@@ -141,7 +141,7 @@ impl TensorPronyShellSection {
         }
     }
 
-    fn layer_law(&self, layer: usize) -> Result<&TensorProny, TensorShellHarmonicError> {
+    pub(super) fn layer_law(&self, layer: usize) -> Result<&TensorProny, TensorShellHarmonicError> {
         match &self.source {
             Source::Homogeneous(law) if layer == 0 => Ok(law),
             Source::Laminate { section, elastic } => match &section.layers()[layer].law {
@@ -245,7 +245,7 @@ impl TensorPronyShellSection {
         ))
     }
 
-    fn material_error(
+    pub(super) fn material_error(
         &self,
         element: usize,
         layer: usize,
@@ -282,6 +282,54 @@ impl PreparedSection {
             .and_then(|v| v.checked_add(core::mem::size_of::<Self>()))
     }
 
+    pub(super) fn layer_faces(&self, layer: usize) -> Option<[f64; 2]> {
+        self.layers.get(layer).map(|prepared| prepared.z)
+    }
+
+    /// One shared original section-to-material strain recovery for both source
+    /// admission and physical field observation. All transverse strains remain.
+    pub(super) fn recover_strain(
+        &self, layer: usize, strain: &[C64; 6], z: f64,
+    ) -> Result<[C64; 6], fs_material::visco::ViscoError> {
+        let prepared = self.layers.get(layer).ok_or(fs_material::visco::ViscoError::Parameters {
+            what: "original shell material layer index is outside the section",
+        })?;
+        if !z.is_finite() || z < prepared.z[0] || z > prepared.z[1] {
+            return Err(fs_material::visco::ViscoError::Parameters {
+                what: "original shell observation must lie inside its material layer",
+            });
+        }
+        let section_strain: [C64; 3] =
+            core::array::from_fn(|r| strain[r] + strain[r + 3].scale(z));
+        let principal = core::array::from_fn(|r| C64::new(
+            compensated_products(
+                (0..3).map(|i| (prepared.to_principal[r][i], section_strain[i].re)),
+            ),
+            compensated_products(
+                (0..3).map(|i| (prepared.to_principal[r][i], section_strain[i].im)),
+            ),
+        ));
+        prepared.material.recover_strain(&principal)
+    }
+
+    /// The original midpoint order is 01, 12, 20. Affine extrapolation gives
+    /// the three vertices; their layer-face cycles bound this finite-element
+    /// strain field by convexity, independently of integration-point values.
+    pub(super) fn admit_facet(
+        &self, section: &TensorPronyShellSection, element: usize,
+        midpoint: &[[C64; 6]; 3], cx: &Cx<'_>,
+    ) -> Result<(), TensorShellHarmonicError> {
+        for vertex in 0..3 {
+            checkpoint(cx)?;
+            let strain: [C64; 6] = core::array::from_fn(|r|
+                midpoint[vertex][r] + midpoint[(vertex + 2) % 3][r]
+                    - midpoint[(vertex + 1) % 3][r]
+            );
+            self.admit(section, element, &strain, cx)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn admit(
         &self,
         section: &TensorPronyShellSection,
@@ -292,21 +340,7 @@ impl PreparedSection {
         for (layer, prepared) in self.layers.iter().enumerate() {
             checkpoint(cx)?;
             for z in prepared.z {
-                let section_strain: [C64; 3] =
-                    core::array::from_fn(|r| strain[r] + strain[r + 3].scale(z));
-                let principal = core::array::from_fn(|r| {
-                    C64::new(
-                        compensated_products(
-                            (0..3).map(|i| (prepared.to_principal[r][i], section_strain[i].re)),
-                        ),
-                        compensated_products(
-                            (0..3).map(|i| (prepared.to_principal[r][i], section_strain[i].im)),
-                        ),
-                    )
-                });
-                prepared
-                    .material
-                    .recover_strain(&principal)
+                self.recover_strain(layer, strain, z)
                     .map_err(|source| section.material_error(element, layer, source))?;
             }
         }

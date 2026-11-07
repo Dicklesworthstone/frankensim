@@ -37,6 +37,12 @@ type Resultants = ([f64; 9], [f64; 9], [f64; 9]);
 mod section;
 use section::PreparedSection;
 pub use section::TensorPronyShellSection;
+mod material;
+use material::PreparedFacet;
+pub use material::{
+    TensorShellMaterialBudget, TensorShellMaterialField, TensorShellMaterialObserver,
+    TensorShellMaterialPoint,
+};
 
 /// The original material, spatial or shared harmonic refusal.
 #[derive(Debug)]
@@ -267,6 +273,7 @@ impl TensorPronyShell {
             .try_fold(0usize, |sum, section| {
                 PreparedSection::payload_bytes(section.layer_count())
                     .and_then(|v| v.checked_add(2 * core::mem::size_of::<ShellViscosity>()))
+                    .and_then(|v| v.checked_add(core::mem::size_of::<PreparedFacet>()))
                     .and_then(|v| sum.checked_add(v))
             })
             .ok_or_else(|| invalid("shell harmonic layer payload overflows"))?;
@@ -290,6 +297,7 @@ impl TensorPronyShell {
             .into());
         }
         let mut materials = Vec::with_capacity(self.sections.len());
+        let mut facets = Vec::with_capacity(self.sections.len());
         let mut storage_sections = Vec::with_capacity(self.sections.len());
         let mut losses = Vec::with_capacity(self.sections.len());
         for (element, section) in self.sections.iter().enumerate() {
@@ -313,6 +321,7 @@ impl TensorPronyShell {
             let (a, b, d) = viscosity;
             losses.push(ShellViscosity::new_coupled(a, b, d)?);
             materials.push(material);
+            facets.push(PreparedFacet::new(self, element)?);
         }
         let mass = dense(&self.model.m, n, cx)?;
         let physical_storage = assemble_constitutive_operator(
@@ -363,17 +372,20 @@ impl TensorPronyShell {
             source: self,
             omega_rad_s: omega,
             materials,
+            facets,
             response,
         })
     }
 }
 
-/// A cached full-coordinate factor and full complex strain recovery per facet.
-/// Repeated forcing cases reuse both; no material inverse is formed during solve.
+/// A cached full-coordinate factor, original facet/support operators and full
+/// complex strain recovery. Repeated forcing cases reuse all three; no geometry
+/// reconstruction or material inverse is formed during solve.
 pub struct PreparedTensorPronyShell<'a> {
     source: &'a TensorPronyShell,
     omega_rad_s: f64,
     materials: Vec<PreparedSection>,
+    facets: Vec<PreparedFacet>,
     response: PreparedHarmonicResponse,
 }
 impl<'a> PreparedTensorPronyShell<'a> {
@@ -411,48 +423,10 @@ impl<'a> PreparedTensorPronyShell<'a> {
         displacement: &[C64],
         cx: &Cx<'_>,
     ) -> Result<(), TensorShellHarmonicError> {
-        for (element, (tri, material)) in self
-            .source
-            .mesh
-            .tris
-            .iter()
-            .zip(&self.materials)
-            .enumerate()
-        {
+        for (element, (facet, material)) in self.facets.iter().zip(&self.materials).enumerate() {
             checkpoint(cx)?;
-            let g = self.source.mesh.facet(element)?;
-            let local: [C64; 18] = core::array::from_fn(|i| {
-                let base = 6 * tri[i / 6] + 3 * ((i % 6) / 3);
-                let terms: [(f64, C64); 3] = core::array::from_fn(|p| {
-                    (
-                        g.frame[i % 3][p],
-                        self.source.model.dof_map[base + p].map_or(C64::ZERO, |r| displacement[r]),
-                    )
-                });
-                C64::new(
-                    compensated_products(terms.iter().map(|(a, b)| (*a, b.re))),
-                    compensated_products(terms.iter().map(|(a, b)| (*a, b.im))),
-                )
-            });
-            let rows = strain_rows(&g, element)?;
-            let midpoint: [[C64; 6]; 3] = rows.map(|point| {
-                core::array::from_fn(|r| {
-                    C64::new(
-                        compensated_products((0..18).map(|i| (point[r][i], local[i].re))),
-                        compensated_products((0..18).map(|i| (point[r][i], local[i].im))),
-                    )
-                })
-            });
-            // Original midpoints are 01, 12, 20; affine extrapolation gives all
-            // three vertices without introducing another curvature operator.
-            for vertex in 0..3 {
-                checkpoint(cx)?;
-                let strain: [C64; 6] = core::array::from_fn(|r| {
-                    midpoint[vertex][r] + midpoint[(vertex + 2) % 3][r]
-                        - midpoint[(vertex + 1) % 3][r]
-                });
-                material.admit(&self.source.sections[element], element, &strain, cx)?;
-            }
+            let midpoint = facet.strains(displacement);
+            material.admit_facet(&self.source.sections[element], element, &midpoint, cx)?;
         }
         checkpoint(cx)
     }

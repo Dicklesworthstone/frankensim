@@ -2253,3 +2253,42 @@ mesh, directors and equilibrium sections retained by assembly.
 coefficients used by the native operator, including the original rotation and
 shear correction once. These accessors permit source-bound full-tensor material
 projection without a duplicate specimen or a changed elastic condensation.
+
+## Original layer harmonic stress, spring storage and material heat
+
+`PreparedTensorPronyShell::prepare_material_observer` binds a complete material
+observer to the same prepared CST/DKT frequency, original facets, global support
+map, layer orientations and full tensor laws. Geometry and original strain rows
+are cached once and shared by repeated harmonic solves and observation. The
+observer adds original constitutive spectra; it performs no additional
+mechanical factorization or pointwise material inverse.
+
+Each original layer is observed at the existing three triangle midpoint
+locations and two positive thickness Gauss points. The signed reference-surface
+coordinate and original layer volume are retained. Full six-component Mandel
+strain and stress stay in the original layer axes. Equilibrium and Maxwell
+spring energy, Kelvin and Maxwell heat, and independent stress power are
+integrated with compensated sums. The signed work-minus-heat residual remains
+visible. Numerical drilling energy, mechanical kinetic energy and boundary
+work are excluded from physical material storage and heat.
+
+Shared whole-cycle admission checks every layer face at every triangle vertex
+before integration. The original plane-stress recovery and material strain
+ceiling remain binding throughout the affine CST/DKT field. For these kinematics,
+the positive quadrature integrates the quadratic material energy exactly in real
+arithmetic; it is not a spatial-discretization or continuum-accuracy certificate.
+A supplied displacement field is observed without certifying its force equation,
+transient startup history, temperature evolution or interface-traction closure.
+
+An explicit additional budget covers original layer points, retained spectra,
+one complete returned field and conservative work. Preparation and observation
+honor cancellation and return no partial field on refusal. The parent harmonic
+payload budget now includes its shared original facet cache.
+
+Three native regression definitions compare rotated, offset mixed-layer fields
+with independent original A/B/D quadratic work, assembled harmonic heat, original
+volume and phase invariance; exercise homogeneous recovery and factor reuse; and
+check payload/work/point caps, source-domain and cancellation refusals, and the
+absence of material heat from pure drilling motion. Source review and exact
+GitHub blob readback completed. Native compilation, formatting and execution
+remain unverified while the workspace is unavailable.
