@@ -3623,3 +3623,39 @@ Numerical regressions cover graded-cap feedback and plastic-work convergence,
 maintained-force exact-profile integration, finite-spring relaxation with coarse
 support recovery, hardness-only refinement, and atomic late refusal. They do not
 constitute empirical material validation.
+
+## Accepted bulk-history hardness on surface cells
+
+`plastic_source::history_field::SourceHistoryHardnessWear` binds compact accepted
+J2/Voce/Chaboche hardness fields to an explicit original cell-to-material-point
+map, alongside independently selected fixed-hardness counterfaces. The local
+pressure cap is min(H_A,H_B); each body's original Archard integral uses its own
+mapped H and actual unsigned cell slip. Local body recession and original volume
+inventories must agree within arithmetic roundoff. Prepared native compliance
+kernels are retained, including dense and matrix-free operator storage.
+
+Original cards, material identities, exact indentation tests, fixed environments
+and selected canonical Young/Poisson claims must agree with the original ordered
+half-space sources. Equal numerical elastic moduli alone do not establish this
+binding. Native strain history is the only admitted owner of alpha; the ordinary
+fixed-hardness admission is unchanged. A successor field retains the same source,
+complete cyclic family/branch identity, point count and explicit cell map, and
+cannot decrease any accepted alpha. Hardness itself may increase or decrease
+according to its independently sourced test. Fixed-source sides remain fixed.
+
+Normal loading, local removal and hardness refresh use the requested native
+approach, maintained force or finite-spring boundary. Refresh retains body
+inventories, recession and permanent indentation, re-equilibrating the changed
+caps with the native signed parameter-work receipt. The complete immutable
+candidate refuses on source, mapping, support, physical-bound, budget or
+cancellation failure. No return map or source query runs inside contact stepping.
+
+This is frozen external/preconditioning property transfer. The caller supplies
+original geometry and a field representative of each mapped material column
+through its declared recession bound. Residual stress, plastic displacements,
+new elastic kernels and bulk work are not transferred. Bulk and reduced surface
+indentation must not own the same deformation or work. One wear interval holds
+beginning pressure, k and mapped H; refine slip when pressure changes appreciably.
+Numerical regressions cover heterogeneous mapped caps and separate wear,
+external softening with retained dent/work, maintained force and spring storage,
+fixed counterfaces, and atomic source/mapping/history/control refusals.

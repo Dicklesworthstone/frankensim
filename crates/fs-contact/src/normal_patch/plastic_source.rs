@@ -14,6 +14,8 @@
 pub mod depth_wear;
 /// Finite loading-device stiffness with original material and geometry bounds.
 pub mod drive;
+/// Accepted native bulk-history hardness mapped to local pressure caps and wear.
+pub mod history_field;
 /// Prescribed normal force with original material and applicability bounds.
 pub mod load;
 /// Original temperature-dependent material properties with retained history.

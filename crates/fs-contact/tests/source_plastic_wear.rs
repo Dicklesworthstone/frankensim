@@ -18,6 +18,9 @@ mod drive;
 #[path = "source_plastic_wear/sliding.rs"]
 mod sliding;
 
+#[path = "source_plastic_wear/history_field.rs"]
+mod history_field;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::hash_domain;
 use fs_contact::interface_binding::{
