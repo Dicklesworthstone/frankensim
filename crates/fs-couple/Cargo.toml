@@ -105,7 +105,7 @@ resolved-dielectric-thermal = ["fs-em/resolved-leaky-dielectric"]
 resolved-electrostatic-circuit-motion = []
 # Source-owned Maxwell-Stefan, Soret and Dufour transport in the live gas assembly.
 molecular-transport = ["dep:fs-gas", "fs-gas/material"]
-# Native SDF barrier friction, accepted sliding history and finite-cell heat.
+# Native SDF friction and sustained finite-plastic rigid tooling with finite-cell heat.
 experimental-solid-contact-heat = ["fs-solid/contact"]
 # Coherent winding heat and magnetic work on the native enthalpy timeline.
 harmonic-winding-heating = ["fs-em/harmonic-exposure"]
@@ -190,3 +190,4 @@ required-features = ["superfluid"]
 [[test]]
 name = "superfluid_caloric"
 required-features = ["superfluid"]
+

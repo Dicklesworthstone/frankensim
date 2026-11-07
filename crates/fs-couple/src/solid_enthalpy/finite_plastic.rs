@@ -20,20 +20,33 @@
 //! does not infer current-area convection or a deformed Fourier operator from
 //! those reference admittances. Cell temperatures are uniform approximations;
 //! load intervals and thermal substeps need independent refinement.
+//! The explicit [`conduction`] entries instead request complete current normal
+//! transport measures from the same proposed finite solid, retaining reference
+//! storage and independently gating the final geometry discrepancy. With
+//! `experimental-solid-contact-heat`, translating rigid tooling can participate
+//! in that same solve; its mechanical work and numerical contact defect remain
+//! separate from physical material heat.
 //!
 //! Mechanical limits are those of the original compressible displacement-only
 //! P1 finite solid, including its volumetric-locking limitations. Optional
 //! inertia uses the same fixed reference mass and endpoint solve.
 
+/// Native source conduction rebuilt at each solved finite-deformation trial.
+pub mod conduction;
+/// Sustained rigid-tool contact through the original plastic/thermal owners.
+#[cfg(feature = "experimental-solid-contact-heat")]
+pub mod contact;
 pub(super) mod feedback;
 pub mod impact;
 pub mod material;
-/// Held current-area pressure through the same native thermal feedback.
-pub mod pressure;
 /// Retained thermal porous compaction on the same conservative heat timeline.
 pub mod porous;
+/// Held current-area pressure through the same native thermal feedback.
+pub mod pressure;
 /// Reciprocal finite sheet forming and native caloric transport.
 pub mod sheet;
+#[cfg(feature = "experimental-solid-contact-heat")]
+pub use contact::{FiniteThermoplasticContactCandidate, FiniteThermoplasticContactEnergy};
 pub use impact::{
     FiniteThermoplasticEllipticImpactError, FiniteThermoplasticImpactError,
     FiniteThermoplasticSourceImpactError,
@@ -49,8 +62,8 @@ use std::convert::Infallible;
 
 use crate::iqn_ils::{IqnIlsError, driver::CouplingMethod};
 use fs_exec::Cx;
-use fs_material::phase::PhaseStateError;
 use fs_matdb::ClaimSelection;
+use fs_material::phase::PhaseStateError;
 use fs_solid::hyper2d::plastic::thermal::FiniteThermoplasticSheetError;
 use fs_solid::hyper3::plastic::FinitePlasticLawField;
 use fs_solid::hyper3::plastic::thermal::{
@@ -72,6 +85,8 @@ pub enum FiniteThermoplasticError<E = Infallible> {
     Source(String),
     Caloric(PhaseStateError),
     Solid(FiniteThermoplasticTetError),
+    #[cfg(feature = "experimental-solid-contact-heat")]
+    Contact(fs_solid::hyper3::plastic::thermal::contact::FiniteThermoplasticPlaneContactError),
     DuctileSolid(fs_solid::hyper3::plastic::ductile::FiniteDuctileTetError),
     Sheet(FiniteThermoplasticSheetError),
     Porous(fs_solid::hyper3::plastic::porous::thermal::FiniteThermalPorousTetError),
@@ -86,6 +101,13 @@ pub enum FiniteThermoplasticError<E = Infallible> {
         heat_defect_j: f64,
         thermal_residual_j: f64,
         combined_residual_j: f64,
+    },
+    /// The accepted-temperature geometry still disagrees with the geometry
+    /// used for transport, even if scalar heat and temperature gates pass.
+    TransportNotConverged {
+        iterations: usize,
+        geometry_relative_defect: f64,
+        geometry_tolerance: f64,
     },
 }
 impl<E> From<DepositionError> for FiniteThermoplasticError<E> {
@@ -140,7 +162,12 @@ impl<'a> FiniteThermoplasticSolid<'a> {
         cx: &Cx<'_>,
     ) -> Result<Self, FiniteThermoplasticError> {
         Self::prepare_sources(
-            thermal, nodes_m, tetrahedra, sources, budget, cx,
+            thermal,
+            nodes_m,
+            tetrahedra,
+            sources,
+            budget,
+            cx,
             FiniteThermoplasticMaterial::try_new,
         )
     }
@@ -161,10 +188,20 @@ impl<'a> FiniteThermoplasticSolid<'a> {
         cx: &Cx<'_>,
     ) -> Result<Self, FiniteThermoplasticError> {
         Self::prepare_sources(
-            thermal, nodes_m, tetrahedra, sources, budget, cx,
-            |query, enthalpy| FiniteThermoplasticMaterial::try_new_with_tabulated_hardening(
-                query, enthalpy, curve_selection, maximum_source_samples,
-            ),
+            thermal,
+            nodes_m,
+            tetrahedra,
+            sources,
+            budget,
+            cx,
+            |query, enthalpy| {
+                FiniteThermoplasticMaterial::try_new_with_tabulated_hardening(
+                    query,
+                    enthalpy,
+                    curve_selection,
+                    maximum_source_samples,
+                )
+            },
         )
     }
 
@@ -175,7 +212,10 @@ impl<'a> FiniteThermoplasticSolid<'a> {
         sources: Vec<FiniteThermoplasticCell<'a>>,
         budget: TetAssemblyBudget,
         cx: &Cx<'_>,
-        mut prepare: impl FnMut(FiniteThermoplasticQuery<'a>, f64)
+        mut prepare: impl FnMut(
+            FiniteThermoplasticQuery<'a>,
+            f64,
+        )
             -> Result<FiniteThermoplasticMaterial<'a>, FiniteThermoplasticError>,
     ) -> Result<Self, FiniteThermoplasticError> {
         poll(cx)?;
@@ -430,7 +470,7 @@ pub struct FiniteThermoplasticReport<E = HyperTetSolution, A = FiniteThermoplast
     pub heat_defect_j: f64,
     pub thermal_residual_j: f64,
     /// Caloric + mechanical internal + explicitly coupled gas storage + kinetic
-    /// change + numerical defects, minus actual external load/pressure/support
+    /// change + numerical defects, minus actual external load/pressure/tool/support
     /// work, boundary heat and incoming energy.
     pub combined_residual_j: f64,
 }

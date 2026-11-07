@@ -5658,3 +5658,50 @@ temperature-dependent pinned midpoint coefficients, finite caloric heating
 and rejected-trial preservation. This is reduced in-plane Kelvin damping on
 fixed reference geometry, not full 3-D dissipation, hereditary memory, a
 spectral certificate, or lateral thermal transport.
+
+
+### Coupled finite forming with sustained tools and current heat paths
+
+With `experimental-solid-contact-heat`, the finite thermoplastic owner advances
+against explicitly translating rigid planes through the original sustained
+contact solve. Every thermal trial starts at the same accepted plastic metric,
+source family, temperature, deformation and optional reference-mass velocity.
+The final mechanical state is re-solved at the actual returned caloric
+temperature. Native force, complete affine-path, material and independent
+contact-work gates remain authoritative; a failed proposal publishes no owner.
+
+`FiniteThermoplasticContactEnergy` retains the native material account alongside
+original dead-load, body-contact and prescribed-tool work. The coupled first law
+counts tool work once, removes body-contact work from the dead-load port, and
+retains the signed normal endpoint defect with the material defect. Only native
+material caloric transfer enters thermal cells. Contact quadrature defects and
+numerical kinetic losses are never deposited as heat. Picard and IQN-ILS reuse
+this same proposal; numerical convergence is not a time-accuracy certificate.
+
+`advance_with_deformed_conduction` prepares complete current normal transport
+metrics from the SAME proposed finite solid before each native heat replay.
+Actual-temperature mechanics separately supplies final metrics. Every used
+area and normal distance must meet an explicit relative discrepancy allowance,
+independently of temperature, per-cell heat and whole-energy gates. Original
+conductivity/resistance laws, reference mass/geometry, caloric identity, clocks,
+scheduled baths and source heat remain retained. The returned observer stores
+the metrics actually used, with their discrepancy reported separately.
+
+`advance_with_plane_contact_and_deformed_conduction` composes these capabilities
+through one shared mechanical proposal and one shared transport helper. A moving
+tool can permanently deform a heated specimen while its current areas and normal
+heat paths alter the thermal response. Geometry callbacks must be pure and
+justify the normal two-point reduction. Topology remains fixed; arbitrary
+skewed-tetrahedron Fourier accuracy, inferred anisotropy, opening interfaces,
+friction, curved/rotating tools and remeshing remain outside this composition.
+Independent physical-interval, thermal-substep and spatial refinement is needed.
+
+Four synthetic integration regression definitions cover independent diagonal
+forming/heating/release and permanent metrics, original consistent inertia and
+late observer refusal/retry, current-geometry conduction with an independent
+four-step thermal recurrence and geometry-only refusal, and simultaneous moving
+tooling/current-area heat. The final test compares actual reaction, temperature,
+material heat and geometry through the public combined entry. Focused Rust
+formatting/parsing and TOML checks passed; independent scalar calculations are
+not Rust execution. Native compilation and these tests remain unverified because
+Cargo and the configured remote runners are unavailable in this environment.

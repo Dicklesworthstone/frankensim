@@ -6,6 +6,11 @@
 
 #[path = "finite_plastic_enthalpy/combined.rs"]
 mod combined;
+#[path = "finite_plastic_enthalpy/conduction.rs"]
+mod conduction;
+#[path = "finite_plastic_enthalpy/contact.rs"]
+#[cfg(feature = "experimental-solid-contact-heat")]
+mod contact;
 #[path = "finite_plastic_enthalpy/creep.rs"]
 mod creep;
 #[path = "finite_plastic_enthalpy/ductile.rs"]
@@ -1815,3 +1820,4 @@ fn hot_source_bound_impact_retains_caloric_timeline_and_continues_with_new_momen
         );
     });
 }
+

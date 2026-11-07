@@ -62,6 +62,10 @@ pub(in crate::solid_enthalpy) trait MechanicalEnergy {
     fn follower_pressure_work_j(&self) -> f64 {
         0.0
     }
+    /// Actual work of prescribed moving contact tools, separate from support work.
+    fn prescribed_tool_work_j(&self) -> f64 {
+        0.0
+    }
     /// Direct stored-energy change of independently sealed source gases.
     fn cavity_gas_storage_change_j(&self) -> f64 {
         0.0
@@ -308,12 +312,60 @@ pub(in crate::solid_enthalpy) fn advance_with_coupling<
     config: FiniteThermoplasticConfig,
     method: CouplingMethod,
     cx: &Cx<'_>,
-    mut mechanics: impl FnMut(
+    mechanics: impl FnMut(
         &[f64],
         f64,
     )
         -> Result<MechanicalProposal<S, E, A>, FiniteThermoplasticError<O::Error>>,
 ) -> Result<FeedbackCandidate<'t, S, E, O, A>, FiniteThermoplasticError<O::Error>> {
+    advance_with_transport(
+        binding,
+        time_s,
+        thermal,
+        observer,
+        target_s,
+        thermal_config,
+        config,
+        method,
+        None,
+        cx,
+        mechanics,
+        |original, _| Ok(original.clone()),
+        |_, _| Ok(0.0),
+    )
+    .map(|(candidate, _)| candidate)
+}
+
+/// The same feedback owner with a transport observer prepared from each actual
+/// native mechanical proposal. A separate geometric gate checks the transport
+/// used for heat against the mechanical state at the returned caloric endpoint.
+/// Every replay still clones the SAME original observer and accepted timeline.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::solid_enthalpy) fn advance_with_transport<
+    't,
+    S,
+    E,
+    O: DepositionObserver,
+    M: CaloricMaterial,
+    A: MechanicalEnergy,
+>(
+    binding: ThermalBinding<'_, '_, M>,
+    time_s: f64,
+    thermal: &DepositionSimulation<'t>,
+    observer: &O,
+    target_s: f64,
+    thermal_config: StepConfig,
+    config: FiniteThermoplasticConfig,
+    method: CouplingMethod,
+    maximum_geometry_relative_defect: Option<f64>,
+    cx: &Cx<'_>,
+    mut mechanics: impl FnMut(
+        &[f64],
+        f64,
+    ) -> Result<MechanicalProposal<S, E, A>, FiniteThermoplasticError<O::Error>>,
+    mut prepare_transport: impl FnMut(&O, &S) -> Result<O, FiniteThermoplasticError<O::Error>>,
+    mut geometry_difference: impl FnMut(&O, &O) -> Result<f64, FiniteThermoplasticError<O::Error>>,
+) -> Result<(FeedbackCandidate<'t, S, E, O, A>, f64), FiniteThermoplasticError<O::Error>> {
     poll(cx)?;
     let duration_s = target_s - time_s;
     if thermal.time_s() != time_s
@@ -328,6 +380,8 @@ pub(in crate::solid_enthalpy) fn advance_with_coupling<
         || !thermal_config.energy_tolerance_j.is_finite()
         || thermal_config.energy_tolerance_j < 0.0
         || thermal_config.energy_tolerance_j > config.energy_tolerance_j
+        || maximum_geometry_relative_defect
+            .is_some_and(|limit| !limit.is_finite() || !(0.0..1.0).contains(&limit))
     {
         return Err(FiniteThermoplasticError::Invalid(
             "matching clocks, positive interval and bounded independent thermal coupling controls required",
@@ -343,6 +397,7 @@ pub(in crate::solid_enthalpy) fn advance_with_coupling<
         ),
     };
     let mut defects = [f64::INFINITY; 4];
+    let mut geometry_relative_defect = 0.0;
     // Every proposal and cached endpoint starts from the SAME accepted owner.
     // Reuse an actual-temperature solve only at its exact evaluated enthalpies;
     // an accelerated iterate normally needs its own native equilibrium solve.
@@ -359,7 +414,7 @@ pub(in crate::solid_enthalpy) fn advance_with_coupling<
         let applied_heat_j = finite(trial.heat_j.iter().sum())?;
         let heat = FiniteHeat {
             binding,
-            inner: observer.clone(),
+            inner: prepare_transport(observer, &trial.state)?,
             cx,
             watts: binding
                 .cells
@@ -397,6 +452,15 @@ pub(in crate::solid_enthalpy) fn advance_with_coupling<
             )?;
             (actual, defect)
         };
+        if maximum_geometry_relative_defect.is_some() {
+            let actual_transport = prepare_transport(observer, &actual.state)?;
+            geometry_relative_defect = geometry_difference(&heat.inner, &actual_transport)?;
+            if !geometry_relative_defect.is_finite() || geometry_relative_defect < 0.0 {
+                return Err(FiniteThermoplasticError::Invalid(
+                    "finite nonnegative transport geometry discrepancy required",
+                ));
+            }
+        }
         let caloric_heat_j = finite(actual.heat_j.iter().sum())?;
         let external_heat_j = finite(thermal_audit.external_heat_j - applied_heat_j)?;
         let thermal_residual_j = finite(
@@ -409,10 +473,12 @@ pub(in crate::solid_enthalpy) fn advance_with_coupling<
             inertia.kinetic_change_j + inertia.numerical_loss_j
         });
         let pressure_work_j = finite(actual.energy.follower_pressure_work_j())?;
+        let tool_work_j = finite(actual.energy.prescribed_tool_work_j())?;
         let gas_storage_j = finite(actual.energy.cavity_gas_storage_change_j())?;
         let cavity_exterior_work_j = finite(actual.energy.cavity_exterior_work_j())?;
         let combined_residual_j =
-            if pressure_work_j == 0.0 && gas_storage_j == 0.0 && cavity_exterior_work_j == 0.0 {
+            if pressure_work_j == 0.0 && tool_work_j == 0.0
+                && gas_storage_j == 0.0 && cavity_exterior_work_j == 0.0 {
                 // Preserve the exact arithmetic of existing unpressured owners.
                 finite(
                     actual.energy.internal_energy_change_j()
@@ -441,6 +507,7 @@ pub(in crate::solid_enthalpy) fn advance_with_coupling<
                         - Dd::from_f64(actual.energy.dead_load_endpoint_work_j())
                         - Dd::from_f64(actual.energy.support_endpoint_work_j())
                         - Dd::from_f64(pressure_work_j)
+                        - Dd::from_f64(tool_work_j)
                         - Dd::from_f64(cavity_exterior_work_j)
                         - Dd::from_f64(external_heat_j)
                         - Dd::from_f64(thermal_audit.incoming_energy_j))
@@ -473,6 +540,8 @@ pub(in crate::solid_enthalpy) fn advance_with_coupling<
             && defects[1] <= config.energy_tolerance_j
             && defects[2].abs() <= config.energy_tolerance_j
             && defects[3].abs() <= config.energy_tolerance_j
+            && maximum_geometry_relative_defect
+                .is_none_or(|limit| geometry_relative_defect <= limit)
         {
             let cells = binding
                 .cells
@@ -493,13 +562,13 @@ pub(in crate::solid_enthalpy) fn advance_with_coupling<
                 combined_residual_j,
             };
             poll(cx)?;
-            return Ok(FeedbackCandidate {
+            return Ok((FeedbackCandidate {
                 thermal: next_thermal,
                 state: actual.state,
                 observer: heat.inner,
                 cells,
                 report,
-            });
+            }, geometry_relative_defect));
         }
         if iteration == config.maximum_iterations {
             break;
@@ -531,6 +600,15 @@ pub(in crate::solid_enthalpy) fn advance_with_coupling<
         }
     }
     poll(cx)?;
+    if let Some(limit) = maximum_geometry_relative_defect
+        && geometry_relative_defect > limit
+    {
+        return Err(FiniteThermoplasticError::TransportNotConverged {
+            iterations: config.maximum_iterations,
+            geometry_relative_defect,
+            geometry_tolerance: limit,
+        });
+    }
     Err(FiniteThermoplasticError::NotConverged {
         iterations: config.maximum_iterations,
         temperature_defect_k: defects[0],
@@ -737,3 +815,4 @@ mod source_composition_tests {
         assert!(check_source_composition::<Infallible>(integrated, 0.5).is_ok());
     }
 }
+
