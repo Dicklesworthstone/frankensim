@@ -10,7 +10,8 @@
 //!
 //! The source-resolved reference density, constitutive coefficients, external
 //! conditions, mesh and support DOFs stay fixed. Absolute endpoint load factors
-//! scale the original prescribed displacement and dead-force patterns. This
+//! scale the original prescribed displacement and dead-force patterns, or
+//! independently supplied endpoint fields for phased multiaxial loading. This
 //! adapter supplies no thermal eigenstrain, evolving-temperature law, arbitrary
 //! imported state or fatigue-to-stiffness feedback. The original constitutive
 //! law determines the admitted hardening and recovery response.
@@ -38,7 +39,8 @@ use fs_qty::{Density, QuantitySpec};
 use super::InertialEnergy;
 use crate::plastic3::fatigue::{
     J2CriticalPlaneGauge, J2FatemiSocieGauge, J2FatigueConfig, J2FatigueError, J2FatigueGauge,
-    J2FatigueObserver, J2FatigueSample, J2VariableAmplitudeGauge, poll, with_path,
+    J2FatigueLoading, J2FatigueObserver, J2FatigueSample, J2VariableAmplitudeGauge, poll,
+    with_path,
 };
 use crate::plastic3::{SmallStrainTetProblem, SmallStrainTetSolution};
 
@@ -56,6 +58,47 @@ pub struct J2DynamicFatigueConfig {
 pub struct J2DynamicFatigueTarget {
     pub time_s: f64,
     pub load_factor: f64,
+}
+
+/// One physical endpoint with independently specified reference boundary fields.
+/// The load factor multiplies these fields; unit factors admit absolute paths.
+/// Displacement values retain the original support DOFs and their order, while
+/// nodal forces may vary independently. Material-point tensors remain outputs
+/// of the same native backward-Euler solve, never caller-supplied observations.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct J2DynamicFatigueLoadingTarget<'a> {
+    pub time_s: f64,
+    pub load_factor: f64,
+    pub loading: J2FatigueLoading<'a>,
+}
+
+/// A cheap borrowed endpoint used by both public loading forms. `None` retains
+/// the original problem fields without copying their displacement values.
+#[derive(Clone, Copy)]
+struct DynamicEndpoint<'a> {
+    time_s: f64,
+    load_factor: f64,
+    loading: Option<J2FatigueLoading<'a>>,
+}
+
+impl<'a> From<J2DynamicFatigueTarget> for DynamicEndpoint<'a> {
+    fn from(target: J2DynamicFatigueTarget) -> Self {
+        Self {
+            time_s: target.time_s,
+            load_factor: target.load_factor,
+            loading: None,
+        }
+    }
+}
+
+impl<'a> From<J2DynamicFatigueLoadingTarget<'a>> for DynamicEndpoint<'a> {
+    fn from(target: J2DynamicFatigueLoadingTarget<'a>) -> Self {
+        Self {
+            time_s: target.time_s,
+            load_factor: target.load_factor,
+            loading: Some(target.loading),
+        }
+    }
 }
 
 /// Latest accepted physical interval and the ORIGINAL native inertia receipt.
@@ -357,7 +400,11 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> J2DynamicFatigueRun<'p, 'm, L> {
         targets: &[J2DynamicFatigueTarget],
         cx: &Cx<'_>,
     ) -> Result<J2DynamicFatigueStep, J2FatigueError> {
-        self.advance_block(targets, false, cx)
+        self.advance_block(
+            targets.iter().copied().map(DynamicEndpoint::from),
+            false,
+            cx,
+        )
     }
 
     /// Advance all physical endpoints and close every critical bank before
@@ -370,26 +417,76 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> J2DynamicFatigueRun<'p, 'm, L> {
         cx: &Cx<'_>,
     ) -> Result<J2DynamicFatigueStep, J2FatigueError> {
         self.observer.require_critical(cx)?;
-        self.advance_block(targets, true, cx)
+        self.advance_block(targets.iter().copied().map(DynamicEndpoint::from), true, cx)
     }
 
-    fn advance_block(
+    /// Accept one independently loaded physical endpoint. Values use metres
+    /// and newtons in the original mesh frame and are multiplied by `load_factor`.
+    pub fn advance_to_with_loading(
         &mut self,
-        targets: &[J2DynamicFatigueTarget],
+        time_s: f64,
+        load_factor: f64,
+        loading: J2FatigueLoading<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<J2DynamicFatigueStep, J2FatigueError> {
+        self.advance_with_loading(
+            &[J2DynamicFatigueLoadingTarget {
+                time_s,
+                load_factor,
+                loading,
+            }],
+            cx,
+        )
+    }
+
+    /// Accept a physical-time block with independent displacement/force fields
+    /// at every endpoint. Fields are validated before observation; a later
+    /// mechanics or fatigue refusal restores the entire previous block state.
+    /// Additive nodal-force entries retain their original order and meaning.
+    pub fn advance_with_loading(
+        &mut self,
+        targets: &[J2DynamicFatigueLoadingTarget<'_>],
+        cx: &Cx<'_>,
+    ) -> Result<J2DynamicFatigueStep, J2FatigueError> {
+        self.advance_block(
+            targets.iter().copied().map(DynamicEndpoint::from),
+            false,
+            cx,
+        )
+    }
+
+    /// Accept independent endpoint fields and close every representative
+    /// SWT/Fatemi-Socie window before publishing mechanics or any fatigue bank.
+    /// Full tensor closure remains required even when the load path returns to
+    /// its initial fields; plastic or inertial history is not reset or repeated.
+    pub fn advance_cycle_with_loading(
+        &mut self,
+        targets: &[J2DynamicFatigueLoadingTarget<'_>],
+        cx: &Cx<'_>,
+    ) -> Result<J2DynamicFatigueStep, J2FatigueError> {
+        self.observer.require_critical(cx)?;
+        self.advance_block(targets.iter().copied().map(DynamicEndpoint::from), true, cx)
+    }
+
+    fn advance_block<'a>(
+        &mut self,
+        targets: impl ExactSizeIterator<Item = DynamicEndpoint<'a>> + Clone,
         close_cycle: bool,
         cx: &Cx<'_>,
     ) -> Result<J2DynamicFatigueStep, J2FatigueError> {
         self.observer.check_sample(cx)?;
-        if targets.is_empty() {
+        let count = targets.len();
+        if count == 0 {
             return Err(J2FatigueError::Invalid(
                 "declare at least one physical endpoint",
             ));
         }
-        if targets.len() > self.remaining_steps() {
+        if count > self.remaining_steps() {
             return Err(J2FatigueError::Budget);
         }
         let mut previous_time = self.time_s;
-        for (index, target) in targets.iter().enumerate() {
+        let mut maximum_forces = self.problem.nodal_forces_n.len();
+        for (index, target) in targets.clone().enumerate() {
             if index % 256 == 0 {
                 poll(cx)?;
             }
@@ -402,26 +499,46 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> J2DynamicFatigueRun<'p, 'm, L> {
                     "physical endpoints need strictly increasing finite time and finite absolute load",
                 ));
             }
+            if let Some(loading) = target.loading {
+                loading.validate(self.problem, target.load_factor, cx)?;
+                maximum_forces = maximum_forces.max(loading.nodal_forces_n.len());
+            }
             previous_time = target.time_s;
         }
+        let mut prescribed = self.problem.prescribed_m.to_vec();
+        let mut forces = Vec::new();
+        forces
+            .try_reserve_exact(maximum_forces)
+            .map_err(|_| J2FatigueError::Budget)?;
         let mut solution = self.solution.clone();
         let mut velocity = self.velocity_mps.clone();
         let checkpoint = self.observer.checkpoint();
-        let mut prescribed = self.problem.prescribed_m.to_vec();
-        let mut forces = self.problem.nodal_forces_n.to_vec();
         let mut time_s = self.time_s;
         let mut last_step = None;
         let proposal = (|| {
-            for (offset, target) in targets.iter().enumerate() {
+            for (offset, target) in targets.enumerate() {
                 self.observer.check_sample(cx)?;
-                scale_pattern(
-                    self.problem.prescribed_m,
-                    &mut prescribed,
-                    target.load_factor,
-                    cx,
-                )?;
-                scale_pattern(
-                    self.problem.nodal_forces_n,
+                if let Some(loading) = target.loading {
+                    scale_values(
+                        loading.prescribed_values_m.iter().copied(),
+                        &mut prescribed,
+                        target.load_factor,
+                        cx,
+                    )?;
+                } else {
+                    scale_values(
+                        self.problem.prescribed_m.iter().map(|&(_, value)| value),
+                        &mut prescribed,
+                        target.load_factor,
+                        cx,
+                    )?;
+                }
+                scale_forces(
+                    target
+                        .loading
+                        .map_or(self.problem.nodal_forces_n, |loading| {
+                            loading.nodal_forces_n
+                        }),
                     &mut forces,
                     target.load_factor,
                     cx,
@@ -469,7 +586,7 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> J2DynamicFatigueRun<'p, 'm, L> {
         self.solution = solution;
         self.velocity_mps = velocity;
         self.time_s = time_s;
-        self.accepted_steps += targets.len();
+        self.accepted_steps += count;
         self.last_step = Some(report);
         Ok(report)
     }
@@ -514,13 +631,13 @@ fn source_density<L: SourceBoundFatigueLaw>(
     Ok(densities)
 }
 
-fn scale_pattern(
-    original: &[(usize, f64)],
+fn scale_values(
+    values: impl Iterator<Item = f64>,
     target: &mut [(usize, f64)],
     factor: f64,
     cx: &Cx<'_>,
 ) -> Result<(), J2FatigueError> {
-    for (index, (&(_, value), (_, endpoint))) in original.iter().zip(target).enumerate() {
+    for (index, (value, (_, endpoint))) in values.zip(target).enumerate() {
         if index % 256 == 0 {
             poll(cx)?;
         }
@@ -530,6 +647,29 @@ fn scale_pattern(
                 "absolute endpoint load is not representable",
             ));
         }
+    }
+    Ok(())
+}
+
+/// Reuse one block-sized force buffer while preserving native additive entries.
+fn scale_forces(
+    original: &[(usize, f64)],
+    target: &mut Vec<(usize, f64)>,
+    factor: f64,
+    cx: &Cx<'_>,
+) -> Result<(), J2FatigueError> {
+    target.clear();
+    for (index, &(dof, value)) in original.iter().enumerate() {
+        if index % 256 == 0 {
+            poll(cx)?;
+        }
+        let endpoint = factor * value;
+        if !endpoint.is_finite() {
+            return Err(J2FatigueError::Invalid(
+                "absolute endpoint force is not representable",
+            ));
+        }
+        target.push((dof, endpoint));
     }
     Ok(())
 }

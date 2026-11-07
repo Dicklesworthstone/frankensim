@@ -10977,6 +10977,31 @@ closure or cancellation refusal publishes no partial state or samples. Ordinary
 fixed-temperature calibration, small-strain geometry, finite plane/sample/work
 budgets and the need to resolve actual physical turning points are unchanged.
 
+The physical-time `J2DynamicFatigueRun` accepts the same fields through
+`J2DynamicFatigueLoadingTarget`, `advance_with_loading`,
+`advance_cycle_with_loading` and `advance_to_with_loading`. Each target declares
+a strictly increasing finite time and an absolute reference-field multiplier.
+Scaling occurs once before the original backward-Euler solve with its unit
+load factor. The previous full displacement, velocity and constitutive state
+remain the initial conditions; reference density and support topology remain
+fixed. Moving-support mass coupling, reactions, support work and the native
+inertial energy receipt therefore accompany the actual fatigue samples.
+
+Original proportional targets and independent fields share one native
+transaction loop. A cheap borrowed endpoint iterator avoids allocating a
+second target trace, and one prescribed buffer plus a force buffer sized for
+the block are reused. A late mechanical, fatigue or closure refusal restores
+all banks and leaves accepted time, velocity, state and last energy unchanged.
+Backward-Euler numerical damping remains separate from physical dissipation
+and empirical fatigue damage; interval refinement and resolved extrema remain
+the caller's responsibility.
+
+The static and dynamic loading regressions include an analytic nonproportional
+shear-circle reference, native plastic continuation with independent forces,
+an independent consistent-mass recurrence with moving supports, original
+energy equality and late refusal/retry across every fatigue bank. Coefficients
+are synthetic implementation references, not measured service-life evidence.
+
 ## Tabulated malleability in native structural consumers
 
 The original small-strain continuum and plane-stress owners accept

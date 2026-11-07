@@ -40,6 +40,9 @@ const NODES: [[f64; 3]; 4] = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 
 const TETS: [[usize; 4]; 1] = [[0, 1, 2, 3]];
 const FRAME: ContentHash = ContentHash([19; 32]);
 
+#[path = "plastic_dynamic_fatigue/loading.rs"]
+mod loading;
+
 fn material(plastic: bool, density_dims: Option<Dims>) -> ResolvedJ2Plasticity {
     material_with_source(plastic, density_dims, None).0
 }
