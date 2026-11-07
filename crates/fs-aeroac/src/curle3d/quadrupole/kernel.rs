@@ -13,39 +13,59 @@ pub(super) const AXES: [(usize, usize); 6] = [(0, 0), (1, 1), (2, 2), (0, 1), (0
 /// Rows p, ux, uy, uz; columns Qxx, Qyy, Qzz, Qxy, Qxz, Qyz [N m].
 pub(super) fn transfer(
     rho: f64,
-    sound_speed: f64,
+    wave: C64,
     frequency: f64,
     displacement: [f64; 3],
 ) -> Option<[[C64; 6]; 4]> {
     let omega = core::f64::consts::TAU * frequency;
-    let k = omega / sound_speed;
+    let k = wave.re;
     let rho_omega = rho * omega;
     let r = det::hypot(
         det::hypot(displacement[0], displacement[1]),
         displacement[2],
     );
     let inv_r = 1.0 / r;
-    if [rho, sound_speed, frequency, omega, k, rho_omega, r, inv_r]
+    if [rho, frequency, omega, k, rho_omega, r, inv_r]
         .iter()
         .any(|x| !x.is_finite() || *x <= 0.0)
         || displacement.iter().any(|x| !x.is_finite())
         || !(k * r).is_finite()
+        || !wave.im.is_finite()
+        || wave.im < 0.0
+        || !(wave.im * r).is_finite()
     {
         return None;
     }
     let n = displacement.map(|x| x / r);
     let (sin, cos) = det::sin_cos(k * r);
-    let green = C64::new(cos, sin).scale((0.25 / core::f64::consts::PI) / r);
+    let mut green = C64::new(cos, sin).scale((0.25 / core::f64::consts::PI) / r);
     let inv_r2 = inv_r * inv_r;
     let inv_r3 = inv_r2 * inv_r;
-    let k2 = k * k;
-    // Hessian: G [a n_i n_j + b delta_ij].
-    let a = C64::new(3.0 * inv_r2 - k2, -3.0 * k * inv_r);
-    let b = C64::new(-inv_r2, k * inv_r);
+    // Hessian: G [a n_i n_j + b delta_ij]. The real branch retains the
+    // original arithmetic; a lossy k differentiates both decay and phase.
+    let (a, b, c) = if wave.im == 0.0 {
+        let k2 = k * k;
+        (
+            C64::new(3.0 * inv_r2 - k2, -3.0 * k * inv_r),
+            C64::new(-inv_r2, k * inv_r),
+            C64::new(6.0 * k2 * inv_r - 15.0 * inv_r3, 15.0 * k * inv_r2 - k2 * k),
+        )
+    } else {
+        green = green.scale(det::exp(-wave.im * r));
+        if green == C64::ZERO {
+            return None;
+        }
+        let ik = C64::new(-wave.im, k);
+        let k2 = wave * wave;
+        (
+            C64::from_re(3.0 * inv_r2) - k2 - ik.scale(3.0 * inv_r),
+            ik.scale(inv_r) - C64::from_re(inv_r2),
+            k2.scale(6.0 * inv_r) - C64::from_re(15.0 * inv_r3) + ik.scale(15.0 * inv_r2) - ik * k2,
+        )
+    };
     // Third derivative: G [c n_i n_j n_l + d (delta_ij n_l +
     // delta_il n_j + delta_jl n_i)]. Differentiating the directions is
     // essential: pressure-null directions can carry transverse velocity.
-    let c = C64::new(6.0 * k2 * inv_r - 15.0 * inv_r3, 15.0 * k * inv_r2 - k2 * k);
     let d = a.scale(inv_r);
     let mut field = [[C64::ZERO; 6]; 4];
     for (entry, (i, j)) in AXES.into_iter().enumerate() {
@@ -85,8 +105,12 @@ pub(super) fn reynolds_moment(rho: f64, volume: f64, velocity: [f64; 3]) -> Opti
 mod tests {
     use super::*;
 
+    fn wave(frequency: f64) -> C64 {
+        C64::from_re(core::f64::consts::TAU * frequency / 343.0)
+    }
+
     fn apply(x: [f64; 3], q: [C64; 6]) -> [C64; 4] {
-        transfer(1.2, 343.0, 127.0, x).unwrap().map(|row| {
+        transfer(1.2, wave(127.0), 127.0, x).unwrap().map(|row| {
             row.into_iter()
                 .zip(q)
                 .fold(C64::ZERO, |s, (h, q)| s + h * q)
@@ -253,10 +277,10 @@ mod tests {
         for x in [0.0, -1.0, f64::INFINITY, f64::NAN] {
             assert!(reynolds_moment(x, 0.5, [1.0; 3]).is_none());
             assert!(reynolds_moment(1.0, x, [1.0; 3]).is_none());
-            assert!(transfer(1.2, 343.0, x, [1.0; 3]).is_none());
+            assert!(transfer(1.2, wave(x), x, [1.0; 3]).is_none());
         }
-        assert!(transfer(1.2, 343.0, 127.0, [0.0; 3]).is_none());
-        assert!(transfer(1.2, 343.0, 127.0, [f64::NAN; 3]).is_none());
+        assert!(transfer(1.2, wave(127.0), 127.0, [0.0; 3]).is_none());
+        assert!(transfer(1.2, wave(127.0), 127.0, [f64::NAN; 3]).is_none());
         assert!(reynolds_moment(1.0, 1.0, [f64::INFINITY; 3]).is_none());
     }
 }

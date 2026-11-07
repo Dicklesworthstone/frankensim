@@ -23,6 +23,18 @@ in a homogeneous stationary lossless ideal pi/m wedge; all 2m tensor image paths
 coherently. Equal rigid/release walls, or mixed walls for even m. No source-size validation, \
 finite wall impedance, general wedge diffraction, enclosed-room reverberation, absorption, \
 motion, source feedback, unresolved SGS sound or measured-SPL qualification.";
+pub(super) const MOLECULAR_ORTHOGONAL_SCOPE: &str = "Prescribed symmetric 3D Lighthill stress moments \
+[N m] in a homogeneous stationary relaxing gas bounded by one to three perpendicular infinite \
+ideal rigid or pressure-release planes; all material-dispersive image pressure/velocity paths \
+interfere coherently. No source-size validation, finite wall impedance, edge diffraction, \
+enclosed-room reverberation, shear/conduction losses, motion, source feedback, unresolved SGS \
+sound or measured-SPL qualification.";
+pub(super) const MOLECULAR_WEDGE_SCOPE: &str = "Prescribed symmetric 3D Lighthill stress moments \
+[N m] in a homogeneous stationary relaxing gas and ideal pi/m wedge; all 2m material-dispersive \
+tensor image paths interfere coherently. Equal rigid/release walls, or mixed walls for even m. \
+No source-size validation, finite wall impedance, general wedge diffraction, enclosed-room \
+reverberation, shear/conduction losses, motion, source feedback, unresolved SGS sound or \
+measured-SPL qualification.";
 
 type Matrix = [[f64; 3]; 3];
 type FieldSum = [[ComplexSum; 6]; 4];
@@ -193,7 +205,7 @@ impl PreparedQuadrupoleObserver {
                 core::array::from_fn(|axis| receiver[axis] - transfer.source_m[axis]);
             let field = kernel::transfer(
                 self.acoustic.density_kg_m3(),
-                self.acoustic.sound_speed_m_s(),
+                self.wavenumber_per_m,
                 self.frequency_hz,
                 displacement,
             )

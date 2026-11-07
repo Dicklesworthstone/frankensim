@@ -2080,11 +2080,38 @@ Green-function Hessian refinement, all-component linear momentum, rotation
 covariance, far-field directivity/impedance, pressure-null transverse velocity,
 and the actual quadratic source's DC/doubled-frequency content. Observer
 fixtures cover coherent cancellation, explicit independent modes, native
-harmonic-field bridging and admission/cancellation refusals. This is
-homogeneous stationary lossless free-space point quadrature: cell-size error
-requires spatial refinement. There is no moving-source correction, mean-flow
-propagation, boundary scattering, absorption, feedback, unresolved SGS sound
-or measured-SPL qualification.
+harmonic-field bridging and admission/cancellation refusals. The ordinary
+constructor is homogeneous stationary lossless point quadrature: cell-size
+error requires spatial refinement. There is no moving-source correction,
+mean-flow propagation, arbitrary-boundary scattering, feedback, unresolved
+SGS sound or measured-SPL qualification.
+
+`PreparedQuadrupoleObserver::new_molecular` and its cancellable variant retain
+the original `RelaxationState` and its `k²=rho omega²/K(omega)`. The SAME complex
+wavenumber supplies the Hessian, third derivatives and every ideal-wall/wedge
+image. Pressure attenuation alone would give incorrect reactive velocity and
+energy transport; momentum remains `grad(p)=i rho omega u`. Supplied N m stress
+moments receive no additional density or volume factor. Classical shear and
+conduction losses remain separate, and no attenuation filter is added. The
+existing real-wavenumber kernel arithmetic is retained. Reference `r/c_eq`,
+actual direct-path phase `Re(k) r/omega`, and broadband arrival are distinct;
+neither exposed delay is applied again during harmonic evaluation.
+
+`RecordedQuadrupoleSpectrum::prepare_molecular_observer` binds those material
+coefficients to the actual interior Welch bin and original source layout.
+Coherent, low-rank, recorded and finite-window readouts use the original cached
+coefficients with unchanged O(N), allocation-free evaluation. Material refusals
+remain typed separately from geometry, work and cancellation refusals. Focused
+G1/G3/G4 `quadrupole_molecular` tests cover an independently eliminated caloric
+reservoir and Green Hessian, refined momentum gradients, isotropic trace and
+shell-integrated caloric dissipation, the empty-reservoir limit, molecular
+tensor images and wedge boundary conditions, and recorded-source coherence.
+The existing mixed compact/stress Welch observer admits molecular propagation
+only when both owners retain the identical original relaxation state and
+wavenumber, in addition to matching equilibrium medium and boundary geometry.
+It retains cross-mechanism interference in free space and ideal image domains;
+different relaxation rates cannot share a combined observation merely because
+equilibrium density and sound speed agree.
 
 ## Native D3Q19 resolved-volume source acquisition
 
@@ -2184,10 +2211,12 @@ interference is retained; separate mechanism powers are not substituted for
 their coherent sum. The original peak-equivalent bin normalization applies once.
 
 Both prepared observers must have identical acoustic state, receiver and exact
-frequency. Homogeneous stationary lossless free space and matching ideal
-perpendicular-plane or pi/m-wedge domains are admitted. Original plane order,
-geometry, boundary conditions and wedge order must match exactly; mismatches
-refuse. Molecular compact paths remain unavailable to the quadrupole owner.
+frequency. Homogeneous stationary lossless or molecularly relaxing free space
+and matching ideal perpendicular-plane or pi/m-wedge domains are admitted.
+Molecular observers must retain the same original relaxation state and complex
+wavenumber; matching equilibrium density and sound speed alone is insufficient.
+Original plane order, geometry, boundary conditions and wedge order must match
+exactly; mismatches refuse.
 The caller must provide disjoint physical mechanisms; a volume source already
 represented by a permeable acoustic surface must not be counted twice.
 

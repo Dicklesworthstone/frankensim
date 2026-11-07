@@ -7,8 +7,10 @@
 
 use super::{CoherenceBudget, CompactFieldStatistics, PreparedQuadrupoleObserver, poll};
 use crate::AeroacError;
+use crate::material::MaterialAeroacError;
 use fs_fft::welch::{WelchBudget, WelchConfig, WelchCrossSpectrum, WelchStream};
 use fs_material::fluid_acoustics::FluidAcousticState;
+use fs_material::relaxation::RelaxationState;
 use fs_math::dd::Dd;
 
 /// Uniform physical source clock, with an explicit timestamp admission error.
@@ -315,6 +317,34 @@ impl RecordedQuadrupoleSpectrum {
             .map_err(AeroacError::Welch)?;
         PreparedQuadrupoleObserver::new_cancellable(
             acoustic,
+            frequency_hz,
+            observer_m,
+            &self.source_positions_m,
+            self.source_positions_m.len(),
+            cancelled,
+        )
+    }
+
+    /// Bind the same recorded source layout and bin to the original molecular
+    /// gas. Absorption and dispersion affect every tensor field coefficient;
+    /// the retained Welch factors, source units and one-sided scale are unchanged.
+    pub fn prepare_molecular_observer(
+        &self,
+        source: RelaxationState,
+        observer_m: [f64; 3],
+        bin: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedQuadrupoleObserver, MaterialAeroacError> {
+        poll(&mut cancelled)?;
+        let frequency_hz = self
+            .spectrum
+            .frequency_hz(bin)
+            .map_err(AeroacError::Welch)?;
+        self.spectrum
+            .peak_bin_hz(bin, frequency_hz)
+            .map_err(AeroacError::Welch)?;
+        PreparedQuadrupoleObserver::new_molecular_cancellable(
+            source,
             frequency_hz,
             observer_m,
             &self.source_positions_m,

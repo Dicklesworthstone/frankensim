@@ -13,6 +13,10 @@
 //! Transform the actual stress history: multiplying velocity phasors and
 //! keeping the same frequency is wrong because the source is quadratic.
 //!
+//! Molecular propagation uses the original material's complex wavenumber in
+//! the same Green Hessian and its gradient, with inviscid momentum unchanged.
+//! It retains absorption and dispersion together, not a pressure-only filter.
+//!
 //! Reference: Lighthill (1952), *On sound generated aerodynamically I*,
 //! <https://doi.org/10.1098/rspa.1952.0060>; resolved-flow application:
 //! Sarkar & Hussaini, NASA-CR-191543 (1993),
@@ -22,7 +26,9 @@ use super::array::IdealAcousticPlane;
 use super::statistics::{ComplexSum, StatisticsSum, finite, invalid, nonfinite};
 use super::{CoherenceBudget, CoherentCompactField, CompactFieldStatistics};
 use crate::AeroacError;
-use fs_material::fluid_acoustics::FluidAcousticState;
+use crate::material::MaterialAeroacError;
+use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
+use fs_material::relaxation::RelaxationState;
 use fs_math::{c64::C64, det};
 
 /// Native accepted compressible flow states as resolved inviscid stress sources.
@@ -43,6 +49,13 @@ pub const QUADRUPOLE_SCOPE: &str = "Prescribed symmetric 3D Lighthill stress mom
 homogeneous stationary lossless free-space point quadrature with coherent near and far fields; \
 no source-size validation, unresolved SGS sound, boundaries, moving-source correction, \
 mean-flow propagation, absorption, source feedback or measured-SPL qualification.";
+
+/// Applicability of the original material's homogeneous relaxing bulk response.
+pub const MOLECULAR_QUADRUPOLE_SCOPE: &str = "Prescribed symmetric 3D Lighthill stress moments [N m]; \
+homogeneous stationary free-space point quadrature with material-owned molecular bulk relaxation \
+and inviscid momentum, coherent near and far fields; no source-size validation, unresolved SGS \
+sound, boundaries, motion, mean-flow propagation, shear/conduction losses, source feedback or \
+measured-SPL qualification.";
 
 /// Six independent entries of one physical symmetric stress moment.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -74,6 +87,7 @@ pub fn resolved_reynolds_moment_n_m(
 struct Transfer {
     source_m: [f64; 3],
     delay_s: f64,
+    phase_delay_s: f64,
     field: [[C64; 6]; 4],
 }
 
@@ -86,6 +100,8 @@ struct Transfer {
 #[derive(Clone, Debug)]
 pub struct PreparedQuadrupoleObserver {
     acoustic: FluidAcousticState,
+    molecular: Option<RelaxationState>,
+    wavenumber_per_m: C64,
     frequency_hz: f64,
     observer_m: [f64; 3],
     transfers: Vec<Transfer>,
@@ -121,6 +137,81 @@ impl PreparedQuadrupoleObserver {
         observer_m: [f64; 3],
         source_positions_m: &[[f64; 3]],
         max_sources: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        Self::prepare(
+            acoustic,
+            C64::from_re(core::f64::consts::TAU * frequency_hz / acoustic.sound_speed_m_s()),
+            None,
+            frequency_hz,
+            observer_m,
+            source_positions_m,
+            max_sources,
+            cancelled,
+        )
+    }
+
+    /// Prepare absorption and dispersion from the original molecular reservoirs.
+    ///
+    /// The supplied stress is already in N m: no density or source-volume
+    /// factor is added. Material density enters velocity through the original
+    /// inviscid momentum law. Classical shear/conduction losses are absent.
+    pub fn new_molecular(
+        source: RelaxationState,
+        frequency_hz: f64,
+        observer_m: [f64; 3],
+        source_positions_m: &[[f64; 3]],
+        max_sources: usize,
+    ) -> Result<Self, MaterialAeroacError> {
+        Self::new_molecular_cancellable(
+            source,
+            frequency_hz,
+            observer_m,
+            source_positions_m,
+            max_sources,
+            || false,
+        )
+    }
+
+    /// Cancellable material-bound preparation, retaining typed material refusals.
+    /// No partial owner is published on cancellation or invalid propagation.
+    pub fn new_molecular_cancellable(
+        source: RelaxationState,
+        frequency_hz: f64,
+        observer_m: [f64; 3],
+        source_positions_m: &[[f64; 3]],
+        max_sources: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, MaterialAeroacError> {
+        poll(&mut cancelled)?;
+        let acoustic = source
+            .gas()
+            .acoustic_state()
+            .map_err(MaterialAeroacError::Material)?;
+        let wave = source
+            .relaxing_wavenumber(core::f64::consts::TAU * frequency_hz)
+            .map_err(MaterialAeroacError::Material)?;
+        Ok(Self::prepare(
+            acoustic,
+            wave,
+            Some(source),
+            frequency_hz,
+            observer_m,
+            source_positions_m,
+            max_sources,
+            cancelled,
+        )?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        acoustic: FluidAcousticState,
+        wave: C64,
+        molecular: Option<RelaxationState>,
+        frequency_hz: f64,
+        observer_m: [f64; 3],
+        source_positions_m: &[[f64; 3]],
+        max_sources: usize,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, AeroacError> {
         poll(&mut cancelled)?;
@@ -133,11 +224,13 @@ impl PreparedQuadrupoleObserver {
         if [
             frequency_hz,
             omega,
-            omega / acoustic.sound_speed_m_s(),
+            wave.re,
             acoustic.density_kg_m3() * omega,
         ]
         .iter()
         .any(|x| !x.is_finite() || *x <= 0.0)
+            || !wave.im.is_finite()
+            || wave.im < 0.0
         {
             return Err(invalid(
                 "quadrupole frequency and wave scales must be positive finite",
@@ -156,32 +249,39 @@ impl PreparedQuadrupoleObserver {
                 return Err(nonfinite("quadrupole source position"));
             }
             let displacement = core::array::from_fn(|i| observer_m[i] - source[i]);
-            let field = kernel::transfer(
-                acoustic.density_kg_m3(),
-                acoustic.sound_speed_m_s(),
-                frequency_hz,
-                displacement,
-            )
-            .ok_or_else(|| {
-                invalid("quadrupole separation or field transfer is not representable")
-            })?;
+            let field =
+                kernel::transfer(acoustic.density_kg_m3(), wave, frequency_hz, displacement)
+                    .ok_or_else(|| {
+                        invalid("quadrupole separation or field transfer is not representable")
+                    })?;
             let range = det::hypot(
                 det::hypot(displacement[0], displacement[1]),
                 displacement[2],
             );
             let delay_s = range / acoustic.sound_speed_m_s();
-            if !delay_s.is_finite() || delay_s <= 0.0 {
+            let phase_delay_s = if molecular.is_some() {
+                range * (wave.re / omega)
+            } else {
+                delay_s
+            };
+            if [delay_s, phase_delay_s]
+                .iter()
+                .any(|v| !v.is_finite() || *v <= 0.0)
+            {
                 return Err(invalid("quadrupole propagation delay is not representable"));
             }
             transfers.push(Transfer {
                 source_m: *source,
                 delay_s,
+                phase_delay_s,
                 field,
             });
         }
         poll(&mut cancelled)?;
         Ok(Self {
             acoustic,
+            molecular,
+            wavenumber_per_m: wave,
             frequency_hz,
             observer_m,
             transfers,
@@ -193,6 +293,14 @@ impl PreparedQuadrupoleObserver {
     /// Original material/EOS acoustic snapshot used by every path.
     pub const fn acoustic(&self) -> FluidAcousticState {
         self.acoustic
+    }
+    /// Original evaluated reservoirs, if molecular absorption was requested.
+    pub const fn molecular_state(&self) -> Option<&RelaxationState> {
+        self.molecular.as_ref()
+    }
+    /// Actual outgoing complex wavenumber, shared by all direct and image paths.
+    pub const fn wavenumber_per_m(&self) -> C64 {
+        self.wavenumber_per_m
     }
     /// Common source frequency [Hz].
     pub const fn frequency_hz(&self) -> f64 {
@@ -210,12 +318,18 @@ impl PreparedQuadrupoleObserver {
     pub fn source_position_m(&self, index: usize) -> Option<[f64; 3]> {
         self.transfers.get(index).map(|t| t.source_m)
     }
-    /// Direct-path travel time r/c [s], already included in the harmonic transfer.
-    /// Reflected transfers contain additional path delays; this value retains
-    /// the original physical source-to-receiver delay rather than an effective
-    /// delay for their coherent sum.
+    /// Direct-path equilibrium reference time r/c [s]. It is the actual delay
+    /// in a lossless fluid; in a dispersive gas use [`Self::source_phase_delay_s`]
+    /// for the retained phase. Neither value is a second delay to apply.
     pub fn source_delay_s(&self, index: usize) -> Option<f64> {
         self.transfers.get(index).map(|t| t.delay_s)
+    }
+
+    /// Direct-path phase delay Re(k) r/omega [s]. In a relaxing gas this is
+    /// neither group delay nor signal-front arrival. Reflected paths retain
+    /// their separate phases in the cached coefficients, not an effective delay.
+    pub fn source_phase_delay_s(&self, index: usize) -> Option<f64> {
+        self.transfers.get(index).map(|t| t.phase_delay_s)
     }
 
     /// Physical boundaries folded into every original stress transfer.
@@ -231,11 +345,23 @@ impl PreparedQuadrupoleObserver {
     /// Physical propagation model and its explicit applicability boundary.
     pub const fn scope(&self) -> &'static str {
         if self.reflection_planes.is_empty() {
-            QUADRUPOLE_SCOPE
+            if self.molecular.is_some() {
+                MOLECULAR_QUADRUPOLE_SCOPE
+            } else {
+                QUADRUPOLE_SCOPE
+            }
         } else if self.reflection_wedge_order.is_some() {
-            reflection::WEDGE_SCOPE
+            if self.molecular.is_some() {
+                reflection::MOLECULAR_WEDGE_SCOPE
+            } else {
+                reflection::WEDGE_SCOPE
+            }
         } else {
-            reflection::ORTHOGONAL_SCOPE
+            if self.molecular.is_some() {
+                reflection::MOLECULAR_ORTHOGONAL_SCOPE
+            } else {
+                reflection::ORTHOGONAL_SCOPE
+            }
         }
     }
 

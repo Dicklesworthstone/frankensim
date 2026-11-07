@@ -19,6 +19,20 @@ Bin-integrated Welch pressure/velocity moments, not deterministic cross-frequenc
 no source validation, finite wall impedance, general diffraction, enclosed-room reverberation, \
 motion, absorption, source feedback, unresolved SGS sound or measured-SPL qualification.";
 
+const MIXED_MOLECULAR_QUADRUPOLE_SCOPE: &str = "Coherently recorded 3D compact volume/force \
+sources and symmetric Lighthill volume stresses in one homogeneous stationary relaxing gas; \
+original molecular absorption/dispersion and inviscid momentum; bin-integrated Welch \
+pressure/velocity moments with all measured source cross terms. Caller supplies disjoint \
+mechanisms without double counting. No source validation, boundaries, motion, mean flow, \
+shear/conduction losses, source feedback, unresolved SGS sound or measured-SPL qualification.";
+const MIXED_MOLECULAR_REFLECTED_QUADRUPOLE_SCOPE: &str = "Coherently recorded 3D compact \
+volume/force sources and symmetric Lighthill volume stresses in one homogeneous stationary \
+relaxing gas and ideal perpendicular-wall or pi/m-wedge domain; all material-dispersive \
+source and image paths retain their measured coherence. Caller supplies disjoint mechanisms \
+without double counting. Bin-integrated Welch moments, not cross-frequency phases; no source \
+validation, finite wall impedance, general diffraction, enclosed-room reverberation, motion, \
+shear/conduction losses, source feedback, unresolved SGS sound or measured-SPL qualification.";
+
 impl PreparedCompactSourceObserver {
     /// Propagate one measured interior Welch bin through the original medium.
     ///
@@ -92,8 +106,9 @@ impl PreparedCompactSourceObserver {
     /// Both observers must have exactly the same acoustic state, receiver and
     /// frequency and identical ideal boundary descriptions (including wedge
     /// order and plane ordering). Free space, perpendicular walls and pi/m
-    /// wedges are admitted. Molecular dispersion/absorption remains unavailable
-    /// to the quadrupole owner. All source-model, compact-cell, finite-record,
+    /// wedges are admitted. Molecular observers must retain the SAME original
+    /// relaxation state and wavenumber; matching equilibrium rho/c alone cannot
+    /// establish a common dispersive propagation law. All source-model, compact-cell, finite-record,
     /// window and aliasing limits remain; no SGS sound is inferred.
     ///
     /// Allocation-free O((compact sources + cells) * segments), with bounded
@@ -112,12 +127,13 @@ impl PreparedCompactSourceObserver {
         if self.acoustic() != quadrupoles.acoustic()
             || self.observer_position_m() != quadrupoles.observer_position_m()
             || self.frequency_hz().to_bits() != quadrupoles.frequency_hz().to_bits()
-            || self.molecular_state().is_some()
+            || self.molecular_state() != quadrupoles.molecular_state()
+            || self.wavenumber_per_m() != quadrupoles.wavenumber_per_m()
             || self.reflection_planes() != quadrupoles.reflection_planes()
             || self.reflection_wedge_order() != quadrupoles.reflection_wedge_order()
         {
             return Err(invalid(
-                "mixed recorded sources require one lossless medium, receiver, frequency and boundary domain",
+                "mixed recorded sources require one original medium, receiver, frequency and boundary domain",
             ));
         }
         let measured = spectrum
@@ -162,9 +178,17 @@ impl PreparedCompactSourceObserver {
         }
         plane::poll(&mut cancelled)?;
         statistics.finish(if self.reflection_planes().is_empty() {
-            MIXED_QUADRUPOLE_SCOPE
+            if self.molecular_state().is_some() {
+                MIXED_MOLECULAR_QUADRUPOLE_SCOPE
+            } else {
+                MIXED_QUADRUPOLE_SCOPE
+            }
         } else {
-            MIXED_REFLECTED_QUADRUPOLE_SCOPE
+            if self.molecular_state().is_some() {
+                MIXED_MOLECULAR_REFLECTED_QUADRUPOLE_SCOPE
+            } else {
+                MIXED_REFLECTED_QUADRUPOLE_SCOPE
+            }
         })
     }
 }
