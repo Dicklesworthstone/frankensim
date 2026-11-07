@@ -321,6 +321,7 @@ impl<'a> PlanarDielectricLayers<'a> {
                 core::ptr::eq(a, b)
             }
             (DielectricResponse::Debye(a), DielectricResponse::Debye(b)) => core::ptr::eq(a, b),
+            (DielectricResponse::Lorentz(a), DielectricResponse::Lorentz(b)) => core::ptr::eq(a, b),
             (DielectricResponse::Ohmic(a), DielectricResponse::Ohmic(b)) => core::ptr::eq(a, b),
             (
                 DielectricResponse::DebyeWithOhmic {
@@ -328,6 +329,18 @@ impl<'a> PlanarDielectricLayers<'a> {
                     conductor: a_conductor,
                 },
                 DielectricResponse::DebyeWithOhmic {
+                    dielectric: b_dielectric,
+                    conductor: b_conductor,
+                },
+            ) => {
+                core::ptr::eq(a_dielectric, b_dielectric) && core::ptr::eq(a_conductor, b_conductor)
+            }
+            (
+                DielectricResponse::LorentzWithOhmic {
+                    dielectric: a_dielectric,
+                    conductor: a_conductor,
+                },
+                DielectricResponse::LorentzWithOhmic {
                     dielectric: b_dielectric,
                     conductor: b_conductor,
                 },

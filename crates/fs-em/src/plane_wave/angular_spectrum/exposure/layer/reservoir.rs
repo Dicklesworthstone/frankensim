@@ -46,6 +46,11 @@ impl<'m> LossLaw<'m> {
                 shared_ohmic_conductivity(dielectric, conductor)?,
                 dielectric.poles(),
             ),
+            DielectricResponse::Lorentz(_) | DielectricResponse::LorentzWithOhmic { .. } => {
+                return Err(bad(
+                    "finite-window film heat has not yet connected the original inertial Lorentz reservoirs",
+                ));
+            }
             DielectricResponse::OpticalConductor(_)
             | DielectricResponse::OpticalMaterial(_)
             | DielectricResponse::SpectralOptical(_)

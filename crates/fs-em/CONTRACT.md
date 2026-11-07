@@ -6222,3 +6222,30 @@ quadrature, exact support refusals and cancellation, and bitwise equality for
 constant tables. The original-source integration regression exercises all four
 query variants through the Maxwell frequency banks and both illumination faces;
 numerical-kernel probes alone do not execute that reconstruction.
+
+## Source-bound Lorentz resonance in coherent waves
+
+`plane_wave::DielectricResponse::Lorentz` consumes the original inertial
+polarization bank from `fs-material`. Interfaces, finite layers and their
+coherent wave consumers retain its actual complex permittivity below, at and
+above a damped resonance, including negative real values. Existing outgoing
+and evanescent branches, TE/TM conventions and Poynting-flux accounting apply.
+
+`LorentzWithOhmic` adds only the independent `-i sigma/omega` contribution under
+`exp(+i omega t)`. Both laws must retain the identical complete original
+material snapshot; equal coefficients from different sources do not qualify.
+A true undamped constitutive pole refuses instead of acquiring artificial loss.
+
+Three source-level integration regressions specify passive interface/film
+scattering through resonance, homogeneous-film subdivision, independent Ohmic
+loss, complete-source identity refusal, and lossless negative-permittivity
+reflection/tunneling without heat. Their real material-card/quantity fixtures
+compile; the full EM tests are authored but unexecuted in the incomplete
+constellation dependency environment. The ten native production oscillator
+tests establish the underlying constitutive dynamics, not full EM integration.
+
+Finite-window film heat explicitly refuses these new variants until the
+original inertial polarization reservoirs are connected to that time-domain
+account. Steady Poynting absorption is not substituted for missing finite-window
+storage/work. Temperature feedback, material dispersion derivatives and a
+transient Maxwell discretization are outside this adapter's scope.

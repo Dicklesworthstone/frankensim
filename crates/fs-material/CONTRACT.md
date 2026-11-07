@@ -19823,3 +19823,36 @@ including complex product signs, overflowed products that cancel, weak retained
 responses and minimum-subnormal coefficient scaling. This is a material query
 for plate/shell consumers; it does not add an assembled plate/shell frequency
 solver or replace the original hereditary material history.
+
+## Inertial dielectric resonance at fixed material conditions
+
+`field_storage::dielectric::lorentz::ResolvedLorentzMaterial` retains a complete
+original material snapshot and explicitly named high-frequency permittivity,
+positive oscillator increments, positive natural angular frequencies, and
+nonnegative damping rates. Natural frequencies require the semantic rad/s
+quantity; Hz and dimension-only inverse seconds refuse. No oscillator or loss
+is inferred from missing source data. The empty bank recovers the instantaneous
+lossless law.
+
+Each pole obeys `P'' + gamma P' + omega0^2 P = delta_epsilon omega0^2 E`.
+Its `exp(+i omega t)` susceptibility uses scaled factored detuning, retains
+negative real permittivity and passive loss, and refuses the actual undamped
+periodic pole without artificial broadening. Original polarization and current
+retain positive restoring plus kinetic storage. Normalization maps this same
+law to the existing exact `fs-modal` forcing owner; there is no second integrator.
+
+Prepared linear-field and continuous-tone transitions advance one to three
+polarization components without warm-step allocation or transcendental calls.
+The harmonic convention is `E(t)=Ec cos(Omega t)+Es sin(Omega t)`, equivalent to
+phasor `Ec-i Es`. Exact lossless resonant growth remains finite over finite time.
+Independent supplied work and frictional heat accompany storage and balance
+residuals. Failed immutable trials publish no partial state.
+
+Ten native tests of the actual production oscillator modules pass, covering
+analytic response, high-Q and true lossless poles, optical-scale ringdown,
+linear and harmonic subdivision, resonant secular growth and independent cycle
+heat. Five material-source integration tests are authored; their source-card
+fixtures compile against real dependencies, but the full material adapter tests
+remain unexecuted without the complete constellation dependency environment.
+This is a linear isotropic fixed-condition law, not measured qualification,
+free-carrier Drude dynamics, nonlinear saturation or a transient Maxwell solver.

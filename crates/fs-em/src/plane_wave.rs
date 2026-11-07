@@ -2,8 +2,9 @@
 //!
 //! This explicit plane-wave rung is separate from the mesh MQS solvers.
 //! Sources declare a nondispersive lossless law, the existing passive Debye
-//! law, an explicitly selected isotropic Ohmic conductor with displacement
-//! current, an original spectral complex-index metal response, or explicitly
+//! law, source-bound inertial Lorentz polarization, an explicitly selected
+//! isotropic Ohmic conductor with displacement current, an original spectral
+//! complex-index metal response, or explicitly
 //! prepared collisional plasma. Selecting a
 //! law is not experimental qualification at a frequency.
 //! Both sides retain their complete source states, including absolute SI mu.
@@ -28,8 +29,9 @@
 use fs_material::{
     conductor::{ResolvedConductorState, planar::PlanarConductorMaterial},
     field_storage::{
-        FieldStorageError, dielectric::ResolvedDebyeCapacitor, linear_electric_permittivity,
-        linear_magnetic_permeability,
+        FieldStorageError,
+        dielectric::{ResolvedDebyeCapacitor, lorentz::ResolvedLorentzMaterial},
+        linear_electric_permittivity, linear_magnetic_permeability,
     },
     state_point::ResolvedMaterialStatePoint,
 };
@@ -75,6 +77,10 @@ pub enum DielectricResponse<'a> {
     /// Original polarization response, with a lossless sourced mu in the SAME
     /// retained bundle. The capacitor geometry cancels from bulk permittivity.
     Debye(&'a ResolvedDebyeCapacitor),
+    /// Original bound-charge oscillators, including inertial storage and
+    /// physical damping. Real permittivity may be negative above resonance.
+    /// This steady response does not replace the retained transient history.
+    Lorentz(&'a ResolvedLorentzMaterial),
     /// Original scalar Ohmic law J=sigma E plus lossless displacement current,
     /// with epsilon and mu from the SAME complete conductor material bundle.
     /// For exp(+i omega t), epsilon_eff = epsilon - i sigma/omega. This admits
@@ -87,6 +93,12 @@ pub enum DielectricResponse<'a> {
     /// Polarization loss and Joule loss add once in the effective permittivity.
     DebyeWithOhmic {
         dielectric: &'a ResolvedDebyeCapacitor,
+        conductor: &'a ResolvedConductorState,
+    },
+    /// Independent bound-charge resonance and DC Ohmic transport from the
+    /// identical complete material snapshot. Each loss channel enters once.
+    LorentzWithOhmic {
+        dielectric: &'a ResolvedLorentzMaterial,
         conductor: &'a ResolvedConductorState,
     },
     /// Visible complex-index source with its original same-state permeability.
@@ -124,8 +136,10 @@ impl<'a> DielectricResponse<'a> {
         match self {
             Self::Lossless(material) => material,
             Self::Debye(model) => model.material(),
+            Self::Lorentz(model) => model.material(),
             Self::Ohmic(conductor) => conductor.material(),
             Self::DebyeWithOhmic { dielectric, .. } => dielectric.material(),
+            Self::LorentzWithOhmic { dielectric, .. } => dielectric.material(),
             Self::OpticalConductor(response) => response.material(),
             Self::OpticalMaterial(response) => response.material(),
             Self::SpectralOptical(response) => response.material(),
@@ -148,6 +162,7 @@ impl<'a> DielectricResponse<'a> {
                     -(y.conductance_s / omega) * geometry,
                 )
             }
+            Self::Lorentz(model) => model.permittivity_f_m(omega)?,
             Self::Ohmic(conductor) => {
                 let epsilon = linear_electric_permittivity(conductor.material())?;
                 let sigma = ohmic_conductivity(conductor)?;
@@ -162,6 +177,14 @@ impl<'a> DielectricResponse<'a> {
             } => {
                 let sigma = shared_ohmic_conductivity(dielectric, conductor)?;
                 let epsilon = Self::Debye(dielectric).permittivity(omega)?;
+                C64::new(epsilon.re, epsilon.im - positive(sigma / omega)?)
+            }
+            Self::LorentzWithOhmic {
+                dielectric,
+                conductor,
+            } => {
+                let sigma = shared_lorentz_ohmic_conductivity(dielectric, conductor)?;
+                let epsilon = dielectric.permittivity_f_m(omega)?;
                 C64::new(epsilon.re, epsilon.im - positive(sigma / omega)?)
             }
             Self::OpticalConductor(response) => response.permittivity_f_m(omega)?,
@@ -213,6 +236,18 @@ fn shared_ohmic_conductivity(
     if dielectric.material().identity() != conductor.material().identity() {
         return Err(ReflectionError::Invalid(
             "Debye and Ohmic wave laws require the same complete material snapshot",
+        ));
+    }
+    ohmic_conductivity(conductor)
+}
+
+fn shared_lorentz_ohmic_conductivity(
+    dielectric: &ResolvedLorentzMaterial,
+    conductor: &ResolvedConductorState,
+) -> Result<f64, ReflectionError> {
+    if dielectric.material().identity() != conductor.material().identity() {
+        return Err(ReflectionError::Invalid(
+            "Lorentz and Ohmic wave laws require the same complete material snapshot",
         ));
     }
     ohmic_conductivity(conductor)
@@ -421,7 +456,14 @@ impl<'a> PlanarDielectricInterface<'a> {
                 } => {
                     shared_ohmic_conductivity(dielectric, conductor)?;
                 }
+                DielectricResponse::LorentzWithOhmic {
+                    dielectric,
+                    conductor,
+                } => {
+                    shared_lorentz_ohmic_conductivity(dielectric, conductor)?;
+                }
                 DielectricResponse::Debye(_)
+                | DielectricResponse::Lorentz(_)
                 | DielectricResponse::OpticalConductor(_)
                 | DielectricResponse::OpticalMaterial(_)
                 | DielectricResponse::SpectralOptical(_)
