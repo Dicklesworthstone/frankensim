@@ -35,6 +35,8 @@ pub mod ionization_network;
 
 /// Coupled electron-impact, photoionization and escaping radiative recombination.
 pub mod collisional_radiative;
+/// Original Milne spectra with isotropic self-absorption and nonlocal slab transfer.
+pub mod diffuse_recombination;
 /// Constant-pressure evolution through the shared extent integrator.
 pub mod isobaric;
 /// Exponential evolution of admitted constant first-order chemical mechanisms.

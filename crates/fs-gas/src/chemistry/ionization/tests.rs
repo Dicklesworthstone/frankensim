@@ -335,6 +335,7 @@ fn recombination_at_the_closed_electron_source_minimum_heats_into_the_domain() {
 }
 
 mod collisional_radiative;
+mod diffuse_recombination;
 mod ionization_network;
 mod photoionization;
 mod radiation_transport;

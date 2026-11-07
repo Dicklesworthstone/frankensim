@@ -7727,3 +7727,43 @@ ODE, resolved second-order refinement, canonical source ordering, conserved
 formation-reference shifts, first photoelectron birth, and transactional
 admission/work/cancellation cases. NIST level gaps with manufactured cross
 sections establish numerical checks, not validated H/He plasma kinetics.
+
+
+## Diffuse spectral recombination radiation in mixed slabs
+
+`chemistry::diffuse_recombination::evaluate_diffuse_recombination` solves the
+frozen, quasi-static bound-free radiation field of ordered homogeneous
+plane-parallel slabs with common area and vacuum boundaries. Original Milne
+spectra supply isotropic spontaneous emission; original energy-dependent cross
+sections supply absorption. Exact uniform-volume-source characteristics include
+both self-absorption and bidirectional nonlocal illumination. The source spectrum
+is never replaced with one mean photon. No beam, scattering, excited-level
+cascade, stimulated emission, light-travel delay or radiation-pressure work is
+inferred.
+
+Positive angular Gauss quadrature uses mu=t^4 to resolve grazing rays. Spectral
+panels split at every original source knot, onset, thermal scale and individual
+emission cutoff. Separate Gauss 8/16 estimates check every cell and directional
+interface number/energy moment. Original total Milne moments independently
+check the integrated emission. Each emitter's omitted tail retains a conditional
+original-envelope bound, propagated conservatively to absorption and interface
+observables. Cold emitters may omit a bounded high-energy emission tail while
+their original high-energy opacity remains active. Shared finite absorption
+support, unresolved tails, exhausted angular/spectral/total work or cancellation
+refuse a complete field rather than extrapolate or publish partial results.
+
+The result retains N+1 bidirectional interfaces, source states, gross capture
+and self/nonlocal absorption, escaped photon energy, net ionization and
+electron/chemical/gas power rates. Actual photon and independently transported
+energy balances close in every cell and globally; source/sink internal transfers
+cancel. Trial quadrature reuses prepared source/geometry bindings and contiguous
+scratch buffers without cloning states or banks. This query does not evolve
+populations or temperatures; its nonzero rates are inputs to a later coupled
+evolution owner. Quadrature differences are estimates, conditional tail bounds
+are not physical-source uncertainty certificates, and no spatial or experimental
+accuracy is implied.
+
+Focused verification covers independent isotropic slab escape from optical
+depth 1e-6 through 1e6, two-slab nonlocal angular integrals and reflection, an
+independently integrated cold/hot spectral-opacity case, uniform-slab subdivision
+invariance, and original support/work/cancellation/darkness behavior.
