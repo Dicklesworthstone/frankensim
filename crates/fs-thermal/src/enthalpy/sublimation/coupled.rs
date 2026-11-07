@@ -143,10 +143,10 @@ impl DepositionSimulation<'_> {
                 return Err(DepositionError::Arithmetic.into());
             }
             let end_s = if dt == stop_s - start_s { stop_s } else { time };
-            account.heat(finite(dt * rates.external_w)?)?;
+            account.heat(finite(dt * rates.external_w.value()?)?)?;
             let phase_cell = next.cells.contains_key(&id).then_some(id);
             if phase_cell.is_some() {
-                let supplied_heat_j = finite(dt * rates.watts[&id])?;
+                let supplied_heat_j = finite(dt * rates.watts[&id].value()?)?;
                 let step = next.sublimate_cell_with_heat(
                     id,
                     law,

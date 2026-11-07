@@ -222,6 +222,89 @@ fn latent_storage_and_unclassified_source_are_each_counted_once() {
 }
 
 #[test]
+fn compensated_heat_sources_preserve_plateau_entropy_in_both_time_owners() {
+    use crate::enthalpy::backward_euler::TransportStepCoefficients;
+    struct Plateau;
+    impl ThermalLaw for Plateau {
+        fn temperature_k(&self, _: f64) -> Result<f64, DepositionError> { Ok(300.0) }
+        fn maximum_temperature_slope(&self) -> f64 { 0.0 }
+        fn specific_entropy_change_j_kg_k(&self, a: f64, b: f64)
+            -> Result<Option<f64>, DepositionError> { Ok(Some((b - a) / 300.0)) }
+    }
+    #[derive(Clone)]
+    struct Channels { interval: bool }
+    impl DepositionObserver for Channels {
+        type Error = DepositionError;
+        fn sources(&mut self, _: &DepositionSimulation<'_>,
+            _: &mut dyn FnMut() -> Result<(), DepositionError>)
+            -> Result<BTreeMap<CellId, f64>, DepositionError> {
+            Ok(if self.interval { BTreeMap::new() } else { [(CellId(1), 1.0)].into() })
+        }
+        fn requires_step_interval(&self) -> bool { self.interval }
+        fn step_sources(&mut self, _: &DepositionSimulation<'_>, _: f64, _: f64, _: f64,
+            _: &mut dyn FnMut() -> Result<(), DepositionError>)
+            -> Result<BTreeMap<CellId, f64>, DepositionError> {
+            Ok(if self.interval { [(CellId(1), 1.0)].into() } else { BTreeMap::new() })
+        }
+        fn heat_transfers(&mut self, _: &DepositionSimulation<'_>,
+            _: &mut dyn FnMut() -> Result<(), DepositionError>)
+            -> Result<Vec<HeatTransfer>, DepositionError> {
+            Ok(vec![HeatTransfer {
+                a: CellId(1), b: CellId(2), power_w: 9_007_199_254_740_992.0,
+            }])
+        }
+        fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>)
+            -> Result<(), DepositionError> { Ok(()) }
+        fn step(&mut self, _: f64, _: f64, _: &BTreeMap<CellId, f64>,
+            _: &DepositionSimulation<'_>, _: &mut dyn FnMut() -> Result<(), DepositionError>)
+            -> Result<(), DepositionError> { Ok(()) }
+    }
+    let mut a = cell(1, 40.0);
+    let mut b = cell(2, 40.0);
+    a.boundary.source_w = 9_007_199_254_740_992.0;
+    b.boundary.source_w = -a.boundary.source_w;
+    let sim = simulation(vec![a, b], false, &Plateau);
+    let assert_entropy = |audit: &EntropyAudit| {
+        assert_eq!(audit.thermal_storage_change_j_k, 1.0 / 300.0);
+        assert_eq!(audit.unclassified_source_at_cell_j_k, 1.0 / 300.0);
+        assert_eq!(audit.temporal_defect_j_k, 0.0);
+        assert_eq!(audit.reservoir_entropy_input_j_k, 0.0);
+        assert_eq!(audit.conduction_generation_j_k, 0.0);
+        assert!(audit.has_unclassified_sources);
+    };
+    for interval in [false, true] {
+        let (next, _, energy, entropy) = sim.advance_observed_with_entropy(
+            &Channels { interval }, 1.0, config(1.0), || Ok(()),
+        ).unwrap();
+        assert_eq!(next.cells()[&CellId(1)].specific_h_j_kg, 41.0);
+        assert_eq!(next.temperature_k(CellId(1)).unwrap(), 300.0);
+        assert_eq!(energy.external_heat_j, 1.0);
+        assert_eq!(energy.residual_j, 0.0);
+        assert_entropy(&entropy);
+    }
+    let step = BackwardEulerStep::new(&sim, 1.0, || Ok(())).unwrap();
+    let trial = step.evaluate_with_transport_and_entropy(&[1.0, 0.0],
+        |_| -> Result<_, DepositionError> {
+            Ok(TransportStepCoefficients {
+                heat: StepCoefficients {
+                    sources_w: [(CellId(1), 1.0)].into(),
+                    conductances_w_k: BTreeMap::new(), payload: (),
+                }.into(),
+                transfers: vec![HeatTransfer {
+                    a: CellId(1), b: CellId(2), power_w: 9_007_199_254_740_992.0,
+                }],
+            })
+        }, || Ok(()),
+    ).unwrap();
+    assert_entropy(trial.entropy_audit().unwrap());
+    let (next, (), energy) = trial.accept(0.0, 0.0, || Ok(())).unwrap();
+    assert_eq!(next.cells()[&CellId(1)].specific_h_j_kg, 41.0);
+    assert_eq!(energy.external_heat_j, 1.0);
+    assert_eq!(energy.residual_j, 0.0);
+    assert_eq!(next.cells()[&CellId(1)].boundary, sim.cells()[&CellId(1)].boundary);
+}
+
+#[test]
 fn unavailable_entropy_and_cancellation_never_publish_partial_states() {
     struct Missing;
     impl ThermalLaw for Missing {

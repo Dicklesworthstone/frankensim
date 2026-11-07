@@ -120,6 +120,118 @@ fn near(a: f64, b: f64) {
 }
 
 #[test]
+fn compensated_heat_implicit_baths_and_transfer_order_preserve_latent_heat() {
+    let large = 9_007_199_254_740_992.0;
+    let old = simulation(&LATENT, vec![cell(1, 1.0, 40.0), cell(2, 1.0, 40.0)], None, vec![]);
+    let step = BackwardEulerStep::new(&old, 1.0, || Ok(())).unwrap();
+    // Bath heat and an opposing source leave +1 W. A larger directed
+    // circulation temporarily masks that input unless compensation survives
+    // both the bath owner and the subsequent internal-transfer owner.
+    for powers in [[large, 1.0, -large], [large, -large, 1.0],
+        [1.0, large, -large], [1.0, -large, large],
+        [-large, large, 1.0], [-large, 1.0, large]] {
+        let trial = step.evaluate_with_boundary_exchanges(
+            &[0.0, 1.0],
+            |_| -> Result<_, DepositionError> {
+                Ok(BoundaryExchangeStepCoefficients {
+                    transport: TransportStepCoefficients {
+                        heat: StepCoefficients {
+                            sources_w: [(CellId(1), -large)].into(),
+                            conductances_w_k: BTreeMap::new(),
+                            payload: (),
+                        }.into(),
+                        transfers: powers.into_iter().map(|power_w| HeatTransfer {
+                            a: CellId(1), b: CellId(2), power_w,
+                        }).collect(),
+                    },
+                    exchanges: BoundaryExchanges {
+                        ambient: [(CellId(1), [
+                            PrescribedBathHeat { outward_power_w: -large, temperature_k: 311.0 },
+                            PrescribedBathHeat { outward_power_w: -1.0, temperature_k: 311.0 },
+                        ])].into(),
+                        ..Default::default()
+                    },
+                })
+            },
+            || Ok(()),
+        ).unwrap();
+        assert_eq!(trial.maximum_cell_residual_j(), 0.0, "transfers: {powers:?}");
+        let (next, (), audit) = trial.accept(0.0, 0.0, || Ok(())).unwrap();
+        assert_eq!(next.cells()[&CellId(1)].specific_h_j_kg, 40.0);
+        assert_eq!(next.cells()[&CellId(2)].specific_h_j_kg, 41.0);
+        assert_eq!(next.temperature_k(CellId(2)).unwrap(), 310.0);
+        assert_eq!(audit.external_heat_j, 1.0);
+        assert_eq!(audit.stored_energy_change_j, 1.0);
+        assert_eq!(audit.residual_j, 0.0);
+    }
+}
+
+#[test]
+fn compensated_heat_implicit_actual_storage_retains_small_cell_energy() {
+    let large = 9_007_199_254_740_992.0;
+    let mut cells = vec![cell(1, large, 40.0), cell(2, 1.0, 40.0), cell(3, large, 40.0)];
+    for (cell, power) in cells.iter_mut().zip([large, 1.0, -large]) {
+        cell.boundary.source_w = power;
+    }
+    let old = simulation(&LATENT, cells, None, vec![]);
+    let step = BackwardEulerStep::new(&old, 1.0, || Ok(())).unwrap();
+    let trial = step.evaluate(&[large, 1.0, -large], empty, || Ok(())).unwrap();
+    assert_eq!(trial.maximum_cell_residual_j(), 0.0);
+    let (next, (), audit) = trial.accept(0.0, 0.0, || Ok(())).unwrap();
+    assert_eq!(next.cells()[&CellId(1)].specific_h_j_kg, 41.0);
+    assert_eq!(next.cells()[&CellId(2)].specific_h_j_kg, 41.0);
+    assert_eq!(next.cells()[&CellId(3)].specific_h_j_kg, 39.0);
+    assert_eq!(audit.stored_energy_change_j, 1.0);
+    assert_eq!(audit.external_heat_j, 1.0);
+    assert_eq!(audit.residual_j, 0.0);
+}
+
+#[test]
+fn compensated_heat_implicit_rounded_reports_cannot_hide_lost_supply() {
+    let large = 9_007_199_254_740_992.0;
+    let mut body = cell(1, large, 40.0);
+    body.boundary.source_w = large;
+    let old = simulation(&LATENT, vec![body], None, vec![]);
+    let step = BackwardEulerStep::new(&old, 1.0, || Ok(())).unwrap();
+    let trial = step.evaluate(&[large], |_| -> Result<_, DepositionError> {
+        Ok(StepCoefficients {
+            sources_w: [(CellId(1), 1.0)].into(),
+            conductances_w_k: BTreeMap::new(),
+            payload: (),
+        })
+    }, || Ok(())).unwrap();
+    // One extra joule cannot fit into this cell's represented increment.
+    // Equal rounded aggregate fields must not certify conservation.
+    assert_eq!(trial.audit().stored_energy_change_j, large);
+    assert_eq!(trial.audit().external_heat_j, large);
+    assert_eq!(trial.audit().residual_j, -1.0);
+    assert!(matches!(trial.accept(0.0, 0.0, || Ok(())),
+        Err(DepositionError::EnergyBalance(-1.0))));
+    assert_eq!(old.cells()[&CellId(1)].specific_h_j_kg, 40.0);
+}
+
+#[test]
+fn compensated_heat_implicit_local_defects_cannot_cancel_at_the_global_gate() {
+    let large = 9_007_199_254_740_992.0;
+    let mut a = cell(1, large, 40.0);
+    let mut b = cell(2, large, 40.0);
+    a.boundary.source_w = large;
+    b.boundary.source_w = -large;
+    let old = simulation(&LATENT, vec![a, b], None, vec![]);
+    let step = BackwardEulerStep::new(&old, 1.0, || Ok(())).unwrap();
+    let trial = step.evaluate(&[large, -large], |_| -> Result<_, DepositionError> {
+        Ok(StepCoefficients {
+            sources_w: [(CellId(1), 1.0), (CellId(2), -1.0)].into(),
+            conductances_w_k: BTreeMap::new(), payload: (),
+        })
+    }, || Ok(())).unwrap();
+    assert_eq!(trial.audit().residual_j, 0.0);
+    assert_eq!(trial.residual_j(), &[-1.0, 1.0]);
+    assert!(matches!(trial.accept(0.0, 0.0, || Ok(())),
+        Err(DepositionError::EnergyBalance(-1.0))));
+}
+
+#[test]
 fn g1_external_native_duration_survives_rounded_absolute_clock() {
     let mut deposited = cell(1, 2.0, 0.0);
     deposited.boundary.source_w = 5.0;

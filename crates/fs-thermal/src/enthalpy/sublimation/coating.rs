@@ -589,7 +589,7 @@ impl<'a> CoatingSimulation<'a> {
             let mut coating_heat = BTreeMap::new();
             for (&id, cell) in &mut next.thermal.cells {
                 checkpoint()?;
-                let heat = finite(dt * rates.watts[&id])?;
+                let heat = finite(dt * rates.watts[&id].value()?)?;
                 applied_heat.add(heat)?;
                 if matches!(mode, AdvanceMode::Coupled(_)) && next.coatings.contains_key(&id) {
                     coating_heat.insert(id, heat);
@@ -647,7 +647,7 @@ impl<'a> CoatingSimulation<'a> {
                 sums.heat_residual.add(defect)?;
                 sums.defects.add(defect.abs())?;
             }
-            let external_heat = finite(dt * rates.external_w)?;
+            let external_heat = finite(dt * rates.external_w.value()?)?;
             let internal_defect = finite(applied_heat.value() - external_heat)?;
             sums.external.add(external_heat)?;
             sums.heat_residual.add(internal_defect)?;

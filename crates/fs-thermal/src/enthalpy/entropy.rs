@@ -142,6 +142,49 @@ impl Sum {
 }
 
 impl DepositionSimulation<'_> {
+    // Authored/generated/interval watts and directed transfers share the same
+    // at-cell temperature. Retain their signed operands until after they have
+    // cancelled, including the low component when dividing by temperature.
+    pub(super) fn entropy_source_powers(
+        &self,
+        generated: &BTreeMap<CellId, f64>,
+        interval: &BTreeMap<CellId, f64>,
+        transfers: &[HeatTransfer],
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(BTreeMap<CellId, observe::EnergySum>, bool), DepositionError> {
+        let mut sources = BTreeMap::new();
+        let mut has_unclassified = false;
+        for (i, (&id, cell)) in self.cells.iter().enumerate() {
+            if i % 256 == 0 { checkpoint()?; }
+            let generated = generated.get(&id).copied().unwrap_or(0.0);
+            let interval = interval.get(&id).copied().unwrap_or(0.0);
+            has_unclassified |= cell.boundary.source_w != 0.0 || generated != 0.0 || interval != 0.0;
+            if generated != 0.0 || interval != 0.0 {
+                let mut power = observe::EnergySum::default();
+                power.add(cell.boundary.source_w)?;
+                power.add(generated)?;
+                power.add(interval)?;
+                sources.insert(id, power);
+            }
+        }
+        for (i, transfer) in transfers.iter().enumerate() {
+            if i % 256 == 0 { checkpoint()?; }
+            has_unclassified |= transfer.power_w != 0.0;
+            for (id, sign) in [(transfer.a, -1.0), (transfer.b, 1.0)] {
+                let power = match sources.entry(id) {
+                    std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        let mut power = observe::EnergySum::default();
+                        power.add(self.cells[&id].boundary.source_w)?;
+                        entry.insert(power)
+                    }
+                };
+                power.add(sign * transfer.power_w)?;
+            }
+        }
+        Ok((sources, has_unclassified))
+    }
+
     /// Advance the original explicit thermal owner and integrate entropy on its
     /// actual CFL/event grid. Every active law must provide its exact de/T integral
     /// in its declared storage basis (dh at fixed pressure, du at fixed volume).
@@ -200,7 +243,7 @@ impl DepositionSimulation<'_> {
     #[allow(clippy::too_many_arguments)]
     fn entropy_step_audit_with_coefficients(
         &self, initial_h: &BTreeMap<CellId, f64>, temperatures: &BTreeMap<CellId, f64>,
-        duration_s: f64, sources: &BTreeMap<CellId, f64>,
+        duration_s: f64, sources: &BTreeMap<CellId, observe::EnergySum>,
         conductances: &BTreeMap<u64, f64>, reservoirs: &BTreeMap<CellId, f64>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<EntropyAudit, DepositionError> {
@@ -213,7 +256,7 @@ impl DepositionSimulation<'_> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn entropy_step_audit_with_boundary_coefficients(
         &self, initial_h: &BTreeMap<CellId, f64>, temperatures: &BTreeMap<CellId, f64>,
-        duration_s: f64, sources: &BTreeMap<CellId, f64>,
+        duration_s: f64, sources: &BTreeMap<CellId, observe::EnergySum>,
         conductances: &BTreeMap<u64, f64>, ambient_conductances: &BTreeMap<CellId, f64>,
         reservoirs: &BTreeMap<CellId, f64>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
@@ -228,7 +271,7 @@ impl DepositionSimulation<'_> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn entropy_step_audit_with_boundary_exchanges(
         &self, initial_h: &BTreeMap<CellId, f64>, temperatures: &BTreeMap<CellId, f64>,
-        duration_s: f64, sources: &BTreeMap<CellId, f64>,
+        duration_s: f64, sources: &BTreeMap<CellId, observe::EnergySum>,
         conductances: &BTreeMap<u64, f64>, ambient_conductances: &BTreeMap<CellId, f64>,
         reservoirs: &BTreeMap<CellId, f64>,
         exchanges: &super::backward_euler::BoundaryExchanges,
@@ -246,7 +289,7 @@ impl DepositionSimulation<'_> {
         let mut storage = Sum::default();
         let mut boundary = Sum::default();
         let mut generation = Sum::default();
-        let mut source = Sum::default();
+        let mut source = observe::EnergySum::default();
         let mut has_source = false;
         let mut covered = BTreeMap::new();
         for (i, (&id, cell)) in self.cells.iter().enumerate() {
@@ -320,16 +363,20 @@ impl DepositionSimulation<'_> {
                     generation.add(finite((q / t) * ((tr - t) / tr))?)?;
                 }
             }
-            let watts = sources.get(&id).copied().unwrap_or(cell.boundary.source_w);
-            source.add(finite(watts / t)?)?;
-            has_source |= watts != 0.0;
+            if let Some(watts) = sources.get(&id) {
+                source.add_divided(watts, t)?;
+                has_source |= watts.value()? != 0.0;
+            } else {
+                source.add(finite(cell.boundary.source_w / t)?)?;
+                has_source |= cell.boundary.source_w != 0.0;
+            }
         }
         let mut audit = EntropyAudit {
             thermal_storage_change_j_k: storage.total()?,
             reservoir_entropy_input_j_k: finite(duration_s * boundary.total()?)?,
             conduction_generation_j_k: finite(duration_s * generation.total()?)?,
             advection: None,
-            unclassified_source_at_cell_j_k: finite(duration_s * source.total()?)?,
+            unclassified_source_at_cell_j_k: finite(duration_s * source.value()?)?,
             has_unclassified_sources: has_source,
             temporal_defect_j_k: 0.0,
         };
@@ -435,25 +482,9 @@ impl<O: DepositionObserver> DepositionObserver for EntropyObserver<O> {
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Self::Error> {
-        let mut sources = BTreeMap::new();
-        let mut has_unclassified = false;
-        for (i, (&id, cell)) in thermal.cells.iter().enumerate() {
-            if i % 256 == 0 { checkpoint()?; }
-            let generated = self.sources.get(&id).copied().unwrap_or(0.0);
-            let interval = self.interval_sources.get(&id).copied().unwrap_or(0.0);
-            has_unclassified |= cell.boundary.source_w != 0.0 || generated != 0.0 || interval != 0.0;
-            if generated != 0.0 || interval != 0.0 {
-                sources.insert(id, finite(finite(cell.boundary.source_w + generated)? + interval)?);
-            }
-        }
-        for (i, transfer) in self.transfers.iter().enumerate() {
-            if i % 256 == 0 { checkpoint()?; }
-            has_unclassified |= transfer.power_w != 0.0;
-            for (id, sign) in [(transfer.a, -1.0), (transfer.b, 1.0)] {
-                let old = sources.get(&id).copied().unwrap_or(thermal.cells[&id].boundary.source_w);
-                sources.insert(id, finite(old + sign * transfer.power_w)?);
-            }
-        }
+        let (sources, has_unclassified) = thermal.entropy_source_powers(
+            &self.sources, &self.interval_sources, &self.transfers, checkpoint,
+        )?;
         let mut audit = thermal.entropy_step_audit_with_boundary_coefficients(
             &self.initial_h, temperatures, duration_s, &sources,
             &self.conductances, &self.ambient, &self.reservoirs, checkpoint,

@@ -542,7 +542,7 @@ impl<'a> PyrolysisSimulation<'a> {
             for (&id, cell) in &mut next.thermal.cells {
                 checkpoint()?;
                 let previous = next.inventories[&id];
-                let input_j = finite(dt * rates.watts[&id])?;
+                let input_j = finite(dt * rates.watts[&id].value()?)?;
                 let step = solve_cell(
                     previous,
                     next.materials[&cell.material_id],
@@ -596,7 +596,7 @@ impl<'a> PyrolysisSimulation<'a> {
                 cell.specific_h_j_kg = step.specific_h_j_kg;
                 next.inventories.insert(id, step.inventory);
             }
-            external.add(finite(dt * rates.external_w)?)?;
+            external.add(finite(dt * rates.external_w.value()?)?)?;
             next.thermal.time_s = endpoint;
             audit.thermal.substeps += 1;
         }

@@ -3486,3 +3486,30 @@ Two synthetic regression definitions cover independent mixed-channel heat,
 reference inventory, native CFL/entropy, and failed-admission retry. Focused
 Rust parsing/formatting and independent scalar heat calculations passed; native
 compilation and test execution remain unverified in this environment.
+
+### Signed heat channels and latent storage
+
+The shared enthalpy rate owner retains Neumaier compensation for each cell
+and for external heat through conductive links, separate reservoir/bath
+contributions, authored and generated sources, and directed internal transfers.
+Only the consuming energy equation rounds the resulting net power. No extra
+heat, modified caloric curve, or apparent heat capacity compensates for lost
+arithmetic. The correction requires one additional scalar per cell and no
+per-channel allocation; the existing sparse traversal and cancellation gates
+remain authoritative.
+
+Backward-Euler local residuals and storage likewise use the actual per-cell
+`m*(h_new-h_old)` and retained powers before rounding aggregate report fields.
+Opposite local defects cannot pass solely because their total vanishes. Explicit
+observed advances retain one compensated external-energy ledger across substeps
+and bound absolute losses when final cell powers cannot represent a low component.
+Equal rounded storage and input reports do not certify a smaller physical
+residual. Existing interval-source external-ledger checks remain active.
+
+Source entropy uses these same authored, generated, interval and directed
+transfer operands, retaining their correction through division by each cell's
+temperature. A latent heat increment contributes `Q/T` without inventing
+conductive production or a temporal defect from premature source rounding.
+Manufactured regressions cover weak latent heating and entropy between opposing
+large channels, reordered link IDs and transfers, generated heat, unequal-mass
+inventories, and heat retained across a heating/cooling history.

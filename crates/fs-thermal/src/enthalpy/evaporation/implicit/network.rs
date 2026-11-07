@@ -523,19 +523,19 @@ impl<'s, 'm, 'l, L: EvaporationLaw + ?Sized> EvaporatingNetworkBackwardEulerStep
                 } = resolved_heat;
                 let mut physical = thermal.clone();
                 physical.set_step_conductances(&conductances_w_k, &mut poll)?;
-                physical.add_step_sources(&sources_w, &mut poll)?;
                 let mut rates = physical.heat_rates_with_boundary_exchanges(
                     f64::MAX,
                     &boundaries,
                     &exchanges,
                     &mut poll,
                 )?;
+                physical.add_rate_sources(&mut rates, &sources_w, &mut poll)?;
                 physical.add_step_transfers(&mut rates, &transfers, &mut poll)?;
-                let external_heat_j = finite(dt * rates.external_w)?;
+                let external_heat_j = finite(dt * rates.external_w.value()?)?;
                 for (&id, surface) in &mut receipts {
                     poll()?;
                     let old = &self.initial.cells[&id];
-                    surface.supplied_heat_j = finite(dt * rates.watts[&id])?;
+                    surface.supplied_heat_j = finite(dt * rates.watts[&id].value()?)?;
                     let mut residual = EnergySum::default();
                     residual.add(finite(
                         old.mass_kg

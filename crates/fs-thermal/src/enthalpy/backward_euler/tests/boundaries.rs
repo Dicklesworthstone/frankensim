@@ -105,7 +105,7 @@ fn g1_current_boundary_conductances_share_energy_entropy_and_native_decay_bound(
         .heat_rates_with_boundaries(100.0, &used, &mut || Ok(()))
         .unwrap();
     near(rates.explicit_dt_s, 0.8 * 2.0 / (1.0 + 4.0));
-    near(rates.external_w, 20.0);
+    near(rates.external_w.value().unwrap(), 20.0);
 }
 
 #[test]

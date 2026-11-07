@@ -336,8 +336,8 @@ pub struct StepConfig {
     /// Maximum thermal step, s. CFL may reduce it further.
     pub max_dt_s: f64,
     /// Maximum stored-minus-incoming-minus-external defect, J.
-    /// Also bounds cumulative absolute roundoff when interval sources enter
-    /// cell/external power, and local work too small to change a cell's enthalpy
+    /// Also bounds cumulative absolute roundoff in final cell power and the
+    /// interval-source external ledger, and work too small to change a cell's enthalpy
     /// coordinate during an explicit advance. Opposing losses count separately,
     /// so a zero global residual cannot conceal them.
     pub energy_tolerance_j: f64,
@@ -735,7 +735,7 @@ impl<'a> DepositionSimulation<'a> {
             }
             temperatures.insert(id, temperature);
             covered.insert(id, cell.boundary.reservoir.map_or(0.0, |r| r.area_m2));
-            rates.insert(id, 0.0);
+            rates.insert(id, observe::EnergySum::default());
             outgoing.insert(id, (0.0, slope));
         }
         for (i, link) in self.links.values().enumerate() {
@@ -747,14 +747,14 @@ impl<'a> DepositionSimulation<'a> {
             let coverage = self.contact_areas(link);
             for (id, sign, side_area) in [(link.a, 1.0, coverage[0]), (link.b, -1.0, coverage[1])] {
                 let rate = rates.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
-                *rate = finite(*rate + sign * power)?;
+                rate.add(sign * power)?;
                 let g = outgoing.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
                 g.0 = finite(g.0 + link.conductance_w_k)?;
                 let area = covered.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
                 *area = finite(*area + side_area)?;
             }
         }
-        let mut external_w = 0.0;
+        let mut external_w = observe::EnergySum::default();
         let mut dt = maximum_explicit_dt;
         for (i, (&id, cell)) in self.cells.iter().enumerate() {
             if i % 256 == 0 {
@@ -767,31 +767,41 @@ impl<'a> DepositionSimulation<'a> {
                 ));
             }
             let mut g = outgoing[&id].0;
-            let mut external = cell.boundary.source_w;
+            let rate = rates.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
+            // Retain each signed channel until all link, bath, source and
+            // directed-transfer powers have entered the same cell balance.
+            // Rounding a boundary subtotal here can erase heat that becomes
+            // representable after a larger internal transfer cancels it.
+            let mut add_external = |power: f64| -> Result<(), DepositionError> {
+                rate.add(power)?;
+                external_w.add(power)
+            };
+            add_external(cell.boundary.source_w)?;
             if let Some(baths) = exchanges.ambient.get(&id) {
                 if area == 0.0 && baths.iter().any(|bath| bath.outward_power_w != 0.0) {
                     return Err(DepositionError::InvalidInput(
                         "nonzero bath heat needs an exposed reference patch",
                     ));
                 }
-                external = finite(external - backward_euler::BoundaryExchanges::outward_power(baths)?)?;
+                for bath in baths {
+                    add_external(-bath.outward_power_w)?;
+                }
             } else {
                 let ambient_g = boundaries.ambient(id, area, cell.boundary.htc_w_m2_k)?;
                 g = finite(g + ambient_g)?;
-                external = finite(external + ambient_g * (cell.boundary.ambient_k - temperatures[&id]))?;
+                add_external(ambient_g * (cell.boundary.ambient_k - temperatures[&id]))?;
             }
             if let Some(r) = cell.boundary.reservoir {
                 if let Some(baths) = exchanges.reservoir.get(&id) {
-                    external = finite(external - backward_euler::BoundaryExchanges::outward_power(baths)?)?;
+                    for bath in baths {
+                        add_external(-bath.outward_power_w)?;
+                    }
                 } else {
                     let reservoir_g = boundaries.reservoir_w_k.get(&id).copied().unwrap_or(r.conductance_w_k);
                     g = finite(g + reservoir_g)?;
-                    external = finite(external + reservoir_g * (r.temperature_k - temperatures[&id]))?;
+                    add_external(reservoir_g * (r.temperature_k - temperatures[&id]))?;
                 }
             }
-            external_w = finite(external_w + external)?;
-            let rate = rates.get_mut(&id).ok_or(DepositionError::Arithmetic)?;
-            *rate = finite(*rate + external)?;
             let slope = outgoing[&id].1;
             let decay = finite(g * slope / cell.mass_kg)?;
             if decay > 0.0 {
@@ -831,16 +841,25 @@ impl<'a> DepositionSimulation<'a> {
             if i % 256 == 0 {
                 checkpoint()?;
             }
+            // A final power too large to represent its retained low component
+            // loses real cell work even if the opposite defect occurs elsewhere.
+            // Interval sources use this same final local gate, after transfers.
+            let power_roundoff = rates[&id].roundoff()?;
+            if power_roundoff != 0.0 {
+                let lost = finite((dt * power_roundoff.abs()).next_up())?;
+                *unrepresented_heat_j = finite((*unrepresented_heat_j + lost).next_up())?;
+            }
             if excluded == Some(id) {
                 continue;
             }
             let old_h = cell.specific_h_j_kg;
-            let next_h = finite(old_h + finite(dt * rates[&id] / cell.mass_kg)?)?;
+            let power_w = rates[&id].value()?;
+            let next_h = finite(old_h + finite(dt * power_w / cell.mass_kg)?)?;
             // Bound local work that disappears on the enthalpy coordinate.
             // Both sides of an internal exchange count; cancellation cannot
             // conceal loss. The caller applies its absolute joule tolerance.
-            if rates[&id] != 0.0 && next_h == old_h {
-                let lost = finite(dt * rates[&id])?.abs();
+            if power_w != 0.0 && next_h == old_h {
+                let lost = finite(dt * power_w)?.abs();
                 *unrepresented_heat_j = finite((*unrepresented_heat_j + lost).next_up())?;
             }
             cell.specific_h_j_kg = next_h;
@@ -849,15 +868,17 @@ impl<'a> DepositionSimulation<'a> {
                 return Err(DepositionError::MaterialDomain);
             }
         }
-        audit.external_heat_j = finite(audit.external_heat_j + finite(dt * external_w)?)?;
+        audit.external_heat_j = finite(audit.external_heat_j + finite(dt * external_w.value()?)?)?;
         Ok((dt, temperatures))
     }
 }
 
 struct HeatRates {
     temperatures: BTreeMap<CellId, f64>,
-    watts: BTreeMap<CellId, f64>,
-    external_w: f64,
+    // Compensation survives observer sources and conservative transfers;
+    // only the final consumer rounds a physical net power to f64.
+    watts: BTreeMap<CellId, observe::EnergySum>,
+    external_w: observe::EnergySum,
     explicit_dt_s: f64,
 }
 
@@ -992,6 +1013,192 @@ mod tests {
     }
     fn close(a: f64, b: f64, tol: f64) {
         assert!((a - b).abs() <= tol, "{a} != {b}");
+    }
+
+    #[test]
+    fn compensated_heat_opposing_baths_preserve_latent_storage() {
+        // A manufactured sharp phase interval: h/L is liquid fraction and
+        // temperature stays at 310 K throughout the admitted chart. The large
+        // exactly representable bath powers expose loss of the 1 W source.
+        struct Plateau;
+        impl ThermalLaw for Plateau {
+            fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+                if (0.0..=100.0).contains(&h) {
+                    Ok(310.0)
+                } else {
+                    Err(DepositionError::MaterialDomain)
+                }
+            }
+            fn maximum_temperature_slope(&self) -> f64 { 0.0 }
+        }
+        let large = 9_007_199_254_740_992.0;
+        let mut body = cell(1, 40.0);
+        body.mass_kg = 1.0;
+        body.geometry.surface_area_m2 = 2.0;
+        body.boundary = Boundary {
+            ambient_k: 311.0,
+            htc_w_m2_k: large,
+            reservoir: Some(Reservoir {
+                area_m2: 1.0,
+                conductance_w_k: large,
+                temperature_k: 309.0,
+            }),
+            source_w: 1.0,
+        };
+        let sim = DepositionSimulation::new(
+            vec![event(0.0, Event::Birth(body))],
+            &[(MaterialId(7), &Plateau)],
+            budget(),
+        ).unwrap();
+        let old = sim.advance_to(0.0, config(1.0), || Ok(())).unwrap().0;
+        let balance = old.power_balance_observed(&(), || Ok(())).unwrap();
+        assert_eq!(balance.net_power_w[&CellId(1)], 1.0);
+        assert_eq!(balance.external_power_w, 1.0);
+        let (next, audit) = old.advance_to(1.0, config(1.0), || Ok(())).unwrap();
+        assert_eq!(next.temperature_k(CellId(1)).unwrap(), 310.0);
+        assert_eq!(next.cells()[&CellId(1)].specific_h_j_kg, 41.0);
+        close(next.cells()[&CellId(1)].specific_h_j_kg / 100.0, 0.41, 1e-15);
+        assert_eq!(audit.external_heat_j, 1.0);
+        assert_eq!(audit.stored_energy_change_j, 1.0);
+        assert_eq!(audit.residual_j, 0.0);
+        assert_eq!(audit.substeps, 1);
+        assert_eq!(old.cells()[&CellId(1)].specific_h_j_kg, 40.0);
+    }
+
+    #[test]
+    fn compensated_heat_link_id_order_retains_small_internal_flux() {
+        let large = 9_007_199_254_740_992.0;
+        for ids in [[10, 11, 12], [10, 12, 11], [11, 10, 12],
+            [11, 12, 10], [12, 10, 11], [12, 11, 10]] {
+            let mut events = vec![
+                birth(0.0, 1, 200_000.0), // 400 K
+                birth(0.0, 2, 202_000.0), // 401 K
+                birth(0.0, 3, 202_000.0), // 401 K
+                birth(0.0, 4, 198_000.0), // 399 K
+            ];
+            for (index, (neighbor, conductance)) in [(2, large), (3, 1.0), (4, large)]
+                .into_iter().enumerate() {
+                events.push(event(0.0, Event::Contact(ThermalLink {
+                    id: ids[index],
+                    a: CellId(1),
+                    b: CellId(neighbor),
+                    area_m2: 0.0002,
+                    conductance_w_k: conductance,
+                })));
+            }
+            let old = run(&simulation(events), 0.0, 1.0).0;
+            let balance = old.power_balance_observed(&(), || Ok(())).unwrap();
+            assert_eq!(balance.net_power_w[&CellId(1)], 1.0, "link IDs: {ids:?}");
+            assert_eq!(balance.net_power_w[&CellId(2)], -large);
+            assert_eq!(balance.net_power_w[&CellId(3)], -1.0);
+            assert_eq!(balance.net_power_w[&CellId(4)], large);
+            assert_eq!(balance.external_power_w, 0.0);
+        }
+    }
+
+    #[test]
+    fn compensated_heat_generated_source_survives_later_directed_transfer() {
+        #[derive(Clone)]
+        struct Channels;
+        impl DepositionObserver for Channels {
+            type Error = DepositionError;
+            fn sources(&mut self, _: &DepositionSimulation<'_>,
+                _: &mut dyn FnMut() -> Result<(), DepositionError>)
+                -> Result<BTreeMap<CellId, f64>, DepositionError> {
+                Ok([(CellId(1), 1.0)].into())
+            }
+            fn heat_transfers(&mut self, _: &DepositionSimulation<'_>,
+                _: &mut dyn FnMut() -> Result<(), DepositionError>)
+                -> Result<Vec<HeatTransfer>, DepositionError> {
+                Ok(vec![HeatTransfer {
+                    a: CellId(1), b: CellId(2), power_w: 9_007_199_254_740_992.0,
+                }])
+            }
+            fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>)
+                -> Result<(), DepositionError> { Ok(()) }
+            fn step(&mut self, _: f64, _: f64, _: &BTreeMap<CellId, f64>,
+                _: &DepositionSimulation<'_>,
+                _: &mut dyn FnMut() -> Result<(), DepositionError>)
+                -> Result<(), DepositionError> { Ok(()) }
+        }
+        let mut a = cell(1, 200_000.0);
+        let mut b = cell(2, 200_000.0);
+        a.mass_kg = 1.0;
+        b.mass_kg = 1.0;
+        a.boundary.source_w = 9_007_199_254_740_992.0;
+        b.boundary.source_w = -a.boundary.source_w;
+        let old = run(&simulation(vec![event(0.0, Event::Birth(a)),
+            event(0.0, Event::Birth(b))]), 0.0, 1.0).0;
+        let balance = old.power_balance_observed(&Channels, || Ok(())).unwrap();
+        assert_eq!(balance.net_power_w[&CellId(1)], 1.0);
+        assert_eq!(balance.net_power_w[&CellId(2)], 0.0);
+        assert_eq!(balance.external_power_w, 1.0);
+        let (next, _, audit) = old.advance_observed(&Channels, 1.0, config(1.0), || Ok(())).unwrap();
+        assert_eq!(next.cells()[&CellId(1)].specific_h_j_kg, 200_001.0);
+        assert_eq!(next.cells()[&CellId(2)].specific_h_j_kg, 200_000.0);
+        assert_eq!(audit.external_heat_j, 1.0);
+        assert_eq!(audit.stored_energy_change_j, 1.0);
+        assert_eq!(audit.residual_j, 0.0);
+        assert_eq!(next.cells()[&CellId(1)].boundary, old.cells()[&CellId(1)].boundary);
+    }
+
+    #[test]
+    fn compensated_heat_external_ledger_retains_input_across_opposing_substeps() {
+        let large = 9_007_199_254_740_992.0;
+        let mut a = cell(1, 200_000.0);
+        let mut b = cell(2, 200_000.0);
+        a.mass_kg = large;
+        b.mass_kg = 1.0;
+        a.boundary.source_w = large;
+        let mut weak = boundary(0.0);
+        weak.source_w = 1.0;
+        let mut cooling = boundary(0.0);
+        cooling.source_w = -large;
+        let sim = simulation(vec![
+            event(0.0, Event::Birth(a)), event(0.0, Event::Birth(b)),
+            event(1.0, Event::Boundary(CellId(1), boundary(0.0))),
+            event(1.0, Event::Boundary(CellId(2), weak)),
+            event(2.0, Event::Boundary(CellId(1), cooling)),
+            event(2.0, Event::Boundary(CellId(2), boundary(0.0))),
+        ]);
+        let strict = StepConfig { max_dt_s: 1.0, energy_tolerance_j: 0.0 };
+        let old = sim.advance_to(0.0, strict, || Ok(())).unwrap().0;
+        let (next, audit) = old.advance_to(3.0, strict, || Ok(())).unwrap();
+        // The large body returns to its original state. The small body's
+        // one joule must survive both the spatial and temporal reductions.
+        assert_eq!(next.cells()[&CellId(1)].specific_h_j_kg, 200_000.0);
+        assert_eq!(next.cells()[&CellId(2)].specific_h_j_kg, 200_001.0);
+        assert_eq!(audit.external_heat_j, 1.0);
+        assert_eq!(audit.stored_energy_change_j, 1.0);
+        assert_eq!(audit.residual_j, 0.0);
+        assert_eq!(audit.substeps, 3);
+    }
+
+    #[test]
+    fn compensated_heat_explicit_local_power_losses_cannot_cancel() {
+        let large = 9_007_199_254_740_992.0;
+        let mut a = cell(1, 200_000.0);
+        let mut b = cell(2, 200_000.0);
+        for c in [&mut a, &mut b] {
+            c.mass_kg = large;
+            c.geometry.surface_area_m2 = 1.0;
+            c.boundary.htc_w_m2_k = 1.0;
+        }
+        a.boundary.source_w = large;
+        a.boundary.ambient_k = 401.0;
+        b.boundary.source_w = -large;
+        b.boundary.ambient_k = 399.0;
+        let old = run(&simulation(vec![event(0.0, Event::Birth(a)),
+            event(0.0, Event::Birth(b))]), 0.0, 1.0).0;
+        assert!(matches!(old.advance_to(1.0, config(1.0), || Ok(())),
+            Err(DepositionError::Arithmetic)));
+        assert_eq!(old.time_s(), 0.0);
+        assert_eq!(old.cells()[&CellId(1)].specific_h_j_kg, 200_000.0);
+        let (_, audit) = old.advance_to(1.0,
+            StepConfig { max_dt_s: 1.0, energy_tolerance_j: 4.0 }, || Ok(()),
+        ).unwrap();
+        assert_eq!(audit.external_heat_j, 0.0);
+        assert_eq!(audit.residual_j, 0.0);
     }
 
     #[test]

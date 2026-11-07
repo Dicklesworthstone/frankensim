@@ -235,6 +235,32 @@ impl<'a> DepositionSimulation<'a> {
         Ok(authored)
     }
 
+    // Keep authored and generated watts as distinct operands in the physical
+    // balance. The temporarily combined boundary source above serves observer
+    // hooks and entropy classification, not heat-rate accumulation.
+    pub(super) fn add_rate_sources(&self, rates: &mut HeatRates,
+        sources: &BTreeMap<CellId, f64>,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>)
+        -> Result<(), DepositionError> {
+        if sources.len() > self.cells.len() {
+            return Err(DepositionError::InvalidInput("too many generated heat sources"));
+        }
+        for (index, (&id, &watts)) in sources.iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            if !self.cells.contains_key(&id) {
+                return Err(DepositionError::InvalidInput("inactive generated-source cell"));
+            }
+            finite(watts)?;
+        }
+        for (index, (&id, &watts)) in sources.iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            if watts == 0.0 { continue; }
+            rates.watts.get_mut(&id).expect("validated generated-source cell").add(watts)?;
+            rates.external_w.add(watts)?;
+        }
+        checkpoint()
+    }
+
     pub(super) fn set_step_conductances(&mut self, values: &BTreeMap<u64, f64>,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>)
         -> Result<Vec<(u64, f64)>, DepositionError> {
@@ -301,16 +327,11 @@ impl<'a> DepositionSimulation<'a> {
             finite(watts)?;
         }
         let dt_s = rates.explicit_dt_s;
-        let mut add_rate = |total: &mut f64, watts: f64| -> Result<(), DepositionError> {
-            let old = *total;
-            let next = finite(old + watts)?;
-            // Neumaier's addition residual retains either small operand.
-            // (next - old) - watts would miss old=1, watts=1e16.
-            let lost_w = finite(if old.abs() >= watts.abs() {
-                (old - next) + watts
-            } else {
-                (watts - next) + old
-            })?;
+        let mut bound_roundoff = |total: &EnergySum| -> Result<(), DepositionError> {
+            // Intermediate addition errors can cancel physically. Bound only
+            // the remainder that cannot enter the final rounded power, after
+            // every interval source has entered the compensated balance.
+            let lost_w = total.roundoff()?;
             if lost_w != 0.0 {
                 // Round the joule bound outward even when the positive product
                 // underflows; opposite signed errors cannot cancel this account.
@@ -318,16 +339,19 @@ impl<'a> DepositionSimulation<'a> {
                 *unrepresented_heat_j =
                     finite((*unrepresented_heat_j + lost_j).next_up())?;
             }
-            *total = next;
             Ok(())
         };
+        let mut has_source = false;
         for (index, (&id, &watts)) in sources.iter().enumerate() {
             if index % 256 == 0 { checkpoint()?; }
             if watts == 0.0 { continue; }
+            has_source = true;
             let total = rates.watts.get_mut(&id).expect("validated interval-source cell");
-            // Bound loss in physical cell power AND its external-energy ledger.
-            add_rate(total, watts)?;
-            add_rate(&mut rates.external_w, watts)?;
+            total.add(watts)?;
+            rates.external_w.add(watts)?;
+        }
+        if has_source {
+            bound_roundoff(&rates.external_w)?;
         }
         checkpoint()
     }
@@ -350,9 +374,9 @@ impl<'a> DepositionSimulation<'a> {
             if index % 256 == 0 { checkpoint()?; }
             if transfer.power_w == 0.0 { continue; }
             let a = rates.watts.get_mut(&transfer.a).expect("validated transfer endpoint");
-            *a = finite(*a - transfer.power_w)?;
+            a.add(-transfer.power_w)?;
             let b = rates.watts.get_mut(&transfer.b).expect("validated transfer endpoint");
-            *b = finite(*b + transfer.power_w)?;
+            b.add(transfer.power_w)?;
         }
         // Deliberately do not modify rates.external_w.
         checkpoint()
@@ -385,17 +409,22 @@ impl<'a> DepositionSimulation<'a> {
         let transfers = observer.heat_transfers(&candidate, &mut checkpoint)?;
         candidate.set_step_conductances(&conductances, &mut checkpoint)?;
         candidate.set_step_reservoir_conductances(&reservoirs, &mut checkpoint)?;
-        candidate.add_step_sources(&sources, &mut checkpoint)?;
         let boundaries = crate::enthalpy::backward_euler::BoundaryConductances {
             ambient_w_k: ambient, ..Default::default()
         };
         let mut rates = candidate.heat_rates_with_boundaries(
             f64::MAX, &boundaries, &mut checkpoint,
         )?;
+        candidate.add_rate_sources(&mut rates, &sources, &mut checkpoint)?;
         candidate.add_step_transfers(&mut rates, &transfers, &mut checkpoint)?;
+        let mut net_power_w = BTreeMap::new();
+        for (index, (id, power)) in rates.watts.into_iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            net_power_w.insert(id, power.value()?);
+        }
         checkpoint()?;
-        Ok(PowerBalance { temperatures_k: rates.temperatures, net_power_w: rates.watts,
-            external_power_w: rates.external_w })
+        Ok(PowerBalance { temperatures_k: rates.temperatures, net_power_w,
+            external_power_w: rates.external_w.value()? })
     }
 
     /// Advance thermal state and a deeply cloned observer as one candidate.
@@ -455,6 +484,7 @@ impl<'a> DepositionSimulation<'a> {
         let mut observer = observer.clone();
         if begin_observer { observer.begin()?; }
         let mut unrepresented_heat_j = 0.0;
+        let mut external_heat = EnergySum::default();
         let mut audit = EnergyAudit { incoming_mass_kg: 0.0, incoming_energy_j: 0.0,
             external_heat_j: 0.0, stored_energy_change_j: 0.0, residual_j: 0.0,
             substeps: 0, events: 0 };
@@ -500,14 +530,15 @@ impl<'a> DepositionSimulation<'a> {
             checkpoint()?;
             let original_links = next.set_step_conductances(&conductances, &mut checkpoint)?;
             let original_reservoirs = next.set_step_reservoir_conductances(&reservoirs, &mut checkpoint)?;
-            let authored = next.add_step_sources(&sources, &mut checkpoint)?;
             let boundaries = crate::enthalpy::backward_euler::BoundaryConductances {
                 ambient_w_k: ambient, ..Default::default()
             };
+            let mut rates = next.heat_rates_with_boundaries(
+                config.max_dt_s, &boundaries, &mut checkpoint,
+            )?;
+            next.add_rate_sources(&mut rates, &sources, &mut checkpoint)?;
+            let authored = next.add_step_sources(&sources, &mut checkpoint)?;
             let step: Result<_, O::Error> = (|| {
-                let mut rates = next.heat_rates_with_boundaries(
-                    config.max_dt_s, &boundaries, &mut checkpoint,
-                )?;
                 next.add_step_transfers(&mut rates, &transfers, &mut checkpoint)?;
                 let dt = observer.limit_timestep_s(&next, rates.explicit_dt_s, &mut checkpoint)?;
                 if !positive(dt) || dt > rates.explicit_dt_s {
@@ -523,9 +554,11 @@ impl<'a> DepositionSimulation<'a> {
                 next.add_interval_sources(
                     &mut rates, &interval_sources, &mut unrepresented_heat_j, &mut checkpoint,
                 )?;
+                external_heat.add_scaled(&rates.external_w, rates.explicit_dt_s)?;
                 let (dt, old_temperatures) = next.thermal_step(
                     rates, &mut audit, &mut unrepresented_heat_j, &mut checkpoint,
                 )?;
+                audit.external_heat_j = external_heat.value()?;
                 if unrepresented_heat_j > config.energy_tolerance_j {
                     return Err(DepositionError::Arithmetic.into());
                 }
@@ -588,7 +621,8 @@ impl<'a> DepositionSimulation<'a> {
         audit.incoming_energy_j = incoming.value()?;
         audit.stored_energy_change_j = stored_change.value()?;
         finite(next.mass_kg())?;
-        audit.residual_j = finite(thermal_change.value()? - audit.external_heat_j)?;
+        thermal_change.add_scaled(&external_heat, -1.0)?;
+        audit.residual_j = thermal_change.value()?;
         if audit.residual_j.abs() > config.energy_tolerance_j {
             return Err(DepositionError::EnergyBalance(audit.residual_j).into());
         }
@@ -598,7 +632,8 @@ impl<'a> DepositionSimulation<'a> {
 }
 
 // Fixed cell order and Neumaier correction retain small terms of either sign.
-// The sum contains physical changes, not arbitrary formation-energy datums.
+// Used for physical changes and signed heat channels, not differences between
+// arbitrary whole-system formation-energy datums.
 #[derive(Default)]
 pub(super) struct EnergySum {
     sum: f64,
@@ -619,6 +654,22 @@ impl EnergySum {
     }
     pub(super) fn value(&self) -> Result<f64, DepositionError> {
         finite(self.sum + self.correction)
+    }
+    pub(super) fn add_scaled(&mut self, other: &Self, scale: f64) -> Result<(), DepositionError> {
+        self.add(finite(scale * other.sum)?)?;
+        self.add(finite(scale * other.correction)?)
+    }
+    pub(super) fn add_divided(&mut self, other: &Self, denominator: f64) -> Result<(), DepositionError> {
+        self.add(finite(other.sum / denominator)?)?;
+        self.add(finite(other.correction / denominator)?)
+    }
+    pub(super) fn roundoff(&self) -> Result<f64, DepositionError> {
+        let value = self.value()?;
+        finite(if self.sum.abs() >= self.correction.abs() {
+            (self.sum - value) + self.correction
+        } else {
+            (self.correction - value) + self.sum
+        })
     }
 }
 

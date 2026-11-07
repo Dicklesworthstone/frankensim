@@ -447,10 +447,10 @@ fn evaluate(
     work.heat += 1;
     let mut maximum = 0.0_f64;
     for (i, &id) in ids.iter().enumerate() {
-        residual[i] = finite(energy[i] - finite(dt * rates.watts[&id])?)?;
+        residual[i] = finite(energy[i] - finite(dt * rates.watts[&id].value()?)?)?;
         maximum = maximum.max(residual[i].abs());
     }
-    Ok((maximum, rates.external_w))
+    Ok((maximum, rates.external_w.value()?))
 }
 
 fn derivative(

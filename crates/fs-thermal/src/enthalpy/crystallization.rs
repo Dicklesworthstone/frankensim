@@ -493,7 +493,7 @@ impl<'a> CrystallizationSimulation<'a> {
             let mut applied_heat = Sum::default();
             for (&id, cell) in &mut next.thermal.cells {
                 checkpoint()?;
-                let heat = finite(dt * rates.watts[&id])?;
+                let heat = finite(dt * rates.watts[&id].value()?)?;
                 applied_heat.add(heat)?;
                 let target_h = finite(cell.specific_h_j_kg + heat / cell.mass_kg)?;
                 let (next_h, caloric_defect) = if let Some(model) =
@@ -584,7 +584,7 @@ impl<'a> CrystallizationSimulation<'a> {
                     audit.maximum_cell_energy_residual_j.max(defect);
                 cell.specific_h_j_kg = next_h;
             }
-            let external_heat = finite(dt * rates.external_w)?;
+            let external_heat = finite(dt * rates.external_w.value()?)?;
             // The shared operator gives opposite internal transfers. Account
             // for their finite-precision aggregation too, not only local h
             // quantization; otherwise a large internal flux could hide a defect.

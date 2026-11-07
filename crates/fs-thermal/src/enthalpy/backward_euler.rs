@@ -76,12 +76,11 @@ impl DepositionSimulation<'_> {
         checkpoint()?;
         let mut trial = self.clone();
         trial.set_step_conductances(conductances_w_k, &mut checkpoint)?;
-        trial.add_step_sources(sources_w, &mut checkpoint)?;
-        let power = trial
-            .heat_rates_with_boundaries(f64::MAX, boundaries, &mut checkpoint)?
-            .external_w;
+        let mut rates = trial
+            .heat_rates_with_boundaries(f64::MAX, boundaries, &mut checkpoint)?;
+        trial.add_rate_sources(&mut rates, sources_w, &mut checkpoint)?;
         checkpoint()?;
-        finite(power)
+        rates.external_w.value()
     }
 
     /// Check a coupled material binding against the timeline's actual borrowed
@@ -463,7 +462,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
         let mut next = self.initial.clone();
         next.time_s = self.target_s;
         let mut storage = Vec::with_capacity(self.ids.len());
-        let mut stored_change = 0.0;
+        let mut stored_change = observe::EnergySum::default();
         let mut initial_h = with_entropy.then(BTreeMap::new);
         for (i, (&id, &joules)) in self.ids.iter().zip(energy_increments_j).enumerate() {
             if i % 256 == 0 {
@@ -487,7 +486,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
                 next.temperature_k(id)?;
             }
             let actual = finite(old.mass_kg * finite(h - old.specific_h_j_kg)?)?;
-            stored_change = finite(stored_change + actual)?;
+            stored_change.add(actual)?;
             storage.push(actual);
         }
         checkpoint()?;
@@ -510,7 +509,6 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
         ) = resolve(&mut next)?;
         checkpoint()?;
         let links = next.set_step_conductances(&conductances_w_k, &mut checkpoint)?;
-        let sources = next.add_step_sources(&sources_w, &mut checkpoint)?;
         let mut rates = if let Some(calorics) = calorics {
             if !stateful_calorics
                 || with_entropy
@@ -537,6 +535,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
             }
             next.heat_rates_with_boundary_exchanges(f64::MAX, &boundaries, &exchanges, &mut checkpoint)?
         };
+        next.add_rate_sources(&mut rates, &sources_w, &mut checkpoint)?;
         if !transfers.is_empty() {
             next.add_step_transfers(&mut rates, &transfers, &mut checkpoint)?;
         }
@@ -544,22 +543,11 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
             // The same signed at-cell convention as the explicit entropy
             // observer. These are NOT heat sources for the energy residual:
             // the native transfer kernel above already applied them once.
-            let mut transfer_sources = BTreeMap::new();
-            let mut has_transfer = false;
-            for (i, transfer) in transfers.iter().enumerate() {
-                if i % 256 == 0 {
-                    checkpoint()?;
-                }
-                has_transfer |= transfer.power_w != 0.0;
-                for (id, sign) in [(transfer.a, -1.0), (transfer.b, 1.0)] {
-                    let old = transfer_sources
-                        .get(&id)
-                        .copied()
-                        .unwrap_or(next.cells[&id].boundary.source_w);
-                    transfer_sources.insert(id, finite(old + sign * transfer.power_w)?);
-                }
-            }
+            let (source_powers, has_sources) = next.entropy_source_powers(
+                &sources_w, &BTreeMap::new(), &transfers, &mut checkpoint,
+            )?;
             let mut audit = if transfers.is_empty()
+                && sources_w.is_empty()
                 && boundaries.ambient_w_k.is_empty()
                 && boundaries.reservoir_w_k.is_empty()
                 && exchanges.is_empty()
@@ -575,7 +563,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
                     &initial_h,
                     &rates.temperatures,
                     rate_duration_s,
-                    &transfer_sources,
+                    &source_powers,
                     &BTreeMap::new(),
                     &boundaries.ambient_w_k,
                     &boundaries.reservoir_w_k,
@@ -583,7 +571,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
                     &mut checkpoint,
                 )?
             };
-            audit.has_unclassified_sources |= has_transfer;
+            audit.has_unclassified_sources |= has_sources;
             Some(audit)
         } else {
             None
@@ -598,13 +586,6 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
                 .expect("validated link")
                 .conductance_w_k = value;
         }
-        for (id, value) in sources {
-            next.cells
-                .get_mut(&id)
-                .expect("validated source")
-                .boundary
-                .source_w = value;
-        }
         let mut residual = Vec::with_capacity(self.ids.len());
         // Only the final, entropy-audited first stage retains rates. Ordinary
         // backward Euler and intermediate Newton trials allocate no extra row.
@@ -615,29 +596,38 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
             if i % 256 == 0 {
                 checkpoint()?;
             }
-            let endpoint_heat = finite(rate_duration_s * rates.watts[&id])?;
-            let heat = if let Some(earlier) = earlier {
-                finite(endpoint_heat + earlier.heat_j[i])?
-            } else {
-                endpoint_heat
-            };
-            residual.push(finite(joules - heat)?);
+            let endpoint_heat = finite(rate_duration_s * rates.watts[&id].value()?)?;
+            let mut balance = observe::EnergySum::default();
+            balance.add(joules)?;
+            balance.add_scaled(&rates.watts[&id], -rate_duration_s)?;
+            if let Some(earlier) = earlier {
+                balance.add(-earlier.heat_j[i])?;
+            }
+            residual.push(balance.value()?);
             if let Some(heat) = &mut retained_heat {
                 heat.push(endpoint_heat);
             }
         }
-        let endpoint_external_heat_j = finite(rate_duration_s * rates.external_w)?;
+        let endpoint_external_heat_j = finite(rate_duration_s * rates.external_w.value()?)?;
         let external_heat_j = if let Some(earlier) = earlier {
             finite(endpoint_external_heat_j + earlier.external_heat_j)?
         } else {
             endpoint_external_heat_j
         };
+        let stored_energy_change_j = stored_change.value()?;
+        // Compare the compensated actual storage against the original signed
+        // supply before rounding aggregate report fields. This also detects a
+        // source remainder too small to enter a cell's final f64 power.
+        stored_change.add_scaled(&rates.external_w, -rate_duration_s)?;
+        if let Some(earlier) = earlier {
+            stored_change.add(-earlier.external_heat_j)?;
+        }
         let audit = EnergyAudit {
             incoming_mass_kg: 0.0,
             incoming_energy_j: 0.0,
             external_heat_j,
-            stored_energy_change_j: stored_change,
-            residual_j: finite(stored_change - external_heat_j)?,
+            stored_energy_change_j,
+            residual_j: stored_change.value()?,
             substeps: 1,
             events: 0,
         };

@@ -478,7 +478,7 @@ fn g0_interval_sources_refuse_hidden_local_rate_loss_in_either_operand_order() {
         ).unwrap();
         assert_eq!(next.cells()[&CellId(1)].specific_h_j_kg, 1.0);
         assert_eq!(audit.external_heat_j, 1e16);
-        assert_eq!(audit.residual_j, 0.0);
+        assert_eq!(audit.residual_j, -1.0);
         assert_eq!(initial.time_s(), 0.0);
         assert_eq!(initial.cells()[&CellId(1)].specific_h_j_kg, 0.0);
     }
