@@ -10,13 +10,22 @@
 //! never performs a second return map, changes stiffness, or infers material
 //! heat from Miner damage. J2, Voce and Chaboche histories remain native. Source
 //! conditions stay fixed; thermal/rate laws, remeshing and service-life
-//! validation require separate models and evidence.
+//! validation require separate models and evidence. Optional Fatemi-Socie
+//! gauges share the same solve and accepted tensors, while retaining explicit
+//! closed representative-cycle windows alongside the live normal-strain Miner
+//! histories. No repetition count or stabilized response is inferred.
+
+pub mod shear;
+pub use shear::{PlaneFatemiSocieGauge, PlaneShearFatigueBudget};
 
 use std::sync::Arc;
 
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use fs_material::fatigue::critical_plane::TensorFatigueSample;
+use fs_material::fatigue::critical_plane::fatemi_socie::{
+    FatemiSocieCalibration, FatemiSocieCycleResult, FatemiSocieError,
+};
 use fs_material::fatigue::critical_plane::miner::{
     CriticalPlaneMiner, CriticalPlaneMinerError, CriticalPlaneMinerLimits, CriticalPlaneMinerResult,
 };
@@ -44,13 +53,15 @@ pub struct PlaneFatigueGauge {
     pub limits: CriticalPlaneMinerLimits,
 }
 
-/// Whole-observation bounds, including the real initial zero-load sample.
+/// Normal-strain history bounds and combined gauge count, including the real
+/// initial zero-load sample. Shear windows have separate aggregate budgets.
 #[derive(Debug, Clone, Copy)]
 pub struct PlaneFatigueConfig {
+    /// Combined normal-strain and shear representative-cycle gauges.
     pub maximum_gauges: usize,
     /// Sum of each gauge's planes times its per-plane rainflow residue limit.
     pub maximum_total_residue: usize,
-    /// Sum of plane counts times the entire declared path's sample count.
+    /// Sum of normal-strain plane counts times the declared path's sample count.
     pub maximum_total_projection_work: u64,
 }
 
@@ -65,6 +76,10 @@ pub enum PlaneFatigueError {
     Gauge {
         gauge: usize,
         error: CriticalPlaneMinerError,
+    },
+    FatemiSocie {
+        gauge: usize,
+        error: FatemiSocieError,
     },
     Mechanics(SmallStrainPlaneError),
     Cancelled,
@@ -94,8 +109,9 @@ struct GaugeState {
 }
 
 /// Resumable native mechanics and bounded fatigue, published transactionally.
-/// Only the latest accepted solution and unresolved rainflow residues are kept;
-/// clones share immutable original quadrature geometry and fatigue calibration.
+/// Keep the latest solution, bounded normal residues and explicitly bounded
+/// representative shear windows. Clones share immutable original quadrature
+/// geometry and calibration, and retain complete open observation histories.
 #[derive(Debug, Clone)]
 pub struct PlaneFatiguePath<'p, 'm, L: SourceBoundFatigueLaw = ResolvedJ2Plasticity> {
     problem: &'p SmallStrainPlaneProblem<'m, L>,
@@ -103,6 +119,8 @@ pub struct PlaneFatiguePath<'p, 'm, L: SourceBoundFatigueLaw = ResolvedJ2Plastic
     solution: SmallStrainPlaneSolution<L::State>,
     gauges: Vec<GaugeState>,
     samples: Vec<TensorFatigueSample>,
+    fatemi_socie: Vec<shear::GaugeState>,
+    shear_samples: Vec<TensorFatigueSample>,
     accepted_increments: usize,
     finished: bool,
 }
@@ -116,10 +134,36 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> PlaneFatiguePath<'p, 'm, L> {
         config: PlaneFatigueConfig,
         cx: &Cx<'_>,
     ) -> Result<Self, PlaneFatigueError> {
+        Self::new_with_shear(
+            problem,
+            gauges,
+            Vec::new(),
+            config,
+            PlaneShearFatigueBudget::default(),
+            cx,
+        )
+    }
+
+    /// Observe normal-strain Miner and/or a separately calibrated shear-cycle
+    /// bank on the same native solve. Shear windows may be restarted after
+    /// conditioning without resetting the normal-strain cycle history.
+    pub fn new_with_shear(
+        problem: &'p SmallStrainPlaneProblem<'m, L>,
+        gauges: Vec<PlaneFatigueGauge>,
+        fatemi_socie: Vec<PlaneFatemiSocieGauge>,
+        config: PlaneFatigueConfig,
+        shear_budget: PlaneShearFatigueBudget,
+        cx: &Cx<'_>,
+    ) -> Result<Self, PlaneFatigueError> {
         poll(cx)?;
-        if gauges.is_empty() || gauges.len() > config.maximum_gauges {
+        let gauge_count = gauges
+            .len()
+            .checked_add(fatemi_socie.len())
+            .ok_or(PlaneFatigueError::Budget)?;
+        if gauge_count == 0 || gauge_count > config.maximum_gauges {
             return Err(PlaneFatigueError::Budget);
         }
+        shear::admit_budget(&fatemi_socie, shear_budget, cx)?;
         let count = u64::try_from(problem.load_path.len())
             .ok()
             .and_then(|n| n.checked_add(1))
@@ -172,8 +216,10 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> PlaneFatiguePath<'p, 'm, L> {
                 .map_err(|error| gauge_error(index, error))?,
             });
         }
+        let mut shear = shear::prepare(problem, &elements, fatemi_socie, bank.len(), cx)?;
         let solution = endpoint(problem, &[0.0]).solve_prepared(&elements, None, cx)?;
         let samples = observe(problem, &solution, &mut bank, cx)?;
+        let shear_samples = shear::observe(problem, &solution, &mut shear, cx)?;
         poll(cx)?;
         Ok(Self {
             problem,
@@ -181,6 +227,8 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> PlaneFatiguePath<'p, 'm, L> {
             solution,
             gauges: bank,
             samples,
+            fatemi_socie: shear,
+            shear_samples,
             accepted_increments: 0,
             finished: false,
         })
@@ -189,6 +237,7 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> PlaneFatiguePath<'p, 'm, L> {
     pub fn solution(&self) -> &SmallStrainPlaneSolution<L::State> {
         &self.solution
     }
+    /// Current accepted tensors in the normal-strain gauge order.
     pub fn samples(&self) -> &[TensorFatigueSample] {
         &self.samples
     }
@@ -223,8 +272,76 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> PlaneFatiguePath<'p, 'm, L> {
             .collect()
     }
 
+    /// Current accepted tensors in the declared shear-gauge order.
+    pub fn fatemi_socie_samples(&self) -> &[TensorFatigueSample] {
+        &self.shear_samples
+    }
+    pub fn fatemi_socie_sample_count(&self, gauge: usize) -> Option<u64> {
+        self.fatemi_socie
+            .get(gauge)
+            .map(|g| g.counter.sample_count())
+    }
+    pub fn fatemi_socie_results(&self) -> Vec<Option<FatemiSocieCycleResult>> {
+        self.fatemi_socie
+            .iter()
+            .map(|g| g.counter.result().copied())
+            .collect()
+    }
+    pub fn fatemi_socie_calibration(&self, gauge: usize) -> Option<&FatemiSocieCalibration> {
+        self.fatemi_socie
+            .get(gauge)
+            .map(|g| g.counter.calibration())
+    }
+    pub fn fatemi_socie_material_source(
+        &self,
+        gauge: usize,
+    ) -> Option<&ResolvedMaterialStatePoint> {
+        self.fatemi_socie
+            .get(gauge)
+            .map(|g| self.problem.law(g.element).fatigue_source())
+    }
+
+    /// Begin a new declared representative cycle at the actual current native
+    /// state. Conditioning is explicit; this does not reset mechanical history,
+    /// normal-strain Miner counters, or the accepted load-path position.
+    pub fn restart_fatemi_socie_cycle(&mut self, cx: &Cx<'_>) -> Result<(), PlaneFatigueError> {
+        poll(cx)?;
+        if self.finished {
+            return Err(PlaneFatigueError::Finished);
+        }
+        if self.fatemi_socie.is_empty() {
+            return Err(PlaneFatigueError::Invalid(
+                "no shear-cycle gauges were declared",
+            ));
+        }
+        let (gauges, samples) =
+            shear::restart(self.problem, &self.solution, &self.fatemi_socie, cx)?;
+        self.fatemi_socie = gauges;
+        self.shear_samples = samples;
+        Ok(())
+    }
+
+    /// Finalize the current closed shear window at any accepted endpoint.
+    /// Closure of all six stress and strain components is required. The result
+    /// predicts the declared representative cycle's life, not accumulated
+    /// damage or the number of repetitions contained in the load path.
+    /// Further mechanical advancement requires an explicit cycle restart.
+    pub fn finish_fatemi_socie_cycle(
+        &mut self,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<FatemiSocieCycleResult>, PlaneFatigueError> {
+        if self.fatemi_socie.is_empty() {
+            return Err(PlaneFatigueError::Invalid(
+                "no shear-cycle gauges were declared",
+            ));
+        }
+        shear::finish_cycles(&mut self.fatemi_socie, cx)
+    }
+
     /// Accept a chronological block. All intermediate endpoints are observed;
     /// a late mechanics/gauge refusal rolls back this entire requested block.
+    /// Only current mechanics and bounded normal residues are cloned. Shear
+    /// windows restore saved prefixes without copying their retained tensors.
     pub fn advance(&mut self, count: usize, cx: &Cx<'_>) -> Result<(), PlaneFatigueError> {
         poll(cx)?;
         if self.finished {
@@ -238,25 +355,47 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> PlaneFatiguePath<'p, 'm, L> {
         if count == 0 {
             return Ok(());
         }
-        let mut candidate = self.clone();
-        for _ in 0..count {
-            poll(cx)?;
-            let factor = candidate.problem.load_path[candidate.accepted_increments];
-            let solution = endpoint(candidate.problem, &[factor]).solve_prepared(
-                &candidate.elements,
-                Some((
-                    candidate.solution.displacement_m.as_flattened(),
-                    &candidate.solution.quadrature_states,
-                )),
-                cx,
-            )?;
-            let samples = observe(candidate.problem, &solution, &mut candidate.gauges, cx)?;
-            candidate.solution = solution;
-            candidate.samples = samples;
-            candidate.accepted_increments += 1;
+        if self
+            .fatemi_socie
+            .iter()
+            .any(|g| g.counter.result().is_some())
+        {
+            return Err(PlaneFatigueError::Invalid(
+                "restart a closed shear cycle before advancing",
+            ));
         }
-        poll(cx)?;
-        *self = candidate;
+        let mut solution = self.solution.clone();
+        let mut gauges = self.gauges.clone();
+        let mut samples = self.samples.clone();
+        let mut shear_samples = self.shear_samples.clone();
+        let checkpoint = shear::checkpoint(&self.fatemi_socie);
+        let attempt = (|| -> Result<(), PlaneFatigueError> {
+            for offset in 0..count {
+                poll(cx)?;
+                let factor = self.problem.load_path[self.accepted_increments + offset];
+                let next = endpoint(self.problem, &[factor]).solve_prepared(
+                    &self.elements,
+                    Some((
+                        solution.displacement_m.as_flattened(),
+                        &solution.quadrature_states,
+                    )),
+                    cx,
+                )?;
+                samples = observe(self.problem, &next, &mut gauges, cx)?;
+                shear_samples = shear::observe(self.problem, &next, &mut self.fatemi_socie, cx)?;
+                solution = next;
+            }
+            poll(cx)
+        })();
+        if let Err(error) = attempt {
+            shear::restore(&mut self.fatemi_socie, &checkpoint);
+            return Err(error);
+        }
+        self.solution = solution;
+        self.gauges = gauges;
+        self.samples = samples;
+        self.shear_samples = shear_samples;
+        self.accepted_increments += count;
         Ok(())
     }
 
@@ -279,8 +418,9 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> PlaneFatiguePath<'p, 'm, L> {
             .collect()
     }
 
-    /// Close endpoint half cycles only at the end of the declared observation.
-    /// Repeated finalization is idempotent; one failed gauge seals none of them.
+    /// Close normal endpoint half cycles and any declared shear cycle only at
+    /// the end of the load path. Repeated finalization is idempotent; a failed
+    /// gauge seals neither bank. Shear results remain available separately.
     pub fn finish(
         &mut self,
         cx: &Cx<'_>,
@@ -300,6 +440,9 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> PlaneFatiguePath<'p, 'm, L> {
             );
         }
         poll(cx)?;
+        // This includes the final cancellation poll and atomic shear rollback.
+        // Publishing the staged normal bank and finished flag cannot then fail.
+        shear::finish_cycles(&mut self.fatemi_socie, cx)?;
         self.gauges = gauges;
         self.finished = true;
         Ok(results)
@@ -346,18 +489,7 @@ fn observe<L: SourceBoundFatigueLaw>(
     let mut samples = Vec::with_capacity(gauges.len());
     for (index, gauge) in gauges.iter_mut().enumerate() {
         poll(cx)?;
-        let point = solution.element_offsets[gauge.element] + gauge.point;
-        let state = &solution.quadrature_states[point];
-        problem
-            .law(gauge.element)
-            .validate_fatigue_history(&state.strain, &state.history)
-            .map_err(|_| {
-                PlaneFatigueError::Invalid("native fatigue material history is inadmissible")
-            })?;
-        let sample = TensorFatigueSample {
-            stress_pa: solution.quadrature_stress_pa[point],
-            total_mechanical_strain: state.strain,
-        };
+        let sample = sample_at(problem, solution, gauge.element, gauge.point)?;
         gauge
             .counter
             .push_with_cancel(sample, &mut || cx.checkpoint().is_err())
@@ -366,6 +498,39 @@ fn observe<L: SourceBoundFatigueLaw>(
     }
     Ok(samples)
 }
+fn sample_at<L: SourceBoundFatigueLaw>(
+    problem: &SmallStrainPlaneProblem<'_, L>,
+    solution: &SmallStrainPlaneSolution<L::State>,
+    element: usize,
+    quadrature_point: usize,
+) -> Result<TensorFatigueSample, PlaneFatigueError> {
+    let point = solution.element_offsets[element] + quadrature_point;
+    let state = &solution.quadrature_states[point];
+    problem
+        .law(element)
+        .validate_fatigue_history(&state.strain, &state.history)
+        .map_err(|_| {
+            PlaneFatigueError::Invalid("native fatigue material history is inadmissible")
+        })?;
+    Ok(TensorFatigueSample {
+        stress_pa: solution.quadrature_stress_pa[point],
+        total_mechanical_strain: state.strain,
+    })
+}
+
+fn absolute_temperature(material: &ResolvedMaterialStatePoint, axis: &str) -> bool {
+    material
+        .axis_quantities()
+        .get(axis)
+        .is_some_and(|quantity| {
+            *quantity == QuantitySpec::dimensional(Temperature::DIMS)
+                || quantity.semantic_type().is_some_and(|semantic| {
+                    semantic.kind() == QuantityKind::AbsoluteTemperature
+                        && semantic.form() == ValueForm::Static
+                })
+        })
+}
+
 fn bind_curve<L: SourceBoundFatigueLaw>(
     law: &L,
     index: usize,
@@ -386,17 +551,7 @@ fn bind_curve<L: SourceBoundFatigueLaw>(
         .curve
         .source()
         .map_or("T", |s| s.request().temperature_axis.as_str());
-    let absolute_temperature = material
-        .axis_quantities()
-        .get(axis)
-        .is_some_and(|quantity| {
-            *quantity == QuantitySpec::dimensional(Temperature::DIMS)
-                || quantity.semantic_type().is_some_and(|semantic| {
-                    semantic.kind() == QuantityKind::AbsoluteTemperature
-                        && semantic.form() == ValueForm::Static
-                })
-        });
-    if !absolute_temperature
+    if !absolute_temperature(material, axis)
         || material.state_coordinate(axis) != Some(scope.temperature_k)
         || gauge.curve.parameters().youngs_modulus_pa != law.fatigue_backbone().elastic.youngs
     {

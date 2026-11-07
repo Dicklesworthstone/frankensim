@@ -11280,3 +11280,40 @@ time integration, unresolved pore-fluid model, evolving porosity, or measured
 foam calibration. The `hyper_porous_cavity` regressions specify native pressure
 feedback, permanent compaction and elastic unloading, direct variable-caloric
 work with large energy datums, independent connected chambers, and atomic refusal.
+
+## Native plane-continuum shear fatigue
+
+`plastic2::fatigue::PlaneFatiguePath::new_with_shear` admits normal-strain
+Miner gauges, Fatemi-Socie gauges or both on the original P1/Q1 load path.
+Both banks observe the same accepted nonlinear solution and complete stress/
+mechanical-strain tensors, including plane-stress thickness contraction,
+plane-strain transverse stress and B-bar assumed strain. The original
+J2/Voce/Chaboche histories retain sole ownership of constitutive integration.
+
+`PlaneFatemiSocieGauge` binds material-state identity, chemistry/process,
+typed absolute temperature, shear modulus and the initial-yield reference.
+Source-backed shear fits additionally bind the original card, fixed typed
+query and E/nu/initial-yield receipts. Axial fatigue coefficients and evolved
+hardening strength cannot substitute for the separate torsional calibration
+and its original initial-yield normalization.
+
+The shared `FatemiSocieCycle` owns the full two-dimensional shear path,
+maximum-shear-plane convention, whole-cycle normal-stress maximum and bounded
+shear-life inversion. `restart_fatemi_socie_cycle` explicitly begins a window
+at the accepted state after conditioning, preserving mechanics and lifetime
+normal history. `finish_fatemi_socie_cycle` requires complete stress/strain
+closure and exposes the representative cycle's life separately. No repetitions
+or accumulated Miner damage are inferred from a shear window.
+
+`PlaneShearFatigueBudget` bounds retained paired tensor samples, search planes,
+projection work and circle work across all gauges. Ordinary advancement stages
+only current mechanics and bounded normal residues; a late failure truncates
+shear histories to their saved accepted prefixes. It does not clone accumulated
+shear tensors on each step. Whole-path finalization seals both banks atomically.
+
+Five focused regressions in `tests/plastic_plane_shear_fatigue.rs` cover native
+P1/Q1 reductions and opening-stress effects, Prager shear reversal, conditioning
+and nonclosure under isotropic hardening, source/G/yield binding, aggregate caps,
+restart equivalence and late append/finalization rollback. They remain synthetic
+implementation checks on the existing scalar-factor load path, with no new
+independent multiaxis excitation or validated component-life claim.
