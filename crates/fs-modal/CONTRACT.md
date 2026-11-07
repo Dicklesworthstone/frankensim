@@ -434,6 +434,40 @@ refusals. These are derivatives of the supplied finite-dimensional mechanical
 pencil, not constitutive identification, changing physical-basis derivatives,
 derivatives of B or Z, material/geometry qualification, or truncation bounds.
 
+`solve_with_parameter_and_port_derivative` additionally accepts the authored
+`HarmonicPortParameterDirection`: a complete real n*p derivative of B and a
+complete complex p*p derivative of Z in the original conjugate port units.
+For `y=B^T v` and `e=Z y`, the differentiated mechanical RHS includes
+`-B_theta e - B (Z_theta y + Z B_theta^T v)`. Both occurrences of the physical
+attachment map remain, including newly coupled ports and nonreciprocal loads.
+Published derivatives are `y_theta=B^T v_theta+B_theta^T v` and
+`e_theta=Z y_theta+Z_theta y`; their signed boundary-work derivative is evaluated
+independently. Direction matrices need not themselves be passive or reciprocal.
+
+`solve_with_total_parameter_derivative` uses the same engine and also accepts
+a finite signed `omega_theta`. Its authored M/C/K/F and optional B/Z directions
+are total derivatives along the parameter, including constitutive dispersion.
+The explicit frequency action is
+`omega_theta*(2*omega*M*q+i*C*q+i*B*Z*B^T*q)`, and velocity is
+`-i*(omega*q_theta+omega_theta*q)`, retaining the DC kinematic term. None for the
+port direction fixes B and Z but keeps their explicit frequency action. This
+does not replace a physical stiffness, damping or impedance slope with a frozen
+material law. Existing fixed-frequency methods delegate with `omega_theta=0`;
+the existing specialized frequency owner retains its separate fast modal path.
+
+Load actions factor through port vectors in O(n*p+p*p) work and O(p) added
+memory, without constructing an n*n load derivative or another factor. Binary
+exponents survive intermediate flow/effort contractions; their uncancelled
+envelopes enter the original-coordinate tangent audit. A supplied port
+direction, or changing frequency with an attached load, adds `192*p` payload
+bytes and work score `256*(n*p+p*p)+256*p`. Nonzero `omega_theta` also adds
+`192*n*n+256*n` work. These allowances augment the parameter bounds above.
+The coordinate basis, port count and physical state interpretation remain fixed.
+`tests/harmonic_parameter_ports.rs` covers total scalar/DC formulas, independent
+coupled nonreciprocal perturbations, compact loaded bare poles, extreme port
+units and port reparameterization, cancelling huge attachment products,
+frequency-owner agreement and transactional refusals.
+
 `solve_with_frequency_derivative` reuses that same prepared factor for the exact
 continuous frequency tangent, including authored `dF/domega` and the complete
 physical `dZ/domega`. Loaded owners require an explicit finite impedance-slope

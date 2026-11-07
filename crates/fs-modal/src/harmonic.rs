@@ -40,7 +40,8 @@ pub use frequency::{
 };
 mod parameter;
 pub use parameter::{
-    HarmonicParameterControls, HarmonicParameterResponse, HarmonicPortParameterResponse,
+    HarmonicParameterControls, HarmonicParameterResponse, HarmonicPortParameterDirection,
+    HarmonicPortParameterResponse,
 };
 mod interference;
 pub use interference::{
