@@ -83,6 +83,33 @@ impl<I: RodMotionInertia> RodMotionFatiguePath<I> {
         })
     }
 
+    /// Include transverse-force shear in both signed S-N and Findley histories.
+    /// Every gauged segment must retain an explicitly isotropic, elastically
+    /// homogeneous circular section. Its original Saint-Venant stress owner
+    /// supplies the local field; native inertia, authored shear correction and
+    /// mechanical work remain unchanged. This is quasistatic section recovery,
+    /// not an end-effect or cross-sectional-inertia stress solution.
+    pub fn new_with_transverse_shear(
+        motion: RodMotion<I>,
+        gauges: Vec<RodFatigueGauge>,
+        findley: Vec<RodFindleyGauge>,
+        config: RodFatigueConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, RodMotionFatigueError> {
+        let observation = RodFatigueObservation::new_motion_with_transverse_shear(
+            motion.model(),
+            motion.pose(),
+            gauges,
+            findley,
+            config,
+            gate,
+        )?;
+        Ok(Self {
+            motion,
+            observation,
+        })
+    }
+
     pub fn motion(&self) -> &RodMotion<I> {
         &self.motion
     }

@@ -7,8 +7,9 @@
 //! stress maximum. Finite rigid rotation therefore does not create a new cycle.
 //!
 //! Scalar S-N rainflow and representative-cycle Findley evaluation reuse the
-//! material owners. Transverse-force shear is explicitly unassessed: Q/A is not
-//! a local stress field. No plasticity, variable-temperature calibration transfer,
+//! material owners. Transverse-force shear is either explicitly unassessed or
+//! recovered through the opt-in homogeneous circular Saint-Venant owner; Q/A is
+//! never used as a local stress field. No plasticity, variable-temperature calibration transfer,
 //! notch correction, life qualification or fatigue-to-stiffness/heat law is
 //! inferred. Caller-selected load endpoints must resolve physical extrema.
 
@@ -24,6 +25,7 @@ use fs_material::fatigue::{
     RainflowLimits, RainflowMiner, SnCurve,
 };
 use fs_material::section::ConcentricShearSection;
+use fs_material::section::transverse_stress::CircularTransverseShearRecovery;
 use fs_material::state_point::ResolvedMaterialStatePoint;
 use fs_qty::semantic::{QuantityKind, ValueForm};
 use fs_qty::{QuantitySpec, Temperature};
@@ -77,7 +79,9 @@ pub struct RodFatigueConfig {
     /// Whole selected annulus axial/bending strain bound, in (0, 0.05].
     /// Both total and mechanical strain are checked; thermal bounds also apply.
     pub maximum_absolute_axial_strain: f64,
-    /// Whole selected annulus torsional engineering-shear bound, in (0, 0.05].
+    /// Whole selected annulus engineering-shear bound, in (0, 0.05]. With
+    /// transverse recovery, the sum of the separate transverse/torsion peaks
+    /// conservatively bounds their combined physical strain everywhere.
     pub maximum_engineering_shear: f64,
     /// Maximum omitted native transverse-force magnitude [N], finite and >=0.
     /// Zero is strict. A nonzero allowance is the caller's explicit decision
@@ -91,10 +95,12 @@ pub struct RodFatigueSample {
     pub point: RodFatiguePoint,
     pub axial_mechanical_strain: f64,
     /// Tensor-Voigt [xx,yy,zz,xy,yz,zx] [Pa], in the local material frame.
-    /// Only axial/bending and circular torsion are represented.
+    /// Axial/bending and circular torsion, plus transverse Saint-Venant shear
+    /// when the observation was explicitly constructed with that model.
     pub stress_pa: [f64; 6],
-    /// Native transverse resultants [Qy,Qz] [N], whose local stress is absent.
-    /// Even a small nonzero value is retained, without a hidden significance cut.
+    /// Native transverse resultants [Qy,Qz] [N] whose local stress is absent.
+    /// Exactly zero when transverse recovery accounts for this contribution;
+    /// otherwise even a small force is retained without a significance cutoff.
     pub unassessed_transverse_force_n: [f64; 2],
 }
 
@@ -147,7 +153,8 @@ struct PointBinding {
 #[derive(Debug, Clone)]
 struct SegmentBinding {
     segment: usize,
-    section: ConcentricShearSection,
+    section: Arc<ConcentricShearSection>,
+    transverse: Option<CircularTransverseShearRecovery>,
 }
 #[derive(Debug, Clone, Copy, Default)]
 struct SegmentSample {
@@ -196,7 +203,26 @@ impl RodFatigueObservation {
         config: RodFatigueConfig,
         gate: &CancelGate,
     ) -> Result<Self, RodFatigueError> {
-        let mut bank = Self::prepare(rod, gauges, findley, config, gate)?;
+        let mut bank = Self::prepare(rod, gauges, findley, config, false, gate)?;
+        bank.observe_native(rod, gate)?;
+        Ok(bank)
+    }
+
+    /// Observe the same native history with transverse-force shear included at
+    /// every fixed point. Each selected segment must retain an explicitly
+    /// isotropic, elastically homogeneous solid circle or concentric tube.
+    /// The source-owned Saint-Venant field satisfies the actual section force
+    /// and traction-free contours; it does not change the native authored
+    /// shear correction, mechanics or energy. End effects and cross-sectional
+    /// inertia remain outside this quasistatic section recovery.
+    pub fn new_with_transverse_shear(
+        rod: &SpatialMaterialRod,
+        gauges: Vec<RodFatigueGauge>,
+        findley: Vec<RodFindleyGauge>,
+        config: RodFatigueConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, RodFatigueError> {
+        let mut bank = Self::prepare(rod, gauges, findley, config, true, gate)?;
         bank.observe_native(rod, gate)?;
         Ok(bank)
     }
@@ -206,6 +232,7 @@ impl RodFatigueObservation {
         gauges: Vec<RodFatigueGauge>,
         findley: Vec<RodFindleyGauge>,
         config: RodFatigueConfig,
+        transverse_shear: bool,
         gate: &CancelGate,
     ) -> Result<Self, RodFatigueError> {
         poll(gate)?;
@@ -278,7 +305,7 @@ impl RodFatigueObservation {
                     ));
                 }
             }
-            bank.add_point(rod, gauge.point, gate)?;
+            bank.add_point(rod, gauge.point, transverse_shear, gate)?;
             bank.normal.push(NormalGauge {
                 direction: gauge.normal_in_material_frame,
                 counter: RainflowMiner::new(gauge.curve, gauge.mean_stress, config.history)
@@ -308,7 +335,7 @@ impl RodFatigueObservation {
                     ));
                 }
             }
-            bank.add_point(rod, gauge.point, gate)?;
+            bank.add_point(rod, gauge.point, transverse_shear, gate)?;
             bank.findley.push(
                 FindleyCycle::new(
                     gauge.calibration,
@@ -328,6 +355,7 @@ impl RodFatigueObservation {
         &mut self,
         rod: &SpatialMaterialRod,
         point: RodFatiguePoint,
+        transverse_shear: bool,
         gate: &CancelGate,
     ) -> Result<(), RodFatigueError> {
         poll(gate)?;
@@ -347,9 +375,19 @@ impl RodFatigueObservation {
         {
             Some(slot) => slot,
             None => {
+                let section = Arc::new(section.clone());
+                let transverse = if transverse_shear {
+                    Some(
+                        CircularTransverseShearRecovery::try_new(Arc::clone(&section))
+                            .map_err(SpatialRodError::from)?,
+                    )
+                } else {
+                    None
+                };
                 self.segments.push(SegmentBinding {
                     segment: point.segment,
-                    section: section.clone(),
+                    section,
+                    transverse,
                 });
                 self.segments.len() - 1
             }
@@ -608,10 +646,12 @@ impl RodFatigueObservation {
         for (point, sample) in self.points.iter().zip(&mut self.samples) {
             poll(gate)?;
             let native = self.recovery[point.segment_slot];
+            let binding = &self.segments[point.segment_slot];
             let transverse =
                 fs_math::det::hypot(native.transverse_force_n[0], native.transverse_force_n[1]);
             if !transverse.is_finite()
-                || transverse > self.config.maximum_unassessed_transverse_force_n
+                || (binding.transverse.is_none()
+                    && transverse > self.config.maximum_unassessed_transverse_force_n)
             {
                 return Err(RodFatigueError::Invalid(
                     "native transverse force exceeds the declared omitted-shear allowance",
@@ -638,7 +678,7 @@ impl RodFatigueObservation {
                     "rod point normal stress is unrepresentable",
                 ));
             }
-            let torsion = self.segments[point.segment_slot]
+            let torsion = binding
                 .section
                 .torsional_stress_at_twist_bounded(
                     point.point.layer,
@@ -649,11 +689,40 @@ impl RodFatigueObservation {
                 .map_err(SpatialRodError::from)?;
             let mut stress_pa = torsion.stress_tensor_pa();
             stress_pa[0] = stress;
+            let unassessed_transverse_force_n = if let Some(recovery) = &binding.transverse {
+                let recovered = recovery
+                    .evaluate(
+                        point.point.layer,
+                        point.point.coordinates_yz_m,
+                        native.transverse_force_n,
+                        self.config.maximum_engineering_shear,
+                    )
+                    .map_err(SpatialRodError::from)?;
+                let combined_bound = recovered.maximum_layer_engineering_shear
+                    + native.curvature[0].abs() * point.radius_m;
+                if !combined_bound.is_finite()
+                    || combined_bound > self.config.maximum_engineering_shear
+                {
+                    return Err(RodFatigueError::Invalid(
+                        "combined transverse and torsional strain exceeds the selected layer domain",
+                    ));
+                }
+                stress_pa[3] += recovered.shear_stress_pa[0];
+                stress_pa[5] += recovered.shear_stress_pa[1];
+                if !stress_pa[3].is_finite() || !stress_pa[5].is_finite() {
+                    return Err(RodFatigueError::Invalid(
+                        "combined rod shear stress overflows",
+                    ));
+                }
+                [0.0; 2]
+            } else {
+                native.transverse_force_n
+            };
             *sample = RodFatigueSample {
                 point: point.point,
                 axial_mechanical_strain: strain,
                 stress_pa,
-                unassessed_transverse_force_n: native.transverse_force_n,
+                unassessed_transverse_force_n,
             };
         }
         for (index, gauge) in self.normal.iter_mut().enumerate() {
@@ -726,6 +795,20 @@ impl SpatialRodFatiguePath {
         gate: &CancelGate,
     ) -> Result<Self, RodFatigueError> {
         let observation = RodFatigueObservation::new(&rod, gauges, findley, config, gate)?;
+        Ok(Self { rod, observation })
+    }
+
+    /// Native equilibrium cycles including the original section's resolved
+    /// transverse shear; see [`RodFatigueObservation::new_with_transverse_shear`].
+    pub fn new_with_transverse_shear(
+        rod: SpatialMaterialRod,
+        gauges: Vec<RodFatigueGauge>,
+        findley: Vec<RodFindleyGauge>,
+        config: RodFatigueConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, RodFatigueError> {
+        let observation =
+            RodFatigueObservation::new_with_transverse_shear(&rod, gauges, findley, config, gate)?;
         Ok(Self { rod, observation })
     }
     pub fn rod(&self) -> &SpatialMaterialRod {

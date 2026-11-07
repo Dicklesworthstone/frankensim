@@ -38,6 +38,8 @@ pub mod wound;
 pub mod torsion;
 /// Explicit transverse shear viscosity on the original corrected shear section.
 pub mod transverse;
+/// Explicit Saint-Venant shear recovery for homogeneous isotropic circles/tubes.
+pub mod transverse_stress;
 
 #[cfg(test)]
 mod parameter_tests;

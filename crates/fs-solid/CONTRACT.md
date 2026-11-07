@@ -1990,12 +1990,20 @@ declared mean-stress policy. Findley gauges retain the full local tensor and
 both shear-vector directions over an explicitly closed representative cycle.
 Findley reports a calibrated fatigue-limit utilization, not an invented cycle
 life. Its finite plane search and enclosing-circle work remain bounded by the
-original material owner. Axial/bending/torsion superposition does not supply a
-local transverse-force shear field: `Q/A` is not substituted for that missing
-field. Selected segments exceeding the caller's explicit unassessed transverse-
-force limit are refused, and the actual omitted forces remain inspectable.
-Zero requires vanishing transverse force; a nonzero limit is an explicit model
-applicability decision, not a bound on the missing local stress or fatigue error.
+original material owner. The original constructors retain an explicit
+unassessed transverse-force limit: omitted forces remain inspectable, zero
+requires vanishing transverse force, and a nonzero allowance is not a local
+stress-error bound. `new_with_transverse_shear` and
+`RodFatigueObservation::new_motion_with_transverse_shear` instead recover this
+contribution through the same material-owned circular Saint-Venant field.
+They require explicit original isotropic roles and homogeneous elastic
+coefficients; no `Q/A` surrogate or heterogeneous averaging enters the tensor.
+Both normal-stress life and Findley receive the combined physical shear at
+their fixed material point. The sum of the separate whole-annulus transverse
+and torsional strain peaks conservatively bounds the combined small-strain
+domain. The native force, authored shear correction and storage remain with
+the original rod; quasistatic section recovery introduces no stress-energy
+replacement, cross-sectional inertia or end-effect solution.
 
 The initial accepted state is sampled once. Explicit target-load blocks use the
 original native equilibrium solver; intermediate Newton and continuation trials

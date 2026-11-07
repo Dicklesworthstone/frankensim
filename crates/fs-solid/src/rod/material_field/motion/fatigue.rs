@@ -27,7 +27,25 @@ impl RodFatigueObservation {
         config: RodFatigueConfig,
         gate: &CancelGate,
     ) -> Result<Self, RodFatigueError> {
-        let mut bank = Self::prepare(model.source(), gauges, findley, config, gate)?;
+        let mut bank = Self::prepare(model.source(), gauges, findley, config, false, gate)?;
+        bank.motion_source = Some(Arc::clone(&model.source));
+        bank.observe_motion(model, pose, gate)?;
+        Ok(bank)
+    }
+
+    /// Bind the same immutable trajectory while resolving transverse shear at
+    /// each fixed gauge through the original circular Saint-Venant section.
+    /// The supported source family and small-strain envelope are identical to
+    /// [`Self::new_with_transverse_shear`]. Only accepted poses enter histories.
+    pub fn new_motion_with_transverse_shear<I>(
+        model: &PreparedRodMotion<I>,
+        pose: &RodMotionPose,
+        gauges: Vec<RodFatigueGauge>,
+        findley: Vec<RodFindleyGauge>,
+        config: RodFatigueConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, RodFatigueError> {
+        let mut bank = Self::prepare(model.source(), gauges, findley, config, true, gate)?;
         bank.motion_source = Some(Arc::clone(&model.source));
         bank.observe_motion(model, pose, gate)?;
         Ok(bank)

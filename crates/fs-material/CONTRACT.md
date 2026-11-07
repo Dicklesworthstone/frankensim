@@ -273,6 +273,34 @@ This is small-strain elastic torsion of perfectly bonded circular layers;
 axial/bending stress, transverse-force shear, viscous history, end effects,
 slip and strength/failure remain separate models.
 
+## Circular transverse-force stress with original isotropic sources
+
+`section::transverse_stress::CircularTransverseShearRecovery` prepares the
+Saint-Venant flexure field for an elastically homogeneous solid circle or
+concentric tube. Original explicit E/nu, E/G or K/G roles supply Poisson ratio
+and uncorrected G. Physical layer subdivision retains its original materials
+and density; unequal elastic coefficients or an undeclared isotropic law refuse.
+The analytic field satisfies section equilibrium, isotropic compatibility,
+the applied transverse resultant and traction-free bore/exterior contours.
+See Di Paola, Pirrotta and Santoro, Acta Mechanica 217 (2011), sections 2 and
+5.2, Eq. (28), <https://doi.org/10.1007/s00707-010-0376-8>.
+
+Preparation is linear in the bounded layer count. Each point query is constant
+work, allocation-free and returns physical tensor shear, engineering strain,
+local elastic storage and the exact whole-selected-annulus strain maximum.
+An explicit small-strain limit therefore cannot be bypassed by querying a
+stress-free point. The native authored shear correction is neither changed nor
+used to infer point stress; recovered storage must not be added to or silently
+identified with that reduced model's energy. This quasistatic prismatic-section
+recovery excludes load-introduction effects, cross-sectional inertia, elastic
+heterogeneity, plasticity and a failure criterion.
+
+`tests/circular_transverse_stress.rs` defines independent Cartesian/Laurent,
+equilibrium/compatibility, integrated force/torque/energy, auxiliary Poisson
+ratio, subdivision, source-refusal and strain-envelope regressions. Native
+rod-fatigue consumers use this same prepared owner. These synthetic checks do
+not establish measured component strength or fatigue life.
+
 ## Frozen brittle and cohesive stiffness
 
 `CohesivePoint::frozen_tangent_pa_m` differentiates the original recoverable

@@ -21,11 +21,12 @@ use fs_material::fatigue::{
 use fs_material::section::thermal::ConcentricThermoelasticSection;
 use fs_material::section::{
     ConcentricElasticSection, ConcentricMaterialLayer, ConcentricShearSection,
+    LayerIsotropicParameters,
 };
 use fs_material::state_point::{
-    INVERSE_TEMPERATURE_DIMS, MaterialPropertySelection, ResolvedMaterialStatePoint,
-    ScalarAdmissibility, ScalarPropertyRequirement, integrate_isotropic_thermal_expansion,
-    resolve_material_state_point,
+    INVERSE_TEMPERATURE_DIMS, IsotropicElasticParameters, MaterialPropertySelection,
+    ResolvedMaterialStatePoint, ScalarAdmissibility, ScalarPropertyRequirement,
+    integrate_isotropic_thermal_expansion, resolve_material_state_point,
 };
 use fs_qty::{Density, Dims, Pressure, QuantitySpec, Temperature};
 use fs_solid::rod::material_field::SpatialMaterialRod;
@@ -206,6 +207,29 @@ fn native(youngs: &[f64]) -> SpatialMaterialRod {
     );
     SpatialMaterialRod::try_straight(0.5, vec![section; 2]).unwrap()
 }
+fn isotropic_native(youngs: &[f64]) -> SpatialMaterialRod {
+    let original = native(youngs);
+    let layers = original.sections()[0].elastic().layers().to_vec();
+    let bindings = layers
+        .iter()
+        .map(|layer| {
+            let requirement = |name| layer.material.property(name).unwrap().requirement().clone();
+            LayerIsotropicParameters {
+                density: requirement("density"),
+                parameters: IsotropicElasticParameters::YoungShear {
+                    young_modulus: requirement("young_modulus"),
+                    shear_modulus: requirement("shear_modulus"),
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+    let section =
+        ConcentricElasticSection::try_new_with_isotropic_parameters(0.0, layers, &bindings)
+            .unwrap()
+            .with_isotropic_shear(0.8)
+            .unwrap();
+    SpatialMaterialRod::try_straight(0.5, vec![section; 2]).unwrap()
+}
 fn config() -> RodFatigueConfig {
     RodFatigueConfig {
         history: RainflowLimits {
@@ -383,6 +407,119 @@ fn torsion_drives_signed_oblique_normal_life_and_original_findley_shear() {
     assert_eq!(done[0].miner_damage, 0.0);
     assert!(done[1].miner_damage > 0.0);
     assert_eq!(path.observation().findley_results()[0].unwrap().samples, 4);
+}
+
+#[test]
+fn transverse_force_drives_native_fixed_point_findley_and_normal_life() {
+    let gate = CancelGate::new();
+    let rod = isotropic_native(&[E]);
+    let oblique = gauge(0, [0.0; 2], [1.0, 1.0, 0.0]);
+    let mut limits = config();
+    limits.maximum_unassessed_transverse_force_n = 0.0;
+    let load = |force| WorldTipLoad {
+        force: [0.0, force, 0.0],
+        moment: [0.0; 3],
+    };
+    let mut omitted =
+        SpatialRodFatiguePath::new(rod.clone(), vec![oblique.clone()], vec![], limits, &gate)
+            .unwrap();
+    assert!(
+        omitted
+            .advance_world(&[load(0.5)], TOLERANCE, &gate)
+            .is_err()
+    );
+    assert_eq!(omitted.sample_count(), 1);
+    let mut path = SpatialRodFatiguePath::new_with_transverse_shear(
+        rod,
+        vec![oblique.clone()],
+        vec![findley(oblique.point)],
+        limits,
+        &gate,
+    )
+    .unwrap();
+    let mut stresses = Vec::new();
+    for force in [0.5, -0.5] {
+        path.advance_world(&[load(force)], TOLERANCE, &gate)
+            .unwrap();
+        let sample = path.observation().normal_samples()[0];
+        let (native_force, _) = path.rod().segment_resultants(0).unwrap();
+        let area = core::f64::consts::PI * R * R;
+        // E/G=2.5 gives nu=1/4 and a centerline multiplier 7/5. No Q/A
+        // uniform stress or the mechanical kappa=0.8 enters this reference.
+        near(
+            sample.stress_pa[3],
+            (7.0 / 5.0) * native_force[1] / area,
+            2e-12,
+        );
+        assert_eq!(sample.unassessed_transverse_force_n, [0.0; 2]);
+        assert_eq!(
+            path.observation().findley_samples()[0].stress_pa,
+            sample.stress_pa
+        );
+        stresses.push(sample.stress_pa);
+    }
+    path.advance_world_and_close_findley_cycle(&[load(0.0)], TOLERANCE, &gate)
+        .unwrap();
+    let result = path.observation().findley_results()[0].unwrap();
+    let amplitude = 0.5 * (stresses[0][3] - stresses[1][3]).abs();
+    near(result.shear_amplitude_pa, amplitude, 2e-7);
+    near(
+        result.maximum_normal_stress_pa,
+        stresses[0][0].max(stresses[1][0]).max(0.0),
+        2e-6,
+    );
+    assert!(result.usage_factor > 0.0);
+    assert!(path.finish(&gate).unwrap()[0].miner_damage > 0.0);
+}
+
+#[test]
+fn transverse_recovery_refuses_foreign_family_and_combined_overstrain_atomically() {
+    let gate = CancelGate::new();
+    let observation = gauge(0, [0.0; 2], [1.0, 1.0, 0.0]);
+    for rod in [native(&[E]), isotropic_native(&[E, 2.0 * E])] {
+        assert!(
+            SpatialRodFatiguePath::new_with_transverse_shear(
+                rod,
+                vec![observation.clone()],
+                vec![],
+                config(),
+                &gate,
+            )
+            .is_err()
+        );
+    }
+    let mut limits = config();
+    limits.maximum_engineering_shear = 1e-4;
+    let rod = isotropic_native(&[E]);
+    let torsion = rod.sections()[0].torsional_stiffness_n_m2() * 6e-5 / R;
+    let mut path = SpatialRodFatiguePath::new_with_transverse_shear(
+        rod,
+        vec![observation],
+        vec![],
+        limits,
+        &gate,
+    )
+    .unwrap();
+    let before = path.clone();
+    assert!(
+        path.advance_world(
+            &[WorldTipLoad {
+                force: [0.0, 0.15, 0.0],
+                moment: [torsion, 0.0, 0.0],
+            }],
+            TOLERANCE,
+            &gate
+        )
+        .is_err()
+    );
+    assert_eq!(path.rod().positions_m(), before.rod().positions_m());
+    assert_eq!(path.rod().frames(), before.rod().frames());
+    assert_eq!(path.summaries(), before.summaries());
+    assert_eq!(
+        path.observation().normal_samples(),
+        before.observation().normal_samples()
+    );
+    assert_eq!(path.sample_count(), 1);
 }
 
 #[test]

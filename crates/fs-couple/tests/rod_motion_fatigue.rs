@@ -19,10 +19,12 @@ use fs_material::fatigue::{
     FatigueScope, MeanStressCorrection, NormalStressDirection, RainflowLimits, RainflowMiner,
     SnCurve, SnPoint,
 };
-use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer};
+use fs_material::section::{
+    ConcentricElasticSection, ConcentricMaterialLayer, LayerIsotropicParameters,
+};
 use fs_material::state_point::{
-    MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
-    resolve_material_state_point,
+    IsotropicElasticParameters, MaterialPropertySelection, ScalarAdmissibility,
+    ScalarPropertyRequirement, resolve_material_state_point,
 };
 use fs_qty::{Density, Pressure, QuantitySpec, Temperature};
 use fs_solid::rod::material_field::SpatialMaterialRod;
@@ -196,6 +198,111 @@ fn same_motion(a: &RodMotion, b: &RodMotion) {
     assert_eq!(a.time_s(), b.time_s());
     assert_eq!(a.accepted_steps(), b.accepted_steps());
     assert_eq!(a.observe([0.0; 3]).unwrap(), b.observe([0.0; 3]).unwrap());
+}
+
+#[test]
+fn transverse_shear_recovery_follows_actual_motion_without_changing_native_work() {
+    let gate = CancelGate::new();
+    let original = rod(false);
+    let layers = original.sections()[0].elastic().layers().to_vec();
+    let requirement = |name| {
+        layers[0]
+            .material
+            .property(name)
+            .unwrap()
+            .requirement()
+            .clone()
+    };
+    let binding = LayerIsotropicParameters {
+        density: requirement("density"),
+        parameters: IsotropicElasticParameters::YoungShear {
+            young_modulus: requirement("young_modulus"),
+            shear_modulus: requirement("shear_modulus"),
+        },
+    };
+    let section =
+        ConcentricElasticSection::try_new_with_isotropic_parameters(0.0, layers, &[binding])
+            .unwrap()
+            .with_isotropic_shear(0.8)
+            .unwrap();
+    let model = Arc::new(
+        SpatialMaterialRod::try_straight(0.8, vec![section])
+            .unwrap()
+            .into_motion_model(RodRootBoundary::Clamped, &gate)
+            .unwrap(),
+    );
+    let mut pose = model.initial_pose();
+    pose.positions_m[1][1] = 0.0008;
+    let mut native =
+        RodMotion::new(model, pose, &[[0.0; 3]; 2], &[[0.0; 3]; 2], 0.0, &gate).unwrap();
+    let mut point = gauge(MeanStressCorrection::Uncorrected);
+    point.point.coordinates_yz_m = [0.0; 2];
+    point.normal_in_material_frame = NormalStressDirection::new([1.0, 1.0, 0.0]).unwrap();
+    let limits = config(17, 1);
+    assert!(
+        RodMotionFatiguePath::new(native.clone(), vec![point.clone()], vec![], limits, &gate)
+            .is_err()
+    );
+    let mut path = RodMotionFatiguePath::new_with_transverse_shear(
+        native.clone(),
+        vec![point],
+        vec![],
+        limits,
+        &gate,
+    )
+    .unwrap();
+    let first = path.observation().normal_samples()[0];
+    // Native gamma_y=0.001, kappa=0.8, G=4000 Pa. The exact circular
+    // centerline multiplier at nu=1/4 is 7/5, independently of that kappa.
+    assert!((first.stress_pa[3] - (7.0 / 5.0) * 0.8 * 4000.0 * 0.001).abs() < 1e-12);
+    assert_eq!(first.unassessed_transverse_force_n, [0.0; 2]);
+    for _ in 0..16 {
+        let (next, expected) = native
+            .step_candidate(
+                0.001,
+                &[RodNodalWrench::default(); 2],
+                controls(0.001),
+                &gate,
+            )
+            .unwrap();
+        let report = path
+            .advance(
+                0.001,
+                &[RodNodalWrench::default(); 2],
+                controls(0.001),
+                &gate,
+            )
+            .unwrap();
+        native = next;
+        same_motion(path.motion(), &native);
+        assert_eq!(report.after, expected.after);
+        assert_eq!(report.integration_defect_j, expected.integration_defect_j);
+        assert_eq!(report.support_impulses, expected.support_impulses);
+        assert_eq!(
+            path.observation().normal_samples()[0].unassessed_transverse_force_n,
+            [0.0; 2]
+        );
+    }
+    assert_ne!(
+        path.observation().normal_samples()[0].stress_pa[3],
+        first.stress_pa[3]
+    );
+    let before = path.clone();
+    assert!(
+        path.advance(
+            0.001,
+            &[RodNodalWrench::default(); 2],
+            controls(0.001),
+            &gate
+        )
+        .is_err()
+    );
+    same_motion(path.motion(), before.motion());
+    assert_eq!(
+        path.observation().normal_samples(),
+        before.observation().normal_samples()
+    );
+    assert_eq!(path.summaries(), before.summaries());
 }
 
 #[test]

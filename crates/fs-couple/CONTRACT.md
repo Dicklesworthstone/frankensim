@@ -178,9 +178,13 @@ Admission observes the supplied mechanical state once, including its preload
 and momentum, without reconstructing earlier damage or inserting a zero-stress
 sample. The rod observer retains original per-layer axial/bending/torsional
 stress, material-frame plane directions, typed source conditions, bounded S-N
-rainflow and optional explicitly closed Findley windows. Local transverse-force
-shear remains subject to the solid observer's explicit applicability allowance;
-it is not inferred from a section-averaged force.
+rainflow and optional explicitly closed Findley windows. Its explicit
+`new_with_transverse_shear` constructor includes the original material owner's
+Saint-Venant transverse field for homogeneous isotropic circles and tubes.
+It retains both free contours, source roles and whole-layer shear bounds.
+Other constructors retain the solid observer's omitted-shear allowance.
+No constructor treats a section-averaged force as a local stress or changes
+the native shear correction to fit the observation.
 
 A native candidate is accepted only after every gauge accepts its tensor.
 Mechanical refusal, late gauge failure, sample/storage budget exhaustion and
