@@ -48,6 +48,8 @@ use fs_sparse::{Coo, Csr};
 mod hex8;
 mod project;
 pub mod source;
+/// Directional strength on actual accepted Kelvin/Maxwell stress histories.
+pub mod strength;
 mod thermal;
 pub use project::{ProjectedViscoSolid, SolidProjectionBudget};
 mod quasistatic;
@@ -1152,6 +1154,7 @@ impl ViscoElements {
         Ok(ViscoElementState {
             system: self,
             histories,
+            endpoint_stress_observed: true,
             energy: ViscoEnergy::default(),
             displacement_m: vec![0.0; self.full_dofs],
             thermal_strains: None,
@@ -1185,6 +1188,9 @@ pub struct ViscoEnergy {
 pub struct ViscoElementState<'a> {
     system: &'a ViscoElements,
     histories: Vec<Vec<TensorPronyState>>,
+    // A zero-duration parameter refresh cannot supply a new Kelvin rate.
+    // Clones and discarded trials preserve this provenance atomically.
+    endpoint_stress_observed: bool,
     energy: ViscoEnergy,
     displacement_m: Vec<f64>,
     thermal_strains: Option<std::sync::Arc<thermal::ThermalSnapshot>>,
@@ -1438,6 +1444,7 @@ impl<'a> ViscoElementState<'a> {
             .map(|&d| mean_force[d])
             .collect();
         self.histories = histories;
+        self.endpoint_stress_observed = true;
         self.energy = energy;
         self.displacement_m.copy_from_slice(u_new);
         if let Some(strains) = thermal {

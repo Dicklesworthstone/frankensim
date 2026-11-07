@@ -10659,3 +10659,47 @@ energy. Local Hill histories survive every accepted point update.
 
 Scope remains small strain and small rotation with an authored fixed material
 metric and frame; these fixtures do not calibrate sheet forming or texture.
+
+## Directional strength on native tensor-viscoelastic histories
+
+`ViscoElements::prepare_orthotropic_strength` binds the existing directional
+tensile or full three-dimensional Tsai-Wu criterion to each original source
+element and its material frame. Immutable material-card identity and the
+complete typed physical query must match the current native coefficients.
+The prepared observer borrows that exact geometry/coefficient owner, retains
+the complete original source receipts, and caches the inverse material frame.
+A foreign or refreshed system requires its own prepared binding.
+
+`PreparedViscoStrength::assess` reads each accepted native integration-point
+stress, including equilibrium elasticity, Maxwell history, Kelvin stress from
+the actual last strain ramp, and imposed thermal eigenstrain. It converts
+work-conjugate Mandel shear to physical tensor shear exactly once, then pulls
+the complete stress into the original material axes before applying the shared
+criterion. Signed normals and shear remain visible; samples are never averaged.
+The original P1, quadratic, hexahedral and B-bar point ordering survives, with
+deterministic governing-point ties and explicit coefficient/strength identities.
+
+Assessment performs no material query, constitutive update, force solve,
+operator construction or displacement-based stress reconstruction. Only its
+bounded output vector allocates; cancellation is checked per point and before
+return. If an imposed thermal field is present, every actual sample temperature
+must equal the current coefficient/strength query. Frozen coefficients do not
+authorize a strength observation at another temperature.
+
+A law-changing Kelvin parameter refresh intentionally has no native endpoint
+rate. A retained transactional stress-observation flag therefore refuses
+assessment until a successful positive-duration native step supplies complete
+stress. Unchanged-law rebinds preserve the flag; source refresh without Kelvin
+continues to have physically determined spring/Maxwell stress. Relaxed initial
+states, clones and rejected trials preserve their existing semantics. Reference
+mass, geometry, histories, work and material evolution are unchanged.
+
+`visco_source/strength.rs` supplies four analytic native regressions: a
+Maxwell-plus-Kelvin strength crossing missed by equilibrium-only checking and
+subsequent fixed-displacement relaxation; rotated signed tensor stress and
+shear-sensitive Tsai-Wu interaction; unaveraged thermal/B-bar quadrature with
+stale-temperature refusal; and source refresh, actual resumed viscous stress,
+owner mismatch, budgets and cancellation. These observe represented endpoint
+stresses, not unsampled space/time peaks, rate-dependent strength calibration,
+progressive damage or fracture evolution.
+

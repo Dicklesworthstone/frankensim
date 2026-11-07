@@ -4,6 +4,9 @@
 #[path = "visco_source/dynamics.rs"]
 mod dynamics;
 
+#[path = "visco_source/strength.rs"]
+mod strength;
+
 use fs_blake3::ContentHash;
 use fs_evidence::ValidityDomain;
 use fs_exec::Cx;

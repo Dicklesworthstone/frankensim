@@ -68,7 +68,7 @@ impl TensileMaterialBinding {
     }
 }
 
-fn admit_same_state(
+pub(crate) fn admit_same_state(
     mechanics: &ResolvedMaterialStatePoint,
     strength: &ResolvedMaterialStatePoint,
 ) -> Result<(), TensileAssessmentError> {
@@ -326,6 +326,6 @@ fn assess_samples(
     })
 }
 
-fn checkpoint(cx: &Cx<'_>) -> Result<(), TensileAssessmentError> {
+pub(crate) fn checkpoint(cx: &Cx<'_>) -> Result<(), TensileAssessmentError> {
     cx.checkpoint().map_err(|_| TensileAssessmentError::Cancelled)
 }

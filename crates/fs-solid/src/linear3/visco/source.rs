@@ -296,6 +296,7 @@ impl ViscoElementState<'_> {
         };
         next.validate_displacement(&self.displacement_m, || cx.checkpoint().is_err())?;
         let mut histories = Vec::with_capacity(self.histories.len());
+        let mut endpoint_stress_observed = self.endpoint_stress_observed;
         let mut stored_j = 0.0;
         let mut parameter_work_j = 0.0;
         for (element_index, ((previous, element), accepted)) in self
@@ -307,6 +308,12 @@ impl ViscoElementState<'_> {
             .enumerate()
         {
             checkpoint(cx)?;
+            if previous.law != element.law && element.law.kv_pa_s().is_some() {
+                // Storage refresh deliberately emits no force observation.
+                // Its zero-duration kernel has no actual Kelvin strain rate;
+                // do not expose that incomplete stress as an accepted endpoint.
+                endpoint_stress_observed = false;
+            }
             // Rates and Kelvin viscosity do not store energy. Keep exact zero
             // parameter work when the physical spring tensors are unchanged.
             let same_storage = previous.law.c_eq() == element.law.c_eq()
@@ -374,6 +381,7 @@ impl ViscoElementState<'_> {
             history: ViscoElementState {
                 system: next,
                 histories,
+                endpoint_stress_observed,
                 energy: ViscoEnergy {
                     stored_j,
                     ..self.energy
