@@ -348,7 +348,7 @@ pub(super) fn reported_step(
     reported_step_with_source(before, after, [a, b], dt, area, ForceChange::default(), 0.0)
 }
 
-fn reported_step_with_source(
+pub(super) fn reported_step_with_source(
     before: Totals,
     after: Totals,
     [a, b]: [Stage; 2],

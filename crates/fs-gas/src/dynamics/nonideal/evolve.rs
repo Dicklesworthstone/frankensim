@@ -11,6 +11,7 @@ use crate::multicomponent::wall_exchange::WallControl;
 use fs_qty::{Length, Time};
 
 mod forcing;
+mod moving;
 mod reconstruction;
 
 /// One end of a stationary quasi-one-dimensional real-gas passage.
@@ -64,7 +65,8 @@ struct Workspace {
 /// The geometric source is paired with face pressure before area scaling,
 /// preserving a uniform-pressure resting state. Finite-speed steady nozzle states
 /// are not exactly well balanced. No gas phase flash, abrupt-junction loss,
-/// spatial viscous transport or moving end wall is added.
+/// spatial viscous transport is inferred. Prescribed end motion
+/// is supplied by the separately admitted moving-wall entry.
 pub struct RealGasEuler1d {
     gas: RealGas,
     states: Vec<Conserved>,
@@ -75,6 +77,7 @@ pub struct RealGasEuler1d {
     time: f64,
     work: Workspace,
     force_work: Option<forcing::Workspace>,
+    moving: Option<crate::dynamics::MovingWorkspace>,
 }
 
 impl RealGasEuler1d {
@@ -129,6 +132,7 @@ impl RealGasEuler1d {
             time: 0.0,
             work,
             force_work: None,
+            moving: None,
         })
     }
 
@@ -526,6 +530,7 @@ fn attempt(
         mesh,
         boundaries,
         boundary_primitive,
+        None,
         &mut work.faces,
         work.traces
             .as_deref_mut()
@@ -550,6 +555,7 @@ fn attempt(
         mesh,
         boundaries,
         boundary_primitive,
+        None,
         &mut work.faces,
         work.traces
             .as_deref_mut()
@@ -595,6 +601,7 @@ fn operator(
     mesh: &Mesh1d,
     boundaries: RealGasBoundaries,
     boundary_primitive: [Option<Primitive>; 2],
+    face_velocity: Option<&[f64]>,
     faces: &mut [FaceFlux],
     mut traces: Option<&mut [reconstruction::Traces]>,
     cancelled: &mut impl FnMut() -> bool,
@@ -625,6 +632,19 @@ fn operator(
                     let index = if face == 0 { 0 } else { n - 1 };
                     let interior = (states[index], primitive[index]);
                     let boundary = if face == 0 { left } else { right };
+                    if let Some(velocity) = face_velocity {
+                        let flux = moving::wall_flux(
+                            gas,
+                            interior,
+                            if face == 0 { -1.0 } else { 1.0 },
+                            velocity[face],
+                            boundary,
+                            cancelled,
+                        )?;
+                        fallbacks += usize::from(flux.used_hll_fallback);
+                        faces[face] = flux;
+                        continue;
+                    }
                     let mut exterior = interior;
                     match boundary {
                         RealGasBoundary::Transmissive => (),
@@ -659,7 +679,13 @@ fn operator(
         } else {
             (trace(face - 1, 1), trace(face, 0), false)
         };
-        let mut flux = gas.interface(left.0, left.1, right.0, right.1, cancelled)?;
+        let mut flux = moving::interface(
+            gas,
+            left,
+            right,
+            face_velocity.map_or(0.0, |velocity| velocity[face]),
+            cancelled,
+        )?;
         if wall {
             // Exact impermeability/work at a stationary mirror boundary. The
             // source-checked numerical Riemann solve supplies pressure traction.

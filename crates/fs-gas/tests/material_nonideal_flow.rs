@@ -22,6 +22,8 @@ const DENSE_SOUND_SPEED: f64 = 434.547_071_783_336_5;
 
 #[path = "material_nonideal_flow/forcing.rs"]
 mod forcing;
+#[path = "material_nonideal_flow/moving.rs"]
+mod moving;
 #[path = "material_nonideal_flow/nozzle.rs"]
 mod nozzle;
 #[path = "material_nonideal_flow/reconstruction.rs"]

@@ -171,7 +171,7 @@ impl RealGasEuler1d {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn update(
+pub(super) fn update(
     gas: &RealGas,
     q: Conserved,
     before: Primitive,

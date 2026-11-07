@@ -167,7 +167,7 @@ Spatial reconstruction accepts explicit `FirstOrder` or source-admitted `Muscl` 
 
 Two traces per cell are cached in one lazy reusable buffer, so each face consumes already-admitted states without a duplicate material solve. Nonperiodic end cells retain their original first-order boundary relation, including physical reflecting walls. Periodic fluxes remain single evaluated and shared; nonuniform geometry uses adjacent physical widths rather than subtracting distant center coordinates. The native conservative face update and SSP-RK2 averages remain unchanged. Accepted reports count source-limited cells and declare any whole-step first-order retry. A CFL-only retry keeps MUSCL; other source/stage refusals halve the interval and allow the more dissipative first-order path. Gas, source work, wall accounts, primitive cache and time still publish together.
 
-The method is second order on smooth admitted fields; extrema, source limiting, end cells and first-order retries limit that statement. The caller declares one homogeneous stable density/temperature branch, and every evaluated state is checked. No phase flash, global entropy or positivity theorem, variable area, viscous/thermal transport, evolving composition or moving wall is inferred. The original `material_nonideal_flow` regressions retain caloric/acoustic source retention, datum-invariant compression, nonuniform free streams, closed-box balances, an independent dense shock and atomic refusal. The added `material_nonideal_flow/reconstruction` cases cover dense acoustic momentum refinement, first-order diffusion comparison, original-reference invariance, uniform nonuniform-mesh flow, pressure impulse and cancellation. Eight native `reconstruction/linear` tests exercise nonuniform affine exactness, monotonicity, coupled source admission, work bounds, cancellation, exact original-payload reuse and smooth conservative transport refinement.
+The method is second order on smooth admitted fields; extrema, source limiting, end cells and first-order retries limit that statement. The caller declares one homogeneous stable density/temperature branch, and every evaluated state is checked. No phase flash, global entropy or positivity theorem, spatial viscous/thermal transport or evolving composition is inferred. Prescribed constant-area end motion has the separate moving-wall entry described below. The original `material_nonideal_flow` regressions retain caloric/acoustic source retention, datum-invariant compression, nonuniform free streams, closed-box balances, an independent dense shock and atomic refusal. The added `material_nonideal_flow/reconstruction` cases cover dense acoustic momentum refinement, first-order diffusion comparison, original-reference invariance, uniform nonuniform-mesh flow, pressure impulse and cancellation. Eight native `reconstruction/linear` tests exercise nonuniform affine exactness, monotonicity, coupled source admission, work bounds, cancellation, exact original-payload reuse and smooth conservative transport refinement.
 
 ## Fully-ionized fueling and selective thermal ash exhaust
 
@@ -690,8 +690,9 @@ remains first order. Source impulse/work, wall impulse/heat/drive work and
 boundary transport have distinct accounts; gas plus finite-wall storage
 subtracts external body work exactly once. Cancellation or refusal publishes
 neither cells, primitive caches, wall inventories, reports nor the clock.
-Zero forcing preserves the original transport/wall path. No moving real-gas
-boundary, hydrostatic well balancing, spatial viscosity or phase flash is added.
+Zero forcing preserves the original transport/wall path. The separate moving-wall
+entry below composes this same source with prescribed boundary motion.
+Hydrostatic well balancing, spatial viscosity and phase flash remain outside scope.
 `tests/material_nonideal_flow/forcing.rs` checks dense-gas acceleration and
 braking, gauge invariance, force-density/volume units, uniform forced transport,
 endpoint-CFL retries, combined wall/body balances and late atomic cancellation.
@@ -8164,3 +8165,59 @@ exceeds 1e17 mol. Empty/dark/zero-duration and original-source, allocation/work
 admission, step and cancellation cases retain transactional behavior. These
 manufactured numerical tests do not validate those extreme parameters as a
 physical plasma or bound the quasi-static approximation.
+
+
+### Original-source real-gas moving chambers and mechanical forcing
+
+With `material,experimental-euler`, `RealGasEuler1d::step_with_moving_walls`
+advances a resolved, constant-area real-gas field between two prescribed
+impermeable ends. Both speeds use the increasing axial coordinate and remain
+held over the accepted interval. Affine face motion reuses the original
+nonuniform `Mesh1d` geometric-conservation law. Extensive SSP-RK2 updates
+mass, laboratory momentum and laboratory total energy with the same face
+velocities and stage volumes. The first Euler stage, twice-displaced second
+Euler endpoint and final average all resolve through the original
+NASA/Peng--Robinson source before publication.
+
+`RealGas::moving_hllc_flux` constructs relative-frame traces from original
+density and temperature, retaining source-owned internal energy instead of
+subtracting large laboratory kinetic energies. The admitted HLLC/HLL flux is
+transformed back to laboratory conserved transport F-wU. Signal speeds remain
+relative to the face, and both stage geometries receive their actual CFL gates.
+`moving_reflecting_wall_flux` reuses the original shock/isentrope pressure
+relation at fluid velocity relative to the wall. Numerical mirrored ends
+retain their original source-checked Riemann pressure. Both kinds have exactly
+zero mass transfer and pressure-times-wall-speed energy transfer. The same
+stage fluxes determine the reported left/right impulse and pressure work.
+
+`step_with_moving_walls_and_body_force` surrounds this transport with the
+existing held-force half steps. The first uses accepted density and physical
+volume; the second uses transported density and displaced physical volume.
+Each endpoint retains original calorics, Mach admission and full-interval
+face-relative CFL. Boundary pressure work and external source work remain
+distinct and are counted once. Retry reconstructs all candidates from accepted
+fields and geometry; cells, primitive caches, mesh and clock swap only after
+the final cancellation check. Zero motion reuses the existing stationary
+method exactly; zero force reuses the source-free moving method.
+
+The numerical scratch and geometry buffers are allocated lazily and reused.
+MUSCL uses the existing cached original-source traces; boundary cells retain
+their original relation. This is a bounded second-order engineering lane on
+smooth admitted solutions, subject to source limiting and first-order retries.
+It does not infer piston inertia, finite wall heat, moving area, open advective
+ends, a phase flash or an entropy/positivity theorem. The prescribed-wall lane
+does not compose the separate finite-wall thermal/drag owner.
+
+Seven executable native tests of the production kinematics module pass:
+independent laboratory F-wU transport, pressure work, Galilean composition,
+bitwise uniform translation, geometric conservation, nonuniform extensive
+balance and second-order work refinement against an independent adiabatic
+volume ODE. A metadata-only compile checks the changed production owner,
+geometry, source and reconstruction control flow with explicitly unimplemented
+constitutive facades; it is not an EOS validation or full crate build.
+Seven original-material regressions in `tests/material_nonideal_flow/moving.rs`
+specify physical moving compression, Galilean wall/face fluxes, uniform
+translation, force-density work on displaced volumes, original-path identity,
+formation-datum invariance and late cancellation/retry. Those complete
+material integration tests were authored but not executed in this resource-
+limited session; the focused arithmetic checks do not replace them.
