@@ -1,10 +1,12 @@
 //! Symmetric Nitsche displacement conditions on a retained implicit surface.
 //!
-//! For basis v_i, t_i=sigma(v_i)n and gamma=beta*reference_modulus/h:
+//! For basis v_i, t_i=sigma_formulation(v_i)n and gamma=beta*reference_modulus/h:
 //! K_Gamma[i,j] = integral(-v_i.t_j - t_i.v_j + gamma*v_i.v_j).
 //! b_g[i] = integral(-t_i.g + gamma*v_i.g). Each cell's reference
 //! K_Gamma and b_g scale by its CURRENT material multiplier. Bulk and ghost
 //! actions, hanging-node elimination and linear solvers are not replaced.
+//! B-bar traces use the retained cell-average dilatation from bulk assembly;
+//! the boundary term does not reintroduce pointwise volumetric stiffness.
 //!
 //! The supplied patch is sampled at the retained numerical surface points.
 //! This is not a certified patch measure, a guaranteed coercivity constant,
@@ -72,7 +74,7 @@ fn traces(cell: &Cell3, point: &SurfacePoint3) -> ([f64; 8], [[f64; 3]; 24]) {
     let (n, gradient) = q1(cell.bounds, point.position);
     let traction = std::array::from_fn(|i| {
         let (a, c) = (i / 3, i % 3);
-        cell.material.traction(gradient[a], c, point.normal)
+        cell.basis_traction(gradient[a], a, c, point.normal)
     });
     (n, traction)
 }

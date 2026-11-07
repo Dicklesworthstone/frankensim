@@ -2,9 +2,10 @@
 //!
 //! Voigt entries are `[xx, yy, zz, xy, yz, xz]`, with physical shear stresses
 //! (no engineering-strain factor in the output). These are numerical samples,
-//! not recovered nodal stresses or bounds on a continuum maximum. Ghost and
-//! Nitsche stabilization affect the solved field but are not material stress.
-use super::material::ReferenceMaterial3;
+//! not recovered nodal stresses or bounds on a continuum maximum. B-bar uses
+//! the same projected dilatation as bulk assembly; its stress is constitutive
+//! stress of that assumed strain, not the unprojected displacement strain.
+//! Ghost and Nitsche stabilization affect the solved field but are not material stress.
 use super::*;
 
 /// One original bulk quadrature point; point order is cell order followed by
@@ -16,7 +17,8 @@ pub struct BulkStressPoint3 {
     pub position: [f64; 3],
     /// Positive reference-volume quadrature weight, not normalized.
     pub weight: f64,
-    /// `C_reference : eps(u)` for the original admitted material.
+    /// `C_reference : eps_formulation(u)` for the original admitted material,
+    /// including the cell's B-bar dilatation projection when selected.
     pub reference_stress: [f64; 6],
     /// Current physical stress: `scale[cell] * reference_stress`.
     pub stress: [f64; 6],
@@ -76,30 +78,66 @@ fn admit_displacement(
     Ok(())
 }
 
-fn stress_basis(material: &ReferenceMaterial3, gradients: &[[f64; 3]; 8]) -> [[f64; 6]; 24] {
-    std::array::from_fn(|i| material.basis_stress(gradients[i / 3], i % 3))
+fn stress_basis(cell: &Cell3, gradients: &[[f64; 3]; 8]) -> [[f64; 6]; 24] {
+    let projected = cell.kinematics.is_projected();
+    let mut basis = std::array::from_fn(|i| {
+        if projected && i < 3 {
+            [0.0; 6]
+        } else {
+            cell.basis_stress(gradients[i / 3], i / 3, i % 3)
+        }
+    });
+    if projected {
+        // The primal map uses u_a-u_0, so these columns are its exact algebraic
+        // derivative at the reference corner. Summing absolute nodal values
+        // would amplify roundoff from a rigid translation by the bulk modulus.
+        for component in 0..3 {
+            for k in 0..6 {
+                basis[component][k] = -(1..8)
+                    .map(|corner| basis[3 * corner + component][k])
+                    .sum::<f64>();
+            }
+        }
+    }
+    basis
 }
 
-fn apply_stress_basis(basis: &[[f64; 6]; 24], local: &[f64; 24]) -> [f64; 6] {
+fn apply_stress_basis(basis: &[[f64; 6]; 24], local: &[f64; 24], projected: bool) -> [f64; 6] {
     let mut value = [0.0; 6];
-    for i in 0..24 {
+    let start = if projected { 3 } else { 0 };
+    for i in start..24 {
+        let displacement = if projected {
+            local[i] - local[i % 3]
+        } else {
+            local[i]
+        };
         for k in 0..6 {
-            value[k] += basis[i][k] * local[i];
+            value[k] += basis[i][k] * displacement;
         }
     }
     value
 }
 
-fn stress(material: &ReferenceMaterial3, gradients: &[[f64; 3]; 8], local: &[f64; 24]) -> [f64; 6] {
-    apply_stress_basis(&stress_basis(material, gradients), local)
+fn stress(cell: &Cell3, gradients: &[[f64; 3]; 8], local: &[f64; 24]) -> [f64; 6] {
+    apply_stress_basis(
+        &stress_basis(cell, gradients),
+        local,
+        cell.kinematics.is_projected(),
+    )
 }
 
-fn mandel_strain(gradients: &[[f64; 3]; 8], local: &[f64; 24]) -> [f64; 6] {
+fn mandel_strain(gradients: &[[f64; 3]; 8], local: &[f64; 24], relative: bool) -> [f64; 6] {
     let mut gradient = [[0.0; 3]; 3];
-    for a in 0..8 {
+    let start = usize::from(relative);
+    for a in start..8 {
         for c in 0..3 {
+            let displacement = if relative {
+                local[3 * a + c] - local[c]
+            } else {
+                local[3 * a + c]
+            };
             for d in 0..3 {
-                gradient[c][d] += local[3 * a + c] * gradients[a][d];
+                gradient[c][d] += displacement * gradients[a][d];
             }
         }
     }
@@ -117,14 +155,14 @@ fn mandel_strain(gradients: &[[f64; 3]; 8], local: &[f64; 24]) -> [f64; 6] {
 // Admit the actual displacement strain, never the unit basis functions or
 // arbitrary adjoint vectors. The reference VJP does not evaluate a primal.
 fn admit_material_strain(
-    material: &ReferenceMaterial3,
+    cell: &Cell3,
     gradients: &[[f64; 3]; 8],
     local: &[f64; 24],
 ) -> Result<(), ElasticityError3> {
-    let Some(source) = material.source_state() else {
+    let Some(source) = cell.material.source_state() else {
         return Ok(());
     };
-    let strain = mandel_strain(gradients, local);
+    let strain = mandel_strain(gradients, local, cell.kinematics.is_projected());
     if strain
         .iter()
         .any(|v| !v.is_finite() || v.abs() > source.maximum_absolute_mandel_strain())
@@ -133,50 +171,83 @@ fn admit_material_strain(
             "bulk strain exceeds retained material domain",
         ));
     }
+    if cell.kinematics.is_projected()
+        && cell
+            .projected_mandel_strain(gradients, local)
+            .iter()
+            .any(|v| !v.is_finite() || v.abs() > source.maximum_absolute_mandel_strain())
+    {
+        return Err(ElasticityError3::Invalid(
+            "projected bulk strain exceeds retained material domain",
+        ));
+    }
     Ok(())
 }
 
 fn admit_affine_material_strain(
-    material: &ReferenceMaterial3,
+    cell: &Cell3,
     gradients: &[[f64; 3]; 8],
     offset: &[f64; 24],
     basis: impl IntoIterator<Item = [f64; 24]>,
     checkpoint: &mut impl FnMut() -> ControlFlow<()>,
 ) -> Result<(), ElasticityError3> {
-    let Some(source) = material.source_state() else {
+    let Some(source) = cell.material.source_state() else {
         return Ok(());
     };
-    let baseline = mandel_strain(gradients, offset);
-    let mut norm_scale = [0.0_f64; 6];
-    let mut norm_sum = [0.0_f64; 6];
+    // Admit both the actual Q1 kinematics and the assumed constitutive strain.
+    // Projection must not conceal a displacement-domain exit, and the projected
+    // normal components can themselves exceed the original component ceiling.
+    let projected = cell.kinematics.is_projected();
+    let family_count = if projected { 2 } else { 1 };
+    let baseline = [
+        mandel_strain(gradients, offset, projected),
+        if projected {
+            cell.projected_mandel_strain(gradients, offset)
+        } else {
+            [0.0; 6]
+        },
+    ];
+    let mut norm_scale = [[0.0_f64; 6]; 2];
+    let mut norm_sum = [[0.0_f64; 6]; 2];
     for local in basis {
         poll(checkpoint)?;
-        let strain = mandel_strain(gradients, &local);
-        for k in 0..6 {
-            let value = strain[k].abs();
-            if !value.is_finite() {
-                return Err(ElasticityError3::Invalid("nonfinite affine bulk strain"));
-            }
-            // Scaled sum of squares avoids squaring a large or tiny direction.
-            if value > norm_scale[k] {
-                let ratio = norm_scale[k] / value;
-                norm_sum[k] = 1.0 + norm_sum[k] * ratio * ratio;
-                norm_scale[k] = value;
-            } else if value != 0.0 {
-                let ratio = value / norm_scale[k];
-                norm_sum[k] += ratio * ratio;
+        let strains = [
+            mandel_strain(gradients, &local, projected),
+            if projected {
+                cell.projected_mandel_strain(gradients, &local)
+            } else {
+                [0.0; 6]
+            },
+        ];
+        for family in 0..family_count {
+            for k in 0..6 {
+                let value = strains[family][k].abs();
+                if !value.is_finite() {
+                    return Err(ElasticityError3::Invalid("nonfinite affine bulk strain"));
+                }
+                // Scaled sum of squares avoids squaring a large or tiny direction.
+                if value > norm_scale[family][k] {
+                    let ratio = norm_scale[family][k] / value;
+                    norm_sum[family][k] = 1.0 + norm_sum[family][k] * ratio * ratio;
+                    norm_scale[family][k] = value;
+                } else if value != 0.0 {
+                    let ratio = value / norm_scale[family][k];
+                    norm_sum[family][k] += ratio * ratio;
+                }
             }
         }
     }
-    for k in 0..6 {
-        // This is the exact component support formula in real arithmetic;
-        // floating-point evaluation is numerical admission, not an enclosure.
-        let radius = norm_scale[k] * norm_sum[k].sqrt();
-        let maximum = baseline[k].abs() + radius;
-        if !maximum.is_finite() || maximum > source.maximum_absolute_mandel_strain() {
-            return Err(ElasticityError3::Invalid(
-                "affine bulk strain ball exceeds retained material domain",
-            ));
+    for family in 0..family_count {
+        for k in 0..6 {
+            // This is the exact component support formula in real arithmetic;
+            // floating-point evaluation is numerical admission, not an enclosure.
+            let radius = norm_scale[family][k] * norm_sum[family][k].sqrt();
+            let maximum = baseline[family][k].abs() + radius;
+            if !maximum.is_finite() || maximum > source.maximum_absolute_mandel_strain() {
+                return Err(ElasticityError3::Invalid(
+                    "affine bulk strain ball exceeds retained material domain",
+                ));
+            }
         }
     }
     Ok(())
@@ -322,6 +393,7 @@ impl CutElasticity3 {
     /// against the retained source strain ceilings at original bulk points.
     /// Shapes, finite coefficients and scales are checked even for legacy laws;
     /// no ceiling is invented for a law without a retained source domain.
+    /// B-bar checks both the actual displacement strain and its projected strain.
     ///
     /// This streams cell-local fields with constant auxiliary storage and no
     /// heap allocation. It shares the stable component support calculation with
@@ -389,7 +461,7 @@ impl CutElasticity3 {
                 poll(&mut checkpoint)?;
                 let (_, gradients) = q1(cell.bounds, position);
                 admit_affine_material_strain(
-                    &cell.material,
+                    cell,
                     &gradients,
                     &local_offset,
                     basis.iter().map(|field| local(cell, *field)),
@@ -426,8 +498,8 @@ impl CutElasticity3 {
             for &(position, weight) in cell.rules.bulk() {
                 poll(&mut checkpoint)?;
                 let (_, gradients) = q1(cell.bounds, position);
-                admit_material_strain(&cell.material, &gradients, &local)?;
-                let reference_stress = stress(&cell.material, &gradients, &local);
+                admit_material_strain(cell, &gradients, &local)?;
+                let reference_stress = stress(cell, &gradients, &local);
                 let stress = reference_stress.map(|s| self.scales[id] * s);
                 if !reference_stress
                     .iter()
@@ -492,14 +564,15 @@ impl CutElasticity3 {
                 poll(&mut checkpoint)?;
                 let (_, gradients) = q1(cell.bounds, position);
                 admit_affine_material_strain(
-                    &cell.material,
+                    cell,
                     &gradients,
                     &local_offset,
                     local_basis.iter().copied(),
                     &mut checkpoint,
                 )?;
-                let constitutive = stress_basis(&cell.material, &gradients);
-                let reference_stress = apply_stress_basis(&constitutive, &local_offset);
+                let constitutive = stress_basis(cell, &gradients);
+                let projected = cell.kinematics.is_projected();
+                let reference_stress = apply_stress_basis(&constitutive, &local_offset, projected);
                 let stress = reference_stress.map(|s| self.scales[id] * s);
                 if !reference_stress
                     .iter()
@@ -511,7 +584,7 @@ impl CutElasticity3 {
                 for (column, local) in result.basis_reference_stresses.iter_mut().zip(&local_basis)
                 {
                     poll(&mut checkpoint)?;
-                    let direction = apply_stress_basis(&constitutive, local);
+                    let direction = apply_stress_basis(&constitutive, local, projected);
                     if direction.iter().any(|s| !s.is_finite()) {
                         return Err(ElasticityError3::Invalid("affine bulk stress overflow"));
                     }
@@ -546,7 +619,7 @@ impl CutElasticity3 {
     }
 
     /// Exact VJP of `reference_stress`, without the current stiffness scale.
-    /// This is the linear map `(C_reference B)^T`, useful for explicitly
+    /// This is the linear map `(C_reference B_formulation)^T`, useful for explicitly
     /// declared stress-relaxation models. It has no direct scale derivative.
     /// Point ordering and unweighted cotangent conventions match the physical
     /// pullback. The reference material is the admitted card, not unit Young's
@@ -594,9 +667,11 @@ impl CutElasticity3 {
                 let (_, gradients) = q1(cell.bounds, position);
                 let d = &derivatives[index];
                 index += 1;
+                let constitutive = stress_basis(cell, &gradients);
                 if let Some(local) = &local {
-                    admit_material_strain(&cell.material, &gradients, local)?;
-                    let value = stress(&cell.material, &gradients, local);
+                    admit_material_strain(cell, &gradients, local)?;
+                    let value =
+                        apply_stress_basis(&constitutive, local, cell.kinematics.is_projected());
                     scales[id] += d.iter().zip(value).map(|(a, b)| a * b).sum::<f64>();
                 }
                 for i in 0..24 {
@@ -604,7 +679,7 @@ impl CutElasticity3 {
                     if self.fixed[node] {
                         continue;
                     }
-                    let b = cell.material.basis_stress(gradients[i / 3], i % 3);
+                    let b = constitutive[i];
                     displacement[3 * node + i % 3] +=
                         factor * d.iter().zip(b).map(|(a, b)| a * b).sum::<f64>();
                 }

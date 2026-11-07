@@ -9,7 +9,7 @@ use std::sync::Arc;
 use fs_material::IsotropicElastic;
 use fs_material::elastic::acoustic::ElasticAcousticState;
 
-use super::ElasticityError3;
+use super::{ElasticityError3, ElasticityFormulation3};
 use crate::HexCell;
 
 /// Complete reference materials for active background cells.
@@ -44,27 +44,39 @@ pub(super) struct PreparedMaterial3 {
 /// Keep the legacy operation tree while general material paths use cached C.
 #[derive(Clone, PartialEq)]
 pub(super) enum ReferenceMaterial3 {
-    Legacy([f64; 2]),
+    Legacy { lame: [f64; 2], bulk: f64 },
     Source(Arc<PreparedMaterial3>),
 }
 
 impl ReferenceMaterial3 {
-    pub(super) fn legacy(material: &IsotropicElastic) -> Result<Self, ElasticityError3> {
+    pub(super) fn legacy(
+        material: &IsotropicElastic,
+        formulation: ElasticityFormulation3,
+    ) -> Result<Self, ElasticityError3> {
         let card = IsotropicElastic::new(material.youngs, material.poisson, material.strain_limit)
             .map_err(|_| ElasticityError3::Invalid("invalid isotropic material"))?;
         let (lambda, mu) = card.lame();
+        // Evaluate K directly; lambda+2mu/3 loses the finite bulk modulus
+        // for strongly auxetic laws where the two Lamé terms nearly cancel.
+        let bulk = (card.youngs / 3.0) / (1.0 - 2.0 * card.poisson);
         if !lambda.is_finite()
             || !mu.is_finite()
             || mu <= 0.0
+            || !bulk.is_finite()
+            || bulk <= 0.0
             || !card.strain_limit.is_finite()
             || card.strain_limit <= 0.0
-            || !((lambda + 2.0 * mu) / mu <= 4.0)
+            || (formulation == ElasticityFormulation3::Displacement
+                && !((lambda + 2.0 * mu) / mu <= 4.0))
         {
             return Err(ElasticityError3::Invalid(
                 "material outside finite compressible regime",
             ));
         }
-        Ok(Self::Legacy([lambda, mu]))
+        Ok(Self::Legacy {
+            lame: [lambda, mu],
+            bulk,
+        })
     }
 
     pub(super) fn from_state(state: ElasticAcousticState) -> Result<Self, ElasticityError3> {
@@ -114,7 +126,9 @@ impl ReferenceMaterial3 {
     /// This is a linear operator action, not admission of a physical strain.
     pub(super) fn basis_stress(&self, g: [f64; 3], component: usize) -> [f64; 6] {
         match self {
-            Self::Legacy([lambda, mu]) => {
+            Self::Legacy {
+                lame: [lambda, mu], ..
+            } => {
                 let mut stress = [lambda * g[component]; 6];
                 stress[component] += 2.0 * mu * g[component];
                 stress[3] = mu
@@ -158,7 +172,9 @@ impl ReferenceMaterial3 {
 
     pub(super) fn traction(&self, g: [f64; 3], component: usize, n: [f64; 3]) -> [f64; 3] {
         match self {
-            Self::Legacy([lambda, mu]) => {
+            Self::Legacy {
+                lame: [lambda, mu], ..
+            } => {
                 // Preserve the original Lamé traction operation order.
                 let dn: f64 = g.iter().zip(n).map(|(g, n)| g * n).sum();
                 std::array::from_fn(|d| {
@@ -179,28 +195,47 @@ impl ReferenceMaterial3 {
 
     pub(super) fn nitsche_modulus(&self) -> f64 {
         match self {
-            Self::Legacy([lambda, mu]) => lambda + 2.0 * mu,
+            Self::Legacy {
+                lame: [lambda, mu], ..
+            } => lambda + 2.0 * mu,
             Self::Source(material) => material.stiffness_bound,
         }
     }
 
     pub(super) fn ghost_modulus(&self) -> f64 {
         match self {
-            Self::Legacy([_, mu]) => *mu,
+            Self::Legacy { lame: [_, mu], .. } => *mu,
             Self::Source(material) => material.stiffness_bound,
         }
     }
 
     pub(super) fn source_state(&self) -> Option<&ElasticAcousticState> {
         match self {
-            Self::Legacy(_) => None,
+            Self::Legacy { .. } => None,
             Self::Source(material) => Some(&material.state),
         }
     }
 
     pub(super) fn legacy_lame(&self) -> Option<[f64; 2]> {
         match self {
-            Self::Legacy(lame) => Some(*lame),
+            Self::Legacy { lame, .. } => Some(*lame),
+            Self::Source(_) => None,
+        }
+    }
+
+    pub(super) fn isotropic_bulk_shear(&self) -> Option<(f64, f64)> {
+        match self {
+            Self::Legacy {
+                lame: [_, shear],
+                bulk,
+            } => Some((*bulk, *shear)),
+            Self::Source(material) if material.state.is_explicitly_isotropic() => {
+                let tensor = material.state.stiffness_mandel_pa();
+                // Use the retained stiffness itself, not a fitted isotropic
+                // proxy or a second inversion of its compliance.
+                let bulk = tensor[0][0] / 3.0 + tensor[0][1] / 3.0 + tensor[0][2] / 3.0;
+                Some((bulk, 0.5 * tensor[3][3]))
+            }
             Self::Source(_) => None,
         }
     }
@@ -214,8 +249,11 @@ pub(super) enum MaterialProvider3<'a> {
 }
 
 impl<'a> MaterialProvider3<'a> {
-    pub(super) fn legacy(material: &IsotropicElastic) -> Result<Self, ElasticityError3> {
-        ReferenceMaterial3::legacy(material).map(Self::Legacy)
+    pub(super) fn legacy(
+        material: &IsotropicElastic,
+        formulation: ElasticityFormulation3,
+    ) -> Result<Self, ElasticityError3> {
+        ReferenceMaterial3::legacy(material, formulation).map(Self::Legacy)
     }
 
     pub(super) fn from_field(field: ElasticMaterialField3<'a>) -> Result<Self, ElasticityError3> {

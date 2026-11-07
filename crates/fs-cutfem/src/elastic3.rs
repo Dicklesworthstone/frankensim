@@ -9,7 +9,9 @@
 //! Cell stiffness scales can change without repeating geometric integration.
 //! Ghost coefficients average the two incident material moduli times their own
 //! scales; the exact discrete scale pullback includes both bulk and ghost work.
-//! Geometry derivatives, incompressible/mixed formulations,
+//! An explicit B-bar option projects isotropic volumetric strain onto one
+//! constant per physical cut cell, retaining fully integrated deviatoric strain.
+//! Geometry derivatives, exact incompressibility,
 //! continuum error bounds and mesh-convergence certification are not claimed.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,20 +30,40 @@ use fs_sparse::precond::Precond;
 pub use material::ElasticMaterialField3;
 use material::{MaterialProvider3, ReferenceMaterial3, engineering_strain};
 
+mod kinematics;
+use kinematics::CellKinematics3;
+
+/// Small-strain formulation used by bulk, embedded tractions and observations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ElasticityFormulation3 {
+    /// Fully integrated Q1 displacement elasticity; may lock near incompressibility.
+    #[default]
+    Displacement,
+    /// Mean-dilatation B-bar for explicitly isotropic, finitely compressible laws.
+    /// The volumetric mean uses the retained PHYSICAL cut volume, not the box.
+    /// This relieves volumetric locking; it does not remove shear locking or
+    /// establish an inf-sup theorem for arbitrary cut/hanging-node configurations.
+    BBar,
+}
+
 /// Assembly bounds and the dimensionless ghost coefficient.
 #[derive(Debug, Clone, Copy)]
 pub struct ElasticityOptions3 {
+    /// Explicit strain formulation; the default retains full Q1 integration.
+    pub formulation: ElasticityFormulation3,
     /// Maximum background hexahedra, before any quadrature allocation.
     pub max_cells: usize,
     /// Maximum active displacement degrees of freedom, including clamps.
     pub max_dofs: usize,
     /// Coefficient multiplying the material modulus and normal-derivative jump.
-    /// Legacy isotropy uses `mu`; tensor fields use a conservative Mandel row norm.
+    /// Displacement uses `mu` for legacy isotropy and a conservative Mandel row
+    /// norm for tensor fields. B-bar uses the original isotropic shear modulus.
     pub ghost_gamma: f64,
 }
 impl Default for ElasticityOptions3 {
     fn default() -> Self {
         Self {
+            formulation: ElasticityFormulation3::Displacement,
             max_cells: 32_768,
             max_dofs: 250_000,
             ghost_gamma: 0.1,
@@ -87,6 +109,7 @@ struct Cell3 {
     nodes: [usize; 8],
     stiffness: [[f64; 24]; 24],
     material: ReferenceMaterial3,
+    kinematics: CellKinematics3,
     rules: CutRules3,
     cut: bool,
 }
@@ -117,6 +140,7 @@ pub struct CutElasticity3 {
     // Ownership identity for prepared loads on immutable geometry/material/DOFs.
     // This survives moves and is independent of the mutable stiffness scales.
     material_body_binding: std::sync::Arc<()>,
+    formulation: ElasticityFormulation3,
     nodes: Vec<[f64; 3]>,
     fixed: Vec<bool>,
     // Full-material inventory, independent of stiffness interpolation or supports.
@@ -222,8 +246,9 @@ impl CutElasticity3 {
     /// Build from admitted native tensors and densities in the global frame.
     /// Each active cut cell retains its original material identity and strain
     /// domain. Material assignment is fixed while stiffness scales change.
-    /// This is Q1 displacement elasticity; admission of an SPD tensor does not
-    /// certify freedom from locking or a sufficiently large boundary penalty.
+    /// Options select full Q1 displacement integration or isotropic B-bar.
+    /// B-bar requires explicitly isotropic native states; tensor admission alone
+    /// does not certify freedom from locking or a sufficient boundary penalty.
     #[allow(clippy::too_many_arguments)]
     pub fn build_with_material_field(
         domain: HexCell,
@@ -263,7 +288,7 @@ impl CutElasticity3 {
             domain,
             counts,
             sdf,
-            MaterialProvider3::legacy(material)?,
+            MaterialProvider3::legacy(material, options.formulation)?,
             clamp,
             options,
             require_box_support,
@@ -331,7 +356,15 @@ impl CutElasticity3 {
                     control.poll()?;
                     let material = materials.at(bounds)?;
                     control.poll()?;
-                    let stiffness = assemble_cell_stiffness(bounds, &rules, &material, control)?;
+                    let kinematics = CellKinematics3::prepare(
+                        options.formulation,
+                        bounds,
+                        &rules,
+                        &material,
+                        control,
+                    )?;
+                    let stiffness =
+                        assemble_cell_stiffness(bounds, &rules, &material, kinematics, control)?;
                     for a in 0..8 {
                         keys.insert(node_key(key, a));
                         if keys.len() > options.max_dofs / 3 {
@@ -346,6 +379,7 @@ impl CutElasticity3 {
                         nodes: [0; 8],
                         stiffness,
                         material,
+                        kinematics,
                         rules,
                         cut: enclosure.hi() >= 0.0,
                     });
@@ -420,6 +454,7 @@ impl CutElasticity3 {
         let reference_cell_masses_kg = collect_reference_masses(&cells)?;
         Ok(Self {
             material_body_binding: std::sync::Arc::new(()),
+            formulation: options.formulation,
             nodes,
             fixed,
             reference_cell_masses_kg,
@@ -429,6 +464,12 @@ impl CutElasticity3 {
             volume_bounds,
             embedded: None,
         })
+    }
+
+    /// Original strain formulation, unchanged by density scaling or loading.
+    #[must_use]
+    pub const fn formulation(&self) -> ElasticityFormulation3 {
+        self.formulation
     }
 
     /// Active node positions, in deterministic lattice-key order.
@@ -805,13 +846,35 @@ fn assemble_cell_stiffness(
     bounds: HexCell,
     rules: &CutRules3,
     material: &ReferenceMaterial3,
+    kinematics: CellKinematics3,
     control: &mut QuadratureControl3<'_>,
 ) -> Result<[[f64; 24]; 24], ElasticityError3> {
     let mut stiffness = [[0.0; 24]; 24];
     for &(p, w) in rules.bulk() {
         control.poll()?;
         let (_, g) = q1(bounds, p);
-        if let Some([lambda, mu]) = material.legacy_lame() {
+        if let Some((_, shear, _)) = kinematics.projected_moduli() {
+            // Separate positive volumetric and deviatoric energies. Subtracting
+            // a full lambda block would lose bending stiffness as K/mu grows.
+            let deviators: [[f64; 6]; 24] = std::array::from_fn(|i| {
+                let mut strain = engineering_strain(g[i / 3], i % 3);
+                let third_trace = g[i / 3][i % 3] / 3.0;
+                for entry in &mut strain[..3] {
+                    *entry -= third_trace;
+                }
+                strain
+            });
+            for i in 0..24 {
+                for j in i..24 {
+                    let a = deviators[i];
+                    let b = deviators[j];
+                    let normal: f64 = (0..3).map(|k| a[k] * b[k]).sum();
+                    let tangential: f64 = (3..6).map(|k| a[k] * b[k]).sum();
+                    let value = shear * (2.0 * normal + tangential);
+                    stiffness[i][j] += w * value;
+                }
+            }
+        } else if let Some([lambda, mu]) = material.legacy_lame() {
             for i in 0..24 {
                 for j in i..24 {
                     let (a, b, ci, cj) = (i / 3, j / 3, i % 3, j % 3);
@@ -832,6 +895,18 @@ fn assemble_cell_stiffness(
                     let value: f64 = strains[i].iter().zip(stresses[j]).map(|(e, s)| e * s).sum();
                     stiffness[i][j] += w * value;
                 }
+            }
+        }
+    }
+    if let Some((bulk, _, mean_gradients)) = kinematics.projected_moduli() {
+        // The projected volumetric energy is one rank-one block. Integrate it
+        // once, instead of repeating the same constant term at every cut point.
+        let volume = rules.volume();
+        for i in 0..24 {
+            control.poll()?;
+            for j in i..24 {
+                stiffness[i][j] +=
+                    (bulk * mean_gradients[i / 3][i % 3]) * (volume * mean_gradients[j / 3][j % 3]);
             }
         }
     }
@@ -915,7 +990,7 @@ fn add_ghosts(
             }
             let weights = [l, r].map(|cell| {
                 gamma
-                    * cell.material.ghost_modulus()
+                    * cell.ghost_modulus()
                     * h
                     * 0.25
                     * (hi[a] - lo[a])

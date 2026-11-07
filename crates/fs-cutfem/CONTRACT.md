@@ -164,6 +164,46 @@ arbitrary adjoint vectors as physical states. Geometry derivatives,
 material evolution and continuum certification are outside this frozen-linear
 operator's scope.
 
+## Explicit isotropic mean-dilatation elasticity
+
+`ElasticityOptions3::formulation = ElasticityFormulation3::BBar` selects
+small-strain mean-dilatation elasticity on Cartesian and balanced-octree Q1
+cells, including embedded displacement supports. The default `Displacement`
+formulation retains its existing full integration and material restrictions.
+B-bar admits finitely compressible isotropic laws, including explicitly
+isotropic native material states; a generic or anisotropic Mandel tensor is
+never silently replaced by an isotropic proxy.
+
+The energy is `mu*dev(epsilon):dev(epsilon) + K*mean(div u)^2/2`.
+The mean integrates the original PHYSICAL cut-volume rule, not the full
+background box. Its gradients are cached once; assembly integrates the
+volumetric contribution as one rank-one block and leaves the deviatoric
+quadrature intact. No new pressure coordinates, global solve, per-apply
+allocation or geometry/material reevaluation is introduced. The selected
+formulation is retained through density updates, and inter-grid transfer
+refuses a formulation mismatch. B-bar ghost jumps use the original shear
+modulus, including native isotropic states, so the extension penalty does not
+reintroduce a bulk-modulus constraint.
+
+Bulk stresses use the projected volumetric strain. Nitsche stiffness, lifting
+and reactions share its traction; physical/reference stress VJPs and all
+scale contractions differentiate the same discrete formulation. Native source
+admission checks BOTH actual Q1 strain and projected constitutive strain,
+including complete affine uncertainty families. Projection cannot conceal a
+material-domain exit. Relative displacement recovery removes rigid
+translations before stress/domain contractions. Original density, material
+identity, consistent inertia and physical-occupancy derivatives are unchanged.
+
+`elastic3_bbar` specifies physical-cut averaging, bending energy refinement,
+native inventory, isotropy admission, scale derivatives and adaptive transfer.
+`elastic3_bbar_stress` specifies independent stress/work, state/scale VJPs,
+raw and projected domain exits, rigid translations, embedded displacement and
+weighted reaction checks. These are numerical formulation tests. B-bar relieves
+volumetric locking; it does not remove shear locking, support exactly
+incompressible materials, or establish an inf-sup/coercivity theorem for every
+cut, pressure mode, penalty, contrast or refinement pattern. Conditioning and
+physical convergence remain properties of the actual resolved problem.
+
 ## Consistent native material inertia in three dimensions
 
 `CutElasticity3::prepare_material_mass` and the adaptive equivalent prepare

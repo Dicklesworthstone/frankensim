@@ -53,7 +53,10 @@ impl<'a> AdaptiveTransfer3<'a> {
         mut checkpoint: impl FnMut() -> ControlFlow<()>,
     ) -> Result<Self, ElasticityError3> {
         poll(&mut checkpoint)?;
-        if coarse.domain != fine.domain || coarse.reference != fine.reference {
+        if coarse.domain != fine.domain
+            || coarse.reference != fine.reference
+            || coarse.formulation() != fine.formulation()
+        {
             return Err(ElasticityError3::Invalid(
                 "enrichment box/material/stabilization mismatch",
             ));

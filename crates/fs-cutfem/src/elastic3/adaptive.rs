@@ -10,11 +10,11 @@ use super::*;
 use crate::octree3::{Octant3, Octree3, OctreeError3, OctreeNode3};
 type Row = Vec<(OctreeNode3, f64)>;
 
+mod body;
 pub mod dirichlet;
 pub mod enrichment;
-pub mod stress;
-mod body;
 mod mass;
+pub mod stress;
 
 /// A reduced operator on independent master nodes of a balanced octree.
 pub struct AdaptiveElasticity3 {
@@ -126,7 +126,7 @@ impl AdaptiveElasticity3 {
         control: &mut QuadratureControl3<'_>,
     ) -> Result<Self, ElasticityError3> {
         control.poll()?;
-        let material = MaterialProvider3::legacy(material)?;
+        let material = MaterialProvider3::legacy(material, options.formulation)?;
         Self::build_material_core(
             domain,
             tree,
@@ -195,7 +195,10 @@ impl AdaptiveElasticity3 {
             control.poll()?;
             let material = provider.at(bounds)?;
             control.poll()?;
-            let stiffness = assemble_cell_stiffness(bounds, &rules, &material, control)?;
+            let kinematics =
+                CellKinematics3::prepare(options.formulation, bounds, &rules, &material, control)?;
+            let stiffness =
+                assemble_cell_stiffness(bounds, &rules, &material, kinematics, control)?;
             control.poll()?;
             let enclosure = sdf.enclose(bounds.lo(), bounds.hi());
             control.poll()?;
@@ -215,6 +218,7 @@ impl AdaptiveElasticity3 {
                 bounds,
                 nodes: [0; 8],
                 material,
+                kinematics,
                 stiffness,
                 rules,
                 cut: enclosure.hi() >= 0.0,
@@ -302,6 +306,7 @@ impl AdaptiveElasticity3 {
         let reference_cell_masses_kg = collect_reference_masses(&cells)?;
         let raw = CutElasticity3 {
             material_body_binding: std::sync::Arc::new(()),
+            formulation: options.formulation,
             fixed: vec![false; raw_nodes.len()],
             nodes: raw_nodes,
             reference_cell_masses_kg,
@@ -333,6 +338,11 @@ impl AdaptiveElasticity3 {
     #[must_use]
     pub fn nodes(&self) -> &[[f64; 3]] {
         &self.nodes
+    }
+    /// Original bulk strain formulation, including on eliminated hanging nodes.
+    #[must_use]
+    pub const fn formulation(&self) -> ElasticityFormulation3 {
+        self.raw.formulation()
     }
     /// Homogeneous master-node clamp mask.
     #[must_use]
@@ -610,7 +620,7 @@ fn patch_ghosts(
                 *jump.entry(r.nodes[i]).or_insert(0.0) -= gr[i][axis];
             }
             let weights = [left, right].map(|side| {
-                let coefficient = gamma * cells[side].material.ghost_modulus();
+                let coefficient = gamma * cells[side].ghost_modulus();
                 coefficient * h * 0.25 * (hi[a] - lo[a]) * (hi[b] - lo[b]) * wu * wv
             });
             if weights.iter().any(|w| !w.is_finite() || *w <= 0.0)

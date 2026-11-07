@@ -4469,8 +4469,17 @@ homogenization, the P2 milestone.
   the consistent tangent eliminates the transverse block by its Schur
   complement. Bounded Newton/backtracking uses the original principal-stretch
   domain and refuses nonpositive transverse stiffness or exhausted budgets.
-  If unit thickness has nonpositive transverse stiffness, initialization tries
-  a volume-preserving thickness. An out-of-domain target is approached by
+  If unit thickness itself violates the material domain, initialization first
+  tries `||F_in_plane||_F/sqrt(2)`, the positive thickness minimizing `I1bar`
+  at zero transverse shear. This retains admissible compressible Gent states
+  whose chain limit excludes the unit-thickness guess; the full traction solve
+  still determines thickness and shear. This candidate consumes one of the
+  same `max_backtracks` seed budget, and every original material bound remains
+  active. Independent scalar Gent traction roots under biaxial extension and
+  compression, all three bulk laws, and reduced work/tangent differences cover
+  this recovery in `hyper_plane_stress.rs`.
+  If an admitted initial thickness has nonpositive transverse stiffness,
+  initialization tries a volume-preserving thickness. An out-of-domain target is approached by
   bounded admissibility bisection until a stable seed is found; the same
   `max_backtracks` cap bounds this search. No accepted deformation or material
   stiffness is clipped. Large biaxial extension is covered for both admissible
