@@ -1,5 +1,41 @@
 # fs-phs — Contract
 
+## Synchronous PM and reluctance electromechanics
+
+`circuit::synchronous::SynchronousMotor` retains two stator-frame flux linkages,
+relative mechanical angle and absolute rotor/stator angular momenta. Electrical
+angle is pole-pair count times relative angle. POWER-INVARIANT alpha/beta and d/q
+coordinates have electrical power `v_d*i_d+v_q*i_q`, with no 3/2 multiplier.
+Phase order a,b,c, positive rotation and the phase-peak to power-invariant PM
+linkage conversion are explicit; the phase voltage transform removes only the
+unsupported three-wire common mode. Returned phase currents have zero sum.
+
+One angle-dependent magnetic energy owns both PM and saliency torque,
+`tau=p*(psi_pm*i_q+(Ld-Lq)*i_d*i_q)`, and their reciprocal speed voltages.
+Zero PM linkage gives synchronous reluctance. The original constant skew map
+applies equal/opposite torque to finite rotor/stator inertias; internal bearing
+drag heats relative motion, while external torque work uses absolute speeds.
+Native interconnection with finite converter buses and a held physical inverter
+vector retains all charge/flux/angle/momentum states in one simultaneous solve.
+
+The original prepared nonlinear solver consumes a symmetric source-owned
+discrete gradient and its analytic endpoint Jacobian. Stable trigonometric
+divided differences retain the zero-angle limit; each quadratic kinetic effort
+remains its own midpoint velocity. Independent constitutive energy differences
+use original d/q flux deviations and momenta. Copper/bearing heat, signed port
+work and internal angular impulses use the accepted discrete effort. These are
+second-order discrete quantities, not exact transient integrals. Successful warm
+steps allocate nothing; explicit native Newton/backtracking limits, cancellation
+and finite physical reporting precede caller output publication.
+
+This is a numerical balanced sinusoidal coaxial reduction with frozen Ld/Lq,
+PM linkage, resistance and inertia. It does not infer saturation, cross-saturation,
+cogging, iron/brush/switching losses, demagnetization, thermal evolution, a neutral
+current path or a fixed stator. Field/dynamometer validity stays with the caller.
+`tests/circuit_synchronous.rs` checks phase power, PM/saliency signs, analytic
+storage/tangents, RL limits, independent d/q ODE refinement, reaction/energy/heat,
+finite-bus motoring/regeneration, and transactional refusal/retry.
+
 ## Reciprocal commutated motor and generator
 
 `circuit::motor::DcMotor` retains armature flux and both absolute rotor/stator

@@ -58,6 +58,8 @@ pub mod converter;
 pub mod inductance;
 /// Reciprocal motor/generator exchange with finite rotor and stator inertia.
 pub mod motor;
+/// Power-invariant synchronous PM/saliency torque with native nonlinear storage.
+pub mod synchronous;
 mod scalar;
 use conductance::ConductanceBlock;
 
