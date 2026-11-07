@@ -65,7 +65,6 @@ struct GroupedResponseData {
     edges_j: Vec<f64>,
     source_ids: Vec<u64>,
     response: RadiationResponse,
-    preparation_roundoff: Vec<f64>,
 }
 
 impl GroupedRadiationResponse {
@@ -158,7 +157,6 @@ impl GroupedRadiationResponse {
             edges_j: group_edges_j,
             source_ids,
             response,
-            preparation_roundoff: vec![0.0; row_count],
         })))
     }
 
@@ -171,7 +169,7 @@ impl GroupedRadiationResponse {
         if errors.len() != self.0.source_ids.len() {
             return Err(RadiationError::InvalidInput("exact preparation source coverage required"));
         }
-        let mut expanded = vec![0.0; self.0.preparation_roundoff.len()];
+        let mut expanded = vec![0.0; self.0.response.rows().len()];
         let mut seen = vec![false; self.0.source_ids.len()];
         for (id, values) in errors {
             let source = self.0.source_ids.binary_search(&id)
@@ -184,12 +182,6 @@ impl GroupedRadiationResponse {
         }
         let data = Arc::make_mut(&mut self.0);
         data.response.add_preparation_roundoff(&expanded)?;
-        for (total, extra) in data.preparation_roundoff.iter_mut().zip(expanded) {
-            let mut error = super::ErrorBudget::new(f64::MAX);
-            error.charge(*total)?;
-            error.charge(extra)?;
-            *total = error.used;
-        }
         Ok(self)
     }
 
@@ -197,7 +189,7 @@ impl GroupedRadiationResponse {
         let groups = self.0.edges_j.len() - 1;
         if group >= groups { return None; }
         let source = self.0.source_ids.binary_search(&source_id).ok()?;
-        Some(self.0.preparation_roundoff[source * groups + group])
+        self.0.response.row_roundoff(source * groups + group)
     }
 
     /// Borrow one canonical coefficient row without applying unit-energy inputs.

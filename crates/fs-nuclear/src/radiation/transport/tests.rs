@@ -171,7 +171,9 @@ fn g0_elastic_multiple_scattering_never_becomes_absorbed_heat() {
     // Preparation corrections remain chargeable even when the final escape
     // coefficient and all subsequent unit-energy products are exactly one.
     assert!(matches!(
-        response.response.apply(&[(11, &[1.0]), (22, &[0.0])], 0.0, || Ok(())),
+        response
+            .response
+            .apply(&[(11, &[1.0]), (22, &[0.0])], 0.0, || Ok(())),
         Err(RadiationError::Budget(_))
     ));
 }
@@ -253,6 +255,46 @@ fn g3_ballistic_subdivision_is_invariant_and_scattering_converges_to_two_stream_
     assert!(errors[1] < errors[0] * 0.5, "{errors:?}");
     assert!(errors[2] < errors[1] * 0.5, "{errors:?}");
     assert!(errors[2] < 5e-4, "{errors:?}");
+}
+
+#[test]
+fn g3_uncoupled_groups_keep_the_same_physical_residual_allowance() {
+    let run = |count: usize| {
+        let groups = (0..count)
+            .map(|incident| {
+                let mut outgoing = vec![0.0; count];
+                outgoing[incident] = 0.9;
+                PhotonCollision {
+                    total_per_m: 1.0,
+                    heat_per_m: 0.1,
+                    redistribution_per_m: outgoing,
+                }
+            })
+            .collect();
+        let prepared = prepare(
+            vec![PhotonSlabCell {
+                cell_id: 7,
+                thickness_m: 1.0,
+                groups,
+            }],
+            vec![7],
+            normal_pair(),
+        );
+        let mut emission = vec![0.0; count];
+        emission[count - 1] = 1.0;
+        prepared
+            .response
+            .apply(&[(7, &emission)], 1e-12, || Ok(()))
+            .unwrap()
+    };
+    let single = run(1);
+    let grouped = run(64);
+    // Only one group is active in each row. The correctly rounded scalar solve
+    // has a nonzero FMA residual that cannot be improved by correction; adding
+    // independent energy groups must not divide its physical energy allowance.
+    assert_eq!(grouped.receiver_energy_j, single.receiver_energy_j);
+    assert_eq!(grouped.escaped_j, single.escaped_j);
+    near(grouped.deposited_j + grouped.escaped_j, 1.0, 1e-14);
 }
 
 #[test]
@@ -370,6 +412,26 @@ fn g4_malformed_transport_resource_exhaustion_and_late_cancellation_refuse() {
             .is_err()
         );
     }
+    // Mirroring a positive ordinate cannot silently erase either hemisphere.
+    assert!(matches!(
+        attempt(
+            vec![mono(1, 1.0, 1.0, 0.0)],
+            edges.clone(),
+            vec![1],
+            vec![
+                PhotonOrdinate {
+                    mu: 1.0,
+                    weight: 1.0
+                },
+                PhotonOrdinate {
+                    mu: 1.0,
+                    weight: f64::from_bits(1)
+                },
+            ],
+            PhotonSlabLimits::default()
+        ),
+        Err(RadiationError::Arithmetic)
+    ));
     let mut limits = PhotonSlabLimits::default();
     limits.max_work = 0;
     assert!(matches!(

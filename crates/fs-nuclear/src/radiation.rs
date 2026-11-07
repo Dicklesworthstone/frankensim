@@ -221,6 +221,17 @@ impl RadiationResponse {
         Ok(())
     }
 
+    // Preserve the complete original coefficient audit when generated rows are
+    // conservatively combined, including defects that could cancel in a sum.
+    pub(super) fn row_roundoff(&self, index: usize) -> Option<f64> {
+        let (closure, uncertainty) = self.0.closure_defects.get(index)?;
+        let mut error = ErrorBudget::new(f64::MAX);
+        for defect in [closure.hi.abs(), closure.lo.abs(), *uncertainty] {
+            error.charge(defect).ok()?;
+        }
+        Some(error.used)
+    }
+
     /// Unique physical emitting identities in ascending order.
     pub fn source_ids(&self) -> impl ExactSizeIterator<Item = u64> + '_ {
         self.0.rows.iter().map(|row| row.source_id)

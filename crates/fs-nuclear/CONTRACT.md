@@ -2904,3 +2904,34 @@ restart with daughter heat counted once, and complete domain/cancellation
 rollback. Native original numerical and thermal implementations were used;
 missing constellation dependencies still prevent full workspace Cargo/DSR
 verification. No empirical isotope or release-performance claim is introduced.
+
+## Spatial convergence of photon deposition responses
+
+`radiation::transport::refinement::refine_slab_response` doubles homogeneous
+sublayers while retaining the original energy groups, angular rule and material
+kernels. An original uniform source is divided by the same exact power-of-two
+weights. Deposits are reduced back to original physical receiver IDs before the
+response is exposed; original thermal cells and nuclear inventories are never
+subdivided or copied into new physical owners.
+
+Every source/group/receiver coefficient and the escape fraction must agree
+between consecutive grids within explicit absolute-plus-relative tolerances.
+Redistributing kernels require two consecutive agreeing comparisons; a failed
+comparison resets the count. This avoids accepting the known symmetry plateau
+between one homogeneous scattering layer and two equal half-layers. Ballistic
+kernels need one comparison. The last-grid change and accepted subdivision
+count remain visible. This is an observed spatial convergence test, not a
+certified error bound or a test of angular/energy resolution. Failure to
+converge, cancellation or exhausted cell/storage/work limits returns no coarse
+fallback.
+
+A single work allowance covers every grid solve, expansion, reduction and
+comparison. The core's storage admission is reused before sublayer allocation.
+Fine-grid linear solves can apply at most two residual corrections through
+their existing LU factors. Compensated residuals retain signed FMA product
+tails; the original absolute unit-energy residual threshold remains mandatory.
+Original coefficient-closure and preparation defects, plus aggregation
+arithmetic, survive the reduction and are charged by the existing response
+audit in emitted joules. Three regressions verify analytic ballistic invariance,
+improved agreement with an independent scattering ODE at tighter tolerance,
+original-ID mapping, zero-heat receivers, retained numerical charges and refusal.

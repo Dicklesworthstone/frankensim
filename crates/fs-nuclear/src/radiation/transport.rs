@@ -40,6 +40,9 @@ use crate::endf::decay::spectra::DecayRadiation;
 /// Explicit per-mass material data and original-density conversion.
 pub mod material;
 
+/// Bounded spatial convergence with original physical cells and sources retained.
+pub mod refinement;
+
 /// Energy balance of one incident photon group in a homogeneous material.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PhotonCollision {
@@ -180,40 +183,11 @@ pub fn prepare_slab_response(
     }
     let n = cells.len();
     let groups = group_edges_j.len().checked_sub(1).unwrap_or(0);
-    if n == 0 || groups == 0 || source_ids.is_empty() || ordinates.is_empty() {
-        return Err(invalid(
-            "nonempty layers, groups, sources and ordinates required",
-        ));
-    }
-    if n > limits.max_cells
-        || n > 128
-        || groups > limits.max_groups
-        || ordinates.len() > limits.max_ordinates
-        || source_ids.len() > limits.response.max_sources
-        || groups > limits.response.max_groups
-        || n > limits.response.max_receivers
-    {
-        return Err(RadiationError::Budget("photon transport dimensions"));
-    }
+    admit_slab_dimensions(n, groups, source_ids.len(), ordinates.len(), limits)?;
     if !group_edges_j.iter().copied().all(nonnegative)
         || !group_edges_j.windows(2).all(|v| v[0] < v[1])
     {
         return Err(invalid("finite ascending photon energy edges required"));
-    }
-    let source_groups = size(&[source_ids.len(), groups])?;
-    let transfers = size(&[source_groups, n])?;
-    if source_groups > limits.response.max_source_groups
-        || transfers > limits.response.max_transfers
-    {
-        return Err(RadiationError::Budget("photon response expansion"));
-    }
-    let values = size(&[7, groups, n, n])?
-        .checked_add(size(&[3, n, groups, groups])?)
-        .and_then(|x| x.checked_add(size(&[32, n, groups]).ok()?))
-        .and_then(|x| x.checked_add(transfers.checked_mul(4)?))
-        .ok_or(RadiationError::Budget("photon scalar storage"))?;
-    if values > limits.max_values {
-        return Err(RadiationError::Budget("photon scalar storage"));
     }
     let mut work = Work {
         remaining: limits.max_work,
@@ -329,6 +303,10 @@ pub fn prepare_slab_response(
             let mut escaped = Sum::default();
             let mut b = vec![0.0; n];
             let mut emitted = vec![0.0; n];
+            // Reused across all active groups; included in the existing linear
+            // scratch reservation rather than allocated for each correction.
+            let mut solve_residual = vec![0.0; n];
+            let mut correction = vec![0.0; n];
             let mut residual_total = Sum::default();
             let mut preparation_error = ErrorBudget::new(f64::MAX);
             for group in (0..=incident).rev() {
@@ -339,35 +317,36 @@ pub fn prepare_slab_response(
                     continue;
                 }
                 let plan = &mut plans[group];
-                if let Some(factor) = &mut plan.factor {
-                    work.charge(size(&[n, n])?, &mut checkpoint)?;
-                    factor
-                        .solve_factored_into(&b, &mut emitted)
-                        .map_err(|_| RadiationError::Arithmetic)?;
-                } else {
-                    work.charge(n, &mut checkpoint)?;
-                    emitted.copy_from_slice(&b);
+                // Only actual, nonnegative group residuals consume the original
+                // unit-energy row allowance. Reserving equal shares for all
+                // lower groups can reject an uncoupled group solely because
+                // of its energy-grid index, even after an optimal scalar solve.
+                let used = value(residual_total)?;
+                if used > ROW_CLOSURE_TOLERANCE {
+                    return Err(RadiationError::Budget("photon equation residual"));
                 }
-                checkpoint()?;
+                let residual = solve_emission(
+                    plan,
+                    &b,
+                    &mut emitted,
+                    &mut solve_residual,
+                    &mut correction,
+                    ROW_CLOSURE_TOLERANCE - used,
+                    &mut work,
+                    &mut checkpoint,
+                )?;
                 if !emitted.iter().copied().all(nonnegative) {
                     return Err(RadiationError::Arithmetic);
                 }
-                let mut residual = Sum::default();
                 for destination in 0..n {
-                    work.charge(2 * n + group + 1, &mut checkpoint)?;
-                    let mut equation = Sum::default();
-                    equation.add(-b[destination])?;
+                    work.charge(n + group + 1, &mut checkpoint)?;
                     let mut collided = Sum::default();
                     for source in 0..n {
-                        equation.add(finite(
-                            plan.equation[destination * n + source] * emitted[source],
-                        )?)?;
                         collided.add(multiply(
                             plan.collision[destination * n + source],
                             emitted[source],
                         )?)?;
                     }
-                    residual.add(value(equation)?.abs())?;
                     let collided = value(collided)?;
                     preparation_error.charge(scaled_bound(
                         collided,
@@ -381,7 +360,6 @@ pub fn prepare_slab_response(
                         rhs[outgoing * n + destination].add(multiply(collided, fraction)?)?;
                     }
                 }
-                let residual = value(residual)?;
                 max_solve_residual = max_solve_residual.max(residual);
                 residual_total.add(residual)?;
                 preparation_error.charge(residual)?;
@@ -447,6 +425,73 @@ pub fn prepare_slab_response(
         max_solve_residual,
         max_response_defect,
     })
+}
+
+// Reuse the original LU with at most two defect-correction solves. The
+// compensated residual includes signed FMA product tails, so rounded matrix
+// products cannot themselves obscure or inflate the unit-energy residual.
+#[allow(clippy::too_many_arguments)]
+fn solve_emission(
+    plan: &mut GroupPlan,
+    rhs: &[f64],
+    emitted: &mut [f64],
+    residual: &mut [f64],
+    correction: &mut [f64],
+    tolerance: f64,
+    work: &mut Work,
+    checkpoint: &mut impl FnMut() -> Result<(), RadiationError>,
+) -> Result<f64, RadiationError> {
+    let n = rhs.len();
+    let Some(factor) = &mut plan.factor else {
+        work.charge(n, checkpoint)?;
+        emitted.copy_from_slice(rhs);
+        return Ok(0.0);
+    };
+    work.charge(size(&[n, n])?, checkpoint)?;
+    factor
+        .solve_factored_into(rhs, emitted)
+        .map_err(|_| RadiationError::Arithmetic)?;
+    for corrections in 0..=2 {
+        let mut norm = Sum::default();
+        for row in 0..n {
+            work.charge(2 * n + 1, checkpoint)?;
+            let mut equation = Sum {
+                hi: rhs[row],
+                lo: 0.0,
+            };
+            for column in 0..n {
+                let coefficient = plan.equation[row * n + column];
+                let product = finite(coefficient * emitted[column])?;
+                let tail = finite(coefficient.mul_add(emitted[column], -product))?;
+                equation.add(-product)?;
+                equation.add(-tail)?;
+            }
+            residual[row] = value(equation)?;
+            norm.add(residual[row].abs())?;
+        }
+        let norm = value(norm)?;
+        if norm <= tolerance {
+            checkpoint()?;
+            return Ok(norm);
+        }
+        if corrections == 2 {
+            break;
+        }
+        work.charge(size(&[n, n])?, checkpoint)?;
+        factor
+            .solve_factored_into(residual, correction)
+            .map_err(|_| RadiationError::Arithmetic)?;
+        work.charge(2 * n, checkpoint)?;
+        for (population, &delta) in emitted.iter_mut().zip(correction.iter()) {
+            let mut updated = Sum {
+                hi: *population,
+                lo: 0.0,
+            };
+            updated.add(delta)?;
+            *population = value(updated)?;
+        }
+    }
+    Err(RadiationError::Budget("photon equation residual"))
 }
 
 /// Shared admission for density-scaled and directly supplied collision data.
@@ -539,7 +584,7 @@ fn first_flights(
             born_pass.push(uniform);
             born_collision.push(uniform_collision(tau, uniform)?);
         }
-        let half_weight = ordinate.weight * 0.5;
+        let half_weight = multiply(ordinate.weight, 0.5)?;
         for source in 0..n {
             work.charge(1, checkpoint)?;
             collisions[source * n + source]
@@ -643,6 +688,50 @@ fn size(dimensions: &[usize]) -> Result<usize, RadiationError> {
         .iter()
         .try_fold(1_usize, |n, &d| n.checked_mul(d))
         .ok_or(RadiationError::Budget("photon extent overflow"))
+}
+
+/// Shared pre-allocation admission for core transport and physical adapters.
+pub(crate) fn admit_slab_dimensions(
+    cells: usize,
+    groups: usize,
+    sources: usize,
+    ordinates: usize,
+    limits: PhotonSlabLimits,
+) -> Result<(), RadiationError> {
+    if cells == 0 || groups == 0 || sources == 0 || ordinates == 0 {
+        return Err(invalid(
+            "nonempty layers, groups, sources and ordinates required",
+        ));
+    }
+    if cells > limits.max_cells
+        || cells > 128
+        || groups > limits.max_groups
+        || ordinates > limits.max_ordinates
+        || sources > limits.response.max_sources
+        || groups > limits.response.max_groups
+        || cells > limits.response.max_receivers
+    {
+        return Err(RadiationError::Budget("photon transport dimensions"));
+    }
+    let source_groups = size(&[sources, groups])?;
+    let transfers = size(&[source_groups, cells])?;
+    if source_groups > limits.response.max_source_groups
+        || transfers > limits.response.max_transfers
+    {
+        return Err(RadiationError::Budget("photon response expansion"));
+    }
+    if storage_values(cells, groups, sources)? > limits.max_values {
+        return Err(RadiationError::Budget("photon scalar storage"));
+    }
+    Ok(())
+}
+
+fn storage_values(cells: usize, groups: usize, sources: usize) -> Result<usize, RadiationError> {
+    size(&[7, groups, cells, cells])?
+        .checked_add(size(&[3, cells, groups, groups])?)
+        .and_then(|x| x.checked_add(size(&[32, cells, groups]).ok()?))
+        .and_then(|x| x.checked_add(size(&[4, sources, groups, cells]).ok()?))
+        .ok_or(RadiationError::Budget("photon scalar storage"))
 }
 
 fn invalid(detail: &'static str) -> RadiationError {
