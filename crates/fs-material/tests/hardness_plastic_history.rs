@@ -200,6 +200,9 @@ fn g1_native_plastic_work_and_independent_hardness_share_one_accepted_history() 
     assert_eq!(model.plastic().hardening_modulus_pa(), 0.0);
     assert_eq!(model.plastic().law().yield_stress, 1.0);
     assert!(state.hardness_pa() > 100.0);
+    // Virgin hardness is an exact source knot; stepping has to evaluate it
+    // without trying to interpolate from an index before the first knot.
+    near(model.hardness_pa_at(0.0).unwrap(), 100.0);
     near(model.hardness_pa_at(0.025).unwrap(), 225.0);
     assert!(model.hardness_pa_at(0.04).unwrap() < model.hardness_pa_at(0.01).unwrap());
 }
