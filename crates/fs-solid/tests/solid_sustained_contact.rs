@@ -619,3 +619,6 @@ mod elliptic;
 
 #[path = "solid_sustained_contact/static_kinetic.rs"]
 mod static_kinetic;
+
+#[path = "solid_sustained_contact/events.rs"]
+mod events;

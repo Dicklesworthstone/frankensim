@@ -1715,6 +1715,59 @@ Focused native regressions cover static hold, breakaway acceleration/work,
 pre-existing slip, translating surfaces, support reactions and actuator work,
 equal-coefficient equivalence and atomic budget/invalid-input/path refusals.
 
+### Located Coulomb stopping, recapture and reversal
+
+`advance_collinear_coulomb_events` on `ExactLinearSolid` and
+`CompleteSpectralSolid` advances through a located sliding stop and either
+static recapture or reversed kinetic sliding. `CollinearCoulombContact` supplies
+one initially closed, compressively loaded contact, a fixed tangent axis,
+constant surface velocity and separate static/kinetic bounds. The complete
+external load stays constant for the original native interval. Initial normal
+motion must lie within the existing velocity allowance; any actual residual is
+carried, and resolved inward motion requires the impact owner.
+
+Each original contact mass-response column must lie exactly in the admitted
+stiffness and viscosity nullspaces, with its full consistent-mass equation
+independently checked. The spectral response must excite only original zero
+eigenvalue modes. This admits affine contact velocities while retaining every
+other original elastic and damped mode. Non-null contact responses, detachment,
+resolved transverse motion and additional unresolved reversals refuse. This is
+a bounded rigid-trace event path, not a general elastic-contact event locator.
+Prescribed support motion remains with the existing supported interval owner.
+
+Incoming slip uses kinetic strength immediately. Normal dwell and its kinetic
+boundary give a force warm start and analytic stopping time; every actual
+segment still uses the original shared force-law solve and fresh replay. A
+resting trace or located stop first tries the static cone, then re-solves with
+kinetic strength if capture fails. At most two physical phases and three force
+solves share one response/product budget. Discarded capture trials count. No
+phase changes the accepted state or advances the native clock independently.
+
+The original held external-load flow is evaluated once. Contact force impulses
+and first time moments provide its rigid-coordinate correction without another
+exponential, a velocity reset or a fictitious impact loss. Segment integration
+retains the low component of endpoint time differences. The actual stop-speed
+residual remains visible. Normal extrema check both penetration and opening;
+tangent extrema check static excursions and unresolved reversal travel against
+both geometric and work allowances. Small endpoint or net-displacement errors
+cannot conceal a resolved interior friction loop.
+
+The receipt records actual phases, stopping time, force solves, gross sliding
+travel, full consistent momentum change, external work, prescribed-surface work,
+normal work and relative friction work. A reversal's two signed work segments
+remain distinct, even when its net travel cancels. The dense owner's original
+viscosity integral is unchanged because contact corrections lie in C's
+nullspace; friction loss is not added to viscosity or assigned to heat.
+Complete-coordinate energy, native interval/cumulative gates, the mandatory
+geometry/feature callback and final cancellation all precede one original atomic
+acceptance. The spectral owner updates actual modal and physical states together.
+
+Focused native tests cover stopping and repeat-step capture, moving surfaces,
+static hysteresis, reversal loss, off-diagonal mass, unchanged elastic/viscous
+spectators and modal continuation, unsupported traces, global budgets, geometry
+refusal and cancellation. Interior normal opening and hidden static/kinetic
+out-and-back excursions have direct regression checks.
+
 ### Sustained directional Coulomb ellipses
 
 `advance_sustained_elliptic_contacts` on `ExactLinearSolid`,

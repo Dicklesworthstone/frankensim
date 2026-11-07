@@ -14,6 +14,9 @@ use fs_solid::dynamics::sustained::{
 use fs_solid::linear3::TetElasticAssembly;
 use fs_sparse::Coo;
 
+#[path = "spectral_sustained_contact/events.rs"]
+mod events;
+
 const N: [f64; 3] = [0.0, 1.0, 0.0];
 const T1: [f64; 3] = [1.0, 0.0, 0.0];
 const T2: [f64; 3] = [0.0, 0.0, 1.0];

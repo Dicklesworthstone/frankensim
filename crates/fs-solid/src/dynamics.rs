@@ -138,6 +138,9 @@ pub struct ExactLinearSolid<F = PreparedQuadraticFlow> {
     flow: F,
     stiffness: Vec<f64>,
     mass: Vec<f64>,
+    // Original admitted viscosity, retained for rigid contact-trace admission.
+    // Its cold allocation is already inside the native preparation envelope.
+    damping: Option<Vec<f64>>,
     // The same admitted inverse already used by the prepared source map.
     // Retaining it gives instantaneous impulses an O(n^2) response.
     inverse_mass: Vec<f64>,
@@ -574,6 +577,7 @@ impl ExactLinearSolid {
             work_correction_j: 0.0,
             affine_force_scale_n,
             viscous: damping.is_some(),
+            damping,
             cumulative_dissipated_j: 0.0,
             dissipation_correction_j: 0.0,
         })
@@ -855,6 +859,7 @@ impl<F> ExactLinearSolid<F> {
             flow: change(self.flow)?,
             stiffness: self.stiffness,
             mass: self.mass,
+            damping: self.damping,
             inverse_mass: self.inverse_mass,
             free_dofs: self.free_dofs,
             state: self.state,

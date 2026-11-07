@@ -95,6 +95,7 @@ fn add(sum: &mut f64, correction: &mut f64, value: f64) {
 
 #[derive(Clone, Copy)]
 struct Oscillator {
+    lambda: f64,
     cosine: f64,
     h_sinc: f64,
     h2_cosc: f64,
@@ -144,6 +145,7 @@ impl Oscillator {
             (sinc, cosc, (1.0 - sinc) / z2, (0.5 - cosc) / z2, cosine)
         };
         let result = Self {
+            lambda,
             cosine,
             h_sinc: h * sinc,
             h2_cosc: h * (h * cosc),
@@ -577,7 +579,6 @@ impl CompleteSpectralSolid {
         let velocity = reconstruct(&self.basis, &v, cx)?;
         let mean_displacement = reconstruct(&self.basis, &mean_q, cx)?;
         let (mut supplied_work_j, mut work_roundoff) = (0.0, 0.0);
-        let mut mean_velocity_mps = zeros(n)?;
         for i in 0..n {
             poll(cx)?;
             let du = displacement[i] - self.displacement[i];
@@ -589,7 +590,39 @@ impl CompleteSpectralSolid {
                 force_start_n[i]
                     .mul_add(du, increment[i] * (displacement[i] - mean_displacement[i])),
             );
-            mean_velocity_mps[i] = du / self.dt_s;
+        }
+        self.accept_force_path(
+            q,
+            v,
+            displacement,
+            velocity,
+            supplied_work_j,
+            step,
+            time_s,
+            cx,
+        )
+    }
+
+    // Shared final original-coordinate admission for affine sources and
+    // piecewise forces on admitted rigid contact directions. The latter keeps
+    // every original elastic mode and supplies independently integrated work.
+    #[allow(clippy::too_many_arguments)]
+    fn accept_force_path(
+        &mut self,
+        q: Vec<f64>,
+        v: Vec<f64>,
+        displacement: Vec<f64>,
+        velocity: Vec<f64>,
+        supplied_work_j: f64,
+        step: u64,
+        time_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<ExactLinearSolidStep> {
+        let n = self.free_dofs.len();
+        let mut mean_velocity_mps = zeros(n)?;
+        for i in 0..n {
+            poll(cx)?;
+            mean_velocity_mps[i] = (displacement[i] - self.displacement[i]) / self.dt_s;
         }
         if q.iter()
             .chain(&v)

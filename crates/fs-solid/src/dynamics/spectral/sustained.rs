@@ -16,6 +16,35 @@ pub(crate) struct Workspace {
 }
 
 impl CompleteSpectralSolid {
+    /// Locate a stop, static recapture or reversal along one rigid contact
+    /// trace, retaining every native elastic mode and the original full energy
+    /// and cumulative-work gates. See the dense owner's event method for the
+    /// compressive, fixed-frame, collinear and constant-load admission domain.
+    pub fn advance_collinear_coulomb_events<P, E>(
+        &mut self,
+        law: &contact::events::CollinearCoulombContact<'_>,
+        initial_force_n: [f64; 3],
+        external_force_n: &[f64],
+        controls: SolidSustainedControls,
+        cx: &Cx<'_>,
+        admit_path: impl FnOnce(
+            &contact::events::SolidCoulombEventPath<'_, '_, Self>,
+        ) -> core::result::Result<P, E>,
+    ) -> core::result::Result<
+        contact::events::SolidCoulombEventStep<P>,
+        SolidSustainedError<E, CompleteSpectralSolidError>,
+    > {
+        contact::events::advance(
+            self,
+            law,
+            initial_force_n,
+            external_force_n,
+            controls,
+            cx,
+            admit_path,
+        )
+    }
+
     /// Advance an oriented Coulomb ellipse through the same original complete
     /// response, work gates and atomic acceptance as sustained disk contact.
     /// Physical contacts/forces reach the mandatory whole-path callback; the
@@ -224,5 +253,98 @@ impl Native for CompleteSpectralSolid {
         // Drop response scratch before its O(n) native staging is allocated.
         drop(scratch);
         self.advance(force, cx)
+    }
+}
+
+impl contact::events::EventNative for CompleteSpectralSolid {
+    fn trace_response(
+        &self,
+        weights: [&[f64]; 3],
+        cx: &Cx<'_>,
+    ) -> Result<contact::events::TraceResponse> {
+        let mut modal_columns: [Vec<f64>; 3] = core::array::from_fn(|_| Vec::new());
+        let mut columns: [Vec<f64>; 3] = core::array::from_fn(|_| Vec::new());
+        for a in 0..3 {
+            modal_columns[a] = project(&self.basis, weights[a], cx)?;
+            if modal_columns[a]
+                .iter()
+                .zip(&self.oscillators)
+                .any(|(force, oscillator)| *force != 0.0 && oscillator.lambda != 0.0)
+            {
+                return Err(invalid(
+                    "event contact must excite only original zero eigenvalue modes",
+                ));
+            }
+            columns[a] = reconstruct(&self.basis, &modal_columns[a], cx)?;
+        }
+        Ok(contact::events::TraceResponse {
+            columns,
+            modal_columns: Some(modal_columns),
+        })
+    }
+
+    fn add_contact_moments(
+        &self,
+        scratch: &mut Workspace,
+        response: &contact::events::TraceResponse,
+        impulse: [fs_math::dd::Dd; 3],
+        displacement_moment: [fs_math::dd::Dd; 3],
+        cx: &Cx<'_>,
+    ) -> Result<()> {
+        use fs_math::dd::Dd;
+        let columns = response
+            .modal_columns
+            .as_ref()
+            .ok_or_else(|| invalid("complete modal contact response required"))?;
+        for i in 0..self.free_dofs.len() {
+            poll(cx)?;
+            let mut q = Dd::from_f64(scratch.modal_displacement[i]);
+            let mut v = Dd::from_f64(scratch.modal_velocity[i]);
+            for a in 0..3 {
+                let column = Dd::from_f64(columns[a][i]);
+                q = q + column * displacement_moment[a];
+                v = v + column * impulse[a];
+            }
+            scratch.modal_displacement[i] = contact::finite(q).map_err(invalid)?;
+            scratch.modal_velocity[i] = contact::finite(v).map_err(invalid)?;
+        }
+        reconstruct_into(
+            &self.basis,
+            &scratch.modal_displacement,
+            &mut scratch.displacement,
+            cx,
+        )?;
+        reconstruct_into(
+            &self.basis,
+            &scratch.modal_velocity,
+            &mut scratch.velocity,
+            cx,
+        )
+    }
+
+    fn accept_force_path(
+        &mut self,
+        scratch: Workspace,
+        supplied_j: f64,
+        viscosity_j: f64,
+        cx: &Cx<'_>,
+    ) -> Result<ExactLinearSolidStep> {
+        if viscosity_j != 0.0 {
+            return Err(invalid(
+                "complete-spectrum owner has no constitutive viscosity",
+            ));
+        }
+        let (step, time_s) = self.next_interval()?;
+        CompleteSpectralSolid::accept_force_path(
+            self,
+            scratch.modal_displacement,
+            scratch.modal_velocity,
+            scratch.displacement,
+            scratch.velocity,
+            supplied_j,
+            step,
+            time_s,
+            cx,
+        )
     }
 }

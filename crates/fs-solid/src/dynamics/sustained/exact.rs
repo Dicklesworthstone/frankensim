@@ -103,3 +103,67 @@ impl Native for ExactLinearSolid {
         self.accept(scratch.candidate, work, loss, step, time_s, cx)
     }
 }
+
+impl events::EventNative for ExactLinearSolid {
+    fn trace_response(
+        &self,
+        weights: [&[f64]; 3],
+        cx: &Cx<'_>,
+    ) -> Result<events::TraceResponse, Self::Error> {
+        let n = self.free_dofs.len();
+        let mut columns: [Vec<f64>; 3] = core::array::from_fn(|_| vec![0.0; n]);
+        for a in 0..3 {
+            for i in 0..n {
+                super::super::poll(cx)?;
+                columns[a][i] = finite(dot(&self.inverse_mass[i * n..(i + 1) * n], weights[a]))
+                    .map_err(Self::invalid)?;
+            }
+        }
+        Ok(events::TraceResponse {
+            columns,
+            modal_columns: None,
+        })
+    }
+
+    fn damping(&self) -> Option<&[f64]> {
+        self.damping.as_deref()
+    }
+
+    fn add_contact_moments(
+        &self,
+        scratch: &mut Workspace,
+        response: &events::TraceResponse,
+        impulse: [Dd; 3],
+        displacement_moment: [Dd; 3],
+        cx: &Cx<'_>,
+    ) -> Result<(), Self::Error> {
+        let n = self.free_dofs.len();
+        for i in 0..n {
+            super::super::poll(cx)?;
+            let mut q = Dd::from_f64(scratch.candidate[i]);
+            let mut v = Dd::from_f64(scratch.candidate[n + i]);
+            for a in 0..3 {
+                let column = Dd::from_f64(response.columns[a][i]);
+                q = q + column * displacement_moment[a];
+                v = v + column * impulse[a];
+            }
+            scratch.candidate[i] = finite(q).map_err(Self::invalid)?;
+            scratch.candidate[n + i] = finite(v).map_err(Self::invalid)?;
+        }
+        Ok(())
+    }
+
+    fn accept_force_path(
+        &mut self,
+        scratch: Workspace,
+        supplied_j: f64,
+        viscosity_j: f64,
+        cx: &Cx<'_>,
+    ) -> Result<ExactLinearSolidStep, Self::Error> {
+        let (step, time_s) = self.next_interval()?;
+        // Contact corrections lie in C's nullspace, so the original observed
+        // viscosity integral is unchanged, including cross terms. Every native
+        // original-coordinate and cumulative energy gate still runs here.
+        self.accept(scratch.candidate, supplied_j, viscosity_j, step, time_s, cx)
+    }
+}

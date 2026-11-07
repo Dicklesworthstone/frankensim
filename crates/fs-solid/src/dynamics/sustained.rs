@@ -17,6 +17,9 @@ mod exact;
 /// Sustained directional Coulomb contact on original complete solid motion.
 pub mod elliptic;
 
+/// Located stopping, static recapture and reversal on admitted rigid traces.
+pub mod events;
+
 /// A fixed physical point trace in one orthonormal normal/two-tangent frame.
 ///
 /// Covectors are dimensionless. Free owners use `free_dofs()` order; the supported
@@ -153,7 +156,7 @@ impl<E> From<ExactLinearSolidError> for SolidSustainedError<E> {
     }
 }
 
-fn finite(value: Dd) -> Result<f64, &'static str> {
+pub(super) fn finite(value: Dd) -> Result<f64, &'static str> {
     let rounded = value.to_f64();
     if value.hi.is_finite() && value.lo.is_finite() && rounded.is_finite() {
         Ok(rounded)
