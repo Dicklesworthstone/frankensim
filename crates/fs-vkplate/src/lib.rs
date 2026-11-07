@@ -80,6 +80,10 @@ pub mod film;
 /// elastic contact across the grain from the stick card.
 pub mod shaft;
 
+/// A cymbal shell's loss from print (opt-in): B20 bronze's thermoelastic damping and a borrowed
+/// anelastic loss factor in place of a preset's two declared T60 points.
+pub mod shell_loss;
+
 mod contact_island;
 mod contact_response;
 pub use contact_island::{Controls as ContactSolveControls, RefusalSite as ContactRefusalSite, SolveError as ContactSolveError, SolveReport as ContactSolveReport};

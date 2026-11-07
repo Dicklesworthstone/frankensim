@@ -20,6 +20,11 @@
 //! (2006, Table 1) measured damping ratios of another snare's batter modes to this batter's
 //! matching shapes (`kit::SKRODZKA_2006_TABLE_1`). It is an upper bound: the measured ratios
 //! already contain loss paths this model carries. It is refused on `--preset-heads`.
+//! `--shell-loss b20`, on crash and ride only (MB 12552), replaces the shell's two declared T60
+//! points with B20 bronze's printed loss at the same frequencies: thermoelastic damping from
+//! fs-material's slab law plus an anelastic loss factor borrowed from cast bells
+//! (`shell_loss`); radiation loss is missing. `b20-low` and `b20-high` are the band's ends and
+//! never post. It is refused on `--preset-heads`.
 //!
 //! The drums' heads and stick come from sourced material cards, and no piece keeps a value fitted
 //! to a recording (see `drum_cards`); `--preset-heads` renders the recording-fitted presets
@@ -47,6 +52,8 @@ const PORT_RADIATION_FLAG: &str = "--port-radiation";
 const MIC_FIRST_ORDER_FLAG: &str = "--mic-first-order";
 /// Opt-in (MB 7247), snare-off only: `--head-mode-damping skrodzka2006`.
 const HEAD_MODE_DAMPING_FLAG: &str = "--head-mode-damping";
+/// Opt-in (MB 12552), crash and ride only: `--shell-loss b20|b20-low|b20-high`.
+const SHELL_LOSS_FLAG: &str = "--shell-loss";
 
 fn main() {
     let preset_heads = std::env::args().any(|a| a == drum_cards::PRESET_HEADS_FLAG);
@@ -106,6 +113,12 @@ fn main() {
             std::process::exit(2);
         }
     });
+    let shell_loss = all.iter().position(|a| a == SHELL_LOSS_FLAG).map(|i| {
+        all.get(i + 1).and_then(|s| fs_vkplate::shell_loss::b20(s)).unwrap_or_else(|| {
+            eprintln!("usage: {SHELL_LOSS_FLAG} b20|b20-low|b20-high");
+            std::process::exit(2)
+        })
+    });
     let wall_loss = all.iter().any(|a| a == CAVITY_WALL_LOSS_FLAG);
     if wall_loss && cavity_modes.is_none() {
         eprintln!("refused: {CAVITY_WALL_LOSS_FLAG} is the loss of the air modes; give {CAVITY_MODES_FLAG} F_MAX_HZ too");
@@ -124,22 +137,26 @@ fn main() {
                 std::process::exit(1)
             })
     });
-    let valued = |i: usize| (i > 0 && (all[i - 1] == OBSERVER_FLAG || all[i - 1] == CAVITY_MODES_FLAG || all[i - 1] == WIRE_CONTACT_FLAG || all[i - 1] == PORT_FLAG || all[i - 1] == PORT_FLOW_LOSS_FLAG || all[i - 1] == HEAD_MODE_DAMPING_FLAG))
+    let valued = |i: usize| (i > 0 && (all[i - 1] == OBSERVER_FLAG || all[i - 1] == CAVITY_MODES_FLAG || all[i - 1] == WIRE_CONTACT_FLAG || all[i - 1] == PORT_FLAG || all[i - 1] == PORT_FLOW_LOSS_FLAG || all[i - 1] == HEAD_MODE_DAMPING_FLAG || all[i - 1] == SHELL_LOSS_FLAG))
         || mic_index.is_some_and(|j| i > j && i <= j + 4);
     let a: Vec<String> = all
         .iter()
         .enumerate()
         .filter(|(i, a)| {
-            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && *a != CAVITY_MODES_FLAG && *a != WIRE_CONTACT_FLAG && *a != CAVITY_WALL_LOSS_FLAG && *a != HEAD_DIPOLE_FLAG && *a != PORT_FLAG && *a != PORT_FLOW_LOSS_FLAG && *a != PORT_RADIATION_FLAG && *a != MIC_FIRST_ORDER_FLAG && *a != HEAD_MODE_DAMPING_FLAG && !valued(*i)
+            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && *a != CAVITY_MODES_FLAG && *a != WIRE_CONTACT_FLAG && *a != CAVITY_WALL_LOSS_FLAG && *a != HEAD_DIPOLE_FLAG && *a != PORT_FLAG && *a != PORT_FLOW_LOSS_FLAG && *a != PORT_RADIATION_FLAG && *a != MIC_FIRST_ORDER_FLAG && *a != HEAD_MODE_DAMPING_FLAG && *a != SHELL_LOSS_FLAG && !valued(*i)
         })
         .map(|(_, a)| a.clone())
         .collect();
     if a.len() < 3 {
-        eprintln!("usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads] [--observer TABLE.tsv] [--port RADIUS_M [--port-flow-loss K] [--port-radiation]] [--mic-first-order ALPHA FX FY FZ] [--head-mode-damping skrodzka2006]");
+        eprintln!("usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads] [--observer TABLE.tsv] [--port RADIUS_M [--port-flow-loss K] [--port-radiation]] [--mic-first-order ALPHA FX FY FZ] [--head-mode-damping skrodzka2006] [--shell-loss b20|b20-low|b20-high]");
         std::process::exit(2);
     }
     if port_radius.is_some() && (!matches!(a[1].as_str(), "kick" | "snare" | "snare-off" | "tom-12" | "tom-14") || observer.is_some()) {
         eprintln!("refused: {PORT_FLAG} needs a drum and the vent-capable Rayleigh observer; closed-body tables contain no opening");
+        std::process::exit(1)
+    }
+    if shell_loss.is_some() && (!matches!(a[1].as_str(), "crash" | "ride") || preset_heads) {
+        eprintln!("refused: {SHELL_LOSS_FLAG} replaces a cymbal shell's declared T60 pair, offered on crash and ride without {} only", drum_cards::PRESET_HEADS_FLAG);
         std::process::exit(1)
     }
     let speed = a.get(3).map(|s| s.parse::<f64>().expect("speed")).filter(|v| *v > 0.0);
@@ -164,6 +181,19 @@ fn main() {
     let grid: f64 = std::env::var("FS_KIT_GRID").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let cy = |s: kit::CymbalSpec| kit::CymbalSpec { grid: s.grid * grid, ..s };
     let cymbal = |s: kit::CymbalSpec, hit: (f64, f64, f64, f64)| drum_cards::cymbal(&cy(s), &[hit], preset_heads);
+    // --shell-loss: the crash's or ride's shell with its T60 pair from print (fs_vkplate::shell_loss);
+    // without the flag the shell is returned as it came
+    let shell = |s: kit::CymbalSpec| match &shell_loss {
+        None => (s, None),
+        Some(loss) => fs_vkplate::shell_loss::with_printed_shell_loss(&s, kit::BRONZE, loss)
+            .map(|(spec, line)| (spec, Some(line)))
+            .unwrap_or_else(|e| {
+                eprintln!("refused: {e}");
+                std::process::exit(1)
+            }),
+    };
+    let (crash_shell, crash_line) = shell(kit::crash());
+    let (ride_shell, ride_line) = shell(drum_cards::ride(preset_heads));
     let hihat = |gap: f64, pedal_n: f64, v: f64| drum_cards::hihat(gap, pedal_n, &[(0.005, v)], preset_heads);
     let (piece, dur): (Result<Piece, String>, f64) = match a[1].as_str() {
         "kick" => (drum(kit::kick(), true, v(3.0)), 1.2),
@@ -174,9 +204,9 @@ fn main() {
         "hihat-closed" => (hihat(0.0, 80.0, v(2.5)), 0.8),
         "hihat-open" => (drum_cards::open_hihat(&[(0.005, v(2.5))], preset_heads), 2.5),
         "splash" => (cymbal(kit::splash(), (0.005, v(2.0), 0.78, 0.005)), 2.6),
-        "crash" => (cymbal(kit::crash(), (0.005, v(6.0), 0.95, 0.008)), 5.0),
+        "crash" => (cymbal(crash_shell, (0.005, v(6.0), 0.95, 0.008)), 5.0),
         "crash-shaft" => (drum_cards::shaft_cymbal(&cy(kit::crash()), speed), 5.0),
-        "ride" => (cymbal(drum_cards::ride(preset_heads), (0.005, v(2.5), 0.6, 0.004)), 4.0),
+        "ride" => (cymbal(ride_shell, (0.005, v(2.5), 0.6, 0.004)), 4.0),
         other => {
             eprintln!("unknown piece {other}");
             std::process::exit(2);
@@ -186,6 +216,9 @@ fn main() {
         eprintln!("refused: {e}");
         std::process::exit(1)
     });
+    if shell_loss.is_some() {
+        p.notes.extend(if a[1] == "crash" { crash_line } else { ride_line });
+    }
     if let Some((alpha, axis)) = mic_pattern {
         for mic in 0..p.instrument.mics.len() {
             p.instrument.set_microphone_pattern(mic, alpha, axis).unwrap_or_else(|e| {
