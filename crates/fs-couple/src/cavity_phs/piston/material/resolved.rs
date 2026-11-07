@@ -9,6 +9,8 @@
 //! This guided axial wall does not model deformation, rotation, thermal
 //! expansion or general multidimensional FSI.
 
+mod shared;
+
 use fs_gas::dynamics::{Euler1d, StepControl};
 use fs_gas::dynamics::piston::{
     Piston, PistonControl, PistonError, PistonLoad, PistonStep, PistonSuspension,

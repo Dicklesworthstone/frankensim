@@ -4952,3 +4952,9 @@ so an ideal-gas stiffness substitution is detectable. These reference
 calculations and source reviews do not replace native execution: the host
 remained unavailable, including a final bounded compiler-availability check.
 No new formatting, compilation or native regression pass is claimed.
+
+## Source-bound two-chamber pressure and finite-wall heat
+
+The same `MaterialResolvedPiston` can drive both resolved mixture chambers through the native shared-piston owner, with optional stationary suspension and one explicit finite thermal inventory. Both pressure fields use the original material-derived mass. Native gas geometry, species, caloric storage, spring energy, physical damping and accepted pressure work remain independently accounted. The suspended heat path deposits only the authored fraction of actual damper loss into the original wall store; the remainder stays an external loss. Gas, wall inventory and piston publish together.
+
+The thermal store does not implicitly re-resolve the rigid specimen's frozen density or infer expansion; representing the same specimen requires a compatible authored caloric inventory. The original negligible-thickness axial partition and split heat/pressure/heat assumptions apply. Three focused regression definitions compare all four entries with native reports and states, independently reconstruct the combined physical energy balance, and exercise warmed final-cancellation/retry across both chambers and the finite wall. They remain uncompiled and unexecuted in the unavailable session executor.

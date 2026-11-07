@@ -1,4 +1,6 @@
 //! Native G1/G4 paths with retained material density and resolved gas state.
+mod shared;
+
 use super::*;
 use super::super::tests::body;
 use crate::cavity_phs::piston::tests::gas as parcel;
