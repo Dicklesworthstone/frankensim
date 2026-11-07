@@ -355,3 +355,96 @@ fn plane_policy_retains_defaults_and_exact_insulation_in_every_orientation() {
         }
     }
 }
+
+#[test]
+fn g3_finite_wall_trials_keep_dynamic_transport_and_rollback_filter_scratch() {
+    let make = || {
+        NsfGrid3::<D3q27>::new(spec(1, WallThermal::Isothermal(293.15)), |_| false, mixed)
+            .unwrap()
+            .with_channel_dynamic_thermal_sgs(config(), 200 * SHAPE.iter().product::<usize>())
+            .unwrap()
+    };
+    let mut grid = make();
+    let mut direct = make();
+    assert!(
+        grid.sgs_transport
+            .iter()
+            .any(|t| t.turbulent_conductivity_lu > 0.0)
+    );
+    assert_eq!(grid.step().unwrap(), direct.step().unwrap());
+    for _ in 0..2 {
+        let accepted = (
+            grid.state_hash(),
+            grid.sgs_transport.clone(),
+            grid.div.clone(),
+            grid.cumulative_ledger(),
+        );
+        let scratch = {
+            let work = workspace(&grid);
+            (
+                work.momentum.viscosities().to_vec(),
+                work.heat.diffusivities().to_vec(),
+                work.momentum.viscosities().as_ptr(),
+                work.heat.diffusivities().as_ptr(),
+            )
+        };
+        let bytes = grid.dynamic_sgs_workspace_bytes();
+        direct.set_thermal_walls(patterned_walls()).unwrap();
+        let expected = direct.step().unwrap();
+        let mut complete_polls = 0;
+        let trial = grid
+            .preview_thermal_wall_step(patterned_walls(), 100, || {
+                complete_polls += 1;
+                false
+            })
+            .unwrap();
+        assert_eq!(*trial.energy_ledger(), expected);
+        assert_eq!(trial.grid().state_hash(), direct.state_hash());
+        assert_eq!(trial.grid().sgs_transport, direct.sgs_transport);
+        assert_eq!(
+            trial.grid().channel_dynamic_thermal_sgs_config(),
+            Some(config())
+        );
+        assert_eq!(trial.grid().dynamic_sgs_workspace_bytes(), bytes);
+        let face_heat: f64 = trial
+            .wall_exchange()
+            .iter()
+            .map(|f| f.heat_into_fluid_j)
+            .sum();
+        assert!((face_heat - expected.wall_heat_j).abs() < 1e-22);
+        drop(trial);
+
+        // Cancel after the complete native step, immediately before its trial
+        // could be returned. Neither physical history nor original scratch moves.
+        let mut polls = 0;
+        assert!(
+            grid.preview_thermal_wall_step(patterned_walls(), 100, || {
+                polls += 1;
+                polls >= complete_polls
+            })
+            .is_err()
+        );
+        assert_eq!(polls, complete_polls);
+        assert_eq!(
+            (
+                grid.state_hash(),
+                grid.sgs_transport.clone(),
+                grid.div.clone(),
+                grid.cumulative_ledger()
+            ),
+            accepted
+        );
+        {
+            let work = workspace(&grid);
+            assert_eq!(work.momentum.viscosities(), scratch.0);
+            assert_eq!(work.heat.diffusivities(), scratch.1);
+            assert_eq!(work.momentum.viscosities().as_ptr(), scratch.2);
+            assert_eq!(work.heat.diffusivities().as_ptr(), scratch.3);
+        }
+        grid.preview_thermal_wall_step(patterned_walls(), 100, || false)
+            .unwrap()
+            .accept();
+        assert_eq!(grid.state_hash(), direct.state_hash());
+        assert_eq!(grid.sgs_transport, direct.sgs_transport);
+    }
+}

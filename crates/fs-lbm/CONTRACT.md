@@ -4218,8 +4218,14 @@ The candidate always refreshes starting history under its proposed held table,
 including an unchanged table. Ordinary public setters retain their original
 unchanged-table no-op, and ordinary steps retain no extra face history. The
 trial copies the exact source-free physical state, supports existing held
-openings, gravity, body forces and local SGS, and explicitly refuses manufactured
-volume callbacks and dynamic SGS workspaces that this copy cannot retain.
+openings, gravity, body forces, local SGS and the original periodic/channel
+dynamic SGS closures. The latter retain their accepted transport and physical
+history while rebuilding deterministic filter scratch with the original
+controls and geometry, capped at the original retained workspace bytes. These
+same-state closures own no Lagrangian or time-averaged model history. The native
+wall update refits transport for each proposed boundary; only molecular heat
+crosses the wall. Manufactured volume callbacks still refuse because their
+external state cannot be copied into the transaction.
 An explicit full-grid cell cap bounds candidate storage; original native
 corrector limits and cancellation checkpoints still apply. A refused or dropped
 trial changes no accepted state or control. `accept` publishes its already

@@ -72,6 +72,39 @@ fn periodic_workspace(grid: &NsfGrid3<D3q27>) -> std::sync::MutexGuard<'_, Works
 }
 
 #[test]
+fn g3_periodic_thermal_trials_retain_the_original_dynamic_closure() {
+    let make = || {
+        NsfGrid3::<D3q27>::new(spec(1), |_| false, mixed)
+            .unwrap()
+            .with_dynamic_thermal_sgs(config(), 200 * SHAPE.iter().product::<usize>())
+            .unwrap()
+    };
+    let mut grid = make();
+    let mut direct = make();
+    assert!(grid.sgs_transport.iter().any(|t| t.eddy_viscosity_lu > 0.0));
+    for _ in 0..2 {
+        let before = grid.state_hash();
+        let bytes = grid.dynamic_sgs_workspace_bytes();
+        let expected = direct.step().unwrap();
+        let trial = grid
+            .preview_thermal_wall_step(Vec::new(), 210, || false)
+            .unwrap();
+        assert!(trial.wall_exchange().is_empty());
+        assert_eq!(*trial.energy_ledger(), expected);
+        assert_eq!(trial.grid().dynamic_thermal_sgs_config(), Some(config()));
+        assert_eq!(trial.grid().dynamic_sgs_workspace_bytes(), bytes);
+        assert_eq!(trial.grid().state_hash(), direct.state_hash());
+        assert_eq!(trial.grid().sgs_transport, direct.sgs_transport);
+        drop(trial);
+        assert_eq!(grid.state_hash(), before);
+        grid.preview_thermal_wall_step(Vec::new(), 210, || false)
+            .unwrap()
+            .accept();
+        assert_eq!(grid.state_hash(), direct.state_hash());
+    }
+}
+
+#[test]
 fn g1_dynamic_nsf_uses_force_corrected_velocity_and_current_nasa_heat_capacity() {
     let gas = ThermochemicalNsfGas::new(
         source::model(-4000.0, 250000.0, 1.0),

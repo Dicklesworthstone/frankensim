@@ -60,15 +60,22 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// actual old/new face fluxes supply the heat
     /// account. No post-step material query reconstructs the exchanged joules.
     ///
-    /// This supports closed domains, existing held openings, molecular/local
-    /// SGS transport, gravity and held body forces. Manufactured `SourceFn`
-    /// callbacks and dynamic SGS are refused: their independent callback/filter
-    /// state is not copied by this transaction. The native source material,
-    /// Mach, caloric, stability and endpoint convergence admissions still apply.
+    /// This supports closed domains, existing held openings, molecular, local
+    /// and dynamic SGS transport, gravity and held body forces. The dynamic
+    /// closures retain their original controls, filter geometry and accepted
+    /// transport; only their deterministic scratch is rebuilt. The native wall
+    /// update refits momentum/heat for the proposed thermal boundary before the
+    /// step. Modeled heat remains on interior faces; molecular conduction owns
+    /// the wall exchange. Manufactured `SourceFn` callbacks remain refused
+    /// because their external state cannot participate in this transaction.
+    /// The native source material, Mach, caloric, stability and endpoint
+    /// convergence admissions still apply.
     ///
     /// `maximum_cells` bounds the full copied grid, including solid cells.
     /// Candidate storage and native step work are O(cells), plus the existing
-    /// bounded corrector passes. Cancellation is polled before and after the
+    /// bounded corrector passes. A dynamic candidate additionally owns one
+    /// filter workspace, bounded by the original retained workspace bytes.
+    /// Cancellation is polled before and after the
     /// copy and wall update, at native work boundaries, and before return.
     /// Callers coupling a finite wall retain their own time-resolution and
     /// joint energy acceptance; this is not a separate fluid integrator.
@@ -85,9 +92,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 maximum: maximum_cells,
             });
         }
-        if self.sources.is_some() || self.dynamic_sgs.is_some() {
+        if self.sources.is_some() {
             return Err(NsfError::Input(
-                "thermal wall trials require source-free molecular or local-SGS fluid state",
+                "thermal wall trials require fluid state without SourceFn callbacks",
             ));
         }
         if self.steps.checked_add(1).is_none() {
@@ -99,9 +106,16 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 "thermal wall trial starts with nonfinite energy",
             ));
         }
-        // The same exact field copy already used for characteristic trials.
-        // Both explicitly admit absence of noncopyable callbacks/dynamic state.
+        // Retain every accepted field with the existing exact native copy.
+        // Characteristic topology cannot carry a dynamic closure, so restore
+        // that owner's controls and independent scratch explicitly for walls.
         let mut candidate = self.characteristic_copy();
+        body_force::checkpoint(&mut cancelled)?;
+        candidate.dynamic_sgs = self
+            .dynamic_sgs
+            .as_ref()
+            .map(|dynamic| dynamic.fresh_for_trial(self.spec.dims))
+            .transpose()?;
         body_force::checkpoint(&mut cancelled)?;
         let before = candidate.set_thermal_walls_recorded(walls, &mut cancelled)?;
         let mut exchange = Vec::new();

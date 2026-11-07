@@ -74,6 +74,71 @@ pub(in crate::nsf3) struct DynamicTransport {
     bytes: usize,
 }
 
+impl DynamicTransport {
+    /// Rebuild only the nonlocal numerical scratch for an unpublished step.
+    ///
+    /// These two closures fit the current fields; neither owns Lagrangian or
+    /// time-averaged model memory. Each combined preparation overwrites its
+    /// scratch and installs the actual wall velocities/scalar policies. The
+    /// grid separately retains its accepted `sgs_transport` and FV history.
+    /// A future history-bearing closure must supply its own transaction here.
+    pub(in crate::nsf3) fn fresh_for_trial(&self, shape: [usize; 3]) -> Result<Self, NsfError> {
+        let (state, bytes) = match &self.state {
+            DynamicState::Periodic { config, workspace } => {
+                if workspace.is_poisoned() {
+                    return Err(NsfError::Input("dynamic NSF workspace lock poisoned"));
+                }
+                let momentum = PeriodicDynamicSgs::new(shape, 1.0, self.bytes)
+                    .map_err(NsfError::DynamicSgs)?;
+                let heat =
+                    PeriodicDynamicScalar::new(shape, self.bytes).map_err(NsfError::DynamicSgs)?;
+                let bytes = momentum
+                    .workspace_bytes()
+                    .checked_add(heat.workspace_bytes());
+                (
+                    DynamicState::Periodic {
+                        config: *config,
+                        workspace: Mutex::new(Workspace { momentum, heat }),
+                    },
+                    bytes,
+                )
+            }
+            DynamicState::Channel {
+                config,
+                normal_axis,
+                workspace,
+            } => {
+                if workspace.is_poisoned() {
+                    return Err(NsfError::Input("channel NSF workspace lock poisoned"));
+                }
+                let momentum = ChannelDynamicSgs::new(shape, 1.0, *normal_axis, self.bytes)
+                    .map_err(NsfError::DynamicSgs)?;
+                let heat = ChannelDynamicScalar::new(shape, *normal_axis, self.bytes)
+                    .map_err(NsfError::DynamicSgs)?;
+                let bytes = momentum
+                    .workspace_bytes()
+                    .checked_add(heat.workspace_bytes());
+                (
+                    DynamicState::Channel {
+                        config: *config,
+                        normal_axis: *normal_axis,
+                        workspace: Mutex::new(ChannelWorkspace { momentum, heat }),
+                    },
+                    bytes,
+                )
+            }
+        };
+        let bytes = bytes.ok_or(NsfError::Input("NSF dynamic workspace capacity overflow"))?;
+        if bytes > self.bytes {
+            return Err(NsfError::DynamicSgs(DynamicSgsError::WorkspaceBytes {
+                required: bytes,
+                maximum: self.bytes,
+            }));
+        }
+        Ok(Self { state, bytes })
+    }
+}
+
 impl<L: Lattice3<27>> NsfGrid3<L> {
     /// Added reusable filter payload: 200 nominal bytes per cell, excluding
     /// fixed metadata and the existing NSF state/predictor/transport vectors.
@@ -370,9 +435,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     fn channel_scalar_walls(&self, normal_axis: usize) -> [ScalarWall; 2] {
         let default = match self.spec.wall {
             WallThermal::Adiabatic => ScalarWall::ZeroGradient,
-            WallThermal::Isothermal(kelvin) => {
-                ScalarWall::Value(self.law.theta_of_kelvin(kelvin))
-            }
+            WallThermal::Isothermal(kelvin) => ScalarWall::Value(self.law.theta_of_kelvin(kelvin)),
         };
         if self.thermal_walls.is_empty() {
             return [default; 2];
@@ -399,12 +462,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 NsfWallThermal::Isothermal(kelvin) => {
                     ScalarWall::Value(self.law.theta_of_kelvin(kelvin))
                 }
-                NsfWallThermal::Film { coefficient_w_m2_k: 0.0, .. } => {
-                    ScalarWall::ZeroGradient
-                }
-                NsfWallThermal::HeatFlux(_) | NsfWallThermal::Film { .. } => {
-                    ScalarWall::Interior
-                }
+                NsfWallThermal::Film {
+                    coefficient_w_m2_k: 0.0,
+                    ..
+                } => ScalarWall::ZeroGradient,
+                NsfWallThermal::HeatFlux(_) | NsfWallThermal::Film { .. } => ScalarWall::Interior,
             };
             count[side] += 1;
             declared[side] = Some(match declared[side] {

@@ -579,3 +579,164 @@ fn overlapping_ambient_owner_and_late_cancellation_are_transactional() {
         );
     });
 }
+
+#[test]
+fn dynamic_channel_transports_heat_with_finite_solid_storage_and_one_clock() {
+    use fs_lbm::nsf3::NsfChannelDynamicThermalSgsConfig;
+    use fs_lbm::sgs3::SgsUse;
+    use fs_lbm::sgs3::dynamic::channel::{ChannelDynamicScalarConfig, ChannelDynamicSgsConfig};
+
+    fn noise(index: usize, salt: u64) -> f64 {
+        let mut value = (index as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ salt;
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^= value >> 31;
+        ((value >> 11) as f64 / (1_u64 << 53) as f64) * 2.0 - 1.0
+    }
+    let dynamic = NsfChannelDynamicThermalSgsConfig {
+        momentum: ChannelDynamicSgsConfig {
+            maximum_coefficient_squared: 16.0,
+            maximum_eddy_to_molecular: 1000.0,
+            usage: SgsUse::Exploration,
+        },
+        heat: ChannelDynamicScalarConfig {
+            maximum_coefficient: 16.0,
+            maximum_diffusivity_to_molecular: 1000.0,
+            usage: SgsUse::Exploration,
+        },
+    };
+    let make = || {
+        NsfGrid3::<D3q27>::new(
+            NsfSpec {
+                dims: [5, 4, 5],
+                periodic: [true, true, false],
+                gas: GasSpec::dry_air_ussa1976(),
+                temperature_k: 300.0,
+                pressure_pa: 100_000.0,
+                dx_m: DX,
+                temperature_window_k: [273.15, 333.15],
+                maximum_mach: 0.2,
+                maximum_temperature_ratio: 0.2,
+                bulk_to_shear_ratio: 0.73,
+                bulk_ratio_source: "Cramer N2 ratio; finite solid/dynamic channel fixture",
+                maximum_cells: 100,
+                wall: WallThermal::Adiabatic,
+                workers: 1,
+                transport_points: 17,
+            },
+            |_| false,
+            |p| {
+                let index = (p[2] * 4 + p[1]) * 5 + p[0];
+                let height = p[2] as f64 + 0.5;
+                let envelope = 4.0 * height * (5.0 - height) / 25.0;
+                (
+                    1.0,
+                    std::array::from_fn(|axis| {
+                        0.002 * envelope * noise(index, 31 * axis as u64 + 7)
+                    }),
+                    300.0 + 0.1 * (1.0 - height / 5.0 + 0.05 * envelope * noise(index, 101)),
+                )
+            },
+        )
+        .unwrap()
+        .with_channel_dynamic_thermal_sgs(dynamic, 20_000)
+        .unwrap()
+    };
+    with_cx(|cx, _| {
+        let law = Law { datum: 0.0 };
+        let mass = 1e-11;
+        let mut gas = make();
+        let mut direct = make();
+        assert!((0..5).any(|z| (0..4).any(|y| (0..5).any(|x| {
+            gas.sgs_transport([x, y, z])
+                .unwrap()
+                .unwrap()
+                .turbulent_conductivity_lu
+                > 0.0
+        }))));
+        let mut wall = solid(&law, &[310.0, 290.0], mass, false, false);
+        let mapping =
+            [([1, 1, 0], false), ([2, 2, 4], true)].map(|(fluid_cell, high)| NsfSolidContact {
+                fluid_cell,
+                axis: 2,
+                high,
+                solid_cell: CellId(u64::from(high)),
+                caloric: &law,
+                layer: NsfSolidLayer::Isothermal,
+            });
+        let mut budget = controls();
+        budget.maximum_fluid_cells = 100;
+        budget.maximum_contacts = 2;
+        for _ in 0..2 {
+            let before = gas.total_energy_j();
+            let h = [
+                wall.cells()[&CellId(0)].specific_h_j_kg,
+                wall.cells()[&CellId(1)].specific_h_j_kg,
+            ];
+            let report = advance_nsf_solid(
+                cx, &mut gas, &mut wall, &mapping, budget, &[0.0; 2], unforced,
+            )
+            .unwrap();
+            let mut heat = [0.0; 2];
+            for exchange in &report.exchanges {
+                heat[exchange.solid_cell.0 as usize] += exchange.face.heat_into_fluid_j;
+            }
+            assert!(heat[0] > 0.0 && heat[1] < 0.0);
+            let mut stored = 0.0;
+            for (index, old) in h.into_iter().enumerate() {
+                let change = mass * (wall.cells()[&CellId(index as u64)].specific_h_j_kg - old);
+                near(change, -heat[index], budget.cell_tolerance_j, 0.0);
+                stored += change;
+            }
+            near(
+                gas.total_energy_j() - before + stored,
+                0.0,
+                budget.total_tolerance_j,
+                0.0,
+            );
+            near(
+                report.coupled_heat_into_fluid_j,
+                report.fluid.wall_heat_j,
+                1e-22,
+                1e-12,
+            );
+            assert_eq!(report.solid_external_heat_j, 0.0);
+            assert_eq!(gas.channel_dynamic_thermal_sgs_config(), Some(dynamic));
+            assert_eq!(gas.dynamic_sgs_workspace_bytes(), Some(20_000));
+            assert_eq!(wall.time_s(), gas.steps() as f64 * gas.law().dt_s);
+
+            // The original dynamic fluid, stepped independently under the
+            // actually accepted solid endpoint, must give the identical state.
+            direct
+                .set_thermal_walls(
+                    mapping
+                        .iter()
+                        .map(|contact| NsfThermalWallFace {
+                            cell: contact.fluid_cell,
+                            axis: contact.axis,
+                            high: contact.high,
+                            thermal: NsfWallThermal::Isothermal(
+                                wall.temperature_k(contact.solid_cell).unwrap(),
+                            ),
+                        })
+                        .collect(),
+                )
+                .unwrap();
+            assert_eq!(direct.step().unwrap(), report.fluid);
+            assert_eq!(gas.state_hash(), direct.state_hash());
+        }
+        let accepted = (gas.state_hash(), wall.cells().clone(), wall.time_s());
+        budget.maximum_endpoint_evaluations = 1;
+        assert!(matches!(
+            advance_nsf_solid(
+                cx, &mut gas, &mut wall, &mapping, budget, &[0.0; 2], unforced
+            ),
+            Err(NsfThermalError::WorkBudget { performed: 1, .. })
+        ));
+        assert_eq!(
+            (gas.state_hash(), wall.cells().clone(), wall.time_s()),
+            accepted
+        );
+        assert_eq!(gas.channel_dynamic_thermal_sgs_config(), Some(dynamic));
+    });
+}

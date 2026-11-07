@@ -4429,10 +4429,15 @@ native fluid trial, including derivative probes and final acceptance.
 This is fixed-geometry, fixed-inventory, first-order coupled time sampling:
 the solid endpoint boundary is held over one original fluid step. Both clocks
 use the same representable lattice timestamp. Native thermal events still
-require explicit splits/processing. Molecular/local SGS and held open controls
-are admitted; manufactured fluid source functions and dynamic SGS currently
-refuse because their reversible wall-trial support is unavailable. Source
-calorics, fluid Mach/temperature/stability bounds and chosen spatial/lattice
+require explicit splits/processing. Molecular/local SGS, held open controls and
+the original periodic/channel dynamic SGS closures are admitted. Dynamic trials
+retain accepted transport and flux history while rebuilding only deterministic
+filter scratch under the original controls, geometry and retained byte bound.
+Channel fits consume each proposed wall temperature; modeled heat remains on
+interior shared faces and molecular conduction owns the wall exchange exactly
+once. Manufactured fluid source callbacks still refuse because their external
+state cannot participate in the transaction. Original exploratory SGS limits,
+source calorics, fluid Mach/temperature/stability bounds and chosen spatial/lattice
 resolution remain authoritative. No moving solid, boundary-layer wall function,
 global time-error bound or experimental convection qualification is implied.
 

@@ -9,8 +9,11 @@
 //! Fixed cells, fixed material laws and one original lattice step are admitted.
 //! The wall temperature/resistance is held at the proposed solid endpoint during
 //! that fluid step, so the coupled time approximation remains first order.
-//! Native fluid source functions and dynamic SGS are currently outside the
-//! reversible wall-trial owner; molecular and local SGS paths remain available.
+//! Molecular, local and dynamic SGS use the same reversible native wall trial.
+//! Dynamic channel momentum/heat fits consume the proposed wall temperatures;
+//! molecular conduction still supplies the sole interface heat. Original
+//! exploratory closure limits remain. Native fluid source callbacks cannot
+//! participate in the wall transaction and remain outside this owner.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
