@@ -5391,3 +5391,57 @@ two-mass solution, preserving all three momenta and complete work. Initially
 separated contact also supports receiver refusal and late-cancellation replay.
 Paths remain affine with one proportional shear direction; callers resolve
 within-step reversals and supply the physical root bracket.
+
+### Original spatial structural/acoustic resonance responses
+
+`cavity_modal::interior::structure::StructuralInterior` now recovers physical
+harmonic storage and supports analytic frequency response and driven receiver
+surveys on its existing complete spatial pencil. Original structural mass,
+stiffness, damping and free-coordinate order, heterogeneous fluid inverse-density
+and compressibility forms, and the reciprocal interface map remain unchanged.
+No structural or pressure mode is selected, normalized, truncated or refitted.
+
+Every ordinary response carries separate structural kinetic/strain and fluid
+kinetic/compression storage. Peak-phasor energies are `v^H Ms v/4`, `u^H Ks u/4`,
+`psi^H Ka psi/4` and `p^H Ma p/4`. The acoustic coordinate is pressure potential,
+not pressure: under the owner's `exp(-i omega t)` convention, `p=-i omega psi`.
+Original signed interface force and displaced flow share B and B^T. Compensated
+contractions preserve coherent cancellation; small signed energy roundoff stays
+visible. Structural and acoustic source/exchange/heat balances are independently
+observable, and no heat or storage is assigned from a work deficit.
+
+`PreparedStructuralInterior::solve_with_frequency_derivative` reuses the existing
+canonical harmonic factor and its original-coordinate residual gate. Returned
+derivatives include displacement, velocity, pressure potential, physical pressure,
+fluid force and displaced flow, all per rad/s. Both force and flow source slopes
+are admitted explicitly; None fixes both phasors. The pressure derivative includes
+`-i(psi+omega psi_omega)`. Independent power derivatives retain both source chain
+rules, reciprocal exchange and the original symmetric structural/relative-wall
+dissipation. Gyroscopic/interface skew work is excluded from heat.
+
+The additional field-recovery budget is `256*n+256` bytes and work score
+`128*n*n+256*n`, on top of the native harmonic-frequency budget; n includes every
+structural and pressure coordinate. These bounds exclude caller arrays, the
+already prepared owner and allocator metadata. Preparation is reused across
+drives, and a response plus tangent requires one factorization per frequency.
+
+`StructuralInterior::survey_resonances` uses the existing shared peak search with
+fixed coherent source phasors and either an original pressure point or a real
+weighted original structural displacement/velocity receiver. Observations retain
+the original negative-time phasor convention; conjugation belongs to effort/flow
+work, not the observation row. Queries remain in rad/s without a Hz round trip.
+Refinement, peak/query caps, native singularity refusal and cancellation preserve
+the shared transactional behavior. The survey reports grid-resolved driven peaks,
+not a complete free-mode census, half-power width or decay Q. Material, geometry,
+small-motion coupling and real memoryless wall-admittance assumptions remain those
+of the original owner; no exterior radiation or new causal material law is inferred.
+
+Four native tests executed the unchanged production response-contraction module
+against the real `fs_math` owner and passed: physical cycle-averaged storage with
+distinct original mass/compliance metrics; reciprocal signed interface and
+coherent cancellation; original source/heat derivatives excluding gyroscopic work;
+and invalid-data/cancellation/replay. Three public FE regressions additionally
+specify complete differentiated source rows and work channels, distinct coupled
+physical receiver peaks and phases, and source-tangent/resource-refusal behavior.
+Those FE regressions are authored but unexecuted while the complete `fs-couple`
+dependency build is unavailable. MR56's broader qualification remains open.

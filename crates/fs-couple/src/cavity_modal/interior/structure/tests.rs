@@ -8,6 +8,9 @@ use fs_solid::linear3::{
 };
 use fs_sparse::Coo;
 
+#[path = "resonance_tests.rs"]
+mod resonance_tests;
+
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();
     let pool = ArenaPool::new(ArenaConfig::default());

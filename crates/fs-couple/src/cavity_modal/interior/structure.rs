@@ -25,8 +25,13 @@
 //! realization of frequency-dependent wall data. Full spatial coordinates still
 //! require mesh/order convergence; dense harmonic preparation is explicitly bounded.
 
+/// Analytic full-field frequency response and original-receiver resonance surveys.
+pub mod resonance;
+mod response;
 /// Full original structural and pressure fields on one exact held-input timeline.
 pub mod time;
+pub use response::StructuralInteriorEnergy;
+use response::work;
 
 use fs_exec::Cx;
 use fs_feec::acoustics::helmholtz::AcousticFeError;
@@ -34,7 +39,7 @@ use fs_feec::acoustics::helmholtz::heterogeneous::time::ResistiveBoundary;
 use fs_feec::acoustics::helmholtz::heterogeneous::{HeterogeneousHelmholtzFe, VelocityTrace};
 use fs_math::c64::C64;
 use fs_modal::harmonic::{
-    HarmonicResponseControls, HarmonicResponseError, PreparedHarmonicResponse,
+    HarmonicResponse, HarmonicResponseControls, HarmonicResponseError, PreparedHarmonicResponse,
 };
 use fs_solid::linear3::TetElasticAssembly;
 use fs_sparse::Csr;
@@ -98,6 +103,15 @@ impl From<AcousticFeError> for StructuralInteriorError {
 impl From<HarmonicResponseError> for StructuralInteriorError {
     fn from(error: HarmonicResponseError) -> Self {
         Self::Harmonic(error)
+    }
+}
+
+impl From<response::ResponseError> for StructuralInteriorError {
+    fn from(error: response::ResponseError) -> Self {
+        match error {
+            response::ResponseError::Invalid(what) => Self::Invalid(what),
+            response::ResponseError::Cancelled => HarmonicResponseError::Cancelled.into(),
+        }
     }
 }
 
@@ -374,12 +388,26 @@ impl<'a, 'f, 'c> StructuralInterior<'a, 'f, 'c> {
                 "strictly positive finite harmonic frequency required",
             ));
         }
+        self.prepare_angular(core::f64::consts::TAU * frequency_hz, cx)
+    }
+
+    // Shared with the rad/s survey: do not round narrow queries through Hz.
+    fn prepare_angular(
+        &self,
+        angular_frequency_rad_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<PreparedStructuralInterior<'_, 'a, 'f, 'c>, StructuralInteriorError> {
+        if !angular_frequency_rad_s.is_finite() || angular_frequency_rad_s <= 0.0 {
+            return Err(invalid(
+                "strictly positive finite angular frequency required",
+            ));
+        }
         let harmonic = PreparedHarmonicResponse::try_new(
             &self.mass,
             &self.damping,
             &self.stiffness,
             self.structural_dofs + self.pressure_dofs(),
-            core::f64::consts::TAU * frequency_hz,
+            angular_frequency_rad_s,
             self.controls,
             cx,
         )?;
@@ -407,6 +435,8 @@ pub struct StructuralInteriorResponse {
     pub fluid_force: Vec<C64>,
     /// Original pressure-basis integrals of structural outward normal velocity.
     pub displaced_flow_m3_s: Vec<C64>,
+    /// Original structural and fluid cycle-averaged storage, with no inferred Q.
+    pub energy: StructuralInteriorEnergy,
     pub average_structural_input_power_w: f64,
     pub average_acoustic_input_power_w: f64,
     /// Signed interface work, positive from fluid into structure.
@@ -418,6 +448,23 @@ pub struct StructuralInteriorResponse {
     /// Whole-system input minus dissipation, from the canonical harmonic owner.
     pub power_balance_residual_w: f64,
     pub relative_residual: f64,
+}
+
+impl StructuralInteriorResponse {
+    /// Original structural source and acoustic exchange minus structural heat.
+    #[must_use]
+    pub fn structural_power_balance_residual_w(&self) -> f64 {
+        self.average_structural_input_power_w + self.average_fluid_to_structure_power_w
+            - self.average_structural_dissipation_w
+    }
+
+    /// Original flow-source work minus the same exchange and relative-wall heat.
+    #[must_use]
+    pub fn acoustic_power_balance_residual_w(&self) -> f64 {
+        self.average_acoustic_input_power_w
+            - self.average_fluid_to_structure_power_w
+            - self.average_wall_dissipation_w
+    }
 }
 
 impl PreparedStructuralInterior<'_, '_, '_, '_> {
@@ -432,6 +479,16 @@ impl PreparedStructuralInterior<'_, '_, '_, '_> {
         cx: &Cx<'_>,
     ) -> Result<StructuralInteriorResponse, StructuralInteriorError> {
         poll(cx)?;
+        let force = self.load(structural_force, inward_flow_load)?;
+        let response = self.harmonic.solve(&force, cx)?;
+        self.response(response, structural_force, inward_flow_load, cx)
+    }
+
+    fn load(
+        &self,
+        structural_force: &[C64],
+        inward_flow_load: &[C64],
+    ) -> Result<Vec<C64>, StructuralInteriorError> {
         let ns = self.model.structural_dofs;
         let na = self.model.pressure_dofs();
         if structural_force.len() != ns || inward_flow_load.len() != na {
@@ -442,24 +499,48 @@ impl PreparedStructuralInterior<'_, '_, '_, '_> {
         let mut force = Vec::with_capacity(ns + na);
         force.extend_from_slice(structural_force);
         force.extend_from_slice(inward_flow_load);
-        let mut response = self.harmonic.solve(&force, cx)?;
+        Ok(force)
+    }
+
+    fn response(
+        &self,
+        mut response: HarmonicResponse,
+        structural_force: &[C64],
+        inward_flow_load: &[C64],
+        cx: &Cx<'_>,
+    ) -> Result<StructuralInteriorResponse, StructuralInteriorError> {
+        let ns = self.model.structural_dofs;
+        let na = self.model.pressure_dofs();
         let potential = response.displacement.split_off(ns);
         let pressure = response.velocity.split_off(ns);
-        let mut fluid_force = vec![C64::ZERO; ns];
-        let mut flow = vec![C64::ZERO; na];
-        for a in 0..na {
-            poll(cx)?;
-            for s in 0..ns {
-                let b = self.model.coupling[a * ns + s];
-                fluid_force[s] = fluid_force[s] + pressure[a].scale(b);
-                flow[a] = flow[a] + response.velocity[s].scale(b);
-            }
-        }
+        let mut cancelled = || cx.checkpoint().is_err();
+        let (fluid_force, flow) = response::interface(
+            &self.model.coupling,
+            &response.velocity,
+            &pressure,
+            &mut cancelled,
+        )?;
+        let energy = response::energy(
+            &self.model.mass,
+            &self.model.stiffness,
+            &response.displacement,
+            &response.velocity,
+            &potential,
+            &pressure,
+            &mut cancelled,
+        )?;
         let structural_power = work(structural_force, &response.velocity);
         let acoustic_power = work(inward_flow_load, &pressure);
         let exchange = work(&fluid_force, &response.velocity);
-        let structural_loss = dissipation(&self.model.damping, ns + na, 0, &response.velocity);
-        let wall_loss = dissipation(&self.model.damping, ns + na, ns, &pressure);
+        let structural_loss = response::dissipation(
+            &self.model.damping,
+            ns + na,
+            0,
+            &response.velocity,
+            &mut cancelled,
+        )?;
+        let wall_loss =
+            response::dissipation(&self.model.damping, ns + na, ns, &pressure, &mut cancelled)?;
         if fluid_force
             .iter()
             .chain(&flow)
@@ -483,6 +564,7 @@ impl PreparedStructuralInterior<'_, '_, '_, '_> {
             pressure_pa: pressure,
             fluid_force,
             displaced_flow_m3_s: flow,
+            energy,
             average_structural_input_power_w: structural_power,
             average_acoustic_input_power_w: acoustic_power,
             average_fluid_to_structure_power_w: exchange,
@@ -564,27 +646,6 @@ fn copy_block(
         }
     }
     Ok(())
-}
-
-fn work(effort: &[C64], flow: &[C64]) -> f64 {
-    0.5 * effort
-        .iter()
-        .zip(flow)
-        .map(|(e, f)| e.re * f.re + e.im * f.im)
-        .sum::<f64>()
-}
-
-fn dissipation(damping: &[f64], n: usize, offset: usize, velocity: &[C64]) -> f64 {
-    let mut loss = 0.0;
-    for i in 0..velocity.len() {
-        for j in 0..velocity.len() {
-            let a = damping[(offset + i) * n + offset + j];
-            let b = damping[(offset + j) * n + offset + i];
-            loss += (0.5 * a + 0.5 * b)
-                * (velocity[i].re * velocity[j].re + velocity[i].im * velocity[j].im);
-        }
-    }
-    0.5 * loss
 }
 
 #[cfg(test)]
