@@ -303,6 +303,30 @@ fn compute_observed(
     })
 }
 
+/// Parsed SDF, material, load and optimizer data; no source path is retained.
+pub(super) struct PreparedStudy(Spec);
+
+impl PreparedStudy {
+    pub(super) fn parse(source: &str) -> Result<Self> {
+        spec::parse(source).map(Self)
+    }
+
+    pub(super) fn source(&self) -> &str { &self.0.canonical }
+
+    pub(super) fn seed(&self) -> u64 { self.0.seed }
+
+    pub(super) fn run(
+        &self, ledger_path: &Path, cap: Option<usize>, gate: &CancelGate,
+    ) -> Result<Outcome> {
+        let spec = &self.0;
+        let ledger = Ledger::open(ledger_path.to_str()
+            .ok_or_else(|| fail("cli-study-sdf3-ledger", "ledger path is not UTF-8"))?)?;
+        if spec.stress.is_some() { return stress::drive(spec, &ledger, cap, gate); }
+        if spec.load_space.is_some() { return load_space::drive(spec, &ledger, cap, gate); }
+        checkpoint::drive(spec, &ledger, cap, gate, None, checkpoint::announce)
+    }
+}
+
 pub(super) fn study(
     source: &str,
     ledger_path: &Path,
@@ -310,12 +334,7 @@ pub(super) fn study(
     gate: &CancelGate,
 ) -> Result<Outcome> {
     let cap = budget(override_text)?;
-    let spec = spec::parse(source)?;
-    let ledger = Ledger::open(ledger_path.to_str()
-        .ok_or_else(|| fail("cli-study-sdf3-ledger", "ledger path is not UTF-8"))?)?;
-    if spec.stress.is_some() { return stress::drive(&spec, &ledger, cap, gate); }
-    if spec.load_space.is_some() { return load_space::drive(&spec, &ledger, cap, gate); }
-    checkpoint::drive(&spec, &ledger, cap, gate, None, checkpoint::announce)
+    PreparedStudy::parse(source)?.run(ledger_path, cap, gate)
 }
 
 pub(super) fn resume(

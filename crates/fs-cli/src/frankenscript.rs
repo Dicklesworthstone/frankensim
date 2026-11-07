@@ -55,10 +55,12 @@
 //! whole-program resume is not implemented. The catalog's physics operators
 //! (`flux.*`, `ascent.*`, …) are admitted by fs-ir but have no stage binding
 //! here and refuse as not executable. `cooling.study` captures its admitted
-//! study, project, geometry and card bytes during binding and executes that
-//! snapshot without reopening inputs. Repeated source paths share the first
-//! snapshot and recheck their pins; distinct snapshots share one quarter of
-//! the declared program memory, capped at 256 MiB of retained input bytes.
+//! study, project, geometry and card bytes during binding. `study.run` retains
+//! the fully parsed thermal or elasticity model, including feature-gated SDF3
+//! data. Both execute their original numerical producers without reopening
+//! inputs. Repeated source paths share the first snapshot and recheck every
+//! pin, seed and iteration allowance; distinct snapshots share one quarter
+//! of the declared program memory, capped at 256 MiB of retained input bytes.
 //! This is not a peak-RSS bound or an atomic multi-file filesystem snapshot.
 //! Other stage drivers still reread their files after binding-time pin checks.
 //! Per-step wall admission is not aggregate program wall-time metering.
@@ -116,10 +118,7 @@ enum Step {
         project: PathBuf,
         cards: Vec<(CardPackKind, PathBuf)>,
     },
-    StudyFile {
-        path: PathBuf,
-        budget: Option<String>,
-    },
+    StudyFile(native_study::FileStudyStep),
 }
 
 impl Step {
@@ -129,7 +128,7 @@ impl Step {
             Self::Import(_) => "cooling.import",
             Self::Solve { .. } => "cooling.solve",
             Self::Run { .. } => "cooling.run",
-            Self::StudyFile { .. } => "study.run",
+            Self::StudyFile(_) => "study.run",
         }
     }
 }
@@ -369,66 +368,19 @@ impl Binder<'_> {
             );
             return None;
         }
-        let bytes = match std::fs::metadata(&path).and_then(|m| {
-            if m.len() > MAX_PROJECT_BYTES {
-                Err(std::io::Error::other("study exceeds the project size cap"))
-            } else {
-                std::fs::read(&path)
-            }
-        }) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                refusals.push(
-                    "frankenscript-input",
-                    format!("cannot read study `{}`: {error}", path.display()),
-                    "provide a readable .fsim study next to the program",
-                );
+        let step = match self.native_studies.prepare_file(path.clone(), pin, self.seed, budget) {
+            Ok(step) => step,
+            Err((code, message)) => {
+                refusals.push(code, format!("study `{}`: {message}", path.display()),
+                    "provide a fully admitted self-contained study with the program's seed, reviewed source pin and valid iteration allowance");
                 return None;
             }
         };
-        let hash = fs_blake3::hash_bytes(&bytes).to_hex();
-        if let Some(pin) = pin
-            && pin != hash
-        {
-            refusals.push(
-                "frankenscript-study-hash",
-                format!(
-                    "study `{}` hashes to {hash}, not the pinned {pin}",
-                    path.display()
-                ),
-                "re-pin :hash after reviewing the study change, or restore the pinned study",
-            );
-        }
-        let root_seed = std::str::from_utf8(&bytes)
-            .ok()
-            .and_then(|text| fs_ir::sexpr::parse(text).ok())
-            .and_then(|node| {
-                node.items()?
-                    .iter()
-                    .find(|clause| clause.head() == Some("seeds"))
-                    .and_then(|seeds| {
-                        let items = seeds.items()?;
-                        let at = items
-                            .iter()
-                            .position(|i| matches!(&i.kind, NodeKind::Keyword(k) if k == "root"))?;
-                        items.get(at + 1).and_then(count_of)
-                    })
-            });
-        if root_seed.is_none() || root_seed != self.seed {
-            refusals.push(
-                "frankenscript-explicit-seed",
-                format!(
-                    "the study seed {:?} differs from the study file's seeds.root {root_seed:?}",
-                    self.seed
-                ),
-                "state the study file's root seed in (seed …) so the program records the seed it runs",
-            );
-        }
         self.studies.push(ProjectBinding {
-            path: path.clone(),
-            hash,
+            path,
+            hash: step.source_hash().to_hex(),
         });
-        Some(Step::StudyFile { path, budget })
+        Some(Step::StudyFile(step))
     }
 
     #[allow(clippy::too_many_lines)] // one keyword grammar per verb
@@ -833,9 +785,7 @@ pub(crate) fn run_program_path(program: &Path, ledger: &Path, mode: OutputMode) 
             Step::Import(command) => import_path(command, mode),
             Step::Solve { project, cards } => solve_path(project, ledger, cards, mode),
             Step::Run { project, cards } => run_workflow_path(project, ledger, cards, mode),
-            Step::StudyFile { path, budget } => {
-                crate::study::study_path(path, ledger, budget.as_deref(), mode)
-            }
+            Step::StudyFile(study) => study.run(ledger, mode),
         };
         stderr.push_str(&output.stderr);
         records.push((step.verb(), output.exit_code, output.stdout));
@@ -936,3 +886,7 @@ pub(crate) fn run_program_path(program: &Path, ledger: &Path, mode: OutputMode) 
         stderr,
     }
 }
+
+#[cfg(test)]
+#[path = "frankenscript/study_file_tests.rs"]
+mod study_file_tests;

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use fs_blake3::ContentHash;
-use crate::study::{PreparedStudy, StudyPins};
+use crate::study::{PreparedStudy, PreparedStudyFile, StudyPins};
 use super::{Binder, Node, ProjectBinding, Refusals, count_of, string_of};
 use crate::{CommandOutput, OutputMode};
 
@@ -23,6 +23,20 @@ impl StudyStep {
     }
 }
 
+#[derive(Debug)]
+pub(super) struct FileStudyStep {
+    model: Rc<PreparedStudyFile>,
+    budget: Option<String>,
+}
+
+impl FileStudyStep {
+    pub(super) fn source_hash(&self) -> ContentHash { self.model.source_hash() }
+
+    pub(super) fn run(&self, ledger: &Path, mode: OutputMode) -> CommandOutput {
+        self.model.run(ledger, self.budget.as_deref(), mode)
+    }
+}
+
 /// Program-local input snapshots. The same declared source path always means
 /// the first admitted snapshot, even if the filesystem changes between clauses.
 /// Distinct paths share one aggregate input-byte allowance (not an RSS claim).
@@ -30,6 +44,7 @@ pub(super) struct SnapshotCache {
     limit: u64,
     used: u64,
     models: BTreeMap<PathBuf, Rc<PreparedStudy>>,
+    files: BTreeMap<PathBuf, Rc<PreparedStudyFile>>,
 }
 
 impl SnapshotCache {
@@ -37,10 +52,53 @@ impl SnapshotCache {
         // Match the native model's input-storage allocation; leave room for
         // decoded state and numerical work. No implicit unlimited grant.
         Self { limit: memory.map_or(0, |bytes| (bytes / 4).min(256 * 1024 * 1024)),
-            used: 0, models: BTreeMap::new() }
+            used: 0, models: BTreeMap::new(), files: BTreeMap::new() }
+    }
+
+    pub(super) fn prepare_file(
+        &mut self, source: PathBuf, pin: Option<&str>, seed: Option<u64>, budget: Option<String>,
+    ) -> Result<FileStudyStep, (&'static str, String)> {
+        if self.models.contains_key(&source) {
+            return Err(("frankenscript-study-input",
+                "this source path already names an admitted cooling.study snapshot".into()));
+        }
+        let check = |model: &PreparedStudyFile| {
+            let hash = model.source_hash().to_hex();
+            if pin.is_some_and(|pin| pin != hash) {
+                return Err(("frankenscript-study-hash",
+                    format!("study hashes to {hash}, not the pinned {}", pin.expect("present pin"))));
+            }
+            if seed != Some(model.seed()) {
+                return Err(("frankenscript-explicit-seed",
+                    format!("the program seed {seed:?} differs from the admitted study seed {}", model.seed())));
+            }
+            model.check_budget(budget.as_deref())
+                .map_err(|error| ("frankenscript-study-budget", error))
+        };
+        let model = if let Some(model) = self.files.get(&source) {
+            check(model)?;
+            Rc::clone(model)
+        } else {
+            let remaining = self.limit.checked_sub(self.used).filter(|value| *value > 0)
+                .ok_or(("frankenscript-study-input",
+                    "study snapshots exceed the program's declared input-storage allowance".into()))?;
+            let prepared = PreparedStudyFile::load(&source, remaining)
+                .map_err(|error| ("frankenscript-study-input", error))?;
+            check(&prepared)?;
+            let used = self.used.checked_add(prepared.input_bytes()).filter(|value| *value <= self.limit)
+                .ok_or(("frankenscript-study-input", "study snapshot input-byte accounting exceeded the program allowance".into()))?;
+            let model = Rc::new(prepared);
+            self.files.insert(source, Rc::clone(&model));
+            self.used = used;
+            model
+        };
+        Ok(FileStudyStep { model, budget })
     }
 
     fn prepare(&mut self, source: PathBuf, pins: StudyPins) -> Result<Rc<PreparedStudy>, String> {
+        if self.files.contains_key(&source) {
+            return Err("this source path already names an admitted study.run snapshot".into());
+        }
         if let Some(model) = self.models.get(&source) {
             model.check(pins)?;
             return Ok(Rc::clone(model));

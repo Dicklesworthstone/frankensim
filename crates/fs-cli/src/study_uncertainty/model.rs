@@ -135,6 +135,11 @@ fn read(path: &Path, cap: u64) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
+/// Shared bounded regular-file read for program-owned study input snapshots.
+pub(crate) fn read_input_snapshot(path: &Path, cap: u64) -> std::result::Result<Vec<u8>, String> {
+    read(path, cap).map_err(|error| error.to_string())
+}
+
 fn input_limit(base: &DecodedProject) -> Result<u64> {
     let memory = base
         .spec

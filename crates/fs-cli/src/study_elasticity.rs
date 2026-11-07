@@ -995,6 +995,76 @@ fn run_prefix(spec: &ElasticitySpec, count: usize) -> Result<(GridSdf, OptimizeR
     Ok((phi, report))
 }
 
+enum PreparedModel {
+    Planar(ElasticitySpec),
+    #[cfg(feature = "sdf3-study")]
+    Spatial(sdf3::PreparedStudy),
+}
+
+/// Own the original elasticity producer's complete parsed physical state.
+pub(super) struct PreparedStudy(PreparedModel);
+
+impl PreparedStudy {
+    pub(super) fn parse(source: &str) -> std::result::Result<Self, String> {
+        let result = if fs_ir::sexpr::parse(source).ok()
+            .is_some_and(|root| root.head() == Some("fsim-sdf3-study"))
+        {
+            #[cfg(feature = "sdf3-study")]
+            { sdf3::PreparedStudy::parse(source).map(PreparedModel::Spatial) }
+            #[cfg(not(feature = "sdf3-study"))]
+            { Err(fail("cli-study-sdf3-feature",
+                "3-D adaptive studies require a binary built with --features sdf3-study")) }
+        } else {
+            parse(source).map(PreparedModel::Planar)
+        };
+        result.map(Self).map_err(|error| format!("{}: {}", error.code, error.message))
+    }
+
+    pub(super) fn source(&self) -> &str {
+        match &self.0 {
+            PreparedModel::Planar(spec) => &spec.canonical,
+            #[cfg(feature = "sdf3-study")]
+            PreparedModel::Spatial(spec) => spec.source(),
+        }
+    }
+
+    pub(super) fn seed(&self) -> u64 {
+        match &self.0 {
+            PreparedModel::Planar(spec) => spec.base.seeds.as_ref().expect("admitted seed").root,
+            #[cfg(feature = "sdf3-study")]
+            PreparedModel::Spatial(spec) => spec.seed(),
+        }
+    }
+
+    pub(super) fn check_budget(&self, text: Option<&str>) -> std::result::Result<(), String> {
+        budget(text).map(|_| ()).map_err(|error| format!("{}: {}", error.code, error.message))
+    }
+
+    pub(super) fn run(
+        &self, ledger_path: &Path, override_text: Option<&str>, mode: OutputMode,
+    ) -> CommandOutput {
+        let result = budget(override_text).and_then(|cap| match &self.0 {
+            PreparedModel::Planar(spec) => start(spec, ledger_path, cap, &CancelGate::new()),
+            #[cfg(feature = "sdf3-study")]
+            PreparedModel::Spatial(spec) => spec.run(ledger_path, cap, &CancelGate::new()),
+        });
+        match result {
+            Ok(out) => render(out, mode),
+            Err(error) => failure_output("study", mode, error),
+        }
+    }
+}
+
+fn start(
+    spec: &ElasticitySpec, ledger_path: &Path, cap: Option<usize>, gate: &CancelGate,
+) -> Result<Outcome> {
+    let ledger = Ledger::open(
+        ledger_path.to_str()
+            .ok_or_else(|| fail("cli-study-elasticity-ledger-path", "ledger path is not UTF-8"))?,
+    )?;
+    drive(spec, &ledger, cap, gate, None)
+}
+
 pub(crate) fn study_path(
     path: &Path,
     ledger_path: &Path,
@@ -1048,12 +1118,7 @@ pub(crate) fn study_path(
             ));
         }
         let spec = parse(source)?;
-        let ledger = Ledger::open(
-            ledger_path
-                .to_str()
-                .ok_or_else(|| fail("cli-study-elasticity-ledger-path", "ledger path is not UTF-8"))?,
-        )?;
-        drive(&spec, &ledger, cap, &CancelGate::new(), None)
+        start(&spec, ledger_path, cap, &CancelGate::new())
     })();
     match result {
         Ok(out) => render(out, mode),
@@ -1140,9 +1205,21 @@ pub(crate) fn looks_like(path: &Path) -> bool {
     {
         return false;
     }
-    std::str::from_utf8(&bytes).is_ok_and(|text| {
-        text.contains("elasticity-2d") || text.contains("fsim-sdf3-study")
-    })
+    std::str::from_utf8(&bytes).is_ok_and(looks_like_source)
+}
+
+/// Route by the declared physical model, not incidental words in metadata.
+pub(super) fn looks_like_source(source: &str) -> bool {
+    let Ok(root) = fs_ir::sexpr::parse(source) else { return false };
+    if root.head() == Some("fsim-sdf3-study") { return true; }
+    if root.head() != Some("fsim-study") { return false; }
+    root.items().is_some_and(|items| items.iter()
+        .filter(|item| item.head() == Some("physics"))
+        .filter_map(Node::items)
+        .any(|items| items.windows(2).any(|pair|
+            matches!(&pair[0].kind, NodeKind::Keyword(key) if key == "type")
+                && matches!(&pair[1].kind, NodeKind::Symbol(name) | NodeKind::Str(name)
+                    if name == "elasticity-2d"))))
 }
 
 pub(crate) fn export(

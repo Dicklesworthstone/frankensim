@@ -252,6 +252,45 @@ fn render_output(out: Outcome, mode: OutputMode) -> CommandOutput {
     }
 }
 
+/// Own the same admitted physical model used by the ordinary study command.
+pub(super) struct PreparedStudy(Admitted);
+
+impl PreparedStudy {
+    pub(super) fn parse(source: &str) -> std::result::Result<Self, String> {
+        admit(source, false)
+            .map(Self)
+            .map_err(|error| format!("{}: {}", error.code, error.message))
+    }
+
+    pub(super) fn source(&self) -> &str { &self.0.source }
+
+    pub(super) fn seed(&self) -> u64 {
+        self.0.spec.seeds.as_ref().expect("admitted seed").root
+    }
+
+    pub(super) fn check_budget(&self, text: Option<&str>) -> std::result::Result<(), String> {
+        budget(text).map(|_| ()).map_err(|error| format!("{}: {}", error.code, error.message))
+    }
+
+    pub(super) fn run(
+        &self, ledger_path: &Path, override_text: Option<&str>, mode: OutputMode,
+    ) -> CommandOutput {
+        match budget(override_text).and_then(|cap| start(&self.0, ledger_path, cap)) {
+            Ok(out) => render_output(out, mode),
+            Err(error) => failure_output("study", mode, error),
+        }
+    }
+}
+
+fn start(admitted: &Admitted, ledger_path: &Path, cap: Option<usize>) -> Result<Outcome> {
+    let ledger = Ledger::open(
+        ledger_path.to_str()
+            .ok_or_else(|| fail("cli-study-ledger-path", "ledger path is not UTF-8"))?,
+    )?;
+    let start = Instant::now();
+    drive(admitted, &ledger, cap, &CancelGate::new(), &|| start.elapsed().as_secs_f64(), None)
+}
+
 pub(crate) fn study_path(
     path: &Path,
     ledger_path: &Path,
@@ -291,20 +330,7 @@ pub(crate) fn study_path(
             exit: exit::INPUT,
         })?;
         let admitted = admit(text, json)?;
-        let ledger = Ledger::open(
-            ledger_path
-                .to_str()
-                .ok_or_else(|| fail("cli-study-ledger-path", "ledger path is not UTF-8"))?,
-        )?;
-        let start = Instant::now();
-        drive(
-            &admitted,
-            &ledger,
-            cap,
-            &CancelGate::new(),
-            &|| start.elapsed().as_secs_f64(),
-            None,
-        )
+        start(&admitted, ledger_path, cap)
     })();
     match result {
         Ok(out) => render_output(out, mode),
