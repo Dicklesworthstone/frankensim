@@ -337,3 +337,25 @@ and covers restart, source-pencil identity, sample limits and late cancellation.
 Physical timestep refinement remains necessary to resolve stress turning points.
 The fixed-condition elastic estimate adds no crack law, stiffness degradation,
 thermal cycling or service-life validation.
+
+## Representative multiaxial windows on continuous plate motion
+
+`PlateFatigueRun` drives the source plate's normal-Miner and Findley observers
+through the same accepted native endpoints. Its `preview_findley`,
+`finish_findley`, `findley_results` and `restart_findley` delegates permit
+conditioning and repeated explicit representative windows while displacement,
+velocity, acceleration and lifetime rainflow history remain continuous.
+
+Finalizing a Findley window leaves normal history live; restarting seeds the
+new window at the current accepted stress tensor. Advancing a finalized window
+without that explicit restart refuses transactionally. A late Findley gauge
+sample limit or cancellation restores every observer and the mechanical state.
+An unsupported open block cannot silently become a periodic fatigue-limit
+comparison, including decaying free vibration.
+
+`tests/fatigue/findley.rs`, included by the existing fatigue integration target,
+checks two native midpoint-oscillator periods against analytic tilted-plane
+shear/normal amplitudes while Miner spans both windows. It also checks late
+cross-gauge budget/cancellation rollback and rejection of a damped nonperiodic
+block. Findley usage remains separate from finite-life damage and adds no
+stiffness evolution, constitutive return map or inferred repetition count.

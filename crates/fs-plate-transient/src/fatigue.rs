@@ -4,7 +4,7 @@
 //! mechanics. Only accepted endpoints enter the shared DKT stress-life observer.
 //! A fatigue/domain/cancellation refusal commits neither motion nor damage.
 //! Initial acceleration is solved from the actual physical residual. Checkpoint
-//! clones retain q/v/a and all unresolved rainflow histories together.
+//! clones retain q/v/a and all unresolved rainflow histories and explicit multiaxial cycle windows together.
 //!
 //! This is a fixed-condition elastic plate estimate. Rayleigh damping describes
 //! an explicitly selected macroscopic loss; it is not an additional local
@@ -12,7 +12,7 @@
 //! their local stress and calibration bindings can be supplied consistently.
 //! Physical timestep refinement is necessary to resolve stress turning points.
 
-use fs_material::fatigue::FatigueSummary;
+use fs_material::fatigue::{FatigueSummary, critical_plane::findley::FindleyCycleResult};
 use fs_plate::fatigue::{FatiguePlate, PlateFatigueError, PlateFatigueObservation};
 use fs_time::galpha::{
     ImplicitStepTelemetry, OperatorGeneralizedAlpha, SecondOrderState, TimeSolveError,
@@ -154,6 +154,41 @@ impl<'a, L: PlateLoad + ?Sized> PlateFatigueRun<'a, L> {
     pub fn summaries(&self) -> Vec<FatigueSummary> {
         self.observation.summaries()
     }
+    /// Completed multiaxial fatigue-limit evaluations, separate from Miner damage.
+    pub fn findley_results(&self) -> Vec<Option<FindleyCycleResult>> {
+        self.observation.findley_results()
+    }
+
+    /// Evaluate the current Findley window without closing either live history.
+    /// The original full stress tensor must form a resolved closed block.
+    pub fn preview_findley(
+        &self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<FindleyCycleResult>, PlateFatigueRunError> {
+        Ok(self.observation.preview_findley(cancelled)?)
+    }
+
+    /// Close one representative elastic stress block atomically while retaining
+    /// the lifetime Miner counters and the accepted motion. Usage is a limit
+    /// comparison; no number of repetitions or finite life is inferred.
+    pub fn finish_findley(
+        &mut self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<FindleyCycleResult>, PlateFatigueRunError> {
+        Ok(self.observation.finish_findley(cancelled)?)
+    }
+
+    /// Start a new Findley block at the current accepted endpoint, for example
+    /// after a conditioning interval or after consuming a completed result.
+    /// This deliberately replaces only the multiaxial observation window.
+    /// Motion and the lifetime scalar rainflow histories remain continuous.
+    pub fn restart_findley(
+        &mut self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), PlateFatigueRunError> {
+        Ok(self.observation.restart_findley(cancelled)?)
+    }
+
     pub fn preview_finish(
         &self,
         cancelled: &mut impl FnMut() -> bool,

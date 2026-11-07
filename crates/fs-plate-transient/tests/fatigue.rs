@@ -301,3 +301,6 @@ fn g4_foreign_or_rescaled_mechanics_cannot_change_the_observed_material() {
     .unwrap();
     assert_eq!(run.state(), &SecondOrderState::new(0.0, &q, &v, &v));
 }
+
+#[path = "fatigue/findley.rs"]
+mod findley;

@@ -1977,3 +1977,32 @@ cover scalar/circular/hard-case solutions, phase rotation, representable extreme
 scales, combined offset/vibration limit crossing, spatial containment and
 cancellation. This is ordinary floating-point linear-shell observation, not an
 interval certificate, nonlinear prestress solve or inferred eigenstrain.
+
+## Multiaxial fatigue-limit windows on native DKT plates
+
+`FatiguePlate::assemble_with_findley` prepares normal-Miner gauges, Findley
+gauges or both on the same original source sections and native pencil. Findley
+gauges recover complete signed plane-stress tensors in [xx, yy, zz, xy, yz, zx]
+order, with engineering twist converted once and membrane pretension retained.
+Their original calibration binds material/process/absolute temperature and,
+when sourced, exact card, named state and every fixed typed query coordinate.
+
+`PlateFindleyBudget` bounds aggregate retained tensor samples, actual plane
+counts and declared projection/circle work. The shared material `FindleyCycle`
+owns two-dimensional shear-path enclosing circles, complete-tensor closure and
+finite-plane selection. Tensor history is retained once per gauge; prepared
+projections and source objects are shared by fresh windows. Appends roll back by
+saved sample counts, without copying retained history at every timestep.
+
+`PlateFatigueObservation` publishes normal and Findley samples together.
+`preview_findley`, `finish_findley` and `findley_results` expose fatigue-limit
+usage separately from accumulated Miner damage. An explicit `restart_findley`
+seeds the new window at the current accepted tensor and preserves lifetime
+normal history. A finished Findley window must be restarted before further
+samples. Overall `finish` remains atomic across both models, including a late
+closure failure. No repetition count, finite life or stabilized material response
+is inferred from a representative stress block.
+
+Four focused tests in `tests/fatigue_findley.rs` cover signed twist/pretension,
+native matrix equality, true rotating shear traction on a tilted plane, explicit
+window continuation, source context, aggregate budgets and late rollback.

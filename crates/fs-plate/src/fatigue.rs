@@ -17,6 +17,10 @@
 //! cycling. Fixed-plane Miner damage remains an empirical estimate; it does
 //! not create cracks, soften stiffness, deposit heat or certify service life.
 
+pub mod findley;
+pub use findley::{PlateFindleyBudget, PlateFindleyGauge};
+
+use fs_material::fatigue::critical_plane::findley::{FindleyCycleResult, FindleyError};
 use std::sync::Arc;
 
 use fs_material::fatigue::{
@@ -76,6 +80,8 @@ pub enum PlateFatigueError {
     Budget,
     SourceMismatch { gauge: usize, what: &'static str },
     Gauge { gauge: usize, error: FatigueError },
+    FindleyGauge { gauge: usize, error: FindleyError },
+    FindleySourceMismatch { gauge: usize, what: &'static str },
     Plate(PlateError),
     Cancelled,
     Finished,
@@ -120,6 +126,8 @@ pub struct FatiguePlate {
     sections: Vec<PlateFatigueSection>,
     elements: Vec<Element>,
     gauges: Vec<Gauge>,
+    findley_gauges: Vec<findley::PreparedGauge>,
+    findley_budget: PlateFindleyBudget,
     config: PlateFatigueConfig,
 }
 
@@ -158,7 +166,40 @@ impl FatiguePlate {
         config: PlateFatigueConfig,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, PlateFatigueError> {
+        Self::assemble_with_findley(
+            mesh,
+            sections,
+            boundary,
+            options,
+            gauges,
+            Vec::new(),
+            config,
+            PlateFindleyBudget::default(),
+            cancelled,
+        )
+    }
+
+    /// Compile normal-Miner and/or multiaxial Findley gauges on one native
+    /// pencil. At least one gauge is required across both independent models.
+    /// Findley gauges assess an explicitly selected closed representative
+    /// elastic stress block; their fatigue-limit usage is not finite-life damage.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub fn assemble_with_findley(
+        mesh: &PlateMesh,
+        sections: Vec<PlateFatigueSection>,
+        boundary: &[usize],
+        options: &AssemblyOptions,
+        gauges: Vec<PlateFatigueGauge>,
+        findley_gauges: Vec<PlateFindleyGauge>,
+        config: PlateFatigueConfig,
+        findley_budget: PlateFindleyBudget,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, PlateFatigueError> {
         poll(cancelled)?;
+        let gauge_count = gauges
+            .len()
+            .checked_add(findley_gauges.len())
+            .ok_or(PlateFatigueError::Budget)?;
         let invalid = PlateFatigueError::Invalid;
         let full = mesh
             .nodes
@@ -167,8 +208,8 @@ impl FatiguePlate {
             .ok_or(PlateFatigueError::Budget)?;
         if mesh.tris.len() > config.maximum_elements
             || full > config.maximum_full_dofs
-            || gauges.is_empty()
-            || gauges.len() > config.maximum_gauges
+            || gauge_count == 0
+            || gauge_count > config.maximum_gauges
             || gauges
                 .len()
                 .checked_mul(config.history.maximum_residue)
@@ -176,6 +217,7 @@ impl FatiguePlate {
         {
             return Err(PlateFatigueError::Budget);
         }
+        findley::admit_budget(&findley_gauges, findley_budget, cancelled)?;
         if sections.len() != mesh.tris.len()
             || !config.maximum_slope.is_finite()
             || !(0.0 < config.maximum_slope && config.maximum_slope <= 0.05)
@@ -267,6 +309,11 @@ impl FatiguePlate {
                 .map_err(|e| gauge_error(index, e))?;
             RainflowMiner::new(gauge.curve.clone(), gauge.mean_stress, config.history)
                 .map_err(|e| gauge_error(index, e))?;
+        }
+        let mut findley_seeds = Vec::with_capacity(findley_gauges.len());
+        for (i, gauge) in findley_gauges.iter().enumerate() {
+            poll(cancelled)?;
+            findley_seeds.push(findley::admit_gauge(i, gauge, &sections)?);
         }
         poll(cancelled)?;
         let model = assemble_with_sections(
@@ -375,12 +422,28 @@ impl FatiguePlate {
                 membrane_stress_pa,
             });
         }
+        let mut prepared_findley = Vec::with_capacity(findley_gauges.len());
+        for (binding, seed) in findley_gauges.into_iter().zip(findley_seeds) {
+            poll(cancelled)?;
+            let e = binding.element;
+            let point = binding.surface_point;
+            prepared_findley.push(findley::PreparedGauge::new(
+                binding,
+                seed,
+                &sections[e],
+                elements[e].dofs,
+                &curvature[e][point],
+                options.pretension,
+            )?);
+        }
         poll(cancelled)?;
         Ok(Self {
             model,
             sections,
             elements,
             gauges: prepared,
+            findley_gauges: prepared_findley,
+            findley_budget,
             config,
         })
     }
@@ -397,6 +460,12 @@ impl FatiguePlate {
     pub const fn config(&self) -> PlateFatigueConfig {
         self.config
     }
+    pub fn findley_gauge(&self, index: usize) -> Option<&PlateFindleyGauge> {
+        self.findley_gauges.get(index).map(|g| &g.binding)
+    }
+    pub const fn findley_budget(&self) -> PlateFindleyBudget {
+        self.findley_budget
+    }
 
     /// Recover signed stresses from the original reduced displacement/slopes.
     /// Recovery is read-only and contributes no sample or cycle by itself.
@@ -405,6 +474,50 @@ impl FatiguePlate {
         displacement: &[f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<f64>, PlateFatigueError> {
+        self.admit_displacement(displacement, cancelled)?;
+        let mut stresses = Vec::with_capacity(self.gauges.len());
+        for gauge in &self.gauges {
+            poll(cancelled)?;
+            let stress =
+                gauge.membrane_stress_pa + dot(&gauge.stress, &local(&gauge.dofs, displacement));
+            if !stress.is_finite() {
+                return Err(PlateFatigueError::Invalid("plate fatigue stress overflow"));
+            }
+            stresses.push(stress);
+        }
+        Ok(stresses)
+    }
+
+    /// Full physical plane-stress tensors in [xx, yy, zz, xy, yz, zx] order
+    /// at the admitted Findley gauges. This read-only recovery observes no cycle.
+    pub fn findley_stresses(
+        &self,
+        displacement: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<[f64; 6]>, PlateFatigueError> {
+        self.admit_displacement(displacement, cancelled)?;
+        self.findley_stresses_admitted(displacement, cancelled)
+    }
+
+    fn findley_stresses_admitted(
+        &self,
+        displacement: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<[f64; 6]>, PlateFatigueError> {
+        self.findley_gauges
+            .iter()
+            .map(|g| {
+                poll(cancelled)?;
+                g.recover(displacement)
+            })
+            .collect()
+    }
+
+    fn admit_displacement(
+        &self,
+        displacement: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), PlateFatigueError> {
         poll(cancelled)?;
         let invalid = PlateFatigueError::Invalid;
         if displacement.len() != self.model.free || displacement.iter().any(|x| !x.is_finite()) {
@@ -436,17 +549,7 @@ impl FatiguePlate {
                 }
             }
         }
-        let mut stresses = Vec::with_capacity(self.gauges.len());
-        for gauge in &self.gauges {
-            poll(cancelled)?;
-            let stress =
-                gauge.membrane_stress_pa + dot(&gauge.stress, &local(&gauge.dofs, displacement));
-            if !stress.is_finite() {
-                return Err(invalid("plate fatigue stress overflow"));
-            }
-            stresses.push(stress);
-        }
-        Ok(stresses)
+        Ok(())
     }
 
     /// Start observation at an explicitly supplied accepted native state.
@@ -473,6 +576,8 @@ impl FatiguePlate {
             plate: self,
             counters,
             stresses: Vec::new(),
+            findley: findley::Bank::new(&self.findley_gauges)?,
+            findley_stresses: Vec::new(),
             finished: false,
         };
         observation.push(displacement, cancelled)?;
@@ -486,6 +591,8 @@ pub struct PlateFatigueObservation<'a> {
     plate: &'a FatiguePlate,
     counters: Vec<RainflowMiner>,
     stresses: Vec<f64>,
+    findley: findley::Bank,
+    findley_stresses: Vec<[f64; 6]>,
     finished: bool,
 }
 impl<'a> PlateFatigueObservation<'a> {
@@ -494,6 +601,43 @@ impl<'a> PlateFatigueObservation<'a> {
     }
     pub fn stresses_pa(&self) -> &[f64] {
         &self.stresses
+    }
+    pub fn findley_stresses_pa(&self) -> &[[f64; 6]] {
+        &self.findley_stresses
+    }
+    pub fn findley_sample_count(&self, gauge: usize) -> Option<u64> {
+        self.findley.sample_count(gauge)
+    }
+    /// Fatigue-limit usage for explicitly finalized representative blocks.
+    pub fn findley_results(&self) -> Vec<Option<FindleyCycleResult>> {
+        self.findley.results()
+    }
+    /// Evaluate the current closed block without closing either live history.
+    pub fn preview_findley(
+        &self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<FindleyCycleResult>, PlateFatigueError> {
+        self.findley.preview(cancelled)
+    }
+    /// Finalize only the Findley window. Normal Miner history remains live.
+    /// A subsequent push requires an explicit Findley restart at this endpoint.
+    pub fn finish_findley(
+        &mut self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<FindleyCycleResult>, PlateFatigueError> {
+        self.findley.finish(cancelled)
+    }
+    /// Select a new representative window at the current accepted stress state,
+    /// for example after conditioning. This deliberately discards only the old
+    /// Findley window; normal-Miner history and accepted mechanics are retained.
+    pub fn restart_findley(
+        &mut self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), PlateFatigueError> {
+        if self.finished {
+            return Err(PlateFatigueError::Finished);
+        }
+        self.findley.restart(&self.findley_stresses, cancelled)
     }
     pub const fn is_finished(&self) -> bool {
         self.finished
@@ -513,15 +657,21 @@ impl<'a> PlateFatigueObservation<'a> {
             return Err(PlateFatigueError::Finished);
         }
         let stresses = self.plate.stresses(displacement, cancelled)?;
+        let findley_stresses = self
+            .plate
+            .findley_stresses_admitted(displacement, cancelled)?;
         let mut next = self.counters.clone();
         for (i, (counter, &stress)) in next.iter_mut().zip(&stresses).enumerate() {
             counter
                 .push_with_cancel(stress, cancelled)
                 .map_err(|e| gauge_error(i, e))?;
         }
-        poll(cancelled)?;
+        // The Findley bank appends with sample-count rollback and performs the
+        // final cancellation poll. No fallible operation follows publication.
+        self.findley.push(&findley_stresses, cancelled)?;
         self.counters = next;
         self.stresses = stresses;
+        self.findley_stresses = findley_stresses;
         Ok(())
     }
 
@@ -541,7 +691,9 @@ impl<'a> PlateFatigueObservation<'a> {
             .collect()
     }
 
-    /// Close the complete observation once; no partial gauge finalization.
+    /// Close both fatigue models atomically. Normal-Miner summaries remain the
+    /// return value; finalized Findley usage is available through findley_results.
+    /// An unsupported/open Findley block refuses without closing normal history.
     pub fn finish(
         &mut self,
         cancelled: &mut impl FnMut() -> bool,
@@ -556,7 +708,7 @@ impl<'a> PlateFatigueObservation<'a> {
                     .map_err(|e| gauge_error(i, e))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        poll(cancelled)?;
+        self.findley.finish(cancelled)?;
         self.counters = next;
         self.finished = true;
         Ok(summaries)
