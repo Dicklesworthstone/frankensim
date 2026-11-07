@@ -18,6 +18,10 @@ type Entry = (&'static str, QuantitySpec, f64);
 #[path = "lorentz/midpoint.rs"]
 mod midpoint_tests;
 
+#[cfg(test)]
+#[path = "lorentz/leaky.rs"]
+mod leaky_tests;
+
 fn frequency(convention: FrequencyConvention) -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(
         QuantityKind::Frequency(convention),

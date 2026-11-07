@@ -59,6 +59,39 @@ pub struct LeakyDielectricMidpointStep<const N: usize> {
     pub energy_residual_j_m3: f64,
 }
 
+/// Admit an independent DC source in the original complete storage bundle.
+/// Both relaxation and inertial polarization use this same conductivity gate.
+pub(super) fn dc_conductivity<'a>(
+    material: &ResolvedMaterialStatePoint,
+    conductivity_property: &str,
+    storage_properties: impl IntoIterator<Item = &'a str>,
+) -> Result<f64, FieldStorageError> {
+    if conductivity_property.trim().is_empty()
+        || storage_properties
+            .into_iter()
+            .any(|name| name == conductivity_property)
+    {
+        return Err(invalid(
+            "DC leakage requires its own nonempty source property name",
+        ));
+    }
+    let key = PropertyKey::new(conductivity_property, ELECTRICAL_CONDUCTIVITY_DIMS);
+    let source = material
+        .property_by_key(&key)
+        .ok_or_else(|| invalid("resolved DC leakage conductivity is missing"))?;
+    let conductivity_s_m = source.value_si();
+    if source.requirement().quantity() != QuantitySpec::dimensional(ELECTRICAL_CONDUCTIVITY_DIMS)
+        || !source.is_static_at_fixed_external_conditions()
+        || !conductivity_s_m.is_finite()
+        || conductivity_s_m < 0.0
+    {
+        return Err(invalid(
+            "DC leakage requires nonnegative conductivity at fixed external conditions",
+        ));
+    }
+    Ok(conductivity_s_m)
+}
+
 impl ResolvedLeakyDielectric {
     /// Adopt a DC conductivity from the complete source bundle already retained
     /// by the Debye law. No second resolution or duplicate source bundle is made.
@@ -74,33 +107,18 @@ impl ResolvedLeakyDielectric {
         dielectric: ResolvedDebyeMaterial,
         conductivity_property: &str,
     ) -> Result<Self, FieldStorageError> {
-        if conductivity_property.trim().is_empty()
-            || conductivity_property == dielectric.high_frequency_property()
-            || dielectric.pole_properties().iter().any(|pole| {
-                conductivity_property == pole.permittivity_increment
-                    || conductivity_property == pole.relaxation_time
-            })
-        {
-            return Err(invalid(
-                "DC leakage requires its own nonempty source property name",
-            ));
-        }
-        let key = PropertyKey::new(conductivity_property, ELECTRICAL_CONDUCTIVITY_DIMS);
-        let source = dielectric
-            .material()
-            .property_by_key(&key)
-            .ok_or_else(|| invalid("resolved DC leakage conductivity is missing"))?;
-        let conductivity_s_m = source.value_si();
-        if source.requirement().quantity()
-            != QuantitySpec::dimensional(ELECTRICAL_CONDUCTIVITY_DIMS)
-            || !source.is_static_at_fixed_external_conditions()
-            || !conductivity_s_m.is_finite()
-            || conductivity_s_m < 0.0
-        {
-            return Err(invalid(
-                "DC leakage requires nonnegative conductivity at fixed external conditions",
-            ));
-        }
+        let conductivity_s_m = dc_conductivity(
+            dielectric.material(),
+            conductivity_property,
+            core::iter::once(dielectric.high_frequency_property()).chain(
+                dielectric.pole_properties().iter().flat_map(|pole| {
+                    [
+                        pole.permittivity_increment.as_str(),
+                        pole.relaxation_time.as_str(),
+                    ]
+                }),
+            ),
+        )?;
         Ok(Self {
             dielectric,
             conductivity_property: conductivity_property.to_owned(),

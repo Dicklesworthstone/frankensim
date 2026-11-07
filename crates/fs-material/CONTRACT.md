@@ -20858,3 +20858,33 @@ work, phase, source rotations, exact frequency slopes, interior strain admission
 source incompatibility, budgets and cancellation. These tests have not been
 compiled or executed because the workspace is unavailable; source review and
 exact remote blob readback do not substitute for native execution.
+
+### Source-owned conduction with inertial dielectric resonance
+
+`field_storage::dielectric::lorentz::leaky::ResolvedLeakyLorentzMaterial`
+binds the original Lorentz material to an independently selected scalar DC
+conductivity. Adoption moves the existing complete source snapshot without
+re-resolution, cloning it, or dropping unrelated multiphysics roles. The
+one-shot resolver uses the same bounded Lorentz requirement builder and adds
+the separate conductivity role. Angular natural frequencies retain their
+original quantity semantics; pole damping and conductivity independently admit
+exact zero. Both Debye and Lorentz composition use the same DC source gate.
+Missing or aliased roles, wrong quantities, negative/nonfinite values, and
+unowned frequency/field/strain/stress restrictions refuse.
+
+The consuming decomposition supplies the unchanged original dielectric, exact
+conductivity property name and source value to the existing spatial owner.
+Polarization current remains dP/dt, with separate restoring/kinetic storage and
+physical pole-friction heat. Conduction contributes sigma E and sigma |E|^2,
+without storage; the selected DC source must exclude the loss already assigned
+to resonant poles. The field owner enforces total-current continuity and owns
+conduction integration, boundary work and heat deposition. No duplicate local
+oscillator, integrator, coefficient fit or material-refresh path is introduced.
+This remains fixed-condition isotropic Ohmic transport, without carrier inertia,
+anisotropic conductivity, breakdown, induction or measured qualification.
+
+Three focused G0/G1 source regressions are authored for complete identity and
+role retention, independent zero/finite-conductivity and zero/finite-pole-loss
+limits, unchanged original polarization/current recovery, and source refusals.
+Formatting and a focused source review pass. These integration tests are not
+claimed executed without the complete material dependency closure.

@@ -27,6 +27,8 @@ use fs_qty::{
     semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm},
 };
 
+/// Independent DC Ohmic conduction sharing the original resonant source bundle.
+pub mod leaky;
 pub mod oscillator;
 pub use oscillator::{
     LorentzError, LorentzHarmonicTransfer, LorentzMidpointPoleStep, LorentzPole, LorentzState,
@@ -99,6 +101,36 @@ fn admit_names(high: &str, poles: &[LorentzPoleProperties]) -> Result<(), FieldS
     Ok(())
 }
 
+fn requirements(
+    high_frequency_property: &str,
+    properties: &[LorentzPoleProperties],
+) -> Result<Vec<ScalarPropertyRequirement>, FieldStorageError> {
+    admit_names(high_frequency_property, properties)?;
+    let mut requirements = vec![ScalarPropertyRequirement::try_new(
+        high_frequency_property,
+        ELECTRIC_PERMITTIVITY_DIMS,
+        ScalarAdmissibility::StrictlyPositive,
+    )?];
+    for names in properties {
+        requirements.push(ScalarPropertyRequirement::try_new(
+            &names.permittivity_increment,
+            ELECTRIC_PERMITTIVITY_DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        )?);
+        requirements.push(ScalarPropertyRequirement::try_with_quantity(
+            &names.angular_frequency,
+            angular_quantity(),
+            ScalarAdmissibility::StrictlyPositive,
+        )?);
+        requirements.push(ScalarPropertyRequirement::try_new(
+            &names.damping_rate,
+            RATE,
+            ScalarAdmissibility::NonNegative,
+        )?);
+    }
+    Ok(requirements)
+}
+
 fn parameter(
     material: &ResolvedMaterialStatePoint,
     name: &str,
@@ -168,29 +200,7 @@ impl ResolvedLorentzMaterial {
         high_frequency_property: &str,
         properties: &[LorentzPoleProperties],
     ) -> Result<Self, FieldStorageError> {
-        admit_names(high_frequency_property, properties)?;
-        let mut requirements = vec![ScalarPropertyRequirement::try_new(
-            high_frequency_property,
-            ELECTRIC_PERMITTIVITY_DIMS,
-            ScalarAdmissibility::StrictlyPositive,
-        )?];
-        for names in properties {
-            requirements.push(ScalarPropertyRequirement::try_new(
-                &names.permittivity_increment,
-                ELECTRIC_PERMITTIVITY_DIMS,
-                ScalarAdmissibility::StrictlyPositive,
-            )?);
-            requirements.push(ScalarPropertyRequirement::try_with_quantity(
-                &names.angular_frequency,
-                angular_quantity(),
-                ScalarAdmissibility::StrictlyPositive,
-            )?);
-            requirements.push(ScalarPropertyRequirement::try_new(
-                &names.damping_rate,
-                RATE,
-                ScalarAdmissibility::NonNegative,
-            )?);
-        }
+        let requirements = requirements(high_frequency_property, properties)?;
         Self::try_from_material(
             resolve_material_state_point(card, point, &requirements, selection)?,
             high_frequency_property,
