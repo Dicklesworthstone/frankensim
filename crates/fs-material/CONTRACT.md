@@ -19680,3 +19680,53 @@ These are synthetic implementation checks, not measured component-life evidence.
 `thermochemical_gas::energy::parcel::transfer::species::diffusion::thermal` prepares an original NASA species catalog and complete pinned binary-diffusivity, mass-specific heat-of-transport and zero-diffusive-flux conductivity sources. Actual traces and the central face requery those same claims. Only owned canonical temperature/pressure dependence is admitted. A reusable Maxwell–Stefan workspace supplies the mass-average molecular flux; centered heat-of-transport coefficients couple Soret forcing to reciprocal heat. Original NASA enthalpy/entropy increments form divided caloric enthalpies, so heat added to existing donor-enthalpy transport includes the finite-distance caloric correction without subtracting arbitrary formation references. Common exact zeros stay absent, positive trace species are retained, and one-sided logarithmic zeros refuse.
 
 The thermal network samples every edge from one unchanged snapshot, then combines molecular masses and additional heat with all existing authored transport paths before one inventory/caloric reconstruction per parcel. Gross original-species withdrawals, mass/energy budgets, pinned source support on the combined endpoint and actual total entropy are checked before publication. This is explicit first-order finite-volume transport, with authored local T/p limits; it supplies no implicit stability guarantee, momentum closure, thermal transpiration, source uncertainty bound or empirical coefficient inference. Six analytic/source/native-network tests cover Soret counterflow, reciprocal heat, variable-Cp divided-enthalpy entropy pairing, common-heat and formation-reference invariance, exact-zero/trace behavior, original endpoint source support, cancellation and coupled conservation.
+
+## Original measured hardening, rate dependence and thermal source transport
+
+The tabulated J2 family retains the original accumulated-equivalent-plastic-strain
+knots and bounded nondecreasing absolute yield ordinates. Its isotropic free
+energy is the exact integral of resistance above the initial yield stress.
+Isothermal source preparation distinguishes the exact Cauchy and Kirchhoff
+property names; total or engineering tensile strain is not silently converted.
+Original material identity, claim, policy, uncertainty, fixed context and each
+queried observation remain inspectable. Prepared constitutive iterations do not
+query the material database or allocate observation receipts.
+
+`TabulatedOverstressJ2` selects linear or power-law associative Perzyna flow at an
+explicit physical duration. Linear flow uses the shared piecewise-linear scalar
+return; nonlinear flow locates one measured segment and uses a bounded monotone
+log-increment solve. The original J2/Prager tensor return, consistent tangent and
+history remain authoritative. Layered-section energy receives the same duration.
+Recoverable table storage, initial-yield loss, viscous loss and integration loss
+remain separate; only physical yield/viscous loss is heat. Machine-scale
+last-knot consistency roundoff is bounded inside the measured domain without
+admitting a physical overshoot.
+
+Finite thermal tables retain fixed strain knots with affine temperature-dependent
+Kirchhoff ordinates. Endpoint admission proves positive nondecreasing resistance
+over the declared interval. The exact signed temperature derivative of table
+storage contributes to entropy, internal energy, coefficient work and reversible
+caloric exchange, including an endpoint curve that becomes a plateau. It adds no
+fixed-history heat-capacity correction because this hardening free energy is
+affine in temperature. Perzyna and simultaneous primary/secondary Norton flow
+retain the same table and native plastic/creep histories.
+
+`resolve_thermal_tabulated_hardening` requires original complete strain/absolute-
+temperature grids, measured family endpoints and affine columns across every
+intervening source row. All original sample receipts survive, including samples
+outside a narrower requested thermal interval. TabulatedOnly observations remain
+discrete evidence for explicitly selected constitutive interpolation. LinearInside
+triangles additionally require a compatible affine plane and original continuous
+rectangle support; bilinear and triangular interpolation are not interchangeable.
+Holes, thermal derivative kinks, single-temperature derivatives and extrapolation
+refuse.
+
+The finite thermal source has separate tabulated affine, Perzyna, Norton/J2 and
+primary Norton/J2 selectors. Thirteen mechanical/thermal parameters remain
+explicit; competing scalar yield/hardening values and their slopes are rejected.
+The same-card surface supplies those coefficients and derivatives. Law/state
+versions retain the existing one/two distinction for simultaneous creep. The
+original source result is shared across family clones. Added material, source and
+structural regression fixtures are synthetic numerical cases, not measured
+calibration. Rust syntax and scoped whitespace were checked; native compilation
+and regression execution remain unverified in the resource-constrained session.

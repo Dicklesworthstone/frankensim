@@ -1,5 +1,8 @@
 //! Synthetic finite thermoplastic source transport, not experimental calibration.
 
+#[path = "plastic_finite_thermal_source/tabulated.rs"]
+mod tabulated;
+
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, Provenance, QueryPoint,

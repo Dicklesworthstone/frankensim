@@ -114,6 +114,11 @@ use super::{
     AffineThermalFiniteJ2, FiniteJ2TemperatureSlopes, FiniteJ2ThermalOverstress,
     FiniteJ2ThermalParameters, FiniteNortonThermalParameters, FiniteThermalJ2Material,
 };
+use crate::plastic::tabulated::thermal_source::ResolvedThermalTabulatedHardening;
+use std::sync::Arc;
+
+/// Original two-coordinate hardening observations on the complete thermal owner.
+pub mod tabulated;
 use crate::MaterialError;
 use crate::creep::StrainHardeningCreep;
 use crate::plastic::finite::{FiniteJ2Limits, FiniteJ2Parameters};
@@ -212,6 +217,7 @@ pub struct ResolvedAffineThermalFiniteJ2 {
     context: QueryPoint,
     temperature_axis: String,
     law: AffineThermalFiniteJ2,
+    tabulated_hardening_source: Option<Arc<ResolvedThermalTabulatedHardening>>,
 }
 
 impl ResolvedAffineThermalFiniteJ2 {
@@ -229,6 +235,16 @@ impl ResolvedAffineThermalFiniteJ2 {
         temperature_axis: &str,
     ) -> Result<Self, MaterialError> {
         let law = parse_law(card)?;
+        Self::admit_family(card, context, temperature_axis, law, None)
+    }
+
+    fn admit_family(
+        card: &ConstitutiveModelCard,
+        context: &QueryPoint,
+        temperature_axis: &str,
+        law: AffineThermalFiniteJ2,
+        tabulated_hardening_source: Option<Arc<ResolvedThermalTabulatedHardening>>,
+    ) -> Result<Self, MaterialError> {
         let absolute = QuantitySpec::semantic(SemanticType::new(
             QuantityKind::AbsoluteTemperature,
             ValueForm::Static,
@@ -282,6 +298,7 @@ impl ResolvedAffineThermalFiniteJ2 {
             context: context.clone(),
             temperature_axis: temperature_axis.to_owned(),
             law,
+            tabulated_hardening_source,
         })
     }
 
@@ -303,6 +320,12 @@ impl ResolvedAffineThermalFiniteJ2 {
     /// Native thermodynamic family; all original-volume conventions stay intact.
     pub const fn law(&self) -> &AffineThermalFiniteJ2 {
         &self.law
+    }
+
+    /// Original selected temperature/strain observations, shared across clones.
+    /// None retains the existing scalar linear/Voce source selection.
+    pub fn tabulated_hardening_source(&self) -> Option<&ResolvedThermalTabulatedHardening> {
+        self.tabulated_hardening_source.as_deref()
     }
 }
 

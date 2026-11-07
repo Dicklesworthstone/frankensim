@@ -16,6 +16,8 @@
 pub mod source;
 /// Associative Perzyna flow over the same bounded measured hardening curve.
 pub mod rate;
+/// Original strain/temperature observations on the affine thermal finite owner.
+pub mod thermal_source;
 
 use super::energy::{EnergyError, EnergyIncrement, EnergyTolerances, StoredEnergy};
 use super::{J2Plasticity, J2State, Update};
