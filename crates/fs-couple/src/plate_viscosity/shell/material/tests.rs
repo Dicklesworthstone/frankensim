@@ -15,7 +15,7 @@ use fs_plate::PlateSection;
 use fs_plate::shell::{CstDktMass, ShellSupport, assemble_shell_with_mass};
 use fs_qty::DynViscosity;
 
-fn source(values: [f64; 6], band: (f64, f64)) -> Arc<PlaneStressViscosity> {
+pub(super) fn source(values: [f64; 6], band: (f64, f64)) -> Arc<PlaneStressViscosity> {
     let mut claims = ClaimSet::new();
     let mut requirements = Vec::new();
     for (key, value) in KEYS.into_iter().zip(values) {
@@ -73,7 +73,7 @@ fn source(values: [f64; 6], band: (f64, f64)) -> Arc<PlaneStressViscosity> {
     Arc::new(PlaneStressViscosity::from_material(state, MaterialPlane::Axes12, KEYS).unwrap())
 }
 
-fn fixture() -> (ShellMesh, ShellModel, Vec<ModePair>) {
+pub(super) fn fixture() -> (ShellMesh, ShellModel, Vec<ModePair>) {
     let mesh = ShellMesh::new(
         vec![[0.0, 0.0, 0.0], [0.2, 0.0, 0.0], [0.0, 0.1, 0.0]],
         vec![[0, 1, 2]],
@@ -101,7 +101,7 @@ fn fixture() -> (ShellMesh, ShellModel, Vec<ModePair>) {
     (mesh, model, modes)
 }
 
-fn limits() -> PlateViscosityLimits {
+pub(super) fn limits() -> PlateViscosityLimits {
     PlateViscosityLimits {
         max_modes: 12,
         max_projection_terms: 2_000_000,

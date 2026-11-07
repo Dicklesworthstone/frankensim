@@ -2231,3 +2231,16 @@ error certification. The four native regressions in
 inertia, mixed-layer motion/heat/frequency slopes and original layer-domain
 refusals. Formatting/parsing checks passed; native execution remains pending
 because the original dependency graph exceeds this session's available memory.
+
+## Positive scaling of admitted shell material channels
+
+`ShellViscosity::scaled` applies a finite positive multiplier to the original
+A/B/D resultants and its square root to their cached passive strain channels.
+The original factor is retained: reconstructing it from rounded scaled matrix
+entries can distort a resolved weak correlated direction. Exact zeros, signed
+couplings and the factor-one identity survive; nonzero coefficient/channel
+underflow or overflow refuses. This fixed-size material operation performs no
+new factorization and supplies no source-temperature or frequency authority.
+The source-bound shell temperature bridge exercises actual affine CST strain
+work across warm/cold factors, including a case where re-factorization lost
+4.04% of the original weak-channel scaling.

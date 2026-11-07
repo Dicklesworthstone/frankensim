@@ -10,6 +10,7 @@ use super::{ModalPlateViscosity, PlateViscosityLimits, ShellViscosity, invalid, 
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_exec::CancelGate;
 use fs_material::plane_stress_viscosity::PlaneStressViscosity;
+use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftState};
 use fs_modal::ModePair;
 use fs_plate::shell::{ShellMesh, ShellModel};
 use std::sync::Arc;
@@ -22,6 +23,9 @@ pub struct ShellMaterialViscosity {
     thickness_m: f64,
     material_angle_rad: f64,
     section: ShellViscosity,
+    reference_section: Arc<ShellViscosity>,
+    temperature_shift_state: Option<TemperatureShiftState>,
+    omega_band_rad_s: (f64, f64),
 }
 
 impl ShellMaterialViscosity {
@@ -62,11 +66,51 @@ impl ShellMaterialViscosity {
             ));
         }
         let section = ShellViscosity::new(membrane, bending).map_err(owner)?;
+        let reference_section = Arc::new(section.clone());
+        let omega_band_rad_s = source.omega_band_rad_s();
         Ok(Self {
             source,
             thickness_m,
             material_angle_rad,
             section,
+            reference_section,
+            temperature_shift_state: None,
+            omega_band_rad_s,
+        })
+    }
+
+    /// Prepare loss and source support at one fixed temperature using the
+    /// original calibrated material owner. Each call starts from this facet's
+    /// immutable reference source, even if this object is already shifted;
+    /// repeatedly selecting a temperature therefore never compounds a shift.
+    ///
+    /// Original rotation, thickness integration and passive channels are
+    /// retained together. A/D scale by the positive shift and their channels
+    /// by its square root, preserving weak physical work without re-factoring
+    /// rounded coefficients. Elasticity, inertia and the source query are
+    /// unchanged. This is cold preparation, not thermal-history integration.
+    pub fn at_temperature(
+        &self,
+        shift: &TemperatureShift,
+        temperature_axis: &str,
+        temperature_k: f64,
+    ) -> Result<Self, AcousticRealizeError> {
+        let shifted = shift
+            .shift_plane_stress_viscosity(&self.source, temperature_axis, temperature_k)
+            .map_err(owner)?;
+        let state = *shifted.state();
+        let section = self
+            .reference_section
+            .scaled(state.factor())
+            .map_err(owner)?;
+        Ok(Self {
+            source: Arc::clone(&self.source),
+            thickness_m: self.thickness_m,
+            material_angle_rad: self.material_angle_rad,
+            section,
+            reference_section: Arc::clone(&self.reference_section),
+            temperature_shift_state: Some(state),
+            omega_band_rad_s: shifted.law().omega_band_rad_s(),
         })
     }
 
@@ -85,6 +129,15 @@ impl ShellMaterialViscosity {
     /// Prepared physical A/D resultants, with exact zero coupling B.
     pub const fn section(&self) -> &ShellViscosity {
         &self.section
+    }
+    /// Actual fixed-temperature declaration, absent for an unshifted source.
+    pub const fn temperature_shift_state(&self) -> Option<&TemperatureShiftState> {
+        self.temperature_shift_state.as_ref()
+    }
+    /// Effective applicability at this facet's selected temperature [rad/s].
+    /// The original reference band remains available through [`Self::source`].
+    pub const fn omega_band_rad_s(&self) -> (f64, f64) {
+        self.omega_band_rad_s
     }
 }
 
@@ -142,7 +195,7 @@ impl ModalShellMaterialViscosity {
         let mut band = (0.0_f64, f64::INFINITY);
         for facet in facets {
             poll(gate)?;
-            let support = facet.source.omega_band_rad_s();
+            let support = facet.omega_band_rad_s();
             band = (band.0.max(support.0), band.1.min(support.1));
         }
         if band.1 < band.0 {
@@ -193,5 +246,7 @@ impl ModalShellMaterialViscosity {
     }
 }
 
+#[cfg(test)]
+mod temperature_tests;
 #[cfg(test)]
 mod tests;

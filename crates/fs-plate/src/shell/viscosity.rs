@@ -61,6 +61,49 @@ impl ShellViscosity {
         })
     }
 
+    /// Scale this admitted physical law by one finite positive factor.
+    /// Original A/B/D entries scale directly; cached strain channels scale by
+    /// its square root. Re-factoring rounded scaled coefficients can distort a
+    /// weak correlated direction, so the original passive factor is retained.
+    /// This does not infer temperature, time or source applicability.
+    ///
+    /// Exact source zeros and coupling signs survive. Factor one is an exact
+    /// clone; nonzero coefficient/channel underflow and overflow refuse.
+    pub fn scaled(&self, factor: f64) -> Result<Self, PlateError> {
+        if !factor.is_finite() || factor <= 0.0 {
+            return Err(bad(
+                "shell viscosity scaling requires a finite positive factor",
+            ));
+        }
+        if factor == 1.0 {
+            return Ok(self.clone());
+        }
+        let scale = |value: f64, multiplier: f64| {
+            let next = value * multiplier;
+            if !next.is_finite() || value != 0.0 && next == 0.0 {
+                Err(bad(
+                    "scaled shell viscosity coefficient or physical channel is unrepresentable",
+                ))
+            } else {
+                Ok(next)
+            }
+        };
+        let mut law = self.clone();
+        for value in law
+            .membrane
+            .iter_mut()
+            .chain(&mut law.coupling)
+            .chain(&mut law.bending)
+        {
+            *value = scale(*value, factor)?;
+        }
+        let root = det::sqrt(factor);
+        for value in law.factor.iter_mut().flatten() {
+            *value = scale(*value, root)?;
+        }
+        Ok(law)
+    }
+
     /// Original A/B/D resultants, without rotation, averaging or diagonalization.
     pub const fn matrices(&self) -> ([f64; 9], [f64; 9], [f64; 9]) {
         (self.membrane, self.coupling, self.bending)

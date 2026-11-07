@@ -3984,3 +3984,24 @@ Thermal cell/fiber resolution and reference transport coefficients remain
 explicit caller choices. The extension does not establish finite-rotation
 forming, deformed heat-transfer geometry, experimental material validation or
 a global time-accuracy certificate.
+
+## Source-bound shell viscosity at a prepared temperature
+
+`ShellMaterialViscosity::at_temperature` uses the existing calibrated material
+shift and retains the original homogeneous rotated A/D section and its passive
+factor. Every snapshot shares the same immutable reference source and section;
+a later temperature selection always starts from those references and cannot
+compound an earlier shift. `ShellViscosity::scaled` scales the original
+coefficients and cached strain channels without re-factoring rounded entries,
+preserving weak correlated physical work. The actual `TemperatureShiftState`
+and transported frequency support accompany the prepared facet. Existing
+constructors keep their unshifted defaults and original source getter semantics.
+
+`ModalShellMaterialViscosity::project` checks actual retained eigenfrequencies
+against the effective facet bands, including zero tensors, before the original
+complete spatial/modal projection. Thickness, orientation, original mass,
+elasticity and modes are unchanged; existing physical channels own the heat.
+Tests verify rotated A/D and full modal-matrix/power scaling, repeatable
+temperature changes, reference-source identity and both expanded and contracted
+frequency admission. This is fixed-temperature preparation without live heat
+feedback or changes to elastic stiffness.
