@@ -15,6 +15,7 @@
 //! not inferred from a bare surface or from the depositing species' name.
 
 /// Error-controlled complete heat/coating/gas histories, including bare surfaces.
+#[path = "coating/adaptive.rs"]
 pub mod adaptive;
 
 use std::cell::RefCell;
