@@ -1,5 +1,38 @@
 # fs-solid CONTRACT
 
+## Conservative midpoint tensile onset and native fracture replay
+
+`initiation::dynamics::TensileElasticTetMotion::probe_midpoint` advances the
+original elastic prehistory through the native centered inertia and P1 Newton
+owners. Its borrowed original elastic backbone supplies exact path-mean stress
+and the analytic endpoint derivative C/2. Physical endpoint stresses are
+restored before the shared tensile detector and elastic-storage observation;
+the accepted step exposes mean stresses separately.
+
+Actual interval-mean dead forces and complete support reactions do work on the
+original displacement increment. Elastic work/storage, mean response work,
+equilibrium work, retained kinetic storage and the complete energy balance have
+independent admission gates. Native numerical kinetic loss must be exactly
+zero; numerical damping is never charged as physical fracture or heat. The
+same cached consistent reference mass and source density survive each step.
+
+`TensileTetMidpointOnset` privately retains the original motion, physical
+interval, ordered mean forces, endpoint supports and solver settings. It
+exposes no backward-Euler or static-load replay. Discovered planes and geometric
+widths pass through the original source-bound seed; the OLD accepted motion
+transfers without impulse, new fracture work or consumed time. Replay uses
+`BrittleTetMotion::advance_midpoint` with that exact mean-force request. A
+refused solve, handoff or work account leaves the original motion usable.
+
+The native detector still observes an affine strain chord, not a certified
+continuous-time event. Exact supplied-path work does not remove oscillator
+frequency warping or resolve unseen reversals. Physical timestep refinement,
+the original tensile-only criterion and fixed receiving planes remain explicit
+model limits. Two native regression definitions cover nonzero-preload and
+nonzero-velocity oscillation with independent phase/energy formulas, followed
+by inertial onset, conservative handoff and native softening replay with moving
+supports and original duplicate force entries.
+
 ## Native inertial tensile initiation and conservative brittle replay
 
 `initiation::dynamics::TensileElasticTetMotion` continues an accepted elastic

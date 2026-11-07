@@ -14,6 +14,9 @@
 //! solves the original physical interval with the original nonlinear brittle
 //! motion owner; the over-strength elastic predictor is never accepted.
 
+/// Exact elastic mean force and centered inertia, with native midpoint replay.
+pub mod midpoint;
+
 use std::sync::Arc;
 
 use super::{TensileElasticTetSolid, TensileTetInitiationError, TensileTetOnset, TensileTetProbe};

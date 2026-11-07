@@ -1,6 +1,9 @@
 //! G1: consistent-mass inertia, discovered tensile planes and original replay.
 //! Manufactured elastic/softening references are implementation checks only.
 
+#[path = "dynamics/midpoint.rs"]
+mod midpoint;
+
 use super::*;
 use fs_material::brittle::source::dynamics::resolve_brittle_dynamic_material;
 use fs_material::state_point::DENSITY_PROPERTY;
