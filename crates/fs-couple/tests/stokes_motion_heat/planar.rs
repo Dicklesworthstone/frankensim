@@ -1,12 +1,15 @@
 //! G1 analytic heat, G3 owner parity and G4 atomic planar heat composition.
 
 use super::{
-    CP, DEPTH, MU, RHO, SPEED, WALL, Caloric, SingleRead, binding, config, exterior, fluid,
+    CP, DEPTH, MU, RHO, SPEED, WALL, Caloric, ClockedHeat, CoupledHeatRefusal, SingleRead,
+    binding, config, exterior, fluid,
     initial_thermal, initial_thermal_with_events, motion, near, shear, slip_exterior,
     slip_routes, thermal_config, top_edges, wall_cell, zero,
 };
 use fs_couple::stokes_motion::GuidedStokesControls;
-use fs_couple::stokes_motion::heating::{PlanarStokesHeatError, PlanarStokesHeatStep};
+use fs_couple::stokes_motion::heating::{
+    PlanarStokesHeatError, PlanarStokesHeatStep, PlanarStokesObservedHeatError,
+};
 use fs_couple::stokes_motion::planar::{
     PlanarStokesConfig, PlanarStokesControls, PlanarStokesError, PlanarStokesMotion,
 };
@@ -294,4 +297,130 @@ fn g1_planar_navier_slip_heat_is_partitioned_once_after_complete_route_admission
     near(fluid_heat, bulk + 0.25 * slip, 2e-10);
     assert_eq!(source.0.get(), 1, "thermalization must not resolve material twice");
     assert_eq!(thermal.time_s(), motion.state().time_s());
+}
+
+
+#[test]
+fn observed_planar_heat_preserves_rotation_slip_and_atomic_observer_history() {
+    let law = Caloric { maximum_h: 100.0 };
+    for with_slip in [false, true] {
+        let n = if with_slip { 1 } else { 2 };
+        let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, n, n));
+        let system = FluxSystem::new(&mesh);
+        let fluid = fluid();
+        let edges = top_edges(&mesh);
+        let gamma = if with_slip { SPEED / 2.0 } else { SPEED };
+        let omega = if with_slip { 0.0 } else { 0.12 };
+        let slip = SPEED - gamma;
+        let field = |x: [f64; 2]| [slip + gamma * x[1], omega * (x[0] - 0.5)];
+        let stress = MU * (gamma + omega);
+        let traction = |_: [f64; 2], normal: [f64; 2]| [stress * normal[1], stress * normal[0]];
+        let boundaries: Vec<_> = if with_slip {
+            slip_exterior(&mesh, &edges, MU, &zero, &traction)
+        } else {
+            (0..mesh.edges.len())
+                .filter(|edge| mesh.is_boundary(*edge) && !edges.contains(edge))
+                .map(|edge| MaterialStokesBoundary::Velocity { edge, value: &field })
+                .collect()
+        };
+        let routes = slip_routes(&boundaries, 0.25);
+        let pressure = [if with_slip { None } else { Some(0.0) }];
+        let (original, ids) = initial_thermal_with_events(
+            &mesh, &law, true,
+            |i, cell| { if i == 0 { cell.specific_h_j_kg = 1.0; } },
+            vec![TimedEvent { time_s: 0.0, event: Event::Birth(wall_cell(DEPTH)) }],
+        );
+        let advance = |
+            owner: &mut PlanarStokesMotion<'_, '_, '_, FluidTransportState>,
+            thermal: &mut DepositionSimulation<'_>,
+            observer: &mut ClockedHeat,
+            cancelled: &mut dyn FnMut() -> bool,
+        | {
+            if with_slip {
+                owner.step_with_slip_heating_observed(
+                    thermal, observer, binding(&ids), &routes, 0.05, &zero, &boundaries,
+                    &pressure, [DEPTH * stress, 0.0], 0.0, PlanarStokesControls::default(),
+                    thermal_config(), cancelled,
+                )
+            } else {
+                owner.step_with_heating_observed(
+                    thermal, observer, binding(&ids), 0.05, &zero, &boundaries,
+                    &pressure, [DEPTH * stress, 0.0], 0.0, PlanarStokesControls::default(),
+                    thermal_config(), cancelled,
+                )
+            }
+        };
+        let mut owner = planar_motion(&system, &fluid, &edges, field, [SPEED, 0.0, omega]);
+        let mut thermal = original.clone();
+        let mut observer = ClockedHeat::new(ids[0]);
+        let mut polls = 0;
+        let step = advance(&mut owner, &mut thermal, &mut observer, &mut || {
+            polls += 1;
+            false
+        }).unwrap();
+        let bulk_heat = 0.05 * DEPTH * MU * (gamma + omega).powi(2);
+        let slip_heat = 0.05 * DEPTH * MU * slip * slip;
+        let observed_heat = 0.015 * 0.01 + 0.035 * 0.03 + 0.2 * 0.05 * 0.05;
+        let total_heat = bulk_heat + slip_heat + observed_heat + 0.03 * 0.8;
+        near(step.motion.velocity_m_s[0], SPEED, 2e-8);
+        near(step.motion.angular_velocity_rad_s, omega, 2e-8);
+        near(owner.state().rotation_rad(), 0.05 * omega, 2e-9);
+        near(step.deposited_viscous_heat_j, bulk_heat, 2e-10);
+        near(step.deposited_slip_heat_j, slip_heat, 2e-10);
+        near(observer.heat_j, observed_heat, 1e-14);
+        near(step.thermal.external_heat_j, total_heat, 2e-10);
+        near(step.thermal.stored_energy_change_j, total_heat, 2e-10);
+        near(step.thermal.residual_j, 0.0, 1e-12);
+        near(
+            thermal.cells()[&WALL].specific_h_j_kg,
+            0.75 * slip_heat / thermal.cells()[&WALL].mass_kg,
+            2e-9,
+        );
+        assert_eq!(observer.begins, 1);
+        assert_eq!(observer.events, 1);
+        assert_eq!(step.thermal.events, 1);
+        assert_eq!(step.thermal.substeps, observer.starts_and_durations.len());
+        assert!(observer.starts_and_durations.iter().any(|&(start, _)| start == 0.015));
+        assert!(observer.starts_and_durations.iter().any(|&(start, _)| start == 0.02));
+        assert_eq!(thermal.links(), original.links());
+        assert_eq!(thermal.time_s(), 0.05);
+        assert_eq!(owner.state().time_s(), thermal.time_s());
+
+        for refuse in [true, false] {
+            let mut retry = planar_motion(&system, &fluid, &edges, field, [SPEED, 0.0, omega]);
+            let old_motion = retry.state().clone();
+            let mut retry_thermal = original.clone();
+            let mut retry_observer = ClockedHeat::new(ids[0]);
+            retry_observer.refuse_at_s = refuse.then_some(0.03);
+            let old_observer = retry_observer.clone();
+            let mut attempts = 0;
+            let refusal = advance(
+                &mut retry, &mut retry_thermal, &mut retry_observer, &mut || {
+                    attempts += 1;
+                    !refuse && attempts == polls
+                },
+            );
+            if refuse {
+                assert!(matches!(refusal, Err(PlanarStokesObservedHeatError::Observer(
+                    CoupledHeatRefusal::Endpoint
+                ))));
+            } else {
+                assert!(matches!(refusal, Err(PlanarStokesObservedHeatError::Heat(
+                    PlanarStokesHeatError::Motion(PlanarStokesError::Cancelled)
+                ))));
+            }
+            assert_eq!(retry.state(), &old_motion);
+            assert_eq!(retry_thermal.time_s(), original.time_s());
+            assert_eq!(retry_thermal.cells(), original.cells());
+            assert_eq!(retry_thermal.links(), original.links());
+            assert_eq!(retry_observer, old_observer);
+
+            retry_observer.refuse_at_s = None;
+            advance(&mut retry, &mut retry_thermal, &mut retry_observer, &mut || false).unwrap();
+            assert_eq!(retry.state(), owner.state());
+            assert_eq!(retry_thermal.time_s(), thermal.time_s());
+            assert_eq!(retry_thermal.cells(), thermal.cells());
+            assert_eq!(retry_observer, observer);
+        }
+    }
 }

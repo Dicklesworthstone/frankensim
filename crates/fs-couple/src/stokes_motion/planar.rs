@@ -14,8 +14,8 @@
 //! tangential SIP treatment retain their original meanings.
 
 use super::heating::{
-    PlanarStokesHeatError, PlanarStokesHeatStep, StokesHeatBinding, StokesSlipHeatRoute,
-    StokesThermalCells,
+    PlanarStokesHeatError, PlanarStokesHeatStep, PlanarStokesObservedHeatError, StokesHeatBinding,
+    StokesSlipHeatRoute, StokesThermalCells, unobserved_planar_error,
 };
 use super::{nonnegative, positive, solve_body_velocity};
 use fs_flux::{
@@ -25,7 +25,7 @@ use fs_flux::{
 use fs_la::{LuWorkspace, LuWorkspaceError};
 use fs_material::fluid_transport::FluidTransport;
 use fs_mbd::{DynamicsError, MassProperties, MomentumImpulseReceipt, Pose, RigidBodyState, Vec3};
-use fs_thermal::enthalpy::{DepositionSimulation, StepConfig};
+use fs_thermal::enthalpy::{DepositionObserver, DepositionSimulation, StepConfig};
 
 /// Physical whole-body coefficients, including the declared extrusion depth.
 /// Springs are independent in the fixed x/y/angle coordinates with rest at the
@@ -788,10 +788,11 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarStokesMotion<'s, 'm, 'a, F> {
         cancelled: impl FnMut() -> bool,
     ) -> Result<PlanarStokesHeatStep, PlanarStokesHeatError> {
         self.step_heating(
-            thermal, cells, None, timestep_s, force_density, exterior,
+            thermal, &mut (), cells, None, timestep_s, force_density, exterior,
             pressure_offsets_pa, external_force_n, external_torque_n_m, controls,
             thermal_config, cancelled,
         )
+        .map_err(unobserved_planar_error)
     }
 
     /// Also deposit native Navier-slip loss with an explicit fluid/wall split.
@@ -823,16 +824,91 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarStokesMotion<'s, 'm, 'a, F> {
         cancelled: impl FnMut() -> bool,
     ) -> Result<PlanarStokesHeatStep, PlanarStokesHeatError> {
         self.step_heating(
-            thermal, cells, Some(routes), timestep_s, force_density, exterior,
+            thermal, &mut (), cells, Some(routes), timestep_s, force_density, exterior,
+            pressure_offsets_pa, external_force_n, external_torque_n_m, controls,
+            thermal_config, cancelled,
+        )
+        .map_err(unobserved_planar_error)
+    }
+
+    /// Advance planar viscous heating with another owner on the common thermal clock.
+    ///
+    /// The same observer composition as the guided path forwards every source,
+    /// transition, interval, conductance, exchange and timestep hook. Additional
+    /// heat enters the native audit once; the separate Stokes receipts retain
+    /// only the original bulk and interfacial dissipation.
+    ///
+    /// The observer's `Clone` must isolate mutable physical history according to
+    /// `DepositionObserver`. Motion, thermal state and accepted observer history
+    /// publish together after all acceptance checks and the final cancellation
+    /// poll. Additional thermal physics does not change the fixed reference mesh
+    /// or the frozen fluid transport used by the native planar motion solve.
+    /// The time-refinement requirements of [`Self::step_with_heating`] apply.
+    ///
+    /// # Errors
+    /// Native map, motion, thermal, observer or cancellation failures preserve
+    /// all three inputs, including refusals after successful thermal substeps.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_heating_observed<O: DepositionObserver>(
+        &mut self,
+        thermal: &mut DepositionSimulation<'_>,
+        observer: &mut O,
+        cells: StokesThermalCells<'_>,
+        timestep_s: f64,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        exterior: &[MaterialStokesBoundary<'_>],
+        pressure_offsets_pa: &[Option<f64>],
+        external_force_n: [f64; 2],
+        external_torque_n_m: f64,
+        controls: PlanarStokesControls,
+        thermal_config: StepConfig,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PlanarStokesHeatStep, PlanarStokesObservedHeatError<O::Error>> {
+        self.step_heating(
+            thermal, observer, cells, None, timestep_s, force_density, exterior,
+            pressure_offsets_pa, external_force_n, external_torque_n_m, controls,
+            thermal_config, cancelled,
+        )
+    }
+
+    /// Also deposit routed Navier-slip heat on that same observed timeline.
+    ///
+    /// The route and partition requirements of [`Self::step_with_slip_heating`]
+    /// and transaction requirements of [`Self::step_with_heating_observed`] apply.
+    /// Bulk and slip heating share the same accepted native flow and heat owner.
+    ///
+    /// # Errors
+    /// Route admission and native motion, thermal, observer or cancellation
+    /// failures preserve every accepted owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_slip_heating_observed<O: DepositionObserver>(
+        &mut self,
+        thermal: &mut DepositionSimulation<'_>,
+        observer: &mut O,
+        cells: StokesThermalCells<'_>,
+        routes: &[StokesSlipHeatRoute],
+        timestep_s: f64,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        exterior: &[MaterialStokesBoundary<'_>],
+        pressure_offsets_pa: &[Option<f64>],
+        external_force_n: [f64; 2],
+        external_torque_n_m: f64,
+        controls: PlanarStokesControls,
+        thermal_config: StepConfig,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PlanarStokesHeatStep, PlanarStokesObservedHeatError<O::Error>> {
+        self.step_heating(
+            thermal, observer, cells, Some(routes), timestep_s, force_density, exterior,
             pressure_offsets_pa, external_force_n, external_torque_n_m, controls,
             thermal_config, cancelled,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn step_heating(
+    fn step_heating<O: DepositionObserver>(
         &mut self,
         thermal: &mut DepositionSimulation<'_>,
+        observer: &mut O,
         cells: StokesThermalCells<'_>,
         routes: Option<&[StokesSlipHeatRoute]>,
         timestep_s: f64,
@@ -844,7 +920,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarStokesMotion<'s, 'm, 'a, F> {
         controls: PlanarStokesControls,
         thermal_config: StepConfig,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<PlanarStokesHeatStep, PlanarStokesHeatError> {
+    ) -> Result<PlanarStokesHeatStep, PlanarStokesObservedHeatError<O::Error>> {
         poll(&mut cancelled)?;
         let binding = StokesHeatBinding {
             mesh: self.system.mesh,
@@ -869,8 +945,9 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarStokesMotion<'s, 'm, 'a, F> {
             controls,
             &mut cancelled,
         )?;
-        let (candidate, audit, heat_j) = binding.advance_heat(
+        let (candidate, accepted_observer, audit, heat_j) = binding.advance_heat_observed(
             thermal,
+            observer,
             cells,
             &routes,
             &motion.flow,
@@ -884,6 +961,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarStokesMotion<'s, 'm, 'a, F> {
         poll(&mut cancelled)?;
         self.state = state;
         *thermal = candidate;
+        *observer = accepted_observer;
         Ok(PlanarStokesHeatStep {
             motion,
             thermal: audit,

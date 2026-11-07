@@ -190,11 +190,77 @@ impl From<DepositionError> for PlanarStokesHeatError {
     }
 }
 
+/// A refused observed planar step preserves every accepted physical history.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PlanarStokesObservedHeatError<E> {
+    /// Original map, motion, thermal, heat-accounting or cancellation refusal.
+    Heat(PlanarStokesHeatError),
+    /// Refusal of the additional owner, retaining its original error type.
+    Observer(E),
+}
+
+impl<E> From<PlanarStokesHeatError> for PlanarStokesObservedHeatError<E> {
+    fn from(error: PlanarStokesHeatError) -> Self { Self::Heat(error) }
+}
+impl<E> From<PlanarStokesError> for PlanarStokesObservedHeatError<E> {
+    fn from(error: PlanarStokesError) -> Self { Self::Heat(error.into()) }
+}
+impl<E> From<DepositionError> for PlanarStokesObservedHeatError<E> {
+    fn from(error: DepositionError) -> Self { Self::Heat(error.into()) }
+}
+impl<E> From<StokesHeatFailure> for PlanarStokesObservedHeatError<E> {
+    fn from(error: StokesHeatFailure) -> Self { Self::Heat(error.into()) }
+}
+impl<E> From<ObserverCouplingError<StokesHeatFailure, E>> for PlanarStokesObservedHeatError<E> {
+    fn from(error: ObserverCouplingError<StokesHeatFailure, E>) -> Self {
+        match error {
+            ObserverCouplingError::Second(error) => Self::Observer(error),
+            ObserverCouplingError::First(error) => Self::Heat(error.into()),
+            ObserverCouplingError::Thermal(error) => Self::Heat(error.into()),
+            ObserverCouplingError::ConflictingConductance(_) => Self::Heat(
+                PlanarStokesHeatError::Binding("conflicting thermal-link conductance owners"),
+            ),
+            ObserverCouplingError::ConflictingReservoirConductance(_) => Self::Heat(
+                PlanarStokesHeatError::Binding("conflicting reservoir-conductance owners"),
+            ),
+            ObserverCouplingError::ConflictingAmbientConductance(_) => Self::Heat(
+                PlanarStokesHeatError::Binding("conflicting ambient-conductance owners"),
+            ),
+        }
+    }
+}
+impl<E: std::fmt::Display> std::fmt::Display for PlanarStokesObservedHeatError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Heat(error) => std::fmt::Display::fmt(error, f),
+            Self::Observer(error) => write!(f, "planar Stokes thermal observer refusal: {error}"),
+        }
+    }
+}
+impl<E: std::error::Error + 'static> std::error::Error for PlanarStokesObservedHeatError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Heat(error) => Some(error),
+            Self::Observer(error) => Some(error),
+        }
+    }
+}
+
+pub(super) fn unobserved_planar_error(
+    error: PlanarStokesObservedHeatError<DepositionError>,
+) -> PlanarStokesHeatError {
+    match error {
+        PlanarStokesObservedHeatError::Heat(error) => error,
+        PlanarStokesObservedHeatError::Observer(error) => error.into(),
+    }
+}
+
 /// Original planar momentum and finite thermal receipts at one accepted time.
 pub struct PlanarStokesHeatStep {
     /// Original planar flow/body endpoint and its separate work accounts.
     pub motion: PlanarStokesStep,
-    /// Native thermal audit, including viscous heat and all authored sources.
+    /// Native thermal audit, including viscous heat, authored sources and any
+    /// additional observer's heat. Internal heat transfers remain conservative.
     pub thermal: EnergyAudit,
     /// Physical bulk heat supplied during native thermal substeps [J].
     /// Already included in `thermal.external_heat_j`; never add it twice.
@@ -238,25 +304,6 @@ impl From<StokesHeatFailure> for PlanarStokesHeatError {
             StokesHeatFailure::Flow(error) => Self::Motion(PlanarStokesError::Flow(error)),
             StokesHeatFailure::Thermal(error) => Self::Thermal(error),
             StokesHeatFailure::Cancelled => Self::Motion(PlanarStokesError::Cancelled),
-        }
-    }
-}
-
-fn unobserved_heat_failure(
-    error: ObserverCouplingError<StokesHeatFailure, DepositionError>,
-) -> StokesHeatFailure {
-    match error {
-        ObserverCouplingError::First(error) => error,
-        ObserverCouplingError::Thermal(error)
-        | ObserverCouplingError::Second(error) => StokesHeatFailure::Thermal(error),
-        ObserverCouplingError::ConflictingConductance(_) => {
-            StokesHeatFailure::Binding("conflicting thermal-link conductance owners")
-        }
-        ObserverCouplingError::ConflictingReservoirConductance(_) => {
-            StokesHeatFailure::Binding("conflicting reservoir-conductance owners")
-        }
-        ObserverCouplingError::ConflictingAmbientConductance(_) => {
-            StokesHeatFailure::Binding("conflicting ambient-conductance owners")
         }
     }
 }
@@ -509,28 +556,6 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
 }
 
 impl StokesHeatBinding<'_> {
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn advance_heat<'a>(
-        &self,
-        thermal: &DepositionSimulation<'a>,
-        cells: StokesThermalCells<'_>,
-        routes: &BTreeMap<usize, StokesSlipHeatRoute>,
-        flow: &MaterialStokesSolution,
-        pressure_offsets_pa: &[Option<f64>],
-        timestep_s: f64,
-        end_time_s: f64,
-        bulk_viscous_heat_j: f64,
-        thermal_config: StepConfig,
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(DepositionSimulation<'a>, EnergyAudit, [f64; 2]), StokesHeatFailure> {
-        self.advance_heat_observed(
-            thermal, &(), cells, routes, flow, pressure_offsets_pa, timestep_s,
-            end_time_s, bulk_viscous_heat_j, thermal_config, cancelled,
-        )
-        .map(|(thermal, (), audit, heat)| (thermal, audit, heat))
-        .map_err(unobserved_heat_failure)
-    }
-
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub(super) fn advance_heat_observed<'a, O: DepositionObserver>(
         &self,
