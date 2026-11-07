@@ -14,6 +14,10 @@
 //! not itself solve heat transport. P1 locking, dry associated compaction and
 //! the declared affine-temperature material limits remain explicit.
 
+/// Independently sealed cavities coupled to the original thermal endpoint.
+pub mod cavity;
+pub use cavity::FiniteThermalPorousCavitiesStep;
+
 use std::sync::Arc;
 
 use fs_exec::Cx;
@@ -24,6 +28,7 @@ use fs_material::plastic::finite::porous::thermal::{
     AffineThermalFinitePorous, FinitePorousThermalError, FinitePorousThermalIncrement,
     FiniteThermalPorousMaterial, FrozenThermalFinitePorous,
 };
+use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_math::dd::Dd;
 
 use super::super::{
@@ -31,6 +36,9 @@ use super::super::{
     reference_size, validate_controls,
 };
 use super::FinitePorousPressureEnergy;
+use super::cavity::cavity_interval_work;
+use crate::hyper3::pressure::cavity::equilibrium::CavityBatch;
+use crate::hyper3::pressure::cavity::{AdiabaticCavity, AdiabaticCavityGas};
 use crate::hyper3::pressure::{ClosedTetPressureSurface, TetPressure};
 use crate::hyper3::{
     HyperTetError, HyperTetProblem, HyperTetSettings, HyperTetSolution, HyperelasticLawField,
@@ -519,7 +527,7 @@ impl<'a, L: FiniteThermalPorousMaterial> FiniteThermalPorousTetSolid<'a, L> {
         )
     }
 
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     fn advance_loaded(
         &self,
         new_temperatures_k: &[f64],
@@ -532,6 +540,35 @@ impl<'a, L: FiniteThermalPorousMaterial> FiniteThermalPorousTetSolid<'a, L> {
         pressure: Option<(&ClosedTetPressureSurface, TetPressure<'_>)>,
         cx: &Cx<'_>,
     ) -> Result<FiniteThermalPorousTetStep<'a, L>, FiniteThermalPorousTetError> {
+        self.advance_cavities_loaded::<ClosedGasParcel>(
+            new_temperatures_k,
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            dt_s,
+            &[],
+            pressure,
+            settings,
+            controls,
+            cx,
+        )
+        .map(|result| result.step)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn advance_cavities_loaded<G: AdiabaticCavityGas>(
+        &self,
+        new_temperatures_k: &[f64],
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        dt_s: f64,
+        cavities: &[AdiabaticCavity<'_, G>],
+        pressure: Option<(&ClosedTetPressureSurface, TetPressure<'_>)>,
+        settings: HyperTetSettings,
+        controls: FiniteThermoplasticControls,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteThermalPorousCavitiesStep<'a, L, G>, FiniteThermalPorousTetError> {
         checkpoint(cx)?;
         validate_controls(settings, controls.material)?;
         if let Some((surface, field)) = pressure {
@@ -591,37 +628,74 @@ impl<'a, L: FiniteThermalPorousMaterial> FiniteThermalPorousTetSolid<'a, L> {
             })
             .transpose()
             .map_err(inertia_error)?;
-        let (equilibrium, force) = if pressure.is_some() {
-            let problem = HyperTetProblem {
-                nodes_m: self.state.nodes_m,
-                tetrahedra: self.state.tetrahedra,
-                material: HyperelasticLawField::PerElement(&frozen),
-                prescribed_m,
-                nodal_forces_n,
-                body_force_n_m3,
-                budget: self.state.budget,
-                settings,
+        let (equilibrium, force, accepted_cavities, cavity_work) =
+            if pressure.is_some() || !cavities.is_empty() {
+                let problem = HyperTetProblem {
+                    nodes_m: self.state.nodes_m,
+                    tetrahedra: self.state.tetrahedra,
+                    material: HyperelasticLawField::PerElement(&frozen),
+                    prescribed_m,
+                    nodal_forces_n,
+                    body_force_n_m3,
+                    budget: self.state.budget,
+                    settings,
+                };
+                let old_u = self.state.displacement_m.as_flattened();
+                if cavities.is_empty() {
+                    let equilibrium = problem.solve_loaded_from(
+                        Some(old_u),
+                        Some(&self.state.elements),
+                        pressure,
+                        None,
+                        inertia.as_ref(),
+                        cx,
+                    )?;
+                    (
+                        equilibrium,
+                        problem.external(&self.state.elements, 1.0),
+                        Vec::new(),
+                        None,
+                    )
+                } else {
+                    let batch =
+                        CavityBatch::new(cavities, self.state.nodes_m, self.state.tetrahedra, cx)?;
+                    let before = batch.evaluate(old_u, cx)?;
+                    let solution = problem.solve_loaded_from_with_cavities(
+                        Some(old_u),
+                        Some(&self.state.elements),
+                        pressure,
+                        None,
+                        inertia.as_ref(),
+                        batch,
+                        cx,
+                    )?;
+                    let work = cavity_interval_work(
+                        cavities,
+                        &before,
+                        &solution.cavities,
+                        old_u,
+                        solution.solid.displacement_m.as_flattened(),
+                        cx,
+                    )?;
+                    (
+                        solution.solid,
+                        problem.external(&self.state.elements, 1.0),
+                        solution.cavities,
+                        Some(work),
+                    )
+                }
+            } else {
+                let (equilibrium, force) = self.state.solve_endpoint(
+                    HyperelasticLawField::PerElement(&frozen),
+                    prescribed_m,
+                    nodal_forces_n,
+                    body_force_n_m3,
+                    settings,
+                    inertia.as_ref(),
+                    cx,
+                )?;
+                (equilibrium, force, Vec::new(), None)
             };
-            let equilibrium = problem.solve_loaded_from(
-                Some(self.state.displacement_m.as_flattened()),
-                Some(&self.state.elements),
-                pressure,
-                None,
-                inertia.as_ref(),
-                cx,
-            )?;
-            (equilibrium, problem.external(&self.state.elements, 1.0))
-        } else {
-            self.state.solve_endpoint(
-                HyperelasticLawField::PerElement(&frozen),
-                prescribed_m,
-                nodal_forces_n,
-                body_force_n_m3,
-                settings,
-                inertia.as_ref(),
-                cx,
-            )?
-        };
         let new_u = equilibrium.displacement_m.as_flattened();
         let motion = inertia
             .as_ref()
@@ -750,6 +824,28 @@ impl<'a, L: FiniteThermalPorousMaterial> FiniteThermalPorousTetSolid<'a, L> {
                 },
             )
             .transpose()?;
+        if let Some(cavity) = &cavity_work {
+            energy.equilibrium_work_residual_j += cavity.endpoint_work_j;
+            let pressure_correction = pressure
+                .as_ref()
+                .map_or(0.0, |work| work.endpoint_work_correction_j.abs());
+            energy_gate(
+                "thermal porous cavity/pressure/constitutive endpoint integration defect",
+                energy.endpoint_work_defect_j.abs()
+                    + pressure_correction
+                    + cavity.absolute_correction_j,
+                controls.material.maximum_endpoint_work_defect_j,
+            )?;
+        }
+        let held_pressure_correction = pressure
+            .as_ref()
+            .map_or(0.0, |work| work.endpoint_work_correction_j);
+        let external_work_defect_j = (Dd::from_f64(energy.endpoint_work_defect_j)
+            + Dd::from_f64(held_pressure_correction)
+            + cavity_work
+                .as_ref()
+                .map_or(Dd::ZERO, |work| work.correction_j))
+        .to_f64();
         energy.balance_error_j = work.dead_load_j + work.support_j
             - energy.internal_energy_change_j
             - energy.caloric_heat_j
@@ -765,6 +861,21 @@ impl<'a, L: FiniteThermalPorousMaterial> FiniteThermalPorousTetSolid<'a, L> {
                 - Dd::from_f64(energy.endpoint_work_defect_j)
                 - Dd::from_f64(pressure.endpoint_work_correction_j))
             .to_f64();
+        }
+        if let Some(cavity) = &cavity_work {
+            // Keep gas storage/exterior work and its endpoint correction
+            // outside material caloric heat. Direct interval work retains the
+            // precision of the original cavity source and geometry owners.
+            energy.balance_error_j = (Dd::from_f64(work.dead_load_j)
+                + Dd::from_f64(work.support_j)
+                + Dd::from_f64(pressure.as_ref().map_or(0.0, |work| work.work_j))
+                + cavity.net_work_j
+                - Dd::from_f64(energy.internal_energy_change_j)
+                - Dd::from_f64(energy.caloric_heat_j)
+                - Dd::from_f64(energy.endpoint_work_defect_j)
+                - Dd::from_f64(held_pressure_correction)
+                - cavity.correction_j)
+                .to_f64();
         }
         if let Some((_, value)) = &motion {
             energy_gate(
@@ -860,31 +971,36 @@ impl<'a, L: FiniteThermalPorousMaterial> FiniteThermalPorousTetSolid<'a, L> {
             (None, None) => (None, None),
             _ => unreachable!("original inertia and motion share one owner"),
         };
-        Ok(FiniteThermalPorousTetStep {
-            solid: Self {
-                state: FinitePlasticTetState {
-                    nodes_m: self.state.nodes_m,
-                    tetrahedra: self.state.tetrahedra,
-                    elements: Arc::clone(&self.state.elements),
-                    budget: self.state.budget,
-                    displacement_m: equilibrium.displacement_m.clone(),
-                    element_deformation: deformation,
-                    element_states: states,
-                    element_first_piola_pa: stress,
-                    stored_energy_j: new_free,
+        Ok(FiniteThermalPorousCavitiesStep {
+            step: FiniteThermalPorousTetStep {
+                solid: Self {
+                    state: FinitePlasticTetState {
+                        nodes_m: self.state.nodes_m,
+                        tetrahedra: self.state.tetrahedra,
+                        elements: Arc::clone(&self.state.elements),
+                        budget: self.state.budget,
+                        displacement_m: equilibrium.displacement_m.clone(),
+                        element_deformation: deformation,
+                        element_states: states,
+                        element_first_piola_pa: stress,
+                        stored_energy_j: new_free,
+                    },
+                    families: Arc::clone(&self.families),
+                    temperatures_k: new_temperatures_k.to_vec(),
+                    internal_energy_j: new_internal,
+                    jacobians,
+                    plastic_jacobians,
+                    motion: next_motion,
                 },
-                families: Arc::clone(&self.families),
-                temperatures_k: new_temperatures_k.to_vec(),
-                internal_energy_j: new_internal,
-                jacobians,
-                plastic_jacobians,
-                motion: next_motion,
+                equilibrium,
+                element_energy,
+                energy,
+                inertia,
+                pressure,
             },
-            equilibrium,
-            element_energy,
-            energy,
-            inertia,
-            pressure,
+            cavities: accepted_cavities,
+            cavity_energy: cavity_work.map_or_else(Vec::new, |work| work.energy),
+            external_work_defect_j,
         })
     }
 }

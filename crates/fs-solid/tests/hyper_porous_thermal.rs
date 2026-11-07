@@ -3,6 +3,11 @@
 #[path = "hyper_porous_thermal/pressure.rs"]
 mod pressure;
 
+#[path = "hyper_porous_thermal/cavity.rs"]
+mod cavity;
+#[path = "hyper3_cavity/gas_fixture.rs"]
+mod gas_fixture;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::plastic::finite::porous::thermal::{

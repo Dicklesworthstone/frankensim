@@ -11948,3 +11948,60 @@ cache reuse, source/budget/cancellation refusals, and every original compatible
 and B-bar strain in a nonuniform HEX8 field. These integration regressions remain
 unexecuted because the original runtime dependency build is resource-blocked;
 the material observer's production arithmetic was exercised separately.
+
+### Thermal retained porous solids with independently sealed cavities
+
+`hyper3::plastic::porous::thermal::FiniteThermalPorousTetSolid::advance_with_cavities`
+closes the prescribed-temperature thermal-material/sealed-gas composition. It
+freezes only the supplied endpoint solid temperatures, admits accepted plastic
+history at its original temperature, and sends the original thermal porous
+tangent, each cavity's follower geometry/acoustic rank-one tangent, optional held
+current-area pressure and optional original-reference consistent inertia through
+one existing native Newton solve. Cavity volume comes from total solid
+displacement, not plastic volume or the thermally reduced material deformation.
+Heating can therefore compact the material while fixed cavity geometry leaves
+the independent gas states unchanged.
+
+The returned `FiniteThermalPorousCavitiesStep` owns the complete original thermal
+step, accepted gases in input-source order, the existing
+`FinitePorousCavityEnergy` receipts and a complete signed external-work defect.
+The dry and thermal paths share one direct original-source interval-work owner.
+Original gas references remain at undeformed cavity volume across retained
+increments; accepted deformed gas parcels are evidence, never replacement source
+references. Stable direct gas caloric increments and compact geometric work
+remain valid with large caloric energy datums and small retained increments.
+
+The complete accepted identity is:
+
+`dead + support + held-pressure work + sum(exterior work) =
+material internal-energy change + original material caloric heat +
+sum(gas stored-energy change) + kinetic change + numerical kinetic loss +
+external-work defect + balance error`.
+
+Original material caloric heat already contains physical yield loss and signed
+reciprocal thermal exchange. Neither gas storage/work, pressure quadrature error,
+constitutive endpoint defect nor numerical kinetic loss enters caloric heat.
+The material work allowance bounds the sum of absolute material, held-pressure
+and individual cavity corrections; independent sources cannot cancel that
+acceptance budget. Backward-Euler numerical kinetic loss retains its own budget.
+Empty cavity lists follow the original thermal pressure/dead-load branches.
+Failures, including final work gates and cancellation, publish no material,
+temperature, gas or momentum history.
+
+Focused regressions are registered under
+`tests/hyper_porous_thermal/cavity.rs`. A completely free heated hollow shell
+combines analytic hydrostatic thermal compaction, independent consistent P1
+mass forcing, current-area exterior pressure and a sealed gas; it checks real
+Newton motion, source gas storage, material caloric heat and the full kinetic
+balance. A connected two-cavity case uses different original heat-capacity
+laws and reversed source order, heats at fixed total volume, releases
+elastically, and checks direct interval energy with a 1e24 J/kg datum,
+original-reference refusal, empty-path equivalence and atomic work/cancellation
+refusals. Source parsed/formatted with pinned rustfmt; native tests were not run
+in the resource-exhausted session.
+
+This composition prescribes the solid temperature and keeps each gas
+isentropic. It does not add gas-wall heat exchange, gas momentum/acoustic
+propagation, pore-fluid transport, contact or evolving conductance. Existing
+P1 locking, thermal-law domain, associated compaction and homogeneous gas-phase
+admission limits remain explicit.

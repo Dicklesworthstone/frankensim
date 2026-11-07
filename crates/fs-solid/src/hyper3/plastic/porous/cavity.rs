@@ -23,7 +23,8 @@ use fs_math::dd::Dd;
 
 use super::{FinitePorousTetError, FinitePorousTetSolid, FinitePorousTetStep};
 use crate::hyper3::plastic::{
-    AcceptedMotion, FinitePlasticStepControls, checkpoint, invalid, validate_controls,
+    AcceptedMotion, FinitePlasticStepControls, FinitePlasticTetError, checkpoint, invalid,
+    validate_controls,
 };
 use crate::hyper3::pressure::cavity::equilibrium::CavityBatch;
 use crate::hyper3::pressure::cavity::{AdiabaticCavity, AdiabaticCavityGas, TetCavityGasLoad};
@@ -78,6 +79,111 @@ pub struct FinitePorousCavityEnergy {
 pub(super) struct CavityEndpointWork {
     pub(super) endpoint_work_j: f64,
     pub(super) absolute_correction_j: f64,
+}
+
+/// One original-source interval account, shared by dry and thermal porous solids.
+pub(super) struct CavityIntervalWork {
+    pub(super) energy: Vec<FinitePorousCavityEnergy>,
+    pub(super) endpoint_work_j: f64,
+    pub(super) absolute_correction_j: f64,
+    pub(super) net_work_j: Dd,
+    pub(super) correction_j: Dd,
+}
+
+/// Retain direct caloric and compact geometric increments without another gas
+/// solve or subtraction of reference-relative potentials.
+#[allow(clippy::too_many_lines)]
+pub(super) fn cavity_interval_work<G: AdiabaticCavityGas>(
+    cavities: &[AdiabaticCavity<'_, G>],
+    before: &[TetCavityGasLoad<G>],
+    after: &[TetCavityGasLoad<G>],
+    old_u: &[f64],
+    new_u: &[f64],
+    cx: &Cx<'_>,
+) -> Result<CavityIntervalWork, FinitePlasticTetError> {
+    checkpoint(cx)?;
+    if cavities.len() != before.len() || before.len() != after.len() || old_u.len() != new_u.len() {
+        return Err(invalid(
+            "complete original cavity epochs and coordinates required",
+        ));
+    }
+    let mut cavity_energy = Vec::with_capacity(cavities.len());
+    let mut endpoint_work = Dd::ZERO;
+    let mut correction = Dd::ZERO;
+    let mut absolute_correction = Dd::ZERO;
+    let mut net_work = Dd::ZERO;
+    for ((source, before), after) in cavities.iter().zip(before).zip(after) {
+        if after.force_n.len() != new_u.len() {
+            return Err(invalid(
+                "complete original cavity force coordinates required",
+            ));
+        }
+        checkpoint(cx)?;
+        let gas_change = before
+            .gas
+            .stored_energy_change_to(&after.gas, || cx.checkpoint().is_err())
+            .map_err(|error| match error {
+                GasEnergyError::Cancelled => FinitePlasticTetError::from(HyperTetError::Cancelled),
+                other => invalid(&format!(
+                    "porous cavity gas energy increment refused: {other}"
+                )),
+            })?;
+        // This interval is the native source-caloric and compact geometric
+        // work, not subtraction of two reference-relative potentials. Its
+        // Dd value retains exterior work separately when the gas term is
+        // large; neither operation repeats the entropy solve.
+        let potential = source.potential_increment(before, after, cx)?;
+        let gas_change = Dd::from_f64(gas_change);
+        let exterior_work = gas_change - potential;
+        let work = -potential;
+        let mut endpoint = Dd::ZERO;
+        for (dof, (&force, (&after, &before))) in after
+            .force_n
+            .iter()
+            .zip(new_u.iter().zip(old_u))
+            .enumerate()
+        {
+            if dof % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            endpoint =
+                endpoint + Dd::from_f64(force) * (Dd::from_f64(after) - Dd::from_f64(before));
+        }
+        let source_correction = work - endpoint;
+        let receipt = FinitePorousCavityEnergy {
+            gas_stored_energy_change_j: gas_change.to_f64(),
+            gas_work_j: (-gas_change).to_f64(),
+            exterior_work_j: exterior_work.to_f64(),
+            work_j: work.to_f64(),
+            endpoint_work_j: endpoint.to_f64(),
+            endpoint_work_correction_j: source_correction.to_f64(),
+        };
+        if [
+            receipt.gas_stored_energy_change_j,
+            receipt.exterior_work_j,
+            receipt.work_j,
+            receipt.endpoint_work_j,
+            receipt.endpoint_work_correction_j,
+        ]
+        .iter()
+        .any(|value| !value.is_finite())
+        {
+            return Err(invalid("finite porous cavity work required"));
+        }
+        endpoint_work = endpoint_work + endpoint;
+        net_work = net_work + work;
+        correction = correction + source_correction;
+        absolute_correction =
+            absolute_correction + Dd::from_f64(receipt.endpoint_work_correction_j.abs());
+        cavity_energy.push(receipt);
+    }
+    Ok(CavityIntervalWork {
+        energy: cavity_energy,
+        endpoint_work_j: endpoint_work.to_f64(),
+        absolute_correction_j: absolute_correction.to_f64(),
+        net_work_j: net_work,
+        correction_j: correction,
+    })
 }
 
 impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
@@ -222,72 +328,7 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
             cx,
         )?;
         let new_u = solution.solid.displacement_m.as_flattened();
-        let mut cavity_energy = Vec::with_capacity(cavities.len());
-        let mut endpoint_work = Dd::ZERO;
-        let mut correction = Dd::ZERO;
-        let mut absolute_correction = Dd::ZERO;
-        for ((source, before), after) in cavities.iter().zip(&before).zip(&solution.cavities) {
-            checkpoint(cx)?;
-            let gas_change = before
-                .gas
-                .stored_energy_change_to(&after.gas, || cx.checkpoint().is_err())
-                .map_err(|error| match error {
-                    GasEnergyError::Cancelled => {
-                        FinitePorousTetError::from(HyperTetError::Cancelled)
-                    }
-                    other => invalid(&format!(
-                        "porous cavity gas energy increment refused: {other}"
-                    ))
-                    .into(),
-                })?;
-            // This interval is the native source-caloric and compact geometric
-            // work, not subtraction of two reference-relative potentials. Its
-            // Dd value retains exterior work separately when the gas term is
-            // large; neither operation repeats the entropy solve.
-            let potential = source.potential_increment(before, after, cx)?;
-            let gas_change = Dd::from_f64(gas_change);
-            let exterior_work = gas_change - potential;
-            let work = -potential;
-            let mut endpoint = Dd::ZERO;
-            for (dof, (&force, (&after, &before))) in after
-                .force_n
-                .iter()
-                .zip(new_u.iter().zip(old_u))
-                .enumerate()
-            {
-                if dof % 256 == 0 {
-                    checkpoint(cx)?;
-                }
-                endpoint =
-                    endpoint + Dd::from_f64(force) * (Dd::from_f64(after) - Dd::from_f64(before));
-            }
-            let source_correction = work - endpoint;
-            let receipt = FinitePorousCavityEnergy {
-                gas_stored_energy_change_j: gas_change.to_f64(),
-                gas_work_j: (-gas_change).to_f64(),
-                exterior_work_j: exterior_work.to_f64(),
-                work_j: work.to_f64(),
-                endpoint_work_j: endpoint.to_f64(),
-                endpoint_work_correction_j: source_correction.to_f64(),
-            };
-            if [
-                receipt.gas_stored_energy_change_j,
-                receipt.exterior_work_j,
-                receipt.work_j,
-                receipt.endpoint_work_j,
-                receipt.endpoint_work_correction_j,
-            ]
-            .iter()
-            .any(|value| !value.is_finite())
-            {
-                return Err(invalid("finite porous cavity work required").into());
-            }
-            endpoint_work = endpoint_work + endpoint;
-            correction = correction + source_correction;
-            absolute_correction =
-                absolute_correction + Dd::from_f64(receipt.endpoint_work_correction_j.abs());
-            cavity_energy.push(receipt);
-        }
+        let work = cavity_interval_work(cavities, &before, &solution.cavities, old_u, new_u, cx)?;
         let force = problem.external(&self.state.elements, 1.0);
         let (step, motion) = self.accept_endpoint(
             solution.solid,
@@ -296,8 +337,8 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
             inertia,
             pressure,
             Some(CavityEndpointWork {
-                endpoint_work_j: endpoint_work.to_f64(),
-                absolute_correction_j: absolute_correction.to_f64(),
+                endpoint_work_j: work.endpoint_work_j,
+                absolute_correction_j: work.absolute_correction_j,
             }),
             cx,
         )?;
@@ -307,7 +348,7 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
             .map_or(0.0, |work| work.endpoint_work_correction_j);
         let external_work_defect_j = (Dd::from_f64(step.energy.endpoint_work_defect_j)
             + Dd::from_f64(held_pressure_correction)
-            + correction)
+            + work.correction_j)
             .to_f64();
         if !external_work_defect_j.is_finite() {
             return Err(invalid("finite combined porous/cavity work defect required").into());
@@ -317,7 +358,7 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
             FinitePorousCavitiesStep {
                 step,
                 cavities: solution.cavities,
-                cavity_energy,
+                cavity_energy: work.energy,
                 external_work_defect_j,
             },
             motion,
