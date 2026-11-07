@@ -402,15 +402,48 @@ impl GasEnthalpyLaw {
     /// Unchanged source conditions, including common pressure.
     pub fn context(&self) -> &QueryPoint { &self.context }
 
-    /// Source NASA-9 specific enthalpy at an admitted temperature [J/kg].
-    pub fn enthalpy_at_temperature(&self, temperature_k: f64) -> Result<f64, GasEnergyError> {
+    fn admitted_temperature(&self, temperature_k: f64) -> Result<Temperature, GasEnergyError> {
         if !temperature_k.is_finite() || temperature_k < self.controls.minimum_temperature_k
             || temperature_k > self.controls.maximum_temperature_k
         {
             return Err(GasEnergyError::Invalid("temperature outside the declared caloric bracket"));
         }
+        Ok(Temperature::new(temperature_k))
+    }
+
+    /// Source-relative enthalpy [J/kg] and endpoint Cp [J/(kg K)].
+    ///
+    /// Both temperatures must lie in this law's admitted continuous caloric
+    /// bracket. Integrating the original NASA-9 Cp cancels formation references
+    /// before rounding and preserves reconciled source seams. Composition and
+    /// source conventions remain unchanged.
+    ///
+    /// Successful queries allocate nothing and evaluate no absolute enthalpy,
+    /// entropy, Gibbs energy or transport state. This supplies thermal trial
+    /// tangents; accepted complete states still use the original material owner.
+    pub fn relative_enthalpy_and_heat_capacity(
+        &self, reference_temperature_k: f64, temperature_k: f64,
+    ) -> Result<(f64, f64), GasEnergyError> {
+        let reference = self.admitted_temperature(reference_temperature_k)?;
+        let temperature = self.admitted_temperature(temperature_k)?;
+        let thermodynamics = self.model.thermodynamics();
+        let change = thermodynamics.specific_enthalpy_change(reference, temperature)
+            .map_err(conversion_error)?.value();
+        let capacity = thermodynamics.evaluate_heat_capacities(temperature)
+            .map_err(conversion_error)?.mass_specific_cp().value();
+        if capacity <= 0.0 || (temperature_k != reference_temperature_k
+            && (change == 0.0 || change.is_sign_positive() != (temperature_k > reference_temperature_k)))
+        {
+            return Err(GasEnergyError::Invalid("source caloric increment and positive Cp must be representable"));
+        }
+        Ok((change, capacity))
+    }
+
+    /// Source NASA-9 specific enthalpy at an admitted temperature [J/kg].
+    pub fn enthalpy_at_temperature(&self, temperature_k: f64) -> Result<f64, GasEnergyError> {
+        let temperature = self.admitted_temperature(temperature_k)?;
         let (_, pressure) = coordinates(&self.context)?;
-        let properties = self.model.thermodynamics().evaluate_properties(Temperature::new(temperature_k), pressure)
+        let properties = self.model.thermodynamics().evaluate_properties(temperature, pressure)
             .map_err(conversion_error)?;
         let h = properties.h().value() / properties.molar_mass().value();
         if !h.is_finite() { return Err(GasEnergyError::Invalid("source enthalpy is not finite")); }

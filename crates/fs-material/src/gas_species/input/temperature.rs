@@ -188,7 +188,32 @@ impl IsobaricGasLaw {
         from: Temperature,
         to: Temperature,
     ) -> Result<f64, MaterialError> {
-        if from.value() != self.reference.state().temperature {
+        self.relative_enthalpy_and_heat_capacity(from, to)
+            .map(|(change, _)| change)
+    }
+
+    /// Original relative enthalpy [J/kg] and endpoint Cp [J/(kg K)] for one
+    /// thermal linearization. Both values come from the same retained gas,
+    /// without resolving the endpoint's transport and source records twice.
+    ///
+    /// Each distinct endpoint retains the complete admission performed by
+    /// [`Self::at_temperature`], including humidity and transport support.
+    /// The reference already admitted during construction is reused only for
+    /// checking the starting state. The energy increment retains the exact
+    /// source integration and gap/reference semantics of
+    /// [`Self::specific_enthalpy_change`]; Cp is its local endpoint tangent
+    /// within the selected source region. A raw reference jump across NASA-9
+    /// regions does not become a continuous caloric law through this method.
+    ///
+    /// # Errors
+    /// The same endpoint, phase, source-gap and representability refusals as
+    /// [`Self::specific_enthalpy_change`].
+    pub fn relative_enthalpy_and_heat_capacity(
+        &self,
+        from: Temperature,
+        to: Temperature,
+    ) -> Result<(f64, f64), MaterialError> {
+        if from.value() != self.reference.state().temperature && from != to {
             self.at_temperature(from)?;
         }
         let endpoint = self.at_temperature(to)?;
@@ -234,7 +259,7 @@ impl IsobaricGasLaw {
                 what: "retained gas enthalpy change must be finite, representable and follow positive Cp".into(),
             });
         }
-        Ok(change)
+        Ok((change, endpoint.state().specific_heat_cp))
     }
 
     /// Resolve all properties at one local absolute temperature and the
@@ -546,5 +571,44 @@ mod tests {
             law.specific_enthalpy_change(Temperature::new(300.0), Temperature::new(340.0))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn caloric_sample_preserves_nonlinear_capacity_and_complete_endpoint_admission() {
+        use crate::thermochemical_gas::tests::{model_in_domains, point};
+        use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
+
+        let model = model_in_domains(
+            vec![0.8, 0.2], 0.001,
+            [250.0, 400.0], [290.0, 330.0], [50000.0, 150000.0],
+        );
+        let law = IsobaricGasLaw::try_from_model(model, point(300.0, 100000.0)).unwrap();
+        // Cp/R = 0.8*(3.5 + 0.001*T) + 0.2*2.5 on a molar basis.
+        let specific_r = R / (0.8 * 0.028 + 0.2 * 0.004);
+        for (from, to) in [(300.0, 315.0), (315.0, 300.0), (305.0, 310.0), (305.0, 305.0)] {
+            let (change, cp) = law.relative_enthalpy_and_heat_capacity(
+                Temperature::new(from), Temperature::new(to),
+            ).unwrap();
+            let expected = specific_r * (3.3 + 0.0004 * (from + to)) * (to - from);
+            let expected_cp = specific_r * (3.3 + 0.0008 * to);
+            assert!((change - expected).abs() <= 2e-12 * expected.abs());
+            assert!((cp - expected_cp).abs() <= 2e-12 * expected_cp);
+        }
+        // Caloric support alone must not bypass the narrower transport source.
+        // Equal endpoints still require admission, even though their heat is zero.
+        for (from, to) in [(300.0, 340.0), (340.0, 300.0), (340.0, 340.0),
+            (f64::NAN, 300.0), (300.0, f64::INFINITY)]
+        {
+            assert!(law.relative_enthalpy_and_heat_capacity(
+                Temperature::new(from), Temperature::new(to),
+            ).is_err());
+        }
+
+        let humid = self::law("300 100000 0.9");
+        for (from, to) in [(300.0, 280.0), (280.0, 300.0), (280.0, 280.0)] {
+            assert!(humid.relative_enthalpy_and_heat_capacity(
+                Temperature::new(from), Temperature::new(to),
+            ).is_err());
+        }
     }
 }

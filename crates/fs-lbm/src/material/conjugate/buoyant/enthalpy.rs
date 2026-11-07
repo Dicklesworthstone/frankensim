@@ -26,7 +26,7 @@ use fs_material::{
     thermochemical_gas::energy::enthalpy::GasEnthalpyLaw,
 };
 use fs_material::thermal::transport::isobaric::IsobaricHeatCapacityLaw;
-use fs_qty::{Pressure, Temperature};
+use fs_qty::Temperature;
 
 /// One immutable, single-phase caloric owner at fixed pressure/composition.
 ///
@@ -36,9 +36,9 @@ use fs_qty::{Pressure, Temperature};
 /// The transport resolver must describe this SAME fluid and source context;
 /// this interface cannot infer a material identity from numerical coefficients.
 /// That source/context correspondence is an explicit caller contract. The
-/// heat-capacity chart's chord derivative can differ from the raw source Cp
-/// within its declared interpolation approximation; no arbitrary pointwise
-/// equality between those two capacities is imposed.
+/// Source-backed heat-capacity charts retain the original Cp(T) integral and
+/// its tangent; explicitly authored enthalpy chords retain their own slopes.
+/// A transport snapshot cannot replace either law with a frozen reference Cp.
 pub trait ConvectionCaloricLaw {
     /// Evaluate original-law relative enthalpy and its local positive Cp.
     /// Both temperatures must remain inside the same admitted source branch.
@@ -97,14 +97,14 @@ impl ConvectionCaloricLaw for IsobaricGasLaw {
         reference_temperature_k: f64,
         temperature_k: f64,
     ) -> Result<AffineSpecificEnthalpy, MaterialError> {
-        let temperature = Temperature::new(temperature_k);
-        let endpoint = self.at_temperature(temperature)?;
+        let (enthalpy_j_kg, heat_capacity_j_kg_k) = self.relative_enthalpy_and_heat_capacity(
+            Temperature::new(reference_temperature_k),
+            Temperature::new(temperature_k),
+        )?;
         Ok(AffineSpecificEnthalpy {
             temperature_k,
-            enthalpy_j_kg: self.specific_enthalpy_change(
-                Temperature::new(reference_temperature_k), temperature,
-            )?,
-            heat_capacity_j_kg_k: endpoint.state().specific_heat_cp,
+            enthalpy_j_kg,
+            heat_capacity_j_kg_k,
         })
     }
 }
@@ -115,35 +115,13 @@ impl ConvectionCaloricLaw for GasEnthalpyLaw {
         reference_temperature_k: f64,
         temperature_k: f64,
     ) -> Result<AffineSpecificEnthalpy, MaterialError> {
-        // These calls retain this owner's explicit caloric bracket. Their
-        // absolute h values are never subtracted to obtain the transported h.
-        self.enthalpy_at_temperature(reference_temperature_k)
-            .map_err(source_error)?;
-        self.enthalpy_at_temperature(temperature_k)
-            .map_err(source_error)?;
-        let pressure = self
-            .context()
-            .axes()
-            .get("pressure")
-            .copied()
-            .ok_or_else(|| source_error("gas caloric context has no pressure"))?;
-        let properties = self
-            .model()
-            .thermodynamics()
-            .evaluate_properties(Temperature::new(temperature_k), Pressure::new(pressure))
-            .map_err(source_error)?;
-        let change = self
-            .model()
-            .thermodynamics()
-            .specific_enthalpy_change(
-                Temperature::new(reference_temperature_k),
-                Temperature::new(temperature_k),
-            )
+        let (enthalpy_j_kg, heat_capacity_j_kg_k) = self
+            .relative_enthalpy_and_heat_capacity(reference_temperature_k, temperature_k)
             .map_err(source_error)?;
         Ok(AffineSpecificEnthalpy {
             temperature_k,
-            enthalpy_j_kg: change.value(),
-            heat_capacity_j_kg_k: properties.mass_specific_cp().value(),
+            enthalpy_j_kg,
+            heat_capacity_j_kg_k,
         })
     }
 }

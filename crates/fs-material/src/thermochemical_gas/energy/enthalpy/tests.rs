@@ -69,6 +69,70 @@ fn pressure_enthalpy_inverse_uses_nasa_curvature_and_returns_one_coherent_medium
 }
 
 #[test]
+fn relative_caloric_sample_integrates_mixture_cp_and_preserves_its_bracket() {
+    let source = model(vec![0.75, 0.25], 0.001);
+    let law = GasEnthalpyLaw::from_mole(&source, mole(vec![0.75, 0.25]),
+        point(300.0, 140000.0), controls()).unwrap();
+    let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / (0.75 * 0.028 + 0.25 * 0.004);
+    for (reference, temperature) in [(280.0, 360.0), (360.0, 280.0), (337.0, 300.0),
+        (320.0, 320.0), (320.0, 320.0_f64.next_up())]
+    {
+        let (change, capacity) = law.relative_enthalpy_and_heat_capacity(reference, temperature).unwrap();
+        // The independent integral of Cp/R = 3.25 + 0.00075*T retains the
+        // small temperature increment before either absolute h is evaluated.
+        let expected_change = r * (temperature - reference)
+            * (3.25 + 0.000375 * (reference + temperature));
+        let expected_capacity = r * (3.25 + 0.00075 * temperature);
+        assert!((change - expected_change).abs() <= 2e-14 * expected_change.abs());
+        assert!((capacity - expected_capacity).abs() <= 2e-14 * expected_capacity);
+        assert_eq!(capacity, law.model().thermodynamics().evaluate_properties(
+            Temperature::new(temperature), fs_qty::Pressure::new(140000.0),
+        ).unwrap().mass_specific_cp().value());
+        assert_eq!(law.relative_enthalpy_and_heat_capacity(temperature, reference).unwrap().0, -change);
+    }
+    for invalid in [279.0, 361.0, 0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        for (reference, temperature) in [(invalid, 320.0), (320.0, invalid), (invalid, invalid)] {
+            assert_eq!(law.relative_enthalpy_and_heat_capacity(reference, temperature),
+                Err(GasEnergyError::Invalid("temperature outside the declared caloric bracket")));
+        }
+    }
+}
+
+#[test]
+fn relative_caloric_sample_preserves_small_heat_under_large_formation_references() {
+    use crate::thermochemical_gas::tests::{species_with_energy_reference, transport};
+
+    let reference = 320.0;
+    let temperature = reference + 2.0_f64.powi(-16);
+    let mut original = None;
+    for formation in [0.0, 2.0_f64.powi(70), -2.0_f64.powi(70)] {
+        let source = ThermochemicalGasModel::new(
+            fs_thermochem::mixture::FrozenIdealGasMixtureModelV1::new(
+                vec![species_with_energy_reference("A", 0.028, 3.5, 0.001, formation)],
+                mole(vec![1.0]),
+            ).unwrap(), vec![transport("A", 1.7e-5, 0.025)], None,
+        ).unwrap();
+        let law = GasEnthalpyLaw::from_mole(&source, mole(vec![1.0]),
+            point(reference, 100000.0), controls()).unwrap();
+        let sample = law.relative_enthalpy_and_heat_capacity(reference, temperature).unwrap();
+        let expected = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / 0.028
+            * (temperature - reference) * (3.5 + 0.0005 * (reference + temperature));
+        assert!(sample.0 > 0.0);
+        assert!((sample.0 - expected).abs() < 2e-14 * expected);
+        if let Some(original) = original {
+            assert_eq!(sample, original);
+        } else {
+            original = Some(sample);
+        }
+        if formation != 0.0 {
+            let rounded_change = law.enthalpy_at_temperature(temperature).unwrap()
+                - law.enthalpy_at_temperature(reference).unwrap();
+            assert!((rounded_change - expected).abs() > 0.5 * expected);
+        }
+    }
+}
+
+#[test]
 fn thermal_entropy_adapter_integrates_original_variable_cp_at_fixed_pressure() {
     let source = model(vec![0.75,0.25],0.001);
     let law = GasEnthalpyLaw::from_mole(&source,mole(vec![0.75,0.25]),
@@ -403,6 +467,28 @@ fn multiregion_model(low_coefficients: [f64; 9], high_coefficients: [f64; 9]) ->
             "N2", 1.8e-5, 0.03, [200.0, 6000.0], [1000.0, 1e7],
         )], None,
     ).unwrap()
+}
+
+#[test]
+fn relative_caloric_sample_integrates_reconciled_regions_with_the_endpoint_cp() {
+    let mut low = [0.0; 9]; low[2] = 3.5;
+    let mut high = [0.0; 9]; high[2] = 4.5;
+    let raw = multiregion_model(low, high);
+    let gas = raw.with_caloric_continuity(Temperature::new(300.0),
+        fs_thermochem::MolarEnergyQuantityV1::new(100000.0),
+        fs_thermochem::MolarThermalQuantityV1::new(1000.0)).unwrap();
+    let law = GasEnthalpyLaw::from_mole(&gas, mole(vec![1.0]),
+        point(300.0, 100000.0), hot_controls(280.0, 3000.0)).unwrap();
+    let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / 0.0280134;
+    for (reference, temperature, integral, cp_over_r) in [
+        (900.0, 1000.0, 350.0, 4.5), (1000.0, 1100.0, 450.0, 4.5),
+        (900.0, 1100.0, 800.0, 4.5), (1100.0, 900.0, -800.0, 3.5),
+        (1000.0, 1000.0, 0.0, 4.5),
+    ] {
+        let (change, capacity) = law.relative_enthalpy_and_heat_capacity(reference, temperature).unwrap();
+        assert!((change - r * integral).abs() <= 2e-14 * (r * integral).abs());
+        assert!((capacity - r * cp_over_r).abs() <= 2e-14 * r * cp_over_r);
+    }
 }
 
 #[test]
