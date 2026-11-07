@@ -57,11 +57,14 @@ pub enum ContactLineRegime2 {
     /// A static equilibrium angle, or zero resolved speed in an explicitly
     /// selected equilibrium rate model. This does not assert contact-line pinning.
     Equilibrium,
-    /// The signed contact-line speed is below the negative pinning deadband.
+    /// Resolved receding motion, or geometric depinning below a sourced
+    /// receding threshold while the observed speed remains in the deadband.
     Receding,
-    /// The signed contact-line speed lies inside the closed pinning deadband.
+    /// A static reaction inside the model's declared pinning interval.
+    /// This boundary classification does not certify exact zero native motion.
     Pinned,
-    /// The signed contact-line speed is above the positive pinning deadband.
+    /// Resolved advancing motion, or geometric depinning above a sourced
+    /// advancing threshold while the observed speed remains in the deadband.
     Advancing,
 }
 

@@ -22,7 +22,7 @@ impl MolecularKineticWetting {
         &self,
         endpoint_angle_radians: f64,
         signed_speed_m_s: f64,
-        regime: ContactLineRegime2,
+        model_speed_m_s: f64,
         temperature: Option<(&str, WettingThermalPoint)>,
     ) -> Result<MolecularKineticSample, Error> {
         // A numerical deadband cannot extend the calibrated operating-speed
@@ -51,14 +51,9 @@ impl MolecularKineticWetting {
         } else {
             (self.reference_temperature_k, self.surface_tension_n_m)
         };
-        let model_speed = if regime == ContactLineRegime2::Pinned {
-            0.0
-        } else {
-            signed_speed_m_s
-        };
         Ok(self.law.apparent_angle(
             endpoint_angle_radians,
-            model_speed,
+            model_speed_m_s,
             temperature_k,
             surface_tension_n_m,
         )?)
@@ -141,6 +136,11 @@ impl WettingPhysics<'_> {
                 )?;
             }
         }
+        if let Some(binding) = &self.equilibrium_hysteresis {
+            let (receding, advancing) = binding.angles()?;
+            law.admit_angle(receding)?;
+            law.admit_angle(advancing)?;
+        }
         if let Some(equilibrium) = &self.equilibrium {
             let sample = self.equilibrium_sample(equilibrium, 0.0, None, gate)?;
             law.apparent_angle(
@@ -185,7 +185,7 @@ impl WettingBinding<'_> {
             samples.insert(
                 position,
                 self.physics_at(position)
-                    .sample(current.angle_radians, speed, None, gate)?,
+                    .sample(current.angle_radians, current.tangent_gradient > 0.0, speed, None, gate)?,
             );
         }
         self.samples = samples;

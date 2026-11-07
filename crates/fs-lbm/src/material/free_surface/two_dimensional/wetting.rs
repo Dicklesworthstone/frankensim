@@ -56,7 +56,7 @@ impl<'s> MaterialFreeSurface2<'s> {
         let mut samples = BTreeMap::new();
         for (&p, current) in &geometry {
             checkpoint(gate)?;
-            samples.insert(p, physics.sample(current.angle_radians, 0.0, None, gate)?);
+            samples.insert(p, physics.sample(current.angle_radians, current.tangent_gradient > 0.0, 0.0, None, gate)?);
         }
         install(&mut self.lattice, wall, &samples, gate)?;
         checkpoint(gate)?;
@@ -86,6 +86,7 @@ impl MaterialFreeSurfaceWetting2<'_, '_> {
                 p,
                 physics.sample(
                     current.angle_radians,
+                    current.tangent_gradient > 0.0,
                     self.samples[&p].signed_speed_m_s,
                     None,
                     gate,
@@ -123,6 +124,7 @@ impl MaterialFreeSurfaceWetting2<'_, '_> {
                 position,
                 physics.sample(
                     current.angle_radians,
+                    current.tangent_gradient > 0.0,
                     self.samples[&position].signed_speed_m_s,
                     None,
                     gate,
@@ -276,7 +278,7 @@ impl MaterialFreeSurfaceWetting2<'_, '_> {
             samples.insert(
                 p,
                 self.physics
-                    .sample(current.angle_radians, speed, None, gate)?,
+                    .sample(current.angle_radians, current.tangent_gradient > 0.0, speed, None, gate)?,
             );
         }
         install(&mut lattice, self.wall, &samples, gate)?;

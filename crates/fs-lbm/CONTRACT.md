@@ -8771,9 +8771,9 @@ unconditional stability.
 
 `MaterialFreeSurfaceEnthalpy3::with_dynamic_equilibrium_gas_wetting` attaches
 the original source-resolved two-phase Cox owner to that equilibrium binding.
-The microscopic angle remains the original angle or Young--Dupre work claim;
-the wedge ratio uses the actual outer-gas viscosity divided by the local liquid
-viscosity. Gas and liquid keep distinct temperatures, source identities and
+The microscopic angle follows the original angle or Young--Dupre work claim,
+or the independently sourced pinning thresholds when explicitly selected below.
+The wedge ratio uses actual outer-gas viscosity divided by local liquid viscosity. Gas and liquid keep distinct temperatures, source identities and
 state coordinates. No contact-speed axis is added to the equilibrium receipt.
 
 Ordinary steps retain the explicit gas snapshot. Existing finite-atmosphere
@@ -8800,7 +8800,7 @@ wall-cell budget refuse deterministically; ordering does not select a winner.
 One source/physics binding is shared per patch, and an immutable shared index
 routes cell history and temperature without cloning cards per cell. The
 pattern is assigned once before physical time advances and before rate-law
-selection. Static Young--Dupre, subsequent Cox/MKT and sourced-gas refresh
+or independent-threshold selection. Static Young--Dupre, subsequent Cox/MKT and sourced-gas refresh
 all use the selected local original claims, actual liquid temperature and the
 same native tension. Existing finite-atmosphere paths update the same outer
 gas on every patch. Samples retain distinct original receipts; `wetting_source`
@@ -8815,6 +8815,44 @@ surface-energy/heat transfer is inferred. Focused synthetic regressions
 specify original-source/temperature routing, native momentum response,
 homogeneous parity, order independence, molecular/two-phase Cox forward
 relations, evolving-gas refresh and complete rollback on patch-source exit.
+
+`MaterialFreeSurfaceEnthalpy3::with_equilibrium_wetting_hysteresis` explicitly
+adds independent static receding/advancing claims from each original base or
+patch card. The original equilibrium angle or Young--Dupre W(T)/sigma(T)
+remains a separate reversible source; it must lie inside that card's current
+threshold bracket at attachment and every thermal/native endpoint. Original
+threshold identities stay pinned, with their own source receipts and no
+fabricated speed axis. A source exit or loss of this ordering refuses the
+complete coupled candidate.
+
+Resolved accepted contact motion outside the declared numerical deadband
+selects its direction's threshold. Inside the deadband, the actual geometric
+angle supplies the bounded static reaction or triggers depinning at the
+appropriate endpoint. Modeled speed is zero there, even when a tiny observed
+speed has the opposite sign. Unresolved contacts use the equilibrium angle;
+a zero-width bracket exactly recovers smooth equilibrium kinetics. The
+original physical-VOF history is independent of imposed curvature ghosts.
+
+Optional Cox, molecular and sourced-gas models consume that selected
+microscopic angle and modeled speed. The actual observed speed remains in
+their admission checks and diagnostics, including the observed and modeled
+Cox capillary numbers. Original local T, sigma and gas transport refresh
+through their existing owners on every selected patch. The same angle field
+drives native curvature, capillary pressure and momentum. Shared patch owners
+remain bounded and no source card is cloned per cell.
+
+Signed static resistance is sigma*(cos(theta_Y)-cos(theta_branch)); its product
+with modeled speed is a nonnegative per-length pinning-loss diagnostic.
+Molecular kinetic loss remains separate. Neither becomes heat without an
+owned contact-line measure and energy exchange. This is a first-cell geometric
+boundary closure, not an exact contact-position constraint, experimental
+calibration, moving-wall model or closed surface-energy budget. Assignment is
+before time advances and after patch selection; constant or spatially uniform
+tension is required. Native synthetic regressions specify sticking and both
+depinning directions in wall-adjacent liquid mass, thermal/patch source routing,
+independent Cox/MKT relations, finite-gas feedback, smooth zero-width parity and
+transactional source/order refusal. These definitions passed syntax and
+source/API review; native execution remains unverified in this environment.
 
 `free_surface3_from_cells_with_uniform_thermal_capillarity` extends that same
 owner to time-varying sigma(T) in the exact zero-Marangoni domain. Every actual

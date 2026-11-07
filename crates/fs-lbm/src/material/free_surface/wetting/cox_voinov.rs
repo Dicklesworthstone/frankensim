@@ -58,8 +58,12 @@ pub struct CoxVoinovLaw {
 /// The endpoint receipt remains its original static angle or adhesion claim.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CoxVoinovSample {
-    /// Signed Ca = mu U / sigma; positive denotes advancing liquid.
+    /// Observed signed Ca = mu U / sigma; positive denotes advancing liquid.
+    /// It remains subject to both phases' limits even inside a pinning deadband.
     pub signed_capillary_number: f64,
+    /// Ca actually consumed by the rate law, zero for a stuck/deadband branch.
+    /// This also stays zero for geometric depinning inside the speed deadband.
+    pub model_signed_capillary_number: f64,
     /// Current source viscosity [Pa s], including thermal evolution.
     pub dynamic_viscosity_pa_s: f64,
     /// The same admitted local surface tension as native capillary pressure [N/m].

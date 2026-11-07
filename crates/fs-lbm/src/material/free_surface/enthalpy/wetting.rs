@@ -112,8 +112,8 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
 
     /// Resolve fixed chemical/finish patches on the original equilibrium wall.
     ///
-    /// Attach once before the first accepted step and before selecting Cox or
-    /// molecular kinetics. Every listed wall cell uses its patch's original
+    /// Attach once before the first accepted step and before selecting pinning,
+    /// Cox or molecular kinetics. Every listed wall cell uses its patch's original
     /// angle or adhesion-work claim; all other cells retain the explicit base
     /// substrate. Patch order has no physical meaning. Duplicate/overlapping
     /// cells, off-wall coordinates, source-domain exits and incompatible liquid
@@ -163,6 +163,54 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             self.rheology_samples = resolved.rheology;
         }
         poll(gate)?;
+        Ok(self)
+    }
+
+    /// Add separately sourced static pinning thresholds around equilibrium adhesion.
+    ///
+    /// Each original base/patch interface card must contain independent static
+    /// advancing/receding claims. The selection policy is applied to those two
+    /// properties on every card; no width is inferred from Young--Dupre work.
+    /// The original equilibrium claim stays separate, and the current Young
+    /// angle must remain between the current thresholds at every thermal stage.
+    ///
+    /// Outside the explicit numerical speed deadband, accepted VOF motion
+    /// selects advancing or receding. Inside it, the current geometric angle
+    /// either supplies the bounded static reaction or triggers depinning at the
+    /// appropriate endpoint. Modeled speed stays zero there, including when a
+    /// tiny observed speed has the opposite sign. Existing Cox/MKT/gas kinetics
+    /// act on that selected endpoint, with observed speed still domain-checked.
+    /// A zero-width bracket recovers smooth equilibrium dynamics.
+    ///
+    /// Attach once before time advances, after any substrate patches, and
+    /// before or after an explicit equilibrium rate law. Constant or spatially
+    /// uniform tension is required. The native ghost/curvature owner consumes
+    /// the resulting angle; this first-cell, backward-time closure does not
+    /// impose an exact fixed contact position. Per-length pinning and molecular
+    /// loss diagnostics are separate and never deposited as invented heat.
+    pub fn with_equilibrium_wetting_hysteresis(
+        mut self,
+        selection: MaterialPropertySelection,
+        pinning_speed_m_s: f64,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        poll(gate)?;
+        if self.accepted_steps() != 0 {
+            return Err(Error::Invalid("pinning thresholds must be selected before native time advances"));
+        }
+        if self.thermocapillary.is_some() && !self.uniform_thermal_capillarity() {
+            return Err(Error::Invalid("equilibrium hysteresis needs constant or spatially uniform tension"));
+        }
+        let binding = self.wetting.take()
+            .ok_or(Error::Invalid("pinning thresholds require an original equilibrium wall"))?
+            .with_equilibrium_hysteresis(
+                selection, pinning_speed_m_s, self.law.temperature_axis(), &self.flow.scaling, gate,
+            )?;
+        let temperatures = temperatures(&self.states, self.law.temperature_axis(), gate)?;
+        let binding = binding.at_temperatures(self.law.temperature_axis(), &temperatures, gate)?;
+        binding.install(&mut self.flow.lattice, gate)?;
+        poll(gate)?;
+        self.wetting = Some(binding);
         Ok(self)
     }
 
@@ -253,9 +301,10 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     /// angle or reversible Young--Dupre work using one chosen Cox or molecular
     /// rate law. The same local T and sigma feed equilibrium and rate response.
     ///
-    /// This homogeneous smooth-wall model has no inferred hysteresis interval
-    /// or pinning threshold. Original equilibrium claims retain their selected
-    /// identities and do not acquire a fictitious speed coordinate. The native
+    /// No hysteresis interval or pinning threshold is inferred. Explicit
+    /// independently sourced thresholds can be added with
+    /// [`Self::with_equilibrium_wetting_hysteresis`]. Original equilibrium claims
+    /// retain their selected identities and no fictitious speed coordinate. The native
     /// accepted VOF history supplies speed; unresolved geometry, source exits,
     /// calibration exits and cancellation refuse the complete candidate.
     /// Kinetic parameters and Cox cutoffs remain explicit model inputs. Local
@@ -298,8 +347,10 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
 
     /// Drive the original equilibrium adhesion boundary with two-phase Cox
     /// kinetics using an explicitly sourced outer gas. The microscopic angle
-    /// still comes from the original equilibrium angle or Young--Dupre work;
-    /// the wedge ratio is mu_gas(T_gas, p_gas, composition) / mu_liquid(T_liquid).
+    /// comes from the original equilibrium angle or Young--Dupre work, or the
+    /// independently sourced static thresholds if explicitly attached. The
+    /// original equilibrium potential remains separate. The wedge ratio is
+    /// mu_gas(T_gas, p_gas, composition) / mu_liquid(T_liquid).
     /// These phases keep distinct temperatures and original source receipts.
     ///
     /// Ordinary stepping holds this gas snapshot. Existing finite-atmosphere

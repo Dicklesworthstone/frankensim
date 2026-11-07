@@ -149,6 +149,7 @@ impl<'m> WettingPhysics<'m> {
             },
             hydrodynamic: None,
             molecular_kinetic: None,
+            equilibrium_hysteresis: None,
             equilibrium: Some(EquilibriumWetting {
                 origin,
                 surface_tension_n_m: liquid.surface_tension_n_m(),
@@ -217,6 +218,7 @@ impl<'m> WettingPhysics<'m> {
             geometric_angle_radians,
             applied_angle_radians,
             equilibrium: Some(equilibrium.origin),
+            equilibrium_hysteresis: None,
             hydrodynamic: None,
             molecular_kinetic: None,
             outer_gas: None,

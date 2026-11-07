@@ -55,6 +55,7 @@ impl<'m> WettingBinding<'m> {
     ) -> Result<Self, Error> {
         checkpoint(gate)?;
         if self.pattern.is_some()
+            || self.physics.equilibrium_hysteresis.is_some()
             || self
                 .physics
                 .equilibrium
@@ -62,7 +63,7 @@ impl<'m> WettingBinding<'m> {
                 .is_none_or(|equilibrium| equilibrium.dynamic)
         {
             return Err(Error::Invalid(
-                "substrate patches require an unpatterned equilibrium binding before rate-law selection",
+                "substrate patches require an unpatterned equilibrium binding before hysteresis/rate-law selection",
             ));
         }
         let maximum_cells = self.physics.controls.maximum_wall_cells;

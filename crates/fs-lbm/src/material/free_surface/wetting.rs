@@ -10,7 +10,8 @@
 //! The thermal owner can instead select local equilibrium explicitly, updating
 //! its original angle or reversible adhesion work. An explicit rate-law selector
 //! can drive Cox or molecular kinetics from that same original equilibrium
-//! source, without inventing advancing/receding measurements or pinning.
+//! source. Independently sourced static thresholds may explicitly add pinning
+//! while that original equilibrium potential and its receipt remain separate.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -52,6 +53,9 @@ use equilibrium::EquilibriumWetting;
 mod pattern;
 pub use pattern::EquilibriumWettingPatch;
 use pattern::WettingPattern;
+mod hysteresis;
+pub use hysteresis::EquilibriumHysteresisSample;
+use hysteresis::EquilibriumHysteresisBinding;
 pub use fs_material::liquid::surface::adhesion::EquilibriumAngleOrigin;
 
 /// Local liquid properties supplied by the existing enthalpy source owner.
@@ -84,12 +88,13 @@ pub struct FreeSurfaceWettingControls {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FreeSurfaceWettingSample {
     /// Positive is advancing liquid along its outward in-wall normal [m/s].
-    /// Zero for a purely equilibrium closure. An explicitly selected rate law
+    /// Zero for a purely equilibrium closure. Explicit pinning or a rate law
     /// retains the actual geometric speed even with an equilibrium source.
     pub signed_speed_m_s: f64,
     /// Equilibrium closure or direction/deadband selection. `Pinned` does not
-    /// certify zero line motion. For an explicit equilibrium rate model,
-    /// `Equilibrium` means the resolved speed is zero; the static model omits it.
+    /// certify zero line motion. With separately sourced equilibrium pinning,
+    /// geometric depinning can select a direction at zero modeled speed.
+    /// `Equilibrium` also denotes an unresolved contact in that closure.
     pub regime: ContactLineRegime2,
     /// Geometric angle through liquid from the accepted first-cell fill [rad].
     pub geometric_angle_radians: f64,
@@ -97,11 +102,15 @@ pub struct FreeSurfaceWettingSample {
     pub applied_angle_radians: f64,
     /// Explicit equilibrium-angle origin, absent for a hysteresis closure.
     pub equilibrium: Option<EquilibriumAngleOrigin>,
+    /// Separately sourced static thresholds around that equilibrium potential.
+    /// The measured contact motion remains distinct from the modeled pinning speed.
+    pub equilibrium_hysteresis: Option<EquilibriumHysteresisSample>,
     /// Optional explicit hydrodynamic prediction, separate from static source claims.
     pub hydrodynamic: Option<CoxVoinovSample>,
     /// Optional molecular-kinetic prediction using actual liquid temperature.
-    /// The pinned branch consumes model speed zero; signed_speed_m_s above
-    /// retains the measured geometric speed. Its loss is diagnostic, not heat.
+    /// Pinning and geometric depinning within the declared deadband consume
+    /// model speed zero; signed_speed_m_s above retains measured motion.
+    /// Its loss is diagnostic, not heat.
     pub molecular_kinetic: Option<MolecularKineticSample>,
     /// Explicit outer-phase transport source, including its own temperature,
     /// pressure and composition. Shared by this wall field, never substituted
@@ -202,6 +211,7 @@ pub(super) struct WettingPhysics<'m> {
     hydrodynamic: Option<HydrodynamicWetting>,
     molecular_kinetic: Option<MolecularKineticWetting>,
     equilibrium: Option<EquilibriumWetting>,
+    equilibrium_hysteresis: Option<EquilibriumHysteresisBinding>,
 }
 
 impl<'s> MaterialFreeSurface3<'s> {
@@ -333,6 +343,7 @@ impl<'m> WettingPhysics<'m> {
             hydrodynamic: None,
             molecular_kinetic: None,
             equilibrium: None,
+            equilibrium_hysteresis: None,
         })
     }
 }
@@ -412,7 +423,7 @@ impl WettingBinding<'_> {
         for (&position, current) in &self.geometry {
             checkpoint(gate)?;
             let speed = self.samples[&position].signed_speed_m_s;
-            samples.insert(position, self.physics_at(position).sample(current.angle_radians, speed, None, gate)?);
+            samples.insert(position, self.physics_at(position).sample(current.angle_radians, current.tangent_gradient > 0.0, speed, None, gate)?);
         }
         self.samples = samples;
         Ok(self)
@@ -463,6 +474,11 @@ impl WettingPhysics<'_> {
             if self.equilibrium.is_none() {
                 law.admit_angle(property.value_si())?;
             }
+        }
+        if let Some(binding) = &self.equilibrium_hysteresis {
+            let (receding, advancing) = binding.angles()?;
+            law.admit_angle(receding)?;
+            law.admit_angle(advancing)?;
         }
         if let Some(equilibrium) = &self.equilibrium {
             let sample = self.equilibrium_sample(equilibrium, 0.0, None, gate)?;
@@ -581,7 +597,7 @@ impl WettingBinding<'_> {
             checkpoint(gate)?;
             let speed = self.samples[&position].signed_speed_m_s;
             let temperature = temperatures.get(&position).map(|&t| (axis, t));
-            samples.insert(position, self.physics_at(position).sample(current.angle_radians, speed, temperature, gate)?);
+            samples.insert(position, self.physics_at(position).sample(current.angle_radians, current.tangent_gradient > 0.0, speed, temperature, gate)?);
         }
         Ok(Self { samples, ..self.clone() })
     }
@@ -598,6 +614,7 @@ impl WettingBinding<'_> {
         if let Some(current) = self.geometry.get(&position) {
             self.physics_at(position).sample(
                 current.angle_radians,
+                current.tangent_gradient > 0.0,
                 self.samples[&position].signed_speed_m_s,
                 Some((axis, WettingThermalPoint {
                     temperature_k, dynamic_viscosity_pa_s, surface_tension_n_m,
@@ -627,6 +644,7 @@ impl WettingBinding<'_> {
                 .equilibrium
                 .as_ref()
                 .is_some_and(|binding| !binding.dynamic)
+                && physics.equilibrium_hysteresis.is_none()
             {
                 // Equilibrium contact angles need no resolved speed. In
                 // particular a filling, locally flat wall stencil is valid.
@@ -641,7 +659,7 @@ impl WettingBinding<'_> {
             };
             let temperature = temperatures
                 .and_then(|(axis, field)| field.get(&position).map(|&t| (axis, t)));
-            result.insert(position, physics.sample(current.angle_radians, speed, temperature, gate)?);
+            result.insert(position, physics.sample(current.angle_radians, current.tangent_gradient > 0.0, speed, temperature, gate)?);
         }
         Ok(result)
     }
@@ -652,6 +670,7 @@ impl WettingPhysics<'_> {
     pub(super) fn sample(
         &self,
         geometric_angle_radians: f64,
+        contact_line_resolved: bool,
         speed: f64,
         temperature: Option<(&str, WettingThermalPoint)>,
         gate: &CancelGate,
@@ -663,21 +682,34 @@ impl WettingPhysics<'_> {
                 temperature,
                 gate,
             )?;
-            if !equilibrium.dynamic {
+            if !equilibrium.dynamic && self.equilibrium_hysteresis.is_none() {
                 return Ok(sample);
             }
-            // The reversible Young angle is one microscopic endpoint. There is
-            // no measured hysteresis bracket and no artificial pinning deadband.
             sample.signed_speed_m_s = speed;
-            sample.regime = if speed > 0.0 {
-                ContactLineRegime2::Advancing
-            } else if speed < 0.0 {
-                ContactLineRegime2::Receding
+            if let Some(binding) = &self.equilibrium_hysteresis {
+                let (regime, angle, hysteresis) = binding.sample(
+                    self.card, sample.applied_angle_radians, geometric_angle_radians,
+                    contact_line_resolved, speed, temperature, gate,
+                )?;
+                let receding = hysteresis.receding_angle_radians;
+                let advancing = hysteresis.advancing_angle_radians;
+                sample.regime = regime;
+                sample.applied_angle_radians = angle;
+                sample.equilibrium_hysteresis = Some(hysteresis);
+                (sample, receding, advancing)
             } else {
-                ContactLineRegime2::Equilibrium
-            };
-            let angle = sample.applied_angle_radians;
-            (sample, angle, angle)
+                // Without independently selected thresholds, the reversible
+                // Young angle remains the sole microscopic endpoint.
+                sample.regime = if speed > 0.0 {
+                    ContactLineRegime2::Advancing
+                } else if speed < 0.0 {
+                    ContactLineRegime2::Receding
+                } else {
+                    ContactLineRegime2::Equilibrium
+                };
+                let angle = sample.applied_angle_radians;
+                (sample, angle, angle)
+            }
         } else {
             // Both explicit rate laws use zero-speed endpoint measurements.
             // Their rate dependence must never be laundered into a material receipt.
@@ -709,6 +741,7 @@ impl WettingPhysics<'_> {
                     geometric_angle_radians,
                     applied_angle_radians,
                     equilibrium: None,
+                    equilibrium_hysteresis: None,
                     hydrodynamic: None,
                     molecular_kinetic: None,
                     outer_gas: None,
@@ -719,6 +752,10 @@ impl WettingPhysics<'_> {
             )
         };
         let regime = sample.regime;
+        let model_speed = sample.equilibrium_hysteresis.as_ref().map_or_else(
+            || if regime == ContactLineRegime2::Pinned { 0.0 } else { speed },
+            |hysteresis| hysteresis.model_speed_m_s,
+        );
         let mut applied_angle_radians = sample.applied_angle_radians;
         let hydrodynamic = if let Some(binding) = &self.hydrodynamic {
             binding.law.admit_angle(receding)?;
@@ -751,14 +788,18 @@ impl WettingPhysics<'_> {
             if binding.outer_gas.is_some() && ratio <= 0.0 {
                 return Err(Error::Invalid("Cox source viscosity ratio is not representable"));
             }
+            // Observed motion must remain in the model domain even when the
+            // declared numerical deadband consumes zero modeled line speed.
             binding.law.admit_capillary_number_at_ratio(capillary, ratio)?;
+            let model_capillary = (viscosity * model_speed) / surface_tension_n_m;
             if regime != ContactLineRegime2::Pinned {
                 applied_angle_radians = binding
                     .law
-                    .apparent_angle_at_ratio(applied_angle_radians, capillary, ratio, gate)?;
+                    .apparent_angle_at_ratio(applied_angle_radians, model_capillary, ratio, gate)?;
             }
             Some(CoxVoinovSample {
                 signed_capillary_number: capillary,
+                model_signed_capillary_number: model_capillary,
                 dynamic_viscosity_pa_s: viscosity,
                 surface_tension_n_m,
                 outer_to_liquid_viscosity_ratio: ratio,
@@ -769,7 +810,7 @@ impl WettingPhysics<'_> {
         let molecular_kinetic = if let Some(binding) = &self.molecular_kinetic {
             binding.law.admit_angle(receding)?;
             binding.law.admit_angle(advancing)?;
-            let prediction = binding.sample(applied_angle_radians, speed, regime, temperature)?;
+            let prediction = binding.sample(applied_angle_radians, speed, model_speed, temperature)?;
             applied_angle_radians = prediction.applied_angle_radians;
             Some(prediction)
         } else {
