@@ -12,6 +12,12 @@ use fs_exec::Cx;
 use fs_fft::harmonic_window::HarmonicWindow;
 use fs_math::dd::Dd;
 
+mod control;
+pub use control::{
+    HarmonicReceiverControlEvaluation, HarmonicReceiverControlLimits,
+    MAX_RECEIVER_CONTROL_SOURCES, PreparedHarmonicReceiverControl,
+};
+
 /// Hard ceiling on simultaneously prepared physical receiver rows.
 pub const MAX_INTERFERENCE_RECEIVERS: usize = 128;
 

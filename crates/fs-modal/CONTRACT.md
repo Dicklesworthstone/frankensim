@@ -1306,3 +1306,42 @@ amplitudes per bank-frequency-row. Warm pair observation allocates nothing and
 does no solve or original-coordinate contraction; requesting selected pairs
 does not construct a dense receiver covariance matrix. Source response
 residuals remain available and signed rounding is never clipped.
+
+### Gain and phase control of physical receiver interference
+
+`harmonic::PreparedHarmonicReceiverControl::try_with_shared_factors` binds
+already solved receiver projections of a bias and complex source-control
+bases. Each gain scales its source's complete authored tone bank. This
+supports independent actuator/frequency bases and shared stochastic drivers
+without solving or retuning the pencil during evaluation. Receiver order,
+physical units, pencil, and source clock remain the caller's common model.
+
+The constructor explicitly declares a shared factor basis: random bank k is
+the same real or proper-complex variable in every input. Counts and laws must
+match. Independent sources occupy different factor slots with explicit zero
+columns elsewhere; unknown dependence is never treated as independence.
+The deterministic mean is bank zero. These are authored second moments,
+without a Gaussian law or fourth-order uncertainty claim.
+
+`evaluate_into` reports the weighted finite-window expected mean-square
+motion and its real Cartesian derivatives with respect to each complex gain.
+For g=A*exp(i*phi), the phase derivative is
+`-g.im*gradient.re + g.re*gradient.im`. The objective includes coherent and
+stochastic contributions, all real sum-frequency terms, and proper-factor
+beats under the original uniform/triangular window. It is the average
+instantaneous vibration, distinct from the mean square of an averaged reading.
+
+Exact frequencies merge across source bases before products. DD amplitudes
+are recomposed first, then the derivative contracts twice the residual field
+with each source response. This preserves quiet residuals under destructive
+interference that can disappear when independently squared source powers are
+subtracted. Half of the symmetric tone-pair kernels suffice; flat per-bank
+arrays retain responses and reusable mixed/gradient scratch.
+
+At most 32 source gains are admitted. Tone count, payload and conservative
+product work are checked before allocation. Warm evaluation allocates nothing
+and performs no mechanical solve or original-coordinate contraction. On
+refusal the caller's gradient is unchanged; subsequent calls rebuild private
+scratch. Source backward residuals remain available. This does not impose
+actuator constraints, establish a causal broadband control filter, add startup
+motion, or certify relative error near a null.

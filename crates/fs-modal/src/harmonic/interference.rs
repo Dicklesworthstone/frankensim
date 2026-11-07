@@ -18,6 +18,8 @@ use fs_math::{c64::C64, dd::Dd};
 
 mod receivers;
 pub use receivers::{
+    HarmonicReceiverControlEvaluation, HarmonicReceiverControlLimits,
+    MAX_RECEIVER_CONTROL_SOURCES, PreparedHarmonicReceiverControl,
     HarmonicReceiver, HarmonicReceiverControls, HarmonicReceiverPairMoments,
     HarmonicReceiverQuantity, MAX_INTERFERENCE_RECEIVERS, PreparedHarmonicReceivers,
 };

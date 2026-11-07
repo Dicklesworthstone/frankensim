@@ -49,6 +49,8 @@ pub use interference::{
     HarmonicImpedanceSample, HarmonicInterferenceControls, HarmonicInterferenceLoad,
     HarmonicInterferenceMoments, MAX_ENSEMBLE_FORCE_TONES, MAX_INTERFERENCE_FACTORS,
     MAX_INTERFERENCE_TONES, PreparedHarmonicInterference, PreparedHarmonicInterferenceEnsemble,
+    HarmonicReceiverControlEvaluation, HarmonicReceiverControlLimits,
+    MAX_RECEIVER_CONTROL_SOURCES, PreparedHarmonicReceiverControl,
     HarmonicReceiver, HarmonicReceiverControls, HarmonicReceiverPairMoments,
     HarmonicReceiverQuantity, MAX_INTERFERENCE_RECEIVERS, PreparedHarmonicReceivers,
 };
