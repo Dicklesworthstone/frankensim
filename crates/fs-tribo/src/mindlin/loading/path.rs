@@ -31,6 +31,9 @@ pub use trial::MindlinPathTrial;
 /// Integrated pressure-weighted sliding over the original accepted path.
 pub mod sliding;
 
+/// Exact contact timing through signed-gap detachment and reentry.
+pub mod gaps;
+
 /// Complete path response; shear work uses the time-average force
 /// in `tangential`, and normal work is audited separately.
 #[derive(Clone, Debug, PartialEq)]

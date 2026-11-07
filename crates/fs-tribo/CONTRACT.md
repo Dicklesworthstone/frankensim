@@ -2579,3 +2579,36 @@ Three G1/G3/G4 regressions cover exact probe/candidate agreement through loading
 unloading, reversal and separation, the actual-travel tangent, frictionless
 limits, and atomic refusals. No new normal, adhesive or friction law is selected
 by this source-neutral probe.
+
+## Exact signed-gap timing for evolving-area Mindlin paths
+
+`HertzMindlinContact::{trial_coupled_gap_path,advance_coupled_gap_path}`
+compose the original scalar Hertz--Mindlin owner over the exact positive-area
+interval of an affine signed indentation path. The signed endpoints must match
+the accepted and endpoint repulsive Hertz geometry. Negative indentation has
+zero shear load; a separate adhesive normal owner supplies attraction and its
+conservative work. There is no endpoint clamping or inferred tensile pressure.
+
+For active duration fraction f, the original solve receives f times the released
+total shear displacement and f² times the scalar body compliance. Its average
+effort and actual-travel tangent return to whole-step units with factors f and
+f². Force ceilings and absolute tolerances are transformed consistently; heat,
+elastic storage change and Hertz normal work are physical interval changes and
+are not multiplied by f. The active and gap durations are computed separately
+to preserve short intervals even when normalized event endpoints round together.
+Unrepresentable transformed physical quantities refuse.
+
+Candidate construction advances zero-load gap drift and the original prescribed
+active path in chronological order. Departure releases retained strain through
+native microslip heat; reentry adds unstrained material after gap motion.
+Accumulated macroscopic slip includes the whole actual path. Probes allocate no
+history, complete proposals enforce the original history ceiling, and errors or
+cancellation publish no state. Fully attached and fully inactive paths delegate
+to the existing path methods. This adds no friction law, JKR partial-slip claim,
+normal trajectory solver, finite-rotation transport or experimental calibration.
+
+Seven G1/G3/G4 regression groups check explicit touch/gap decomposition, whole
+compatibility and analytic tangent, force-budget scaling, release/flight/reentry,
+contact-duration representation, original-path parity and atomic refusals.
+All 26 changing-load/path tests pass in a focused original-source Rust build
+with actual `fs-math`; this is not a full workspace or cross-ISA build.

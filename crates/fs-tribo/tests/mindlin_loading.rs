@@ -1,4 +1,6 @@
 //! Independent Hertz/MDR checks for explicit varying-load shear histories.
+#[path = "mindlin_loading/gaps.rs"]
+mod gaps;
 #[path = "mindlin_loading/trial.rs"]
 mod trial;
 use fs_math::det;
