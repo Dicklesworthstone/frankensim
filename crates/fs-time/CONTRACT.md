@@ -285,6 +285,32 @@ where claimed below.
   symplecticity, moving gimbals, variable stiffness/rest phase or parametric
   preload work is claimed. Full Cargo remains unavailable with missing
   constellation siblings.
+- `RotorBank::torsional_network_stepper(couplings, duration)` adds finite
+  elastic/viscous transmission BETWEEN distinct original rotor shafts.
+  Each authored port has strain `x=q_first-ratio*q_second-rest`, potential
+  `k*x^2/2`, relative rate `s_first-ratio*s_second`, and reciprocal shaft
+  torques `(-effort, ratio*effort)`. Negative ratios, parallel couplings and
+  dependent closed coupling loops retain their actual physical coefficients;
+  zero ratio is the first-shaft/carrier limit. Full-tensor carrier recoil and
+  simultaneous external torque remain owned by the existing rotor bank.
+  Two implicit midpoint shaft stages surround the native gyrostat drift.
+  The sparse two-entry incidence rows and rank-three carrier term assemble
+  `H=B*(diag(1/J)+A^T I^-1 A)*B^T`; one cached native Cholesky factor solves
+  `I+delta/2*sqrt(D_eff)*H*sqrt(D_eff)`, with `D_eff=D+delta*K/2`.
+  At most 64 couplings are admitted. Preparation is O(E^3), stored factors are
+  O(E^2), and accepted steps use O(N+E^2) work and fixed stack arrays without
+  allocation. Empty/zero-law networks delegate exactly to held-torque stepping.
+  Per-coupling polarized storage changes and nonnegative viscous heat remain
+  distinct from drive/external work and the original gyrostat defect. Original
+  actual impulse, recoil, phase, constitutive and work checks reject unresolved
+  transfers without publishing a half-step. The combined half-stage PSD-trace
+  resolution number is at most two; frequency estimates and second-order
+  splitting still require refinement, not an interval or exact-trajectory claim.
+  `gyrostat_torsional_network` covers analytic two-shaft oscillation and loaded
+  damping, full-tensor oblique-loop Euler refinement, reciprocal work, limits
+  and refusals. Fixed topology, ratios, rest phases and coefficients are
+  required; rigid gearing, backlash, clutch friction, gear-tooth/material
+  validity, thermal allocation and parameter-change work are not inferred.
 - `RotorBank::lock_mode(mask)` prepares retained ideal rotor/carrier shaft
   locks with `I_mode=I_reduced+sum_selected J_i a_i a_i^T`.
   Engagement applies simultaneous original-owner impulses with complete

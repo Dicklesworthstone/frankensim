@@ -25,6 +25,12 @@ pub use viscous::{ViscousRotorStep, ViscousRotorStepper};
 mod torsional;
 pub use torsional::{TorsionalRotorStep, TorsionalRotorStepper};
 
+#[path = "rotors/torsional_network.rs"]
+mod torsional_network;
+pub use torsional_network::{
+    MAX_TORSIONAL_COUPLINGS, TorsionalCoupling, TorsionalNetworkStep, TorsionalNetworkStepper,
+};
+
 #[path = "rotors/locked.rs"]
 mod locked;
 pub use locked::{
@@ -369,7 +375,14 @@ impl<const N: usize> RotorBank<N> {
         }
         let after_carrier = self.carrier_momentum(&after)?;
         let external = after.total_momentum_body - state.total_momentum_body;
-        self.admit_recoil(before_carrier, after_carrier, external, &actual)?;
+        self.admit_recoil(
+            before_carrier,
+            after_carrier,
+            external,
+            &actual,
+            external_impulse_body,
+            &shaft_impulse_nms,
+        )?;
         let after_omega = self.inertia.velocity(after_carrier)?;
         let mean_omega = before_omega.scale(0.5) + after_omega.scale(0.5);
         let mut rates = [0.0; N];
@@ -559,28 +572,42 @@ impl<const N: usize> RotorBank<N> {
         after_carrier: Vec3,
         external: Vec3,
         axial_change: &[f64; N],
+        requested_external: Vec3,
+        requested_axial: &[f64; N],
     ) -> Result<(), LieStepError> {
         // Each rotor can resolve its own impulse while a much larger rotor
         // erases that transfer in the aggregate h passed to the native drift.
         // Check the transfer independently of both endpoint sums and energy:
         // at zero carrier rate, lost recoil can falsely report zero work error.
         let mut required = components(external).map(dd);
-        for (rotor, delta) in self.rotors.iter().zip(axial_change) {
-            for (value, axis) in required.iter_mut().zip(components(rotor.axis_body)) {
+        let mut requested = components(requested_external).map(dd);
+        for ((rotor, delta), impulse) in self.rotors.iter().zip(axial_change).zip(requested_axial) {
+            for ((value, physical), axis) in required
+                .iter_mut()
+                .zip(requested.iter_mut())
+                .zip(components(rotor.axis_body))
+            {
                 *value = *value - dd(axis) * dd(*delta);
+                *physical = *physical - dd(axis) * dd(*impulse);
             }
         }
-        for ((before, after), expected) in components(before_carrier)
+        for (((before, after), expected), requested) in components(before_carrier)
             .into_iter()
             .zip(components(after_carrier))
             .zip(required)
+            .zip(requested)
         {
             let expected = scalar(expected.to_f64(), "carrier impulse balance")?;
+            let requested = scalar(requested.to_f64(), "requested carrier impulse")?;
             let actual = scalar((dd(after) - dd(before)).to_f64(), "carrier impulse change")?;
             // Retain the lane's existing carrier-resolution allowance, with no
             // |h| term that could admit an erased (or materially partial) kick.
+            // Equal/opposite physical impulses can round differently against
+            // unequal stored p. A zero requested recoil must not be mistaken
+            // for a lost nonzero torque because of that rounding remainder;
+            // the actual transfers still obey the same local residual bound.
             let scale = before.abs().max(after.abs()).max(expected.abs());
-            if (expected != 0.0 && actual == 0.0)
+            if (requested != 0.0 && actual == 0.0)
                 || (actual - expected).abs() > 4096.0 * f64::EPSILON * scale
             {
                 return Err(invalid("unresolved carrier recoil against rotor momentum"));

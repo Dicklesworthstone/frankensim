@@ -523,6 +523,39 @@ fn aggregate_spin_must_resolve_simultaneous_carrier_recoil() {
     close(balanced.shaft_work_j[2], 0.5, 0.0);
     close(balanced.kinetic_energy_change_j, 1.0, 0.0);
     close(balanced.work_energy_residual_j, 0.0, 0.0);
+
+    // Equal/opposite physical transfers need no carrier torque even when
+    // additions to unequal stored shaft momenta round differently. The actual
+    // transfer residual remains checked at the original carrier scale.
+    let unequal = bank
+        .state_from_velocities(
+            So3::identity(),
+            Vec3::new(1.0, 0.0, 0.0),
+            [0.0, -0.875],
+            [0.0; 2],
+        )
+        .unwrap();
+    assert_eq!(unequal.axial_momentum_nms, [1.0, 0.125]);
+    let balanced = bank
+        .apply_impulse(&unequal, [0.1, -0.1], Vec3::default())
+        .unwrap();
+    assert_ne!(balanced.axial_momentum_change_nms.iter().sum::<f64>(), 0.0);
+    assert_eq!(
+        balanced.state_after.total_momentum_body,
+        unequal.total_momentum_body
+    );
+    vector(
+        bank.angular_velocity(&balanced.state_after).unwrap(),
+        Vec3::new(1.0, 0.0, 0.0),
+        0.0,
+    );
+    close(balanced.work_energy_residual_j, 0.0, 2e-15);
+    // A genuinely nonzero requested recoil still must not disappear, even
+    // when it is small enough to fit the relative residual allowance.
+    assert!(
+        bank.apply_impulse(&unequal, [0.1, -0.1 + f64::EPSILON / 16.0], Vec3::default())
+            .is_err()
+    );
 }
 
 #[test]

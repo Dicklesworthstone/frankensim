@@ -407,6 +407,7 @@ impl<const N: usize> RotorLock<N> {
         let delta_omega = self
             .inertia
             .velocity(after.total_momentum_body - state.total_momentum_body)?;
+        let mut requested_reaction = [0.0; N];
         for i in 0..N {
             if self.locked[i] {
                 let reaction = product(
@@ -414,6 +415,7 @@ impl<const N: usize> RotorLock<N> {
                     self.bank.rotors[i].axis_body.dot(delta_omega),
                     "retained locked axial momentum change",
                 )?;
+                requested_reaction[i] = reaction;
                 after.axial_momentum_nms[i] = increment(
                     state.axial_momentum_nms[i],
                     reaction,
@@ -429,6 +431,8 @@ impl<const N: usize> RotorLock<N> {
             self.bank.carrier_momentum(&after)?,
             after.total_momentum_body - state.total_momentum_body,
             &change,
+            after.total_momentum_body - state.total_momentum_body,
+            &requested_reaction,
         )?;
         let mean_omega = self
             .inertia
