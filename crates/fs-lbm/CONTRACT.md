@@ -8104,8 +8104,18 @@ through the trajectory. Thus a pressure-dependent angle law changes native
 capillary motion when the prescribed pressure data changes between scenarios.
 The existing static-only admission and scalar constant-support rules are intact.
 
-The existing native smoothed VOF field supplies the actual wall-adjacent fill
-and in-wall gradient. For outward liquid normal `-grad(phi)/|grad(phi)|`, the
+Physical VOF fractions supply the wall history independently of imposed-angle
+curvature ghosts. A cached tangential average uses only complete opposite
+neighbor pairs, retaining centered affine geometry even at transverse walls.
+The first inward physical layer supplies the normal derivative. Inactive
+interior gas contributes zero through the existing sparse geometry owner;
+explicit solid, outside-domain and piston cells remain excluded. Merely
+changing the prescribed angle or activating an empty gas halo cannot move
+this measured field. Only boundary tile lanes are scanned after walking the
+active tile keys, and the wall-cell budget precedes stencil memoization.
+The capillary ghost/smoothing/pressure path remains its original owner.
+
+For outward liquid normal `-grad(phi)/|grad(phi)|`, the
 signed geometric speed is `(phi_new - phi_old) * dx / (dt * |grad_t(phi_new)|)`;
 the gradient is per LATTICE CELL, not per metre. Positive speed advances liquid.
 It is a first-cell spatial estimate and a backward time difference, not a

@@ -8,7 +8,8 @@ pub(super) struct PlanarContactField3 {
     angles: BTreeMap<[usize; 3], PlanarContactAngle3>,
 }
 
-/// Smoothed, wall-adjacent VOF geometry. Gradients use lattice cell coordinates.
+/// Tangentially smoothed physical VOF geometry, independent of angle ghosts.
+/// Gradients use lattice cell coordinates.
 /// This is a first-cell contact-line estimate, not a subcell wall intersection.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct WallFill3 {
@@ -31,34 +32,61 @@ impl FreeSurface3 {
     /// The complete wall-adjacent fill history includes gas cells. A later
     /// activated tile was gas, so a missing history coordinate means zero fill.
     pub(crate) fn planar_wall_fill(
-        &mut self,
-        wall: PlanarWall3,
-        maximum_cells: usize,
-        gate: &CancelGate,
-    ) -> Result<BTreeMap<[usize; 3], WallFill3>, FreeSurfaceError3> {
-        self.refresh_fill(gate)?;
-        self.planar_wall_fill_from_cache(wall, maximum_cells, gate)
-    }
-
-    fn planar_wall_fill_from_cache(
         &self,
         wall: PlanarWall3,
         maximum_cells: usize,
         gate: &CancelGate,
     ) -> Result<BTreeMap<[usize; 3], WallFill3>, FreeSurfaceError3> {
+        check_cancel(gate)?;
         let axis = wall.axis();
         let dims = self.grid.tile_dims();
         let extents = [dims.0 * TILE, dims.1 * TILE, dims.2 * TILE];
         let edge = if wall.upper() { extents[axis] - 1 } else { 0 };
         let mut result = BTreeMap::new();
-        let sample = |position: [i64; 3]| -> Option<f64> {
-            let (slot, lane) = self
-                .grid
-                .resolve_source(position[0], position[1], position[2])?;
-            Some(self.fill_smooth[&self.grid.active_keys()[slot]][lane])
+        // Contact history measures physical fill, not the prescribed-angle
+        // curvature cache: changing a ghost must not manufacture line motion.
+        // The same sparse geometry owner supplies inactive interior gas as
+        // zero, keeping the stencil invariant under empty-halo activation.
+        let physical = |p: [i64; 3]| -> Option<f64> {
+            if self.planar_piston_contains(p) {
+                return None;
+            }
+            if let Some((slot, lane)) = self.grid.resolve_source(p[0], p[1], p[2]) {
+                Some(self.fill(self.grid.active_keys()[slot], lane))
+            } else {
+                self.local_geometric_fill(p).map(|(fill, _)| fill)
+            }
+        };
+        let mut cache = BTreeMap::new();
+        let mut sample = |position: [i64; 3]| -> Option<f64> {
+            if let Some(&value) = cache.get(&position) {
+                return Some(value);
+            }
+            let mut sum = physical(position)?;
+            let mut count = 1.0;
+            for tangent in 0..3 {
+                if tangent == axis { continue; }
+                let mut plus = position;
+                let mut minus = position;
+                plus[tangent] += 1;
+                minus[tangent] -= 1;
+                // Complete pairs keep the filter centered even at transverse
+                // walls. Affine physical planes therefore retain their angle.
+                if let (Some(a), Some(b)) = (physical(plus), physical(minus)) {
+                    sum += a + b;
+                    count += 2.0;
+                }
+            }
+            let value = sum / count;
+            cache.insert(position, value);
+            Some(value)
         };
         for &key in self.tiles.keys() {
             check_cancel(gate)?;
+            let (x, y, z) = Self::global_of(key, 0);
+            if [x, y, z][axis] != (edge / TILE * TILE) as i64 {
+                continue;
+            }
             for lane in 0..TILE_CELLS {
                 let (x, y, z) = Self::global_of(key, lane);
                 let p = [x, y, z];
@@ -70,7 +98,9 @@ impl FreeSurface3 {
                         "planar wetting exceeds its wall-cell budget",
                     ));
                 }
-                let fill = self.fill_smooth[&key][lane];
+                let fill = sample(p).ok_or(FreeSurfaceError3::Transport(
+                    "planar wetting requires physical wall-adjacent fill",
+                ))?;
                 let mut tangent_squared = 0.0;
                 for tangent in 0..3 {
                     if tangent == axis {
@@ -208,7 +238,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn g1_wall_fill_angle_and_per_cell_ghost_follow_all_six_normal_conventions() {
+    fn g1_g3_physical_wall_history_and_angle_ghosts_follow_all_six_normal_conventions() {
         for wall in [
             PlanarWall3::XMin,
             PlanarWall3::XMax,
@@ -237,20 +267,28 @@ mod tests {
                     let tangent = (axis + 1) % 3;
                     let slope: f64 = 0.03;
                     for &key in surface.grid.active_keys() {
-                        surface.fill_smooth.insert(
-                            key,
-                            core::array::from_fn(|lane| {
+                        let values = core::array::from_fn(|lane| {
                                 let (x, y, z) = FreeSurface3::global_of(key, lane);
                                 let p = [x, y, z];
                                 let inward = if wall.upper() { 7 - p[axis] } else { p[axis] };
                                 0.5 - sign * slope * p[tangent] as f64
                                     - slope * (angle.cos() / angle.sin()) * inward as f64
-                            }),
-                        );
+                            });
+                        // Actual interface mass/populations supply the history.
+                        // Retain an independent affine curvature-cache oracle
+                        // for the existing normal/ghost/pressure checks below.
+                        surface.fill_smooth.insert(key, values);
+                        let slot = surface.grid.slot_of(key).unwrap();
+                        let tile = surface.tiles.get_mut(&key).unwrap();
+                        for lane in 0..TILE_CELLS {
+                            tile.cells[lane] = Cell3::Interface;
+                            tile.mass[lane] = values[lane]
+                                * surface.grid.populations(slot, lane).iter().sum::<f64>();
+                        }
                     }
                     let gate = CancelGate::new_clock_free();
                     let geometry = surface
-                        .planar_wall_fill_from_cache(wall, 64, &gate)
+                        .planar_wall_fill(wall, 64, &gate)
                         .unwrap();
                     let mut p = [3; 3];
                     p[axis] = if wall.upper() { 7 } else { 0 };
@@ -277,6 +315,27 @@ mod tests {
                     let key = surface.grid.active_keys()[slot];
                     assert!(surface.curvature(key, lane).abs() < 2e-12);
                     assert!((surface.reference_density(key, lane) - 1.0).abs() < 2e-14);
+                    let populations = surface.grid.state_bits();
+                    let mass = surface.ledger_mass();
+                    let mut pressure = Vec::new();
+                    for imposed in [core::f64::consts::PI / 6.0, 5.0 * core::f64::consts::PI / 6.0] {
+                        surface.set_planar_contact_field(
+                            wall, geometry.keys().map(|&p| (p, imposed)).collect(), &gate,
+                        ).unwrap();
+                        surface.refresh_fill(&gate).unwrap();
+                        pressure.push(surface.reference_density(key, lane));
+                        let measured = surface.planar_wall_fill(wall, 64, &gate).unwrap();
+                        for (position, before) in &geometry {
+                            let after = measured[position];
+                            assert_eq!(before.fill.to_bits(), after.fill.to_bits());
+                            assert_eq!(before.tangent_gradient.to_bits(), after.tangent_gradient.to_bits());
+                            assert_eq!(before.angle_radians.to_bits(), after.angle_radians.to_bits());
+                        }
+                        assert_eq!(surface.grid.state_bits(), populations);
+                        assert_eq!(surface.ledger_mass(), mass);
+                    }
+                    assert!((pressure[0] - pressure[1]).abs() > 1e-8,
+                        "angle ghosts must still change native pressure while physical history is fixed");
                 }
             }
         }
