@@ -214,6 +214,13 @@ pub enum SheetThermalError {
         surface: usize,
         error: ConductionError,
     },
+    /// Sourced volumetric optics or their original angular preparation refused.
+    LayerOptics {
+        band: Option<usize>,
+        slab: usize,
+        layer: Option<usize>,
+        error: ConductionError,
+    },
     Linear(LuWorkspaceError),
     Budget {
         evaluations: usize,

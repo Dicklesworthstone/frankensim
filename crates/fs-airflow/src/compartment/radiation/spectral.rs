@@ -363,6 +363,34 @@ impl<'a> SpectralOptics<'a> {
         self.slab_bands.as_deref()
     }
 
+    /// Refresh material response without changing the original finite spectral
+    /// partition, soot, opaque surfaces, physical layer axis or geometry.
+    pub(super) fn with_slab_feedback(
+        &self,
+        slab_bands: Vec<Vec<SlabPair>>,
+    ) -> Result<Self, RadiationError> {
+        let original = self.slab_bands().ok_or(RadiationError::Invalid(
+            "slab feedback requires original spectral slab bands",
+        ))?;
+        if slab_bands.len() != original.len()
+            || slab_bands.iter().zip(original).any(|(updated, old)| {
+                updated.len() != old.len() || updated.iter().zip(old).any(|(a, b)| {
+                    a.surfaces != b.surfaces || a.optics.layer_count() != b.optics.layer_count()
+                        || a.optics.layers().iter().zip(b.optics.layers()).any(|(x, y)| {
+                            x.thickness_m() != y.thickness_m()
+                        })
+                })
+            })
+        {
+            return Err(RadiationError::Invalid(
+                "slab feedback must retain the original bands, ports and layer geometry",
+            ));
+        }
+        let mut result = self.clone();
+        result.slab_bands = Some(slab_bands.into());
+        Ok(result)
+    }
+
     /// Whether the optical transfer operator changes within a declared band
     /// and therefore requires point-wavelength sampling. Fixed molecular bands
     /// and band-constant surface emissivities return false; active Rayleigh soot

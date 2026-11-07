@@ -4679,12 +4679,35 @@ Gray callbacks query only non-port faces; genuine spectral inputs skip them.
 Only actual layer and opaque-face heat enters native storage. Local and total
 native joule residuals and the applied material/gas/bath balance gate acceptance.
 
-The returned candidate already contains its reported material heating.
-Gas temperatures, optical coefficients and geometry remain prescribed for the
-interval; apply the returned gas/bath exchanges once when accepting their
-owners. Rebuild sourced optics when physical conditions require new
-coefficients. The adapter does not advance gas or certify timestep, spatial
-resolution, scattering or refractive-interface accuracy.
+`candidate_slab_thermal_with_feedback` additionally resolves sourced layer
+absorption and real refractive index inside every native endpoint residual,
+Jacobian and globalization probe. `SlabLayerState` carries the original
+reference layer, original slab/layer/band axis and finite wavelength endpoints,
+plus the actual native cell, material identity, specific enthalpy and temperature.
+Thus latent-plateau phase response need not be misrepresented as a temperature
+change. The deterministic caller-owned constitutive law must not advance its
+own accepted history or infer spectral data from a total-gray coefficient.
+
+Changing optics rebuilds the original incoherent angular/Fresnel response,
+including heterogeneous refraction, total internal reflection, n² internal
+emission and repeated returns. Identical layer responses reuse the immutable
+coefficients. Each preparation retains its original quadrature budget and the
+whole solve retains the shared thermal trial ceiling. Thickness, ports and
+ordered cells remain fixed; changing geometry requires its physical owner.
+The returned layer's source domain must cover the actual queried temperature.
+Spectral feedback retains the original finite bands, opaque surface sources,
+gas/soot sources and omitted-emission gates. Reports retain the optical sources
+at the accepted thermal endpoint, never a stale initial-temperature response.
+
+The returned candidate already contains its reported material heating. Apply
+the returned gas/bath exchanges once when accepting their owners. Gas
+temperatures and geometry remain prescribed; the fixed-optics entry point also
+keeps its original coefficients fixed. Neither adapter advances gas or certifies
+timestep, spatial resolution, scattering, coherence, phase kinetics or material
+accuracy. A source-domain, geometry, budget or cancellation refusal does not
+advance the input thermal state. Focused regressions compare sensible and
+latent feedback with independent Fresnel ray sums and scalar energy roots,
+and finite-band feedback with independently integrated band heat.
 
 ## Developing turbulent tube material coupling
 

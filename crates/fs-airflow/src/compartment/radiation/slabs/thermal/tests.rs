@@ -1,4 +1,6 @@
 use super::*;
+
+mod feedback;
 use crate::compartment::radiation::{AbsorptionCoefficient, OpticalPath, RadiationError};
 use crate::compartment::radiation::spectral::{BandSurfaceEmissivity, SpectralBand};
 use fs_conduction::radiation::{

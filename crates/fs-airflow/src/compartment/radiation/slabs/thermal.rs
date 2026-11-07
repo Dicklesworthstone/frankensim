@@ -7,9 +7,12 @@
 //!
 //! The sheet adapter's single bounded backward-Euler/Newton driver owns all
 //! numerical stepping. This adapter supplies only the endpoint optical source
-//! resolver. Gray or genuine finite spectral bands retain the slab's matched-
-//! index, plane-parallel, nonscattering model and diffuse enclosure-port closure.
+//! resolver. Gray or genuine finite spectral bands retain the slab's declared
+//! refractive, plane-parallel, nonscattering model and diffuse enclosure-port closure.
 //! Gas temperatures and optical geometry remain prescribed over the interval.
+//! `candidate_slab_thermal_with_feedback` also resolves each layer's sourced
+//! absorption and refractive index at every native endpoint trial, including
+//! Jacobian probes and latent-enthalpy changes at constant temperature.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,6 +29,9 @@ use super::super::{
     spectral::{SpectralOptics, SpectralSolve, SpectralWorkspace},
     walls::WallRadiation,
 };
+
+mod feedback;
+pub use feedback::SlabLayerState;
 
 /// The original thermal driver's controls, reports and error semantics apply.
 pub use shared::{
