@@ -4064,6 +4064,46 @@ numerical slice can execute the exact IOR/lens numerical bodies and existing
 pupil kernels independently of the runtime; that check is not a substitute
 for compiling or running the full camera/tracer integration tests.
 
+### Sequential refractive camera
+
+With `tracer`, `LensSurface` and `SequentialLens` admit up to 32 explicitly
+positioned spherical caps or planes, each with a clear radius and the original
+scene-side `DielectricGlass`. Sensor and scene exterior phase indices are one.
+Disjoint axial cap bounds preserve surface order; an unchanged-medium plane
+acts as an internal aperture stop. Native phase-index and absorption laws keep
+their original spectral bands and query refusals. Construction never invents
+an optical prescription or measured glass data.
+
+`PhysicalCamera::with_sequential_lens` places the sensor at the camera eye and
+derives reference focal/focus diagnostics from the thick-system ABCD matrix.
+Actual rays use spherical intersections and vector Snell refraction, retaining
+chromatic and spherical aberration, finite thickness, skew rays, clipping, TIR,
+and absorption over the actual distance inside each glass. Cumulative Stokes
+transport retains interface-generated polarization when computing unpolarized
+direct-image transmission. It does not multiply independent Fresnel averages.
+
+`generate_sequential_spectral_rays_from_tangent_offsets` returns separate
+optional rays and weights. Uniform sampling of the projected rear cap uses its
+exact projected-area/solid-angle Jacobian; the planar limit is cos^4(theta).
+Clipped wavelengths retain zero sample mass. The native cinematic path tracer
+continues every surviving wavelength independently and sums the original packet
+measure, including native surface/volume transport and contribution AOVs. AOV
+primary geometry follows the hero lane, including an absent clipped hero.
+Camera continuity includes every surface and its full native glass identity.
+Depth is axial distance from the sensor, and surface normal/albedo AOVs remain
+available. Motion stays unavailable until a lens-aware inverse mapping exists.
+
+The film convention is direct sensor irradiance divided by
+`pi*rear_clear_radius^2/rear_vertex_z^2`; multiplying by that factor recovers
+irradiance from a radiometric scene. Exposure, ISO and QE remain explicit.
+This finite-thickness direct-image model omits reflected ghosts, aspheres,
+coatings, diffraction and autofocus. Its unweighted ray and optical-centre
+projection entry points refuse; a distorted lens has no single projective
+centre. Pose animation retains the authored prescription and fixed focus.
+The rear sampling aperture is not an entrance-pupil measurement, so no f-number
+is inferred. Polarized-scene analyzer and curved-raster attachment require
+their own weighted, potentially clipped camera-path interface.
+
 The motion path reconstructs only the supplied interpolation model. It does not
 invent mechanical bandwidth, unwrap rotations absent from keyframes, smooth a
 declared contact/terminal discontinuity, validate the source dynamics, or claim

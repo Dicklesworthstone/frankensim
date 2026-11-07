@@ -9577,13 +9577,23 @@ fn prepare_aligned_aov_primary(
     let physical = camera
         .evaluate_exposure(cx, exposure, absolute_time_s)
         .map_err(TracerError::from)?;
-    let depth_m = match physical
-        .project_from_optical_center(primary.hit.point, settings.camera_aspect())
-        .map_err(TracerError::from)?
-    {
-        OpticalCenterProjection::InFront { depth_m, .. } => depth_m,
-        OpticalCenterProjection::BehindCamera { .. } => {
+    let depth_m = if physical.sequential_lens().is_some() {
+        // Real lens distortion has no optical-centre projection, but axial
+        // scene depth remains well-defined in the authored sensor frame.
+        let depth = physical.forward().dot(primary.hit.point.delta_from(physical.eye()));
+        if !depth.is_finite() || depth <= 0.0 {
             return Err(CinematicAovError::InvalidPrimary);
+        }
+        depth
+    } else {
+        match physical
+            .project_from_optical_center(primary.hit.point, settings.camera_aspect())
+            .map_err(TracerError::from)?
+        {
+            OpticalCenterProjection::InFront { depth_m, .. } => depth_m,
+            OpticalCenterProjection::BehindCamera { .. } => {
+                return Err(CinematicAovError::InvalidPrimary);
+            }
         }
     };
     let geometric_normal_world = aov_unit_normal(primary.hit.normal)?;
@@ -9651,6 +9661,11 @@ fn aligned_previous_motion(
     absolute_time_s: f64,
     current_camera: PhysicalCamera,
 ) -> Result<Option<[f64; 2]>, CinematicAovError> {
+    if current_camera.sequential_lens().is_some() {
+        // A lens-aware inverse raster mapping is required before exporting
+        // motion; keep this channel unavailable without dropping valid AOVs.
+        return Ok(None);
+    }
     let previous_sample_time_s =
         shutter_aligned_previous_reference_time(provenance, absolute_time_s);
     let Some(previous) =
@@ -10026,6 +10041,24 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
             // retaining the complete explicit exterior law and source state.
             hasher.update(b"native-thin-lens-exterior.v1");
             update_continuity_ior(hasher, exterior);
+        }
+    }
+    if let Some(lens) = camera.sequential_lens() {
+        hasher.update(b"native-sequential-spectral-lens.v1");
+        update_continuity_f64(hasher, lens.reference_wavelength_nm());
+        hasher.update(&(lens.surfaces().len() as u64).to_le_bytes());
+        for surface in lens.surfaces() {
+            update_continuity_f64s(hasher, [
+                surface.vertex_z_m(), surface.curvature_per_m(), surface.clear_radius_m(),
+            ]);
+            if let Some(glass) = surface.medium_after() {
+                hasher.update(&[1]);
+                hasher.update(Material::Dielectric {
+                    glass: *glass, surface: DielectricSurface::SMOOTH,
+                }.content_identity().as_bytes());
+            } else {
+                hasher.update(&[0]);
+            }
         }
     }
 }
@@ -13824,6 +13857,71 @@ fn trace_path_with_regions<'scene>(
                 physical.admit_dispersive_raster(half_tan * s.camera_aspect(), half_tan)?;
                 let x_tan = (2.0 * (f64::from(px) + jx) / w - 1.0) * s.camera_aspect() * half_tan;
                 let y_tan = (1.0 - 2.0 * (f64::from(py) + jy) / h) * half_tan;
+                if physical.sequential_lens().is_some() {
+                    // A thick spectral lens changes both origin and direction.
+                    // Continue every wavelength on its own native path, keeping
+                    // the original packet's integration measure and RNG identity.
+                    // Rejected pupil draws remain zero samples, never retries.
+                    let optical = physical.generate_sequential_spectral_rays_from_tangent_offsets(
+                        cx, x_tan, y_tan, camera_lens_sample(key, pixel, sample)?, &lambdas,
+                    )?;
+                    let mut result = PathTraceSample {
+                        xyz: [0.0; 3],
+                        primary: None,
+                        absolute_time_s: Some(time.interval.time_at(time.normalized)),
+                        pixel_jitter: [jx, jy],
+                        contribution_split: capture_primary.then_some(PathContributionSplit::ZERO),
+                    };
+                    for (lane, optical) in optical.into_iter().enumerate() {
+                        let Some(optical) = optical else { continue };
+                        if optical.weight == 0.0 {
+                            continue;
+                        }
+                        let medium_stack = lighting.initial_media
+                            .stack(scene, cx, optical.ray.origin, ray_time)?;
+                        if medium_ior(
+                            medium_stack.last().map(|entry| *entry.glass), lambdas[lane],
+                        )? != 1.0 {
+                            return Err(CameraError::SequentialLensOutsideModel.into());
+                        }
+                        let mut throughput = [0.0; PACKET];
+                        throughput[lane] = optical.weight;
+                        let child = trace_path_with_regions(
+                            scene, lighting, cx, s, kn, pixel, sample, jx, jy, ul,
+                            ray_time, camera_path, capture_primary, path_sobol,
+                            Some(SpectralPathState {
+                                ray: optical.ray,
+                                throughput,
+                                previous_bsdf: None,
+                                prev_origin: optical.ray.origin,
+                                segment_origin: optical.ray.origin,
+                                medium_stack,
+                                rng,
+                                next_depth: 0,
+                                active_lane: Some(lane),
+                                remaining_smooth_dielectric_splits: SMOOTH_DIELECTRIC_SPLIT_BUDGET,
+                            }),
+                            #[cfg(feature = "volumes")]
+                            medium,
+                            #[cfg(feature = "photometry")]
+                            fixtures,
+                            #[cfg(feature = "volumes")]
+                            scene_media,
+                        )?;
+                        add_xyz(&mut result.xyz, child.xyz);
+                        if let (Some(total), Some(part)) = (
+                            &mut result.contribution_split, child.contribution_split,
+                        ) {
+                            total.add_assign(part);
+                        }
+                        // AOV geometry follows the hero ray, including a
+                        // genuinely clipped hero. No other colour borrows it.
+                        if lane == 0 {
+                            result.primary = child.primary;
+                        }
+                    }
+                    return Ok(result);
+                }
                 #[cfg(feature = "volumes")]
                 if physical.has_diffraction()
                     && (medium.is_some() || scene_media.is_some())

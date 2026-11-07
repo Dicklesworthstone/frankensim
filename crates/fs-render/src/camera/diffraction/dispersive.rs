@@ -328,6 +328,9 @@ impl DispersiveThinLens {
     }
 
     fn admit_camera(&self, camera: &PhysicalCamera) -> Result<(), CameraError> {
+        if camera.sequential_lens.is_some() {
+            return Err(CameraError::SequentialLensOutsideModel);
+        }
         let focal = camera
             .projection
             .focal_length_m()

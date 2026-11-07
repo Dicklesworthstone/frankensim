@@ -1,14 +1,16 @@
 //! Validated physical and animated cameras for cinematic rendering.
 //!
-//! The optical model is an ideal thin lens. Focus distance is the positive
-//! axial distance from the lens plane, not distance along each raster ray.
+//! The default optical model is an ideal thin lens. Its focus distance is the
+//! positive axial distance from the lens plane, not along each raster ray.
 //! Opt-in circular, annular and bladed pupil diffraction covers incoherent, paraxial,
 //! focused, declared-plane and separated multi-plane defocused imaging. With
 //! `tracer`, native material laws can explicitly drive longitudinal thin-lens
 //! dispersion. Explicit pupil-wave queries also preserve coherent and partially
-//! coherent illumination on one authored pupil-plane phase reference. Lens
-//! distortion, other aberrations, rolling shutter, and
-//! autofocus heuristics are outside this contract.
+//! coherent illumination on one authored pupil-plane phase reference. With
+//! `tracer`, an explicit sequential spherical/planar prescription instead traces
+//! real glass thickness, aperture clipping, chromatic and surface aberrations,
+//! Fresnel loss and absorption. Its eye is the sensor centre and its rays carry
+//! wavelength-specific weights. Rolling shutter and autofocus remain separate.
 
 use core::fmt;
 
@@ -31,6 +33,10 @@ pub use diffraction::{
 };
 #[cfg(feature = "tracer")]
 pub use diffraction::{DispersiveThinLens, ThinLensElement};
+#[cfg(feature = "tracer")]
+mod sequential;
+#[cfg(feature = "tracer")]
+pub use sequential::{LensSurface, SequentialCameraRay, SequentialLens, SequentialLensRay};
 
 const PI: f64 = core::f64::consts::PI;
 const LOOK_AT_SINE_MIN: f64 = 1.0e-10;
@@ -86,6 +92,12 @@ pub enum CameraError {
     DispersiveLensOutsideModel,
     /// A geometric dispersive lens needs a separate ray for each wavelength.
     DispersionRequiresSpectralRays,
+    /// Sequential surface geometry, aperture, material support or order is invalid.
+    InvalidSequentialLens,
+    /// A query exceeds the direct sequential lens model or its numerical domain.
+    SequentialLensOutsideModel,
+    /// A real lens requires separate spectral rays with optical throughput.
+    SequentialLensRequiresWeightedRays,
     /// A shot contains no keyframes.
     EmptyShot,
     /// Shot bounds or shot identity are invalid.
@@ -277,6 +289,15 @@ impl CameraError {
             Self::InvalidDispersiveLens
             | Self::DispersiveLensOutsideModel
             | Self::DispersionRequiresSpectralRays => DISPERSIVE_LENS,
+            Self::InvalidSequentialLens
+            | Self::SequentialLensOutsideModel
+            | Self::SequentialLensRequiresWeightedRays => &[
+                CameraFix {
+                    rank: 1,
+                    code: "admit_sequential_lens",
+                    message: "use ordered nonoverlapping spherical or planar surfaces, source-supported glass, a fixed sensor, and weighted wavelength-specific direct rays",
+                },
+            ],
             Self::EmptyShot => EMPTY_SHOT,
             Self::InvalidShot => INVALID_SHOT,
             Self::InvalidKeyframes | Self::IncompatibleKeyframes | Self::InvalidInterpolation => {
@@ -320,6 +341,9 @@ impl fmt::Display for CameraError {
             Self::DispersionRequiresSpectralRays => {
                 "geometric dispersive camera requires a separate ray for each wavelength"
             }
+            Self::InvalidSequentialLens => "sequential lens prescription is invalid",
+            Self::SequentialLensOutsideModel => "query exceeds the direct sequential lens model",
+            Self::SequentialLensRequiresWeightedRays => "sequential camera requires weighted spectral rays",
             Self::EmptyShot => "camera shot has no keyframes",
             Self::InvalidShot => "camera shot bounds or identity are invalid",
             Self::InvalidKeyframes => "camera keyframes are invalid",
@@ -815,6 +839,8 @@ pub struct PhysicalCamera {
     layered_diffraction: Option<LayeredDiffraction>,
     #[cfg(feature = "tracer")]
     dispersive_lens: Option<DispersiveThinLens>,
+    #[cfg(feature = "tracer")]
+    sequential_lens: Option<SequentialLens>,
 }
 
 /// Projection of a world point through the deterministic optical centre.
@@ -983,6 +1009,8 @@ impl PhysicalCamera {
             layered_diffraction: None,
             #[cfg(feature = "tracer")]
             dispersive_lens: None,
+            #[cfg(feature = "tracer")]
+            sequential_lens: None,
         })
     }
 
@@ -1030,6 +1058,13 @@ impl PhysicalCamera {
     #[must_use]
     pub fn raster_vertical_half_tan(&self) -> f64 {
         #[cfg(feature = "tracer")]
+        if let Some(lens) = &self.sequential_lens {
+            return half_ratio(
+                self.projection.sensor_height_m().expect("admitted sequential sensor"),
+                lens.surfaces()[0].vertex_z_m(),
+            );
+        }
+        #[cfg(feature = "tracer")]
         if let Some(distance) = self.dispersive_sensor_distance_m() {
             return half_ratio(
                 self.projection
@@ -1041,22 +1076,30 @@ impl PhysicalCamera {
         self.projection.vertical_half_tan()
     }
 
-    /// Positive axial focus distance (m).
+    /// Positive axial focus distance (m), measured from the lens plane for an
+    /// ideal lens or the sensor centre for a sequential prescription.
     #[must_use]
     pub const fn focus_distance_m(&self) -> f64 {
         self.focus_distance_m
     }
 
-    /// Ideal aperture geometry.
+    /// Ideal aperture geometry, or the projected rear-cap sampling disk for a
+    /// sequential prescription. Internal stops retain their own clear radii.
     #[must_use]
     pub const fn aperture(&self) -> &Aperture {
         &self.aperture
     }
 
     /// Derived f-number when both a physical focal length and nonzero aperture
-    /// radius are declared.
+    /// radius are declared. Sequential lenses return `None`: their rear clear
+    /// aperture alone does not determine the entrance pupil or its f-number.
     #[must_use]
     pub fn f_number(&self) -> Option<f64> {
+        #[cfg(feature = "tracer")]
+        if self.sequential_lens.is_some() {
+            // Rear clear aperture is a sampling domain, not the entrance pupil.
+            return None;
+        }
         self.projection
             .focal_length_m()
             .filter(|_| !self.aperture.is_pinhole())
@@ -1083,6 +1126,11 @@ impl PhysicalCamera {
         world_point: Point3,
         aspect_ratio: f64,
     ) -> Result<OpticalCenterProjection, CameraError> {
+        #[cfg(feature = "tracer")]
+        if self.sequential_lens.is_some() {
+            // A distorted multi-surface image has no single projective centre.
+            return Err(CameraError::SequentialLensOutsideModel);
+        }
         ensure_point_finite(world_point)?;
         let half_tan = self.raster_vertical_half_tan();
         if !aspect_ratio.is_finite()
@@ -1205,6 +1253,10 @@ impl PhysicalCamera {
             return Err(CameraError::DiffractionRequiresSpectralPath);
         }
         #[cfg(feature = "tracer")]
+        if self.sequential_lens.is_some() {
+            return Err(CameraError::SequentialLensRequiresWeightedRays);
+        }
+        #[cfg(feature = "tracer")]
         if self.dispersive_lens.is_some() {
             return Err(CameraError::DispersionRequiresSpectralRays);
         }
@@ -1272,6 +1324,13 @@ impl PhysicalCamera {
         #[cfg(feature = "tracer")]
         {
             camera.dispersive_lens = self.dispersive_lens.clone();
+            camera.sequential_lens = self.sequential_lens.clone();
+            if let Some(lens) = &camera.sequential_lens {
+                let expected = lens.reference_focus()?.1;
+                if (focus_distance_m - expected).abs() > 64.0 * f64::EPSILON * expected {
+                    return Err(CameraError::IncompatibleKeyframes);
+                }
+            }
             camera.admit_dispersive_lens()?;
         }
         Ok(camera)
@@ -1280,6 +1339,10 @@ impl PhysicalCamera {
     fn optical_state_matches(&self, other: &Self) -> bool {
         #[cfg(feature = "tracer")]
         if self.dispersive_lens != other.dispersive_lens {
+            return false;
+        }
+        #[cfg(feature = "tracer")]
+        if self.sequential_lens != other.sequential_lens {
             return false;
         }
         self.projection == other.projection
@@ -1322,6 +1385,10 @@ impl CameraKeyframe {
         camera: PhysicalCamera,
         world_point: Point3,
     ) -> Result<Self, CameraError> {
+        #[cfg(feature = "tracer")]
+        if camera.sequential_lens.is_some() {
+            return Err(CameraError::SequentialLensOutsideModel);
+        }
         ensure_point_finite(world_point)?;
         let distance = camera.forward.dot(world_point.delta_from(camera.eye));
         if !distance.is_finite() || distance <= 0.0 {

@@ -786,6 +786,10 @@ impl PhysicalCamera {
 
     fn admit_diffraction_projection(&self) -> Result<(), CameraError> {
         #[cfg(feature = "tracer")]
+        if self.sequential_lens.is_some() {
+            return Err(CameraError::SequentialLensOutsideModel);
+        }
+        #[cfg(feature = "tracer")]
         self.admit_dispersive_lens()?;
         if self
             .projection
