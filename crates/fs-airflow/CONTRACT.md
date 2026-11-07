@@ -904,6 +904,47 @@ film and wall-viscosity chains, signed natural/mixed geometry, pure-flow limits,
 source refusals, sphere/mixed equilibrium, integrated half-cell heat and native backward-Euler
 energy and separate-bath entropy accounts.
 
+### Original gas convection on the same implicit conductive surface
+
+`medium::convection::implicit::ImplicitGasConvection` now binds the original
+`IsobaricGasLaw` to that native `IntegratedCaloricGrayBoundary` interface. It
+retains the source pressure, fixed composition, original transport choices and
+phase admission while resolving convection at the actual exterior temperature
+after the body's k(T), half-cell and coating resistance. Prescribed gas and
+radiative baths remain separate external heat/entropy destinations; this
+adapter creates neither a finite gas store nor another thermal integrator.
+
+Gas and liquid owners share one correlation/chain-rule evaluator, geometry
+admission and equilibrium heat-tangent implementation. The common public
+`ExteriorConvectionSettings`, `ExteriorConvectionResponse` and
+`ExteriorConvectionError` retain the original `LiquidExteriorConvection*`
+names as compatible re-exports. Mean-film laws include the one-half temperature
+chain in rho, Cp, k and viscosity. Sieder-Tate and Whitaker query the SAME gas
+at the wall solely for the original viscosity correction, retaining bulk
+Re/Pr/k. Natural and aiding mixed convection retain the original isobaric
+ideal-gas expansion 1/T and its derivative -1/T^2, actual signed drive,
+source-domain checks and exact sphere/mixed equilibrium heat limits.
+
+Analytic source tangents come from the original native Sutherland, USSA/Eucken
+and named Wilke/WMS gas models, including composition-dependent mixing
+denominator derivatives. No source fits or production finite differences are
+introduced. Active thermochemical transport derivatives explicitly refuse;
+bulk-held circular developing laws still accept the original thermochemical
+source because their wall-property derivative is exactly zero. Each bulk,
+film and viscosity query rechecks declared temperature support. Original
+humid-gas saturation and named-species domains remain mandatory; rectangular
+four-isothermal-wall sections still require a whole-perimeter thermal owner
+and cannot enter a pointwise exterior boundary. Analytic derivatives do not
+supply an empirical model-accuracy bound or expand any correlation's domain.
+
+Focused gas regressions exercise original pressure/composition, exact material
+queries, film and wall-viscosity chain rules, natural/mixed expansion, phase and
+geometry refusal, and bulk-held thermochemical source support. A native
+conducting-wall regression independently balances the analytic k(T) half-cell,
+finite plate strip and gray radiation, then checks accepted backward-Euler
+storage and separate bath energy/entropy accounts for dry air and a named gas
+mixture. These runnable tests do not claim experimental validation.
+
 `source::observer::SourceConvectionObserver` supplies these heat rates to the
 original explicit `DepositionSimulation::advance_observed` timeline and composes
 with other `DepositionObserver` owners. Every actual substep reads its starting

@@ -55,7 +55,7 @@ fn validate_component(state: &GasState) -> Result<(), MaterialError> {
 
 /// Wilke's positive interaction coefficient. The same coefficient belongs to
 /// the WMS conductivity model; it is not evaluated from conductivity ratios.
-fn interaction(left: &GasState, right: &GasState, left_mass: f64, right_mass: f64) -> f64 {
+pub(crate) fn interaction(left: &GasState, right: &GasState, left_mass: f64, right_mass: f64) -> f64 {
     let numerator = 1.0 + (left.dynamic_viscosity / right.dynamic_viscosity).sqrt()
         * (right_mass / left_mass).sqrt().sqrt();
     numerator * numerator / (8.0 * (1.0 + left_mass / right_mass)).sqrt()

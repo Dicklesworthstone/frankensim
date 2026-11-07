@@ -6,6 +6,9 @@
 //! water mole fraction, not its relative humidity; no water enters from an
 //! unspecified reservoir. Every endpoint retains the original phase admission.
 
+mod tangent;
+pub use tangent::IsobaricGasTransportTangent;
+
 use super::{GasInputError, GasRecord};
 use crate::MaterialError;
 use crate::gas::{GasSpec, GasState, saturation_pressure_water_pa};

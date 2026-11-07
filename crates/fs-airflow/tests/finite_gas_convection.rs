@@ -23,6 +23,8 @@ mod tube_sections;
 mod laminar_sections;
 #[path = "finite_gas_convection/isochoric_wall.rs"]
 mod isochoric_wall;
+#[path = "finite_gas_convection/implicit.rs"]
+mod implicit;
 use fs_airflow::graph::thermal::medium::convection::{
     ForcedConvectionSettings, evaluate_forced_from_material, finite_gas::*,
 };

@@ -4857,6 +4857,24 @@ compressible inertia, phase equilibrium or experimental validation is implied.
 G0/G3 unit tests cover fixed-composition EOS scaling, viscosity/conductivity
 response, humid cooling refusal and source/domain preservation.
 
+`IsobaricGasLaw::transport_temperature_tangent` retains that same evaluated
+`GasRecord` and returns analytic isobaric derivatives of density, Cp, conductivity
+and dynamic viscosity for the original engineering gas models. The derivative
+holds pressure and mole fractions fixed, including water. It differentiates
+Sutherland viscosity, the original USSA/Eucken conductivity, and the complete
+Wilke/WMS quotient, including each temperature-dependent interaction denominator.
+Ideal-gas density gives `-rho/T`; these models' frozen Cp gives zero. Values and
+phase/domain admission remain with `at_temperature`, and mixture interaction
+values use the original native function. Additional derivative storage is a
+fixed stack array for at most six species. No finite-difference material query,
+replacement transport fit or experimental accuracy claim is introduced.
+At a validity endpoint the tangent belongs only to the admitted branch.
+Thermochemical transport derivatives explicitly refuse until their original
+source derivative seam exists; value-only thermochemical queries are unchanged.
+Focused G0/G1/G3 tests compare original values, independently differentiated
+pure-gas equations, high-order differences of the original mixture evaluator,
+pressure scaling, component permutation, saturation and source-boundary refusal.
+
 `IsobaricGasLaw::specific_enthalpy_change` supplies the retained gas's relative
 isobaric h increment without subtracting large formation enthalpies. Legacy
 and named engineering gases use their original constant mixture Cp; canonical

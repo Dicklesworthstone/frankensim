@@ -59,7 +59,7 @@ pub use free_surface::{
     PlanarFreeSurfaceSection, PlanarFreeSurfaceSections,
 };
 
-/// Original liquid curves and exact tangents on the native implicit exterior surface.
+/// Original liquid and gas sources with exact tangents on native implicit surfaces.
 pub mod implicit;
 
 /// Geometry and heat-flow direction required by the selected forced correlation.
