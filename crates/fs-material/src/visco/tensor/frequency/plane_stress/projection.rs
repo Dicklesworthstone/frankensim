@@ -6,8 +6,8 @@ use fs_math::{c64::C64, dd::Dd};
 // must not erase an unrelated weak in-plane slope. Keeping every product
 // factored also permits cancellation before restoring physical units. DD is
 // compensated accumulation, not a relative-accuracy theorem at cancellation.
-#[derive(Default)]
-struct Sum {
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Sum {
     fraction: Dd,
     exponent: i32,
 }
@@ -37,16 +37,36 @@ fn binary_scale(mut value: f64, mut exponent: i32) -> f64 {
 }
 
 impl Sum {
-    fn add(&mut self, factors: [f64; 4]) {
-        if factors.contains(&0.0) {
+    pub(crate) fn add(&mut self, factors: [f64; 4]) {
+        self.add_ratio(&factors, &[]);
+    }
+
+    // Inputs are original finite factors; denominators must be nonzero.
+    // Dividing their binary mantissas avoids overflowing 1/tau before the
+    // physical spring strain has supplied its compensating scale.
+    pub(crate) fn add_ratio(&mut self, numerator: &[f64], denominator: &[f64]) {
+        self.add_binary_ratio(numerator, denominator, 0);
+    }
+
+    fn add_binary_ratio(&mut self, numerator: &[f64], denominator: &[f64], shift: i32) {
+        if numerator.contains(&0.0) {
             return;
         }
-        let (mut fraction, mut exponent) = (Dd::ONE, 0);
-        for factor in factors {
+        let (mut fraction, mut exponent) = (Dd::ONE, shift);
+        for &factor in numerator {
             let (f, e) = split(factor);
             fraction = fraction * Dd::from_f64(f);
             exponent += e;
         }
+        for &factor in denominator {
+            let (f, e) = split(factor);
+            fraction = fraction / Dd::from_f64(f);
+            exponent -= e;
+        }
+        self.accumulate(fraction, exponent);
+    }
+
+    fn accumulate(&mut self, fraction: Dd, exponent: i32) {
         if self.fraction == Dd::ZERO {
             self.fraction = fraction;
             self.exponent = exponent;
@@ -61,12 +81,44 @@ impl Sum {
         self.exponent = scale;
     }
 
-    fn value(self) -> f64 {
+    // Square only normalized channel mantissas. Both the source spectrum and
+    // original tau remain binary-factored until this physical energy/heat sum.
+    fn add_square(
+        &mut self,
+        channel: Self,
+        spectrum: (f64, i32),
+        weight: f64,
+        denominator: &[f64],
+    ) {
+        if channel.fraction == Dd::ZERO || spectrum.0 == 0.0 {
+            return;
+        }
+        let (_, shift) = split(if channel.fraction.hi != 0.0 {
+            channel.fraction.hi
+        } else {
+            channel.fraction.lo
+        });
+        let normalized = Dd::from_pair(
+            binary_scale(channel.fraction.hi, -shift),
+            binary_scale(channel.fraction.lo, -shift),
+        );
+        let mut factor = Self::default();
+        factor.add_ratio(&[weight, spectrum.0], denominator);
+        self.accumulate(
+            normalized * normalized * factor.fraction,
+            2 * (channel.exponent + shift) + spectrum.1 + factor.exponent,
+        );
+    }
+
+    pub(crate) fn value(self) -> f64 {
         binary_scale(self.fraction.to_f64(), self.exponent)
     }
 }
 
-pub(super) fn apply(t: &[[C64; 3]; 6], strain: &[C64; 3]) -> [C64; 6] {
+pub(crate) fn apply<const N: usize, const M: usize>(
+    t: &[[C64; M]; N],
+    strain: &[C64; M],
+) -> [C64; N] {
     core::array::from_fn(|i| {
         let (mut real, mut imaginary) = (Sum::default(), Sum::default());
         for (map, value) in t[i].iter().zip(strain) {
@@ -77,6 +129,62 @@ pub(super) fn apply(t: &[[C64; 3]; 6], strain: &[C64; 3]) -> [C64; 6] {
         }
         C64::new(real.value(), imaginary.value())
     })
+}
+
+/// Apply the original complex branch transfer (storage - i loss) without
+/// rounding its intermediate spring strain or any matrix entry first.
+pub(crate) fn apply_spectrum<const N: usize, const M: usize>(
+    matrix: &[[f64; M]; N],
+    vector: &[C64; M],
+    spectrum: [(f64, i32); 2],
+) -> [C64; N] {
+    let [a, b] = spectrum;
+    core::array::from_fn(|i| {
+        let (mut re, mut im) = (Sum::default(), Sum::default());
+        for (&map, value) in matrix[i].iter().zip(vector) {
+            re.add_binary_ratio(&[map, value.re, a.0], &[], a.1);
+            re.add_binary_ratio(&[map, value.im, b.0], &[], b.1);
+            im.add_binary_ratio(&[map, value.im, a.0], &[], a.1);
+            im.add_binary_ratio(&[-map, value.re, b.0], &[], b.1);
+        }
+        C64::new(re.value(), im.value())
+    })
+}
+
+/// Positive Gram norm with the complete original spectral/rate/heat scale.
+/// No channel or squared strain is rounded into physical units prematurely.
+pub(crate) fn weighted_norm<const N: usize, const M: usize>(
+    matrix: &[[f64; M]; N],
+    vector: &[C64; M],
+    rate: f64,
+    spectrum: (f64, i32),
+    weight: f64,
+    denominator: &[f64],
+) -> f64 {
+    weighted_norms(matrix, vector, rate, spectrum, [(weight, denominator)])[0]
+}
+
+/// Reuse each original Gram contraction for independent storage/heat scales.
+pub(crate) fn weighted_norms<const N: usize, const M: usize, const K: usize>(
+    matrix: &[[f64; M]; N],
+    vector: &[C64; M],
+    rate: f64,
+    spectrum: (f64, i32),
+    weights: [(f64, &[f64]); K],
+) -> [f64; K] {
+    let mut totals = [Sum::default(); K];
+    for row in matrix {
+        let (mut re, mut im) = (Sum::default(), Sum::default());
+        for (&map, value) in row.iter().zip(vector) {
+            re.add([map, value.re, rate, 1.0]);
+            im.add([map, value.im, rate, 1.0]);
+        }
+        for (total, (weight, denominator)) in totals.iter_mut().zip(&weights) {
+            total.add_square(re, spectrum, *weight, denominator);
+            total.add_square(im, spectrum, *weight, denominator);
+        }
+    }
+    totals.map(Sum::value)
 }
 
 pub(super) fn project(c: &[[C64; 6]; 6], t: &[[C64; 3]; 6], i: usize, j: usize, scale: f64) -> C64 {
@@ -108,6 +216,63 @@ pub(super) fn project(c: &[[C64; 6]; 6], t: &[[C64; 3]; 6], i: usize, j: usize, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn physical_stress_and_heat_survive_an_unrepresentable_spring_strain() {
+        let branch = [(1.0, -2000), (1.0, -1000)];
+        let strain = [C64::from_re(2_f64.powi(-200))];
+        let stiffness = [[2_f64.powi(400)]];
+        let gram = [[2_f64.powi(200)]];
+        assert_eq!(apply_spectrum(&[[1.0]], &strain, branch)[0], C64::ZERO);
+        assert_eq!(
+            apply_spectrum(&stiffness, &strain, branch)[0].im,
+            -2_f64.powi(-800)
+        );
+        assert_eq!(
+            weighted_norm(&gram, &strain, 1.0, branch[0], 0.5, &[2_f64.powi(-1000)]),
+            2_f64.powi(-1001)
+        );
+        // The opposite limit: B*epsilon overflows, but the complete
+        // branch energy remains finite after original frequency scaling.
+        assert_eq!(
+            weighted_norm(
+                &[[2_f64.powi(600)]],
+                &[C64::from_re(2_f64.powi(500))],
+                1.0,
+                (1.0, -2000),
+                0.25,
+                &[]
+            ),
+            2_f64.powi(198)
+        );
+    }
+
+    #[test]
+    fn original_relaxation_time_divides_after_physical_spring_scale() {
+        let mut heat = Sum::default();
+        heat.add_ratio(&[0.5, 1e-200, 1e-200], &[1e-300]);
+        assert!((heat.value() - 5e-101).abs() < 2e-115);
+        let mut subnormal_tau = Sum::default();
+        let spring = 2_f64.powi(-537);
+        subnormal_tau.add_ratio(&[0.5, spring, spring], &[f64::from_bits(1)]);
+        assert_eq!(subnormal_tau.value(), 0.5);
+    }
+
+    #[test]
+    fn physical_rate_and_gram_are_applied_before_restoring_units() {
+        let result = apply_spectrum(
+            &[[1e200, 0.0], [0.0, -1e200]],
+            &[C64::new(1e200, -1e200), C64::new(1e200, 1e200)],
+            [(1e-300, 0), (0.0, 0)],
+        );
+        for (actual, expected) in result
+            .into_iter()
+            .zip([C64::new(1e100, -1e100), C64::new(-1e100, -1e100)])
+        {
+            assert!((actual.re - expected.re).abs() < 3e-16 * expected.re.abs());
+            assert!((actual.im - expected.im).abs() < 3e-16 * expected.im.abs());
+        }
+    }
 
     #[test]
     fn full_strain_map_retains_signed_complex_cancellation() {

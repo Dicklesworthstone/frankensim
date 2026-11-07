@@ -65,6 +65,11 @@ pub use harmonic::{
     ViscoHarmonicError, ViscoHarmonicFrequencyOperator, ViscoHarmonicFrequencyResponse,
     ViscoHarmonicOperator, ViscoHarmonicResponse,
 };
+mod harmonic_material;
+pub use harmonic_material::{
+    ViscoHarmonicMaterialBudget, ViscoHarmonicMaterialField, ViscoHarmonicMaterialObserver,
+    ViscoHarmonicMaterialPoint,
+};
 mod poles;
 pub use poles::{
     PreparedViscoPoles, ViscoJointHarmonicBudget, ViscoJointHarmonicError,

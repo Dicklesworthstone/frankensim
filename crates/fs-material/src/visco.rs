@@ -55,7 +55,7 @@ pub mod tensor;
 pub use modified_zener::ModifiedFractionalZener;
 pub use tensor::{
     Mandel6, PlaneStressHarmonic, PronyBranch, TensorProny, TensorPronyFrequencyDerivative,
-    TensorPronyState,
+    TensorPronyHarmonic, TensorPronyHarmonicBranch, TensorPronyHarmonicPoint, TensorPronyState,
 };
 
 /// Typed refusals of the viscoelastic layer. Display strings carry stable

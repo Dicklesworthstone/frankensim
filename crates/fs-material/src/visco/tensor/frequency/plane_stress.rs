@@ -3,7 +3,7 @@
 use super::super::{MaterialPlane, TensorProny, ViscoError};
 use fs_math::c64::C64;
 
-mod projection;
+pub(super) mod projection;
 mod response;
 pub use response::PlaneStressHarmonic;
 

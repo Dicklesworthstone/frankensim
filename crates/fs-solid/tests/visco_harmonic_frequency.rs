@@ -122,6 +122,73 @@ fn scalar_pencil(w: f64) -> (C64, C64, f64, f64) {
     )
 }
 
+fn material_budget() -> ViscoHarmonicMaterialBudget {
+    ViscoHarmonicMaterialBudget {
+        maximum_points: 32,
+        maximum_payload_bytes: 1 << 20,
+        maximum_work: 10_000_000,
+    }
+}
+
+#[test]
+fn original_quadrature_observer_recovers_stress_spring_energy_and_solver_heat() {
+    with_cx(|cx, _| {
+        let source = solid(scalar_law(), &[3], cx);
+        let w = 3.0;
+        let q = C64::new(0.001, -0.0004);
+        let (pencil, _, loss, _) = scalar_pencil(w);
+        let response = source.prepare_harmonic_response(w, controls(), cx)
+            .unwrap().solve(&[pencil * q], cx).unwrap();
+        let observer = source.prepare_harmonic_material_observer(w, material_budget(), cx)
+            .unwrap();
+        let field = observer.observe(&response.displacement_m, cx).unwrap();
+        assert_eq!(observer.omega_rad_s(), w);
+        assert!(core::ptr::eq(observer.source(), &source));
+        assert_eq!(field.points.len(), 1);
+        let point = &field.points[0];
+        assert_eq!((point.element, point.quadrature_point), (0, 0));
+        relative(point.volume_m3, 1.0 / 6.0);
+        near(point.strain_mandel[0], q);
+        assert!(point.strain_mandel[1..].iter().all(|e| *e == C64::ZERO));
+        assert!(point.compatible_strain_mandel.is_none());
+        let x = 0.1 * w;
+        let storage = 1.0 + 3.0 * x * x / (1.0 + x * x);
+        near(point.material.stress_mandel_pa[0], C64::new(6.0 * storage, -6.0 * loss) * q);
+        relative(field.mean_stored_energy_j, 0.25 * storage * q.norm_sq());
+        relative(field.mean_material_heat_w, response.average_material_heat_w);
+        relative(field.mean_stress_power_w, response.average_input_power_w);
+        assert!(field.power_balance_residual_w.abs() < 1e-12 * field.mean_material_heat_w);
+        assert_eq!(field, observer.observe(&response.displacement_m, cx).unwrap());
+    });
+}
+
+#[test]
+fn original_material_field_rejects_incomplete_domains_and_keeps_prepared_reuse() {
+    with_cx(|cx, gate| {
+        let source = solid(scalar_law().with_band((0.5, 10.0)).unwrap(), &[3], cx);
+        for budget in [
+            ViscoHarmonicMaterialBudget { maximum_points: 0, ..material_budget() },
+            ViscoHarmonicMaterialBudget { maximum_payload_bytes: 0, ..material_budget() },
+            ViscoHarmonicMaterialBudget { maximum_work: 0, ..material_budget() },
+        ] {
+            assert!(source.prepare_harmonic_material_observer(2.0, budget, cx).is_err());
+        }
+        assert!(source.prepare_harmonic_material_observer(0.0, material_budget(), cx).is_err());
+        assert!(source.prepare_harmonic_material_observer(11.0, material_budget(), cx).is_err());
+        let observer = source.prepare_harmonic_material_observer(2.0, material_budget(), cx).unwrap();
+        let safe = [C64::new(0.001, 0.001)];
+        let field = observer.observe(&safe, cx).unwrap();
+        assert!(observer.observe(&[], cx).is_err());
+        assert!(observer.observe(&[C64::from_re(f64::NAN)], cx).is_err());
+        // Both real and imaginary endpoint amplitudes fit the cap, but the
+        // full sinusoidal peak exceeds the original .02 material limit.
+        assert!(observer.observe(&[C64::new(0.019, 0.019)], cx).is_err());
+        assert_eq!(field, observer.observe(&safe, cx).unwrap());
+        gate.request();
+        assert!(observer.observe(&safe, cx).is_err());
+    });
+}
+
 #[test]
 fn actual_material_dispersion_and_source_phase_give_analytic_motion_and_heat_slopes() {
     with_cx(|cx, _| {

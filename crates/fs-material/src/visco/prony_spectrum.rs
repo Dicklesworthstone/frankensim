@@ -125,6 +125,16 @@ impl PronySpectrumWeights {
         Some([self.storage.apply(stiffness)?, self.loss.apply(stiffness)?])
     }
 
+    /// Original storage/loss multipliers as (binary mantissa, exponent).
+    /// Constitutive observations retain this scale through Gram contractions
+    /// and heat division instead of rounding an unrepresentable spring strain.
+    pub(crate) fn primal_binary(&self) -> [(f64, i32); 2] {
+        [
+            (self.storage.fraction, self.storage.exponent),
+            (self.loss.fraction, self.loss.exponent),
+        ]
+    }
+
     pub(crate) fn modulus_derivative(&self, stiffness: f64) -> Option<[f64; 2]> {
         Some([
             self.storage_derivative.apply(stiffness)?,

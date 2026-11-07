@@ -7,6 +7,8 @@ use fs_math::dd::Dd;
 mod plane_stress;
 mod strain;
 pub use plane_stress::PlaneStressHarmonic;
+mod response;
+pub use response::{TensorPronyHarmonic, TensorPronyHarmonicBranch, TensorPronyHarmonicPoint};
 
 /// Physical tensor derivatives with respect to angular frequency [rad/s].
 #[derive(Clone, Debug, PartialEq)]

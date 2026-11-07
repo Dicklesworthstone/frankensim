@@ -26,6 +26,43 @@ const NODES: [[f64; 3]; 8] = [
 const CELLS: [[usize; 8]; 1] = [[0, 1, 2, 3, 4, 5, 6, 7]];
 const FORMS: [Formulation; 2] = [Formulation::Standard, Formulation::BBar];
 
+#[test]
+fn harmonic_bbar_observation_retains_every_original_compatible_strain() {
+    with_cx(|cx, _| {
+        let m = coupled();
+        let source = system(&NODES, &m, Formulation::BBar, &[], 2, cx);
+        let observer = source.prepare_harmonic_material_observer(2.0,
+            ViscoHarmonicMaterialBudget {
+                maximum_points: 8,
+                maximum_payload_bytes: 1 << 20,
+                maximum_work: 10_000_000,
+            }, cx).unwrap();
+        let displacement: Vec<_> = NODES.iter().flat_map(|p| [
+            fs_math::c64::C64::new(0.0001 * p[0] * p[1], 0.0002 * p[0]),
+            fs_math::c64::C64::ZERO,
+            fs_math::c64::C64::ZERO,
+        ]).collect();
+        let field = observer.observe(&displacement, cx).unwrap();
+        assert_eq!(field.points.len(), 8);
+        let mut raw_min = f64::INFINITY;
+        let mut raw_max = f64::NEG_INFINITY;
+        for point in &field.points {
+            let raw = point.compatible_strain_mandel.unwrap();
+            let trace = point.strain_mandel[0] + point.strain_mandel[1] + point.strain_mandel[2];
+            near(trace.re, 0.00005, 1e-18);
+            near(trace.im, 0.0002, 1e-18);
+            let raw_trace = raw[0].re + raw[1].re + raw[2].re;
+            raw_min = raw_min.min(raw_trace);
+            raw_max = raw_max.max(raw_trace);
+            near(point.volume_m3, 0.125, 1e-15);
+            assert!(point.material.mean_stored_energy_j_m3 > 0.0);
+            assert!(point.material.mean_material_heat_w_m3 > 0.0);
+        }
+        assert!(raw_max - raw_min > 0.00005);
+        relative(field.mean_stress_power_w, field.mean_material_heat_w, 2e-12);
+    });
+}
+
 fn with_cx(f: impl FnOnce(&Cx<'_>, &fs_exec::CancelGate)) {
     let gate = fs_exec::CancelGate::new_clock_free();
     fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {

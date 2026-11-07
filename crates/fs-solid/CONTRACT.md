@@ -11920,3 +11920,31 @@ outside this explicit prescribed-traction extension.
 The focused vector regressions specify independent closed-form nodal forces,
 rotated-frame wrenches, actual Newmark motion under changing shear direction,
 atomic receiver retry and tangential adhesion work on prescribed supports.
+
+## Full original-quadrature harmonic material fields
+
+`ViscoElements::prepare_harmonic_material_observer` caches the original free/support
+maps and each element's original tensor-Prony harmonic spectrum. Repeated forcing
+cases reuse this immutable observer without another mechanical factorization.
+It accepts the original free-coordinate displacement phasor from either harmonic
+solver and returns every original constitutive quadrature point: six-component
+strain and stress, equilibrium/Maxwell storage, separate Kelvin/Maxwell heat and
+signed stress-work closure. The reference quadrature volumes independently
+integrate total stored energy, physical material heat and stress work.
+
+Original compatible strain is retained alongside B-bar constitutive strain, and
+both independently satisfy the full-cycle source limit. Original fixed supports
+are zero, matching the harmonic mechanical owners. No point is subsampled and no
+strain is reconstructed from a modal loss ratio. Preparation admits point count,
+heap numerical payload and conservative work before allocating the cache; each
+observation reuses one local nodal buffer and returns one complete field. Budget,
+cancellation, band and strain refusals publish no partial field or material history.
+This observes a supplied phasor, without certifying an external force equation or
+adding startup transients, thermal evolution or a spatial error estimate.
+
+Three native regressions cover analytic tetrahedral stress and spring energy,
+agreement with the independent mechanical solver's input/heat, deterministic
+cache reuse, source/budget/cancellation refusals, and every original compatible
+and B-bar strain in a nonuniform HEX8 field. These integration regressions remain
+unexecuted because the original runtime dependency build is resource-blocked;
+the material observer's production arithmetic was exercised separately.

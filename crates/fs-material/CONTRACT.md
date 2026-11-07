@@ -20229,3 +20229,34 @@ Thermal expansion shifts all normal strains and the original uniaxial reduction 
 The original thermal expansion owner now prepares an owned coefficient account for reuse during constitutive trials. Its shared finish operation performs no source query, allocation or return map. Existing borrowed thermal families use the same arithmetic for elastic, Prager, Voce and table entropy, coefficient work, exact expansion increments and the change in temperature times mechanical entropy. Native physical and numerical dissipation stay with the original material law; numerical loss is never heated. The scalar interval checks its response, lateral freedom and retained state against that native tensor account.
 
 Four G0/G1 regression sources cover heated constant-force knot crossing and retained extension with independent storage/entropy equations; actual-duration linear and power-law holds; original caloric/source identity and atomic refusals; and stress-free expansion with full tensor-domain admission. They also compare the owned account to the existing borrowed thermal family. Rustfmt syntax/format, scoped whitespace and independent scalar arithmetic checks passed. DSR and RCH are unavailable and shared build storage is full; native Cargo compilation and regression execution remain unverified. The declared small-strain and empirical source domains remain binding.
+
+## Original harmonic stress, spring storage and physical heat
+
+`TensorProny::prepare_harmonic_material` borrows the original complete tensor law
+and prepares its storage/loss spectrum once at a positive finite frequency inside
+the original source band. Allocation-free point observations admit the complete
+six-component physical strain cycle and report the full stress phasor, original
+equilibrium and Maxwell spring energy, separate Kelvin and Maxwell heat, and an
+independent signed stress-work balance. Peak phasors use exp(-i omega t), with
+quarter-weight mean spring energy and half-weight mean dashpot heat. DC uses the
+original static/time-domain owner and is refused by this sinusoidal observer.
+
+Original Gram factors determine positive storage and heat. Binary-factored
+Maxwell weights remain inside the original Gram contractions, their squares and
+division by the original relaxation time. A spring strain too small to represent
+does not erase representable branch stress or heat; an overflowing intermediate
+Gram strain does not reject a representable scaled energy. Both energy and heat
+reuse each original Gram contraction. `branch_response` retains source branch
+order and reports the original memory-equation spring strain and branch stress;
+its rounded strain is not used as the stress/heat intermediate. Work is evaluated
+independently from complete stress and strain rate, without forcing closure or
+inferring a temperature evolution. Original source conditions and histories are
+unchanged. Outputs remain f64 and do not promise relative accuracy at cancellation.
+
+Twelve tests of the actual strain/projection arithmetic passed against the real
+`fs-math`, including spring-strain underflow with representable stress/heat and
+the opposite intermediate-overflow case. Five native material regressions cover
+full anisotropic stress/energy, original ramp-history convergence, transverse
+stress constraints, source/domain refusal and extreme relaxation scales. Their
+integration execution remains pending because the original runtime dependency
+build is blocked by this environment's memory limit.
