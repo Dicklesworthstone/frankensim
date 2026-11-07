@@ -738,7 +738,7 @@ impl FiniteMoistureAtmosphere {
                 .filter(|count| *count <= maximum_total_cells)
                 .ok_or_else(|| invalid("shared-atmosphere total cell budget exhausted"))?;
             if body.field.inventory().time_s.to_bits() != time_s.to_bits()
-                || body.field.inventory().reference.query().axes()["temperature"].to_bits()
+                || body.field.inventory().temperature_kelvin().to_bits()
                     != temperature.to_bits()
             {
                 return Err(invalid(

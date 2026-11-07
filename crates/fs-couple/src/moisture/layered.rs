@@ -53,7 +53,7 @@ impl MoistureLayer {
             .filter(|(name, _)| name.as_str() != "relative_humidity")
             .map(|(name, value)| (name.as_str(), value.to_bits()))
             .eq(slab
-                .reference
+                .transport
                 .query_point()
                 .iter()
                 .filter(|(name, _)| name.as_str() != "moisture_content")
@@ -63,7 +63,7 @@ impl MoistureLayer {
             .iter()
             .filter(|(name, _)| name.as_str() != "relative_humidity")
             .eq(slab
-                .reference
+                .transport
                 .axis_quantities()
                 .iter()
                 .filter(|(name, _)| name.as_str() != "moisture_content"));

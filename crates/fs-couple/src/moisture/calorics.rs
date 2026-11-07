@@ -159,10 +159,10 @@ fn admit(
         .clone()
         .with(
             "moisture_content",
-            field.reference.query().axes()["moisture_content"],
+            field.transport.query().axes()["moisture_content"],
         )
         .map_err(|_| invalid("invalid original moisture source context"))?;
-    if law.card_identity() != field.card.content_hash() || context != field.reference.query() {
+    if law.card_identity() != field.card.content_hash() || context != field.transport.query() {
         return Err(invalid(
             "sorption heat must retain the same solid card and all fixed transport conditions",
         ));

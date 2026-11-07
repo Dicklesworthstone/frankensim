@@ -1349,6 +1349,41 @@ annular geometry. `tests/annular_channel.rs` exercises momentum-preserving
 gas changes through the common channel API alongside the original analytic
 Poiseuille, logarithmic Couette and narrow-gap checks.
 
+## Prescribed-temperature moisture histories
+
+`MoistureSlab::at_prescribed_temperature` and
+`MoistureCartesian::at_prescribed_temperature` propose a uniform-temperature
+event at the accepted clock. They retain every cell's dry-basis water content,
+dry skeleton, reference geometry, time, definition identity, and original
+density/stress-free datum. They re-evaluate the originally pinned diffusivity
+claims at the new absolute temperature and every occupied moisture state;
+Cartesian fields retain all three explicitly selected principal sources. Any
+unsupported cell, source-domain hole at an occupied endpoint, invalid
+temperature, or inadmissible diffusivity refuses without publishing a state.
+The transport anchor is an occupied cell, so the historical reference moisture
+does not unnecessarily constrain a new temperature cut of the transport source.
+Reference density is never queried to create or remove either inventory.
+
+`temperature_kelvin` reports the current environment; `transport_context`
+exposes its pinned source bundle, while `reference` remains the original datum.
+Ordinary and SDIRK stages, finite-atmosphere/solution participants, paired and
+adaptive reservoir controllers, layered sorption admission, and sorption-energy
+admission all use the current context. Existing boundary laws and reservoirs
+must independently qualify the same temperature. Kirchhoff paths are prepared
+from the current source context on the next proposal; no old-temperature chart
+is retained. Return temperature events use the same original claim pins.
+
+Each transport interval remains isothermal: callers cut intervals at prescribed
+temperature changes. This API supplies neither a solid heat equation nor the
+heat needed for the imposed event, and does not interpolate an environmental
+history across an unqualified source path. Native elasticity can resolve its
+qualified current environment; the existing fixed-temperature hygroscopic
+expansion integral still refuses a temperature change from its stress-free
+datum. Thermal eigenstrain is never inferred from a moisture coefficient.
+Authored G1 regressions exercise analytic hot-source flux, principal-axis
+refresh, degenerate-front wetting, history invariance, late-cell refusal,
+boundary/reservoir temperature agreement and the retained strain refusal.
+
 ## Second-order spatial moisture diffusion
 
 `MoistureCartesian::advance_sdirk2` applies the existing Alexander two-stage

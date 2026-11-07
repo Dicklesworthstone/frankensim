@@ -243,6 +243,43 @@ impl MoistureCartesian {
     pub const fn reference(&self) -> &ResolvedMaterialStatePoint {
         &self.reference
     }
+
+    /// Current prescribed uniform temperature [K]. The original dry-mass and
+    /// stress-free reference datum is not changed by a temperature event.
+    pub fn temperature_kelvin(&self) -> f64 {
+        self.field().temperature_kelvin()
+    }
+
+    /// Original pinned principal diffusivity claims in the current environment.
+    /// The moisture coordinate is an admitted anchor, not a field average.
+    pub const fn transport_context(&self) -> &ResolvedMaterialStatePoint {
+        &self.transport
+    }
+
+    /// Rebind every principal D(T,M) to an externally prescribed uniform
+    /// temperature at the current time, preserving the entire accepted water
+    /// field and dry skeleton. All occupied source states must remain admissible.
+    /// Cut subsequent transport intervals at temperature events and supply
+    /// matching boundary sources. This imposes no heat equation or thermal
+    /// eigenstrain; the original fixed-temperature hygroscopic datum is retained.
+    pub fn at_prescribed_temperature(
+        &self,
+        temperature_kelvin: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Self, MoistureError> {
+        let transport = binding::at_prescribed_temperature(
+            &self.card,
+            &self.transport,
+            temperature_kelvin,
+            &self.moisture,
+            self.kirchhoff_diffusivity,
+            cx,
+        )?;
+        let mut next = self.clone();
+        next.transport = transport;
+        poll(cx)?;
+        Ok(next)
+    }
     pub fn moisture(&self) -> &[f64] {
         &self.moisture
     }
@@ -280,6 +317,7 @@ impl MoistureCartesian {
         binding::MoistureField {
             card: &self.card,
             reference: &self.reference,
+            transport: &self.transport,
             moisture: &self.moisture,
             dry_mass_per_cell_kg: self.dry_mass_per_cell_kg,
             time_s: self.time_s,
@@ -359,7 +397,7 @@ impl MoistureCartesian {
         cx: &Cx<'_>,
     ) -> Result<(Self, MoistureCartesianReport), MoistureError> {
         poll(cx)?;
-        let temperature = self.reference.query().axes()["temperature"];
+        let temperature = self.temperature_kelvin();
         let boundaries = [
             faces[0].resolve(temperature)?,
             faces[1].resolve(temperature)?,

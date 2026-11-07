@@ -204,7 +204,7 @@ fn evolve_shared<
                 "shared adaptive total cell budget exhausted",
             ))?;
         if field.time_s.to_bits() != start.to_bits()
-            || field.reference.query().axes()["temperature"].to_bits() != temperature.to_bits()
+            || field.temperature_kelvin().to_bits() != temperature.to_bits()
         {
             return Err(MoistureAdvanceError::Invalid(
                 "shared adaptive specimens need one accepted clock and reservoir temperature",

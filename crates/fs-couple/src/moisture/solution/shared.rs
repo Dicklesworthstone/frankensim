@@ -169,7 +169,7 @@ impl FiniteMoistureSolution {
                     "shared-solution total cell budget exhausted",
                 ))?;
             if inventory.time_s.to_bits() != time_s.to_bits()
-                || inventory.reference.query().axes()["temperature"].to_bits()
+                || inventory.temperature_kelvin().to_bits()
                     != temperature.to_bits()
             {
                 return Err(SolutionMoistureError::Invalid(

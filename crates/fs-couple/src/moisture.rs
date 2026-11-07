@@ -24,6 +24,9 @@
 //! infinite reservoirs; `atmosphere` instead balances an actual finite vapor
 //! inventory against this same diffusion owner. The plate consumer retains the
 //! fixed geometry and rebuilds actual stiffness AND wet inertia.
+//! Prescribed uniform-temperature events rebind the original diffusivity claims
+//! without resetting moisture or time. Each following interval remains isothermal;
+//! the original stress-free mechanical datum and dry skeleton remain unchanged.
 
 /// Whole-duration temporal accuracy around the original conservative endpoints.
 pub mod adaptive;
@@ -536,10 +539,51 @@ impl MoistureSlab {
         &self.reference
     }
 
+    /// Current prescribed uniform temperature [K], distinct from the immutable
+    /// density and stress-free reference datum returned by `reference`.
+    pub fn temperature_kelvin(&self) -> f64 {
+        self.field().temperature_kelvin()
+    }
+
+    /// Originally pinned transport claims in the current environmental context.
+    /// Its moisture coordinate is an admitted anchor; local cell evaluations
+    /// remain available in each transport step report.
+    pub const fn transport_context(&self) -> &ResolvedMaterialStatePoint {
+        &self.transport
+    }
+
+    /// Propose an externally prescribed uniform-temperature event at the current
+    /// accepted time. Re-query the original D(T,M) claims at every occupied M;
+    /// unsupported temperatures or any inadmissible cell refuse atomically.
+    /// Water, dry mass, geometry, time, source pins and reference datum are retained.
+    /// Cut transport intervals at temperature events and provide boundary laws
+    /// qualified at the new temperature. No heat balance or thermal strain is
+    /// inferred. A fixed-temperature hygroscopic solid still refuses a response
+    /// away from its original stress-free temperature.
+    pub fn at_prescribed_temperature(
+        &self,
+        temperature_kelvin: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Self, MoistureError> {
+        let transport = binding::at_prescribed_temperature(
+            &self.card,
+            &self.transport,
+            temperature_kelvin,
+            &self.moisture,
+            self.kirchhoff_diffusivity.is_some(),
+            cx,
+        )?;
+        let mut next = self.clone();
+        next.transport = transport;
+        poll(cx)?;
+        Ok(next)
+    }
+
     fn field(&self) -> binding::MoistureField<'_> {
         binding::MoistureField {
             card: &self.card,
             reference: &self.reference,
+            transport: &self.transport,
             moisture: &self.moisture,
             dry_mass_per_cell_kg: self.dry_mass_per_cell_kg,
             time_s: self.time_s,
@@ -620,13 +664,7 @@ impl MoistureSlab {
         cx: &Cx<'_>,
     ) -> Result<(Self, MoistureStepReport), MoistureError> {
         poll(cx)?;
-        let temperature = self
-            .reference
-            .query_point()
-            .iter()
-            .find(|(name, _)| name == "temperature")
-            .expect("admitted temperature")
-            .1;
+        let temperature = self.temperature_kelvin();
         let boundary = [
             faces[0].resolve(temperature)?,
             faces[1].resolve(temperature)?,

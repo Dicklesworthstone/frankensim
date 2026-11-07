@@ -139,20 +139,69 @@ pub(super) fn resolve_transport_state(
     Ok(state)
 }
 
+/// A prescribed uniform-temperature event changes the transport environment,
+/// never the reference density datum or either conserved inventory. Reuse the
+/// originally selected claims, including on a return to an earlier temperature.
+/// Bind at an occupied state: the original reference moisture need not remain
+/// in the current temperature cut of the transport source's support.
+pub(super) fn at_prescribed_temperature(
+    card: &MaterialCard,
+    binding: &ResolvedMaterialStatePoint,
+    temperature_kelvin: f64,
+    moisture: &[f64],
+    allow_degenerate: bool,
+    cx: &Cx<'_>,
+) -> Result<ResolvedMaterialStatePoint, MoistureError> {
+    poll(cx)?;
+    if !positive(temperature_kelvin) {
+        return Err(MoistureError::Invalid(
+            "prescribed absolute temperature must be finite and positive",
+        ));
+    }
+    let point = binding
+        .query()
+        .with("temperature", temperature_kelvin)
+        .and_then(|point| point.with("moisture_content", moisture[0]))
+        .map_err(|_| MoistureError::Invalid("unrepresentable prescribed temperature context"))?;
+    let transport = binding.at_query_point(card, &point)?;
+    if !allow_degenerate {
+        admit_transport_state(&transport)?;
+    }
+    for &m in &moisture[1..] {
+        poll(cx)?;
+        let point = point
+            .clone()
+            .with("moisture_content", m)
+            .map_err(|_| MoistureError::Invalid("unrepresentable dry-basis moisture coordinate"))?;
+        let state = transport.at_query_point(card, &point)?;
+        if !allow_degenerate {
+            admit_transport_state(&state)?;
+        }
+    }
+    poll(cx)?;
+    Ok(transport)
+}
+
 /// Geometry-independent view of an accepted equal-reference-volume inventory.
 /// The mechanical owner supplies actual cell geometry, never a surrogate slab.
 #[derive(Clone, Copy)]
 pub(super) struct MoistureField<'a> {
     pub card: &'a MaterialCard,
     pub reference: &'a ResolvedMaterialStatePoint,
+    pub transport: &'a ResolvedMaterialStatePoint,
     pub moisture: &'a [f64],
     pub dry_mass_per_cell_kg: f64,
     pub time_s: f64,
     pub identity: ContentHash,
 }
 impl MoistureField<'_> {
+    pub fn temperature_kelvin(&self) -> f64 {
+        self.transport
+            .state_coordinate("temperature")
+            .expect("admitted absolute temperature")
+    }
     pub fn point_at(&self, moisture: f64) -> Result<QueryPoint, MoistureError> {
-        self.reference
+        self.transport
             .query()
             .with("moisture_content", moisture)
             .map_err(|_| MoistureError::Invalid("unrepresentable dry-basis moisture coordinate"))

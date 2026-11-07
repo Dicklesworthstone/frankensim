@@ -40,6 +40,8 @@ mod cartesian;
 mod layered;
 #[path = "moisture/adaptive.rs"]
 mod adaptive;
+#[path = "moisture/temperature.rs"]
+mod temperature;
 
 fn qty(kind: QuantityKind) -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))

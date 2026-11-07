@@ -180,7 +180,7 @@ fn advance_pair<F: ReservoirField<N>, const N: usize>(
 ) -> Result<PairedAtmosphereMoistureCandidate<F, F::Report, N>, AtmosphereMoistureError> {
     poll(cx)?;
     let temperature = atmospheres[0].gas().state().state().temperature;
-    if field.inventory().reference.query().axes()["temperature"].to_bits()
+    if field.inventory().temperature_kelvin().to_bits()
         != temperature.to_bits()
     {
         return Err(invalid(
