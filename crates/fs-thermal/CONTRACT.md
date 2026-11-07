@@ -773,6 +773,14 @@ expand beyond the initial equilibrium envelope. Each receipt and the aggregate
 account record supplied heat once, preserving independent substrate datums and
 the common deposit/vapor datum.
 
+If the frozen-temperature pressure predictor has no admissible local caloric
+endpoint, the shared solve tries the original pressure, vacuum and the initial
+equilibrium envelope as bounded starting anchors before bracketing. Every
+refused trial consumes the original pressure budget; cancellation propagates
+and no caloric chart or inventory limit is relaxed. A narrow-temperature
+manufactured case verifies cooling-driven deposition onto a bare support whose
+latent heat makes the joint endpoint admissible despite the failed predictor.
+
 `CoatingSimulation::exchange_chamber_with_heat` accepts sparse heat entries
 keyed by persistent cell identity. Every active coated substrate participates,
 including bare or unheated receivers; future births cannot consume vapor.

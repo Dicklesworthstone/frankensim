@@ -481,6 +481,106 @@ fn g1_supplied_heat_matches_a_manufactured_hot_coating_and_bare_cold_receiver() 
 }
 
 #[test]
+fn g1_cooling_bare_support_uses_latent_heat_when_pressure_predictor_leaves_chart() {
+    struct NarrowLaw;
+    impl SublimationLaw for NarrowLaw {
+        fn temperature_range_k(&self) -> [f64; 2] {
+            [225.0, 240.0]
+        }
+        fn properties(&self, t: f64) -> Result<SublimationProperties, SublimationError> {
+            LAW.properties(t)
+        }
+    }
+    let narrow = NarrowLaw;
+    let mut surfaces = [surface(0.001, 0.0, TEMPERATURE)];
+    surfaces[0].law = &narrow;
+    let bath = reservoir(100.0);
+    let dt = 0.02;
+    let target = 225.01;
+    let conductance = surfaces[0].state.area_m2
+        * (MOLAR_MASS / (2.0 * core::f64::consts::PI * MOLAR_GAS_CONSTANT * TEMPERATURE)).sqrt();
+    // The manufactured emission is constant even as latent heat changes T.
+    // Solve backward-Euler vapor conservation independently of the solver.
+    let rate = beta() * conductance;
+    let pressure = (100.0 + dt * rate * 10.0) / (1.0 + dt * rate);
+    let transfer = dt * conductance * (10.0 - pressure);
+    let capacity = surfaces[0].state.substrate_mass_kg * SUBSTRATE_CP;
+    let heat = capacity * (target - TEMPERATURE) + transfer * LATENT;
+    let predictor = 100.0 / (1.0 + dt * rate);
+    let predictor_transfer = dt * conductance * (10.0 - predictor);
+    assert!(TEMPERATURE + (heat - predictor_transfer * LATENT) / capacity < 225.0);
+    let solve = |controls| {
+        advance_supported_chamber_with_heat(
+            &surfaces,
+            bath,
+            dt,
+            &[heat],
+            controls,
+            |_, h| Ok(h / SUBSTRATE_CP),
+            || Ok(()),
+        )
+    };
+    let step = solve(config()).unwrap();
+    close(
+        step.surfaces[0].phase.surface_temperature_k,
+        target,
+        1e-8,
+        0.0,
+    );
+    close(
+        step.surfaces[0].state.deposit_mass_kg,
+        -transfer,
+        1e-15,
+        1e-10,
+    );
+    close(mass(step.reservoir) * beta(), pressure, 1e-8, 1e-10);
+    assert!(step.pressure_iterations > 1);
+    conservation(&surfaces, bath, &step);
+
+    let mut limited = config();
+    limited.max_iterations = 1;
+    let first_trial_calls = core::cell::Cell::new(0);
+    assert!(
+        advance_supported_chamber_with_heat(
+            &surfaces,
+            bath,
+            dt,
+            &[heat],
+            limited,
+            |_, h| Ok(h / SUBSTRATE_CP),
+            || {
+                first_trial_calls.set(first_trial_calls.get() + 1);
+                Ok(())
+            },
+        )
+        .is_err()
+    );
+    let calls = core::cell::Cell::new(0);
+    let cancelled = advance_supported_chamber_with_heat(
+        &surfaces,
+        bath,
+        dt,
+        &[heat],
+        config(),
+        |_, h| Ok(h / SUBSTRATE_CP),
+        || {
+            calls.set(calls.get() + 1);
+            if calls.get() > first_trial_calls.get() {
+                Err(SublimationError::Cancelled)
+            } else {
+                Ok(())
+            }
+        },
+    );
+    assert_eq!(cancelled, Err(SublimationError::Cancelled));
+    assert_eq!(surfaces[0].state.deposit_mass_kg, 0.0);
+    assert_eq!(
+        surfaces[0].state.substrate_specific_enthalpy_j_kg,
+        SUBSTRATE_CP * TEMPERATURE
+    );
+}
+
+#[test]
 fn g0_shared_supported_heat_validates_inputs_and_preserves_zero_heat_results() {
     let surfaces = [surface(0.001, 1e-3, 240.0), surface(0.002, 0.0, 220.0)];
     let bath = reservoir(30.0);

@@ -461,7 +461,38 @@ pub(crate) fn solve_chamber<T: ChamberExchange, C: FnMut() -> Result<(), Sublima
             residual_kg: residual,
         })
     };
-    let initial = evaluate(prediction)?;
+    let initial = match evaluate(prediction) {
+        Ok(value) => value,
+        Err(SublimationError::Cancelled) => return Err(SublimationError::Cancelled),
+        Err(initial_error) => {
+            // This frozen-temperature predictor omits supplied heat and the
+            // latent buffering of a newly forming deposit. Its local caloric
+            // endpoint can therefore leave the material domain even when the
+            // joint pressure/temperature solution is admissible. Find one
+            // physical pressure anchor before the ordinary bracket solve;
+            // none of these trials changes the finite inventory or charts.
+            // Existing max_iterations charges every refused pressure trial.
+            let pressures = [initial_pressure, 0.0, upper_pressure];
+            let mut anchor = None;
+            for (index, pressure) in pressures.into_iter().enumerate() {
+                if evaluations.get() >= config.max_iterations {
+                    break;
+                }
+                if pressure == prediction || pressures[..index].contains(&pressure) {
+                    continue;
+                }
+                match evaluate(pressure) {
+                    Ok(value) => {
+                        anchor = Some(value);
+                        break;
+                    }
+                    Err(SublimationError::Cancelled) => return Err(SublimationError::Cancelled),
+                    Err(_) => {}
+                }
+            }
+            anchor.ok_or(initial_error)?
+        }
+    };
     let endpoint = if admitted(&initial, initial_mass, config) {
         initial
     } else {
