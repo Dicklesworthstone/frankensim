@@ -176,8 +176,9 @@ impl<G> MaterialStokesField<'_, '_, G> {
     ///
     /// Equal-step G-energy stability has the scope of the native
     /// [`FluxSystem::assemble_stokes_mixed_bdf2`] entry. Single-state kinetic
-    /// energy need not decrease at every unforced step. This does not change
-    /// density, transport interfaces, or add variable-step/nonlinear dynamics.
+    /// energy need not decrease at every unforced step. Use
+    /// [`Self::bdf2_stokes_mixed_variable_step`] when intervals change. Neither
+    /// density transport nor nonlinear dynamics is included.
     ///
     /// # Errors
     /// Preserves native two-history admission, convergence and physical-output
@@ -190,11 +191,41 @@ impl<G> MaterialStokesField<'_, '_, G> {
         older_velocity: Option<&[f64]>,
         timestep_s: f64,
     ) -> Result<MaterialStokesFieldSolution<G>, MaterialFluxError> {
+        self.bdf2_stokes_mixed_variable_step(
+            force_density,
+            boundaries,
+            previous_velocity,
+            older_velocity.map(|older| (older, timestep_s)),
+            timestep_s,
+        )
+    }
+
+    /// Advance frozen density/viscosity layers with unequal BDF2 timesteps.
+    ///
+    /// `older_history` pairs u_(n-1) with its actual interval to u_n in seconds.
+    /// `None` starts with BDF1; otherwise the new/previous step ratio lies in
+    /// (0, 2]. One unchanged spatial density metric weights both histories and
+    /// recovers physical energy and reactions. Source snapshots are not queried
+    /// again. All endpoint loads and recovered outputs retain physical SI units.
+    /// See [`FluxSystem::assemble_stokes_mixed_bdf2_variable_step`] for stability
+    /// scope. Neither density transport nor nonlinear advection is introduced.
+    ///
+    /// # Errors
+    /// Preserves native history/ratio admission, convergence and SI recovery;
+    /// caller-owned histories and the frozen material field stay unchanged.
+    pub fn bdf2_stokes_mixed_variable_step(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+    ) -> Result<MaterialStokesFieldSolution<G>, MaterialFluxError> {
         let reference = self.reference_density_kg_m3;
         with_physical_boundaries(boundaries, reference, |primitive_boundaries| {
             let assembly = self
                 .system
-                .assemble_stokes_mixed_bdf2_variable_density(
+                .assemble_stokes_mixed_bdf2_variable_density_variable_step(
                     self.params,
                     &|cell, _| self.samples[cell].relative_density,
                     &|cell, _| self.samples[cell].normalized_viscosity,
@@ -204,7 +235,7 @@ impl<G> MaterialStokesField<'_, '_, G> {
                     },
                     primitive_boundaries,
                     previous_velocity,
-                    older_velocity,
+                    older_history,
                     timestep_s,
                 )
                 .map_err(MaterialFluxError::Boundary)?;

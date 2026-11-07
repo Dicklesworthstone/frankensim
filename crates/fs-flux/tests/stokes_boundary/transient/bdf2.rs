@@ -11,11 +11,17 @@ fn density(y: f64) -> f64 {
 
 #[test]
 fn quadratic_time_graded_shear_uses_both_histories_and_one_reference_density() {
+    for previous_dt in [0.065, 0.13, 0.26] {
+        quadratic_time_graded_shear(previous_dt);
+    }
+}
+
+fn quadratic_time_graded_shear(previous_dt: f64) {
     let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 3, 3));
     let system = FluxSystem::new(&mesh);
     let params = FluxParams::default();
     let dt = 0.13;
-    let time = 3.0 * dt;
+    let time = 0.6;
     let intercept = |t: f64| 0.3 + 1.1 * t + 0.4 * t * t;
     let slope = |t: f64| 0.4 + 0.6 * t - 0.2 * t * t;
     let previous = density_test_moments(&system, &|point| {
@@ -23,7 +29,7 @@ fn quadratic_time_graded_shear_uses_both_histories_and_one_reference_density() {
     });
     let older = density_test_moments(&system, &|point| {
         [
-            intercept(time - 2.0 * dt) + slope(time - 2.0 * dt) * point[1],
+            intercept(time - dt - previous_dt) + slope(time - dt - previous_dt) * point[1],
             0.0,
         ]
     });
@@ -76,14 +82,14 @@ fn quadratic_time_graded_shear_uses_both_histories_and_one_reference_density() {
             })
             .collect();
         let assembly = system
-            .assemble_stokes_mixed_bdf2_variable_density(
+            .assemble_stokes_mixed_bdf2_variable_density_variable_step(
                 params,
                 &rho,
                 &|_, point| (0.7 + 1.2 * point[1]) / reference,
                 &force,
                 &boundaries,
                 &previous,
-                Some(&older),
+                Some((&older, previous_dt)),
                 dt,
             )
             .unwrap();
@@ -246,6 +252,98 @@ fn original_bdf1_startup_gives_second_order_time_convergence() {
     for pair in errors.windows(2) {
         assert!(pair[0] / pair[1] > 3.8 && pair[0] / pair[1] < 4.1);
     }
+}
+
+/// Alternating short/long steps preserve order for the continuum solution
+/// u(t)=t³/3. Its nonzero third derivative exposes the BDF2 truncation error;
+/// changing-step coefficients are essential even though spatial flow is uniform.
+#[test]
+fn alternating_steps_keep_second_order_for_density_weighted_acceleration() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
+    let system = FluxSystem::new(&mesh);
+    let params = FluxParams::default();
+    let rho = |_: usize, point: [f64; 2]| density(point[1]);
+    let traction = |point: [f64; 2], normal: [f64; 2]| normal.map(|n| -(4.0 - 2.0 * point[0]) * n);
+    let boundaries = traction_boundaries(&mesh, &traction);
+    let final_time: f64 = 0.4;
+    let mut errors = Vec::new();
+    for pairs in [4, 8, 16] {
+        let short_dt = final_time / (3 * pairs) as f64;
+        let mut time = 0.0;
+        let mut previous = vec![0.0; system.n_u];
+        let mut older: Option<(Vec<f64>, f64)> = None;
+        for step in 0..2 * pairs {
+            let dt = if step % 2 == 0 {
+                short_dt
+            } else {
+                2.0 * short_dt
+            };
+            time += dt;
+            let force = |point: [f64; 2]| [density(point[1]) * time * time - 2.0, 0.0];
+            let solution = system
+                .assemble_stokes_mixed_bdf2_variable_density_variable_step(
+                    params,
+                    &rho,
+                    &|_, _| 0.7,
+                    &force,
+                    &boundaries,
+                    &previous,
+                    older
+                        .as_ref()
+                        .map(|(velocity, interval)| (velocity.as_slice(), *interval)),
+                    dt,
+                )
+                .unwrap()
+                .solve()
+                .unwrap();
+            for (pressure, point) in solution.pressure.iter().zip(&mesh.centroids) {
+                assert!((pressure - (4.0 - 2.0 * point[0])).abs() < 3e-9);
+            }
+            older = Some((previous, dt));
+            previous = solution.field.x[..system.n_u].to_vec();
+        }
+        let (error, divergence) =
+            system.velocity_error(&previous, &|_| [final_time.powi(3) / 3.0, 0.0]);
+        assert!(divergence < 3e-11);
+        errors.push(error);
+    }
+    for pair in errors.windows(2) {
+        let order_ratio = pair[0] / pair[1];
+        assert!((3.5..4.5).contains(&order_ratio), "errors: {errors:?}");
+    }
+}
+
+#[test]
+fn invalid_previous_interval_or_step_growth_refuses_before_callbacks() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 1, 1));
+    let system = FluxSystem::new(&mesh);
+    let queries = Cell::new(0);
+    let coefficient = |_: usize, _: [f64; 2]| {
+        queries.set(queries.get() + 1);
+        1.0
+    };
+    let value = |_: [f64; 2]| {
+        queries.set(queries.get() + 1);
+        [0.0; 2]
+    };
+    let boundaries = velocity_boundaries(&mesh, &value);
+    let previous = vec![0.0; system.n_u];
+    for previous_dt in [0.0, -0.1, f64::NAN, f64::INFINITY, 0.049, f64::MIN_POSITIVE] {
+        assert!(matches!(
+            system.assemble_stokes_mixed_bdf2_variable_density_variable_step(
+                FluxParams::default(),
+                &coefficient,
+                &coefficient,
+                &value,
+                &boundaries,
+                &previous,
+                Some((&previous, previous_dt)),
+                0.1,
+            ),
+            Err(StokesBoundaryError::InvalidInput(_))
+        ));
+    }
+    assert_eq!(queries.get(), 0);
 }
 
 #[test]

@@ -302,6 +302,12 @@ fn spatial_binding_refuses_unrepresentable_common_normalization() {
 
 #[test]
 fn sourced_bdf2_keeps_two_histories_and_physical_normalization() {
+    for previous_dt in [0.25, 0.5] {
+        sourced_bdf2_physical_normalization(previous_dt);
+    }
+}
+
+fn sourced_bdf2_physical_normalization(previous_dt: f64) {
     let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
     let system = FluxSystem::new(&mesh);
     let spec = GasSpec::dry_air_ussa1976();
@@ -317,14 +323,15 @@ fn sourced_bdf2_keeps_two_histories_and_physical_normalization() {
         lower.material.transport_state().unwrap().density_kg_m3(),
         upper.material.transport_state().unwrap().density_kg_m3(),
     ];
-    // u(t)=t² on both layers. Exact u(1/2)=1/4 and u(0)=0 are the
-    // supplied histories; BDF2 must recover u(1)=1 from endpoint u'=2.
+    // u(t)=t² on both layers. Histories use their actual times; both constant
+    // and doubled intervals must recover u(1)=1 from endpoint u'=2.
     let mut previous = vec![0.0; system.n_u];
+    let mut older = vec![0.0; system.n_u];
     for (edge, geometry) in mesh.edges.iter().enumerate() {
         previous[2 * edge] = 0.25 * geometry.normal[0];
+        older[2 * edge] = (0.5 - previous_dt).powi(2) * geometry.normal[0];
     }
-    let older = vec![0.0; system.n_u];
-    let snapshot = previous.clone();
+    let snapshots = [previous.clone(), older.clone()];
     let traction = |point: [f64; 2], normal: [f64; 2]| {
         let pressure = 5.0 - 0.8 * point[0];
         normal.map(|n| -pressure * n)
@@ -355,7 +362,13 @@ fn sourced_bdf2_keeps_two_histories_and_physical_normalization() {
         let field = binding.bind_stokes_materials(sources).unwrap();
         let queries = [lower.queries.get(), upper.queries.get()];
         let solved = field
-            .bdf2_stokes_mixed_step(&force, &boundaries, &previous, Some(&older), 0.5)
+            .bdf2_stokes_mixed_variable_step(
+                &force,
+                &boundaries,
+                &previous,
+                Some((&older, previous_dt)),
+                0.5,
+            )
             .unwrap();
         let (error, divergence) = system.velocity_error(&solved.discrete().x, &|_| [1.0, 0.0]);
         assert!(error < 3e-10 && divergence < 3e-10, "{error}, {divergence}");
@@ -380,11 +393,11 @@ fn sourced_bdf2_keeps_two_histories_and_physical_normalization() {
 
         // The homogeneous source adapter reaches the same native time formula.
         let homogeneous = binding
-            .bdf2_stokes_mixed_step(
+            .bdf2_stokes_mixed_variable_step(
                 &|_| [2.0 * reference_density - 0.8, 0.0],
                 &boundaries,
                 &previous,
-                Some(&older),
+                Some((&older, previous_dt)),
                 0.5,
             )
             .unwrap();
@@ -400,6 +413,6 @@ fn sourced_bdf2_keeps_two_histories_and_physical_normalization() {
             3e-10,
         );
     }
-    assert_eq!(previous, snapshot);
-    assert_eq!(older, vec![0.0; system.n_u]);
+    assert_eq!(previous, snapshots[0]);
+    assert_eq!(older, snapshots[1]);
 }

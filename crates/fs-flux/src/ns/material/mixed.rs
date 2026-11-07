@@ -482,8 +482,9 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
     /// original BDF1 startup. The same frozen source density weights all three
     /// time levels and every SI conversion. Equal-step G-energy stability is
     /// conditional on dissipative spatial/boundary data, as documented by the
-    /// native [`crate::ns::FluxSystem::assemble_stokes_mixed_bdf2`] entry. This does not
-    /// support variable timesteps, transported density or nonlinear advection.
+    /// native [`crate::ns::FluxSystem::assemble_stokes_mixed_bdf2`] entry. Use
+    /// [`Self::bdf2_stokes_mixed_variable_step`] when intervals change. Transported
+    /// density and nonlinear advection are not included.
     ///
     /// # Errors
     /// Preserves native admission/convergence and physical-output refusals;
@@ -496,9 +497,38 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         older_velocity: Option<&[f64]>,
         timestep_s: f64,
     ) -> Result<MaterialStokesSolution, MaterialFluxError> {
+        self.bdf2_stokes_mixed_variable_step(
+            force_density,
+            boundaries,
+            previous_velocity,
+            older_velocity.map(|older| (older, timestep_s)),
+            timestep_s,
+        )
+    }
+
+    /// Advance linear Stokes with unequal BDF2 timesteps and physical SI loads.
+    ///
+    /// `older_history` pairs u_(n-1) with the actual previous interval in seconds;
+    /// `None` performs BDF1 startup. The new/previous step ratio must lie in
+    /// (0, 2]. All source properties stay frozen and use one reference density.
+    /// Endpoint forces, traction, pressure recovery and boundary reactions retain
+    /// their SI units. See [`crate::ns::FluxSystem::assemble_stokes_mixed_bdf2_variable_step`]
+    /// for the derivative and stability scope.
+    ///
+    /// # Errors
+    /// Preserves native history/ratio admission, convergence and SI recovery;
+    /// neither caller-owned history is modified.
+    pub fn bdf2_stokes_mixed_variable_step(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+    ) -> Result<MaterialStokesSolution, MaterialFluxError> {
         let density = self.transport.density_kg_m3();
         let flow = with_physical_boundaries(boundaries, density, |primitive_boundaries| {
-            self.system.bdf2_stokes_mixed_step(
+            self.system.bdf2_stokes_mixed_variable_step(
                 self.params,
                 &|point| {
                     let physical = force_density(point);
@@ -506,7 +536,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                 },
                 primitive_boundaries,
                 previous_velocity,
-                older_velocity,
+                older_history,
                 timestep_s,
             )
         })
