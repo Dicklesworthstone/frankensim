@@ -55,6 +55,22 @@ pressure/velocity source derivatives, Robin pressure/velocity and passive wall
 absorption, independent narrow-surface-mode references within a fixed work
 budget, finite reflected self-fields, original-clock harmonic lines and refusals.
 
+`PreparedImpedanceWallCompactSourceObserver` prepares complete physical Q/F
+source assemblies for reflected-only or coherent total observation, including
+receivers on the wall. One 4-by-4 Cartesian transfer per original source feeds
+the existing compensated array/statistics owner. Source and mechanism phases
+survive until pressure and vector velocity are formed; explicitly independent
+sources still retain their own Q/F and direct/reflected cross terms. Caller
+supplied low-rank coherence factors propagate the full pressure/velocity second
+moments without inventing independence from unknown phase. Harmonic lines keep
+the original source clock for finite-window observation. Preparation shares one
+aggregate Q/F evaluation cap across all sources and retains separate native
+unit-amplitude diagnostics; application performs no allocation or quadrature.
+`impedance_wall_array` compares rotated ideal-wall assemblies against analytic
+Green-function images and dense source covariance algebra, checks finite-wall
+Robin pressure/velocity and absorption for coherent and partially coherent
+sources, and exercises aggregate work, cancellation and direct-self-field limits.
+
 ## Exact physical records and sampled harmonic receivers
 
 `observation::AngularHarmonicFieldLine` and `PreparedHarmonicField::new_angular`

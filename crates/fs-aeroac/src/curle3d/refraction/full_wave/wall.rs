@@ -23,7 +23,13 @@ use super::*;
 use crate::curle3d::{CompactSourcePhasor, PreparedCompactSourceObserver};
 use fs_material::fluid_acoustics::FluidAcousticState;
 
+mod array;
 mod force;
+pub use array::{
+    IMPEDANCE_WALL_REFLECTED_ARRAY_SCOPE, IMPEDANCE_WALL_TOTAL_ARRAY_SCOPE,
+    ImpedanceWallCompactSourceDiagnostics, ImpedanceWallFieldKind,
+    PreparedImpedanceWallCompactSourceObserver,
+};
 pub use force::{ImpedanceWallForceDiagnostics, PreparedImpedanceWallForce};
 
 const SCOPE: &str = "Prescribed stationary compact 3D volume source in one homogeneous \
