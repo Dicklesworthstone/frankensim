@@ -8,8 +8,8 @@ use fs_tribo::{
     DryInterfaceSystemCard, FlashTemperatureEstimate, FlashTemperatureInput,
     FlashTemperatureUnknown, FrictionLaw, FrictionRegime, HeatPartition, HertzCylinderPlane,
     HertzSpherePlane, InputAuthority, InterfaceMedium, InterfaceSystemRef, LocalArchardSample,
-    SurfaceThermalProperties, TangentialSlip, TriboError, WearState, WorkLedger,
-    flash_temperature_candidate,
+    LocalHardnessArchardSample, SurfaceThermalProperties, TangentialSlip, TriboError, WearState,
+    WorkLedger, flash_temperature_candidate,
 };
 
 fn interface() -> InterfaceSystemRef {
@@ -195,6 +195,132 @@ fn local_archard_coefficients_integrate_one_original_inventory_atomically() {
             .unwrap();
     assert_eq!(empty.increment_m3, 0.0);
     assert_eq!(state, accepted);
+}
+
+#[test]
+fn g1_g3_local_hardness_retains_spatial_correlation_and_quadrature_refinement() {
+    let samples = [
+        LocalHardnessArchardSample {
+            wear_coefficient: 2.0e-6,
+            pressure_weighted_sliding_j: 20.0,
+            hardness_pa: 1.0e9,
+        },
+        LocalHardnessArchardSample {
+            wear_coefficient: 2.0e-6,
+            pressure_weighted_sliding_j: 5.0,
+            hardness_pa: 4.0e9,
+        },
+    ];
+    let evaluate = |samples: Vec<LocalHardnessArchardSample>| {
+        ArchardLaw::advance_local_hardness_pressure_weighted_sliding(
+            &interface(),
+            &mut WearState::default(),
+            samples,
+        )
+        .unwrap()
+    };
+    let original = evaluate(samples.to_vec());
+    // Independent two-region integral: the more heavily sliding region is soft.
+    let expected = 4.0e-14 + 2.5e-15;
+    assert!((original.increment_m3 / expected - 1.0).abs() < 1.0e-14);
+    let exchanged = evaluate(vec![
+        LocalHardnessArchardSample {
+            hardness_pa: 4.0e9,
+            ..samples[0]
+        },
+        LocalHardnessArchardSample {
+            hardness_pa: 1.0e9,
+            ..samples[1]
+        },
+    ]);
+    assert!((exchanged.increment_m3 / 2.0e-14 - 1.0).abs() < 1.0e-14);
+    assert!(original.increment_m3 > 2.0 * exchanged.increment_m3);
+    let refined = evaluate(
+        samples
+            .into_iter()
+            .flat_map(|sample| {
+                [LocalHardnessArchardSample {
+                    pressure_weighted_sliding_j: 0.5 * sample.pressure_weighted_sliding_j,
+                    ..sample
+                }; 2]
+            })
+            .collect(),
+    );
+    assert!((refined.increment_m3 / original.increment_m3 - 1.0).abs() < 1.0e-14);
+    assert_eq!(refined.provenance(), original.provenance());
+
+    // Uniform hardness uses exactly the existing coefficient-only arithmetic.
+    let common = 2.0e9;
+    let mut legacy_state = WearState::default();
+    let legacy = ArchardLaw::advance_local_pressure_weighted_sliding(
+        &interface(),
+        &mut legacy_state,
+        samples.map(|sample| LocalArchardSample {
+            wear_coefficient: sample.wear_coefficient,
+            pressure_weighted_sliding_j: sample.pressure_weighted_sliding_j,
+        }),
+        common,
+    )
+    .unwrap();
+    let uniform = evaluate(
+        samples
+            .map(|sample| LocalHardnessArchardSample {
+                hardness_pa: common,
+                ..sample
+            })
+            .to_vec(),
+    );
+    assert_eq!(uniform, legacy);
+}
+
+#[test]
+fn g0_local_hardness_refuses_invalid_late_samples_without_partial_wear() {
+    let valid = LocalHardnessArchardSample {
+        wear_coefficient: 1.0e-5,
+        pressure_weighted_sliding_j: 20.0,
+        hardness_pa: 2.0e9,
+    };
+    let original = WearState::new(1.0e-12).unwrap();
+    for hardness_pa in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let mut state = original;
+        assert!(
+            ArchardLaw::advance_local_hardness_pressure_weighted_sliding(
+                &interface(),
+                &mut state,
+                [
+                    valid,
+                    LocalHardnessArchardSample {
+                        hardness_pa,
+                        ..valid
+                    }
+                ],
+            )
+            .is_err()
+        );
+        assert_eq!(state, original);
+    }
+    let mut state = original;
+    let empty =
+        ArchardLaw::advance_local_hardness_pressure_weighted_sliding(&interface(), &mut state, [])
+            .unwrap();
+    assert_eq!(empty.increment_m3, 0.0);
+    let zero = ArchardLaw::advance_local_hardness_pressure_weighted_sliding(
+        &interface(),
+        &mut state,
+        [
+            LocalHardnessArchardSample {
+                pressure_weighted_sliding_j: 0.0,
+                ..valid
+            },
+            LocalHardnessArchardSample {
+                wear_coefficient: 0.0,
+                ..valid
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(zero.increment_m3, 0.0);
+    assert_eq!(state, original);
 }
 
 #[test]

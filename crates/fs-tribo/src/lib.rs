@@ -1991,6 +1991,22 @@ pub struct LocalArchardSample {
     /// Local `p * |ds| * dA` contribution [N m], nonnegative.
     pub pressure_weighted_sliding_j: f64,
 }
+/// One spatial or temporal Archard contribution with its own material hardness.
+///
+/// Keep `k`, the actual pressure-weighted sliding, and `H` at the same physical
+/// point. In general `sum(k * I / H)` cannot be recovered from separate averages
+/// of these fields. Hardness is a positive indentation pressure in pascals,
+/// independently measured or explicitly modeled at the sample's material state;
+/// it is not an empirical scale reading or a yield-stress conversion.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LocalHardnessArchardSample {
+    /// Dimensionless local Archard coefficient, nonnegative.
+    pub wear_coefficient: f64,
+    /// Local `p * |ds| * dA` contribution [N m], nonnegative.
+    pub pressure_weighted_sliding_j: f64,
+    /// The wearing body's indentation hardness at this sample [Pa], positive.
+    pub hardness_pa: f64,
+}
 /// Caller-owned wear volume in cubic metres.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct WearState {
@@ -2041,11 +2057,45 @@ impl ArchardLaw {
     ) -> Result<WearAdvance, TriboError> {
         interface.validate()?;
         positive_finite(hardness_pa, "hardness_pa")?;
+        Self::advance_local_hardness_pressure_weighted_sliding(
+            interface,
+            state,
+            samples
+                .into_iter()
+                .map(|sample| LocalHardnessArchardSample {
+                    wear_coefficient: sample.wear_coefficient,
+                    pressure_weighted_sliding_j: sample.pressure_weighted_sliding_j,
+                    hardness_pa,
+                }),
+        )
+    }
+
+    /// Integrate `sum(k_i * I_i / H_i)` without homogenizing material hardness.
+    ///
+    /// `I_i = integral p |ds| dA` belongs to the same quadrature point or
+    /// interval as `k_i` and `H_i`. The caller owns that mapping, the original
+    /// sources, physical support and quadrature accuracy. In particular, bulk
+    /// work hardening can supply each point's independently sourced hardness;
+    /// neither indentation depth nor wear recession is equivalent plastic strain.
+    ///
+    /// The iterator is consumed once with constant auxiliary storage and
+    /// compensated summation. Invalid samples or a nonfinite total refuse the
+    /// complete update before changing `state`. Empty samples remove nothing.
+    /// This advances volume only: geometry, debris, heat and constitutive history
+    /// remain with their physical owners. See Archard (1953),
+    /// <https://doi.org/10.1063/1.1721448>.
+    pub fn advance_local_hardness_pressure_weighted_sliding(
+        interface: &InterfaceSystemRef,
+        state: &mut WearState,
+        samples: impl IntoIterator<Item = LocalHardnessArchardSample>,
+    ) -> Result<WearAdvance, TriboError> {
+        interface.validate()?;
         nonnegative_finite(state.volume_m3, "wear_volume_m3")?;
         let mut increment_m3 = 0.0;
         let mut compensation = 0.0;
         for sample in samples {
             nonnegative_finite(sample.wear_coefficient, "wear_coefficient")?;
+            positive_finite(sample.hardness_pa, "hardness_pa")?;
             nonnegative_finite(
                 sample.pressure_weighted_sliding_j,
                 "pressure_weighted_sliding_j",
@@ -2054,7 +2104,7 @@ impl ArchardLaw {
                 sample.wear_coefficient,
                 sample.pressure_weighted_sliding_j,
                 "wear_increment",
-            )? / hardness_pa;
+            )? / sample.hardness_pa;
             nonnegative_finite(contribution, "wear_increment")?;
             let corrected = contribution - compensation;
             let next = checked_add(increment_m3, corrected, "wear_increment")?;

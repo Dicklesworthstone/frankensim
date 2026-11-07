@@ -443,6 +443,17 @@ reactions, and residual embedding.
   dissipated work and every explicit heat/other channel, and commits all four
   candidate totals only after their closure checks pass. `ArchardLaw` computes
   `dV = k F ds/H` in m3 and commits only a validated candidate state.
+  `advance_local_hardness_pressure_weighted_sliding` integrates independently
+  supplied `k_i I_i/H_i` samples with their own positive SI indentation hardness.
+  It preserves the spatial/temporal correlation of pressure, slip, coefficient
+  and hardness, rather than dividing total sliding by an averaged hardness.
+  The original common-hardness quadrature delegates to the same compensated,
+  single-pass kernel. Auxiliary numerical storage is constant; all samples
+  must pass before the caller's volume changes. Source support, mapping bulk
+  history to the wearing surface, quadrature error and geometry feedback remain
+  with the consumer. Synthetic G0/G1/G3 dry-baseline tests cover independent
+  two-region integrals, field interchange, refinement, uniform parity and late
+  invalid-hardness rollback; this is not a calibrated life prediction.
 - `flash_temperature_candidate` is a typed model-form branch. With complete
   caller thermal conductivity/diffusivity data for every nonzero heat share,
   it reports the uniform-flux semi-infinite candidate
