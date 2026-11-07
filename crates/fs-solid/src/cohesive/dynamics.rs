@@ -1002,7 +1002,7 @@ impl<'p, 'm, 'a> StepProblem<'p, 'm, 'a> {
                     finite(end.energy.work + patch.area_m2 * step.equilibrium.energy.work)?;
                 end.energy.stored_change = finite(
                     end.energy.stored_change
-                        + patch.area_m2 * (next.stored_energy_j_m2() - old.stored_energy_j_m2()),
+                        + patch.area_m2 * step.equilibrium.energy.stored_change,
                 )?;
                 let losses = DynamicsPatchDissipation {
                     patch_id: patch.id,

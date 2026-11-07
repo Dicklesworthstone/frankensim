@@ -59,7 +59,8 @@ pub struct DynamicsInterval<'m, 'a> {
     pub maximum_normal_jump_m: Vec<f64>,
     pub external_work_j: f64,
     pub prescribed_jump_work_j: f64,
-    /// Independently reconstructed from interval endpoints and accepted work.
+    /// Reconstructed from kinetic/bulk endpoints, accepted constitutive storage
+    /// increments and accepted work. Absolute cohesive totals are diagnostics.
     pub energy_residual_j: f64,
     /// Sum of the original accepted native first-law allowances.
     pub energy_tolerance_j: f64,
@@ -229,7 +230,7 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
             result.external_work_j + result.prescribed_jump_work_j
                 - result.kinetic_energy_change_j
                 - (result.bulk_stored_after_j - result.bulk_stored_before_j)
-                - (result.cohesive_stored_after_j - result.cohesive_stored_before_j)
+                - result.cohesive_energy_j.stored_change
                 - result.cohesive_energy_j.dissipated
                 - result.viscous_dissipated_j
                 - result.friction_dissipated_j,

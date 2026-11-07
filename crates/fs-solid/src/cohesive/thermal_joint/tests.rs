@@ -148,3 +148,62 @@ fn thermal_joint_fracture_accounts_viscous_path_loss_before_failure() {
     assert!(reclosed.bond().failed());assert_eq!(r.bond_viscous_dissipated_j,0.0);
     assert_eq!(r.cohesive_energy_j.dissipated,0.0);
 }
+
+// G1: a retained thermal preload must not hide the original bond's small work.
+// Powers of two give an independent exact spring/dashpot series recurrence.
+#[test]
+fn retained_bulk_energy_does_not_erase_bond_storage_or_viscous_loss() {
+    use fs_material::cohesive::CohesiveViscosity;
+
+    let bulk = ThermoMaxwell::new(
+        2.0_f64.powi(80),
+        vec![],
+        vec![
+            ThermalKnot {
+                temperature_k: 280.0,
+                modulus_scale: 1.0,
+                relaxation_scale: 1.0,
+                free_strain: -2.0_f64.powi(-10),
+            },
+            ThermalKnot {
+                temperature_k: 300.0,
+                modulus_scale: 1.0,
+                relaxation_scale: 1.0,
+                free_strain: 0.0,
+            },
+        ],
+        Limits { max_strain: 0.04, max_strain_rate_s: 1.0 },
+    ).unwrap();
+    let stiffness = 2.0_f64.powi(140);
+    let law = BilinearCohesive::new(
+        stiffness, 2.0_f64.powi(72), 128.0, stiffness, 2.0_f64.powi(-60),
+    ).unwrap().with_viscosity(CohesiveViscosity::new(stiffness, stiffness, 1.0).unwrap());
+    let initial = Joint::new(
+        0.0, vec![Member::new(1, 1.0, 1.0, &bulk, 300.0).unwrap()],
+        7, 1.0, &law, budget(),
+    ).unwrap();
+    let temperatures = BTreeMap::from([(1, 280.0)]);
+    let mut controls = config();
+    controls.equilibrium.newton.relative_tolerance = 0.0;
+    let first_gap = 2.0_f64.powi(-71);
+    let (loaded, _) = initial.advance_controlled(
+        1.0, first_gap, &temperatures, controls, &mut || false,
+    ).unwrap();
+    let (relaxed, report) = loaded.advance_controlled(
+        2.0, 1.5 * first_gap, &temperatures, controls, &mut || false,
+    ).unwrap();
+
+    // The member retains 2^59 J while the bond gains 5/32 J. Subtracting
+    // aggregate endpoint totals gives zero and would reject this native step.
+    assert_eq!(loaded.members()[&1].point().stored_energy_j_m3(), 2.0_f64.powi(59));
+    assert_eq!(loaded.stored_energy_j(), relaxed.stored_energy_j());
+    assert_eq!(report.bulk_energy_j.stored_change, 0.0);
+    assert_eq!(report.bulk_energy_j.dissipated, 0.0);
+    assert_eq!(report.bulk_energy_j.numerical_dissipation, 0.0);
+    assert_eq!(report.cohesive_energy_j.dissipated, 0.0);
+    near(report.cohesive_energy_j.stored_change, 5.0 / 32.0, 1e-12);
+    near(report.bond_viscous_dissipated_j, 1.0 / 16.0, 1e-12);
+    near(report.endpoint_work_j, 1.0 / 4.0, 1e-12);
+    near(report.cohesive_work_correction_j, 1.0 / 32.0, 1e-12);
+    near(report.energy_residual_j, 0.0, 1e-12);
+}

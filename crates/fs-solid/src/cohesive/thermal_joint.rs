@@ -230,12 +230,14 @@ impl<'a> Joint<'a> {
         let cohesive_work=finite(cohesive.work+viscous)?;
         let work=finite(force*(extension_m-self.extension_m))?;
         let correction=finite(force*(gap-self.bond.jump_m()[0])-cohesive_work)?;
-        let storage=finite(next.stored_energy_j()-self.stored_energy_j())?;
+        // Both constitutive owners have already checked their own increments.
+        // Subtracting whole-joint inventories can erase a resolved bond change
+        // beside a large unchanged member preload.
+        let storage=finite(energy.stored_change+cohesive.stored_change)?;
         let residual=finite(storage+energy.dissipated+energy.numerical_dissipation
             +cohesive.dissipated+viscous+correction-work-energy.thermal_strain_work-energy.modulus_work)?;
         let conjugacy=finite(work-correction-energy.mechanical_work-cohesive_work)?;
-        let storage_check=finite(storage-energy.stored_change-cohesive.stored_change)?;
-        for defect in [residual,conjugacy,storage_check] {
+        for defect in [residual,conjugacy] {
             if defect.abs()>config.energy_tolerance_j { return Err(Error::Energy(defect)); }
         }
         poll(cancelled)?;

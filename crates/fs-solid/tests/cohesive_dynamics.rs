@@ -158,6 +158,71 @@ fn original_consistent_mass_and_cohesive_stiffness_have_second_order_motion() {
 }
 
 #[test]
+fn native_shear_motion_preserves_small_bond_storage_under_fixed_compression() {
+    use fs_solid::cohesive::dynamics::interval::IntervalConfig;
+    with_cx(|cx| {
+        let assembled = scalar_tet(cx);
+        let mass = CsrOp::symmetric(assembled.mass);
+        let elastic = CsrOp::symmetric(assembled.stiffness);
+        let law = BilinearCohesive::new(1000.0, 1.0, 0.002, 1e20, 0.02).unwrap();
+        let bond = CohesivePatch::new(7, 0.01, &law, vec![JumpTerm {
+            dof: 0, local: [0.0, 1.0, 0.0],
+        }]).unwrap();
+        let system = CohesiveSystem::new(&elastic, vec![bond], budget()).unwrap();
+        let offsets = [[-0.001, 0.0, 0.0]];
+        let initial = system.bonded_state().solve(&[0.0], &offsets, config().solve, cx)
+            .unwrap().state;
+        let mut controls = config();
+        // A large passive preload must not loosen this actual work gate.
+        controls.relative_energy_tolerance = 0.0;
+        let h = 1.0/128.0;
+        controls.maximum_step_s = h;
+        let motion = initial.into_dynamics(&mass, vec![0.01], 0.0, controls).unwrap();
+        // M=.1, K_bulk=10, K_bond=A*Kt=10. Exact midpoint oscillator update.
+        let u = h*0.01/(1.0+0.25*h*h*20.0/0.1);
+        let v = 2.0*u/h-0.01;
+        let expected_bond_change = 0.5*10.0*u*u;
+        let step = motion.advance(&[0.0], &offsets, h, cx).unwrap();
+        close(step.motion.state().displacements_m()[0], u, 1e-13);
+        close(step.motion.velocity_m_s()[0], v, 1e-11);
+        assert_eq!(step.cohesive_stored_before_j, step.cohesive_stored_after_j);
+        assert!(step.cohesive_energy_j.stored_change > 0.0);
+        close(step.cohesive_energy_j.stored_change, expected_bond_change, 1e-14);
+        close(step.cohesive_energy_j.work, expected_bond_change, 1e-14);
+        assert_eq!(step.cohesive_energy_j.dissipated, 0.0);
+        assert_eq!(step.prescribed_jump_work_j, 0.0);
+        close(step.energy_residual_j, 0.0, 1e-12);
+
+        let interval = motion.advance_interval(&[0.0], &offsets, 4.0*h,
+            IntervalConfig {
+                minimum_step_s: 1e-6,
+                reversal_time_tolerance_s: 1e-6,
+                maximum_trials: 8,
+                maximum_substeps: 4,
+                maximum_total_residual_evaluations: 32_000,
+                maximum_total_newton_iterations: 480,
+            }, cx).unwrap();
+        let mut repeated = motion.clone();
+        let mut summed_storage = 0.0;
+        for _ in 0..4 {
+            let next = repeated.advance(&[0.0], &offsets, h, cx).unwrap();
+            summed_storage += next.cohesive_energy_j.stored_change;
+            repeated = next.motion;
+        }
+        assert_eq!(interval.accepted_substeps, 4);
+        assert_eq!(interval.cohesive_stored_before_j, interval.cohesive_stored_after_j);
+        assert!(interval.cohesive_energy_j.stored_change > 0.0);
+        close(interval.cohesive_energy_j.stored_change, summed_storage, 1e-14);
+        close(interval.cohesive_energy_j.stored_change,
+            0.5*10.0*repeated.state().displacements_m()[0].powi(2), 1e-14);
+        assert_eq!(interval.motion.state().displacements_m(), repeated.state().displacements_m());
+        assert_eq!(interval.motion.velocity_m_s(), repeated.velocity_m_s());
+        assert_eq!(interval.motion.state().points(), repeated.state().points());
+        close(interval.energy_residual_j, 0.0, 1e-12);
+    });
+}
+
+#[test]
 fn complete_native_interval_retains_small_kinetic_exchange_beside_unchanged_motion() {
     use fs_solid::cohesive::dynamics::interval::IntervalConfig;
     struct Modes([f64; 2]);

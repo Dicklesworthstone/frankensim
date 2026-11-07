@@ -8176,6 +8176,24 @@ remain separate. G0 tests cover a coupled mass counter-mode and a 1.5-joule
 exchange beside a large transferred inventory; the native interval regression
 retains a small oscillator exchange beside unchanged free motion.
 
+Native cohesive storage changes use each original material trial's incremental
+account, integrated over its original patch area, rather than subtracting large
+absolute endpoint inventories. A passive compressive preload cannot hide the
+recoverable energy of small shear motion or loosen an absolute-only work gate.
+The focused consistent-mass P1 regression compares that motion, velocity and
+bond-energy increment with an independent midpoint oscillator solution while
+the rounded absolute cohesive endpoint energies remain equal. The complete
+interval gate retains those accepted increments across its substeps; the same
+regression compares the interval with repeated native steps and their original
+constitutive history.
+
+Thermally driven series joints likewise combine the original member and bond
+storage increments. Their member/constitutive gates, force compatibility and
+work-conjugacy gates remain in force. A separate native spring/dashpot regression
+retains a small bond storage gain and viscous loss beside an unchanged bulk
+preload, with independently specified endpoint work and its signed quadrature
+correction.
+
 The accepted endpoint replay also reports `DynamicsPatchDissipation` in original
 patch order, with actual area-integrated fracture, viscosity and friction losses.
 Its sums use the same arithmetic as the global loss accounts. A downstream
