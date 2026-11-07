@@ -7,6 +7,8 @@ mod common;
 mod induction;
 #[path = "nonlinear_permanent/midpoint.rs"]
 mod midpoint;
+#[path = "nonlinear_permanent/virtual_work.rs"]
+mod virtual_work;
 #[path = "nonlinear_winding_circuit/common.rs"]
 mod winding;
 
@@ -173,6 +175,21 @@ fn nonlinear_owner_retains_the_recoil_natural_load_and_actual_h_energy() {
                     .virtual_work(&[[0.0; 2]; 3], &mut || false)
                     .is_err()
             );
+            // The explicit material-carried rigid mode is well defined even
+            // when this recoil law's actual cell coenergy is negative.
+            let rotation = [[0.0, 0.0], [0.0, 1.0], [-1.0, 0.0]];
+            assert_eq!(
+                field
+                    .rigid_magnet_virtual_work(&rotation, &mut || false)
+                    .unwrap(),
+                0.0
+            );
+            assert_eq!(
+                reference
+                    .rigid_magnet_virtual_work(&rotation, &mut || false)
+                    .unwrap(),
+                0.0
+            );
             // Only the bottom edge is prescribed. The exact P1 equation is
             // B_x = signed Br + mu J/3, H_x = J/3. An interior curl(Br)
             // source alone misses this natural-boundary contribution entirely.
@@ -330,6 +347,13 @@ fn conductive_recoil_history_relaxes_toward_its_nonzero_bias_with_separate_losse
         &mut || false,
     )
     .unwrap();
+    assert!(
+        original
+            .field(&mut || false)
+            .unwrap()
+            .rigid_magnet_virtual_work(&[[0.0; 2]; 5], &mut || false)
+            .is_err()
+    );
     let c = sigma * depth / 18.0;
     let k = 4.0 * depth / mu;
     let dt = 0.1;

@@ -572,6 +572,14 @@ fn only_actual_fields_are_source_admitted_and_rejected_candidates_preserve_histo
     let response = &winding.unit_fields()[0];
     assert!(response.is_incremental_response());
     assert!(response.impressed_current_density_a_m2().is_some());
+    assert!(
+        response
+            .rigid_magnet_virtual_work(
+                &vec![[0.0; 2]; problem.mesh().vertices().len()],
+                &mut || false
+            )
+            .is_err()
+    );
     assert!(matches!(
         response.maxwell_wrench(
             &[0],

@@ -1846,6 +1846,31 @@ Analytic scaling/rigid-motion tests and independently re-solved geometry
 perturbations exercise current-only, flux-only and mixed controls, nonlinear
 coenergy, nonzero rotor torque, cancellation and original-state retention.
 
+The separate `rigid_magnet_virtual_work` methods admit source-backed recoil
+magnets under an explicit rigid material-frame convention: Br rotates with
+the original magnet cell while its magnitude, recoil slope, material state
+and energy reference stay fixed. Every recoil cell must have a skew P1
+displacement gradient, checked against the local contraction's roundoff scale
+without an absolute strain deadband. Connected magnets move rigidly; separate
+magnets may have different motions, including zero. The complete displacement
+declares torque origin, angle and exterior extension. To extract one rotor's
+torque, other physical source regions stay stationary and the moving extension
+lies in their current-free surroundings.
+
+The original recoil storage `|B-Br|^2/(2*mu)` contributes
+`-volume H.Omega(B-Br)=0` because `delta Br=Omega Br`. The implementation retains
+this exact shape/source cancellation; freezing Br in the spatial frame would
+produce a different, incorrect load for the declared material motion. Native
+nonlinear surroundings still contribute their actual coenergy. No alternate
+recoil energy reference or formation energy is introduced, and negative recoil
+cell coenergy is allowed. Shear/dilation of any magnet, incremental responses
+and induction histories refuse. This is static virtual work: finite movement
+requires rotated geometry AND source directions followed by original field
+solves and source-envelope admission. Independent finite-rotation tests cover
+alignment torque, saturated surroundings, fixed stator currents, a frozen-Br
+negative control, rigid-motion objectivity and atomic refusals. They establish
+implementation consistency, not empirical magnet/device validation.
+
 ## Distributed winding and circuit connection
 
 `winding::PlanarWindingBasis` admits signed trianglewise `J_z / terminal_current`

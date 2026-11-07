@@ -18,6 +18,9 @@
 //! differentiate the original magnetic potential along a complete displacement
 //! at held integrated currents and Dirichlet A_z. Their shape work uses actual
 //! constitutive coenergy and can extract torque without an exterior contour.
+//! Their explicit `rigid_magnet_virtual_work` mode also admits source-backed
+//! recoil magnets whose remanence rotates with each rigid material frame;
+//! straining a magnet requires a separate constitutive motion law.
 
 use fs_ga::Wrench;
 

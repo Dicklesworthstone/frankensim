@@ -47,6 +47,8 @@
 //! not evolve geometry. Static linear and reversible nonlinear planar fields
 //! also expose native virtual work at held integrated currents and boundary
 //! A_z, using the actual discrete magnetic potential and nonlinear coenergy.
+//! An explicit rigid-magnet mode carries recoil directions with the material
+//! frame and extracts permanent-magnet torque from the original field.
 //! The dielectric field uses the same contour integral for electric force and
 //! torque. Native circuit electrode potentials can reconstruct its original
 //! spatial field and mechanical load without another field solve.
