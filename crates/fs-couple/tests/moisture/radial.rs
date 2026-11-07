@@ -2,6 +2,8 @@
 use super::*;
 use fs_couple::moisture::radial::*;
 
+#[path = "radial/atmosphere.rs"]
+mod finite_atmosphere;
 #[path = "radial/sdirk.rs"]
 mod sdirk;
 

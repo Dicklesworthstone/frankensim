@@ -206,3 +206,85 @@ fn radial_solid_refuses_unresolved_geometry_foreign_sources_and_late_material_ex
         assert_eq!(limited.time_s(), 0.0);
     });
 }
+
+#[test]
+fn finite_radial_vapor_drives_native_shape_and_preserves_both_inputs_on_late_refusal() {
+    use crate::atmosphere::{atmosphere as gas, controls as air_controls, sorption};
+    with_cx(|cx| {
+        let air = gas(0.8, 1.0);
+        let saved_air = air.clone();
+        let original = radial_specimen(card([0.01; 2], 0.3), vec![0.0, 0.04], vec![0.1], cx);
+        let binding = radial_binding(&original, vec![0, 1, 2, 4, 5, 11], cx);
+        let boundary = [None, Some(sorption(0.25))];
+        let (candidate, solid) = binding
+            .advance_finite_atmosphere(
+                &air,
+                &original,
+                0.25,
+                &boundary,
+                config(),
+                nonlinear(),
+                air_controls(),
+                cx,
+            )
+            .unwrap();
+        assert!(candidate.step().water_to_solid_kg > 0.0);
+        assert!(
+            candidate.atmosphere().relative_humidity().unwrap() < air.relative_humidity().unwrap()
+        );
+        near(
+            candidate.atmosphere().gas().mass_kg() + solid.wet_mass_kg(),
+            air.gas().mass_kg() + original.wet_mass_kg(),
+            3e-12,
+        );
+        near(
+            solid.tangent().unwrap().pencil().total_mass_kg,
+            candidate.moisture().wet_mass_kg(),
+            1e-12,
+        );
+        let change = candidate.moisture().moisture()[0] - original.moisture()[0];
+        for (x, u) in binding
+            .reference_nodes_m()
+            .iter()
+            .zip(solid.solution().displacement_m())
+        {
+            for k in 0..3 {
+                near(u[k], [0.01, 0.04, 0.02][k] * change * x[k], 1e-10);
+            }
+        }
+        assert_eq!(solid.time_s(), candidate.moisture().time_s());
+        let limited = radial_specimen(card([0.01; 2], 0.105), vec![0.0, 0.04], vec![0.1], cx);
+        let limited_binding = radial_binding(&limited, vec![0, 1, 2, 4, 5, 11], cx);
+        let water_only = air
+            .advance_radial(
+                &limited,
+                0.25,
+                &boundary,
+                config(),
+                nonlinear(),
+                air_controls(),
+                cx,
+            )
+            .unwrap();
+        assert!(water_only.moisture().moisture()[0] > 0.105);
+        assert!(
+            limited_binding
+                .advance_finite_atmosphere(
+                    &air,
+                    &limited,
+                    0.25,
+                    &boundary,
+                    config(),
+                    nonlinear(),
+                    air_controls(),
+                    cx,
+                )
+                .is_err()
+        );
+        assert_eq!(air, saved_air);
+        assert_eq!(original.moisture(), &[0.1]);
+        assert_eq!(original.time_s(), 0.0);
+        assert_eq!(limited.moisture(), &[0.1]);
+        assert_eq!(limited.time_s(), 0.0);
+    });
+}

@@ -288,4 +288,63 @@ impl MoistureRadialSolid {
             solid,
         })
     }
+
+    /// Resolve the native mechanical endpoint against the actual finite-air
+    /// humidity solution. A late material or mechanical refusal publishes
+    /// neither the radial water field nor the atmosphere's changed inventory.
+    /// Gas pressure is not automatically a surface traction; sorption heat and
+    /// mechanical feedback into the reference diffusion metric remain separate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_finite_atmosphere(
+        &self,
+        atmosphere: &atmosphere::FiniteMoistureAtmosphere,
+        moisture: &MoistureRadial,
+        dt_s: f64,
+        faces: &[Option<atmosphere::DryBasisSorption>; 2],
+        transport: MoistureStepConfig,
+        nonlinear: MoistureNonlinearConfig,
+        controls: atmosphere::AtmosphereMoistureSolve,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (
+            crate::moisture::radial::atmosphere::RadialAtmosphereMoistureCandidate,
+            MoistureSolidState,
+        ),
+        atmosphere::AtmosphereMoistureError,
+    > {
+        let candidate =
+            atmosphere.advance_radial(moisture, dt_s, faces, transport, nonlinear, controls, cx)?;
+        let solid = self.resolve(candidate.moisture(), cx)?;
+        poll(cx)?;
+        Ok((candidate, solid))
+    }
+
+    /// Keep both chambers, their signed face exchanges and the dependent native
+    /// solid response in one accepted candidate, including steady through-flow.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_paired_atmospheres(
+        &self,
+        first: &atmosphere::FiniteMoistureAtmosphere,
+        second: &atmosphere::FiniteMoistureAtmosphere,
+        moisture: &MoistureRadial,
+        dt_s: f64,
+        faces: &[Option<atmosphere::pair::AtmosphereMoistureFace>; 2],
+        transport: MoistureStepConfig,
+        nonlinear: MoistureNonlinearConfig,
+        controls: atmosphere::pair::PairedAtmosphereMoistureSolve,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (
+            crate::moisture::radial::atmosphere::PairedRadialAtmosphereMoistureCandidate,
+            MoistureSolidState,
+        ),
+        atmosphere::AtmosphereMoistureError,
+    > {
+        let candidate = first.advance_paired_radial(
+            second, moisture, dt_s, faces, transport, nonlinear, controls, cx,
+        )?;
+        let solid = self.resolve(candidate.moisture(), cx)?;
+        poll(cx)?;
+        Ok((candidate, solid))
+    }
 }

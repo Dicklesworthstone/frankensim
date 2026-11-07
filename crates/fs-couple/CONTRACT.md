@@ -3139,12 +3139,35 @@ surface exchange uses each boundary's curved area. Conservative backward Euler
 uses a reusable native tridiagonal workspace, bounded nonlinear iteration and
 independent endpoint residual/water-balance checks before publication. A solid
 center is sealed. This is a fixed, homogeneous, isothermal radial reduction;
-axial/angular gradients, arbitrary tensor orientation, swelling feedback and
-finite exterior reservoirs require their respective spatial/coupling owners.
+axial/angular gradients, arbitrary tensor orientation and swelling feedback
+require their respective spatial/coupling owners.
 Analytic cylindrical/spherical steady potentials, a spherical transient
 eigenmode, nonlinear dry-front balance and finite surface flux define the focused
 verification in `tests/moisture/radial.rs`; they are not measured validation or
 a continuum-error certificate for an arbitrary mesh or time step.
+
+### Finite atmosphere exchange on radial geometry
+
+`FiniteMoistureAtmosphere::advance_radial`, `advance_shared_radial` and
+`advance_paired_radial` couple the original radial fluxes to the existing finite
+gas inventory owners. The actual implicit endpoint RH drives sourced sorption
+and surface transfer; every probe restarts the original specimen. Compensated
+local water increments use each shell's actual dry mass. Shared chambers debit
+one gas inventory for all stable-ID-ordered specimens; paired chambers retain
+separate signed inner/outer transfers even when total solid water is unchanged.
+The original atmosphere owners resolve changed composition and pressure and
+check carrier, water and total mass before all endpoints publish together.
+
+Native solid adapters resolve compatible deformation and wet vibration inertia
+after the accepted single or paired atmosphere candidate. A late constitutive
+or mechanical refusal preserves every original gas and solid input. Gas
+pressure is not automatically imposed as a mechanical traction. Temperature and
+gas volumes are prescribed; condensation, carrier permeation and sorption heat
+remain separate physics. Source-supported RH brackets and explicit work budgets
+remain caller inputs. Seven radial gas regressions cover analytic exchange,
+finite surface resistance, opposing chamber flow, unequal shared inventories,
+dry-front wetting, sealed redistribution and atomic refusals; a native solid
+regression adds finite-vapor shape/inertia and late mechanical refusal.
 
 ### Second-order radial transients
 

@@ -10,10 +10,13 @@
 //! This is isothermal bound-water diffusion in a fixed, homogeneous dry skeleton.
 //! The supplied property must describe isotropic or radial-principal transport;
 //! arbitrary anisotropic tensors, axial/angular gradients, swelling feedback,
-//! hysteresis and finite exterior reservoirs are outside this reduction.
+//! hysteresis remain outside this reduction. The atmosphere adapter supplies
+//! finite exterior vapor inventories through the same original radial fluxes.
 
 use super::*;
 
+/// Finite vapor inventories coupled to native radial moisture diffusion.
+pub mod atmosphere;
 mod sdirk;
 
 /// Physical area and storage measure for a radial reduction.
