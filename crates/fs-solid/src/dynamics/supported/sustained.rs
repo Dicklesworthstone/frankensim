@@ -9,12 +9,12 @@ use contact::{
 
 // Binding one authored support-acceleration endpoint never mutates the source
 // owner. It supplies the same input to every native contact response and retry.
-struct Interval<'a> {
-    body: &'a mut SupportedSpectralSolid,
-    acceleration_end: &'a [f64],
+pub(super) struct Interval<'a> {
+    pub(super) body: &'a mut SupportedSpectralSolid,
+    pub(super) acceleration_end: &'a [f64],
 }
-struct Workspace {
-    trial: Option<SupportedIntervalTrial>,
+pub(super) struct Workspace {
+    pub(super) trial: Option<SupportedIntervalTrial>,
 }
 
 impl SupportedSpectralSolid {

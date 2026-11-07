@@ -6,6 +6,18 @@
 //! these close work from polynomial sources and accelerating prescribed supports.
 
 use super::*;
+use fs_math::dd::Dd;
+
+/// Exact observations of a piecewise force on original rigid modal directions.
+/// Work is independently integrated by the enclosing full-coordinate owner.
+pub(crate) struct RigidForceCorrection<'a> {
+    pub modal_columns: &'a [Vec<f64>; 3],
+    pub impulse: [Dd; 3],
+    pub displacement: [Dd; 3],
+    pub displacement_moments: [[Dd; 3]; 3],
+    pub endpoint_force: [f64; 3],
+    pub supplied_work_j: f64,
+}
 
 /// Accepted motion and original-coordinate continuous trajectory observations.
 #[derive(Clone, Debug)]
@@ -265,7 +277,6 @@ impl CompleteSpectralSolid {
             reconstruct(&self.basis, &moments[2], cx)?,
         ];
         let (mut supplied_work_j, mut roundoff) = (0.0, 0.0);
-        let mut mean_velocity_mps = zeros(n)?;
         for i in 0..n {
             poll(cx)?;
             let du = displacement[i] - self.displacement[i];
@@ -280,7 +291,121 @@ impl CompleteSpectralSolid {
                         * (displacement[i] - r as f64 * displacement_moments_m[r - 1][i]),
                 );
             }
-            mean_velocity_mps[i] = du / self.dt_s;
+        }
+        self.trial_polynomial_path(
+            q,
+            v,
+            displacement,
+            velocity,
+            displacement_moments_m,
+            acceleration_mps2,
+            supplied_work_j,
+            step,
+            time_s,
+            cx,
+        )
+    }
+
+    /// Stage real rigid-force moments on the original polynomial predecessor.
+    /// Every modal/physical coordinate and continuous observation is updated;
+    /// the original interval and cumulative free-energy gates remain active.
+    pub(crate) fn correct_rigid_polynomial(
+        &self,
+        mut trial: PolynomialTrial,
+        correction: RigidForceCorrection<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<PolynomialTrial> {
+        let n = self.free_dofs.len();
+        if correction
+            .modal_columns
+            .iter()
+            .any(|column| column.len() != n || column.iter().any(|value| !value.is_finite()))
+        {
+            return Err(invalid(
+                "complete finite rigid modal force columns required",
+            ));
+        }
+        let mut acceleration = zeros(n)?;
+        let mut moments = [zeros(n)?, zeros(n)?, zeros(n)?];
+        let finite = |v| crate::dynamics::sustained::finite(v).map_err(invalid);
+        for i in 0..n {
+            poll(cx)?;
+            let mut q = Dd::from_f64(trial.modal_displacement[i]);
+            let mut v = Dd::from_f64(trial.modal_velocity[i]);
+            let mut a = Dd::ZERO;
+            let mut observations = [Dd::ZERO; 3];
+            for axis in 0..3 {
+                let column = correction.modal_columns[axis][i];
+                if column != 0.0 && self.oscillators[i].lambda != 0.0 {
+                    return Err(invalid(
+                        "piecewise force correction must excite original rigid modes",
+                    ));
+                }
+                let column = Dd::from_f64(column);
+                q = q + column * correction.displacement[axis];
+                v = v + column * correction.impulse[axis];
+                a = a + column * Dd::from_f64(correction.endpoint_force[axis]);
+                for k in 0..3 {
+                    observations[k] =
+                        observations[k] + column * correction.displacement_moments[k][axis];
+                }
+            }
+            trial.modal_displacement[i] = finite(q)?;
+            trial.modal_velocity[i] = finite(v)?;
+            acceleration[i] = finite(a)?;
+            for k in 0..3 {
+                moments[k][i] = finite(observations[k])?;
+            }
+        }
+        let displacement = reconstruct(&self.basis, &trial.modal_displacement, cx)?;
+        let velocity = reconstruct(&self.basis, &trial.modal_velocity, cx)?;
+        let acceleration = reconstruct(&self.basis, &acceleration, cx)?;
+        for i in 0..n {
+            trial.output.acceleration_mps2[i] = finite(
+                Dd::from_f64(trial.output.acceleration_mps2[i]) + Dd::from_f64(acceleration[i]),
+            )?;
+        }
+        for (k, values) in moments.iter().enumerate() {
+            let values = reconstruct(&self.basis, values, cx)?;
+            for (i, value) in values.iter().enumerate() {
+                trial.output.displacement_moments_m[k][i] = finite(
+                    Dd::from_f64(trial.output.displacement_moments_m[k][i]) + Dd::from_f64(*value),
+                )?;
+            }
+        }
+        self.trial_polynomial_path(
+            trial.modal_displacement,
+            trial.modal_velocity,
+            displacement,
+            velocity,
+            trial.output.displacement_moments_m,
+            trial.output.acceleration_mps2,
+            correction.supplied_work_j,
+            trial.output.motion.step,
+            trial.output.motion.time_s,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn trial_polynomial_path(
+        &self,
+        q: Vec<f64>,
+        v: Vec<f64>,
+        displacement: Vec<f64>,
+        velocity: Vec<f64>,
+        displacement_moments_m: [Vec<f64>; 3],
+        acceleration_mps2: Vec<f64>,
+        supplied_work_j: f64,
+        step: u64,
+        time_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<PolynomialTrial> {
+        let n = self.free_dofs.len();
+        let mut mean_velocity_mps = zeros(n)?;
+        for i in 0..n {
+            poll(cx)?;
+            mean_velocity_mps[i] = (displacement[i] - self.displacement[i]) / self.dt_s;
         }
         if q.iter()
             .chain(&v)

@@ -1763,7 +1763,8 @@ eigenvalue modes. This admits affine contact velocities while retaining every
 other original elastic and damped mode. Non-null contact responses, detachment,
 resolved transverse motion and additional unresolved reversals refuse. This is
 a bounded rigid-trace event path, not a general elastic-contact event locator.
-Prescribed support motion remains with the existing supported interval owner.
+The supported extension below retains constant support acceleration; general
+support histories remain with the existing supported interval owner.
 
 Incoming slip uses kinetic strength immediately. Normal dwell and its kinetic
 boundary give a force warm start and analytic stopping time; every actual
@@ -1797,6 +1798,43 @@ static hysteresis, reversal loss, off-diagonal mass, unchanged elastic/viscous
 spectators and modal continuation, unsupported traces, global budgets, geometry
 refusal and cancellation. Interior normal opening and hidden static/kinetic
 out-and-back excursions have direct regression checks.
+
+### Coulomb events with accelerating native supports
+
+`SupportedSpectralSolid::advance_collinear_coulomb_events` extends the same
+located stop/recapture/reversal resolver to prescribed supports whose retained
+acceleration stays constant during the original interval. Contact rows and
+external loads use all represented coordinates. The three free contact
+responses must remain independent rigid directions of the original full
+stiffness; other free elastic modes retain their original polynomial forcing.
+Changing support acceleration or a nonrigid contact trace refuses atomically.
+
+For each contact force component, the original free mass response is
+`B = [M_ff^-1 J_f^T; 0]`. Its additional support reaction is
+`R_c = M_cf B_f - J_c^T`; the full original equation `M B = J^T + R` is checked.
+Thus consistent cross mass and contact loads directly applied to prescribed
+coordinates both remain active. Constant support acceleration contributes
+`-R_c dot a_c` to the contact acceleration. The full momentum audit includes
+the independently derived actuator reaction impulse.
+
+Actuator work adds the actual phase integral `integral R_c F dot v_c dt` to the
+original native support-reaction work. Each support's quadratic displacement
+supplies that integral, including either side of a friction reversal. Free
+source work separately retains `-M_fc a_c`; contact work on supported rows is
+removed from the free subsystem's port without dropping it from the full
+solid. Neither source is inferred from an energy difference. The event receipt
+exposes `support_work_j` independently of prescribed-surface work and friction.
+
+The corrected native polynomial trial retains actual modal/physical position,
+velocity, endpoint acceleration and all three continuous displacement moments.
+Original free energy, full support reactions, free-row force residual, interval
+and cumulative work gates precede geometry admission and one atomic publication
+of both owners. The original supported advance uses the same final gate. Native
+tests independently integrate actuator reactions for capture and reversal,
+check cross-mass momentum and common velocity boosts, preserve a driven elastic
+spectator and subsequent modal continuation, and reject changing acceleration,
+nonrigid traces, spent budgets, geometry changes and cancellation. A direct
+piecewise-polynomial oracle checks the three force-induced displacement moments.
 
 ### Sustained directional Coulomb ellipses
 

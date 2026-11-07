@@ -122,6 +122,8 @@ impl events::EventNative for ExactLinearSolid {
         Ok(events::TraceResponse {
             columns,
             modal_columns: None,
+            support_reaction_columns: None,
+            acceleration_offset: [0.0; 3],
         })
     }
 
@@ -133,10 +135,9 @@ impl events::EventNative for ExactLinearSolid {
         &self,
         scratch: &mut Workspace,
         response: &events::TraceResponse,
-        impulse: [Dd; 3],
-        displacement_moment: [Dd; 3],
+        path: &events::ContactForcePath<'_, '_>,
         cx: &Cx<'_>,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<f64, Self::Error> {
         let n = self.free_dofs.len();
         for i in 0..n {
             super::super::poll(cx)?;
@@ -144,13 +145,13 @@ impl events::EventNative for ExactLinearSolid {
             let mut v = Dd::from_f64(scratch.candidate[n + i]);
             for a in 0..3 {
                 let column = Dd::from_f64(response.columns[a][i]);
-                q = q + column * displacement_moment[a];
-                v = v + column * impulse[a];
+                q = q + column * path.displacement_moment[a];
+                v = v + column * path.impulse[a];
             }
             scratch.candidate[i] = finite(q).map_err(Self::invalid)?;
             scratch.candidate[n + i] = finite(v).map_err(Self::invalid)?;
         }
-        Ok(())
+        Ok(0.0)
     }
 
     fn accept_force_path(

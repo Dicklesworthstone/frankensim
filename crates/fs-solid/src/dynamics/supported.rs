@@ -24,6 +24,7 @@ use fs_exec::Cx;
 use fs_sparse::{Coo, Csr};
 
 mod admission;
+mod events;
 mod frictional_impact;
 mod impact;
 mod impulse;
@@ -471,15 +472,8 @@ impl SupportedSpectralSolid {
             .free_rows
             .iter()
             .fold(0.0_f64, |m, &i| m.max(residual[i].abs()));
-        if free_force_residual_n > self.controls.maximum_free_force_residual_n {
-            return Err(SupportedSolidError::FreeForce {
-                residual_n: free_force_residual_n,
-                allowance_n: self.controls.maximum_free_force_residual_n,
-            });
-        }
         let mut applied_by_row = zeros(n)?;
         let (mut applied_work_j, mut applied_roundoff) = (0.0, 0.0);
-        let mut mean_velocity_mps = zeros(n)?;
         for i in 0..n {
             poll(cx)?;
             let du = displacement[i] - self.displacement[i];
@@ -490,7 +484,6 @@ impl SupportedSpectralSolid {
                 &mut applied_roundoff,
                 applied_by_row[i],
             );
-            mean_velocity_mps[i] = du / h;
         }
         let mut support_reaction_n = zeros(count)?;
         let (mut support_work_j, mut support_roundoff) = (0.0, 0.0);
@@ -524,6 +517,50 @@ impl SupportedSpectralSolid {
                 &mut support_roundoff,
                 -applied_by_row[row],
             );
+        }
+        self.trial_force_path(
+            trial,
+            displacement,
+            velocity,
+            copy(support_acceleration_end_mps2)?,
+            support_reaction_n,
+            free_force_residual_n,
+            applied_work_j,
+            support_work_j,
+            cx,
+        )
+    }
+
+    // Shared original full-coordinate acceptance for polynomial support paths
+    // and piecewise rigid contact corrections. Both supply independent applied
+    // and reaction work; neither derives an actuator port from energy change.
+    #[allow(clippy::too_many_arguments)]
+    fn trial_force_path(
+        &self,
+        trial: super::spectral::polynomial::PolynomialTrial,
+        displacement: Vec<f64>,
+        velocity: Vec<f64>,
+        accepted_acceleration: Vec<f64>,
+        support_reaction_n: Vec<f64>,
+        free_force_residual_n: f64,
+        applied_work_j: f64,
+        support_work_j: f64,
+        cx: &Cx<'_>,
+    ) -> Result<SupportedIntervalTrial> {
+        poll(cx)?;
+        if !free_force_residual_n.is_finite()
+            || free_force_residual_n > self.controls.maximum_free_force_residual_n
+        {
+            return Err(SupportedSolidError::FreeForce {
+                residual_n: free_force_residual_n,
+                allowance_n: self.controls.maximum_free_force_residual_n,
+            });
+        }
+        let n = self.coordinates.len();
+        let mut mean_velocity_mps = zeros(n)?;
+        for i in 0..n {
+            poll(cx)?;
+            mean_velocity_mps[i] = (displacement[i] - self.displacement[i]) / self.dt_s;
         }
         let stored_after_j = quadratic(&self.stiffness, &displacement, cx)?;
         let kinetic_after_j = quadratic(&self.mass, &velocity, cx)?;
@@ -586,7 +623,6 @@ impl SupportedSpectralSolid {
         }
         let step = trial.motion().step;
         let time_s = trial.motion().time_s;
-        let accepted_acceleration = copy(support_acceleration_end_mps2)?;
         poll(cx)?;
         Ok(SupportedIntervalTrial {
             free: trial,

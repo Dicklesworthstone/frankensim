@@ -10,7 +10,7 @@ pub(super) fn rigid_response<E, N>(
     cx: &Cx<'_>,
 ) -> Result<(), SolidSustainedError<E, N>> {
     let n = before.displacement.len();
-    for (column, weight) in response.columns.iter().zip(weights) {
+    for (a, (column, weight)) in response.columns.iter().zip(weights).enumerate() {
         for i in 0..n {
             poll(cx)?;
             let row = &before.mass[i * n..(i + 1) * n];
@@ -18,10 +18,14 @@ pub(super) fn rigid_response<E, N>(
             let magnitude = row.iter().zip(column).fold(Dd::ZERO, |sum, (m, b)| {
                 sum + (Dd::from_f64(*m) * Dd::from_f64(*b)).abs()
             });
+            let reaction = response
+                .support_reaction_columns
+                .as_ref()
+                .map_or(Dd::ZERO, |columns| Dd::from_f64(columns[a][i]));
             gate(
                 "original contact mass response",
-                product - Dd::from_f64(weight[i]),
-                rounding(&[magnitude, Dd::from_f64(weight[i])]),
+                product - Dd::from_f64(weight[i]) - reaction,
+                rounding(&[magnitude, Dd::from_f64(weight[i]), reaction]),
             )?;
             let stiffness = dot(&before.stiffness[i * n..(i + 1) * n], column);
             let viscosity = damping.map_or(Dd::ZERO, |c| dot(&c[i * n..(i + 1) * n], column));
@@ -422,9 +426,11 @@ pub(super) fn final_path<E, N>(
     du: &[f64],
     c: &SolidSustainedContact<'_>,
     phases: &[SolidCoulombPhase],
+    response: &TraceResponse,
     impulse: [Dd; 3],
     external: &[f64],
     viscosity: f64,
+    support_work: f64,
     controls: SolidSustainedControls,
     cx: &Cx<'_>,
 ) -> Result<Measured, SolidSustainedError<E, N>> {
@@ -496,7 +502,11 @@ pub(super) fn final_path<E, N>(
                     * (Dd::from_f64(q[j]) - Dd::from_f64(before.displacement[j]));
         }
         let expected = (0..3).fold(Dd::ZERO, |sum, a| {
-            sum + Dd::from_f64(c.velocity_weights[a][i]) * impulse[a]
+            let reaction = response
+                .support_reaction_columns
+                .as_ref()
+                .map_or(Dd::ZERO, |columns| Dd::from_f64(columns[a][i]));
+            sum + (Dd::from_f64(c.velocity_weights[a][i]) + reaction) * impulse[a]
         });
         gate(
             "original mass and event impulse",
@@ -512,7 +522,7 @@ pub(super) fn final_path<E, N>(
     }
     let external = dot(external, du);
     let supplied = external + surface + normal + friction;
-    let energy_error = change + Dd::from_f64(viscosity) - supplied;
+    let energy_error = change + Dd::from_f64(viscosity) - supplied - Dd::from_f64(support_work);
     gate(
         "original event energy and all force work",
         energy_error,
@@ -524,6 +534,7 @@ pub(super) fn final_path<E, N>(
                 surface,
                 normal,
                 friction,
+                Dd::from_f64(support_work),
             ]),
     )?;
     Ok(Measured {

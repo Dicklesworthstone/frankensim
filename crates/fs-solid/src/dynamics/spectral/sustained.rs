@@ -280,6 +280,8 @@ impl contact::events::EventNative for CompleteSpectralSolid {
         Ok(contact::events::TraceResponse {
             columns,
             modal_columns: Some(modal_columns),
+            support_reaction_columns: None,
+            acceleration_offset: [0.0; 3],
         })
     }
 
@@ -287,10 +289,9 @@ impl contact::events::EventNative for CompleteSpectralSolid {
         &self,
         scratch: &mut Workspace,
         response: &contact::events::TraceResponse,
-        impulse: [fs_math::dd::Dd; 3],
-        displacement_moment: [fs_math::dd::Dd; 3],
+        path: &contact::events::ContactForcePath<'_, '_>,
         cx: &Cx<'_>,
-    ) -> Result<()> {
+    ) -> Result<f64> {
         use fs_math::dd::Dd;
         let columns = response
             .modal_columns
@@ -302,8 +303,8 @@ impl contact::events::EventNative for CompleteSpectralSolid {
             let mut v = Dd::from_f64(scratch.modal_velocity[i]);
             for a in 0..3 {
                 let column = Dd::from_f64(columns[a][i]);
-                q = q + column * displacement_moment[a];
-                v = v + column * impulse[a];
+                q = q + column * path.displacement_moment[a];
+                v = v + column * path.impulse[a];
             }
             scratch.modal_displacement[i] = contact::finite(q).map_err(invalid)?;
             scratch.modal_velocity[i] = contact::finite(v).map_err(invalid)?;
@@ -319,7 +320,8 @@ impl contact::events::EventNative for CompleteSpectralSolid {
             &scratch.modal_velocity,
             &mut scratch.velocity,
             cx,
-        )
+        )?;
+        Ok(0.0)
     }
 
     fn accept_force_path(

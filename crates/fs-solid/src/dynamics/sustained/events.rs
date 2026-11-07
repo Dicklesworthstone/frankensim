@@ -47,7 +47,7 @@ pub struct SolidCoulombPhase {
     pub frictional_work_j: f64,
     /// Fresh original contact-law solve at this segment's actual duration.
     pub solve: SolveReport,
-    duration: Dd,
+    pub(crate) duration: Dd,
 }
 
 /// Complete staged motion for the caller's geometry/feature admission.
@@ -85,6 +85,9 @@ pub struct SolidCoulombEventStep<P, S = ExactLinearSolidStep> {
     pub sliding_distance_m: f64,
     pub external_work_j: f64,
     pub prescribed_surface_work_j: f64,
+    /// Independently integrated work supplied by native prescribed supports.
+    /// Zero for owners without moving support coordinates.
+    pub support_work_j: f64,
     pub normal_contact_work_j: f64,
     pub frictional_work_j: f64,
     pub frictional_dissipation_j: f64,
@@ -129,6 +132,19 @@ impl ExactLinearSolid {
 pub(crate) struct TraceResponse {
     pub columns: [Vec<f64>; 3],
     pub modal_columns: Option<[Vec<f64>; 3]>,
+    /// Additional original-row support reaction per contact force component.
+    /// Free rows are zero; absent for unconstrained native coordinates.
+    pub support_reaction_columns: Option<[Vec<f64>; 3]>,
+    /// Acceleration of the trace due to prescribed support motion.
+    pub acceleration_offset: [f64; 3],
+}
+
+pub(crate) struct ContactForcePath<'a, 'contact> {
+    pub contact: &'a SolidSustainedContact<'contact>,
+    pub phases: &'a [SolidCoulombPhase],
+    pub external: &'a [f64],
+    pub impulse: [Dd; 3],
+    pub displacement_moment: [Dd; 3],
 }
 
 pub(crate) trait EventNative: Native {
@@ -144,10 +160,9 @@ pub(crate) trait EventNative: Native {
         &self,
         scratch: &mut Self::Workspace,
         response: &TraceResponse,
-        impulse: [Dd; 3],
-        displacement_moment: [Dd; 3],
+        path: &ContactForcePath<'_, '_>,
         cx: &Cx<'_>,
-    ) -> Result<(), Self::Error>;
+    ) -> Result<f64, Self::Error>;
     fn accept_force_path(
         &mut self,
         scratch: Self::Workspace,
@@ -231,7 +246,9 @@ pub(crate) fn advance<B: EventNative, P, E>(
     let mut acceleration = [0.0; 3];
     let mut velocity = [0.0; 3];
     for a in 0..3 {
-        acceleration[a] = finite(dot(&response.columns[a], external))?;
+        acceleration[a] = finite(
+            dot(&response.columns[a], external) + Dd::from_f64(response.acceleration_offset[a]),
+        )?;
         velocity[a] = finite(
             dot(c.velocity_weights[a], before.velocity)
                 - Dd::from_f64(c.prescribed_surface_velocity_mps[a]),
@@ -297,7 +314,19 @@ pub(crate) fn advance<B: EventNative, P, E>(
             moment[a] = moment[a] + Dd::from_f64(phase.force_n[a]) * first;
         }
     }
-    body.add_contact_moments(&mut scratch, &response, impulse, moment, cx)
+    let support_work = body
+        .add_contact_moments(
+            &mut scratch,
+            &response,
+            &ContactForcePath {
+                contact: c,
+                phases: &path.phases,
+                external,
+                impulse,
+                displacement_moment: moment,
+            },
+            cx,
+        )
         .map_err(native_error::<E, B>)?;
     let du: Vec<_> = body
         .displacement(&scratch)
@@ -313,9 +342,11 @@ pub(crate) fn advance<B: EventNative, P, E>(
         &du,
         c,
         &path.phases,
+        &response,
         impulse,
         external,
         native_work.viscosity_j,
+        support_work,
         controls,
         cx,
     )?;
@@ -348,6 +379,7 @@ pub(crate) fn advance<B: EventNative, P, E>(
         sliding_distance_m: measured.distance,
         external_work_j: measured.external,
         prescribed_surface_work_j: measured.surface,
+        support_work_j: support_work,
         normal_contact_work_j: measured.normal,
         frictional_work_j: measured.friction,
         frictional_dissipation_j: (-measured.friction).max(0.0),

@@ -16,6 +16,9 @@ use fs_solid::dynamics::sustained::{
 use fs_solid::linear3::TetElasticAssembly;
 use fs_sparse::Coo;
 
+#[path = "supported_sustained_contact/events.rs"]
+mod events;
+
 const N: [f64; 3] = [0.0, 1.0, 0.0];
 const X: [f64; 3] = [1.0, 0.0, 0.0];
 const Z: [f64; 3] = [0.0, 0.0, 1.0];
