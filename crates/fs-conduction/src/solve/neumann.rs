@@ -12,16 +12,20 @@
 //! The linear lane admits constant anisotropic/heterogeneous bulk and sheet
 //! conductivity. [`solve_mean_temperature_newton`] handles temperature-dependent
 //! laws with the full constitutive tangent and a constrained Newton direction.
-//! Disconnected bodies require separate mean data and refuse both lanes.
+//! Matching and nonmatching finite-resistance contacts may connect independent
+//! body meshes. Thermally disconnected components require separate mean data.
 
 use fs_sparse::Coo;
 
 mod nonlinear;
-pub use nonlinear::{MeanTemperatureNewtonConfig, solve_mean_temperature_newton};
+pub use nonlinear::{
+    MeanTemperatureNewtonConfig, solve_mean_temperature_newton,
+    solve_mean_temperature_newton_with_interfaces,
+};
 
 use super::{
     CgState, ConductionError, ConductionProblem, ConductionReport, ConductionSolution, CsrOp,
-    DofMap, ElementMaterials, LinearConfig, LinearSolveEvidence, StopReason,
+    DofMap, ElementMaterials, LinearConfig, LinearSolveEvidence, StopReason, ThermalInterfaces,
     assemble_operator_scaled_with_interfaces, full_residual, norm2, physical_report,
     residual_roundoff_floor, spd_preconditioner, true_relative_residual,
 };
@@ -83,6 +87,39 @@ pub fn solve_mean_temperature(
     mean_temperature_k: f64,
     config: MeanTemperatureConfig,
 ) -> Result<ConductionSolution, ConductionError> {
+    solve_mean_temperature_impl(cx, problem, None, mean_temperature_k, config)
+}
+
+/// Solve a flux-driven assembly connected by declared finite thermal contacts.
+///
+/// The original matching/nonmatching contact integrals join the independent
+/// body traces while retaining their temperature jumps and source receipts.
+/// One volume mean belongs to the entire thermally connected assembly. No
+/// temperature is pinned to a reservoir, and internal contact heat is neither
+/// an external source nor an additional compatibility constraint per body.
+///
+/// Contact resistance is held fixed. Temperature-dependent bulk/sheet laws
+/// use [`solve_mean_temperature_newton_with_interfaces`]. The same physical
+/// admission and residual checks as [`solve_mean_temperature`] apply; genuinely
+/// disconnected components still need independent mean data and are refused.
+pub fn solve_mean_temperature_with_interfaces(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    interfaces: &ThermalInterfaces,
+    mean_temperature_k: f64,
+    config: MeanTemperatureConfig,
+) -> Result<ConductionSolution, ConductionError> {
+    solve_mean_temperature_impl(cx, problem, Some(interfaces), mean_temperature_k, config)
+}
+
+#[allow(clippy::too_many_lines)]
+fn solve_mean_temperature_impl(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    interfaces: Option<&ThermalInterfaces>,
+    mean_temperature_k: f64,
+    config: MeanTemperatureConfig,
+) -> Result<ConductionSolution, ConductionError> {
     poll(cx, 0)?;
     if !mean_temperature_k.is_finite() || mean_temperature_k <= 0.0 {
         return Err(invalid("mean temperature must be finite and positive"));
@@ -136,9 +173,10 @@ pub fn solve_mean_temperature(
         problem.source,
         &initial,
         None,
-        None,
+        interfaces,
         problem.element_materials,
     )?;
+    require_connected(cx, &system.operator)?;
     compatible_heat(
         problem,
         &system,
@@ -222,10 +260,10 @@ pub fn solve_mean_temperature(
         problem.source,
         &temperature,
         None,
-        None,
+        interfaces,
         problem.element_materials,
     )?;
-    let physical = physical_report(problem, None, &final_system, &dofs, &temperature)?;
+    let physical = physical_report(problem, interfaces, &final_system, &dofs, &temperature)?;
     let threshold = crate::require_finite(
         "Neumann residual threshold",
         config
@@ -299,26 +337,21 @@ fn volume_weights(
         assigned.validate_for(problem.mesh)?;
     }
     let n = problem.mesh.vertex_count();
-    let mut parents: Vec<_> = (0..n).collect();
     let mut weights = vec![0.0; n];
     for (e, tet) in problem.mesh.complex().tets.iter().enumerate() {
         if e % crate::assemble::ASSEMBLY_TILE == 0 {
             poll(cx, e)?;
         }
-        let first = root(&mut parents, tet[0] as usize);
         for &vertex in tet {
             let vertex = vertex as usize;
-            let other = root(&mut parents, vertex);
-            parents[other] = first;
             weights[vertex] += problem.mesh.element_volume(e) / 4.0;
         }
     }
-    let connected = root(&mut parents, 0);
     for (i, &weight) in weights.iter().enumerate() {
         if i % crate::assemble::ASSEMBLY_TILE == 0 {
             poll(cx, i)?;
         }
-        if !weight.is_finite() || weight <= 0.0 || root(&mut parents, i) != connected {
+        if !weight.is_finite() || weight <= 0.0 {
             return Err(invalid(
                 "one connected body with no orphan vertices requires one mean datum",
             ));
@@ -333,6 +366,41 @@ fn volume_weights(
     }
 
     Ok(weights)
+}
+
+/// Connectivity belongs to the admitted heat operator, not just the volume
+/// mesh: a positive contact joins two traces without identifying their nodes.
+/// Scan the already assembled sparse Picard operator once, with O(vertices)
+/// storage. This also refuses a numerically vanished connecting conductance.
+fn require_connected(cx: &Cx<'_>, operator: &fs_sparse::Csr) -> Result<(), ConductionError> {
+    let n = operator.nrows();
+    let mut parents: Vec<_> = (0..n).collect();
+    for row in 0..n {
+        if row % crate::assemble::ASSEMBLY_TILE == 0 {
+            poll(cx, row)?;
+        }
+        let (columns, values) = operator.row(row);
+        for (&column, &value) in columns.iter().zip(values) {
+            crate::require_finite("Neumann operator", value)?;
+            if value != 0.0 && column != row {
+                let first = root(&mut parents, row);
+                let other = root(&mut parents, column);
+                parents[other] = first;
+            }
+        }
+    }
+    let connected = root(&mut parents, 0);
+    for vertex in 0..n {
+        if vertex % crate::assemble::ASSEMBLY_TILE == 0 {
+            poll(cx, vertex)?;
+        }
+        if root(&mut parents, vertex) != connected {
+            return Err(invalid(
+                "one connected body or thermal-contact assembly requires one mean datum; disconnected components need separate means",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn compatible_heat(

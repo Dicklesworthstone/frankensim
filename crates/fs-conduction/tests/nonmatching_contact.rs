@@ -93,6 +93,81 @@ fn unequal_trace_meshes_recover_the_exact_piecewise_linear_slab_and_contact_jump
         assert_eq!(solution.temperature.len(),mesh.vertex_count());
     });
 }
+
+#[test]
+fn unequal_trace_meshes_share_one_mean_without_pinning_either_body() {
+    use fs_conduction::solve::{
+        MeanTemperatureConfig, MeanTemperatureNewtonConfig,
+        solve_mean_temperature_newton_with_interfaces, solve_mean_temperature_with_interfaces,
+    };
+    with_cx(|cx| {
+        let (mesh, split) = mesh([1, 2, 3], 0.0);
+        let bc = ThermalBoundaryBuilder::new(&mesh)
+            .region(
+                "out",
+                |f| on_box_face(f.centroid[0], 0.0),
+                ThermalBc::neumann(100.0).unwrap(),
+            )
+            .unwrap()
+            .region(
+                "in",
+                |f| on_box_face(f.centroid[0], 2.0),
+                ThermalBc::neumann(-100.0).unwrap(),
+            )
+            .unwrap()
+            .adiabatic_remainder()
+            .finish()
+            .unwrap();
+        let (a, b) = sides(&mesh, split, 0.0);
+        let contacts =
+            ThermalInterfaces::with_nonmatching(cx, &mesh, &bc, vec![], vec![declaration(a, b)])
+                .unwrap();
+        let k = ConductivityModel::isotropic_declared(10.0).unwrap();
+        let source = ScalarField::Uniform(0.0);
+        let problem = ConductionProblem {
+            mesh: &mesh,
+            boundary: &bc,
+            material: &k,
+            element_materials: None,
+            source: &source,
+        };
+        let linear = solve_mean_temperature_with_interfaces(
+            cx,
+            problem,
+            &contacts,
+            315.0,
+            MeanTemperatureConfig::default(),
+        )
+        .unwrap();
+        let newton = solve_mean_temperature_newton_with_interfaces(
+            cx,
+            problem,
+            &contacts,
+            315.0,
+            MeanTemperatureNewtonConfig::default(),
+        )
+        .unwrap();
+        for solution in [&linear, &newton] {
+            for (i, (p, &t)) in mesh
+                .positions()
+                .iter()
+                .zip(&solution.temperature)
+                .enumerate()
+            {
+                let expected = if i < split {
+                    300.0 + 10.0 * p[0]
+                } else {
+                    310.0 + 10.0 * p[0]
+                };
+                assert!((t - expected).abs() < 1e-7, "{t} != {expected}");
+            }
+            assert_eq!(solution.report.energy.dirichlet_in_w, 0.0);
+            assert_eq!(solution.report.free_dofs, mesh.vertex_count());
+            assert!((solution.report.interface_fluxes[0].heat_rate_a_to_b_w + 100.0).abs() < 1e-6);
+            assert!(solution.report.final_residual <= solution.report.residual_threshold);
+        }
+    });
+}
 #[test]
 fn signed_flux_and_nonuniform_pullback_use_overlap_integrals_not_surface_means() {
     with_cx(|cx| {

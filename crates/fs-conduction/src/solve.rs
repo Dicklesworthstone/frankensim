@@ -70,7 +70,8 @@ pub use maximum::{LinearMaximumPolish, MaximumPhysicalGateRefusal, polish_linear
 mod neumann;
 pub use neumann::{
     MeanTemperatureConfig, MeanTemperatureNewtonConfig, solve_mean_temperature,
-    solve_mean_temperature_newton,
+    solve_mean_temperature_newton, solve_mean_temperature_newton_with_interfaces,
+    solve_mean_temperature_with_interfaces,
 };
 
 /// The pieces a conduction solve needs, borrowed together.

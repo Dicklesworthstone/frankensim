@@ -1,5 +1,33 @@
 # CONTRACT: fs-conduction
 
+## Mean-constrained contact assemblies
+
+`solve::solve_mean_temperature_with_interfaces` and
+`solve_mean_temperature_newton_with_interfaces` use the existing sparse
+matching/nonmatching contact operator for a flux-driven assembly with one
+prescribed P1 volume-mean temperature. Independent traces retain their finite
+temperature jump and original resistance receipts. The complete admitted heat
+operator determines connectivity; geometrically separate bodies joined by a
+positive contact need one mean, while thermally disconnected components refuse.
+The connectivity pass reuses the assembled sparse operator and needs only one
+vertex-sized disjoint-set array, without dense constraints or a second contact
+assembly.
+
+The mean is a datum, not an inferred conserved-energy temperature. Every
+original heat equation is rechecked, including the temporarily eliminated
+algebraic reference row. Internal contact heat is reported once and contributes
+no external heat or artificial Dirichlet reaction. The Newton variant retains
+the original temperature-dependent bulk/sheet laws and includes the fixed
+contact in both constrained tangent solves and line-search residuals. Live
+temperature-dependent contact resistance requires a separate constitutive
+owner and is not inferred by these fixed-interface entry points.
+
+Focused G1 tests in `tests/contact.rs` and `tests/nonmatching_contact.rs` check
+piecewise analytic temperature fields, a manufactured nonlinear field, finite
+contact jumps, original source receipts, unequal trace meshes, physical heat
+compatibility and zero thermostat reaction. They establish the declared
+discrete behavior, not a continuum or experimental validation claim.
+
 ## Original Cp(T) in enthalpy storage and conductivity moments
 
 Material enthalpy storage and prescribed-temperature/equilibrium inverses use

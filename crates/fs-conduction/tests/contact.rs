@@ -673,6 +673,204 @@ fn two_slab_contact_matches_level_a_series_and_retains_receipt() {
 }
 
 #[test]
+fn mean_temperature_contact_equilibrium_preserves_jump_without_a_thermostat() {
+    use fs_conduction::solve::{MeanTemperatureConfig, solve_mean_temperature_with_interfaces};
+    let (mesh, split) = two_slab_mesh(2);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "out",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::neumann(100.0).unwrap(),
+        )
+        .unwrap()
+        .region(
+            "in",
+            |f| on_box_face(f.centroid[0], 2.0),
+            ThermalBc::neumann(-100.0).unwrap(),
+        )
+        .unwrap()
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    let card = contact_card(UncertaintyModel::Unstated);
+    let interfaces = ThermalInterfaces::new(
+        &mesh,
+        &boundary,
+        vec![InterfaceSurface::new("bondline", oriented_pairs(&mesh), resistance(&card)).unwrap()],
+    )
+    .unwrap();
+    let material = ConductivityModel::isotropic_declared(K).unwrap();
+    let source = ScalarField::Uniform(0.0);
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &material,
+        element_materials: None,
+        source: &source,
+    };
+    for mean in [315.0, 615.0] {
+        let solve = || {
+            with_cx(|cx| {
+                solve_mean_temperature_with_interfaces(
+                    cx,
+                    problem,
+                    &interfaces,
+                    mean,
+                    MeanTemperatureConfig::default(),
+                )
+                .unwrap()
+            })
+        };
+        let solution = solve();
+        for (i, (position, &actual)) in mesh
+            .positions()
+            .iter()
+            .zip(&solution.temperature)
+            .enumerate()
+        {
+            let expected = mean - 15.0 + 10.0 * position[0] + if i < split { 0.0 } else { 10.0 };
+            assert!(
+                (actual - expected).abs() < 1e-7,
+                "{actual} versus {expected}"
+            );
+        }
+        assert_eq!(solution.report.free_dofs, mesh.vertex_count());
+        assert_eq!(solution.report.energy.dirichlet_in_w, 0.0);
+        assert!(solution.report.energy.closure_w.abs() < 1e-10);
+        assert!(solution.report.final_residual <= solution.report.residual_threshold);
+        let contact = &solution.report.interface_fluxes[0];
+        assert!((contact.heat_rate_a_to_b_w + 100.0).abs() < 1e-7);
+        assert!((contact.mean_jump_k + 10.0).abs() < 1e-8);
+        assert_eq!(contact.receipt, resistance(&card).receipt().clone());
+        assert_eq!(solution, solve());
+    }
+    // Global heat compatibility still applies even with a generous residual
+    // allowance. Internal contact transfer cannot absorb net supplied power.
+    let heating = ScalarField::Uniform(1.0);
+    let error = with_cx(|cx| {
+        solve_mean_temperature_with_interfaces(
+            cx,
+            ConductionProblem {
+                source: &heating,
+                ..problem
+            },
+            &interfaces,
+            315.0,
+            MeanTemperatureConfig {
+                residual_atol_w: 1e6,
+                ..Default::default()
+            },
+        )
+        .unwrap_err()
+    });
+    assert!(error.to_string().contains("no steady heat balance"));
+}
+
+#[test]
+fn mean_temperature_nonlinear_contact_matches_piecewise_manufactured_heat() {
+    use fs_conduction::solve::{
+        MeanTemperatureNewtonConfig, solve_mean_temperature_newton_with_interfaces,
+    };
+    let (mesh, split) = two_slab_mesh(2);
+    // k(T)=T/100, T_a=280+20*x, T_b=306+(60/3.06)*(x-1).
+    // The shared flux is -60 W/m2, so R''=0.1 gives T_a-T_b=-6 K.
+    // In each slab, -div(k grad(T))=-slope^2/100 exactly.
+    let right_slope = 60.0 / 3.06;
+    let right_end = 306.0 + right_slope;
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "left",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::neumann(56.0).unwrap(),
+        )
+        .unwrap()
+        .region(
+            "right",
+            |f| on_box_face(f.centroid[0], 2.0),
+            ThermalBc::neumann(-right_end * right_slope / 100.0).unwrap(),
+        )
+        .unwrap()
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    let card = contact_card(UncertaintyModel::Unstated);
+    let interfaces = ThermalInterfaces::new(
+        &mesh,
+        &boundary,
+        vec![InterfaceSurface::new("bondline", oriented_pairs(&mesh), resistance(&card)).unwrap()],
+    )
+    .unwrap();
+    let material = ConductivityModel::isotropic(
+        fs_conduction::ConductivityTable::declared_curve(vec![(250.0, 2.5), (400.0, 4.0)]).unwrap(),
+    );
+    let source = ScalarField::Nodal(
+        (0..mesh.vertex_count())
+            .map(|i| {
+                if i < split {
+                    -4.0
+                } else {
+                    -right_slope * right_slope / 100.0
+                }
+            })
+            .collect(),
+    );
+    let mean = 0.5 * (290.0 + 306.0 + 0.5 * right_slope);
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &material,
+        element_materials: None,
+        source: &source,
+    };
+    let solution = with_cx(|cx| {
+        solve_mean_temperature_newton_with_interfaces(
+            cx,
+            problem,
+            &interfaces,
+            mean,
+            MeanTemperatureNewtonConfig::default(),
+        )
+        .unwrap()
+    });
+    for (i, (position, &actual)) in mesh
+        .positions()
+        .iter()
+        .zip(&solution.temperature)
+        .enumerate()
+    {
+        let expected = if i < split {
+            280.0 + 20.0 * position[0]
+        } else {
+            306.0 + right_slope * (position[0] - 1.0)
+        };
+        assert!(
+            (actual - expected).abs() < 2e-7,
+            "{actual} versus {expected}"
+        );
+    }
+    let measured_mean = mesh
+        .complex()
+        .tets
+        .iter()
+        .enumerate()
+        .map(|(e, tet)| {
+            mesh.element_volume(e)
+                * tet
+                    .iter()
+                    .map(|&v| solution.temperature[v as usize] / 4.0)
+                    .sum::<f64>()
+        })
+        .sum::<f64>()
+        / mesh.total_volume();
+    assert!((measured_mean - mean).abs() < 1e-10);
+    assert_eq!(solution.report.energy.dirichlet_in_w, 0.0);
+    assert!(solution.report.energy.closure_w.abs() < 1e-10);
+    assert!((solution.report.interface_fluxes[0].heat_rate_a_to_b_w + 60.0).abs() < 1e-7);
+    assert!(solution.report.final_residual <= solution.report.residual_threshold);
+    assert!(solution.report.iterations > 1);
+}
+
+#[test]
 fn missing_interface_card_and_missing_binding_refuse_typed() {
     let missing = InterfaceResistance::from_card(
         "bondline",

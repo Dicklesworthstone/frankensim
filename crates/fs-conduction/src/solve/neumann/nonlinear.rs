@@ -13,11 +13,12 @@ use fs_sparse::Coo;
 use super::super::{
     AssembledSystem, ConductionError, ConductionProblem, ConductionReport, ConductionSolution,
     DofMap, ElementMaterials, InitialGuess, LineSearch, LinearConfig, LinearSolveEvidence,
-    Nonlinearity, SolveConfig, StopReason, StopRule, assemble_jacobian_with_optional_interfaces,
-    assemble_operator_scaled_with_interfaces, full_residual, physical_report,
-    residual_roundoff_floor, spd_preconditioner, true_relative_residual,
+    Nonlinearity, SolveConfig, StopReason, StopRule, ThermalInterfaces,
+    assemble_jacobian_with_optional_interfaces, assemble_operator_scaled_with_interfaces,
+    full_residual, physical_report, residual_roundoff_floor, spd_preconditioner,
+    true_relative_residual,
 };
-use super::{compatible_heat, compensated, invalid, poll, volume_weights};
+use super::{compatible_heat, compensated, invalid, poll, require_connected, volume_weights};
 
 /// Numerical policy for mean-constrained Newton conduction.
 #[derive(Debug, Clone, PartialEq)]
@@ -76,6 +77,37 @@ pub fn solve_mean_temperature_newton(
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,
     mean_temperature_k: f64,
+    config: MeanTemperatureNewtonConfig,
+) -> Result<ConductionSolution, ConductionError> {
+    solve_mean_temperature_newton_impl(cx, problem, None, mean_temperature_k, config)
+}
+
+/// Mean-constrained nonlinear conduction through a finite-resistance assembly.
+///
+/// The existing matching/nonmatching contact operator enters the residual,
+/// exact tangent, both constrained Newton solves, and final heat report once.
+/// Contact resistance remains fixed; bulk and tangential-sheet conductivity
+/// may depend on the actual local temperature through their original laws.
+/// Connectivity is checked on the complete admitted Picard operator, so one
+/// mean is sufficient only when the contacts join every body. No artificial
+/// thermostat, load projection or welded temperature continuity is introduced.
+/// The numerical policy and refusals are those of [`solve_mean_temperature_newton`].
+pub fn solve_mean_temperature_newton_with_interfaces(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    interfaces: &ThermalInterfaces,
+    mean_temperature_k: f64,
+    config: MeanTemperatureNewtonConfig,
+) -> Result<ConductionSolution, ConductionError> {
+    solve_mean_temperature_newton_impl(cx, problem, Some(interfaces), mean_temperature_k, config)
+}
+
+#[allow(clippy::too_many_lines)]
+fn solve_mean_temperature_newton_impl(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    interfaces: Option<&ThermalInterfaces>,
+    mean_temperature_k: f64,
     mut config: MeanTemperatureNewtonConfig,
 ) -> Result<ConductionSolution, ConductionError> {
     let weights = volume_weights(cx, problem, mean_temperature_k)?;
@@ -126,7 +158,8 @@ pub fn solve_mean_temperature_newton(
             "mean-adjusted initial temperatures must be finite and positive",
         ));
     }
-    let mut system = assemble(cx, problem, &temperature)?;
+    let mut system = assemble(cx, problem, interfaces, &temperature)?;
+    require_connected(cx, &system.operator)?;
     compatible_heat(
         problem,
         &system,
@@ -165,7 +198,7 @@ pub fn solve_mean_temperature_newton(
                 &temperature,
                 config.net_heat_tolerance_w,
             )?;
-            let physical = physical_report(problem, None, &system, &dofs, &temperature)?;
+            let physical = physical_report(problem, interfaces, &system, &dofs, &temperature)?;
             poll(cx, iteration)?;
             return Ok(ConductionSolution {
                 temperature,
@@ -205,6 +238,7 @@ pub fn solve_mean_temperature_newton(
         let direction = direction(
             cx,
             problem,
+            interfaces,
             &temperature,
             &residual,
             &weights,
@@ -224,7 +258,7 @@ pub fn solve_mean_temperature_newton(
                 .map(|(&t, &d)| alpha.mul_add(d, t))
                 .collect();
             if candidate.iter().all(|t| t.is_finite() && *t > 0.0) {
-                match assemble(cx, problem, &candidate) {
+                match assemble(cx, problem, interfaces, &candidate) {
                     Ok(trial_system) => {
                         let trial = norm2(&full_residual(&trial_system, &candidate));
                         if trial.is_finite()
@@ -268,6 +302,7 @@ pub fn solve_mean_temperature_newton(
 fn assemble(
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,
+    interfaces: Option<&ThermalInterfaces>,
     temperature: &[f64],
 ) -> Result<AssembledSystem, ConductionError> {
     assemble_operator_scaled_with_interfaces(
@@ -278,7 +313,7 @@ fn assemble(
         problem.source,
         temperature,
         None,
-        None,
+        interfaces,
         problem.element_materials,
     )
 }
@@ -298,6 +333,7 @@ fn mean_error(weights: &[f64], temperature: &[f64], mean: f64) -> f64 {
 fn direction(
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,
+    interfaces: Option<&ThermalInterfaces>,
     temperature: &[f64],
     residual: &[f64],
     weights: &[f64],
@@ -312,7 +348,7 @@ fn direction(
         problem.boundary,
         problem.material,
         temperature,
-        None,
+        interfaces,
         problem.element_materials,
     )?;
     let n = temperature.len();
