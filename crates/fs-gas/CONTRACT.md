@@ -7613,3 +7613,72 @@ the original face flux keeps its existing arithmetic. This permits a caller
 to replace the molecular stress discretization without subtracting a huge
 old stress work from a small physical heat or enthalpy flux. The separated
 receipts do not add an independent energy source or a new entropy guarantee.
+
+## Reacting material compression with finite-rate heat exchange
+
+`material::compression::thermal::MaterialThermalCompressionReactor` adds held-bath
+and finite-source-body heat exchange to the same common `ClosedGasParcel` volume
+stroke. It prepares one original `MaterialIsochoricReactor` and reuses its chemical
+stages and dense feed workspace throughout and between strokes. The fixed path
+scheduler and symmetric isentropic-volume / rigid-reacting-thermal / isentropic-
+volume composition are shared with the original adiabatic compression owner;
+the fixed and adaptive adiabatic APIs retain their existing behavior.
+
+The middle stage integrates reaction and signed `G (Tpartner - Tgas)` together
+inside the original implicit chemistry/caloric solve. NASA temperature-dependent
+Cv, formation energy, composition, pressure, source transport and acoustic
+response remain original. There is no frozen gamma, nominal heat capacity,
+separate temperature update or second reaction-heat term. The caller supplies
+constant total conductance in W/K; no moving-area or material-name conductance
+law is inferred.
+
+A held bath has fixed temperature and infinite capacity, with finite declared
+conductance. A finite `FiniteHeatBody` instead carries its exact original
+enthalpy/phase source, mass, current enthalpy, density and held body pressure
+through all accepted intervals. Original Cp variation and latent plateaus remain
+inside the existing finite-body stage elimination. Body volume changes never
+replace the prescribed gas volume. Source and neutral dilute-gas admission,
+caloric bracketing, thermal/chemical entropy gates, mass conservation and final
+material reconciliation remain with the original owners.
+
+The gas report separates pressure work delivered to the gas, signed partner heat,
+actual stored-energy increments and `Delta Ugas - W_on_gas - Qgas`. Pressure work
+is the original isentropic caloric work, not an independent measured-pressure
+quadrature. Gas first-law residuals are accumulated directly from the material
+rigid stages, so subtracting large stroke totals cannot hide their small defects.
+The finite-body result additionally retains its original `Delta H`, `Delta U`
+and outward pressure-volume work. Its two directly accumulated combined residuals
+represent `Delta Ugas + Delta Hbody - W_on_gas` and
+`Delta Ugas + Delta Ubody + W_by_body - W_on_gas`. Exchanged heat cancels once;
+body expansion work and gas compression work retain distinct signs and owners.
+
+Reported gas entropy sums original volume-map and native chemical/thermal-stage
+changes. Partner entropy is `-Q/Tbath` or the finite body's original integral of
+`dh/T`; reported production sums native gas-plus-partner production and the
+volume-map increments. As with adiabatic compression, native chemical entries
+precede material endpoint reconciliation and exclude its entropy correction.
+These stage diagnostics do not independently bound published-parcel entropy or
+certify global passivity, integration accuracy or experimental validity.
+
+`MaterialThermalCompressionSolve` admits 1..=4096 equal-time intervals on the
+logarithmic volume path. The exact requested final volume and elapsed duration
+are retained. Fixed volume uses one original reactor call regardless of the
+requested interval count; zero duration preserves both physical states after
+admission and cannot move volume. All proposed gas/body states remain private
+until the entire stroke and final cancellation check succeed. Intermediate source,
+transport, balance, representability, work-budget or cancellation refusal rolls
+back the complete stroke, including an internally accepted prefix. A failed
+proposal changes reusable numerical workspace only. Native integration controls
+and their energy/entropy tolerances apply separately to each stage; accumulated
+residuals are reported, not relabelled as a global error bound. The caller must
+refine splitting intervals to assess coupled heat/reaction/compression error.
+
+Focused manufactured regressions cover a closed-form exothermic bath trajectory
+through both compression/cooling and expansion/heating, second-order splitting
+refinement of temperature and pressure work, independently integrated variable-Cv
+and finite variable-Cp body trajectories, latent melting and both work accounts,
+original fixed-volume and insulated compatibility, exact no-op states, late
+cancellation/replay and source refusal after a feasible prefix. These fixtures
+are numerical physics checks, not measured kinetic or heat-transfer calibration.
+Pinned Rust parsing/formatting was checked; the new native tests have not been
+executed because the shared host has no available compilation memory or disk.

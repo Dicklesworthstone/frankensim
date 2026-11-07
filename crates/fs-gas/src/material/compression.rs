@@ -7,7 +7,8 @@
 //! Volume follows a constant logarithmic rate. The caller controls temporal
 //! splitting error through `substeps`, or selects the adaptive controller in
 //! [`adaptive`]; the chemistry owner still controls its own integration error. These are homogeneous gas states, without piston
-//! inertia, shocks, wall heat transfer or phase change.
+//! inertia or shocks. [`thermal`] additionally composes original reacting heat
+//! exchange with a held bath or finite caloric body; the gas remains single-phase.
 
 use super::{
     ClosedGasParcel, MaterialKineticsError, MaterialKineticsSolve, ThermochemicalGasModel,
@@ -19,6 +20,8 @@ use fs_thermochem::kinetics::IdealGasKineticsV1;
 
 /// Automatic bounded time refinement using the same physical interval owner.
 pub mod adaptive;
+/// Simultaneous source-owned heat exchange during a prescribed volume stroke.
+pub mod thermal;
 
 /// Maximum prescribed trajectory intervals in one atomic fixed-step update.
 pub const MAX_COMPRESSION_SUBSTEPS: usize = 4096;
@@ -122,76 +125,109 @@ pub fn advance_closed_parcel_compression(
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<MaterialCompressionStep, MaterialCompressionError> {
     poll(&mut cancelled)?;
-    let initial_volume = parcel.volume_m3();
-    let final_volume = final_volume.value();
-    let duration_s = duration.value();
-    if !positive(final_volume)
-        || !duration_s.is_finite()
-        || duration_s < 0.0
-        || !(1..=MAX_COMPRESSION_SUBSTEPS).contains(&controls.substeps)
-    {
-        return Err(MaterialCompressionError::Invalid(
-            "finite positive volume, nonnegative duration and 1..=4096 substeps required",
-        ));
-    }
-    let moving = final_volume != initial_volume;
-    if moving && duration_s == 0.0 {
-        return Err(MaterialCompressionError::Invalid(
-            "a finite compression or expansion stroke requires positive elapsed time",
-        ));
-    }
-    let ratio = final_volume / initial_volume;
-    if !positive(ratio) {
-        return Err(MaterialCompressionError::Invalid(
-            "volume ratio must remain finite and positive",
-        ));
-    }
-    let log_ratio = fs_math::det::ln(ratio);
-    let steps = if moving { controls.substeps } else { 1 };
+    let path = FixedCompressionPath::new(
+        parcel.volume_m3(),
+        final_volume,
+        duration,
+        controls.substeps,
+    )?;
     let mut candidate = parcel.clone();
     // Admit original volume controls even for the fixed-volume/no-op path.
-    candidate.set_volume_isentropic(initial_volume, controls.volume, &mut cancelled)?;
+    candidate.set_volume_isentropic(path.initial_volume_m3, controls.volume, &mut cancelled)?;
     let mut totals = CompressionTotals::default();
-    let mut elapsed = 0.0;
-    for index in 0..steps {
+    for index in 0..path.substeps {
         poll(&mut cancelled)?;
-        let end_time = if index + 1 == steps {
-            duration_s
-        } else {
-            duration_s * ((index + 1) as f64 / steps as f64)
-        };
-        let dt = end_time - elapsed;
-        if duration_s > 0.0 && !positive(dt) {
-            return Err(MaterialCompressionError::Invalid(
-                "trajectory interval does not advance representable physical time",
-            ));
-        }
-        let midpoint =
-            initial_volume * fs_math::det::exp(log_ratio * ((index as f64 + 0.5) / steps as f64));
-        let endpoint = if index + 1 == steps {
-            final_volume
-        } else {
-            initial_volume * fs_math::det::exp(log_ratio * ((index + 1) as f64 / steps as f64))
-        };
         advance_interval(
             &mut candidate,
             bank,
             mechanism,
-            CompressionInterval {
-                duration_s: dt,
-                midpoint_volume_m3: midpoint,
-                final_volume_m3: endpoint,
-            },
+            path.interval(index)?,
             controls,
             &mut totals,
             &mut cancelled,
         )?;
-        elapsed = end_time;
     }
-    let report = totals.finish(initial_volume, final_volume, duration)?;
+    let report = totals.finish(path.initial_volume_m3, path.final_volume_m3, duration)?;
     poll(&mut cancelled)?;
     *parcel = candidate;
     Ok(report)
+}
+
+/// One bounded fixed-step path, shared by adiabatic and thermal compression.
+struct FixedCompressionPath {
+    initial_volume_m3: f64,
+    final_volume_m3: f64,
+    duration_s: f64,
+    log_ratio: f64,
+    substeps: usize,
+}
+
+impl FixedCompressionPath {
+    fn new(
+        initial_volume_m3: f64,
+        final_volume: Volume,
+        duration: Time,
+        substeps: usize,
+    ) -> Result<Self, MaterialCompressionError> {
+        let final_volume_m3 = final_volume.value();
+        let duration_s = duration.value();
+        if !positive(final_volume_m3)
+            || !duration_s.is_finite()
+            || duration_s < 0.0
+            || !(1..=MAX_COMPRESSION_SUBSTEPS).contains(&substeps)
+        {
+            return Err(MaterialCompressionError::Invalid(
+                "finite positive volume, nonnegative duration and 1..=4096 substeps required",
+            ));
+        }
+        let moving = final_volume_m3 != initial_volume_m3;
+        if moving && duration_s == 0.0 {
+            return Err(MaterialCompressionError::Invalid(
+                "a finite compression or expansion stroke requires positive elapsed time",
+            ));
+        }
+        let ratio = final_volume_m3 / initial_volume_m3;
+        if !positive(ratio) {
+            return Err(MaterialCompressionError::Invalid(
+                "volume ratio must remain finite and positive",
+            ));
+        }
+        Ok(Self {
+            initial_volume_m3,
+            final_volume_m3,
+            duration_s,
+            log_ratio: fs_math::det::ln(ratio),
+            substeps: if moving { substeps } else { 1 },
+        })
+    }
+
+    fn interval(&self, index: usize) -> Result<CompressionInterval, MaterialCompressionError> {
+        let start = self.duration_s * (index as f64 / self.substeps as f64);
+        let end = if index + 1 == self.substeps {
+            self.duration_s
+        } else {
+            self.duration_s * ((index + 1) as f64 / self.substeps as f64)
+        };
+        let duration_s = end - start;
+        if self.duration_s > 0.0 && !positive(duration_s) {
+            return Err(MaterialCompressionError::Invalid(
+                "trajectory interval does not advance representable physical time",
+            ));
+        }
+        Ok(CompressionInterval {
+            duration_s,
+            midpoint_volume_m3: self.initial_volume_m3
+                * fs_math::det::exp(self.log_ratio * ((index as f64 + 0.5) / self.substeps as f64)),
+            final_volume_m3: if index + 1 == self.substeps {
+                self.final_volume_m3
+            } else {
+                self.initial_volume_m3
+                    * fs_math::det::exp(
+                        self.log_ratio * ((index + 1) as f64 / self.substeps as f64),
+                    )
+            },
+        })
+    }
 }
 
 /// A prescribed interval of the original logarithmic volume trajectory.
@@ -283,7 +319,18 @@ impl CompressionTotals {
     }
 }
 
-/// Fixed and adaptive drivers compose exactly these original source operations.
+/// Original rigid-stage changes; formation energy is already inside its calorics.
+#[derive(Clone, Copy)]
+struct CompressionChemicalStep {
+    internal_energy_change_j: f64,
+    /// Stored energy change minus the original stage's supplied heat.
+    energy_residual_j: f64,
+    entropy_change_j_k: f64,
+    accepted_steps: usize,
+    rejected_steps: usize,
+}
+
+/// Fixed and adaptive adiabatic drivers retain their original chemistry owner.
 fn advance_interval(
     candidate: &mut ClosedGasParcel,
     bank: &ThermochemicalGasModel,
@@ -293,41 +340,64 @@ fn advance_interval(
     totals: &mut CompressionTotals,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), MaterialCompressionError> {
-    let first = candidate.set_volume_isentropic(
-        interval.midpoint_volume_m3,
-        controls.volume,
-        &mut *cancelled,
-    )?;
-    let chemical = advance_closed_parcel_adiabatic(
+    advance_interval_with(
         candidate,
-        bank,
-        mechanism,
-        Time::new(interval.duration_s),
-        controls.kinetics,
-        &mut *cancelled,
-    )?;
-    let second = candidate.set_volume_isentropic(
-        interval.final_volume_m3,
+        interval,
         controls.volume,
-        &mut *cancelled,
-    )?;
+        totals,
+        cancelled,
+        |candidate, duration, cancelled| {
+            let chemical = advance_closed_parcel_adiabatic(
+                candidate,
+                bank,
+                mechanism,
+                duration,
+                controls.kinetics,
+                &mut *cancelled,
+            )?;
+            let balance = chemical.chemistry.balance();
+            Ok(CompressionChemicalStep {
+                internal_energy_change_j: chemical.balance.energy_residual_j,
+                energy_residual_j: chemical.balance.energy_residual_j,
+                entropy_change_j_k: balance.entropy_change_j_k,
+                accepted_steps: balance.accepted_steps,
+                rejected_steps: balance.rejected_steps,
+            })
+        },
+    )
+    .map(|_| ())
+}
+
+/// Shared symmetric volume/rigid-stage composition, including thermal exchange.
+/// Returns both volume entropy increments for the counterpart entropy account.
+fn advance_interval_with<F: FnMut() -> bool>(
+    candidate: &mut ClosedGasParcel,
+    interval: CompressionInterval,
+    volume: GasEntropySolve,
+    totals: &mut CompressionTotals,
+    cancelled: &mut F,
+    chemical: impl FnOnce(
+        &mut ClosedGasParcel,
+        Time,
+        &mut F,
+    ) -> Result<CompressionChemicalStep, MaterialCompressionError>,
+) -> Result<[f64; 2], MaterialCompressionError> {
+    let first =
+        candidate.set_volume_isentropic(interval.midpoint_volume_m3, volume, &mut *cancelled)?;
+    let chemical = chemical(candidate, Time::new(interval.duration_s), &mut *cancelled)?;
+    let second =
+        candidate.set_volume_isentropic(interval.final_volume_m3, volume, &mut *cancelled)?;
     accumulate(&mut totals.work, -first.work_by_gas_j);
     accumulate(&mut totals.work, -second.work_by_gas_j);
     accumulate(&mut totals.energy, first.stored_energy_change_j);
-    accumulate(&mut totals.energy, chemical.balance.energy_residual_j);
+    accumulate(&mut totals.energy, chemical.internal_energy_change_j);
     accumulate(&mut totals.energy, second.stored_energy_change_j);
-    accumulate(&mut totals.residual, chemical.balance.energy_residual_j);
+    accumulate(&mut totals.residual, chemical.energy_residual_j);
     accumulate(&mut totals.entropy, first.entropy_change_j_k);
-    accumulate(
-        &mut totals.entropy,
-        chemical.chemistry.balance().entropy_change_j_k,
-    );
+    accumulate(&mut totals.entropy, chemical.entropy_change_j_k);
     accumulate(&mut totals.entropy, second.entropy_change_j_k);
-    totals.add_counts(
-        1,
-        chemical.chemistry.balance().accepted_steps,
-        chemical.chemistry.balance().rejected_steps,
-    )
+    totals.add_counts(1, chemical.accepted_steps, chemical.rejected_steps)?;
+    Ok([first.entropy_change_j_k, second.entropy_change_j_k])
 }
 
 fn accumulate((sum, correction): &mut (f64, f64), value: f64) {
