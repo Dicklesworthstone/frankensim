@@ -284,11 +284,21 @@ impl ConductionThermalNetwork<'_> {
                     ..response
                 };
                 let candidate = match drive {
-                    ConductionDrive::Power { .. } => {
-                        return Err(invalid(
-                            "power regulation requires a linear Ohmic material snapshot; nonlinear field response is unsupported",
-                        ));
-                    }
+                    ConductionDrive::Power {
+                        positive,
+                        negative,
+                        source,
+                    } => problem.solve_power_with_materials_and_contacts_candidate(
+                        sources,
+                        contact_sources,
+                        positive,
+                        negative,
+                        source,
+                        assembly,
+                        field_controls,
+                        bounded,
+                        &mut || (*cancel.borrow_mut())(),
+                    ),
                     ConductionDrive::Voltage(voltage) => problem
                         .solve_with_materials_and_contacts_candidate(
                             sources,

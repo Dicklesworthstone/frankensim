@@ -1,4 +1,6 @@
 //! Manufactured T/E and T/J sources, independent finite-capacity BE balances.
+#[path = "response/power.rs"]
+mod power;
 #[path = "response/circuit.rs"]
 mod circuit;
 #[path = "response/heat.rs"]

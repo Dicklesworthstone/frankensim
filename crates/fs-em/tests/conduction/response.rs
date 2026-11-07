@@ -5,6 +5,8 @@ use super::*;
 mod contacts;
 #[path = "response/current.rs"]
 mod current;
+#[path = "response/power.rs"]
+mod power;
 use fs_em::conduction::response::{
     ConductionResponseControls, ConductionResponseError, PlanarConductionResponse,
 };

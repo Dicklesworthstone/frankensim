@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 /// Original local contact source laws and uniform-trace response gates.
 pub mod contact;
+mod power;
 use contact::{
     ContactResponseControls, ContactResponseError, ContactResponseSample, ContactResponseSources,
 };

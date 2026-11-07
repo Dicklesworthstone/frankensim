@@ -69,13 +69,14 @@ pub struct ConductionCurrentTrace {
     pub inward_current_density_a_m2: f64,
 }
 
-/// Ideal held-power supply for a stationary, linear Ohmic terminal pair.
+/// Ideal held-power supply for a stationary conducting terminal pair.
 ///
 /// Power is delivered INTO the conductor. The positive electrode has positive
 /// voltage/current; swap electrodes to reverse polarity. Voltage and current
 /// compliance are hard limits: an unattainable set point is refused, never
 /// clipped while still reporting the requested power. Supply losses, storage,
-/// control dynamics and field-dependent nonlinear material laws are not modeled.
+/// control dynamics are not modeled. Linear snapshots use `solve_power`; the
+/// source-response owners close nonlinear material laws at the actual drive.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ConductionPowerSource {
     pub power_w: f64,
@@ -84,16 +85,21 @@ pub struct ConductionPowerSource {
 }
 
 impl ConductionPowerSource {
-    pub(crate) fn operating_point(self, resistance_ohm: f64) -> Result<(f64, f64), &'static str> {
+    pub(crate) fn validate(self) -> Result<(), &'static str> {
         if !self.power_w.is_finite()
             || self.power_w < 0.0
             || !positive(self.maximum_voltage_v)
             || !positive(self.maximum_current_a)
-            || !positive(resistance_ohm)
         {
-            return Err(
-                "nonnegative finite power, positive finite compliance and resistance required",
-            );
+            return Err("nonnegative finite power and positive finite compliance required");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn operating_point(self, resistance_ohm: f64) -> Result<(f64, f64), &'static str> {
+        self.validate()?;
+        if !positive(resistance_ohm) {
+            return Err("positive finite terminal resistance required");
         }
         // Separate square roots avoid overflowing P*R or P/R when both
         // required terminal amplitudes are themselves representable.
