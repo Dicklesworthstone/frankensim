@@ -2072,3 +2072,34 @@ work, interface traction, interior maxima, complete-domain containment,
 cancellation/reuse and the thermal closure refusal. The existing total-energy
 regression now includes the condensed director's native membrane/bending
 contribution when comparing recovered shear work with the full shell operator.
+
+## CST/DKT hereditary membrane and bending resultants
+
+`shell::relaxation::ShellRelaxationBranch` admits a passive excess A/B/D
+stiffness block and its explicit positive relaxation time. A [N/m], B [N]
+and D [N m] are increments above the unchanged equilibrium elastic pencil.
+The existing coupled-resultant factor owns passivity, including signed B and
+resolved weak directions; no viscosity units or frequency-sampled total
+storage tensor are inferred. Material source support remains caller data.
+
+`project_relaxation` uses the original support map, facet transformations,
+CST membrane rows and signed three-point DKT curvature rule shared with
+instantaneous shell viscosity. Geometry and physical strains are computed
+once per facet across its spectrum. Drilling stabilization, prestress,
+stiffeners and inertia acquire no material memory. Each complete modal Gram
+matrix is accumulated in the existing double-double arithmetic owner.
+Exactly equal positive f64 times aggregate; distinct times and every
+cross-mode coefficient remain separate. Rank reduction, history and temporal
+evolution belong to the existing consuming material-memory owner.
+
+Spatial dimensions, total supplied branches, distinct times and projection
+work are bounded before output allocation. Cancellation returns no partial
+image. The public shell pencil does not carry mesh identity: matching mesh,
+bare CST/DKT support map and basis remain a caller obligation. MITC, tied and
+obliquely constrained pencils retain their own projection owners.
+
+`tests/shell_relaxation.rs` checks independent affine A/B/D work with both B
+signs and heterogeneous/equal facet times, correlated weak stiffness beside
+rigid/drilling nulls, and source, budget and cancellation refusals. The three
+new focused native tests and all six existing shell-viscosity tests passed
+with the original numerical owners after sharing the strain contraction.

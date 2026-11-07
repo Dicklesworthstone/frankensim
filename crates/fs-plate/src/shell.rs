@@ -20,6 +20,8 @@ pub use inertia::{CstDktMass, ReferenceDensityMoments};
 use inertia::ReferenceInertia;
 /// Physical membrane/bending loss on the original CST/DKT strain field.
 pub mod viscosity;
+/// Passive hereditary membrane/bending branches on the same physical strains.
+pub mod relaxation;
 
 impl ReferenceDensityMoments {
     /// Consume the existing laminate owner's exact mass moments, normalized by

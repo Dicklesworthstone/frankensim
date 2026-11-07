@@ -72,7 +72,7 @@ impl ShellViscosity {
             .all(|x| *x == 0.0)
     }
 
-    fn channels(&self, strain: &[f64; 6]) -> [f64; 6] {
+    pub(super) fn channels(&self, strain: &[f64; 6]) -> [f64; 6] {
         core::array::from_fn(|column| {
             compensated_products((0..6).map(|row| (self.factor[row][column], strain[row])))
         })
@@ -109,9 +109,9 @@ pub fn projection_terms(full_dofs: usize, elements: usize, modes: usize) -> Opti
         .checked_add(elements.checked_mul(local)?)
 }
 
-fn admit(
+pub(super) fn admit(
     mesh: &ShellMesh,
-    sections: &[ShellViscosity],
+    section_count: usize,
     model: &ShellModel,
     budget: ShellViscosityBudget,
     modes: usize,
@@ -141,10 +141,10 @@ fn admit(
             });
         }
     }
-    if sections.len() != mesh.tris.len() {
+    if section_count != mesh.tris.len() {
         return Err(PlateError::SectionCount {
             expected: mesh.tris.len(),
-            actual: sections.len(),
+            actual: section_count,
         });
     }
     if mesh.nodes.len() < 3
@@ -203,6 +203,44 @@ fn compensated_products(terms: impl Iterator<Item = (f64, f64)>) -> f64 {
     sum + correction
 }
 
+// Shared CST/DKT kinematics for instantaneous viscosity and hereditary excess
+// stiffness. The material owner only sees physical strain: drilling,
+// equilibrium prestress and numerical stabilization never enter either law.
+pub(super) fn projected_strains(
+    g: &FacetGeometry,
+    element: usize,
+    tri: &[usize; 3],
+    model: &ShellModel,
+    modes: &[Vec<f64>],
+    output: &mut [[[f64; 6]; 3]],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), PlateError> {
+    let rows = strain_rows(g, element)?;
+    for (mode, strain) in modes.iter().zip(output) {
+        if cancelled() {
+            return Err(PlateError::Cancelled);
+        }
+        let nodal: [f64; 18] = core::array::from_fn(|i| {
+            let base = 6 * tri[i / 6] + 3 * ((i % 6) / 3);
+            compensated_products((0..3).map(|p| {
+                (
+                    g.frame[i % 3][p],
+                    model.dof_map[base + p].map_or(0.0, |index| mode[index]),
+                )
+            }))
+        });
+        for (out, point) in strain.iter_mut().zip(&rows) {
+            *out = core::array::from_fn(|r| {
+                compensated_products((0..18).map(|i| (point[r][i], nodal[i])))
+            });
+            if out.iter().any(|value| !value.is_finite()) {
+                return Err(bad("shell projected physical strain is nonfinite"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Assemble the complete sparse physical viscous operator on a bare CST/DKT
 /// shell's original supported global translation/rotation coordinates.
 ///
@@ -223,7 +261,7 @@ pub fn assemble_constitutive_operator(
     if cancelled() {
         return Err(PlateError::Cancelled);
     }
-    admit(mesh, sections, model, budget, 18)?;
+    admit(mesh, sections.len(), model, budget, 18)?;
     let mut coo = Coo::new(model.free, model.free);
     for (element, (tri, law)) in mesh.tris.iter().zip(sections).enumerate() {
         if cancelled() {
@@ -310,7 +348,7 @@ pub fn project_viscosity(
             "shell viscosity requires a nonempty bounded projection basis",
         ));
     }
-    admit(mesh, sections, model, budget, n)?;
+    admit(mesh, sections.len(), model, budget, n)?;
     if modes
         .iter()
         .any(|mode| mode.len() != model.free || mode.iter().any(|v| !v.is_finite()))
@@ -320,7 +358,7 @@ pub fn project_viscosity(
         ));
     }
     let mut out = vec![0.0; n * n];
-    let mut local = vec![[0.0; 18]; n];
+    let mut strains = vec![[[0.0; 6]; 3]; n];
     let mut channels = vec![[0.0; 6]; n];
     for (element, (tri, law)) in mesh.tris.iter().zip(sections).enumerate() {
         if cancelled() {
@@ -330,31 +368,14 @@ pub fn project_viscosity(
         if law.is_zero() {
             continue;
         }
-        let rows = strain_rows(&g, element)?;
         let scale = det::sqrt(g.area_m2) * det::sqrt(1.0 / 3.0);
-        for (mode, nodal) in modes.iter().zip(&mut local) {
+        projected_strains(&g, element, tri, model, modes, &mut strains, &mut cancelled)?;
+        for point in 0..3 {
             if cancelled() {
                 return Err(PlateError::Cancelled);
             }
-            for i in 0..18 {
-                let base = 6 * tri[i / 6] + 3 * ((i % 6) / 3);
-                nodal[i] = compensated_products((0..3).map(|p| {
-                    (
-                        g.frame[i % 3][p],
-                        model.dof_map[base + p].map_or(0.0, |index| mode[index]),
-                    )
-                }));
-            }
-        }
-        for point in rows {
-            if cancelled() {
-                return Err(PlateError::Cancelled);
-            }
-            for (nodal, channel) in local.iter().zip(&mut channels) {
-                let strain = core::array::from_fn(|r| {
-                    compensated_products((0..18).map(|i| (point[r][i], nodal[i])))
-                });
-                *channel = law.channels(&strain).map(|x| scale * x);
+            for (strain, channel) in strains.iter().zip(&mut channels) {
+                *channel = law.channels(&strain[point]).map(|x| scale * x);
                 if channel.iter().any(|v| !v.is_finite()) {
                     return Err(bad("shell viscosity projected strain channels overflow"));
                 }
