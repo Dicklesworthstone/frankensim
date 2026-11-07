@@ -21,6 +21,8 @@ use crate::endf::decay::spectra::DecayRadiation;
 use crate::endf::spectrum::PositiveIntegral;
 use crate::{Accumulator, FissionError, nonnegative};
 
+mod stochastic_activation;
+
 /// Explicit spectral-data agreement allowance, not a numerical-error tolerance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DecayRadiationClosure {

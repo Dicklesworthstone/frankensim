@@ -79,6 +79,9 @@ pub use activation::{CaptureActivationCellSource, CaptureActivationHeating};
 mod stochastic;
 pub use stochastic::{StochasticDecayCellSource, StochasticDecayHeating};
 
+mod stochastic_activation;
+pub use stochastic_activation::{StochasticActivationCellSource, StochasticActivationHeating};
+
 mod stochastic_production;
 pub use stochastic_production::{
     StochasticDecayProductionCellSource, StochasticDecayProductionHeating,

@@ -539,6 +539,40 @@ explicitly manufactured; they are not evaluated isotope data. This scope does
 not add neutron feedback, automatic thermal-temperature feedback, or a joint
 fission-product distribution.
 
+## Integer activation heat and evaluated radiation
+
+With `thermal`, `StochasticActivationCellSource` binds the accepted integer
+capture/decay history to its original material cell. `StochasticActivationHeating`
+uses the existing `NuclearHeating` transaction, clipping native thermal steps at
+sampled events and authored forcing changes. It passes the original absolute
+endpoint to the source, credits prompt capture and subsequent decay heat once,
+and keeps outward radiation and nonrecoverable energy separate. Independent
+cells require distinct stream keys; clock mismatch, material-domain refusal,
+work budgets and cancellation retain the original material and nuclear states.
+
+`BurnupDecayRadiation::from_stochastic_activation_step` projects the original
+integer decay counts through the existing evaluated spectral partition. It
+checks original model identity, interval and reaction totals; it neither
+resamples photons nor re-evolves populations. The same source supports
+`with_grouped_decay_radiation`, retaining group-dependent receiver deposition.
+Prompt capture radiation has no invented daughter-decay spectrum: it remains
+explicit ungrouped escape in this grouped-decay configuration. The original
+mean-energy routing and spectral reconciliation still own the energy account.
+
+The prepared activation schedule explicitly owns nuclear temperature and flux.
+Material temperature is checked against the admitted model domain, but does not
+silently redraw clocks or replace the authored irradiation history. Temperature
+feedback requires an appropriately authored/refined history; this adapter does
+not claim an implicit neutron/thermal solve.
+
+Four focused coupled regressions pass: prompt-versus-daughter event calorimetry,
+shutdown/restart with thermal subdivision, material/RNG rollback, and grouped
+radiation with separate capture energy and receiver heat. The full thermal-enabled
+nuclear production source compiled through the focused native dependency seam.
+The six activation and four coupled regressions also passed after including the
+concurrently published cross-section and radiation-transport source additions.
+This is not a full workspace Cargo result.
+
 ## Stochastic transport and event-local radioactive heat
 
 `decay::stochastic::transport::StochasticDecayTransportState` advances a complete
