@@ -2,6 +2,8 @@ use super::*;
 use crate::compressible::spatial::mixture::{BodyForce3d, ForceControl3d, ForcingWorkspace3d};
 use fs_lbm::sgs3::dynamic::lagrangian::LagrangianDynamicSgs;
 
+mod species;
+
 type Coupled = MolecularEuler3d<ConstantTransport>;
 
 fn memory_config() -> MixtureLagrangianSubgridConfig {

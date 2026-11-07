@@ -8,6 +8,9 @@ pub use crate::compressible::mixture::molecular::{
     MolecularStepControl, StabilizedMolecularStepControl,
 };
 
+#[cfg(feature = "experimental-sgs")]
+mod lagrangian_species;
+
 /// Complete accepted volumetric multicomponent molecular/advection interval.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MolecularStepReport3d {
@@ -707,7 +710,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     .as_mut()
                     .expect("the Lagrangian mixture owner was just selected")
                     .prepare_lagrangian(&mut filter, &self.accepted, &mut cancelled)?;
-                let fit = trial.report();
+                let fit = trial.reports();
                 let report = self.step_prepared(
                     maximum_duration,
                     controls,

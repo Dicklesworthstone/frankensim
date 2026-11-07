@@ -7829,6 +7829,48 @@ completed; these gas integration tests were not compiled or executed here.
 Periodic-domain, smooth-field, exploration-only and unqualified turbulence/model
 boundaries remain; no wall/inflow memory or compressible SGS-energy model is added.
 
+### Independent Lagrangian heat and species mixing in evolving mixtures
+
+`MolecularEuler3d::with_lagrangian_dynamic_species_sgs` accepts
+`MixtureLagrangianSpeciesSubgridConfig` with independent momentum, temperature
+and common-species memory controls. The original complete nonreacting split
+owns one shared triple-history filter. It samples the accepted physical START
+state once, reads every original mass fraction without a transpose, and holds
+all three coefficients through both molecular halves, SSP/RKL stages and
+whole-split retries. The next sample uses the actual elapsed accepted duration.
+
+Conservative faces apply those held coefficients to current face density and
+the full current strain. Heat uses the original source Cp; common species flux
+retains the present-species mass closure, exactly absent species, original
+Maxwell--Stefan/Soret/Dufour transport and matching referenced partial enthalpies
+in total energy. The original combined stability estimate includes each
+transport. Stress and heat retain their actual molecular-ratio gates, and
+`maximum_species_diffusivity_m2_s` bounds both fitted cell and actual face
+diffusivity. Independent scalar transport remains active at zero momentum fit.
+
+Complete acceptance commits all three histories and fit reports together.
+Failures, cancellation and rejected retries publish none of them. The
+`lagrangian_subgrid_heat_report` and `lagrangian_subgrid_species_report` getters
+share the existing accepted-start sample clock; they are not endpoint fits.
+Standalone molecular advancement outside the prepared physical step refuses.
+
+The additional numerical payload is 448 bytes/cell: 376 shared history/filter,
+40 physical rho/u/T staging, 24 held coefficients and 8 original rho*Cv cache.
+Storage is independent of species count and reused during stepping; detached
+history remains budgeted. The fixed-Prandtl/Schmidt path retains 216 bytes/cell.
+Both paths retain first-order pathline/coefficient integration, explicit
+authored timescales and periodic Cartesian exploratory admission. No turbulent
+reaction-rate, wall/inflow history, SGS-energy or shock closure is supplied.
+
+Six consumer regression groups cover independent zero-momentum heat/species
+fluxes, budgets/refusals, uniform molecular bits, accepted-start/source-gauge
+conservation, forced shortening/cancellation/replay and RKL publication. These
+consumer tests were parsed and reviewed but not compiled or executed here;
+full consumer validation remains outstanding after upstream asupersync compiler
+SIGKILLs in earlier full and metadata-only builds. The shared core passed 68
+real-source tests. A separate executed core probe confirmed the consumer shear
+fixture has exactly zero momentum fit and positive heat/species diffusivities.
+
 ### Explicit diffusive closure for evolving-mixture pressure outlets
 
 The spatial mixture `MolecularTransport3d` accepts an explicitly authored

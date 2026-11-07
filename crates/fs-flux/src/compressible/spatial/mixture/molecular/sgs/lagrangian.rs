@@ -5,19 +5,30 @@
 //! held through both molecular halves, SSP/RKL stages and whole-split retries.
 //! The original face owner still evaluates current density, strain, composition,
 //! source heat capacities and referenced partial enthalpies at every stage.
-//! Thus common-Schmidt species fluxes retain zero net diffusive mass and carry
-//! their own enthalpy; no separate viscous or chemical heat source is added.
+//! Both fixed-Schmidt and independently fitted species fluxes retain zero net
+//! diffusive mass and carry their own referenced enthalpy; no separate viscous
+//! or chemical heat source is added.
 //!
 //! Only the complete nonreacting physical interval commits the history and its
 //! report. Internal molecular clocks and rejected intervals cannot age it. The
 //! next sample uses the previous ACTUAL accepted duration, including shortening.
 //! This is first-order pathline/coefficient integration with an explicit memory
-//! time in seconds. Fixed Prandtl/Schmidt numbers are authored model parameters,
-//! not dynamically fitted scalar histories. Fully periodic Cartesian grids only;
-//! no wall/inflow history, reaction-rate closure, SGS energy or shock model.
+//! time in seconds. Fixed Prandtl/Schmidt controls remain an explicit option.
+//! Independent heat/common-species histories instead use their own Germano
+//! contractions and memory times, sharing the same momentum trajectory and
+//! accepted sample clock. Fully periodic Cartesian grids only; no wall/inflow
+//! history, reaction-rate closure, SGS energy or shock model.
 
 use super::*;
+use fs_lbm::sgs3::dynamic::lagrangian::scalar::components::{
+    LagrangianComponentsTrial, LagrangianDynamicComponents,
+};
 use fs_lbm::sgs3::dynamic::lagrangian::{LagrangianDynamicSgs, LagrangianSgsTrial};
+
+mod species;
+pub use species::{
+    LagrangianComponentsConfig, LagrangianScalarConfig, MixtureLagrangianSpeciesSubgridConfig,
+};
 
 /// Pathline-averaged stress plus fixed gradient-diffusion heat/species controls.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -42,18 +53,131 @@ impl MixtureLagrangianSubgridConfig {
     }
 }
 
+#[derive(Clone, Copy)]
+enum LagrangianConfig {
+    FixedTransport(MixtureLagrangianSubgridConfig),
+    Species(MixtureLagrangianSpeciesSubgridConfig),
+}
+
+// The complete physical split detaches exactly one trajectory owner. The
+// independent variant owns all three histories and cannot advance one alone.
+pub(in crate::compressible::spatial::mixture::molecular) enum LagrangianFilter {
+    Momentum(LagrangianDynamicSgs),
+    Species(LagrangianDynamicComponents),
+}
+
+impl LagrangianFilter {
+    fn accepted_time(&self) -> Option<f64> {
+        match self {
+            Self::Momentum(filter) => filter.accepted_time(),
+            Self::Species(filter) => filter.accepted_time(),
+        }
+    }
+
+    pub(in crate::compressible::spatial::mixture::molecular) fn filter_width(&self) -> f64 {
+        match self {
+            Self::Momentum(filter) => filter.filter_width(),
+            Self::Species(filter) => filter.filter_width(),
+        }
+    }
+
+    fn workspace_bytes(&self) -> usize {
+        match self {
+            Self::Momentum(filter) => filter.workspace_bytes(),
+            Self::Species(filter) => filter.workspace_bytes(),
+        }
+    }
+}
+
+pub(in crate::compressible::spatial::mixture::molecular) type LagrangianReports = (
+    DynamicSgsReport,
+    Option<DynamicScalarReport>,
+    Option<DynamicScalarReport>,
+);
+
+/// The borrow belongs only to the detached history, leaving face scratch free.
+pub(in crate::compressible::spatial::mixture::molecular) enum LagrangianTrial<'a> {
+    Momentum(LagrangianSgsTrial<'a>),
+    Species(LagrangianComponentsTrial<'a>),
+}
+
+impl LagrangianTrial<'_> {
+    pub(in crate::compressible::spatial::mixture::molecular) fn report(&self) -> DynamicSgsReport {
+        match self {
+            Self::Momentum(trial) => trial.report(),
+            Self::Species(trial) => trial.momentum_report(),
+        }
+    }
+
+    pub(in crate::compressible::spatial::mixture::molecular) fn reports(
+        &self,
+    ) -> LagrangianReports {
+        match self {
+            Self::Momentum(_) => (self.report(), None, None),
+            Self::Species(trial) => (
+                self.report(),
+                Some(trial.scalar_report()),
+                Some(trial.components_report()),
+            ),
+        }
+    }
+
+    pub(in crate::compressible::spatial::mixture::molecular) fn coefficients_squared(
+        &self,
+    ) -> impl ExactSizeIterator<Item = f64> + '_ {
+        let cells = match self {
+            Self::Momentum(trial) => trial.viscosities().len(),
+            Self::Species(trial) => trial.viscosities().len(),
+        };
+        (0..cells).map(|cell| {
+            match self {
+                Self::Momentum(trial) => trial.coefficient_squared(cell),
+                Self::Species(trial) => trial.coefficient_squared(cell),
+            }
+            .expect("an admitted Lagrangian trial retains its coefficient shape")
+        })
+    }
+
+    fn scalar_coefficient(&self, cell: usize) -> Option<f64> {
+        match self {
+            Self::Momentum(_) => None,
+            Self::Species(trial) => trial.scalar_coefficient(cell),
+        }
+    }
+
+    fn component_coefficient(&self, cell: usize) -> Option<f64> {
+        match self {
+            Self::Momentum(_) => None,
+            Self::Species(trial) => trial.component_coefficient(cell),
+        }
+    }
+
+    pub(in crate::compressible::spatial::mixture::molecular) fn commit(self) {
+        match self {
+            Self::Momentum(trial) => trial.commit(),
+            Self::Species(trial) => trial.commit(),
+        }
+    }
+}
+
 pub(super) struct LagrangianTransport {
-    pub(super) config: MixtureLagrangianSubgridConfig,
+    config: LagrangianConfig,
     // The complete coupled owner temporarily detaches this filter while its
     // borrowed history trial exists. Held face transport is allowed only then.
-    filter: Option<LagrangianDynamicSgs>,
+    filter: Option<LagrangianFilter>,
     // Detached storage still belongs to the transaction and its byte budget.
     filter_bytes: usize,
     filter_width: f64,
     density: Vec<f64>,
     velocity: Vec<[f64; 3]>,
+    // Empty for fixed Prandtl/Schmidt: its original capacity is unchanged.
+    temperature: Vec<f64>,
+    heat_coefficient: Vec<f64>,
+    species_coefficient: Vec<f64>,
     held_nonzero: bool,
     last_report: Option<DynamicSgsReport>,
+    last_heat_report: Option<DynamicScalarReport>,
+    last_species_report: Option<DynamicScalarReport>,
 }
 
 impl LagrangianTransport {
@@ -61,10 +185,34 @@ impl LagrangianTransport {
         self.filter_bytes
             + self.density.capacity() * size_of::<f64>()
             + self.velocity.capacity() * size_of::<[f64; 3]>()
+            + (self.temperature.capacity()
+                + self.heat_coefficient.capacity()
+                + self.species_coefficient.capacity())
+                * size_of::<f64>()
     }
 
     pub(super) fn filter_width(&self) -> f64 {
         self.filter_width
+    }
+
+    pub(super) fn fixed_transport_config(&self) -> Option<MixtureLagrangianSubgridConfig> {
+        match self.config {
+            LagrangianConfig::FixedTransport(config) => Some(config),
+            LagrangianConfig::Species(_) => None,
+        }
+    }
+
+    pub(super) fn transport_controls(&self) -> (Option<f64>, Option<f64>, f64) {
+        match self.config {
+            LagrangianConfig::FixedTransport(config) => (
+                Some(config.transport.turbulent_prandtl),
+                Some(config.turbulent_schmidt),
+                config.transport.model.maximum_eddy_to_molecular,
+            ),
+            LagrangianConfig::Species(config) => {
+                (None, None, config.momentum.maximum_eddy_to_molecular)
+            }
+        }
     }
 
     pub(super) fn admit_prepared_step(&self) -> Result<bool, DissipationError> {
@@ -98,13 +246,40 @@ impl SubgridTransport {
         config: MixtureLagrangianSubgridConfig,
     ) -> Result<Self, DissipationError> {
         config.validate()?;
+        Self::new_lagrangian_owner(flow, LagrangianConfig::FixedTransport(config))
+    }
+
+    fn new_lagrangian_owner(
+        flow: &MixtureEuler3d,
+        config: LagrangianConfig,
+    ) -> Result<Self, DissipationError> {
         dynamic::admit_domain(flow)?;
         let cells = flow.cell_count();
-        let bytes = LagrangianDynamicSgs::required_bytes(cells).map_err(dynamic::dynamic_error)?;
-        let filter = LagrangianDynamicSgs::new(flow.grid.shape, flow.grid.spacing, bytes)
-            .map_err(dynamic::dynamic_error)?;
+        let independent = matches!(config, LagrangianConfig::Species(_));
+        let filter = if independent {
+            LagrangianFilter::Species(
+                LagrangianDynamicComponents::new(
+                    flow.grid.shape,
+                    flow.grid.spacing,
+                    flow.gas.species_count(),
+                    LagrangianDynamicComponents::required_bytes(cells)
+                        .map_err(dynamic::dynamic_error)?,
+                )
+                .map_err(dynamic::dynamic_error)?,
+            )
+        } else {
+            LagrangianFilter::Momentum(
+                LagrangianDynamicSgs::new(
+                    flow.grid.shape,
+                    flow.grid.spacing,
+                    LagrangianDynamicSgs::required_bytes(cells).map_err(dynamic::dynamic_error)?,
+                )
+                .map_err(dynamic::dynamic_error)?,
+            )
+        };
         let filter_width = filter.filter_width();
         let filter_bytes = filter.workspace_bytes();
+        let scalar_cells = if independent { cells } else { 0 };
         Ok(Self {
             closure: ViscosityClosure::Lagrangian(LagrangianTransport {
                 config,
@@ -113,8 +288,13 @@ impl SubgridTransport {
                 filter_width,
                 density: allocated(cells, 0.0)?,
                 velocity: allocated(cells, [0.0; 3])?,
+                temperature: allocated(scalar_cells, 0.0)?,
+                heat_coefficient: allocated(scalar_cells, 0.0)?,
+                species_coefficient: allocated(scalar_cells, 0.0)?,
                 held_nonzero: false,
                 last_report: None,
+                last_heat_report: None,
+                last_species_report: None,
             }),
             wall_models: [None; 6],
             dynamic_coefficient_squared: allocated(cells, 0.0)?,
@@ -126,7 +306,7 @@ impl SubgridTransport {
         &self,
     ) -> Option<MixtureLagrangianSubgridConfig> {
         match &self.closure {
-            ViscosityClosure::Lagrangian(dynamic) => Some(dynamic.config),
+            ViscosityClosure::Lagrangian(dynamic) => dynamic.fixed_transport_config(),
             _ => None,
         }
     }
@@ -138,7 +318,7 @@ impl SubgridTransport {
             ViscosityClosure::Lagrangian(dynamic) => dynamic
                 .filter
                 .as_ref()
-                .and_then(LagrangianDynamicSgs::accepted_time)
+                .and_then(LagrangianFilter::accepted_time)
                 .map(Time::new),
             _ => None,
         }
@@ -155,7 +335,7 @@ impl SubgridTransport {
 
     pub(in crate::compressible::spatial::mixture::molecular) fn take_lagrangian_filter(
         &mut self,
-    ) -> Option<LagrangianDynamicSgs> {
+    ) -> Option<LagrangianFilter> {
         match &mut self.closure {
             ViscosityClosure::Lagrangian(dynamic) => dynamic.filter.take(),
             _ => None,
@@ -166,10 +346,10 @@ impl SubgridTransport {
     // owner remains available for the original conservative step transaction.
     pub(in crate::compressible::spatial::mixture::molecular) fn prepare_lagrangian<'a>(
         &mut self,
-        filter: &'a mut LagrangianDynamicSgs,
+        filter: &'a mut LagrangianFilter,
         flow: &MixtureEuler3d,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<LagrangianSgsTrial<'a>, DissipationError> {
+    ) -> Result<LagrangianTrial<'a>, DissipationError> {
         let ViscosityClosure::Lagrangian(dynamic) = &mut self.closure else {
             return Err(DissipationError::Invalid(
                 "missing Lagrangian mixture owner",
@@ -184,16 +364,55 @@ impl SubgridTransport {
             let primitive = cell(row, species).primitive(&flow.gas, &mut *cancelled)?;
             dynamic.density[index] = primitive.density;
             dynamic.velocity[index] = primitive.velocity;
+            if let Some(temperature) = dynamic.temperature.get_mut(index) {
+                *temperature = primitive.temperature;
+            }
         }
-        let trial = filter
-            .prepare(
-                dynamic.config.transport.model,
-                flow.time,
-                &dynamic.density,
-                &dynamic.velocity,
-                &mut *cancelled,
-            )
-            .map_err(dynamic::dynamic_error)?;
+        let trial = match (dynamic.config, filter) {
+            (LagrangianConfig::FixedTransport(config), LagrangianFilter::Momentum(filter)) => {
+                LagrangianTrial::Momentum(
+                    filter
+                        .prepare(
+                            config.transport.model,
+                            flow.time,
+                            &dynamic.density,
+                            &dynamic.velocity,
+                            &mut *cancelled,
+                        )
+                        .map_err(dynamic::dynamic_error)?,
+                )
+            }
+            (LagrangianConfig::Species(config), LagrangianFilter::Species(filter)) => {
+                let trial = filter
+                    .prepare(
+                        config.momentum,
+                        config.heat,
+                        config.species,
+                        flow.time,
+                        &dynamic.density,
+                        &dynamic.velocity,
+                        &dynamic.temperature,
+                        |component, index| {
+                            flow.states[index * (species + 4) + component] / dynamic.density[index]
+                        },
+                        &mut *cancelled,
+                    )
+                    .map_err(dynamic::dynamic_error)?;
+                if trial.components_report().maximum_diffusivity
+                    > config.maximum_species_diffusivity_m2_s
+                {
+                    return Err(DissipationError::Invalid(
+                        "Lagrangian species diffusivity exceeds its physical admission bound",
+                    ));
+                }
+                LagrangianTrial::Species(trial)
+            }
+            _ => {
+                return Err(DissipationError::Invalid(
+                    "Lagrangian mixture history and controls differ",
+                ));
+            }
+        };
         for (index, (coefficient, fitted)) in self
             .dynamic_coefficient_squared
             .iter_mut()
@@ -205,15 +424,38 @@ impl SubgridTransport {
             }
             *coefficient = fitted;
         }
+        for (index, (heat, species)) in dynamic
+            .heat_coefficient
+            .iter_mut()
+            .zip(&mut dynamic.species_coefficient)
+            .enumerate()
+        {
+            if index % 64 == 0 {
+                poll(cancelled)?;
+            }
+            *heat = trial
+                .scalar_coefficient(index)
+                .ok_or(DissipationError::Invalid(
+                    "Lagrangian mixture heat coefficient shape differs",
+                ))?;
+            *species = trial
+                .component_coefficient(index)
+                .ok_or(DissipationError::Invalid(
+                    "Lagrangian mixture species coefficient shape differs",
+                ))?;
+        }
         poll(cancelled)?;
-        dynamic.held_nonzero = trial.report().maximum_coefficient_squared != 0.0;
+        let (momentum, heat, species) = trial.reports();
+        dynamic.held_nonzero = momentum.maximum_coefficient_squared != 0.0
+            || heat.is_some_and(|report| report.maximum_coefficient != 0.0)
+            || species.is_some_and(|report| report.maximum_coefficient != 0.0);
         Ok(trial)
     }
 
     pub(in crate::compressible::spatial::mixture::molecular) fn restore_lagrangian_filter(
         &mut self,
-        filter: LagrangianDynamicSgs,
-        committed_report: Option<DynamicSgsReport>,
+        filter: LagrangianFilter,
+        committed_reports: Option<LagrangianReports>,
     ) {
         let ViscosityClosure::Lagrangian(dynamic) = &mut self.closure else {
             unreachable!("a coupled step retains its original mixture SGS owner");
@@ -221,8 +463,10 @@ impl SubgridTransport {
         debug_assert!(dynamic.filter.is_none());
         debug_assert_eq!(filter.workspace_bytes(), dynamic.filter_bytes);
         dynamic.filter = Some(filter);
-        if let Some(report) = committed_report {
-            dynamic.last_report = Some(report);
+        if let Some((momentum, heat, species)) = committed_reports {
+            dynamic.last_report = Some(momentum);
+            dynamic.last_heat_report = heat;
+            dynamic.last_species_report = species;
         }
     }
 }

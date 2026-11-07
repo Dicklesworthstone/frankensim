@@ -9,8 +9,9 @@
 //! Dynamic stress, heat and species apply their fitted coefficients to the
 //! conservative face strain, with separately averaged density and coefficient.
 //! A zero cell-centered strain cannot erase transport across resolved face shear.
-//! Lagrangian stress optionally holds that coefficient over one complete physical
-//! coupled step, committing its signed pathline history only with accepted flow.
+//! Lagrangian stress, optionally with independent heat/common-species memories,
+//! holds the fitted coefficients over one complete physical coupled step and
+//! commits all signed pathline histories only with accepted flow.
 //! The existing stage-local composition, calorics and face strain remain active.
 //! An optional joint Germano fit supplies a common species diffusivity directly,
 //! independently of stress and heat; it retains this same mass-frame and
@@ -34,8 +35,9 @@ use super::super::sum;
 use super::*;
 use crate::compressible::spatial::molecular::sgs::face_gradient;
 pub use crate::compressible::spatial::molecular::sgs::{
-    ChannelDynamicThermalSubgridConfig, DynamicAveraging, DynamicScalarConfig, DynamicSgsConfig,
-    DynamicSgsReport, DynamicSubgridConfig, DynamicThermalSubgridConfig, EquilibriumWallConfig,
+    ChannelDynamicThermalSubgridConfig, DynamicAveraging, DynamicScalarConfig, DynamicScalarReport,
+    DynamicSgsConfig, DynamicSgsReport, DynamicSubgridConfig, DynamicThermalSubgridConfig,
+    EquilibriumWallConfig,
     LagrangianSgsConfig, LagrangianSubgridConfig, SgsModel, SgsUse, SubgridConfig,
 };
 use fs_gas::multicomponent::dissipation::{MaxwellStefanSolveV1, TransportFaceReport};
@@ -46,7 +48,10 @@ use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
 mod dynamic;
 mod lagrangian;
-pub use lagrangian::MixtureLagrangianSubgridConfig;
+pub use lagrangian::{
+    LagrangianComponentsConfig, LagrangianScalarConfig, MixtureLagrangianSpeciesSubgridConfig,
+    MixtureLagrangianSubgridConfig,
+};
 mod wall;
 pub use dynamic::{
     ChannelDynamicComponentsConfig, DynamicComponentsConfig,
@@ -343,6 +348,7 @@ impl SubgridTransport {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<TransportFaceReport, DissipationError> {
         let dynamic_heat = match &self.closure {
+            ViscosityClosure::Lagrangian(dynamic) => dynamic.face_heat_coefficient(left, right),
             ViscosityClosure::DynamicThermal(dynamic) => {
                 Some(dynamic.face_heat_coefficient(left, right))
             }
@@ -358,6 +364,7 @@ impl SubgridTransport {
             _ => None,
         };
         let dynamic_species = match &self.closure {
+            ViscosityClosure::Lagrangian(dynamic) => dynamic.face_species_coefficient(left, right),
             ViscosityClosure::DynamicSpecies(dynamic) => Some((
                 dynamic.face_species_coefficient(left, right),
                 dynamic.config.maximum_species_diffusivity_m2_s,
@@ -469,11 +476,7 @@ impl SubgridTransport {
                 Some(dynamic.config.turbulent_schmidt),
                 dynamic.config.transport.model.maximum_eddy_to_molecular,
             ),
-            ViscosityClosure::Lagrangian(dynamic) => (
-                Some(dynamic.config.transport.turbulent_prandtl),
-                Some(dynamic.config.turbulent_schmidt),
-                dynamic.config.transport.model.maximum_eddy_to_molecular,
-            ),
+            ViscosityClosure::Lagrangian(dynamic) => dynamic.transport_controls(),
             ViscosityClosure::DynamicThermal(dynamic) => (
                 None,
                 Some(dynamic.config.turbulent_schmidt),
