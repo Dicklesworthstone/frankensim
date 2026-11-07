@@ -18,7 +18,8 @@ use fs_material::state_point::{
     MaterialPropertySelection, SPECIFIC_HEAT_CAPACITY_DIMS, SPECIFIC_HEAT_CAPACITY_PROPERTY as CP,
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
 };
-use fs_qty::{Dims, DynViscosity};
+use fs_qty::{Dims, DynViscosity, QuantitySpec,
+    semantic::{MoistureBasis, QuantityKind, SemanticType, ValueForm}};
 use fs_solid::membrane::{
     MembraneBudget, MembraneDomain, MembranePatch,
     dynamics::{
@@ -39,6 +40,15 @@ fn fixture(
     variable_cp: bool,
     density: &[[f64; 3]],
     revision: u32,
+) -> (MembranePatch, Vec<PlaneStressViscosity>, SheetCaloric) {
+    fixture_at_moisture(variable_cp, density, revision, None)
+}
+
+fn fixture_at_moisture(
+    variable_cp: bool,
+    density: &[[f64; 3]],
+    revision: u32,
+    moisture: Option<f64>,
 ) -> (MembranePatch, Vec<PlaneStressViscosity>, SheetCaloric) {
     let mut properties = vec![
         (AREAL_DENSITY, 6.0, Dims([-2, 1, 0, 0, 0, 0])),
@@ -78,10 +88,30 @@ fn fixture(
             ScalarPropertyRequirement::try_new(key, dims, ScalarAdmissibility::Finite).unwrap(),
         );
     }
+    let moisture_quantity = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::Moisture(MoistureBasis::DryMass), ValueForm::Static,
+    ));
+    let cp_validity = ValidityDomain::unconstrained().with("T", 299.0, 301.0);
+    let cp_validity = if moisture.is_some() {
+        cp_validity.with_quantity("water_content", moisture_quantity, 0.0, 0.2)
+    } else {
+        cp_validity.with("omega", 0.0, 1000.0)
+    };
     claims
         .insert_claim(PropertyClaim {
             key: PropertyKey::new(CP, SPECIFIC_HEAT_CAPACITY_DIMS),
-            value: if variable_cp {
+            value: if moisture.is_some() {
+                PropertyValue::Surface2D {
+                    axes: ["T".into(), "water_content".into()],
+                    axis_dims: [fs_qty::Temperature::DIMS, Dims::NONE],
+                    samples: vec![
+                        ([299.0, 0.0], 0.019), ([300.0, 0.0], 0.020), ([301.0, 0.0], 0.021),
+                        ([299.0, 0.2], 0.038), ([300.0, 0.2], 0.040), ([301.0, 0.2], 0.042),
+                    ],
+                    triangles: vec![[0, 1, 3], [1, 4, 3], [1, 2, 4], [2, 5, 4]],
+                    dims: SPECIFIC_HEAT_CAPACITY_DIMS,
+                }
+            } else if variable_cp {
                 PropertyValue::Curve {
                     abscissa: "T".into(),
                     abscissa_dims: Dims([0, 0, 0, 1, 0, 0]),
@@ -94,14 +124,12 @@ fn fixture(
                     dims: SPECIFIC_HEAT_CAPACITY_DIMS,
                 }
             },
-            interpolation: if variable_cp {
+            interpolation: if variable_cp || moisture.is_some() {
                 InterpolationPolicy::LinearInside
             } else {
                 InterpolationPolicy::ConstantWithinValidity
             },
-            validity: ValidityDomain::unconstrained()
-                .with("T", 299.0, 301.0)
-                .with("omega", 0.0, 1000.0),
+            validity: cp_validity,
             uncertainty: UncertaintyModel::Unstated,
             observations: vec![],
             provenance,
@@ -118,11 +146,14 @@ fn fixture(
         vec![],
     )
     .unwrap();
-    let query = QueryPoint::new()
+    let mut query = QueryPoint::new()
         .with("T", 300.0)
         .unwrap()
         .with("omega", 0.0)
         .unwrap();
+    if let Some(moisture) = moisture {
+        query = query.with_quantity("water_content", moisture_quantity, moisture).unwrap();
+    }
     let source = resolve_material_state_point(
         &card,
         &query,
@@ -419,6 +450,50 @@ fn variable_heat_capacity_uses_original_enthalpy_inversion_and_full_facet_mass()
     );
     assert_eq!(original.motion().time_s(), 0.0);
     assert_eq!(heat.time_s(), 0.0);
+}
+
+#[test]
+fn g1_held_moisture_changes_native_membrane_heat_response_without_changing_mechanics() {
+    let expected = scalar_step(0.2, -0.3, 1.0, 0.04, 0.7);
+    let mut temperatures = Vec::new();
+    let mut card_identity = None;
+    for (moisture, capacity_scale) in [(0.0, 1.0), (0.2, 2.0)] {
+        // Same complete material card, mechanics, geometry, reference mass and
+        // forcing. Only the held source coordinate selects a different Cp(T).
+        let (p, laws, caloric) = fixture_at_moisture(true, &[[6.0; 3]], 0, Some(moisture));
+        let identity = caloric.sheet().material().card_identity();
+        if let Some(original) = card_identity { assert_eq!(identity, original); }
+        card_identity = Some(identity);
+        for sample in caloric.heat_capacity_samples() {
+            assert_eq!(sample.query().axes()["water_content"], moisture);
+            assert_eq!(sample.card_identity(), identity);
+        }
+        let viscosity = MembraneViscosity::new(&p, laws, (0.0, 1000.0), || false).unwrap();
+        let original = motion(&viscosity, &[[0.2, -0.3]]);
+        let heat = thermal(&caloric, &[(30, 3.0, 0.001)], vec![]);
+        let next = advance_candidate(
+            &original, &heat, &(), 0.04, &loads(&[0.7]), &cells(&caloric, &[30]),
+            config(), &CancelGate::new_clock_free(),
+        ).unwrap();
+        near(next.motion().motion().displacement_m()[1][2], expected.z, 2e-12);
+        near(next.motion().motion().velocity_m_s()[1][2], expected.v, 2e-12);
+        near(next.report().material_heat_j, expected.heat, 2e-12);
+        near(next.report().thermal.stored_energy_change_j, expected.heat, 2e-12);
+        near(next.report().heat_handoff_residual_j, 0.0, 2e-12);
+        let delta_h = expected.heat / 3.0;
+        let normalized_h = delta_h / capacity_scale;
+        let delta_t = 2.0 * normalized_h
+            / (0.02 + (0.02_f64.powi(2) + 0.002 * normalized_h).sqrt());
+        let temperature = next.thermal().temperature_k(CellId(30)).unwrap();
+        near(temperature, 300.0 + delta_t, 6e-8);
+        let cell = &next.thermal().cells()[&CellId(30)];
+        near(cell.specific_h_j_kg - heat.cells()[&CellId(30)].specific_h_j_kg,
+            delta_h, 2e-12);
+        assert_eq!(cell.mass_kg, 3.0, "held conditioning does not simulate water uptake");
+        assert_eq!(cell.geometry, heat.cells()[&CellId(30)].geometry);
+        temperatures.push(temperature);
+    }
+    assert!(temperatures[0] > temperatures[1] && temperatures[1] > 300.0);
 }
 
 #[test]

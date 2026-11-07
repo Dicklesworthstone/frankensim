@@ -5,8 +5,9 @@ use crate::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState,
     HeatCapacityKnot, PhaseStateError, SolidLiquidPhase};
 use crate::state_point::{SPECIFIC_HEAT_CAPACITY_PROPERTY as CP,
     SPECIFIC_HEAT_CAPACITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY as K,
-    THERMAL_CONDUCTIVITY_DIMS};
-use fs_matdb::{ClaimId, InterpolationPolicy, MatDbError, PropertyValue};
+    THERMAL_CONDUCTIVITY_DIMS, ResolvedScalarProperty};
+use fs_matdb::{ClaimId, ClaimSelection, MatDbError, PropertyKey, PropertySupportError};
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 
 /// A source query, geometry conversion or caloric-chart refusal.
 #[derive(Debug)]
@@ -15,6 +16,8 @@ pub enum SheetThermalError {
     Sheet(SheetError),
     /// Original query-coordinate admission.
     Query(MatDbError),
+    /// Original continuous source-line refusal, including its witness context.
+    Support(Box<PropertySupportError>),
     /// Original bounded enthalpy-chart construction/evaluation.
     Phase(PhaseStateError),
     /// A missing, ambiguous or unsupported physical representation.
@@ -23,6 +26,7 @@ pub enum SheetThermalError {
 impl From<SheetError> for SheetThermalError {fn from(e:SheetError)->Self{Self::Sheet(e)}}
 impl From<MaterialStatePointError> for SheetThermalError {fn from(e:MaterialStatePointError)->Self{Self::Sheet(e.into())}}
 impl From<MatDbError> for SheetThermalError {fn from(e:MatDbError)->Self{Self::Query(e)}}
+impl From<PropertySupportError> for SheetThermalError {fn from(e:PropertySupportError)->Self{Self::Support(Box::new(e))}}
 impl From<PhaseStateError> for SheetThermalError {fn from(e:PhaseStateError)->Self{Self::Phase(e)}}
 impl core::fmt::Display for SheetThermalError {
     fn fmt(&self,f:&mut core::fmt::Formatter<'_>)->core::fmt::Result {write!(f,"sheet thermal: {self:?}")}
@@ -33,14 +37,13 @@ impl std::error::Error for SheetThermalError {}
 /// change only T. No conditions or replacement material are guessed.
 fn point_at(sheet:&ResolvedSheet,temperature:f64)->Result<QueryPoint,SheetThermalError> {
     if !temperature.is_finite() || temperature<=0.0 {return Err(SheetThermalError::Invalid("positive absolute temperature required"));}
-    let material=sheet.material();let mut point=QueryPoint::new();
-    for (name,value) in material.query_point() {
-        let value=*value;
-        point=if let Some(&quantity)=material.axis_quantities().get(name) {
-            point.with_quantity(name.clone(),quantity,value)?
-        } else {point.with(name.clone(),value)?};
+    let absolute=QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,ValueForm::Static));
+    if sheet.material().axis_quantities().get("T").is_some_and(|&q|
+        q!=absolute && q!=QuantitySpec::dimensional(fs_qty::Temperature::DIMS)) {
+        return Err(SheetThermalError::Invalid("sheet thermal T must retain its absolute-temperature meaning"));
     }
-    Ok(point.with("T",temperature)?)
+    Ok(sheet.material().query().with("T",temperature)?)
 }
 fn sample(sheet:&ResolvedSheet,card:&MaterialCard,claim:ClaimId,key:&'static str,dims:Dims,
     temperature:f64)->Result<ResolvedMaterialStatePoint,SheetThermalError> {
@@ -51,6 +54,15 @@ fn sample(sheet:&ResolvedSheet,card:&MaterialCard,claim:ClaimId,key:&'static str
     let requirement=ScalarPropertyRequirement::try_new(key,dims,ScalarAdmissibility::StrictlyPositive)?;
     Ok(resolve_material_state_point(card,&point,&[requirement],
         MaterialPropertySelection::PinnedByProperty(vec![(key.into(),claim)]))?)
+}
+
+// Existing characterized scalar/T-only records retain their conditioning
+// selectors and applicability. Additional response axes need the common typed
+// held-environment policy; this owner evolves temperature alone.
+fn thermal_source_supported(property:&ResolvedScalarProperty)->bool {
+    (property.source_axes().iter().all(|(axis,_)|axis=="T")
+        && property.is_constant_at_fixed_temperature())
+        || property.has_only_fixed_external_conditions(Some("T"),false)
 }
 
 /// A source-retaining single-phase sensible-heat chart for the original sheet.
@@ -64,9 +76,11 @@ pub struct SheetCaloric {
 }
 impl SheetCaloric {
     /// Integrate the explicitly selected Cp source through the ORIGINAL chart
-    /// constructor. Include all source breakpoints in the selected Kelvin span;
-    /// tabulated-only knots are not permission to interpolate or evolve between
-    /// them. Other conditioning coordinates and typed descriptors remain fixed.
+    /// constructor. The canonical source-line owner retains every crossed curve
+    /// knot and sampled-surface edge in the selected Kelvin span. Source holes,
+    /// source switching and exact-only spans refuse. Other conditioning
+    /// coordinates and typed descriptors remain fixed; new environmental
+    /// response axes require explicit static quantity meanings.
     ///
     /// The apparent density mu/t is a reference geometry conversion for chart
     /// bookkeeping ONLY. Actual thermal cells must use reference mu*area mass.
@@ -82,21 +96,17 @@ impl SheetCaloric {
         if !lo.is_finite() || !hi.is_finite() || lo<=0.0 || hi<=lo {
             return Err(SheetThermalError::Invalid("finite increasing positive Kelvin span required"));
         }
-        let source=card.claims().claim(heat_capacity_claim)
-            .ok_or(SheetThermalError::Invalid("missing selected sheet heat-capacity source"))?;
-        let mut temperatures=vec![lo];
-        match (&source.value,source.interpolation) {
-            (PropertyValue::Scalar {..},InterpolationPolicy::ConstantWithinValidity)=>{},
-            (PropertyValue::Curve {abscissa,abscissa_dims,knots,..},InterpolationPolicy::LinearInside)
-                if abscissa=="T" && *abscissa_dims==Dims([0,0,0,1,0,0]) && knots.len()<=4096=> {
-                temperatures.extend(knots.iter().map(|p|p.0).filter(|&t|lo<t && t<hi));
-            },
-            _=>return Err(SheetThermalError::Invalid("Cp needs an admitted constant or bounded Kelvin-linear law, not exact-only samples or a different axis")),
+        let lower=sample(&sheet,card,heat_capacity_claim,CP,SPECIFIC_HEAT_CAPACITY_DIMS,lo)?;
+        if !thermal_source_supported(lower.property(CP)
+            .ok_or(SheetThermalError::Invalid("missing resolved Cp"))?) {
+            return Err(SheetThermalError::Invalid("Cp needs a temperature path at supported held conditions, not a frozen foreign-axis law"));
         }
-        temperatures.push(hi);
+        let line=card.claims().query_line_typed(
+            &PropertyKey::new(CP,SPECIFIC_HEAT_CAPACITY_DIMS),"T",
+            &lower.query(),&point_at(&sheet,hi)?,ClaimSelection::Pinned(heat_capacity_claim))?;
         let density=sheet.areal_density_kg_m2()/sheet.thickness_m();
-        let mut samples=Vec::with_capacity(temperatures.len());let mut knots=Vec::with_capacity(temperatures.len());
-        for temperature in temperatures {
+        let mut samples=Vec::with_capacity(line.knots.len());let mut knots=Vec::with_capacity(line.knots.len());
+        for (temperature,_) in line.knots {
             let material=sample(&sheet,card,heat_capacity_claim,CP,SPECIFIC_HEAT_CAPACITY_DIMS,temperature)?;
             let cp=material.property(CP).ok_or(SheetThermalError::Invalid("missing resolved Cp"))?.value_si();
             knots.push(HeatCapacityKnot {temperature_k:temperature,specific_heat_capacity_j_kg_k:cp,
@@ -126,12 +136,13 @@ impl SheetCaloric {
 /// Retain the returned common source bundle with the consumer's numeric result.
 /// Through-thickness textile conductivity is NOT automatically an isotropic
 /// three-dimensional conductivity tensor; direction/geometry remain explicit.
+/// Typed pressure, moisture and composition remain at the original held state.
 pub fn conductivity_at_temperature(sheet:&ResolvedSheet,card:&MaterialCard,claim:ClaimId,t:f64)
     ->Result<ResolvedMaterialStatePoint,SheetThermalError> {
     let resolved=sample(sheet,card,claim,K,THERMAL_CONDUCTIVITY_DIMS,t)?;
-    if !resolved.property(K).ok_or(SheetThermalError::Invalid("missing conductivity"))?
-        .is_constant_at_fixed_temperature() {
-        return Err(SheetThermalError::Invalid("conductivity must be constant or temperature-dependent, not a frozen foreign-axis law"));
+    if !thermal_source_supported(resolved.property(K)
+        .ok_or(SheetThermalError::Invalid("missing conductivity"))?) {
+        return Err(SheetThermalError::Invalid("conductivity needs supported held conditions, not a frozen foreign-axis law"));
     }
     Ok(resolved)
 }
