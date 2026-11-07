@@ -121,6 +121,10 @@ impl CapacitorFedBuckBoost {
     pub const fn parameters(&self) -> BuckBoostParameters {
         self.converter.parameters()
     }
+    /// Authored bridge fractions; observing them changes no charge or flux.
+    pub const fn modulation(&self) -> super::BridgeModulation {
+        self.converter.modulation()
+    }
     pub const fn terminals(&self) -> CapacitorTerminals {
         self.terminals
     }

@@ -90,7 +90,7 @@ impl<'t> VoltageDrivenConverterEnthalpyCandidate<'t> {
     }
 }
 
-fn all_resistances(
+pub(super) fn all_resistances(
     p: BuckBoostParameters,
     terminal: [f64; 2],
 ) -> [f64; VOLTAGE_DRIVEN_HEAT_CHANNELS] {
@@ -105,7 +105,7 @@ fn all_resistances(
         terminal[1],
     ]
 }
-fn resolved_parameters(
+pub(super) fn resolved_parameters(
     mut parameters: BuckBoostParameters,
     channels: &[ConverterChannelMaterial; VOLTAGE_DRIVEN_HEAT_CHANNELS],
 ) -> Result<(BuckBoostParameters, [f64; 2]), Error> {
@@ -123,7 +123,7 @@ fn resolved_parameters(
     }
     Ok((parameters, terminal))
 }
-fn sum(values: impl IntoIterator<Item = f64>) -> Result<Dd, Error> {
+pub(super) fn sum(values: impl IntoIterator<Item = f64>) -> Result<Dd, Error> {
     let mut total = Dd::ZERO;
     for value in values {
         total = total + Dd::from_f64(finite(value)?);
@@ -212,7 +212,7 @@ fn physical_account(
 }
 
 impl VoltageDrivenConverterThermalNetwork<'_> {
-    fn network(&self) -> MaterialNetwork<'_> {
+    pub(super) fn network(&self) -> MaterialNetwork<'_> {
         MaterialNetwork {
             cells: self.cells,
             resistors: &[],

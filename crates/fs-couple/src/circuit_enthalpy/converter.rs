@@ -2,6 +2,8 @@
 //! material/enthalpy endpoint. Electrical integration stays with fs-phs;
 //! source evaluation and finite heat stay with their original owners.
 
+/// Finite capacitor supplies, their series losses and all original thermal bodies.
+pub mod capacitor;
 /// Finite voltage sources/loads and all seven material heat paths.
 pub mod voltage;
 
