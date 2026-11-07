@@ -30,6 +30,37 @@ morphology is claimed. Focused tests compare independent two-body and ideal-gas
 balances, datum changes, canonical shared-gas exchange, reflection, inventory
 limits and cancellation.
 
+### Bare-film initialization with finite thermal contact
+
+`sublimation::gas::chamber::coating::resistance::advance_resistive_chamber_with_births`
+explicitly initializes a thermally resistive film from a zero volatile inventory.
+The authored zero-mass deposit enthalpy must invert to the original substrate
+temperature within floating-point roundoff. It is a caloric reference, not a
+mass or energy seed. The original bare-interface snapshot emits no nonexistent
+deposit and accepts incoming molecules under the same shared gas inventory
+ceiling. Their energy enters the actual positive final deposit mass before the
+original finite-conductance kernel shares heat with the substrate. Gas-film
+mass resistance and reflected-carrier heat retain their original owners.
+
+Every bare row must receive positive representable mass in that interval.
+Absent vapor, zero exposure, or sealed mass transfer refuses the birth; heating
+a still-bare support requires its separate thermal owner. Existing positive-film
+entry points retain their positive-inventory admission and extinction refusal.
+The returned state enters those existing APIs without a mass floor or special
+born-film representation.
+
+This is a first-order frozen bare-exposure interval selected by the caller. It
+does not locate a birth/nucleation event or model re-emission during that first
+interval. Equal-half-step adaptivity from zero is not claimed: the newborn's
+gross withdrawal fraction need not decrease when its age and trial step are
+halved together. Complete extinction, nucleation barriers and general lifecycle
+transitions remain separate models.
+
+Three G0/G1/G3 integration regressions cover independent molecular, two-body and
+ideal-gas balances, independent caloric datums, positive-film re-entry, reflected
+heat, finite gas films, inventory refusal and transactional cancellation.
+
+
 ## Source-bound finite membrane entropy and thermal stress
 
 `HyperelasticMembrane::thermoelastic_state` prepares the original expansion

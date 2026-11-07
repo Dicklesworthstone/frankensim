@@ -7,10 +7,12 @@
 //! conservation transaction. Neither an effective heat capacity nor a second
 //! latent heater is supplied.
 //!
-//! Both condensed inventories must be positive. Bare nucleation, complete film
-//! extinction, spatial temperature profiles and thickness-dependent conductance
-//! require an explicit physical transition/model. This first-order frozen-rate
-//! interval does not infer them. Refine time for coupled transport accuracy.
+//! The ordinary entry points require positive condensed inventories. The
+//! explicit bare-birth entry point can form a positive film from incoming
+//! molecules at the original support temperature, without a mass seed. Complete
+//! extinction, localized birth time, spatial temperature profiles and
+//! thickness-dependent conductance require separate physical models. These are
+//! first-order frozen-rate intervals, not a complete coating lifecycle.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -29,13 +31,14 @@ use super::{
     snapshot_surface_at_temperature_with_kinetics, validate_storage, validate_surface,
 };
 
-/// One existing coating with two independent original caloric coordinates.
+/// One coating with two independent original caloric coordinates.
 ///
 /// The gas contacts only the deposit. `conductance_w_k` is the complete frozen
 /// support/deposit thermal conductance, not a per-area coefficient. Zero means
 /// thermal insulation. Both inverse charts must be continuous, nondecreasing
 /// and retain their original material domains. The fixed binding offset aligns
 /// only deposit enthalpy with its gas species; support enthalpy is independent.
+/// A zero-mass deposit is admitted only by the explicit bare-birth entry point.
 #[derive(Clone, Copy)]
 pub struct GasResistiveSurface<'a> {
     pub id: u64,
@@ -134,11 +137,12 @@ fn snapshot(
     film: Option<f64>,
     duration_s: f64,
     controls: GasSupportedChamberSolve,
+    admit_births: bool,
 ) -> Result<SurfaceSnapshot, GasSurfaceError> {
     let state = surface.state;
     if !positive(state.substrate_mass_kg)
         || !state.substrate_specific_enthalpy_j_kg.is_finite()
-        || !positive(state.deposit.mass_kg)
+        || !(positive(state.deposit.mass_kg) || (admit_births && state.deposit.mass_kg == 0.0))
         || !nonnegative(surface.conductance_w_k)
     {
         return Err(invalid(
@@ -151,13 +155,26 @@ fn snapshot(
     if !positive(support_t) {
         return Err(invalid("original support temperature is invalid"));
     }
+    let temperature = if state.deposit.mass_kg == 0.0 {
+        // This h is a caloric reference, not a mass/energy seed. The bare
+        // substrate supplies the initial molecular boundary temperature.
+        let tolerance = 16.0 * f64::EPSILON * support_t.abs().max(deposit_t.abs());
+        if !positive(deposit_t) || (support_t - deposit_t).abs() > tolerance {
+            return Err(invalid(
+                "bare deposit caloric reference must match the original support temperature",
+            ));
+        }
+        support_t
+    } else {
+        deposit_t
+    };
     let mut snapshot = snapshot_surface_at_temperature_with_kinetics(
         surface.law,
         surface.binding,
         state.deposit,
         gas,
         catalog,
-        deposit_t,
+        temperature,
         SurfaceKinetics {
             accommodation_coefficient: surface.binding.accommodation_coefficient,
             mass_transfer_coefficient_m_s: film,
@@ -189,6 +206,11 @@ fn prepare(
     let energy = molecular_stream_energy(snapshot, reflected_heat_into_gas_j)?;
     let dm = snapshot.transferred_mass_kg;
     let next_mass = snapshot.solid.mass_kg - dm;
+    if snapshot.solid.mass_kg == 0.0 && !positive(next_mass) {
+        return Err(invalid(
+            "bare resistive birth requires positive representable incoming deposit mass",
+        ));
+    }
     let mass_residual = (next_mass - snapshot.solid.mass_kg) + dm;
     if !positive(next_mass)
         || (dm != 0.0 && next_mass == snapshot.solid.mass_kg)
@@ -324,6 +346,7 @@ pub fn advance_resistive_chamber<'catalog>(
         catalog,
         duration_s,
         controls,
+        false,
         cancelled,
     )
 }
@@ -353,6 +376,54 @@ pub fn advance_resistive_chamber_with_films<'catalog>(
         catalog,
         duration_s,
         controls,
+        false,
+        cancelled,
+    )
+}
+
+/// Form a thermally resistive film on explicitly admitted bare substrates.
+///
+/// A zero-mass row must carry the original deposit enthalpy at its substrate
+/// temperature: its inverse chart is checked against that temperature. This
+/// caloric reference stores no energy. The original bare-interface molecular
+/// snapshot admits incoming molecules and emits no nonexistent deposit. Their
+/// full energy heats the ACTUAL positive final film mass, then the original
+/// finite-conductance solver shares heat with the support. Reflected molecular
+/// heat participates in that same newborn-film balance exactly once.
+///
+/// Every bare row must receive a positive representable deposit in this
+/// interval. Zero duration, zero area, sealed films or absent vapor therefore
+/// refuse a bare birth; heating a still-bare substrate requires its own owner.
+/// Positive-film rows retain ordinary behavior. Optional film coefficients and
+/// every shared gas/inventory budget have the same meaning as above.
+///
+/// This explicitly freezes bare exposure over one caller-chosen interval. It
+/// does NOT locate a nucleation/birth time or account for re-emission during
+/// that first interval. The accepted positive film can then enter ordinary
+/// resistive evolution. Do not use this operation as a generic equal-half-step
+/// adaptive birth probe: a newborn's gross withdrawal fraction need not shrink
+/// when both its age and the next trial interval are halved. No artificial mass
+/// seed, evaporation of support, complete extinction or barrier law is added.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_resistive_chamber_with_births<'catalog>(
+    surfaces: &[GasResistiveSurface<'_>],
+    accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
+    films: Option<&BTreeMap<u64, f64>>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    duration_s: f64,
+    controls: GasSupportedChamberSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<GasResistiveChamberCandidate<'catalog>, GasSurfaceError> {
+    advance(
+        surfaces,
+        accommodation,
+        films,
+        gas,
+        catalog,
+        duration_s,
+        controls,
+        true,
         cancelled,
     )
 }
@@ -366,6 +437,7 @@ fn advance<'catalog>(
     catalog: &'catalog ThermochemicalGasModel,
     duration_s: f64,
     controls: GasSupportedChamberSolve,
+    admit_births: bool,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<GasResistiveChamberCandidate<'catalog>, GasSurfaceError> {
     poll(&mut cancelled)?;
@@ -409,6 +481,7 @@ fn advance<'catalog>(
                 films.and_then(|coefficients| coefficients.get(&surface.id).copied()),
                 duration_s,
                 controls,
+                admit_births,
             )
         },
         |surface, snapshot, reflected, cancelled| {
@@ -461,3 +534,7 @@ fn advance<'catalog>(
 #[cfg(test)]
 #[path = "resistance/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "resistance/birth_tests.rs"]
+mod birth_tests;
