@@ -256,6 +256,9 @@ impl AcousticMedium {
 /// `Lambda = V / (e_l e_m e_n)` with `e_0 = 1` and `e_k = 2` for
 /// `k >= 1`. Modes are returned ascending in `omega` (ties broken by
 /// `(l, m, n)` lexicographic order), truncated to `count`.
+/// Selection takes `O(count log count)` work and `O(count)` storage,
+/// independently of the cavity's aspect ratio. No enclosing index cube
+/// or frequency cutoff approximation is used.
 ///
 /// # Errors
 /// [`VibroError`] on non-finite/non-positive geometry, zero count, or
@@ -297,46 +300,7 @@ pub fn rectangular_cavity_modes(
         });
     }
     let pi = core::f64::consts::PI;
-    // Enumerate a generous index box, sort by omega, truncate.
-    // Enumeration box with an explicit SUFFICIENCY proof instead of an
-    // isotropic-count heuristic (which silently dropped the lowest
-    // modes of elongated cavities — executed counterexample in the
-    // tests): any mode OUTSIDE the `0..=max_index` box has, along the
-    // violating axis alone, `omega >= c0 pi (max_index + 1) / L_axis`.
-    // The box is therefore complete for the lowest `count` modes once
-    // that single-axis exclusion bound exceeds the count-th smallest
-    // frequency found INSIDE the box, for every axis (the binding axis
-    // is the longest one); double the box and retry otherwise.
-    let mut max_index = 2usize;
-    let mut all: Vec<(f64, usize, usize, usize)>;
-    loop {
-        all = Vec::with_capacity((max_index + 1).pow(3));
-        for l in 0..=max_index {
-            for m in 0..=max_index {
-                for n in 0..=max_index {
-                    let k2 =
-                        (l as f64 / lx).powi(2) + (m as f64 / ly).powi(2) + (n as f64 / lz).powi(2);
-                    all.push((c0 * pi * k2.sqrt(), l, m, n));
-                }
-            }
-        }
-        all.sort_by(|p, q| {
-            p.0.partial_cmp(&q.0)
-                .expect("finite frequencies")
-                .then(p.1.cmp(&q.1))
-                .then(p.2.cmp(&q.2))
-                .then(p.3.cmp(&q.3))
-        });
-        if all.len() >= count {
-            let omega_cut = all[count - 1].0;
-            let excluded_floor = c0 * pi * (max_index + 1) as f64 / lx.max(ly).max(lz);
-            if excluded_floor > omega_cut {
-                break;
-            }
-        }
-        max_index *= 2;
-    }
-    all.truncate(count);
+    let all = rectangular_mode_indices([lx, ly, lz], c0, count)?;
     let volume = lx * ly * lz;
     let eps = |k: usize| if k == 0 { 1.0 } else { 2.0 };
     let mut omegas = Vec::with_capacity(count);
@@ -360,6 +324,92 @@ pub fn rectangular_cavity_modes(
         rho0,
         c0,
     })
+}
+
+/// A min-heap entry, ordered by the same frequency and lexicographic rule as
+/// the public basis. Unrepresentable frontier frequencies are kept as infinity;
+/// they cannot be returned as admitted natural frequencies.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RectangularMode {
+    omega: f64,
+    indices: [usize; 3],
+}
+
+impl Eq for RectangularMode {}
+
+impl Ord for RectangularMode {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        other
+            .omega
+            .total_cmp(&self.omega)
+            .then_with(|| other.indices.cmp(&self.indices))
+    }
+}
+
+impl PartialOrd for RectangularMode {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn rectangular_mode_indices(
+    lengths: [f64; 3],
+    sound_speed: f64,
+    count: usize,
+) -> Result<Vec<(f64, usize, usize, usize)>, VibroError> {
+    let allocation_error = || VibroError::BadParameter {
+        what: "requested cavity mode storage is not representable or available",
+    };
+    let mut selected = Vec::new();
+    selected
+        .try_reserve_exact(count)
+        .map_err(|_| allocation_error())?;
+    let mut frontier = std::collections::BinaryHeap::new();
+    frontier
+        .try_reserve(count.checked_mul(2).ok_or_else(allocation_error)?)
+        .map_err(|_| allocation_error())?;
+    frontier.push(RectangularMode {
+        omega: 0.0,
+        indices: [0; 3],
+    });
+    while selected.len() < count {
+        let RectangularMode {
+            omega,
+            indices: [l, m, n],
+        } = frontier
+            .pop()
+            .expect("each selected mode has an axial successor");
+        if !omega.is_finite() {
+            return Err(VibroError::BadParameter {
+                what: "requested cavity natural frequency is unrepresentable",
+            });
+        }
+        selected.push((omega, l, m, n));
+        if selected.len() == count {
+            break;
+        }
+        // Every lattice point has ONE parent: decrement l if l > 0,
+        // otherwise m if m > 0, otherwise n. Frequencies and tie-breaking
+        // indices never decrease along an edge. Thus the heap minimum is
+        // the next global mode, including degeneracies; no visited set or
+        // aspect-ratio-dependent bounding cube is needed.
+        for axis in 0..3 {
+            if (axis == 1 && l != 0) || (axis == 2 && (l != 0 || m != 0)) {
+                continue;
+            }
+            let mut indices = [l, m, n];
+            indices[axis] += 1;
+            let k2 = (indices[0] as f64 / lengths[0]).powi(2)
+                + (indices[1] as f64 / lengths[1]).powi(2)
+                + (indices[2] as f64 / lengths[2]).powi(2);
+            let omega = sound_speed * core::f64::consts::PI * k2.sqrt();
+            frontier.push(RectangularMode {
+                omega: if omega.is_finite() { omega } else { f64::INFINITY },
+                indices,
+            });
+        }
+    }
+    Ok(selected)
 }
 
 fn det_cos(x: f64) -> f64 {
@@ -2011,7 +2061,7 @@ mod review_regressions {
         // old isotropic index-box heuristic returned (0,0,1)/(0,1,0)
         // modes at ~10776 rad/s as the 5th/6th modes of a 1.0 x 0.1 x
         // 0.1 duct, silently dropping the true (4,0,0) and (5,0,0)
-        // axial modes. The sufficiency-checked box must return the
+        // axial modes. Exact mode selection must return the
         // pure axial ladder omega_l = l pi c0 / lx.
         let air = AcousticMedium::air();
         let cav = rectangular_cavity_modes(1.0, 0.1, 0.1, air, 0.0, 6, &[[0.25, 0.05]])
@@ -2027,6 +2077,61 @@ mod review_regressions {
         println!(
             "{{\"suite\":\"fs-couple-vibro\",\"case\":\"elongated-cavity-regression\",\"verdict\":\"pass\"}}"
         );
+    }
+
+    #[test]
+    fn g2_rectangular_mode_frontier_matches_exhaustive_spectrum_and_multiplicities() {
+        // Independent finite-box oracle: an index >= count cannot precede
+        // the count lower axial indices. Include degenerate cubes and long
+        // cavities along different axes to exercise the unique-parent tree.
+        let count = 40;
+        let c0 = 343.0;
+        for lengths in [
+            [1.0, 1.0, 1.0],
+            [1.0, 0.7, 0.4],
+            [20.0, 1.0, 0.5],
+            [0.5, 20.0, 1.0],
+            [1.0, 0.5, 20.0],
+        ] {
+            let mut exact = Vec::new();
+            for l in 0..count {
+                for m in 0..count {
+                    for n in 0..count {
+                        let k2 = (l as f64 / lengths[0]).powi(2)
+                            + (m as f64 / lengths[1]).powi(2)
+                            + (n as f64 / lengths[2]).powi(2);
+                        exact.push((c0 * core::f64::consts::PI * k2.sqrt(), l, m, n));
+                    }
+                }
+            }
+            exact.sort_by(|a, b| {
+                a.0.total_cmp(&b.0)
+                    .then(a.1.cmp(&b.1))
+                    .then(a.2.cmp(&b.2))
+                    .then(a.3.cmp(&b.3))
+            });
+            exact.truncate(count);
+            assert_eq!(rectangular_mode_indices(lengths, c0, count).unwrap(), exact);
+        }
+    }
+
+    #[test]
+    fn g2_thousands_of_slender_cavity_modes_retain_physical_norms_and_shapes() {
+        // The former enclosing-cube search would require 4097^3 candidates
+        // (> 2 TiB of tuple storage). These modes all lie below transverse
+        // cutoff, so the exact axial spectrum and normalization are known.
+        let air = AcousticMedium::air();
+        let length = 10_000.0;
+        let points = [[0.37 * length, 0.05]];
+        let cavity = rectangular_cavity_modes(length, 0.1, 0.1, air, 0.0, 4096, &points)
+            .expect("a slender cavity needs no enclosing index cube");
+        for (l, &omega) in cavity.omegas.iter().enumerate() {
+            let expected = air.c0 * core::f64::consts::PI * l as f64 / length;
+            assert!((omega - expected).abs() <= 2e-15 * expected.max(1.0));
+            assert_eq!(cavity.lambdas[l], if l == 0 { 100.0 } else { 50.0 });
+            let shape = det_cos(l as f64 * core::f64::consts::PI * points[0][0] / length);
+            assert_eq!(cavity.interface[l], [shape]);
+        }
     }
 
     #[test]
