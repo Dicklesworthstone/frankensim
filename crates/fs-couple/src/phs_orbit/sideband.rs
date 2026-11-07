@@ -573,7 +573,45 @@ pub(super) fn observe_with_budget(
     budget: &mut ObservationBudget,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Vec<C64>, Vec<PhsPortSidebandCheck>, usize)> {
-    let (n, m) = (problem.system.state_dim(), problem.system.port_dim());
+    observe_mapped_with_budget(
+        problem,
+        orbit,
+        response,
+        c,
+        envelope_tolerances,
+        problem.system.port_dim(),
+        0,
+        &|effort, output| problem.system.output_from_effort_into(effort, output).is_ok(),
+        budget,
+        cancelled,
+    )
+}
+
+// One original Hessian evaluation can observe several work-conjugate maps.
+// Internal callers must admit the full output count, retained payload and
+// callback arithmetic before entering this shared refinement owner.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn observe_mapped_with_budget(
+    problem: &PhsOrbitProblem<'_>,
+    orbit: &HbOrbit,
+    response: &[C64],
+    c: &PhsPortSidebandControls,
+    envelope_tolerances: &[f64],
+    output_count: usize,
+    extra_work_per_sample: u128,
+    map_effort: &impl Fn(&[f64], &mut [f64]) -> bool,
+    budget: &mut ObservationBudget,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Vec<C64>, Vec<PhsPortSidebandCheck>, usize)> {
+    if output_count == 0
+        || envelope_tolerances.len() != output_count
+        || envelope_tolerances.iter().any(|x| !x.is_finite() || *x <= 0.0)
+    {
+        return Err(PhsPortSidebandError::Invalid(
+            "complete positive mapped-output tolerances required",
+        ));
+    }
+    let (n, m) = (problem.system.state_dim(), output_count);
     let starting_actions = budget.actions;
     let mut previous: Option<Vec<C64>> = None;
     let mut trace = Vec::new();
@@ -594,15 +632,22 @@ pub(super) fn observe_with_budget(
                 "physical output Hessian-action cap exhausted",
             ));
         }
-        budget.work += observation_work(n, m, samples);
+        budget.work = extra_work_per_sample
+            .checked_mul(samples as u128)
+            .and_then(|extra| observation_work(n, m, samples).checked_add(extra))
+            .and_then(|work| budget.work.checked_add(work))
+            .ok_or(PhsPortSidebandError::Budget(
+                "mapped physical output arithmetic count overflow",
+            ))?;
         if budget.work > c.max_observation_work as u128 {
             return Err(PhsPortSidebandError::Budget(
                 "physical output arithmetic cap exhausted",
             ));
         }
         let shift = core::f64::consts::TAU * (trace.len() % 3) as f64 / (3.0 * samples as f64);
-        let (coefficients, omitted) =
-            project(problem, orbit, response, c, samples, shift, cancelled)?;
+        let (coefficients, omitted) = project(
+            problem, orbit, response, c, m, map_effort, samples, shift, cancelled,
+        )?;
         let change = previous.as_ref().map(|old| {
             let mut norms = vec![0.0; m];
             for (i, (&a, &b)) in coefficients.iter().zip(old).enumerate() {
@@ -641,15 +686,13 @@ fn project(
     orbit: &HbOrbit,
     response: &[C64],
     c: &PhsPortSidebandControls,
+    output_count: usize,
+    map_effort: &impl Fn(&[f64], &mut [f64]) -> bool,
     samples: usize,
     shift: f64,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Vec<C64>, Vec<f64>)> {
-    let (n, m, h) = (
-        problem.system.state_dim(),
-        problem.system.port_dim(),
-        c.sideband.harmonics,
-    );
+    let (n, m, h) = (problem.system.state_dim(), output_count, c.sideband.harmonics);
     let fft = Fft::new(samples);
     let mut data = vec![FftComplex::default(); samples];
     let mut scratch = data.clone();
@@ -705,13 +748,12 @@ fn project(
             for (v, z) in direction.iter_mut().zip(&envelopes[j * n..(j + 1) * n]) {
                 *v = if imaginary { z.im } else { z.re };
             }
+            flows.fill(f64::NAN);
             if !problem
                 .tangent
                 .apply_hessian(&states[j * n..(j + 1) * n], &direction, &mut effort)
-                || problem
-                    .system
-                    .output_from_effort_into(&effort, &mut flows)
-                    .is_err()
+                || !map_effort(&effort, &mut flows)
+                || flows.iter().any(|x| !x.is_finite())
             {
                 return Err(PhsPortSidebandError::SourceRefused);
             }

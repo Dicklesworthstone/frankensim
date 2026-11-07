@@ -32,6 +32,7 @@ use fs_vfit::mimo::{
 };
 
 mod operator;
+pub mod sideband;
 use operator::{Boundary, dot};
 
 /// Separate adapter limits. Shared HB/shooting workspace and work caps also apply.
