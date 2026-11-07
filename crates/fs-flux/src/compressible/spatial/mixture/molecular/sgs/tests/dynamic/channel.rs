@@ -137,6 +137,7 @@ fn stage<L: TransportLaw>(op: &mut MolecularTransport3d<L>, flow: &MixtureEuler3
         flow.states(),
         &mut op.work.primitive,
         &mut op.work.gradient,
+        &mut op.work.viscosity,
         &mut op.work.flux,
         op.sgs.as_mut(),
         DissipationControl::default(),
@@ -335,8 +336,8 @@ fn g1_channel_species_and_referenced_enthalpy_remain_active_at_zero_eddy_viscosi
                 right,
                 axis,
             );
-            let heat = -heat_diffusion * cp * (pr.temperature - pl.temperature)
-                / flow.grid.spacing[axis];
+            let heat =
+                -heat_diffusion * cp * (pr.temperature - pl.temperature) / flow.grid.spacing[axis];
             close(delta[6], heat + (h[0] - h[1]) * j, 4e-14);
             nonzero += usize::from(j.abs() > 1e-10);
         }
@@ -454,9 +455,8 @@ fn g0_channel_zero_fit_clears_all_transport_and_keeps_molecular_trajectory() {
         unreachable!()
     };
     assert!(
-        (0..actual.cell_count())
-            .all(|cell| model.face_heat_coefficient(cell, cell).0 == 0.0
-                && model.face_species_coefficient(cell, cell) == 0.0)
+        (0..actual.cell_count()).all(|cell| model.face_heat_coefficient(cell, cell).0 == 0.0
+            && model.face_species_coefficient(cell, cell) == 0.0)
     );
     let controls = DissipationControl::default();
     let report = active

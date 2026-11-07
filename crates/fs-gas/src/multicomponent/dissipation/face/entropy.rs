@@ -285,7 +285,9 @@ pub(in crate::multicomponent::dissipation) fn interior<L: TransportLaw>(
     out[..n].copy_from_slice(evaluated.mass_fluxes());
     let mut report = TransportFaceReport {
         diffusivity_m2_s: 0.0,
+        nonmechanical_diffusivity_m2_s: 0.0,
         dynamic_viscosity_pa_s: coefficients.dynamic_viscosity.value(),
+        bulk_viscosity_pa_s: coefficients.bulk_viscosity.value(),
         thermal_conductivity_w_m_k: coefficients.thermal_conductivity.value(),
         maximum_gradient_residual_per_m: evaluated.maximum_gradient_residual_per_m(),
         mass_frame_residual_kg_m2_s: evaluated.mass_frame_residual_kg_m2_s(),
@@ -293,6 +295,7 @@ pub(in crate::multicomponent::dissipation) fn interior<L: TransportLaw>(
         // divided source enthalpies, which need not share one effective T.
         enthalpy_temperature_k: t,
         reduced_heat_flux_w_m2: 0.0,
+        nonmechanical_energy_flux_w_m2: 0.0,
     };
     let longitudinal = coefficients.longitudinal_viscosity()?;
     let stress = longitudinal * grad_u;
@@ -310,6 +313,7 @@ pub(in crate::multicomponent::dissipation) fn interior<L: TransportLaw>(
         }
     }
     report.reduced_heat_flux_w_m2 = checked(heat)?;
+    report.nonmechanical_energy_flux_w_m2 = checked(energy + heat)?;
     let work_velocity = 0.5 * pl.velocity + 0.5 * pr.velocity;
     out[n + 1] = checked(energy + heat - Dd::from_f64(work_velocity) * Dd::from_f64(stress))?;
     if !out.iter().all(|v| v.is_finite()) {
@@ -330,10 +334,14 @@ pub(in crate::multicomponent::dissipation) fn interior<L: TransportLaw>(
     report.diffusivity_m2_s = molecular_scale
         .max(longitudinal / pl.density.min(pr.density))
         .max(thermal_scale);
+    report.nonmechanical_diffusivity_m2_s = molecular_scale.max(thermal_scale);
     if thermal_force_scale > 0.0 {
         let storage_scale = (maximum_heat / pl.temperature.min(pr.temperature))
             * (pl.density.max(pr.density) / left.cv_density.min(right.cv_density));
         report.diffusivity_m2_s = report.diffusivity_m2_s.max(
+            molecular_scale * (1.0 + thermal_force_scale) * (1.0 + storage_scale) + thermal_scale,
+        );
+        report.nonmechanical_diffusivity_m2_s = report.nonmechanical_diffusivity_m2_s.max(
             molecular_scale * (1.0 + thermal_force_scale) * (1.0 + storage_scale) + thermal_scale,
         );
     }
@@ -382,8 +390,8 @@ pub(in crate::multicomponent::dissipation) fn reservoir<L: TransportLaw>(
         ));
     }
     interior(
-        gas, law, diffusion, workspace, left, right, distance, distance,
-        mass_ratio, binary, out, controls, cancelled,
+        gas, law, diffusion, workspace, left, right, distance, distance, mass_ratio, binary, out,
+        controls, cancelled,
     )
 }
 

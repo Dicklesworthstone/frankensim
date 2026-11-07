@@ -15,6 +15,7 @@ use super::{
 };
 use crate::compressible::AxisBoundaries;
 use crate::compressible::mixture::molecular::interval::{self, Action, Stage, parabolic};
+use crate::compressible::stress;
 pub use fs_gas::multicomponent::dissipation::{
     DissipationControl, DissipationError, SpatialTransport, StabilizedDissipationControl,
     TransportLaw, WallThermalCondition,
@@ -105,6 +106,7 @@ struct Workspace {
     primitive: Vec<Primitive>,
     /// Row-major derivative axis, then velocity component: du_i/dx_j.
     gradient: Vec<[[f64; 3]; 3]>,
+    viscosity: Vec<stress::Viscosity>,
     flux: [Vec<f64>; 3],
     boundary_step: Vec<f64>,
     boundary_trial: Vec<f64>,
@@ -127,6 +129,11 @@ struct Workspace {
 /// caller explicitly selects [`PressureOutletPolicy::ZeroDiffusiveFlux`]. All
 /// successful field stages reuse flat buffers; no independent reservoir
 /// inventory is introduced.
+/// Compatible cell-weighted molecular stress applies on periodic,
+/// zero-diffusive-outlet and free-slip domains. Any bath or prescribed
+/// no-slip/Navier wall retains the original full mechanical discretization.
+/// Its sixteen-byte/cell cache is included in the combined workspace budget.
+/// SGS remains a separate authored face model without a new energy guarantee.
 pub struct MolecularTransport3d<L: TransportLaw> {
     source: SpatialTransport<L>,
     grid: CartesianGrid,
@@ -170,11 +177,11 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 .checked_mul(width)?;
             scalars
                 .checked_mul(size_of::<f64>())?
-                .checked_add(
-                    flow.grid
-                        .len()
-                        .checked_mul(size_of::<Primitive>() + size_of::<[[f64; 3]; 3]>())?,
-                )?
+                .checked_add(flow.grid.len().checked_mul(
+                    size_of::<Primitive>()
+                        + size_of::<[[f64; 3]; 3]>()
+                        + size_of::<stress::Viscosity>(),
+                )?)?
                 .checked_add(source.workspace_bytes())?
                 .checked_add(flow.workspace_bytes())
         };
@@ -252,6 +259,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 candidate: allocated(count, 0.0)?,
                 primitive: allocated(grid.len(), Primitive::default())?,
                 gradient: allocated(grid.len(), [[0.0; 3]; 3])?,
+                viscosity: allocated(grid.len(), stress::Viscosity::default())?,
                 flux: [
                     allocated(grid.face_len(0) * width, 0.0)?,
                     allocated(grid.face_len(1) * width, 0.0)?,
@@ -273,6 +281,13 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     /// Declared molecular closure on this owner's Euler pressure outlets.
     pub const fn pressure_outlet_policy(&self) -> PressureOutletPolicy {
         self.pressure_outlets
+    }
+
+    /// Whether the complete domain admits the compatible molecular stress
+    /// identity. Prescribed wall/bath work and any modeled SGS contribution
+    /// retain their original qualifications.
+    pub fn uses_compatible_molecular_stress(&self) -> bool {
+        compatible_stress_domain(self.boundaries, &self.walls)
     }
     /// Configure one physical reflecting side. Periodic axes have no wall.
     /// Normal wall motion is refused until conservative moving geometry exists.
@@ -341,6 +356,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 * size_of::<f64>()
             + self.work.primitive.capacity() * size_of::<Primitive>()
             + self.work.gradient.capacity() * size_of::<[[f64; 3]; 3]>()
+            + self.work.viscosity.capacity() * size_of::<stress::Viscosity>()
             + self
                 .inertia
                 .map_or(0, |_| WallInertiaControl3d::solver_workspace_bytes())
@@ -576,6 +592,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                                 &self.work.current,
                                 &mut self.work.primitive,
                                 &mut self.work.gradient,
+                                &mut self.work.viscosity,
                                 &mut self.work.flux,
                                 #[cfg(feature = "experimental-sgs")]
                                 self.sgs.as_mut(),
@@ -828,6 +845,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 &self.work.current,
                 &mut self.work.primitive,
                 &mut self.work.gradient,
+                &mut self.work.viscosity,
                 &mut self.work.flux,
                 #[cfg(feature = "experimental-sgs")]
                 self.sgs.as_mut(),
@@ -872,6 +890,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             &self.work.stage,
             &mut self.work.primitive,
             &mut self.work.gradient,
+            &mut self.work.viscosity,
             &mut self.work.flux,
             #[cfg(feature = "experimental-sgs")]
             self.sgs.as_mut(),
@@ -915,6 +934,7 @@ fn spatial<'a, L: TransportLaw>(
     states: &[f64],
     primitive: &mut [Primitive],
     gradient: &mut [[[f64; 3]; 3]],
+    viscosity: &mut [stress::Viscosity],
     fluxes: &mut [Vec<f64>; 3],
     #[cfg(feature = "experimental-sgs")] mut sgs: Option<&mut SubgridTransport>,
     controls: DissipationControl,
@@ -923,8 +943,37 @@ fn spatial<'a, L: TransportLaw>(
     let reservoirs = reservoirs.into();
     let species = source.gas().species_count();
     let width = species + 4;
+    let compatible = compatible_stress_domain(boundaries, walls);
+    let mut minimum_density = f64::INFINITY;
+    let mut maximum_cell_stress_scale: f64 = 0.0;
     for (row, value) in states.chunks_exact(width).zip(primitive.iter_mut()) {
         *value = cell(row, species).primitive(source.gas(), &mut *cancelled)?;
+        minimum_density = minimum_density.min(value.density);
+    }
+    if compatible {
+        for (index, value) in viscosity.iter_mut().enumerate() {
+            poll(cancelled)?;
+            let p = primitive[index];
+            let coefficients = source.coefficients_from_primitive(
+                SpatialPrimitive {
+                    partial_densities: &states[index * width..index * width + species],
+                    normal_velocity: p.velocity[0],
+                    transverse_velocity: [p.velocity[1], p.velocity[2]],
+                    pressure: p.pressure,
+                },
+                &mut *cancelled,
+            )?;
+            *value = stress::Viscosity {
+                shear: coefficients.dynamic_viscosity.value(),
+                bulk: coefficients.bulk_viscosity.value(),
+            };
+            if !value.valid() || !value.scale::<3>().is_finite() {
+                return Err(DissipationError::Invalid(
+                    "nonfinite or negative cell viscosity",
+                ));
+            }
+            maximum_cell_stress_scale = maximum_cell_stress_scale.max(value.scale::<3>());
+        }
     }
     // A single nine-derivative cache supplies both tangential directions of
     // every face. Free-slip ghosts reflect only normal velocity. No-slip,
@@ -957,6 +1006,7 @@ fn spatial<'a, L: TransportLaw>(
         }
     };
     let mut stats = Stage::default();
+    let mut mechanical_faces = false;
     cartesian::faces::<DissipationError, _>(grid, boundaries, cancelled, |face, cancelled| {
         let axis = face.axis;
         let [a, b] = tangents(axis);
@@ -965,6 +1015,14 @@ fn spatial<'a, L: TransportLaw>(
             flux.copy_within(first * width..(first + 1) * width, face.index * width);
             return Ok(());
         }
+        mechanical_faces |= matches!(
+            face.kind,
+            cartesian::FaceKind::Interior { .. }
+                | cartesian::FaceKind::Boundary {
+                    condition: BoundaryCondition::Reflecting,
+                    ..
+                }
+        );
         let output = &mut flux[face.index * width..(face.index + 1) * width];
         let receipt = match face.kind {
             cartesian::FaceKind::Interior { left, right } => {
@@ -974,7 +1032,7 @@ fn spatial<'a, L: TransportLaw>(
                             + 0.5 * gradient[right][derivative][component]
                     })
                 });
-                let receipt = source.face_from_primitives(
+                let mut receipt = source.face_from_primitives(
                     normal(left, axis),
                     normal(right, axis),
                     grid.spacing[axis],
@@ -983,6 +1041,58 @@ fn spatial<'a, L: TransportLaw>(
                     output,
                     &mut *cancelled,
                 )?;
+                let face_viscosity = stress::Viscosity {
+                    shear: receipt.dynamic_viscosity_pa_s,
+                    bulk: receipt.bulk_viscosity_pa_s,
+                };
+                if compatible
+                    && (viscosity[left] != face_viscosity || viscosity[right] != face_viscosity)
+                {
+                    let traction = stress::traction(
+                        axis,
+                        grid.spacing[axis],
+                        [primitive[left].velocity, primitive[right].velocity],
+                        [viscosity[left], viscosity[right]],
+                        |side, component, derivative| {
+                            gradient[[left, right][side]][derivative][component]
+                        },
+                    );
+                    let velocity = [axis, a, b].map(|component| {
+                        0.5 * primitive[left].velocity[component]
+                            + 0.5 * primitive[right].velocity[component]
+                    });
+                    output[species] = -traction[axis];
+                    output[species + 1] = -traction[a];
+                    output[species + 2] = -traction[b];
+                    // Source enthalpy, Fourier and Dufour terms are retained
+                    // BEFORE stress work; subtracting a huge old face work
+                    // would irreversibly erase a finite scalar-energy flux.
+                    output[species + 3] = receipt.nonmechanical_energy_flux_w_m2
+                        - velocity[0] * traction[axis]
+                        - velocity[1] * traction[a]
+                        - velocity[2] * traction[b];
+                    if !output.iter().all(|v| v.is_finite()) {
+                        return Err(DissipationError::Invalid(
+                            "compatible molecular face overflow",
+                        ));
+                    }
+                }
+                if compatible {
+                    // Flux arithmetic may bypass replacement for matching
+                    // samples; its mechanical admission still uses the actual
+                    // cell coefficients and global minimum stage density.
+                    receipt.diffusivity_m2_s = receipt.nonmechanical_diffusivity_m2_s.max(
+                        viscosity[left]
+                            .scale::<3>()
+                            .max(viscosity[right].scale::<3>())
+                            / minimum_density,
+                    );
+                    if !receipt.diffusivity_m2_s.is_finite() {
+                        return Err(DissipationError::Invalid(
+                            "compatible molecular face scale overflow",
+                        ));
+                    }
+                }
                 #[cfg(feature = "experimental-sgs")]
                 let receipt = if let Some(sgs) = sgs.as_ref() {
                     sgs.add_face(
@@ -1171,6 +1281,11 @@ fn spatial<'a, L: TransportLaw>(
         stats.add(receipt);
         Ok(())
     })?;
+    if compatible && mechanical_faces {
+        // Also covers singleton/all-wall grids without an interior face. A
+        // domain made solely of true zero-flux faces retains its zero rate.
+        stats.rate = stats.rate.max(maximum_cell_stress_scale / minimum_density);
+    }
     // Covers all three axes, full cross-stress stencils and doubled wall
     // gradients. Both SSP states also undergo original source admission.
     // This engineering interval bound is not a positivity/entropy theorem.
@@ -1193,6 +1308,21 @@ fn side_for(axis: usize, upper: bool) -> BoundarySide {
         (2, true) => BoundarySide::ZMax,
         _ => unreachable!("Cartesian axis"),
     }
+}
+
+fn compatible_stress_domain(boundaries: Boundaries3d, walls: &[MolecularWall3d; 6]) -> bool {
+    walls
+        .iter()
+        .all(|wall| matches!(wall, MolecularWall3d::SlipAdiabatic))
+        && (0..3).all(|axis| match boundaries.axis(axis) {
+            AxisBoundaries::Periodic => true,
+            AxisBoundaries::Ends { lower, upper } => [lower, upper].into_iter().all(|condition| {
+                matches!(
+                    condition,
+                    BoundaryCondition::Reflecting | BoundaryCondition::PressureOutlet { .. }
+                )
+            }),
+        })
 }
 fn side_index(side: BoundarySide) -> usize {
     match side {

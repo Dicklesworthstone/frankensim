@@ -1,6 +1,7 @@
 use super::*;
 
 mod adaptive;
+mod compatible_stress;
 mod coupled;
 mod navier_slip;
 mod pressure_outlet;

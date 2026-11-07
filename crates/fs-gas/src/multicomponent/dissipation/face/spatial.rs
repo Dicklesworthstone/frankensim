@@ -39,6 +39,22 @@ impl<L: TransportLaw> SpatialTransport<L> {
         self.prepared.law()
     }
 
+    /// Sample source-owned coefficients at one admitted three-momentum cell.
+    ///
+    /// This is the spatial counterpart of
+    /// [`PlanarTransport::coefficients_from_primitive`]. It uses the original
+    /// full spatial caloric admission and prepared source scratch, without
+    /// constructing a fictitious face or evaluating any diffusive flux.
+    pub fn coefficients_from_primitive(
+        &mut self,
+        primitive: SpatialPrimitive<'_>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<TransportCoefficients, DissipationError> {
+        let trace = primitive_trace(&self.prepared.gas, primitive, &mut cancelled)?;
+        self.prepared
+            .coefficients_at_trace(trace.densities, trace.primitive, &mut cancelled)
+    }
+
     /// Prepared numerical heap capacity, including the original Maxwell--Stefan
     /// workspace. Immutable gas storage, bounded stack scratch and the supplied
     /// law's own storage/evaluation allocations retain their original contracts.

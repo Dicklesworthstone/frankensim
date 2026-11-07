@@ -13,6 +13,7 @@ use super::{
 };
 use crate::compressible::AxisBoundaries;
 pub use crate::compressible::molecular::MolecularWall2d;
+use crate::compressible::stress::{self, Viscosity};
 pub(in crate::compressible) mod adaptive;
 pub(in crate::compressible) mod interval;
 pub(in crate::compressible) mod stabilized;
@@ -92,6 +93,7 @@ struct Workspace {
     primitive: Vec<Primitive>,
     /// Row-major derivative axes, then velocity component: du_i/dx_j.
     gradient: Vec<[f64; 4]>,
+    viscosity: Vec<Viscosity>,
     x_flux: Vec<f64>,
     y_flux: Vec<f64>,
     // Retained lazily by RKL2, never allocated per stage or retry.
@@ -117,6 +119,13 @@ struct Workspace {
 /// midpoint approximation; boundary velocity and referenced species enthalpy
 /// supply the original bath energy effort. Refine the boundary layer independently.
 /// Unbound Transmissive faces still refuse.
+///
+/// On fully periodic or adiabatic free-slip domains, source viscosities are
+/// sampled at cells and combined with the compatible full-tensor stress stencil.
+/// Its molecular contribution dissipates kinetic energy semidiscretely even
+/// for varying positive shear/bulk viscosity. Species and heat keep the original
+/// face law. Any bath, no-slip or finite-slip side retains the original full
+/// mechanical operator; no unsupported boundary-work or finite-step claim is made.
 pub struct MolecularTransport2d<L: TransportLaw> {
     source: PlanarTransport<L>,
     grid: CartesianGrid,
@@ -130,7 +139,8 @@ pub struct MolecularTransport2d<L: TransportLaw> {
 impl<L: TransportLaw> MolecularTransport2d<L> {
     /// Required combined numerical buffers for the supplied flow and operator.
     /// Includes source-kernel/MS work, every field/stage/face/gradient buffer and
-    /// incoming state excess capacity. Immutable sources, prepared coefficients,
+    /// incoming state excess capacity, including sixteen viscosity bytes per cell.
+    /// Immutable sources and the provider's own prepared coefficients,
     /// bounded stack scratch and arbitrary TransportLaw storage/allocations are
     /// excluded: this is not a whole-process or provider-allocation budget.
     pub fn required_workspace_bytes(
@@ -153,11 +163,9 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                 .checked_mul(width)?;
             let bytes = scalars
                 .checked_mul(size_of::<f64>())?
-                .checked_add(
-                    flow.grid
-                        .len()
-                        .checked_mul(size_of::<Primitive>() + size_of::<[f64; 4]>())?,
-                )?
+                .checked_add(flow.grid.len().checked_mul(
+                    size_of::<Primitive>() + size_of::<[f64; 4]>() + size_of::<Viscosity>(),
+                )?)?
                 .checked_add(source.workspace_bytes())?
                 .checked_add(flow.workspace_bytes())?;
             Some(bytes)
@@ -207,6 +215,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                 candidate: allocated(count, 0.0)?,
                 primitive: allocated(grid.len(), Primitive::default())?,
                 gradient: allocated(grid.len(), [0.0; 4])?,
+                viscosity: allocated(grid.len(), Viscosity::default())?,
                 x_flux: allocated((nx + 1) * ny * width, 0.0)?,
                 y_flux: allocated(nx * (ny + 1) * width, 0.0)?,
                 stabilized_x_flux: Vec::new(),
@@ -256,6 +265,12 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
         self.walls[wall_index(side.axis(), side.sign())]
     }
 
+    /// Whether every physical side admits compatible molecular stress.
+    /// This is a semidiscrete molecular identity, not a time-step certificate.
+    pub fn uses_compatible_molecular_stress(&self) -> bool {
+        compatible_boundaries(self.boundaries, &self.walls)
+    }
+
     /// Exact immutable source species and caloric path.
     pub fn gas(&self) -> &MixtureGas {
         self.source.gas()
@@ -284,6 +299,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                 * size_of::<f64>()
             + self.work.primitive.capacity() * size_of::<Primitive>()
             + self.work.gradient.capacity() * size_of::<[f64; 4]>()
+            + self.work.viscosity.capacity() * size_of::<Viscosity>()
     }
     /// Last completely published requested-duration molecular interval.
     pub const fn last_step(&self) -> Option<&MolecularReport> {
@@ -356,6 +372,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                         &self.work.current,
                         &mut self.work.primitive,
                         &mut self.work.gradient,
+                        &mut self.work.viscosity,
                         &mut self.work.x_flux,
                         &mut self.work.y_flux,
                         controls,
@@ -377,6 +394,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                         &self.work.current,
                         &mut self.work.primitive,
                         &mut self.work.gradient,
+                        &mut self.work.viscosity,
                         &mut self.work.x_flux,
                         &mut self.work.y_flux,
                         controls,
@@ -416,6 +434,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                     &self.work.stage,
                     &mut self.work.primitive,
                     &mut self.work.gradient,
+                    &mut self.work.viscosity,
                     &mut self.work.x_flux,
                     &mut self.work.y_flux,
                     controls,
@@ -574,6 +593,7 @@ fn spatial<L: TransportLaw>(
     states: &[f64],
     primitive: &mut [Primitive],
     gradient: &mut [[f64; 4]],
+    viscosity: &mut [Viscosity],
     x_flux: &mut [f64],
     y_flux: &mut [f64],
     controls: DissipationControl,
@@ -583,6 +603,37 @@ fn spatial<L: TransportLaw>(
     let width = species + 3;
     for (row, value) in states.chunks_exact(width).zip(primitive.iter_mut()) {
         *value = cell(row, species).primitive(source.gas(), &mut *cancelled)?;
+    }
+    let compatible = compatible_boundaries(boundaries, walls);
+    let mut mechanical_scale = 0.0_f64;
+    if compatible {
+        let mut minimum_density = f64::INFINITY;
+        for (index, coefficients) in viscosity.iter_mut().enumerate() {
+            let p = primitive[index];
+            let sampled = source.coefficients_from_primitive(
+                NormalPrimitive {
+                    partial_densities: &states[index * width..index * width + species],
+                    normal_velocity: p.velocity[0],
+                    transverse_velocity: p.velocity[1],
+                    pressure: p.pressure,
+                },
+                &mut *cancelled,
+            )?;
+            *coefficients = Viscosity {
+                shear: sampled.dynamic_viscosity.value(),
+                bulk: sampled.bulk_viscosity.value(),
+            };
+            mechanical_scale = mechanical_scale.max(coefficients.scale::<2>());
+            minimum_density = minimum_density.min(p.density);
+        }
+        // A neighboring high viscosity acts on both cells, including the less
+        // dense one. Do not bound only each coefficient divided by its own rho.
+        mechanical_scale /= minimum_density;
+        if !mechanical_scale.is_finite() || mechanical_scale < 0.0 {
+            return Err(DissipationError::Invalid(
+                "planar compatible molecular scale overflow",
+            ));
+        }
     }
     for (index, row) in gradient.iter_mut().enumerate() {
         poll(cancelled)?;
@@ -617,14 +668,14 @@ fn spatial<L: TransportLaw>(
             return Ok(());
         }
         let output = &mut flux[face.index * width..(face.index + 1) * width];
-        let receipt = match face.kind {
+        let mut receipt = match face.kind {
             cartesian::FaceKind::Interior { left, right } => {
                 let tangential = std::array::from_fn(|component| {
                     let global = if component == 0 { axis } else { tangent };
                     0.5 * gradient[left][2 * tangent + global]
                         + 0.5 * gradient[right][2 * tangent + global]
                 });
-                source.face_from_primitives(
+                let receipt = source.face_from_primitives(
                     normal(left, axis),
                     normal(right, axis),
                     grid.spacing[axis],
@@ -632,7 +683,40 @@ fn spatial<L: TransportLaw>(
                     controls.diffusion,
                     output,
                     &mut *cancelled,
-                )?
+                )?;
+                let cells = [viscosity[left], viscosity[right]];
+                let original = Viscosity {
+                    shear: receipt.dynamic_viscosity_pa_s,
+                    bulk: receipt.bulk_viscosity_pa_s,
+                };
+                if compatible && (cells[0] != original || cells[1] != original) {
+                    let traction = stress::traction(
+                        axis,
+                        grid.spacing[axis],
+                        [primitive[left].velocity, primitive[right].velocity],
+                        cells,
+                        |side, component, derivative| {
+                            gradient[[left, right][side]][2 * derivative + component]
+                        },
+                    );
+                    // Source output is still in its normal/tangential frame;
+                    // the common axis permutation below restores global order.
+                    output[species] = -traction[axis];
+                    output[species + 1] = -traction[tangent];
+                    let mut energy = receipt.nonmechanical_energy_flux_w_m2;
+                    for component in 0..2 {
+                        let velocity = 0.5 * primitive[left].velocity[component]
+                            + 0.5 * primitive[right].velocity[component];
+                        energy -= velocity * traction[component];
+                    }
+                    output[species + 2] = energy;
+                    if !output.iter().all(|value| value.is_finite()) {
+                        return Err(DissipationError::Invalid(
+                            "planar compatible molecular flux overflow",
+                        ));
+                    }
+                }
+                receipt
             }
             cartesian::FaceKind::Boundary {
                 cell,
@@ -755,6 +839,9 @@ fn spatial<L: TransportLaw>(
         if axis == 1 {
             output.swap(species, species + 1);
         }
+        if compatible {
+            receipt.diffusivity_m2_s = receipt.nonmechanical_diffusivity_m2_s.max(mechanical_scale);
+        }
         stats.add(receipt);
         Ok(())
     })?;
@@ -811,4 +898,19 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), DissipationError> {
 
 fn wall_index(axis: usize, sign: f64) -> usize {
     2 * axis + usize::from(sign > 0.0)
+}
+
+fn compatible_boundaries(boundaries: Boundaries2d, walls: &[MolecularWall2d; 4]) -> bool {
+    (0..2).all(|axis| match boundaries.axis(axis) {
+        AxisBoundaries::Periodic => true,
+        AxisBoundaries::Ends { lower, upper } => {
+            [lower, upper]
+                .into_iter()
+                .enumerate()
+                .all(|(side, condition)| {
+                    condition == BoundaryCondition::Reflecting
+                        && walls[2 * axis + side] == MolecularWall2d::SlipAdiabatic
+                })
+        }
+    })
 }

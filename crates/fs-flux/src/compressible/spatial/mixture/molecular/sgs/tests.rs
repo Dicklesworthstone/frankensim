@@ -113,6 +113,7 @@ fn faces(op: &mut MolecularTransport3d<ConstantTransport>, flow: &MixtureEuler3d
         flow.states(),
         &mut op.work.primitive,
         &mut op.work.gradient,
+        &mut op.work.viscosity,
         &mut op.work.flux,
         op.sgs.as_mut(),
         DissipationControl::default(),

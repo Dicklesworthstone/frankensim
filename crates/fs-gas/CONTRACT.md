@@ -7588,3 +7588,24 @@ powers; and darkness, empty/zero-time identities, bounded work and cancellation.
 The dense adaptive reference remains separate from the resolved fixed-step
 refinement fixture. Exact conservation alone does not establish temporal order
 or validate the declared unit-escape approximation.
+
+## Primitive transport coefficients and separated face-energy contributions
+
+`PlanarTransport::coefficients_from_primitive` and
+`SpatialTransport::coefficients_from_primitive` query the original transport
+provider at an admitted cell primitive. They use the original caloric trace,
+temperature, pressure and mole fractions, reuse binary-coefficient scratch, and
+validate the returned shear/bulk/thermal and binary transport coefficients.
+They do not construct a face, solve a Maxwell--Stefan system or advance time.
+Cancellation and provider errors remain explicit.
+
+`TransportFaceReport` also carries `bulk_viscosity_pa_s`,
+`nonmechanical_energy_flux_w_m2` and `nonmechanical_diffusivity_m2_s`.
+The separated energy contribution retains the original species-enthalpy,
+Fourier and reciprocal Dufour terms before mechanical stress work is added.
+The corresponding diffusivity excludes the mechanical stress estimate.
+Engineering, entropy-conjugate and wall/bath paths populate these receipts;
+the original face flux keeps its existing arithmetic. This permits a caller
+to replace the molecular stress discretization without subtracting a huge
+old stress work from a small physical heat or enthalpy flux. The separated
+receipts do not add an independent energy source or a new entropy guarantee.

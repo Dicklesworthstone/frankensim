@@ -21,10 +21,16 @@ pub struct TransportFaceReport {
     /// Molecular-mass contrasts include every species present on either trace,
     /// without letting absent catalog species restrict the diffusion step.
     pub diffusivity_m2_s: f64,
+    /// Species, Fourier and Soret/Dufour scale before spatial inverse lengths
+    /// [m²/s], excluding the Newtonian mechanical contribution. Spatial owners
+    /// may combine this with the bound of their own compatible stress quadrature.
+    pub nonmechanical_diffusivity_m2_s: f64,
     /// Original molecular shear viscosity at this face [Pa s], before any
     /// composing modeled transport. Exposes the actual source evaluation
     /// without repeating a stateful material/kinetic law query.
     pub dynamic_viscosity_pa_s: f64,
+    /// Original authored bulk viscosity from the same face source query [Pa s].
+    pub bulk_viscosity_pa_s: f64,
     /// Original zero-diffusive-flux thermal conductivity at this face [W/(m K)],
     /// from the same source evaluation as the molecular flux.
     pub thermal_conductivity_w_m_k: f64,
@@ -40,6 +46,12 @@ pub struct TransportFaceReport {
     /// Fourier plus reciprocal Dufour heat, excluding species enthalpy and
     /// mechanical work [W/m²], positive in the oriented face direction.
     pub reduced_heat_flux_w_m2: f64,
+    /// Source species-enthalpy flux plus Fourier/Dufour heat before mechanical
+    /// work [W/m²], positive in the oriented face direction. This is accumulated
+    /// directly, never recovered by subtracting stress work from the full flux.
+    /// Baths retain their selected source enthalpy convention; impermeable walls
+    /// carry only their conductive heat here (zero for adiabatic slip walls).
+    pub nonmechanical_energy_flux_w_m2: f64,
 }
 
 /// Thermal boundary for an impermeable no-slip molecular wall.
@@ -110,6 +122,50 @@ impl<L: TransportLaw> PlanarTransport<L> {
     pub const fn law(&self) -> &L {
         &self.law
     }
+
+    /// Sample the original molecular coefficients at one admitted cell state.
+    ///
+    /// Spatial owners may use these cell samples in a compatible stress
+    /// quadrature while retaining the existing face law for species and heat.
+    /// The actual T, p and mole fractions come from the original caloric source;
+    /// all returned coefficients and the law's binary diffusion matrix are
+    /// validated. This performs no flux, Maxwell--Stefan solve or time advance.
+    /// The prepared binary scratch is reused; source-law work retains its own
+    /// allocation/cancellation contract. Thermal cross coefficients are still
+    /// qualified by the ordinary face evaluation that uses them.
+    pub fn coefficients_from_primitive(
+        &mut self,
+        primitive: NormalPrimitive<'_>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<TransportCoefficients, DissipationError> {
+        let trace = primitive_trace(&self.gas, primitive, &mut cancelled)?;
+        self.coefficients_at_trace(trace.densities, trace.primitive, &mut cancelled)
+    }
+
+    fn coefficients_at_trace(
+        &mut self,
+        densities: &[f64],
+        primitive: Primitive,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<TransportCoefficients, DissipationError> {
+        poll(cancelled)?;
+        let n = self.gas.species_count();
+        let mut x = [0.0; MAX_SPECIES];
+        fractions(&self.gas, densities, &mut x[..n])?;
+        let coefficients = self.law.evaluate(
+            Temperature::new(primitive.temperature),
+            Pressure::new(primitive.pressure),
+            &x[..n],
+            &mut self.binary,
+            cancelled,
+        )?;
+        coefficients.validate()?;
+        coefficients.longitudinal_viscosity()?;
+        validate_binary(&self.binary, n)?;
+        poll(cancelled)?;
+        Ok(coefficients)
+    }
+
     /// Prepared face/Maxwell--Stefan numerical heap capacity. Immutable gas and
     /// species storage, the caller-supplied law's storage/evaluation allocations,
     /// fixed-size owners and bounded stack scratch are outside this budget.
@@ -765,12 +821,15 @@ fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
     };
     let mut report = TransportFaceReport {
         diffusivity_m2_s: 0.0,
+        nonmechanical_diffusivity_m2_s: 0.0,
         dynamic_viscosity_pa_s: coefficients.dynamic_viscosity.value(),
+        bulk_viscosity_pa_s: coefficients.bulk_viscosity.value(),
         thermal_conductivity_w_m_k: coefficients.thermal_conductivity.value(),
         maximum_gradient_residual_per_m: evaluated.maximum_gradient_residual_per_m(),
         mass_frame_residual_kg_m2_s: evaluated.mass_frame_residual_kg_m2_s(),
         enthalpy_temperature_k: enthalpy_temperature,
         reduced_heat_flux_w_m2: 0.0,
+        nonmechanical_energy_flux_w_m2: 0.0,
     };
     out[..n].copy_from_slice(evaluated.mass_fluxes());
     let longitudinal = coefficients.longitudinal_viscosity()?;
@@ -811,9 +870,9 @@ fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
             / model.molar_mass().value();
         enthalpy_flux[k] = h_referenced * out[k];
     }
-    let energy = sum(enthalpy_flux[..n].iter().copied())
-        - coefficients.thermal_conductivity.value() * grad_t
-        - velocity * stress;
+    let nonmechanical_energy = sum(enthalpy_flux[..n].iter().copied())
+        - coefficients.thermal_conductivity.value() * grad_t;
+    let energy = nonmechanical_energy - velocity * stress;
     // H_i is a kinetic heat of transport, not the caloric partial enthalpy
     // already included above. The reciprocal term must use the actual species
     // flux once. With theta=grad(T)/T², the added force is x_i M_i H_i theta/R;
@@ -829,6 +888,11 @@ fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
     };
     report.reduced_heat_flux_w_m2 =
         -coefficients.thermal_conductivity.value() * grad_t + reciprocal_heat;
+    report.nonmechanical_energy_flux_w_m2 = if coupled {
+        nonmechanical_energy + reciprocal_heat
+    } else {
+        nonmechanical_energy
+    };
     let energy = if coupled {
         energy + reciprocal_heat
     } else {
@@ -839,7 +903,10 @@ fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
     } else {
         energy
     };
-    if !out.iter().all(|value| value.is_finite()) || !report.reduced_heat_flux_w_m2.is_finite() {
+    if !out.iter().all(|value| value.is_finite())
+        || !report.reduced_heat_flux_w_m2.is_finite()
+        || !report.nonmechanical_energy_flux_w_m2.is_finite()
+    {
         return Err(DissipationError::Invalid("non-finite molecular face flux"));
     }
     let gamma = 1.0
@@ -848,6 +915,8 @@ fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
     let viscosity_scale = viscosity_scale::<TRANSVERSE>(longitudinal, cross, mu);
     report.diffusivity_m2_s = (maximum_diffusion * mass_ratio * gamma)
         .max(viscosity_scale / pl.density.min(pr.density))
+        .max(coefficients.thermal_conductivity.value() / left.cv_density.min(right.cv_density));
+    report.nonmechanical_diffusivity_m2_s = (maximum_diffusion * mass_ratio * gamma)
         .max(coefficients.thermal_conductivity.value() / left.cv_density.min(right.cv_density));
     if thermal_force_scale > 0.0 {
         // Include both off-diagonal couplings and their product in the existing
@@ -863,6 +932,8 @@ fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
             * (1.0 + thermal_storage_scale)
             + coefficients.thermal_conductivity.value() / left.cv_density.min(right.cv_density);
         report.diffusivity_m2_s = report.diffusivity_m2_s.max(coupled_scale);
+        report.nonmechanical_diffusivity_m2_s =
+            report.nonmechanical_diffusivity_m2_s.max(coupled_scale);
     }
     if !report.diffusivity_m2_s.is_finite() || report.diffusivity_m2_s < 0.0 {
         return Err(DissipationError::Invalid("molecular face scale overflow"));
@@ -958,6 +1029,7 @@ fn wall_components<const TRANSVERSE: usize, L: TransportLaw>(
     Ok(TransportFaceReport {
         diffusivity_m2_s,
         dynamic_viscosity_pa_s: mu,
+        bulk_viscosity_pa_s: c.bulk_viscosity.value(),
         enthalpy_temperature_k: p.temperature,
         thermal_conductivity_w_m_k: c.thermal_conductivity.value(),
         ..TransportFaceReport::default()
@@ -1055,10 +1127,13 @@ fn no_slip_wall_components<const TRANSVERSE: usize, L: TransportLaw>(
     poll(cancelled)?;
     Ok(TransportFaceReport {
         diffusivity_m2_s,
+        nonmechanical_diffusivity_m2_s: c.thermal_conductivity.value() / trace.cv_density,
         dynamic_viscosity_pa_s: mu,
+        bulk_viscosity_pa_s: c.bulk_viscosity.value(),
         enthalpy_temperature_k: face_temperature,
         thermal_conductivity_w_m_k: c.thermal_conductivity.value(),
         reduced_heat_flux_w_m2: -c.thermal_conductivity.value() * temperature_gradient,
+        nonmechanical_energy_flux_w_m2: -c.thermal_conductivity.value() * temperature_gradient,
         ..TransportFaceReport::default()
     })
 }

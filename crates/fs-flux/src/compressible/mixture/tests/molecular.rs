@@ -1,4 +1,5 @@
 mod adaptive;
+mod compatible_stress;
 mod stabilized;
 mod walls;
 use super::*;
