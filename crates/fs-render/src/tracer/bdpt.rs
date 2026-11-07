@@ -38,7 +38,9 @@ mod anisotropic_tests;
 /// and connections, preserving material boundaries closer than one micrometre.
 /// Version 10 retains emitting surfaces as scattering vertices on either
 /// subpath. Their emission is evaluated independently at each camera prefix.
-pub const BIDIRECTIONAL_TRACER_SEMANTICS_VERSION: u32 = 10;
+/// Version 11 bounds sampled mesh-emitter ray origins by their original native
+/// surface witnesses, preserving nearby reflectors and endpoint media.
+pub const BIDIRECTIONAL_TRACER_SEMANTICS_VERSION: u32 = 11;
 
 /// Admitted finite-light BDPT technique set.
 ///
@@ -1112,6 +1114,94 @@ fn generate_camera_subpaths<'scene>(
     Ok(paths)
 }
 
+/// Preserve the sampled physical point and its PDFs while bounding departure
+/// from the original emitter mesh. Rectangle admission fixes this native query
+/// at four vertices and two triangles, for both direct and rigid emitters.
+fn sampled_emitter_origin(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    primitive_index: usize,
+    point: Point3,
+    normal: Vec3,
+) -> Result<MeshBoundaryOrigin, TracerError> {
+    use crate::charts::proximity::{ProximityBudget, ProximityError};
+    use fs_ivl::Interval;
+
+    let primitive = scene
+        .primitives
+        .get(primitive_index)
+        .ok_or(TracerError::InvalidInput)?;
+    let mut budget = ProximityBudget::new(128);
+    let map_error = |error| match error {
+        ProximityError::Cancelled => TracerError::Cancelled,
+        _ => TracerError::InvalidInput,
+    };
+    let (mesh, transform, local, world) = match &primitive.shape {
+        Shape::Mesh(mesh) => {
+            let witness = mesh
+                .nearest_surface_with_cx(cx, point, &mut budget)
+                .map_err(map_error)?
+                .witness
+                .ok_or(TracerError::InvalidInput)?;
+            (mesh, RigidTransform::identity(), witness, witness)
+        }
+        Shape::Instance(instance) => {
+            let SharedGeometry::Mesh(mesh) = instance.geometry() else {
+                return Err(TracerError::InvalidInput);
+            };
+            let query = instance
+                .nearest_surface_with_cx(cx, point, &mut budget)
+                .map_err(map_error)?;
+            (
+                mesh.as_ref(),
+                instance.transform(),
+                query.local_witness.ok_or(TracerError::InvalidInput)?,
+                query.proximity.witness.ok_or(TracerError::InvalidInput)?,
+            )
+        }
+        Shape::Chart(_) | Shape::AnimatedInstance(_) => return Err(TracerError::InvalidInput),
+    };
+    let geometric = world.normal.ok_or(TracerError::MissingNormal)?;
+    let (reconstructed, _) = MeshBoundaryOrigin::from_triangle(
+        mesh,
+        local.triangle_index.ok_or(TracerError::InvalidInput)?,
+        local.barycentric.ok_or(TracerError::InvalidInput)?,
+        transform,
+        geometric,
+    )
+    .ok_or(TracerError::InvalidInput)?;
+    // The sampled rectangle and native mesh may differ within admission's
+    // roundoff allowance. Include that separation instead of moving the
+    // physical endpoint, changing its density, or treating it as exact contact.
+    let alignment = normal.dot(geometric).abs() - 64.0 * f64::EPSILON;
+    if !alignment.is_finite() || alignment <= 0.5 {
+        return Err(TracerError::InvalidInput);
+    }
+    // Project componentwise before summing: a large tangential translation
+    // must not turn into artificial normal thickness. The interval subtraction
+    // includes cancellation in the sampled/reconstructed point difference.
+    let displacement = [
+        (point.x, reconstructed.point.x, geometric.x),
+        (point.y, reconstructed.point.y, geometric.y),
+        (point.z, reconstructed.point.z, geometric.z),
+    ]
+    .into_iter()
+    .fold(Interval::point(0.0), |sum, (sampled, native, axis)| {
+        sum + (Interval::point(sampled) - Interval::point(native)).abs()
+            * Interval::point(axis.abs())
+    });
+    let normal_error = ((Interval::point(reconstructed.normal_error) + displacement)
+        / Interval::point(alignment))
+    .hi();
+    if !normal_error.is_finite() || normal_error < 0.0 {
+        return Err(TracerError::InvalidInput);
+    }
+    Ok(MeshBoundaryOrigin {
+        point,
+        normal_error,
+    })
+}
+
 fn generate_light_subpath<'scene>(
     scene: &'scene Scene,
     lighting: &SceneLighting<'_>,
@@ -1132,12 +1222,15 @@ fn generate_light_subpath<'scene>(
     };
     let mut vertices = Vec::with_capacity(settings.max_depth as usize + 1);
     vertices.push(Vertex::light(emission, wavelength_nm));
+    vertices[0].mesh_boundary_origin = Some(sampled_emitter_origin(
+        scene, cx, emission.primitive_index, emission.point, emission.normal,
+    )?);
     let (spectrum, scale) = emission.emission;
     let emitted = spectrum.eval(wavelength_nm) * scale;
     let cosine = emission.normal.dot(emission.direction).abs();
     let beta = emitted * cosine / (emission.pdf_position_area * emission.pdf_direction_solid_angle);
     let ray = Ray {
-        origin: dielectric_spawn_origin(emission.point, emission.normal, emission.direction),
+        origin: vertices[0].spawn_origin(emission.direction),
         dir: emission.direction,
     };
     let initial_stack = lighting
@@ -1854,12 +1947,15 @@ fn connect_s1(
             let position_pdf = lighting
                 .rectangle_emission_pdfs(sample.light_index, direction.scale(-1.0))
                 .map_or(0.0, |(pdf, _)| pdf);
+            let emitter_origin = sampled_emitter_origin(
+                scene, cx, sample.primitive_index, sample.point, sample.normal,
+            )?;
             let source_medium = lighting
                 .initial_media
                 .stack(
                     scene,
                     cx,
-                    dielectric_spawn_origin(sample.point, sample.normal, direction.scale(-1.0)),
+                    emitter_origin.spawn(sample.normal, direction.scale(-1.0)),
                     ray_time,
                 )?
                 .last()
@@ -1872,7 +1968,7 @@ fn connect_s1(
                 },
                 point: sample.point,
                 geometric_normal: Some(sample.normal),
-                mesh_boundary_origin: None,
+                mesh_boundary_origin: Some(emitter_origin),
                 brushed_frame: None,
                 wo: None,
                 beta: emitted / sample.pdf_solid_angle,
@@ -2962,6 +3058,154 @@ mod tests {
         )
         .unwrap();
         (scene, camera, shutter)
+    }
+
+    #[test]
+    fn g1_sampled_emitter_launches_preserve_nearby_reflections() {
+        with_test_cx(|cx| {
+            let optics = ConductorOptics::representative_tungsten();
+            let settings = Settings {
+                width: 1, height: 1, spp: 64, max_depth: 2,
+                sampler: Sampler::Iid, strategy: DirectStrategy::Mis, seed: 73,
+            };
+            for instanced in [false, true] {
+                for offset in [[0.0; 3], [1.0e8, -3.0, 0.0], [0.0, 0.0, 1.0e6]] {
+                    let quad = |z: f64, half: f64| TriMesh::new(
+                        vec![
+                            [offset[0] - half, offset[1] - half, offset[2] + z],
+                            [offset[0] + half, offset[1] - half, offset[2] + z],
+                            [offset[0] + half, offset[1] + half, offset[2] + z],
+                            [offset[0] - half, offset[1] + half, offset[2] + z],
+                        ],
+                        vec![[0, 1, 2], [0, 2, 3]],
+                    );
+                    let (mut scene, _, _) = direct_emitter_scene(true);
+                    scene.primitives[0].shape = if instanced {
+                        Shape::Instance(GeometryInstance::try_new(
+                            91,
+                            hash_domain("bdpt-emitter-origin-test", b"original-rectangle"),
+                            SharedGeometry::mesh(emitter_quad(0.0)),
+                            RigidTransform::try_new([0.0, 0.0, 0.0, 1.0], offset).unwrap(),
+                        ).unwrap())
+                    } else {
+                        Shape::Mesh(quad(0.0, 1.0))
+                    };
+                    // Exercise both signs of the geometry/metadata roundoff
+                    // allowance without moving the physically sampled point.
+                    let source_shift = if instanced { -0.5e-10 } else { 0.5e-10 };
+                    scene.lights[0].corner = Point3::new(
+                        offset[0] - 1.0, offset[1] - 1.0, offset[2] + source_shift,
+                    );
+                    for side in [1.0, -1.0] {
+                        scene.primitives.push(Primitive {
+                            shape: Shape::Mesh(quad(side * 0.5e-6, 4.0)),
+                            material: Material::Conductor {
+                                optics, surface: ConductorSurface::SMOOTH,
+                            },
+                            emission: None,
+                        });
+                    }
+                    let lighting = validate_scene(&scene, cx, None).unwrap();
+                    let mut checked_sides = [0; 2];
+                    for sample in 0..settings.spp {
+                        let mut rng = SubpathRng::new(
+                            &settings, 0, sample, LIGHT_WALK_DOMAIN, None,
+                        );
+                        let random = rng.next4();
+                        let emission = lighting.sample_rectangle_emission(
+                            random[0], random[1], random[2], random[3],
+                        ).unwrap();
+                        if (emission.point.x - offset[0]).abs() > 0.5
+                            || (emission.point.y - offset[1]).abs() > 0.5
+                            || emission.direction.z.abs() < 0.1
+                        {
+                            continue;
+                        }
+                        let vertices = generate_light_subpath(
+                            &scene, &lighting, cx, &settings, None, 550.0, 0, sample, None,
+                        ).unwrap();
+                        assert_eq!(vertices.len(), 3,
+                            "light launch must retain the nearby mirror and return to its emitter");
+                        let side = usize::from(emission.direction.z < 0.0);
+                        checked_sides[side] += 1;
+                        assert!(matches!(vertices[1].kind,
+                            VertexKind::Surface { primitive_index } if primitive_index == side + 1));
+                        assert!(matches!(vertices[2].kind,
+                            VertexKind::Surface { primitive_index: 0 }));
+                        assert_eq!(vertices[0].point, emission.point);
+                        assert_eq!(vertices[0].pdf_fwd.to_bits(), emission.pdf_position_area.to_bits());
+                        assert_eq!(vertices[0].geometric_normal, Some(emission.normal));
+                        let expected = vertices[1].beta
+                            * optics.fresnel(550.0, 1.0, emission.direction.z.abs()).unwrap();
+                        assert!((vertices[2].beta - expected).abs() < 3.0e-12 * expected);
+                    }
+                    assert!(checked_sides.into_iter().all(|count| count > 0),
+                        "both emitting hemispheres must be exercised");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn g1_sampled_emitter_connections_keep_the_original_host_medium() {
+        with_test_cx(|cx| {
+            let settings = Settings {
+                width: 1, height: 1, spp: 1, max_depth: 2,
+                sampler: Sampler::Iid, strategy: DirectStrategy::Mis, seed: 73,
+            };
+            let mut expected = None;
+            for bottom in [-5.0e-5, -0.5e-6] {
+                let (mut scene, _, _) = direct_emitter_scene(true);
+                scene.camera.eye = Point3::new(0.0, 0.0, -0.1e-6);
+                scene.primitives.push(Primitive {
+                    shape: Shape::Mesh(emitter_quad(-0.25e-6)),
+                    material: Material::Lambertian { reflectance: lift_rgb([0.7; 3]) },
+                    emission: None,
+                });
+                scene.primitives.push(Primitive {
+                    shape: Shape::Mesh(closed_smooth_slab(bottom, 1.0)),
+                    material: Material::Dielectric {
+                        glass: DielectricGlass::representative_crown(),
+                        surface: DielectricSurface::SMOOTH,
+                    },
+                    emission: None,
+                });
+                let lighting = validate_scene(&scene, cx, None).unwrap();
+                let stack = lighting.initial_media.stack(&scene, cx, scene.camera.eye, None).unwrap();
+                let physical = PhysicalCamera::try_legacy_compatible(
+                    scene.camera.eye, scene.camera.forward, scene.camera.up,
+                    scene.camera.half_tan, 2.0, Aperture::try_circular(0.0).unwrap(),
+                ).unwrap();
+                let ray = Ray { origin: scene.camera.eye, dir: scene.camera.forward };
+                let intersection = intersect(&scene, cx, &ray, None).unwrap().unwrap();
+                assert_eq!(intersection.primitive_index, 1);
+                let frame = surface_frame(&intersection.hit, &ray).unwrap();
+                let camera_vertices = [
+                    Vertex {
+                        positive_medium: stack.last().copied(),
+                        negative_medium: stack.last().copied(),
+                        ..Vertex::camera(scene.camera.eye)
+                    },
+                    Vertex::surface(
+                        &scene, intersection, ray, frame, &stack, 1.0, 1.0, None,
+                    ).unwrap(),
+                ];
+                let emission = lighting.sample_rectangle_emission(0.25, 0.75, 0.25, 0.5).unwrap();
+                let light_vertices = [Vertex::light(emission, 550.0)];
+                let connected = connect_s1(
+                    &scene, &lighting, &physical, cx, None, &settings,
+                    BidirectionalStrategySet::CameraConnected, &light_vertices,
+                    &camera_vertices, 2, 550.0, [0.25, 0.5, 0.25, 0.75],
+                ).unwrap().expect("the receiver and sampled emitter share their original glass");
+                assert!(connected > 0.0);
+                if let Some(previous) = expected {
+                    assert_eq!(connected.to_bits(), previous,
+                        "moving an unused host boundary cannot change the reflected connection");
+                } else {
+                    expected = Some(connected.to_bits());
+                }
+            }
+        });
     }
 
     fn closed_smooth_slab(z_bottom: f64, z_top: f64) -> TriMesh {
