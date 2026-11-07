@@ -10,6 +10,8 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 
+#[path = "friction_heat_moving_partial_slip/pair_temperature.rs"]
+mod pair_temperature;
 #[path = "friction_heat_moving_partial_slip/pressure.rs"]
 mod pressure;
 

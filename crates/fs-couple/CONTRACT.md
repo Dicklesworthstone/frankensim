@@ -3566,3 +3566,49 @@ history transfer refuses a change of time rule. Focused source-card, clock and
 full wave-network tests compare analytic branch decay, mean pressure, membrane
 momentum, spring storage and resistor heat. No within-step flow resolution,
 nonlocal shell coupling or full voice qualification is implied.
+
+## Pair-resolved material and interface feedback in moving partial slip
+
+The existing `friction_heat::moving::partial_slip` owner intersects each
+transported A-material parcel with both original surface cell grids at the
+proposed endpoint, as well as the original supplied pressure intervals.
+`MovingSlipRegion::surface_b_cell` retains the opposing caloric identity;
+`endpoint_interface_index` identifies that exact A/B pair in the callback's
+swept patches and solved interface-temperature coordinates. A constitutive
+source can therefore depend on either original body temperature and that
+pair's massless interface temperature. One large A cell no longer forces the
+same traction law across differently heated or heterogeneous B cells. No
+averaged interface temperature, new caloric store or body heat fraction is
+introduced.
+
+Monotone cursors merge the actual material, A-cell, B-cell and pressure
+boundaries rather than constructing a Cartesian product of the surfaces.
+Original normal-load coverage is independently checked. Every resulting
+region copies its surviving native elastic strains and kinetic flags exactly;
+crossing an opposing cell boundary neither resets nor averages that memory.
+Only the original law's static/kinetic coefficients may vary. The source,
+storage law, pressure authority and generalized-work owner remain unchanged.
+The original region limit includes all newly resolved intersections and
+refuses before a constitutive source call if they do not fit.
+
+Constitutive coefficients are endpoint source values over the existing
+first-order transport/return-map interval. Regional physical plastic heat still
+follows the complete swept footprint, including cell pairs visited before the
+endpoint. Assigning a source to its endpoint pair does not reassign that
+history of heat deposition. The original finite two-body network determines
+signed body heat and each interface temperature together; numerical return
+loss and elastic outflow retain their separate mechanical accounts. Time
+refinement across heterogeneous material boundaries remains independent of
+thermal-cell and pressure-field refinement. Transverse transport, torsion,
+changing normal load and native body momentum are still outside this strip
+owner.
+
+Five focused regressions check independent unequal-traction and swept-heat
+integrals, coupled opposing-body/interface feedback against analytically
+condensed finite-caloric equations, exact strain/kinetic history through a
+moving B boundary, constant-source mechanical invariance under opposing-grid
+refinement, and bounded refusal with retry. Existing pressure tests retain
+their independent load, storage, physical heat, numerical loss and outflow
+oracles while allowing the actual opposing grid to subdivide each pressure
+region. These synthetic constitutive tests establish no measured material
+calibration or whole-system convergence claim.

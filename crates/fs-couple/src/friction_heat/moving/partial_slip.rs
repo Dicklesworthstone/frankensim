@@ -13,7 +13,11 @@
 //! Refine time independently of the original finite thermal cells. The pressure
 //! is uniform by default; an original normal owner's piecewise-constant profile
 //! can instead supply spatially resolved pressure. Its boundaries split the
-//! material parcels without averaging their histories. A reference ellipse
+//! material parcels without averaging their histories. Both original surface
+//! cell grids also split the parcels, so each constitutive source can query its
+//! actual two body temperatures and corresponding solved interface temperature.
+//! These are endpoint source values; time refinement still resolves transit
+//! across a changing interface. A reference ellipse
 //! supplies the native shear law's area and total load, not an elliptical
 //! pressure field. Torsion, changing normal load,
 //! adhesion, recirculated outflow memory and native body dynamics are absent.
@@ -33,6 +37,7 @@ use std::convert::Infallible;
 
 mod pressure;
 pub use pressure::{MovingPressureCell, MovingPressureProfile};
+mod regions;
 
 /// One unchanged physical material parcel, measured in surface A coordinates.
 #[derive(Clone, Debug, PartialEq)]
@@ -58,12 +63,19 @@ pub struct MovingPartialSlip {
     pressure: Option<MovingPressureProfile>,
 }
 
-/// Candidate parcel geometry. Each region lies within one ORIGINAL A cell;
-/// a source may therefore query that material's actual endpoint temperature.
+/// Candidate parcel geometry. At the proposed endpoint each region lies within
+/// one ORIGINAL cell on each surface and one supplied pressure interval. Sources
+/// can query the two actual caloric states and the matching solved interface
+/// temperature without averaging different cell pairs.
 #[derive(Clone, Debug)]
 pub struct MovingSlipRegion {
     pub material_span_m: [f64; 2],
     pub surface_a_cell: CellId,
+    pub surface_b_cell: CellId,
+    /// Index of this endpoint pair in the callback's swept patches and interface
+    /// temperatures (also in the accepted heat report). A region's generated
+    /// heat still follows its complete swept path, including other cell pairs.
+    pub endpoint_interface_index: usize,
     pub area_fraction: f64,
     /// Actual supplied pressure on this region [Pa], before any friction law.
     pub normal_pressure_pa: f64,
@@ -79,9 +91,9 @@ impl MovingSlipRegion {
 }
 
 /// Source laws at the candidate thermal endpoint, in region order. Only the
-/// original law's static/kinetic coefficients may change. A source that needs
-/// an interface temperature must resolve its spatial applicability itself;
-/// this owner never invents an average of unequal interface temperatures.
+/// original law's static/kinetic coefficients may change. Each region identifies
+/// both original caloric cells and its exact endpoint interface-temperature
+/// coordinate; no average of unequal interface temperatures is invented.
 pub struct MovingPartialSlipSource<P> {
     pub laws: Vec<PartialSlipLaw>,
     pub conductivity_w_m_k: BTreeMap<CellId, f64>,
@@ -377,8 +389,10 @@ impl MovingPartialSlip {
     /// Accept transport, original regional memory and all finite thermal cells
     /// together. Body offsets determine actual signed longitudinal slip; the
     /// footprint offset independently determines material residence. A region's
-    /// source may use its exact original A-cell temperature. No averaged
-    /// interface temperature is supplied as a constitutive material coordinate.
+    /// source may use both original cell temperatures and the solved temperature
+    /// of their endpoint interface. The law is held at these endpoint source
+    /// values over the split interval; time refinement resolves passage across
+    /// a heterogeneous opposing surface independently of thermal mesh refinement.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub fn step_candidate<'m, P, E>(
         &self,
@@ -484,84 +498,17 @@ impl MovingPartialSlip {
                 state: PartialSlipState::zero(),
             });
         }
-        // Split at actual material and supplied pressure boundaries. Sorted
-        // cursors visit each pressure interval once; no dense cross product,
-        // interpolation or spring averaging occurs when material is advected.
-        let mut regions = Vec::new();
-        let mut first_cell = 0;
-        let mut pressure_cell = 0;
-        let footprint_area = self.route.footprint_area_m2();
-        let uniform_pressure =
-            finite(self.reference.normal_patch().normal_load_n() / footprint_area)?;
-        for parcel in transported {
-            while first_cell < self.route.surfaces[0].len()
-                && self.route.surfaces[0][first_cell].face.span_m[1] <= parcel.span_m[0]
-            {
-                first_cell += 1;
-            }
-            for face in self.route.surfaces[0].iter().skip(first_cell) {
-                check()?;
-                if face.face.span_m[0] >= parcel.span_m[1] {
-                    break;
-                }
-                let span = [
-                    parcel.span_m[0].max(face.face.span_m[0]),
-                    parcel.span_m[1].min(face.face.span_m[1]),
-                ];
-                if span[1] <= span[0] {
-                    continue;
-                }
-                let mut push = |span: [f64; 2],
-                                pressure: f64,
-                                normalized_patch: NormalPatchView| {
-                    if regions.len() >= controls.maximum_regions {
-                        return Err(MovingPartialSlipError::RegionBudget);
-                    }
-                    let area_fraction = (span[1] - span[0]) / length;
-                    let normal_load_n = finite(area_fraction * normalized_patch.normal_load_n())?;
-                    regions.push(MovingSlipRegion {
-                        material_span_m: span,
-                        surface_a_cell: face.face.cell,
-                        area_fraction,
-                        normal_pressure_pa: pressure,
-                        normal_load_n,
-                        state: parcel.state.clone(),
-                        normalized_patch,
-                    });
-                    Ok(())
-                };
-                if let Some(profile) = &self.pressure {
-                    while pressure_cell < profile.cells().len()
-                        && finite(profile.cells()[pressure_cell].span_m[1] + shift)? <= span[0]
-                    {
-                        pressure_cell += 1;
-                    }
-                    for cell in profile.cells().iter().skip(pressure_cell) {
-                        check()?;
-                        let start = finite(cell.span_m[0] + shift)?;
-                        let end = finite(cell.span_m[1] + shift)?;
-                        if start >= span[1] {
-                            break;
-                        }
-                        let segment = [span[0].max(start), span[1].min(end)];
-                        if segment[1] > segment[0] {
-                            push(
-                                segment,
-                                cell.normal_pressure_pa,
-                                profile
-                                    .normalized_patch(cell.normal_pressure_pa, footprint_area)?,
-                            )?;
-                        }
-                    }
-                } else {
-                    push(
-                        span,
-                        uniform_pressure,
-                        self.reference.normal_patch().clone(),
-                    )?;
-                }
-            }
-        }
+        // Partition both actual surface grids and the original pressure cells
+        // once, outside every nonlinear thermal/source evaluation. Each retained
+        // material strain and kinetic branch survives every intersection.
+        let regions = regions::partition(
+            self,
+            &transported,
+            end,
+            heat_step.patches(),
+            controls.maximum_regions,
+            &check,
+        )?;
         let normal_load = finite(
             regions
                 .iter()

@@ -107,10 +107,23 @@ fn pressure_edges_microslip_and_heat_while_the_core_sticks() {
     let (thermal, contact) = loaded(&edges, 1.0, initial([0.0; 2]), edge_core());
     let next = step(&contact, &thermal, 0.1, position(0.0, -0.004, 0.0), 1.0);
     let r = next.report();
-    assert_eq!(r.regions.len(), 3);
-    for (i, region) in r.regions.iter().enumerate() {
+    let mut loads = [0.0; 3];
+    for region in &r.regions {
+        let span = region.region.material_span_m;
+        let i = if span[1] <= 0.25 {
+            0
+        } else if span[1] <= 0.75 {
+            1
+        } else {
+            2
+        };
         assert_eq!(region.region.normal_pressure_pa, [0.4, 1.6, 0.4][i]);
-        near(region.region.normal_load_n, [0.1, 0.8, 0.1][i], 1e-15);
+        near(
+            region.region.normal_load_n,
+            (span[1] - span[0]) * [0.4, 1.6, 0.4][i],
+            1e-15,
+        );
+        loads[i] += region.region.normal_load_n;
         assert_eq!(
             region.response.state,
             if i == 1 {
@@ -123,6 +136,9 @@ fn pressure_edges_microslip_and_heat_while_the_core_sticks() {
             region.response.checkpoint.normal_patch().authority(),
             contact.reference().normal_patch().authority()
         );
+    }
+    for (load, expected) in loads.into_iter().zip([0.1, 0.8, 0.1]) {
+        near(load, expected, 1e-15);
     }
     // Independent two-spring calculation: k=[60,40]. Edge capacities are
     // [0.12,0.28] N, so the weak spring returns to 0.002 m; the core stays
@@ -186,21 +202,28 @@ fn material_memory_crosses_pressure_boundaries_without_reset_or_thermalizing_out
     near(r.numerical_dissipation_j, 0.00003, 2e-14);
     near(r.heat.thermal.stored_energy_change_j, 0.00006, 3e-10);
     near(r.total_energy_residual_j, 0.0, 5e-10);
-    let carried = r
+    let carried: Vec<_> = r
         .regions
         .iter()
-        .find(|r| r.region.material_span_m == [0.75, 1.0])
-        .unwrap();
-    assert_eq!(carried.region.accepted_state(), &old_right);
-    assert_eq!(
-        carried.response.next_state.region_elastic_displacement_m(),
-        old_right.region_elastic_displacement_m()
+        .filter(|r| r.region.material_span_m[0] >= 0.75 && r.region.material_span_m[1] <= 1.0)
+        .collect();
+    near(
+        carried.iter().map(|r| r.region.area_fraction).sum(),
+        0.25,
+        1e-15,
     );
-    assert_eq!(
-        carried.response.next_state.sliding_regions(),
-        old_right.sliding_regions()
-    );
-    assert_eq!(carried.region.normal_pressure_pa, 1.6);
+    for carried in carried {
+        assert_eq!(carried.region.accepted_state(), &old_right);
+        assert_eq!(
+            carried.response.next_state.region_elastic_displacement_m(),
+            old_right.region_elastic_displacement_m()
+        );
+        assert_eq!(
+            carried.response.next_state.sliding_regions(),
+            old_right.sliding_regions()
+        );
+        assert_eq!(carried.region.normal_pressure_pa, 1.6);
+    }
     let entering = r
         .regions
         .iter()
