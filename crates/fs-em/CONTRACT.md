@@ -4334,6 +4334,24 @@ outside this analytic boundary model.
 
 ## Source-backed nonlinear electrostatics and differential capacitance
 
+Both planar and axisymmetric nonlinear electrodes accept prescribed volume
+charge, internal free-charge sheets, outward displacement traces and independent
+impressed polarization through `solve_with_sources`. The original linear source
+assembler supplies exact P1 moments and geometric boundary admission; a normal
+flux cannot also prescribe a voltage-controlled or floating electrode. Each
+electrical component independently closes
+`Q_electrode + Q_volume + Q_sheet - Q_outward = 0`.
+The original material `D(E)`, energy, coenergy and analytic tangent are retained;
+impressed P is added only to total displacement, with its `E.P` pairing reported
+separately. It does not invent a source storage or heat law. Differential
+capacitance holds these sources fixed. Maxwell contours require a source-free
+exterior, and shape derivatives with nonzero surface/P sources refuse until a
+source transport law is supplied. The common bounded Gauss/Newton iteration
+retains original-law backtracking, final residual recomputation and checked-CG
+work limits, reusing residual scratch for each linear right-hand side.
+Synthetic regressions cover nonlinear interface jumps, depolarization, prescribed
+flux signs, mixed electrodes and exact radial source-work moments.
+
 `electrostatic::nonlinear::axisymmetric::AxisymmetricNonlinearElectrostatics`
 uses this same prepared nonlinear Gauss/Newton and differential-capacitance
 owner on the original revolved metric. Constant cell fields integrate against

@@ -60,9 +60,9 @@ pub(super) struct SourceLoads {
     pub volume_charge_c: f64,
     pub sheet_charge_c: f64,
     pub outward_displacement_c: f64,
-    sheets: Vec<ElectrostaticChargeSheet>,
-    traces: Vec<ElectrostaticDisplacementTrace>,
-    loaded_cells: Vec<bool>,
+    pub(super) sheets: Vec<ElectrostaticChargeSheet>,
+    pub(super) traces: Vec<ElectrostaticDisplacementTrace>,
+    pub(super) loaded_cells: Vec<bool>,
 }
 
 // Integral(N_i r)/integral(r) on a triangle equals

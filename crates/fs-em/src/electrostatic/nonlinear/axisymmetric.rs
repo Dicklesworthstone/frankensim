@@ -17,6 +17,10 @@ use super::{
     add, finite, invalid, poll,
     tangent::{DifferentialCapacitance, DifferentialCapacitanceControls},
 };
+use crate::electrostatic::{
+    ElectrostaticChargeSheet, ElectrostaticDisplacementTrace, PlanarElectrostaticSources,
+    axisymmetric::AxisymmetricElectrostaticSources,
+};
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_rep_mesh::{Metric2, TriComplex2};
 
@@ -120,6 +124,35 @@ impl<'m> AxisymmetricNonlinearElectrodes<'m> {
             )?,
         })
     }
+
+    /// Prescribed P in local (r,z), internal surfaces of revolution carrying
+    /// free charge, and physical outward D.n traces use the same exact radial
+    /// moments as the native linear field. The constitutive D(E) remains the
+    /// original nonlinear law; fixed P contributes no inferred storage law.
+    pub fn solve_with_sources(
+        &self,
+        sources: AxisymmetricElectrostaticSources<'_>,
+        controls: &[ElectrodeControl],
+        initial_relative_voltage_v: &[f64],
+        solve: NonlinearElectrostaticControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<AxisymmetricNonlinearElectricField<'m>, Error> {
+        Ok(AxisymmetricNonlinearElectricField {
+            problem: self.problem,
+            field: self.core.solve_with_sources(
+                PlanarElectrostaticSources {
+                    free_charge_density_c_m3: sources.free_charge_density_c_m3,
+                    impressed_polarization_c_m2: sources.impressed_polarization_c_m2,
+                    charge_sheets: sources.charge_sheets,
+                    displacement_traces: sources.displacement_traces,
+                },
+                controls,
+                initial_relative_voltage_v,
+                solve,
+                cancelled,
+            )?,
+        })
+    }
 }
 
 /// Accepted original nonlinear meridional field and physical conservation gates.
@@ -168,6 +201,27 @@ impl<'m> AxisymmetricNonlinearElectricField<'m> {
     /// Original cellwise `[D_r, D_z]` in C/m²; material jumps are retained.
     pub fn displacement_c_m2(&self) -> &[[f64; 2]] {
         self.field.displacement_c_m2()
+    }
+    pub fn constitutive_displacement_c_m2(&self) -> &[[f64; 2]] {
+        self.field.constitutive_displacement_c_m2()
+    }
+    pub fn impressed_polarization_c_m2(&self) -> Option<&[[f64; 2]]> {
+        self.field.impressed_polarization_c_m2()
+    }
+    pub fn free_charge_sheets(&self) -> &[ElectrostaticChargeSheet] {
+        self.field.free_charge_sheets()
+    }
+    pub fn displacement_traces(&self) -> &[ElectrostaticDisplacementTrace] {
+        self.field.displacement_traces()
+    }
+    pub fn sheet_charge_c(&self) -> f64 {
+        self.field.sheet_charge_c()
+    }
+    pub fn outward_displacement_c(&self) -> f64 {
+        self.field.outward_displacement_c()
+    }
+    pub fn polarization_pairing_j(&self) -> f64 {
+        self.field.polarization_pairing_j()
     }
     pub fn cell_energy_j(&self) -> &[f64] {
         self.field.cell_energy_j()
@@ -238,6 +292,11 @@ impl<'m> AxisymmetricNonlinearElectricField<'m> {
     ) -> Result<f64, Error> {
         poll(cancelled)?;
         let mesh = self.problem.mesh();
+        if self.field.additional_sources.has_geometry_sources() {
+            return Err(invalid(
+                "axisymmetric shape work with impressed polarization or surface sources requires their transport law",
+            ));
+        }
         if displacement_m.len() != mesh.vertices().len()
             || displacement_m.iter().flatten().any(|v| !v.is_finite())
             || self

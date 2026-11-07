@@ -85,7 +85,7 @@ impl Dofs {
     }
     pub fn residual(
         &self,
-        evaluation: &Evaluation,
+        nodal: &[f64],
         rhs: &[f64],
         out: &mut [f64],
         scratch: &mut [f64],
@@ -94,7 +94,7 @@ impl Dofs {
         scratch.fill(0.0);
         for (v, index) in self.index.iter().enumerate() {
             if let Some(i) = *index {
-                add(&mut out[i], &mut scratch[i], evaluation.nodal[v] - rhs[v])?;
+                add(&mut out[i], &mut scratch[i], nodal[v] - rhs[v])?;
             }
         }
         for i in 0..out.len() {
@@ -158,16 +158,78 @@ impl<'m> NonlinearElectrodes<'m> {
         initial: &[f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Dofs, Vec<f64>, VoltageReferences), Error> {
-        let n = self.problem.mesh.vertices().len();
+        self.layout.coordinates(controls, initial, cancelled)
+    }
+
+    /// Solve the original nonlinear Gauss equations with mixed voltage/charge
+    /// electrodes. Initial potentials are relative to the first voltage control
+    /// in each electrical component; all absolute references are retained
+    /// separately. Prescribed nodes take their component-relative boundary
+    /// value, and each floating trace has one shared guess.
+    /// Every trial must stay inside all material field supports. No accepted
+    /// history is mutated and no unconverged/partially admitted field is returned.
+    pub fn solve(
+        &self,
+        free_charge_density_c_m3: &[f64],
+        controls: &[ElectrodeControl],
+        initial_relative_voltage_v: &[f64],
+        solve: NonlinearElectrostaticControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<NonlinearElectricField<'m>, Error> {
+        solve::solve(
+            self,
+            super::super::PlanarElectrostaticSources::volume_charge(free_charge_density_c_m3),
+            controls,
+            initial_relative_voltage_v,
+            solve,
+            cancelled,
+        )
+    }
+
+    /// Solve the same nonlinear Gauss equations with original volume charge,
+    /// internal free-charge sheets, outward displacement traces and impressed
+    /// polarization. P is an independent fixed source, not the polarization
+    /// already contained in D(E). Field support and all electrode controls are
+    /// unchanged; prescribed displacement cannot overlap a physical electrode,
+    /// including a floating one. Source charge remains fixed in dQ/dV queries.
+    pub fn solve_with_sources(
+        &self,
+        sources: super::super::PlanarElectrostaticSources<'_>,
+        controls: &[ElectrodeControl],
+        initial_relative_voltage_v: &[f64],
+        solve: NonlinearElectrostaticControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<NonlinearElectricField<'m>, Error> {
+        solve::solve(
+            self,
+            sources,
+            controls,
+            initial_relative_voltage_v,
+            solve,
+            cancelled,
+        )
+    }
+}
+
+impl Layout {
+    /// Geometry-independent equipotential quotient, shared by triangular and
+    /// tetrahedral fields after their native surface/component admission.
+    pub fn coordinates(
+        &self,
+        controls: &[ElectrodeControl],
+        initial: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Dofs, Vec<f64>, VoltageReferences), Error> {
+        let n = self.components.len();
         if initial.len() != n || initial.iter().any(|v| !v.is_finite()) {
             return Err(invalid(
                 "complete finite relative initial potentials required",
             ));
         }
-        let references = self.layout.voltage_references(controls, cancelled)?;
+        let references = self.voltage_references(controls, cancelled)?;
         for (t, control) in controls.iter().enumerate() {
             poll(cancelled)?;
-            let trace = &self.layout.terminals[t];
+            let trace = &self.terminals[t];
             if matches!(control, ElectrodeControl::Charge(_))
                 && trace.iter().any(|&v| initial[v] != initial[trace[0]])
             {
@@ -183,7 +245,7 @@ impl<'m> NonlinearElectrodes<'m> {
         let mut potential = initial.to_vec();
         for v in 0..n {
             poll(cancelled)?;
-            if let Some(t) = self.layout.node_terminal[v] {
+            if let Some(t) = self.node_terminal[v] {
                 match controls[t] {
                     ElectrodeControl::Voltage(value) => {
                         let difference = finite(value - references.voltage_by_vertex_v[v])?;
@@ -217,30 +279,5 @@ impl<'m> NonlinearElectrodes<'m> {
             potential,
             references,
         ))
-    }
-
-    /// Solve the original nonlinear Gauss equations with mixed voltage/charge
-    /// electrodes. Initial potentials are relative to the first voltage control
-    /// in each electrical component; all absolute references are retained
-    /// separately. Prescribed nodes take their component-relative boundary
-    /// value, and each floating trace has one shared guess.
-    /// Every trial must stay inside all material field supports. No accepted
-    /// history is mutated and no unconverged/partially admitted field is returned.
-    pub fn solve(
-        &self,
-        free_charge_density_c_m3: &[f64],
-        controls: &[ElectrodeControl],
-        initial_relative_voltage_v: &[f64],
-        solve: NonlinearElectrostaticControls,
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<NonlinearElectricField<'m>, Error> {
-        solve::solve(
-            self,
-            free_charge_density_c_m3,
-            controls,
-            initial_relative_voltage_v,
-            solve,
-            cancelled,
-        )
     }
 }

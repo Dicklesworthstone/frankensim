@@ -132,6 +132,8 @@ impl<'m> NonlinearElectricField<'m> {
                 }
                 if self.free_charge_density_c_m3[inner] != 0.0
                     || self.free_charge_density_c_m3[outer] != 0.0
+                    || self.additional_sources.cell_has_source(inner)
+                    || self.additional_sources.cell_has_source(outer)
                     || vertices
                         .iter()
                         .any(|&v| self.nodal_boundary_charge_c[v as usize].is_some())
@@ -205,6 +207,11 @@ impl<'m> NonlinearElectricField<'m> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ElectrostaticShapeForces<'_, 'm>, Error> {
         poll(cancelled)?;
+        if self.additional_sources.has_geometry_sources() {
+            return Err(invalid(
+                "shape forces with impressed polarization or surface sources require their transport law",
+            ));
+        }
         let n = self.problem.mesh.vertices().len();
         let mut nodal_force_n = vec![[0.0; 2]; n];
         let mut corrections = vec![[0.0; 2]; n];
@@ -255,6 +262,11 @@ impl<'m> NonlinearElectricField<'m> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, Error> {
         poll(cancelled)?;
+        if self.additional_sources.has_geometry_sources() {
+            return Err(invalid(
+                "shape work with impressed polarization or surface sources requires their transport law",
+            ));
+        }
         if displacement_m.len() != self.problem.mesh.vertices().len()
             || displacement_m.iter().flatten().any(|v| !v.is_finite())
             || !thickness_change_m.is_finite()

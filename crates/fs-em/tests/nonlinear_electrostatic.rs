@@ -6,6 +6,8 @@ mod axisymmetric;
 mod force;
 #[path = "nonlinear_electrostatic/gauges.rs"]
 mod gauges;
+#[path = "nonlinear_electrostatic/sources.rs"]
+mod sources;
 #[path = "nonlinear_electrostatic/thermal.rs"]
 mod thermal;
 

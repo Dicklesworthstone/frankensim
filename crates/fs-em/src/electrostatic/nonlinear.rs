@@ -1,4 +1,4 @@
-//! Nonlinear electrostatics on the original planar P1 complex.
+//! Nonlinear electrostatics on original P1 complexes with typed geometry owners.
 //!
 //! The voltage functional uses integral D.dE; physical field storage uses
 //! integral E.dD. They coincide only for linear response. Floating electrodes
@@ -13,15 +13,19 @@
 //! potential E.D-W-Q, with physical storage and switching heat kept separate.
 //! These fixed-source discrete balances supply no thermal evolution,
 //! electrostriction or spatial error bounds.
+//! Prescribed charge sheets, outward displacement and impressed polarization
+//! use the same original source integration as the linear dielectric fields.
 
 /// Revolved nonlinear fields, charged electrodes and differential capacitance.
 pub mod axisymmetric;
 mod electrodes;
 pub mod force;
+mod gauss;
 /// Retained vector polarization on the same prepared geometry and Gauss solver.
 #[cfg(feature = "dielectric-hysteresis")]
 pub mod hysteretic;
 mod solve;
+mod sources;
 pub mod tangent;
 
 use super::{ElectrostaticError, finite, geometry, poll, positive};
@@ -556,6 +560,7 @@ pub struct NonlinearElectricField<'m> {
     terminal_charge_c: Vec<f64>,
     nodal_boundary_charge_c: Vec<Option<f64>>,
     free_charge_density_c_m3: Vec<f64>,
+    additional_sources: sources::RetainedSources,
     evaluation: Evaluation,
     volume_charge_c: f64,
     charge_balance_residual_c: f64,
@@ -627,7 +632,17 @@ impl<'m> NonlinearElectricField<'m> {
     pub fn electric_field_v_m(&self) -> &[[f64; 2]] {
         &self.evaluation.electric
     }
+    /// Total D from the constitutive law plus any separately impressed P.
+    /// Interface jumps are retained; neighboring cells are never averaged.
     pub fn displacement_c_m2(&self) -> &[[f64; 2]] {
+        self.additional_sources
+            .total_displacement_c_m2
+            .as_deref()
+            .unwrap_or(&self.evaluation.displacement)
+    }
+    /// Constitutive D only, excluding the independently prescribed P source.
+    /// This includes polarization already represented by the material law.
+    pub fn constitutive_displacement_c_m2(&self) -> &[[f64; 2]] {
         &self.evaluation.displacement
     }
     pub fn cell_energy_j(&self) -> &[f64] {
@@ -639,8 +654,9 @@ impl<'m> NonlinearElectricField<'m> {
     pub fn energy_j(&self) -> f64 {
         self.evaluation.energy
     }
-    /// Voltage objective: reversible coenergy for ordinary cells, incremental
-    /// E.D-W-Q for cells with frozen polarization. It is not extra storage.
+    /// Constitutive voltage potential: reversible coenergy for ordinary cells,
+    /// incremental E.D-W-Q for frozen polarization. Prescribed charge/flux/P
+    /// source terms are accounted separately. This is not additional storage.
     pub fn coenergy_j(&self) -> f64 {
         self.evaluation.coenergy
     }
@@ -656,7 +672,7 @@ impl<'m> NonlinearElectricField<'m> {
     pub fn charge_balance_residual_c(&self) -> f64 {
         self.charge_balance_residual_c
     }
-    /// Largest absolute electrode-plus-volume free charge of any electrical
+    /// Largest absolute Q_electrode+Q_volume+Q_sheet-Q_outward of any electrical
     /// component, independently gated so opposite defects cannot cancel.
     pub fn maximum_component_charge_residual_c(&self) -> f64 {
         self.maximum_component_charge_residual_c
