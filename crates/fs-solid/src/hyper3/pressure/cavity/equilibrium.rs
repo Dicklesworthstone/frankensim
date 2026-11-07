@@ -86,6 +86,116 @@ impl<G: AdiabaticCavityGas> AdiabaticCavity<'_, G> {
     }
 }
 
+/// An immutable set of independently sourced cavities on one exact solid chart.
+/// Reference and boundary ownership are checked once, before native iteration.
+pub(crate) struct CavityBatch<'sources, 'gas, G> {
+    sources: &'sources [AdiabaticCavity<'gas, G>],
+    origin_node: usize,
+}
+
+impl<'sources, 'gas, G: AdiabaticCavityGas> CavityBatch<'sources, 'gas, G> {
+    /// Native non-cavity paths need no geometry binding or admission.
+    pub const fn empty() -> Self {
+        Self {
+            sources: &[],
+            origin_node: 0,
+        }
+    }
+
+    pub fn new(
+        sources: &'sources [AdiabaticCavity<'gas, G>],
+        nodes_m: &[[f64; 3]],
+        tetrahedra: &[[usize; 4]],
+        cx: &Cx<'_>,
+    ) -> Result<Self, HyperTetError> {
+        checkpoint(cx)?;
+        let mut occupied = std::collections::BTreeSet::new();
+        let mut origin_node = 0;
+        for (index, source) in sources.iter().enumerate() {
+            checkpoint(cx)?;
+            if !source.cavity.surface().matches_reference(nodes_m, tetrahedra) {
+                return Err(invalid(&format!(
+                    "sealed cavity {index} requires the exact solid reference chart",
+                )));
+            }
+            for &face in source.cavity.solid_face_indices() {
+                checkpoint(cx)?;
+                if !occupied.insert(face) {
+                    return Err(invalid(&format!(
+                        "sealed cavity {index} repeats an already bound boundary face",
+                    )));
+                }
+            }
+            let cavity_origin = source.cavity.nodes[0];
+            if index == 0 || cavity_origin < origin_node {
+                origin_node = cavity_origin;
+            }
+        }
+        // The global admission chart does not depend on input source order.
+        // Each cavity's own current geometry still uses its separate anchor.
+        checkpoint(cx)?;
+        Ok(Self {
+            sources,
+            origin_node,
+        })
+    }
+
+    pub const fn sources(&self) -> &'sources [AdiabaticCavity<'gas, G>] {
+        self.sources
+    }
+
+    pub fn evaluate(
+        &self,
+        displacement_m: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<TetCavityGasLoad<G>>, HyperTetError> {
+        match self.sources {
+            [] => return Ok(Vec::new()),
+            [source] => return source.evaluate(displacement_m, cx).map(|load| vec![load]),
+            _ => {}
+        }
+        // Retain the original complete-solid finite/orientation/volume checks,
+        // but run their O(nodes + tets) sweep and allocation only once per trial.
+        // The full positions are not the coordinates of any other chamber.
+        drop(self.sources[0].cavity.surface.positions_and_volume_about(
+            displacement_m,
+            self.origin_node,
+            cx,
+        )?);
+        AdmittedCavityDisplacement {
+            sources: self.sources,
+            displacement_m,
+        }
+        .evaluate(cx)
+    }
+}
+
+/// A displacement admitted against exactly these registered immutable sources.
+/// There is no constructor or method accepting another displacement or cavity.
+/// Consuming the epoch publishes all loads together or returns the first refusal.
+struct AdmittedCavityDisplacement<'a, 'gas, G> {
+    sources: &'a [AdiabaticCavity<'gas, G>],
+    displacement_m: &'a [f64],
+}
+
+impl<G: AdiabaticCavityGas> AdmittedCavityDisplacement<'_, '_, G> {
+    fn evaluate(self, cx: &Cx<'_>) -> Result<Vec<TetCavityGasLoad<G>>, HyperTetError> {
+        let mut loads = Vec::with_capacity(self.sources.len());
+        for source in self.sources {
+            checkpoint(cx)?;
+            loads.push(source.cavity.adiabatic_gas_load_with_geometry(
+                source.reference,
+                source.exterior_pressure_pa,
+                source.controls,
+                || source.cavity.evaluate_after_mesh_admission(self.displacement_m, cx),
+                cx,
+            )?);
+        }
+        checkpoint(cx)?;
+        Ok(loads)
+    }
+}
+
 /// Free-coordinate factors of `sum_c w_c w_c^T` in original cavity order.
 ///
 /// One cavity retains the original dense reduction, including zero entries and

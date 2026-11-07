@@ -7501,6 +7501,20 @@ compression with gravity and ambient pressure, and the second chamber's volume
 and temperature response when the first is heated. Source ordering, inventory,
 force balance, empty/single reductions and boundary ownership are checked.
 
+For multiple chambers, a private immutable batch validates common reference
+charts and boundary ownership once. Every Newton/Armijo trial then performs
+the original complete-solid geometry admission once, using a canonical anchor
+independent of source order. Each chamber still forms its current compact
+positions from its own cached reference offsets and original displacement
+offsets. It never subtracts already rounded global positions. All positive gas
+volumes and original thermodynamic sources admit independently; a failure
+publishes no partial batch. Empty and single-source paths retain the original
+evaluation. This removes repeated complete-mesh preparation and allocation;
+full-chart force and acoustic source vectors remain per cavity. No measured
+wall-clock speedup is asserted. A distant-chamber regression checks retained
+tiny volume work, independent equal-reference surfaces, source-order invariance
+and bitwise agreement with standalone force, potential and tangent evaluations.
+
 The same geometry and static equilibrium path accept native
 `ClosedRealGasParcel` inventories through the sealed `AdiabaticCavityGas` seam.
 `AdiabaticCavity`, `TetCavityGasLoad` and `HyperTetCavitiesSolution` retain the

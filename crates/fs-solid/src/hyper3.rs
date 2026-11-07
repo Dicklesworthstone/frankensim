@@ -1224,23 +1224,9 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         cx: &Cx<'_>,
     ) -> Result<HyperTetCavitiesSolution<G>, HyperTetError> {
         checkpoint(cx)?;
-        let mut occupied = std::collections::BTreeSet::new();
-        for (index, source) in cavities.iter().enumerate() {
-            checkpoint(cx)?;
-            if !source.cavity.surface().matches_reference(self.nodes_m, self.tetrahedra) {
-                return Err(HyperTetError::InvalidInput {
-                    what: format!("sealed cavity {index} requires the exact solid reference chart"),
-                });
-            }
-            for &face in source.cavity.solid_face_indices() {
-                checkpoint(cx)?;
-                if !occupied.insert(face) {
-                    return Err(HyperTetError::InvalidInput {
-                        what: format!("sealed cavity {index} repeats an already bound boundary face"),
-                    });
-                }
-            }
-        }
+        let cavity_batch = pressure::cavity::equilibrium::CavityBatch::new(
+            cavities, self.nodes_m, self.tetrahedra, cx,
+        )?;
         let pressure = if let Some((surface, applied)) = pressure {
             if !surface.matches_reference(self.nodes_m, self.tetrahedra) {
                 return Err(HyperTetError::InvalidInput {
@@ -1252,7 +1238,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
             None
         };
         self.solve_loaded_from_with_cavities(
-            None, None, pressure, gravity, None, cavities, cx,
+            None, None, pressure, gravity, None, cavity_batch, cx,
         )
     }
 
@@ -1408,7 +1394,8 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
             None
         };
         self.solve_loaded_from_with_cavities::<ClosedGasParcel>(
-            None, None, pressure, Some((reference_density, source)), None, &[], cx,
+            None, None, pressure, Some((reference_density, source)), None,
+            pressure::cavity::equilibrium::CavityBatch::empty(), cx,
         ).map(|solution| solution.solid)
     }
 
@@ -1445,7 +1432,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         self.solve_loaded_from_with_cavities::<ClosedGasParcel>(
             initial_displacement, prepared_elements, pressure,
             gravity.map(|(density, field)| (density, gravity::StationaryGravity3::from_samples(field))),
-            inertia, &[], cx,
+            inertia, pressure::cavity::equilibrium::CavityBatch::empty(), cx,
         ).map(|solution| solution.solid)
     }
 
@@ -1463,11 +1450,12 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
             gravity::StationaryGravity3<'_>,
         )>,
         inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
-        cavities: &[pressure::cavity::AdiabaticCavity<'_, G>],
+        cavity_batch: pressure::cavity::equilibrium::CavityBatch<'_, '_, G>,
         cx: &Cx<'_>,
     ) -> Result<HyperTetCavitiesSolution<G>, HyperTetError> {
         checkpoint(cx)?;
         self.validate_inputs()?;
+        let cavities = cavity_batch.sources();
         if inertia.is_some()
             && (initial_displacement.is_none()
                 || self.settings.load_steps != 1
@@ -1620,11 +1608,10 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                 }
                 // Keep the source evaluation and its sparse/rank-one tangent
                 // together: accepted trials need no second thermodynamic solve.
-                let mut cavity_loads = Vec::with_capacity(cavities.len());
+                let cavity_loads = cavity_batch.evaluate(displacement, cx)?;
                 let mut combined = (cavities.len() > 1)
                     .then(|| force.iter().copied().map(Dd::from_f64).collect::<Vec<_>>());
-                for source in cavities {
-                    let current = source.evaluate(displacement, cx)?;
+                for current in &cavity_loads {
                     for (index, (total, &value)) in force.iter_mut().zip(&current.force_n).enumerate() {
                         if index % 256 == 0 { checkpoint(cx)?; }
                         if let Some(sum) = &mut combined {
@@ -1633,7 +1620,6 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                             *total = load.mul_add(value, *total);
                         }
                     }
-                    cavity_loads.push(current);
                 }
                 if let Some(sum) = combined {
                     for (total, value) in force.iter_mut().zip(sum) {

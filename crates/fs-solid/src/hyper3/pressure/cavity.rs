@@ -244,6 +244,15 @@ impl ClosedTetCavity {
         cx: &Cx<'_>,
     ) -> Result<TetCavityVolume<'_>, HyperTetError> {
         let (positions_m, volume_m3) = self.positions_and_volume(displacement_m, cx)?;
+        self.volume_from_positions(positions_m, volume_m3, cx)
+    }
+
+    fn volume_from_positions(
+        &self,
+        positions_m: Vec<[f64; 3]>,
+        volume_m3: f64,
+        cx: &Cx<'_>,
+    ) -> Result<TetCavityVolume<'_>, HyperTetError> {
         let mut gradient_m2 = vec![0.0; 3 * self.nodes.len()];
         for face in &self.local_faces {
             checkpoint(cx)?;
@@ -263,6 +272,40 @@ impl ClosedTetCavity {
             volume_m3,
             gradient_m2,
         })
+    }
+
+    // Only the private admitted batch epoch calls this boundary-only path.
+    // Its complete solid has already passed the original pressure admission.
+    // Reference offsets were prepared with the EXACT subtraction used by the
+    // standalone path. Adding original displacement offsets preserves that
+    // path's arithmetic without translating rounded global current positions.
+    fn evaluate_after_mesh_admission(
+        &self,
+        displacement_m: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<TetCavityVolume<'_>, HyperTetError> {
+        checkpoint(cx)?;
+        if displacement_m.len() != 3 * self.surface.nodes_m.len() {
+            return Err(invalid("admitted cavity displacement has the wrong full chart"));
+        }
+        let anchor = 3 * self.nodes[0];
+        let origin = [
+            finite(displacement_m[anchor])?,
+            finite(displacement_m[anchor + 1])?,
+            finite(displacement_m[anchor + 2])?,
+        ];
+        let mut positions = Vec::with_capacity(self.nodes.len());
+        for (&node, reference) in self.nodes.iter().zip(&self.reference_positions_m) {
+            checkpoint(cx)?;
+            let mut current = [0.0; 3];
+            for axis in 0..3 {
+                let offset = finite(finite(displacement_m[3 * node + axis])? - origin[axis])?;
+                current[axis] = finite(reference[axis] + offset)?;
+            }
+            positions.push(current);
+        }
+        let volume = enclosed_volume(&positions, &self.local_faces, cx)?;
+        self.volume_from_positions(positions, volume, cx)
     }
 
     fn positions_and_volume(
@@ -331,6 +374,25 @@ impl ClosedTetCavity {
         controls: GasEntropySolve,
         cx: &Cx<'_>,
     ) -> Result<TetCavityGasLoad<G>, HyperTetError> {
+        self.adiabatic_gas_load_with_geometry(
+            gas,
+            exterior_pressure_pa,
+            controls,
+            || self.evaluate(displacement_m, cx),
+            cx,
+        )
+    }
+
+    // The standalone owner and the admitted batch epoch share all source,
+    // force, tangent and potential arithmetic. Only geometry admission differs.
+    fn adiabatic_gas_load_with_geometry<'a, G: AdiabaticCavityGas>(
+        &'a self,
+        gas: &G,
+        exterior_pressure_pa: f64,
+        controls: GasEntropySolve,
+        geometry: impl FnOnce() -> Result<TetCavityVolume<'a>, HyperTetError>,
+        cx: &Cx<'_>,
+    ) -> Result<TetCavityGasLoad<G>, HyperTetError> {
         checkpoint(cx)?;
         if gas.volume_m3().to_bits() != self.reference_volume_m3.to_bits()
             || !exterior_pressure_pa.is_finite()
@@ -340,7 +402,10 @@ impl ClosedTetCavity {
                 "adiabatic cavity gas must start at the reference volume with finite nonnegative exterior pressure",
             ));
         }
-        let geometry = self.evaluate(displacement_m, cx)?;
+        let geometry = geometry()?;
+        if !std::ptr::eq(geometry.cavity, self) {
+            return Err(invalid("gas load geometry belongs to a different cavity"));
+        }
         let mut was_cancelled = false;
         let proposed = gas.at_volume_isentropic(
             geometry.volume_m3,
@@ -375,8 +440,9 @@ impl ClosedTetCavity {
         let compact_force = load
             .generalized_forces_cancellable(|| cx.checkpoint().is_err())
             .map_err(map_error)?;
-        let mut force_n = vec![0.0; displacement_m.len()];
-        let mut volume_gradient = vec![0.0; displacement_m.len()];
+        let dofs = 3 * self.surface.nodes_m.len();
+        let mut force_n = vec![0.0; dofs];
+        let mut volume_gradient = vec![0.0; dofs];
         for (local, &value) in compact_force.iter().enumerate() {
             if local % 256 == 0 { checkpoint(cx)?; }
             let node = self.nodes[local / 3];
