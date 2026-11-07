@@ -23,7 +23,8 @@ mod diffraction;
 #[cfg(feature = "tracer")]
 pub(crate) use diffraction::ProjectedPupilFootprint;
 pub use diffraction::{
-    CoherentDiffractionError, CoherentDiffractionLimits, CoherentDiffractionSample,
+    CoherentDiffractionError, CoherentDiffractionLimits, CoherentDiffractionPixel,
+    CoherentDiffractionPixelLimits, CoherentDiffractionPixelPower, CoherentDiffractionSample,
     CoherentPupilIllumination, CoherentPupilWave, DefocusedDiffraction, FocusedDiffraction,
     LayeredCameraRay, LayeredDiffraction, MAX_COHERENT_PUPIL_TANGENT, PreparedCoherentDiffraction,
     PupilCoherenceFactor, SpectralCameraRay,

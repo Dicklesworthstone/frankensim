@@ -15,13 +15,19 @@
 //!
 //! All waves share one vacuum wavelength and the declared source-plane
 //! curvature. This clear-pupil, scalar, paraxial query does not make the
-//! radiance path tracer coherent, resolve polarization, integrate a detector
-//! pixel/shutter, or infer phases from arbitrary scene points. See TU Delft,
+//! radiance path tracer coherent, resolve polarization, integrate a shutter,
+//! or infer phases from arbitrary scene points. Finite rectangular pixels
+//! integrate the same field with bandwidth-guided positive quadrature. See TU Delft,
 //! *Interference and Coherence*, for field versus intensity superposition:
 //! <https://interactivetextbooks.tudelft.nl/tn2421/content/Chap5_Interference/InterferenceCoherence_2022_01Clean.html>.
 
 use super::{CameraError, PhysicalCamera, PreparedDiffractionAmplitude};
 use fs_math::{c64::C64, dd::Dd};
+
+mod pixel;
+pub use pixel::{
+    CoherentDiffractionPixel, CoherentDiffractionPixelLimits, CoherentDiffractionPixelPower,
+};
 
 /// Largest admitted magnitude of a source or observation tangent coordinate.
 /// This paraxial model boundary is not an optical error certificate.
@@ -91,6 +97,10 @@ pub enum CoherentDiffractionError {
     NonFiniteAmplitude,
     /// A source or observation coordinate is outside the declared paraxial domain.
     OutsideParaxialDomain,
+    /// Pixel bounds are not finite and strictly increasing on both axes.
+    InvalidPixel,
+    /// The maximum subcell intensity phase span is outside `(0, 1]` radians.
+    InvalidPixelResolution,
     /// A preparation count exceeds the caller's explicit bound.
     Limit {
         /// Quantity whose admitted count was exceeded.
@@ -217,14 +227,8 @@ impl PreparedCoherentDiffraction<'_, '_> {
     ) -> Result<CoherentDiffractionSample, CoherentDiffractionError> {
         poll(&mut cancelled)?;
         admit_coordinate(tangent_coordinate)?;
-        let mean = self.field(self.illumination.mean, tangent_coordinate, &mut cancelled)?;
-        let mean_power = square(mean)?;
-        let mut fluctuation_power = Dd::ZERO;
-        for factor in self.illumination.factors {
-            poll(&mut cancelled)?;
-            fluctuation_power = fluctuation_power
-                + square(self.field(factor.waves, tangent_coordinate, &mut cancelled)?)?;
-        }
+        let (mean, mean_power, fluctuation_power) =
+            self.field_moments(tangent_coordinate, &mut cancelled)?;
         let result = CoherentDiffractionSample {
             mean_field: C64::new(rounded(mean[0])?, rounded(mean[1])?),
             mean_power_density_w: rounded(mean_power)?,
@@ -233,6 +237,23 @@ impl PreparedCoherentDiffraction<'_, '_> {
         };
         poll(&mut cancelled)?;
         Ok(result)
+    }
+
+    fn field_moments(
+        &self,
+        tangent_coordinate: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<([Dd; 2], Dd, Dd), CoherentDiffractionError> {
+        let mean = self.field(self.illumination.mean, tangent_coordinate, cancelled)?;
+        let mean_power = square(mean)?;
+        let mut fluctuation_power = Dd::ZERO;
+        for factor in self.illumination.factors {
+            poll(cancelled)?;
+            fluctuation_power = fluctuation_power
+                + square(self.field(factor.waves, tangent_coordinate, cancelled)?)?;
+        }
+        rounded(fluctuation_power)?;
+        Ok((mean, mean_power, fluctuation_power))
     }
 
     fn field(

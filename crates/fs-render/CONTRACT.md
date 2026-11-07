@@ -3829,13 +3829,37 @@ returning a complete sample. Source and observation tangent magnitudes must
 not exceed 0.1. This is a scalar paraxial model boundary, not an error bound.
 The original clear-pupil, material-domain, physical-medium and finite-defocus
 limits remain. Layered source planes, scene-derived coherence, vector/polarized
-imaging, finite pixels and finite-shutter beat integration are outside this
-query; the existing radiance renderer retains its original semantics.
+imaging and finite-shutter beat integration are outside this query; the
+existing radiance renderer retains its original semantics.
+
+`PreparedCoherentDiffraction::integrate_pixel` collects mean, fluctuation and
+total power in watts over an admitted `CoherentDiffractionPixel` rectangle.
+Bounds use the original tangent coordinates. For a perpendicular physical
+image plane at distance d, lateral bounds map as x/d and the irradiance and
+area Jacobians cancel; no solid-angle cosine is inserted. It integrates each
+source bank's complete field square, then adds independent covariance powers,
+so a dark centre never replaces bright fringes elsewhere in the pixel.
+
+The original medium wavelength and pupil radius set the diffraction scale s.
+The pupil's intensity Fourier support lies within [-2,2] on each normalized
+axis, including defocus and all tilted-source cross terms. Positive 4-by-4
+Gauss quadrature uses subcells with `2*width/s` no greater than the caller's
+`maximum_phase_span_rad` in (0,1]. This bandwidth-guided resolution is not an
+error certificate; reducing the span assesses quadrature error independently
+of the scalar/paraxial model. Counts for all samples and original pupil-wave
+evaluations are checked before the first field query and returned with the
+result. The fixed traversal uses DD accumulation and constant scratch with no
+allocation, polls at every sample and wave, and leaves no partial publication
+on cancellation. Empty illumination returns zero without field evaluation.
 
 `tests/coherent_diffraction.rs` checks the physical four/two/zero interference
 limits, signed Airy lobes, weak cancellation residuals, common-phase and
 covariance-basis invariance, independent complex pupil integration, bounded
-admission, cancellation/reuse and numerical overflow. The runnable
+admission, cancellation/reuse and numerical overflow.
+Finite-pixel regressions additionally compare an independent separable square-
+pupil integral, retain exact coherent nulls and independent-factor powers,
+check pixel partition additivity and weak residuals, and refuse work before
+evaluation. The runnable
 `examples/coherent_pupil.rs` emits a CSV comparison of coherent, partially
 coherent and incoherent illumination with the same pupil and isolated powers.
 

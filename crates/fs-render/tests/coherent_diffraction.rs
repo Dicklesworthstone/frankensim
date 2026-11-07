@@ -5,6 +5,7 @@ use fs_geom::{Point3, Vec3};
 use fs_math::c64::C64;
 use fs_render::camera::{
     Aperture, CameraError, CameraProjection, CoherentDiffractionError, CoherentDiffractionLimits,
+    CoherentDiffractionPixel, CoherentDiffractionPixelLimits, CoherentDiffractionPixelPower,
     CoherentPupilIllumination, CoherentPupilWave, DefocusedDiffraction, FocusedDiffraction,
     PhysicalCamera, PupilCoherenceFactor,
 };
@@ -357,4 +358,266 @@ fn g0_empty_banks_are_dark_and_finite_overflow_is_refused() {
         large.observe([0.0; 2], || false),
         Err(CoherentDiffractionError::Unrepresentable)
     );
+}
+
+const PIXEL_LIMITS: CoherentDiffractionPixelLimits = CoherentDiffractionPixelLimits {
+    maximum_phase_span_rad: 1.0,
+    maximum_samples: 100_000,
+    maximum_pupil_evaluations: 500_000,
+};
+
+fn pixel(low_q: [f64; 2], high_q: [f64; 2]) -> CoherentDiffractionPixel {
+    CoherentDiffractionPixel::try_new(low_q.map(|v| v * SCALE), high_q.map(|v| v * SCALE)).unwrap()
+}
+
+fn pixel_power(
+    camera: &PhysicalCamera,
+    mean: &[CoherentPupilWave],
+    factors: &[PupilCoherenceFactor<'_>],
+    footprint: CoherentDiffractionPixel,
+) -> CoherentDiffractionPixelPower {
+    camera
+        .prepare_coherent_diffraction(
+            LAMBDA_NM,
+            CoherentPupilIllumination { mean, factors },
+            LIMITS,
+            || false,
+        )
+        .unwrap()
+        .integrate_pixel(footprint, PIXEL_LIMITS, || false)
+        .unwrap()
+}
+
+// Independent 1-D composite Simpson rule, used only for the separable analytic
+// square-pupil sinc transfer. It shares no production pupil or pixel kernel.
+fn integrate_reference(low: f64, high: f64, integrand: impl Fn(f64) -> f64) -> f64 {
+    let n = 8192;
+    let step = (high - low) / n as f64;
+    let mut sum = integrand(low) + integrand(high);
+    for i in 1..n {
+        sum += if i % 2 == 0 { 2.0 } else { 4.0 } * integrand(low + step * i as f64);
+    }
+    sum * step / 3.0
+}
+
+#[test]
+fn g1_finite_pixel_resolves_a_dark_centre_and_matches_square_pupil_power() {
+    let camera =
+        base(Aperture::try_regular_polygon(RADIUS, 4, core::f64::consts::FRAC_PI_4).unwrap())
+            .with_in_focus_diffraction(FocusedDiffraction::try_new(0.0).unwrap())
+            .unwrap();
+    let waves = [
+        wave([-2.2, 0.0], C64::ONE),
+        wave([2.2, 0.0], C64::new(-1.0, 0.0)),
+    ];
+    let footprint = pixel([-7.1, -4.3], [8.3, 2.8]);
+    let prepared = camera
+        .prepare_coherent_diffraction(
+            LAMBDA_NM,
+            CoherentPupilIllumination {
+                mean: &waves,
+                factors: &[],
+            },
+            LIMITS,
+            || false,
+        )
+        .unwrap();
+    let result = prepared
+        .integrate_pixel(footprint, PIXEL_LIMITS, || false)
+        .unwrap();
+    let sinc = |q: f64| {
+        let phase = q * core::f64::consts::FRAC_1_SQRT_2;
+        if phase == 0.0 {
+            1.0
+        } else {
+            phase.sin() / phase
+        }
+    };
+    let x = integrate_reference(-7.1, 8.3, |q| (sinc(q + 2.2) - sinc(q - 2.2)).powi(2));
+    let y = integrate_reference(-4.3, 2.8, |q| sinc(q).powi(2));
+    // sqrt(area)/lambda for the square, times the tangent-to-q Jacobian.
+    let expected = x * y / (2.0 * core::f64::consts::PI.powi(2));
+    close(result.power_w, expected, 3e-10);
+    assert!(result.power_w > 1.0);
+    let centre = prepared.observe([0.0; 2], || false).unwrap();
+    assert!(centre.power_density_w * footprint.area_tangent() < 1e-20 * result.power_w);
+    assert_eq!(result.pupil_evaluations, 2 * result.quadrature_samples);
+    assert_eq!(result.fluctuation_power_w, 0.0);
+    let refined = prepared
+        .integrate_pixel(
+            footprint,
+            CoherentDiffractionPixelLimits {
+                maximum_phase_span_rad: 0.5,
+                ..PIXEL_LIMITS
+            },
+            || false,
+        )
+        .unwrap();
+    close(refined.power_w, expected, 5e-12);
+    assert!(refined.quadrature_samples > result.quadrature_samples);
+}
+
+#[test]
+fn g3_pixel_power_preserves_coherent_nulls_and_independent_factor_powers() {
+    let footprint = pixel([-3.5, -2.5], [4.5, 3.5]);
+    let unit = [wave([0.2, -0.1], C64::ONE)];
+    let opposite = [wave([0.2, -0.1], C64::new(-1.0, 0.0))];
+    let factors = [
+        PupilCoherenceFactor { waves: &unit },
+        PupilCoherenceFactor { waves: &opposite },
+    ];
+    for camera in [focused(), defocused(2.4)] {
+        let one = pixel_power(&camera, &unit, &[], footprint).power_w;
+        let constructive = pixel_power(&camera, &[unit[0], unit[0]], &[], footprint);
+        close(constructive.power_w, 4.0 * one, 2e-13);
+        let dark = pixel_power(&camera, &[unit[0], opposite[0]], &[], footprint);
+        assert_eq!(dark.power_w, 0.0);
+        let mixed = pixel_power(&camera, &unit, &factors, footprint);
+        close(mixed.mean_power_w, one, 2e-13);
+        close(mixed.fluctuation_power_w, 2.0 * one, 2e-13);
+        close(mixed.power_w, 3.0 * one, 2e-13);
+    }
+}
+
+#[test]
+fn g3_adjacent_pixels_add_and_weak_interference_survives_area_integration() {
+    let camera = base(Aperture::try_annular(RADIUS, 0.4 * RADIUS).unwrap())
+        .with_in_focus_diffraction(FocusedDiffraction::try_new(0.0).unwrap())
+        .unwrap();
+    let waves = [
+        wave([-0.7, 0.2], C64::new(0.8, -0.3)),
+        wave([1.1, -0.4], C64::new(-0.1, 0.6)),
+    ];
+    let whole = pixel_power(&camera, &waves, &[], pixel([-4.0, -2.0], [4.0, 2.0]));
+    let left = pixel_power(&camera, &waves, &[], pixel([-4.0, -2.0], [0.0, 2.0]));
+    let right = pixel_power(&camera, &waves, &[], pixel([0.0, -2.0], [4.0, 2.0]));
+    close(whole.power_w, left.power_w + right.power_w, 2e-10);
+    let strong = wave([0.2, -0.1], C64::new(1e16, -2e16));
+    let weak = wave([0.2, -0.1], C64::new(0.5, 0.75));
+    let cancel = wave([0.2, -0.1], C64::new(-1e16, 2e16));
+    let footprint = pixel([-2.0; 2], [2.0; 2]);
+    close(
+        pixel_power(&camera, &[strong, weak, cancel], &[], footprint).power_w,
+        pixel_power(&camera, &[weak], &[], footprint).power_w,
+        3e-12,
+    );
+}
+
+#[test]
+fn g0_g4_pixel_admission_work_preflight_and_cancelled_reuse() {
+    let camera = focused();
+    let waves = [wave([0.0; 2], C64::ONE)];
+    let prepared = camera
+        .prepare_coherent_diffraction(
+            LAMBDA_NM,
+            CoherentPupilIllumination {
+                mean: &waves,
+                factors: &[],
+            },
+            LIMITS,
+            || false,
+        )
+        .unwrap();
+    let footprint = pixel([-1.0; 2], [1.0; 2]);
+    assert_eq!(footprint.minimum_tangent(), [-SCALE; 2]);
+    assert_eq!(footprint.maximum_tangent(), [SCALE; 2]);
+    let baseline = prepared
+        .integrate_pixel(footprint, PIXEL_LIMITS, || false)
+        .unwrap();
+    let mut polls = 0;
+    assert!(matches!(
+        prepared.integrate_pixel(
+            footprint,
+            CoherentDiffractionPixelLimits {
+                maximum_samples: 0,
+                ..PIXEL_LIMITS
+            },
+            || {
+                polls += 1;
+                false
+            },
+        ),
+        Err(CoherentDiffractionError::Limit {
+            quantity: "pixel quadrature samples",
+            ..
+        })
+    ));
+    assert_eq!(polls, 1, "work refusal precedes every field sample");
+    assert!(matches!(
+        prepared.integrate_pixel(
+            footprint,
+            CoherentDiffractionPixelLimits {
+                maximum_pupil_evaluations: baseline.pupil_evaluations - 1,
+                ..PIXEL_LIMITS
+            },
+            || false,
+        ),
+        Err(CoherentDiffractionError::Limit {
+            quantity: "pixel pupil evaluations",
+            ..
+        })
+    ));
+    let mut polls = 0;
+    assert_eq!(
+        prepared.integrate_pixel(footprint, PIXEL_LIMITS, || {
+            polls += 1;
+            polls == 31
+        }),
+        Err(CoherentDiffractionError::Cancelled)
+    );
+    assert_eq!(
+        prepared
+            .integrate_pixel(footprint, PIXEL_LIMITS, || false)
+            .unwrap(),
+        baseline
+    );
+    for phase in [0.0, -1.0, 1.01, f64::NAN] {
+        assert_eq!(
+            prepared.integrate_pixel(
+                footprint,
+                CoherentDiffractionPixelLimits {
+                    maximum_phase_span_rad: phase,
+                    ..PIXEL_LIMITS
+                },
+                || false,
+            ),
+            Err(CoherentDiffractionError::InvalidPixelResolution)
+        );
+    }
+    assert_eq!(
+        CoherentDiffractionPixel::try_new([0.0; 2], [0.0, 0.1]),
+        Err(CoherentDiffractionError::InvalidPixel)
+    );
+    assert_eq!(
+        CoherentDiffractionPixel::try_new([f64::NAN, 0.0], [0.01; 2]),
+        Err(CoherentDiffractionError::InvalidPixel)
+    );
+    assert_eq!(
+        CoherentDiffractionPixel::try_new([0.0; 2], [0.08; 2]),
+        Err(CoherentDiffractionError::OutsideParaxialDomain)
+    );
+    let empty = camera
+        .prepare_coherent_diffraction(
+            LAMBDA_NM,
+            CoherentPupilIllumination {
+                mean: &[],
+                factors: &[],
+            },
+            LIMITS,
+            || false,
+        )
+        .unwrap();
+    let dark = empty
+        .integrate_pixel(
+            footprint,
+            CoherentDiffractionPixelLimits {
+                maximum_samples: 0,
+                maximum_pupil_evaluations: 0,
+                ..PIXEL_LIMITS
+            },
+            || false,
+        )
+        .unwrap();
+    assert_eq!(dark.power_w, 0.0);
+    assert_eq!(dark.quadrature_samples, 0);
 }

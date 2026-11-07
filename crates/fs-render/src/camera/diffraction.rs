@@ -42,7 +42,8 @@ mod polygon;
 use annular::AnnularPupil;
 use circular::{CircularDefocus, jinc};
 pub use coherent::{
-    CoherentDiffractionError, CoherentDiffractionLimits, CoherentDiffractionSample,
+    CoherentDiffractionError, CoherentDiffractionLimits, CoherentDiffractionPixel,
+    CoherentDiffractionPixelLimits, CoherentDiffractionPixelPower, CoherentDiffractionSample,
     CoherentPupilIllumination, CoherentPupilWave, MAX_COHERENT_PUPIL_TANGENT,
     PreparedCoherentDiffraction, PupilCoherenceFactor,
 };
