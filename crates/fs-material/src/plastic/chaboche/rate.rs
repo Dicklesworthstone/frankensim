@@ -97,6 +97,27 @@ impl<const N: usize> ChabocheOverstressJ2<N> {
         self.kinetics.stress_scale_pa()
     }
 
+    /// Physical endpoint overstress for an actual nonnegative increment.
+    /// The same native inverse rate defines the heat of an axial reduction.
+    pub fn endpoint_overstress_pa(&self, increment: f64) -> Result<f64, ChabocheError> {
+        if !increment.is_finite() || increment < 0.0 {
+            return Err(ChabocheError::Invalid(
+                "overstress requires a finite nonnegative plastic increment",
+            ));
+        }
+        let value = self.kinetics.endpoint_overstress(increment);
+        if !value.is_finite() || value < 0.0 {
+            return Err(ChabocheError::Invalid(
+                "endpoint overstress is not representable",
+            ));
+        }
+        Ok(value)
+    }
+
+    pub(super) fn kinetics(&self) -> &VoceOverstressJ2 {
+        &self.kinetics
+    }
+
     /// Native checked stress/history and generally nonsymmetric full tangent.
     pub fn response(
         &self,
@@ -122,6 +143,7 @@ impl<const N: usize> ChabocheOverstressJ2<N> {
             strain,
             tolerances,
             Some(&self.kinetics),
+            false,
         )
     }
 }

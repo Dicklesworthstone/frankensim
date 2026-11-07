@@ -8,6 +8,7 @@
 use super::{ChabocheEnergyIncrement, ChabocheError, ChabocheJ2, ChabocheState};
 use crate::fiber::Uniaxial;
 use crate::plastic::energy::EnergyTolerances;
+use crate::plastic::rate::VoceOverstressJ2;
 use crate::{MaterialAdmissibility, MaterialError, SmallStrainLaw, Voigt};
 use fs_evidence::ModelCard;
 
@@ -25,6 +26,12 @@ pub struct UniaxialChabocheState<const N: usize = 1> {
 }
 
 impl<const N: usize> UniaxialChabocheState<N> {
+    /// Internal construction after native thermal transport of an already
+    /// axial state. External callers cannot import arbitrary tensor histories.
+    pub(in crate::plastic) fn from_transported_history(history: ChabocheState<N>) -> Self {
+        Self { history }
+    }
+
     /// Signed plastic strain in the fiber direction.
     pub const fn plastic_strain(&self) -> f64 {
         self.history.plastic.plastic_strain[0]
@@ -92,6 +99,15 @@ impl<const N: usize> UniaxialChaboche<N> {
         strain: f64,
         state: &UniaxialChabocheState<N>,
     ) -> Result<UniaxialChabocheResponse<N>, ChabocheError> {
+        self.response_with_kinetics(strain, state, None)
+    }
+
+    fn response_with_kinetics(
+        &self,
+        strain: f64,
+        state: &UniaxialChabocheState<N>,
+        kinetics: Option<&VoceOverstressJ2>,
+    ) -> Result<UniaxialChabocheResponse<N>, ChabocheError> {
         let linear = self.backbone.backbone().backbone();
         let e = linear.elastic.youngs;
         let trial = e * (strain - state.plastic_strain())
@@ -99,9 +115,12 @@ impl<const N: usize> UniaxialChaboche<N> {
         // q of this tensor is |trial|; branch shifts are subtracted by the
         // shared owner, including their dependence on the plastic increment.
         let effective = [2.0 * trial / 3.0, -trial / 3.0, -trial / 3.0, 0.0, 0.0, 0.0];
-        let returned = self
-            .backbone
-            .solve_increment(&effective, &state.history, e)?;
+        let returned = match kinetics {
+            Some(rate) => self
+                .backbone
+                .solve_rate_increment(&effective, &state.history, e, rate)?,
+            None => self.backbone.solve_increment(&effective, &state.history, e)?,
+        };
         let next = self.backbone.returned_state(&state.history, &returned);
         let tensor = self.compatible_strain(strain, next.plastic.plastic_strain[0]);
         self.backbone.validate_history(&tensor, &next)?;
@@ -177,5 +196,97 @@ impl<const N: usize> Uniaxial for UniaxialChaboche<N> {
     }
     fn card(&self) -> ModelCard {
         self.backbone.card()
+    }
+}
+
+/// Free-sided axial restriction of the original joint Chaboche/Perzyna law.
+/// Every branch and the actual physical interval remain with the native owner.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UniaxialChabocheOverstress<const N: usize = 1> {
+    axial: UniaxialChaboche<N>,
+    law: super::rate::ChabocheOverstressJ2<N>,
+}
+
+impl<const N: usize> UniaxialChabocheOverstress<N> {
+    pub fn new(law: super::rate::ChabocheOverstressJ2<N>) -> Result<Self, MaterialError> {
+        let axial = UniaxialChaboche::new(law.backbone().clone())?;
+        let linear = axial.backbone().backbone().backbone();
+        let mut modulus = linear.elastic.youngs
+            + linear.kinematic_hardening
+            + axial.backbone().backbone().isotropic_hardening_derivative_pa(0.0);
+        for branch in axial.backbone().branches() {
+            modulus += branch.modulus_pa();
+        }
+        if !(modulus + law.kinetics().linear_overstress_modulus_pa()).is_finite() {
+            return Err(MaterialError::Parameters {
+                what: "axial kinetic return modulus must be representable".into(),
+            });
+        }
+        Ok(Self { axial, law })
+    }
+
+    pub const fn law(&self) -> &super::rate::ChabocheOverstressJ2<N> {
+        &self.law
+    }
+
+    pub fn response(
+        &self,
+        strain: f64,
+        state: &UniaxialChabocheState<N>,
+    ) -> Result<UniaxialChabocheResponse<N>, ChabocheError> {
+        self.axial
+            .response_with_kinetics(strain, state, Some(self.law.kinetics()))
+    }
+
+    /// The full-tensor owner retains branch storage, recovery, actual viscous
+    /// heat and the separate backward-Euler numerical work remainder.
+    pub fn advance_with_energy(
+        &self,
+        old_strain: f64,
+        old: &UniaxialChabocheState<N>,
+        strain: f64,
+        tolerances: EnergyTolerances,
+    ) -> Result<ChabocheEnergyIncrement<N>, ChabocheError> {
+        let old_tensor = self.axial.compatible_strain(old_strain, old.plastic_strain());
+        let next = self.response(strain, old)?;
+        self.law
+            .advance_with_energy(&old_tensor, &old.history, &next.strain, tolerances)
+    }
+}
+
+impl<const N: usize> Uniaxial for UniaxialChabocheOverstress<N> {
+    type State = UniaxialChabocheState<N>;
+
+    fn initial_state(&self) -> Self::State {
+        self.axial.initial_state()
+    }
+    fn stress(&self, strain: f64, state: &Self::State) -> f64 {
+        self.response(strain, state).map_or(f64::NAN, |r| r.stress_pa)
+    }
+    fn tangent(&self, strain: f64, state: &Self::State) -> f64 {
+        self.response(strain, state).map_or(f64::NAN, |r| r.tangent_pa)
+    }
+    fn update_state(&self, strain: f64, state: &Self::State) -> Self::State {
+        self.response(strain, state).map_or_else(
+            |_| UniaxialChabocheState {
+                history: ChabocheState {
+                    plastic: crate::plastic::J2State {
+                        plastic_strain: [f64::NAN; 6],
+                        alpha: f64::NAN,
+                    },
+                    backstress_pa: [[f64::NAN; 6]; N],
+                },
+            },
+            |r| r.state,
+        )
+    }
+    fn admissibility(&self) -> MaterialAdmissibility {
+        MaterialAdmissibility {
+            tangent_symmetric: true,
+            ..self.law.admissibility()
+        }
+    }
+    fn card(&self) -> ModelCard {
+        self.law.card()
     }
 }

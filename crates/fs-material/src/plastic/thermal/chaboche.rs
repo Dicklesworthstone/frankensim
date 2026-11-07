@@ -21,6 +21,9 @@
 //! <https://docs.software.vt.edu/abaqusv2025/English/SIMACAETHERefMap/simathe-c-combinedhardening.htm>.
 //! The definitions above use FrankenSim's positive backstress convention.
 
+/// Owned free-sided thermal intervals retaining every native cyclic branch.
+pub mod axial;
+
 use super::expansion::ThermalHistoryContribution;
 use super::*;
 use crate::plastic::chaboche::rate::ChabocheOverstressJ2;
@@ -528,25 +531,12 @@ impl<'a, const N: usize> ThermalChabocheSource<'a, N> {
                 tolerances,
             ),
         }?;
-        let mut contribution = ThermalHistoryContribution::default();
-        for i in 0..N {
-            let slope = self.modulus_slopes_pa_k[i];
-            if slope == 0.0 {
-                continue;
-            }
-            contribution.variable_storage = true;
-            let c0 = resolved.previous_law.branches()[i].modulus_pa();
-            let c1 = resolved.law.branches()[i].modulus_pa();
-            // X/C is bounded by the admitted plastic history, avoiding C^2
-            // overflow/underflow in the otherwise equivalent 3 X:X/(4 C^2).
-            let y0 = old_state.backstress_pa[i].map(|x| x / c0);
-            let y1 = mechanical.state.backstress_pa[i].map(|x| x / c1);
-            let shape0 = 0.75 * contract(&y0, &y0);
-            let shape1 = 0.75 * contract(&y1, &y1);
-            contribution.old_entropy_j_m3_k -= slope * shape0;
-            contribution.new_entropy_j_m3_k -= slope * shape1;
-            contribution.coefficient_storage_change_j_m3 += (c1 - c0) * shape0;
-        }
+        let contribution = branch_history_contribution(
+            &self.modulus_slopes_pa_k,
+            &resolved,
+            old_state,
+            &mechanical.state,
+        )?;
         let native = EnergyIncrement {
             strain: mechanical.strain,
             stress_pa: mechanical.stress_pa,
@@ -573,6 +563,40 @@ impl<'a, const N: usize> ThermalChabocheSource<'a, N> {
             },
         ))
     }
+}
+
+// Both borrowed tensor and owned axial intervals use this original branch
+// thermodynamics. Recovery and mechanical storage already belong to the native
+// increment; only signed coefficient work and entropy are added here.
+fn branch_history_contribution<const N: usize>(
+    modulus_slopes_pa_k: &[f64; N],
+    resolved: &ThermalChaboche<N>,
+    old: &ChabocheState<N>,
+    next: &ChabocheState<N>,
+) -> Result<ThermalHistoryContribution, FeedbackError> {
+    let mut contribution = ThermalHistoryContribution::default();
+    for (i, slope) in modulus_slopes_pa_k.iter().copied().enumerate() {
+        if slope == 0.0 {
+            continue;
+        }
+        contribution.variable_storage = true;
+        let c0 = resolved.previous_law.branches()[i].modulus_pa();
+        let c1 = resolved.law.branches()[i].modulus_pa();
+        // X/C is bounded by admitted history, avoiding a potentially
+        // unrepresentable C^2 in the equivalent 3 X:X/(4 C^2).
+        let y0 = old.backstress_pa[i].map(|x| x / c0);
+        let y1 = next.backstress_pa[i].map(|x| x / c1);
+        let shape0 = finite(0.75 * contract(&y0, &y0))?;
+        let shape1 = finite(0.75 * contract(&y1, &y1))?;
+        contribution.old_entropy_j_m3_k =
+            finite(contribution.old_entropy_j_m3_k - product(slope, shape0)?)?;
+        contribution.new_entropy_j_m3_k =
+            finite(contribution.new_entropy_j_m3_k - product(slope, shape1)?)?;
+        contribution.coefficient_storage_change_j_m3 = finite(
+            contribution.coefficient_storage_change_j_m3 + product(c1 - c0, shape0)?,
+        )?;
+    }
+    Ok(contribution)
 }
 
 impl<const N: usize> ThermalChaboche<N> {

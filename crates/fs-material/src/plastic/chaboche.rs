@@ -21,7 +21,7 @@
 //! recoverable hardening or numerical integration loss is relabeled as heat.
 
 use super::J2State;
-use super::energy::{EnergyError, EnergyTolerances, IncrementEnergy};
+use super::energy::{EnergyError, EnergyTolerances, IncrementEnergy, StoredEnergy};
 use super::voce::VoceJ2;
 use crate::tensor::{contract, deviator, trace};
 use crate::{MaterialAdmissibility, MaterialError, SmallStrainLaw, Tangent6, Voigt};
@@ -209,6 +209,43 @@ impl<const N: usize> ChabocheJ2<N> {
             .backbone()
             .validate_overstress_history(strain, &state.plastic)?;
         self.validate_branches(state)
+    }
+
+    /// Inspect recoverable storage at the retained history without performing
+    /// another return. Valid viscous overstress is preserved by this inspection.
+    pub fn stored_energy(
+        &self,
+        strain: &Voigt,
+        state: &ChabocheState<N>,
+    ) -> Result<StoredEnergy, ChabocheError> {
+        self.validate_history(strain, state)?;
+        self.energy_at_history(strain, state)
+    }
+
+    fn energy_at_history(
+        &self,
+        strain: &Voigt,
+        state: &ChabocheState<N>,
+    ) -> Result<StoredEnergy, ChabocheError> {
+        let elastic = subtract(strain, &state.plastic.plastic_strain);
+        let mut energy = self.backbone.backbone().energy_of(
+            &elastic,
+            state.plastic.alpha,
+            &state.plastic.plastic_strain,
+        )?;
+        energy.hardening_j_m3 += self.backbone.saturation_storage(state.plastic.alpha);
+        for (branch, backstress) in self.branches.iter().zip(&state.backstress_pa) {
+            if branch.modulus_pa != 0.0 {
+                energy.kinematic_hardening_j_m3 +=
+                    0.75 * (contract(backstress, backstress) / branch.modulus_pa);
+            }
+        }
+        if !energy.total_j_m3().is_finite() || energy.total_j_m3() < 0.0 {
+            return Err(ChabocheError::Invalid(
+                "native Chaboche storage is not representable",
+            ));
+        }
+        Ok(energy)
     }
 
     fn validate_branches(&self, state: &ChabocheState<N>) -> Result<(), ChabocheError> {
@@ -563,7 +600,21 @@ impl<const N: usize> ChabocheJ2<N> {
         strain: &Voigt,
         tolerances: EnergyTolerances,
     ) -> Result<ChabocheEnergyIncrement<N>, ChabocheError> {
-        self.advance_with_rate_energy(old_strain, old_state, strain, tolerances, None)
+        self.advance_with_rate_energy(old_strain, old_state, strain, tolerances, None, false)
+    }
+
+    /// The thermal owner already admitted this history at its OLD temperature.
+    /// In particular an absent-branch, zero-Voce endpoint must not recheck old
+    /// yield against a newly softened surface. All native history, new-yield
+    /// and energy gates remain active in the common account.
+    pub(in crate::plastic) fn advance_with_energy_from_admitted_history(
+        &self,
+        old_strain: &Voigt,
+        old_state: &ChabocheState<N>,
+        strain: &Voigt,
+        tolerances: EnergyTolerances,
+    ) -> Result<ChabocheEnergyIncrement<N>, ChabocheError> {
+        self.advance_with_rate_energy(old_strain, old_state, strain, tolerances, None, true)
     }
 
     fn advance_with_rate_energy(
@@ -573,9 +624,10 @@ impl<const N: usize> ChabocheJ2<N> {
         strain: &Voigt,
         tolerances: EnergyTolerances,
         kinetics: Option<&super::rate::VoceOverstressJ2>,
+        admitted_old: bool,
     ) -> Result<ChabocheEnergyIncrement<N>, ChabocheError> {
         self.validate_history(old_strain, old_state)?;
-        if self.absent() {
+        if self.absent() && !admitted_old {
             let next = match kinetics {
                 Some(rate) => {
                     rate.advance_with_energy(old_strain, &old_state.plastic, strain, tolerances)?
@@ -636,19 +688,9 @@ impl<const N: usize> ChabocheJ2<N> {
             &next.state.plastic.plastic_strain,
             &old_state.plastic.plastic_strain,
         );
-        let mut initial = linear.energy_of(
-            &old_e,
-            old_state.plastic.alpha,
-            &old_state.plastic.plastic_strain,
-        )?;
-        let mut final_state = linear.energy_of(
-            &new_e,
-            next.state.plastic.alpha,
-            &next.state.plastic.plastic_strain,
-        )?;
+        let initial = self.energy_at_history(old_strain, old_state)?;
+        let final_state = self.energy_at_history(strain, &next.state)?;
         let numerical = linear.energy_of(&subtract(&new_e, &old_e), delta, &delta_p)?;
-        initial.hardening_j_m3 += self.backbone.saturation_storage(old_state.plastic.alpha);
-        final_state.hardening_j_m3 += self.backbone.saturation_storage(next.state.plastic.alpha);
         let mut numerical_dissipation = numerical.total_j_m3()
             + self
                 .backbone
@@ -663,11 +705,8 @@ impl<const N: usize> ChabocheJ2<N> {
             if branch.modulus_pa == 0.0 {
                 continue;
             }
-            let initial_branch = 0.75 * (contract(a0, a0) / branch.modulus_pa);
             let final_branch = 0.75 * (contract(a1, a1) / branch.modulus_pa);
             let da = subtract(a1, a0);
-            initial.kinematic_hardening_j_m3 += initial_branch;
-            final_state.kinematic_hardening_j_m3 += final_branch;
             numerical_dissipation += 0.75 * (contract(&da, &da) / branch.modulus_pa);
             recovery_dissipation += 2.0 * branch.recovery_per_strain * delta * final_branch;
         }

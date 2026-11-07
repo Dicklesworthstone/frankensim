@@ -20654,3 +20654,37 @@ The existing 256-by-512 random-history gate now supplies the original generated
 Gram rows: rounding their rank-deficient product into a matrix can introduce
 an active direction. Its random draws and physical assertions are unchanged;
 matrix-only passivity admission is not weakened to repair synthetic input.
+
+## Complete cyclic history in owned thermal axial intervals
+
+`ThermalChabocheSource::at_uniaxial_temperatures` prepares source-bound,
+shared axial intervals retaining one through eight independent Chaboche
+branches, Prager and Voce history, thermal expansion and actual physical time.
+The original scalar return also supplies linear or power-law Perzyna response
+through `UniaxialChabocheOverstress`; its tangent differentiates the same joint
+branch/flow equation. No effective single backstress replaces the original
+ordered branches.
+
+Temperature changes preserve each strain-like branch coordinate X/C before
+the native mechanical update. Original source and caloric identities, accepted
+temperature and branch roles govern successor admission. Source queries,
+thermal integration and immutable preparation occur outside constitutive
+trials. The original tensor owner independently checks scalar stress, transverse
+freedom and every history component in stress units. The audited native state
+and shared thermal account retain branch storage/entropy, coefficient work,
+physical yield/recovery/viscous heat and numerical loss separately. Numerical
+loss never heats the material. Native storage inspection performs no return or
+relaxation, including on accepted viscous states.
+
+The borrowed and owned thermal paths share branch thermodynamics. A restricted
+old-history admission seam permits thermal softening only after the old history
+is checked at its own temperature, including explicitly absent branches; public
+isothermal admission retains its prior behavior. Five focused regression
+definitions cover thermal cycling/reversal, independent rate/tangent and heat
+equations, unloaded branch transport, original-source/clock/domain refusal, and
+the zero-branch limit. Independent scalar fixture arithmetic passed. The
+execution host became unavailable before edits; no Rust formatting, compilation
+or native regression execution was performed. Small strain, globally affine
+positive-or-absent branch moduli, fixed recovery coefficients and original
+source domains remain binding; finite cyclic forming, static recovery and
+experimental calibration are not supplied by this extension.
