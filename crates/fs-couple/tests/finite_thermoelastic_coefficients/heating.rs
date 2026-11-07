@@ -1,5 +1,8 @@
 //! G1/G3 finite heat: actual original coefficients, expansion, Cp and waves.
 
+#[path = "heating/reservoir.rs"]
+mod reservoir;
+
 use super::*;
 use fs_couple::finite_solid::thermal::thermodynamics::heating::{
     FiniteSolidCaloricState, FiniteThermoelasticHeatError, FiniteThermoelasticHeatSolve,

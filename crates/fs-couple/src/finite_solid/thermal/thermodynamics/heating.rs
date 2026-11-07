@@ -25,6 +25,10 @@ use fs_thermochem::solution::caloric::BinaryCaloricErrorV1;
 use fs_thermochem::solution::caloric::temperature::{self, TemperatureControl, TemperatureSample};
 use std::sync::Arc;
 
+#[path = "heating/reservoir.rs"]
+mod reservoir;
+pub use reservoir::FiniteThermoelasticReservoirBalance;
+
 /// Shared inverse controls plus whole-call bounded temperature-path admission.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FiniteThermoelasticHeatSolve {
@@ -54,6 +58,10 @@ pub enum FiniteThermoelasticHeatError {
     ClausiusBounds {
         entropy_change_j_per_k: f64,
         bounds_j_per_k: [f64; 2],
+    },
+    ReservoirEntropy {
+        endpoint_conduction_j_per_k: f64,
+        temporal_defect_j_per_k: f64,
     },
     Cancelled,
 }
@@ -377,13 +385,28 @@ impl FiniteSolidCaloricState {
         &self,
         heat_j: f64,
         controls: FiniteThermoelasticHeatSolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<FiniteThermoelasticHeatBalance> {
+        self.solve_heat(controls, |_| finite(heat_j), 0.0, cancelled)
+    }
+
+    // One original source continuation/inverse/closure path. The two callers
+    // supply either fixed joules or a passive affine endpoint boundary input.
+    fn solve_heat(
+        &self,
+        controls: FiniteThermoelasticHeatSolve,
+        heat_at_temperature: impl Fn(f64) -> Result<f64>,
+        heat_temperature_derivative_j_per_k: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<FiniteThermoelasticHeatBalance> {
         poll(&mut cancelled)?;
         controls.thermal.validate()?;
+        let heat_j = heat_at_temperature(self.temperature_k())?;
         let [lo, hi] = controls.thermal.bracket;
         let range = self.source.coefficients.temperature_range_k();
         if !heat_j.is_finite()
+            || !heat_temperature_derivative_j_per_k.is_finite()
+            || heat_temperature_derivative_j_per_k > 0.0
             || lo < range[0]
             || hi > range[1]
             || self.temperature_k() < lo
@@ -448,12 +471,13 @@ impl FiniteSolidCaloricState {
                 Ok(TemperatureSample {
                     state,
                     change_j,
-                    residual_j: finite(change_j - heat_j)?,
+                    residual_j: finite(change_j - heat_at_temperature(t)?)?,
                 })
             },
-            |state| Some(state.heat_capacity_j_per_k),
+            |state| Some(state.heat_capacity_j_per_k - heat_temperature_derivative_j_per_k),
         )?;
         let final_state = root.sample.state;
+        let heat_j = heat_at_temperature(final_state.temperature_k())?;
         let change = self.internal_energy_change_to(&final_state)?;
         let entropy = self.entropy_change_to(&final_state)?;
         if final_state.temperature_k() == self.temperature_k()
@@ -466,15 +490,8 @@ impl FiniteSolidCaloricState {
         let a = change / self.temperature_k();
         let b = change / final_state.temperature_k();
         let bounds = [a.min(b), a.max(b)];
-        let allowance = controls.entropy_tolerance_j_per_k
-            + controls.thermal.energy_tolerance_j
-                / self.temperature_k().min(final_state.temperature_k())
-            + 64.0
-                * f64::EPSILON
-                * (bounds[0].abs().max(bounds[1].abs())
-                    + self.source.volume_m3
-                        * (self.potential.entropy_j_m3_k().abs()
-                            + final_state.potential.entropy_j_m3_k().abs()));
+        let allowance =
+            self.entropy_allowance(&final_state, controls, bounds[0].abs().max(bounds[1].abs()));
         if !allowance.is_finite()
             || entropy < bounds[0] - allowance
             || entropy > bounds[1] + allowance
@@ -494,6 +511,23 @@ impl FiniteSolidCaloricState {
             iterations: root.iterations,
             state_evaluations: evaluations,
         })
+    }
+
+    fn entropy_allowance(
+        &self,
+        final_state: &Self,
+        controls: FiniteThermoelasticHeatSolve,
+        thermal_entropy_scale_j_per_k: f64,
+    ) -> f64 {
+        controls.entropy_tolerance_j_per_k
+            + controls.thermal.energy_tolerance_j
+                / self.temperature_k().min(final_state.temperature_k())
+            + 64.0
+                * f64::EPSILON
+                * (thermal_entropy_scale_j_per_k
+                    + self.source.volume_m3
+                        * (self.potential.entropy_j_m3_k().abs()
+                            + final_state.potential.entropy_j_m3_k().abs()))
     }
 }
 

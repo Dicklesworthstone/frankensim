@@ -551,6 +551,44 @@ reduction and atomic source/budget/cancellation refusals. Unrelated FE/time
 adapters and thermal-field wrappers were not included in that validation;
 this is not a full workspace build.
 
+### Timed reservoir exchange at held deformation
+
+`FiniteSolidCaloricState::exchange_with_reservoir` advances that same original
+inventory for an explicit duration against an authored
+`fs_thermal::enthalpy::Reservoir`. The descriptor retains its covered area,
+prescribed bath temperature and total conductance G in W/K; area does not
+multiply G again. One backward-Euler inverse solves
+`Delta U(T) + dt*G*(T - T_bath) = 0` with the actual tangent `c_F(T) + dt*G`.
+It reuses the finite-heat source cache, bounded branch sampling and direct
+energy/entropy increments. Temperature-dependent Cp, elastic coefficients and
+expansion continue to affect the same evolved stress and acoustic response.
+
+`FiniteThermoelasticReservoirBalance` retains the actual endpoint power and
+`Q = dt*G*(T_bath - T_final)` separately from the independently evaluated
+internal-energy change. It exposes the body's original heat balance, endpoint
+conduction entropy `Q*(1/T_final - 1/T_bath)`, temporal entropy defect
+`Delta S_body - Q/T_final` and combined body-plus-bath entropy change. The
+time-discretization contribution is not relabeled as physical generated heat
+or boundary dissipation. The existing energy/entropy allowances govern final
+acceptance; late cancellation leaves the supplied state unchanged.
+
+The prescribed reservoir has no represented finite heat capacity. Its
+temperature may lie outside the material's source interval, while every body
+state and the offered branch remain supported. Conductance and bath
+temperature are held over the explicit interval; duration refinement remains
+independent of nonlinear solver tolerances. Insulation, zero duration and an
+equal-temperature bath retain the original state after input admission. This
+transaction does not add spatial contact topology or infer a global thermal
+slope bound from sampled material capacity.
+
+Three additional original consumer tests cover the constant-Cp backward-Euler
+closed form, refinement toward exponential cooling/heating with decreasing
+temporal entropy defect, variable-source heating/cooling across a Cp knot,
+updated mechanics, exact large-datum invariance, supported body states with an
+external bath temperature, no-op behavior and atomic domain/budget/cancellation
+refusal. The selected native consumer root passes all nine tests using the
+same real dependency and original-source closure described above.
+
 ## Circuit-driven spatial hysteresis and finite heat
 
 The `hysteretic-eddy-heating` feature is an alias of `magnetic-hysteresis`;
