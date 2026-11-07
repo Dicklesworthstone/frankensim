@@ -12,7 +12,24 @@ fixed, observed and adaptive intervals clip at history knots. Scheduled
 single-bath power replaces the original channel through the existing boundary
 exchange owner, with one heat credit and entropy at the actual bath temperature.
 Passive SDIRK entropy admission retains those actual stage exchanges. A
-composed law's separately declared bath remains law-owned. Accepted states
+composed law's separately declared bath remains law-owned.
+
+`GrayTwoBathBoundary::with_radiative_temperature_history` now binds a second,
+independently prescribed radiation-temperature schedule through that original
+exchange owner. The native chain/graph queries its physical endpoint or SDIRK
+stage time, clips fixed/observed/adaptive intervals to its knots, and retains
+both actual bath temperatures in the entropy quadrature. Convection and
+radiation still resolve one shared exterior temperature and half-cell/coating
+drop; conductivity, source-emissivity and density-driven geometry derivatives
+remain in the same analytic enthalpy tangent. The borrowed schedule introduces
+no new surface storage or duplicate heat credit. Timeless queries on a
+scheduled law, exhausted time support and cancellation refuse, including zero
+emissivity cases. Autonomous exchange laws retain their original arithmetic
+through default time-aware trait queries. Focused G1/G3 regressions compare
+both stage balances with independent scalar fourth-power solutions and check
+actual-bath entropy, knot replay, adaptive refinement and rollback.
+
+Accepted states
 retain authored boundaries; conflicting native temperature events, outside-domain
 queries, invalid samples, budget exhaustion and cancellation refuse
 transactionally. Histories never imply extrapolation or additional heat sources.

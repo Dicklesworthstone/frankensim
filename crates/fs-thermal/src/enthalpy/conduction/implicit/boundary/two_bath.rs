@@ -7,7 +7,7 @@
 use super::super::ImplicitConductionLaw;
 use super::surface::BoundGraySurface;
 use super::{
-    GrayAmbientBoundary, GrayAmbientControls, ImplicitBoundaryExchangeLaw,
+    BathTemperatureSchedule, GrayAmbientBoundary, GrayAmbientControls, ImplicitBoundaryExchangeLaw,
     ImplicitBoundaryExchangeState, ImplicitBoundaryGeometry, ImplicitGraySurfaceLaw,
     ImplicitGraySurfaceState,
 };
@@ -36,7 +36,8 @@ pub struct GrayTwoBathResponse {
 ///
 /// The original selected channel supplies the gas temperature, including its
 /// scheduled boundary events. The large black radiative surrounding has the
-/// explicitly fixed temperature supplied here. Attach through the original
+/// explicitly fixed temperature supplied here, or the continuous history
+/// attached with `with_radiative_temperature_history`. Attach through the original
 /// chain/graph `with_boundary_exchanges`; each exchange then retains its actual
 /// reservoir entropy rather than using an inferred effective temperature.
 ///
@@ -58,6 +59,7 @@ pub struct GrayTwoBathBoundary<'a> {
     convection_w_m2_k: f64,
     surface_law: Option<BoundGraySurface<'a>>,
     radiative_temperature_k: f64,
+    radiative_history: Option<&'a BathTemperatureSchedule>,
     controls: GrayAmbientControls,
 }
 
@@ -82,6 +84,7 @@ impl<'a> GrayTwoBathBoundary<'a> {
             convection_w_m2_k,
             surface_law: None,
             radiative_temperature_k,
+            radiative_history: None,
             controls,
         })
     }
@@ -104,6 +107,28 @@ impl<'a> GrayTwoBathBoundary<'a> {
         Ok(self)
     }
 
+    /// Replace the fixed radiative bath with one prescribed continuous history.
+    ///
+    /// The original native time owner samples this history at each physical
+    /// endpoint and SDIRK stage, independently of the gas bath. Its intervals
+    /// stop at every knot. Both bath powers retain their actual temperatures
+    /// for heat and entropy accounting, with one shared half-cell resistance.
+    /// The closed source time range never extrapolates, including when the
+    /// emissivity is zero. This borrows the original immutable schedule and
+    /// introduces neither surface storage nor another heat source.
+    pub fn with_radiative_temperature_history(
+        mut self,
+        history: &'a BathTemperatureSchedule,
+    ) -> Result<Self, DepositionError> {
+        if self.radiative_history.is_some() {
+            return Err(DepositionError::InvalidInput(
+                "radiative bath already has a prescribed temperature history",
+            ));
+        }
+        self.radiative_history = Some(history);
+        Ok(self)
+    }
+
     /// Resolve one shared surface, its signed bath powers and exact total tangent.
     /// Failed material queries, surface convergence or cancellation return no
     /// response. Numerical acceptance controls the NET surface balance, even
@@ -120,6 +145,28 @@ impl<'a> GrayTwoBathBoundary<'a> {
             gas_temperature_k,
             geometry,
             0.0,
+            None,
+            checkpoint,
+        )
+    }
+
+    /// Resolve both actual bath powers at a physical time without advancing it.
+    /// A history-owned boundary requires this query (or the native time-aware
+    /// trait query); the timeless query refuses instead of using a stale bath.
+    pub fn evaluate_at_time(
+        &self,
+        specific_h_j_kg: f64,
+        gas_temperature_k: f64,
+        geometry: ImplicitBoundaryGeometry,
+        time_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<GrayTwoBathResponse, DepositionError> {
+        self.evaluate_with_geometry_tangent(
+            specific_h_j_kg,
+            gas_temperature_k,
+            geometry,
+            0.0,
+            Some(time_s),
             checkpoint,
         )
     }
@@ -130,9 +177,24 @@ impl<'a> GrayTwoBathBoundary<'a> {
         gas_temperature_k: f64,
         geometry: ImplicitBoundaryGeometry,
         relative_distance_slope_kg_j: f64,
+        time_s: Option<f64>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<GrayTwoBathResponse, DepositionError> {
         checkpoint()?;
+        if time_s.is_some_and(|time| !time.is_finite() || time < 0.0) {
+            return Err(DepositionError::InvalidInput(
+                "invalid boundary exchange time",
+            ));
+        }
+        let radiative_temperature_k = match (self.radiative_history, time_s) {
+            (Some(history), Some(time)) => history.temperature_at(time)?,
+            (Some(_), None) => {
+                return Err(DepositionError::InvalidInput(
+                    "scheduled radiative bath requires physical time",
+                ));
+            }
+            (None, _) => self.radiative_temperature_k,
+        };
         if !positive(gas_temperature_k)
             || !nonnegative(geometry.area_m2)
             || !positive(geometry.half_distance_m)
@@ -164,7 +226,9 @@ impl<'a> GrayTwoBathBoundary<'a> {
                 && (k == 0.0 || !coefficients.has_enthalpy_response()))
         {
             checkpoint()?;
-            return Ok(self.response(t, gas_temperature_k, [0.0; 2], 0.0, 0.0, 0)?);
+            return Ok(self.response(
+                t, gas_temperature_k, radiative_temperature_k, [0.0; 2], 0.0, 0.0, 0,
+            )?);
         }
         let (bulk, conductivity_weight) = if k == 0.0 {
             // The massless exterior can still exchange heat between its two
@@ -182,10 +246,11 @@ impl<'a> GrayTwoBathBoundary<'a> {
         // Work in Ts-Tgas rather than subtracting rounded surface Kelvin. This
         // retains small near-equilibrium fluxes, including the one-bath limit.
         let cell_delta = t - gas_temperature_k;
-        let radiative_delta = self.radiative_temperature_k - gas_temperature_k;
+        let radiative_delta = radiative_temperature_k - gas_temperature_k;
         let mut lo = 0.0_f64.min(cell_delta).min(radiative_delta);
         let mut hi = 0.0_f64.max(cell_delta).max(radiative_delta);
-        let initial_radiation = self.radiation_coefficients(t, coefficients.emissivity)?.0;
+        let initial_radiation =
+            Self::radiation_coefficients(t, radiative_temperature_k, coefficients.emissivity)?.0;
         let initial_total = finite(bulk + coefficients.convection_w_m2_k + initial_radiation)?;
         if !positive(initial_total) {
             return Err(DepositionError::Arithmetic);
@@ -206,7 +271,7 @@ impl<'a> GrayTwoBathBoundary<'a> {
                 return Err(DepositionError::Arithmetic);
             }
             let (radiation_g, radiation_slope) =
-                self.radiation_coefficients(surface, coefficients.emissivity)?;
+                Self::radiation_coefficients(surface, radiative_temperature_k, coefficients.emissivity)?;
             let surface_slope = finite(coefficients.convection_w_m2_k + radiation_slope)?;
             let convection_flux = finite(coefficients.convection_w_m2_k * offset)?;
             let radiation_flux = finite(radiation_g * (offset - radiative_delta))?;
@@ -246,7 +311,7 @@ impl<'a> GrayTwoBathBoundary<'a> {
                     // while its two baths may still exchange finite heat.
                     let source_derivative = coefficients.flux_enthalpy_derivative(
                         surface,
-                        self.radiative_temperature_k,
+                        radiative_temperature_k,
                         offset,
                         offset - radiative_delta,
                     )?;
@@ -259,6 +324,7 @@ impl<'a> GrayTwoBathBoundary<'a> {
                 return self.response(
                     surface,
                     gas_temperature_k,
+                    radiative_temperature_k,
                     [convection, radiation],
                     derivative,
                     residual,
@@ -288,14 +354,13 @@ impl<'a> GrayTwoBathBoundary<'a> {
     }
 
     fn radiation_coefficients(
-        &self,
         t: f64,
+        bath: f64,
         emissivity: f64,
     ) -> Result<(f64, f64), DepositionError> {
         if emissivity == 0.0 {
             return Ok((0.0, 0.0));
         }
-        let bath = self.radiative_temperature_k;
         let scale = emissivity * SIGMA;
         Ok((
             finite(scale * (t + bath) * t.mul_add(t, bath * bath))?,
@@ -307,6 +372,7 @@ impl<'a> GrayTwoBathBoundary<'a> {
         &self,
         surface_temperature_k: f64,
         gas_temperature_k: f64,
+        radiative_temperature_k: f64,
         powers: [f64; 2],
         derivative: f64,
         surface_residual_w: f64,
@@ -320,7 +386,7 @@ impl<'a> GrayTwoBathBoundary<'a> {
                 },
                 PrescribedBathHeat {
                     outward_power_w: powers[1],
-                    temperature_k: self.radiative_temperature_k,
+                    temperature_k: radiative_temperature_k,
                 },
             ],
             power_enthalpy_derivative_w_kg_j: derivative,
@@ -354,6 +420,24 @@ impl ImplicitBoundaryExchangeLaw for GrayTwoBathBoundary<'_> {
             .map(|response| response.boundary)
     }
 
+    fn state_at_specific_enthalpy_and_time(
+        &self,
+        specific_h_j_kg: f64,
+        bath_temperature_k: f64,
+        geometry: ImplicitBoundaryGeometry,
+        time_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ImplicitBoundaryExchangeState, DepositionError> {
+        self.evaluate_at_time(
+            specific_h_j_kg,
+            bath_temperature_k,
+            geometry,
+            time_s,
+            checkpoint,
+        )
+        .map(|response| response.boundary)
+    }
+
     fn state_at_specific_enthalpy_with_geometry_tangent(
         &self,
         specific_h_j_kg: f64,
@@ -367,9 +451,35 @@ impl ImplicitBoundaryExchangeLaw for GrayTwoBathBoundary<'_> {
             bath_temperature_k,
             geometry,
             half_distance_relative_enthalpy_derivative_kg_j,
+            None,
             checkpoint,
         )
         .map(|response| Some(response.boundary))
+    }
+
+    fn state_at_specific_enthalpy_with_geometry_tangent_and_time(
+        &self,
+        specific_h_j_kg: f64,
+        bath_temperature_k: f64,
+        geometry: ImplicitBoundaryGeometry,
+        half_distance_relative_enthalpy_derivative_kg_j: f64,
+        time_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<ImplicitBoundaryExchangeState>, DepositionError> {
+        self.evaluate_with_geometry_tangent(
+            specific_h_j_kg,
+            bath_temperature_k,
+            geometry,
+            half_distance_relative_enthalpy_derivative_kg_j,
+            Some(time_s),
+            checkpoint,
+        )
+        .map(|response| Some(response.boundary))
+    }
+
+    fn next_transition_time_s(&self, after_s: f64) -> Option<f64> {
+        self.radiative_history
+            .and_then(|history| history.next_transition_time_s(after_s))
     }
 }
 

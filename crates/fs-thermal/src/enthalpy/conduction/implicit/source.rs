@@ -252,7 +252,15 @@ impl ImplicitConductionChain<'_> {
             });
         let coupled = self.coupled_heat_source.as_ref()
             .and_then(|source| source.law.next_transition_time_s(after_s));
-        earlier_transition(baths, coupled, after_s)
+        self.reservoir_exchanges
+            .values()
+            .chain(self.ambient_exchanges.values())
+            .fold(
+                earlier_transition(baths, coupled, after_s),
+                |next, exchange| {
+                    earlier_transition(next, exchange.next_transition_time_s(after_s), after_s)
+                },
+            )
     }
 }
 

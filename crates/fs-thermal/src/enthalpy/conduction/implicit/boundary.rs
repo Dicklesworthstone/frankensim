@@ -156,6 +156,27 @@ pub trait ImplicitBoundaryExchangeLaw {
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<ImplicitBoundaryExchangeState, DepositionError>;
 
+    /// The same exchange at the physical endpoint or SDIRK stage time.
+    /// Prescribed baths owned by this law may vary continuously with time;
+    /// the returned powers and actual temperatures share that same instant.
+    /// Autonomous laws retain their existing query and arithmetic.
+    fn state_at_specific_enthalpy_and_time(
+        &self,
+        specific_h_j_kg: f64,
+        bath_temperature_k: f64,
+        geometry: ImplicitBoundaryGeometry,
+        time_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ImplicitBoundaryExchangeState, DepositionError> {
+        checkpoint()?;
+        if !time_s.is_finite() || time_s < 0.0 {
+            return Err(DepositionError::InvalidInput(
+                "invalid boundary exchange time",
+            ));
+        }
+        self.state_at_specific_enthalpy(specific_h_j_kg, bath_temperature_k, geometry, checkpoint)
+    }
+
     /// The same two actual bath powers and their TOTAL d(Q_0+Q_1)/dh when
     /// the shared half-distance evolves. The supplied derivative is
     /// (dd/dh)/d [kg/J], and geometry contains its current value. Both bath
@@ -171,6 +192,39 @@ pub trait ImplicitBoundaryExchangeLaw {
         _checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<Option<ImplicitBoundaryExchangeState>, DepositionError> {
         Ok(None)
+    }
+
+    /// Physical-time counterpart retaining the complete moving-distance tangent.
+    /// Time and both prescribed bath temperatures remain fixed in dQ/dh.
+    fn state_at_specific_enthalpy_with_geometry_tangent_and_time(
+        &self,
+        specific_h_j_kg: f64,
+        bath_temperature_k: f64,
+        geometry: ImplicitBoundaryGeometry,
+        half_distance_relative_enthalpy_derivative_kg_j: f64,
+        time_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<ImplicitBoundaryExchangeState>, DepositionError> {
+        checkpoint()?;
+        if !time_s.is_finite() || time_s < 0.0 {
+            return Err(DepositionError::InvalidInput(
+                "invalid boundary exchange time",
+            ));
+        }
+        self.state_at_specific_enthalpy_with_geometry_tangent(
+            specific_h_j_kg,
+            bath_temperature_k,
+            geometry,
+            half_distance_relative_enthalpy_derivative_kg_j,
+            checkpoint,
+        )
+    }
+
+    /// Next finite, strictly future slope change of a continuous owned bath.
+    /// Fixed and adaptive native intervals stop here. Discontinuous forcing
+    /// requires an explicit event law; a stage query does not infer jump sides.
+    fn next_transition_time_s(&self, _after_s: f64) -> Option<f64> {
+        None
     }
 }
 

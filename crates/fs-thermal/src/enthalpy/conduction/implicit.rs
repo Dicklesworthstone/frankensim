@@ -731,19 +731,21 @@ impl<'a> ImplicitConductionChain<'a> {
             if let Some(law) = self.reservoir_exchanges.get(&id) {
                 let state = if self.has_material_density_geometry(id) {
                     require_geometry_tangent(
-                        law.state_at_specific_enthalpy_with_geometry_tangent(
+                        law.state_at_specific_enthalpy_with_geometry_tangent_and_time(
                             cell.specific_h_j_kg,
                             bath_temperature_k,
                             geometry,
                             distance.relative_enthalpy_slope_kg_j,
+                            thermal.time_s,
                             checkpoint,
                         )?,
                     )?
                 } else {
-                    law.state_at_specific_enthalpy(
+                    law.state_at_specific_enthalpy_and_time(
                         cell.specific_h_j_kg,
                         bath_temperature_k,
                         geometry,
+                        thermal.time_s,
                         checkpoint,
                     )?
                 }
@@ -804,19 +806,21 @@ impl<'a> ImplicitConductionChain<'a> {
             if let Some(law) = self.ambient_exchanges.get(&id) {
                 let state = if self.has_material_density_geometry(id) {
                     require_geometry_tangent(
-                        law.state_at_specific_enthalpy_with_geometry_tangent(
+                        law.state_at_specific_enthalpy_with_geometry_tangent_and_time(
                             cell.specific_h_j_kg,
                             bath_temperature_k,
                             geometry,
                             distance.relative_enthalpy_slope_kg_j,
+                            thermal.time_s,
                             checkpoint,
                         )?,
                     )?
                 } else {
-                    law.state_at_specific_enthalpy(
+                    law.state_at_specific_enthalpy_and_time(
                         cell.specific_h_j_kg,
                         bath_temperature_k,
                         geometry,
+                        thermal.time_s,
                         checkpoint,
                     )?
                 }
@@ -1591,4 +1595,3 @@ mod tests;
 #[cfg(test)]
 #[path = "implicit/density_tests.rs"]
 mod density_tests;
-
