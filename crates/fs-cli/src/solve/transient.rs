@@ -41,6 +41,7 @@ mod enthalpy;
 mod enclosure;
 mod natural;
 mod radiative;
+mod surface_storage;
 use radiative::PhysicalEnergy;
 mod sampled_peak;
 use sampled_peak::SampledPeak;
@@ -141,7 +142,7 @@ pub(super) fn no_claim(spec: &ProjectSpec) -> &'static str {
 pub(super) fn admit(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
     // Also reject a transient-adjoint output on a steady project; an ignored
     // report request must never look like a completed derivative calculation.
-    adjoint::requested(spec)?;
+    let requested_adjoint = adjoint::requested(spec)?;
     if radiation::pointwise_requested(spec) {
         if !policy(spec).is_some_and(|time| time.enthalpy.is_some()) {
             return Err(conduction_error(
@@ -163,6 +164,11 @@ pub(super) fn admit(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
     let Some(transient) = policy(spec) else {
         return Ok(());
     };
+    if !transient.surface_capacities.is_empty() && requested_adjoint.is_some() {
+        return Err(bad(
+            "coating storage requires a complete trajectory storage pullback; use the forward temperature and energy results until coating adjoints are admitted",
+        ));
+    }
     if let Some(violation) = spec
         .validate()
         .into_iter()
@@ -863,6 +869,10 @@ pub(super) fn solve(
         })
         .and_then(|n| total_steps.checked_mul(row_bytes).and_then(|s| n.checked_add(s)))
         .ok_or_else(|| bad("transient memory estimate overflows"))?;
+    let bytes = bytes.checked_add(surface_storage::workspace_bytes(
+        problem.mesh.vertex_count(), problem.mesh.element_count(),
+        problem.mesh.boundary().len(), policy.surface_capacities.len(),
+    )?).ok_or_else(|| bad("combined volume and surface storage estimate overflows"))?;
     // The enclosure owner retains dense patch-space radiosity work, bounded
     // independently from the sparse solid. Include it in forward admission.
     let bytes = if let Some(lowering) = radiation {
@@ -1066,6 +1076,9 @@ pub(super) fn solve(
         return Err(bad("combined transient numerical work allowance overflows"));
     }
     let engine = BackwardEuler::per_element(cx, problem.mesh, &capacities).map_err(lower)?;
+    let (engine, surface_storage_fragment) = surface_storage::prepare(
+        cx, engine, problem, &policy.surface_capacities, deadline,
+    )?;
     // One exact geometric binding per spatial rung is shared by both time
     // grids and every outer natural, air, radiation and reverse evaluation.
     let enclosure = radiation.map(|lowering| enclosure::Model::bind(cx, problem, lowering))
@@ -1277,6 +1290,7 @@ pub(super) fn solve(
     let boundary_history_fragment = boundary_history.as_ref()
         .map(|history| format!(",\"boundary_history\":{}", history.receipt))
         .unwrap_or_default();
+    let boundary_history_fragment = format!("{boundary_history_fragment}{surface_storage_fragment}");
     let receipt = format!(
         "{{\"schema\":\"fs-cli-transient-conduction-v1\",\"method\":\"backward-euler\",\"status\":\"completed\",\"qoi_time\":\"final\",\"initial_temperature_k\":{},\"final_time_s\":{},\"coarse_steps\":{coarse_steps},\"fine_steps\":{fine_steps},\"total_steps\":{total_steps},\"max_steps\":{},\"coarse_step_s\":{},\"fine_step_s\":{},\"coarse_max_step_s\":{coarse_max_step},\"fine_max_step_s\":{fine_max_step},\"workload\":{workload_receipt}{boundary_history_fragment},\"energy_tolerance_j\":{},\"capacities\":[{}],\"nonlinear\":{nonlinear_receipt},\"temperature_contact\":{contact_receipt},\"radiation\":{radiation_receipt},\"conjugate\":{airflow_receipt},\"natural\":{natural_receipt},\"coarse\":[{}],\"fine\":[{}],\"sampled_peak\":{sampled_peak_receipt},\"temporal_error\":{{\"status\":{},\"qoi\":\"temperature-max\",\"region\":{},\"coarse_final_k\":{},\"fine_final_k\":{},\"absolute_difference_k\":{},\"assumed_order\":1,\"safety_factor\":1.25,\"estimated_half_width_k\":{estimate},\"spatial_error_measured\":false}},\"energy\":{{\"stored_change_j\":{},\"integrated_net_input_j\":{},\"window_residual_j\":{},\"maximum_step_residual_j\":{}}},\"authority\":\"Estimated\",\"no_claim\":{}{adjoint_fragment}}}",
         number(initial_temperature)?,

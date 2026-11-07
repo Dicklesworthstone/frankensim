@@ -48,6 +48,8 @@ pub mod dims {
     pub const ENERGY: Dims = Dims([2, 1, -2, 0, 0, 0]);
     /// Volumetric heat capacity, J/(m³ K).
     pub const VOLUMETRIC_HEAT_CAPACITY: Dims = Dims([-1, 1, -2, -1, 0, 0]);
+    /// Areal heat capacity, J/(m² K).
+    pub const AREAL_HEAT_CAPACITY: Dims = Dims([0, 1, -2, -1, 0, 0]);
     /// Specific enthalpy, J/kg.
     pub const SPECIFIC_ENTHALPY: Dims = Dims([2, 0, -2, 0, 0, 0]);
     /// Reference mass density, kg/m³.
@@ -810,6 +812,22 @@ pub struct TransientRegionCapacity {
     pub source: String,
 }
 
+/// Storage of a thermally thin, perfectly bonded boundary coating (schema v17).
+///
+/// The coating shares the original solid boundary temperature and adds no
+/// contact resistance, tangential conduction or new thermal degree of freedom.
+/// Its volume must not also be represented by a meshed region's capacity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransientSurfaceCapacity {
+    /// Exact target of one declared exterior thermal boundary law.
+    pub target: String,
+    /// Uniform, temperature-independent areal capacity in J/(m² K).
+    /// Zero explicitly declares no added storage.
+    pub areal_heat_capacity: QtyAny,
+    /// Nonempty source or engineering basis; this is not a material receipt.
+    pub source: String,
+}
+
 /// One explicitly supplied point on a stationary-domain enthalpy chart.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransientEnthalpyKnot {
@@ -989,6 +1007,9 @@ pub struct ConductionTransient {
     /// Exactly one explicitly sourced capacity per conduction region for the
     /// constant-capacity model. Must be empty when `enthalpy` is declared.
     pub capacities: Vec<TransientRegionCapacity>,
+    /// Optional perfectly bonded coating storage on named thermal boundaries.
+    /// Admitted with constant regional capacities; omission adds no storage.
+    pub surface_capacities: Vec<TransientSurfaceCapacity>,
     /// Optional total-enthalpy model (schema v13), replacing constant
     /// capacities. No phase curve or reference density is inferred.
     pub enthalpy: Option<TransientEnthalpy>,
@@ -2340,6 +2361,37 @@ impl ProjectSpec {
                 "project-conduction-transient-capacity-coverage",
                 "transient capacity declarations do not exactly cover conduction regions",
                 "declare one sourced heat capacity for every region",
+            ));
+        }
+        let mut surface_targets = BTreeSet::new();
+        for capacity in &transient.surface_capacities {
+            if conduction.boundaries.iter()
+                .filter(|boundary| boundary.target == capacity.target).count() != 1
+                || !surface_targets.insert(capacity.target.as_str())
+            {
+                out.push(violation(
+                    "project-conduction-transient-surface-capacity-target",
+                    format!("surface capacity target `{}` is unknown or repeated", capacity.target),
+                    "name one original exterior thermal boundary per coating; combine coincident layers explicitly",
+                ));
+            }
+            if capacity.areal_heat_capacity.dims != dims::AREAL_HEAT_CAPACITY
+                || !capacity.areal_heat_capacity.value.is_finite()
+                || capacity.areal_heat_capacity.value < 0.0
+                || capacity.source.trim().is_empty()
+            {
+                out.push(violation(
+                    "project-conduction-transient-surface-capacity",
+                    format!("surface capacity for `{}` requires nonnegative finite J/(m² K) and a source", capacity.target),
+                    "declare the coating's fixed areal capacity without double-counting a meshed layer",
+                ));
+            }
+        }
+        if !transient.surface_capacities.is_empty() && transient.enthalpy.is_some() {
+            out.push(violation(
+                "project-conduction-transient-surface-storage-model",
+                "surface capacities require the constant regional capacity model",
+                "use explicit regional capacities; total-enthalpy surface storage needs its own native adapter",
             ));
         }
         if let Some(enthalpy) = &transient.enthalpy {

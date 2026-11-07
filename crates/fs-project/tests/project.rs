@@ -2419,6 +2419,7 @@ fn transient_project() -> ProjectSpec {
     let mut spec = reference_project();
     let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
     setup.transient = Some(fs_project::ConductionTransient {
+        surface_capacities: Vec::new(),
         initial_temperature: fs_project::TransientInitialTemperature::Uniform(kelvin(293.15)),
         horizon: QtyAny::new(10.0, fs_project::spec::dims::TIME),
         max_step: QtyAny::new(1.0, fs_project::spec::dims::TIME),
@@ -3517,4 +3518,77 @@ fn g0_thermal_history_refuses_missing_tail_wrong_owner_units_and_unbudgeted_swit
         }
         assert!(spec.validate().iter().any(|v| v.code.starts_with("project-conduction-transient")), "{variant}");
     }
+}
+
+fn coated_transient_project() -> ProjectSpec {
+    let mut spec = transient_project();
+    let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    setup.transient.as_mut().unwrap().surface_capacities.push(fs_project::TransientSurfaceCapacity {
+        target: setup.boundaries[0].target.clone(),
+        areal_heat_capacity: QtyAny::new(120.0, fs_project::spec::dims::AREAL_HEAT_CAPACITY),
+        source: "declared thin bonded film; not included in volume storage".into(),
+    });
+    spec
+}
+
+#[test]
+fn g0_surface_capacity_roundtrips_both_spellings_and_binds_physical_storage() {
+    let spec = coated_transient_project();
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+    let text = print_sexpr(&spec).unwrap();
+    assert!(text.contains(":surface-capacities (surface-capacities (surface-capacity"));
+    assert_eq!(parse_sexpr(&text).unwrap().spec, spec);
+    assert_eq!(parse_json(&print_json(&spec).unwrap()).unwrap().spec, spec);
+    let mut changed = spec.clone();
+    changed.cooling.as_mut().unwrap().conduction.as_mut().unwrap().transient.as_mut()
+        .unwrap().surface_capacities[0].areal_heat_capacity.value *= 2.0;
+    assert_ne!(canonical_hash(text.as_bytes()), canonical_hash(print_sexpr(&changed).unwrap().as_bytes()));
+    changed.cooling.as_mut().unwrap().conduction.as_mut().unwrap().transient.as_mut()
+        .unwrap().surface_capacities[0].areal_heat_capacity.value = 0.0;
+    assert!(changed.validate().is_empty(), "zero explicitly adds no storage");
+    assert!(!print_sexpr(&transient_project()).unwrap().contains("surface-capacities"));
+}
+
+#[test]
+fn g0_surface_capacity_refuses_wrong_units_unknown_or_overlapping_targets_and_storage_models() {
+    for variant in ["units", "negative", "nonfinite", "source", "target", "overlap", "enthalpy"] {
+        let mut spec = coated_transient_project();
+        let time = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+            .transient.as_mut().unwrap();
+        match variant {
+            "units" => time.surface_capacities[0].areal_heat_capacity.dims = fs_project::spec::dims::VOLUMETRIC_HEAT_CAPACITY,
+            "negative" => time.surface_capacities[0].areal_heat_capacity.value = -1.0,
+            "nonfinite" => time.surface_capacities[0].areal_heat_capacity.value = f64::INFINITY,
+            "source" => time.surface_capacities[0].source.clear(),
+            "target" => time.surface_capacities[0].target = "undeclared-boundary".into(),
+            "overlap" => time.surface_capacities.push(time.surface_capacities[0].clone()),
+            _ => time.enthalpy = Some(fs_project::TransientEnthalpy {
+                materials: Vec::new(), max_newton_iterations: 10, max_backtracks: 4,
+            }),
+        }
+        let expected = match variant {
+            "target" | "overlap" => "project-conduction-transient-surface-capacity-target",
+            "enthalpy" => "project-conduction-transient-surface-storage-model",
+            _ => "project-conduction-transient-surface-capacity",
+        };
+        assert!(spec.validate().iter().any(|v| v.code == expected), "{variant}: {:?}", spec.validate());
+    }
+}
+
+#[test]
+fn g0_v16_migration_preserves_volume_storage_and_refuses_hidden_coatings() {
+    let historical = transient_project();
+    let current = print_sexpr(&historical).unwrap();
+    let down = |text: &str| text
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 16", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 16", 1);
+    let old = down(&current);
+    let migrated = parse_sexpr_migrating(&old).unwrap();
+    assert_eq!(migrated.decoded.spec, historical);
+    let receipt = migrated.migration.unwrap();
+    assert_eq!((receipt.source_version, receipt.target_version), (16, FSIM_VERSION));
+    assert_eq!(receipt.rule.label(), "transient-surface-capacity-v17");
+    assert!(receipt.verifies(old.as_bytes(), current.as_bytes()));
+    let hidden = down(&print_sexpr(&coated_transient_project()).unwrap());
+    assert_eq!(parse_sexpr_migrating(&hidden).unwrap_err().code, "fsim-migration-payload");
 }

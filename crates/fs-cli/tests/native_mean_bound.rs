@@ -730,6 +730,7 @@ fn g0_bounded_scalar_and_feedback_models_cannot_publish_a_frozen_mean_bound() {
         .as_mut()
         .unwrap()
         .transient = Some(fs_project::spec::ConductionTransient {
+        surface_capacities: Vec::new(),
         initial_temperature: fs_project::TransientInitialTemperature::Uniform(
             fs_qty::QtyAny::new(300.0, fs_project::spec::dims::TEMPERATURE)),
         horizon: fs_qty::QtyAny::new(1.0, fs_project::spec::dims::TIME),

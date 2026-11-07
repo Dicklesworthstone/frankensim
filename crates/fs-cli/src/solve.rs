@@ -339,7 +339,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// original contact and convection plus complete physical radiative fluxes.
 /// Version 134 shares the physical solve geometry across surface power, airflow
 /// measures, retained fields and adjoints when propagating geometry offsets.
-pub const SOLVE_DRIVER_VERSION: u32 = 134;
+/// Version 135 includes declared thin-coating heat storage in both native
+/// temperature grids and every coupled capacity response and energy audit.
+pub const SOLVE_DRIVER_VERSION: u32 = 135;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

@@ -94,6 +94,7 @@ fn fixture(enthalpy: bool, scheduled: bool) -> Fixture {
         };
     }
     setup.transient = Some(ConductionTransient {
+        surface_capacities: Vec::new(),
         initial_temperature: TransientInitialTemperature::Uniform(QtyAny::new(
             INITIAL_K,
             dims::TEMPERATURE,

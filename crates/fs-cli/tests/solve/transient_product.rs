@@ -11,6 +11,7 @@ use json::JsonValue as J;
 pub(super) fn declaration(spec: &mut ProjectSpec, capacity: f64, horizon: f64) {
     let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
     setup.transient = Some(ConductionTransient {
+        surface_capacities: Vec::new(),
         initial_temperature: fs_project::TransientInitialTemperature::Uniform(
             QtyAny::new(293.15, fs_project::spec::dims::TEMPERATURE)),
         horizon: QtyAny::new(horizon, fs_project::spec::dims::TIME),
@@ -712,4 +713,112 @@ fn g1_capacity_history_reverse_keeps_dynamic_prescribed_lifts_and_signed_flux_in
         "an unused static flux is not a history-amplitude control");
     close(n(&gradient.get("regional_power").unwrap().as_array().unwrap()[0],
         "dtemperature_duniform_added_watts_k_per_w"), 0.1, 2e-7);
+}
+
+fn coating(spec: &mut ProjectSpec, target: &str, capacity: f64) {
+    capacity_history_time(spec).surface_capacities.push(fs_project::TransientSurfaceCapacity {
+        target: target.into(),
+        areal_heat_capacity: QtyAny::new(capacity, fs_project::spec::dims::AREAL_HEAT_CAPACITY),
+        source: "synthetic bonded coating, additional to the original volume capacity".into(),
+    });
+}
+
+#[test]
+fn g1_native_coating_storage_changes_the_same_thermal_field_and_zero_is_an_exact_identity() {
+    // Equal face areas and equal volume nodal weights keep uniform heating
+    // exactly uniform: dT/dt = P / (C_volume V + C_surface A).
+    let root3 = 3.0_f64.sqrt();
+    let points = [
+        [0.0, 0.0, 0.0], [1.0, 0.0, 0.0],
+        [0.5, root3 / 2.0, 0.0], [0.5, root3 / 6.0, (2.0_f64 / 3.0).sqrt()],
+    ];
+    let mut mesh = String::from("solid enclosure\n");
+    for [a, b, c] in [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]] {
+        mesh.push_str(&facet(points[a], points[b], points[c]));
+    }
+    mesh.push_str("endsolid enclosure\n");
+    let bytes = mesh.into_bytes();
+    let volume = 2.0_f64.sqrt() / 12.0;
+    let area = root3;
+    let mut fields = Vec::new();
+    for areal in [None, Some(0.0), Some(25.0), Some(50.0)] {
+        let mut spec = conduction_fixture_project(7, &bytes);
+        declaration(&mut spec, 100.0, 2.0);
+        spec.solver.as_mut().unwrap().tolerance_rel = 1e-12;
+        spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0].condition =
+            ThermalBoundaryCondition::HeatFlux {
+                outward_flux: QtyAny::new(0.0, fs_project::spec::dims::HEAT_FLUX),
+            };
+        if let Some(capacity) = areal { coating(&mut spec, "air", capacity); }
+        let ledger = Ledger::open(":memory:").unwrap();
+        import_fixture(&ledger, &spec, bytes.clone());
+        let (_, qoi, conduction, solution) =
+            run_conjugate_to_completion(&ledger, &decode(&spec), &fixture_cards());
+        let expected = 293.15 + 10.0 / (100.0 * volume + areal.unwrap_or(0.0) * area);
+        close(receipt_number_field(&qoi, "value"), expected, 2e-9);
+        let field = J::parse(&solution).unwrap();
+        let temperatures = field.get("temperature").unwrap().as_array().unwrap();
+        for value in temperatures { close(value.as_f64().unwrap(), expected, 2e-9); }
+        fields.push(temperatures.to_vec());
+        let parsed = J::parse(&conduction).unwrap();
+        let time = parsed.get("transient").unwrap();
+        let energy = time.get("energy").unwrap();
+        close(n(energy, "stored_change_j"), 10.0, 2e-7);
+        close(n(energy, "integrated_net_input_j"), 10.0, 2e-7);
+        assert!(n(energy, "maximum_step_residual_j") <= 1e-6);
+        if let Some(capacity) = areal {
+            let storage = time.get("surface_storage").unwrap();
+            close(n(storage, "total_capacity_j_k"), capacity * area, 2e-12);
+            let row = &storage.get("surfaces").unwrap().as_array().unwrap()[0];
+            close(n(row, "area_m2"), area, 2e-13);
+            close(n(row, "boundary_faces"), 4.0, 0.0);
+            assert_eq!(row.str_field("target"), Some("air"));
+        } else {
+            assert!(time.get("surface_storage").is_none());
+        }
+    }
+    assert_eq!(fields[0], fields[1], "zero storage preserves the original capacity operator");
+    assert_ne!(fields[1], fields[2], "the coating changes the physical solve, not only its report");
+}
+
+#[test]
+fn g1_native_coating_on_prescribed_nodes_retains_its_reservoir_storage_reaction() {
+    let bytes = tetra_stl();
+    let mut values = Vec::new();
+    for areal in [None, Some(6.0)] {
+        let mut spec = driven_face_project(&bytes);
+        if let Some(capacity) = areal { coating(&mut spec, "driven-face", capacity); }
+        let ledger = Ledger::open(":memory:").unwrap();
+        import_fixture(&ledger, &spec, bytes.clone());
+        let (_, _, conduction, solution) =
+            run_conjugate_to_completion(&ledger, &decode(&spec), &fixture_cards());
+        let parsed = J::parse(&conduction).unwrap();
+        let energy = parsed.get("transient").unwrap().get("energy").unwrap();
+        values.push((J::parse(&solution).unwrap().get("temperature").unwrap().clone(),
+            n(energy, "stored_change_j"), n(energy, "integrated_net_input_j")));
+        assert!(n(energy, "maximum_step_residual_j") <= 1e-6);
+    }
+    assert_eq!(values[0].0, values[1].0,
+        "storage only on prescribed nodes cannot alter the original free-node response");
+    let added_j = 6.0 * (3.0_f64.sqrt() / 2.0) * (330.0 - 300.0);
+    close(values[1].1 - values[0].1, added_j, 2e-7);
+    close(values[1].2 - values[0].2, added_j, 2e-7);
+}
+
+#[test]
+fn g0_native_coating_adjoint_refusal_does_not_publish_an_incomplete_field() {
+    let bytes = tetra_stl();
+    let mut spec = conduction_fixture_project(7, &bytes);
+    declaration(&mut spec, 100.0, 2.0);
+    coating(&mut spec, "air", 20.0);
+    spec.outputs.as_mut().unwrap().push(OutputRequest {
+        name: "temperature-final-adjoint".into(), kind: "report".into(), region: None,
+    });
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_fixture(&ledger, &spec, bytes);
+    let error = run_solve(&ledger, &CancelGate::new_clock_free(), &mut benign_clock(),
+        &decode(&spec), &fixture_cards(), &mut Vec::new()).unwrap_err();
+    assert_eq!(error.code, "cli-solve-conduction-transient", "{error:?}");
+    assert_eq!(error.stage, Some("conduction"));
+    assert_eq!(stage_receipt_hashes(&ledger, error.run.as_ref().unwrap()).len(), 4);
 }

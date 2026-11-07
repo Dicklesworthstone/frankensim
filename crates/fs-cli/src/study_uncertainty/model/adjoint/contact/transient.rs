@@ -19,6 +19,7 @@ fn fixture(enthalpy: bool) -> Fixture {
     let materials = project.materials.as_ref().unwrap();
     let setup = project.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
     let mut time = ConductionTransient {
+        surface_capacities: Vec::new(),
         initial_temperature: TransientInitialTemperature::Uniform(QtyAny::new(
             293.15, dims::TEMPERATURE)),
         horizon: QtyAny::new(2.0, dims::TIME),

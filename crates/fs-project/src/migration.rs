@@ -87,6 +87,9 @@ pub enum MigrationRule {
     /// Version 15 gains explicit closed-enclosure surface exchange. Historical
     /// radiation remains attached to its original external reservoirs.
     ConductionEnclosureRadiationV16,
+    /// Version 16 gains explicit storage for thermally thin bonded coatings.
+    /// Historical projects retain their original volume-only heat capacities.
+    TransientSurfaceCapacityV17,
 }
 
 impl MigrationRule {
@@ -116,6 +119,7 @@ impl MigrationRule {
             MigrationRule::TransientPhaseConductivityV14 => "transient-phase-conductivity-v14",
             MigrationRule::TransientRegionalInitialTemperatureV15 => "transient-regional-initial-temperature-v15",
             MigrationRule::ConductionEnclosureRadiationV16 => "conduction-enclosure-radiation-v16",
+            MigrationRule::TransientSurfaceCapacityV17 => "transient-surface-capacity-v17",
         }
     }
 
@@ -139,6 +143,7 @@ impl MigrationRule {
             MigrationRule::TransientPhaseConductivityV14 => 13,
             MigrationRule::TransientRegionalInitialTemperatureV15 => 14,
             MigrationRule::ConductionEnclosureRadiationV16 => 15,
+            MigrationRule::TransientSurfaceCapacityV17 => 16,
         }
     }
 }
@@ -254,6 +259,7 @@ pub fn migrate_envelope(
         13 => MigrationRule::TransientPhaseConductivityV14,
         14 => MigrationRule::TransientRegionalInitialTemperatureV15,
         15 => MigrationRule::ConductionEnclosureRadiationV16,
+        16 => MigrationRule::TransientSurfaceCapacityV17,
         v if v == FSIM_VERSION => {
             return Err(ProjectError {
                 code: "fsim-migration-not-needed",
@@ -299,7 +305,8 @@ pub fn migrate_envelope(
         | MigrationRule::TransientEnthalpyV13
         | MigrationRule::TransientPhaseConductivityV14
         | MigrationRule::TransientRegionalInitialTemperatureV15
-        | MigrationRule::ConductionEnclosureRadiationV16 => {
+        | MigrationRule::ConductionEnclosureRadiationV16
+        | MigrationRule::TransientSurfaceCapacityV17 => {
             // The document's internal `versions.schema` field must move with
             // the envelope: the validator admits only the current schema.
             // The rewrite is exactly these two byte strings, never a
@@ -320,6 +327,17 @@ pub fn migrate_envelope(
         }
     };
     let decoded = parse_sexpr(&migrated)?;
+    if declared_version > 0 && declared_version < 17
+        && decoded.spec.cooling.as_ref().and_then(|cooling| cooling.conduction.as_ref())
+            .and_then(|setup| setup.transient.as_ref())
+            .is_some_and(|time| !time.surface_capacities.is_empty())
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates surface heat storage but its payload declares it"),
+            hint: "declare coatings in a current-version project; migration preserves historical volume storage".into(),
+        });
+    }
     if declared_version > 0 && declared_version < 16
         && decoded.spec.cooling.as_ref().and_then(|cooling| cooling.conduction.as_ref())
             .is_some_and(|setup| {

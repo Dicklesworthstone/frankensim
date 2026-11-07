@@ -61,7 +61,9 @@ pub const STUDY_FSIM_VERSION: u32 = 1;
 /// migration never creates temperature differences between regions.
 /// Version 16 adds explicit closed-enclosure gray-diffuse radiation. Older
 /// projects migrate with no enclosure, preserving every ambient reservoir.
-pub const FSIM_VERSION: u32 = 16;
+/// Version 17 adds optional, explicitly sourced areal heat capacities on
+/// original thermal boundaries. Older projects acquire no coating storage.
+pub const FSIM_VERSION: u32 = 17;
 
 pub use assignment::{
     ConductionInterfaceLimits, ConductionInterfaceResolution, ConductionSourceFace,
@@ -99,7 +101,8 @@ pub use spec::{
     SurfaceOffset, ThermalBoundary, ThermalBoundaryCondition, ThermalLimit, TransientEnthalpy,
     TransientBoundarySchedule, TransientBoundaryStep, TransientBoundaryTarget,
     TransientEnthalpyKnot, TransientInitialTemperature, TransientPhaseConductivity, TransientPowerStep,
-    TransientRegionCapacity, TransientRegionEnthalpy, TransientRegionPower, UnitsDoctrine, Vent,
+    TransientRegionCapacity, TransientRegionEnthalpy, TransientRegionPower,
+    TransientSurfaceCapacity, UnitsDoctrine, Vent,
     Versions, requirement_source_reviews,
 };
 pub use study::{

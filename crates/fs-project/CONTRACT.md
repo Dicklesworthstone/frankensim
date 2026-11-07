@@ -1,5 +1,33 @@
 # CONTRACT: fs-project
 
+## Schema v17: explicitly declared thin-coating storage
+
+An optional `ConductionTransient.surface_capacities` list adds one sourced,
+uniform areal heat capacity in J/(m² K) to each named original exterior
+thermal boundary. Values are finite and nonnegative; zero explicitly adds no
+storage. Targets must name exactly one declared boundary and may not repeat.
+The current native consumer admits these coatings with constant regional
+capacity storage. This is engineering input, not an inferred density/Cp or
+material-database receipt.
+
+The coating is thermally thin and perfectly bonded to the existing boundary
+temperature. It adds no resistance, independent temperature or tangential
+conduction, and its volume must not already be included in regional storage.
+The optional canonical clause is:
+
+```lisp
+:surface-capacities (surface-capacities
+  (surface-capacity :target "coated-wall"
+    :areal-heat-capacity 120.0kg·s^-2·K^-1
+    :source "Declared bonded film, absent from volume storage"))
+```
+
+Omission adds no field to the canonical payload. The v16-to-v17 migration
+rewrites only the two version declarations and retains a receipt binding
+both byte strings; it invents no coating. Historical pre-v17 envelopes
+containing a nonempty surface-storage payload refuse migration. Both
+spellings bind target, value, dimensions and source into project identity.
+
 The versioned `.fsim` project schema (bead f85xj.6.1): the user-facing
 contract for the ratified thermal-design-assurance vertical
 (`frankensim-vertical-ratification-v1`). One semantic model, two spellings,

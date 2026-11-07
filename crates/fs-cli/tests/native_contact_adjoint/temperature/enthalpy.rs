@@ -59,6 +59,7 @@ fn fixture(horizon: f64, max_step: f64) -> Fixture {
         };
     }
     setup.transient = Some(ConductionTransient {
+        surface_capacities: Vec::new(),
         initial_temperature: TransientInitialTemperature::FromRegionalEnthalpy,
         horizon: QtyAny::new(horizon, dims::TIME),
         max_step: QtyAny::new(max_step, dims::TIME),

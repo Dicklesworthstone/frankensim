@@ -21,6 +21,7 @@ fn write(fixture: &Fixture) {
 fn add_transient(fixture: &mut Fixture, initial: f64) {
     let setup = fixture.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
     setup.transient = Some(ConductionTransient {
+        surface_capacities: Vec::new(),
         initial_temperature: TransientInitialTemperature::Uniform(QtyAny::new(initial, dims::TEMPERATURE)),
         horizon: QtyAny::new(2.0, dims::TIME),
         max_step: QtyAny::new(0.5, dims::TIME),

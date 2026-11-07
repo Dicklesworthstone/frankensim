@@ -1,5 +1,33 @@
 # CONTRACT: fs-cli
 
+## Native coating heat storage — driver 135
+
+Schema-v17 constant-capacity transient projects may add uniform, explicitly
+sourced areal heat capacity to a named exterior thermal boundary through
+`transient.surface_capacities`. Every spatial rung binds those declarations
+to its actual boundary partition and calls the existing
+`BackwardEuler::with_surface_heat_capacity` owner. The original region/surface
+precedence is preserved; the adiabatic remainder receives no undeclared layer.
+
+Both time grids, scheduled prescribed boundaries, temperature-dependent bulk
+and contact solves, natural/transported convection, and patch-mean ambient or
+enclosure radiation share the resulting capacity matrix. The coating is
+thermally thin and perfectly bonded: it adds no separate temperature, contact
+resistance, tangential conduction or latent heat. It must not also be counted
+as a meshed volume. Prescribed boundary nodes retain their coating storage and
+reservoir reactions. Zero capacity leaves the original operator unchanged.
+
+Before stepping, admission includes coating assembly workspace. The existing
+transient receipt retains each target's actual face count, area, areal and
+integrated capacity, and source, with the same complete storage/net-input
+energy gate. Repeated targets, missing/empty retained patches, unsupported
+units and storage models refuse. Total-enthalpy and trajectory-adjoint
+coatings remain explicitly unsupported; no incomplete derivative is emitted.
+
+Native regressions compare uniform heating on a regular tetrahedron against
+`P t / (C_volume V + C_surface A)`, preserve the zero/empty field exactly, and
+check the added reservoir heat when only prescribed nodes carry storage.
+
 ## Adaptive reflected-enclosure cooling — driver 133
 
 Steady adaptive projects now admit closed and open area-mean gray enclosures

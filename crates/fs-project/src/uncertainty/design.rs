@@ -235,6 +235,7 @@ mod tests {
         let mut base = base();
         let setup = base.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
         setup.transient = Some(ConductionTransient {
+            surface_capacities: Vec::new(),
             initial_temperature: TransientInitialTemperature::Uniform(QtyAny::new(293.15, dims::TEMPERATURE)),
             horizon: QtyAny::new(1.0, dims::TIME),
             max_step: QtyAny::new(1.0, dims::TIME), max_steps: 3,

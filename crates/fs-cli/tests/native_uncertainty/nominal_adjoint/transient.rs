@@ -18,6 +18,7 @@ fn fixture() -> Fixture {
         .as_mut()
         .unwrap();
     setup.transient = Some(ConductionTransient {
+        surface_capacities: Vec::new(),
         initial_temperature: TransientInitialTemperature::Uniform(QtyAny::new(
             293.15,
             dims::TEMPERATURE,

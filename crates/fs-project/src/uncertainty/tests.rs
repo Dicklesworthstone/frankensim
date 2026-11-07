@@ -40,6 +40,7 @@ fn sampled_peak_is_explicit_and_requires_a_transient_base() {
     let mut project = base();
     let setup = project.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
     setup.transient = Some(crate::ConductionTransient {
+        surface_capacities: Vec::new(),
         initial_temperature: crate::TransientInitialTemperature::Uniform(
             QtyAny::new(330.0, crate::spec::dims::TEMPERATURE)),
         horizon: QtyAny::new(2.0, crate::spec::dims::TIME),

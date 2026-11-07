@@ -13,6 +13,7 @@ fn fixture() -> Fixture {
     requirement.margin.value = 1.0;
     let setup = fixture.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
     setup.transient = Some(ConductionTransient {
+        surface_capacities: Vec::new(),
         initial_temperature: TransientInitialTemperature::Uniform(QtyAny::new(330.0, dims::TEMPERATURE)),
         horizon: QtyAny::new(2.0, dims::TIME),
         max_step: QtyAny::new(0.5, dims::TIME),

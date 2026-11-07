@@ -35,7 +35,8 @@ use crate::spec::{
     TransientBoundaryTarget, TransientBoundarySchedule, TransientBoundaryStep,
     TransientEnthalpy, TransientEnthalpyKnot, TransientInitialTemperature,
     TransientPhaseConductivity, TransientPowerStep, TransientRegionCapacity,
-    TransientRegionEnthalpy, TransientRegionPower, UnitsDoctrine, Vent, Versions,
+    TransientRegionEnthalpy, TransientRegionPower, TransientSurfaceCapacity,
+    UnitsDoctrine, Vent, Versions,
 };
 
 /// Domain for canonical `.fsim` byte hashing.
@@ -730,6 +731,16 @@ fn lower_conduction(setup: &ConductionSetup) -> Result<Node, ProjectError> {
             kw("max-steps"), int(i64::from(transient.max_steps)),
             kw("energy-tolerance"), qty(transient.energy_tolerance)?,
             kw("capacities"), list(capacities)];
+        if !transient.surface_capacities.is_empty() {
+            let mut surfaces = vec![sym("surface-capacities")];
+            for row in &transient.surface_capacities {
+                surfaces.push(list(vec![sym("surface-capacity"),
+                    kw("target"), text(&row.target),
+                    kw("areal-heat-capacity"), qty(row.areal_heat_capacity)?,
+                    kw("source"), text(&row.source)]));
+            }
+            time.extend([kw("surface-capacities"), list(surfaces)]);
+        }
         if let Some(enthalpy) = &transient.enthalpy {
             time.extend([kw("enthalpy"), lower_enthalpy(enthalpy)?]);
         }
@@ -2902,7 +2913,8 @@ fn read_transient(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionTra
         return None;
     };
     let pairs = read_pairs(body, "transient", &["initial-temperature", "horizon", "max-step",
-        "max-steps", "energy-tolerance", "capacities", "enthalpy", "power-schedules", "boundary-schedules"], out);
+        "max-steps", "energy-tolerance", "capacities", "surface-capacities",
+        "enthalpy", "power-schedules", "boundary-schedules"], out);
     let max_steps = match field(&pairs, "max-steps") {
         Some(Node { kind: NodeKind::Int(value), .. }) => u32::try_from(*value).unwrap_or_default(),
         _ => 0,
@@ -2950,12 +2962,45 @@ fn read_transient(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionTra
         max_steps,
         energy_tolerance: expect_qty(field(&pairs, "energy-tolerance"), "transient.energy-tolerance", out),
         capacities,
+        surface_capacities: field(&pairs, "surface-capacities")
+            .map_or_else(Vec::new, |node| read_surface_capacities(node, out)),
         enthalpy: field(&pairs, "enthalpy").and_then(|node| read_enthalpy(node, out)),
         boundary_schedules: field(&pairs, "boundary-schedules")
             .map_or_else(Vec::new, |node| read_transient_boundary_schedules(node, out)),
         power_schedules: field(&pairs, "power-schedules")
             .map_or_else(Vec::new, |node| read_transient_power_schedules(node, out)),
     })
+}
+
+fn read_surface_capacities(node: &Node, out: &mut Vec<Violation>) -> Vec<TransientSurfaceCapacity> {
+    let Some(("surface-capacities", rows)) = section_name(node) else {
+        out.push(Violation {
+            code: "project-malformed-clause",
+            what: "transient.surface-capacities must be a `(surface-capacities ...)` list".into(),
+            fix: "declare each coating's target, areal-heat-capacity and source".into(),
+        });
+        return Vec::new();
+    };
+    let mut surfaces = Vec::new();
+    for node in rows {
+        let Some(("surface-capacity", body)) = section_name(node) else {
+            out.push(Violation {
+                code: "project-malformed-clause",
+                what: "surface capacity rows must be `(surface-capacity ...)`".into(),
+                fix: "declare target, areal-heat-capacity and source".into(),
+            });
+            continue;
+        };
+        let fields = read_pairs(body, "transient.surface-capacity",
+            &["target", "areal-heat-capacity", "source"], out);
+        surfaces.push(TransientSurfaceCapacity {
+            target: expect_str(field(&fields, "target"), "surface-capacity.target", out),
+            areal_heat_capacity: expect_qty(field(&fields, "areal-heat-capacity"),
+                "surface-capacity.areal-heat-capacity", out),
+            source: expect_str(field(&fields, "source"), "surface-capacity.source", out),
+        });
+    }
+    surfaces
 }
 
 fn read_enthalpy(node: &Node, out: &mut Vec<Violation>) -> Option<TransientEnthalpy> {
