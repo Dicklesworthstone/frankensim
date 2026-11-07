@@ -294,7 +294,7 @@ impl CohesivePatchLoadLine {
                     // Each probe retains the SAME accepted history and time.
                     let old = old_point.jump_m();
                     let x = self.current.jump[point];
-                    let scales = old_point.law().mixed_mode_parameters().map_or(
+                    let scales = old_point.law().mixed_mode_coefficients().map_or(
                         [old_point.law().onset_separation_m(); 3],
                         |p| {
                             [

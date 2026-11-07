@@ -3,7 +3,9 @@
 //! Intact traction has separate Kn and Kt. Damage initiates on
 //! `(Kn <gn>/Tn)^2 + (Kt |gt|/Tt)^2 = 1`. At the FIRST outward crossing of
 //! that surface, beta = Kt |gt|^2/(Kn <gn>^2 + Kt |gt|^2) selects
-//! `Gc = GIc + (GIIc-GIc) beta^eta` (Benzeggagh--Kenane).
+//! the explicitly selected Benzeggagh--Kenane or power-law fracture envelope.
+//! BK uses `Gc = GIc + (GIIc-GIc) beta^eta`; power law uses
+//! `(GI/GIc)^alpha + (GII/GIIc)^alpha = 1`, with GI=(1-beta)Gc.
 //!
 //! At fixed coefficients this implementation FREEZES beta and its envelope at
 //! initiation. The physical active-separation direction is retained as well:
@@ -13,7 +15,7 @@
 //! `r = sqrt(Kn <gn>^2 + Kt |gt|^2)`. This makes arbitrary subsequent straight
 //! jump paths passive, with exact analytic work, while reproducing the chosen
 //! pure-mode and proportional mixed-mode fracture energies. It is a declared
-//! onset-mix extension, not a claim that BK coupon data calibrate arbitrary
+//! onset-mix extension, not a claim that coupon data calibrate arbitrary
 //! nonproportional histories. Changing direction after onset does not reselect
 //! toughness or restore failed bonds. Both shear directions are isotropic.
 //!
@@ -29,7 +31,11 @@ use super::{
     outward_crossing, positive,
 };
 
-/// Explicit ordered-interface coefficients. All values are coherent SI.
+mod fracture;
+pub use fracture::{MixedModeCoefficients, MixedModeFractureCriterion};
+pub(super) use fracture::MixedModeLaw;
+
+/// Explicit BK ordered-interface coefficients. All values are coherent SI.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MixedModeParameters {
     /// Undamaged opening stiffness, Pa/m.
@@ -68,7 +74,7 @@ pub struct MixedModeHistory {
     pub onset_sqrt_energy: f64,
     /// Complete-failure energy-norm coordinate, sqrt(J/m2).
     pub failure_sqrt_energy: f64,
-    /// BK fracture work on the retained mode at current coefficients, J/m2.
+    /// Selected fracture work on the retained mode at current coefficients, J/m2.
     pub fracture_energy_j_m2: f64,
 }
 
@@ -88,7 +94,14 @@ impl BilinearCohesive {
         compression_stiffness_pa_m: f64,
         maximum_separation_m: f64,
     ) -> Result<Self, CohesiveError> {
-        let p = parameters;
+        Self::new_mixed_law(parameters.into(), compression_stiffness_pa_m, maximum_separation_m)
+    }
+
+    fn new_mixed_law(
+        p: MixedModeLaw,
+        compression_stiffness_pa_m: f64,
+        maximum_separation_m: f64,
+    ) -> Result<Self, CohesiveError> {
         for value in [
             p.normal_stiffness_pa_m,
             p.tangential_stiffness_pa_m,
@@ -96,13 +109,10 @@ impl BilinearCohesive {
             p.tangential_strength_pa,
             p.mode_i_fracture_energy_j_m2,
             p.mode_ii_fracture_energy_j_m2,
-            p.bk_exponent,
         ] {
             positive(value)?;
         }
-        if p.bk_exponent < 1.0 {
-            return Err(CohesiveError::Invalid("BK exponent must be at least one"));
-        }
+        p.admit_criterion()?;
         let mut law = Self::new(
             p.normal_stiffness_pa_m,
             p.normal_strength_pa,
@@ -121,15 +131,30 @@ impl BilinearCohesive {
         let a = positive(p.normal_strength_pa / det::sqrt(p.normal_stiffness_pa_m))?;
         let b = positive(p.tangential_strength_pa / det::sqrt(p.tangential_stiffness_pa_m))?;
         admit_softening_interval(p, positive((0.5 * a) * a)?, positive((0.5 * b) * b)?)?;
+        p.admit_power_range(a.min(b), maximum_separation_m)?;
         positive((p.tangential_stiffness_pa_m * maximum_separation_m) * maximum_separation_m)?;
         law.mixed_mode = Some(p);
         Ok(law)
     }
 
-    /// Explicit mode-dependent data, absent for the original isotropic law.
+    /// Original BK inputs, absent for common-mode and power-law models.
+    /// Use `mixed_mode_coefficients` and `mixed_mode_criterion` for either family.
     #[must_use]
     pub const fn mixed_mode_parameters(&self) -> Option<MixedModeParameters> {
-        self.mixed_mode
+        match self.mixed_mode {
+            Some(MixedModeLaw { coefficients: p,
+                criterion: MixedModeFractureCriterion::BenzeggaghKenane { exponent } }) =>
+                Some(MixedModeParameters {
+                    normal_stiffness_pa_m: p.normal_stiffness_pa_m,
+                    tangential_stiffness_pa_m: p.tangential_stiffness_pa_m,
+                    normal_strength_pa: p.normal_strength_pa,
+                    tangential_strength_pa: p.tangential_strength_pa,
+                    mode_i_fracture_energy_j_m2: p.mode_i_fracture_energy_j_m2,
+                    mode_ii_fracture_energy_j_m2: p.mode_ii_fracture_energy_j_m2,
+                    bk_exponent: exponent,
+                }),
+            _ => None,
+        }
     }
 }
 
@@ -139,10 +164,15 @@ impl BilinearCohesive {
 // Normalize both positive factors before multiplication to retain SI rescaling
 // and avoid large reciprocal energies. Ordinary mechanical steps do no work here.
 fn admit_softening_interval(
-    p: MixedModeParameters,
+    p: MixedModeLaw,
     normal_onset_energy: f64,
     shear_onset_energy: f64,
 ) -> Result<(), CohesiveError> {
+    let bk_exponent = match p.criterion {
+        MixedModeFractureCriterion::BenzeggaghKenane { exponent } => exponent,
+        MixedModeFractureCriterion::PowerLaw { exponent } =>
+            return p.admit_power_softening(normal_onset_energy, shear_onset_energy, exponent),
+    };
     // Preserve the inexpensive sufficient screen for ordinary well-separated
     // envelopes, including repeated source-bound thermal coefficient refreshes.
     let relative_guard = 1.0 + 64.0 * f64::EPSILON;
@@ -167,14 +197,14 @@ fn admit_softening_interval(
     // eta>1, the product is monotone or concave, so the endpoints suffice.
     // In the remaining case its second derivative changes sign at most once;
     // the convex prefix contains the only possible interior minimum.
-    if gii > gi && a > b && p.bk_exponent > 1.0 {
-        let inv = 1.0 / (p.bk_exponent + 1.0);
-        let convex_end = (((p.bk_exponent - 1.0) * inv) * (a / (a - b))).min(1.0);
+    if gii > gi && a > b && bk_exponent > 1.0 {
+        let inv = 1.0 / (bk_exponent + 1.0);
+        let convex_end = (((bk_exponent - 1.0) * inv) * (a / (a - b))).min(1.0);
         let derivative = |beta: f64| {
-            let power = det::pow(beta, p.bk_exponent);
+            let power = det::pow(beta, bk_exponent);
             let toughness = (1.0 - power) * gi + power * gii;
             let compliance = (1.0 - beta) * a + beta * b;
-            (gii - gi) * (1.0 - inv) * det::pow(beta, p.bk_exponent - 1.0) * compliance
+            (gii - gi) * (1.0 - inv) * det::pow(beta, bk_exponent - 1.0) * compliance
                 - (a - b) * inv * toughness
         };
         if derivative(convex_end) > 0.0 {
@@ -194,7 +224,7 @@ fn admit_softening_interval(
             // this bracket. Their separate lower endpoints bound the entire
             // unresolved interval, even if eta concentrates the minimum closer
             // to beta=1 than one floating-point spacing can represent.
-            let power = det::pow(low, p.bk_exponent);
+            let power = det::pow(low, bk_exponent);
             let lower_toughness = (1.0 - power) * gi + power * gii;
             let lower_compliance = (1.0 - high) * a + high * b;
             minimum = minimum.min(lower_toughness * lower_compliance);
@@ -235,18 +265,14 @@ impl MixedModeHistory {
     }
     /// Intersect the new quadratic strength surface with the SAME physical
     /// initiation ray. Its energy weighting changes with Kn/Kt, so temperature
-    /// dependent BK data use that weighting rather than a rotated current gap.
-    pub(super) fn at_parameters(self, p: MixedModeParameters) -> Result<Self, CohesiveError> {
+    /// dependent fracture data use that weighting rather than a rotated current gap.
+    pub(super) fn at_parameters(self, p: MixedModeLaw) -> Result<Self, CohesiveError> {
         let radius = positive(coordinate(p, self.onset_direction)?)?;
         let onset = positive(radius / positive(strength_coordinate(p, self.onset_direction)?)?)?;
         let shear = det::sqrt(p.tangential_stiffness_pa_m)
             * norm([0.0, self.onset_direction[1], self.onset_direction[2]])?;
         let beta = finite((shear / radius) * (shear / radius))?.clamp(0.0, 1.0);
-        let fracture = positive(
-            p.mode_i_fracture_energy_j_m2
-                + (p.mode_ii_fracture_energy_j_m2 - p.mode_i_fracture_energy_j_m2)
-                    * det::pow(beta, p.bk_exponent),
-        )?;
+        let fracture = p.toughness(self.onset_direction, radius, beta)?;
         let failure = positive(2.0 * (fracture / onset))?;
         if failure <= onset {
             return Err(CohesiveError::Invalid(
@@ -398,6 +424,7 @@ impl<'a> CohesivePoint<'a> {
                     derivative_r * stiffness[i] * active_jump[i] / radius
                 });
                 if let Some((_, lambda)) = initiation {
+                    classical &= p.smooth_initiation(h.onset_direction);
                     let (da, dgc) = initiation_gradient(p, self.jump, jump, lambda, h)?;
                     let derivative_a =
                         (b / denominator) * ((b + a * a) / radius - 2.0 * a) / denominator;
@@ -433,7 +460,7 @@ impl<'a> CohesivePoint<'a> {
     }
 }
 
-pub(super) fn coordinate(p: MixedModeParameters, g: [f64; 3]) -> Result<f64, CohesiveError> {
+pub(super) fn coordinate(p: MixedModeLaw, g: [f64; 3]) -> Result<f64, CohesiveError> {
     norm([
         det::sqrt(p.normal_stiffness_pa_m) * g[0].max(0.0),
         det::sqrt(p.tangential_stiffness_pa_m) * g[1],
@@ -441,7 +468,7 @@ pub(super) fn coordinate(p: MixedModeParameters, g: [f64; 3]) -> Result<f64, Coh
     ])
 }
 pub(super) fn strength_coordinate(
-    p: MixedModeParameters,
+    p: MixedModeLaw,
     g: [f64; 3],
 ) -> Result<f64, CohesiveError> {
     norm([
@@ -451,7 +478,7 @@ pub(super) fn strength_coordinate(
     ])
 }
 pub(super) fn initiate(
-    p: MixedModeParameters,
+    p: MixedModeLaw,
     old: [f64; 3],
     end: [f64; 3],
 ) -> Result<(MixedModeHistory, f64), CohesiveError> {
@@ -470,11 +497,7 @@ pub(super) fn initiate(
     let onset = positive(coordinate(p, g)?)?;
     let shear = det::sqrt(p.tangential_stiffness_pa_m) * norm([0.0, g[1], g[2]])?;
     let beta = finite((shear / onset) * (shear / onset))?.clamp(0.0, 1.0);
-    let fracture = positive(
-        p.mode_i_fracture_energy_j_m2
-            + (p.mode_ii_fracture_energy_j_m2 - p.mode_i_fracture_energy_j_m2)
-                * det::pow(beta, p.bk_exponent),
-    )?;
+    let fracture = p.toughness(g, onset, beta)?;
     let failure = positive(2.0 * (fracture / onset))?;
     if failure <= onset {
         return Err(CohesiveError::Invalid(
@@ -496,7 +519,7 @@ pub(super) fn initiate(
     ))
 }
 pub(super) fn initiation_gradient(
-    p: MixedModeParameters,
+    p: MixedModeLaw,
     old: [f64; 3],
     end: [f64; 3],
     lambda: f64,
@@ -525,18 +548,7 @@ pub(super) fn initiation_gradient(
     let radius = h.onset_sqrt_energy;
     let beta = h.energy_shear_fraction;
     let gradient_radius = core::array::from_fn::<_, 3, _>(|i| stiffness[i] * g[i] / radius);
-    let gradient_beta = [
-        -2.0 * beta * stiffness[0] * g[0] / (radius * radius),
-        2.0 * (1.0 - beta) * stiffness[1] * g[1] / (radius * radius),
-        2.0 * (1.0 - beta) * stiffness[2] * g[2] / (radius * radius),
-    ];
-    let slope = (p.mode_ii_fracture_energy_j_m2 - p.mode_i_fracture_energy_j_m2)
-        * p.bk_exponent
-        * if beta == 0.0 {
-            if p.bk_exponent == 1.0 { 1.0 } else { 0.0 }
-        } else {
-            det::pow(beta, p.bk_exponent - 1.0)
-        };
+    let gradient_gc = p.toughness_gradient(g, radius, beta, h.fracture_energy_j_m2)?;
     let mut da = [0.0; 3];
     let mut dgc = [0.0; 3];
     for j in 0..3 {
@@ -544,7 +556,7 @@ pub(super) fn initiation_gradient(
         for i in 0..3 {
             let dg = if i == j { lambda } else { 0.0 } + delta[i] * dlambda;
             da[j] += gradient_radius[i] * dg;
-            dgc[j] += slope * gradient_beta[i] * dg;
+            dgc[j] += gradient_gc[i] * dg;
         }
         finite(da[j])?;
         finite(dgc[j])?;
@@ -554,3 +566,6 @@ pub(super) fn initiation_gradient(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod power_law_tests;

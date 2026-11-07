@@ -1,6 +1,6 @@
 //! Source binding for the explicitly selected frozen-onset mixed-mode law.
 use super::*;
-use crate::cohesive::mixed_mode::MixedModeParameters;
+use crate::cohesive::mixed_mode::{MixedModeCoefficients, MixedModeParameters};
 
 /// Pure opening stiffness, Pa/m.
 pub const COHESIVE_NORMAL_STIFFNESS_PROPERTY: &str = "cohesive_normal_stiffness";
@@ -16,6 +16,8 @@ pub const COHESIVE_MODE_I_FRACTURE_ENERGY_PROPERTY: &str = "cohesive_mode_i_frac
 pub const COHESIVE_MODE_II_FRACTURE_ENERGY_PROPERTY: &str = "cohesive_mode_ii_fracture_energy";
 /// Dimensionless calibrated BK interaction exponent.
 pub const COHESIVE_BK_EXPONENT_PROPERTY: &str = "cohesive_bk_exponent";
+/// Dimensionless calibrated power-law interaction exponent, alpha >= 1/2.
+pub const COHESIVE_POWER_LAW_EXPONENT_PROPERTY: &str = "cohesive_power_law_exponent";
 
 impl ResolvedBilinearCohesive {
     /// Select mode-dependent fracture from explicit original interface claims.
@@ -27,13 +29,33 @@ impl ResolvedBilinearCohesive {
         resolved: ResolvedInterfaceStatePoint,
         maximum_separation_m: f64,
     ) -> Result<Self, MaterialStatePointError> {
+        Self::try_from_selected_mixed_resolved(card, resolved, maximum_separation_m, false)
+    }
+
+    /// Explicit power-law selection. BK exponents and bulk strengths cannot
+    /// substitute for a missing original power-law interface calibration.
+    pub fn try_from_power_law_mixed_mode_resolved(
+        card: &InterfaceSystemCard,
+        resolved: ResolvedInterfaceStatePoint,
+        maximum_separation_m: f64,
+    ) -> Result<Self, MaterialStatePointError> {
+        Self::try_from_selected_mixed_resolved(card, resolved, maximum_separation_m, true)
+    }
+
+    fn try_from_selected_mixed_resolved(
+        card: &InterfaceSystemCard,
+        resolved: ResolvedInterfaceStatePoint,
+        maximum_separation_m: f64,
+        power_law: bool,
+    ) -> Result<Self, MaterialStatePointError> {
         if resolved.card_identity() != card.content_hash() {
             return Err(invalid(
                 "mixed cohesive law requires original ordered interface card",
             ));
         }
         let mut values = [0.0; 8];
-        for (value, (name, dims)) in values.iter_mut().zip(mixed_properties()) {
+        let properties = if power_law { power_law_properties() } else { mixed_properties() };
+        for (value, (name, dims)) in values.iter_mut().zip(properties) {
             let property = resolved.property(name).ok_or_else(|| {
                 MaterialStatePointError::InvalidRequirement {
                     property: name.into(),
@@ -60,7 +82,20 @@ impl ResolvedBilinearCohesive {
             }
         }
         let [kn, kt, tn, tt, gi, gii, eta, compression] = values;
-        let law = BilinearCohesive::new_mixed_mode(
+        let law = if power_law {
+            BilinearCohesive::new_power_law_mixed_mode(
+                MixedModeCoefficients {
+                    normal_stiffness_pa_m: kn,
+                    tangential_stiffness_pa_m: kt,
+                    normal_strength_pa: tn,
+                    tangential_strength_pa: tt,
+                    mode_i_fracture_energy_j_m2: gi,
+                    mode_ii_fracture_energy_j_m2: gii,
+                },
+                eta, compression, maximum_separation_m,
+            )
+        } else {
+            BilinearCohesive::new_mixed_mode(
             MixedModeParameters {
                 normal_stiffness_pa_m: kn,
                 tangential_stiffness_pa_m: kt,
@@ -73,7 +108,7 @@ impl ResolvedBilinearCohesive {
             compression,
             maximum_separation_m,
         )
-        .map_err(|_| {
+        }.map_err(|_| {
             invalid("mixed cohesive coefficients violate positive-softening or separation bounds")
         })?;
         Ok(Self {
@@ -100,6 +135,28 @@ pub fn resolve_mixed_mode_bilinear_cohesive(
         .collect();
     let resolved = resolve_interface_state_point(card, point, &requirements?, selection)?;
     ResolvedBilinearCohesive::try_from_mixed_mode_resolved(card, resolved, maximum_separation_m)
+}
+
+/// Resolve the explicitly selected power-law envelope. Pure-mode energies,
+/// stiffnesses and strengths remain independent source requirements.
+pub fn resolve_power_law_mixed_mode_bilinear_cohesive(
+    card: &InterfaceSystemCard,
+    point: &QueryPoint,
+    selection: MaterialPropertySelection,
+    maximum_separation_m: f64,
+) -> Result<ResolvedBilinearCohesive, MaterialStatePointError> {
+    let requirements: Result<Vec<_>, _> = power_law_properties().into_iter().map(|(name, dims)| {
+        ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::StrictlyPositive)
+    }).collect();
+    let resolved = resolve_interface_state_point(card, point, &requirements?, selection)?;
+    ResolvedBilinearCohesive::try_from_power_law_mixed_mode_resolved(
+        card, resolved, maximum_separation_m)
+}
+
+pub(super) fn power_law_properties() -> [(&'static str, Dims); 8] {
+    let mut properties = mixed_properties();
+    properties[6] = (COHESIVE_POWER_LAW_EXPONENT_PROPERTY, Dims::NONE);
+    properties
 }
 
 pub(super) fn mixed_properties() -> [(&'static str, Dims); 8] {

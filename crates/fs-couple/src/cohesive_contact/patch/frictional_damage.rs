@@ -690,7 +690,7 @@ impl Context<'_, '_> {
             let x = current.jump[p];
             let law = self.previous[p].point().law();
             let scales = law
-                .mixed_mode_parameters()
+                .mixed_mode_coefficients()
                 .map_or([law.onset_separation_m(); 3], |v| {
                     [
                         v.normal_strength_pa / v.normal_stiffness_pa_m,

@@ -16,7 +16,7 @@ impl<'a> CohesivePoint<'a> {
     /// `integral_0^1 d(s) K_compression max(-g_n(s),0) ds` [Pa].
     ///
     /// All three outputs share the same original irreversible damage path,
-    /// including first frozen-BK initiation, unloading and complete failure.
+    /// including first selected-envelope initiation, unloading and complete failure.
     /// The extra scalar is nonnegative and adds no energy or material state.
     /// It supports a declared damaged-area rigid-Coulomb mixture; this is not
     /// an implementation of a separate elastic friction internal variable.
@@ -41,7 +41,7 @@ impl<'a> CohesivePoint<'a> {
     ///
     /// The pressure gradient differentiates the SAME analytic pressure integral,
     /// including moving initiation, rupture and normal-sign crossings. A first
-    /// BK envelope retains its original initiation sensitivities; an accepted
+    /// mixed-mode envelope retains its original initiation sensitivities; an accepted
     /// envelope stays frozen. No quadrature, finite difference or new history
     /// is introduced. Ordinary pressure callers execute no derivative work.
     ///
@@ -195,6 +195,7 @@ fn damaged_compression_gradient(
                 0.0,
             )
         } else {
+            if !p.smooth_initiation(history.onset_direction) { return None; }
             let (_, lower) = super::super::mixed_mode::initiate(p, old.jump, end.jump).ok()?;
             let (da, dgc) = super::super::mixed_mode::initiation_gradient(
                 p, old.jump, end.jump, lower, history,

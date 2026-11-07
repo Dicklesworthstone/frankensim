@@ -148,7 +148,7 @@ impl CohesiveLoadLine {
             ));
         }
         let old = point.jump_m();
-        let scales = point.law().mixed_mode_parameters().map_or(
+        let scales = point.law().mixed_mode_coefficients().map_or(
             [point.law().onset_separation_m(); 3],
             |p| {
                 [

@@ -79,7 +79,7 @@ pub struct BilinearCohesive {
     maximum_separation: f64,
     onset: f64,
     failure: f64,
-    mixed_mode: Option<mixed_mode::MixedModeParameters>,
+    mixed_mode: Option<mixed_mode::MixedModeLaw>,
     viscosity: Option<CohesiveViscosity>,
 }
 impl BilinearCohesive {

@@ -17,7 +17,7 @@
 //! at first initiation. At new coefficients its quadratic strength surface
 //! gives `r0 = sqrt(Kn en^2+Kt |et|^2) / sqrt((Kn en/Tn)^2+(Kt |et|/Tt)^2)`.
 //! The current weighting is `beta(T) = Kt |et|^2/(Kn en^2+Kt |et|^2)` and
-//! `Gc(T) = GIc(T)+(GIIc(T)-GIc(T))*beta(T)^eta(T)`, `rf = 2 Gc/r0`.
+//! the selected BK or power-law envelope gives `Gc(T)`, with `rf = 2 Gc/r0`.
 //! Original onset beta remains a separate historical observation. Changing Kn
 //! relative to Kt changes energy weighting without rotating the physical mode.
 //! An uninitiated point first crossing the changed strength surface adopts the
@@ -65,7 +65,8 @@ impl CohesivePoint<'_> {
         energy_tolerance_j_m2: f64,
     ) -> Result<CohesiveTemperatureStep<'b>, CohesiveError> {
         positive(energy_tolerance_j_m2)?;
-        if self.law.mixed_mode.is_some() != law.mixed_mode.is_some() {
+        if self.law.mixed_mode.map(|p| p.criterion.is_power_law())
+            != law.mixed_mode.map(|p| p.criterion.is_power_law()) {
             return Err(CohesiveError::Invalid(
                 "temperature transfer cannot change the cohesive envelope model",
             ));

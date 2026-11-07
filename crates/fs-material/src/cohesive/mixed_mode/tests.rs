@@ -293,10 +293,10 @@ fn analytic_initiation_resolves_compression_switch_and_shear_reversal() {
     ] {
         let a = [dn * old[0], dt * old[1], dt * old[2]];
         let b = [dn * end[0], dt * end[1], dt * end[2]];
-        let (history, fraction) = initiate(p, a, b).unwrap();
+        let (history, fraction) = initiate(p.into(), a, b).unwrap();
         close(fraction, expected, 1e-14);
         let at = core::array::from_fn(|i| (1.0 - fraction) * a[i] + fraction * b[i]);
-        close(strength_coordinate(p, at).unwrap(), 1.0, 1e-14);
+        close(strength_coordinate(p.into(), at).unwrap(), 1.0, 1e-14);
         let pure_shear = old[1] != 0.0 || end[1] != 0.0;
         close(
             history.fracture_energy_j_m2,

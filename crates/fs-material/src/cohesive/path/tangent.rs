@@ -100,6 +100,7 @@ fn mean_tangent(
                     0.0,
                 )),
                 (None, Some(history)) => {
+                    if !parameters.smooth_initiation(history.onset_direction) { return None; }
                     // Reuse the original quadratic-onset/BK sensitivity owner.
                     // Freezing the newly selected envelope would drop genuine
                     // nonproportional-path sensitivity and give a wrong matrix.

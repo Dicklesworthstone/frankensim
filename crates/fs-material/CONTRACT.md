@@ -8019,6 +8019,55 @@ actual native-equilibrium load histories. Temperature/rate-dependent toughness,
 fatigue, evolving mode-mix calibration and fracture heat partition remain separate.
 
 
+### Explicit power-law mixed-mode fracture
+
+`BilinearCohesive::new_power_law_mixed_mode` selects the power-law envelope
+`(GI/GIc)^alpha + (GII/GIIc)^alpha = 1` with `alpha >= 1/2`, independent
+of the existing BK constructor. `MixedModeCoefficients` supplies the six
+mechanical coefficients; `mixed_mode_criterion()` identifies the selected
+family and exponent. The legacy `mixed_mode_parameters()` getter remains
+BK-specific. Generic consumers use `mixed_mode_coefficients()`.
+
+The original quadratic initiation, frozen physical onset direction,
+irreversible damage, analytic path work, vector traction, physical viscosity
+and thermal transfer remain the numerical owners. Separate scaled normal and
+shear amplitudes retain weak-mode toughness contributions even when the
+reported shear-energy fraction rounds to one. First-initiation endpoint and
+path tangents include the selected power-law toughness gradient. At
+`alpha = 1/2`, pure-mode initiation has a cusp: classical derivatives
+explicitly decline, while the endpoint branch uses a zero transverse
+subgradient. An already accepted initiation envelope remains frozen.
+
+Admission checks positive softening over every mode, not only the pure limits.
+Writing `a = Tn^2/(2 Kn GIc)`, `b = Tt^2/(2 Kt GIIc)`, the condition is
+`max(a,b) < 1` for `alpha >= 1`, or
+`||(a,b)||_(alpha/(1-alpha)) < 1` for `1/2 <= alpha < 1`, with a
+roundoff guard. The new power-law constructor also requires the sufficient
+all-mode failure-distance bound
+`2 Gmax / (min(Tn/sqrt(Kn),Tt/sqrt(Kt)) sqrt(min(Kn,Kt)))`
+to fit the declared separation range. `Gmax = max(GIc,GIIc)` for
+`alpha <= 1`; for `alpha > 1` it is the dual norm
+`||(GIc,GIIc)||_(alpha/(alpha-1))`. This conservative admission covers
+rotation after initiation; legacy BK admission is unchanged.
+
+`resolve_power_law_mixed_mode_bilinear_cohesive` and
+`CohesiveEnvelope::FrozenOnsetPowerLaw` require the original dimensionless
+`cohesive_power_law_exponent` claim alongside all seven independent
+mechanical interface properties. A BK exponent is not a substitute.
+Temperature refresh preserves original claims, viscosity/range bounds and
+the selected family; an explicit power-law exponent change reevaluates the
+envelope on the retained physical onset direction without healing.
+Common/BK/power-law family changes refuse even when the complete source
+bundle contains every alternative.
+
+The fracture-envelope equation follows Neves et al., Processes 10 (2022) 2730,
+Eq. (5), <https://doi.org/10.3390/pr10122730>. Reported adhesive envelopes
+include `alpha = 1/2`; the exponent is not a BK calibration. The tests use
+manufactured coefficients and independently check proportional work,
+initiation-sensitive endpoint/path gradients, weak modes, admission,
+viscosity and thermal history. They do not supply a measured adhesive
+calibration or validate arbitrary nonproportional experiments.
+
 ## Solid-vapor constitutive laws
 
 `sublimation` supplies the shared `fs_thermal::sublimation::SublimationLaw`

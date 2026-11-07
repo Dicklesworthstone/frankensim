@@ -13,7 +13,20 @@ pub const COHESIVE_VISCOSITY_DIMS: Dims = Dims([-2, 1, -1, 0, 0, 0]);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CohesiveEnvelope {
     CommonMode,
+    /// Benzeggagh--Kenane envelope.
     FrozenOnsetMixedMode,
+    /// Power-law envelope, with its own calibrated exponent.
+    FrozenOnsetPowerLaw,
+}
+impl CohesiveEnvelope {
+    pub(super) fn for_law(law: &BilinearCohesive) -> Self {
+        use crate::cohesive::mixed_mode::MixedModeFractureCriterion;
+        match law.mixed_mode_criterion() {
+            None => Self::CommonMode,
+            Some(MixedModeFractureCriterion::BenzeggaghKenane { .. }) => Self::FrozenOnsetMixedMode,
+            Some(MixedModeFractureCriterion::PowerLaw { .. }) => Self::FrozenOnsetPowerLaw,
+        }
+    }
 }
 impl ResolvedBilinearCohesive {
     /// Retain all original receipts and the ordered interface. Eta is fixed at
@@ -59,6 +72,9 @@ impl ResolvedBilinearCohesive {
             CohesiveEnvelope::FrozenOnsetMixedMode => {
                 Self::try_from_mixed_mode_resolved(card, resolved, maximum_separation_m)
             }
+            CohesiveEnvelope::FrozenOnsetPowerLaw => {
+                Self::try_from_power_law_mixed_mode_resolved(card, resolved, maximum_separation_m)
+            }
         }?;
         bound.law = bound.law.with_viscosity(viscosity);
         Ok(bound)
@@ -79,6 +95,7 @@ pub fn resolve_viscous_bilinear_cohesive(
     let mut names = match envelope {
         CohesiveEnvelope::CommonMode => properties().to_vec(),
         CohesiveEnvelope::FrozenOnsetMixedMode => mixed_mode::mixed_properties().to_vec(),
+        CohesiveEnvelope::FrozenOnsetPowerLaw => mixed_mode::power_law_properties().to_vec(),
     };
     names.extend([
         (COHESIVE_NORMAL_VISCOSITY_PROPERTY, COHESIVE_VISCOSITY_DIMS),

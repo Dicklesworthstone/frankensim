@@ -5,7 +5,7 @@
 //! `at_temperature` path retains the same envelope and claims; its successor can
 //! be consumed only with the point owner's temperature-history transfer.
 
-/// Explicit normal/shear source data for the frozen-onset BK extension.
+/// Explicit normal/shear source data for frozen-onset BK and power-law envelopes.
 pub mod mixed_mode;
 pub use mixed_mode::*;
 
@@ -40,7 +40,7 @@ pub const FRACTURE_ENERGY_PER_AREA_DIMS: Dims = Dims([0, 1, -2, 0, 0, 0]);
 /// A bilinear cohesive law tied to the complete original ordered interface.
 ///
 /// The standard constructor selects common-mode data; the explicitly named
-/// mixed-mode constructor selects independent normal/shear data and BK exponent.
+/// mixed-mode constructors select independent normal/shear data and an explicit envelope.
 /// This does not infer mixed-mode calibration, adhesion from bulk chemistry,
 /// physical bonding from geometric contact, or fracture heat partition.
 #[derive(Debug, Clone, PartialEq)]
@@ -168,11 +168,7 @@ impl ResolvedBilinearCohesive {
                 source,
             })?;
         let resolved = self.resolved.at_query_point(card, &point)?;
-        let envelope = if self.law.mixed_mode_parameters().is_some() {
-            CohesiveEnvelope::FrozenOnsetMixedMode
-        } else {
-            CohesiveEnvelope::CommonMode
-        };
+        let envelope = CohesiveEnvelope::for_law(&self.law);
         match self.law.viscosity() {
             Some(viscosity) => Self::try_from_viscous_resolved(
                 card,
@@ -186,6 +182,11 @@ impl ResolvedBilinearCohesive {
                     Self::try_from_resolved(card, resolved, self.law.maximum_separation_m())
                 }
                 CohesiveEnvelope::FrozenOnsetMixedMode => Self::try_from_mixed_mode_resolved(
+                    card,
+                    resolved,
+                    self.law.maximum_separation_m(),
+                ),
+                CohesiveEnvelope::FrozenOnsetPowerLaw => Self::try_from_power_law_mixed_mode_resolved(
                     card,
                     resolved,
                     self.law.maximum_separation_m(),
@@ -210,8 +211,7 @@ impl ResolvedBilinearCohesive {
             || self.surfaces != next.surfaces
             || self.resolved.axis_quantities() != next.resolved.axis_quantities()
             || self.law.maximum_separation_m() != next.law.maximum_separation_m()
-            || self.law.mixed_mode_parameters().is_some()
-                != next.law.mixed_mode_parameters().is_some()
+            || CohesiveEnvelope::for_law(&self.law) != CohesiveEnvelope::for_law(&next.law)
             || self.law.viscosity().map(|v| v.maximum_rate_m_s())
                 != next.law.viscosity().map(|v| v.maximum_rate_m_s())
         {

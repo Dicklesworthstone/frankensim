@@ -464,7 +464,7 @@ fn first_mixed_mode_selection_can_precede_outward_energy_radius_growth() {
     let start = [1.6e-4, 3.85e-4, 0.0];
     let end = [4.4e-4, -7e-4, 0.0];
     let (history, initiation) =
-        super::super::mixed_mode::initiate(parameters, start, end).unwrap();
+        super::super::mixed_mode::initiate(parameters.into(), start, end).unwrap();
     let stiffness = [
         parameters.normal_stiffness_pa_m,
         parameters.tangential_stiffness_pa_m,

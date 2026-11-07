@@ -635,3 +635,65 @@ fn strongly_anisotropic_source_reaches_original_adhesive_failure_path() {
         assert!((actual_work - expected_work).abs() < 1e-9);
     }
 }
+
+#[test]
+fn power_law_source_selection_survives_thermal_and_viscous_binding_without_bk_aliasing() {
+    use fs_material::cohesive::mixed_mode::MixedModeFractureCriterion;
+    for viscous in [false, true] {
+        let mut inputs=mixed_mode_claims();
+        inputs[6]=claim(COHESIVE_POWER_LAW_EXPONENT_PROPERTY,Dims::NONE,0.5);
+        inputs[6].value=PropertyValue::Curve {
+            abscissa:"T".into(), abscissa_dims:Temperature::DIMS,
+            knots:vec![(280.0,0.5),(340.0,0.75)], dims:Dims::NONE,
+        };
+        inputs[6].interpolation=InterpolationPolicy::LinearInside;
+        if viscous {
+            inputs.push(claim(COHESIVE_NORMAL_VISCOSITY_PROPERTY,COHESIVE_VISCOSITY_DIMS,2e7));
+            inputs.push(claim(COHESIVE_TANGENTIAL_VISCOSITY_PROPERTY,COHESIVE_VISCOSITY_DIMS,3e7));
+        }
+        let interface=card(inputs,"manufactured power-law source; not measured adhesive data");
+        let query=QueryPoint::new().with("T",280.0).unwrap();
+        let cold=if viscous {
+            resolve_viscous_bilinear_cohesive(&interface,&query,
+                MaterialPropertySelection::SingleClaimOnly,CohesiveEnvelope::FrozenOnsetPowerLaw,
+                0.02,0.2).unwrap()
+        } else {
+            resolve_power_law_mixed_mode_bilinear_cohesive(&interface,&query,
+                MaterialPropertySelection::SingleClaimOnly,0.02).unwrap()
+        };
+        assert!(cold.law().mixed_mode_parameters().is_none());
+        assert_eq!(cold.law().mixed_mode_criterion(),
+            Some(MixedModeFractureCriterion::PowerLaw{exponent:0.5}));
+        assert!(resolve_mixed_mode_bilinear_cohesive(&interface,&query,
+            MaterialPropertySelection::SingleClaimOnly,0.02).is_err());
+        let hot=cold.at_temperature(&interface,"T",340.0).unwrap();
+        cold.require_temperature_successor(&hot,"T").unwrap();
+        assert_eq!(hot.law().mixed_mode_criterion(),
+            Some(MixedModeFractureCriterion::PowerLaw{exponent:0.75}));
+        assert_eq!(hot.law().viscosity().map(|v|v.maximum_rate_m_s()),viscous.then_some(0.2));
+        for (a,b) in cold.resolved().properties().iter().zip(hot.resolved().properties()) {
+            assert_eq!(a.answer().receipt.selected,b.answer().receipt.selected);
+        }
+        let first=cold.law().bonded_point()
+            .trial_over_time([0.0004,0.0005,-0.0002],0.5,1e-8).unwrap().equilibrium.point;
+        let transferred=first.transfer_temperature(hot.law(),1e-8).unwrap();
+        assert_eq!(transferred.point.mixed_mode_history().unwrap().onset_direction,
+            first.mixed_mode_history().unwrap().onset_direction);
+        assert!(transferred.point.damage()>=first.damage());
+    }
+    let bk_only=card(mixed_mode_claims(),"BK source has no power-law calibration");
+    assert!(resolve_power_law_mixed_mode_bilinear_cohesive(&bk_only,
+        &QueryPoint::new().with("T",300.0).unwrap(),
+        MaterialPropertySelection::SingleClaimOnly,0.02).is_err());
+    let mut inputs=mixed_mode_claims();
+    inputs.push(claim(COHESIVE_POWER_LAW_EXPONENT_PROPERTY,Dims::NONE,0.5));
+    let interface=card(inputs.clone(),"both envelopes explicitly supplied");
+    let resolved=bundle(&interface,&inputs);
+    let power=ResolvedBilinearCohesive::try_from_power_law_mixed_mode_resolved(
+        &interface,resolved.clone(),0.02).unwrap();
+    let bk=ResolvedBilinearCohesive::try_from_mixed_mode_resolved(
+        &interface,resolved,0.02).unwrap();
+    assert_eq!(power.resolved(),bk.resolved());
+    assert!(power.require_temperature_successor(&bk,"T").is_err());
+    assert!(bk.require_temperature_successor(&power,"T").is_err());
+}
