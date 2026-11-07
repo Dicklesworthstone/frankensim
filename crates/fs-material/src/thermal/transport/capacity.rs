@@ -888,6 +888,62 @@ mod tests {
     }
 
     #[test]
+    fn g1_inlet_gain_matches_constant_cp_and_equilibrium() {
+        let knots = [[200.0, 1000.0], [400.0, 1000.0], [1000.0, 1000.0]];
+        let curve = CapacityCurve::new(&knots);
+        for (initial, wall) in [(300.0, 800.0), (800.0, 300.0), (350.0, 350.0)] {
+            for exposure in [0.0_f64, 1e-6, 500.0, 50_000.0, 1e6] {
+                let answer = curve.linear_heat_exchange(initial, wall, exposure).unwrap();
+                let expected = (-exposure / 1000.0).exp();
+                // Exp roundoff scales with exposure/Cp.
+                let bound = 8.0 * f64::EPSILON * (1.0 + exposure / 1000.0) * expected;
+                assert!((answer.inlet_energy_gain - expected).abs() <= bound);
+            }
+        }
+    }
+
+    #[test]
+    fn g1_inlet_gain_crosses_knots_and_matches_independent_energy_perturbations() {
+        let knots = [[200.0, 1200.0], [300.0, 1400.0], [400.0, 1800.0], [600.0, 1000.0]];
+        let curve = CapacityCurve::new(&knots);
+        for (initial, wall) in [(250.0, 550.0), (550.0, 250.0)] {
+            let answer = curve.linear_heat_exchange(initial, wall, 4000.0).unwrap();
+            let expected = (wall - answer.temperature) / (wall - initial);
+            assert!((answer.inlet_energy_gain - expected).abs() < 2e-14);
+            let inputs = [initial - 1e-3, initial + 1e-3];
+            let outputs = inputs.map(|t| curve.linear_heat_exchange(t, wall, 4000.0).unwrap().temperature);
+            let measured = curve.energy_change(outputs[0], outputs[1]).unwrap()
+                / curve.energy_change(inputs[0], inputs[1]).unwrap();
+            assert!((answer.inlet_energy_gain - measured).abs() < 2e-8);
+        }
+    }
+
+    #[test]
+    fn g1_affine_inlet_gain_retains_weak_and_saturated_response() {
+        for (intercept, slope) in [(800.0, 2.0), (3000.0, -2.0)] {
+            let knots = [200.0, 400.0, 800.0].map(|t| [t, intercept + slope * t]);
+            let curve = CapacityCurve::new(&knots);
+            for (initial, wall) in [(300.0, 600.0), (600.0, 300.0)] {
+                for attenuation in [1e-12_f64, 50.0, 800.0] {
+                    // Independent affine primitive at a prescribed relative gap.
+                    let travel = (wall - initial) * -(-attenuation).exp_m1();
+                    let exposure = (intercept + slope * wall) * attenuation - slope * travel;
+                    let answer = curve.linear_heat_exchange(initial, wall, exposure).unwrap();
+                    let expected = (-attenuation).exp();
+                    assert!((answer.inlet_energy_gain - expected).abs() <=
+                        if attenuation < 1.0 { 32.0 * f64::EPSILON } else { 2e-12 * expected });
+                    if attenuation >= 50.0 {
+                        assert_eq!(answer.temperature, wall);
+                    }
+                    if attenuation == 50.0 {
+                        assert!(answer.inlet_energy_gain > 0.0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn g1_constant_capacity_exchange_matches_newton_cooling_and_keeps_small_steps() {
         let knots = [[200.0, 1000.0], [1000.0, 1000.0]];
         let curve = CapacityCurve::new(&knots);

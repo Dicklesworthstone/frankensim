@@ -482,7 +482,7 @@ impl<'a> TransportNetwork<'a> {
     fn march_once_with_source(&self, cx: &Cx<'_>, walls: Option<&[f64]>,
         inlets: &[Option<f64>], solved_nodes: Option<&[f64]>,
         source: Option<caloric::CaloricContext<'_>>,
-        mut retained_enthalpies: Option<&mut [Option<f64>]>)
+        mut caloric_capture: Option<caloric::CaloricCapture<'_>>)
         -> Result<TransportMarch, TransportError> {
         poll(cx)?;
         if source.is_some() && (solved_nodes.is_some() || self.feedback.is_some() || self.circulation.is_some()) {
@@ -491,7 +491,8 @@ impl<'a> TransportNetwork<'a> {
         let reference_k = source.and_then(|source| source.reference_k).unwrap_or_else(||
             inlets.iter().flatten().next().copied().unwrap_or(self.reference_k));
         let n = self.order.len();
-        if retained_enthalpies.as_ref().is_some_and(|values| values.len() != n)
+        if caloric_capture.as_ref().is_some_and(|capture|
+            capture.node_enthalpies.len() != n || capture.branch_enthalpy_gains.len() != self.models.len())
             || source.and_then(|source| source.inlet_enthalpies).is_some_and(|values| values.len() != n) {
             return Err(TransportError::InvalidInput("source enthalpy coordinate shape"));
         }
@@ -532,8 +533,8 @@ impl<'a> TransportNetwork<'a> {
                 Some(source) => source.temperature(reference_k, coordinate)?,
                 None => coordinate,
             };
-            if let Some(values) = &mut retained_enthalpies {
-                values[node] = Some(coordinate);
+            if let Some(capture) = &mut caloric_capture {
+                capture.node_enthalpies[node] = Some(coordinate);
             }
             result.node_temperatures_k[node] = Some(temperature);
             let entering_temperature = inlets[node].unwrap_or(temperature);
@@ -562,7 +563,16 @@ impl<'a> TransportNetwork<'a> {
                     let range = self.row_range(branch);
                     if let Some(walls) = walls {
                         let marched = match source {
-                            Some(source) => source.path(self, branch, temperature)?.march(&walls[range.clone()])?,
+                            Some(source) => {
+                                let path = source.path(self, branch, temperature)?;
+                                if let Some(capture) = &mut caloric_capture {
+                                    let (marched, gain) = path.march_with_enthalpy_gain(&walls[range.clone()])?;
+                                    capture.branch_enthalpy_gains[branch] = gain;
+                                    marched
+                                } else {
+                                    path.march(&walls[range.clone()])?
+                                }
+                            },
                             None => self.path(branch, temperature)?.march(&walls[range.clone()])?,
                         };
                         result.reference_temperatures_k[range].copy_from_slice(&marched.reference_temperatures_k());

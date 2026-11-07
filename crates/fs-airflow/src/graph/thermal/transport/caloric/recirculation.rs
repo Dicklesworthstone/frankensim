@@ -37,6 +37,7 @@ struct Trial {
     inlets: Vec<Option<f64>>,
     inlet_enthalpies: Vec<Option<f64>>,
     node_enthalpies: Vec<Option<f64>>,
+    branch_enthalpy_gains: Vec<f64>,
     march: TransportMarch,
     mismatch: Vec<f64>,
     temperature_residual: f64,
@@ -157,7 +158,7 @@ impl CaloricFeedback {
             if iteration + 1 == self.config.max_iterations {
                 return Err(self.no_convergence(iteration + 1, &current));
             }
-            let matrix = self.jacobian(network, cx, walls, &current.march)?;
+            let matrix = self.jacobian(network, cx, &current.branch_enthalpy_gains)?;
             let correction = solve_feedback(cx, &matrix, &current.mismatch, false)?;
             let mut scale = 1.0;
             let mut accepted = None;
@@ -238,13 +239,17 @@ impl CaloricFeedback {
         source.reference_k = Some(reference);
         source.inlet_enthalpies = Some(&inlet_enthalpies);
         let mut node_enthalpies = vec![None; inlet_enthalpies.len()];
+        let mut branch_enthalpy_gains = vec![1.0; network.topology.models.len()];
         let march = network.topology.march_once_with_source(
             cx,
             walls,
             &inlets,
             None,
             Some(source),
-            Some(&mut node_enthalpies),
+            Some(CaloricCapture {
+                node_enthalpies: &mut node_enthalpies,
+                branch_enthalpy_gains: &mut branch_enthalpy_gains,
+            }),
         )?;
         let mut mismatch = vec![0.0; self.sources.len()];
         let mut corrections = vec![0.0; self.sources.len()];
@@ -291,6 +296,7 @@ impl CaloricFeedback {
             inlets,
             inlet_enthalpies,
             node_enthalpies,
+            branch_enthalpy_gains,
             march,
             mismatch,
             temperature_residual,
@@ -298,33 +304,16 @@ impl CaloricFeedback {
         })
     }
 
-    /// Eliminate the native DAG in enthalpy coordinates. Channel response is
-    /// evaluated once per branch, then shared by all supply columns. There is
-    /// no finite-difference source probing or whole-network perturbation solve.
+    /// Eliminate the native DAG using the gains retained by the accepted
+    /// primal channel pass, then share them across all supply columns. No
+    /// duplicate channel march or finite-difference network probe is needed.
     fn jacobian(
         &self,
         network: &CaloricTransportNetwork<'_>,
         cx: &Cx<'_>,
-        walls: Option<&[f64]>,
-        march: &TransportMarch,
+        gains: &[f64],
     ) -> Result<Vec<Vec<f64>>, TransportError> {
         let topology = &network.topology;
-        let mut gains = vec![1.0; topology.models.len()];
-        if let Some(walls) = walls {
-            for (branch, gain) in gains.iter_mut().enumerate() {
-                poll(cx)?;
-                if let BranchThermalModel::Exchange(_) = &topology.models[branch] {
-                    let inlet = march.branches[branch]
-                        .inlet_temperature_k
-                        .ok_or(TransportError::InvalidInput("heated branch has no inlet"))?;
-                    *gain = network
-                        .path(branch, inlet)?
-                        .march_with_inlet_response(&walls[topology.row_range(branch)])?
-                        .1
-                        .enthalpy_gain;
-                }
-            }
-        }
         let n = self.sources.len();
         let mut matrix = vec![vec![0.0; n]; n];
         for (i, row) in matrix.iter_mut().enumerate() {

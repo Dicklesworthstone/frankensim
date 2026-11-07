@@ -126,7 +126,7 @@ impl CaloricAirPath {
         ))
     }
 
-    fn march_with_enthalpy_gain(
+    pub(crate) fn march_with_enthalpy_gain(
         &self,
         wall_temperatures_k: &[f64],
     ) -> Result<(AirMarch, f64), AirflowError> {

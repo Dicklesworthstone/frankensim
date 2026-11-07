@@ -286,6 +286,13 @@ fn source_error(error: ThermalTransportError) -> TransportError {
     AirflowError::CaloricSource(error).into()
 }
 
+/// Optional primal output retained by the nonlinear return owner. Branch gains
+/// come from the same original channel pass as its heat and node enthalpies.
+pub(super) struct CaloricCapture<'a> {
+    pub(super) node_enthalpies: &'a mut [Option<f64>],
+    pub(super) branch_enthalpy_gains: &'a mut [f64],
+}
+
 /// Borrowed constitutive data for the native graph walk; topology stays native.
 #[derive(Clone, Copy)]
 pub(super) struct CaloricContext<'a> {
