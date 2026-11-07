@@ -1,6 +1,9 @@
 //! Same-card original thermal hardening observations on the reciprocal caloric owner.
 //! The independent coaxial oracle includes the table's exact storage and entropy.
 
+#[path = "tabulated/pressure.rs"]
+mod pressure;
+
 use super::*;
 use fs_matdb::ClaimSelection;
 use fs_material::plastic::finite::thermal::source::tabulated::THERMAL_FINITE_J2_TABULATED_LAW_ID;

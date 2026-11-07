@@ -4481,3 +4481,36 @@ is explicitly refused by this pure-Maxwell image; temperature is frozen and
 no live thermal work, measured damping authority or nonlinear failure law is
 inferred. Independent full-tensor complex constitutive contraction and the
 existing exact pHS/RK4 heat comparison are the focused numerical test seams.
+
+## Pressure-driven finite plasticity through original caloric transport
+
+`solid_enthalpy::finite_plastic::FiniteThermoplasticSolid::advance_with_pressure`
+and `advance_with_pressure_and_coupling` retain the original held pressure field
+through every native thermal proposal. The existing finite material source,
+complete plastic/creep metric and accumulated history, physical interval,
+caloric binding and reference inertia remain authoritative. Both relaxed Picard
+and IQN-ILS use the shared enthalpy feedback owner; its actual-transport-
+temperature re-evaluation and per-cell heat/combined-energy gates decide
+acceptance.
+
+The pressure-aware candidate retains native material energy and the original
+pressure path work, endpoint work and geometric correction. The complete
+external-work defect includes the material and pressure terms once. Physical
+yield/viscous/creep heat and signed reciprocal exchange enter the original
+caloric transport exactly once. Pressure quadrature correction and numerical
+kinetic loss never become heat. The native absolute-sum work budget prevents
+opposing integration errors from hiding behind a small signed total. Existing
+unpressured result types retain their default energy account and arithmetic.
+
+Two focused regression definitions use the original sourced thermal hardening
+surface with explicit Arrhenius Perzyna kinetics. Independent finite coaxial,
+pressure-volume, caloric and consistent-mass equations cover loading, heating
+under held pressure, release and successive dynamic intervals; both feedback
+methods, exact accepted temperatures, original source retention, late refusal
+and successful retry are exercised. Independent fixture arithmetic was checked.
+No Rust formatting, compilation or native tests ran after execution-host loss.
+
+This retains the fully solid, compressible P1 finite-strain and first-order
+time domains, original reference mass and reference transport coefficients.
+Deformed thermal conductances, contact tooling, exterior-fluid evolution and
+experimental forming calibration are not inferred.

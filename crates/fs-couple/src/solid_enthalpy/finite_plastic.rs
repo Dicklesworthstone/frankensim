@@ -28,6 +28,8 @@
 pub(super) mod feedback;
 pub mod impact;
 pub mod material;
+/// Held current-area pressure through the same native thermal feedback.
+pub mod pressure;
 /// Retained thermal porous compaction on the same conservative heat timeline.
 pub mod porous;
 /// Reciprocal finite sheet forming and native caloric transport.
@@ -40,6 +42,7 @@ pub use material::{
     CaloricReference, FiniteThermoplasticMaterial, FiniteThermoplasticQuery,
     ReferenceCaloricMaterial, ReferenceCaloricQuery,
 };
+pub use pressure::{FiniteThermoplasticPressureCandidate, FiniteThermoplasticPressureEnergy};
 
 use std::collections::BTreeSet;
 use std::convert::Infallible;
@@ -433,13 +436,13 @@ pub struct FiniteThermoplasticReport<E = HyperTetSolution, A = FiniteThermoplast
 }
 
 /// Commit the complete triple together; borrowing it cannot mutate accepted owners.
-pub struct FiniteThermoplasticCandidate<'m, 't, O> {
+pub struct FiniteThermoplasticCandidate<'m, 't, O, A = FiniteThermoplasticTetEnergy> {
     thermal: DepositionSimulation<'t>,
     solid: FiniteThermoplasticSolid<'m>,
     observer: O,
-    report: FiniteThermoplasticReport,
+    report: FiniteThermoplasticReport<HyperTetSolution, A>,
 }
-impl<'m, 't, O> FiniteThermoplasticCandidate<'m, 't, O> {
+impl<'m, 't, O, A> FiniteThermoplasticCandidate<'m, 't, O, A> {
     pub const fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
@@ -449,7 +452,7 @@ impl<'m, 't, O> FiniteThermoplasticCandidate<'m, 't, O> {
     pub const fn observer(&self) -> &O {
         &self.observer
     }
-    pub const fn report(&self) -> &FiniteThermoplasticReport {
+    pub const fn report(&self) -> &FiniteThermoplasticReport<HyperTetSolution, A> {
         &self.report
     }
     pub fn into_parts(
@@ -458,7 +461,7 @@ impl<'m, 't, O> FiniteThermoplasticCandidate<'m, 't, O> {
         DepositionSimulation<'t>,
         FiniteThermoplasticSolid<'m>,
         O,
-        FiniteThermoplasticReport,
+        FiniteThermoplasticReport<HyperTetSolution, A>,
     ) {
         (self.thermal, self.solid, self.observer, self.report)
     }
