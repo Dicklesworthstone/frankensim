@@ -1,4 +1,9 @@
 //! Original JKR/Maugis pressure on actual exterior P1 tetrahedral faces.
+//! Mixed-mode JKR profiles retain their actual shear-reduced footprint and
+//! normal opening. Their normal pressure follows this same projection path;
+//! the original mixed-mode owner separately retains tangential efforts and
+//! storage. Prescribing that field is not a self-consistent finite-body
+//! normal/shear contact solve.
 //!
 //! Each polar cell belongs wholly to one coplanar exterior face. Its three
 //! barycentric functions come from the ORIGINAL mesh, not caller-authored

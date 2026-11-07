@@ -7,6 +7,7 @@ mod support;
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
 use fs_blake3::ContentHash;
 use fs_contact::normal_patch::{
+    adhesive::mixed_mode::{JkrMixedModeEnvelope, SourceJkrMixedMode},
     maugis::{MaugisEnvelope, SourceMaugisSphereContact},
     traction::{
         AdhesiveTractionProfile,
@@ -236,6 +237,170 @@ fn zero_resultant_patch_keeps_its_p1_load_pattern_and_drives_actual_native_defor
         }
         assert!(native.native().nodal_motion(cx).unwrap()[0][0][2] < 0.0);
         assert!(native.native().state().strain_energy_j > 0.0);
+    });
+}
+
+#[test]
+fn mixed_mode_peeling_changes_actual_p1_deformation_at_unchanged_zero_normal_load() {
+    let source = SourceJkrMixedMode::new(
+        sources::jkr(),
+        JkrMixedModeEnvelope {
+            maximum_tangential_displacement_to_radius: 0.1,
+            maximum_mean_shear_stress_to_yield: 0.1,
+        },
+    )
+    .unwrap();
+    let normal = source.normal_source();
+    let e = normal.normal_state().elastic().reduced_modulus_pa();
+    let w = normal.normal_state().adhesion_energy_j_per_m2();
+    let r = normal.effective_radius_m();
+    let g_star = source.reduced_shear_modulus_pa();
+    let critical = source.critical_tangential_force_n(0.0).unwrap();
+    let shear = [0.0, 0.8 * critical, 0.3 * critical];
+    let profiles = shear
+        .map(|t| AdhesiveTractionProfile::jkr_mixed_mode_force(&source, 0.0, [t, 0.0]).unwrap());
+    let a0 = profiles[0].contact_radius_m();
+    let l = 4.0 * a0;
+    let nodes = nodes(l);
+    let material = material();
+    let problem = TetLinearElasticProblem {
+        nodes_m: &nodes,
+        tetrahedra: &TETS,
+        materials: TetMaterialField::Uniform(&material),
+        fixed_dofs: &[],
+        budget: Default::default(),
+    };
+    // Independently solve the dimensional force-controlled Griffith equation
+    // at N=0. H=B+sqrt(B²-alpha*T²), a³=3RH/(4E*). The normal force is zero,
+    // but each quadrant's first moment bends its actual P1 face:
+    // edge force = aH/(16L), centre force = -4*edge, in world z.
+    let reference_forces = |t: f64| {
+        let b = 3.0 * PI * w * r;
+        let hertz = b + (b * b - e * t * t / (4.0 * g_star)).sqrt();
+        let a = (3.0 * r * hertz / (4.0 * e)).cbrt();
+        let edge = a * hertz / (16.0 * l);
+        vec![
+            (2, -4.0 * edge),
+            (5, edge),
+            (8, edge),
+            (11, edge),
+            (14, edge),
+        ]
+    };
+    let initial_forces = reference_forces(shear[0]);
+    let peeled_forces = reference_forces(shear[1]);
+    assert!(peeled_forces[1].1 < 0.85 * initial_forces[1].1);
+    assert!(profiles[1].contact_radius_m() < profiles[0].contact_radius_m());
+    support::with_cx(|cx| {
+        let geometry = TetLoadGeometry3::new(&nodes, &TETS, problem.budget, 16, cx).unwrap();
+        let other = geometry.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        let reference_load = |t| {
+            geometry
+                .assemble(&[], VolumeLoad3::None, &reference_forces(t), cx)
+                .unwrap()
+        };
+        let mut patch = AdhesiveP1Patch3::new(
+            &geometry,
+            frame(),
+            grid(&geometry, vec![0.0, 0.4 * a0, a0]),
+            controls(&profiles[0]),
+            &gate(),
+            cx,
+        )
+        .unwrap();
+        for (profile, &t) in profiles.iter().zip(&shear) {
+            let (load, transfer) = patch.assemble(profile, &other, &gate(), cx).unwrap();
+            let expected = reference_forces(t);
+            assert_eq!(load.nodal_forces_n().len(), expected.len());
+            for (&(actual_dof, actual), &(expected_dof, expected)) in
+                load.nodal_forces_n().iter().zip(&expected)
+            {
+                assert_eq!(actual_dof, expected_dof);
+                close(actual, expected, 1e-17);
+            }
+            assert_eq!(transfer.source.model_identity, source.identity());
+            assert_eq!(
+                transfer.source.normal_state_identity,
+                normal.normal_state().identity()
+            );
+            assert_eq!(transfer.source.authority, profile.authority());
+            assert_eq!(transfer.source.radial_evaluations, 0);
+            assert!(transfer.force_world_n.into_iter().all(|f| f.abs() < 1e-14));
+            assert!(
+                transfer
+                    .moment_about_centre_n_m
+                    .into_iter()
+                    .all(|m| m.abs() < 1e-18)
+            );
+        }
+
+        let mut reference = reference_load(shear[0])
+            .begin_transient(
+                &problem,
+                None,
+                0.0,
+                &[[0.0; 3]; 6],
+                &[[0.0; 3]; 6],
+                native_config(),
+                cx,
+            )
+            .unwrap();
+        let mut actual = patch
+            .begin_transient(
+                &profiles[0],
+                &other,
+                &problem,
+                None,
+                0.0,
+                &[[0.0; 3]; 6],
+                &[[0.0; 3]; 6],
+                native_config(),
+                &gate(),
+                cx,
+            )
+            .unwrap();
+        for index in [1, 2, 1] {
+            let step = actual
+                .advance(&profiles[index], &other, 2e-7, &gate(), cx)
+                .unwrap()
+                .clone();
+            let expected = reference
+                .advance(&reference_load(shear[index]), 2e-7, cx)
+                .unwrap();
+            for (&a, &b) in actual
+                .native()
+                .state()
+                .displacement
+                .iter()
+                .zip(&reference.state().displacement)
+            {
+                close(a, b, 1e-20);
+            }
+            for (&a, &b) in actual
+                .native()
+                .state()
+                .velocity
+                .iter()
+                .zip(&reference.state().velocity)
+            {
+                close(a, b, 1e-14);
+            }
+            close(
+                step.traction_work_on_solid_j,
+                expected.mechanical_work_j,
+                1e-24,
+            );
+            close(
+                step.spatial_traction_work_j,
+                expected.mechanical_work_j,
+                1e-24,
+            );
+            assert!(step.work_residual_j.abs() <= step.work_tolerance_j);
+            assert_eq!(step.quadrature_work_estimate_j, 0.0);
+            assert_eq!(step.transfer.source.model_identity, source.identity());
+        }
+        assert!(actual.native().state().strain_energy_j > 0.0);
+        assert!(actual.native().nodal_motion(cx).unwrap()[0][0][2] < 0.0);
     });
 }
 

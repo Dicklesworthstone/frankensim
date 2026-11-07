@@ -16,7 +16,10 @@ pub mod sectors;
 
 use super::{
     NormalLawSource,
-    adhesive::{JkrError, SourceJkrSphereContact},
+    adhesive::{
+        JkrError, SourceJkrSphereContact,
+        mixed_mode::{JkrMixedModeError, JkrMixedModeResponse, SourceJkrMixedMode},
+    },
     maugis::{
         SourceMaugisSphereContact,
         continuation::{MaugisContinuationError, MaugisEquilibrium},
@@ -35,6 +38,8 @@ pub const MAX_ANNULAR_TRACTION_RINGS: usize = 4096;
 pub enum AdhesiveTractionError {
     /// The original JKR source rejected the requested attached state.
     Jkr(JkrError),
+    /// The original full-stick mixed-mode source rejected the selected state.
+    MixedMode(JkrMixedModeError),
     /// The original finite-zone source rejected the requested branch or state.
     Maugis(MaugisContinuationError),
     /// An equilibrium belongs to another original material/geometry owner.
@@ -127,6 +132,77 @@ impl NormalLawSource {
 }
 
 impl AdhesiveTractionProfile {
+    /// Normal pressure on the actual shear-reduced, full-stick JKR disk at
+    /// prescribed normal approach and vector tangential displacement.
+    ///
+    /// The original conservative mixed-mode source equilibrates the radius;
+    /// only its normal elastic opening supplies the tensile flat-punch term.
+    /// Using the pure-normal sqrt(2 E* W / (pi a)) coefficient here would spend
+    /// the shear energy release a second time and give the wrong normal load.
+    /// The profile retains the complete mixed-mode identity and can use the
+    /// existing annular/polar transfers without resampling the singular rim.
+    /// It carries normal traction only: tangential load and elastic storage
+    /// remain with that same original mixed-mode owner.
+    pub fn jkr_mixed_mode_displacement(
+        source: &SourceJkrMixedMode,
+        indentation_m: f64,
+        tangential_displacement_m: [f64; 2],
+    ) -> Result<Self, AdhesiveTractionError> {
+        let response = source
+            .evaluate_displacement_controlled(indentation_m, tangential_displacement_m)
+            .map_err(AdhesiveTractionError::MixedMode)?;
+        Self::mixed_mode_response(source, response)
+    }
+
+    /// Normal pressure from the original simultaneous normal/shear force
+    /// equilibrium, including its marginal peeling point. Force and
+    /// displacement control keep their distinct branch admission.
+    pub fn jkr_mixed_mode_force(
+        source: &SourceJkrMixedMode,
+        normal_force_n: f64,
+        tangential_force_n: [f64; 2],
+    ) -> Result<Self, AdhesiveTractionError> {
+        let response = source
+            .evaluate_force_controlled(normal_force_n, tangential_force_n)
+            .map_err(AdhesiveTractionError::MixedMode)?;
+        Self::mixed_mode_response(source, response)
+    }
+
+    // Only canonical responses produced immediately above enter this helper:
+    // a caller cannot replace the radius, force or source through public fields.
+    fn mixed_mode_response(
+        source: &SourceJkrMixedMode,
+        response: JkrMixedModeResponse,
+    ) -> Result<Self, AdhesiveTractionError> {
+        let normal = source.normal_source();
+        let a = response.contact_radius_m;
+        let e = normal.normal_state().elastic().reduced_modulus_pa();
+        let hertz_depth = a * (a / normal.effective_radius_m());
+        // Axisymmetric elastic half-space solution at prescribed a and delta:
+        // p = 2 E*a/(pi R) sqrt(1-r²/a²)
+        //   - E*(a²/R-delta)/(pi a sqrt(1-r²/a²)).
+        // Its integral is 2 E*a (delta-a²/(3R)), the original normal effort.
+        let hertz_peak_pa = finite((2.0 / PI) * e * (a / normal.effective_radius_m()))?;
+        let tensile_pa = finite((e / PI) * ((hertz_depth - response.indentation_m) / a))?;
+        if tensile_pa < 0.0 {
+            return Err(AdhesiveTractionError::Invalid(
+                "mixed-mode branch has no tensile edge opening",
+            ));
+        }
+        Ok(Self {
+            model_identity: source.identity(),
+            normal_state_identity: normal.normal_state().identity(),
+            authority: response.authority,
+            contact_radius_m: a,
+            interaction_radius_m: a,
+            normal_force_n: response.normal_force_n,
+            distribution: Distribution::Jkr {
+                hertz_peak_pa,
+                tensile_pa,
+            },
+        })
+    }
+
     /// Explicitly select the original attached JKR branch, including tensile
     /// net load and its displacement fold. No branch history is advanced.
     pub fn jkr_attached(

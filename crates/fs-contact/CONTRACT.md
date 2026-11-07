@@ -3539,6 +3539,29 @@ constant-profile equivalence in Dense/MatrixFree/FFT lanes and exact no-op
 histories. G0/G4 checks cover original claim/test ownership, interior support
 holes, negative hardness, actual body-depth limits and late refusal atomicity.
 
+## Mixed-mode JKR normal traction on structural faces
+
+`AdhesiveTractionProfile::{jkr_mixed_mode_displacement,jkr_mixed_mode_force}`
+evaluates the original `SourceJkrMixedMode` under its corresponding control and
+retains the full mixed-mode identity, ordered normal-source identity and source
+authority. Its normal field uses the actual peeled contact radius `a` and the
+normal elastic opening: the tensile flat-punch coefficient is
+`E*(a*a/R - delta)/(pi*a)`, rather than the pure-normal coefficient derived from
+total adhesion energy. Shear energy release is therefore not counted again as
+normal attraction. Original source, shear and branch limits still apply,
+including the distinct force- and displacement-controlled peeling folds.
+
+The same opaque profile feeds the existing exact annular and polar transfers
+and `fs-solid::loads3::adhesive` P1 face projection, retaining signed normal
+force, first moments and work on the actual prescribed structural motion.
+Tangential traction, coupled elastic storage and subsequent slip/peel evolution
+remain with the original mixed-mode owner; this normal-pressure export does not
+introduce a self-consistent finite-body contact solve or a new material law.
+Focused regressions specify dimensional pressure/load and normal energy release,
+source retention, fold admission, thin-ring and affine-work transfer, and native
+P1 deformation under shear-dependent pressure at fixed zero normal resultant.
+These are numerical-model regression specifications, not experimental validation.
+
 `advance_wear_integrated`, `advance_wear_integrated_at_load` and
 `advance_wear_integrated_with_drive` instead solve each original profile's
 `integral H(z) dz = k_i * p_begin * abs(ds)` across the exposed affine segments.
