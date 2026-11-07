@@ -1,9 +1,9 @@
 use super::*;
 use crate::render::schedule::force::coupled::{CoupledModalSystem, ModalCouplingConfig};
 use fs_math::c64::C64;
+use fs_modal::ModePair;
 use fs_modal::time::{
     ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel,
-    ModePair,
 };
 use fs_plate::PlateSection;
 use fs_plate::shell::{CstDktMass, ShellSupport, assemble_shell_sections_with_mass};
