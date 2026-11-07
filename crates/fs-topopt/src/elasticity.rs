@@ -12,8 +12,10 @@ use fs_rep_mesh::TetComplex;
 use fs_solver::LinearOp;
 
 /// Shared source-bound elastic material fields for topology design.
+mod density_sensitivity;
 pub mod material;
 pub mod second_order;
+pub use density_sensitivity::ReferenceDensitySensitivityError;
 pub use material::MaterialElasticityError;
 
 /// The density-elasticity problem on a tet complex: per-cell 12×12

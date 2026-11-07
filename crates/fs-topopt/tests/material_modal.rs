@@ -1,5 +1,7 @@
 //! Source material density reaches both modal front doors and their derivatives.
 
+mod density_sensitivity;
+
 use std::ops::ControlFlow;
 
 use fs_rep_mesh::TetComplex;

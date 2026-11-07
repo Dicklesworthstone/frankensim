@@ -30,9 +30,27 @@ cubical homology), so the optimization stack lives here.
   unchanged. Physical mass objectives use the retained full reference-cell
   inventory, including fixed nodes. Uniform fields preserve the existing
   mass tiles. G0 Cartesian mass/moment oracles and G3 mode scaling, solver
-  parity and finite-difference sensitivities exercise this path. Density is
-  prescribed reference data; no thermal expansion or density-design adjoint
-  is inferred from the nodal field.
+  parity and finite-difference sensitivities exercise this path. Density
+  remains explicit reference data; no thermal expansion law is inferred.
+- Original nodal physical density has analytic mass and modal pullbacks.
+  `reference_density_mass_gradient` integrates each cubic density basis
+  against the full vector displacement field; `reference_density_inventory_gradient`
+  uses physical linear occupancy, including clamped-node inventory. The two
+  derivatives hold geometry, constitutive tensors and topology occupancy fixed.
+  `MatrixFreeEigenObjective::reference_density_gradient` returns the same
+  smooth-min aggregate's nodal physical-density derivative from the original
+  mass-normalized modes and cluster weights. The dense eigenpair helper
+  exposes the matching single-mode derivative. All weighted modes accumulate
+  into one candidate vector without another linear/eigenproblem solve, global
+  matrix or per-node perturbation; interruption restores the prior moduli.
+  The positive cubic simplex identity and binary-factored products retain
+  representable moments at extreme scales. Missing original nodal fields
+  refuse the explicit pullback; legacy and SDF3 objective reports carry None.
+  Units are derivatives per kg/m³, with inventory derivatives in m³. A full
+  repeated cluster remains necessary at an eigenvalue crossing. Five native
+  numerical-leaf tests cover independent simplex integrals, Cartesian inertia,
+  permutations and extreme scales; real-owner regressions add density-field
+  perturbations, dense/matrix-free parity, Euler scaling, inventory and rollback.
 - `DensityFilter` — Helmholtz filter: volume-weighted cell→vertex
   scatter, (M + r²K)⁻¹M solve on the FULL vertex space (natural BCs —
   the correct filter behavior: no boundary droop), vertex→cell

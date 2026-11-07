@@ -468,6 +468,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                 objective: MatrixFreeEigenObjective {
                     aggregate,
                     gradient,
+                    reference_density_gradient: None,
                     modal,
                 },
                 projected_rho: design.projected,

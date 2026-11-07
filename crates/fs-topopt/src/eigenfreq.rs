@@ -141,6 +141,58 @@ pub fn eigenvalue_gradient(
     pipeline.filter.apply_transpose(&chained)
 }
 
+/// Derivative of a mass-normalized mode's squared frequency with respect to
+/// the original nodal reference density [kg/m³], holding stiffness, geometry
+/// and projected topology occupancy fixed.
+///
+/// The supplied mode must use the same retained density field and mass
+/// interpolation. For a simple eigenpair, dλ/dρ_a = -λ φᵀ M_,a φ. A repeated
+/// cluster requires its weighted sum; individual eigenvectors do not define a
+/// differentiable eigenvalue at a crossing. The matrix-free objective returns
+/// the complete aggregate pullback in `reference_density_gradient`.
+///
+/// This uses exact cubic density moments in one cell pass, without another
+/// solve or differentiating only the cell-average normalization.
+pub fn eigenvalue_reference_density_gradient(
+    elasticity: &DensityElasticity,
+    projected_occupancy: &[f64],
+    lambda: f64,
+    phi_full: &[f64],
+    control: &mut crate::control::SolveControl<'_>,
+) -> Result<Vec<f64>, crate::elasticity::ReferenceDensitySensitivityError> {
+    use crate::elasticity::ReferenceDensitySensitivityError;
+    control.checkpoint("eigen-reference-density")?;
+    if projected_occupancy.len() != elasticity.cells()
+        || projected_occupancy
+            .iter()
+            .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+        || !lambda.is_finite()
+        || lambda < 0.0
+    {
+        return Err(ReferenceDensitySensitivityError::InvalidInput(
+            "projected occupancies in [0,1] and a finite nonnegative eigenvalue required",
+        ));
+    }
+    let nodes = elasticity
+        .nodal_reference_density_kg_m3()
+        .ok_or(ReferenceDensitySensitivityError::MissingNodalDensity)?
+        .len();
+    let mass_weights: Vec<f64> = projected_occupancy
+        .iter()
+        .map(|&r| mass_interp(r))
+        .collect();
+    let mut gradient = vec![0.0; nodes];
+    elasticity.accumulate_reference_density_mass_gradient(
+        &mass_weights,
+        phi_full,
+        -lambda,
+        &mut gradient,
+        control,
+    )?;
+    control.checkpoint("eigen-reference-density-publish")?;
+    Ok(gradient)
+}
+
 /// Smooth-min aggregation of the lowest eigenvalues:
 /// λ_agg = −(1/β)·ln Σ exp(−β·λ_k) ≤ min_k λ_k, with weights
 /// w_k = exp(−βλ_k)/Σ — the exact aggregate gradient is Σ w_k·∇λ_k.

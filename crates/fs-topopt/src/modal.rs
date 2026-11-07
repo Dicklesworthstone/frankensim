@@ -10,7 +10,7 @@ use fs_spectral::generalized::{GeneralizedError, GeneralizedOp, GeneralizedOptio
 
 use crate::control::{EvaluationStop, SolveControl, SolveWork};
 use crate::eigenfreq::{mass_interp, mass_interp_derivative, smooth_min};
-use crate::elasticity::DensityElasticity;
+use crate::elasticity::{DensityElasticity, ReferenceDensitySensitivityError};
 use crate::filter::heaviside_derivative;
 use crate::pipeline::DesignPipeline;
 
@@ -87,6 +87,13 @@ pub struct MatrixFreeEigenObjective {
     pub aggregate: f64,
     /// Derivative through consistent mass, SIMP, projection, and filter transpose.
     pub gradient: Vec<f64>,
+    /// Derivative of this SAME aggregate with respect to original nodal
+    /// physical densities [kg/m³], in mesh vertex order. Present only when an
+    /// explicit nodal reference-density field is retained. Geometry, material
+    /// tensors and occupancy stay fixed; this is separate from the raw design
+    /// gradient above. Uses the same mass-normalized modes and cluster weights,
+    /// with no additional linear or eigenproblem solve.
+    pub reference_density_gradient: Option<Vec<f64>>,
     /// Actual modal fields and solve diagnostics used for this derivative.
     pub modal: MatrixFreeEigenReport,
 }
@@ -250,8 +257,30 @@ pub fn controlled_matrix_free_eigenfrequency_objective(
         let (aggregate, weights) = smooth_min(&modal.values, options.aggregation_beta);
         let p = &pipeline.params;
         let mut local = vec![0.0; rho.len()];
+        let mut reference_density_gradient = elasticity
+            .nodal_reference_density_kg_m3()
+            .map(|values| vec![0.0; values.len()]);
+        let reference_mass_weights: Option<Vec<f64>> = reference_density_gradient
+            .as_ref()
+            .map(|_| projected.iter().map(|&r| mass_interp(r)).collect());
         for ((&lambda, mode), &weight) in modal.values.iter().zip(&modal.modes).zip(&weights) {
             control.checkpoint("eigen-sensitivity").map_err(GeneralizedError::Operator)?;
+            if let (Some(gradient), Some(mass_weights)) =
+                (&mut reference_density_gradient, &reference_mass_weights)
+            {
+                elasticity.accumulate_reference_density_mass_gradient(
+                    mass_weights, mode, -weight * lambda, gradient, control,
+                ).map_err(|error| match error {
+                    ReferenceDensitySensitivityError::Stopped(error) =>
+                        GeneralizedError::Operator(error),
+                    ReferenceDensitySensitivityError::InvalidInput(message) =>
+                        GeneralizedError::InvalidInput(message),
+                    ReferenceDensitySensitivityError::MissingNodalDensity =>
+                        GeneralizedError::InvalidInput("original nodal density field required"),
+                    ReferenceDensitySensitivityError::Nonfinite { .. } =>
+                        GeneralizedError::Breakdown("nonfinite physical-density modal sensitivity"),
+                })?;
+            }
             let strain = elasticity.cell_energies(mode);
             let kinetic = elasticity.cell_kinetic(mode);
             for cell in 0..rho.len() {
@@ -276,7 +305,12 @@ pub fn controlled_matrix_free_eigenfrequency_objective(
         }
         control.checkpoint("eigen-objective-publish").map_err(GeneralizedError::Operator)?;
         modal.work = control.work();
-        Ok(MatrixFreeEigenObjective { aggregate, gradient, modal })
+        Ok(MatrixFreeEigenObjective {
+            aggregate,
+            gradient,
+            reference_density_gradient,
+            modal,
+        })
     })();
     if result.is_err() { elasticity.moduli = previous_moduli; }
     result
