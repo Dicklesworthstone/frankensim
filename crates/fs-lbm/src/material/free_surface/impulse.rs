@@ -10,6 +10,12 @@ use super::{
 use crate::impulse::{ImpulseControls, ImpulseError, ImpulseReport, poll};
 use fs_exec::CancelGate;
 
+mod wrench;
+pub use wrench::{
+    MaterialFreeSurfaceWrenchImpulse3, MaterialFreeSurfaceWrenchImpulseControls3,
+    MaterialFreeSurfaceWrenchImpulseReport3,
+};
+
 /// Explicit physical admission limits for a three-dimensional liquid impulse.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialFreeSurfaceImpulseControls3 {
@@ -127,6 +133,33 @@ fn prepare<const D: usize>(
     if impulses.len() != count {
         return Err(ImpulseError::Invalid("physical impulse field has the wrong shape").into());
     }
+    let (native, units) = prepare_controls(scaling, mass_unit, count, max_cells, limits)?;
+    let density_unit = positive(
+        scaling.material.density_kg_m3() * scaling.velocity_scale,
+        "liquid impulse-density unit is unrepresentable",
+    )?;
+    let mut field = Vec::new();
+    field.try_reserve_exact(count)
+        .map_err(|_| ImpulseError::Invalid("physical impulse allocation refused"))?;
+    for (index, impulse) in impulses.iter().enumerate() {
+        if index % 64 == 0 { poll(gate)?; }
+        let mut converted = [0.0; D];
+        for axis in 0..D {
+            converted[axis] = represented(impulse[axis], impulse[axis] / density_unit)?;
+        }
+        field.push(converted);
+    }
+    Ok((field, native, units))
+}
+
+/// Shared scalar admission for dense impulse fields and compact total wrenches.
+fn prepare_controls(
+    scaling: MaterialFreeSurfaceScaling<'_>,
+    mass_unit: f64,
+    count: usize,
+    max_cells: usize,
+    limits: [f64; 3],
+) -> Result<(ImpulseControls, [f64; 3]), MaterialFreeSurfaceImpulseError> {
     let [speed, momentum_budget, work_budget] = limits;
     positive(speed, "physical impulse speed must be positive and finite")?;
     if !momentum_budget.is_finite() || momentum_budget < 0.0
@@ -148,22 +181,7 @@ fn prepare<const D: usize>(
         maximum_work_defect: represented(work_budget, work_budget / work_unit)?,
     };
     native.admit(count)?;
-    let density_unit = positive(
-        scaling.material.density_kg_m3() * scaling.velocity_scale,
-        "liquid impulse-density unit is unrepresentable",
-    )?;
-    let mut field = Vec::new();
-    field.try_reserve_exact(count)
-        .map_err(|_| ImpulseError::Invalid("physical impulse allocation refused"))?;
-    for (index, impulse) in impulses.iter().enumerate() {
-        if index % 64 == 0 { poll(gate)?; }
-        let mut converted = [0.0; D];
-        for axis in 0..D {
-            converted[axis] = represented(impulse[axis], impulse[axis] / density_unit)?;
-        }
-        field.push(converted);
-    }
-    Ok((field, native, [mass_unit, momentum_unit, work_unit]))
+    Ok((native, [mass_unit, momentum_unit, work_unit]))
 }
 
 /// Private conversion container only: this native-shaped value never escapes

@@ -4,10 +4,27 @@ use super::MaterialFreeSurfaceRheology3;
 use crate::material::free_surface::{
     MaterialFreeSurfaceImpulseControls3, MaterialFreeSurfaceImpulseError,
     MaterialFreeSurfaceImpulseReport3,
+    MaterialFreeSurfaceWrenchImpulse3, MaterialFreeSurfaceWrenchImpulseControls3,
+    MaterialFreeSurfaceWrenchImpulseReport3,
 };
 use fs_exec::CancelGate;
 
 impl MaterialFreeSurfaceRheology3<'_, '_> {
+    /// Deposit a total physical wrench on the original retained liquid mass.
+    /// The native Guo-frame update preserves intrinsic density and physical
+    /// viscous stress, retaining the source's pressure/rate samples and local
+    /// collision coefficients. No constitutive query, time or heat is added.
+    /// SI linear/angular balances and cancellation precede publication.
+    pub fn apply_wrench_impulse(
+        &mut self,
+        cells: &[usize],
+        wrench: MaterialFreeSurfaceWrenchImpulse3,
+        controls: MaterialFreeSurfaceWrenchImpulseControls3,
+        gate: &CancelGate,
+    ) -> Result<MaterialFreeSurfaceWrenchImpulseReport3, MaterialFreeSurfaceImpulseError> {
+        self.flow.apply_wrench_impulse(cells, wrench, controls, gate)
+    }
+
     /// Apply a resolved instantaneous impulse density [N s/m³] using each
     /// original cell's retained liquid mass and fixed physical units.
     ///

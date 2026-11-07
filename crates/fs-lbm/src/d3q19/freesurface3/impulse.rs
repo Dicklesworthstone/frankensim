@@ -5,6 +5,8 @@ use crate::d3q19::{E3, W3};
 use crate::impulse::{ImpulseControls, ImpulseError, ImpulseReport, ImpulseSum, poll};
 use fs_exec::CancelGate;
 
+mod wrench;
+
 impl FreeSurface3 {
     /// Apply one instantaneous liquid impulse per original geometric cell.
     ///

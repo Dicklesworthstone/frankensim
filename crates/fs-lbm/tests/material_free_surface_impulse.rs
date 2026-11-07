@@ -1,4 +1,6 @@
 //! SI liquid impulses use actual partial-fill inertia and never integrate dt.
+#[path = "material_free_surface_impulse/wrench.rs"]
+mod wrench;
 use fs_evidence::ValidityDomain;
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::freesurface3::ContactModel3;

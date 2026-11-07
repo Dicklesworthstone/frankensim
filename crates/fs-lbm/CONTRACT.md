@@ -15243,3 +15243,47 @@ continuation, zero-input and datum behavior, physical accuracy refusals and
 atomic cancellation. This remains a bounded planar, initially quiescent
 thermal-volume bridge; general repeated thermal VOF and phase change require
 their own physical evolution and conservative transport owners.
+
+
+## Localized wrench on retained free-surface liquid
+
+`FreeSurface3::apply_wrench_impulse` deposits a total linear/angular impulse
+on a strictly increasing, unique x-fastest stencil of original located wet
+cells. It reuses the native rank-aware `WrenchPlan3` at actual cell centers.
+Fluid inertia is population density; interface inertia is its retained liquid
+mass. Empty cell volume and unlocated conversion carry supply no inertia or
+lever arm. Gas, inactive/solid cells, piston-occupied cells and inadmissible
+interface inventories refuse before publication. Collinear stencils retain
+their represented transverse couples and refuse unresolved axial spin.
+
+The minimum mass-weighted squared velocity increment passes through the same
+Guo-frame population impulse as the original density-field entry. Canonical
+density, physical nonequilibrium stress, fill, tracked mass, classification,
+force history, geometry epoch and time remain fixed. Independent angular
+readback integrates the actual before/after physical velocities with the SAME
+retained liquid masses. Local/global torque, linear momentum, signed kinetic
+work and low-Mach limits are admitted together before any population publishes.
+A dependent receipt and final cancellation poll precede publication as well.
+
+Storage and work follow the selected stencil: two compact vectors, native
+sparse tile lookups and the bounded 3-by-3 rank solve. There is no full-domain
+scan, dense impulse array, liquid-owner clone, collision, pressure projection,
+heat assignment or implicit receiving-body reaction. The coupling owner must
+supply reciprocal body dynamics and its own work account.
+
+`MaterialFreeSurface3`, `MaterialFreeSurfaceRheology3` and
+`MaterialFreeSurfaceEnthalpy3` expose the same entry with
+`MaterialFreeSurfaceWrenchImpulse3` in kg m/s and kg m²/s. Original cell size,
+density and velocity units convert the total wrench; no extra timestep is
+applied. Linear/angular SI defects are re-evaluated against the authored
+physical request inside the native transaction, including origin-conversion
+transport and representability. Rheology and thermal histories remain attached
+to the original source state; signed mechanical work changes resolved kinetic
+energy and is not deposited again as enthalpy.
+
+Native regressions check unequal partial-fill inertia, actual torque/work,
+retained Guo stress, untouched nonselected cells, origin/boost covariance,
+rank refusal, invalid inventory, speed limits and dependent-receipt/cancellation
+atomicity. SI receipt regressions exercise distinct mass/momentum/angular/work
+units, authored-origin transport and unrepresentable readback. The material
+integration regression compares the same physical wrench at two timesteps.
