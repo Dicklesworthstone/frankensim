@@ -428,27 +428,45 @@ fn segment_line_distance(start: Vec3, end: Vec3, length: f64) -> Result<f64, Gra
     for i in 0..3 {
         let j = (i + 1) % 3;
         let k = (i + 2) % 3;
-        let (first, e1) = product_parts(a[j], b[k]);
-        let (second, e2) = product_parts(a[k], b[j]);
-        let exponent = if first == 0.0 {
+        let (mut first, e1) = precise_product_parts(a[j], b[k]);
+        let (mut second, e2) = precise_product_parts(a[k], b[j]);
+        let exponent = if first.to_f64() == 0.0 {
             e2
-        } else if second == 0.0 {
+        } else if second.to_f64() == 0.0 {
             e1
         } else {
             e1.max(e2)
         };
-        let first = scaled_nonnegative(first.abs(), e1 - exponent)?.copysign(first);
-        let second = scaled_nonnegative(second.abs(), e2 - exponent)?.copysign(second);
-        // Ordinary symmetric subtraction makes equal products cancel exactly;
-        // a one-sided FMA would retain only one product's rounding error.
+        if first.to_f64() != 0.0 && e1 != exponent {
+            first = first * Dd::from_f64(scaled_nonnegative(1.0, e1 - exponent)?);
+        }
+        if second.to_f64() != 0.0 && e2 != exponent {
+            second = second * Dd::from_f64(scaled_nonnegative(1.0, e2 - exponent)?);
+        }
+        // Keep BOTH product residuals: rounded products can invent a gap in a
+        // nearly collinear passage, while a one-sided FMA loses exact crossings.
         perpendicular[i] = scaled_nonnegative(
-            (first - second).abs() / denominator,
+            (first - second).to_f64().abs() / denominator,
             exponent - denominator_exponent,
         )?;
     }
     Ok(
         Vec3::new(perpendicular[0], perpendicular[1], perpendicular[2])
             .stable_norm("mutual gravity drift closest separation")?,
+    )
+}
+
+// Preserve the exact product of binary64 mantissas before cross-product
+// cancellation, without overflowing/underflowing the original coordinates.
+fn precise_product_parts(first: f64, second: f64) -> (Dd, i32) {
+    if first == 0.0 || second == 0.0 {
+        return (Dd::ZERO, 0);
+    }
+    let (a, ea) = binary_parts(first.abs());
+    let (b, eb) = binary_parts(second.abs());
+    (
+        Dd::from_f64(a.copysign(first)) * Dd::from_f64(b.copysign(second)),
+        ea + eb,
     )
 }
 

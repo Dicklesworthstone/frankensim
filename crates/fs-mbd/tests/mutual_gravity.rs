@@ -612,6 +612,91 @@ fn separation_guard_catches_interior_source_crossing_with_separated_endpoints() 
 }
 
 #[test]
+fn nearly_collinear_drift_preserves_cutoff_and_quadrupole_domain() {
+    // Exact binary64 endpoint arithmetic gives cross_z =
+    // -829499063469487 * 2^-103 and closest separation 2.4543097163281874e-17.
+    // Subtracting rounded products instead gives 6.662592407082328e-17,
+    // incorrectly admitting the 4e-17 cutoff. At scale 2^60 these are about
+    // 28 m, 77 m and 46 m. Tiny G keeps kicks below endpoint roundoff.
+    let start = [1.4065803653300177, 0.9491028081375255, 0.0];
+    let momentum = [-2.762617458500739, -1.8641010867925905, 0.0];
+    for scale in [1.0, 2.0_f64.powi(60)] {
+        let radius = 1e-17 * scale;
+        let moment = 0.4 * radius * radius;
+        let properties =
+            [MassProperties::new(1.0, Vec3::ZERO, Vec3::new(moment, moment, moment)).unwrap(); 2];
+        let radii = [radius; 2];
+        for axes in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let permute = |v: [f64; 3]| Vec3::new(v[axes[0]], v[axes[1]], v[axes[2]]).scale(scale);
+            let states = [
+                state(Vec3::ZERO, Vec3::ZERO),
+                state(permute(start), permute(momentum)),
+            ];
+            let model = MutualGravity::new(FRAME, 1e-30, 4e-17 * scale, 1).unwrap();
+            assert!(model.load(FRAME, &states, &properties, || false).is_ok());
+            assert_eq!(
+                model.step(FRAME, &states, &properties, 1.0, || false),
+                Err(GravityError::Invalid(
+                    "mutual gravity separation cutoff reached"
+                )),
+                "scale {scale:e}, axes {axes:?}",
+            );
+            // A resolved near miss remains admissible; cancellation must not
+            // turn every almost-collinear path into an exact collision.
+            assert!(
+                MutualGravity::new(FRAME, 1e-30, 2e-17 * scale, 1)
+                    .unwrap()
+                    .step(FRAME, &states, &properties, 1.0, || false)
+                    .is_ok(),
+                "scale {scale:e}, axes {axes:?}",
+            );
+
+            // Both product residuals must cancel for an exact diagonal crossing.
+            let unsoftened = MutualGravity::new(FRAME, 1e-30, 0.0, 1).unwrap();
+            let crossing = [
+                states[0],
+                state(permute(start), permute(start).scale(-2.0)),
+            ];
+            assert_eq!(
+                unsoftened.step(FRAME, &crossing, &properties, 1.0, || false),
+                Err(GravityError::Invalid(
+                    "mutual gravity separation cutoff reached"
+                )),
+                "exact crossing: scale {scale:e}, axes {axes:?}",
+            );
+            // The same drift guard also protects the extended-body far field,
+            // independently of the monopole separation cutoff.
+            let quadrupole = unsoftened.quadrupole(&radii, 0.5).unwrap();
+            assert!(
+                quadrupole
+                    .load(FRAME, &states, &properties, || false)
+                    .is_ok()
+            );
+            assert_eq!(
+                quadrupole.step(FRAME, &states, &properties, 1.0, || false),
+                Err(GravityError::OutsideExpansionDomain),
+                "scale {scale:e}, axes {axes:?}",
+            );
+            assert!(
+                unsoftened
+                    .quadrupole(&radii, 0.9)
+                    .unwrap()
+                    .step(FRAME, &states, &properties, 1.0, || false)
+                    .is_ok(),
+                "scale {scale:e}, axes {axes:?}",
+            );
+        }
+    }
+}
+
+#[test]
 fn budgets_frames_singularities_arithmetic_and_late_cancellation_refuse_atomically() {
     let (states, properties) = three_bodies();
     let saved = states;

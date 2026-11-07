@@ -891,6 +891,11 @@ the immutable input system untouched and returns no candidate. Both endpoints an
 the complete straight relative drift segments must clear the separation cutoff,
 preventing a split drift from tunneling through a source. This is not a validated
 enclosure of a true curved encounter: callers must resolve near-field motion.
+The shared monopole/quadrupole drift guard retains both cross-product residuals
+before exponent rescaling. Nearly collinear encounters therefore do not acquire
+a fictitious clearance from independently rounded products; exact diagonal
+crossings remain excluded. The regression includes all coordinate permutations,
+large-distance scaling, excluded encounters and admitted near misses.
 `tests/mutual_gravity.rs` covers analytic finite-source recoil, independent force/
 potential derivatives, the two-body Kepler period and second-order apocenter error,
 20-orbit energy/momentum behavior, frame/boost/permutation covariance, reversal,
