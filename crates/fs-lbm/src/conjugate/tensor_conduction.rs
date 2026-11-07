@@ -26,7 +26,8 @@ mod sdirk;
 mod nonlinear;
 pub use nonlinear::{
     RotatedSolidConductivity, TensorConductivityLaw, TensorNonlinearConfig,
-    TensorNonlinearSolution, solve_nonlinear_tensor_conduction,
+    TensorNonlinearSolution, TensorNonlinearStep, advance_nonlinear_tensor_conduction,
+    solve_nonlinear_tensor_conduction,
 };
 pub use transient::{TensorConductionStep, advance_tensor_conduction};
 pub use sdirk::{

@@ -58,6 +58,81 @@ pub fn advance_tensor_conduction(
     config: &EnergyConfig,
     gate: &CancelGate,
 ) -> Result<TensorConductionStep, ChtError> {
+    let prepared = prepare_tensor_step(
+        domain,
+        tensors.len(),
+        heat_capacity_j_k,
+        previous_temperature_k,
+        start_time_s,
+        time_step_s,
+        gate,
+    )?;
+    let step = prepared.storage();
+    let solution =
+        solve_tensor_conduction_inner(domain, solids, setup, tensors, config, Some(&step), gate)?;
+    poll(gate)?;
+    let record = prepared.record(domain, setup, &solution)?;
+    poll(gate)?;
+    Ok(TensorConductionStep { solution, record })
+}
+
+/// One admitted physical sensible-storage interval. Frozen and original-law
+/// tensor drivers borrow the same immutable old state and use the same ledger.
+pub(super) struct PreparedTensorStep<'a> {
+    coefficient_w_k: Vec<f64>,
+    heat_capacity_j_k: &'a [f64],
+    previous_temperature_k: &'a [f64],
+    time_s: f64,
+    time_step_s: f64,
+}
+
+impl PreparedTensorStep<'_> {
+    /// Borrow cell-only storage; no trace or contact gains artificial capacity.
+    pub(super) fn storage(&self) -> PseudoStep<'_> {
+        PseudoStep {
+            coefficient_w_k: &self.coefficient_w_k,
+            previous: self.previous_temperature_k,
+            junction_coefficient_w_k: &[],
+        }
+    }
+
+    /// Account actual final heat and original-state storage, including the
+    /// prescribed-cell thermostat contribution through the existing owner.
+    pub(super) fn record(
+        &self,
+        domain: &VoxelDomain,
+        setup: &ThermalSetup,
+        solution: &TensorConductionSolution,
+    ) -> Result<TransientRecord, ChtError> {
+        let solids_present = (0..domain.cell_count()).any(|cell| !domain.is_fluid(cell));
+        record_conduction_step(
+            domain,
+            setup,
+            &solution.temperature,
+            solution.report.balance,
+            solution.report.iterations,
+            |cell| {
+                self.heat_capacity_j_k[cell]
+                    * (solution.temperature[cell] - self.previous_temperature_k[cell])
+            },
+            (self.time_s, self.time_step_s, solids_present),
+            0.0,
+            0.0,
+        )
+    }
+}
+
+/// Admit the same physical time, field shape and C/dt for either tensor owner.
+/// Conductivity entries are frozen tensors or immutable original laws.
+pub(super) fn prepare_tensor_step<'a>(
+    domain: &VoxelDomain,
+    conductivity_entries: usize,
+    heat_capacity_j_k: &'a [f64],
+    previous_temperature_k: &'a [f64],
+    start_time_s: f64,
+    time_step_s: f64,
+    gate: &CancelGate,
+) -> Result<PreparedTensorStep<'a>, ChtError> {
     poll(gate)?;
     finite("tensor.transient.start_time_s", start_time_s)?;
     finite_positive("tensor.transient.time_step_s", time_step_s)?;
@@ -72,11 +147,11 @@ pub fn advance_tensor_conduction(
     let cells = domain.cell_count();
     if heat_capacity_j_k.len() != cells
         || previous_temperature_k.len() != cells
-        || tensors.len() != cells
+        || conductivity_entries != cells
     {
         return Err(ChtError::InvalidInput {
             field: "tensor.transient.fields",
-            reason: "one capacity, previous temperature and tensor per domain cell are required"
+            reason: "one capacity, previous temperature and conductivity entry per domain cell are required"
                 .into(),
         });
     }
@@ -110,28 +185,11 @@ pub fn advance_tensor_conduction(
         finite_positive("tensor.transient.storage_w_k", coefficient)?;
         coefficient_w_k.push(coefficient);
     }
-    let step = PseudoStep {
-        coefficient_w_k: &coefficient_w_k,
-        previous: previous_temperature_k,
-        junction_coefficient_w_k: &[],
-    };
-    let solution =
-        solve_tensor_conduction_inner(domain, solids, setup, tensors, config, Some(&step), gate)?;
-    poll(gate)?;
-    let solids_present = (0..cells).any(|cell| !domain.is_fluid(cell));
-    let record = record_conduction_step(
-        domain,
-        setup,
-        &solution.temperature,
-        solution.report.balance,
-        solution.report.iterations,
-        |cell| {
-            heat_capacity_j_k[cell] * (solution.temperature[cell] - previous_temperature_k[cell])
-        },
-        (time_s, time_step_s, solids_present),
-        0.0,
-        0.0,
-    )?;
-    poll(gate)?;
-    Ok(TensorConductionStep { solution, record })
+    Ok(PreparedTensorStep {
+        coefficient_w_k,
+        heat_capacity_j_k,
+        previous_temperature_k,
+        time_s,
+        time_step_s,
+    })
 }

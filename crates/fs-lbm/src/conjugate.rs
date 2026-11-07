@@ -204,7 +204,8 @@ pub use tensor_conduction::{
     ConductivityTensor, RotatedSolidConductivity, TENSOR_SDIRK2_GAMMA,
     TensorConductivityLaw, TensorConductionReport, TensorConductionSdirk2Step,
     TensorConductionSolution, TensorConductionStep, TensorNonlinearConfig,
-    TensorNonlinearSolution, advance_tensor_conduction, advance_tensor_conduction_sdirk2,
+    TensorNonlinearSolution, TensorNonlinearStep, advance_nonlinear_tensor_conduction,
+    advance_tensor_conduction, advance_tensor_conduction_sdirk2,
     solve_nonlinear_tensor_conduction, solve_tensor_conduction,
 };
 pub use transient::{TransientConfig, TransientRecord, TransientSolution, march_energy};

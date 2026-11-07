@@ -1,5 +1,28 @@
 # CONTRACT: fs-lbm
 
+## Physical backward Euler with original tensor conductivity laws
+
+`advance_nonlinear_tensor_conduction` advances original-law full-tensor
+conduction with complete fixed sensible capacities C[J/K]. Frozen and nonlinear
+drivers share the same time/storage admission and original-state energy-record
+owner. Each nonlinear trial retains original cell-to-face conductivity integrals,
+endpoint derivatives, source support, finite-contact heat and the immutable
+physical old-temperature field. Positive storage admits insulated bodies.
+Prescribed-cell reservoirs supply their conductive reaction and storage change
+exactly once. Newton, backtracking, shared Krylov and cancellation limits remain
+active, and refusal returns no partial interval. Conductivity data does not
+infer latent heat, variable capacity or material-history evolution. Physical
+time accuracy is first order.
+
+Seven native pipeline regressions cover analytic nonlinear cooling, unequal
+capacities with finite contact, temporal refinement, equivalence to frozen
+tensor storage, insulated rotated heating, thermostat storage, and invalid
+time/storage/support/cancellation. An additional steady regression forces
+backtracking inside a narrow original source domain and checks zero-budget
+transactional refusal. These pipeline regressions are authored and syntax
+checked; the complete dependency graph was not compiled or executed here.
+Analytical fixture calculations validate the reference values only.
+
 ## Original-law nonlinear full-tensor conduction
 
 `solve_nonlinear_tensor_conduction` accepts one immutable
@@ -26,9 +49,9 @@ original physical heat acceptance.
 
 Evidence: 25 actual-native selected-source Rust tests passed (13 new
 constitutive/integral/tangent/condensation checks and 12 existing conductance/HMM
-checks). Four public pipeline regressions cover transformed-affine full-tensor
+checks). Five public pipeline regressions cover transformed-affine full-tensor
 heat, independent rotated laws with finite contacts, constant-law equivalence,
-and budget/support/cancellation refusal. Full pipeline compilation and
+budget/support/cancellation refusal and original-source bounded backtracking. Full pipeline compilation and
 execution remain unverified in the current dependency/capacity-limited environment.
 
 ## Physical SDIRK2 on the full-tensor conduction operator

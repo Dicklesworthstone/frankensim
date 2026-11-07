@@ -339,3 +339,117 @@ fn refuses_unfunded_work_invalid_states_source_gaps_and_cancellation() {
         ChtError::Cancelled
     );
 }
+
+#[test]
+fn original_source_bounds_force_backtracking_and_zero_budget_refuses_transactionally() {
+    // The entire original source is declared on this one closed interval.
+    // Queries are immutable and have no trial-history or counter side effects.
+    struct BoundedExponential;
+
+    impl BoundedExponential {
+        fn point(t: f64) -> Result<f64, ChtError> {
+            if !t.is_finite() || !(300.0..=400.0).contains(&t) {
+                return Err(ChtError::InvalidInput {
+                    field: "test.bounded_exponential_source",
+                    reason: "original conductivity support is exactly 300..=400 K".into(),
+                });
+            }
+            Ok(((t - 300.0) / 10.0).exp())
+        }
+
+        fn tensor(k: f64) -> Result<ConductivityTensor, ChtError> {
+            ConductivityTensor::new([[k, 0.0, 0.0], [0.0, k, 0.0], [0.0, 0.0, k]])
+        }
+    }
+
+    impl TensorConductivityLaw for BoundedExponential {
+        fn conductivity_at_temperature(&self, t: f64) -> Result<ConductivityTensor, ChtError> {
+            Self::tensor(Self::point(t)?)
+        }
+
+        fn mean_conductivity(&self, from: f64, to: f64) -> Result<ConductivityTensor, ChtError> {
+            Self::point(from)?;
+            Self::point(to)?;
+            let lo = from.min(to);
+            let span = (to - from).abs() / 10.0;
+            let k = Self::point(lo)?;
+            // This source has no internal gaps. Its exact symmetric integral
+            // mean uses expm1 to retain small temperature differences.
+            Self::tensor(if span == 0.0 {
+                k
+            } else {
+                k * span.exp_m1() / span
+            })
+        }
+    }
+
+    let domain = VoxelDomain::from_fn(1, 1, 1, 1.0, |_| Voxel::Solid(0)).unwrap();
+    let material = [SolidMaterial::new("original bounded exponential law", 1.0)];
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Temperature(300.0);
+    faces[1] = ThermalFace::Temperature(400.0);
+    let setup = ThermalSetup::new(faces);
+    let original_setup = setup.clone();
+    let initial = [300.0];
+    let law = BoundedExponential;
+    let laws: [&dyn TensorConductivityLaw; 1] = [&law];
+    let zero_backtracks = TensorNonlinearConfig {
+        max_backtracks: 0,
+        ..controls()
+    };
+    let refused = solve_nonlinear_tensor_conduction(
+        &domain,
+        &material,
+        &setup,
+        &laws,
+        &initial,
+        &zero_backtracks,
+        &CancelGate::new(),
+    );
+    assert!(matches!(refused, Err(ChtError::SolverNotConverged { .. })));
+    assert_eq!(initial, [300.0]);
+    assert_eq!(setup, original_setup);
+
+    let config = controls();
+    let result = solve_nonlinear_tensor_conduction(
+        &domain,
+        &material,
+        &setup,
+        &laws,
+        &initial,
+        &config,
+        &CancelGate::new(),
+    )
+    .unwrap();
+    assert!(result.backtracks > 0);
+    assert!(result.backtracks <= config.max_backtracks);
+    let solved = &result.solution;
+    let expected = 300.0 + 10.0 * ((1.0 + 10.0_f64.exp()) / 2.0).ln();
+    assert!((solved.temperature[0] - expected).abs() < 1e-6);
+    for &t in solved
+        .temperature
+        .iter()
+        .chain(solved.face_temperature_k.iter().flatten())
+    {
+        assert!(
+            (300.0..=400.0).contains(&t),
+            "unsupported accepted temperature {t}"
+        );
+    }
+    assert_eq!(solved.face_temperature_k[0][0], 300.0);
+    assert_eq!(solved.face_temperature_k[0][1], 400.0);
+    let t = solved.temperature[0];
+    // Area=1 and half-cell distance=1/2. These are independent original
+    // integrals, not secants recovered from the reported face heat.
+    let left_heat = 20.0 * ((t - 300.0) / 10.0).exp_m1();
+    let right_heat = -20.0 * ((t - 300.0) / 10.0).exp() * ((400.0 - t) / 10.0).exp_m1();
+    assert!((solved.outward_heat_w[0][0] - left_heat).abs() < 1e-6);
+    assert!((solved.outward_heat_w[0][1] - right_heat).abs() < 1e-6);
+    assert!(solved.outward_heat_w[0].iter().sum::<f64>().abs() < 1e-4);
+    for &q in &solved.outward_heat_w[0][2..] {
+        assert!(q.abs() < 1e-6);
+    }
+    assert!(solved.report.max_heat_residual <= config.linear.tolerance);
+    assert_eq!(initial, [300.0]);
+    assert_eq!(setup, original_setup);
+}

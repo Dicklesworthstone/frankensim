@@ -16,8 +16,10 @@ use super::{
 
 mod local;
 mod material;
+mod transient;
 use local::{KirchhoffCell, KirchhoffRecovery};
 pub use material::{RotatedSolidConductivity, TensorConductivityLaw};
+pub use transient::{TensorNonlinearStep, advance_nonlinear_tensor_conduction};
 
 /// Bounded nonlinear and algebraic work for one original-law spatial endpoint.
 #[derive(Debug, Clone, Copy, PartialEq)]
