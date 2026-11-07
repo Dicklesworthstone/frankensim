@@ -187,31 +187,24 @@ impl TwoPort {
                 "wave block requires finite forward-decaying k and impedance",
             ));
         }
+        if (rout - rin).abs() < 1e-12 * rin {
+            return Self::from_cylinder_wave(wave, rin, length, reference);
+        }
         let e = crate::exp_i(wave.wavenumber.scale(length));
-        let (ratio, ylp, ylm, yrp, yrm) = if (rout - rin).abs() < 1e-12 * rin {
-            // Derivative of exp(+/-ikx), with the SAME constitutive series
-            // relation used by basis_pair. Do not replace the wave owner.
-            let area = core::f64::consts::PI * rin * rin;
-            let ik = C64::new(0.0, 1.0) * wave.wavenumber;
-            let series = (ik * wave.specific_impedance).recip();
-            let y = ik.scale(area) * series;
-            (1.0, y, -y, y, -y)
-        } else {
-            let slope = (rout - rin) / length;
-            let xl = rin / slope;
-            let xr = xl + length;
-            let ik = C64::new(0.0, 1.0) * wave.wavenumber;
-            let series = (ik * wave.specific_impedance).recip();
-            let area_l = core::f64::consts::PI * rin * rin;
-            let area_r = core::f64::consts::PI * rout * rout;
-            (
-                xl / xr,
-                (ik - C64::from_re(1.0 / xl)).scale(area_l) * series,
-                (-ik - C64::from_re(1.0 / xl)).scale(area_l) * series,
-                (ik - C64::from_re(1.0 / xr)).scale(area_r) * series,
-                (-ik - C64::from_re(1.0 / xr)).scale(area_r) * series,
-            )
-        };
+        let slope = (rout - rin) / length;
+        let xl = rin / slope;
+        let xr = xl + length;
+        let ik = C64::new(0.0, 1.0) * wave.wavenumber;
+        let series = (ik * wave.specific_impedance).recip();
+        let area_l = core::f64::consts::PI * rin * rin;
+        let area_r = core::f64::consts::PI * rout * rout;
+        let (ratio, ylp, ylm, yrp, yrm) = (
+            xl / xr,
+            (ik - C64::from_re(1.0 / xl)).scale(area_l) * series,
+            (-ik - C64::from_re(1.0 / xl)).scale(area_l) * series,
+            (ik - C64::from_re(1.0 / xr)).scale(area_r) * series,
+            (-ik - C64::from_re(1.0 / xr)).scale(area_r) * series,
+        );
         let yl = [ylp.scale(reference), ylm.scale(reference)];
         let yr = [yrp.scale(reference), yrm.scale(reference)];
         // Incoming/outgoing power waves from local forward-left/backward-right
@@ -247,6 +240,52 @@ impl TwoPort {
             }
         }
         Self::new(s, reference)
+    }
+    /// Exact homogeneous cylinder response without a nearly singular wave
+    /// basis or heap allocation. With e=exp(i k L), the common denominator is
+    /// 4 Z R + (Z-R)^2 (1-e^2). Keeping both terms separately retains finite
+    /// series loading when kL and R/Z tend to zero together (the Poiseuille
+    /// limit, or a short high-impedance neck). No growing exponential occurs.
+    fn from_cylinder_wave(
+        wave: &SegmentWave,
+        radius: f64,
+        length: f64,
+        reference: f64,
+    ) -> Result<Self, DuctError> {
+        let area = core::f64::consts::PI * radius * radius;
+        // Preserve the supplied constitutive pressure/velocity relation and
+        // the actual geometry, as the endpoint wave bases do.
+        let impedance = wave.specific_impedance / C64::from_re(area);
+        let scale = impedance.re.abs().max(impedance.im.abs()).max(reference);
+        if !finite(impedance) || !scale.is_finite() || !area.is_finite() || area <= 0.0 {
+            return Err(DuctError::Singular);
+        }
+        let z = C64::new(impedance.re / scale, impedance.im / scale);
+        let r = reference / scale;
+        let phase = wave.wavenumber.scale(length);
+        if !finite(phase) {
+            return Err(DuctError::Singular);
+        }
+        let sin_phase = det::sin(phase.re);
+        let cos_phase = det::cos(phase.re);
+        let decay = det::exp(-phase.im);
+        let e = C64::new(cos_phase, sin_phase).scale(decay);
+        let decay_squared = decay * decay;
+        // 1-exp(2 i kL): expm1 retains weak attenuation and the half-angle
+        // identity retains the real phase term when cos(2 Re kL) rounds to 1.
+        let difference = C64::new(
+            -det::expm1(-2.0 * phase.im) + 2.0 * decay_squared * sin_phase * sin_phase,
+            -2.0 * decay_squared * sin_phase * cos_phase,
+        );
+        let mismatch = z - C64::from_re(r);
+        let transmission_numerator = z.scale(4.0 * r);
+        let denominator = transmission_numerator + mismatch * mismatch * difference;
+        if denominator == C64::ZERO || !finite(denominator) {
+            return Err(DuctError::Singular);
+        }
+        let reflected = mismatch * (z + C64::from_re(r)) * difference / denominator;
+        let transmitted = transmission_numerator * e / denominator;
+        Self::new([reflected, transmitted, transmitted, reflected], reference)
     }
     /// Connect self's right port to right's left port. Solving their two
     /// internal wave equations gives denominator 1-self.S22*right.S11.

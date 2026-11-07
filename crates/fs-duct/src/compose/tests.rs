@@ -193,6 +193,142 @@ fn dd_response(m: [Dc; 4], load: Option<C64>) -> (C64, C64, C64) {
 }
 
 #[test]
+fn cylinder_scattering_retains_short_high_contrast_loading() {
+    // R is only a numerical wave reference. Changing it must not erase the
+    // finite physical series inertance Z*k*L=1 as kL and R/Z shrink together.
+    // The independent DD transfer matrix resolves that lumped limit without
+    // using the bounded exponential identity in the production calculation.
+    let radius = 0.002;
+    let area = PI * radius * radius;
+    let length = 0.1;
+    for contrast in [1e6, 1e10, 1e14, 1e18] {
+        let wave = SegmentWave {
+            wavenumber: C64::from_re(1.0 / (contrast * length)),
+            characteristic_impedance: C64::from_re(contrast),
+            specific_impedance: C64::from_re(contrast * area),
+            shear_number: f64::INFINITY,
+        };
+        let observed =
+            TwoPort::from_wave(&Segment::Cylinder { radius, length }, &wave, 1.0).unwrap();
+        let [a, b, c, d] = dd_cylinder(wave, length);
+        let denominator = a + b + c + d;
+        let expected = [
+            ((a + b - c - d) / denominator).rounded(),
+            (Dc::real(2.0) / denominator).rounded(),
+            (Dc::real(2.0) / denominator).rounded(),
+            ((Dc::ZERO - a + b - c + d) / denominator).rounded(),
+        ];
+        for (actual, target) in observed.scattering.into_iter().zip(expected) {
+            assert!(
+                (actual - target).abs() < 2e-14,
+                "contrast={contrast:e}, actual={actual:?}, DD={target:?}"
+            );
+        }
+        // Both acoustic power conservation and reciprocity hold in this
+        // lossless limit, including where the old endpoint basis collapsed.
+        let [r, t, reverse, opposite] = observed.scattering;
+        assert_eq!(t, reverse);
+        assert_eq!(r, opposite);
+        assert!((r.norm_sq() + t.norm_sq() - 1.0).abs() < 2e-14);
+        assert!((r.conj() * t + t.conj() * r).abs() < 2e-14);
+    }
+}
+
+#[test]
+fn cylinder_scattering_retains_poiseuille_resistance() {
+    let gas = gas();
+    let radius: f64 = 1e-4;
+    let area = PI * radius * radius;
+    let length = 0.01;
+    let reference = gas.characteristic_impedance / area;
+    let resistance = 8.0 * gas.dynamic_viscosity * length / (PI * radius.powi(4));
+    let expected_r = resistance / (2.0 * reference + resistance);
+    let expected_t = 2.0 * reference / (2.0 * reference + resistance);
+    // The exact hydraulic/isothermal asymptote has Z'=8 mu/(pi a^4),
+    // Y'=i omega A gamma/(rho c^2). Exercise its DC limit directly rather
+    // than requesting the full Bessel law below its certified shear range.
+    for omega in [1e-6, 1e-14, 1e-22, 1e-26] {
+        let (wavenumber, characteristic_impedance) = crate::helmholtz_wave_from_telegraph(
+            C64::from_re(resistance / length),
+            C64::new(
+                0.0,
+                omega * area * gas.gamma / (gas.density * gas.sound_speed.powi(2)),
+            ),
+        );
+        let wave = SegmentWave {
+            wavenumber,
+            characteristic_impedance,
+            specific_impedance: characteristic_impedance.scale(area),
+            shear_number: 0.0,
+        };
+        let scattering =
+            TwoPort::from_wave(&Segment::Cylinder { radius, length }, &wave, reference)
+                .unwrap()
+                .scattering;
+        assert!(
+            (scattering[0] - C64::from_re(expected_r)).abs() < 1e-9,
+            "omega={omega:e}, reflection={:?}, DC={expected_r:e}",
+            scattering[0]
+        );
+        assert!(
+            (scattering[1] - C64::from_re(expected_t)).abs() < 1e-9,
+            "omega={omega:e}, transmission={:?}, DC={expected_t:e}",
+            scattering[1]
+        );
+        assert!(scattering[0].norm_sq() + scattering[1].norm_sq() < 1.0);
+    }
+    // Also cover the original constitutive owner at the lower end of its
+    // admitted viscous AND thermal shear range, without widening that range.
+    for shear in [1e-4, 1e-5, 2e-6] {
+        let omega = shear * shear * gas.dynamic_viscosity / (gas.density * radius * radius);
+        let wave = crate::segment_wave(&gas, radius, omega, LossModel::Bessel).unwrap();
+        let scattering =
+            TwoPort::from_wave(&Segment::Cylinder { radius, length }, &wave, reference)
+                .unwrap()
+                .scattering;
+        assert!((scattering[0] - C64::from_re(expected_r)).abs() < 1e-9);
+        assert!((scattering[1] - C64::from_re(expected_t)).abs() < 1e-9);
+    }
+}
+
+#[test]
+fn cylinder_scattering_retains_opaque_matched_and_half_wave_limits() {
+    let radius = 0.003;
+    let area = PI * radius * radius;
+    let length = 0.7;
+    let impedance = C64::new(1800.0, 450.0);
+    let reference = 350.0;
+    let opaque = SegmentWave {
+        wavenumber: C64::new(3.0, 2000.0),
+        characteristic_impedance: impedance,
+        specific_impedance: impedance.scale(area),
+        shear_number: f64::INFINITY,
+    };
+    let scattering = TwoPort::from_wave(&Segment::Cylinder { radius, length }, &opaque, reference)
+        .unwrap()
+        .scattering;
+    let expected = (impedance - C64::from_re(reference)) / (impedance + C64::from_re(reference));
+    assert!((scattering[0] - expected).abs() < 2e-15);
+    assert_eq!(scattering[1], C64::ZERO);
+    assert_eq!(scattering[2], C64::ZERO);
+
+    for attenuation in [0.0, 0.1, 20.0] {
+        let matched = SegmentWave {
+            wavenumber: C64::new(PI / length, attenuation / length),
+            characteristic_impedance: C64::from_re(reference),
+            specific_impedance: C64::from_re(reference * area),
+            shear_number: f64::INFINITY,
+        };
+        let result = TwoPort::from_wave(&Segment::Cylinder { radius, length }, &matched, reference)
+            .unwrap()
+            .scattering;
+        let expected = crate::exp_i(matched.wavenumber.scale(length));
+        assert!(result[0].abs() < 2e-15);
+        assert!((result[1] - expected).abs() < 2e-15);
+    }
+}
+
+#[test]
 fn closed_chimney_coordinate_poles_keep_the_physical_scattering_limits() {
     // G1: a rigid stub has Z = i Zc cot(kh). Use its independent sine/cosine
     // junction solution, which stays finite at both zeros and poles of Z.
