@@ -3343,8 +3343,12 @@ string's own mean radius (E 0.1555 mm, A 0.3405 mm, D 0.399 mm, G 0.40275 mm; us
 - its `young_modulus` gives the least-squares inharmonicity of the printed partials;
 - its `shear_modulus` gives the measured torsional stiffness.
 
-Each pack states its torsional loss factor with the constant-loss anchor: 0.0032 (E), 0.071 (A), 0.036 (D) and
-0.119 (G). It is the pendulum-and-string decrement with the pendulum's own gravity stiffness taken out. The
+Each pack states its torsional loss factor with the constant-loss anchor: 0.0055 (E), 0.072 (A), 0.036 (D) and
+0.120 (G). It is the pendulum-and-string decrement with the pendulum's own gravity stiffness taken out. The
+pendulum's own loss is unstated, so each value is the midpoint of the range it allows: from 0 up to the least, over
+all 35 strings of the table, of the value that would give a string all of its system loss. The pack states both
+ends. The printed torsional stiffness is used as printed; by the same method the table's solid-steel E strings read
+a shear modulus 4 to 5 times steel's, so it may hold more than the string's own twisting stiffness. The
 bending viscosity is written as 0 because no transverse internal loss is measured; such a string loses
 transverse energy only to its air drag and its supports.
 

@@ -213,7 +213,8 @@ fn string_pack(bytes:&[u8])->ResolvedMaterialStatePoint {
 // his string torsional stiffness on the 329 mm bed (both halves twist), and its Young's modulus is the least-squares
 // inharmonicity of his whole-cent partials. On a violin span every twist mode carries the string's own loss factor at
 // its own frequency: the pendulum-and-string decrement with the pendulum's 30.355 g cm/rad of gravity stiffness taken
-// out, at the midpoint of the bracket the pendulum's unstated own loss leaves (0 up to all of the steel E's loss).
+// out, at the midpoint of the bracket the pendulum's unstated own loss leaves: from 0 up to the least, over all 35
+// strings measured on that pendulum, of the loss that would give a string all of its system loss.
 #[test]
 fn the_dominant_packs_hold_pickerings_strings_and_their_measured_twist_loss() {
     use core::f64::consts::PI;
@@ -224,8 +225,10 @@ fn the_dominant_packs_hold_pickerings_strings_and_their_measured_twist_loss() {
         ("s32",196.0,include_bytes!("../examples/material_strings/packs/violin-string-dominant-g-pickering1985-section.fsmatpk"))];
     let (bed,gram_cm,pendulum,speaking,span)=(0.329,9.80665e-5,30.355,0.328,0.383);
     let system=|row:&str| pickering("damping_coefficient_printed_x100",row)/100.0/PI;
-    let k_e=pickering("torsion_stiffness_printed_g_cm_per_rad","s01");
-    let pendulum_loss=system("s01")*(k_e+pendulum)/pendulum;
+    let pendulum_loss=(1..=35).map(|i| format!("s{i:02}"))
+        .map(|row| system(&row)*(pickering("torsion_stiffness_printed_g_cm_per_rad",&row)+pendulum)/pendulum)
+        .fold(f64::INFINITY,f64::min);
+    assert!(pendulum_loss.is_finite()&&pendulum_loss>0.0);
     let spectrum=ConstantLossSpectrum::fit_over(STRING_LOSS_SPECTRUM_BAND_RAD_S);
     with_cx(|cx,gate| for (row,pitch,bytes) in packs {
         let m=string_pack(bytes);

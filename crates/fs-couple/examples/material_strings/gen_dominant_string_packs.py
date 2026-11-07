@@ -17,8 +17,11 @@ Torsional loss: Pickering's damping coefficient is 100x the logarithmic decremen
 TOGETHER, near 7 Hz. His method text (p. 6) gives the pendulum alone: 4.12 g, 5.4016 Hz, effective torsional stiffness
 30.355 g cm/rad. The string holds k / (k + 30.355) of the stored energy, so its own loss factor is
 eta_t = (eta_sys (k + k_p) - eta_p k_p) / k with eta_sys = decrement / pi. eta_p, the pendulum's own loss, is unstated.
-It lies between 0 and the value that gives the steel E string (the least damped) all of its system loss. The pack writes
-the midpoint of that bracket and states both ends.
+It lies between 0 and the least, over every string of the table measured on that pendulum, of the value that gives the
+string all of its system loss, eta_sys (k + k_p) / k_p. The pack writes the midpoint of that bracket and states both ends.
+
+The printed k is used as printed. By the same method Pickering's solid-steel E strings (s02, s03, s05) read a shear
+modulus 4 to 5 times steel's, so k may hold more than the string's own twisting stiffness; each section says so.
 
 eta_t is written as a constant loss factor (fs_couple::bowed_string::runtime::reciprocal::bank::torsion): the Kelvin-Voigt
 shear viscosity eta_t G / omega_ref with omega_ref = 2 pi 200 rad/s, and the anchor
@@ -46,7 +49,7 @@ PENDULUM_HZ = 5.4016  # Pickering (1985) p. 6
 OMEGA_REF = 2.0 * math.pi * 200.0
 OMEGA_MAX = 2.0 * math.pi * 40_000.0
 STRINGS = [("e", "s01"), ("a", "s12"), ("d", "s22"), ("g", "s32")]
-LEAST_DAMPED = "s01"
+SOLID_STEEL = ("s02", "s03", "s05")
 
 rows = {}
 notes = {}
@@ -82,8 +85,29 @@ def system_loss(s):
     return rows["damping_coefficient_printed_x100_" + s] / 100.0 / math.pi
 
 
-k_least = rows["torsion_stiffness_printed_g_cm_per_rad_" + LEAST_DAMPED]
-pendulum_loss_max = system_loss(LEAST_DAMPED) * (k_least + PENDULUM_STIFFNESS) / PENDULUM_STIFFNESS
+def pendulum_bound(s):
+    """The pendulum's own loss factor that would give string s all of its system loss."""
+    return system_loss(s) * (rows["torsion_stiffness_printed_g_cm_per_rad_" + s] + PENDULUM_STIFFNESS) / PENDULUM_STIFFNESS
+
+
+TABLE = sorted(key[len("damping_coefficient_printed_x100_"):] for key in rows
+               if key.startswith("damping_coefficient_printed_x100_")
+               and "torsion_stiffness_printed_g_cm_per_rad_" + key[len("damping_coefficient_printed_x100_"):] in rows)
+BOUNDING = min(TABLE, key=pendulum_bound)
+pendulum_loss_max = pendulum_bound(BOUNDING)
+
+
+def solid_steel_shear_ratio():
+    """Shear modulus by this method on Pickering's solid-steel E strings, over steel's 80 GPa: (least, greatest)."""
+    ratios = []
+    for s in SOLID_STEEL:
+        r = 0.25 * (rows["diameter_max_" + s] + rows["diameter_min_" + s])
+        gj = rows["torsion_stiffness_printed_g_cm_per_rad_" + s] * G_CM * BED / 4.0
+        ratios.append(gj / (math.pi * r ** 4 / 2.0) / 80e9)
+    return min(ratios), max(ratios)
+
+
+SOLID_LO, SOLID_HI = solid_steel_shear_ratio()
 
 
 def fmt(v):
@@ -119,16 +143,20 @@ for name, s in STRINGS:
          "the printed tension T %s N and the test bed L %s m; shear_modulus = (k L / 4) / (pi r^4 / 2) with the printed "
          "string torsional stiffness k %s g cm/rad" % (SEED, s, fmt(r), fmt(mu), fmt(b), ns[0], ns[-1], rms, fmt(tension), fmt(BED), fmt(k)),
          "The stiffnesses are the whole wound string's, assigned to a cylinder of its own radius; they are not the moduli "
-         "of any one of its materials. The deviations are printed to whole cents, which bounds the precision of B. "
+         "of any one of its materials. The printed torsional stiffness is used as printed, but by this same method "
+         "Pickering's solid-steel E strings (%s) read a shear modulus %.1f to %.1f times steel's 80 GPa, so it may hold "
+         "more than the string's own twisting stiffness. The deviations are printed to whole cents, which bounds the "
+         "precision of B. " % (", ".join(SOLID_STEEL), SOLID_LO, SOLID_HI) +
          "Temperature and humidity are not stated by the source. The validity band omega 0 to 2 pi 40 kHz and T 280 to "
          "320 K is the band in which this use is DECLARED by the pack author, not a measured band."),
         ("dominant-%s-twist-loss" % name, "the same string",
          "Pickering (1985) printed damping coefficient %s = 100 x the logarithmic decrement of his torsion pendulum (p. 6: "
          "4.12 g, %s Hz, effective torsional stiffness %s g cm/rad) clamped at the string's centre, swinging at %.3f Hz: "
          "system loss factor %.6f; the string's own torsional loss factor %.6f to %.6f (the pendulum's own loss from 0 to "
-         "%.6f, the bound that gives the least damped string, %s, all of its system loss); written %.6f, the midpoint" % (
+         "%.6f, the least over the table's %d strings of the value that gives a string all of its system loss, reached by "
+         "%s); written %.6f, the midpoint" % (
              fmt(rows["damping_coefficient_printed_x100_" + s]), fmt(PENDULUM_HZ), fmt(PENDULUM_STIFFNESS), swing_hz, eta_sys,
-             eta_lo, eta_hi, pendulum_loss_max, LEAST_DAMPED, eta_t),
+             eta_lo, eta_hi, pendulum_loss_max, len(TABLE), BOUNDING, eta_t),
          "Measured near 7 Hz and applied as a CONSTANT loss factor at every twist mode's own frequency: "
          "kelvin_voigt_shear_viscosity = eta_t G / omega_ref with shear_viscosity_constant_loss_reference_omega = "
          "omega_ref = 2 pi 200 rad/s, an encoding frequency only. Wound strings' measured torsional Q is nearly the same on "
