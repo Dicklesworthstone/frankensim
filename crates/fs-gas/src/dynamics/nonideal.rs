@@ -9,8 +9,8 @@
 //!
 //! The existing HLLC/HLL kernel, physical mesh, conservative update and balance
 //! types are shared with the ideal-gas field. Only constitutive admission and
-//! the bounded homogeneous field owner differ. Piecewise-constant spatial
-//! reconstruction and SSP-RK2 time stepping are an Estimated baseline. Local
+//! the bounded homogeneous field owner differ. First-order or source-admitted
+//! MUSCL reconstruction and SSP-RK2 time stepping are an Estimated baseline. Local
 //! source/stability checks do not establish a globally single-phase rectangle,
 //! entropy stability, positivity for arbitrary EOS, or a shock-thickness model.
 

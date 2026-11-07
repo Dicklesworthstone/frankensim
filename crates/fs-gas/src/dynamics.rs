@@ -3,7 +3,7 @@
 //! HLLC restores the contact wave; inadmissible star states fall back to an HLL
 //! flux. The ideal mechanical owner supports MUSCL reconstruction and SSP RK2.
 //! The material-gated `nonideal` owner binds original NASA/PR source laws to the
-//! same flux/update machinery with explicit first-order spatial reconstruction.
+//! same flux/update machinery with first-order or source-admitted MUSCL traces.
 //! Both use local signal speeds and transactional time-step reduction without
 //! clipping conserved variables.
 //! This is an Estimated engineering baseline, not a discrete entropy theorem.

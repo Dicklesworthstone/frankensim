@@ -11,6 +11,7 @@ use crate::multicomponent::wall_exchange::WallControl;
 use fs_qty::{Length, Time};
 
 mod forcing;
+mod reconstruction;
 
 /// One end of a stationary constant-area real-gas interval.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -44,16 +45,19 @@ struct Workspace {
     stage_primitive: Vec<Primitive>,
     candidate: Vec<Conserved>,
     candidate_primitive: Vec<Primitive>,
+    traces: Option<Vec<reconstruction::Traces>>,
 }
 
 /// Conservative density, momentum and total-energy evolution on an original
 /// constant-area mesh. Nonuniform cell widths use the retained physical volumes.
 ///
-/// The initial spatial path is piecewise constant. Time stepping uses SSP-RK2
-/// and requires `StepControl::reconstruction == Reconstruction::FirstOrder`.
-/// Every Euler stage and final average resolves through the original real-gas
-/// source. Bounded retries halve dt; refusal/cancellation publishes no state.
-/// Numerical scratch is allocated once; native material resolution retains its
+/// MUSCL reconstructs density, velocity and temperature through the original
+/// source, with shared slope contraction for inadmissible endpoint pairs.
+/// Every SSP-RK2 Euler stage and final average also resolves through that source.
+/// Bounded retries halve dt; a source-invalid stage retries with first-order
+/// traces, while CFL-only retries retain the requested reconstruction order.
+/// Refusal/cancellation publishes no state. Trace scratch is allocated on first
+/// MUSCL use and reused; native material resolution retains its
 /// own allocations. Optional local wall sources use the same gas calorics;
 /// no gas phase flash, spatial viscous transport or moving end wall is added.
 pub struct RealGasEuler1d {
@@ -127,6 +131,7 @@ impl RealGasEuler1d {
             stage_primitive: allocated(n, Primitive::default())?,
             candidate: allocated(n, Conserved::default())?,
             candidate_primitive: allocated(n, Primitive::default())?,
+            traces: None,
         };
         poll(&mut cancelled)?;
         Ok(Self {
@@ -187,7 +192,7 @@ impl RealGasEuler1d {
 
     /// Advance by at most the supplied duration. CFL and retries use the same
     /// controls/report as the original gas owner. This entry explicitly requires
-    /// piecewise-constant spatial reconstruction; no implicit MUSCL downgrade.
+    /// first-order or source-admitted MUSCL spatial reconstruction.
     pub fn step(
         &mut self,
         maximum_duration: Time,
@@ -239,11 +244,16 @@ impl RealGasEuler1d {
             || !positive(controls.cfl)
             || controls.cfl > 0.45
             || controls.maximum_halvings > 32
-            || controls.reconstruction != Reconstruction::FirstOrder
         {
             return Err(RealGasFlowError::Invalid(
-                "positive duration, CFL <= 0.45, at most 32 halvings and FirstOrder reconstruction required",
+                "positive duration, CFL <= 0.45 and at most 32 halvings required",
             ));
+        }
+        if controls.reconstruction == Reconstruction::Muscl && self.work.traces.is_none() {
+            self.work.traces = Some(allocated(
+                self.states.len(),
+                [(Conserved::default(), Primitive::default()); 2],
+            )?);
         }
         let force = match force {
             Some((source, force_controls)) => {
@@ -272,6 +282,7 @@ impl RealGasEuler1d {
         let mut dt = maximum_duration.value().min(0.9 * controls.cfl / rate);
         let before = self.totals(&mut cancelled)?;
         let mut last = RealGasFlowError::Invalid("no admissible real-gas step");
+        let mut first_order_retry = false;
         for halvings in 0..=controls.maximum_halvings {
             poll(&mut cancelled)?;
             if !positive(dt) || !(self.time + dt).is_finite() || self.time + dt <= self.time {
@@ -279,6 +290,11 @@ impl RealGasEuler1d {
                     "time step cannot advance represented clock",
                 ));
             }
+            let reconstruction = if first_order_retry {
+                Reconstruction::FirstOrder
+            } else {
+                controls.reconstruction
+            };
             let result = (|| {
                 let mut exchange = Accumulator::default();
                 let mut source_rate = 0.0_f64;
@@ -308,6 +324,7 @@ impl RealGasEuler1d {
                     &self.mesh,
                     self.boundaries,
                     self.boundary_primitive,
+                    reconstruction,
                     dt,
                     controls.cfl,
                     &mut self.work,
@@ -409,8 +426,9 @@ impl RealGasEuler1d {
                         maximum_cfl: a.signal_rate.max(b.signal_rate).max(source_rate) * dt,
                         halvings,
                         hll_fallback_faces: a.fallbacks + b.fallbacks,
-                        limited_cells: 0,
-                        first_order_retry: false,
+                        limited_cells: a.limited + b.limited,
+                        first_order_retry: first_order_retry
+                            && controls.reconstruction == Reconstruction::Muscl,
                         before,
                         after,
                         boundary_change: boundary,
@@ -428,6 +446,15 @@ impl RealGasEuler1d {
                 }
                 Err(RealGasFlowError::Cancelled) => return Err(RealGasFlowError::Cancelled),
                 Err(error) => {
+                    // A wave-speed retry does not justify losing smooth-wave
+                    // accuracy. Other stage/source failures can use the more
+                    // dissipative admitted piecewise-constant transport.
+                    if !matches!(
+                        error,
+                        RealGasFlowError::Numerical(Error::CflExceeded { .. })
+                    ) {
+                        first_order_retry = true;
+                    }
                     last = error;
                     dt *= 0.5;
                 }
@@ -469,6 +496,7 @@ fn attempt(
     mesh: &Mesh1d,
     boundaries: RealGasBoundaries,
     boundary_primitive: [Option<Primitive>; 2],
+    reconstruction: Reconstruction,
     dt: f64,
     cfl: f64,
     work: &mut Workspace,
@@ -482,6 +510,9 @@ fn attempt(
         boundaries,
         boundary_primitive,
         &mut work.faces,
+        work.traces
+            .as_deref_mut()
+            .filter(|_| reconstruction == Reconstruction::Muscl),
         cancelled,
     )?;
     cfl_gate(a.signal_rate * dt, cfl)?;
@@ -503,6 +534,9 @@ fn attempt(
         boundaries,
         boundary_primitive,
         &mut work.faces,
+        work.traces
+            .as_deref_mut()
+            .filter(|_| reconstruction == Reconstruction::Muscl),
         cancelled,
     )?;
     cfl_gate(b.signal_rate * dt, cfl)?;
@@ -545,9 +579,21 @@ fn operator(
     boundaries: RealGasBoundaries,
     boundary_primitive: [Option<Primitive>; 2],
     faces: &mut [FaceFlux],
+    mut traces: Option<&mut [reconstruction::Traces]>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Stage, RealGasFlowError> {
     let n = states.len();
+    let limited = match &mut traces {
+        Some(output) => {
+            reconstruction::prepare(gas, states, primitive, mesh, boundaries, output, cancelled)?
+        }
+        None => 0,
+    };
+    let trace = |cell: usize, side: usize| {
+        traces
+            .as_ref()
+            .map_or((states[cell], primitive[cell]), |pairs| pairs[cell][side])
+    };
     let mut fallbacks = 0;
     for face in 0..=n {
         poll(cancelled)?;
@@ -557,11 +603,7 @@ fn operator(
         }
         let (left, right, wall) = if face == 0 || face == n {
             match boundaries {
-                RealGasBoundaries::Periodic => (
-                    (states[n - 1], primitive[n - 1]),
-                    (states[0], primitive[0]),
-                    false,
-                ),
+                RealGasBoundaries::Periodic => (trace(n - 1, 1), trace(0, 0), false),
                 RealGasBoundaries::Ends { left, right } => {
                     let index = if face == 0 { 0 } else { n - 1 };
                     let interior = (states[index], primitive[index]);
@@ -598,11 +640,7 @@ fn operator(
                 }
             }
         } else {
-            (
-                (states[face - 1], primitive[face - 1]),
-                (states[face], primitive[face]),
-                false,
-            )
+            (trace(face - 1, 1), trace(face, 0), false)
         };
         let mut flux = gas.interface(left.0, left.1, right.0, right.1, cancelled)?;
         if wall {
@@ -634,6 +672,6 @@ fn operator(
         gravity_force: 0.0,
         gravity_power: 0.0,
         fallbacks,
-        limited: 0,
+        limited,
     })
 }

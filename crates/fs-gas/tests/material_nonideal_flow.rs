@@ -22,6 +22,8 @@ const DENSE_SOUND_SPEED: f64 = 434.547_071_783_336_5;
 
 #[path = "material_nonideal_flow/forcing.rs"]
 mod forcing;
+#[path = "material_nonideal_flow/reconstruction.rs"]
+mod reconstruction;
 #[path = "material_nonideal_flow/thermal.rs"]
 mod thermal;
 
@@ -430,8 +432,15 @@ fn cancellation_source_refusal_and_boundary_edits_publish_no_partial_field() {
     );
     assert_eq!(flow.boundaries(), RealGasBoundaries::Periodic);
     assert!(
-        flow.step(Time::new(1e-5), StepControl::default(), || false)
-            .is_err()
+        flow.step(
+            Time::new(1e-5),
+            StepControl {
+                cfl: 0.5,
+                ..controls()
+            },
+            || false
+        )
+        .is_err()
     );
     assert_eq!(flow.states(), states);
     assert_eq!(flow.time().value(), 0.0);
