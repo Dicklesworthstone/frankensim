@@ -5237,3 +5237,43 @@ heat or thermal expansion. The next native timestep uses the refreshed law and
 the same branch memory. G2 regressions in
 `tests/cohesive_modal/relaxation/temperature.rs` cover actual continued body
 motion, source/receiver refusal and late cancellation with replay.
+
+## Combined source Kelvin–Maxwell loss on the primary MITC shell
+
+`TensorShellMaterial` accepts the original resolved tensor's explicitly sourced
+Kelvin matrix alongside its Maxwell branches. `TensorShellRelaxation` uses the
+same five-strain constrained owner, original MITC trial fields, positive area
+and thickness quadrature, source rotation and shear-energy correction. A
+viscous thickness-normal constraint contributes its actual additional history;
+it is not condensed independently at each branch or replaced by a modal decay.
+The original equilibrium A/B/D/shear and all inertia checks remain binding.
+
+The complete instantaneous modal viscosity is summed with compensated work
+arithmetic and factored by the shared original-unit passive matrix owner.
+`kelvin_connections(component)` supplies its existing bilateral dashpot
+channels for cold coupled construction. `attach_to_with_kelvin_connections`
+then checks the exact contiguous connection range, every complete signed modal
+column, zero spring/rest extension and original resistance. Constant-loss
+substitutions refuse. The original `attach_to` refuses a nonzero feedthrough
+unless the explicit Kelvin binding is used. Kelvin heat remains in the native
+connection account; Maxwell and viscous-normal relaxation heat remain in the
+native material account. Both use the same existing exact held-force evolution.
+
+Source observations use actual displacement, velocity and complete reconstructed
+history, including the displacement-dependent physical normal strain. Initial
+and staged source checks retain the full original strain domain. A displaced
+body with retained normal viscosity refuses the ambiguous zero-history
+`Unrelaxed` shorthand; fully relaxed initialization and zero-displacement
+unrelaxed initialization keep their exact physical meanings. The caller still
+owns spatial modal signs, degenerate-basis identity and avoiding duplicate
+physical material bindings. Source-band and runtime work/state/energy gates
+remain unchanged; integration-point checks do not certify all spatial or
+between-step peaks.
+
+Focused native regressions compare every modal cross term to direct complex
+six-dimensional source reduction and original spatial quadrature, compare
+combined exact motion with independent continuous equations and separately
+integrated Kelvin/relaxation heat, check full channel admission and retain
+zero-Kelvin Maxwell identity. They exercise the actual material, geometry,
+projection, passive factor and pHS propagation owners; they do not substitute
+for execution of the complete coupled rendering wrapper.

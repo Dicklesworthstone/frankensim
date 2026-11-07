@@ -8,7 +8,8 @@ use fs_matdb::{
 use fs_material::sheet::SheetMatrix;
 use fs_material::state_point::MaterialPropertySelection;
 use fs_material::visco_tensor::source::{
-    TensorBranchProperties, TensorElasticity, TensorPronyProperties,
+    TensorBranchProperties, TensorElasticity, TensorKelvinViscosityProperties,
+    TensorPronyProperties,
 };
 use fs_math::c64::C64;
 use fs_modal::ModePair;
@@ -18,7 +19,17 @@ use fs_plate::shell::mitc::{
 };
 use fs_qty::{Density, Dims, Pressure};
 
+mod kelvin;
+
 fn source(band: (f64, f64), density: f64) -> Arc<ResolvedTensorMaterial> {
+    source_with_kelvin(band, density, None)
+}
+
+fn source_with_kelvin(
+    band: (f64, f64),
+    density: f64,
+    viscosity: Option<[[f64; 6]; 6]>,
+) -> Arc<ResolvedTensorMaterial> {
     let mut claims = ClaimSet::new();
     let mut add = |name: &str, dims: Dims, value: f64| {
         claims
@@ -59,6 +70,19 @@ fn source(band: (f64, f64), density: f64) -> Arc<ResolvedTensorMaterial> {
             names.push(key);
         }
     }
+    let kelvin = viscosity.map(|matrix| {
+        let mut names = Vec::new();
+        for i in 0..6 {
+            for j in i..6 {
+                let key = format!("viscosity-{i}-{j}");
+                add(&key, Dims([-1, 1, -1, 0, 0, 0]), matrix[i][j]);
+                names.push(key);
+            }
+        }
+        TensorKelvinViscosityProperties {
+            viscosity_upper: names.try_into().unwrap(),
+        }
+    });
     let card = MaterialCard::assemble(
         MaterialStateId {
             chemistry: "synthetic".into(),
@@ -70,26 +94,34 @@ fn source(band: (f64, f64), density: f64) -> Arc<ResolvedTensorMaterial> {
         vec![],
     )
     .unwrap();
-    Arc::new(
-        ResolvedTensorMaterial::resolve(
-            &card,
-            &QueryPoint::new()
-                .with("T", 295.0)
-                .unwrap()
-                .with("omega", band.0)
-                .unwrap(),
-            TensorPronyProperties {
-                elasticity: TensorElasticity::Isotropic,
-                strain_limit: "strain_limit".into(),
-                branches: vec![TensorBranchProperties {
-                    stiffness_upper: names.try_into().unwrap(),
-                    relaxation_time: "tau".into(),
-                }],
-            },
-            MaterialPropertySelection::SingleClaimOnly,
-        )
-        .unwrap(),
+    let resolved = ResolvedTensorMaterial::resolve(
+        &card,
+        &QueryPoint::new()
+            .with("T", 295.0)
+            .unwrap()
+            .with("omega", band.0)
+            .unwrap(),
+        TensorPronyProperties {
+            elasticity: TensorElasticity::Isotropic,
+            strain_limit: "strain_limit".into(),
+            branches: vec![TensorBranchProperties {
+                stiffness_upper: names.try_into().unwrap(),
+                relaxation_time: "tau".into(),
+            }],
+        },
+        MaterialPropertySelection::SingleClaimOnly,
     )
+    .unwrap();
+    Arc::new(match kelvin {
+        Some(properties) => resolved
+            .with_kelvin_viscosity(
+                &card,
+                properties,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap(),
+        None => resolved,
+    })
 }
 
 fn facet(source: Arc<ResolvedTensorMaterial>, kappa: f64) -> TensorShellMaterial {
@@ -103,13 +135,20 @@ fn facet(source: Arc<ResolvedTensorMaterial>, kappa: f64) -> TensorShellMaterial
 }
 
 fn fixture(mass: ShellMass) -> (MitcShellModel, Vec<ModePair>, TensorShellMaterial) {
+    fixture_with_source(mass, source((0.0, 1e8), 1000.0))
+}
+
+fn fixture_with_source(
+    mass: ShellMass,
+    source: Arc<ResolvedTensorMaterial>,
+) -> (MitcShellModel, Vec<ModePair>, TensorShellMaterial) {
     let mesh = ShellMesh::new(
         vec![[0.0, 0.0, 0.0], [0.4, 0.0, 0.0], [0.0, 0.3, 0.0]],
         vec![[0, 1, 2]],
     )
     .unwrap();
     let directors = NodalDirectors::new(&mesh, vec![[0.0, 0.0, 1.0]; 3], 0.9).unwrap();
-    let material = facet(source((0.0, 1e8), 1000.0), 0.8);
+    let material = facet(source, 0.8);
     let [h, i1, i2] = material.moments().unwrap();
     let c = 2e6 / (1.0 - 0.25 * 0.25);
     let sheet = |s| SheetMatrix::orthotropic(c * s, c * s, 0.25 * c * s, 8e5 * s).unwrap();

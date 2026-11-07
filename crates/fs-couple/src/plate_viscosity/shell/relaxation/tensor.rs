@@ -5,7 +5,7 @@
 //! history-dependent constraint; branches are never condensed independently.
 
 use super::*;
-use crate::render::schedule::force::coupled::ModalPlaneStressPoint;
+use crate::render::schedule::force::coupled::{ModalConnection, ModalPlaneStressPoint};
 use crate::tensor_material::{PlaneStressPoint, PlaneStressRelaxation, TensorMaterialError};
 use fs_material::visco_tensor::coordinates::{
     RelaxationCoordinateBudget, RelaxationCoordinates, RelaxationMemoryMap,
@@ -67,14 +67,6 @@ impl TensorShellMaterial {
             ));
         }
         let law = source.rotated_law(material_to_facet).map_err(owner)?;
-        if law
-            .kv_pa_s()
-            .is_some_and(|d| d.iter().flatten().any(|v| *v != 0.0))
-        {
-            return Err(invalid(
-                "pure shell Maxwell memory cannot discard source Kelvin viscosity",
-            ));
-        }
         Ok(Self {
             source,
             law,
@@ -149,7 +141,7 @@ impl TensorShellMaterialPoint {
     }
 }
 
-/// Complete source-bound Maxwell channels on the original supported MITC basis.
+/// Complete source-bound Kelvin–Maxwell loss on the original supported MITC basis.
 /// Equilibrium elasticity and inertia are validated against that model and are
 /// counted once. No numerical drilling or fitted modal decay is material heat.
 #[derive(Clone, Debug)]
@@ -158,6 +150,7 @@ pub struct TensorShellRelaxation {
     points: Vec<TensorShellMaterialPoint>,
     modal: ModalShellRelaxation,
     shared: RelaxationCoordinates,
+    viscosity: ModalPlateViscosity,
     equilibrium_omega_squared: Vec<f64>,
     band_rad_s: (f64, f64),
 }
@@ -208,11 +201,21 @@ impl TensorShellRelaxation {
         let states = facets
             .iter()
             .try_fold(0usize, |sum, facet| {
+                // A thickness-normal dashpot retains one additional physical
+                // strain history, even for a source without Maxwell branches.
+                let normal = usize::from(
+                    facet
+                        .law
+                        .kv_pa_s()
+                        .is_some_and(|d| d[2].iter().any(|v| *v != 0.0)),
+                );
                 facet
                     .law
                     .branches()
                     .len()
-                    .checked_mul(84)
+                    .checked_mul(6)
+                    .and_then(|r| r.checked_add(normal))
+                    .and_then(|r| r.checked_mul(14))
                     .and_then(|r| sum.checked_add(r))
             })
             .ok_or_else(|| invalid("tensor shell material history extent overflows"))?;
@@ -223,7 +226,9 @@ impl TensorShellRelaxation {
             + 16 * model.pencil().k.nnz() as u128 * n as u128
             + 17 * model.pencil().free as u128 * (n as u128).pow(2)
             + mesh.nodes.len() as u128 * 6 * n as u128
-            + count as u128 * n as u128 * 256;
+            + count as u128 * n as u128 * 256
+            + count as u128 * (n as u128).pow(2)
+            + 64 * (n as u128).pow(3);
         if setup >= limits.max_projection_terms as u128 {
             return Err(invalid(
                 "tensor shell original geometry and modal pencil exceed projection work",
@@ -254,6 +259,7 @@ impl TensorShellRelaxation {
         let mut rows = Vec::with_capacity(states);
         let mut times = Vec::with_capacity(states);
         let mut points = Vec::with_capacity(count);
+        let mut viscosity = vec![fs_math::dd::Dd::ZERO; n * n];
         let mut band = (0.0_f64, f64::MAX);
         let rule = integration_rule();
         for (e, facet) in facets.iter().enumerate() {
@@ -271,7 +277,7 @@ impl TensorShellRelaxation {
                 gate,
             )
             .map_err(tensor_error)?
-            .relaxation_image(point_work, gate)
+            .viscoelastic_image(point_work, gate)
             .map_err(tensor_error)?;
             validate_section(
                 model,
@@ -335,6 +341,9 @@ impl TensorShellRelaxation {
                         )
                         .map_err(tensor_error)?;
                     let start = rows.len();
+                    for (total, &value) in viscosity.iter_mut().zip(image.feedthrough_viscosity()) {
+                        *total = *total + fs_math::dd::Dd::from_f64(value);
+                    }
                     rows.extend_from_slice(image.coupling_rows());
                     times.extend(
                         image
@@ -382,6 +391,15 @@ impl TensorShellRelaxation {
             }
             other => owner(other),
         })?;
+        // Reuse the original-unit compensated passive-work owner. The full
+        // spatial matrix retains cross-modal loss, including both shears;
+        // no diagonal decay or viscosity sampled at a modal frequency is used.
+        let viscosity = ModalPlateViscosity::from_psd_modal_matrix(
+            viscosity.into_iter().map(|value| value.to_f64()).collect(),
+            n,
+            1.0,
+            gate,
+        )?;
         for point in &mut points {
             poll(gate)?;
             point.memory_map = Some(shared.memory_map(point.memory.clone()).map_err(owner)?);
@@ -394,6 +412,7 @@ impl TensorShellRelaxation {
             points,
             band_rad_s: band,
             shared,
+            viscosity,
             equilibrium_omega_squared,
             modal: ModalShellRelaxation {
                 projected: Vec::new(),
@@ -429,6 +448,19 @@ impl TensorShellRelaxation {
     }
     pub const fn shared_coordinates(&self) -> &RelaxationCoordinates {
         &self.shared
+    }
+    /// Complete instantaneous reduced C [1/s], with its original passive
+    /// channels. Normal-stress relaxation remains in the material histories.
+    pub const fn kelvin_viscosity(&self) -> &ModalPlateViscosity {
+        &self.viscosity
+    }
+
+    /// Include these dashpots in the original coupled system's construction,
+    /// then pass their exact contiguous range to
+    /// [`Self::attach_to_with_kelvin_connections`]. The reference resistance is
+    /// only a channel normalization; the full source matrix is unchanged.
+    pub fn kelvin_connections(&self, component: usize) -> Vec<ModalConnection> {
+        self.viscosity.connections(component)
     }
     /// Original diagonal entries of Phi^T K Phi [1/s²], including the
     /// original numerical elastic regularization, with no material loss added.
@@ -477,7 +509,8 @@ impl TensorShellRelaxation {
     }
 
     /// Existing pHS displacement-only branches. Callers of this low-level
-    /// bridge retain the source-band and accepted-strain admission obligation.
+    /// bridge must also include `kelvin_viscosity()` in their physical
+    /// resistance and retain source-band and accepted-strain admission.
     pub fn branches(
         &self,
         first_mode: usize,
@@ -531,6 +564,33 @@ impl TensorShellRelaxation {
         initial: InitialPlateMemory,
         gate: &CancelGate,
     ) -> Result<CoupledModalSystem, AcousticRealizeError> {
+        if self.viscosity.channel_count() != 0 {
+            return Err(invalid(
+                "tensor shell Kelvin channels require an explicit original connection range",
+            ));
+        }
+        self.attach_to_with_kelvin_connections(system, component, 0..0, initial, gate)
+    }
+
+    /// Bind complete source memory after constructing the system with
+    /// `kelvin_connections(component)`. Verify every original full modal
+    /// column and coefficient before attaching any history, so missing,
+    /// rescaled or unrelated dashpots cannot silently discard source loss.
+    /// Kelvin work remains in the runtime's connection heat account; internal
+    /// normal and Maxwell relaxation use its separate material heat account.
+    ///
+    /// With retained normal viscosity, a nonzero displaced body's zero source
+    /// history is not the transformed image's zero history. Such an unrelaxed
+    /// request refuses; relaxed initialization or a zero displacement is exact.
+    pub fn attach_to_with_kelvin_connections(
+        &self,
+        system: CoupledModalSystem,
+        component: usize,
+        kelvin_connections: Range<usize>,
+        initial: InitialPlateMemory,
+        gate: &CancelGate,
+    ) -> Result<CoupledModalSystem, AcousticRealizeError> {
+        poll(gate)?;
         self.validate_component(
             system
                 .components()
@@ -544,6 +604,48 @@ impl TensorShellRelaxation {
             .iter()
             .map(|m| m.modes().len())
             .sum::<usize>();
+        if kelvin_connections.start > kelvin_connections.end
+            || kelvin_connections.len() != self.viscosity.channel_count()
+            || system
+                .constant_loss_connections()
+                .iter()
+                .any(|anchor| kelvin_connections.contains(&anchor.connection))
+        {
+            return Err(invalid(
+                "tensor shell requires every original Kelvin channel without constant-loss substitution",
+            ));
+        }
+        for (channel, connection) in kelvin_connections.enumerate() {
+            poll(gate)?;
+            let actual = system
+                .connection_column(connection)
+                .ok_or_else(|| invalid("tensor shell Kelvin connection is absent"))?;
+            let law = system
+                .connection_coefficients(connection)
+                .ok_or_else(|| invalid("tensor shell Kelvin law is absent"))?;
+            self.validate_kelvin_channel(
+                channel,
+                start,
+                actual,
+                law.stiffness_n_m,
+                law.damping_n_s_m,
+                law.rest_extension_m,
+            )?;
+        }
+        if initial == InitialPlateMemory::Unrelaxed
+            && self
+                .points
+                .iter()
+                .any(|point| point.image.point().normal_strain_coordinates() != 0)
+            && system.components()[component]
+                .states()
+                .iter()
+                .any(|state| state.displacement_m_sqrt_kg != 0.0)
+        {
+            return Err(invalid(
+                "displaced shell with normal Kelvin history requires relaxed source initialization",
+            ));
+        }
         let memory_start = system.material_memory().len();
         let system = self.modal.attach_to(system, component, initial, gate)?;
         if system.linear_frequency_upper_bound_rad_s() > self.band_rad_s.1 {
@@ -567,6 +669,43 @@ impl TensorShellRelaxation {
         system
             .with_plane_stress_material_points(bindings, gate)
             .map_err(owner)
+    }
+
+    fn validate_kelvin_channel(
+        &self,
+        channel: usize,
+        first_mode: usize,
+        actual: &[f64],
+        stiffness: f64,
+        damping: f64,
+        rest_extension: f64,
+    ) -> Result<(), AcousticRealizeError> {
+        let expected = self
+            .viscosity
+            .channel_shapes()
+            .get(channel)
+            .ok_or_else(|| invalid("unknown tensor shell Kelvin channel"))?;
+        let end = first_mode
+            .checked_add(self.mode_count())
+            .ok_or_else(|| invalid("tensor shell Kelvin mode extent overflows"))?;
+        if end > actual.len()
+            || stiffness != 0.0
+            || rest_extension != 0.0
+            || damping != self.viscosity.reference_resistance_n_s_m()
+            || actual.iter().enumerate().any(|(i, &value)| {
+                value
+                    != if (first_mode..end).contains(&i) {
+                        expected[i - first_mode]
+                    } else {
+                        0.0
+                    }
+            })
+        {
+            return Err(invalid(
+                "tensor shell Kelvin connection must retain its complete original source work",
+            ));
+        }
+        Ok(())
     }
 }
 

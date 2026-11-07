@@ -33,12 +33,15 @@ pub struct ModalPlaneStressPoint {
 }
 
 impl ModalPlaneStressPoint {
-    fn validate(&self, displacement: &[f64], memory: &[f64]) -> Result<(),ModalCouplingError> {
+    fn validate(&self, displacement: &[f64], velocity: &[f64], memory: &[f64]) -> Result<(),ModalCouplingError> {
         let q=displacement.get(self.modes.clone())
             .ok_or_else(||invalid("complete tensor material displacement layout changed"))?;
+        let v=velocity.get(self.modes.clone())
+            .ok_or_else(||invalid("complete tensor material velocity layout changed"))?;
         let z=memory.get(self.memories.clone())
             .ok_or_else(||invalid("complete tensor material history layout changed"))?;
         let q:Vec<_>=q.iter().map(|q|self.strain_scale*q).collect();
+        let v:Vec<_>=v.iter().map(|v|self.strain_scale*v).collect();
         let mut z=match &self.memory_map {
             Some(map)=>map.reconstruct(z)
                 .map_err(|_|invalid("complete tensor material history reconstruction failed"))?,
@@ -48,7 +51,7 @@ impl ModalPlaneStressPoint {
         self.image.strain(&q,&z).map_err(|_|invalid("complete tensor material surface strain exceeds its original source domain"))?;
         // Recompute through the ORIGINAL complete law, including normal history;
         // never substitute zero by definition or admit nonfinite normal traction.
-        self.image.normal_stress_pa(&q,&z)
+        self.image.normal_stress_pa_with_velocity(&q,&v,&z)
             .map_err(|_|invalid("complete tensor material normal traction is unrepresentable"))?;
         Ok(())
     }
@@ -83,7 +86,9 @@ impl CoupledModalSystem {
         }
         let q:Vec<_>=self.models.iter().flat_map(|m|m.states())
             .map(|s|s.displacement_m_sqrt_kg).collect();
-        for point in &points { poll(Some(gate))?; point.validate(&q,&self.material_memory)?; }
+        let v:Vec<_>=self.models.iter().flat_map(|m|m.states())
+            .map(|s|s.velocity_m_sqrt_kg_per_s).collect();
+        for point in &points { poll(Some(gate))?; point.validate(&q,&v,&self.material_memory)?; }
         self.plane_stress_material_points=points;
         Ok(self)
     }
@@ -92,8 +97,10 @@ impl CoupledModalSystem {
         if self.plane_stress_material_points.is_empty() {return Ok(());}
         let q:Vec<_>=self.candidates.iter().flat_map(|m|m.states())
             .map(|s|s.displacement_m_sqrt_kg).collect();
+        let v:Vec<_>=self.candidates.iter().flat_map(|m|m.states())
+            .map(|s|s.velocity_m_sqrt_kg_per_s).collect();
         for point in &self.plane_stress_material_points {
-            poll(gate)?; point.validate(&q,&self.candidate_material_memory)?;
+            poll(gate)?; point.validate(&q,&v,&self.candidate_material_memory)?;
         }
         Ok(())
     }
@@ -350,3 +357,6 @@ fn stored_energy(branches: &[RelaxationBranch], models: &[ModalAcousticTimeModel
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod velocity_tests;
