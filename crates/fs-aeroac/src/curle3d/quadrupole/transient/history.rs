@@ -67,6 +67,9 @@ pub struct PreparedQuadrupoleHistory {
     samples: usize,
     // Source-major nodes. Caller input is sample-major, like native records.
     nodes: Vec<Node>,
+    // Authored endpoint conditions remain distinct from solve roundoff in
+    // reconstructed polynomial coefficients (needed for causal admission).
+    initial_rates_n_m_s: Vec<[f64; 6]>,
     workspace_bytes: usize,
     inverse_timestep_s: Dd,
     sixth: Dd,
@@ -121,6 +124,7 @@ impl PreparedQuadrupoleHistory {
             count
                 .and_then(|n| n.checked_mul(core::mem::size_of::<Node>()))
                 .and_then(|n| n.checked_add(sources.checked_mul(core::mem::size_of::<[f64; 3]>())?))
+                .and_then(|n| n.checked_add(sources.checked_mul(core::mem::size_of::<[f64; 6]>())?))
                 .and_then(|n| {
                     n.checked_add(samples.checked_mul(
                         core::mem::size_of::<Dd>() + core::mem::size_of::<[Dd; 6]>(),
@@ -257,6 +261,7 @@ impl PreparedQuadrupoleHistory {
             clock,
             samples,
             nodes,
+            initial_rates_n_m_s: ends.iter().map(|end| end.initial_rate_n_m_s).collect(),
             workspace_bytes,
             inverse_timestep_s,
             sixth,
@@ -275,6 +280,21 @@ impl PreparedQuadrupoleHistory {
     }
     pub const fn sample_count(&self) -> usize {
         self.samples
+    }
+
+    /// Original authored initial value, rate and integral. The acceleration
+    /// remains that of the reconstructed spline. This preserves exact
+    /// physical onset declarations separately from polynomial-solve roundoff;
+    /// ordinary interpolation and its derivatives remain unchanged.
+    pub fn initial_source(&self, source: usize) -> Result<TransientQuadrupoleSource, AeroacError> {
+        if source >= self.source_count() {
+            return Err(invalid("quadrupole initial source index"));
+        }
+        let mut initial = self.source_at_elapsed(source, Dd::ZERO)?;
+        initial.stress_moment_n_m = self.nodes[source * self.samples].moment;
+        initial.stress_rate_n_m_s = self.initial_rates_n_m_s[source];
+        initial.stress_integral_n_m_s = self.nodes[source * self.samples].integral.map(Dd::to_f64);
+        Ok(initial)
     }
     /// Requested peak preparation payload, including temporary factors/work.
     pub const fn workspace_bytes(&self) -> usize {

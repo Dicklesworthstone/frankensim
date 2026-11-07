@@ -25,11 +25,13 @@ use crate::AeroacError;
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{dd::Dd, det};
 
-mod reflection;
 /// Finite physical stress records with consistent derivatives and integrals.
 pub mod history;
+/// Causal molecular absorption/dispersion of complete transient stress fields.
+pub mod molecular;
 /// Doppler-correct pressure of uniform and accelerating physical stress moments.
 pub mod moving;
+mod reflection;
 
 /// One source's physical symmetric stress history at one retarded time.
 ///

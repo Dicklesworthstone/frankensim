@@ -3119,8 +3119,52 @@ The interpolation is offline and uses the complete supplied record. It does
 not certify source bandwidth, antialiasing, positivity, derivative error or
 turbulence-source validity, and does not invent prehistory, silence, periodic
 continuation or a post-record tail. Its source-clock and interpolation errors
-require independent refinement. The original homogeneous stationary lossless
-propagation scope remains; molecular transient propagation is not supplied.
+require independent refinement. The original history-bound observer retains
+homogeneous stationary lossless propagation; the molecular observer below
+supplies a separate, explicitly initially resting dispersive observation path.
 `tests/quadrupole_history.rs` specifies cubic reproduction with nonzero initial
 integrals, original-clock refinement, full reflected fields, three momentum
 equations, DD epoch translation and coverage/ownership/cancellation admission.
+
+## Causal molecular transient stress propagation
+
+`curle3d::quadrupole::transient::molecular::PreparedMolecularQuadrupoleObserver`
+retains the original `RelaxationState`, full physical stress histories and every
+direct, ideal-wall or wedge path. `RelaxationState::laplace_response` analytically
+continues the ORIGINAL caloric reservoir sum into finite Re(s)>=0; s=-i omega
+matches this exterior owner's exp(-i omega t) convention. Its stable excess
+propagation rate preserves weak loss without subtracting nearly equal
+wavenumbers. No fitted spectrum, effective bulk viscosity or classical shear
+and conduction attenuation is added.
+
+The observer extracts each exact frozen-speed r/c_inf wavefront and prepares
+four bounded radial symbols. They act on the same Q, Qdot, Qddot and causal
+integral used by the native full pressure/vector-velocity kernel, including
+transverse near fields, tensor image transformations and signed interference.
+Instantaneous p*u is formed after coherent path/source sums. The empty-reservoir
+limit uses the complete original lossless field without FFT propagation error.
+
+An initially resting call explicitly declares zero prehistory and unexcited
+exterior/material state. Nonzero authored initial Q, Qdot or integral refuses;
+a finite initial Qddot jump is admitted without a smooth-start order claim.
+Native recorded histories retain authored endpoint data separately from
+spline-solve roundoff. Geometry, source order, clock and the full finite output
+horizon are checked; later source and received tails remain unspecified.
+
+BDF2 convolution quadrature samples the analytic material response at
+right-half-plane Laplace points. Contour inversion prepares causal weights,
+then a separate zero-padded FFT computes linear convolution. The first N
+weights suffice for the first N outputs without truncating a physical tail.
+Time-step error, contour alias/roundoff, original interpolation/bandwidth and
+cell-size errors require separate refinement. With transform length L, work is
+O(paths*L*log L + paths*N); numerical storage/work and cancellation are explicitly
+bounded. This is a finite-prefix observation cache, not a streaming predictor,
+coupled radiation reaction or automatic error certificate.
+
+Six focused regression groups specify independently eliminated molecular Green
+derivatives and harmonic signs, lossless full-field/large-clock parity, BDF2
+refinement against independent Bromwich inversion, coherent ideal boundaries
+and cancellation, original recorded binding and no circular future wrap, and
+explicit onset, ownership, clock, budget and cancellation refusals. Selective
+formatter/diff checks and a separate developer numerical oracle check passed;
+native Rust execution was unavailable.
