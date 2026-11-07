@@ -10,7 +10,7 @@ fn export_tolerances() -> MaterialRemovalTolerances {
 
 // Authored uniform-cell surrogate for this synthetic one-loaded-cell fixture.
 // The actual normal recession remains in the native, unchanged contact history.
-fn export_geometry(
+pub(super) fn export_geometry(
     contact: &PlasticSlidingHeatContact<'_>,
     thermal: &DepositionSimulation<'_>,
 ) -> ([CellGeometry; 2], [ContactPatchUpdate; 1]) {

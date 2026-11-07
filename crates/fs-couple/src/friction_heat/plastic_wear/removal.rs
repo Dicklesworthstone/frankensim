@@ -130,10 +130,11 @@ impl<'a> PlasticSlidingHeatContact<'a> {
             tolerances,
             || checkpoint(cx),
         )?;
-        let route = FrictionHeatRoute::from_link(
+        let route = FrictionHeatRoute::from_link_with_resistance(
             &thermal,
             self.route.link_id(),
             conductivity_w_m_k,
+            self.route.area_resistance_m2_k_w(),
         )?;
         if route.cells() != cells
             || (route.contact_area_m2() - area).abs()

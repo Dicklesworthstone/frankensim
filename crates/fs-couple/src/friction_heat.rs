@@ -1,16 +1,18 @@
 //! General friction work coupled to the existing finite enthalpy network.
 //!
 //! An existing contact patch becomes a zero-capacity, common-temperature
-//! interface. Its two conductances are k*A/d from the ORIGINAL cell geometry
-//! and endpoint material conductivities. The original direct link is suppressed
-//! only in the trial, retaining its surface coverage; otherwise conduction would
+//! interface. Its two conductances use the ORIGINAL cell geometry, endpoint
+//! material conductivities and explicitly supplied contact resistances. The
+//! original direct link is suppressed only in the trial, retaining its surface
+//! coverage; otherwise conduction would
 //! be counted twice. Signed body heat includes ordinary hot-to-cold exchange.
 //! Only the sum equals exported frictional work. No heat fraction or store is
 //! introduced, and interface temperature is a solved coordinate, not an average.
 //!
 //! This is a cell-centred, orthogonal finite-volume discretization: cell
 //! centrelines run between opposite face centres of uniform prismatic cells.
-//! The contact is their shared face and has negligible interfacial resistance.
+//! The contact is their shared face. The default has zero interfacial resistance;
+//! a finite resistance split locates the massless heat-generation plane.
 //! Spatial and temporal refinement remain necessary. Moving footprints, thermal
 //! expansion, finite third-body storage and a flash-temperature approximation
 //! are not supplied by this module. The source owns any such constitutive work.
@@ -21,7 +23,7 @@ use fs_thermal::enthalpy::backward_euler::{
 };
 use fs_thermal::enthalpy::{
     CellGeometry, CellId, ContactPatch, DepositionError, DepositionSimulation, EnergyAudit,
-    MaterialId, series_conductance_w_k,
+    MaterialId, series_contact_conductance_w_k,
 };
 use fs_tribo::{TangentialLaw, TangentialStep, TangentialStepInput, TriboError};
 use std::cell::RefCell;
@@ -96,6 +98,7 @@ pub struct FrictionHeatRoute {
     material: [MaterialId; 2],
     mass_kg: [f64; 2],
     distances_m: [f64; 2],
+    area_resistance_m2_k_w: [f64; 2],
 }
 impl FrictionHeatRoute {
     /// Bind an existing perfect-contact link between adjoining uniform cells.
@@ -111,6 +114,21 @@ impl FrictionHeatRoute {
         link_id: u64,
         reference_k_w_m_k: [f64; 2],
     ) -> Result<Self, DepositionError> {
+        Self::from_link_with_resistance(thermal, link_id, reference_k_w_m_k, [0.0; 2])
+    }
+
+    /// Bind finite area-specific resistances [m² K/W] on either side of the
+    /// massless friction heat-generation plane. Their sum must be the original
+    /// direct link's contact resistance. The split is an explicit physical
+    /// assumption about that plane, not an arbitrary prescribed heat fraction.
+    /// Source identity and pressure/temperature evolution belong to the caller.
+    pub fn from_link_with_resistance(
+        thermal: &DepositionSimulation<'_>,
+        link_id: u64,
+        reference_k_w_m_k: [f64; 2],
+        area_resistance_m2_k_w: [f64; 2],
+    ) -> Result<Self, DepositionError> {
+        let resistance = Self::total_resistance(area_resistance_m2_k_w)?;
         let patch = thermal
             .contact_patch(link_id)
             .ok_or(invalid("inactive friction heat contact"))?;
@@ -172,7 +190,12 @@ impl FrictionHeatRoute {
                 "friction heat requires opposing orthogonal cell normals",
             ));
         }
-        let expected = series_conductance_w_k(patch.link.area_m2, distances_m, reference_k_w_m_k)?;
+        let expected = series_contact_conductance_w_k(
+            patch.link.area_m2,
+            distances_m,
+            reference_k_w_m_k,
+            resistance,
+        )?;
         if (patch.link.conductance_w_k - expected).abs()
             > 64.0 * f64::EPSILON * expected.abs().max(patch.link.conductance_w_k.abs())
         {
@@ -186,6 +209,7 @@ impl FrictionHeatRoute {
             material: [cells[0].material_id, cells[1].material_id],
             mass_kg: [cells[0].mass_kg, cells[1].mass_kg],
             distances_m,
+            area_resistance_m2_k_w,
         };
         route.conductances(reference_k_w_m_k)?;
         Ok(route)
@@ -205,6 +229,18 @@ impl FrictionHeatRoute {
     /// Actual per-side centre-to-interface distances [m].
     pub const fn distances_m(&self) -> [f64; 2] {
         self.distances_m
+    }
+    /// Accepted contact resistance from the heat-generation plane to each body.
+    pub const fn area_resistance_m2_k_w(&self) -> [f64; 2] {
+        self.area_resistance_m2_k_w
+    }
+    fn total_resistance(resistance: [f64; 2]) -> Result<f64, DepositionError> {
+        if resistance.iter().any(|r| !r.is_finite() || *r < 0.0) {
+            return Err(invalid(
+                "contact resistances must be finite and nonnegative",
+            ));
+        }
+        finite(resistance[0] + resistance[1])
     }
     fn validate(&self, thermal: &DepositionSimulation<'_>) -> Result<(), DepositionError> {
         if thermal.contact_patch(self.patch.link.id) != Some(self.patch) {
@@ -236,7 +272,19 @@ impl FrictionHeatRoute {
                     "friction heat conductivity must be finite nonnegative material data",
                 ));
             }
-            result[i] = finite(self.patch.link.area_m2 * (conductivity[i] / self.distances_m[i]))?;
+            result[i] = if self.area_resistance_m2_k_w[i] == 0.0 {
+                // Preserve the original perfect-contact arithmetic exactly.
+                finite(self.patch.link.area_m2 * (conductivity[i] / self.distances_m[i]))?
+            } else if conductivity[i] == 0.0 {
+                0.0
+            } else {
+                let bulk = finite(self.distances_m[i] / conductivity[i])?;
+                let total = finite(bulk + self.area_resistance_m2_k_w[i])?;
+                if bulk <= 0.0 || total <= 0.0 {
+                    return Err(DepositionError::Arithmetic);
+                }
+                finite(self.patch.link.area_m2 / total)?
+            };
             if conductivity[i] > 0.0 && result[i] == 0.0 {
                 return Err(DepositionError::Arithmetic);
             }

@@ -41,6 +41,10 @@ pub mod removal;
 /// Adaptive time refinement for prescribed actual sliding velocities.
 pub mod adaptive;
 
+/// Source-resolved finite thermal resistance at actual pressure and temperature.
+pub mod resistance;
+use resistance::{PlasticThermalResistance, PlasticThermalResistanceSample};
+
 use core::convert::Infallible;
 use std::cell::Cell;
 
@@ -186,6 +190,7 @@ pub enum PlasticSlidingHeatError<E = Infallible> {
     Invalid(&'static str),
     Contact(SourcePlasticSlidingError),
     Phase(PhaseStateError),
+    ResistanceSource(fs_material::state_point::MaterialStatePointError),
     Thermal(DepositionError),
     Source(E),
     Newton(NewtonError),
@@ -288,6 +293,7 @@ pub struct PlasticSlidingHeatContact<'a> {
     footprint: PlasticSlidingHeatFootprint,
     limits: PlasticSlidingHeatLimits,
     plastic_work_heat: PlasticWorkHeatPartition,
+    resistance: Option<PlasticThermalResistance>,
     time_s: f64,
 }
 
@@ -298,6 +304,8 @@ pub struct PlasticSlidingHeatReport<P> {
     pub source: P,
     /// Exact original material conductivity supplied at the accepted thermal root.
     pub conductivity_w_m_k: [f64; 2],
+    /// Exact endpoint resistance query, when sourced finite contact is configured.
+    pub contact_resistance: Option<PlasticThermalResistanceSample>,
     pub previous_contact_area_m2: f64,
     /// Native temperature-refreshed pressure area before this interval's wear.
     pub refreshed_contact_area_m2: f64,
@@ -373,6 +381,7 @@ struct Staged<P> {
     prepared: PreparedMechanics,
     payload: P,
     conductivity_w_m_k: [f64; 2],
+    contact_resistance: Option<PlasticThermalResistanceSample>,
 }
 
 fn checkpoint(cx: &Cx<'_>) -> Result<(), DepositionError> {
@@ -589,6 +598,7 @@ impl<'a> PlasticSlidingHeatContact<'a> {
             footprint,
             limits,
             plastic_work_heat: PlasticWorkHeatPartition::default(),
+            resistance: None,
             time_s: thermal.time_s(),
         };
         bound.admit_footprint_support()?;
@@ -747,7 +757,7 @@ impl<'a> PlasticSlidingHeatContact<'a> {
                                   interface_temperature,
                                   prepared: PreparedMechanics|
                  -> Result<
-                    FrictionHeatInput<Staged<P>>,
+                    (FrictionHeatInput<Staged<P>>, [f64; 2]),
                     PlasticSlidingHeatError<E>,
                 > {
                     let PlasticSlidingHeatSource {
@@ -755,6 +765,22 @@ impl<'a> PlasticSlidingHeatContact<'a> {
                         transport,
                     } = resolve(endpoint, interface_temperature)
                         .map_err(PlasticSlidingHeatError::Source)?;
+                    let contact_resistance = self
+                        .resistance
+                        .as_ref()
+                        .map(|resistance| {
+                            resistance.sample(
+                                &prepared.source,
+                                prepared.mechanics.candidate(),
+                                interface_temperature,
+                                cx,
+                            )
+                        })
+                        .transpose()?;
+                    let resistance = contact_resistance.as_ref().map_or(
+                        self.route.area_resistance_m2_k_w(),
+                        |sample| sample.area_resistance_m2_k_w,
+                    );
                     let StepCoefficients {
                         mut sources_w,
                         conductances_w_k,
@@ -771,29 +797,36 @@ impl<'a> PlasticSlidingHeatContact<'a> {
                             *source_w = finite(*source_w + power_w)?;
                         }
                     }
-                    Ok(FrictionHeatInput {
-                        // Plastic heat enters its declared bulk receiver above;
-                        // the interface receives friction once. Parameter work
-                        // is never silently included in either heat source.
-                        dissipated_j: prepared.mechanics.frictional_work_j(),
-                        conductivity_w_m_k,
-                        transport: StepCoefficients {
-                            sources_w,
-                            conductances_w_k,
-                            payload: Staged {
-                                prepared,
-                                payload,
-                                conductivity_w_m_k,
+                    Ok((
+                        FrictionHeatInput {
+                            // Plastic heat enters its declared bulk receiver above;
+                            // the interface receives friction once. Parameter work
+                            // is never silently included in either heat source.
+                            dissipated_j: prepared.mechanics.frictional_work_j(),
+                            conductivity_w_m_k,
+                            transport: StepCoefficients {
+                                sources_w,
+                                conductances_w_k,
+                                payload: Staged {
+                                    prepared,
+                                    payload,
+                                    conductivity_w_m_k,
+                                    contact_resistance,
+                                },
                             },
                         },
-                    })
+                        resistance,
+                    ))
                 };
-                if self.footprint == PlasticSlidingHeatFootprint::EvolvingActiveCells {
-                    step.evaluate_with_area(
+                if self.footprint == PlasticSlidingHeatFootprint::EvolvingActiveCells
+                    || self.resistance.is_some()
+                {
+                    step.evaluate_with_area_and_resistance(
                         &x[..cells],
                         interface_temperature,
                         prepare,
                         heat_input,
+                        false,
                         check,
                     )
                     .map(|area_trial| {
@@ -806,7 +839,7 @@ impl<'a> PlasticSlidingHeatContact<'a> {
                         interface_temperature,
                         |endpoint, temperature| {
                             let (_, prepared) = prepare(endpoint, temperature)?;
-                            heat_input(endpoint, temperature, prepared)
+                            heat_input(endpoint, temperature, prepared).map(|(input, _)| input)
                         },
                         check,
                     )
@@ -845,6 +878,7 @@ impl<'a> PlasticSlidingHeatContact<'a> {
             prepared,
             payload,
             conductivity_w_m_k,
+            contact_resistance,
         } = staged;
         let PreparedMechanics {
             source,
@@ -896,6 +930,7 @@ impl<'a> PlasticSlidingHeatContact<'a> {
             footprint: self.footprint,
             limits: self.limits,
             plastic_work_heat: self.plastic_work_heat,
+            resistance: self.resistance.clone(),
             time_s: target_s,
         };
         check()?;
@@ -907,6 +942,7 @@ impl<'a> PlasticSlidingHeatContact<'a> {
                 heat,
                 source: payload,
                 conductivity_w_m_k,
+                contact_resistance,
                 previous_contact_area_m2,
                 refreshed_contact_area_m2,
                 endpoint_contact_area_m2,

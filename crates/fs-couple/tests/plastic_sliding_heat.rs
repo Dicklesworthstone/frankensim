@@ -11,6 +11,9 @@ mod wear_export;
 #[path = "plastic_sliding_heat/adaptive.rs"]
 mod adaptive;
 
+#[path = "plastic_sliding_heat/resistance.rs"]
+mod resistance;
+
 #[path = "../../fs-contact/tests/source_point/common.rs"]
 mod source_common;
 
@@ -184,6 +187,10 @@ struct Fixture {
 }
 
 fn fixture(cx: &Cx<'_>) -> Fixture {
+    fixture_with_extra_claim(cx, None)
+}
+
+fn fixture_with_extra_claim(cx: &Cx<'_>, extra: Option<PropertyClaim>) -> Fixture {
     let [(a, ha), (b, hb)] = [material("heat-body-A", 0), material("heat-body-B", 1)];
     let cards = [a, b];
     let hardness_keys = [ha, hb];
@@ -221,6 +228,9 @@ fn fixture(cx: &Cx<'_>) -> Fixture {
         ),
     ] {
         claims.insert_claim(claim(key, values)).unwrap();
+    }
+    if let Some(extra) = extra {
+        claims.insert_claim(extra).unwrap();
     }
     let card = InterfaceSystemCard::assemble(
         old.surface_a().clone(),
@@ -325,6 +335,14 @@ fn fixture(cx: &Cx<'_>) -> Fixture {
 }
 
 fn network(curves: &[ResolvedHeatCapacityCurve; 2], initial_k: f64) -> DepositionSimulation<'_> {
+    network_with_resistance(curves, initial_k, 0.0)
+}
+
+fn network_with_resistance(
+    curves: &[ResolvedHeatCapacityCurve; 2],
+    initial_k: f64,
+    area_resistance_m2_k_w: f64,
+) -> DepositionSimulation<'_> {
     let mut events = Vec::new();
     for side in 0..2 {
         let (start, end) = if side == 0 {
@@ -366,8 +384,13 @@ fn network(curves: &[ResolvedHeatCapacityCurve; 2], initial_k: f64) -> Depositio
             a: CELLS[0],
             b: CELLS[1],
             area_m2: AREA,
-            conductance_w_k: series_conductance_w_k(AREA, [0.5 * LENGTH; 2], [CONDUCTIVITY; 2])
-                .unwrap(),
+            conductance_w_k: series_contact_conductance_w_k(
+                AREA,
+                [0.5 * LENGTH; 2],
+                [CONDUCTIVITY; 2],
+                area_resistance_m2_k_w,
+            )
+            .unwrap(),
         }),
     });
     DepositionSimulation::new(

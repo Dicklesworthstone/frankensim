@@ -28,11 +28,22 @@ impl FrictionHeatRoute {
         Ok(patch)
     }
 
-    fn at_area(&self, area_m2: f64, conductivity_w_m_k: [f64; 2]) -> Result<Self, DepositionError> {
+    fn at_area_with_resistance(
+        &self,
+        area_m2: f64,
+        conductivity_w_m_k: [f64; 2],
+        area_resistance_m2_k_w: [f64; 2],
+    ) -> Result<Self, DepositionError> {
+        let resistance = Self::total_resistance(area_resistance_m2_k_w)?;
         let mut next = self.clone();
         next.patch = self.patch_at_area(area_m2)?;
-        next.patch.link.conductance_w_k =
-            series_conductance_w_k(area_m2, self.distances_m, conductivity_w_m_k)?;
+        next.area_resistance_m2_k_w = area_resistance_m2_k_w;
+        next.patch.link.conductance_w_k = series_contact_conductance_w_k(
+            area_m2,
+            self.distances_m,
+            conductivity_w_m_k,
+            resistance,
+        )?;
         next.conductances(conductivity_w_m_k)?;
         Ok(next)
     }
@@ -68,7 +79,10 @@ impl<'s, 'm> FrictionHeatStep<'s, 'm> {
             energy_increments_j,
             interface_temperature_k,
             prepare,
-            resolve,
+            |state, temperature, staged| {
+                resolve(state, temperature, staged)
+                    .map(|input| (input, self.route.area_resistance_m2_k_w))
+            },
             false,
             checkpoint,
         )
@@ -88,8 +102,40 @@ impl<'s, 'm> FrictionHeatStep<'s, 'm> {
             energy_increments_j,
             interface_temperature_k,
             prepare,
-            resolve,
+            |state, temperature, staged| {
+                resolve(state, temperature, staged)
+                    .map(|input| (input, self.route.area_resistance_m2_k_w))
+            },
             true,
+            checkpoint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    /// Evaluate actual area and two source-resolved contact resistances together.
+    /// The callback returns resistance from the massless heat-generation plane
+    /// to each original body [m² K/W]. The same native cell/interface residuals
+    /// and acceptance gates own all heat. Adopt the returned route and thermal
+    /// state together; finite resistance is retained in the accepted direct link.
+    pub fn evaluate_with_area_and_resistance<A, P, E: From<DepositionError>>(
+        &self,
+        energy_increments_j: &[f64],
+        interface_temperature_k: f64,
+        prepare: impl FnOnce(&DepositionSimulation<'m>, f64) -> Result<(f64, A), E>,
+        resolve: impl FnOnce(
+            &DepositionSimulation<'m>,
+            f64,
+            A,
+        ) -> Result<(FrictionHeatInput<P>, [f64; 2]), E>,
+        with_entropy: bool,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<FrictionHeatAreaTrial<'m, P>, E> {
+        self.evaluate_area_option(
+            energy_increments_j,
+            interface_temperature_k,
+            prepare,
+            resolve,
+            with_entropy,
             checkpoint,
         )
     }
@@ -100,7 +146,11 @@ impl<'s, 'm> FrictionHeatStep<'s, 'm> {
         energy_increments_j: &[f64],
         interface_temperature_k: f64,
         prepare: impl FnOnce(&DepositionSimulation<'m>, f64) -> Result<(f64, A), E>,
-        resolve: impl FnOnce(&DepositionSimulation<'m>, f64, A) -> Result<FrictionHeatInput<P>, E>,
+        resolve: impl FnOnce(
+            &DepositionSimulation<'m>,
+            f64,
+            A,
+        ) -> Result<(FrictionHeatInput<P>, [f64; 2]), E>,
         with_entropy: bool,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<FrictionHeatAreaTrial<'m, P>, E> {
@@ -121,8 +171,8 @@ impl<'s, 'm> FrictionHeatStep<'s, 'm> {
                 expected: Some(self.route.patch),
                 replacement: Some(provisional),
             }])?;
-            let input = resolve(endpoint.thermal(), interface_temperature_k, staged)?;
-            let route = self.route.at_area(area_m2, input.conductivity_w_m_k)?;
+            let (input, resistance) = resolve(endpoint.thermal(), interface_temperature_k, staged)?;
+            let route = self.route.at_area_with_resistance(area_m2, input.conductivity_w_m_k, resistance)?;
             endpoint.replace_contact_patches(&[ContactPatchUpdate {
                 id: self.route.link_id(),
                 expected: Some(provisional),

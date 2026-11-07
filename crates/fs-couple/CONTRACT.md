@@ -980,6 +980,36 @@ exercise thermal-softening recruitment followed by wear-induced opening, actual
 friction/volume/heat accounts, original irreversible histories, incomplete face
 support and late source refusal using independent two-cell elastic/heat references.
 
+## Pressure-dependent resistance in hardness-coupled friction heat
+
+`FrictionHeatRoute::from_link_with_resistance` admits two finite nonnegative
+area-specific resistances around the existing massless heat-generation plane.
+Each thermal leg is `A / (d_i/k_i + R_i)`; the accepted direct link retains the
+same series sum `R_A + R_B`. The original direct path is suppressed once during
+the native heat solve. Zero resistance preserves the original half-cell
+arithmetic. The declared resistance split locates the generation plane; it does
+not prescribe the resulting heat fraction or add an interface heat store.
+
+`PlasticSlidingHeatContact::with_sourced_contact_resistance` pins the canonical
+thermal-resistance claim from the original ordered interface, original fixed
+conditions and explicitly typed static-pressure axis. Every thermal trial uses
+the solved interface temperature and mean pressure over the actual positive-
+pressure cells of the worn native endpoint. Equal native cell areas make this
+mean exactly the resultant/loaded-area convention, without a nominal-area or
+pressure/hardness area substitution. Sources calibrated to different pressure
+or temperature conventions are outside this reduced model.
+
+The same native cell-energy and massless-interface residuals own all transfers.
+Accepted reports retain the actual resistance query and split; the successor
+thermal patch and route retain its series conductance. Adaptive continuation and
+actual material export preserve this resistance/source checkpoint. Claim support,
+identity, geometry or nonlinear refusal publishes no partial physical state.
+The model still has two uniform bulk receivers, beginning-pressure sliding/wear,
+endpoint heat coefficients and no resolved lateral constriction or third-body
+storage. Physical time/grid refinement remains necessary. Focused regressions
+cover an independent asymmetric quadratic heat oracle, actual worn pressure,
+export/continuation, exact zero-resistance replay and late source refusal.
+
 ## Runtime controls through pressure observation
 
 `PressureRenderer` admits and applies batches of the existing `ControlDelta`
