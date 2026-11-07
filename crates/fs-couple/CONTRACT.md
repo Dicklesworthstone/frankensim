@@ -3592,6 +3592,33 @@ nonreciprocal loads, DC work and power-conjugate unit changes, plus admission
 and cancellation. Rust syntax/formatting were checked; native execution remains
 unverified in the current dependency/resource environment.
 
+## Exact distributed viscothermal memory
+
+`WideTubeLoss::new_with_sampling` and
+`with_regional_viscothermal_sections_options` explicitly select exact viscous
+and thermal relaxation through `ViscothermalTimeOptions`. The original gas
+transport coefficients, eight-arm Foster spectrum, wide-tube applicability and
+spatial splitting remain unchanged. Both generated series impedance and dual
+thermal admittance carry the same rule into the original acoustic network.
+Exact viscous branches use held flow/mean pressure; exact thermal branches use
+held pressure/mean flow. Their native owners integrate independent positive
+resistor heat and retain the same wave-plus-material work balance.
+
+The 5% complex/real-loss fit gate and 0.03 section-scattering gate use the actual
+selected sampled port transfer, conjugated to the duct frequency convention.
+They retain the same analogue target and can refuse an unresolved exact clock.
+Integer and finite-band fractional propagation remain independent explicit
+choices; original lengths, section gases, allpass phase and every delay enter
+the cold scattering check. Existing constructors retain midpoint defaults.
+`FlueVoice::from_network_with_time_options` carries the selection through the
+original jet and optional sourced walls, while `TwoSidedAperture::with_time_options`
+selects each original reed tract independently without replacing its mechanics.
+Native synthetic tests compare generated load responses, actual integer and
+fractional network transmission, independent storage/work, geometry, default
+compatibility and existing refusals. This remains a first-order wide-boundary-
+layer model, not all-shear Bessel physics or measured instrument qualification.
+
+
 ## Exact source-bound Maxwell wall memory
 
 `WallRelaxation::with_network_sampling(ExactHeldFlow)` carries an explicit time

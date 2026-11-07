@@ -35,8 +35,8 @@ use super::paired::{BladePropagator, PairedAperture, PairedTrial};
 use super::modal::{ModalAperture, ModalApertureFrame};
 use super::modal::pressure::MaterialPressureFrame;
 use super::radiation::environment::multiport::MimoEnvironment;
-use super::viscothermal::{ViscothermalSection, ViscothermalSectionSpec,
-    with_regional_viscothermal_sections, with_regional_fractional_viscothermal_sections};
+use super::viscothermal::{ViscothermalSection, ViscothermalSectionSpec, ViscothermalTimeOptions,
+    with_regional_viscothermal_sections_options};
 use crate::acoustic_realize::AcousticRealizeError;
 use super::slit_channel::FixedChannel;
 use supply::SupplyChannelFrame;
@@ -369,8 +369,31 @@ impl TwoSidedAperture {
         Self::build(valve, sources, limits, gate, Some(policies), None)
     }
 
+    /// Select viscous/thermal memory and propagation independently on both
+    /// original acoustic sides. Exact branches use the shared mean-pressure/
+    /// mean-flow port; the same sampled response and full valve/network work
+    /// gates apply. Entries are ordered [upstream, downstream]. The supplied
+    /// valve retains all original material, contact and initial state.
+    pub fn with_time_options(valve: LoadedAperture, sources: [ApertureDuctSpec; 2],
+        limits: TwoSidedLimits, options: [ViscothermalTimeOptions; 2], gate: &CancelGate)
+        -> Result<Self, AcousticRealizeError>
+    {
+        Self::build_with_time_options(valve, sources, limits, gate, options, None)
+    }
+
     fn build(valve: LoadedAperture, sources: [ApertureDuctSpec; 2],
         limits: TwoSidedLimits, gate: &CancelGate, policies: Option<[FractionalTubePolicy; 2]>,
+        supply_channel: Option<FixedChannel>)
+        -> Result<Self, AcousticRealizeError>
+    {
+        let options = std::array::from_fn(|side| ViscothermalTimeOptions {
+            fractional: policies.map(|p| p[side]), ..Default::default()
+        });
+        Self::build_with_time_options(valve, sources, limits, gate, options, supply_channel)
+    }
+
+    fn build_with_time_options(valve: LoadedAperture, sources: [ApertureDuctSpec; 2],
+        limits: TwoSidedLimits, gate: &CancelGate, options: [ViscothermalTimeOptions; 2],
         supply_channel: Option<FixedChannel>)
         -> Result<Self, AcousticRealizeError>
     {
@@ -399,14 +422,11 @@ impl TwoSidedAperture {
             valve.install_supply_inertance(load.inertance_pa_s_m3)?;
             supply::admit_parasitic_root(&valve, load.inertance_pa_s_m3)?;
         }
-        let prepare =|source: ApertureDuctSpec, policy: Option<FractionalTubePolicy>| -> Result<DuctSide, AcousticRealizeError> {
+        let prepare =|source: ApertureDuctSpec, options: ViscothermalTimeOptions| -> Result<DuctSide, AcousticRealizeError> {
             poll(gate)?;
-            let (graph, gases, losses) = match policy {
-                Some(policy) => with_regional_fractional_viscothermal_sections(
-                    source.graph.clone(), source.gases.clone(), dt, &source.viscothermal, policy, gate),
-                None => with_regional_viscothermal_sections(
-                    source.graph.clone(), source.gases.clone(), dt, &source.viscothermal, gate),
-            }?;
+            let policy = options.fractional;
+            let (graph, gases, losses) = with_regional_viscothermal_sections_options(
+                source.graph.clone(), source.gases.clone(), dt, &source.viscothermal, options, gate)?;
             let (network, represented, fractional) = if let Some(policy) = policy {
                 let (network, represented, details) = graph.realize_fractional_waveguide(&gases, dt, policy, gate)?;
                 (network, represented, Some((policy, details)))
@@ -418,8 +438,8 @@ impl TwoSidedAperture {
                 mimo_environment: None, boundaries: None, opening_losses: Vec::new() })
         };
         let [up, down] = sources;
-        let model = Self { valve, sides: [prepare(up, policies.map(|p|p[0]))?,
-            prepare(down, policies.map(|p|p[1]))?], limits, material_ducts: [None, None], supply_channel,
+        let model = Self { valve, sides: [prepare(up, options[0])?,
+            prepare(down, options[1])?], limits, material_ducts: [None, None], supply_channel,
             spatial_pressure_work_j: [0.0; 2] };
         // A lowering must preserve the exact boundary used in the mechanical solve.
         let actual_z = model.sides.iter().map(|s| s.network.inlet_impedance_pa_s_m3()).sum::<f64>();

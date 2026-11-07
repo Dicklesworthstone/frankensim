@@ -6,13 +6,14 @@
 //! This is the same wide-boundary-layer model as fs-duct, NOT an all-shear
 //! Bessel or nonlinear gas model. Both viscous and thermal shear must be >=10.
 //! fs-phs owns positive Foster identification; fs-vfit owns every retained
-//! impedance/admittance state and its midpoint pressure/flow work. No new time
-//! integrator, attenuation multiplier, fitted audio gain or delayed force.
+//! impedance/admittance state and its power-conjugate pressure/flow work. The
+//! explicit exact memory selection uses that owner's held-input mean output.
+//! No attenuation multiplier, fitted audio gain or delayed force is introduced.
 //!
 //! A physical cell is P/4--Z/2--P/4--Y--P/4--Z/2--P/4. Integer propagation
 //! intervals partition the ORIGINAL section transit exactly; no extra delay is
 //! introduced by the three instantaneous load nodes. Cold response checks use
-//! the actual integer intervals and bilinear loads, not their analogue ideal.
+//! the actual integer intervals and selected sampled loads, not their analogue ideal.
 //! The explicitly selected fractional image instead partitions ORIGINAL physical
 //! lengths and uses the same allpass response as execution in that cold check.
 //! On that image, material/gas loss coefficients use original physical lengths.
@@ -20,13 +21,15 @@
 use super::network::{NetworkNode, TubeNetworkSpec, TubeSection};
 use super::fractional::{FractionalSection, FractionalTubePolicy};
 mod partition;
+#[cfg(test)]
+mod exact_tests;
 use partition::FractionalPartition;
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_exec::CancelGate;
 use fs_material::gas::GasState;
 use fs_math::{c64::C64, det};
 use fs_vfit::impedance::SeriesImpedanceSpec;
-use fs_vfit::relaxation::{RelaxationImpedanceSpec, RelaxationTerm};
+use fs_vfit::relaxation::{RelaxationImpedanceSpec, RelaxationSampling, RelaxationTerm, MAX_RELAXATION_BRANCHES};
 use fs_vfit::waveguide::network::admittance::{AdmittanceTerm, RelaxationAdmittanceSpec};
 
 /// Explicit physical section and numerical resolution; unselected sections stay
@@ -41,6 +44,18 @@ pub struct ViscothermalSectionSpec {
     pub minimum_frequency_hz: f64,
     /// High edge [Hz], strictly above the low edge; not an output low-pass.
     pub maximum_frequency_hz: f64,
+}
+
+/// Independent time choices for the same regional distributed-loss lowering.
+/// Defaults retain integer propagation and the original midpoint memories.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ViscothermalTimeOptions {
+    /// Time representation of both viscous impedance and thermal admittance.
+    /// ExactHeldFlow on the dual thermal owner means held pressure/mean flow.
+    pub sampling: RelaxationSampling,
+    /// None retains integer transit; Some retains the declared physical lengths
+    /// and existing finite-band allpass phase admission.
+    pub fractional: Option<FractionalTubePolicy>,
 }
 
 /// Physical geometry/gas plus the existing owner's checked eight-arm spectrum.
@@ -60,6 +75,7 @@ pub struct WideTubeLoss {
     terms: Vec<(f64, f64)>,
     complex_error: f64,
     resistance_error: f64,
+    sampling: RelaxationSampling,
 }
 
 /// Mapping and independently checked discretization of ONE supplied section.
@@ -103,7 +119,7 @@ fn wave_error(e: fs_vfit::waveguide::WaveguideError) -> AcousticRealizeError {
 impl WideTubeLoss {
     /// Fit only the universal sqrt(omega) kernel, never a pressure waveform.
     /// Poles use a fixed 64-fold guard band and eight existing Foster arms.
-    /// Check 65 in-band frequencies: analogue and actual bilinear responses must
+    /// Check 65 in-band frequencies: analogue and actual sampled responses must
     /// each meet 5% relative complex AND real-loss error. Positive
     /// coefficients from the shared fitter confer no admission on their own.
     ///
@@ -115,6 +131,17 @@ impl WideTubeLoss {
     /// approximation, unresolved clocks/fits, allocation or cancellation.
     pub fn new(radius: f64, gas: &GasState, dt: f64, band: [f64; 2], gate: &CancelGate)
         -> Result<Self, AcousticRealizeError>
+    {
+        Self::new_with_sampling(radius, gas, dt, band, RelaxationSampling::BilinearMidpoint, gate)
+    }
+
+    /// Select continuous branch decay under held input while retaining the
+    /// original physical spectrum, applicability and sampled response gates.
+    /// Both series viscous and dual thermal loads carry the same time rule.
+    /// The exact mean response can differ from the analogue target; a clock
+    /// that fails the original 5% complex/resistive gate is still refused.
+    pub fn new_with_sampling(radius: f64, gas: &GasState, dt: f64, band: [f64; 2],
+        sampling: RelaxationSampling, gate: &CancelGate) -> Result<Self, AcousticRealizeError>
     {
         checkpoint(gate)?;
         if ![radius, gas.density, gas.sound_speed, gas.dynamic_viscosity, gas.prandtl, dt, band[0], band[1]]
@@ -140,14 +167,14 @@ impl WideTubeLoss {
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         let mut result = Self { radius, density:gas.density, speed:gas.sound_speed,
             viscosity:gas.dynamic_viscosity, gamma:gas.gamma, prandtl:gas.prandtl,
-            dt, band, series_gain, shunt_gain, terms, complex_error:0.0, resistance_error:0.0 };
+            dt, band, series_gain, shunt_gain, terms, complex_error:0.0, resistance_error:0.0, sampling };
         for i in 0..=64 {
             checkpoint(gate)?;
             let f = band[0] * det::pow(band[1]/band[0], f64::from(i)/64.0);
             let omega = core::f64::consts::TAU * f;
             let target = C64::new(det::sqrt(omega), -det::sqrt(omega));
             for discrete in [false, true] {
-                let value = result.kernel(omega, discrete);
+                let value = result.kernel(f, discrete)?;
                 let complex = (value-target).abs()/target.abs();
                 let real = (value.re-target.re).abs()/target.re;
                 if !complex.is_finite() || !real.is_finite() || complex>0.05 || real>0.05 {
@@ -159,13 +186,23 @@ impl WideTubeLoss {
         }
         Ok(result)
     }
-    fn kernel(&self, mut omega: f64, discrete: bool) -> C64 {
+    fn kernel(&self, frequency_hz: f64, discrete: bool) -> Result<C64, AcousticRealizeError> {
         if discrete {
-            let x=omega*self.dt*0.5;
-            omega=2.0*(det::sin(x)/det::cos(x))/self.dt;
+            let mut terms = [RelaxationTerm::default(); MAX_RELAXATION_BRANCHES];
+            for (term, &(gain, rate)) in terms.iter_mut().zip(&self.terms) {
+                *term = RelaxationTerm { resistance_pa_s_m3: gain, rate_per_s: rate };
+            }
+            let load = RelaxationImpedanceSpec::new(SeriesImpedanceSpec {
+                resistance_pa_s_m3: 0.0, inertance_pa_s2_m3: 0.0, compliance_m3_pa: None,
+            }, &terms[..self.terms.len()]).map_err(wave_error)?.with_sampling(self.sampling);
+            // fs-vfit reports exp(+i omega n dt), the duct convention is its
+            // conjugate. This same transfer is used in admission and scattering.
+            return load.sampled_impedance(frequency_hz, self.dt)
+                .map(C64::conj).map_err(wave_error);
         }
+        let omega = core::f64::consts::TAU * frequency_hz;
         let s=C64::new(0.0,-omega);
-        self.terms.iter().fold(C64::ZERO, |v,&(g,p)| v+(s/(s+C64::from_re(p))).scale(g))
+        Ok(self.terms.iter().fold(C64::ZERO, |v,&(g,p)| v+(s/(s+C64::from_re(p))).scale(g)))
     }
     /// Unit-length excess series impedance [Pa s/m^4] and thermal shunt
     /// admittance [m^2/(Pa s)], under exp(-i omega t). No inviscid storage included.
@@ -176,7 +213,7 @@ impl WideTubeLoss {
         if !frequency_hz.is_finite() || frequency_hz<self.band[0] || frequency_hz>self.band[1] {
             return Err(invalid("viscothermal response query is outside its admitted band"));
         }
-        let kernel=self.kernel(core::f64::consts::TAU*frequency_hz,discrete);
+        let kernel=self.kernel(frequency_hz,discrete)?;
         Ok((kernel.scale(self.series_gain),kernel.scale(self.shunt_gain)))
     }
     /// Series loss for a positive represented length. No lossless inertance is
@@ -188,7 +225,7 @@ impl WideTubeLoss {
         }).collect();
         RelaxationImpedanceSpec::new(SeriesImpedanceSpec {
             resistance_pa_s_m3:0.0,inertance_pa_s2_m3:0.0,compliance_m3_pa:None,
-        },&terms).map_err(wave_error)
+        },&terms).map(|load| load.with_sampling(self.sampling)).map_err(wave_error)
     }
     /// Thermal loss for a positive represented length. No adiabatic compliance
     /// is added: characteristic propagation already accounts for it.
@@ -197,8 +234,11 @@ impl WideTubeLoss {
         let terms:Vec<_>=self.terms.iter().map(|&(g,p)|AdmittanceTerm {
             conductance_m3_pa_s:g*self.shunt_gain*length,rate_per_s:p,
         }).collect();
-        RelaxationAdmittanceSpec::new(0.0,0.0,&terms).map_err(wave_error)
+        RelaxationAdmittanceSpec::new(0.0,0.0,&terms)
+            .map(|load| load.with_sampling(self.sampling)).map_err(wave_error)
     }
+    /// Selected viscous/thermal memory rule, also used by the reported response.
+    #[must_use] pub const fn sampling(&self)->RelaxationSampling {self.sampling}
     /// Physical radius [m].
     #[must_use] pub const fn radius_m(&self)->f64 {self.radius}
     /// Original viscosity [Pa s], not a dimensionless damping knob.
@@ -230,7 +270,8 @@ pub fn with_viscothermal_sections(graph: TubeNetworkSpec, gas:&GasState, dt:f64,
     if graph.sound_speed_m_s.to_bits()!=gas.sound_speed.to_bits() {
         return Err(invalid("viscothermal medium must equal the network propagation medium"));
     }
-    let (graph, reports, _) = expand_sections(graph, gas, None, dt, selections, gate, None)?;
+    let (graph, reports, _) = expand_sections(graph, gas, None, dt, selections, gate,
+        ViscothermalTimeOptions::default())?;
     Ok((graph, reports))
 }
 
@@ -246,11 +287,8 @@ pub fn with_regional_viscothermal_sections(graph: TubeNetworkSpec, gases: Vec<Ga
     selections:&[ViscothermalSectionSpec],gate:&CancelGate)
     -> Result<(TubeNetworkSpec,Vec<GasState>,Vec<ViscothermalSection>),AcousticRealizeError>
 {
-    checkpoint(gate)?;
-    graph.validate_section_gases(&gases)?;
-    let inlet = gases[graph.inlet_section_index()?];
-    let (graph, reports, mapped) = expand_sections(graph, &inlet, Some(gases), dt, selections, gate, None)?;
-    Ok((graph, mapped.expect("regional expansion preserves its mapping"), reports))
+    with_regional_viscothermal_sections_options(graph, gases, dt, selections,
+        ViscothermalTimeOptions::default(), gate)
 }
 
 /// The same regional loss law and topology with ORIGINAL physical quarter lengths.
@@ -260,7 +298,7 @@ pub fn with_regional_viscothermal_sections(graph: TubeNetworkSpec, gases: Vec<Ga
 /// no integer rounding precedes material loss scaling. The original geometry
 /// tolerance is divided among quarters and checked again on the total DC length.
 /// Existing gas, shear, Foster, spatial and sampled-scattering gates still apply.
-/// The scattering check includes the ACTUAL allpass phase and bilinear loads,
+/// The scattering check includes the ACTUAL allpass phase and midpoint loads,
 /// against the homogeneous wide-tube model at the ORIGINAL physical length.
 ///
 /// Original node addresses, solid-wall loads and regional gas identities survive.
@@ -275,19 +313,34 @@ pub fn with_regional_fractional_viscothermal_sections(
     graph: TubeNetworkSpec, gases: Vec<GasState>, dt: f64,
     selections: &[ViscothermalSectionSpec], policy: FractionalTubePolicy, gate: &CancelGate,
 ) -> Result<(TubeNetworkSpec, Vec<GasState>, Vec<ViscothermalSection>), AcousticRealizeError> {
+    with_regional_viscothermal_sections_options(graph, gases, dt, selections,
+        ViscothermalTimeOptions { fractional: Some(policy), ..Default::default() }, gate)
+}
+
+/// Lower the original regional sections with explicit propagation and memory
+/// time choices. Exact memories share the same physical Foster spectrum,
+/// source gases and spatial cells. Both cold response gates use the selected
+/// runtime mean-pressure/mean-flow transfer; no bilinear report is reused for
+/// exact decay. All original geometry, band, phase, work and memory refusals
+/// remain in force. Existing lowering functions select midpoint by default.
+pub fn with_regional_viscothermal_sections_options(
+    graph: TubeNetworkSpec, gases: Vec<GasState>, dt: f64,
+    selections: &[ViscothermalSectionSpec], options: ViscothermalTimeOptions, gate: &CancelGate,
+) -> Result<(TubeNetworkSpec, Vec<GasState>, Vec<ViscothermalSection>), AcousticRealizeError> {
     checkpoint(gate)?;
-    policy.angular_frequency(dt)?;
+    if let Some(policy) = options.fractional { policy.angular_frequency(dt)?; }
     graph.validate_section_gases(&gases)?;
     let inlet = gases[graph.inlet_section_index()?];
     let (graph, reports, mapped) = expand_sections(graph, &inlet, Some(gases), dt,
-        selections, gate, Some(policy))?;
+        selections, gate, options)?;
     Ok((graph, mapped.expect("regional expansion preserves its mapping"), reports))
 }
 
 fn expand_sections(mut graph: TubeNetworkSpec, uniform:&GasState, gases:Option<Vec<GasState>>, dt:f64,
-    selections:&[ViscothermalSectionSpec],gate:&CancelGate,policy:Option<FractionalTubePolicy>)
+    selections:&[ViscothermalSectionSpec],gate:&CancelGate,options:ViscothermalTimeOptions)
     -> Result<(TubeNetworkSpec,Vec<ViscothermalSection>,Option<Vec<GasState>>),AcousticRealizeError>
 {
+    let policy = options.fractional;
     let mut seen=std::collections::BTreeSet::new();
     let mut total=0usize;
     for s in selections {
@@ -333,8 +386,8 @@ fn expand_sections(mut graph: TubeNetworkSpec, uniform:&GasState, gases:Option<V
             }
         };
         if n<4*selection.cells {return Err(invalid("each viscothermal cell needs four positive propagation intervals"));}
-        let loss=WideTubeLoss::new(section.radius_m,gas,dt,
-            [selection.minimum_frequency_hz,selection.maximum_frequency_hz],gate)?;
+        let loss=WideTubeLoss::new_with_sampling(section.radius_m,gas,dt,
+            [selection.minimum_frequency_hz,selection.maximum_frequency_hz],options.sampling,gate)?;
         let section_start=graph.sections.len();let node_start=graph.nodes.len();
         let intervals=4*selection.cells;
         // Rounded cumulative boundaries preserve total transit exactly. Each
@@ -441,7 +494,7 @@ fn section_error(r:&ViscothermalSection,f:f64,boundary:&impl Fn(usize)->usize,
     let sh=C64::new(0.5*(ep-em)*det::cos(g.im),0.5*(ep+em)*det::sin(g.im));
     let target=scattering([ch,z*sh/propagation.scale(zc),y*sh/propagation.scale(1.0/zc),ch]);
     let mut m=[C64::ONE,C64::ZERO,C64::ZERO,C64::ONE];
-    let kernel=loss.kernel(w,true);
+    let kernel=loss.kernel(f,true)?;
     for cell in 0..r.source.cells {
         let length=fractional.map_or_else(
             || (boundary(4*cell+4)-boundary(4*cell)) as f64*(loss.speed*loss.dt), |p| p.cell_length_m(cell));

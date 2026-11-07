@@ -9,6 +9,12 @@ use fs_couple::bernoulli_aperture::{BernoulliAperture,
 use fs_dcontact::Obstacle;
 
 fn model(upstream_length: f64, paired: bool) -> TwoSidedAperture {
+    model_with_sampling(upstream_length, paired, fs_vfit::relaxation::RelaxationSampling::BilinearMidpoint)
+}
+
+fn model_with_sampling(upstream_length: f64, paired: bool,
+    sampling: fs_vfit::relaxation::RelaxationSampling) -> TwoSidedAperture
+{
     let g=gas(293.15);
     let sources=[upstream_length,0.4001].map(|length| ApertureDuctSpec {
         graph: graph(g,length), gases: vec![g], viscothermal: vec![selection(0)] });
@@ -37,10 +43,31 @@ fn model(upstream_length: f64, paired: bool) -> TwoSidedAperture {
         },ApertureState {opening_m:4e-4,opening_velocity_m_s:0.0},contact,
             BladePropagator::ExactZoh).unwrap().into()
     };
-    TwoSidedAperture::with_fractional_transits(valve,sources,TwoSidedLimits {
+    TwoSidedAperture::with_time_options(valve,sources,TwoSidedLimits {
         maximum_energy_j:1.0,energy_absolute_tolerance_j:1e-16,energy_relative_tolerance:1e-7,
         flow_absolute_tolerance_m3_s:1e-16,flow_relative_tolerance:1e-8,
-    },[policy();2],&CancelGate::new_clock_free()).unwrap()
+    },[fs_couple::bernoulli_aperture::viscothermal::ViscothermalTimeOptions {
+        sampling, fractional: Some(policy()) };2],&CancelGate::new_clock_free()).unwrap()
+}
+
+#[test]
+fn exact_memory_selection_reaches_both_original_single_and_paired_reed_tracts() {
+    use fs_vfit::relaxation::RelaxationSampling;
+    for paired in [false,true] {
+        let mut model=model_with_sampling(0.4001,paired,RelaxationSampling::ExactHeldFlow);
+        for side in [ValveSide::Upstream,ValveSide::Downstream] {
+            assert_eq!(model.viscothermal_sections(side)[0].loss.sampling(),
+                RelaxationSampling::ExactHeldFlow);
+        }
+        let mut heat=0.0;
+        for _ in 0..256 {
+            let frame=model.step_under_gate(TwoSidedDrive {
+                source_pressure_pa:100.0,blade_forces_n:[0.0;2]},&CancelGate::new_clock_free()).unwrap();
+            assert!(frame.balance_residual_j().abs()<1e-12);
+            heat+=frame.upstream.interior_loss_j+frame.downstream.interior_loss_j;
+        }
+        assert!(heat>0.0);
+    }
 }
 
 #[test]

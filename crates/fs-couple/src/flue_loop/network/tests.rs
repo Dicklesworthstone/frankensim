@@ -33,6 +33,31 @@ pub(super) fn voice(source: FlueNetworkSpec) -> FlueVoice {
 }
 
 #[test]
+fn exact_viscothermal_choice_reaches_the_original_jet_network_and_heat() {
+    use fs_vfit::relaxation::RelaxationSampling;
+    let card = mint_tonal_interim_card().unwrap();
+    let mut input = source(gas(), -0.8);
+    input.viscothermal.push(ViscothermalSectionSpec { section: 0, cells: 8,
+        minimum_frequency_hz: 200.0, maximum_frequency_hz: 400.0 });
+    let options = ViscothermalTimeOptions { sampling: RelaxationSampling::ExactHeldFlow,
+        fractional: None };
+    let mut voice = FlueVoice::from_network_with_time_options(Some(&card), 90.0, 1e-6,
+        geometry(), input, None, 48_000, 3, 0, options, &CancelGate::new_clock_free()).unwrap();
+    assert_eq!(voice.network().unwrap().viscothermal_sections()[0].loss.sampling(),
+        RelaxationSampling::ExactHeldFlow);
+    voice.apply(FlueControl::SetBlowingPressure(300.0)).unwrap();
+    let mut heat = 0.0;
+    voice.step_block_observed(&mut [0.0; 512], |line| {
+        let FlueResonator::Network(network) = line else { panic!("physical graph") };
+        let frame = network.last_frame().unwrap();
+        assert!(frame.balance_residual_j().abs() < 1e-12);
+        heat += frame.interior_loss_j;
+        Ok(())
+    }).unwrap();
+    assert!(heat > 0.0);
+}
+
+#[test]
 fn jet_and_whole_tube_network_close_the_same_work_window() {
     let mut v = voice(source(gas(), -0.9));
     v.apply(FlueControl::SetBlowingPressure(300.0)).unwrap();

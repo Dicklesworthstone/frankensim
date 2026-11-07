@@ -13,8 +13,8 @@ use crate::bernoulli_aperture::network::boundaries::{
 };
 use crate::bernoulli_aperture::fractional::{FractionalSection, FractionalTubePolicy};
 use crate::bernoulli_aperture::viscothermal::{
-    ViscothermalSection, ViscothermalSectionSpec, with_regional_viscothermal_sections,
-    with_regional_fractional_viscothermal_sections,
+    ViscothermalSection, ViscothermalSectionSpec, ViscothermalTimeOptions,
+    with_regional_viscothermal_sections_options,
 };
 use crate::bernoulli_aperture::wall::WallState;
 use crate::bernoulli_aperture::wall::material::{
@@ -124,9 +124,10 @@ fn poll(gate: &CancelGate) -> Result<(), FlueError> {
 
 impl FlueNetwork {
     fn new(source: FlueNetworkSpec, wall_input: Option<MaterialWallInput>, dt: f64,
-        zc: f64, gate: &CancelGate, policy: Option<FractionalTubePolicy>) -> Result<Self, FlueError>
+        zc: f64, gate: &CancelGate, options: ViscothermalTimeOptions) -> Result<Self, FlueError>
     {
         poll(gate)?;
+        let policy = options.fractional;
         // Bind to ORIGINAL geometry before subdivision. Both operations preserve
         // original node indices; material area must not depend on loss-cell count.
         let (wall_graph, walls) = match &wall_input {
@@ -144,12 +145,8 @@ impl FlueNetwork {
             None => (source.graph.clone(), Vec::new()),
         };
         for wall in &walls { poll(gate)?; wall.validate_time_step(dt).map_err(physical)?; }
-        let (graph, gases, losses) = match policy {
-            Some(policy) => with_regional_fractional_viscothermal_sections(
-                wall_graph, source.gases.clone(), dt, &source.viscothermal, policy, gate),
-            None => with_regional_viscothermal_sections(
-                wall_graph, source.gases.clone(), dt, &source.viscothermal, gate),
-        }.map_err(physical)?;
+        let (graph, gases, losses) = with_regional_viscothermal_sections_options(
+            wall_graph, source.gases.clone(), dt, &source.viscothermal, options, gate).map_err(physical)?;
         // A caller cannot provide a second, inconsistent source cross-section.
         let actual = graph.inlet_impedance_with_gases(&gases).map_err(physical)?;
         if actual.to_bits() != zc.to_bits() {
@@ -441,8 +438,8 @@ impl FlueVoice {
         geometry: FlueGeometry, source: FlueNetworkSpec, sample_rate_hz: u32,
         voice_seed: u64, voice_index: u32, gate: &CancelGate,
     ) -> Result<Self, FlueError> {
-        Self::from_network_with_walls(card, displacement_gain, seed_amplitude_rel, geometry,
-            source, None, sample_rate_hz, voice_seed, voice_index, gate, None)
+        Self::from_network_with_time_options(card, displacement_gain, seed_amplitude_rel, geometry,
+            source, None, sample_rate_hz, voice_seed, voice_index, ViscothermalTimeOptions::default(), gate)
     }
 
     /// The same jet and regional gas network with source-bound structural walls.
@@ -468,8 +465,8 @@ impl FlueVoice {
         geometry: FlueGeometry, source: FlueNetworkSpec, walls: MaterialWallInput,
         sample_rate_hz: u32, voice_seed: u64, voice_index: u32, gate: &CancelGate,
     ) -> Result<Self, FlueError> {
-        Self::from_network_with_walls(card, displacement_gain, seed_amplitude_rel, geometry,
-            source, Some(walls), sample_rate_hz, voice_seed, voice_index, gate, None)
+        Self::from_network_with_time_options(card, displacement_gain, seed_amplitude_rel, geometry,
+            source, Some(walls), sample_rate_hz, voice_seed, voice_index, ViscothermalTimeOptions::default(), gate)
     }
 
     /// Keep sub-sample bore travel in the ORIGINAL jet-drive and material-wall
@@ -497,16 +494,27 @@ impl FlueVoice {
         policy: FractionalTubePolicy, sample_rate_hz: u32,
         voice_seed: u64, voice_index: u32, gate: &CancelGate,
     ) -> Result<Self, FlueError> {
-        Self::from_network_with_walls(card, displacement_gain, seed_amplitude_rel, geometry,
-            source, walls, sample_rate_hz, voice_seed, voice_index, gate, Some(policy))
+        Self::from_network_with_time_options(card, displacement_gain, seed_amplitude_rel, geometry,
+            source, walls, sample_rate_hz, voice_seed, voice_index,
+            ViscothermalTimeOptions { fractional: Some(policy), ..Default::default() }, gate)
     }
 
+    /// Compose the original jet, optional sourced walls and regional bore with
+    /// explicit distributed-loss memory and propagation choices. Exact viscous
+    /// and thermal branches retain their physical spectrum, mean port outputs
+    /// and independent heat; the same sampled fit/scattering gates still apply.
+    /// Wall binding precedes subdivision and its separate time rule is retained.
+    /// Existing constructors select midpoint memory and keep their signatures.
+    ///
+    /// # Errors
+    /// Original source/material/geometry/clock refusals, failed selected-rule
+    /// loss or phase admission, exhausted budgets or cancellation.
     #[allow(clippy::too_many_arguments)]
-    fn from_network_with_walls(
+    pub fn from_network_with_time_options(
         card: Option<&JetCard>, displacement_gain: f64, seed_amplitude_rel: f64,
         geometry: FlueGeometry, source: FlueNetworkSpec, walls: Option<MaterialWallInput>,
-        sample_rate_hz: u32, voice_seed: u64, voice_index: u32, gate: &CancelGate,
-        policy: Option<FractionalTubePolicy>,
+        sample_rate_hz: u32, voice_seed: u64, voice_index: u32,
+        options: ViscothermalTimeOptions, gate: &CancelGate,
     ) -> Result<Self, FlueError> {
         poll(gate)?;
         // Preserve the no-card refusal before touching expensive reduction.
@@ -525,7 +533,7 @@ impl FlueVoice {
         let capacity = source.max_jet_history_samples;
         let voice = Self::with_resonator(Some(card), displacement_gain, seed_amplitude_rel,
             geometry, &gas, sample_rate_hz, voice_seed, voice_index, minimum, capacity,
-            |zc| FlueNetwork::new(source, walls, 1.0 / f64::from(sample_rate_hz), zc, gate, policy)
+            |zc| FlueNetwork::new(source, walls, 1.0 / f64::from(sample_rate_hz), zc, gate, options)
                 .map(|n| FlueResonator::Network(Box::new(n))))?;
         poll(gate)?;
         Ok(voice)
