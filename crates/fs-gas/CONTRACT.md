@@ -161,7 +161,7 @@ With both `material` and `experimental-euler`, `dynamics::nonideal::RealGas` bin
 
 The existing const-generic HLLC/HLL kernel now accepts a constitutive admission callback. Both HLLC stars and each HLL fallback middle state are resolved through the original real-gas EOS. A source-invalid star can use the original bounded HLL speed expansion; cancellation propagates. The ideal/frozen-gas paths retain the same shared numerical algebra and admission semantics.
 
-`RealGasEuler1d` reuses the original mesh, conservative volume update, compensated totals, step controls and balance reports. It admits constant area with nonuniform cell widths, periodic interfaces evaluated once, zero-gradient traces, fixed reflecting walls and prescribed exterior states in the same energy gauge. Reflecting walls use the shared EOS-checked flux and exactly zero mass/energy transfer. Numerical scratch is preallocated and accepted primitives are cached. Every first Euler stage, second Euler endpoint and final SSP-RK2 average is source-admitted before the final transactional swap; actual face signal speeds determine both stage CFL gates and bounded time-step retries.
+`RealGasEuler1d` reuses the original quasi-one-dimensional mesh, conservative volume update, compensated totals, step controls and balance reports. It admits smoothly varying face areas and producer-integrated physical volumes, nonuniform cell widths, periodic interfaces with one shared physical end area, zero-gradient traces, fixed reflecting walls and prescribed exterior states in the same energy gauge. Reflecting walls use the shared EOS-checked flux and exactly zero mass/energy transfer. Numerical scratch is preallocated and accepted primitives are cached. Every first Euler stage, second Euler endpoint and final SSP-RK2 average is source-admitted before the final transactional swap; actual face signal speeds determine both stage CFL gates and bounded time-step retries.
 
 Spatial reconstruction accepts explicit `FirstOrder` or source-admitted `Muscl` through the existing `StepControl`. MUSCL limits density, velocity and temperature on physical nonuniform cell widths, then constructs BOTH traces with the original NASA/Peng--Robinson state owner and common energy gauge. One scale contracts the complete primitive increment when either original-source endpoint refuses; twelve contractions bound the work before the exact accepted cell is reused. No individual thermodynamic coordinate is clipped. Constant and unrepresented trace increments reuse the original conservative payload and primitive cache without constitutive reevaluation.
 
@@ -7856,3 +7856,42 @@ recombination, gas cooling and captured-electron cooling directly with the
 independent finite-escape result. This establishes numerical behavior of the
 declared frozen slab model; it does not add a dense-plasma or time-dependent
 radiation approximation.
+
+### Real-gas nozzle momentum and stationary side-wall traction
+
+The original NASA/Peng--Robinson field now admits stationary varying-area
+passages through `RealGasEuler1d::new_on_mesh`. Both reconstruction choices and
+the existing force/wall compositions use the same physical `Mesh1d` volumes.
+The geometric pressure source is `p_i (A_right - A_left)`; it exchanges axial
+momentum with the stationary passage and performs no energy work. The shared
+ideal/real-gas update pairs this source with each face pressure before area
+multiplication, so a uniform-pressure resting state is preserved without
+subtracting large extensive pressure forces. Finite-speed steady nozzle states
+are not exactly well balanced.
+
+Both SSP-RK2 stages accumulate the original cell-pressure side-wall force with
+compensated summation. `StepReport::area_momentum_impulse` integrates those
+stage forces, and the inlet/outlet changes use their own physical face areas.
+Mass and energy remain boundary/source balances; area pressure enters only
+momentum, once. The initial step estimate, face CFL gates and both mechanical
+force endpoints use both adjacent area/volume metrics. Source forcing and
+finite-wall heat/drag retain their separate impulse/work/heat accounts.
+
+No geometry re-integration or extra per-step allocation is introduced.
+Varying-area volumes remain the geometry producer's physical integrals;
+constant-area volumes retain the axial consistency check. A periodic seam
+requires identical end areas at construction and boundary replacement, with
+transactional refusal. The same original material branch, energy gauge,
+source admission, retry and cancellation limits apply. This is the smooth
+quasi-one-dimensional engineering model, excluding abrupt-junction mixing,
+moving cross sections, general viscous stress and a fully discrete entropy
+theorem.
+
+Five native tests of the actual shared geometry kernel cover pressure rest,
+moving-flow advection, extensive mass/momentum/energy balance, second-order
+smooth pressure-source quadrature and scale-robust face CFL arithmetic.
+Five original-material integration regressions are included for stationary
+balance, closed compression, forced area scaling, periodic seam admission and
+cancel/retry publication. Those full real-gas integration tests were not run
+in this constrained environment; the focused native result does not replace
+the repository Cargo/DSR gate.

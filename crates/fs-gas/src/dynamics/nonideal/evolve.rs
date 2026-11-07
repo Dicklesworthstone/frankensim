@@ -13,7 +13,7 @@ use fs_qty::{Length, Time};
 mod forcing;
 mod reconstruction;
 
-/// One end of a stationary constant-area real-gas interval.
+/// One end of a stationary quasi-one-dimensional real-gas passage.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RealGasBoundary {
     /// Zero-gradient exterior trace; not a nonreflecting subsonic outlet.
@@ -49,7 +49,9 @@ struct Workspace {
 }
 
 /// Conservative density, momentum and total-energy evolution on an original
-/// constant-area mesh. Nonuniform cell widths use the retained physical volumes.
+/// quasi-one-dimensional mesh. Face areas and integrated physical cell volumes
+/// retain the original passage geometry. Pressure traction on the stationary
+/// side wall changes axial momentum without doing mechanical work.
 ///
 /// MUSCL reconstructs density, velocity and temperature through the original
 /// source, with shared slope contraction for inadmissible endpoint pairs.
@@ -58,8 +60,11 @@ struct Workspace {
 /// traces, while CFL-only retries retain the requested reconstruction order.
 /// Refusal/cancellation publishes no state. Trace scratch is allocated on first
 /// MUSCL use and reused; native material resolution retains its
-/// own allocations. Optional local wall sources use the same gas calorics;
-/// no gas phase flash, spatial viscous transport or moving end wall is added.
+/// own allocations. Optional local wall sources use the same gas calorics.
+/// The geometric source is paired with face pressure before area scaling,
+/// preserving a uniform-pressure resting state. Finite-speed steady nozzle states
+/// are not exactly well balanced. No gas phase flash, abrupt-junction loss,
+/// spatial viscous transport or moving end wall is added.
 pub struct RealGasEuler1d {
     gas: RealGas,
     states: Vec<Conserved>,
@@ -99,27 +104,7 @@ impl RealGasEuler1d {
                 "state count differs from original mesh",
             ));
         }
-        let area = mesh
-            .uniform_cross_section()
-            .ok_or(RealGasFlowError::Invalid(
-                "homogeneous real-gas field currently requires constant area",
-            ))?;
-        for (i, &volume) in mesh.volumes().iter().enumerate() {
-            poll(&mut cancelled)?;
-            // The original uniform constructor retains its declared width;
-            // subtracting distant rounded coordinates can lose that precision.
-            let width = mesh
-                .uniform_cell_width()
-                .map_or_else(|| mesh.width(i), Length::value);
-            let expected = area * width;
-            if !positive(expected)
-                || (volume - expected).abs() > 64.0 * f64::EPSILON * volume.max(expected)
-            {
-                return Err(RealGasFlowError::Invalid(
-                    "constant-area cell volume differs from original face geometry",
-                ));
-            }
-        }
+        admit_geometry(&mesh, boundaries, &mut cancelled)?;
         let boundary_primitive = admit_boundaries(&gas, boundaries, &mut cancelled)?;
         let mut primitive = allocated(n, Primitive::default())?;
         for (p, &q) in primitive.iter_mut().zip(&states) {
@@ -183,6 +168,7 @@ impl RealGasEuler1d {
         boundaries: RealGasBoundaries,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(), RealGasFlowError> {
+        admit_geometry(&self.mesh, boundaries, &mut cancelled)?;
         let primitive = admit_boundaries(&self.gas, boundaries, &mut cancelled)?;
         poll(&mut cancelled)?;
         self.boundaries = boundaries;
@@ -267,17 +253,11 @@ impl RealGasEuler1d {
         if force.is_some() && self.force_work.is_none() {
             self.force_work = Some(forcing::Workspace::new(self.states.len())?);
         }
-        let area = self.mesh.face_areas()[0];
         let mut rate = 0.0_f64;
-        for (p, &volume) in self.primitive.iter().zip(self.mesh.volumes()) {
+        for (i, p) in self.primitive.iter().enumerate() {
             poll(&mut cancelled)?;
-            let local = (p.velocity.abs() + p.sound_speed) * (area / volume);
-            if !positive(local) {
-                return Err(RealGasFlowError::Invalid(
-                    "unrepresentable real-gas signal rate",
-                ));
-            }
-            rate = rate.max(local);
+            let speed = p.velocity.abs() + p.sound_speed;
+            rate = rate.max(self.mesh.signal_rate(i, [speed; 2])?);
         }
         let mut dt = maximum_duration.value().min(0.9 * controls.cfl / rate);
         let before = self.totals(&mut cancelled)?;
@@ -360,18 +340,19 @@ impl RealGasEuler1d {
             match result {
                 Ok((a, b, force_change, source_rate, mut thermal)) => {
                     let after = totals(&self.work.candidate, self.mesh.volumes(), &mut cancelled)?;
-                    let factor = 0.5 * dt * area;
+                    let factor = 0.5 * dt;
+                    let areas = self.mesh.face_areas();
                     let left = Totals::from_array(core::array::from_fn(|k| {
-                        factor * (a.left.array()[k] + b.left.array()[k])
+                        (factor * areas[0]) * (a.left.array()[k] + b.left.array()[k])
                     }));
                     let right = Totals::from_array(core::array::from_fn(|k| {
-                        -factor * (a.right.array()[k] + b.right.array()[k])
+                        -(factor * areas[self.states.len()])
+                            * (a.right.array()[k] + b.right.array()[k])
                     }));
                     let boundary = Totals::from_array(core::array::from_fn(|k| {
-                        factor
-                            * ((a.left.array()[k] + b.left.array()[k])
-                                - (a.right.array()[k] + b.right.array()[k]))
+                        left.array()[k] + right.array()[k]
                     }));
+                    let area_momentum_impulse = factor * (a.area_force + b.area_force);
                     let (wall_impulse, wall_heat, wall_work) =
                         thermal.as_ref().map_or((0.0, 0.0, 0.0), |report| {
                             (
@@ -382,7 +363,7 @@ impl RealGasEuler1d {
                         });
                     let source = [
                         0.0,
-                        wall_impulse + force_change.impulse,
+                        area_momentum_impulse + wall_impulse + force_change.impulse,
                         wall_heat + wall_work + force_change.work,
                     ];
                     let residual = Totals::from_array(core::array::from_fn(|k| {
@@ -434,7 +415,7 @@ impl RealGasEuler1d {
                         boundary_change: boundary,
                         left_boundary_change: left,
                         right_boundary_change: right,
-                        area_momentum_impulse: 0.0,
+                        area_momentum_impulse,
                         gravity_momentum_impulse: 0.0,
                         gravity_work: 0.0,
                         wall_momentum_impulse: wall_impulse,
@@ -465,6 +446,42 @@ impl RealGasEuler1d {
             last: Box::new(last),
         })
     }
+}
+
+/// A periodic seam is one physical face. Variable-area volumes are retained
+/// from their geometry producer; constant-area volumes still have an exact
+/// axial cross-check. No trapezoidal-volume approximation is silently imposed.
+fn admit_geometry(
+    mesh: &Mesh1d,
+    boundaries: RealGasBoundaries,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), RealGasFlowError> {
+    poll(cancelled)?;
+    let areas = mesh.face_areas();
+    if boundaries == RealGasBoundaries::Periodic && areas[0] != areas[mesh.cell_count()] {
+        return Err(RealGasFlowError::Invalid(
+            "periodic end faces must have identical physical area",
+        ));
+    }
+    if let Some(area) = mesh.uniform_cross_section() {
+        for (i, &volume) in mesh.volumes().iter().enumerate() {
+            poll(cancelled)?;
+            // Retain the declared uniform width rather than subtracting
+            // distant, rounded face coordinates.
+            let width = mesh
+                .uniform_cell_width()
+                .map_or_else(|| mesh.width(i), Length::value);
+            let expected = area * width;
+            if !positive(expected)
+                || (volume - expected).abs() > 64.0 * f64::EPSILON * volume.max(expected)
+            {
+                return Err(RealGasFlowError::Invalid(
+                    "constant-area cell volume differs from original face geometry",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn admit_boundaries(
@@ -652,23 +669,31 @@ fn operator(
         fallbacks += usize::from(flux.used_hll_fallback);
         faces[face] = flux;
     }
-    let area = mesh.face_areas()[0];
     let mut signal_rate = 0.0_f64;
-    for (i, &volume) in mesh.volumes().iter().enumerate() {
+    let mut area_force = 0.0;
+    let mut compensation = 0.0;
+    for (i, p) in primitive.iter().enumerate() {
         poll(cancelled)?;
-        let rate = area * (0.5 * faces[i].signal_speed + 0.5 * faces[i + 1].signal_speed) / volume;
-        if !positive(rate) {
-            return Err(RealGasFlowError::Invalid(
-                "unrepresentable real-gas face CFL",
-            ));
-        }
-        signal_rate = signal_rate.max(rate);
+        signal_rate = signal_rate
+            .max(mesh.signal_rate(i, [faces[i].signal_speed, faces[i + 1].signal_speed])?);
+        // The same stationary side-wall pressure source enters the update.
+        // It supplies impulse, not energy; heat/drag/body work remain separate.
+        let force = p.pressure * (mesh.face_areas()[i + 1] - mesh.face_areas()[i]);
+        let term = force - compensation;
+        let next = area_force + term;
+        compensation = (next - area_force) - term;
+        area_force = next;
+    }
+    if !area_force.is_finite() {
+        return Err(RealGasFlowError::Invalid(
+            "unrepresentable real-gas side-wall pressure force",
+        ));
     }
     Ok(Stage {
         left: faces[0],
         right: faces[n],
         signal_rate,
-        area_force: 0.0,
+        area_force,
         gravity_force: 0.0,
         gravity_power: 0.0,
         fallbacks,

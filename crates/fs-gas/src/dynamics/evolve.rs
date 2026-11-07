@@ -1233,12 +1233,13 @@ fn forward_entering(
                 + ratio * (al * left[2] - ar * right[2] + balance.power(i, mesh, faces)),
         };
     }
-    Conserved::from_array(core::array::from_fn(|k| {
-        // Pair pressure traction with the geometric source before multiplying
-        // by area: a uniform-pressure resting state then cancels exactly.
-        let pressure = if k == 1 { primitive[i].pressure } else { 0.0 };
-        q.array()[k] + ratio * (al * (left[k] - pressure) - ar * (right[k] - pressure))
-    }))
+    Conserved::from_array(super::geometry::balance::pressure_balanced_update(
+        q.array(),
+        ratio,
+        [al, ar],
+        [left, right],
+        primitive[i].pressure,
+    ))
 }
 pub(super) fn totals(
     states: &[Conserved],

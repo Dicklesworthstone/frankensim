@@ -3,6 +3,8 @@
 use super::{Error, MAX_EULER_CELLS, allocated, positive};
 use fs_qty::Length;
 
+pub(super) mod balance;
+
 /// Axial faces, physical face areas, and integrated physical cell volumes.
 ///
 /// The quasi-one-dimensional model assumes smoothly varying area and one
@@ -103,6 +105,24 @@ impl Mesh1d {
     pub const fn uniform_cross_section(&self) -> Option<f64> {
         self.uniform_area
     }
+    /// Native finite-volume face-crossing rate, including both physical areas.
+    /// Dividing area by volume first avoids overflow in a representable large
+    /// cross section. Equal face speeds retain the uniform-mesh source path.
+    #[cfg(feature = "material")]
+    pub(super) fn signal_rate(&self, i: usize, speeds: [f64; 2]) -> Result<f64, Error> {
+        if speeds.iter().any(|speed| !positive(*speed)) {
+            return Err(Error::Invalid(
+                "positive finite face signal speeds required",
+            ));
+        }
+        let rate =
+            balance::face_signal_rate([self.areas[i], self.areas[i + 1]], self.volumes[i], speeds);
+        if !positive(rate) {
+            return Err(Error::Invalid("unrepresentable geometric face CFL"));
+        }
+        Ok(rate)
+    }
+
     pub(super) fn center(&self, i: usize) -> f64 {
         self.positions[i] + 0.5 * (self.positions[i + 1] - self.positions[i])
     }

@@ -241,8 +241,8 @@ fn admit_cfl(
     maximum: f64,
     rate: &mut f64,
 ) -> Result<(), RealGasFlowError> {
-    let local = (primitive.velocity.abs() + primitive.sound_speed)
-        * (mesh.face_areas()[cell] / mesh.volumes()[cell]);
+    let speed = primitive.velocity.abs() + primitive.sound_speed;
+    let local = mesh.signal_rate(cell, [speed; 2])?;
     cfl_gate(local * dt, maximum)?;
     *rate = rate.max(local);
     Ok(())
