@@ -337,7 +337,7 @@ fn slab_coefficients(emissivities: &[f64], slabs: &[SlabPair]) -> BoundaryCoeffi
     for slab in slabs {
         let [a, b] = slab.surfaces;
         for (side, (i, j)) in [(a, b), (b, a)].into_iter().enumerate() {
-            result.reflection[i] = slab.optics.reflectance();
+            result.reflection[i] = slab.optics.reflectances()[side];
             result.transmission[i] = slab.optics.transmittance();
             result.partner[i] = j;
             result.diagonal[i] = 1.0;

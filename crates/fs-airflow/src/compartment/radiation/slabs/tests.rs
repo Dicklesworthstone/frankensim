@@ -257,53 +257,66 @@ fn transparent_layers_pass_radiation_and_receive_exactly_zero_heat() {
 #[test]
 fn g1_refractive_slab_reflection_reaches_enclosure_and_original_layer_heat() {
     let model = geometry([1.3; 2], false);
-    let mut pair = slab(&[0.2, 0.6]);
-    pair.optics = AbsorbingSlab::new_refractive(
-        pair.optics.layers().to_vec(),
-        1.5,
-        "authored dielectric index",
-        SlabQuadrature::default(),
-        || false,
-    )
-    .unwrap();
-    let report = run(&model, pair.clone(), &[700.0, 400.0]);
-    let h = [blackbody(900.0), blackbody(250.0)];
-    let b = [blackbody(700.0), blackbody(400.0)];
-    let emission = pair.optics.emission_to_faces(&b).unwrap();
-    let mut heat = [0.0; 2];
-    pair.optics.layer_net_fluxes(h, &b, &mut heat).unwrap();
-    for side in 0..2 {
-        close(
-            report.surface_radiosity_w_m2[1 + side],
-            emission[side]
-                + pair.optics.reflectance() * h[side]
-                + pair.optics.transmittance() * h[1 - side],
-        );
-        close(report.layer_heat_power[0][side].value(), 1.3 * heat[side]);
-        assert_eq!(report.surface_heat_power[1 + side].value(), 0.0);
-    }
-    assert!(pair.optics.reflectance() > 0.08);
-    conserved(&report);
-
-    let equilibrium = model
-        .evaluate_with_slabs(
-            &[Temperature::new(700.0); 4],
-            &[0.6; 2].map(emissivity),
-            &[pair],
-            &[vec![Temperature::new(700.0); 2]],
-            [Temperature::new(700.0); 2],
-            &absorption([0.0; 2]),
-            RadiationSolve::default(),
-            &mut model.workspace().unwrap(),
+    for indices in [[1.5; 2], [1.4, 2.1]] {
+        let mut pair = slab(&[0.2, 0.6]);
+        pair.optics = AbsorbingSlab::new(
+            pair.optics
+                .layers()
+                .iter()
+                .cloned()
+                .zip(indices)
+                .map(|(layer, index)| {
+                    layer
+                        .with_refractive_index(index, "authored layer index")
+                        .unwrap()
+                })
+                .collect(),
+            SlabQuadrature::default(),
             || false,
         )
         .unwrap();
-    for q in equilibrium
-        .surface_heat_power
-        .iter()
-        .chain(equilibrium.layer_heat_power.iter().flatten())
-    {
-        assert_eq!(q.value(), 0.0);
+        let report = run(&model, pair.clone(), &[700.0, 400.0]);
+        let h = [blackbody(900.0), blackbody(250.0)];
+        let b = [blackbody(700.0), blackbody(400.0)];
+        let emission = pair.optics.emission_to_faces(&b).unwrap();
+        let mut heat = [0.0; 2];
+        pair.optics.layer_net_fluxes(h, &b, &mut heat).unwrap();
+        for side in 0..2 {
+            close(
+                report.surface_radiosity_w_m2[1 + side],
+                emission[side]
+                    + pair.optics.reflectances()[side] * h[side]
+                    + pair.optics.transmittance() * h[1 - side],
+            );
+            close(report.layer_heat_power[0][side].value(), 1.3 * heat[side]);
+            assert_eq!(report.surface_heat_power[1 + side].value(), 0.0);
+        }
+        assert!(pair.optics.reflectance() > 0.08);
+        if indices[0] != indices[1] {
+            assert!((pair.optics.reflectances()[0] - pair.optics.reflectances()[1]).abs() > 0.01);
+        }
+        conserved(&report);
+
+        let equilibrium = model
+            .evaluate_with_slabs(
+                &[Temperature::new(700.0); 4],
+                &[0.6; 2].map(emissivity),
+                &[pair],
+                &[vec![Temperature::new(700.0); 2]],
+                [Temperature::new(700.0); 2],
+                &absorption([0.0; 2]),
+                RadiationSolve::default(),
+                &mut model.workspace().unwrap(),
+                || false,
+            )
+            .unwrap();
+        for q in equilibrium
+            .surface_heat_power
+            .iter()
+            .chain(equilibrium.layer_heat_power.iter().flatten())
+        {
+            assert_eq!(q.value(), 0.0);
+        }
     }
 }
 

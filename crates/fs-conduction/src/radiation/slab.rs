@@ -2,17 +2,19 @@
 //!
 //! Each layer has a uniform temperature and sourced absorption in inverse
 //! metres. The default constructor uses refractive index one. The explicit
-//! refractive constructor adds two smooth Fresnel interfaces around a stack
-//! with one sourced real index, including all internal reflections. There is
-//! no scattering or coherent interference.
+//! refractive constructor supplies one sourced real index to the stack.
+//! Individual layers may instead declare different real indices, retaining
+//! every smooth Fresnel interface and all internal reflections. There is no
+//! scattering or coherent interference.
 //! Incident radiance is diffuse. Emergent hemispherical flux is resolved, but
 //! is generally NOT Lambertian; a scalar view-factor consumer must explicitly
 //! own its diffuse-port closure.
 //!
 //! At each positive direction cosine mu the exact ray-layer factors are
 //! t_i = exp(-kappa_i*d_i/mu) and a_i = -expm1(-kappa_i*d_i/mu).
-//! The SAME mu traverses every layer before angular integration. Consequently
-//! dividing a material layer does not introduce artificial angular mixing.
+//! The SAME conserved transverse optical direction traverses every interface
+//! before angular integration, with Snell-adjusted mu in each material.
+//! Dividing a material layer does not introduce artificial angular mixing.
 //! Positive hemispherical weights 2*mu*dmu retain the grazing-ray limit and
 //! the optically thin diffuse absorptance 2*kappa*d.
 //! Positive GL8/GL16 rules prepare boundary escape and symmetric interlayer
@@ -32,6 +34,7 @@ use super::radiation_error;
 use super::spectral::planck::{GL8, GL16};
 use crate::ConductionError;
 
+mod layered;
 mod refraction;
 
 /// Maximum physical layers in one prepared slab.
@@ -46,6 +49,8 @@ pub struct AbsorbingLayer {
     optical_depth: f64,
     temperature_support_k: [f64; 2],
     source: Arc<str>,
+    refractive_index: f64,
+    refractive_index_source: Option<Arc<str>>,
 }
 
 impl AbsorbingLayer {
@@ -78,7 +83,37 @@ impl AbsorbingLayer {
             optical_depth: thickness_m * absorption_m_inv,
             temperature_support_k,
             source: source.into(),
+            refractive_index: 1.0,
+            refractive_index_source: None,
         })
+    }
+    /// Declare this layer's real index for smooth incoherent Fresnel transport.
+    /// The source must support this layer's temperature and gray/band scope.
+    /// The default index-one layer has no inferred optical-material source.
+    pub fn with_refractive_index(
+        mut self,
+        refractive_index: f64,
+        source: impl Into<String>,
+    ) -> Result<Self, ConductionError> {
+        let source = source.into();
+        if !refractive_index.is_finite()
+            || refractive_index < 1.0
+            || !(refractive_index * refractive_index).is_finite()
+            || source.trim().is_empty()
+        {
+            return Err(invalid(
+                "need a sourced real refractive index >= 1 with representable n²",
+            ));
+        }
+        self.refractive_index = refractive_index;
+        self.refractive_index_source = Some(source.into());
+        Ok(self)
+    }
+    pub const fn refractive_index(&self) -> f64 {
+        self.refractive_index
+    }
+    pub fn refractive_index_source(&self) -> Option<&str> {
+        self.refractive_index_source.as_deref()
     }
     pub const fn thickness_m(&self) -> f64 {
         self.thickness_m
@@ -136,15 +171,13 @@ pub struct SlabQuadratureReport {
 /// Immutable, source-bearing diffuse-incident slab response.
 ///
 /// The default matched-index material has zero reflection. An explicitly
-/// refractive stack includes both exterior Fresnel interfaces and trapped rays.
+/// refractive stack includes all declared Fresnel interfaces and trapped rays.
 /// Internal layer-to-layer heat still exists and is retained independently of
 /// the two outgoing port fields. Clones share source and coefficient storage.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AbsorbingSlab {
     layers: Arc<[AbsorbingLayer]>,
-    refractive_index: f64,
-    refractive_index_source: Option<Arc<str>>,
-    reflectance: f64,
+    reflectance: [f64; 2],
     transmittance: f64,
     face_coupling: Arc<[[f64; 2]]>,
     layer_coupling: Arc<[f64]>,
@@ -152,12 +185,15 @@ pub struct AbsorbingSlab {
 }
 
 impl AbsorbingSlab {
+    /// Prepare the declared layers, retaining every per-layer refractive index.
+    /// Unqualified layers use the original matched-index model; use
+    /// `AbsorbingLayer::with_refractive_index` to declare optical material data.
     pub fn new(
         layers: Vec<AbsorbingLayer>,
         controls: SlabQuadrature,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, ConductionError> {
-        Self::prepare(layers, 1.0, None, controls, cancelled)
+        Self::prepare(layers, controls, cancelled)
     }
 
     /// A plane-parallel dielectric stack in an index-one environment.
@@ -166,14 +202,14 @@ impl AbsorbingSlab {
     /// Its source must support the layers' declared temperature intervals and
     /// the caller's gray or finite-band scope. Absorption is the geometric
     /// Beer--Lambert bulk law; real-index Fresnel interfaces require negligible
-    /// interfacial extinction. Conductors, index gradients, rough surfaces,
+    /// interfacial extinction. Conductors, within-layer index gradients, rough surfaces,
     /// coherent films and evanescent tunnelling are outside this model.
     ///
     /// Each polarization retains its own reflection series before averaging.
     /// Internally trapped thermal rays contribute to layer-to-layer exchange,
     /// with the n² radiance/etendue factor, even though they cannot escape.
     pub fn new_refractive(
-        layers: Vec<AbsorbingLayer>,
+        mut layers: Vec<AbsorbingLayer>,
         refractive_index: f64,
         index_source: impl Into<String>,
         controls: SlabQuadrature,
@@ -189,19 +225,16 @@ impl AbsorbingSlab {
                 "need a sourced real refractive index >= 1 with representable n²",
             ));
         }
-        Self::prepare(
-            layers,
-            refractive_index,
-            Some(source.into()),
-            controls,
-            cancelled,
-        )
+        let source: Arc<str> = source.into();
+        for layer in &mut layers {
+            layer.refractive_index = refractive_index;
+            layer.refractive_index_source = Some(source.clone());
+        }
+        Self::prepare(layers, controls, cancelled)
     }
 
     fn prepare(
         layers: Vec<AbsorbingLayer>,
-        refractive_index: f64,
-        refractive_index_source: Option<Arc<str>>,
         controls: SlabQuadrature,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, ConductionError> {
@@ -226,13 +259,18 @@ impl AbsorbingSlab {
             maximum_estimated_coefficient_error: 0.0,
             maximum_partition_residual: 0.0,
         };
-        if refractive_index == 1.0 && layers.iter().all(|layer| layer.optical_depth == 0.0) {
+        let refractive_index = layers[0].refractive_index;
+        let uniform_index = layers
+            .iter()
+            .all(|layer| layer.refractive_index == refractive_index);
+        if uniform_index
+            && refractive_index == 1.0
+            && layers.iter().all(|layer| layer.optical_depth == 0.0)
+        {
             checkpoint(&mut cancelled, 0)?;
             return Ok(Self {
                 layers: layers.into(),
-                refractive_index,
-                refractive_index_source,
-                reflectance: 0.0,
+                reflectance: [0.0; 2],
                 transmittance: 1.0,
                 face_coupling: vec![[0.0; 2]; n].into(),
                 layer_coupling: vec![0.0; n * n].into(),
@@ -241,7 +279,7 @@ impl AbsorbingSlab {
         }
         // Only the upper triangular exchange entries are accumulated. Mirror
         // once at publication so reciprocity is bit-identical by construction.
-        let channels = 2 + 2 * n + n * n;
+        let channels = 3 + 2 * n + n * n;
         let mut total = vec![0.0; channels];
         let mut correction = vec![0.0; channels];
         let mut errors = vec![0.0; channels];
@@ -249,16 +287,31 @@ impl AbsorbingSlab {
         let mut fine = vec![0.0; channels];
         let mut rule_correction = vec![0.0; channels];
         let mut pending = Vec::new();
-        if refractive_index > 1.0 && n > 1 && layers.iter().any(|layer| layer.optical_depth > 0.0) {
+        let mut bands = Vec::new();
+        if !uniform_index {
+            let mut edges = vec![0.0, 1.0];
+            edges.extend(layers.iter().map(AbsorbingLayer::refractive_index));
+            edges.sort_by(f64::total_cmp);
+            edges.dedup();
+            bands.extend(edges.windows(2).map(|edge| [edge[0], edge[1]]));
+            for band in (0..bands.len()).rev() {
+                pending.push((0.0, 1.0, 0_usize, false, band));
+            }
+        } else if refractive_index > 1.0
+            && n > 1
+            && layers.iter().any(|layer| layer.optical_depth > 0.0)
+        {
             let inverse = refractive_index.recip();
             let critical_mu = ((1.0 - inverse) * (1.0 + inverse)).sqrt();
-            pending.push((0.0, critical_mu, 0_usize, true));
+            pending.push((0.0, critical_mu, 0_usize, true, 0));
         }
         // External incidence is integrated in external mu, avoiding a square
         // root singularity at the escape-cone edge. Trapped rays use internal mu.
-        pending.push((0.0, 1.0, 0_usize, false));
-        let integration_width: f64 = pending.iter().map(|(lo, hi, _, _)| hi - lo).sum();
-        while let Some((lo, hi, depth, trapped)) = pending.pop() {
+        if uniform_index {
+            pending.push((0.0, 1.0, 0_usize, false, 0));
+        }
+        let integration_width: f64 = pending.iter().map(|(lo, hi, _, _, _)| hi - lo).sum();
+        while let Some((lo, hi, depth, trapped, band)) = pending.pop() {
             checkpoint(&mut cancelled, report.angular_evaluations)?;
             if report.angular_evaluations + 24 > controls.maximum_evaluations {
                 return Err(invalid(format!(
@@ -267,7 +320,19 @@ impl AbsorbingSlab {
                 )));
             }
             for (nodes, output) in [(&GL8[..], &mut coarse), (&GL16[..], &mut fine)] {
-                if refractive_index == 1.0 {
+                if !uniform_index {
+                    layered::rule(
+                        &layers,
+                        bands[band],
+                        lo,
+                        hi,
+                        nodes,
+                        output,
+                        &mut rule_correction,
+                        &mut cancelled,
+                        &mut report.angular_evaluations,
+                    )?;
+                } else if refractive_index == 1.0 {
                     rule(
                         &layers,
                         lo,
@@ -313,15 +378,15 @@ impl AbsorbingSlab {
                     return Err(invalid("angular panel cannot be subdivided representably"));
                 }
                 // Fixed left-first traversal, independent of any task scheduling.
-                pending.push((mid, hi, depth + 1, trapped));
-                pending.push((lo, mid, depth + 1, trapped));
+                pending.push((mid, hi, depth + 1, trapped, band));
+                pending.push((lo, mid, depth + 1, trapped, band));
             }
         }
         if total.iter().any(|&x| !nonnegative(x)) {
             return Err(invalid("nonfinite angular response"));
         }
         let transmittance = total[0];
-        let reflectance = total[channels - 1];
+        let reflectance = [total[channels - 2], total[channels - 1]];
         let face: Vec<[f64; 2]> = (0..n)
             .map(|i| [total[1 + 2 * i], total[2 + 2 * i]])
             .collect();
@@ -334,7 +399,7 @@ impl AbsorbingSlab {
             }
         }
         for side in 0..2 {
-            let mut partition = reflectance + transmittance;
+            let mut partition = reflectance[side] + transmittance;
             let mut c = 0.0;
             for a in &face {
                 add(&mut partition, &mut c, a[side]);
@@ -352,8 +417,6 @@ impl AbsorbingSlab {
         checkpoint(&mut cancelled, report.angular_evaluations)?;
         Ok(Self {
             layers: layers.into(),
-            refractive_index,
-            refractive_index_source,
             reflectance,
             transmittance,
             face_coupling: face.into(),
@@ -368,15 +431,32 @@ impl AbsorbingSlab {
     pub fn layers(&self) -> &[AbsorbingLayer] {
         &self.layers
     }
-    pub const fn refractive_index(&self) -> f64 {
-        self.refractive_index
+    /// Common layer index, or None when the physical layers differ.
+    /// Original per-layer indices and sources remain on `layers()`.
+    pub fn refractive_index(&self) -> Option<f64> {
+        let index = self.layers[0].refractive_index;
+        self.layers
+            .iter()
+            .all(|layer| layer.refractive_index == index)
+            .then_some(index)
     }
-    /// None identifies the default index-one model, not inferred material data.
+    /// Common source only when every layer declares the same index and source.
+    /// Per-layer source access remains available for heterogeneous stacks.
     pub fn refractive_index_source(&self) -> Option<&str> {
-        self.refractive_index_source.as_deref()
+        let source = self.layers[0].refractive_index_source.as_deref()?;
+        (self.refractive_index().is_some()
+            && self
+                .layers
+                .iter()
+                .all(|layer| layer.refractive_index_source.as_deref() == Some(source)))
+        .then_some(source)
     }
-    /// Diffuse incident reflectance, equal on the two reciprocal exterior faces.
+    /// Front diffuse incident reflectance. Use `reflectances()` for both sides:
+    /// an absorbing heterogeneous stack can have unequal front/back reflection.
     pub const fn reflectance(&self) -> f64 {
+        self.reflectance[0]
+    }
+    pub const fn reflectances(&self) -> [f64; 2] {
         self.reflectance
     }
     pub const fn transmittance(&self) -> f64 {

@@ -84,8 +84,9 @@ pub(super) fn rule(
                     let transmission = escape * through * entered;
                     let reflection = r + escape * r * through * through * entered;
                     add(&mut output[0], &mut correction[0], q * transmission);
-                    let last = output.len() - 1;
-                    add(&mut output[last], &mut correction[last], q * reflection);
+                    for last in output.len() - 2..output.len() {
+                        add(&mut output[last], &mut correction[last], q * reflection);
+                    }
                     for i in 0..n {
                         let front = 1 + 2 * i;
                         let back = front + 1;
@@ -128,7 +129,7 @@ pub(super) fn rule(
 
 // R and 1-R are computed independently: a squared amplitude resolves small R,
 // while 4ab/(a+b)² retains weak transmission near grazing incidence.
-fn power_fractions(a: f64, b: f64) -> (f64, f64) {
+pub(super) fn power_fractions(a: f64, b: f64) -> (f64, f64) {
     let ratio = a.min(b) / a.max(b);
     let sum = 1.0 + ratio;
     (((1.0 - ratio) / sum).powi(2), 4.0 * ratio / (sum * sum))

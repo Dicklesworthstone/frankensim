@@ -5294,7 +5294,7 @@ coefficient discrepancy and incident-energy partition residual are numerical
 diagnostics, not certified material or continuum error bounds. A finite
 positive thickness/absorption product that overflows takes the opaque limit.
 
-The default constructor uses refractive index one. `new_refractive` accepts a
+An undeclared layer uses refractive index one. `new_refractive` accepts a
 sourced real index n >= 1, common to the entire stack, in an index-one exterior.
 It preserves Snell refraction and the separate s/p Fresnel reflection series
 before averaging unpolarized power. All incoherent round trips are summed
@@ -5305,12 +5305,29 @@ their vacuum blackbody-exitance difference. The common-index stack has equal
 front/back reflectance, while individual layer escape fractions can differ.
 Both reflection and transmission enter the incident partition diagnostic.
 
+`AbsorbingLayer::with_refractive_index` supplies a distinct sourced index per
+layer to the same `AbsorbingSlab::new` preparation and all existing heat consumers.
+The common Snell coordinate p = n sin(theta) retains angle memory through every
+interface. Integration splits at every critical p=n; the common measure d(p²)
+includes local n² thermal radiance and channels trapped in high-index subregions.
+Prefix/suffix reflection sweeps sum all repeated passes with positive independently
+retained reflection deficits. The full layer exchange costs O(N²) per ordinate;
+there is no growing transfer matrix or iterative bounce truncation. Lossless
+trapped channels exchange no heat, while small positive absorption survives
+reflection rounded to one. A real low-index gap blocks its nonpropagating channels.
+`reflectances()` retains distinct front/back values; `reflectance()` denotes the
+front. The common `refractive_index()` is now optional, with original individual
+indices and source strings retained by `layers()` for heterogeneous materials.
+Uniform indices reuse the original preparation path. G0/G1/G3 regressions compare
+independent dense two-direction boundary equations, lossless stacks, low-index
+gaps, weak trapped absorption, reversal, subdivision and equilibrium.
+
 G0/G1/G3 tests compare transparent two-interface reflection, opaque n² exchange,
 independent polarized boundary-return ray sweeps, isothermal subdivision,
 reversal, and equilibrium. The index source must support the layer temperature
 intervals and declared gray/band scope. Real-index Fresnel boundaries assume
 negligible interfacial extinction: this is not a conductor model. There is no
-scattering, internal index gradient, rough interface, coherent interference or
+scattering, within-layer index gradient, rough interface, coherent interference or
 evanescent tunnelling. Incident radiance is diffuse; emergent hemispherical
 power is generally not Lambertian.
 A scalar view-factor consumer explicitly owns its exterior diffuse-port

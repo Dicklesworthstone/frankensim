@@ -1,5 +1,7 @@
 use super::*;
 
+mod heterogeneous;
+
 fn slab(depths: &[f64]) -> AbsorbingSlab {
     AbsorbingSlab::new(
         depths
