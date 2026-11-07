@@ -1025,13 +1025,29 @@ impl Frame2d {
             3 * e.j + 1,
             3 * e.j + 2,
         ];
-        let ue: Vec<f64> = dofs.iter().map(|&d| u[d]).collect();
+        // Remove the common translation before rotating or adding the
+        // reference chord. Forming `L*c + u_j - u_i` first can discard the
+        // entire strain-carrying chord at large absolute translations. Keep
+        // nodal rotations: their difference from the chord angle is bending.
+        let ue = [
+            0.0,
+            0.0,
+            u[dofs[2]],
+            u[dofs[3]] - u[dofs[0]],
+            u[dofs[4]] - u[dofs[1]],
+            u[dofs[5]],
+        ];
         let (c, s, ln, alpha) = match self.geometry {
             Geometry::Linear => (e.cos0, e.sin0, e.l0, 0.0),
             Geometry::Corotational => {
-                let dx = e.l0 * e.cos0 + ue[3] - ue[0];
-                let dy = e.l0 * e.sin0 + ue[4] - ue[1];
+                let dx = e.l0.mul_add(e.cos0, ue[3]);
+                let dy = e.l0.mul_add(e.sin0, ue[4]);
                 let ln = dx.hypot(dy);
+                if !ln.is_finite() || ln <= 0.0 {
+                    return Err(SolidError::InvalidInput {
+                        what: "current frame chord must have finite positive length".into(),
+                    });
+                }
                 let (c, s) = (dx / ln, dy / ln);
                 // Rigid chord rotation relative to the initial chord,
                 // unwrapped to the branch nearest the committed angle.
@@ -1891,6 +1907,110 @@ mod damping_admission_tests {
             [0.0, 0.1, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0, 0.0],
         ] {
             assert!(frame.admit_damping_matrix(&bad).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod strain_objectivity_tests {
+    use super::{ElementTrial, Frame2d, Geometry, SectionModel};
+
+    fn oblique_frame(geometry: Geometry) -> Frame2d {
+        let mut frame = Frame2d::new(geometry);
+        frame.add_node(0.0, 0.0);
+        frame.add_node(1.3 * 0.37_f64.cos(), 1.3 * 0.37_f64.sin());
+        frame
+            .add_element(0, 1, 3, 0.0, &|| SectionModel::Elastic {
+                ea: 2.1e9,
+                ei: 2.1e5,
+            })
+            .unwrap();
+        frame
+    }
+
+    fn same_physical_response(expected: &ElementTrial, actual: &ElementTrial) {
+        // Equal represented relative motion must reach identical constitutive
+        // states, forces and tangents, even under a large rigid translation.
+        assert_eq!(actual.d, expected.d);
+        assert_eq!(actual.q, expected.q);
+        assert_eq!(actual.kb, expected.kb);
+        assert_eq!(actual.p, expected.p);
+        assert_eq!(actual.k, expected.k);
+        assert_eq!(actual.alpha, expected.alpha);
+    }
+
+    #[test]
+    fn rigid_translation_creates_no_frame_strain_or_force() {
+        for geometry in [Geometry::Linear, Geometry::Corotational] {
+            let frame = oblique_frame(geometry);
+            let e = &frame.elements[0];
+            let reference = frame.element_trial(e, &[0.0; 6]).unwrap();
+            for translation in [1e6, 2.0_f64.powi(48), 1e100] {
+                let motion = [
+                    translation,
+                    -translation,
+                    0.0,
+                    translation,
+                    -translation,
+                    0.0,
+                ];
+                let translated = frame.element_trial(e, &motion).unwrap();
+                same_physical_response(&reference, &translated);
+                assert_eq!(translated.q, [0.0; 3]);
+                assert_eq!(translated.d, vec![(0.0, 0.0); 3]);
+            }
+        }
+    }
+
+    #[test]
+    fn strained_frame_response_is_invariant_under_superposed_translation() {
+        // Dyadic increments remain exactly represented at this translation;
+        // no solver can recover deformation lost when inputs were rounded.
+        let translation = 2.0_f64.powi(40);
+        let motion = [0.0, 0.0, 1.0 / 64.0, 1.0 / 16.0, 1.0 / 32.0, -1.0 / 128.0];
+        let translated = [
+            translation,
+            -translation,
+            motion[2],
+            translation + motion[3],
+            -translation + motion[4],
+            motion[5],
+        ];
+        for geometry in [Geometry::Linear, Geometry::Corotational] {
+            let frame = oblique_frame(geometry);
+            let e = &frame.elements[0];
+            let reference = frame.element_trial(e, &motion).unwrap();
+            assert!(
+                reference
+                    .d
+                    .iter()
+                    .any(|&(strain, curvature)| { strain.abs() > 1e-6 && curvature.abs() > 1e-6 })
+            );
+            let shifted = frame.element_trial(e, &translated).unwrap();
+            same_physical_response(&reference, &shifted);
+        }
+    }
+
+    #[test]
+    fn corotational_frame_rejects_collapsed_chord_before_constitutive_update() {
+        let mut frame = Frame2d::new(Geometry::Corotational);
+        frame.add_node(0.0, 0.0);
+        frame.add_node(1.0, 0.0);
+        frame
+            .add_element(0, 1, 3, 0.0, &|| SectionModel::Elastic { ea: 7.0, ei: 3.0 })
+            .unwrap();
+        let e = &frame.elements[0];
+        assert!(
+            frame
+                .element_trial(e, &[0.0, 0.0, 0.0, -1.0, 0.0, 0.0])
+                .is_err()
+        );
+        for invalid in [f64::INFINITY, f64::NAN] {
+            assert!(
+                frame
+                    .element_trial(e, &[0.0, 0.0, 0.0, invalid, 0.0, 0.0])
+                    .is_err()
+            );
         }
     }
 }
