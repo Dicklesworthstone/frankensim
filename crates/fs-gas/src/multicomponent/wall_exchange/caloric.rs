@@ -512,7 +512,7 @@ pub(crate) fn exchange_caloric_with_heat_storage(
             },
         };
         response.validate()?;
-        Ok(response)
+        Ok::<_, WallExchangeError>(response)
     };
     // Reuse the original radial loss and gas sensible-heating owner exactly.
     let mut update = exchange_caloric(
