@@ -1,4 +1,5 @@
 //! Original angle-dependent magnetic storage and its symmetric component work.
+use super::saturation::MagneticLaw;
 use super::{SynchronousMotorParameters, SynchronousOperatingPoint, invalid};
 use crate::{ConstitutiveDiscreteGradient, ContinuousStorageTangent, PhsError, Storage};
 use fs_math::{dd::Dd, det};
@@ -15,14 +16,14 @@ fn complete(values: &[f64]) -> bool {
     values.len() == 5 && values.iter().all(|v| v.is_finite())
 }
 
-fn to_dq(sine: f64, cosine: f64, value: [f64; 2]) -> [f64; 2] {
+pub(super) fn to_dq(sine: f64, cosine: f64, value: [f64; 2]) -> [f64; 2] {
     [
         cosine.mul_add(value[0], sine * value[1]),
         (-sine).mul_add(value[0], cosine * value[1]),
     ]
 }
 
-fn to_ab(sine: f64, cosine: f64, value: [f64; 2]) -> [f64; 2] {
+pub(super) fn to_ab(sine: f64, cosine: f64, value: [f64; 2]) -> [f64; 2] {
     [
         cosine.mul_add(value[0], -sine * value[1]),
         sine.mul_add(value[0], cosine * value[1]),
@@ -31,14 +32,13 @@ fn to_ab(sine: f64, cosine: f64, value: [f64; 2]) -> [f64; 2] {
 
 pub(super) fn operating_point(
     p: SynchronousMotorParameters,
+    law: &MagneticLaw,
     state: &[f64; 5],
 ) -> Result<SynchronousOperatingPoint, PhsError> {
     let (s, c) = det::sin_cos(f64::from(p.pole_pairs) * state[2]);
     let flux_dq_wb = to_dq(s, c, [state[0], state[1]]);
-    let current_dq_a = [
-        (flux_dq_wb[0] - p.pm_flux_linkage_wb) / p.d_inductance_h,
-        flux_dq_wb[1] / p.q_inductance_h,
-    ];
+    let current_dq_a = law.current_dq(p, flux_dq_wb)?;
+    let differential_inductance_dq_h = law.differential_inductance_dq(p, flux_dq_wb)?;
     let current_alpha_beta_a = to_ab(s, c, current_dq_a);
     let phase_a = det::sqrt(2.0 / 3.0) * current_alpha_beta_a[0];
     let quadrature = det::sqrt(0.5) * current_alpha_beta_a[1];
@@ -52,8 +52,17 @@ pub(super) fn operating_point(
         state[4] / p.stator_inertia_kg_m2,
     ];
     let electrical_speed = f64::from(p.pole_pairs) * (shaft_speed_rad_s[0] - shaft_speed_rad_s[1]);
-    let electromagnetic_torque_nm = (f64::from(p.pole_pairs) * current_dq_a[1])
-        * (p.d_inductance_h - p.q_inductance_h).mul_add(current_dq_a[0], p.pm_flux_linkage_wb);
+    let electromagnetic_torque_nm = match law {
+        MagneticLaw::Linear => {
+            (f64::from(p.pole_pairs) * current_dq_a[1])
+                * (p.d_inductance_h - p.q_inductance_h)
+                    .mul_add(current_dq_a[0], p.pm_flux_linkage_wb)
+        }
+        MagneticLaw::Curves { .. } => {
+            f64::from(p.pole_pairs)
+                * flux_dq_wb[0].mul_add(current_dq_a[1], -flux_dq_wb[1] * current_dq_a[0])
+        }
+    };
     let speed_voltage_dq_v = [
         -electrical_speed * flux_dq_wb[1],
         electrical_speed * flux_dq_wb[0],
@@ -64,6 +73,7 @@ pub(super) fn operating_point(
             .chain(&current_dq_a)
             .chain(&phase_current_a)
             .chain(&flux_dq_wb)
+            .chain(&differential_inductance_dq_h)
             .chain(&shaft_speed_rad_s)
             .chain(&speed_voltage_dq_v)
             .chain(&[electromagnetic_torque_nm])
@@ -78,6 +88,7 @@ pub(super) fn operating_point(
         current_dq_a,
         phase_current_a,
         flux_dq_wb,
+        differential_inductance_dq_h,
         shaft_speed_rad_s,
         electromagnetic_torque_nm,
         speed_voltage_dq_v,

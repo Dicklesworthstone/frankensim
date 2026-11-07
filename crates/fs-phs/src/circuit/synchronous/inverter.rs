@@ -183,6 +183,7 @@ impl BridgeStamp {
 pub struct AveragedSynchronousInverter {
     parameters: InverterParameters,
     machine_parameters: SynchronousMotorParameters,
+    machine_magnetic_law: super::saturation::MagneticLaw,
     system: PortHamiltonian,
     base_resistance: [f64; 36],
     scales: [f64; 2],
@@ -210,6 +211,7 @@ impl AveragedSynchronousInverter {
             ));
         }
         let machine_parameters = machine.parameters();
+        let machine_magnetic_law = machine.magnetic_law.clone();
         // Two current ports share ONE capacitor: source current stays external;
         // the second closes reciprocally through the actual inverter vector.
         let capacitor = PortHamiltonian::new(
@@ -254,6 +256,7 @@ impl AveragedSynchronousInverter {
         Ok(Self {
             parameters,
             machine_parameters,
+            machine_magnetic_law,
             system,
             base_resistance,
             scales,
@@ -372,7 +375,29 @@ impl PreparedSynchronousInverter {
         self.model.admit_bus(state)?;
         super::storage::operating_point(
             self.model.machine_parameters,
+            &self.model.machine_magnetic_law,
             &[state[1], state[2], state[3], state[4], state[5]],
+        )
+    }
+
+    /// Request a feasible rotor-torque current reference from the SAME retained
+    /// magnetic law used by this inverter's native machine storage. The authored
+    /// d current is fixed; current magnitude and original source support bound
+    /// q current. This does not certify voltage feasibility or transient limits.
+    pub fn current_reference_for_torque_controlled(
+        &self,
+        requested_torque_nm: f64,
+        d_current_a: f64,
+        current_limit_a: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<super::reference::TorqueCurrentReference, PreparedStepError> {
+        super::reference::allocate(
+            self.model.machine_parameters,
+            &self.model.machine_magnetic_law,
+            requested_torque_nm,
+            d_current_a,
+            current_limit_a,
+            cancelled,
         )
     }
 

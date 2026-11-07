@@ -1,5 +1,56 @@
 # fs-phs — Contract
 
+## Original-flux synchronous saturation
+
+`SynchronousMotor::with_flux_curves` admits two existing immutable
+`InductorFluxCurve` sources: d-axis current against `lambda_d-psi_pm` and q-axis
+current against `lambda_q`. Their original integrated energies replace the two
+quadratic magnetic terms. The same energy gives power-invariant phase currents,
+`tau=p*(lambda_d*i_q-lambda_q*i_d)`, reciprocal speed voltage and equal/opposite
+rotor/stator torque. Finite inertias, signed external shaft work and the original
+native five-state solve remain intact. The existing linear constructor retains
+its optimized analytic storage path.
+
+The source curves are authoritative. Returned parameter Ld/Lq entries become
+their zero-curve-flux differential inductances; they are reference metadata,
+not a saturated constitutive law. Operating points return the actual local
+differential inductances using the original scalar one-sided knot convention.
+The finite-bus averaged inverter retains the same source handles for current,
+torque and differential-inductance queries instead of reconstructing from Ld/Lq.
+
+The motor and prepared inverter can allocate a torque current reference at an
+authored fixed d current. They search every original piecewise-affine inverse
+q-law branch inside the actual source support and current-magnitude circle,
+selecting the feasible root with least absolute q current. If the request is
+unattainable, the returned achievable torque explicitly reports the limit.
+This bounded allocation preserves the original torque law; it does not infer
+MTPA, a voltage-feasible operating point or transient current protection.
+
+A symmetric coordinate split averages original scalar flux divided differences
+at both endpoint angles and original angle work at both flux endpoints. A
+trigonometric `sinc` expression evaluates angle work without subtracting nearly
+equal energies or dividing by a vanishing mechanical angle. The analytic
+endpoint action differentiates these same original scalar chords; quadratic
+shaft efforts remain midpoint velocities. Independent energy accounting uses
+the original scalar energy changes and polarized kinetic differences, never
+accepted port work or torque. A true continuous tangent refuses an actual
+source kink or support endpoint; bounded Newton chords retain the original
+scalar endpoint convention.
+
+Initial currents, operating states, all four split corners and every queried
+Newton trial must remain in the original closed source support. There is no
+extrapolation, support clipping or inference of a continuous-path support
+theorem from accepted endpoints. Refused/cancelled steps leave caller outputs
+unchanged and can be retried through the existing workspace. Warm evaluation,
+analytic actions and stepping allocate nothing. Independent d/q laws describe
+reversible axis saturation only; cross-saturation, hysteresis, temperature,
+demagnetization and empirical machine validity require their own source laws.
+`tests/circuit_synchronous_saturation.rs` checks original-energy torque,
+cross-segment and zero-angle component work, analytic tangents and kink refusal,
+linear-source equivalence, domain/refusal retry, and independent nonlinear
+finite-bus trajectory refinement with regeneration, shaft reaction and heat.
+
+
 ## Finite-bus averaged synchronous inverter
 
 `circuit::synchronous::inverter::AveragedSynchronousInverter` composes one finite
@@ -65,8 +116,9 @@ second-order discrete quantities, not exact transient integrals. Successful warm
 steps allocate nothing; explicit native Newton/backtracking limits, cancellation
 and finite physical reporting precede caller output publication.
 
-This is a numerical balanced sinusoidal coaxial reduction with frozen Ld/Lq,
-PM linkage, resistance and inertia. It does not infer saturation, cross-saturation,
+The linear constructor is a numerical balanced sinusoidal coaxial reduction
+with frozen Ld/Lq, PM linkage, resistance and inertia; explicit original-flux
+saturation is described above. Neither lane infers cross-saturation,
 cogging, iron/brush/switching losses, demagnetization, thermal evolution, a neutral
 current path or a fixed stator. Field/dynamometer validity stays with the caller.
 `tests/circuit_synchronous.rs` checks phase power, PM/saliency signs, analytic

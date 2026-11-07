@@ -22,9 +22,13 @@
 //! source-owned symmetric discrete gradient preserves magnetic and kinetic
 //! component work, with an analytic Newton tangent and no new integrator.
 //!
+//! [`SynchronousMotor::with_flux_curves`] instead admits bounded, reversible
+//! independent d/q saturation laws. Their original energy and current own
+//! `tau = p*(lambda_d*i_q-lambda_q*i_d)` and the same reciprocal speed voltage.
+//!
 //! This is a balanced three-wire, sinusoidal, frozen-parameter, coaxial machine.
 //! Zero PM linkage admits synchronous reluctance; equal Ld/Lq removes saliency.
-//! Saturation, cross-saturation, zero-sequence current, cogging, iron losses,
+//! Cross-saturation, zero-sequence current, cogging, iron losses,
 //! demagnetization, thermal evolution and device switching need their own laws.
 //! Parameter admission is numerical, not a field or dynamometer validation.
 //!
@@ -32,22 +36,31 @@
 //! amplitude-invariant 3/2; this owner explicitly uses power invariance):
 //! <https://ocw.mit.edu/courses/6-685-electric-machines-fall-2013/c5edfb0f28f7c1b1b4d1588f179074c6_MIT6_685F13_chapter7.pdf>.
 
+use super::inductance::InductorFluxCurve;
 use crate::{
     PhsError, PortHamiltonian, PreparedStepError, PreparedStepRecord, ResistanceWitness,
-    SolveBudget, StepWorkspace,
+    SolveBudget, StepWorkspace, Storage,
 };
 use fs_math::det;
 
 mod storage;
 use storage::SynchronousStorage;
+mod saturation;
+use saturation::{MagneticLaw, SaturatedStorage};
 
 /// Finite DC bus, physical leg modulation and averaged channel conduction.
 pub mod inverter;
+/// Original-law fixed-d-current torque allocation under current/source limits.
+pub mod reference;
 
 /// Explicit frozen machine data, in SI units, with no inferred source card.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SynchronousMotorParameters {
+    /// Linear d inductance, or source-derived zero-excess-flux reference when
+    /// returned by a machine constructed with `with_flux_curves`.
     pub d_inductance_h: f64,
+    /// Linear q inductance, or source-derived zero-flux reference when returned
+    /// by a machine constructed with `with_flux_curves`.
     pub q_inductance_h: f64,
     /// Per-phase resistance, also the power-invariant alpha/beta resistance.
     pub winding_resistance_ohm: f64,
@@ -70,6 +83,10 @@ pub struct SynchronousOperatingPoint {
     /// Balanced a,b,c winding currents [A], with no zero-sequence channel.
     pub phase_current_a: [f64; 3],
     pub flux_dq_wb: [f64; 2],
+    /// Local original-law differential d/q inductance [H], not secant L.
+    /// At a source knot this follows the curve's one-sided convention: right
+    /// segment at an interior knot, left segment at the final support endpoint.
+    pub differential_inductance_dq_h: [f64; 2],
     pub shaft_speed_rad_s: [f64; 2],
     /// Electromagnetic torque ON the rotor; the stator receives its negative.
     pub electromagnetic_torque_nm: f64,
@@ -83,6 +100,7 @@ pub struct SynchronousOperatingPoint {
 /// outputs are `[i_alpha, i_beta, omega_rotor, omega_stator]`.
 pub struct SynchronousMotor {
     parameters: SynchronousMotorParameters,
+    magnetic_law: MagneticLaw,
     system: PortHamiltonian,
 }
 
@@ -152,6 +170,43 @@ impl SynchronousMotor {
     /// approximation hides torque reaction, acceleration or generated voltage.
     pub fn new(parameters: SynchronousMotorParameters) -> Result<Self, PhsError> {
         let storage = SynchronousStorage::new(parameters)?;
+        Self::assemble(parameters, MagneticLaw::Linear, Box::new(storage))
+    }
+
+    /// Admit independent, bounded original current-versus-flux laws. The d
+    /// curve's coordinate is `lambda_d - psi_pm`; the q curve's is `lambda_q`.
+    /// Their stored energies replace the two quadratic magnetic terms while
+    /// preserving the original five states and both finite shaft inertias.
+    ///
+    /// These curves are authoritative: the supplied `d_inductance_h` and
+    /// `q_inductance_h` entries are replaced by their differential inductance
+    /// at zero curve flux in returned parameter metadata. Use the operating
+    /// point's actual differential inductances for a saturated state.
+    ///
+    /// Every source query, including Newton probes and the discrete gradient's
+    /// four flux/angle corners, must remain within the original closed support.
+    /// No extrapolation, fitted torque law, cross-saturation or hysteresis is
+    /// inferred. Warm source queries and stepping allocate nothing.
+    pub fn with_flux_curves(
+        mut parameters: SynchronousMotorParameters,
+        d: InductorFluxCurve,
+        q: InductorFluxCurve,
+    ) -> Result<Self, PhsError> {
+        parameters.d_inductance_h = d
+            .differential_inductance_h(0.0)
+            .map_err(|_| invalid("synchronous d flux law has no zero-flux inductance"))?;
+        parameters.q_inductance_h = q
+            .differential_inductance_h(0.0)
+            .map_err(|_| invalid("synchronous q flux law has no zero-flux inductance"))?;
+        let storage = SaturatedStorage::new(parameters, d.clone(), q.clone())?;
+        Self::assemble(parameters, MagneticLaw::Curves { d, q }, Box::new(storage))
+    }
+
+    fn assemble(
+        parameters: SynchronousMotorParameters,
+        magnetic_law: MagneticLaw,
+        storage: Box<dyn Storage>,
+    ) -> Result<Self, PhsError> {
         let r = parameters.winding_resistance_ohm;
         let b = parameters.bearing_drag_nm_s_per_rad;
         if [r, b].iter().any(|v| !v.is_finite() || *v < 0.0) {
@@ -197,9 +252,13 @@ impl SynchronousMotor {
         g[5] = 1.0;
         g[14] = 1.0;
         g[19] = 1.0;
-        let system = PortHamiltonian::new(5, 4, j, resistance, g, Box::new(storage))?
+        let system = PortHamiltonian::new(5, 4, j, resistance, g, storage)?
             .with_resistance_witness(witness)?;
-        Ok(Self { parameters, system })
+        Ok(Self {
+            parameters,
+            magnetic_law,
+            system,
+        })
     }
 
     pub const fn parameters(&self) -> SynchronousMotorParameters {
@@ -231,10 +290,7 @@ impl SynchronousMotor {
     ) -> Result<[f64; 5], PhsError> {
         let p = self.parameters;
         let (s, c) = det::sin_cos(f64::from(p.pole_pairs) * relative_angle_rad);
-        let d = p
-            .d_inductance_h
-            .mul_add(current_dq_a[0], p.pm_flux_linkage_wb);
-        let q = p.q_inductance_h * current_dq_a[1];
+        let [d, q] = self.magnetic_law.flux_dq(p, current_dq_a)?;
         let state = [
             c.mul_add(d, -s * q),
             s.mul_add(d, c * q),
@@ -281,7 +337,7 @@ impl SynchronousMotor {
     }
 
     pub fn operating_point(&self, state: &[f64; 5]) -> Result<SynchronousOperatingPoint, PhsError> {
-        storage::operating_point(self.parameters, state)
+        storage::operating_point(self.parameters, &self.magnetic_law, state)
     }
 
     /// Allocate native five-state Newton scratch once, with explicit existing
