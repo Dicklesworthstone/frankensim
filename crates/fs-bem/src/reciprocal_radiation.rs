@@ -38,7 +38,8 @@ pub mod pipe_end;
 mod field;
 pub use field::Solution;
 mod ports;
-pub use ports::VelocityPortSolution;
+pub use ports::{CoherentPortFieldLimits, CoherentRadiationPower, CoherentVelocityPortField,
+    VelocityPortSolution};
 mod receivers;
 pub use receivers::{ReceiverGeometry,PreparedReceivers};
 

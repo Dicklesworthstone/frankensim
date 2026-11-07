@@ -6,6 +6,9 @@
 //! into a P0 observer or relabeling the auxiliary density as normal velocity.
 use super::{HelmholtzError, Medium, Prepared, Solution, C64, bad, finite, poll, zeroed};
 
+mod coherent;
+pub use coherent::{CoherentPortFieldLimits, CoherentRadiationPower, CoherentVelocityPortField};
+
 /// One complete velocity-driven source batch and its unchanged projected work.
 /// Column j of the row-major impedance and solution j have the same source.
 /// All densities stay bound to the source geometry, frequency and medium.

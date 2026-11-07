@@ -48,14 +48,36 @@ impl PreparedReceivers<'_,'_> {
     pub fn kernel_evaluations(&self)->usize {self.rows.kernel_evaluations}
     fn evaluate_fields(&self,solution:&Solution<'_,'_>,velocity:bool)
         ->Result<VectorObservation,HelmholtzError> {
-        if !core::ptr::eq(self.owner,solution.owner) || self.k.to_bits()!=solution.k.to_bits()
-            || self.medium!=solution.medium || solution.coefficients.len()!=self.owner.unknowns() {
+        self.evaluate_coefficients(solution.owner,solution.k,solution.medium,&solution.coefficients,velocity)
+    }
+    fn evaluate_coefficients(&self,owner:&Prepared<'_>,k:f64,medium:Medium,
+        coefficients:&[C64],velocity:bool)->Result<VectorObservation,HelmholtzError> {
+        if !core::ptr::eq(self.owner,owner) || self.k.to_bits()!=k.to_bits()
+            || self.medium!=medium || coefficients.len()!=self.owner.unknowns() {
             return Err(bad("linear receiver and solution source/frequency/medium disagree"));
         }
         self.rows.evaluate(|i| {
             let f=&self.owner.facets[i];
-            (f.ids.map(|a|solution.coefficients[a]),solution.coefficients[self.owner.vertices+i])
+            (f.ids.map(|a|coefficients[a]),coefficients[self.owner.vertices+i])
         },velocity)
+    }
+    /// Observe all coherent velocity-port sources after combining their original
+    /// densities. Receiver rows, source identity and integration estimates are
+    /// unchanged; this does no boundary solve or new quadrature.
+    /// # Errors
+    /// Source/frequency/medium mismatch or nonfinite field arithmetic.
+    pub fn evaluate_coherent(&self,field:&CoherentVelocityPortField<'_,'_>)
+        ->Result<Observation,HelmholtzError> {
+        Ok(self.evaluate_coefficients(field.owner,field.k,field.medium,&field.coefficients,false)?.scalar)
+    }
+    /// Pressure and particle velocity from the SAME coherent P1/P0 field.
+    /// Feed the unchanged result to near_field::FirstOrder for actual reactive
+    /// near-field directional response; no source-direction estimate is used.
+    /// # Errors
+    /// The scalar refusals, missing derivative preparation or overflow.
+    pub fn evaluate_coherent_velocity(&self,field:&CoherentVelocityPortField<'_,'_>)
+        ->Result<VectorObservation,HelmholtzError> {
+        self.evaluate_coefficients(field.owner,field.k,field.medium,&field.coefficients,true)
     }
     /// Complex pressure [Pa] from D[p_P1]+S[lambda_P0], with propagated local
     /// integration discrepancies. These are estimates, not continuum/BEM bounds.

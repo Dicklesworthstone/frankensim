@@ -3499,3 +3499,33 @@ three regional fields and far-field mesh refinement, both single-interface
 reductions, transparent fields, offset-core translation, and refusal/reuse
 behavior. Oracle self-tests can run independently of the BEM dependency graph;
 their success alone is not verification of the coupled production solve.
+
+### Coherent original velocity-port fields
+
+`VelocityPortSolution::coherent` combines every original complex source coefficient
+and prescribed normal velocity under `exp(-i omega t)`, retaining signed,
+dependent and zero-coupling columns. Geometry, frequency, medium and P1/P0
+densities stay immutable and bound to the original `Prepared` owner. Panel-mean
+pressure remains a work quantity; receiver integration reads the original
+density shapes. The existing adaptive receiver row bank observes coherent
+pressure and particle velocity for its admitted array without another boundary
+solve or quadrature. First-order microphone response remains the existing
+pressure/velocity projection.
+
+`CoherentVelocityPortField::power` independently streams the original antipodal
+plane-wave rule over the combined density, so outgoing power includes all
+interference. It reports unmodified complex surface work and the normalized
+real-work/flux discrepancy, with no unit-bearing normalization floor. The
+maximum unit-source backward residual is explicitly not a residual/error bound
+for a nearly cancelling combined field. Additional payload includes the
+original angular-direction table and streaming wave scratch; work and
+cancellation are admitted. Native geometry, wavelength and resonance-exclusion
+limits remain unchanged. No continuum accuracy, causal realization,
+acoustic-band extension or listening acceptance is inferred.
+
+Three real-owner regression definitions compare coherent fields/work/flux with
+an independent direct combined-source solve, exercise 64 coincident directional
+receivers and scalar agreement, and check exact payload boundaries, cancellation
+and source mismatches. Independent source review and exact GitHub blob readback
+completed. Native tests and Rust formatting remain unexecuted while the
+workspace is unavailable.
