@@ -4202,6 +4202,38 @@ late-cancelled updates, characteristic trials and actual-pressure source refusal
 These conditions prescribe external thermal data; they do not introduce solid
 heat storage, a turbulent wall function or a new natural-convection qualification.
 
+`preview_thermal_wall_step` now exposes one reversible original fluid step for
+finite-wall composition. Its `NsfThermalWallTrial` retains the exact grid,
+complete native energy ledger, original prior energy and canonical per-face
+`NsfThermalWallExchange` joules. Positive local heat enters the fluid on either
+orientation. The starting boundary-history refresh returns its already
+evaluated sparse heat fluxes; the accepted conservative corrector retains the
+same endpoint face fluxes used by its energy equation. Their original trapezoid
+supplies each exchange. Residual probes do not replace that consumed history,
+and no accepted-temperature property requery reconstructs the heat afterward.
+Only explicitly listed local faces appear in this account; unlisted global
+walls and mechanical wall work retain their distinct native accounts.
+
+The candidate always refreshes starting history under its proposed held table,
+including an unchanged table. Ordinary public setters retain their original
+unchanged-table no-op, and ordinary steps retain no extra face history. The
+trial copies the exact source-free physical state, supports existing held
+openings, gravity, body forces and local SGS, and explicitly refuses manufactured
+volume callbacks and dynamic SGS workspaces that this copy cannot retain.
+An explicit full-grid cell cap bounds candidate storage; original native
+corrector limits and cancellation checkpoints still apply. A refused or dropped
+trial changes no accepted state or control. `accept` publishes its already
+admitted candidate without additional fallible work.
+
+This supplies the fluid side of `fs-couple::nsf_thermal`, whose original finite
+thermal cells receive the opposite actual joules and own their storage and
+spatial conduction. That adapter separately gates local and joint energy and
+retains first-order held-endpoint thermal coupling. Native regression sources
+cover all heat-flux orientations, original direct-step equivalence for newly
+installed controls, unchanged-table continuation, optional endpoint residual
+control, work/source refusal and late cancellation. This is a coupling seam,
+not an independently calibrated turbulent or conjugate benchmark.
+
 **Prescribed open faces (pexfp.138).**
 `set_open_face(axis, high, Some(NsfOpenState))` declares the density [kg/m³],
 Cartesian velocity [m/s] and temperature [K] of a uniform exterior ghost plane.

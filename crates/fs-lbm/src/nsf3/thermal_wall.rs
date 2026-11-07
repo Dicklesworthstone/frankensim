@@ -106,9 +106,29 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// evaluation. A refusal or cancellation publishes neither controls nor history.
     pub fn set_thermal_walls_cancellable(
         &mut self,
+        walls: Vec<NsfThermalWallFace>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(), NsfError> {
+        self.set_thermal_walls_impl(walls, cancelled, false).map(|_| ())
+    }
+
+    // The original history refresh can retain its exact sparse molecular
+    // face fluxes for a subsequent native conjugate trial. Public setters keep
+    // their existing behavior and discard this optional interval input.
+    pub(super) fn set_thermal_walls_recorded(
+        &mut self,
+        walls: Vec<NsfThermalWallFace>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<f64>, NsfError> {
+        self.set_thermal_walls_impl(walls, cancelled, true)
+    }
+
+    fn set_thermal_walls_impl(
+        &mut self,
         mut walls: Vec<NsfThermalWallFace>,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<(), NsfError> {
+        record: bool,
+    ) -> Result<Vec<f64>, NsfError> {
         checkpoint(&mut cancelled)?;
         if walls.len() > self.n.saturating_mul(6) {
             return Err(NsfError::Input(
@@ -179,8 +199,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             return Err(NsfError::Input("thermal wall faces must be unique"));
         }
         checkpoint(&mut cancelled)?;
-        if walls == self.thermal_walls {
-            return Ok(());
+        if walls == self.thermal_walls && !record {
+            return Ok(Vec::new());
         }
         let old = core::mem::replace(&mut self.thermal_walls, walls);
         let history = (|| {
@@ -210,7 +230,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 &self.material,
                 coefficients,
             );
-            let history = self.flux_divergence(
+            let history = self.flux_divergence_with_wall_heat(
                 &self.e,
                 &rho,
                 &velocity,
@@ -222,7 +242,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             checkpoint(&mut cancelled)?;
             Ok((history, transport))
         })();
-        let ((div, wall, open), transport) = match history {
+        let ((div, wall, open, local_heat), transport) = match history {
             Ok(history) => history,
             Err(error) => {
                 self.thermal_walls = old;
@@ -235,7 +255,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.div = div;
         self.wall_out = wall;
         self.open_out = open;
-        Ok(())
+        Ok(local_heat)
     }
 
     /// Current sparse overrides in canonical `(cell, axis, high)` order.

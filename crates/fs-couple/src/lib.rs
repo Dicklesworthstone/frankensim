@@ -192,6 +192,8 @@ pub mod modal_acoustic_time {
 }
 /// Original resolved compressible flow coupled to the original causal DG bore.
 pub mod nsf_dg;
+/// Resolved fluid wall heat coupled to original finite spatial solid storage.
+pub mod nsf_thermal;
 pub mod pcm_wav;
 pub mod piano_vertical;
 pub mod pickup;

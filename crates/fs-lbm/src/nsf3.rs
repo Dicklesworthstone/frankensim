@@ -117,6 +117,8 @@ mod coupling;
 pub use coupling::{NsfCouplingComponent, NsfCouplingControl, NsfCouplingReport};
 mod thermal_wall;
 pub use thermal_wall::{NsfThermalWallFace, NsfWallThermal};
+mod thermal_wall_trial;
+pub use thermal_wall_trial::{NsfThermalWallExchange, NsfThermalWallTrial};
 /// Unpublished original NSF interval for reciprocal characteristic coupling.
 pub use characteristic_trial::NsfCharacteristicTrial;
 
@@ -1311,6 +1313,23 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         transport: &[NsfSgsTransport],
         faces: Option<&OpenFaces>,
     ) -> Result<(Vec<f64>, f64, BoundaryFlux), NsfError> {
+        self.flux_divergence_with_wall_heat(et, rho, u, theta, sig, transport, faces)
+            .map(|(divergence, wall, boundary, _)| (divergence, wall, boundary))
+    }
+
+    // Retain the SAME sparse face values already used below for divergence and
+    // wall accounts. A conjugate trial consumes them without a second source
+    // query or a split reconstructed from the aggregate wall heat.
+    fn flux_divergence_with_wall_heat(
+        &self,
+        et: &[f64],
+        rho: &[f64],
+        u: &[[f64; 3]],
+        theta: &[f64],
+        sig: &[[f64; 6]],
+        transport: &[NsfSgsTransport],
+        faces: Option<&OpenFaces>,
+    ) -> Result<(Vec<f64>, f64, BoundaryFlux, Vec<f64>), NsfError> {
         let n = self.n;
         let mut g = vec![[0.0; 3]; n];
         let solid = &self.solid;
@@ -1532,7 +1551,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         if !open.wall_heat_out.is_finite() || !open.wall_work_out.is_finite() {
             return Err(NsfError::Input("wall heat or mechanical power overflowed"));
         }
-        Ok((div, out, open))
+        Ok((div, out, open, local_wall_heat))
     }
 
     fn stream(&self, post: &[[f64; Q]], incoming: Option<&IncomingPopulations>) -> Vec<[f64; Q]> {
@@ -1614,7 +1633,22 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         next_body_acceleration: Option<Vec<body_force::BodyAcceleration>>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<EnergyLedger, NsfError> {
+        self.step_with_wall_exchange(next_body_acceleration, cancelled, None)
+    }
+
+    // Optional per-face output is the original old/new trapezoid used by the
+    // accepted conservative corrector. Endpoint residual probes diagnose that
+    // candidate and never replace its already-consumed heat flux history.
+    fn step_with_wall_exchange(
+        &mut self,
+        next_body_acceleration: Option<Vec<body_force::BodyAcceleration>>,
+        cancelled: &mut impl FnMut() -> bool,
+        wall_exchange: Option<(&[f64], &mut Vec<NsfThermalWallExchange>)>,
+    ) -> Result<EnergyLedger, NsfError> {
         body_force::checkpoint(cancelled)?;
+        if wall_exchange.as_ref().is_some_and(|(old, _)| old.len() != self.thermal_walls.len()) {
+            return Err(NsfError::Input("thermal wall exchange history does not match its faces"));
+        }
         let body_force = body_force::BodyForceStep::new(
             &self.body_acceleration,
             next_body_acceleration.as_deref(),
@@ -1796,7 +1830,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 })
                 .collect();
             let sig = self.stress_field(&next, &f1, &rho1, &th1, &trial_material, &trial_transport);
-            let (div1, wall1, open1) = self.flux_divergence(
+            let (div1, wall1, open1, wall_heat_flux) = self.flux_divergence_with_wall_heat(
                 &et_trial,
                 &rho1,
                 &u1,
@@ -1805,6 +1839,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 &trial_transport,
                 faces1.as_ref(),
             )?;
+            // Ordinary native steps keep no additional face-history storage.
+            let wall_heat_flux = if wall_exchange.is_some() { wall_heat_flux } else { Vec::new() };
             let mut material_new = trial_material;
             let mut e1 = self.e.clone();
             let mut th_new = th1.clone();
@@ -1856,12 +1892,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             result = Some(coupling::Endpoint {
                 force: f1, velocity: u1, energy: e1, divergence: div1,
                 wall_flux: wall1, boundary_flux: open1, faces: faces1,
+                wall_heat_flux,
                 material: material_new,
             });
         }
         let coupling::Endpoint {
             force: force1, velocity: u1, energy: e1, divergence: div1,
             wall_flux: wall1, boundary_flux: open1, faces: faces1,
+            wall_heat_flux,
             material: mut material_new,
         } = result.expect("at least one coupling pass");
         for i in 0..n {
@@ -2082,7 +2120,31 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         }
         let reservoir_exchanges = self.finish_reservoir_exchanges(
             open1, &reservoir_flows, &reservoir_mass_by_aperture)?;
+        let local_exchange = match wall_exchange.as_ref() {
+            Some((old, _)) => {
+                if wall_heat_flux.len() != self.thermal_walls.len() {
+                    return Err(NsfError::Input("thermal wall endpoint lost its face fluxes"));
+                }
+                let mut exchange = Vec::with_capacity(self.thermal_walls.len());
+                for ((face, &before), &after) in self.thermal_walls.iter().zip(*old).zip(&wall_heat_flux) {
+                    body_force::checkpoint(cancelled)?;
+                    let direction = if face.high { -1.0 } else { 1.0 };
+                    let heat_into_fluid_j = unit * (direction * 0.5 * (before + after));
+                    if !heat_into_fluid_j.is_finite() {
+                        return Err(NsfError::Input("thermal wall interval heat overflowed"));
+                    }
+                    exchange.push(NsfThermalWallExchange {
+                        cell: face.cell, axis: face.axis, high: face.high, heat_into_fluid_j,
+                    });
+                }
+                Some(exchange)
+            }
+            None => None,
+        };
         body_force::checkpoint(cancelled)?;
+        if let (Some((_, destination)), Some(exchange)) = (wall_exchange, local_exchange) {
+            *destination = exchange;
+        }
         if let Some(field) = next_body_acceleration {
             self.body_acceleration = field;
         }

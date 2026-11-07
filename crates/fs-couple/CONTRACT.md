@@ -4292,6 +4292,52 @@ temperature changes, reference-source identity and both expanded and contracted
 frequency admission. This is fixed-temperature preparation without live heat
 feedback or changes to elastic stiffness.
 
+## Resolved NSF convection against finite spatial solid storage
+
+`nsf_thermal::advance_nsf_solid` advances the original `NsfGrid3` and original
+`DepositionSimulation` together for one lattice step. Each unique native fluid
+face maps to an explicitly bound solid cell and its same registered caloric
+object. The face area is the original dx²; mapped patches must fit the cell's
+exposed surface. The adapter removes their area from authored ambient exchange
+and refuses a competing ambient-conductance override on those cells.
+
+The actual solid endpoint temperature drives an isothermal interface or the
+original molecular gas half-cell in series with `d_s/k_s(h) + R_contact`.
+The explicitly bound original conductivity law retains its enthalpy/phase
+admission; zero conductivity insulates. Solid conductivity is held through its
+declared half-layer, without inventing an integrated profile or phase boundary.
+The finite cell still owns all storage. Native reciprocal solid links and
+independent sources/reservoirs remain in the same backward-Euler residual.
+
+Each fluid trial retains its complete original fields, material and flux
+history. The SAME local-face trapezoid joules consumed by the native fluid
+energy equation are debited once from their respective solid cells. Opposing
+face heat is never apportioned from a net wall total. Newton/Krylov probes
+start from the accepted states and discard their private candidates; the final
+thermal payload retains the exact final fluid trial for joint publication.
+Original local/total thermal checks, independent fluid and per-cell/interface
+transfer checks, and a combined storage/external-supply check must all pass.
+Cancellation, source refusal, exhausted work and failed energy gates preserve
+both owners. Cell/contact limits and a shared endpoint-query cap bound every
+native fluid trial, including derivative probes and final acceptance.
+
+This is fixed-geometry, fixed-inventory, first-order coupled time sampling:
+the solid endpoint boundary is held over one original fluid step. Both clocks
+use the same representable lattice timestamp. Native thermal events still
+require explicit splits/processing. Molecular/local SGS and held open controls
+are admitted; manufactured fluid source functions and dynamic SGS currently
+refuse because their reversible wall-trial support is unavailable. Source
+calorics, fluid Mach/temperature/stability bounds and chosen spatial/lattice
+resolution remain authoritative. No moving solid, boundary-layer wall function,
+global time-error bound or experimental convection qualification is implied.
+
+Focused native regression sources cover an independent uniform-fluid and finite
+wall capacity balance with series resistance, separate heating/cooling patches,
+solid conduction and remaining ambient area, conductivity/insulation response,
+source identity and work limits, and transactional late source/cancellation
+refusal. These regression sources have not been executed on the current
+resource-constrained build host; parsing is not native numerical validation.
+
 ## Local resonance surveys of complete nonlinear forced responses
 
 `phs_orbit::forced_resonance::survey_forced_port_resonances` connects the original

@@ -151,6 +151,7 @@ pub(super) struct Endpoint {
     pub(super) energy: Vec<f64>,
     pub(super) divergence: Vec<f64>,
     pub(super) wall_flux: f64,
+    pub(super) wall_heat_flux: Vec<f64>,
     pub(super) boundary_flux: BoundaryFlux,
     pub(super) faces: Option<OpenFaces>,
     pub(super) material: Vec<Option<NsfCellMaterial>>,

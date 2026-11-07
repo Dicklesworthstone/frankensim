@@ -388,7 +388,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
 
     // Characteristic topology prohibits SourceFn. Copy every remaining owner
     // field rather than reconstructing populations from macroscopic values.
-    fn characteristic_copy(&self) -> Self {
+    pub(super) fn characteristic_copy(&self) -> Self {
         Self {
             spec: self.spec.clone(), law: self.law.clone(), material: self.material.clone(),
             coupling_control: self.coupling_control,
