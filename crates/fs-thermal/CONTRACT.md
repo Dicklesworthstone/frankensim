@@ -1284,6 +1284,44 @@ equal sticking and specular nonsticking reflection; it supplies no gas-film,
 diffuse thermal accommodation, Knudsen-layer or moving-geometry model.
 
 
+### Integrated turnover through supported-film birth and extinction
+
+`sublimation::molecular::turnover::integrate_molecular_turnover` integrates the
+original kinetic coefficients at frozen surface/gas temperatures and exposed
+area. The finite ideal vapor follows `dm_v/dt = c - lambda*m_v`; both gross
+streams are integrated analytically. Molecules may return during the same
+interval, so neither stream is limited to a fraction of its original inventory.
+A prescribed bath uses the same original coefficients and sign convention.
+
+The caller explicitly admits barrier-free heterogeneous deposition and a
+zero-residence bare-interface closure. At zero coating mass, outgoing sticking
+molecules are limited to the smaller of the saturation capacity and the
+incoming stream. An undersaturated bare support immediately reemits incoming
+sticking molecules at its own temperature; a supersaturated support begins
+accumulating coating. The substrate never supplies volatile mass. Complete
+film loss is located analytically, and equal incoming/reemitted streams continue
+for the remaining bare interval. Those streams can exchange heat even at zero
+net mass. No arbitrary seed or fractional-inventory termination threshold is used.
+
+`MolecularTurnover` retains the signed transfer independently of subtracting
+large gross streams, the actual endpoint inventories, first extinction time,
+and separate compensated stream/deposit/vapor mass residuals. Tiny return
+streams use a cancellation-free exponential ratio; independently representable
+late tails survive exponential underflow. Consumers must admit the residuals
+against their physical mass budgets and retain or refuse topology differences
+caused by inventory encoding. Zero-time, sealed and exact-equilibrium states
+preserve inventories exactly. Scalar work is allocation-free and bounded; there
+is no nonlinear iteration or hardware-performance claim.
+
+Eight G0/G1/G3 native tests cover the affine solution, gross recycling, birth,
+extinction and subdivision across the bare boundary, the prescribed film limit,
+tiny return streams/events, exact stationary/no-op states, late tails and invalid
+inputs. This operation supplies no caloric evolution: its consumer must close
+both original energy accounts using the distinct stream temperatures. Fixed
+temperature and area, bulk-solid saturation, complete sticking-stream thermalization
+and the original dilute film remain approximations. No nucleation barrier,
+submonolayer coverage, residence kinetics, morphology or resolved film is claimed.
+
 ### Molecular normal momentum and explicit Maxwell reflection
 
 `sublimation::molecular::momentum` supplies allocation-free half-space momentum

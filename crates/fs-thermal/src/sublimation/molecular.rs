@@ -31,6 +31,9 @@ pub mod momentum;
 /// Exact incoming mass, vector momentum and crossing energy with bulk drift.
 pub mod drift;
 
+/// Integrated counterflow with finite-vapor feedback and an exact bare-film boundary.
+pub mod turnover;
+
 /// Opposing mass fluxes per unit exposed area [kg/(m² s)].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MolecularMassFlux {
