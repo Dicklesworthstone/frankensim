@@ -179,6 +179,30 @@ struct CurveStorage {
     curves: Vec<(usize, ScalarCurve)>,
 }
 
+// Share the ORIGINAL scalar constitutive owner with native motor flux storage.
+// Its winding row must be empty: a scalar curve cannot erase a reciprocal
+// magnetic cross term or add energy on top of an existing linear self term.
+pub(super) fn storage_with_inductor_curve(
+    linear: QuadraticStorage,
+    coordinate: usize,
+    curve: &super::inductance::InductorFluxCurve,
+) -> Result<Box<dyn Storage>, crate::PhsError> {
+    let n = linear.n;
+    if coordinate >= n
+        || (0..n).any(|i| {
+            linear.matrix()[coordinate * n + i] != 0.0 || linear.matrix()[i * n + coordinate] != 0.0
+        })
+    {
+        return Err(crate::PhsError::Dimension {
+            what: "nonlinear winding requires an empty original quadratic row and column",
+        });
+    }
+    Ok(Box::new(CurveStorage {
+        linear,
+        curves: vec![(coordinate, curve.scalar.clone())],
+    }))
+}
+
 impl Storage for CurveStorage {
     fn continuous_tangent(&self) -> Option<&dyn ContinuousStorageTangent> {
         Some(self)

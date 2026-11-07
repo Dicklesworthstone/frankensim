@@ -33,6 +33,9 @@ use crate::{
 };
 use fs_math::det;
 
+/// Bounded nonlinear winding storage on the same reciprocal three-state motor.
+pub mod nonlinear;
+
 /// Caller-admitted, frozen constitutive data in SI units. No fitted defaults.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DcMotorParameters {
