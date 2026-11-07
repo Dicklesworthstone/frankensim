@@ -1,4 +1,7 @@
 //! Independent finite-gas graph and exact-time references for both native stages.
+#[path = "sdirk/adaptive.rs"]
+mod adaptive;
+
 use super::*;
 use fs_couple::moisture::atmosphere::FiniteMoistureAtmosphere;
 use fs_couple::moisture::radial::{

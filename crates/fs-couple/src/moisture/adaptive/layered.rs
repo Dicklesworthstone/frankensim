@@ -16,6 +16,7 @@ use crate::moisture::{
     },
 };
 
+mod atmosphere;
 mod radial;
 mod sdirk;
 mod solution;
@@ -44,9 +45,9 @@ impl LayeredTransport for MoistureLayeredSdirk2Report {
         &self.endpoint
     }
 }
-impl LayeredTransport for AtmosphereMoistureStep<MoistureLayeredReport> {
+impl<R: LayeredTransport> LayeredTransport for AtmosphereMoistureStep<R> {
     fn transport(&self) -> &MoistureLayeredReport {
-        &self.transport
+        self.transport.transport()
     }
 }
 impl LayeredTransport
