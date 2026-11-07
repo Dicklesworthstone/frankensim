@@ -24,6 +24,9 @@ use crate::{
 use fs_math::det;
 
 mod compliance;
+mod trial;
+
+pub use trial::MindlinPathTrial;
 
 /// Integrated pressure-weighted sliding over the original accepted path.
 pub mod sliding;
@@ -83,13 +86,13 @@ impl HertzMindlinContact {
         self.advance_path(state, input, true, cancelled)
     }
 
-    fn advance_path(
+    fn admit_path(
         &self,
         state: &HertzMindlinState,
         input: &TangentialStepInput,
         prescribed: bool,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<MindlinPathStep, MindlinPathError> {
+    ) -> Result<(), MindlinPathError> {
         poll(cancelled)?;
         self.check_owner(state)?;
         input.solve.validate()?;
@@ -106,6 +109,17 @@ impl HertzMindlinContact {
         if let Some(p) = input.nominal_pressure_pa {
             nonnegative_finite(p, "contact_pressure_pa")?;
         }
+        Ok(())
+    }
+
+    fn advance_path(
+        &self,
+        state: &HertzMindlinState,
+        input: &TangentialStepInput,
+        prescribed: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MindlinPathStep, MindlinPathError> {
+        self.admit_path(state, input, prescribed, cancelled)?;
         if input.normal_n == state.normal_force_n() {
             let tangential = self.advance(state, input)?;
             poll(cancelled)?;

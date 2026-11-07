@@ -2564,3 +2564,18 @@ original rank-one support immediately on both sides of a one-sided zero.
 All ten tests pass through the isolated original-source dry-tribology build
 with actual `fs-math` and `fs-rand`; this is not a full constellation build or
 experimental validation.
+
+## Allocation-free changing-area Mindlin coupling probes
+
+`mindlin::loading::path::MindlinPathTrial` exposes the same fixed-load or
+changing-area path response and scalar body-recoil solve as the original
+Hertz--Mindlin owner, without copying or constructing reversal memory. Its
+analytic tangent differentiates average force against actual shear travel;
+the supplied mechanical compliance is already used to resolve that travel.
+The probe retains the original force, iteration, input and cancellation checks.
+Only retained-history capacity is deferred: callers must obtain a successful
+`advance_coupled_path` candidate before publishing mechanical or contact state.
+Three G1/G3/G4 regressions cover exact probe/candidate agreement through loading,
+unloading, reversal and separation, the actual-travel tangent, frictionless
+limits, and atomic refusals. No new normal, adhesive or friction law is selected
+by this source-neutral probe.
