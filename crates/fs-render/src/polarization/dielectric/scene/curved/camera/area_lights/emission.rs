@@ -10,7 +10,9 @@ use super::{
     AreaEmitterError, CameraRadianceError, CurvedCameraScene, EmissionSides, SurfaceEmitter,
 };
 use crate::polarization::dielectric::scene::curved::CurvedPolarizedScene;
-use fs_geom::Point3;
+use crate::instances::GeometryInstance;
+use crate::polarization::Stokes;
+use fs_geom::{Point3, Vec3};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum AreaEmission<'e> {
@@ -41,6 +43,42 @@ impl<'e> AreaEmission<'e> {
                 .radiance_w_m2_sr_nm(wavelength_nm)
                 .map_err(CameraRadianceError::Thermal),
         }
+    }
+
+    /// The declared body axis owns every area-bundle frame, including a
+    /// spectral knot or interpolated wavelength whose Stokes state is
+    /// unpolarized. Preparation and shooting therefore use the same chart
+    /// without a wavelength-dependent switch to an unrelated caller axis.
+    /// Sources with no declaration retain their original arbitrary basis.
+    pub(super) fn polarization_axis(
+        &self,
+        instance: &GeometryInstance,
+        unpolarized_axis: Vec3,
+    ) -> Vec3 {
+        if let Self::Calibrated(emitter) = self
+            && let Some(polarization) = emitter.polarization()
+        {
+            instance.transform().transform_vector(polarization.reference_axis())
+        } else {
+            unpolarized_axis
+        }
+    }
+
+    /// The same original spectral source law as camera hits, expressed in the
+    /// source-owned area-bundle frame admitted during preparation.
+    pub(super) fn polarization(
+        &self,
+        instance: &GeometryInstance,
+        wavelength_nm: f64,
+        unpolarized_axis: Vec3,
+    ) -> Result<(Vec3, Stokes), CameraRadianceError> {
+        if let Self::Calibrated(emitter) = self
+            && let Some(polarization) = emitter.polarization()
+        {
+            let state = polarization.normalized_stokes(wavelength_nm)?;
+            return Ok((self.polarization_axis(instance, unpolarized_axis), state));
+        }
+        Ok((unpolarized_axis, Stokes::unpolarized(1.0)))
     }
 
     pub(super) fn admit_local_medium(

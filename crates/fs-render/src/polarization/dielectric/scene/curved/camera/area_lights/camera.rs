@@ -70,6 +70,8 @@ pub struct AreaLightBinding<'a, 's, 'm> {
     pub receiver_object_id: u64,
     pub source_side: BoundarySide,
     pub initial_medium: usize,
+    /// Fallback basis for sources without declared polarization. A source
+    /// declaration owns its body axis even at unpolarized spectral knots.
     pub source_transverse_axis: Vec3,
     pub seeds: &'a [BundleImageSeed<'a>],
     pub image_options: BundleImageOptions,
@@ -637,8 +639,11 @@ pub(super) fn validate_source_binding(
     if expected_medium.is_some_and(|medium| medium != binding.initial_medium) {
         return Err(invalid());
     }
+    let source_axis = binding.source.emitter.polarization_axis(
+        binding.source.instance, binding.source_transverse_axis,
+    );
     for seed in binding.seeds {
-        PolarizationFrame::try_new(seed.initial_direction, binding.source_transverse_axis)
+        PolarizationFrame::try_new(seed.initial_direction, source_axis)
             .map_err(|_| invalid())?;
     }
     Ok(())
@@ -714,9 +719,16 @@ pub(super) fn emitter_weight_for_source(
             .map_err(|error| AreaLightCameraError::Source {
                 binding: index, error: AreaEmitterError::Source(error),
             })?;
+        let (transverse_axis, _) = binding.source.emitter.polarization(
+            binding.source.instance, wavelength, binding.source_transverse_axis,
+        )?;
+        // Membership and both proposal densities are geometric. Keep this
+        // replay unpolarized so an exact polarized extinction cannot remove
+        // an otherwise supported image; actual source contributions use the
+        // original full Stokes state in source.launch and SurfaceEmission.
         let launch = BundleConnectionLaunch {
             ray: Ray { origin: sample.position_m(), dir: source_direction },
-            transverse_axis: binding.source_transverse_axis,
+            transverse_axis,
             wavelength_nm: wavelength, normalized_source_stokes: Stokes::unpolarized(1.0),
             initial_medium: binding.initial_medium,
         };

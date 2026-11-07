@@ -4,13 +4,13 @@
 //! horizontal axis is the supplied world axis projected onto that ray's
 //! transverse plane. In opposite travel frames sharing this axis the native
 //! reciprocity convention is A=diag(1,1,-1,1), so the camera seed is A*a.
-//! With M_reverse=A*M_forward^T*A, unpolarized emission gives
-//! e0^T*M_reverse*A*a = a^T*M_forward*e0. V is NOT negated, and the seed's
+//! With M_reverse=A*M_forward^T*A, source state s gives
+//! s^T*A*M_reverse*A*a = a^T*M_forward*s. V is NOT negated, and the seed's
 //! intensity retains the physical analyzer throughput instead of being one.
 //!
 //! This is an ideal local analyzer at the geometric camera launch plane, with
 //! a wavelength-independent declared row. It supplies no finite-thickness or
-//! angle-dependent polarizer, polarized source law, bulk birefringence, or
+//! angle-dependent polarizer, bulk birefringence, or
 //! propagation through a resolved camera lens. The existing ray geometry,
 //! complete Stokes Fresnel response, Beer path and radiance index conversion
 //! remain authoritative. All-zero rows refuse because the original traversal
@@ -163,7 +163,7 @@ impl CameraAnalyzer {
 }
 
 impl CurvedCameraScene<'_, '_> {
-    /// Measure the original unpolarized source scene through a declared passive
+    /// Measure the original source scene through a declared passive
     /// analyzer at this camera ray's launch. Native counter streams, per-path
     /// budgets, thermal/surface emission and endpoint n² conversion are shared
     /// with [`Self::sample_ray`]; no post-hoc scalar attenuation approximates

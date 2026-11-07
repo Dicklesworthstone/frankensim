@@ -2,7 +2,7 @@
 //!
 //! The rendering equation adds Le at every encountered source, including a
 //! surface that subsequently reflects or transmits. Its contribution uses the
-//! arriving reciprocal Stokes I and that encounter's local index, never the
+//! arriving reciprocal Stokes response and that encounter's local index, never the
 //! final path's index or the current surface's sampled BSDF/PDF.
 //! See PBRT 4e, section 13.4:
 //! <https://pbr-book.org/4ed/Light_Transport_I_Surface_Reflection/A_Better_Path_Tracer>.
@@ -14,6 +14,10 @@ use super::{
 
 use super::super::CurvedTraceEvent;
 use super::thermal::ThermalEmission;
+use crate::polarization::dielectric::transport::PolarizationFrame;
+use crate::polarization::dielectric::transport::connection::{
+    normalized_camera, reciprocal_contraction,
+};
 
 #[cfg(feature = "volumes")]
 use super::super::participating::{CurvedRayleighEvent, CurvedRayleighPath};
@@ -217,10 +221,43 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
                 PathTermination::Extinguished,
             ));
         }
+        let polarization_weight = if let Some(polarization) =
+            emitter.and_then(|emitter| emitter.polarization())
+        {
+            let source = polarization.normalized_stokes(beam.wavelength_nm())?;
+            if source.q == 0.0 && source.u == 0.0 && source.v == 0.0 {
+                // Retain every legacy intensity bit and its arbitrary frame.
+                1.0
+            } else {
+                let axis = self.camera.emitter_polarization_axes
+                    .get(contact.witness.boundary_id)
+                    .and_then(|axis| *axis)
+                    .ok_or(CameraRadianceError::NumericalRange)?;
+                let frame = PolarizationFrame::try_new(beam.ray().dir.scale(-1.0), axis)
+                    .map_err(CurvedSceneError::from)?;
+                // Keep physical prefix I outside the bounded polarization
+                // contraction so the existing logarithmic recovery can rescue
+                // extreme source/prefix products. Reciprocity negates U only.
+                let camera = normalized_camera(*beam, source).map_err(CurvedSceneError::from)?;
+                reciprocal_contraction(camera, frame, source).map_err(CurvedSceneError::from)?
+            }
+        } else {
+            1.0
+        };
+        // A crossed source/analyzer state is exact zero emitted contribution,
+        // not an extinguished path. The original material still scatters.
+        if polarization_weight == 0.0 {
+            return Ok(());
+        }
         let local_index = phase_index(beam.medium(), beam.wavelength_nm())?;
         let ratio = self.initial_index / local_index;
         let weight = beam.power().i * (ratio * ratio);
         let direct = (emitted * weight) * mis_weight;
+        let direct = if polarization_weight == 1.0 {
+            direct
+        } else {
+            direct * polarization_weight
+        };
         // Keep the complete static arithmetic, including signed zero and the
         // original overflow recovery, when the history is exactly steady.
         let direct = if source_scale == 1.0 {
@@ -237,6 +274,11 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
                 + fs_math::det::ln(beam.power().i)
                 + 2.0 * (fs_math::det::ln(self.initial_index) - fs_math::det::ln(local_index))
                 + fs_math::det::ln(mis_weight);
+            let logarithm = if polarization_weight == 1.0 {
+                logarithm
+            } else {
+                logarithm + fs_math::det::ln(polarization_weight)
+            };
             let logarithm = if source_scale == 1.0 {
                 logarithm
             } else {

@@ -5,10 +5,11 @@
 //! branch/directional proposal; bulk propagation retains Beer absorption and frame
 //! transport. For reciprocal paths, the reverse Mueller matrix is a transpose
 //! up to polarization-convention sign matrices D. With unpolarized emission
-//! and intensity-only detection, e0^T D M^T D e0 = e0^T M e0. This does NOT
-//! provide a general polarized camera. [`CameraAnalyzer`] supplies an explicit
-//! passive detector row for the same unpolarized sources: its reciprocal seed
-//! retains Q/U/V and its physical throughput through this original walk.
+//! and intensity-only detection, e0^T D M^T D e0 = e0^T M e0.
+//! [`CameraAnalyzer`] supplies an explicit passive detector row; optional
+//! [`SourcePolarization`] retains the emitter's full spectral Stokes state.
+//! Their original reciprocal contraction aligns the physical source frame at
+//! each encounter, retaining Q/U/V and absolute throughput through this walk.
 //!
 //! Radiance obeys L/n^2 along smooth isotropic lossless propagation. Consequently
 //! each source contribution is multiplied ONCE by (n_camera/n_source)^2,
@@ -33,7 +34,8 @@
 //! <https://pbr-book.org/4ed/Reflection_Models/Rough_Dielectric_BSDF>, and PBRT 3e,
 //! section 16.1.3, <https://pbr-book.org/3ed-2018/Light_Transport_III_Bidirectional_Methods/The_Path-Space_Measurement_Equation>.
 //!
-//! Finite emitters are uniform, unpolarized radiance on original native surfaces.
+//! Finite emitters supply uniform radiance on original native surfaces, with
+//! optional authored spectral polarization in an original body-local frame.
 //! Emission is added before the same path reflects or transmits; it does not
 //! replace the surface's optical interaction. Supplied radiance is independently
 //! calibrated: no thermal emissivity or material/source energy coupling is inferred.
@@ -65,6 +67,8 @@ use fs_exec::Cx;
 use fs_geom::Vec3;
 
 mod emission;
+mod polarized_source;
+pub use polarized_source::SourcePolarization;
 /// Finite-source emission histories on native group-delay paths.
 pub mod transient;
 use emission::SurfaceEmission;
@@ -229,7 +233,7 @@ pub enum EmissionSides {
     Both,
 }
 
-/// Uniform unpolarized source on an actual native surface. Reflection or
+/// Uniform source on an actual native surface, initially unpolarized. Reflection or
 /// transmission continues under the original material after emission is added.
 /// No thermal emissivity is inferred from the independently calibrated spectrum.
 /// Supplied
@@ -240,6 +244,7 @@ pub struct SurfaceEmitter {
     object_id: u64,
     spectrum: RadianceSpectrum,
     sides: EmissionSides,
+    polarization: Option<SourcePolarization>,
 }
 
 impl SurfaceEmitter {
@@ -248,6 +253,7 @@ impl SurfaceEmitter {
             object_id,
             spectrum,
             sides,
+            polarization: None,
         }
     }
     pub const fn object_id(&self) -> u64 {
@@ -258,6 +264,28 @@ impl SurfaceEmitter {
     }
     pub const fn sides(&self) -> EmissionSides {
         self.sides
+    }
+
+    /// Retain a physical spectral polarization in the emitting body's local
+    /// coordinates. Its declared support must cover the complete radiance
+    /// spectrum; neither source is extrapolated. Intensity and sidedness remain
+    /// those of this emitter, with no automatic polarizer transmission loss.
+    pub fn with_polarization(
+        mut self,
+        polarization: SourcePolarization,
+    ) -> Result<Self, CameraRadianceError> {
+        if let Some((low, high)) = polarization.wavelength_bounds_nm() {
+            let (source_low, source_high) = self.spectrum.wavelength_bounds_nm();
+            if low > source_low || high < source_high {
+                return Err(CameraRadianceError::InvalidPolarization);
+            }
+        }
+        self.polarization = Some(polarization);
+        Ok(self)
+    }
+
+    pub const fn polarization(&self) -> Option<&SourcePolarization> {
+        self.polarization.as_ref()
     }
 }
 
@@ -318,6 +346,7 @@ impl<'a> EnvironmentRadiance<'a> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum CameraRadianceError {
     InvalidSpectrum,
+    InvalidPolarization,
     InvalidEnvironmentScale,
     InvalidEmitter {
         object_id: u64,
@@ -414,6 +443,9 @@ impl CameraRadianceSample {
 pub struct CurvedCameraScene<'s, 'm> {
     scene: &'s CurvedPolarizedScene<'m>,
     emitters: Vec<Option<&'s SurfaceEmitter>>,
+    // Source axes are bound once to the immutable native placement. Ordinary
+    // unpolarized scenes keep this empty and allocate no additional table.
+    emitter_polarization_axes: Vec<Option<Vec3>>,
     diffuse_thermal_emitters: Vec<Option<DiffuseThermalEmitter>>,
     environment: Option<EnvironmentRadiance<'s>>,
     volume_emitters: Vec<Option<IsothermalVolumeEmitter>>,
@@ -458,6 +490,13 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
             }
             slots.push(None);
         }
+        let mut emitter_polarization_axes = Vec::new();
+        if emitters.iter().any(|emitter| emitter.polarization.is_some()) {
+            emitter_polarization_axes
+                .try_reserve_exact(scene.bindings.len())
+                .map_err(|_| CameraRadianceError::AllocationRefused)?;
+            emitter_polarization_axes.resize(scene.bindings.len(), None);
+        }
         for emitter in emitters {
             cx.checkpoint()?;
             let index = scene
@@ -471,12 +510,26 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
                     object_id: emitter.object_id,
                 });
             }
+            if let Some(polarization) = &emitter.polarization {
+                let instances = scene.geometry.instances();
+                let instance = instances
+                    .binary_search_by_key(&emitter.object_id, |instance| instance.object_id())
+                    .map_err(|_| CameraRadianceError::InvalidEmitter {
+                        object_id: emitter.object_id,
+                    })?;
+                emitter_polarization_axes[index] = Some(
+                    instances[instance]
+                        .transform()
+                        .transform_vector(polarization.reference_axis()),
+                );
+            }
             slots[index] = Some(emitter);
         }
         cx.checkpoint()?;
         Ok(Self {
             scene,
             emitters: slots,
+            emitter_polarization_axes,
             diffuse_thermal_emitters: Vec::new(),
             environment,
             volume_emitters: Vec::new(),

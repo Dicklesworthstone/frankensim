@@ -18,7 +18,8 @@ impl CurvedRayleighCameraScene<'_, '_, '_, '_> {
     /// Retain the original surface and molecular counter streams, thermal and
     /// surface sources, field identities and local radiance index conversion.
     /// The analyzer is the same passive launch-plane response as for clear
-    /// camera rays. Sources remain unpolarized; unresolved tails still refuse.
+    /// camera rays. Authored surface polarization uses the same source-frame
+    /// contraction at native hits; unresolved tails still refuse.
     #[allow(clippy::too_many_arguments)]
     pub fn sample_ray_analyzed(
         &self,

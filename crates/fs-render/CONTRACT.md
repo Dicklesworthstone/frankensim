@@ -635,8 +635,9 @@ differentiable lift). Pure Rust throughout.
   cosine and refractive Jacobians are not applied twice. Detector interactions
   refuse. Numerical limits and indistinguishable
   native extinction/underflow are unresolved
-  errors. This covers reciprocal isotropic stationary media and intensity-only
-  endpoints, not general polarized adjoints. Terminal transport weight describes only the final continuation,
+  errors. This covers reciprocal isotropic stationary media and passive
+  intensity observations, including the explicit source/analyzer Stokes laws
+  described below. Terminal transport weight describes only the final continuation,
   while returned radiance sums all encountered sources. Unresolved continuation,
   overflow and cancellation still return errors without publishing a partial sum.
   `camera::raster::CurvedCameraRaster` prepares the original physical
@@ -8386,8 +8387,9 @@ An identity row takes the original scalar launch path exactly. Nonpolarizing
 rows do not require a distinguished transverse axis.
 
 `CurvedCameraScene::sample_ray_analyzed` and
-`sample_ray_analyzed_with_samples` observe the existing unpolarized surface,
-environment and supported thermal emissions. The geometric spectral raster
+`sample_ray_analyzed_with_samples` observe the original surface emissions,
+including optional `SourcePolarization`, and unpolarized environment and
+supported thermal emissions. The geometric spectral raster
 adds `sample_pixel_analyzed` and `sample_pixel_sensor_analyzed`; the original
 four wavelength-dependent paths, counter streams, CIE or multichannel QE
 responses, lens/pupil weights and all-or-error pixel behavior are retained.
@@ -8397,7 +8399,7 @@ identity, cancellation and work limits remain authoritative.
 
 This is an ideal, wavelength-independent detector row at the geometric camera
 launch plane. It does not provide a finite-thickness or angle-dependent
-polarizer, resolved lens propagation, polarized source emission, bulk
+polarizer, resolved lens propagation, bulk
 birefringence or analyzer overloads for explicit emitter-connection consumers.
 The molecular-scattering extension is described below.
 
@@ -8443,9 +8445,9 @@ The implementation shares the original launched-beam traversal bodies and
 result construction without cloning scene tables or adding path traversals.
 
 The physical scope remains the original admitted reciprocal molecular
-Mueller laws and unpolarized source models. The detector is the declared ideal
-local analyzer, without resolved polarizer/lens propagation, polarized source
-emission, bulk birefringence, or analyzer overloads for explicit emitter
+Mueller laws and the original source models, including authored surface
+polarization. The detector is the declared ideal local analyzer, without
+resolved polarizer/lens propagation, bulk birefringence, or analyzer overloads for explicit emitter
 connections or the separate molecular transient-history consumers.
 
 Three focused regression groups specify right-angle Rayleigh/depolarized
@@ -8619,9 +8621,10 @@ path integrations, random draws or source-history allocations. An invalid
 projected analyzer axis refuses the complete observation.
 
 This remains an ideal passive wavelength-independent launch-plane analyzer
-over the original unpolarized emitters, frozen geometry/media and narrowband
-envelope/group-delay assumptions. It introduces no lens/analyzer transit,
-polarized source history or coherent optical carrier evolution.
+over the original emitters, frozen geometry/media and narrowband
+envelope/group-delay assumptions. A prescribed intensity history scales the
+source's complete spectral Stokes state together. It introduces no lens/analyzer
+transit, time-varying polarization fractions or coherent optical carrier evolution.
 
 Three focused regression groups specify native oblique-Fresnel analyzer
 parity and original history identity; complementary complete-Stokes molecular
@@ -8904,3 +8907,44 @@ results. Pinned formatter/parser checks and independent source review passed;
 native execution was blocked by dependency-build storage exhaustion. General
 wavelength-changing recycling, saturation and finite photon flight delays remain
 outside this explicitly resonant, linear, quasistatic model.
+
+## Polarized finite surface sources through native cameras and area sampling
+
+`camera::SourcePolarization` retains constant or wavelength-dependent normalized
+Stokes emission, with I exactly one and an explicitly authored geometry-local
+positive-Q axis. The original `SurfaceEmitter` retains the absolute radiance
+spectrum and sidedness. Source tables contain 2–1024 ordered positive vacuum
+wavelengths, interpolate fractional Q/U/V by convex linear weights, and must
+cover the complete radiance band. Queries never extrapolate or fit polarization
+angles. Invalid states, axes and spectral support refuse.
+
+Camera preparation binds source axes through the immutable native instance
+placement once. At each actual emitter hit, the physical outward frame and the
+original positive-coherency reciprocal contraction retain all Stokes components
+and the A=diag(1,1,-1,1) convention. Exact source/analyzer extinction contributes
+zero without terminating the original material continuation. The existing
+prefix, source history, MIS weight, Beer loss and local phase-index radiance
+conversion each apply once; logarithmic range recovery includes the source
+polarization response. Sources without a polarization declaration preserve the
+original arithmetic.
+
+Original finite-area proposals launch that same source state and body axis into
+the existing differentiated bundle/image owner. An area source's declared axis
+also owns unpolarized spectral knots, so preparation and shooting use the same
+frame throughout its spectrum. Rough and molecular receivers
+therefore receive the original polarized illumination. Reverse emitter-hit
+membership remains an unpolarized geometric probe, preserving proposal support
+at a polarized dark port. No new propagator, random draws, optical solves or
+per-query allocation is introduced; constant source evaluation is constant work
+and table queries use bounded binary search.
+
+Ordinary, analyzed, molecular, transient/history, shutter and spectral camera
+observations share the same source contribution owner. Histories scale the full
+state's intensity; they do not rotate its polarization in time. Focused native
+regressions cover physical-cone admission, linear/circular/partial analyzer
+responses, exact extinction, body rotation, spectral changes, independently
+expanded total-internal-reflection phase, delayed source exposures and molecular
+scattering. These are authored source laws and numerical model checks, not
+measured emitter calibration, coherent interference between scene paths,
+polarized environment/thermal emission, bulk birefringence or a resolved physical
+polarizer. The original opt-in tracer/volume feature boundaries remain in force.

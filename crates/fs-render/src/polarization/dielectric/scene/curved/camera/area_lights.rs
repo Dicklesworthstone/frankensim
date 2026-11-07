@@ -21,6 +21,7 @@ use crate::charts::area_source::MeshAreaError;
 use crate::gradient_index::bundle::ProjectionOptions;
 use crate::gradient_index::event::BoundarySide;
 use crate::instances::{GeometryInstance, SharedGeometry};
+#[cfg(test)]
 use crate::polarization::Stokes;
 use crate::polarization::dielectric::scene::Interaction;
 use crate::polarization::dielectric::scene::curved::CurvedPolarizedScene;
@@ -211,8 +212,9 @@ impl AreaIrradianceSample {
 
 impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
     /// Bind the existing calibrated spectrum to one original native source
-    /// object. Detector receivers are supported; the source itself cannot be
-    /// a detector. No camera scene or replacement photometric source is built.
+    /// object, including its optional spectral polarization and body-local
+    /// reference axis. Detector receivers are supported; the source itself
+    /// cannot be a detector. No replacement photometric source is built.
     pub fn try_new(
         cx: &Cx<'_>,
         scene: &'s CurvedPolarizedScene<'m>,
@@ -578,9 +580,12 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
         self.emitter.admit_local_medium(self.scene, sample.position_m, initial_medium, wavelength_nm)
             .map_err(AreaEmitterError::Camera)?;
         let radiance = self.emitter.evaluate(wavelength_nm).map_err(AreaEmitterError::Camera)?;
+        let (transverse_axis, normalized_source_stokes) = self.emitter
+            .polarization(self.instance, wavelength_nm, transverse_axis)
+            .map_err(AreaEmitterError::Camera)?;
         Ok((BundleConnectionLaunch { ray: Ray { origin: sample.position_m,
             dir: seed.initial_direction }, transverse_axis, wavelength_nm,
-            normalized_source_stokes: Stokes::unpolarized(1.0), initial_medium }, source, radiance))
+            normalized_source_stokes, initial_medium }, source, radiance))
     }
 
     #[allow(clippy::too_many_arguments)]
