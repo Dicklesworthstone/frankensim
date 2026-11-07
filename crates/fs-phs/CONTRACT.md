@@ -76,6 +76,30 @@ case with zero averaged current, centered-PWM refinement over a fixed physical
 horizon, and transactional limits/refusals. They do not assert native execution
 or measured semiconductor validity merely from their presence.
 
+### Switched voltage sources and resistive loads
+
+`switching::voltage_driven::PreparedVoltageDrivenSwitchCycle` composes those
+same gate intervals with the existing finite-resistance voltage terminals.
+Both source/load currents evolve with the capacitor voltages throughout each
+interval, rather than being frozen at a sampled edge. Sources may be held for
+the whole cycle or changed at each authored interval. The original inductor
+flux and bus charges remain continuous, including during regeneration.
+
+The returned `VoltageDrivenStep` retains each source's signed work, both
+terminal-resistor heats, and all five internal conduction heats. Positive
+heat integrals include resolved ripple; squared mean current is not used.
+The complete-cycle gate reconciles storage and all physical transfers using
+the actual transfer scale, excluding unchanged stored energy. Every native
+interval gate remains authoritative. Cancellation or late refusal publishes
+neither output. Shared caches bound preparation by distinct connection/duration
+pairs and warm stepping adds no allocations or matrix exponentials.
+
+Focused `circuit_converter::voltage_switching` tests compare independently
+integrated Kirchhoff/current/voltage/heat equations, static native parity,
+regeneration, load-ripple heating, cache reuse, and cancellation/refusal/retry.
+This joins existing linear physical owners; semiconductor transition physics,
+dead time, diode recovery, device cards and thermal feedback remain unclaimed.
+
 ## Averaged bidirectional power conversion
 
 `circuit::converter::AveragedBuckBoost` assembles the original flux and both bus

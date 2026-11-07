@@ -20,6 +20,9 @@ use super::{
 use crate::linear_exact::LinearSplitBudget;
 use crate::{PhsError, PreparedStepError, PreparedStepRecord, storage_energy_change};
 
+/// Switched trajectories driven by finite voltage-source and load resistances.
+pub mod voltage_driven;
+
 /// Bound the physical event work and native caches before preparation.
 pub const MAX_SWITCH_INTERVALS: usize = 64;
 
@@ -86,6 +89,50 @@ impl Sum {
     fn total(self) -> f64 {
         self.value + self.correction
     }
+}
+
+fn admit_cycle(
+    intervals: &[SwitchInterval],
+    controls: SwitchCycleControls,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(f64, BridgeModulation), PreparedStepError> {
+    poll(cancelled)?;
+    if !(1..=MAX_SWITCH_INTERVALS).contains(&controls.max_intervals)
+        || intervals.is_empty()
+        || intervals.len() > controls.max_intervals
+        || !controls.absolute_energy_tolerance_j.is_finite()
+        || controls.absolute_energy_tolerance_j < 0.0
+        || !controls.relative_energy_tolerance.is_finite()
+        || controls.relative_energy_tolerance < 0.0
+    {
+        return Err(invalid("invalid switching cycle interval or energy allowance").into());
+    }
+    let mut duration = Sum::default();
+    let mut high_time = [Sum::default(); 2];
+    for interval in intervals {
+        poll(cancelled)?;
+        if !positive(interval.duration_s) {
+            return Err(invalid("switch intervals require positive finite duration").into());
+        }
+        duration.add(interval.duration_s);
+        if interval.state.input_high {
+            high_time[0].add(interval.duration_s);
+        }
+        if interval.state.output_high {
+            high_time[1].add(interval.duration_s);
+        }
+    }
+    let period_s = duration.total();
+    if !positive(period_s) {
+        return Err(invalid("switching cycle period is unrepresentable").into());
+    }
+    Ok((
+        period_s,
+        BridgeModulation {
+            input_high_fraction: high_time[0].total() / period_s,
+            output_high_fraction: high_time[1].total() / period_s,
+        },
+    ))
 }
 
 /// Centered PWM on one common carrier: each positive-bus connection is high
@@ -186,40 +233,7 @@ impl PreparedSwitchCycle {
         controls: SwitchCycleControls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, PreparedStepError> {
-        poll(&mut cancelled)?;
-        if !(1..=MAX_SWITCH_INTERVALS).contains(&controls.max_intervals)
-            || intervals.is_empty()
-            || intervals.len() > controls.max_intervals
-            || !controls.absolute_energy_tolerance_j.is_finite()
-            || controls.absolute_energy_tolerance_j < 0.0
-            || !controls.relative_energy_tolerance.is_finite()
-            || controls.relative_energy_tolerance < 0.0
-        {
-            return Err(invalid("invalid switching cycle interval or energy allowance").into());
-        }
-        let mut duration = Sum::default();
-        let mut high_time = [Sum::default(); 2];
-        for interval in intervals {
-            poll(&mut cancelled)?;
-            if !positive(interval.duration_s) {
-                return Err(invalid("switch intervals require positive finite duration").into());
-            }
-            duration.add(interval.duration_s);
-            if interval.state.input_high {
-                high_time[0].add(interval.duration_s);
-            }
-            if interval.state.output_high {
-                high_time[1].add(interval.duration_s);
-            }
-        }
-        let period_s = duration.total();
-        if !positive(period_s) {
-            return Err(invalid("switching cycle period is unrepresentable").into());
-        }
-        let averaged_modulation = BridgeModulation {
-            input_high_fraction: high_time[0].total() / period_s,
-            output_high_fraction: high_time[1].total() / period_s,
-        };
+        let (period_s, averaged_modulation) = admit_cycle(intervals, controls, &mut cancelled)?;
         let mut caches: Vec<CachedInterval> = Vec::new();
         let mut cache_indices = Vec::with_capacity(intervals.len());
         for &interval in intervals {

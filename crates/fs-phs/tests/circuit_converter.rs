@@ -5,6 +5,8 @@ use fs_phs::PreparedStepError;
 mod switching;
 #[path = "circuit_converter/terminals.rs"]
 mod terminals;
+#[path = "circuit_converter/voltage_switching.rs"]
+mod voltage_switching;
 use fs_phs::circuit::converter::{AveragedBuckBoost, BridgeModulation, BuckBoostParameters};
 use fs_phs::linear_exact::{LinearSplitBudget, PreparedExactZoh};
 
