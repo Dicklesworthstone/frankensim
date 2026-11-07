@@ -1545,6 +1545,23 @@ the original P1 observer once, retaining every interference term. Failed or
 cancelled batches publish no partial matrix. This is real-frequency response;
 it supplies neither a causal loading realization nor complex loaded poles.
 
+`JumpSolution::prepare_receivers` and
+`ScreenVelocityPortSolution::prepare_receivers` also expose Cartesian particle
+velocity beside pressure. They reuse the original adaptive P1 double-layer
+pressure/gradient rows already used by molecular screens. Every derivative
+component has its own quadrature gate; Euler momentum uses the solved real
+`rho*omega`, with `omega=k*c`, and retains reactive near-field velocity on both
+sides and at pressure nodes. The results feed the existing `FirstOrder`
+microphone without a plane-wave approximation. Receiver preparation admits
+the complete row payload, positions and work before integration. Repeated
+coherent source-rate evaluations combine original jumps before contraction,
+with no new quadrature or boundary solve. Exact face/edge clearance and
+cancellation apply; complex-frequency jumps refuse. These quadrature
+discrepancies do not establish convergence of the screen mesh or materials.
+`open_screen_receivers.rs` checks both-sided Euler finite differences on three
+step sizes, pressure-node directional pickup, coherent ports, the lossless
+molecular limit, resource refusals and cancellation/replay.
+
 Three focused tests authored in `open_screen_many.rs` compare work with
 independent degree-two triangle quadrature, coherent fields with an original
 combined-drive solve, folded-facet traces with an independently projected
