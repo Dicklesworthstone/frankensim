@@ -444,6 +444,93 @@ claim does not extend to those mixed or nonlinear cases. The existing heat,
 counterflow and piston compositions automatically use the corrected native
 path whenever its conditions apply.
 
+
+## Connected channels and ideal superleaks
+
+`fs_duct::superfluid::TwoFluidConnection` joins the right end of one native
+channel to the left end of another. Both channels retain their original wave,
+wall/profile, body-force and vortex/friction owners. They must share exactly the
+same immutable reference material and accepted time; their lengths, areas and
+cell counts may differ.
+
+The connection stores the two endpoint half volumes' inertia. Simply equating
+adjacent-cell pressures and temperatures would omit that physical storage and
+make a split channel differ from the original unsplit discretization. With
+`D = dx_left/(2*A_left) + dx_right/(2*A_right)`, the connection stores
+
+```text
+K_junction = rho*D*U^2/2 + rho*f_s*f_n*D*W^2/2,
+U = A*v,  W = A*(v_n-v_s).
+```
+
+Flows point from the first channel to the second. A small inertia-normalized
+reciprocal solve couples both native endpoint responses to this storage.
+Authored body forces act on the joined half volumes as well as channel
+interiors, and their work remains an external source. No dense channel solve,
+finite-difference response probe or new numerical dependency is introduced.
+
+`ConnectionKind::Open` conserves both normal and superfluid volume currents.
+`ConnectionKind::Superleak` constrains normal flow to zero while retaining
+superfluid inertia. Writing superfluid volume flow as `Q_s`, its constraint is
+`(U,W)=(f_s*Q_s,-Q_s)`; its effective inertia is `rho_s*D`. The driving effort
+is proportional to `delta p-rho*s*delta T`. It therefore preserves the
+small-signal fountain equilibrium `p_hot-p_cold = rho*s*(T_hot-T_cold)`, and an
+initially equal-pressure pair drives superfluid toward the warmer side.
+Admission rejects an existing nonzero normal current instead of silently
+removing its kinetic energy.
+
+Run the sourced 1.8 K helium comparison with:
+
+```sh
+cargo run -p fs-duct --features superfluid --example superfluid_superleak
+```
+
+Create the connection with `TwoFluidConnection::try_new`, then call `step`
+using `ConnectionDrive` for the two outer boundary velocities, per-channel
+forces and friction selectors. `ConnectionStep` reports junction energy and
+work, combined represented-energy residual, mass and entropy residuals, and
+both unchanged native channel reports. The connection's `flow_m3_s()` is the
+instantaneous accepted flow; joined channel endpoint faces contain the last
+interval's mean flow, as required by the original boundary convention. Both
+instantaneous component speeds and the native staged channels must satisfy
+their original physical limits.
+
+### Full thermomechanical endpoint response
+
+`thermomechanical_ends_response` exposes the complete reciprocal 4-by-4
+response in end-major order:
+`[left bulk, left relative, right bulk, right relative]`. At each end the
+outward volume flows are `(U,W)` and the conjugate efforts are
+`(p',rho_s*s*T')`. Their product is wave-availability power. It retains
+thermal expansion, communication between ends and the same fitted or split
+dissipation operator used by actual steps. Cached endpoint columns come from
+the native scalar tridiagonal factors.
+
+This general response does not identify wave work with transported heat or
+entropy. Full outward entropy current is `rho*s*(U+f_s*W)`; relative
+counterflow heat is `rho_s*s*T0*W`. An ideal superleak can transport mass with
+zero normal entropy current. The response query publishes no accepted state;
+the final physical proposal independently checks every original limit.
+
+### Connection scope
+
+The joined half volumes use an inviscid plug-flow closure. Interior wall,
+profile and mutual-friction models remain active, but no extra half-volume
+drag, entrance loss, porous critical velocity or junction vortex transport is
+inferred. Lossless equal-grid splitting is compared against the original
+unsplit solver; that exact segmentation claim does not extend to a missing
+junction dissipation model. Area-change and superleak support reactions do not
+carry a whole-system axial-momentum claim. Vortex reservoirs and authored
+vortex drift remain separate ports. Material coefficients remain frozen: this
+adds neither nonlinear advection nor finite-temperature or lambda-transition
+feedback.
+
+Both channels and the connection publish together. A refused physical limit,
+heat callback or final cancellation preserves all three accepted histories.
+The focused regressions cover split/unsplit waves, unequal-area component
+currents, fountain equilibrium and flow direction, half-volume forcing,
+profile-memory rollback, and the instantaneous junction speed gate.
+
 ## Discrete sourced helium reference temperatures
 
 `HeliumSvpReference::at_temperature_k` now admits exactly 1.4, 1.6, 1.8 and

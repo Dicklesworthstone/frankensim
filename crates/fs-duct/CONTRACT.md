@@ -4473,3 +4473,63 @@ invariants, geometry/flow reversal, conversion-work balance, full-H/m driven
 loads, and refusal/cancellation. Selective formatting and diff checks and a
 separate developer numerical fixture check passed; native Rust compilation
 and tests remain unexecuted in this environment.
+
+
+## Reciprocal serial superfluid connections and ideal superleaks
+
+Under the existing `superfluid` feature, `ThermomechanicalEndsResponse`
+provides the full reciprocal two-end relation between outward volume flows
+`(A*v,A*(v_n-v_s))` and efforts `(p',rho_s*s*T')`. Its fixed end-major 4-by-4
+matrix is extracted from the same cached native tridiagonal endpoint columns
+and the active wave rotation. Queries do not publish fields, time, profile or
+vortex memory, cumulative heat, or the last accepted heat field. Only the
+algebraic reference bypasses amplitude limits; actual steps retain every
+original admission and balance check.
+
+`TwoFluidConnection` composes the right end of the first channel and left end
+of the second. Reference material and accepted clocks must match exactly;
+areas, lengths and cell counts may differ. Its immutable binding includes
+geometry and verifies that joined accepted endpoint means have not been
+modified independently. The connection owns the previously external endpoint
+half-volume inertia, with `D=dx_L/(2*A_L)+dx_R/(2*A_R)` and kinetic metric
+`diag(rho*D,rho*f_s*f_n*D)`. Authored endpoint body forces act on those half
+volumes and their work appears once. An inertia-normalized 2-by-2 solve uses the
+sum of both native endpoint impedances; no new channel-sized allocation,
+factorization family, or finite-difference response probing is introduced.
+
+An open connection shares both component volume currents. An ideal superleak
+restricts `(U,W)=(f_s,-1)*Q_s`, giving inertia `rho_s*D`, zero normal entropy
+current, and stationary fountain relation `delta p=rho*s*delta T`. Constructing
+a superleak on existing normal flow is refused. Reference, midpoint and final
+flows are reconstructed on the constraint. The instantaneous endpoint
+component velocities are admitted against both channels' authored speed and
+slow-wave limits before publication; admitting only midpoint speeds is
+insufficient for a finite-inertia connection.
+
+The original accepted channel endpoint faces store interval means; connection
+`flow_m3_s()` stores instantaneous accepted flow. Native wave work on the two
+inner ports is exchanged with connection kinetic energy. The joint report
+retains both original channel reports, connection body and pressure/thermal
+work, outer wave work, combined energy residual, and conservative first-order
+mass/entropy residuals. Distinct wave availability, physical heat and entropy
+units remain explicit. Every finite, original domain, energy and cancellation
+gate precedes joint publication. `step_with_heat` exposes both actual pending
+per-cell dissipative heat slices; a rejected callback or final cancellation
+publishes none of the two channels or connection.
+
+The junction half volumes are inviscid plug flow. Channel-interior friction,
+normal-wall/profile memory and vortex models remain owned by their native
+modules, without an inferred junction drag, entrance loss or vortex drift.
+The lossless equal-grid split is compared against the unsplit native channel.
+No such segmentation equivalence is claimed for omitted junction dissipation,
+nor is whole-system axial momentum claimed across area changes or superleak
+support. No porous critical-velocity law, nonlinear finite-temperature EOS,
+reference remapping, phase transition or geometric vortex resolution is
+introduced.
+
+Regression targets are `superfluid_thermomechanical` (full affine response,
+reciprocity, power/current mapping and nonpublication) and
+`superfluid_connection` (lossless segmentation, unequal areas, fountain
+equilibrium/direction, half-volume forces, atomic refusals and instantaneous
+speed limits). `superfluid_superleak` demonstrates the sourced 1.8 K helium
+reference and prints the native conservation reports.

@@ -80,3 +80,15 @@ required-features = ["superfluid"]
 [[test]]
 name = "superfluid_vortex_transport"
 required-features = ["superfluid"]
+
+[[test]]
+name = "superfluid_thermomechanical"
+required-features = ["superfluid"]
+
+[[test]]
+name = "superfluid_connection"
+required-features = ["superfluid"]
+
+[[example]]
+name = "superfluid_superleak"
+required-features = ["superfluid"]

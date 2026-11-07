@@ -45,17 +45,22 @@ use fs_material::MaterialError;
 use fs_material::superfluid::{NormalViscousSpectrum, NormalViscousWall, TwoFluidState};
 
 mod boundary;
+/// Reciprocal serial two-fluid and ideal-superleak connections with finite junction inertia.
+pub mod connection;
 mod modes;
 mod momentum;
 mod step;
 mod tangle;
+mod thermomechanical;
 mod viscosity;
 pub use boundary::{
     ChannelEnd, CounterflowEndsResponse, ImpermeableEndResponse, ImpermeableEndsResponse,
 };
+pub use connection::{ConnectionDrive, ConnectionKind, ConnectionStep, TwoFluidConnection};
 use modes::Modes;
 pub use momentum::{BodyForce, ComponentForceDensity, ForcedChannelStep};
 pub use tangle::{VortexTransportBoundaries, VortexTransportBoundary, VortexTransportControls};
+pub use thermomechanical::ThermomechanicalEndsResponse;
 
 /// Source admission, caller domain, cancellation or numerical refusal.
 #[derive(Debug, Clone, PartialEq)]

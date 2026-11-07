@@ -417,7 +417,7 @@ impl TwoFluidChannel {
     }
 }
 
-fn endpoint_inverse(
+pub(super) fn endpoint_inverse(
     work: &mut SolveWorkspace,
     slot: usize,
     end: usize,
