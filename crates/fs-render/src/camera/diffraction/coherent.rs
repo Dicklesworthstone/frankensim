@@ -19,7 +19,9 @@
 //! or infer phases from arbitrary scene points. Finite rectangular pixels
 //! integrate the same field with bandwidth-guided positive quadrature. The
 //! separate spectral exposure query retains cross-frequency beats over an
-//! actual shutter and the physical sensor plane's common Fresnel phase. See TU Delft,
+//! actual shutter and the physical sensor plane's common Fresnel phase. Its
+//! Jones counterpart preserves two paraxial polarization components and projects
+//! analyzer fields before photodetection. See TU Delft,
 //! *Interference and Coherence*, for field versus intensity superposition:
 //! <https://interactivetextbooks.tudelft.nl/tn2421/content/Chap5_Interference/InterferenceCoherence_2022_01Clean.html>.
 
@@ -31,8 +33,10 @@ mod pixel;
 pub use exposure::{
     CoherentDiffractionExposureLimits, CoherentDiffractionExposurePixelLimits,
     CoherentDiffractionExposureSample, CoherentDiffractionPixelExposure,
-    CoherentDiffractionShutter, CoherentDiffractionTone, MAX_COHERENT_DIFFRACTION_TONES,
-    PreparedCoherentDiffractionExposure,
+    CoherentDiffractionShutter, CoherentDiffractionTone, CoherentJonesDetector,
+    CoherentJonesDiffractionTone, CoherentJonesPupilIllumination, CoherentJonesPupilWave,
+    JonesPupilCoherenceFactor, MAX_COHERENT_DIFFRACTION_TONES, PreparedCoherentDiffractionExposure,
+    PreparedCoherentJonesDiffractionExposure,
 };
 pub use pixel::{
     CoherentDiffractionPixel, CoherentDiffractionPixelLimits, CoherentDiffractionPixelPower,
@@ -116,6 +120,8 @@ pub enum CoherentDiffractionError {
     InvalidSensorPlane,
     /// Every tone must declare the same ordered covariance-factor identities.
     InconsistentCoherenceFactors,
+    /// An ideal Jones analyzer needs a finite, nonzero polarization direction.
+    InvalidPolarizationAnalyzer,
     /// The original analytic shutter kernel refused its clock or contraction.
     Shutter(fs_fft::harmonic_window::WindowError),
     /// A preparation count exceeds the caller's explicit bound.

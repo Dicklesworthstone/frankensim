@@ -23,6 +23,12 @@ use super::{
 use fs_fft::harmonic_window::{HarmonicWindow, ProperHarmonicProduct};
 use fs_math::det;
 
+mod jones;
+pub use jones::{
+    CoherentJonesDetector, CoherentJonesDiffractionTone, CoherentJonesPupilIllumination,
+    CoherentJonesPupilWave, JonesPupilCoherenceFactor, PreparedCoherentJonesDiffractionExposure,
+};
+
 const C_M_S: f64 = 299_792_458.0;
 const TAU: Dd = Dd {
     hi: core::f64::consts::TAU,
@@ -331,27 +337,8 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CoherentDiffractionPixelExposure, CoherentDiffractionError> {
         poll(&mut cancelled)?;
-        let minimum = pixel.minimum_tangent();
-        let maximum = pixel.maximum_tangent();
-        let maximum_step = std::array::from_fn(|axis| {
-            let radius = minimum[axis].abs().max(maximum[axis].abs());
-            let gradient =
-                2.0 / self.minimum_scale + self.wavenumber_span * self.sensor_distance_m * radius;
-            limits.spatial.maximum_phase_span_rad / gradient
-        });
-        let (subdivisions, samples, pupil_evaluations) =
-            pixel::pixel_work(pixel, limits.spatial, maximum_step, self.waves)?;
-        let pair_contractions = samples.checked_mul(self.contractions).ok_or_else(|| {
-            limit(
-                "pixel exposure pair contractions",
-                limits.maximum_pair_contractions,
-            )
-        })?;
-        admit_count(
-            "pixel exposure pair contractions",
-            pair_contractions,
-            limits.maximum_pair_contractions,
-        )?;
+        let (subdivisions, samples, pupil_evaluations, pair_contractions) =
+            self.pixel_work(pixel, limits, self.waves, self.contractions)?;
         let power =
             pixel::integrate_moments(pixel, subdivisions, &mut cancelled, |at, cancelled| {
                 self.moments(at, cancelled)
@@ -376,14 +363,44 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
         Ok(result)
     }
 
-    fn moments(
+    // The Jones detector shares the same pupil/sensor bandwidth and positive
+    // spatial rule; only its source count and number of analyzed components differ.
+    fn pixel_work(
+        &self,
+        pixel: CoherentDiffractionPixel,
+        limits: CoherentDiffractionExposurePixelLimits,
+        waves: usize,
+        contractions: usize,
+    ) -> Result<([usize; 2], usize, usize, usize), CoherentDiffractionError> {
+        let minimum = pixel.minimum_tangent();
+        let maximum = pixel.maximum_tangent();
+        let maximum_step = std::array::from_fn(|axis| {
+            let radius = minimum[axis].abs().max(maximum[axis].abs());
+            let gradient =
+                2.0 / self.minimum_scale + self.wavenumber_span * self.sensor_distance_m * radius;
+            limits.spatial.maximum_phase_span_rad / gradient
+        });
+        let (subdivisions, samples, pupil_evaluations) =
+            pixel::pixel_work(pixel, limits.spatial, maximum_step, waves)?;
+        let pair_contractions = samples.checked_mul(contractions).ok_or_else(|| {
+            limit(
+                "pixel exposure pair contractions",
+                limits.maximum_pair_contractions,
+            )
+        })?;
+        admit_count(
+            "pixel exposure pair contractions",
+            pair_contractions,
+            limits.maximum_pair_contractions,
+        )?;
+        Ok((subdivisions, samples, pupil_evaluations, pair_contractions))
+    }
+
+    fn rotations(
         &self,
         at: [f64; 2],
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<[Dd; 2], CoherentDiffractionError> {
-        if self.waves == 0 {
-            return Ok([Dd::ZERO; 2]);
-        }
+    ) -> Result<[[Dd; 2]; MAX_COHERENT_DIFFRACTION_TONES], CoherentDiffractionError> {
         let distance = Dd::from_f64(self.sensor_distance_m)
             * (Dd::ONE
                 + (Dd::from_f64(at[0]) * Dd::from_f64(at[0])
@@ -398,6 +415,50 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
             let (sine, cosine) = det::sin_cos_dd(phase);
             rotations[i] = [cosine, sine];
         }
+        Ok(rotations)
+    }
+
+    // One scalar analytic-field component. Jones projection happens BEFORE
+    // this contraction, so weak analyzer residuals never subtract rounded powers.
+    fn contract_component(
+        &self,
+        fields: &mut [[Dd; 2]; MAX_COHERENT_DIFFRACTION_TONES],
+        rotations: &[[Dd; 2]; MAX_COHERENT_DIFFRACTION_TONES],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Dd, CoherentDiffractionError> {
+        let mut moment = Dd::ZERO;
+        for i in 0..self.groups.len() {
+            poll(cancelled)?;
+            let [ar, ai] = fields[i];
+            let [cr, ci] = rotations[i];
+            fields[i] = [ar * cr - ai * ci, ar * ci + ai * cr];
+            moment = moment + square(fields[i])?;
+            for j in 0..i {
+                poll(cancelled)?;
+                // The shared kernel includes 1/2 for real peak phasors.
+                // Analytic-field power removes that half, and the two
+                // Hermitian cross terms supply another factor of two.
+                moment = moment
+                    + Dd::from_f64(4.0)
+                        * self.kernels[i * (i - 1) / 2 + j]
+                            .mean_real_product_parts_dd(fields[i], fields[j])?;
+            }
+        }
+        if rounded(moment)? < 0.0 {
+            return Err(CoherentDiffractionError::Unrepresentable);
+        }
+        Ok(moment)
+    }
+
+    fn moments(
+        &self,
+        at: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<[Dd; 2], CoherentDiffractionError> {
+        if self.waves == 0 {
+            return Ok([Dd::ZERO; 2]);
+        }
+        let rotations = self.rotations(at, cancelled)?;
         let mut result = [Dd::ZERO; 2];
         for bank in 0..=self.factors {
             poll(cancelled)?;
@@ -413,27 +474,7 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
                 fields[group][0] = fields[group][0] + field[0];
                 fields[group][1] = fields[group][1] + field[1];
             }
-            let mut moment = Dd::ZERO;
-            for i in 0..self.groups.len() {
-                poll(cancelled)?;
-                let [ar, ai] = fields[i];
-                let [cr, ci] = rotations[i];
-                fields[i] = [ar * cr - ai * ci, ar * ci + ai * cr];
-                moment = moment + square(fields[i])?;
-                for j in 0..i {
-                    poll(cancelled)?;
-                    // The shared kernel includes 1/2 for real peak phasors.
-                    // Analytic-field power removes that half, and the two
-                    // Hermitian cross terms supply another factor of two.
-                    moment = moment
-                        + Dd::from_f64(4.0)
-                            * self.kernels[i * (i - 1) / 2 + j]
-                                .mean_real_product_parts_dd(fields[i], fields[j])?;
-                }
-            }
-            if rounded(moment)? < 0.0 {
-                return Err(CoherentDiffractionError::Unrepresentable);
-            }
+            let moment = self.contract_component(&mut fields, &rotations, cancelled)?;
             let component = usize::from(bank != 0);
             result[component] = result[component] + moment;
         }

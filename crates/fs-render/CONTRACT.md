@@ -3937,6 +3937,60 @@ shared versus independent spectral covariance columns, monochromatic power and
 energy normalization, equal-frequency weak residuals, spatial refinement,
 physical-conjugate refusal, work preflight and cancellation/reuse.
 
+### Polarization-resolved coherent camera detection
+
+`PhysicalCamera::prepare_coherent_jones_diffraction_exposure` propagates authored
+`CoherentJonesPupilWave` spectra through the original wavelength-specific pupil,
+defocus, physical medium and finite-shutter optics. Each vector wave has two
+complex sqrt(W) amplitudes in the same orthonormal paraxial pupil x/y basis;
+their squared magnitudes sum to its isolated transmitted power. One tone is
+the monochromatic case. Frequencies retain the common pupil-centre clock,
+negative-time analytic-field convention and original chromatic sensor phase.
+
+Jones covariance column r denotes the same random coefficient across both
+polarizations and all frequencies. Different columns remain uncorrelated.
+Independent horizontal and vertical fluctuations therefore need separate
+columns; a deterministic Jones vector is not an unpolarized source. Equal
+frequencies coalesce as DD vector fields before detector projection and power.
+The camera never creates phase coherence from matching polarization, similar
+frequencies, Stokes radiance or scene geometry.
+
+`CoherentJonesDetector::POLARIZATION_INSENSITIVE` measures |Ex|² + |Ey|².
+Orthogonal components cannot cancel. `CoherentJonesDetector::analyzer(mode)`
+normalizes a finite nonzero Jones direction and measures |a† E|². The ideal
+analyzer is frequency-independent and selects one mode; its rejected
+orthogonal output is not another input to this detector. Linear, circular and
+elliptical modes are specified by their complex components, with no inferred
+viewing-direction handedness. Mode magnitude is deliberately not attenuation
+or gain. DD projection happens before the analytic temporal contraction,
+preserving weak analyzer residuals and permitting interference between
+coherent orthogonal inputs after projection. An analyzer never establishes
+coherence between independent source columns.
+
+Point observations return shutter-average tangent-coordinate power density;
+finite pixels return average watts and integrated joules. They reuse the
+original positive spatial quadrature, physical pupil bandwidth, cross-frequency
+sensor-chirp bound and analytic shutter kernels. Each vector source evaluates
+its pupil once per spatial sample for both components. Source budgets count
+vector waves. Preparation preflights both polarization components so a cached
+query supports either detector; each pixel charges its actual one or two
+analyzed components. Observation uses bounded scratch, no allocations and
+bounded cancellation checks. Errors publish no partial measurement, and the
+same source/pupil preparation is reusable with another analyzer or after
+cancellation. Original numerical refusals and resolution limits remain.
+
+This is two-component paraxial diffraction through an isotropic scalar pupil,
+not longitudinal/high-NA vector diffraction, polarization-dependent pupil
+transfer, nonparallel ray-frame transport or coherent scene rendering. An
+arbitrary finite-pixel polarization state is not inferred from its integrated
+power. Scalar/paraxial and quadrature errors are not certified by this API.
+
+The coherent-camera tests verify orthogonal and matched interference, Malus's
+law, complex circular-mode conjugation, shared versus independent spectral
+coherence, wavelength-specific defocused beats, independent square-pupil pixel
+integrals, complementary analyzer power, exposure energy, DD weak residuals,
+basis rotation, exact logical work bounds and cancellation/reuse.
+
 ### Source-depth-resolved diffraction across separated planes
 
 `PhysicalCamera::with_layered_diffraction(LayeredDiffraction)` admits one to

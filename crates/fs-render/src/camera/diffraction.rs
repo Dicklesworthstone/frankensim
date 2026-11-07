@@ -23,8 +23,9 @@
 //! wave PSF. The radiance renderer uses incoherent imaging. Explicit complex
 //! transfer queries retain the pupil phase for authored coherent fields;
 //! they do not infer coherence or propagation phase between scene points.
-//! Polarization, other aberrations and pupil-dependent occlusion are outside
-//! this paraxial, isoplanatic model.
+//! Jones exposure queries share this transfer between two paraxial transverse
+//! components. Polarization-dependent pupil transfer, other aberrations and
+//! pupil-dependent occlusion are outside this paraxial, isoplanatic model.
 
 use super::{ApertureKind, CameraError, LensSample, PhysicalCamera, direct_unit};
 use crate::charts::Ray;
@@ -46,9 +47,12 @@ pub use coherent::{
     CoherentDiffractionExposurePixelLimits, CoherentDiffractionExposureSample,
     CoherentDiffractionLimits, CoherentDiffractionPixel, CoherentDiffractionPixelExposure,
     CoherentDiffractionPixelLimits, CoherentDiffractionPixelPower, CoherentDiffractionSample,
-    CoherentDiffractionShutter, CoherentDiffractionTone, CoherentPupilIllumination,
-    CoherentPupilWave, MAX_COHERENT_DIFFRACTION_TONES, MAX_COHERENT_PUPIL_TANGENT,
-    PreparedCoherentDiffraction, PreparedCoherentDiffractionExposure, PupilCoherenceFactor,
+    CoherentDiffractionShutter, CoherentDiffractionTone, CoherentJonesDetector,
+    CoherentJonesDiffractionTone, CoherentJonesPupilIllumination, CoherentJonesPupilWave,
+    CoherentPupilIllumination, CoherentPupilWave, JonesPupilCoherenceFactor,
+    MAX_COHERENT_DIFFRACTION_TONES, MAX_COHERENT_PUPIL_TANGENT, PreparedCoherentDiffraction,
+    PreparedCoherentDiffractionExposure, PreparedCoherentJonesDiffractionExposure,
+    PupilCoherenceFactor,
 };
 #[cfg(feature = "tracer")]
 pub use dispersive::{DispersiveThinLens, ThinLensElement};

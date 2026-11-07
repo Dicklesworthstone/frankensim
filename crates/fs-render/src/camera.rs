@@ -29,11 +29,13 @@ pub use diffraction::{
     CoherentDiffractionExposurePixelLimits, CoherentDiffractionExposureSample,
     CoherentDiffractionLimits, CoherentDiffractionPixel, CoherentDiffractionPixelExposure,
     CoherentDiffractionPixelLimits, CoherentDiffractionPixelPower, CoherentDiffractionSample,
-    CoherentDiffractionShutter, CoherentDiffractionTone, CoherentPupilIllumination,
-    CoherentPupilWave, DefocusedDiffraction, FocusedDiffraction, LayeredCameraRay,
-    LayeredDiffraction, MAX_COHERENT_DIFFRACTION_TONES, MAX_COHERENT_PUPIL_TANGENT,
-    PreparedCoherentDiffraction, PreparedCoherentDiffractionExposure, PupilCoherenceFactor,
-    SpectralCameraRay,
+    CoherentDiffractionShutter, CoherentDiffractionTone, CoherentJonesDetector,
+    CoherentJonesDiffractionTone, CoherentJonesPupilIllumination, CoherentJonesPupilWave,
+    CoherentPupilIllumination, CoherentPupilWave, DefocusedDiffraction, FocusedDiffraction,
+    JonesPupilCoherenceFactor, LayeredCameraRay, LayeredDiffraction,
+    MAX_COHERENT_DIFFRACTION_TONES, MAX_COHERENT_PUPIL_TANGENT, PreparedCoherentDiffraction,
+    PreparedCoherentDiffractionExposure, PreparedCoherentJonesDiffractionExposure,
+    PupilCoherenceFactor, SpectralCameraRay,
 };
 #[cfg(feature = "tracer")]
 pub use diffraction::{DispersiveThinLens, ThinLensElement};

@@ -8,9 +8,536 @@ use fs_render::camera::{
     CoherentDiffractionExposureLimits, CoherentDiffractionExposurePixelLimits,
     CoherentDiffractionLimits, CoherentDiffractionPixel, CoherentDiffractionPixelLimits,
     CoherentDiffractionPixelPower, CoherentDiffractionShutter, CoherentDiffractionTone,
-    CoherentPupilIllumination, CoherentPupilWave, DefocusedDiffraction, FocusedDiffraction,
-    PhysicalCamera, PupilCoherenceFactor,
+    CoherentJonesDetector, CoherentJonesDiffractionTone, CoherentJonesPupilIllumination,
+    CoherentJonesPupilWave, CoherentPupilIllumination, CoherentPupilWave, DefocusedDiffraction,
+    FocusedDiffraction, JonesPupilCoherenceFactor, PhysicalCamera, PupilCoherenceFactor,
 };
+
+const JONES_TOTAL: CoherentJonesDetector = CoherentJonesDetector::POLARIZATION_INSENSITIVE;
+
+fn jones_wave(q: [f64; 2], amplitude_sqrt_w: [C64; 2]) -> CoherentJonesPupilWave {
+    CoherentJonesPupilWave {
+        tangent_direction: q.map(|v| v * SCALE),
+        amplitude_sqrt_w,
+    }
+}
+
+fn jones_tone<'a>(
+    frequency_hz: f64,
+    mean: &'a [CoherentJonesPupilWave],
+    factors: &'a [JonesPupilCoherenceFactor<'a>],
+) -> CoherentJonesDiffractionTone<'a> {
+    CoherentJonesDiffractionTone {
+        frequency_hz,
+        illumination: CoherentJonesPupilIllumination { mean, factors },
+    }
+}
+
+#[test]
+fn g1_jones_detector_orthogonality_malus_and_complex_analyzers() {
+    let camera = focused();
+    let frequency = 299_792_458.0 / LAMBDA;
+    let shutter = CoherentDiffractionShutter::try_new(3.0, 0.02).unwrap();
+    let one = core::f64::consts::PI * RADIUS * RADIUS / (LAMBDA * LAMBDA);
+    let orthogonal = [
+        jones_wave([0.0; 2], [C64::ONE, C64::ZERO]),
+        jones_wave([0.0; 2], [C64::ZERO, C64::new(-1.0, 0.0)]),
+    ];
+    let tones = [jones_tone(frequency, &orthogonal, &[])];
+    let query = camera
+        .prepare_coherent_jones_diffraction_exposure(&tones, 0.03, shutter, EXPOSURE_LIMITS, || {
+            false
+        })
+        .unwrap();
+    let plus = CoherentJonesDetector::analyzer([C64::ONE, C64::ONE]).unwrap();
+    let minus = CoherentJonesDetector::analyzer([C64::ONE, C64::new(-1.0, 0.0)]).unwrap();
+    close(
+        query
+            .observe([0.0; 2], JONES_TOTAL, || false)
+            .unwrap()
+            .power_density_w,
+        2.0 * one,
+        3e-12,
+    );
+    assert_eq!(
+        query
+            .observe([0.0; 2], plus, || false)
+            .unwrap()
+            .power_density_w,
+        0.0
+    );
+    close(
+        query
+            .observe([0.0; 2], minus, || false)
+            .unwrap()
+            .power_density_w,
+        2.0 * one,
+        3e-12,
+    );
+
+    let horizontal = [orthogonal[0]];
+    let tones = [jones_tone(frequency, &horizontal, &[])];
+    let horizontal = camera
+        .prepare_coherent_jones_diffraction_exposure(&tones, 0.03, shutter, EXPOSURE_LIMITS, || {
+            false
+        })
+        .unwrap();
+    for angle in [0.0_f64, 0.23, 0.71, core::f64::consts::FRAC_PI_2] {
+        let analyzer = CoherentJonesDetector::analyzer([
+            C64::new(angle.cos(), 0.0),
+            C64::new(angle.sin(), 0.0),
+        ])
+        .unwrap();
+        close(
+            horizontal
+                .observe([0.0; 2], analyzer, || false)
+                .unwrap()
+                .power_density_w,
+            one * angle.cos().powi(2),
+            3e-12,
+        );
+    }
+    let circular = [jones_wave([0.0; 2], [C64::ONE, C64::new(0.0, 1.0)])];
+    let tones = [jones_tone(frequency, &circular, &[])];
+    let circular = camera
+        .prepare_coherent_jones_diffraction_exposure(&tones, 0.03, shutter, EXPOSURE_LIMITS, || {
+            false
+        })
+        .unwrap();
+    let matched = CoherentJonesDetector::analyzer([C64::ONE, C64::new(0.0, 1.0)]).unwrap();
+    let crossed = CoherentJonesDetector::analyzer([C64::ONE, C64::new(0.0, -1.0)]).unwrap();
+    close(
+        circular
+            .observe([0.0; 2], matched, || false)
+            .unwrap()
+            .power_density_w,
+        2.0 * one,
+        3e-12,
+    );
+    assert_eq!(
+        circular
+            .observe([0.0; 2], crossed, || false)
+            .unwrap()
+            .power_density_w,
+        0.0
+    );
+    // Analyzer magnitude/global phase is not gain or an extra source phase.
+    let same_mode =
+        CoherentJonesDetector::analyzer([C64::new(0.0, 1e308), C64::new(-1e308, 0.0)]).unwrap();
+    assert_eq!(
+        circular.observe([0.0; 2], same_mode, || false).unwrap(),
+        circular.observe([0.0; 2], matched, || false).unwrap()
+    );
+}
+
+#[test]
+fn g1_jones_analyzer_reveals_only_authored_cross_frequency_coherence() {
+    let camera = defocused(2.4);
+    let f0 = 299_792_458.0 / LAMBDA;
+    let distance = 0.037;
+    let at = [0.0302, -0.0001];
+    let a = [CoherentJonesPupilWave {
+        tangent_direction: [0.03, 0.0],
+        amplitude_sqrt_w: [C64::new(0.8, -0.2), C64::ZERO],
+    }];
+    let b = [CoherentJonesPupilWave {
+        tangent_direction: [0.0299, 0.00015],
+        amplitude_sqrt_w: [C64::ZERO, C64::new(-0.3, 0.9)],
+    }];
+    for delta in [1e9, 0.13 * f0] {
+        let f1 = f0 + delta;
+        let beat = f1 - f0;
+        let field = |wave: CoherentJonesPupilWave, frequency: f64, component: usize| {
+            camera
+                .defocused_diffraction_amplitude(
+                    std::array::from_fn(|axis| at[axis] - wave.tangent_direction[axis]),
+                    299_792_458.0 / frequency * 1e9,
+                )
+                .unwrap()
+                * wave.amplitude_sqrt_w[component]
+        };
+        let x = field(a[0], f0, 0);
+        let y = field(b[0], f1, 1);
+        let diagonal = x.norm_sq() + y.norm_sq();
+        for (start, duration) in [(0.0, 0.2 / beat), (-0.13 / beat, 1.0 / beat)] {
+            let shutter = CoherentDiffractionShutter::try_new(start, duration).unwrap();
+            let tones = [jones_tone(f0, &a, &[]), jones_tone(f1, &b, &[])];
+            let query = camera
+                .prepare_coherent_jones_diffraction_exposure(
+                    &tones,
+                    distance,
+                    shutter,
+                    EXPOSURE_LIMITS,
+                    || false,
+                )
+                .unwrap();
+            close(
+                query
+                    .observe(at, JONES_TOTAL, || false)
+                    .unwrap()
+                    .power_density_w,
+                diagonal,
+                3e-12,
+            );
+            let phase = core::f64::consts::TAU
+                * beat
+                * (distance * (1.0 + 0.5 * (at[0] * at[0] + at[1] * at[1])) / 299_792_458.0
+                    - start
+                    - 0.5 * duration);
+            for analyzer_phase in [0.0_f64, 0.67] {
+                let mode_y = C64::new(analyzer_phase.cos(), analyzer_phase.sin());
+                let analyzer = CoherentJonesDetector::analyzer([C64::ONE, mode_y]).unwrap();
+                let cross = y * x.conj() * mode_y.conj() * C64::new(phase.cos(), phase.sin());
+                let expected = 0.5 * diagonal
+                    + cross.re * sinc_reference(core::f64::consts::PI * beat * duration);
+                close(
+                    query
+                        .observe(at, analyzer, || false)
+                        .unwrap()
+                        .power_density_w,
+                    expected,
+                    3e-10,
+                );
+                let af = [JonesPupilCoherenceFactor { waves: &a }];
+                let bf = [JonesPupilCoherenceFactor { waves: &b }];
+                let shared = [jones_tone(f0, &[], &af), jones_tone(f1, &[], &bf)];
+                let shared = camera
+                    .prepare_coherent_jones_diffraction_exposure(
+                        &shared,
+                        distance,
+                        shutter,
+                        EXPOSURE_LIMITS,
+                        || false,
+                    )
+                    .unwrap()
+                    .observe(at, analyzer, || false)
+                    .unwrap();
+                assert_eq!(shared.mean_power_density_w, 0.0);
+                close(shared.fluctuation_power_density_w, expected, 3e-10);
+                let af = [
+                    JonesPupilCoherenceFactor { waves: &a },
+                    JonesPupilCoherenceFactor { waves: &[] },
+                ];
+                let bf = [
+                    JonesPupilCoherenceFactor { waves: &[] },
+                    JonesPupilCoherenceFactor { waves: &b },
+                ];
+                let independent = [jones_tone(f0, &[], &af), jones_tone(f1, &[], &bf)];
+                let independent = camera
+                    .prepare_coherent_jones_diffraction_exposure(
+                        &independent,
+                        distance,
+                        shutter,
+                        EXPOSURE_LIMITS,
+                        || false,
+                    )
+                    .unwrap()
+                    .observe(at, analyzer, || false)
+                    .unwrap();
+                close(independent.power_density_w, 0.5 * diagonal, 3e-12);
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_jones_pixel_matches_square_pupil_analyzer_integrals_and_complementary_power() {
+    let camera =
+        base(Aperture::try_regular_polygon(RADIUS, 4, core::f64::consts::FRAC_PI_4).unwrap())
+            .with_in_focus_diffraction(FocusedDiffraction::try_new(0.0).unwrap())
+            .unwrap();
+    let waves = [
+        jones_wave([-2.2, 0.0], [C64::ONE, C64::ZERO]),
+        jones_wave([2.2, 0.0], [C64::ZERO, C64::new(-1.0, 0.0)]),
+    ];
+    let tones = [jones_tone(299_792_458.0 / LAMBDA, &waves, &[])];
+    let shutter = CoherentDiffractionShutter::try_new(-0.07, 0.04).unwrap();
+    let query = camera
+        .prepare_coherent_jones_diffraction_exposure(&tones, 0.03, shutter, EXPOSURE_LIMITS, || {
+            false
+        })
+        .unwrap();
+    let footprint = pixel([-7.1, -4.3], [8.3, 2.8]);
+    let plus = CoherentJonesDetector::analyzer([C64::ONE, C64::ONE]).unwrap();
+    let minus = CoherentJonesDetector::analyzer([C64::ONE, C64::new(-1.0, 0.0)]).unwrap();
+    let total = query
+        .integrate_pixel(footprint, JONES_TOTAL, EXPOSURE_PIXEL_LIMITS, || false)
+        .unwrap();
+    let selected = query
+        .integrate_pixel(footprint, plus, EXPOSURE_PIXEL_LIMITS, || false)
+        .unwrap();
+    let complement = query
+        .integrate_pixel(footprint, minus, EXPOSURE_PIXEL_LIMITS, || false)
+        .unwrap();
+    // Independent analytic square-pupil transform and separable Simpson rule.
+    let sinc = |q: f64| sinc_reference(q * core::f64::consts::FRAC_1_SQRT_2);
+    let y = integrate_reference(-4.3, 2.8, |q| sinc(q).powi(2));
+    let norm = y / (2.0 * core::f64::consts::PI.powi(2));
+    let expected_total =
+        norm * integrate_reference(-7.1, 8.3, |q| sinc(q + 2.2).powi(2) + sinc(q - 2.2).powi(2));
+    let expected_selected =
+        norm * integrate_reference(-7.1, 8.3, |q| 0.5 * (sinc(q + 2.2) - sinc(q - 2.2)).powi(2));
+    close(total.average_power.power_w, expected_total, 3e-10);
+    close(selected.average_power.power_w, expected_selected, 3e-10);
+    close(
+        selected.energy_j,
+        shutter.duration_s() * expected_selected,
+        3e-10,
+    );
+    close(
+        selected.average_power.power_w + complement.average_power.power_w,
+        total.average_power.power_w,
+        3e-13,
+    );
+    assert_eq!(
+        total.average_power.pupil_evaluations,
+        2 * total.average_power.quadrature_samples
+    );
+    assert_eq!(
+        selected.average_power.pupil_evaluations,
+        total.average_power.pupil_evaluations
+    );
+    assert_eq!(total.pair_contractions, 2 * selected.pair_contractions);
+    let refined = query
+        .integrate_pixel(
+            footprint,
+            plus,
+            CoherentDiffractionExposurePixelLimits {
+                spatial: CoherentDiffractionPixelLimits {
+                    maximum_phase_span_rad: 0.5,
+                    ..PIXEL_LIMITS
+                },
+                ..EXPOSURE_PIXEL_LIMITS
+            },
+            || false,
+        )
+        .unwrap();
+    close(refined.energy_j, selected.energy_j, 2e-11);
+}
+
+#[test]
+fn g3_jones_projection_retains_weak_fields_and_rotates_with_its_basis() {
+    let camera = defocused(2.4);
+    let frequency = 299_792_458.0 / LAMBDA;
+    let shutter = CoherentDiffractionShutter::try_new(0.0, 0.1).unwrap();
+    let a = [jones_wave([0.2, -0.1], [C64::new(1e16, -2e16), C64::ZERO])];
+    let small = [jones_wave([0.2, -0.1], [C64::new(0.5, 0.75), C64::ZERO])];
+    let b = [jones_wave([0.2, -0.1], [C64::ZERO, C64::new(-1e16, 2e16)])];
+    let tones = [
+        jones_tone(frequency, &a, &[]),
+        jones_tone(frequency, &small, &[]),
+        jones_tone(frequency, &b, &[]),
+    ];
+    let query = camera
+        .prepare_coherent_jones_diffraction_exposure(&tones, 0.03, shutter, EXPOSURE_LIMITS, || {
+            false
+        })
+        .unwrap();
+    assert_eq!(query.frequency_count(), 1);
+    let analyzer = CoherentJonesDetector::analyzer([C64::ONE, C64::ONE]).unwrap();
+    let at = [0.5 * SCALE, -0.3 * SCALE];
+    let h = camera
+        .defocused_diffraction_amplitude([0.3 * SCALE, -0.2 * SCALE], LAMBDA_NM)
+        .unwrap();
+    let measured = query
+        .observe(at, analyzer, || false)
+        .unwrap()
+        .power_density_w;
+    let expected = 0.5 * h.norm_sq() * C64::new(0.5, 0.75).norm_sq();
+    assert!(measured > 0.0);
+    close(measured, expected, 2e-12);
+
+    let angle = 0.37_f64;
+    let cosine = C64::new(angle.cos(), 0.0);
+    let sine = C64::new(angle.sin(), 0.0);
+    let rotate = |z: [C64; 2]| [z[0] * cosine + z[1] * sine, z[1] * cosine - z[0] * sine];
+    let source = [jones_wave(
+        [0.2, -0.1],
+        [C64::new(0.8, 0.2), C64::new(-0.3, 0.5)],
+    )];
+    let rotated = [CoherentJonesPupilWave {
+        amplitude_sqrt_w: rotate(source[0].amplitude_sqrt_w),
+        ..source[0]
+    }];
+    let mode = [C64::new(0.4, -0.2), C64::new(0.3, 0.7)];
+    let observe = |waves: &[CoherentJonesPupilWave], mode| {
+        camera
+            .prepare_coherent_jones_diffraction_exposure(
+                &[jones_tone(frequency, waves, &[])],
+                0.03,
+                shutter,
+                EXPOSURE_LIMITS,
+                || false,
+            )
+            .unwrap()
+            .observe(at, CoherentJonesDetector::analyzer(mode).unwrap(), || false)
+            .unwrap()
+            .power_density_w
+    };
+    close(
+        observe(&rotated, rotate(mode)),
+        observe(&source, mode),
+        3e-13,
+    );
+}
+
+#[test]
+fn g0_g4_jones_admission_exact_work_and_cancelled_reuse() {
+    let camera = focused();
+    let f0 = 299_792_458.0 / LAMBDA;
+    let shutter = CoherentDiffractionShutter::try_new(0.0, 0.2e-9).unwrap();
+    for mode in [
+        [C64::ZERO; 2],
+        [C64::new(f64::NAN, 0.0), C64::ONE],
+        [C64::ONE, C64::new(0.0, f64::INFINITY)],
+    ] {
+        assert_eq!(
+            CoherentJonesDetector::analyzer(mode),
+            Err(CoherentDiffractionError::InvalidPolarizationAnalyzer)
+        );
+    }
+    let waves = [jones_wave([0.0; 2], [C64::ONE, C64::new(0.0, 1.0)])];
+    let tones = [
+        jones_tone(f0, &waves, &[]),
+        jones_tone(f0 + 1e9, &waves, &[]),
+    ];
+    assert!(matches!(
+        camera.prepare_coherent_jones_diffraction_exposure(
+            &tones,
+            0.03,
+            shutter,
+            CoherentDiffractionExposureLimits {
+                maximum_pair_contractions: 5,
+                ..EXPOSURE_LIMITS
+            },
+            || false,
+        ),
+        Err(CoherentDiffractionError::Limit {
+            quantity: "Jones exposure pair contractions",
+            requested: 6,
+            maximum: 5
+        })
+    ));
+    let equal = [tones[0], tones[0]];
+    assert!(
+        camera
+            .prepare_coherent_jones_diffraction_exposure(
+                &equal,
+                0.03,
+                shutter,
+                CoherentDiffractionExposureLimits {
+                    maximum_pair_contractions: 2,
+                    ..EXPOSURE_LIMITS
+                },
+                || false,
+            )
+            .is_ok()
+    );
+    let query = camera
+        .prepare_coherent_jones_diffraction_exposure(&tones, 0.03, shutter, EXPOSURE_LIMITS, || {
+            false
+        })
+        .unwrap();
+    let baseline = query.observe([0.0; 2], JONES_TOTAL, || false).unwrap();
+    let mut polls = 0;
+    assert_eq!(
+        query
+            .integrate_pixel(
+                pixel([-0.1; 2], [0.1; 2]),
+                JONES_TOTAL,
+                CoherentDiffractionExposurePixelLimits {
+                    maximum_pair_contractions: 1,
+                    ..EXPOSURE_PIXEL_LIMITS
+                },
+                || {
+                    polls += 1;
+                    false
+                }
+            )
+            .unwrap_err(),
+        CoherentDiffractionError::Limit {
+            quantity: "pixel exposure pair contractions",
+            requested: 96,
+            maximum: 1,
+        }
+    );
+    assert_eq!(
+        polls, 1,
+        "pair work must be refused before pupil evaluation"
+    );
+    let mut polls = 0;
+    assert_eq!(
+        query.integrate_pixel(
+            pixel([-1.0; 2], [1.0; 2]),
+            JONES_TOTAL,
+            EXPOSURE_PIXEL_LIMITS,
+            || {
+                polls += 1;
+                polls == 11
+            }
+        ),
+        Err(CoherentDiffractionError::Cancelled)
+    );
+    assert_eq!(
+        query.observe([0.0; 2], JONES_TOTAL, || false).unwrap(),
+        baseline
+    );
+    let factors = [JonesPupilCoherenceFactor { waves: &waves }];
+    let inconsistent = [tones[0], jones_tone(f0 + 1e9, &[], &factors)];
+    assert!(matches!(
+        camera.prepare_coherent_jones_diffraction_exposure(
+            &inconsistent,
+            0.03,
+            shutter,
+            EXPOSURE_LIMITS,
+            || false,
+        ),
+        Err(CoherentDiffractionError::InconsistentCoherenceFactors)
+    ));
+    let invalid = [jones_wave([0.0; 2], [C64::ONE, C64::new(0.0, f64::NAN)])];
+    assert!(matches!(
+        camera.prepare_coherent_jones_diffraction_exposure(
+            &[jones_tone(f0, &invalid, &[])],
+            0.03,
+            shutter,
+            EXPOSURE_LIMITS,
+            || false,
+        ),
+        Err(CoherentDiffractionError::NonFiniteAmplitude)
+    ));
+    let empty = camera
+        .prepare_coherent_jones_diffraction_exposure(
+            &[],
+            0.03,
+            shutter,
+            CoherentDiffractionExposureLimits {
+                maximum_tones: 0,
+                sources: CoherentDiffractionLimits {
+                    maximum_waves: 0,
+                    maximum_factors: 0,
+                },
+                maximum_pair_contractions: 0,
+            },
+            || false,
+        )
+        .unwrap()
+        .integrate_pixel(
+            pixel([-1.0; 2], [1.0; 2]),
+            JONES_TOTAL,
+            CoherentDiffractionExposurePixelLimits {
+                spatial: CoherentDiffractionPixelLimits {
+                    maximum_samples: 0,
+                    maximum_pupil_evaluations: 0,
+                    ..PIXEL_LIMITS
+                },
+                maximum_pair_contractions: 0,
+            },
+            || false,
+        )
+        .unwrap();
+    assert_eq!(empty.energy_j, 0.0);
+    assert_eq!(empty.pair_contractions, 0);
+}
 
 const EXPOSURE_LIMITS: CoherentDiffractionExposureLimits = CoherentDiffractionExposureLimits {
     maximum_tones: 16,
