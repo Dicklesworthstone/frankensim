@@ -13840,6 +13840,17 @@ decay at `nu k²`. The collision operator alone adds no thermal equation,
 molecular relaxation or temperature-dependent bulk-viscosity sampling. The
 separate thermal-plate coupling below explicitly supplies physical bulk heat.
 
+`MaterialForceGrid3::try_new_with_bulk_viscosity` binds the existing
+`BulkViscousMaterial` snapshots to transient 3-D material forcing. Supported
+independent-trace collision families refresh shear and bulk from one accepted
+material epoch while preserving their other relaxation rates. Physical bulk
+uses the pinned Boussinesq reference density and original dx/dt mapping; local
+density departures remain buoyancy inputs. An accepted endpoint supplies the
+next collision's viscosities, preserving the existing explicit lag and atomic
+source/population/force publication. Families without an independent trace mode
+refuse this constructor. This momentum owner adds no thermal equation or heat
+reservoir; the separate thermal owners retain those responsibilities.
+
 ## Physical shear and bulk heating on 3-D thermal plates
 
 `PlatesGrid3::set_central_moment_bulk_collision` retains independent bulk and

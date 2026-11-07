@@ -495,6 +495,18 @@ pub trait ViscousLattice3<const Q: usize>: Lattice3<Q> {
         collision: Self::Collision,
         tau: f64,
     ) -> Result<Self::Collision, Self::Error>;
+
+    /// Retune an independently configured second-moment trace, retaining shear,
+    /// equilibrium and higher-order rates. A tied collision returns None rather
+    /// than silently changing its family or its shear viscosity. The default
+    /// keeps custom lattices source-compatible without promising bulk support.
+    fn with_bulk_relaxation(
+        collision: Self::Collision,
+        _tau: f64,
+    ) -> Result<Option<Self::Collision>, Self::Error> {
+        Self::validate(collision)?;
+        Ok(None)
+    }
 }
 
 impl ViscousLattice3<19> for D3q19 {
@@ -536,6 +548,25 @@ impl ViscousLattice3<19> for D3q19 {
         updated.validate()?;
         Ok(updated)
     }
+
+    fn with_bulk_relaxation(
+        collision: Self::Collision,
+        tau: f64,
+    ) -> Result<Option<Self::Collision>, Self::Error> {
+        use crate::d3q19::CollisionModel3;
+        collision.validate()?;
+        CollisionModel3::Bgk { tau }.validate()?;
+        let CollisionModel3::CentralMomentBulk {
+            shear_rate, higher_order_rate, ..
+        } = collision else {
+            return Ok(None);
+        };
+        let updated = CollisionModel3::CentralMomentBulk {
+            shear_rate, bulk_rate: 1.0 / tau, higher_order_rate,
+        };
+        updated.validate()?;
+        Ok(Some(updated))
+    }
 }
 
 impl ViscousLattice3<27> for crate::d3q27::D3q27 {
@@ -557,6 +588,25 @@ impl ViscousLattice3<27> for crate::d3q27::D3q27 {
         }
         collision.validate()?;
         Ok(collision)
+    }
+
+    fn with_bulk_relaxation(
+        mut collision: Self::Collision,
+        tau: f64,
+    ) -> Result<Option<Self::Collision>, Self::Error> {
+        use crate::d3q27::{CollisionError27, CollisionModel27};
+        collision.validate()?;
+        if !tau.is_finite() || tau <= 0.5 {
+            return Err(CollisionError27::Tau { tau });
+        }
+        match &mut collision.model {
+            CollisionModel27::CentralMoment { rates } | CollisionModel27::Cumulant { rates } => {
+                rates.omega[1] = 1.0 / tau;
+            }
+            CollisionModel27::Bgk { .. } | CollisionModel27::Trt { .. } => return Ok(None),
+        }
+        collision.validate()?;
+        Ok(Some(collision))
     }
 }
 
