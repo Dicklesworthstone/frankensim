@@ -10,15 +10,15 @@
 //!
 //! Geometry, support elimination and reference matrices remain fixed. This
 //! inherits the supplied spatial DKT/inertia approximation and small-deflection plate
-//! assumptions. Nonnegative Rayleigh coefficients dissipate energy when the
-//! supplied stiffness is positive semidefinite; this adapter does not establish
-//! that spectral property. The optional material operator separately admits
+//! assumptions. The actual Rayleigh combination is admitted for nonnegative
+//! work, including when prestress makes K indefinite. This does not establish
+//! elastic stability. The optional material operator separately admits
 //! passive constitutive tensors without damping geometric prestress or stiffeners.
 
 use crate::PlateModel;
 use fs_plate::viscosity::PlateBendingViscosity;
 use fs_solver::FlexiblePreconditioner;
-use fs_sparse::{Csr, DirectOrdering, LdltError, LdltOptions, SymbolicLdlt};
+use fs_sparse::{Coo, Csr, DirectOrdering, LdltError, LdltOptions, SymbolicLdlt};
 use fs_time::galpha::second_order_adjoint::SecondOrderVjp;
 use fs_time::galpha::second_order_adjoint::trajectory::StructuralTrajectoryModel;
 use fs_time::galpha::{
@@ -94,6 +94,8 @@ pub enum PlateDynamicsError {
     Budget(&'static str),
     /// The original sparse mass factorization refused, including its byte cap.
     MassFactor(LdltError),
+    /// Sparse Rayleigh passivity admission refused, including its factor cap.
+    DampingFactor(LdltError),
     /// Cancellation observed before publishing a model or preconditioner.
     Cancelled,
 }
@@ -122,6 +124,129 @@ fn dot_row(matrix: &Csr, row: usize, input: &[f64]) -> f64 {
         .fold(0.0, |sum, (&column, &value)| {
             value.mul_add(input[column], sum)
         })
+}
+
+// Positive coefficients alone cannot make alpha*M + beta*K passive when
+// prestress has made K indefinite. Admit the ACTUAL combination once, without
+// modifying either physical operator or factoring inside a time step.
+fn admit_rayleigh_damping<C: FnMut() -> bool>(
+    model: &PlateModel,
+    parameters: PlateDynamicsParameters,
+    options: &LdltOptions,
+    cancelled: &mut C,
+) -> Result<(), PlateDynamicsError> {
+    if parameters.stiffness_damping_s == 0.0 {
+        // The original mass admission already established M > 0. Pure mass
+        // damping and the conservative limit require no second factorization.
+        return Ok(());
+    }
+    let invalid = || {
+        PlateDynamicsError::InvalidInput(
+            "Rayleigh damping has a negative, asymmetric or unresolved dissipative direction",
+        )
+    };
+    let cm = parameters.mass_scale * parameters.mass_damping_per_s;
+    let ck = parameters.stiffness_scale * parameters.stiffness_damping_s;
+    let entry = |row, column| cm * model.m.get(row, column) + ck * model.k.get(row, column);
+    let n = model.free;
+    let mut roots = vec![0.0; n];
+    let mut active = vec![usize::MAX; n];
+    let mut dimension = 0;
+    for row in 0..n {
+        poll(cancelled)?;
+        let diagonal = entry(row, row);
+        if !diagonal.is_finite() || diagonal < 0.0 {
+            return Err(invalid());
+        }
+        if diagonal > 0.0 {
+            roots[row] = diagonal.sqrt();
+            active[row] = dimension;
+            dimension += 1;
+        }
+    }
+
+    // Congruence scaling removes displacement/slope units and diagonal
+    // magnitudes. This shift belongs ONLY to the sign test's scratch matrix:
+    // it admits semidefinite rigid directions within arithmetic resolution.
+    // Original unshifted M and K still supply every force, work and adjoint.
+    let roundoff = 64.0 * f64::EPSILON * dimension.max(8) as f64;
+    let mut scaled = Coo::new(dimension, dimension);
+    let mut coupled = false;
+    for row in 0..n {
+        poll(cancelled)?;
+        if active[row] != usize::MAX {
+            scaled.push(active[row], active[row], 1.0 + roundoff);
+        }
+        let (mass_columns, mass_values) = model.m.row(row);
+        let (stiffness_columns, stiffness_values) = model.k.row(row);
+        let (mut mi, mut ki) = (0, 0);
+        let mut entries = 0usize;
+        // Merge the sparse row supports before scaling: cancelling mass and
+        // stiffness entries must be combined in their physical units first.
+        while mi < mass_columns.len() || ki < stiffness_columns.len() {
+            if entries % 256 == 0 {
+                poll(cancelled)?;
+            }
+            entries += 1;
+            let column = mass_columns
+                .get(mi)
+                .copied()
+                .unwrap_or(usize::MAX)
+                .min(stiffness_columns.get(ki).copied().unwrap_or(usize::MAX));
+            let mut value = 0.0;
+            if mass_columns.get(mi) == Some(&column) {
+                value = cm * mass_values[mi];
+                mi += 1;
+            }
+            if stiffness_columns.get(ki) == Some(&column) {
+                value += ck * stiffness_values[ki];
+                ki += 1;
+            }
+            if column == row {
+                continue;
+            }
+            let mirror = entry(column, row);
+            if !value.is_finite() || !mirror.is_finite() {
+                return Err(invalid());
+            }
+            if value == 0.0 && mirror == 0.0 {
+                continue;
+            }
+            if roots[row] == 0.0 || roots[column] == 0.0 {
+                // A PSD matrix's zero diagonal requires its entire row to
+                // vanish. Removing a coupled zero row would hide active work.
+                return Err(invalid());
+            }
+            let large = roots[row].max(roots[column]);
+            let small = roots[row].min(roots[column]);
+            let lower = value / large / small;
+            let upper = mirror / large / small;
+            if !lower.is_finite()
+                || !upper.is_finite()
+                || (lower - upper).abs() > roundoff * lower.abs().max(upper.abs()).max(1.0)
+            {
+                return Err(invalid());
+            }
+            scaled.push(active[row], active[column], 0.5 * lower + 0.5 * upper);
+            coupled = true;
+        }
+    }
+    if !coupled {
+        return Ok(());
+    }
+    let scaled = scaled.assemble();
+    poll(cancelled)?;
+    let symbolic = SymbolicLdlt::analyze(&scaled, DirectOrdering::Amd)
+        .map_err(PlateDynamicsError::DampingFactor)?;
+    poll(cancelled)?;
+    let factor = symbolic
+        .factor(&scaled, options)
+        .map_err(PlateDynamicsError::DampingFactor)?;
+    poll(cancelled)?;
+    if factor.inertia().negative != 0 {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 /// One immutable spatial plate and load parameter point.
@@ -178,13 +303,16 @@ impl<'a, L: PlateLoad + ?Sized> PlateDynamics<'a, L> {
         )
     }
 
-    /// Bind the same physical model with explicit consistent-mass factor limits.
+    /// Bind the same physical model with explicit sparse admission-factor limits.
     /// Diagonal mass uses the original linear-time admission and needs no factor.
     /// For consistent mass, the existing sparse LDLT service checks positive
     /// definiteness once; its factors are then discarded. No mass lumping or
     /// modified physical operator is introduced. Set `max_factor_bytes` to bound
     /// the numeric factor and scratch separately from the source operator budget.
-    /// Cancellation is checked around the bounded synchronous factorization.
+    /// Nonzero stiffness-proportional damping additionally checks the actual
+    /// Rayleigh combination, with these same factor limits. Zero damping
+    /// directions remain legal; no admission shift enters the physical law.
+    /// Cancellation is checked around the bounded synchronous factorizations.
     #[allow(clippy::too_many_lines)]
     pub fn new_with_mass_options<C: FnMut() -> bool>(
         model: &'a PlateModel,
@@ -326,6 +454,7 @@ impl<'a, L: PlateLoad + ?Sized> PlateDynamics<'a, L> {
                 ));
             }
         }
+        admit_rayleigh_damping(model, parameters, mass_options, cancelled)?;
         poll(cancelled)?;
         Ok(Self {
             model,

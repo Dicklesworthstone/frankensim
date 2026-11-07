@@ -699,6 +699,11 @@ against CST/DKT.
   sparse LDLT inertia once, without changing or lumping the physical matrix.
   `new_with_mass_options` exposes the original factor's numeric byte/pivot
   controls; cancellation is checked around that bounded synchronous work.
+  Those controls also bound sparse passivity admission of the actual Rayleigh
+  combination when stiffness-proportional damping is selected. Prestress may
+  make K indefinite while mass damping still makes C passive; exact zero-loss
+  directions remain unchanged. See `fs-plate-transient/CONTRACT.md` for the
+  dimensionless arithmetic allowance and refusal boundary.
   The mass Jacobi preconditioner is exact only for lumped mass; consistent
   acceleration and its initialization pullback solve the full original matrix
   under explicit Krylov restart/cycle limits. An

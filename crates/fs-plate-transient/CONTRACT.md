@@ -61,6 +61,33 @@ compares midpoint trajectories with dense LU steps and integrated viscous
 work. Original-model, extra storage-budget and cancellation refusals are
 covered separately.
 
+### Passive Rayleigh damping under prestress
+
+Positive Rayleigh coefficients do not guarantee nonnegative work when prestress
+makes the supplied K indefinite. `PlateDynamics` therefore admits the actual
+`alpha*M + beta*K` combination before returning a model. A negative or coupled
+zero diagonal refuses; remaining coordinates are scaled by their own positive
+diagonals and checked with the existing sparse LDLT inertia owner. The check
+uses sparse row unions and O(DOFs + stored entries) input scratch, followed by
+the factor's original fill-dependent allocation. No dense damping matrix is
+created. Pure mass, zero and diagonal damping need no additional factor.
+
+The sign check allows assembly roundoff of `64*eps*max(active_dofs,8)` in the
+dimensionless congruence matrix. Its diagonal shift exists only in admission
+scratch: original forces, transposes, derivatives and energy use the unchanged
+M and K, so exact undamped directions remain undamped. Unresolved sparse pivots
+refuse. The `new_with_mass_options` factor-byte and pivot controls also govern
+this damping check; cancellation is polled during row work and around the
+bounded synchronous analysis/factorization. Later attached material viscosity
+is separately passive and cannot conceal an active authored Rayleigh mechanism.
+This establishes numerical passivity within the stated arithmetic resolution,
+not elastic stability of K or a physical identification of Rayleigh coefficients.
+
+`tests/rayleigh_damping.rs` demonstrates the previously admissible +2 W kinetic
+energy source, preserves semidefinite null modes under coordinate scalings
+`2^(-200)` and `2^200`, admits a passive combination with indefinite K, and
+checks original-C midpoint work balance and factor-budget/cancellation refusals.
+
 ## Consistent physical inertia
 
 `PlateDynamics::new` admits the complete symmetric positive-definite sparse
