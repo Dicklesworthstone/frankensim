@@ -3,6 +3,8 @@ use super::*;
 use fs_em::spatial::conduction::motion::SpatialConductionMotion;
 use std::cell::Cell;
 
+mod terminals;
+
 fn model(
     cards: &[MaterialCard; 2],
     context: &QueryPoint,

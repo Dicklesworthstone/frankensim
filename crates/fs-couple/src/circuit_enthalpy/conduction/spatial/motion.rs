@@ -107,6 +107,12 @@ impl SpatialConductionThermalNetwork<'_> {
     ///
     /// Voltage and distributed-current boundary traces retain their native
     /// meaning; current-only open components retain their charge-neutral gauge.
+    /// [`SpatialConductionDrive`] also admits total-current and mixed-terminal
+    /// controls. Each endpoint rebuilds the original conductance response and
+    /// adds its actual motional current before solving the authored controls.
+    /// An open-circuit electrode therefore develops its motional voltage; zero
+    /// authored current does not mean zero electric field. Held terminal power
+    /// is not admitted in this moving path.
     /// For finite-resistance stationary interfaces use
     /// [`Self::step_moving_contact_candidate`] with explicit heat bindings.
     /// All original material identities, volume/mass guards, source domains,
@@ -121,12 +127,12 @@ impl SpatialConductionThermalNetwork<'_> {
     /// work. Geometry, velocity and B are held; temporal/spatial refinement is
     /// still required independently of the conservation gates.
     #[allow(clippy::too_many_arguments)]
-    pub fn step_moving_candidate<'t, C: SpatialConductorMaterial>(
+    pub fn step_moving_candidate<'t, 'd, C: SpatialConductorMaterial>(
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
         problem: &SpatialConduction<C>,
-        boundary: &SpatialConductionBoundary,
+        drive: impl Into<SpatialConductionDrive<'d>>,
         motion: SpatialConductionMotion<'_>,
         assembly: WeightedAssemblyLimits,
         field_controls: ConductionControls,
@@ -138,7 +144,7 @@ impl SpatialConductionThermalNetwork<'_> {
             thermal,
             target_s,
             problem,
-            boundary,
+            drive,
             motion,
             &[],
             assembly,
@@ -164,12 +170,12 @@ impl SpatialConductionThermalNetwork<'_> {
     /// domains and transactional refusals are those of
     /// [`Self::step_moving_candidate`].
     #[allow(clippy::too_many_arguments)]
-    pub fn step_moving_contact_candidate<'t, C: SpatialConductorMaterial>(
+    pub fn step_moving_contact_candidate<'t, 'd, C: SpatialConductorMaterial>(
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
         problem: &SpatialConduction<C>,
-        boundary: &SpatialConductionBoundary,
+        drive: impl Into<SpatialConductionDrive<'d>>,
         motion: SpatialConductionMotion<'_>,
         contact_bindings: &[ConductionContactThermal<'_>],
         assembly: WeightedAssemblyLimits,
@@ -192,7 +198,7 @@ impl SpatialConductionThermalNetwork<'_> {
             thermal,
             target_s,
             problem,
-            boundary,
+            drive,
             motion,
             contact_bindings,
             assembly,
@@ -214,6 +220,7 @@ impl SpatialConductionThermalNetwork<'_> {
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub(crate) fn step_moving_resolved_candidate<
         't,
+        'd,
         C: SpatialConductorMaterial,
         S,
         E: From<ConductionThermalError>,
@@ -222,7 +229,7 @@ impl SpatialConductionThermalNetwork<'_> {
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
         problem: &SpatialConduction<C>,
-        boundary: &SpatialConductionBoundary,
+        drive: impl Into<SpatialConductionDrive<'d>>,
         motion: SpatialConductionMotion<'_>,
         contact_bindings: &[ConductionContactThermal<'_>],
         assembly: WeightedAssemblyLimits,
@@ -235,6 +242,28 @@ impl SpatialConductionThermalNetwork<'_> {
         sample: impl Fn(&S) -> &MaterialNetworkSample,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<SpatialMovingConductionEnthalpyCandidate<'t, C, S>, CircuitEnthalpyError<E>> {
+        let drive = drive.into();
+        // Prepared terminal responses need N-1 stationary basis solves and
+        // one motional-source solve. Charge all of them on every thermal trial,
+        // including the zero-current case; the latter still has a real field.
+        let field_solves = match drive {
+            SpatialConductionDrive::Boundary(_) => 1,
+            SpatialConductionDrive::TotalCurrent { .. } => 2,
+            SpatialConductionDrive::TerminalCurrents { terminals, .. }
+            | SpatialConductionDrive::MixedTerminals { terminals, .. } => {
+                if terminals.len() < 2 {
+                    return Err(map_conduction_error(invalid(
+                        "moving terminal drive needs at least two electrodes",
+                    )));
+                }
+                terminals.len()
+            }
+            SpatialConductionDrive::Power { .. } => {
+                return Err(map_conduction_error(invalid(
+                    "held terminal power is not admitted with prescribed motional EMF",
+                )));
+            }
+        };
         let dt = self
             .admit_step(
                 thermal,
@@ -262,20 +291,109 @@ impl SpatialConductionThermalNetwork<'_> {
             &[],
             |next, _resistors, contact_owner, remaining| {
                 check(cancel).map_err(map_conduction_error)?;
-                if remaining == 0 {
+                if field_solves > remaining {
                     return Err(CircuitEnthalpyError::CircuitBudget);
                 }
-                let field = next
-                    .solve_with_motion(boundary, motion, field_controls, &mut || {
-                        (*cancel.borrow_mut())()
-                    })
-                    .map_err(field_error)
-                    .map_err(map_conduction_error)?;
+                let field = match drive {
+                    SpatialConductionDrive::Boundary(boundary) => {
+                        next.solve_with_motion(boundary, motion, field_controls, &mut || {
+                            (*cancel.borrow_mut())()
+                        })
+                    }
+                    SpatialConductionDrive::TotalCurrent {
+                        positive_faces,
+                        negative_faces,
+                        current_a,
+                        reference_voltage_v,
+                    } => {
+                        let response = next
+                            .resistance_at_reference_voltage(
+                                positive_faces,
+                                negative_faces,
+                                reference_voltage_v,
+                                field_controls,
+                                &mut || (*cancel.borrow_mut())(),
+                            )
+                            .map_err(field_error)
+                            .map_err(map_conduction_error)?;
+                        response.field_at_current_with_motion(
+                            current_a,
+                            motion,
+                            field_controls,
+                            &mut || (*cancel.borrow_mut())(),
+                        )
+                    }
+                    SpatialConductionDrive::TerminalCurrents {
+                        terminals,
+                        currents_a,
+                        response,
+                    } => {
+                        let matrix = next
+                            .conductance_matrix(terminals, response, field_controls, &mut || {
+                                (*cancel.borrow_mut())()
+                            })
+                            .map_err(field_error)
+                            .map_err(map_conduction_error)?;
+                        matrix.field_at_currents_with_motion(
+                            currents_a,
+                            motion,
+                            field_controls,
+                            &mut || (*cancel.borrow_mut())(),
+                        )
+                    }
+                    SpatialConductionDrive::MixedTerminals {
+                        terminals,
+                        current_terminals,
+                        voltages_v,
+                        currents_a,
+                        response,
+                        mixed,
+                    } => {
+                        let matrix = next
+                            .conductance_matrix(terminals, response, field_controls, &mut || {
+                                (*cancel.borrow_mut())()
+                            })
+                            .map_err(field_error)
+                            .map_err(map_conduction_error)?;
+                        let mixed = matrix
+                            .prepare_current_control(current_terminals, mixed, &mut || {
+                                (*cancel.borrow_mut())()
+                            })
+                            .map_err(field_error)
+                            .map_err(map_conduction_error)?;
+                        mixed.field_at_controls_with_motion(
+                            voltages_v,
+                            currents_a,
+                            motion,
+                            field_controls,
+                            &mut || (*cancel.borrow_mut())(),
+                        )
+                    }
+                    SpatialConductionDrive::Power { .. } => {
+                        return Err(map_conduction_error(invalid(
+                            "held terminal power is not admitted with prescribed motional EMF",
+                        )));
+                    }
+                }
+                .map_err(field_error)
+                .map_err(map_conduction_error)?;
                 let heat_j = finite(dt * field.joule_power_w())?;
-                let terminal_work_j = finite(dt * field.terminal_power_w())?;
+                let terminal_work_j = finite(
+                    dt * drive
+                        .supplied_power_from_terminals_w(
+                            next.mesh(),
+                            field.voltage_v(),
+                            field.nodal_boundary_current_a(),
+                            field.terminal_power_w(),
+                            cancel,
+                        )
+                        .map_err(map_conduction_error)?,
+                )?;
                 let mechanical_work_j = finite(dt * field.mechanical_power_w())?;
                 let net_supplied_work_j = finite(terminal_work_j - mechanical_work_j)?;
                 if (field.joule_power_w() > 0.0 && heat_j == 0.0)
+                    || finite(terminal_work_j - finite(dt * field.terminal_power_w())?)?.abs()
+                        > controls.total_energy_tolerance_j
                     || finite(heat_j - net_supplied_work_j)?.abs()
                         > controls.total_energy_tolerance_j
                 {
@@ -302,7 +420,7 @@ impl SpatialConductionThermalNetwork<'_> {
                             net_supplied_work_j,
                         },
                     },
-                    1,
+                    field_solves,
                 ))
             },
             |candidate| {

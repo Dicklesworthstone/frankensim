@@ -495,3 +495,87 @@ fn refused_surface_trials_and_cancellation_keep_field_and_enthalpy_unchanged() {
 
 #[path = "heat/circuit.rs"]
 mod circuit;
+
+#[test]
+fn current_controlled_motion_retains_complete_thermal_contact_and_radiation_assembly() {
+    use fs_couple::circuit_enthalpy::conduction::heat::step_spatial_moving_conduction_candidate;
+    use fs_em::spatial::conduction::motion::SpatialConductionMotion;
+
+    with_heat(
+        0.2,
+        100000.0,
+        2000.0,
+        |cx, _, heat, thermal, field, regions| {
+            let prepared = heat.prepare(cx, &thermal).unwrap();
+            let [positive, negative] = electrodes(&field, 2.0);
+            let drive = SpatialConductionDrive::total_current(&positive, &negative, 2.0);
+            let stationary = prepared
+                .step_spatial_conduction_candidate(
+                    cx,
+                    &thermal,
+                    0.5,
+                    &field,
+                    drive,
+                    regions,
+                    1e-12,
+                    limits(),
+                    field_controls(),
+                    config(),
+                    &[0.0; 2],
+                )
+                .unwrap();
+            let velocities = vec![[0.0, -10.0, 0.0]; regions.len()];
+            let fields = vec![[0.0, 0.0, 1.0]; regions.len()];
+            let moving = step_spatial_moving_conduction_candidate(
+                &prepared,
+                cx,
+                &thermal,
+                0.5,
+                &field,
+                drive,
+                SpatialConductionMotion {
+                    velocity_m_s: &velocities,
+                    flux_density_t: &fields,
+                },
+                &[],
+                regions,
+                1e-12,
+                limits(),
+                field_controls(),
+                config(),
+                &[0.0; 2],
+            )
+            .unwrap();
+            for cell in [CellId(30), CellId(10)] {
+                near(
+                    moving.thermal().temperature_k(cell).unwrap(),
+                    stationary.thermal().temperature_k(cell).unwrap(),
+                );
+            }
+            let report = moving.report();
+            near(
+                report.electrical.heat_j,
+                stationary.report().electrical.heat_j,
+            );
+            near(report.electrical.mechanical_work_j, -20.0);
+            near(
+                report.electrical.terminal_work_j,
+                report.electrical.heat_j - 20.0,
+            );
+            assert!(report.electrical.terminal_work_j < 0.0);
+            near(
+                report.source.thermal_contacts[0]
+                    .interface
+                    .value_m2_k_per_w(),
+                stationary.report().source.thermal_contacts[0]
+                    .interface
+                    .value_m2_k_per_w(),
+            );
+            near(
+                report.total_energy_residual_j + 0.5 * report.source.radiation_net_power_w(),
+                0.0,
+            );
+            near(thermal.time_s(), 0.0);
+        },
+    );
+}

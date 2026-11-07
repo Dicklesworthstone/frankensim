@@ -1,7 +1,7 @@
 //! Prescribed motion and resistive joints through the existing complete heat owner.
 use super::*;
 use crate::circuit_enthalpy::conduction::spatial::motion::SpatialMovingConductionEnthalpyCandidate;
-use fs_em::spatial::conduction::{SpatialConductionBoundary, motion::SpatialConductionMotion};
+use fs_em::spatial::conduction::motion::SpatialConductionMotion;
 
 /// Close moving bulk current, stationary resistive interfaces and a complete
 /// sourced heat assembly at one finite-enthalpy endpoint.
@@ -12,6 +12,9 @@ use fs_em::spatial::conduction::{SpatialConductionBoundary, motion::SpatialCondu
 /// Native conductor-frame loss and explicitly partitioned contact loss enter
 /// those finite cells once. Laboratory E.J and Lorentz output are separate:
 /// terminal work minus mechanical output supplies the deposited Joule heat.
+/// Boundary traces and [`SpatialConductionDrive`]'s total-current and mixed
+/// terminal controls share this path. Terminal responses include motional EMF
+/// at every proposed temperature; stationary held-power control is refused.
 ///
 /// Contact-adjacent tetrahedra must have zero prescribed velocity. Moving or
 /// sliding interfaces require a surface-work law and remain a native refusal.
@@ -29,6 +32,7 @@ use fs_em::spatial::conduction::{SpatialConductionBoundary, motion::SpatialCondu
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn step_spatial_moving_conduction_candidate<
     't,
+    'd,
     A: HeatAssembly + ?Sized,
     C: SpatialConductorMaterial,
 >(
@@ -37,7 +41,7 @@ pub fn step_spatial_moving_conduction_candidate<
     thermal: &DepositionSimulation<'t>,
     target_s: f64,
     problem: &SpatialConduction<C>,
-    boundary: &SpatialConductionBoundary,
+    drive: impl Into<SpatialConductionDrive<'d>>,
     motion: SpatialConductionMotion<'_>,
     contacts: &[contacts::ConductionContactThermal<'_>],
     regions: &[SpatialConductionRegion],
@@ -69,7 +73,7 @@ pub fn step_spatial_moving_conduction_candidate<
         thermal,
         target_s,
         problem,
-        boundary,
+        drive,
         motion,
         contacts,
         assembly,

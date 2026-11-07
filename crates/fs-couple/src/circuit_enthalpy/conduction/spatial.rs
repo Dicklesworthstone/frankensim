@@ -131,6 +131,26 @@ impl<'a> SpatialConductionDrive<'a> {
         field: &SpatialConductionField,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<f64, Error> {
+        self.supplied_power_from_terminals_w(
+            mesh,
+            &field.voltage_v,
+            &field.nodal_boundary_current_a,
+            field.supplied_power_w,
+            cancel,
+        )
+    }
+
+    // Moving and stationary fields share authored terminal work. In a moving
+    // conductor this must remain independent of conductor-frame Joule loss:
+    // the difference is the signed work transferred to the motion owner.
+    fn supplied_power_from_terminals_w(
+        self,
+        mesh: &fs_rep_mesh::TetComplex,
+        voltage_v: &[f64],
+        nodal_boundary_current_a: &[Option<f64>],
+        boundary_power_w: f64,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<f64, Error> {
         fn add(sum: &mut f64, correction: &mut f64, value: f64) -> Result<(), Error> {
             let adjusted = finite(value - *correction)?;
             let next = finite(*sum + adjusted)?;
@@ -145,12 +165,12 @@ impl<'a> SpatialConductionDrive<'a> {
             faces
                 .first()
                 .and_then(|&face| mesh.faces.get(face))
-                .and_then(|vertices| field.voltage_v.get(vertices[0] as usize))
+                .and_then(|vertices| voltage_v.get(vertices[0] as usize))
                 .copied()
                 .ok_or_else(|| invalid("current electrode lost its solved potential"))
         };
         let power = match self {
-            Self::Boundary(_) => field.supplied_power_w,
+            Self::Boundary(_) => boundary_power_w,
             Self::Power { source, .. } => source.power_w,
             Self::TotalCurrent {
                 positive_faces,
@@ -212,7 +232,7 @@ impl<'a> SpatialConductionDrive<'a> {
                     for vertex in vertices {
                         check(cancel)?;
                         let reaction =
-                            field.nodal_boundary_current_a[vertex as usize].ok_or_else(|| {
+                            nodal_boundary_current_a[vertex as usize].ok_or_else(|| {
                                 invalid("voltage electrode lost its current reaction")
                             })?;
                         add(&mut current, &mut current_correction, reaction)?;
