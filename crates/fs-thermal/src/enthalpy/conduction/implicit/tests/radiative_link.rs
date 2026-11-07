@@ -4,6 +4,8 @@ use super::super::link::{GrayRadiativeControls, GrayRadiativeLink};
 use super::*;
 use std::cell::Cell;
 
+mod surface_sources;
+
 const SIGMA: f64 = 5.670_374_419e-8;
 
 struct Material {

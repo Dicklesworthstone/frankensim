@@ -1,5 +1,6 @@
 //! Two finite bodies exchanging heat through one pair of gray gap surfaces.
 
+use super::super::boundary::{BoundGraySurface, ImplicitGraySurfaceLaw};
 use super::super::contact::{ImplicitContactLaw, ImplicitContactState};
 use super::super::{ImplicitConductionLaw, ImplicitConductionState};
 use super::{ImplicitLinkLaw, ImplicitLinkState};
@@ -56,6 +57,8 @@ pub struct GrayRadiativeResponse {
 /// reduce to epsilon_eff = 1 / (1/epsilon_A + 1/epsilon_B - 1). See the original
 /// theory at <https://mooseframework.inl.gov/modules/heat_transfer/>.
 /// Fixed emissivities, gap HTC and two coating resistances are explicit inputs.
+/// `with_surface_laws` replaces fixed emissivities with the original ordered
+/// bulk-enthalpy surface sources, including their temperature/phase response.
 /// `with_gap_resistance` can replace the gap HTC with an original two-sided
 /// nonradiative contact law at the ordered bulk enthalpies.
 ///
@@ -69,7 +72,7 @@ pub struct GrayRadiativeResponse {
 /// Both bodies keep their original finite thermal storage. The existing link
 /// owner applies one signed power with equal/opposite cell contributions and
 /// its original entropy production. No prescribed bath, extra surface storage,
-/// enclosure solver, profile-integrated k(T), source-dependent emissivity,
+/// enclosure solver, profile-integrated k(T), surface-temperature-dependent emissivity,
 /// near-field radiation or participating-medium transport is introduced.
 /// The face kernel allocates nothing; a supplied source law retains its own
 /// evaluation costs and is queried once per enthalpy trial. The geometry-aware
@@ -77,7 +80,9 @@ pub struct GrayRadiativeResponse {
 /// balance; area, view, coatings and independently authored gap remain fixed.
 pub struct GrayRadiativeLink<'a> {
     materials: [&'a dyn ImplicitConductionLaw; 2],
+    emissivities: [f64; 2],
     effective_emissivity: f64,
+    surface_laws: Option<[BoundGraySurface<'a>; 2]>,
     gap_htc_w_m2_k: f64,
     gap_resistance: Option<BoundGapResistance<'a>>,
     coating_resistances_m2_k_w: [f64; 2],
@@ -122,12 +127,50 @@ impl<'a> GrayRadiativeLink<'a> {
         };
         Ok(Self {
             materials,
+            emissivities,
             effective_emissivity,
+            surface_laws: None,
             gap_htc_w_m2_k,
             gap_resistance: None,
             coating_resistances_m2_k_w,
             controls,
         })
+    }
+
+    /// Replace both zero fixed emissivities with original enthalpy surface laws.
+    ///
+    /// Each source uses the SAME ordered caloric object as its finite body.
+    /// Its emissivity and complete d(epsilon)/dh are resolved once per trial
+    /// at that body's original BULK enthalpy, before any insulation shortcut.
+    /// Solved face temperatures do not replace the source coordinates. This is
+    /// the same declared cell-state gray closure as the ambient boundary, not
+    /// a model for separate surface temperatures or evolving surface phases.
+    ///
+    /// Both source convection values and derivatives must be zero: the common
+    /// gap HTC or `with_gap_resistance` already owns nonradiative exchange.
+    /// Fixed gap/coating inputs remain unchanged. Attachment is unique and
+    /// requires both original fixed emissivities to be zero. Source values,
+    /// domains and tangents are checked at every actual native trial.
+    ///
+    /// The full effective-emissivity derivative includes an opening face at
+    /// epsilon=0 without dividing by that emissivity. When BOTH faces have
+    /// zero emissivity and nonzero onset derivatives, the radiosity reduction
+    /// has no unique joint linearization; that source corner refuses rather
+    /// than fabricating a Newton tangent.
+    pub fn with_surface_laws(
+        mut self,
+        laws: [&'a dyn ImplicitGraySurfaceLaw; 2],
+    ) -> Result<Self, DepositionError> {
+        if self.surface_laws.is_some() || self.emissivities != [0.0; 2] {
+            return Err(DepositionError::InvalidInput(
+                "gray link surface sources must uniquely replace two zero fixed emissivities",
+            ));
+        }
+        self.surface_laws = Some([
+            BoundGraySurface::new(self.materials[0].caloric_law(), laws[0])?,
+            BoundGraySurface::new(self.materials[1].caloric_law(), laws[1])?,
+        ]);
+        Ok(self)
     }
 
     /// Compose one original NONRADIATIVE gap resistance with gray radiation.
@@ -220,12 +263,13 @@ impl<'a> GrayRadiativeLink<'a> {
         ];
         let temperatures = [states[0].temperature_k, states[1].temperature_k];
         let conductivities = [states[0].conductivity_w_m_k, states[1].conductivity_w_m_k];
-        // Query the original gap once, even if a bulk later proves insulating.
-        // Neither an insulation shortcut nor surface Newton may hide source
-        // domain failures or replace the declared bulk-state coordinates.
+        // Query each original source once, even if a bulk proves insulating.
+        // Neither shortcuts nor surface Newton may hide source-domain failures
+        // or replace the declared bulk-state coordinates.
+        let (emissivity, emissivity_slopes) = self.emissivity_at(enthalpies_j_kg, checkpoint)?;
         let (gap_htc, gap_state) = self.gap_at(enthalpies_j_kg, checkpoint)?;
-        let disconnected = self.effective_emissivity == 0.0 && gap_htc == 0.0;
-        if disconnected || conductivities.contains(&0.0) {
+        let disconnected = emissivity == 0.0 && gap_htc == 0.0;
+        if (disconnected && emissivity_slopes == [0.0; 2]) || conductivities.contains(&0.0) {
             let surfaces = match (conductivities[0] == 0.0, conductivities[1] == 0.0) {
                 (false, false) => Some(temperatures),
                 (true, false) if !disconnected => Some([temperatures[1]; 2]),
@@ -263,7 +307,10 @@ impl<'a> GrayRadiativeLink<'a> {
         let delta = finite(temperatures[0] - temperatures[1])?;
         // x=(Tsa-Tsb)/(Ta-Tb); never subtract rounded surface temperatures or
         // divide by a small bulk delta. Positive passivity brackets x in [0,1].
-        let mut x = fraction(bulk, self.coefficients(temperatures, gap_htc)?.0);
+        let mut x = fraction(
+            bulk,
+            self.coefficients(temperatures, gap_htc, emissivity)?.0,
+        );
         let (mut lo, mut hi) = (0.0, 1.0);
         for iterations in 1..=self.controls.maximum_iterations {
             checkpoint()?;
@@ -271,7 +318,8 @@ impl<'a> GrayRadiativeLink<'a> {
                 (-weights[0] * (1.0 - x)).mul_add(delta, temperatures[0]),
                 (weights[1] * (1.0 - x)).mul_add(delta, temperatures[1]),
             ];
-            let (surface_g, slopes, radiation_g) = self.coefficients(surfaces, gap_htc)?;
+            let (surface_g, slopes, radiation_g) =
+                self.coefficients(surfaces, gap_htc, emissivity)?;
             let g = finite(area * series(bulk, surface_g))?;
             let power = finite(g * delta)?;
             let surface_delta = x * delta;
@@ -331,6 +379,25 @@ impl<'a> GrayRadiativeLink<'a> {
                             )?,
                         )?;
                         derivatives[side] = finite(derivatives[side] - feedback)?;
+                    }
+                }
+                // At fixed faces, dq/dh = sigma*(Tsa^4-Tsb^4)*epsilon_eff'.
+                // The same implicit surface response divides this by
+                // D=1+ra*F'_a+rb*F'_b. Factoring the fourth-power difference
+                // preserves near equilibrium and the zero-emissivity onset.
+                let inverse_surface_response = (bulk / scale) / denominator;
+                for side in 0..2 {
+                    if emissivity_slopes[side] != 0.0 {
+                        let coefficient = finite(
+                            (SIGMA * emissivity_slopes[side])
+                                * (surfaces[0] + surfaces[1])
+                                * surfaces[0].mul_add(surfaces[0], surfaces[1] * surfaces[1]),
+                        )?;
+                        let feedback = finite(
+                            (area * inverse_surface_response)
+                                * finite(coefficient * surface_delta)?,
+                        )?;
+                        derivatives[side] = finite(derivatives[side] + feedback)?;
                     }
                 }
                 let link = ImplicitLinkState {
@@ -421,15 +488,60 @@ impl<'a> GrayRadiativeLink<'a> {
         Ok((htc, Some(state)))
     }
 
+    fn emissivity_at(
+        &self,
+        enthalpies: [f64; 2],
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(f64, [f64; 2]), DepositionError> {
+        let Some(laws) = &self.surface_laws else {
+            return Ok((self.effective_emissivity, [0.0; 2]));
+        };
+        let states = [
+            laws[0].evaluate(enthalpies[0], checkpoint)?,
+            laws[1].evaluate(enthalpies[1], checkpoint)?,
+        ];
+        if states.iter().any(|s| {
+            s.convection_w_m2_k != 0.0 || s.convection_enthalpy_derivative_kg_w_m2_k_j != 0.0
+        }) {
+            return Err(DepositionError::MaterialDomain);
+        }
+        let values = states.map(|s| s.emissivity);
+        let slopes = states.map(|s| s.emissivity_enthalpy_derivative_kg_j);
+        let small = usize::from(values[0] > values[1]);
+        let large = 1 - small;
+        let low = values[small];
+        let high = values[large];
+        if high == 0.0 {
+            if slopes.iter().all(|s| *s != 0.0) {
+                return Err(DepositionError::InvalidInput(
+                    "two zero-emissivity onsets have no joint gray-link tangent",
+                ));
+            }
+            return Ok((0.0, [0.0; 2]));
+        }
+        // epsilon_eff=low/(1-low+low/high), d_eff/d_low=(1/denominator)^2,
+        // d_eff/d_high=(low/high/denominator)^2. Every ratio is <=1; no tiny
+        // emissivity reciprocal, product of emissivities or 0/0 is formed.
+        let ratio = low / high;
+        let denominator = (1.0 - low) + ratio;
+        let low_weight = denominator.recip();
+        let high_weight = ratio / denominator;
+        let mut derivatives = [0.0; 2];
+        derivatives[small] = finite((slopes[small] * low_weight) * low_weight)?;
+        derivatives[large] = finite((slopes[large] * high_weight) * high_weight)?;
+        Ok((low / denominator, derivatives))
+    }
+
     fn coefficients(
         &self,
         t: [f64; 2],
         gap_htc: f64,
+        effective_emissivity: f64,
     ) -> Result<(f64, [f64; 2], f64), DepositionError> {
         let mut radiation = 0.0;
         let mut slopes = [gap_htc; 2];
-        if self.effective_emissivity != 0.0 {
-            let scale = self.effective_emissivity * SIGMA;
+        if effective_emissivity != 0.0 {
+            let scale = effective_emissivity * SIGMA;
             radiation = finite(scale * (t[0] + t[1]) * t[0].mul_add(t[0], t[1] * t[1]))?;
             for side in 0..2 {
                 slopes[side] =

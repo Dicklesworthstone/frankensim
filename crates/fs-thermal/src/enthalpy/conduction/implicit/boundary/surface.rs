@@ -103,13 +103,13 @@ pub trait ImplicitGraySurfaceLaw {
     ) -> Result<ImplicitGraySurfaceState, DepositionError>;
 }
 
-pub(super) struct BoundGraySurface<'a> {
+pub(in super::super) struct BoundGraySurface<'a> {
     law: &'a dyn ImplicitGraySurfaceLaw,
     bounds_j_kg: [f64; 2],
 }
 
 impl<'a> BoundGraySurface<'a> {
-    pub(super) fn new(
+    pub(in super::super) fn new(
         caloric: &dyn ThermalLaw,
         law: &'a dyn ImplicitGraySurfaceLaw,
     ) -> Result<Self, DepositionError> {
@@ -132,7 +132,7 @@ impl<'a> BoundGraySurface<'a> {
         })
     }
 
-    pub(super) fn evaluate(
+    pub(in super::super) fn evaluate(
         &self,
         h: f64,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,

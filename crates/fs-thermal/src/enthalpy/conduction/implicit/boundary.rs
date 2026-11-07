@@ -26,6 +26,7 @@ pub use two_bath::{GrayTwoBathBoundary, GrayTwoBathResponse};
 /// Original enthalpy-dependent gray emissivity and convective surface response.
 #[path = "boundary/surface.rs"]
 mod surface;
+pub(super) use surface::BoundGraySurface;
 pub use surface::{ImplicitGraySurfaceLaw, ImplicitGraySurfaceState};
 
 /// Original energy and actual exterior-temperature gray source response.

@@ -3136,10 +3136,31 @@ Focused regressions compare independent surface/tangent and BE/SDIRK endpoint
 references, recover the original nonradiative source-contact solution, and check
 original source coordinates, query count, identity, domain and cancellation.
 
-The fixed gray/full-view, cellwise-conductivity and fixed-geometry approximation
-is explicit. This does not replace the existing general-enclosure radiosity
-owner or supply source-dependent emissivity, profile-integrated k(T), near-field
-radiation, participating media or photon entropy. Focused regressions exercise
+`GrayRadiativeLink::with_surface_laws` reuses the original
+`ImplicitGraySurfaceLaw` admission and query owner for both ordered bodies.
+Each emissivity and its complete derivative are resolved once at the body's
+original bulk enthalpy before insulation shortcuts. The source caloric objects
+must match exactly; finite source bounds remain authoritative. Solved face
+temperatures never substitute for source coordinates. Both fixed emissivities
+must be zero before attachment; source convection values and derivatives must
+be zero because the common fixed or source-owned gap already owns that heat.
+
+The same surface solve adds
+`A*sigma*(Tsa^4-Tsb^4)*(d epsilon_eff/dh_i)/D` to each full native tangent.
+Normalized ratios evaluate the radiosity derivative without reciprocals of
+tiny emissivities or division by emitted power. A single zero-emissivity face
+retains its opening derivative, including on an isothermal latent plateau.
+Simultaneous zero emissivities with two nonzero onset derivatives refuse the
+nondifferentiable joint corner rather than inventing a Newton linearization.
+Constant source values recover the original fixed-emissivity results. Focused
+tests compare full tangents and unequal-mass BE/SDIRK chain/graph heat and
+entropy against independent fourth-power surface and endpoint balances.
+
+The gray/full-view, cell-state emissivity, cellwise-conductivity and fixed-area
+approximations are explicit. This does not replace the existing general-enclosure
+radiosity owner or supply surface-temperature-dependent emissivity,
+profile-integrated k(T), near-field radiation, participating media or photon
+entropy. Focused regressions exercise
 independent two-surface balances, reversal, sensible/latent tangents, near-equal
 temperatures, insulating limits and original unequal-mass chain/graph BE/SDIRK
 energy and thermal-entropy quadrature.
