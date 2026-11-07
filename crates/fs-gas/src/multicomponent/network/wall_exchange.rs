@@ -609,13 +609,19 @@ impl<'law> NetworkWallOperator<'law> {
                 .ok_or(WallExchangeError::Invalid(
                     "implicit conductivity lost its caloric source",
                 ))?;
-            // Every storage proposal retains this half's original gas film;
-            // the callback composes it with k at that very same proposed state.
-            let mut conductance = |candidate| self.endpoint_conductance(index, candidate);
+            // The heat law sees BOTH original endpoint temperatures; a source-
+            // integrated profile also resolves its material face inside the film.
+            let gas_sensitivity_bound_w_per_k = self.endpoint_conductance_bound(index, contact)?;
+            let mut resolve = |candidate, temperatures, checkpoint: &mut dyn FnMut() -> bool| {
+                self.endpoint_conductance(index, candidate, temperatures, duration, controls, checkpoint)
+            };
             return crate::multicomponent::wall_exchange::
                 exchange_cell_with_heat_storage_and_conductance(
                     &self.gas, state, volume, duration, contact, source,
-                    Some(&mut conductance), controls, cancelled,
+                    Some(crate::multicomponent::wall_exchange::WallEndpointConduction {
+                        gas_sensitivity_bound_w_per_k,
+                        resolve: &mut resolve,
+                    }), controls, cancelled,
                 );
         }
         #[cfg(feature = "material")]

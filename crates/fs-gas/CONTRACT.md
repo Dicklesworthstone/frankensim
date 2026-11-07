@@ -794,10 +794,35 @@ coordinates, a different chart, source extrapolation or an unavailable pinned
 claim refuse before state publication. Temperature-only sources continue to
 refuse energy-coordinate walls. Inspectors distinguish the two source forms.
 
-The initial-state mode retains constitutive lag. Implicit endpoint evaluation
-closes that local lag but remains a first-order, fixed-geometry, lumped-wall
-backward-Euler approximation with frozen gas-film/drag coefficients; neither
-mode resolves a through-wall temperature field.
+`MaterialWallConduction::with_integrated_profile()` instead prepares the exact
+original piecewise-affine conductivity line once and shares it across clones.
+At every proposed finite gas/wall endpoint, the existing `fs-material`
+Kirchhoff/film owner solves the material-face temperature and
+`P = C * integral(T_face..T_wall, k(T) dT) = G_film * (T_face - T_gas)`.
+The gas and wall retain their original caloric laws and exactly one heat debit.
+The actual material profile must stay in source support; gas temperature may
+lie outside the solid chart when the solved face remains supported. Exact
+power derivatives fund Newton's slope, and the original source's maximum k
+bounds gas-inversion error without inflating the relative physical heat budget.
+The initial heat bound uses the integrated law's passive monotonicity. If an
+unused storage endpoint has an unsupported material face, bounded source-aware
+bracketing searches for a supported opposite-sign residual; it never clips a
+face temperature or hides an unsupported physical root. The nested flux residual
+is included in the final heat budget. Geometry preparation adds no per-query
+allocation.
+
+This opt-in currently supports local branch/plenum finite material contacts.
+Shared gas ports and wall links explicitly refuse it. Phase-dependent k(T,phi)
+also refuses: one lumped wall h cannot provide a spatial phase field. Selecting
+`InitialState` after opting in refuses at binding rather than silently replacing
+the integrated law with a point sample. Source-domain or cancellation refusal
+preserves the accepted network and all original wall inventories.
+
+The initial-state mode retains constitutive lag. Ordinary implicit endpoint
+evaluation closes that local lag but still samples one wall temperature. The
+integrated profile adds a quasi-steady through-wall constitutive solve; all
+modes retain fixed geometry, lumped-wall storage, backward-Euler time integration
+and frozen gas-film/drag coefficients. None resolves transient internal diffusion.
 For centre-temperature storage, the conduction length is the surface-to-centre
 distance. Adiabatic contacts refuse. Original phase-aware spatial and mechanical
 owners remain responsible for moving fronts, wall support, shrinkage and liquid

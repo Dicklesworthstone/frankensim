@@ -387,9 +387,31 @@ pub fn exchange_cell_with_heat_storage(
     )
 }
 
-/// The same finite-storage owner with an optional source-owned endpoint
-/// conductance. Its callback reads a proposed wall state, whose conductance
-/// field always retains the original film. No candidate is published here.
+/// One original endpoint heat law. Derivatives, when supplied, are of POWER
+/// with respect to [Twall,Tgas], including every material and film resistance.
+pub(crate) struct WallHeatResponse {
+    pub(crate) conductance_w_per_k: f64,
+    pub(crate) power_to_gas_w: f64,
+    pub(crate) temperature_derivative_w_per_k: Option<[f64; 2]>,
+    pub(crate) flux_error_w: f64,
+}
+
+pub(crate) struct WallEndpointConduction<'a> {
+    // Some: the heat law depends on both temperatures; refine gas against this
+    // global slope bound before querying it. None: the original wall-only k law
+    // supplies its coefficient first, retaining its original caloric precision.
+    pub(crate) gas_sensitivity_bound_w_per_k: Option<f64>,
+    pub(crate) resolve: &'a mut dyn FnMut(
+        WallContact,
+        [f64; 2],
+        &mut dyn FnMut() -> bool,
+    ) -> Result<WallHeatResponse, WallExchangeError>,
+}
+
+/// The same finite-storage owner with an optional source-owned endpoint heat
+/// law. Its callback reads original wall storage and both actual temperatures;
+/// the contact's conductance field retains the original film. No candidate is
+/// published here. An exact integrated profile can supply its power tangents.
 /// The bracket uses passive storage limits, not a frozen-flux bound that could
 /// exclude roots when conductivity increases during heating or melting.
 #[allow(clippy::too_many_arguments)]
@@ -400,7 +422,7 @@ pub(crate) fn exchange_cell_with_heat_storage_and_conductance(
     duration: Time,
     contact: WallContact,
     wall: &MaterialWallCaloric<'_>,
-    conductance: Option<&mut dyn FnMut(WallContact) -> Result<f64, WallExchangeError>>,
+    conductance: Option<WallEndpointConduction<'_>>,
     control: WallControl,
     cancelled: impl FnMut() -> bool,
 ) -> Result<WallUpdate, WallExchangeError> {
@@ -432,7 +454,7 @@ pub(crate) fn exchange_caloric_with_heat_storage(
     duration: Time,
     contact: WallContact,
     wall: &MaterialWallCaloric<'_>,
-    mut conductance: Option<&mut dyn FnMut(WallContact) -> Result<f64, WallExchangeError>>,
+    mut conductance: Option<WallEndpointConduction<'_>>,
     control: WallControl,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<WallUpdate, WallExchangeError> {
@@ -451,19 +473,34 @@ pub(crate) fn exchange_caloric_with_heat_storage(
         _ => unreachable!("binding admitted finite storage"),
     };
     let state_dependent = conductance.is_some();
-    let mut conductance_at = |candidate: WallContact| {
-        let value = match &mut conductance {
-            Some(resolve) => resolve(candidate)?,
-            None => authored_conductance,
+    let gas_sensitivity_bound = conductance
+        .as_ref()
+        .and_then(|law| law.gas_sensitivity_bound_w_per_k);
+    let mut response_at = |candidate: WallContact,
+                           temperatures: [f64; 2],
+                           cancelled: &mut dyn FnMut() -> bool| {
+        let response = match &mut conductance {
+            Some(law) => (law.resolve)(candidate, temperatures, cancelled)?,
+            None => WallHeatResponse {
+                conductance_w_per_k: authored_conductance,
+                power_to_gas_w: authored_conductance * (temperatures[0] - temperatures[1]),
+                temperature_derivative_w_per_k: Some([authored_conductance, -authored_conductance]),
+                flux_error_w: 0.0,
+            },
         };
-        if !nonnegative(value) {
+        if !nonnegative(response.conductance_w_per_k)
+            || !response.power_to_gas_w.is_finite()
+            || !nonnegative(response.flux_error_w)
+            || response
+                .temperature_derivative_w_per_k
+                .is_some_and(|d| !nonnegative(d[0]) || !nonnegative(-d[1]))
+        {
             return Err(WallExchangeError::Invalid(
-                "material wall endpoint conductance",
+                "material wall endpoint heat law",
             ));
         }
-        Ok(value)
+        Ok(response)
     };
-    let conductance_w_per_k = conductance_at(contact)?;
     // Reuse the original radial loss and gas sensible-heating owner exactly.
     let mut update = exchange_caloric(
         gas,
@@ -478,39 +515,88 @@ pub(crate) fn exchange_caloric_with_heat_storage(
         control,
         &mut cancelled,
     )?;
-    update.contact = with_conductance(contact, conductance_w_per_k);
-    let integrated = conductance_w_per_k * duration.value();
+    let gas_at = |energy,
+                  wall_temperature,
+                  precision_integrated,
+                  heat_scale,
+                  cancelled: &mut dyn FnMut() -> bool| {
+        let mut state = gas.primitive(update.momentum, energy, &mut *cancelled)?;
+        let target = energy - 0.5 * update.momentum * state.velocity;
+        state.temperature = if gas_sensitivity_bound.is_some() {
+            refine_caloric_temperature_with_allowance(
+                gas, state.temperature, target, volume_m3, precision_integrated,
+                control.tolerance(heat_scale), control, cancelled,
+            )?
+        } else {
+            refine_caloric_temperature(
+                gas, state.temperature, target, volume_m3, precision_integrated,
+                wall_temperature, heat_scale, control, cancelled,
+            )?
+        };
+        Ok::<_, WallExchangeError>(state)
+    };
+    let mut endpoint_at = |candidate: WallContact,
+                           wall_temperature: f64,
+                           energy: f64,
+                           heat_scale: f64,
+                           cancelled: &mut dyn FnMut() -> bool| {
+        // A wall-only coefficient does not depend on gas T. Resolve it before
+        // the original gas inverse, then form its power at the actual endpoint.
+        let sampled = if gas_sensitivity_bound.is_none() {
+            Some(response_at(candidate, [wall_temperature; 2], cancelled)?)
+        } else {
+            None
+        };
+        let bound = sampled.as_ref().map_or_else(
+            || gas_sensitivity_bound.expect("two-temperature law has a slope bound"),
+            |response| response.conductance_w_per_k,
+        );
+        let integrated_bound = bound * duration.value();
+        if !nonnegative(integrated_bound) {
+            return Err(WallExchangeError::Invalid(
+                "integrated material wall conductance",
+            ));
+        }
+        let gas_state = gas_at(
+            energy,
+            wall_temperature,
+            integrated_bound,
+            heat_scale,
+            cancelled,
+        )?;
+        let response = if let Some(mut response) = sampled {
+            response.power_to_gas_w =
+                response.conductance_w_per_k * (wall_temperature - gas_state.temperature);
+            response
+        } else {
+            response_at(
+                candidate,
+                [wall_temperature, gas_state.temperature],
+                cancelled,
+            )?
+        };
+        Ok::<_, WallExchangeError>((gas_state, response))
+    };
+    let (initial_gas, initial_response) =
+        endpoint_at(contact, initial_wall, update.energy, 0.0, &mut cancelled)?;
+    update.contact = with_conductance(contact, initial_response.conductance_w_per_k);
+    let integrated = initial_response.conductance_w_per_k * duration.value();
     if !nonnegative(integrated) {
         return Err(WallExchangeError::Invalid(
             "integrated material wall conductance",
         ));
     }
-    let gas_at =
-        |energy, wall_temperature, integrated, heat_scale, cancelled: &mut dyn FnMut() -> bool| {
-            let mut state = gas.primitive(update.momentum, energy, &mut *cancelled)?;
-            state.temperature = refine_caloric_temperature(
-                gas,
-                state.temperature,
-                energy - 0.5 * update.momentum * state.velocity,
-                volume_m3,
-                integrated,
-                wall_temperature,
-                heat_scale,
-                control,
-                cancelled,
-            )?;
-            Ok::<_, WallExchangeError>(state)
-        };
-    let initial_gas = gas_at(update.energy, initial_wall, integrated, 0.0, &mut cancelled)?;
     if integrated == 0.0 || initial_wall == initial_gas.temperature {
         poll(&mut cancelled)?;
         return Ok(update);
     }
-    let initial_flux = integrated * (initial_wall - initial_gas.temperature);
+    let initial_flux = duration.value() * initial_response.power_to_gas_w;
     if !initial_flux.is_finite() {
         return Err(WallExchangeError::Invalid("material wall heat increment"));
     }
-    if initial_flux.abs() <= control.tolerance(initial_flux.abs()) {
+    if initial_flux.abs() + duration.value() * initial_response.flux_error_w
+        <= control.tolerance(initial_flux.abs())
+    {
         update.report.thermal_residual_j = -initial_flux;
         poll(&mut cancelled)?;
         return Ok(update);
@@ -530,7 +616,13 @@ pub(crate) fn exchange_caloric_with_heat_storage(
     // Source-energy bounds also retain exact latent intervals, whose inventory
     // is not determined by temperature. A held-flux bound is valid only for
     // fixed conductance: an endpoint material law can increase that flux.
-    let flux_limit = if state_dependent {
+    let flux_limit = if gas_sensitivity_bound.is_some() {
+        // Positive k(T) makes the original integrated material/film power
+        // decrease along passive exchange. Include constitutive and gas-inverse
+        // error in its initial-flux bound; point-sampled k has no such guarantee.
+        initial_flux.abs() + duration.value() * initial_response.flux_error_w
+            + control.tolerance(initial_flux.abs())
+    } else if state_dependent {
         f64::INFINITY
     } else {
         initial_flux.abs()
@@ -564,30 +656,28 @@ pub(crate) fn exchange_caloric_with_heat_storage(
             "material wall has no supported heat interval",
         ));
     }
-    let equation = |heat: f64, cancelled: &mut dyn FnMut() -> bool| {
+    let mut equation = |heat: f64, cancelled: &mut dyn FnMut() -> bool| {
         let wall_state = wall.after(contact, -heat)?;
-        let endpoint_integrated = conductance_at(wall_state.contact)? * duration.value();
-        let gas_state = gas_at(
-            update.energy + heat / volume_m3,
+        let (gas_state, response) = endpoint_at(
+            wall_state.contact,
             wall_state.temperature_k,
-            endpoint_integrated,
+            update.energy + heat / volume_m3,
             heat.abs(),
             cancelled,
         )?;
         let gas_capacity = gas.caloric(gas_state.temperature)?.1 * volume_m3;
-        let flux = endpoint_integrated * (wall_state.temperature_k - gas_state.temperature);
+        let flux = duration.value() * response.power_to_gas_w;
         let residual = heat - flux;
-        // A material source supplies values, not an exact derivative of G.
-        // Do not pass the frozen-G tangent off as the nonlinear Jacobian.
-        let slope = if state_dependent {
-            None
-        } else {
-            wall_state
-                .temperature_slope_k_per_j
-                .map(|wall_slope| 1.0 + integrated * (wall_slope + 1.0 / gas_capacity))
-        };
+        // Only exact power derivatives from the original law enter Newton.
+        // Point-sampled state-dependent k still supplies no invented dG/dh.
+        let slope = response
+            .temperature_derivative_w_per_k
+            .zip(wall_state.temperature_slope_k_per_j)
+            .map(|(derivatives, wall_slope)| {
+                1.0 + duration.value()
+                    * (derivatives[0] * wall_slope - derivatives[1] / gas_capacity)
+            });
         if !positive(gas_capacity)
-            || !nonnegative(endpoint_integrated)
             || slope.is_some_and(|slope| !positive(slope))
             || !residual.is_finite()
             || !flux.is_finite()
@@ -596,7 +686,31 @@ pub(crate) fn exchange_caloric_with_heat_storage(
         }
         Ok((residual, slope, heat.abs().max(flux.abs())))
     };
-    let (heat, iterations) = solve_scalar(low, high, 0.0, control, equation, &mut cancelled)?;
+    // Reserve part of the physical budget for a nested constitutive flux solve.
+    // The final check below includes that law's reported power-error bound.
+    let mut solve_control =
+        if initial_response.temperature_derivative_w_per_k.is_some() && state_dependent {
+            WallControl {
+                absolute_energy_tolerance_j: 0.5 * control.absolute_energy_tolerance_j,
+                relative_energy_tolerance: 0.5 * control.relative_energy_tolerance,
+                ..control
+            }
+        } else {
+            control
+        };
+    let bracket_iterations = if gas_sensitivity_bound.is_some() {
+        let far = if initial_flux > 0.0 { high } else { low };
+        let (supported, iterations) = supported_profile_heat_bracket(
+            far, solve_control, &mut equation, &mut cancelled,
+        )?;
+        if initial_flux > 0.0 { high = supported; } else { low = supported; }
+        solve_control.maximum_iterations -= iterations;
+        iterations
+    } else {
+        0
+    };
+    let (heat, iterations) = solve_scalar(low, high, 0.0, solve_control, equation, &mut cancelled)?;
+    let iterations = iterations + bracket_iterations;
     let energy = update.energy + heat / volume_m3;
     let actual_heat = (energy - update.energy) * volume_m3;
     if !actual_heat.is_finite() || (heat != 0.0 && actual_heat == 0.0) {
@@ -605,26 +719,26 @@ pub(crate) fn exchange_caloric_with_heat_storage(
         ));
     }
     let actual_wall = wall.after(contact, -actual_heat)?;
-    let actual_conductance = conductance_at(actual_wall.contact)?;
-    let actual_integrated = actual_conductance * duration.value();
-    let actual_gas = gas_at(
-        energy,
+    let (_, actual_response) = endpoint_at(
+        actual_wall.contact,
         actual_wall.temperature_k,
-        actual_integrated,
+        energy,
         actual_heat.abs(),
         &mut cancelled,
     )?;
+    let actual_conductance = actual_response.conductance_w_per_k;
+    let actual_integrated = actual_conductance * duration.value();
     let wall_change = actual_wall.energy_change_j;
     let energy_residual = update.report.energy_residual_j + actual_heat + wall_change;
-    let thermal_residual =
-        actual_heat - actual_integrated * (actual_wall.temperature_k - actual_gas.temperature);
+    let thermal_residual = actual_heat - duration.value() * actual_response.power_to_gas_w;
     let scale = actual_heat.abs().max(wall_change.abs());
     if !nonnegative(actual_integrated)
         || !energy_residual.is_finite()
         || !thermal_residual.is_finite()
         || energy_residual.abs()
             > control.tolerance(scale.max(update.report.mechanical_work_to_gas_j.abs()))
-        || thermal_residual.abs() > control.tolerance(scale)
+        || thermal_residual.abs() + duration.value() * actual_response.flux_error_w
+            > control.tolerance(scale)
     {
         return Err(WallExchangeError::Balance {
             energy_residual_j: energy_residual,
@@ -640,6 +754,49 @@ pub(crate) fn exchange_caloric_with_heat_storage(
     update.report.iterations = iterations;
     poll(&mut cancelled)?;
     Ok(update)
+}
+
+/// Find a supported far bracket for a passive integrated profile. Storage
+/// bounds need not support the material FACE, even when the physical heat root
+/// does. Search between the last supported wrong-sign point and the unsupported
+/// endpoint; never clip a material temperature, invent k, or accept a wrong sign.
+fn supported_profile_heat_bracket(
+    far: f64,
+    control: WallControl,
+    equation: &mut impl FnMut(
+        f64, &mut dyn FnMut() -> bool,
+    ) -> Result<(f64, Option<f64>, f64), WallExchangeError>,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<(f64, usize), WallExchangeError> {
+    let direction = far.signum();
+    let mut supported = 0.0;
+    let mut unsupported = far.abs();
+    let mut trial = unsupported;
+    let mut domain_error = None;
+    for contractions in 0..control.maximum_iterations {
+        if cancelled() { return Err(WallExchangeError::Cancelled); }
+        match equation(direction * trial, cancelled) {
+            Ok((residual, _, scale)) => {
+                if direction * residual >= -control.tolerance(scale) || domain_error.is_none() {
+                    return Ok((direction * trial, contractions));
+                }
+                supported = trial;
+            }
+            Err(error @ WallExchangeError::Thermal(
+                fs_thermal::enthalpy::DepositionError::MaterialDomain,
+            )) => {
+                domain_error = Some(error);
+                unsupported = trial;
+            }
+            Err(error) => return Err(error),
+        }
+        let next = supported + 0.5 * (unsupported - supported);
+        if next <= supported || next >= unsupported {
+            return Err(domain_error.unwrap_or(WallExchangeError::TemperatureIterations));
+        }
+        trial = next;
+    }
+    Err(WallExchangeError::TemperatureIterations)
 }
 
 fn with_conductance(mut contact: WallContact, value: f64) -> WallContact {

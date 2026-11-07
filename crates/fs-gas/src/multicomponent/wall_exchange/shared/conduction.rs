@@ -26,6 +26,11 @@ impl Group<'_> {
         let mut implicit = false;
         for layer in layers.iter().flatten() {
             poll(cancelled)?;
+            if layer.has_integrated_profile() {
+                return Err(WallExchangeError::Invalid(
+                    "integrated wall profiles require local finite caloric contacts",
+                ));
+            }
             if layer.evaluation() == WallConductionEvaluation::ImplicitEndpoint {
                 if caloric.is_none() {
                     return Err(WallExchangeError::Invalid(

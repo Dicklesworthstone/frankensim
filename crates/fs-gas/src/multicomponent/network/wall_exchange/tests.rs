@@ -383,6 +383,8 @@ mod caloric;
 #[cfg(feature = "material")]
 mod conduction;
 #[cfg(feature = "material")]
+mod integrated_conduction;
+#[cfg(feature = "material")]
 mod phase_conduction;
 mod thermal_law;
 mod shared;

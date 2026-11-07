@@ -33,6 +33,11 @@ impl WallLinks {
             poll(cancelled)?;
             for (side, layer) in layers.iter().enumerate() {
                 if let Some(layer) = layer {
+                    if layer.has_integrated_profile() {
+                        return Err(WallExchangeError::Invalid(
+                            "integrated wall profiles require local finite caloric contacts",
+                        ));
+                    }
                     let wall = &group(link.walls[side]).accepted.storage;
                     if layer.evaluation() == WallConductionEvaluation::ImplicitEndpoint
                         && wall.heat_storage.is_none()

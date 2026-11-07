@@ -29,7 +29,9 @@ pub(crate) use gas::{WallGasCaloric, WallGasState};
 mod caloric;
 pub(crate) use caloric::exchange_caloric_with_heat_storage;
 #[cfg(feature = "material")]
-pub(crate) use caloric::exchange_cell_with_heat_storage_and_conductance;
+pub(crate) use caloric::{
+    WallEndpointConduction, WallHeatResponse, exchange_cell_with_heat_storage_and_conductance,
+};
 pub use caloric::{MaterialWallCaloric, WallCaloricConstraint, exchange_cell_with_heat_storage};
 
 /// Axial drag at a stationary or prescribed axially sliding radial wall.
@@ -702,6 +704,33 @@ pub(crate) fn refine_caloric_temperature(
     wall_temperature: f64,
     heat_scale_j: f64,
     control: WallControl,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<f64, WallExchangeError> {
+    if integrated == 0.0 {
+        return Ok(temperature);
+    }
+    let predicted_heat = integrated * (wall_temperature - temperature);
+    if !predicted_heat.is_finite() {
+        return Err(WallExchangeError::Invalid("caloric heat precision scale"));
+    }
+    refine_caloric_temperature_with_allowance(
+        gas, temperature, target, volume_m3, integrated,
+        control.tolerance(heat_scale_j.max(predicted_heat.abs())), control, cancelled,
+    )
+}
+
+/// Refine against a physical heat allowance independent of the constitutive
+/// sensitivity bound. A global |dP/dTgas| bound is NOT a secant conductance and
+/// must not enlarge relative error by pretending its product with delta T is heat.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn refine_caloric_temperature_with_allowance(
+    gas: &impl WallGasCaloric,
+    temperature: f64,
+    target: f64,
+    volume_m3: f64,
+    integrated: f64,
+    heat_allowance_j: f64,
+    control: WallControl,
     mut cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<f64, WallExchangeError> {
     if integrated == 0.0 {
@@ -710,22 +739,21 @@ pub(crate) fn refine_caloric_temperature(
     poll(&mut cancelled)?;
     let (energy, cv) = gas.caloric(temperature)?;
     let capacity = cv * volume_m3;
-    let predicted_heat = integrated * (wall_temperature - temperature);
-    if !positive(capacity) || !nonnegative(integrated) || !predicted_heat.is_finite() {
+    if !positive(capacity) || !nonnegative(integrated) {
         return Err(WallExchangeError::Invalid("caloric heat precision scale"));
     }
     if energy == target {
         return Ok(temperature);
     }
-    // Temperature error enters the heat equation through G*dt. Scale by the
-    // actual/trial exchange, not the gas's unrelated total sensible inventory.
+    // Temperature error enters through the integrated |dP/dTgas| bound.
+    // The caller separately funds this from actual/trial physical heat.
     let sensitivity = if integrated <= capacity {
         1.0 / (1.0 + integrated / capacity)
     } else {
         let ratio = capacity / integrated;
         ratio / (1.0 + ratio)
     };
-    let allowance = 0.125 * control.tolerance(heat_scale_j.max(predicted_heat.abs())) * sensitivity;
+    let allowance = 0.125 * heat_allowance_j * sensitivity;
     if !positive(allowance) {
         return Err(WallExchangeError::Invalid(
             "unrepresentable caloric heat precision",
