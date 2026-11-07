@@ -1269,9 +1269,21 @@ impl RigidKineticEnergyChange {
         before.accumulate_kinetic_energy_change(properties, after, &mut self.change)
     }
 
+    /// Retains the complete reduction for an enclosing material or heat balance.
+    ///
+    /// Original body contributions cancel before their product layers are
+    /// combined. Coupled owners must still recover source work and physical
+    /// losses independently; this value measures only actual kinetic storage.
+    pub fn finish_retained(self) -> Result<Dd, DynamicsError> {
+        let change = self.change.total();
+        finite_derived(change.hi, "kinetic_energy.change_j")?;
+        finite_derived(change.lo, "kinetic_energy.change_low_j")?;
+        Ok(change)
+    }
+
     /// Rounds the complete reduction once, refusing an unrepresentable result.
     pub fn finish(self) -> Result<f64, DynamicsError> {
-        finite_derived(self.change.total().to_f64(), "kinetic_energy.change_j")
+        Ok(self.finish_retained()?.to_f64())
     }
 }
 

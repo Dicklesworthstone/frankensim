@@ -18,7 +18,8 @@ use super::resolved::{
     ResolvedCaloricContactSource,
 };
 use super::*;
-use fs_mbd::{DynamicsError, MassProperties, RigidBodyState, Vec3};
+use fs_math::dd::Dd;
+use fs_mbd::{DynamicsError, MassProperties, RigidBodyState, RigidKineticEnergyChange, Vec3};
 
 /// Simultaneous retained contacts sharing original rigid bodies and caloric cells.
 pub mod network;
@@ -271,18 +272,23 @@ impl<'a> CaloricPartialSlip<'a> {
                 next[0].point_kinematics(properties[0], arms_body_m[0])?,
                 next[1].point_kinematics(properties[1], arms_body_m[1])?,
             ];
+            // Cancel common translation before adding either point's spin.
+            // Absolute point diagnostics can erase the actual small slip
+            // which drives the original return map and its physical heat.
             let relative = before[0]
-                .point_velocity_world
-                .add(after[0].point_velocity_world)
-                .sub(before[1].point_velocity_world)
-                .sub(after[1].point_velocity_world)
-                .scale(0.5);
+                .relative_velocity_world(before[1])?
+                .scale(0.5)
+                .add(after[0].relative_velocity_world(after[1])?.scale(0.5));
             let relative_spin = before[0]
                 .angular_velocity_world
-                .add(after[0].angular_velocity_world)
                 .sub(before[1].angular_velocity_world)
-                .sub(after[1].angular_velocity_world)
                 .scale(0.5)
+                .add(
+                    after[0]
+                        .angular_velocity_world
+                        .sub(after[1].angular_velocity_world)
+                        .scale(0.5),
+                )
                 .dot(axes[2]);
             let common_spin = before[0]
                 .angular_velocity_world
@@ -368,7 +374,7 @@ impl<'a> CaloricPartialSlip<'a> {
         let mut angular = [Vec3::ZERO; 2];
         let mut dp = Vec3::ZERO;
         let mut dl = Vec3::ZERO;
-        let mut kinetic = 0.0;
+        let mut kinetic = RigidKineticEnergyChange::new();
         for i in 0..2 {
             let sign = if i == 0 { 1.0 } else { -1.0 };
             let actual = next[i]
@@ -392,16 +398,19 @@ impl<'a> CaloricPartialSlip<'a> {
             dl = dl
                 .add(actual_angular)
                 .add(bodies[i].pose().position_world().cross(actual));
-            kinetic +=
-                next[i].kinetic_energy(properties[i])? - bodies[i].kinetic_energy(properties[i])?;
+            kinetic.add_body(properties[i], bodies[i], next[i])?;
         }
+        let kinetic = kinetic.finish_retained()?;
         let caloric = &contact.report().caloric;
-        let mechanical = kinetic + caloric.contact.generalized_work.work_into_interface_j;
-        let total = kinetic
-            + caloric.contact_internal_energy_change_j
-            + caloric.thermal.stored_energy_change_j
-            + caloric.contact.generalized_work.numerical_dissipation_j
-            - caloric.external_heat_j;
+        let mechanical = (kinetic
+            + Dd::from_f64(caloric.contact.generalized_work.work_into_interface_j))
+        .to_f64();
+        let total = (kinetic
+            + Dd::from_f64(caloric.contact_internal_energy_change_j)
+            + Dd::from_f64(caloric.thermal.stored_energy_change_j)
+            + Dd::from_f64(caloric.contact.generalized_work.numerical_dissipation_j)
+            - Dd::from_f64(caloric.external_heat_j))
+        .to_f64();
         if linear
             .into_iter()
             .chain([dp])
@@ -437,7 +446,7 @@ impl<'a> CaloricPartialSlip<'a> {
                 body_angular_momentum_residual_nm_s: angular,
                 linear_momentum_change_n_s: dp,
                 world_angular_momentum_change_nm_s: dl,
-                kinetic_energy_change_j: kinetic,
+                kinetic_energy_change_j: kinetic.to_f64(),
                 mechanical_energy_residual_j: mechanical,
                 total_energy_residual_j: total,
             },

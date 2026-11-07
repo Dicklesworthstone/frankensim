@@ -3093,6 +3093,18 @@ contact or any late balance failure leaves all bodies unchanged. Distinct
 dynamic witnesses are not silently moved to a fabricated common point; a
 tangential couple due to an admitted finite gap can still fail angular balance.
 
+The shared circular/directional impact assembly reduces original fixed-inertia
+kinetic products across every body before rounding. Moving-support work and
+relative-contact midpoint work retain independent product layers through the
+complete energy gates; scalar per-body impulse reports do not rebuild storage.
+`RigidKineticEnergyChange::finish_retained` exposes the same retained reduction
+to coupled finite-material/heat owners. Representable small physical loss
+survives opposing large transfers, while actual momentum rounding and source
+work errors remain rejection defects. Focused regression definitions cover a
+20.25 J pair loss that separately rounded body reports change to 20.5 J, and a
+10.125 J moving-support loss hidden by scalar storage/work subtraction. The
+small production arithmetic tests do not execute the complete impact solver.
+
 Four native physical tests cover off-center rotated anisotropic inertia with
 independently derived normal/tangent cross-coupling, sticking/restitution and
 moving-support work, a simultaneous three-body chain with exact input-order

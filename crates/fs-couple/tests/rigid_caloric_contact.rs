@@ -339,6 +339,72 @@ fn g1_native_shear_spin_and_variable_stiffness_match_independent_entropy_referen
 }
 
 #[test]
+fn g3_native_shear_spin_and_finite_heat_survive_unchanged_kinetic_inventory() {
+    let curves = curves();
+    let thermal = thermal(&curves);
+    let contact = contact(&thermal, &curves, model(0.04, true), [0.0; 3]);
+    let (bodies, properties) = mechanics();
+    let solve = |states: &[RigidBodyState; 2]| {
+        contact.step_rigid_resolved_candidate(
+            states, properties, ARMS, &thermal, DT, frame(), 1.0,
+            &work("kinetic inventory and physical heat"), controls(), [0.0; 3],
+            &[0.0; 2], 300.0, source, || false,
+        ).unwrap()
+    };
+    let reference = solve(&bodies);
+    // A common normal translation does no work in this frozen shear/spin
+    // phase. Its unchanged inventory must not change the original tangential
+    // return map, physical microslip heat or finite caloric endpoint.
+    let speed = 2.0_f64.powi(30);
+    let boosted = std::array::from_fn(|i| RigidBodyState::new(
+        bodies[i].pose(),
+        bodies[i].linear_momentum_world().add(
+            Vec3::new(0.0, 0.0, properties[i].mass() * speed),
+        ),
+        bodies[i].angular_momentum_body(),
+    ).unwrap());
+    let candidate = solve(&boosted);
+    let report = candidate.report();
+    let expected = reference.report();
+    let physical = &report.contact.caloric.contact;
+    assert_eq!(physical.state, PartialSlipStateKind::GrossSlide);
+    assert!(physical.dissipation.heat_j > 1e-4);
+    assert!(physical.generalized_work.numerical_dissipation_j > 0.0);
+    near(report.kinetic_energy_change_j, expected.kinetic_energy_change_j, 2e-12);
+    assert!(report.kinetic_energy_change_j < -1e-4);
+    near(physical.dissipation.heat_j,
+        expected.contact.caloric.contact.dissipation.heat_j, 2e-12);
+    near(report.contact.caloric.thermal.stored_energy_change_j,
+        expected.contact.caloric.thermal.stored_energy_change_j, 2e-10);
+    near(report.mechanical_energy_residual_j, 0.0, controls().energy_tolerance_j);
+    near(report.total_energy_residual_j, 0.0, controls().energy_tolerance_j);
+    let mut rounded_absolute_change = 0.0;
+    for i in 0..2 {
+        assert_eq!(candidate.bodies()[i].pose(), boosted[i].pose());
+        assert_eq!(candidate.bodies()[i].linear_momentum_world().z,
+            boosted[i].linear_momentum_world().z);
+        near(candidate.bodies()[i].linear_momentum_world().x,
+            reference.bodies()[i].linear_momentum_world().x, 2e-12);
+        near(candidate.bodies()[i].linear_momentum_world().y,
+            reference.bodies()[i].linear_momentum_world().y, 2e-12);
+        assert_eq!(candidate.bodies()[i].angular_momentum_body(),
+            reference.bodies()[i].angular_momentum_body());
+        near(candidate.thermal().temperature_k(CELL[i]).unwrap(),
+            reference.thermal().temperature_k(CELL[i]).unwrap(), 2e-10);
+        // Physical heat and each surface's reversible entropy exchange retain
+        // their original owners. Numerical return-map loss is not deposited.
+        near(report.contact.caloric.deposited_heat_j[i],
+            report.contact.caloric.physical_heat_j[i]
+                + report.contact.caloric.reversible_heat_j[i], 2e-12);
+        rounded_absolute_change += candidate.bodies()[i].kinetic_energy(properties[i]).unwrap()
+            - boosted[i].kinetic_energy(properties[i]).unwrap();
+    }
+    assert_eq!(rounded_absolute_change, 0.0);
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(contact.time_s(), 0.0);
+}
+
+#[test]
 fn g1_gross_slide_heats_only_physical_loss_with_native_off_center_impulses() {
     let curves = curves();
     let thermal = thermal(&curves);

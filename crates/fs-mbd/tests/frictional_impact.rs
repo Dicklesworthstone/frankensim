@@ -293,6 +293,94 @@ fn g3_contact_balance_retains_small_normal_loss_under_boost_and_origin_shift() {
 }
 
 #[test]
+fn g3_simultaneous_native_transfers_cancel_before_rounding_the_physical_loss() {
+    let properties = [property(1.0, Vec3::new(1.0, 1.4, 1.8)); 2];
+    for boost in [0.0, 2.0_f64.powi(48)] {
+        let initial = [
+            body(
+                Vec3::ZERO,
+                UnitQuaternion::IDENTITY,
+                Vec3::new(boost - 8.0, 0.0, 0.0),
+            ),
+            body(
+                Vec3::ZERO,
+                UnitQuaternion::IDENTITY,
+                Vec3::new(boost + 1.0, 0.0, 0.0),
+            ),
+        ];
+        let mut bodies = initial;
+        let mut contact = plane(
+            RigidImpactPoint { body: 0, arm_body: Vec3::ZERO },
+            0.0,
+            0.0,
+        );
+        contact.normal_world = Vec3::new(1.0, 0.0, 0.0);
+        contact.tangent_world = Vec3::new(0.0, 1.0, 0.0);
+        contact.other = RigidImpactCounterpart::Body(RigidImpactPoint {
+            body: 1,
+            arm_body: Vec3::ZERO,
+        });
+        let report = apply_rigid_frictional_impacts(
+            &mut bodies, &properties, &[contact], controls(), &CancelGate::new(),
+        ).unwrap();
+        // mA=mB=1, relative approach=9: J=4.5 and physical loss=9²/4.
+        // Both momentum jumps are EXACTLY representable under this boost.
+        for state in bodies {
+            assert_eq!(state.linear_momentum_world().x, boost - 3.5);
+            assert_eq!(state.angular_momentum_body(), Vec3::ZERO);
+        }
+        close(report.contact.impulses[0][0], 4.5);
+        close(report.contact.dissipated_energy, 20.25);
+        close(report.kinetic_change_j, -20.25);
+        close(report.relative_impulse_work_j, -20.25);
+        close(report.work_energy_residual_j, 0.0);
+        close(report.total_energy_residual_j, 0.0);
+        if boost != 0.0 {
+            let rounded_separately: f64 = (0..2).map(|i| {
+                initial[i].kinetic_energy_change_to(properties[i], bodies[i]).unwrap()
+            }).sum();
+            assert_eq!(rounded_separately, -20.5);
+        }
+    }
+}
+
+#[test]
+fn g3_moving_support_work_cancels_native_storage_before_scalar_reports() {
+    let properties = [property(1.0, Vec3::new(1.0, 1.4, 1.8))];
+    for boost in [0.0, 2.0_f64.powi(48)] {
+        let mut bodies = [body(
+            Vec3::ZERO,
+            UnitQuaternion::IDENTITY,
+            Vec3::new(boost - 8.0, 0.0, 0.0),
+        )];
+        let mut contact = plane(
+            RigidImpactPoint { body: 0, arm_body: Vec3::ZERO },
+            0.0,
+            0.0,
+        );
+        contact.normal_world = Vec3::new(1.0, 0.0, 0.0);
+        contact.tangent_world = Vec3::new(0.0, 1.0, 0.0);
+        contact.other = RigidImpactCounterpart::PrescribedPlane {
+            point_world: Vec3::ZERO,
+            velocity_world: Vec3::new(boost - 3.5, 0.0, 0.0),
+        };
+        let report = apply_rigid_frictional_impacts(
+            &mut bodies, &properties, &[contact], controls(), &CancelGate::new(),
+        ).unwrap();
+        assert_eq!(bodies[0].linear_momentum_world().x, boost - 3.5);
+        close(report.contact.impulses[0][0], 4.5);
+        close(report.contact.dissipated_energy, 10.125);
+        close(report.relative_impulse_work_j, -10.125);
+        close(report.work_energy_residual_j, 0.0);
+        close(report.total_energy_residual_j, 0.0);
+        assert_eq!(report.support_work_j, 4.5 * (boost - 3.5));
+        if boost != 0.0 {
+            assert_ne!(report.kinetic_change_j - report.support_work_j, -10.125);
+        }
+    }
+}
+
+#[test]
 fn g3_common_translation_cannot_hide_spin_driven_contact() {
     let properties = [property(1.0, Vec3::new(1.0, 1.0, 1.0)); 2];
     // Both absolute point velocities round to U. Their original COM and spin

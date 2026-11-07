@@ -351,6 +351,19 @@ support restriction, source ranges and time-refinement obligations are unchanged
 Its finite-gas cavity composition consumes the same retained mechanical storage
 and work rather than rounding them again before the combined gas/wall balance.
 
+The original rigid caloric partial-slip owner and its shared-body network now
+retain native fixed-inertia kinetic increments across all participating bodies
+and through their complete material/thermal balances. They recover relative
+midpoint motion from original COM/spin/arm components before common translation
+can swallow real slip. Contact free energy, independently computed constitutive
+work, per-surface reversible entropy heat and physical microslip heat keep their
+original owners; return-map numerical loss never enters a thermal cell. The
+existing absolute energy tolerances do not grow with unchanged kinetic storage.
+Focused regression definitions compare actual shear/spin impulses, histories,
+physical losses and finite caloric endpoints with and without a dominant common
+normal translation. Full coupled execution remains separate from arithmetic
+leaf checks.
+
 ## Original specific heat in coupled capacity admission
 
 Electrical, dielectric, magnetic, piezoelectric, thermoelastic, creep and

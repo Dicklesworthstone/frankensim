@@ -407,6 +407,68 @@ fn g1_shared_native_inertia_and_affine_entropy_match_independent_three_cell_refe
 }
 
 #[test]
+fn g3_shared_body_contact_heat_preserves_small_changes_under_common_motion() {
+    let curves = curves();
+    let thermal = thermal(&curves);
+    let contacts = contacts(&thermal, &curves, 0.04, true, [0.0; 2]);
+    let (bodies, properties) = mechanics();
+    let work = work();
+    let inputs = inputs(&contacts, &work);
+    let solve = |states: &[RigidBodyState; 3]| {
+        step_rigid_caloric_network(
+            states, &properties, &inputs, &thermal, 0.02, controls(), &[0.0; 3],
+            |_, links, _| -> Result<_, Infallible> { Ok(source(links, [0.0; 3])) },
+            || false,
+        ).unwrap()
+    };
+    let reference = solve(&bodies);
+    let speed = 2.0_f64.powi(30);
+    let boosted = std::array::from_fn(|i| RigidBodyState::new(
+        bodies[i].pose(),
+        bodies[i].linear_momentum_world().add(
+            Vec3::new(0.0, 0.0, properties[i].mass() * speed),
+        ),
+        bodies[i].angular_momentum_body(),
+    ).unwrap());
+    let candidate = solve(&boosted);
+    let report = candidate.report();
+    near(report.kinetic_energy_change_j, reference.report().kinetic_energy_change_j, 2e-12);
+    assert!(report.kinetic_energy_change_j < -1e-4);
+    near(report.thermal.stored_energy_change_j,
+        reference.report().thermal.stored_energy_change_j, 2e-10);
+    near(report.mechanical_energy_residual_j, 0.0, 2e-7);
+    near(report.total_energy_residual_j, 0.0, 2e-7);
+    let mut rounded_absolute_change = 0.0;
+    for i in 0..3 {
+        near(candidate.bodies()[i].linear_momentum_world().x,
+            reference.bodies()[i].linear_momentum_world().x, 2e-12);
+        assert_eq!(candidate.bodies()[i].linear_momentum_world().z,
+            boosted[i].linear_momentum_world().z);
+        assert_eq!(candidate.bodies()[i].angular_momentum_body(),
+            reference.bodies()[i].angular_momentum_body());
+        near(candidate.thermal().temperature_k(IDS[i]).unwrap(),
+            reference.thermal().temperature_k(IDS[i]).unwrap(), 2e-10);
+        rounded_absolute_change += candidate.bodies()[i].kinetic_energy(properties[i]).unwrap()
+            - boosted[i].kinetic_energy(properties[i]).unwrap();
+    }
+    for (actual, expected) in report.interfaces.iter().zip(&reference.report().interfaces) {
+        assert_eq!(actual.contact.state, PartialSlipStateKind::GrossSlide);
+        assert!(actual.contact.dissipation.heat_j > 1e-4);
+        assert!(actual.contact.generalized_work.numerical_dissipation_j > 0.0);
+        near(actual.contact.dissipation.heat_j, expected.contact.dissipation.heat_j, 2e-12);
+        near(actual.midpoint_relative_velocity_mps[0],
+            expected.midpoint_relative_velocity_mps[0], 2e-12);
+        for i in 0..2 {
+            near(actual.deposited_heat_j[i],
+                actual.physical_heat_j[i] + actual.reversible_heat_j[i], 2e-12);
+        }
+    }
+    assert_eq!(rounded_absolute_change, 0.0);
+    assert_eq!(thermal.time_s(), 0.0);
+    assert!(contacts.iter().all(|contact| contact.time_s() == 0.0));
+}
+
+#[test]
 fn g1_two_gross_sliding_contacts_partition_only_physical_heat_into_shared_cell() {
     let curves = curves();
     let thermal = thermal(&curves);

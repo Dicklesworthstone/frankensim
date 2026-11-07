@@ -322,6 +322,47 @@ mod tests {
     }
 
     #[test]
+    fn original_contact_endpoint_transfers_retain_the_pair_loss_before_rounding() {
+        let boost = 2.0_f64.powi(48);
+        let mut combined = MomentumWork::default();
+        let mut rounded = 0.0;
+        for old in [boost - 8.0, boost + 1.0] {
+            let mut body = MomentumWork::default();
+            body.add_fixed_inertia(
+                1.0, [1.0, 1.4, 1.8], IDENTITY,
+                [[old, 0.0, 0.0], [0.0; 3]],
+                [[boost - 3.5, 0.0, 0.0], [0.0; 3]],
+            );
+            rounded += body.total().to_f64();
+            combined.merge(body);
+        }
+        assert_eq!(rounded, -20.5);
+        assert_eq!(combined.total().to_f64(), -20.25);
+        // Actual endpoint storage, independently known Newton-plastic loss.
+        assert_eq!((combined.total() + Dd::from_f64(9.0 * 9.0 / 4.0)).to_f64(), 0.0);
+    }
+
+    #[test]
+    fn original_contact_storage_and_independent_support_work_keep_finite_loss() {
+        let boost = 2.0_f64.powi(48);
+        let mut storage = MomentumWork::default();
+        storage.add_fixed_inertia(
+            1.0, [1.0, 1.4, 1.8], IDENTITY,
+            [[boost - 8.0, 0.0, 0.0], [0.0; 3]],
+            [[boost - 3.5, 0.0, 0.0], [0.0; 3]],
+        );
+        let mut source = MomentumWork::default();
+        source.add_product(Dd::from_f64(boost - 3.5), Dd::from_f64(4.5));
+        let loss = 4.5 * 4.5 / 2.0;
+        assert_ne!(storage.total().to_f64() - source.total().to_f64(), -loss);
+        assert_eq!(storage.difference(source).to_f64(), -loss);
+        // An erroneous independent source remains an actual balance defect;
+        // the kernel never infers the work from the desired physical loss.
+        source.add_product(Dd::from_f64(0.25), Dd::from_f64(1.0));
+        assert_eq!((storage.difference(source) + Dd::from_f64(loss)).to_f64(), -0.25);
+    }
+
+    #[test]
     fn rotated_inertia_retains_small_storage_beside_unchanged_spin() {
         let half_angle = core::f64::consts::FRAC_PI_8;
         let axes = [half_angle.cos(), 0.0, 0.0, half_angle.sin()];

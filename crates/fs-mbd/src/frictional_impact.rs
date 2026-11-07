@@ -23,7 +23,7 @@ pub mod hertz_patch;
 /// Independent dynamic contact islands with atomic whole-scene publication.
 pub mod islands;
 
-use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3};
+use crate::{DynamicsError, MassProperties, MomentumWork, RigidBodyState, Vec3};
 use fs_contact::frictional_multicontact::{
     FrictionalContact, FrictionalContactConfig, FrictionalContactError, FrictionalContactResult,
     NormalVelocityLaw, solve_frictional_contacts,
@@ -92,14 +92,17 @@ pub struct RigidFrictionalImpactReport<R = FrictionalContactResult> {
     pub contact: R,
     pub kinetic_before_j: f64,
     pub kinetic_after_j: f64,
-    /// Actual kinetic change from native momentum increments and midpoint
-    /// velocities. Unlike subtracting the total energies, this retains small
-    /// contact losses alongside a large unchanged common translation.
+    /// Actual kinetic change through the original fixed mass and full inertia.
+    /// All bodies' product layers reduce before rounding, retaining small
+    /// contact losses alongside large opposing transfers or common motion.
     pub kinetic_change_j: f64,
     /// Signed work supplied by explicitly moving prescribed supports.
     pub support_work_j: f64,
     pub relative_impulse_work_j: f64,
+    /// Retained storage minus independently integrated support/contact work.
+    /// May differ from subtracting the rounded scalar diagnostic fields.
     pub work_energy_residual_j: f64,
+    /// Retained storage minus support work plus original physical impact loss.
     pub total_energy_residual_j: f64,
     pub support_impulse_ns: Vec3,
     pub support_angular_impulse_nms: Vec3,
@@ -462,7 +465,7 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
         ));
     }
     let mut impulses = vec![ImpulseAccumulator::default(); bodies.len()];
-    let mut support_work = Dd::ZERO;
+    let mut support_work = MomentumWork::default();
     let mut support_impulse = [Dd::ZERO; 3];
     let mut support_angular = [Dd::ZERO; 3];
     for (slot, &index) in order.iter().enumerate() {
@@ -476,7 +479,10 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
                 impulses[point.body].add(bodies[point.body], point.arm_body, impulse.scale(-1.0));
             }
             RigidImpactCounterpart::PrescribedPlane { velocity_world, .. } => {
-                support_work = support_work + Dd::from_f64(impulse.dot(velocity_world));
+                support_work.add_compensated(
+                    components(velocity_world).map(Dd::from_f64),
+                    components(impulse).map(Dd::from_f64),
+                );
                 add_vector(&mut support_impulse, impulse);
                 add_cross(
                     &mut support_angular,
@@ -496,7 +502,7 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
     let mut candidate = Vec::with_capacity(bodies.len());
     let mut before = Dd::ZERO;
     let mut after = Dd::ZERO;
-    let mut kinetic_change = Dd::ZERO;
+    let mut kinetic_change = MomentumWork::default();
     let mut linear_change = [Dd::ZERO; 3];
     let mut angular_change = [Dd::ZERO; 3];
     for ((&body, &property), impulse) in bodies.iter().zip(properties).zip(impulses) {
@@ -509,7 +515,14 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
         candidate.push(applied.state_after);
         before = before + Dd::from_f64(applied.work.kinetic_energy_before_j);
         after = after + Dd::from_f64(applied.work.kinetic_energy_after_j);
-        kinetic_change = kinetic_change + Dd::from_f64(applied.work.kinetic_energy_change_j);
+        // Retain the original storage products across ALL bodies. Rewrapping
+        // scalar impulse reports loses a small net loss between large opposite
+        // transfers, even though both actual momentum jumps are representable.
+        body.accumulate_kinetic_energy_change(
+            property,
+            applied.state_after,
+            &mut kinetic_change,
+        )?;
         add_vector(&mut linear_change, applied.linear_increment_world);
         // The event fixes every pose. Evaluate delta(x cross p + R L)
         // directly, so an unchanged large orbital momentum cannot swallow
@@ -528,9 +541,8 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
     }
     let before = before.to_f64();
     let after = after.to_f64();
-    let support_work = support_work.to_f64();
-    let kinetic_change_j = kinetic_change.to_f64();
-    let mut relative_work = Dd::ZERO;
+    let kinetic_change_j = kinetic_change.total().to_f64();
+    let mut relative_work = MomentumWork::default();
     let mut endpoint_error = 0.0_f64;
     for (slot, &index) in order.iter().enumerate() {
         poll_with(gate)?;
@@ -551,14 +563,24 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
             let velocity = relative.dot(prepared[slot].axes[axis]);
             endpoint_error = endpoint_error
                 .max((velocity - physical.relative_velocities_after[slot][axis]).abs());
-            relative_work = relative_work
-                + Dd::from_f64(
-                    0.5 * (kinematics[slot].relative_velocity_m_s[axis] + velocity)
-                        * physical.impulses[slot][axis],
-                );
+            relative_work.add_product(
+                Dd::from_f64(0.5 * kinematics[slot].relative_velocity_m_s[axis])
+                    + Dd::from_f64(0.5 * velocity),
+                Dd::from_f64(physical.impulses[slot][axis]),
+            );
         }
     }
-    let relative_work = relative_work.to_f64();
+    // Source work remains independent of native storage. Cancel its product
+    // layers before rounding either large scalar diagnostic; genuine momentum
+    // rounding defects remain in these acceptance residuals, never in heat.
+    let kinetic_minus_source = kinetic_change.difference(support_work);
+    let work_residual = (kinetic_minus_source - relative_work.total()).to_f64();
+    let total_residual =
+        (kinetic_minus_source + Dd::from_f64(physical.dissipated_energy)).to_f64();
+    let constitutive_work_residual =
+        (relative_work.total() - Dd::from_f64(physical.relative_work)).to_f64();
+    let support_work = support_work.total().to_f64();
+    let relative_work = relative_work.total().to_f64();
     let report = RigidFrictionalImpactReport {
         contact_ids: order.iter().map(|&i| contacts[i].id).collect(),
         kinetic_before_j: before,
@@ -566,8 +588,8 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
         kinetic_change_j,
         support_work_j: support_work,
         relative_impulse_work_j: relative_work,
-        work_energy_residual_j: kinetic_change_j - support_work - relative_work,
-        total_energy_residual_j: kinetic_change_j - support_work + physical.dissipated_energy,
+        work_energy_residual_j: work_residual,
+        total_energy_residual_j: total_residual,
         support_impulse_ns: rounded_vector(support_impulse),
         support_angular_impulse_nms: rounded_vector(support_angular),
         linear_momentum_residual_ns: rounded_vector(std::array::from_fn(|i| {
@@ -582,10 +604,12 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
     if [
         before,
         after,
+        kinetic_change_j,
         support_work,
         relative_work,
         report.work_energy_residual_j,
         report.total_energy_residual_j,
+        constitutive_work_residual,
         endpoint_error,
         magnitude(report.linear_momentum_residual_ns),
         magnitude(report.angular_momentum_residual_nms),
@@ -597,8 +621,7 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
         || magnitude(report.angular_momentum_residual_nms) > controls.angular_momentum_tolerance_nms
         || report.work_energy_residual_j.abs() > controls.energy_tolerance_j
         || report.total_energy_residual_j.abs() > controls.energy_tolerance_j
-        || (relative_work - report.contact.physical().relative_work).abs()
-            > controls.energy_tolerance_j
+        || constitutive_work_residual.abs() > controls.energy_tolerance_j
     {
         return Err(RigidFrictionalImpactError::Audit(Box::new(report)));
     }

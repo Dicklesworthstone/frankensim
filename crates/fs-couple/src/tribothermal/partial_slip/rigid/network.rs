@@ -397,17 +397,19 @@ pub fn step_rigid_caloric_network<'a, 't, S, E>(
                             .point_kinematics(properties[input.bodies[1]], input.arms_body_m[1])?,
                     ];
                     let relative = before[i][0]
-                        .point_velocity_world
-                        .add(after[0].point_velocity_world)
-                        .sub(before[i][1].point_velocity_world)
-                        .sub(after[1].point_velocity_world)
-                        .scale(0.5);
+                        .relative_velocity_world(before[i][1])?
+                        .scale(0.5)
+                        .add(after[0].relative_velocity_world(after[1])?.scale(0.5));
                     let relative_spin = before[i][0]
                         .angular_velocity_world
-                        .add(after[0].angular_velocity_world)
                         .sub(before[i][1].angular_velocity_world)
-                        .sub(after[1].angular_velocity_world)
                         .scale(0.5)
+                        .add(
+                            after[0]
+                                .angular_velocity_world
+                                .sub(after[1].angular_velocity_world)
+                                .scale(0.5),
+                        )
                         .dot(vector(input.frame.normal()));
                     let common_spin = before[i][0]
                         .angular_velocity_world
@@ -540,9 +542,9 @@ pub fn step_rigid_caloric_network<'a, 't, S, E>(
     )?;
     let mut expected_linear = vec![Vec3::ZERO; bodies.len()];
     let mut expected_angular = vec![Vec3::ZERO; bodies.len()];
-    let mut work = 0.0;
-    let mut internal_change = 0.0;
-    let mut numerical = 0.0;
+    let mut work = Dd::ZERO;
+    let mut internal_change = Dd::ZERO;
+    let mut numerical = Dd::ZERO;
     for (i, input) in ordered.iter().enumerate() {
         poll()?;
         let m = &staged.mechanical[i];
@@ -571,15 +573,15 @@ pub fn step_rigid_caloric_network<'a, 't, S, E>(
                     .scale(sign),
             );
         }
-        work = finite(work + m.contact.generalized_work.work_into_interface_j)?;
-        internal_change = finite(internal_change + m.internal_change)?;
-        numerical = finite(numerical + m.contact.generalized_work.numerical_dissipation_j)?;
+        work = work + Dd::from_f64(m.contact.generalized_work.work_into_interface_j);
+        internal_change = internal_change + Dd::from_f64(m.internal_change);
+        numerical = numerical + Dd::from_f64(m.contact.generalized_work.numerical_dissipation_j);
     }
     let mut linear = Vec::with_capacity(bodies.len());
     let mut angular = Vec::with_capacity(bodies.len());
     let mut dp = Vec3::ZERO;
     let mut dl = Vec3::ZERO;
-    let mut kinetic = 0.0;
+    let mut kinetic = RigidKineticEnergyChange::new();
     for (i, before) in bodies.iter().enumerate() {
         poll()?;
         let after = &staged.bodies[i];
@@ -597,15 +599,17 @@ pub fn step_rigid_caloric_network<'a, 't, S, E>(
         dl = dl
             .add(actual_angular)
             .add(before.pose().position_world().cross(actual));
-        kinetic = finite(
-            kinetic + after.kinetic_energy(properties[i])?
-                - before.kinetic_energy(properties[i])?,
-        )?;
+        kinetic.add_body(properties[i], *before, *after)?;
     }
-    let mechanical = finite(kinetic + work)?;
+    let kinetic = kinetic.finish_retained()?;
+    let mechanical = finite((kinetic + work).to_f64())?;
     let total = finite(
-        kinetic + internal_change + heat.thermal.stored_energy_change_j + numerical
-            - staged.external_heat_j,
+        (kinetic
+            + internal_change
+            + Dd::from_f64(heat.thermal.stored_energy_change_j)
+            + numerical
+            - Dd::from_f64(staged.external_heat_j))
+        .to_f64(),
     )?;
     if linear
         .iter()
@@ -699,7 +703,7 @@ pub fn step_rigid_caloric_network<'a, 't, S, E>(
             body_angular_momentum_residual_nm_s: angular,
             linear_momentum_change_n_s: dp,
             world_angular_momentum_change_nm_s: dl,
-            kinetic_energy_change_j: kinetic,
+            kinetic_energy_change_j: kinetic.to_f64(),
             mechanical_energy_residual_j: mechanical,
             total_energy_residual_j: total,
         },
