@@ -22,6 +22,12 @@ use crate::phase::water::IsobaricWater;
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
 
 impl ThermalLaw for IsobaricWater {
+    fn bulk_density_kg_m3(&self, h: f64) -> Result<Option<f64>, DepositionError> {
+        self.state_at_specific_enthalpy(h, || false)
+            .map(|answer| Some(answer.state().bulk_density_kg_m3()))
+            .map_err(|_| DepositionError::MaterialDomain)
+    }
+
     fn temperature_k(&self, specific_h_j_kg: f64) -> Result<f64, DepositionError> {
         self.state_at_specific_enthalpy(specific_h_j_kg, || false)
             .map(|answer| answer.state().temperature_k())
@@ -45,6 +51,12 @@ impl ThermalLaw for IsobaricWater {
 // thermal kernel's fixed geometry is reference heat-exchange geometry, not a
 // rigid vessel or an automatically updated vapor volume.
 impl ThermalLaw for IsobaricWaterVaporization {
+    fn bulk_density_kg_m3(&self, h: f64) -> Result<Option<f64>, DepositionError> {
+        self.state_at_specific_enthalpy(h)
+            .map(|state| Some(state.bulk_density_kg_m3()))
+            .map_err(|_| DepositionError::MaterialDomain)
+    }
+
     fn temperature_k(&self, specific_h_j_kg: f64) -> Result<f64, DepositionError> {
         self.state_at_specific_enthalpy(specific_h_j_kg)
             .map(|state| state.temperature_k())
@@ -67,6 +79,12 @@ impl ThermalLaw for IsobaricWaterVaporization {
 }
 
 impl ThermalLaw for EquilibriumEnthalpyPhaseCurve {
+    fn bulk_density_kg_m3(&self, h: f64) -> Result<Option<f64>, DepositionError> {
+        self.values_at_specific_enthalpy(h)
+            .map(|state| Some(state.bulk_density_kg_m3))
+            .map_err(|_| DepositionError::MaterialDomain)
+    }
+
     fn caloric_identity(&self) -> Option<[u8; 32]> {
         Some(*self.identity().as_bytes())
     }

@@ -17,8 +17,9 @@
 //! entropy when `advance_observed_with_entropy` is selected. No caloric law,
 //! material mixing rule, phase geometry or second stepping kernel is inferred.
 //! Reference geometry and mass remain frozen by default. Explicit planar phase
-//! layers may instead grow or retreat at constant density and footprint: their
-//! current mass determines every normal centre-to-face distance. This changes
+//! layers may instead grow or retreat at fixed footprint: their current mass
+//! and either explicit constant density or the original caloric density law
+//! determine every normal centre-to-face distance. This changes
 //! thermal resistance, not the stored reference mesh or contact topology. The
 //! coefficient-freezing time error and cell-resolution error require independent
 //! refinement.
@@ -84,9 +85,25 @@ pub struct PlanarPhaseLayer {
     pub density_kg_m3: f64,
 }
 
+/// A fixed-footprint layer whose current volume is `mass / rho(h)`.
+///
+/// The registered thermal law must supply its original bulk density at the
+/// same enthalpy as heat storage. Phase fractions and their mixture-volume law
+/// remain with that material owner. This explicitly selected one-dimensional
+/// geometry permits normal expansion/contraction; it supplies no lateral
+/// strain, stress, moving mesh, gas displacement or new pressure law. The caller
+/// must admit that shape approximation and the source's pressure constraint.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlanarDensityLayer {
+    pub cell_id: CellId,
+    /// Fixed area of EACH normal face [m²].
+    pub footprint_area_m2: f64,
+}
+
 #[derive(Clone, Copy)]
 struct BoundPhaseLayer {
     layer: PlanarPhaseLayer,
+    uses_material_density: bool,
     half_distance_m: f64,
     exposed_area_m2: f64,
     reservoir_area_m2: Option<f64>,
@@ -138,6 +155,7 @@ pub struct ConductionObserver<'a> {
     reservoir_values: BTreeMap<CellId, f64>,
     ambient_values: BTreeMap<CellId, f64>,
     has_phase_layers: bool,
+    has_material_density_layers: bool,
     prepared: bool,
 }
 
@@ -171,6 +189,7 @@ impl<'a> ConductionObserver<'a> {
             reservoir_values: BTreeMap::new(),
             ambient_values: BTreeMap::new(),
             has_phase_layers: false,
+            has_material_density_layers: false,
             prepared: false,
         };
         for (i, &(id, law)) in laws.iter().enumerate() {
@@ -322,6 +341,7 @@ impl<'a> ConductionObserver<'a> {
                 .expect("admitted phase cell")
                 .phase_layer = Some(BoundPhaseLayer {
                 layer,
+                uses_material_density: false,
                 half_distance_m,
                 exposed_area_m2,
                 reservoir_area_m2,
@@ -332,6 +352,58 @@ impl<'a> ConductionObserver<'a> {
         self.prepare(thermal, &mut checkpoint)?;
         checkpoint()?;
         Ok(self)
+    }
+
+    /// Refresh planar resistance from the original material density as it heats,
+    /// cools or changes phase. Storage and CFL still use the actual cell mass;
+    /// density never recreates mass from the frozen reference volume.
+    ///
+    /// At binding, `rho(h) * reference_volume` must agree with the cell mass.
+    /// Every later starting state uses `d = mass / (2 * rho(h) * footprint)`
+    /// on links, reservoir faces and ambient faces alike. Endpoint density is
+    /// checked before an advance can publish, including at latent plateaus.
+    /// The existing enthalpy owner accounts heat under the material's pressure
+    /// constraint; this adapter adds no second pressure-work term.
+    ///
+    /// Fixed-density and material-density layers may coexist on separate cells.
+    /// Unknown density, unsupported states, changed reference geometry or face
+    /// coverage refuse. The implicit fixed-geometry solver does not admit these
+    /// layers; explicit temporal and spatial refinement remain necessary.
+    pub fn with_material_density_layers(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        layers: &[PlanarDensityLayer],
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        checkpoint()?;
+        if layers.len() > self.cells.len() {
+            return Err(DepositionError::InvalidInput(
+                "material density layers exceed existing conduction cells",
+            ));
+        }
+        let mut reference = Vec::with_capacity(layers.len());
+        for layer in layers {
+            checkpoint()?;
+            let cell = thermal.cells.get(&layer.cell_id).ok_or(
+                DepositionError::InvalidInput("inactive material density layer"),
+            )?;
+            reference.push(PlanarPhaseLayer {
+                cell_id: layer.cell_id,
+                footprint_area_m2: layer.footprint_area_m2,
+                density_kg_m3: material_density(thermal, cell)?,
+            });
+        }
+        let mut result = self.with_planar_phase_layers(thermal, &reference, &mut checkpoint)?;
+        for layer in layers {
+            result.cells.get_mut(&layer.cell_id)
+                .expect("admitted planar cell")
+                .phase_layer.as_mut().expect("admitted planar layer")
+                .uses_material_density = true;
+        }
+        result.has_material_density_layers |= !layers.is_empty();
+        result.prepare(thermal, &mut checkpoint)?;
+        checkpoint()?;
+        Ok(result)
     }
 
     /// Bind selected complete exposed ambient faces to the same material owner.
@@ -491,7 +563,11 @@ impl<'a> ConductionObserver<'a> {
                         "bound planar layer reservoir coverage changed",
                     ));
                 }
-                phase.half_distance_m = phase.layer.half_distance(cell.mass_kg)?;
+                let mut layer = phase.layer;
+                if phase.uses_material_density {
+                    layer.density_kg_m3 = material_density(thermal, cell)?;
+                }
+                phase.half_distance_m = layer.half_distance(cell.mass_kg)?;
             }
             let k = self.laws[&binding.material_id].conductivity_w_m_k(cell.specific_h_j_kg)?;
             if !nonnegative(k) {
@@ -663,6 +739,27 @@ impl PlanarPhaseLayer {
     }
 }
 
+fn material_density(
+    thermal: &DepositionSimulation<'_>,
+    cell: &DepositedCell,
+) -> Result<f64, DepositionError> {
+    let law = thermal.materials[&cell.material_id];
+    if law.storage_basis() != ThermalStorageBasis::Enthalpy {
+        return Err(DepositionError::InvalidInput(
+            "material density layers require enthalpy storage",
+        ));
+    }
+    let density = law
+        .bulk_density_kg_m3(cell.specific_h_j_kg)?
+        .ok_or(DepositionError::InvalidInput(
+            "material density layer requires the original caloric density law",
+        ))?;
+    if !positive(density) {
+        return Err(DepositionError::MaterialDomain);
+    }
+    Ok(density)
+}
+
 impl DepositionObserver for ConductionObserver<'_> {
     type Error = DepositionError;
     fn begin(&mut self) -> Result<(), Self::Error> {
@@ -749,10 +846,35 @@ impl DepositionObserver for ConductionObserver<'_> {
         _: f64,
         _: f64,
         _: &BTreeMap<CellId, f64>,
-        _: &DepositionSimulation<'_>,
+        thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Self::Error> {
         self.prepared = false;
+        checkpoint()?;
+        if self.has_material_density_layers {
+            for (&id, binding) in &self.cells {
+                if let Some(phase) = binding.phase_layer {
+                    if phase.uses_material_density {
+                        checkpoint()?;
+                        let cell = thermal.cells.get(&id).ok_or(
+                            DepositionError::InvalidInput("material density layer disappeared"),
+                        )?;
+                        if cell.material_id != binding.material_id
+                            || cell.body_id != binding.body_id
+                            || cell.segment_id != binding.segment_id
+                            || cell.geometry != binding.geometry
+                        {
+                            return Err(DepositionError::InvalidInput(
+                                "spatial conduction cell binding changed",
+                            ));
+                        }
+                        let mut layer = phase.layer;
+                        layer.density_kg_m3 = material_density(thermal, cell)?;
+                        layer.half_distance(cell.mass_kg)?;
+                    }
+                }
+            }
+        }
         checkpoint()
     }
 }

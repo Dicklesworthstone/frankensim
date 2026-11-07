@@ -5,6 +5,9 @@ use std::cell::Cell;
 #[path = "phase_layer_tests.rs"]
 mod phase_layers;
 
+#[path = "density_layer_tests.rs"]
+mod density_layers;
+
 struct Sensible;
 impl ThermalLaw for Sensible {
     fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {

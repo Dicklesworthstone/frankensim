@@ -299,7 +299,7 @@ impl<'a> ImplicitConductionChain<'a> {
         checkpoint()?;
         if conduction.has_phase_layers {
             return Err(ImplicitConductionError::Invalid(
-                "mass-evolving planar phase layers require the explicit conduction observer",
+                "mass- or density-evolving planar layers require the explicit conduction observer",
             ));
         }
         let ids: Vec<_> = thermal.cells.keys().copied().collect();

@@ -301,7 +301,7 @@ fn changed_unselected_mass_cancellation_and_fixed_implicit_paths_refuse() {
     assert!(matches!(
         implicit::ImplicitConductionChain::new(&thermal, &observer, &[], || Ok(())),
         Err(implicit::ImplicitConductionError::Invalid(
-            "mass-evolving planar phase layers require the explicit conduction observer"
+            "mass- or density-evolving planar layers require the explicit conduction observer"
         ))
     ));
 }

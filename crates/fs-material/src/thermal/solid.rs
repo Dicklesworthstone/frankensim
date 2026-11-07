@@ -161,6 +161,13 @@ impl EquilibriumEnthalpyPhaseCurve {
 }
 
 impl ThermalLaw for PureSolidThermalLaw<'_> {
+    fn bulk_density_kg_m3(&self, h: f64) -> Result<Option<f64>, DepositionError> {
+        self.admit(h)?;
+        self.curve.values_at_specific_enthalpy(h)
+            .map(|state| Some(state.bulk_density_kg_m3))
+            .map_err(|_| DepositionError::MaterialDomain)
+    }
+
     fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
         self.admit(h)?;
         self.curve.temperature_at_specific_enthalpy(h)

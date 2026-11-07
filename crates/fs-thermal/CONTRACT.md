@@ -1447,6 +1447,33 @@ and retreat resistance, both link sides, finite heat storage/conservation,
 temperature-dependent conductivity shared by both baths, per-side coverage,
 unchanged default admission, cancellation and the implicit-mode refusal.
 
+### Original material density in planar heat transport
+
+`ConductionObserver::with_material_density_layers` selects the same planar
+geometry with the original thermal law's optional `bulk_density_kg_m3(h)`.
+The current conserved mass and density at the actual stored enthalpy set
+`d = m / (2 rho(h) A)` for every normal link, reservoir and ambient face.
+Density is evaluated once per selected cell during coefficient preparation;
+the half-distance is reused across faces. Final-state density and distance
+are admitted before an advance publishes, including after its last substep.
+Unavailable density, unsupported enthalpy or nonpositive/unrepresentable
+response refuses transactionally. The constant-density path is unchanged.
+
+The original enthalpy law owns the pressure constraint and phase mixture.
+Heating never reconstructs mass from density times the frozen reference
+volume, and latent density changes remain visible when temperature is constant.
+This mode requires enthalpy storage; an internal-energy law with moving volume
+would need its own pressure-work equation. No extra p*dV heat is added.
+The declared fixed-footprint, normal-expansion reduction supplies no lateral
+strain, stress, mesh motion or gas displacement. The fixed-geometry implicit
+solver refuses this mode; explicit timestep and spatial refinement still apply.
+
+G0/G1/G3 tests in `conduction/density_layer_tests.rs` cover a heating trajectory
+with evolving resistance, both external faces, one density query per cell,
+constant-density equivalence, missing data and final-state refusal. Material
+integration in `fs-material/tests/density_conduction.rs` exercises the original
+solid/liquid density law through a latent plateau and conserved heat transport.
+
 
 ## Implicit enthalpy transport on geometric conduction chains
 

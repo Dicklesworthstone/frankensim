@@ -109,6 +109,15 @@ pub trait ThermalLaw {
     /// historical h-labelled argument is u for an explicit internal-energy law.
     /// Refuse extrapolation.
     fn temperature_k(&self, specific_h_j_kg: f64) -> Result<f64, DepositionError>;
+    /// Optional original bulk mass density [kg/m³] at this SAME specific energy.
+    /// This is the material's current density, including its declared phase
+    /// mixture and pressure constraint, not the reference mesh's mass/volume.
+    /// It never changes stored mass or geometry by itself. An explicitly chosen
+    /// geometric consumer may use it to derive volume from the conserved mass.
+    /// `None` means unavailable; no density is inferred from heat capacity.
+    fn bulk_density_kg_m3(
+        &self, _specific_h_j_kg: f64,
+    ) -> Result<Option<f64>, DepositionError> { Ok(None) }
     /// Global upper bound on dT/de [kg K/J] over the admitted storage domain.
     /// Must be finite and nonnegative; an underestimated bound invalidates CFL.
     /// Admitted once at timeline construction and reused across advances and

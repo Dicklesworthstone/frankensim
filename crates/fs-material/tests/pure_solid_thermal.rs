@@ -91,11 +91,13 @@ fn solid_domain_retains_original_calorimetry_not_the_melting_temperature_test() 
         assert_eq!(ThermalLaw::maximum_temperature_slope(&source), 1.0);
         for h in [-140_000.0, -20_000.0, 0.0, 45_000.0, 46_000.0] {
             assert_eq!(solid.temperature_k(h + shift), ThermalLaw::temperature_k(&source, h + shift));
+            assert_eq!(solid.bulk_density_kg_m3(h + shift), ThermalLaw::bulk_density_kg_m3(&source, h + shift));
         }
         let onset = 46_000.0 + shift;
         for h in [onset.next_up(), 70_000.0 + shift, 100_000.0 + shift] {
             assert_eq!(ThermalLaw::temperature_k(&source, h), Ok(273.0));
             assert_eq!(solid.temperature_k(h), Err(DepositionError::MaterialDomain));
+            assert_eq!(solid.bulk_density_kg_m3(h), Err(DepositionError::MaterialDomain));
             assert_eq!(solid.specific_entropy_change_j_kg_k(shift, h), Err(DepositionError::MaterialDomain));
         }
         for (a, b) in [(-20_000.0, 20_000.0), (20_000.0, -20_000.0), (46_000.0, 46_000.0)] {
