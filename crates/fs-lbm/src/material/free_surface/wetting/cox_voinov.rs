@@ -55,14 +55,14 @@ pub struct CoxVoinovLaw {
 }
 
 /// Physical coefficients actually used in one model prediction.
-/// The endpoint material receipt remains a STATIC angle measurement.
+/// The endpoint receipt remains its original static angle or adhesion claim.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CoxVoinovSample {
     /// Signed Ca = mu U / sigma; positive denotes advancing liquid.
     pub signed_capillary_number: f64,
     /// Current source viscosity [Pa s], including thermal evolution.
     pub dynamic_viscosity_pa_s: f64,
-    /// The native owner's admitted constant surface tension [N/m].
+    /// The same admitted local surface tension as native capillary pressure [N/m].
     pub surface_tension_n_m: f64,
     /// Applied outer/liquid dynamic-viscosity ratio. A sourced outer gas uses
     /// its actual viscosity and the local liquid viscosity; the original API

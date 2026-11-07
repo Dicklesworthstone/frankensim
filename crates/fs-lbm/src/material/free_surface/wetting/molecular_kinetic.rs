@@ -16,8 +16,9 @@
 //! model parameters, never inferred from viscosity, a material name or a static
 //! contact angle. They remain constant only over the explicitly admitted
 //! temperature interval; no Arrhenius extrapolation is implied. A selected
-//! static advancing/receding endpoint supplies theta_0. Combining that endpoint
-//! with this rate law is a hysteresis closure, not a microscopic pinning proof.
+//! static advancing/receding endpoint or explicitly selected equilibrium angle
+//! supplies theta_0. Combining a hysteresis endpoint with this rate law does not
+//! prove microscopic pinning; the equilibrium mode introduces no deadband.
 //!
 //! O(1) arithmetic, no allocation, fixed deterministic transcendental owner.
 //! Hydrodynamic matching, gas-wedge dissipation, slip, precursor films,

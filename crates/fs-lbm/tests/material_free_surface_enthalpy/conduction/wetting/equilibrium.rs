@@ -8,6 +8,9 @@ use fs_material::liquid::surface::adhesion::EQUILIBRIUM_WORK_OF_ADHESION_PROPERT
 #[path = "equilibrium_height_graph.rs"]
 mod height_graph;
 
+#[path = "equilibrium_dynamic.rs"]
+mod dynamic;
+
 fn equilibrium_interface(
     liquid: &MaterialCard,
     solid: &MaterialCard,

@@ -6,20 +6,21 @@
 //! the temperature extension already owned by the enthalpy transport.
 //!
 //! The thermal stage holds the last accepted contact speed while re-evaluating
-//! both pinned angle claims. Its angles drive the same interval's native flow.
+//! the pinned equilibrium source or hysteresis claims. Its angles drive the
+//! same interval's native flow.
 //! The accepted advected temperature and original backward geometric speed then
 //! admit the endpoint history. Equilibrium and dynamic adhesion compose with
-//! uniform sigma(T); equilibrium also admits the finite-slope height graph's
-//! existing Marangoni owner. The graph boundary angle is installed before its
-//! normal, area and stress are
-//! reconstructed. This local-cell closure does not resolve interface
+//! uniform sigma(T); purely equilibrium wetting also admits the finite-slope
+//! height graph's existing Marangoni owner. The graph boundary angle is installed
+//! before its normal, area and stress are reconstructed. This local-cell closure
+//! does not resolve interface
 //! temperature, calibrated pinning or a surface-energy balance.
 
 use super::*;
 use crate::d3q19::freesurface3::PlanarWall3;
 use crate::material::free_surface::wetting::{
-    CoxVoinovControls, CoxVoinovLaw, EquilibriumAngleOrigin, FreeSurfaceWettingControls,
-    FreeSurfaceWettingSample, MolecularKineticLaw, WettingThermalPoint,
+    CoxVoinovControls, CoxVoinovLaw, EquilibriumAngleOrigin, EquilibriumWettingRateLaw,
+    FreeSurfaceWettingControls, FreeSurfaceWettingSample, MolecularKineticLaw, WettingThermalPoint,
 };
 use fs_matdb::InterfaceSystemCard;
 use fs_material::state_point::{MaterialPropertySelection, ResolvedInterfaceStatePoint};
@@ -36,8 +37,9 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     /// wetting rolls back the complete thermal/flow step.
     ///
     /// This smooth, homogeneous stationary-wall closure supplies no pinning,
-    /// contact-line friction or dynamic-angle law. It cannot be combined with
-    /// the separate Cox/hysteresis, planar or local thermocapillary owners.
+    /// contact-line friction or dynamic-angle law until explicitly extended by
+    /// [`Self::with_dynamic_equilibrium_wetting`]. It cannot be combined with
+    /// a separate hysteresis, planar or local thermocapillary owner.
     /// The uniform thermal-capillarity owner can evolve sigma(T), provided all
     /// actual wet cells agree exactly at every admitted stage. A height graph
     /// instead admits one planar SIDE wall: every occupied interface cell in
@@ -191,6 +193,53 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
 }
 
 impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
+    /// Explicitly drive moving contact lines from the original equilibrium
+    /// angle or reversible Young--Dupre work using one chosen Cox or molecular
+    /// rate law. The same local T and sigma feed equilibrium and rate response.
+    ///
+    /// This homogeneous smooth-wall model has no inferred hysteresis interval
+    /// or pinning threshold. Original equilibrium claims retain their selected
+    /// identities and do not acquire a fictitious speed coordinate. The native
+    /// accepted VOF history supplies speed; unresolved geometry, source exits,
+    /// calibration exits and cancellation refuse the complete candidate.
+    /// Kinetic parameters and Cox cutoffs remain explicit model inputs. Local
+    /// molecular loss is diagnostic and is not silently injected as heat.
+    /// Constant or uniform thermal surface tension is required, as for the
+    /// existing dynamic planar closure; height-graph coupling is not admitted.
+    pub fn with_dynamic_equilibrium_wetting(
+        mut self,
+        law: EquilibriumWettingRateLaw,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        poll(gate)?;
+        if self.thermocapillary.is_some() && !self.uniform_thermal_capillarity() {
+            return Err(Error::Invalid(
+                "dynamic equilibrium wetting needs constant or spatially uniform surface tension",
+            ));
+        }
+        if matches!(&law, EquilibriumWettingRateLaw::CoxVoinov(_)) && self.rheology.is_some() {
+            return Err(Error::Invalid("Cox wetting requires a Newtonian liquid"));
+        }
+        let binding = self
+            .wetting
+            .take()
+            .ok_or(Error::Invalid(
+                "dynamic equilibrium wetting requires an original equilibrium source",
+            ))?
+            .with_equilibrium_rate_law(
+                law,
+                self.law.temperature_axis(),
+                &self.flow.scaling,
+                gate,
+            )?;
+        let temperatures = temperatures(&self.states, self.law.temperature_axis(), gate)?;
+        let binding = binding.at_temperatures(self.law.temperature_axis(), &temperatures, gate)?;
+        binding.install(&mut self.flow.lattice, gate)?;
+        poll(gate)?;
+        self.wetting = Some(binding);
+        Ok(self)
+    }
+
     /// Add a hydrodynamic Cox law to an existing STATIC hysteresis binding.
     /// The actual local source viscosity and native surface tension follow the
     /// enthalpy trajectory. Surface tension is constant unless the uniform

@@ -85,7 +85,11 @@ impl WettingPhysics<'_> {
                 "contact line already owns a dynamic model; molecular kinetics and Cox cannot be stacked",
             ));
         }
-        if self.equilibrium.is_some() {
+        if self
+            .equilibrium
+            .as_ref()
+            .is_some_and(|binding| !binding.dynamic)
+        {
             return Err(Error::Invalid(
                 "equilibrium wetting cannot acquire an implicit molecular or hysteresis rate law",
             ));
@@ -128,8 +132,19 @@ impl WettingPhysics<'_> {
                     "molecular wetting cannot add rate dependence to a measured dynamic-angle curve",
                 ));
             }
+            if self.equilibrium.is_none() {
+                law.apparent_angle(
+                    property.value_si(),
+                    0.0,
+                    reference_temperature_k,
+                    surface_tension_n_m,
+                )?;
+            }
+        }
+        if let Some(equilibrium) = &self.equilibrium {
+            let sample = self.equilibrium_sample(equilibrium, 0.0, None, gate)?;
             law.apparent_angle(
-                property.value_si(),
+                sample.applied_angle_radians,
                 0.0,
                 reference_temperature_k,
                 surface_tension_n_m,

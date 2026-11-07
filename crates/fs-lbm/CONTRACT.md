@@ -8321,8 +8321,9 @@ Equilibrium samples retain their explicit angle origin and
 receipt, without fabricated hysteresis claims or a contact-speed query.
 This boundary does not need a resolved contact-line velocity, and therefore
 does not reject locally flat filling stencils merely for a zero tangential
-gradient. Adding Cox dynamics refuses rather than turning equilibrium work
-into a measured advancing/receding bracket. The separate planar and local
+gradient. An implicit Cox extension refuses rather than turning equilibrium work
+into a measured advancing/receding bracket. The explicit rate-law selector below
+retains the equilibrium source instead. The separate planar and local
 thermocapillary geometries remain incompatible with imposed wall angles;
 the height-graph sidewall domain is specified below. The local-cell
 interface-temperature approximation, stationary homogeneous-wall assumption
@@ -8334,6 +8335,30 @@ cover constant-source native parity, local W(T) feedback into the same
 momentum step with conserved mass and explicit heat, original-source and
 partial-wetting rollback/retry, and refusal of an implicit Cox extension.
 They are synthetic numerical tests, not experimental wetting validation.
+
+`MaterialFreeSurfaceEnthalpy3::with_dynamic_equilibrium_wetting` explicitly
+extends that original equilibrium binding with either
+`EquilibriumWettingRateLaw::CoxVoinov` or `MolecularKinetic`. The existing
+full-angle Cox or Blake--Haynes law uses the sourced equilibrium angle, or
+Young--Dupre angle from the original W(T) and SAME native sigma(T), as its
+microscopic endpoint. Cutoffs and molecular calibration remain separate model
+inputs. Accepted VOF history supplies signed contact-line speed; this smooth
+homogeneous-wall mode introduces no hysteresis interval or pinning deadband.
+Samples retain one original equilibrium claim with no fabricated speed axis,
+plus explicit dynamic-model diagnostics. Both thermal preparation and the
+advected endpoint refresh the selected source and native boundary together.
+
+Only constant or spatially uniform thermal tension is admitted for this moving
+boundary; the equilibrium height-graph extension remains static. Cox requires
+a Newtonian liquid and its declared low-Ca domain. Unresolved moving geometry,
+source/calibration exits, duplicate rate laws and cancellation refuse the whole
+candidate. Molecular loss remains a per-length diagnostic, not caloric heat.
+First-cell spatial and backward-time speed approximations, stationary-wall
+assumptions and the absence of closed surface/mechanical energy accounting
+remain. Focused synthetic regression definitions check independent forward Cox
+and molecular equations, original thermal adhesion receipts, native population
+response, and rollback; they do not establish experimental calibration or
+unconditional stability.
 
 `free_surface3_from_cells_with_uniform_thermal_capillarity` extends that same
 owner to time-varying sigma(T) in the exact zero-Marangoni domain. Every actual

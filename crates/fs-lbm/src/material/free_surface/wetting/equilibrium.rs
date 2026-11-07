@@ -18,6 +18,8 @@ use fs_material::liquid::surface::{
 pub(super) struct EquilibriumWetting {
     origin: EquilibriumAngleOrigin,
     surface_tension_n_m: Option<f64>,
+    /// Set only by the explicit equilibrium-rate-law selection below.
+    pub(super) dynamic: bool,
 }
 
 impl<'m> WettingBinding<'m> {
@@ -89,9 +91,33 @@ impl<'m> WettingBinding<'m> {
             equilibrium: Some(EquilibriumWetting {
                 origin,
                 surface_tension_n_m: liquid.surface_tension_n_m(),
+                dynamic: false,
             }),
         };
         Self::with_physics(flow, wall, physics, gate)
+    }
+
+    pub(in crate::material::free_surface) fn with_equilibrium_rate_law(
+        mut self,
+        law: EquilibriumWettingRateLaw,
+        temperature_axis: &str,
+        scaling: &MaterialFreeSurfaceScaling<'_>,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        checkpoint(gate)?;
+        let equilibrium = self.physics.equilibrium.as_mut().ok_or(Error::Invalid(
+            "an equilibrium rate law requires an original equilibrium wetting source",
+        ))?;
+        if equilibrium.dynamic {
+            return Err(Error::Invalid("equilibrium wetting already owns a rate law"));
+        }
+        equilibrium.dynamic = true;
+        match law {
+            EquilibriumWettingRateLaw::CoxVoinov(law) => self.with_cox_voinov(law, scaling, gate),
+            EquilibriumWettingRateLaw::MolecularKinetic(law) => {
+                self.with_molecular_kinetic(law, temperature_axis, scaling, gate)
+            }
+        }
     }
 }
 
