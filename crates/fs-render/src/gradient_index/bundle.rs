@@ -40,7 +40,7 @@ pub use continuation::{
 };
 
 /// Numerical semantics of smooth-field angular ray bundles.
-pub const RAY_BUNDLE_SEMANTICS_VERSION: u32 = 2;
+pub const RAY_BUNDLE_SEMANTICS_VERSION: u32 = 3;
 
 /// Analytic, symmetric spatial Hessian of phase index, in inverse square metres.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -987,11 +987,7 @@ fn bundle_step_in_coordinates<F: SecondOrderIndexField + ?Sized>(
     } else {
         None
     };
-    if stage[9] < state[9]
-        || stage[10] < state[10]
-        || stage[11] < state[11]
-        || stage.iter().any(|x| !x.is_finite())
-    {
+    if stage.iter().any(|x| !x.is_finite()) {
         return Err(GradientIndexError::NumericalRange);
     }
     Ok(BundleTrial {

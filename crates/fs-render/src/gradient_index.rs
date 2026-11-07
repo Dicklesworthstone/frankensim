@@ -32,7 +32,7 @@ pub mod event;
 pub mod thermal;
 
 /// Version of the deterministic gradient-index propagation arithmetic.
-pub const GRADIENT_INDEX_SEMANTICS_VERSION: u32 = 2;
+pub const GRADIENT_INDEX_SEMANTICS_VERSION: u32 = 3;
 /// Hard ceiling on attempted adaptive steps, including rejected steps.
 pub const MAX_GRADIENT_INDEX_STEPS: u32 = 1_000_000;
 
@@ -750,9 +750,6 @@ fn trial_step_guarded_observed<F: GradientIndexField + ?Sized>(
     let projection_error = norm(sub(direction, raw_direction)).max(norm(sub(axis, raw_axis)));
     put_vec(&mut stage, 3, direction);
     put_vec(&mut stage, 6, axis);
-    if stage[9] < state[9] || stage[10] < state[10] || stage[11] < state[11] {
-        return Err(GradientIndexError::NumericalRange);
-    }
     Ok(Trial {
         state: stage,
         error,
@@ -795,6 +792,14 @@ fn normalized_error(
     step: f64,
     options: GradientIndexOptions,
 ) -> Result<f64, GradientIndexError> {
+    // Dormand–Prince has a negative quadrature weight. Although all admitted
+    // phase/group indices and extinction samples are nonnegative, an unresolved
+    // finite trial can decrease their integrals. Reject and refine that trial;
+    // it is neither a material-domain failure nor a reason to clamp the path.
+    // This shared policy also governs event walks, bundles and thermal sources.
+    if (9..12).any(|i| trial.state[i] < state[i]) {
+        return Ok(f64::MAX);
+    }
     let angular_scale = options.direction_tolerance + options.relative_tolerance;
     let mut result = trial.projection_error / angular_scale;
     for i in 0..12 {

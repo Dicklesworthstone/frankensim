@@ -547,3 +547,160 @@ fn g1_infrared_lte_emission_uses_the_same_absorbing_path_and_si_planck_law() {
     close(emission, expected, 2e-11 * expected);
     close(path.propagation.optical_depth, 0.6 * length, 2e-14);
 }
+
+// A nonnegative smooth profile with roots at the positive-weight stages of
+// an initial unit Dormand–Prince step. Its integral on [0,1] is 139/1575000.
+// The negative 8/9-stage weight makes the first tentative depth negative.
+struct StructuredAbsorption;
+
+impl GradientIndexField for StructuredAbsorption {
+    fn sample(&self, position: Point3, _: f64) -> Result<GradientIndexSample, GradientIndexError> {
+        // For n(y)=1.5+0.3y, the on-axis ray has x(s)=5 asinh(s/5).
+        // Express absorption using its exact inverse so the depth oracle is
+        // independent of the numerical curved ray and its quadrature.
+        let s = 5.0 * (position.x / 5.0).sinh();
+        let polynomial = s * (s - 0.3) * (s - 0.8) * (s - 1.0);
+        GradientIndexSample::try_new(
+            1.5 + 0.3 * position.y,
+            Vec3::new(0.0, 0.3, 0.0),
+            10000.0 * polynomial * polynomial,
+            Some(1.5 + 0.3 * position.y),
+        )
+    }
+}
+
+impl bundle::SecondOrderIndexField for StructuredAbsorption {
+    fn sample_second_order(
+        &self,
+        position: Point3,
+        wavelength_nm: f64,
+    ) -> Result<bundle::IndexJet, GradientIndexError> {
+        Ok(bundle::IndexJet::new(
+            self.sample(position, wavelength_nm)?,
+            bundle::IndexHessian::ZERO,
+        ))
+    }
+}
+
+fn structured_absorption_options() -> GradientIndexOptions {
+    GradientIndexOptions {
+        initial_step_m: 1.0,
+        max_step_m: 1.0,
+        relative_tolerance: 1e-11,
+        optical_depth_tolerance: 1e-12,
+        ..GradientIndexOptions::default()
+    }
+}
+
+#[test]
+fn g1_positive_curved_optical_integrals_refine_nonmonotone_trials() {
+    let options = structured_absorption_options();
+    let scalar = propagate(&StructuredAbsorption, ray(), axis(), 550.0, 1.0, options).unwrap();
+    let bundle = bundle::propagate_bundle(
+        &StructuredAbsorption,
+        ray(),
+        axis(),
+        550.0,
+        1.0,
+        bundle::BundleOptions {
+            integration: options,
+            ..bundle::BundleOptions::default()
+        },
+    )
+    .unwrap();
+    let event = event::propagate_to_boundary(
+        &StructuredAbsorption,
+        &mut Unbounded,
+        ray(),
+        axis(),
+        550.0,
+        1.0,
+        None,
+        event::GradientEventOptions {
+            integration: options,
+            ..event::GradientEventOptions::default()
+        },
+    )
+    .unwrap();
+    let expected_depth = 139.0 / 157.5;
+    let temperature = 420.0;
+    let wavelength_nm = 11000.0;
+    let (thermal_path, emission) = thermal::propagate_emission_to_boundary_with_control(
+        &StructuredAbsorption,
+        &|_: Point3| Ok(temperature),
+        1e-12,
+        &mut Unbounded,
+        ray(),
+        axis(),
+        wavelength_nm,
+        1.0,
+        None,
+        event::GradientEventOptions {
+            integration: options,
+            ..event::GradientEventOptions::default()
+        },
+        || true,
+    )
+    .unwrap();
+    let lambda_m: f64 = wavelength_nm * 1e-9;
+    let h = 6.626_070_15e-34;
+    let c = 299_792_458.0_f64;
+    let k = 1.380_649e-23;
+    let blackbody = (2.0 * h * c * c / lambda_m.powi(5)) * 1e-9
+        / (h * c / (lambda_m * k * temperature)).exp_m1();
+    close(
+        emission,
+        blackbody * -(-expected_depth).exp_m1(),
+        2e-9 * blackbody,
+    );
+    for path in [
+        scalar,
+        *bundle.propagation(),
+        event.propagation,
+        thermal_path.propagation,
+    ] {
+        close(path.optical_depth, expected_depth, 2e-9);
+        close(path.power_transmittance(), (-expected_depth).exp(), 1e-9);
+        close(path.ray.origin.x, 5.0 * 0.2_f64.asinh(), 2e-9);
+        close(path.final_sample.phase_index() * path.ray.dir.x, 1.5, 2e-10);
+        assert!(path.rejected_steps > 0);
+        assert!(path.max_normalized_error_estimate <= 1.0);
+        assert_eq!(
+            path.field_evaluations,
+            1 + 6 * (path.accepted_steps + path.rejected_steps)
+        );
+    }
+}
+
+#[test]
+fn g4_unresolved_optical_integrals_retain_accuracy_budget_and_cancellation_limits() {
+    let mut options = structured_absorption_options();
+    options.min_step_m = 1.0;
+    assert_eq!(
+        propagate(&StructuredAbsorption, ray(), axis(), 550.0, 1.0, options),
+        Err(GradientIndexError::AccuracyNotReached)
+    );
+    options.min_step_m = 1e-10;
+    options.max_steps = 1;
+    assert_eq!(
+        propagate(&StructuredAbsorption, ray(), axis(), 550.0, 1.0, options),
+        Err(GradientIndexError::StepBudgetExceeded)
+    );
+    let mut polls = 0;
+    assert_eq!(
+        propagate_with_control(
+            &StructuredAbsorption,
+            ray(),
+            axis(),
+            550.0,
+            1.0,
+            structured_absorption_options(),
+            || {
+                polls += 1;
+                polls <= 2
+            },
+        ),
+        Err(GradientIndexError::Cancelled)
+    );
+    assert_eq!(polls, 3);
+}
