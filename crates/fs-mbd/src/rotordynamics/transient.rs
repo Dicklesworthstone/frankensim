@@ -18,6 +18,8 @@ use super::{MAX_ROTOR_DOFS, RotorBearingModel, RotorError, RotorOperatingPoint, 
 use fs_la::factor::{Cholesky, FactorError, Lu, cholesky, lu};
 use fs_math::dd::Dd;
 
+pub mod drive;
+
 /// Original generalized displacement/angle and rate coordinates.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RotorTransientState {
