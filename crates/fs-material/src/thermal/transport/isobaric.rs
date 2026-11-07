@@ -417,6 +417,18 @@ pub(crate) fn source_linear_heat_exchange(
     })
 }
 
+/// Exact exposure to a boundary of one already admitted original Cp interval.
+/// The phase owner uses this to split sensible and latent residence without
+/// copying the logarithmic exchange kernel or approximating a transition time.
+pub(crate) fn source_linear_heat_exchange_exposure(
+    knots: &[[f64; 2]; 2],
+    initial_k: f64,
+    final_k: f64,
+    reservoir_k: f64,
+) -> Result<f64, ThermalTransportError> {
+    CapacityCurve::new(knots).exchange_integral(0, initial_k, final_k, reservoir_k)
+}
+
 impl ThermalLaw for IsobaricHeatCapacityLaw {
     fn caloric_identity(&self) -> Option<[u8; 32]> {
         Some(*self.identity.as_bytes())

@@ -35,6 +35,8 @@
 //! rung deliberately has no power vocabulary of its own.
 
 pub mod interference;
+/// Exact held-bath convection on the original sensible/latent chart.
+pub mod exchange;
 /// Prepared original uniform-body residual for coupled endpoint solves.
 pub mod endpoint;
 

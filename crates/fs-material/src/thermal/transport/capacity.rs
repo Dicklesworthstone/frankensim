@@ -499,14 +499,30 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
         ))
     }
 
-    #[cfg(test)]
-    fn exchange_integral(
+    /// Exposure required to traverse part of one original affine-Cp interval.
+    /// Reaching the reservoir itself takes infinite exposure. This shares the
+    /// forward integral used by the bounded exchange inverse.
+    pub(super) fn exchange_integral(
         &self,
         index: usize,
         initial: f64,
         final_t: f64,
         reservoir: f64,
     ) -> Result<f64, ThermalTransportError> {
+        let Some(upper) = index.checked_add(1).and_then(|i| self.knots.get(i)) else {
+            return Err(invalid("heat-exchange interval is outside source support"));
+        };
+        let lower = &self.knots[index];
+        if !positive(reservoir)
+            || !initial.is_finite() || !final_t.is_finite()
+            || initial < lower.temperature() || initial > upper.temperature()
+            || final_t < lower.temperature() || final_t > upper.temperature()
+            || (final_t > initial && final_t > reservoir)
+            || (final_t < initial && final_t < reservoir)
+        {
+            return Err(invalid("heat-exchange exposure needs a supported path toward the reservoir"));
+        }
+        if initial == final_t { return Ok(0.0); }
         let segment = ExchangeSegment {
             distance: (reservoir - initial).abs(),
             width: (final_t - initial).abs(),

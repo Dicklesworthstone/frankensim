@@ -10,6 +10,8 @@
 //! finite-strain, fluid, remeshing, acoustic, and optical consumers own their
 //! respective responses to the returned phase state.
 
+/// Exact fixed-reservoir sensible and latent heat exchange.
+pub mod exchange;
 /// Declared stationary solid/liquid mixture mobility on this same h chart.
 pub mod mushy;
 /// Shared declared phase dependence of thermal conductivity.

@@ -5124,15 +5124,19 @@ or continuum entropy certificate.
 ## Entropy across the accepted adaptive enthalpy history
 
 `adaptive_state_with_entropy` prepares a resumable
-`AdaptiveEnthalpyEntropyState` using the original backward-Euler adaptive
-controller. The physical history is exposed read-only through `history()`;
+`AdaptiveEnthalpyEntropyState` using the shared backward-Euler and SDIRK2
+adaptive controller. The physical history is exposed read-only through `history()`;
 `entropy_balance()` retains the complete accepted window. The original
 energy-only methods continue through the same controller with the optional
 account disabled. No separate Newton solve, spatial discretization, time-error
 estimator or controller is introduced.
 
 Each comparison trial keeps its coarse solve energy-only and entropy-admits
-the two actual fine endpoints through their original final physical operators.
+the two actual fine intervals through their original physical operators.
+Backward Euler uses its endpoint account; `advance_to_sdirk2` and its observed
+counterpart retain both native stages and their actual heat/reservoir
+quadrature. The methods may alternate between event calls without resetting
+accepted enthalpy, heat or entropy.
 Only a pair accepted by the native time-error controller enters the retained
 account. Rejected comparison work contributes to work counters, never to
 storage or heat/entropy totals. Ten double-double accumulators retain signed
@@ -5142,7 +5146,7 @@ resumption. Material and bonded-film storage is remeasured directly from the
 original initial enthalpies to the accepted final field. The unclassified-input
 flag survives cancellation of signed source totals.
 
-One caller-supplied absolute J/K tolerance applies to each fine endpoint and
+One caller-supplied absolute J/K tolerance applies to each fine interval and
 to the whole accepted window; it is not multiplied by the number of steps.
 The next account is checked before the physical field, clock and entropy are
 published together. A refused pair leaves earlier accepted pairs intact.
@@ -5159,6 +5163,9 @@ radiation remains unsupported. No photon entropy is inferred. Regression definit
 native accepted trajectory bits, budget-resumed totals, rejected-work
 exclusion, latent storage and signed source cancellation, observer
 cancellation, and radiative cooling with the original native energy path.
+The SDIRK2 definitions additionally compare original stage bath entropy,
+method switching through latent storage, whole-window resumption and native
+negative-production refusal. L-stability is not an entropy-positivity proof.
 
 
 ### Entropy admission for scheduled adaptive enthalpy histories
@@ -5374,3 +5381,44 @@ flux tangents, plus mass/volume assembly scaling, original identity, support
 hole, axis and cancellation refusals. These native tests were authored but
 not executed in the implementation environment. Syntax parsing and an
 independent scalar arithmetic audit are not compilation or native execution.
+
+## Exact fixed-reservoir convection through sensible and latent enthalpy
+
+`lumped::exchange::solve_lumped_linear_exchange` evolves an original
+`LumpedEnthalpyBody` against a fixed-temperature bath with its held convection
+coefficient, area and mass. It delegates to the original phase curve's
+`linear_heat_exchange_with_checkpoint`, using exposure `G * duration / mass`.
+The material operation integrates `dh/dX = T_bath - T(h)` through retained
+source-affine Cp branches, authored affine T(h) intervals (including mushy
+spans), and sharp fusion plateaus. A plateau consumes its latent inventory
+at the actual constant driving temperature. Heating and cooling use the
+same supplied equilibrium chart; latent heat enters the storage account once.
+
+The phase operation visits each crossed interval once, allocates no trajectory
+or temporary chart, and reuses the original bounded sensible-exchange kernel.
+No temporal subdivision or apparent heat capacity is introduced. It reports
+the integrated relative heat, exposure-weighted temperature, represented
+endpoint enthalpy change and their actual residual separately. Original
+material/curve identities, state density and source support remain intact.
+The bath may lie outside source support; the material trajectory may not.
+Completely lost absolute-enthalpy increments refuse. Partial quantization
+remains visible rather than being hidden by the arbitrary enthalpy datum.
+
+The native body adapter retains the conservative full-span conductivity/Biot
+gate and requires radiation to be explicitly disabled. It admits the actual
+stored-energy residual against the caller's absolute joule tolerance before
+returning a complete immutable proposal. Zero conductance or duration retains
+the initial state. Cancellation before work, during chart traversal or before
+publication returns no accepted proposal. This is a fixed-geometry, fixed-mass,
+fixed-conductance, infinite-bath reduction. The caller retains the original
+chart's pressure/work convention; internal power, finite baths, radiation,
+geometry evolution and nonequilibrium phase kinetics require their existing
+physical owners rather than reinterpretation of this exchange.
+
+Six material and four native lumped regression definitions exercise independent
+analytical sensible/latent heating and cooling, latent residence, equilibrium,
+source subdivision, exchange composition, datum shifts, authored mushy laws,
+weak heat, original identity/support and cancellation, integrated convection
+means, Biot/radiation admission and the absolute state-quantization budget.
+These definitions were syntax-checked but not natively executed in the
+resource-exhausted implementation environment.

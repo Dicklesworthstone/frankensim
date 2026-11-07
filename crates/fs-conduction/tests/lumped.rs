@@ -5,6 +5,9 @@
 
 mod support;
 
+#[path = "lumped/exchange.rs"]
+mod exchange;
+
 use fs_blake3::ContentHash;
 use fs_conduction::ConductionError;
 use fs_conduction::bc::{ThermalBc, ThermalBoundary, ThermalBoundaryBuilder};
