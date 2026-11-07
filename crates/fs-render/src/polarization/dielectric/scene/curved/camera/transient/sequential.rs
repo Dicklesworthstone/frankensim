@@ -3,6 +3,8 @@
 use super::*;
 use crate::camera::SequentialCameraBeam;
 
+mod exposure;
+
 impl TransientCurvedCameraScene<'_, '_, '_> {
     /// Continue a timed sequential beam through the original native history
     /// walk. Every source sees the supplied sensor observation clock and its
@@ -102,7 +104,7 @@ impl TransientCurvedCameraScene<'_, '_, '_> {
     }
 }
 
-fn lens_delay(optical: &SequentialCameraBeam) -> Result<Dd, TransientCameraError> {
+pub(super) fn lens_delay(optical: &SequentialCameraBeam) -> Result<Dd, TransientCameraError> {
     optical
         .group_delay_s()
         .filter(|delay| finite_dd(*delay) && Dd::ZERO.lt(*delay))

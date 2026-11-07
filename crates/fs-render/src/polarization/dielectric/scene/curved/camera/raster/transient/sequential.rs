@@ -6,6 +6,8 @@ use super::*;
 use crate::camera::SequentialCameraBeam;
 use crate::polarization::dielectric::scene::curved::camera::transient::admit_time;
 
+mod exposure;
+
 /// A resolved-lens observation with its original admitted sensor clock.
 /// The contained visible or QE result retains optional wavelength paths and
 /// the complete proposal measure, including physically clipped draws.

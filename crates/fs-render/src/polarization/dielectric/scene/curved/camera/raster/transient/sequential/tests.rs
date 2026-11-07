@@ -20,6 +20,8 @@ use fs_blake3::ContentHash;
 use fs_geom::{Point3, Vec3};
 use std::sync::Mutex;
 
+mod exposure;
+
 const SEED: u64 = 79;
 const SAMPLE: u32 = 6;
 const C: f64 = 299792458.0;

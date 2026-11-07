@@ -4290,8 +4290,23 @@ pupil, spectral and surface variate addresses are retained; clipped wavelengths
 keep zero contribution and their complete proposal mass without history calls.
 Even a fully clipped packet admits the sensor clock and cancellation. Original
 source failures abort the complete observation. These entry points cover
-instantaneous finite-source histories; exposure quadrature, area-source and
-molecular transient coupling through the resolved lens remain separate work.
+instantaneous finite-source histories.
+
+`sample_sequential_ray_during_exposure` and its original-variate counterpart
+retain a rectangular `ExposureWindow` at the physical sensor. Each emitting
+hit requests its original history's interval average after subtracting that
+hit's lens-plus-scene group delay from both shutter endpoints. There is one
+native path per wavelength, with no temporal quadrature or extra random draws.
+`sample_pixel_sequential_during_exposure` and
+`sample_pixel_sensor_sequential_during_exposure` reuse the original visible
+and QE integrations, including optional clipped lanes and sensor-side analyzer
+placement. QE energy and expected photoelectrons use the explicit DD shutter
+duration and the common detector rate integrator. Default generic exposure
+payloads preserve the original mandatory-ray API. Different per-pixel windows
+can express authored row timing; moving geometry, time-varying optical laws,
+and nonlinear sensor response are not inferred. Unsupported source interval
+averages refuse rather than substituting sampled instantaneous values.
+Area-source and molecular transient lens coupling remain separate work.
 
 `CurvedCameraRaster::sample_pixel_sequential` and
 `sample_pixel_sensor_sequential` integrate the same full optical seeds into

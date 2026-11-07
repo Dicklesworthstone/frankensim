@@ -13,6 +13,8 @@ use fs_exec::{CancelGate, ExecMode, StreamKey};
 use fs_geom::Vec3;
 use std::sync::Mutex;
 
+mod exposure;
+
 fn with_cx(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
     let gate = CancelGate::new_clock_free();
     fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {

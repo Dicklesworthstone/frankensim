@@ -4,8 +4,9 @@
 //! laws are fixed. One original path therefore suffices: each emitting hit
 //! requests its source's mean over the shutter interval shifted by that hit's
 //! own group delay. No temporal quadrature or extra transport variates occur.
-//! The interval is rectangular at the original launch/pupil clock; lens transit,
-//! moving geometry and nonlinear sensor electronics are not supplied here.
+//! The interval is rectangular at the original observer clock. Explicit timed
+//! sequential beams include their lens transit before every source interval;
+//! moving geometry and nonlinear sensor electronics remain separate models.
 
 use super::*;
 
@@ -93,7 +94,31 @@ impl TransientCurvedCameraScene<'_, '_, '_> {
     ) -> Result<ExposureCameraSample, TransientCameraError> {
         cx.checkpoint()?;
         let beam = self.launch(ray, wavelength_nm, initial_medium)?;
-        let initial_index = phase_index(beam.medium(), wavelength_nm)?;
+        self.sample_launched_ray_during_exposure(
+            cx,
+            beam,
+            initial_medium,
+            window,
+            Dd::ZERO,
+            settings,
+            seed,
+            path_id,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn sample_launched_ray_during_exposure(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        window: ExposureWindow,
+        launch_delay_s: Dd,
+        settings: CurvedTraceSettings,
+        seed: u64,
+        path_id: u64,
+    ) -> Result<ExposureCameraSample, TransientCameraError> {
+        let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
         let mut emission = SurfaceEmission::new(self.camera, initial_index);
         let mut error = None;
         let result = self.camera.scene.trace_with_seed_events_mode(
@@ -105,7 +130,16 @@ impl TransientCurvedCameraScene<'_, '_, '_> {
             path_id,
             true,
             &self.camera.spatial_volume_emitters,
-            |event| self.observe_exposure(cx, window, event, &mut emission, &mut error),
+            |event| {
+                self.observe_exposure_with_delay(
+                    cx,
+                    window,
+                    launch_delay_s,
+                    event,
+                    &mut emission,
+                    &mut error,
+                )
+            },
         );
         if let Some(error) = error {
             return Err(error);
@@ -131,7 +165,29 @@ impl TransientCurvedCameraScene<'_, '_, '_> {
     ) -> Result<ExposureCameraSample, TransientCameraError> {
         cx.checkpoint()?;
         let beam = self.launch(ray, wavelength_nm, initial_medium)?;
-        let initial_index = phase_index(beam.medium(), wavelength_nm)?;
+        self.sample_launched_ray_with_samples_during_exposure(
+            cx,
+            beam,
+            initial_medium,
+            window,
+            Dd::ZERO,
+            settings,
+            samples,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn sample_launched_ray_with_samples_during_exposure(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        window: ExposureWindow,
+        launch_delay_s: Dd,
+        settings: CurvedTraceSettings,
+        samples: impl FnMut(u32) -> [f64; 3],
+    ) -> Result<ExposureCameraSample, TransientCameraError> {
+        let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
         let mut emission = SurfaceEmission::new(self.camera, initial_index);
         let mut error = None;
         let result = self.camera.scene.trace_with_samples_events_mode(
@@ -142,7 +198,16 @@ impl TransientCurvedCameraScene<'_, '_, '_> {
             samples,
             true,
             &self.camera.spatial_volume_emitters,
-            |event| self.observe_exposure(cx, window, event, &mut emission, &mut error),
+            |event| {
+                self.observe_exposure_with_delay(
+                    cx,
+                    window,
+                    launch_delay_s,
+                    event,
+                    &mut emission,
+                    &mut error,
+                )
+            },
         );
         if let Some(error) = error {
             return Err(error);
@@ -162,12 +227,26 @@ impl TransientCurvedCameraScene<'_, '_, '_> {
         emission: &mut SurfaceEmission<'_, '_, '_>,
         error: &mut Option<TransientCameraError>,
     ) -> Result<(), CurvedSceneError> {
+        self.observe_exposure_with_delay(cx, window, Dd::ZERO, event, emission, error)
+    }
+
+    pub(super) fn observe_exposure_with_delay(
+        &self,
+        cx: &Cx<'_>,
+        window: ExposureWindow,
+        launch_delay_s: Dd,
+        event: CurvedTraceEvent<'_>,
+        emission: &mut SurfaceEmission<'_, '_, '_>,
+        error: &mut Option<TransientCameraError>,
+    ) -> Result<(), CurvedSceneError> {
         match event {
             CurvedTraceEvent::Arrival(path) => {
-                let scale = self.exposure_scale(cx, window, path).map_err(|failure| {
-                    *error = Some(failure);
-                    CurvedSceneError::NumericalRange
-                })?;
+                let scale = self
+                    .exposure_scale_with_delay(cx, window, launch_delay_s, path)
+                    .map_err(|failure| {
+                        *error = Some(failure);
+                        CurvedSceneError::NumericalRange
+                    })?;
                 emission.observe_modulated(path, scale)
             }
             CurvedTraceEvent::Departure { path, .. } => {
@@ -183,7 +262,19 @@ impl TransientCurvedCameraScene<'_, '_, '_> {
         window: ExposureWindow,
         path: &CurvedPathResult,
     ) -> Result<f64, TransientCameraError> {
-        let Some((binding, opening)) = self.source_query(cx, window.open_s, path)? else {
+        self.exposure_scale_with_delay(cx, window, Dd::ZERO, path)
+    }
+
+    pub(super) fn exposure_scale_with_delay(
+        &self,
+        cx: &Cx<'_>,
+        window: ExposureWindow,
+        launch_delay_s: Dd,
+        path: &CurvedPathResult,
+    ) -> Result<f64, TransientCameraError> {
+        let Some((binding, opening)) =
+            self.source_query_with_delay(cx, window.open_s, launch_delay_s, path)?
+        else {
             return Ok(1.0);
         };
         average_history(cx, binding, opening, window)
@@ -198,8 +289,7 @@ pub(super) fn average_history(
 ) -> Result<f64, TransientCameraError> {
     let object_id = binding.object_id;
     let emission_close_s = retarded_time(window.close_s, opening.group_delay_s, object_id)?;
-    let duration_error =
-        ((emission_close_s - opening.emission_time_s) - window.duration_s).abs();
+    let duration_error = ((emission_close_s - opening.emission_time_s) - window.duration_s).abs();
     if !opening.emission_time_s.lt(emission_close_s)
         || (window.duration_s * Dd::from_f64(64.0 * f64::EPSILON)).lt(duration_error)
     {

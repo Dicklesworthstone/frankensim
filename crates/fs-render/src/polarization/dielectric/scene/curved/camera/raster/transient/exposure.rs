@@ -12,34 +12,34 @@ use crate::polarization::dielectric::scene::curved::camera::transient::exposure:
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ExposurePixelSample {
+pub struct ExposurePixelSample<P = CurvedPixelSample> {
     window: ExposureWindow,
-    mean_pixel: CurvedPixelSample,
+    mean_pixel: P,
 }
 
-impl ExposurePixelSample {
+impl<P> ExposurePixelSample<P> {
     pub const fn window(&self) -> ExposureWindow {
         self.window
     }
     /// Original CIE/XYZ observation of the shutter-averaged radiance.
-    pub const fn mean_pixel_sample(&self) -> &CurvedPixelSample {
+    pub const fn mean_pixel_sample(&self) -> &P {
         &self.mean_pixel
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ExposureSensorPixelSample<const CHANNELS: usize> {
+pub struct ExposureSensorPixelSample<const CHANNELS: usize, P = CurvedSensorPixelSample<CHANNELS>> {
     window: ExposureWindow,
-    mean_pixel: CurvedSensorPixelSample<CHANNELS>,
+    mean_pixel: P,
     qe_weighted_energy_j_m2_sr: [f64; CHANNELS],
     photoelectrons_per_m2_sr: [f64; CHANNELS],
 }
 
-impl<const C: usize> ExposureSensorPixelSample<C> {
+impl<const C: usize, P> ExposureSensorPixelSample<C, P> {
     pub const fn window(&self) -> ExposureWindow {
         self.window
     }
-    pub const fn mean_pixel_sample(&self) -> &CurvedSensorPixelSample<C> {
+    pub const fn mean_pixel_sample(&self) -> &P {
         &self.mean_pixel
     }
     /// Time-integrated QE-weighted radiance, before pixel etendue.
@@ -155,10 +155,7 @@ impl CurvedCameraRaster<'_> {
     }
 }
 
-pub(super) fn finish_pixel(
-    window: ExposureWindow,
-    mean_pixel: CurvedPixelSample,
-) -> ExposurePixelSample {
+pub(super) fn finish_pixel<P>(window: ExposureWindow, mean_pixel: P) -> ExposurePixelSample<P> {
     ExposurePixelSample { window, mean_pixel }
 }
 
@@ -166,19 +163,27 @@ pub(super) fn finish_sensor<const C: usize>(
     window: ExposureWindow,
     mean_pixel: CurvedSensorPixelSample<C>,
 ) -> Result<ExposureSensorPixelSample<C>, TransientRasterError> {
+    let qe_rate = *mean_pixel.qe_weighted_radiance_w_m2_sr();
+    let electron_rate = *mean_pixel.photoelectron_rate_per_m2_sr();
+    finish_sensor_rates(window, mean_pixel, qe_rate, electron_rate)
+}
+
+// Both mandatory and clipped-lane pixel payloads use the same final unit
+// conversion. The rates already include original spectral and pupil weights.
+pub(super) fn finish_sensor_rates<const C: usize, P>(
+    window: ExposureWindow,
+    mean_pixel: P,
+    qe_rate: [f64; C],
+    electron_rate: [f64; C],
+) -> Result<ExposureSensorPixelSample<C, P>, TransientRasterError> {
     let mut qe_weighted_energy_j_m2_sr = [0.0; C];
     let mut photoelectrons_per_m2_sr = [0.0; C];
     for channel in 0..C {
-        qe_weighted_energy_j_m2_sr[channel] = integrate_rate(
-            mean_pixel.qe_weighted_radiance_w_m2_sr()[channel],
-            window.duration_s(),
-        )
-        .map_err(|error| TransientRasterError::Source(error.into()))?;
-        photoelectrons_per_m2_sr[channel] = integrate_rate(
-            mean_pixel.photoelectron_rate_per_m2_sr()[channel],
-            window.duration_s(),
-        )
-        .map_err(|error| TransientRasterError::Source(error.into()))?;
+        qe_weighted_energy_j_m2_sr[channel] = integrate_rate(qe_rate[channel], window.duration_s())
+            .map_err(|error| TransientRasterError::Source(error.into()))?;
+        photoelectrons_per_m2_sr[channel] =
+            integrate_rate(electron_rate[channel], window.duration_s())
+                .map_err(|error| TransientRasterError::Source(error.into()))?;
     }
     Ok(ExposureSensorPixelSample {
         window,
