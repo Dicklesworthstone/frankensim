@@ -15075,3 +15075,35 @@ invariance, explicit source-density roundoff budgets, incompatible geometry,
 ordinary thermal refusal and cancellation. Changed Rust sources passed parser
 and whitespace review; these tests were not compiled or executed in the
 constrained environment.
+
+### Localized linear and angular impulses on dense native lattices
+
+`Grid3::apply_wrench_impulse` and `ForcedGrid3::apply_wrench_impulse`
+deposit one authored total `WrenchImpulse3` onto an increasing, unique stencil
+of actual fluid cells. `origin` fixes the angular-impulse reference in lattice
+lengths; native positions are cell centers. The stencil's original population
+masses determine its center and inertia. The rotation solves
+`I * delta_omega = angular - (center-origin) cross linear`, using the original
+rank-aware angular correction. Together with uniform translation, this is the
+minimum mass-weighted squared velocity change that supplies the wrench.
+
+Collinear stencils carry transverse angular impulse but cannot invent axial
+spin. A single cell carries its point-force moment but no independent couple.
+Unresolved angular impulse outside the explicit budget is refused. The API
+requires nonperiodic topology; it does not infer an unwrapped moment chart.
+
+The existing Guo-frame impulse retains physical nonequilibrium stress and
+density, supplies signed kinetic work, and preserves the original uniform or
+cellwise force epoch. The dependent receipt observes original and staged
+physical momentum at each selected position. Deposition error and measured
+local/global linear and angular defects must pass their explicit bounds before
+the original population swap. Rank failure, excess speed, a late torque defect,
+or cancellation preserves all accepted fields and completed-step counts.
+
+There is one compact stencil vector plus the native bounded 3-by-3 factorization
+workspace; the original next-population storage is reused without a dense
+impulse field. No time, collision, pressure projection, heat or receiving-body
+reaction is added. The coupled body owner retains its reciprocal dynamics and
+work account. Tests cover unequal-mass couples on D3Q19 and D3Q27, off-center
+loads and origin covariance, minimum-change deposition, rank deficiency,
+spatial-force torque, retained stress, Galilean work, and late refusal/cancellation.
