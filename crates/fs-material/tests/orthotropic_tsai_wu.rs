@@ -207,6 +207,111 @@ fn g1_biaxial_tension_and_out_of_plane_shear_can_govern_before_uniaxial_limits()
 }
 
 #[test]
+fn g1_affine_loading_holds_prestress_fixed_through_unloading_and_load_reversal() {
+    let strengths = [100.0, 180.0, 15.0, 35.0, 8.0, 19.0, 6.0, 4.0, 5.0];
+    let law = law(strengths, [0.2, -0.3, 0.1]);
+    for axis in 0..3 {
+        for initial in [0.4 * strengths[2 * axis], -0.4 * strengths[2 * axis + 1]] {
+            for sign in [1.0, -1.0] {
+                let mut residual = [0.0; 6];
+                let mut load = [0.0; 6];
+                residual[axis] = initial;
+                load[axis] = sign * 0.2 * strengths[2 * axis];
+                let endpoint = if sign > 0.0 { strengths[2 * axis] }
+                    else { -strengths[2 * axis + 1] };
+                let result = law.assess_affine_load(&residual, &load).unwrap();
+                near(result.load_factor(), (endpoint - initial) / load[axis]);
+                near(result.boundary().material_stress_pa()[axis], endpoint);
+                near(result.boundary().utilization(), 1.0);
+            }
+        }
+        for sign in [1.0, -1.0] {
+            let mut residual = [0.0; 6];
+            let mut load = [0.0; 6];
+            residual[axis + 3] = 0.3 * strengths[axis + 6];
+            load[axis + 3] = sign * 0.2 * strengths[axis + 6];
+            let result = law.assess_affine_load(&residual, &load).unwrap();
+            near(result.load_factor(), if sign > 0.0 { 3.5 } else { 6.5 });
+            near(result.boundary().material_stress_pa()[axis + 3], sign * strengths[axis + 6]);
+        }
+    }
+}
+
+#[test]
+fn g1_affine_multiaxial_boundary_matches_independent_strength_polynomial() {
+    let strengths = [100.0, 180.0, 15.0, 35.0, 8.0, 19.0, 6.0, 4.0, 5.0];
+    let interaction = [0.2, -0.3, 0.1];
+    let law = law(strengths, interaction);
+    let residual = [15.0, -5.0, 1.5, 1.0, -0.4, 0.6];
+    assert!(polynomial(residual, strengths, interaction) < 1.0);
+    for load in [
+        [12.0, 4.0, -1.5, 2.0, 0.7, -0.4],
+        [-9.0, 1.0, -2.5, -0.5, 0.2, -0.1],
+        [0.0, 0.0, 0.0, 0.5, -0.7, 0.9],
+    ] {
+        let result = law.assess_affine_load(&residual, &load).unwrap();
+        let stress_at = |factor: f64| core::array::from_fn(|i| residual[i] + factor * load[i]);
+        assert_eq!(result.boundary().material_stress_pa(), stress_at(result.load_factor()));
+        near(polynomial(result.boundary().material_stress_pa(), strengths, interaction), 1.0);
+        assert!(polynomial(stress_at(result.load_factor() * 0.99), strengths, interaction) < 1.0);
+        assert!(polynomial(stress_at(result.load_factor() * 1.01), strengths, interaction) > 1.0);
+        near(result.boundary().utilization(), 1.0);
+        for scale in [1e-100, 0.01, 100.0, 1e100] {
+            let scaled = law.assess_affine_load(&residual, &load.map(|v| v * scale)).unwrap();
+            near(scaled.load_factor() * scale, result.load_factor());
+            for (a, b) in scaled.boundary().material_stress_pa().into_iter()
+                .zip(result.boundary().material_stress_pa()) {
+                near(a, b);
+            }
+        }
+        let zero_residual = law.assess_affine_load(&[0.0; 6], &load).unwrap();
+        near(zero_residual.load_factor(), 1.0 / law.assess_material_stress(&load).unwrap().utilization());
+    }
+}
+
+#[test]
+fn g0_affine_loading_refuses_initial_failure_and_undefined_directions() {
+    let law = law([100.0; 9], [0.0; 3]);
+    let load = [10.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    for residual in [
+        [100.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [-101.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [80.0, 80.0, 0.0, 0.0, 0.0, 0.0],
+    ] {
+        assert!(law.assess_affine_load(&residual, &load).is_err());
+    }
+    assert!(law.assess_affine_load(&[0.0; 6], &[0.0; 6]).is_err());
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut invalid = load;
+        invalid[4] = bad;
+        assert!(law.assess_affine_load(&invalid, &load).is_err());
+        assert!(law.assess_affine_load(&[0.0; 6], &invalid).is_err());
+    }
+    // A small remaining margin must not be rounded away by subtracting two
+    // separately evaluated nearly equal dimensional strength polynomials.
+    let residual = [100.0 * (1.0 - 1e-8), 0.0, 0.0, 0.0, 0.0, 0.0];
+    let result = law.assess_affine_load(&residual, &load).unwrap();
+    assert!(result.load_factor() > 0.0);
+    near(result.boundary().material_stress_pa()[0], 100.0);
+}
+
+#[test]
+fn g0_affine_loading_refuses_boundary_lost_to_prestress_cancellation() {
+    // The limiting multiplier is 0.5 + 1e-20, which rounds to 0.5. Its
+    // reconstructed stress is zero instead of the opposite 1 Pa intercept.
+    // A finite multiplier alone must not publish this as a strength boundary.
+    for (tension, compression, residual, load) in [
+        (1.0, 1e20, -5e19, 1e20),
+        (1e20, 1.0, 5e19, -1e20),
+    ] {
+        let law = law([tension, compression, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0], [0.0; 3]);
+        let residual = [residual, 0.0, 0.0, 0.0, 0.0, 0.0];
+        assert!(!law.assess_material_stress(&residual).unwrap().reaches_limit());
+        assert!(law.assess_affine_load(&residual, &[load, 0.0, 0.0, 0.0, 0.0, 0.0]).is_err());
+    }
+}
+
+#[test]
 fn g0_full_convexity_is_checked_instead_of_three_independent_pair_bounds() {
     for interactions in [
         [-0.75; 3],

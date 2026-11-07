@@ -3553,9 +3553,12 @@ homogenization, the P2 milestone.
   `min_i(limit_i EA / E_i)` and that layer governs. A layer without the claim
   refuses as missing data, never as unbreakable. The capacity retains the
   original section and the complete strength answers, including the explicit
-  caller-owned diameter-resolved path. Bundled strength sources must be static
-  at held external conditions; moisture/pressure/composition dependence is
-  retained, while unowned strain, rate and frequency applicability refuses.
+  caller-owned diameter-resolved path. Both constructors require strength
+  sources static at held external conditions; moisture/pressure/composition
+  dependence is retained, while unowned strain, stress, rate and frequency
+  applicability refuses. The external-source path additionally admits a
+  positive, explicitly length-typed `wire_diameter` held as a fixed drawing
+  coordinate; it cannot freeze a live response coordinate into a constant.
   `assess_axial_bending` reports each annulus's normal-stress extrema
   `E_i N/EA +/- E_i r_outer_i |M|/EI`, comparing only positive maximum stress
   with that layer's own limit. Signed compression and biaxial bending are
@@ -18815,6 +18818,17 @@ return a nonnegative homogeneous utilization without squared dimensional
 stresses, eigensolves, allocation or source queries during assessment. Its
 reciprocal scales every component of the current stress, including thermal or
 residual stress, and is not a load factor with those components held fixed.
+
+`assess_affine_load` instead finds the first positive multiplier on
+`sigma = residual + multiplier * load`, holding thermal/manufacturing stress
+fixed. A strictly interior residual state and a nonzero linear unit-load
+response are required. The cached quadratic form and a scaled, rationalized
+root resolve the first crossing without iteration or allocation, including
+initial unloading and load reversal. The returned multiplier retains a
+reassessment of the actual boundary stress. Material axes, conditions and the
+strength surface remain fixed; this is not nonlinear redistribution or an
+interval bound. Analytical normal/shear intercepts, an independent multiaxial
+polynomial, load rescaling and near-boundary residuals have focused regressions.
 
 `tests/orthotropic_tsai_wu.rs` checks every normal/shear intercept, an independent
 dimensional polynomial, combined tensile/shear crossings, three-axis convexity,

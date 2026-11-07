@@ -20,6 +20,9 @@
 //! normalized stress scale and rationalized negative-B root avoid squaring
 //! dimensional stresses or subtracting nearly equal roots. Prepared point
 //! assessment allocates nothing and performs no eigensolve or source lookup.
+//! An affine-load assessment additionally holds residual/thermal stress fixed
+//! and solves for the remaining positive multiplier of one declared mechanical
+//! stress direction. It uses the same complete strength surface and sources.
 //!
 //! Reference: Tsai and Wu (1971), doi:10.1177/002199837100500106; the 3-D
 //! stress polynomial is also given in SIMULIA, Generalized Damage Initiation
@@ -281,6 +284,113 @@ impl OrthotropicTsaiWu {
             utilization,
         })
     }
+
+    /// First positive load multiplier reaching this surface on
+    /// `stress = residual_stress_pa + multiplier * load_stress_pa`.
+    ///
+    /// Both tensors are in the original material axes. The residual tensor
+    /// stays fixed: multiplying the reciprocal of a total-stress utilization
+    /// would incorrectly scale thermal or manufacturing stress as well. The
+    /// load tensor must be the actual unit-load response of the same linear
+    /// mechanical model; this method supplies no nonlinear load redistribution,
+    /// moving material axes, temperature change or post-failure evolution.
+    ///
+    /// The original residual state must be strictly inside the surface and
+    /// the load direction must be nonzero. Positive definiteness then gives
+    /// exactly one positive intersection, even if loading initially unloads
+    /// the residual stress. A scaled, rationalized quadratic solve avoids an
+    /// iterative stress search and allocates nothing. The reassessed boundary
+    /// must have unit utilization within `128 * f64::EPSILON` relative roundoff.
+    /// This arithmetic-resolution gate is not a material strength allowance;
+    /// the returned boundary observation is not an interval bound.
+    ///
+    /// # Errors
+    /// Already-reached limits, zero/nonfinite directions and unrepresentable
+    /// intermediate values, multiplier or boundary stress refuse.
+    pub fn assess_affine_load(
+        &self,
+        residual_stress_pa: &Voigt,
+        load_stress_pa: &Voigt,
+    ) -> Result<OrthotropicTsaiWuLoadLimit, MaterialStatePointError> {
+        let residual = self.assess_material_stress(residual_stress_pa)?;
+        if residual.reaches_limit() {
+            return Err(invalid("affine Tsai-Wu loading requires a residual state strictly inside its strength surface"));
+        }
+        let r: [f64; 6] = core::array::from_fn(|i| residual_stress_pa[i] / self.scales_pa[i]);
+        let d: [f64; 6] = core::array::from_fn(|i| load_stress_pa[i] / self.scales_pa[i]);
+        if load_stress_pa.iter().any(|v| !v.is_finite())
+            || d.iter().enumerate().any(|(i, v)| {
+                !v.is_finite() || (*v == 0.0 && load_stress_pa[i] != 0.0)
+            })
+        {
+            return Err(invalid("affine Tsai-Wu loading needs finite representable material-axis stresses"));
+        }
+        let scale = d.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        if scale == 0.0 {
+            return Err(invalid("affine Tsai-Wu loading requires a nonzero stress direction"));
+        }
+        let direction = d.map(|v| v / scale);
+        if direction.iter().zip(d).any(|(u, v)| *u == 0.0 && v != 0.0) {
+            return Err(invalid("affine Tsai-Wu load dynamic range is unrepresentable"));
+        }
+        let coordinates = |s: &[f64; 6]| -> [f64; 6] {
+            core::array::from_fn(|i| if i < 3 {
+                self.factor[i][0] * s[0] + self.factor[i][1] * s[1] + self.factor[i][2] * s[2]
+            } else {
+                s[i]
+            })
+        };
+        let qr = coordinates(&r);
+        let qd = coordinates(&direction);
+        let norm = qd.iter().fold(0.0, |sum, value| hypot(sum, *value));
+        let linear_residual: f64 = (0..3).map(|i| self.linear[i] * r[i]).sum();
+        let b = 2.0 * qr.iter().zip(qd).map(|(a, b)| a * b).sum::<f64>()
+            + (0..3).map(|i| self.linear[i] * direction[i]).sum::<f64>();
+        // If U is the positive homogeneous utilization, A=U*(U-B).
+        // Therefore 1-(A+B)=(1-U)*(1+U-B), retaining the small clearance
+        // near the surface without subtracting two nearly equal polynomials.
+        let clearance = (1.0 - residual.utilization())
+            * (1.0 + residual.utilization() - linear_residual);
+        if !b.is_finite() || !clearance.is_finite() || clearance <= 0.0 {
+            return Err(invalid("affine Tsai-Wu residual clearance is unrepresentable"));
+        }
+        let radius = hypot(0.5 * b, norm * sqrt(clearance));
+        let distance = if b >= 0.0 {
+            clearance / (radius + 0.5 * b)
+        } else {
+            ((radius - 0.5 * b) / norm) / norm
+        };
+        let load_factor = distance / scale;
+        if !load_factor.is_finite() || load_factor <= 0.0 {
+            return Err(invalid("affine Tsai-Wu limiting load multiplier is unrepresentable"));
+        }
+        let boundary_stress = core::array::from_fn(|i| {
+            residual_stress_pa[i] + load_factor * load_stress_pa[i]
+        });
+        let boundary = self.assess_material_stress(&boundary_stress)?;
+        let boundary_roundoff = 128.0 * f64::EPSILON * boundary.utilization().max(1.0);
+        if (boundary.utilization() - 1.0).abs() > boundary_roundoff {
+            return Err(invalid("affine Tsai-Wu boundary cannot be resolved on the strength surface within floating-point roundoff"));
+        }
+        Ok(OrthotropicTsaiWuLoadLimit {
+            load_factor,
+            boundary,
+        })
+    }
+}
+
+/// First boundary reached while a declared stress direction scales and the
+/// original residual stress remains fixed. No damaged state is constructed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OrthotropicTsaiWuLoadLimit {
+    load_factor: f64,
+    boundary: OrthotropicTsaiWuAssessment,
+}
+impl OrthotropicTsaiWuLoadLimit {
+    /// Positive multiplier of the supplied unit-load stress tensor.
+    pub const fn load_factor(&self) -> f64 { self.load_factor }
+    /// Actual boundary stress and its independently reassessed utilization.
+    pub const fn boundary(&self) -> &OrthotropicTsaiWuAssessment { &self.boundary }
 }
 
 /// Full coupled strength observation; no isolated failure mode is inferred.

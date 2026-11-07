@@ -24,7 +24,7 @@ pub use finite::ResolvedTensileHyperelastic;
 mod orthotropic;
 pub use orthotropic::{OrthotropicTensileAssessment, OrthotropicTensileLimit};
 mod tsai_wu;
-pub use tsai_wu::{OrthotropicTsaiWu, OrthotropicTsaiWuAssessment};
+pub use tsai_wu::{OrthotropicTsaiWu, OrthotropicTsaiWuAssessment, OrthotropicTsaiWuLoadLimit};
 
 use crate::Voigt;
 use crate::state_point::{
