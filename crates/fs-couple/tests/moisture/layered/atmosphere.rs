@@ -1,4 +1,7 @@
 //! Finite native vapor, material partition and complete stack inventories.
+#[path = "atmosphere/sdirk.rs"]
+mod sdirk;
+
 #[path = "atmosphere/pair.rs"]
 mod pair;
 
@@ -327,3 +330,4 @@ fn g0_finite_layered_exchange_refuses_insufficient_work_and_changing_unowned_sou
         assert_eq!(held_pressure.layers()[0].slab().moisture(), &[0.1]);
     });
 }
+

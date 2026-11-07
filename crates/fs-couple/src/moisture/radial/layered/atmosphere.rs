@@ -20,6 +20,10 @@ use crate::moisture::{
     surface::admit_environment,
 };
 
+pub use crate::moisture::layered::atmosphere::{
+    LayeredRadialAtmosphereSdirk2Candidate, SharedLayeredRadialAtmosphereSdirk2Candidate,
+};
+
 /// A complete independently sourced coated body in one common gas inventory.
 pub struct LayeredRadialMoistureParticipant<'a> {
     /// Stable, unique physical-inventory ID; fixes summation and result order.
@@ -98,7 +102,7 @@ fn admit_exchange(
 
 /// Re-query the selected end-material claim at the actual solid-side surface
 /// activity. An explicit exterior resistance permits a difference from gas RH.
-fn surface_sorption(
+pub(in crate::moisture) fn surface_sorption(
     moisture: &MoistureLayeredRadial,
     transport: &MoistureLayeredReport,
     cx: &Cx<'_>,

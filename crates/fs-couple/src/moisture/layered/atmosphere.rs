@@ -22,6 +22,13 @@ use crate::moisture::atmosphere::pair::{
 use crate::moisture::reservoir::water_sum;
 use crate::moisture::surface::admit_environment;
 
+mod sdirk;
+pub use sdirk::{
+    LayeredAtmosphereSdirk2Candidate, LayeredAtmosphereSdirk2Step,
+    LayeredRadialAtmosphereSdirk2Candidate, SharedLayeredAtmosphereSdirk2Candidate,
+    SharedLayeredRadialAtmosphereSdirk2Candidate,
+};
+
 /// One heterogeneous stack sharing the same finite atmospheric water inventory.
 pub struct LayeredMoistureParticipant<'a> {
     pub id: u64,
