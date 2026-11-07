@@ -86,11 +86,11 @@ pub fn refine_slab_response(
 
 /// Refine internal emission and external irradiation on the same physical slab.
 ///
-/// Only uniform internal emitters are split and averaged. A boundary beam is
+/// Only uniform internal emitters are split and averaged. A boundary source is
 /// never divided by the number of spatial cells: its original incident joules
-/// enter the same face at the same cosine on every grid. The return map retains
-/// all original source and receiving-cell identities. Source IDs need not be
-/// cell IDs and distinct sources may illuminate the same boundary or layer.
+/// enter the same face with the same angular distribution on every grid. The
+/// return map retains all original source and receiving-cell identities. Source
+/// IDs need not be cell IDs and distinct sources may illuminate the same boundary or layer.
 ///
 /// The convergence criterion, consecutive-agreement rule, work/storage limits
 /// and no-claim boundaries are those of [`refine_slab_response`]. In particular,
@@ -184,6 +184,7 @@ pub fn refine_slab_response_with_sources(
                 }
                 None
             }
+            PhotonSourceGeometry::Diffuse { .. } => None,
         };
         source_indices.push(index);
     }
@@ -323,7 +324,7 @@ fn aggregate(
         let source_id = source.source_id;
         let emitters = match source.geometry {
             PhotonSourceGeometry::UniformLayer { .. } => subdivisions,
-            PhotonSourceGeometry::Collimated { .. } => 1,
+            PhotonSourceGeometry::Collimated { .. } | PhotonSourceGeometry::Diffuse { .. } => 1,
         };
         let weight = 1.0 / emitters as f64;
         let mut group_rows = Vec::with_capacity(groups);

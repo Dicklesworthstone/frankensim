@@ -83,6 +83,14 @@ fn prepare_sources(
     cells: Vec<PhotonSlabCell>,
     sources: Vec<PhotonSlabSource>,
 ) -> PhotonSlabResponse {
+    prepare_angular_sources(cells, sources, normal_pair())
+}
+
+fn prepare_angular_sources(
+    cells: Vec<PhotonSlabCell>,
+    sources: Vec<PhotonSlabSource>,
+    ordinates: Vec<PhotonOrdinate>,
+) -> PhotonSlabResponse {
     let edges = (0..=cells[0].groups.len())
         .map(|group| group as f64 * 1e-13)
         .collect();
@@ -92,11 +100,130 @@ fn prepare_sources(
         edges,
         cells,
         sources,
-        normal_pair(),
+        ordinates,
         PhotonSlabLimits::default(),
         || Ok(()),
     )
     .unwrap()
+}
+
+fn diffuse(source_id: u64, boundary: PhotonSlabBoundary) -> PhotonSlabSource {
+    PhotonSlabSource {
+        source_id,
+        geometry: PhotonSourceGeometry::Diffuse { boundary },
+    }
+}
+
+#[test]
+fn g1_g3_diffuse_absorption_refines_to_the_exponential_integral_solution() {
+    // Constant incident radiance gives T(tau) = 2*integral_0^1 mu*exp(-tau/mu)dmu
+    // = 2*E_3(tau), DLMF https://dlmf.nist.gov/8.19.E3. At tau=1, recurrence
+    // gives 2*E_3(1)=E_1(1); this independently evaluated value is not a beam sum.
+    let exact = 0.219_383_934_395_520_27;
+    let errors = [8, 32, 128].map(|count| {
+        let ordinates = (0..count)
+            .map(|i| PhotonOrdinate {
+                mu: (i as f64 + 0.5) / count as f64,
+                weight: 1.0 / count as f64,
+            })
+            .collect();
+        let response = prepare_angular_sources(
+            vec![mono(5, 1.0, 1.0, 0.0)],
+            vec![diffuse(99, PhotonSlabBoundary::Left)],
+            ordinates,
+        );
+        let result = apply(&response, &[(99, &[1.0])]);
+        near(result.deposited_j + result.escaped_j, 1.0, 2e-14);
+        (result.escaped_j - exact).abs()
+    });
+    assert!(errors[1] < errors[0] / 10.0, "{errors:?}");
+    assert!(errors[2] < errors[1] / 10.0, "{errors:?}");
+    assert!(errors[2] < 4e-6, "{errors:?}");
+}
+
+#[test]
+fn g1_g3_diffuse_illumination_preserves_vacuum_energy_and_layer_orientation() {
+    // The original mirrored full-range rule does not have first moment 1/2.
+    // A constant-radiance source still supplies exactly the declared joules.
+    for opacity in [0.0, 1e-12] {
+        let result = apply(
+            &prepare_angular_sources(
+                vec![mono(5, 1.0, opacity, 0.0)],
+                vec![diffuse(99, PhotonSlabBoundary::Left)],
+                gauss_legendre_4(),
+            ),
+            &[(99, &[7.0])],
+        );
+        near(result.deposited_j + result.escaped_j, 7.0, 3e-14);
+        if opacity == 0.0 {
+            assert_eq!(result.deposited_j, 0.0);
+        } else {
+            assert!(result.deposited_j > 0.0);
+        }
+    }
+    let cells = vec![mono(50, 0.5, 0.6, 0.0), mono(3, 2.0, 0.7, 0.0)];
+    let left = prepare_angular_sources(
+        cells.clone(),
+        vec![diffuse(99, PhotonSlabBoundary::Left)],
+        gauss_legendre_4(),
+    );
+    let reversed = prepare_angular_sources(
+        cells.into_iter().rev().collect(),
+        vec![diffuse(99, PhotonSlabBoundary::Right)],
+        gauss_legendre_4(),
+    );
+    let a = apply(&left, &[(99, &[3.0])]);
+    let b = apply(&reversed, &[(99, &[3.0])]);
+    assert_eq!(a.receiver_energy_j, b.receiver_energy_j);
+    assert_eq!(a.escaped_j, b.escaped_j);
+}
+
+#[test]
+fn g1_diffuse_multigroup_scattering_matches_cosine_weighted_illumination() {
+    let cells = vec![PhotonSlabCell {
+        cell_id: 5,
+        thickness_m: 1.0,
+        groups: vec![
+            PhotonCollision {
+                total_per_m: 1.0,
+                heat_per_m: 0.3,
+                redistribution_per_m: vec![0.7, 0.0],
+            },
+            PhotonCollision {
+                total_per_m: 2.0,
+                heat_per_m: 0.4,
+                redistribution_per_m: vec![0.8, 0.8],
+            },
+        ],
+    }];
+    let ordinates = gauss_legendre_4();
+    let response = prepare_angular_sources(
+        cells.clone(),
+        vec![diffuse(99, PhotonSlabBoundary::Left)],
+        ordinates.clone(),
+    );
+    let result = apply(&response, &[(99, &[2.0, 7.0])]);
+    let normalization: f64 = ordinates.iter().map(|o| o.mu * o.weight).sum();
+    let mut expected_heat = 0.0;
+    for ordinate in &ordinates {
+        let response = prepare_angular_sources(
+            cells.clone(),
+            vec![beam(99, PhotonSlabBoundary::Left, ordinate.mu)],
+            ordinates.clone(),
+        );
+        let energy = apply(&response, &[(99, &[2.0, 7.0])]);
+        expected_heat += ordinate.mu * ordinate.weight / normalization * energy.deposited_j;
+    }
+    near(result.deposited_j, expected_heat, 5e-14);
+    near(result.deposited_j + result.escaped_j, 9.0, 5e-14);
+    let elastic = prepare_angular_sources(
+        vec![mono(5, 1.0, 0.0, 2.0)],
+        vec![diffuse(99, PhotonSlabBoundary::Left)],
+        ordinates,
+    );
+    let elastic = apply(&elastic, &[(99, &[7.0])]);
+    assert_eq!(elastic.deposited_j, 0.0);
+    near(elastic.escaped_j, 7.0, 5e-14);
 }
 
 #[test]

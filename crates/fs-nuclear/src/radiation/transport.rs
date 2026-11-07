@@ -2,8 +2,8 @@
 //!
 //! Exact characteristic integrals give the first collision and escape fractions
 //! for an isotropic, spatially uniform source in each homogeneous layer or a
-//! collimated beam incident on either exterior boundary. Angular integration of
-//! internal emission uses an explicit positive quadrature. Scattered energy is again
+//! collimated or diffuse field incident on either exterior boundary. Angular
+//! integration uses an explicit positive quadrature. Scattered energy is again
 //! isotropic and uniform in its receiving layer (the flat-source collision-
 //! probability approximation). Repeated same-group scattering is solved with
 //! the original prepared LU owner, once factored per group. Lower-energy groups
@@ -67,7 +67,7 @@ pub struct PhotonSlabCell {
     pub groups: Vec<PhotonCollision>,
 }
 
-/// Exterior face through which an incident beam enters the ordered slab.
+/// Exterior face through which irradiation enters the ordered slab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PhotonSlabBoundary {
     Left,
@@ -86,6 +86,11 @@ pub enum PhotonSourceGeometry {
         boundary: PhotonSlabBoundary,
         mu: f64,
     },
+    /// Constant incident radiance over the inward hemisphere. The supplied
+    /// ordinates carry incident-energy fractions `mu * weight / sum(mu * weight)`.
+    /// This cosine-weighted rule preserves the supplied face-crossing energy;
+    /// its angular approximation must be refined independently of the slab grid.
+    Diffuse { boundary: PhotonSlabBoundary },
 }
 
 /// A physical source identity and its explicit spatial/angular distribution.
@@ -97,7 +102,8 @@ pub struct PhotonSlabSource {
 }
 
 /// A positive direction cosine and its probability weight on one hemisphere.
-/// The same rule is used for both signs, each with half the source energy.
+/// Internal isotropic emission uses both signs, each with half the source energy.
+/// Diffuse boundary irradiation uses the inward sign and normalized cosine weights.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PhotonOrdinate {
     pub mu: f64,
@@ -235,11 +241,13 @@ pub fn prepare_slab_response(
 /// Prepare internal emission and external irradiation with one transport solve.
 ///
 /// Applying the returned response takes energy in joules for each source/group.
-/// A collimated source's input is the energy that actually crosses the slab face,
+/// A boundary source's input is the energy that actually crosses the slab face,
 /// not intensity per unit area or solid angle: no area or additional cosine
 /// factor is applied. Direct first collisions follow Beer–Lambert attenuation
-/// along the incident path. Their heat deposits locally; their outgoing photon
-/// energy enters the original isotropic flat-source scattering operator. That
+/// along each incident path. Diffuse irradiation integrates these paths with
+/// normalized cosine weights on the supplied positive angular quadrature.
+/// Their heat deposits locally; their outgoing photon energy enters the original
+/// isotropic flat-source scattering operator. That
 /// operator is factored once per group and shared by all source kinds.
 ///
 /// Source identities are independent of receiver identities. Escape includes
@@ -399,37 +407,47 @@ pub fn prepare_slab_response_with_sources(
             let mut deposited = vec![Sum::default(); n];
             let mut escaped = Sum::default();
             let mut preparation_error = ErrorBudget::new(f64::MAX);
-            match source.geometry {
+            let first_flight = match source.geometry {
                 PhotonSourceGeometry::UniformLayer { cell_id } => {
                     rhs[incident * n + indices[&cell_id]].add(1.0)?;
+                    None
                 }
-                PhotonSourceGeometry::Collimated { boundary, mu } => {
-                    let (collided, transmitted, defect) = beam_first_flight(
-                        &cells,
-                        incident,
-                        boundary,
-                        mu,
-                        &mut work,
-                        &mut checkpoint,
-                    )?;
-                    first_flight_defect = first_flight_defect.max(defect);
-                    preparation_error.charge(defect)?;
-                    escaped.add(transmitted)?;
-                    for (cell, &energy) in collided.iter().enumerate() {
-                        work.charge(incident + 2, &mut checkpoint)?;
-                        preparation_error.charge(scaled_bound(
-                            energy,
-                            kernel_defect[cell * groups + incident],
-                        )?)?;
-                        deposited[cell].add(multiply(energy, heat[cell * groups + incident])?)?;
-                        // Include same-group redistribution: these are the
-                        // initial isotropic emissions for the repeated-scatter
-                        // equation, not another copy of the incident beam.
-                        for outgoing in 0..=incident {
-                            let fraction =
-                                redistribution[(cell * groups + incident) * groups + outgoing];
-                            rhs[outgoing * n + cell].add(multiply(energy, fraction)?)?;
-                        }
+                PhotonSourceGeometry::Collimated { boundary, mu } => Some(beam_first_flight(
+                    &cells,
+                    incident,
+                    boundary,
+                    mu,
+                    &mut work,
+                    &mut checkpoint,
+                )?),
+                PhotonSourceGeometry::Diffuse { boundary } => Some(diffuse_first_flight(
+                    &cells,
+                    incident,
+                    boundary,
+                    &ordinates,
+                    &mut preparation_error,
+                    &mut work,
+                    &mut checkpoint,
+                )?),
+            };
+            if let Some((collided, transmitted, defect)) = first_flight {
+                first_flight_defect = first_flight_defect.max(defect);
+                preparation_error.charge(defect)?;
+                escaped.add(transmitted)?;
+                for (cell, &energy) in collided.iter().enumerate() {
+                    work.charge(incident + 2, &mut checkpoint)?;
+                    preparation_error.charge(scaled_bound(
+                        energy,
+                        kernel_defect[cell * groups + incident],
+                    )?)?;
+                    deposited[cell].add(multiply(energy, heat[cell * groups + incident])?)?;
+                    // Include same-group redistribution: these are the
+                    // initial isotropic emissions for the repeated-scatter
+                    // equation, not another copy of the incident field.
+                    for outgoing in 0..=incident {
+                        let fraction =
+                            redistribution[(cell * groups + incident) * groups + outgoing];
+                        rhs[outgoing * n + cell].add(multiply(energy, fraction)?)?;
                     }
                 }
             }
@@ -795,6 +813,59 @@ fn beam_first_flight(
         return Err(RadiationError::Budget("photon beam first-flight closure"));
     }
     Ok((collided, ray, defect))
+}
+
+// Constant radiance gives incident energy dQ proportional to mu*dmu. Normalize
+// the finite quadrature's first angular moment, not the transport coefficients:
+// a mirrored full-range rule need not integrate that half-range moment exactly.
+fn diffuse_first_flight(
+    cells: &[PhotonSlabCell],
+    group: usize,
+    boundary: PhotonSlabBoundary,
+    ordinates: &[PhotonOrdinate],
+    errors: &mut ErrorBudget,
+    work: &mut Work,
+    checkpoint: &mut impl FnMut() -> Result<(), RadiationError>,
+) -> Result<(Vec<f64>, f64, f64), RadiationError> {
+    let mut normalization = Sum::default();
+    for ordinate in ordinates {
+        work.charge(1, checkpoint)?;
+        normalization.add(multiply(ordinate.mu, ordinate.weight)?)?;
+    }
+    let normalization = value(normalization)?;
+    let mut collided = vec![Sum::default(); cells.len()];
+    let mut transmitted = Sum::default();
+    for ordinate in ordinates {
+        let weight = ratio(multiply(ordinate.mu, ordinate.weight)?, normalization)?;
+        let (ray_collisions, escape, defect) =
+            beam_first_flight(cells, group, boundary, ordinate.mu, work, checkpoint)?;
+        // Directional defects must not cancel when their angular average closes.
+        // The aggregate closure is checked below and charged by the caller.
+        errors.charge(scaled_bound(weight, defect)?)?;
+        work.charge(cells.len() + 1, checkpoint)?;
+        for (total, energy) in collided.iter_mut().zip(ray_collisions) {
+            total.add(multiply(weight, energy)?)?;
+        }
+        transmitted.add(multiply(weight, escape)?)?;
+    }
+    work.charge(cells.len() + 1, checkpoint)?;
+    let collided = collided
+        .into_iter()
+        .map(value)
+        .collect::<Result<Vec<_>, _>>()?;
+    let transmitted = value(transmitted)?;
+    let mut closure = Sum { hi: -1.0, lo: 0.0 };
+    closure.add(transmitted)?;
+    for &energy in &collided {
+        closure.add(energy)?;
+    }
+    let defect = value(closure)?.abs();
+    if defect > ROW_CLOSURE_TOLERANCE {
+        return Err(RadiationError::Budget(
+            "diffuse photon first-flight closure",
+        ));
+    }
+    Ok((collided, transmitted, defect))
 }
 
 // 1 - (1-exp(-tau))/tau. The power series retains collision energy in optically

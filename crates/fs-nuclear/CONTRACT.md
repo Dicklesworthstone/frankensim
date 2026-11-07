@@ -2865,15 +2865,26 @@ slab solution, density/depth scaling, numerical/resource refusal and
 cancellation. Manufactured kernels establish these equations, not accuracy for
 an evaluated shielding material.
 
-## External collimated photon absorption
+## External collimated and diffuse photon absorption
 
 `radiation::transport::prepare_slab_response_with_sources` admits explicit
-uniform layer emission and collimated gamma/X-ray irradiation through either
+uniform layer emission and collimated or diffuse gamma/X-ray irradiation through either
 exterior face. Sources have independent identities; every physical layer remains
 a heat receiver. A beam's supplied `mu` is its positive inward direction cosine,
 so its path through a layer is `thickness / mu`. The grouped response accepts
 incident joules actually crossing that face, with no inferred area or extra
 cosine weighting.
+
+`PhotonSourceGeometry::Diffuse` supplies constant incident radiance over the
+inward hemisphere. Each ordinate carries the fraction
+`mu * weight / sum(mu * weight)` of the supplied face-crossing joules. Normalizing
+this angular moment preserves source energy even for a mirrored full-range
+quadrature whose positive half does not integrate `mu` exactly. It does not
+renormalize material coefficients or transport responses. The resulting angular
+approximation must be refined separately from layer subdivision. G1/G3 tests
+check convergence to the analytic absorption-only transmittance `2 E_3(tau)`,
+vacuum and thin absorption, orientation reversal, multigroup scattering energy
+closure, and diffuse heating on the original native thermal cells.
 
 Analytic Beer–Lambert first collisions partition the beam into direct local
 heat, outgoing photons and uncollided transmission. Outgoing energy, including
@@ -2891,9 +2902,9 @@ and external sources, and incidence/identity/resource/cancellation refusal.
 Scattered emission retains the isotropic flat-source approximation and requires
 spatial/angular convergence. Automatic spatial refinement presently accepts
 uniform internal sources through its original entry point. The explicit-source
-`refine_slab_response_with_sources` also supports boundary beams and mixed
-source families. Internal sources divide among sublayers; boundary beams retain
-their full incident joules, physical side and cosine on every grid. Receiver
+`refine_slab_response_with_sources` also supports boundary irradiation and mixed
+source families. Internal sources divide among sublayers; boundary sources retain
+their full incident joules, physical side and angular distribution on every grid. Receiver
 energies reduce to original physical cells. The same work/storage allowances,
 consecutive-grid convergence rule and charged arithmetic audit remain active.
 G1/G3/G4 controls add beam convergence against an independent two-stream

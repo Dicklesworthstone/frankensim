@@ -202,6 +202,65 @@ fn bind(
 }
 
 #[test]
+fn g1_diffuse_irradiation_refines_and_heats_the_original_thermal_cells() {
+    let original = thermal(&LAW, 2.0, 0.0);
+    let source = PhotonIllumination {
+        source: PhotonSlabSource {
+            source_id: 9001,
+            geometry: PhotonSourceGeometry::Diffuse {
+                boundary: PhotonSlabBoundary::Left,
+            },
+        },
+        power: schedule(&[(0.0, [4.0, 0.0])]),
+    };
+    let mut limits = PhotonSlabLimits::default();
+    limits.response.max_sources = 1;
+    let (heating, response) = ExternalPhotonHeating::from_refined_slab(
+        &original,
+        "diffuse material heating".into(),
+        geometry(),
+        layers(false),
+        vec![source],
+        [0.25, 0.75]
+            .map(|mu| PhotonOrdinate { mu, weight: 0.5 })
+            .to_vec(),
+        limits,
+        PhotonSlabRefinement {
+            absolute_tolerance: 1e-12,
+            relative_tolerance: 1e-12,
+            max_levels: 1,
+        },
+        allowance(),
+        || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(response.subdivisions_per_layer, 2);
+    let (heated, accepted, audit) = heating
+        .advance_to(&original, 1.0, controls(1.0), || Ok(()))
+        .unwrap();
+    // Half-range midpoint weights give cosine flux fractions 1/4 and 3/4.
+    let mut first = 0.0;
+    let mut second = 0.0;
+    for mu in [0.25_f64, 0.75] {
+        first += 4.0 * mu * -(-0.5 / mu).exp_m1();
+        second += 4.0 * mu * (-0.5 / mu).exp() * -(-1.0 / mu).exp_m1();
+    }
+    close(
+        heated.temperature_k(CellId(11)).unwrap(),
+        300.0 + first / 4.0,
+    );
+    close(
+        heated.temperature_k(CellId(29)).unwrap(),
+        300.0 + second / 6.0,
+    );
+    close(accepted.audit().incident_j, 4.0);
+    close(accepted.audit().absorbed_j, first + second);
+    close(accepted.audit().escaped_j, 4.0 - first - second);
+    close(accepted.audit().thermal_credit_j, first + second);
+    close(audit.stored_energy_change_j, first + second);
+}
+
+#[test]
 fn g1_external_spectral_pulse_heats_native_cells_and_clips_at_true_knots() {
     let original = thermal(&LAW, 2.0, 1.0);
     let heating = bind(&original, vec![pulse()], false);
