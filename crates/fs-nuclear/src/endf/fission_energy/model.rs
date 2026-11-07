@@ -85,6 +85,7 @@ pub struct PreparedFissionEnergy {
 #[derive(Clone, Debug)]
 pub struct CollapsedFissionEnergy {
     evaluation: Arc<FissionEnergyRelease>,
+    source_preparation: PreparedFissionEnergy,
     weighted: ReactionWeightedCollapse,
     source_cross_section: PointwiseCrossSection,
     source_spectrum: FluxSpectrum,
@@ -217,6 +218,10 @@ impl PreparedFissionEnergy {
     pub fn reference_treatment(&self) -> &ReferenceEnergyTreatment {
         &self.reference
     }
+    /// The admitted energy/1-eV laws, shared with each collapsed temperature.
+    pub(super) fn component_curves(&self) -> &[TabulatedYield] {
+        &self.curves
+    }
     pub fn interpolation_error_j(&self, component: FissionEnergyComponent) -> f64 {
         self.interpolation_error_j[component.index()]
     }
@@ -278,6 +283,7 @@ impl PreparedFissionEnergy {
         checkpoint()?;
         Ok(CollapsedFissionEnergy {
             evaluation: Arc::clone(&self.evaluation),
+            source_preparation: self.clone(),
             weighted,
             components_j,
             source_cross_section: fission.clone(),
@@ -301,6 +307,12 @@ impl PreparedFissionEnergy {
 }
 
 impl CollapsedFissionEnergy {
+    /// Exact prepared component laws and reference treatment used for collapse.
+    /// This prevents a temperature series from silently changing energy policy.
+    pub fn source_preparation(&self) -> &PreparedFissionEnergy {
+        &self.source_preparation
+    }
+
     pub fn evaluation(&self) -> &Arc<FissionEnergyRelease> {
         &self.evaluation
     }

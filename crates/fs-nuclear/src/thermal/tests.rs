@@ -21,6 +21,9 @@ mod burnup_production_tests;
 #[path = "temperature_tests.rs"]
 mod temperature_tests;
 
+#[path = "evaluated_fission_temperature_tests.rs"]
+mod evaluated_fission_temperature_tests;
+
 #[path = "adaptive/tests.rs"]
 mod adaptive_tests;
 

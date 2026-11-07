@@ -2741,3 +2741,43 @@ ballistic subdivision, convergence toward an independently derived two-stream
 slab solution, density/depth scaling, numerical/resource refusal and
 cancellation. Manufactured kernels establish these equations, not accuracy for
 an evaluated shielding material.
+
+## Evaluated prompt fission energy on the changing material timeline
+
+`endf::fission_energy::temperature::append_prompt_temperature_series_to_burnup`
+accepts matched product/MT458 condensations at each processed temperature and
+uses the same temperature-component assembly. Explicit fragment, prompt-neutron
+and prompt-photon routing is retained at every knot. The original fixed-state
+bridge and the series share source matching, routing and the J/fission routing
+allowance; neither path adds delayed MT458 components to product-decay heat.
+
+`CollapsedFissionEnergy::source_preparation` retains the actual prepared law.
+A series requires identical original MT458 coefficients, uncertainties and
+tables, the same continuation policy and Sher--Beck neutron-yield source where
+applicable, and the same prepared curves, domain and approximation bounds.
+Changing a reference policy or numerical preparation at a temperature knot
+cannot masquerade as temperature dependence. Different group means resulting
+from the processed fission cross section remain valid.
+
+The result is ordinary `BurnupData` with original `TabulatedFission` channels.
+Existing finite inventories, prescribed or kinetic fluxes, transport and
+material heating consume it through their established owners. There is no new
+inventory, thermal integrator or delayed-energy reservoir. Only actual native
+thermal substeps publish accepted nuclear histories; out-of-domain temperatures
+and cancellation discard the candidate. The original frozen-temperature step
+remains a first-order partitioned approximation, with native/adaptive timestep
+refinement available. Processed temperature knots must be supplied explicitly;
+Doppler processing, self-shielding and within-group spectral feedback are not
+automatically inferred by this assembly.
+
+The actual nuclear root with `thermal` enabled compiled 478 owning tests without
+compiler diagnostics. All 28 evaluated-energy tests, three new evaluated-fission
+thermal integration tests and three existing thermal-temperature tests passed.
+Together with the 26 cross-section/product tests for the temperature-component
+assembly, the focused scope contains 60 distinct passing tests, including 19
+new regressions. The new thermal cases exercise self-heating against an
+independent continuous ODE with first-order timestep refinement, shutdown and
+restart with daughter heat counted once, and complete domain/cancellation
+rollback. Native original numerical and thermal implementations were used;
+missing constellation dependencies still prevent full workspace Cargo/DSR
+verification. No empirical isotope or release-performance claim is introduced.

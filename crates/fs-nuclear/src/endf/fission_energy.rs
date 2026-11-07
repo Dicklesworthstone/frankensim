@@ -30,6 +30,9 @@ pub mod model;
 /// Prompt outgoing products on the original fission-product burnup owner.
 pub mod burnup;
 
+/// Evaluated prompt products across processed temperature knots.
+pub mod temperature;
+
 /// Original MF1/MT458 component identity, in source IFC order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FissionEnergyComponent {

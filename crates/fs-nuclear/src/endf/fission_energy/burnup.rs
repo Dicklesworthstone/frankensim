@@ -232,6 +232,37 @@ impl CollapsedFissionEnergy {
         maximum_routing_roundoff_j: f64,
         mut checkpoint: impl FnMut() -> Result<(), FissionError>,
     ) -> Result<BurnupData, EndfError> {
+        let channels = self.prompt_channels_for_burnup(
+            yields,
+            routing,
+            limits,
+            maximum_routing_roundoff_j,
+            &mut checkpoint,
+        )?;
+        let mut assembled =
+            yields.append_to_burnup(data, &channels, exported_products, limits, &mut checkpoint)?;
+        for reaction in &mut assembled.reactions[data.reactions.len()..] {
+            checkpoint()?;
+            reaction.data_id = format!(
+                "{} | {} | MF1/MT458 outgoing prompt products",
+                reaction.data_id,
+                self.evaluation().data_id()
+            );
+        }
+        checkpoint()?;
+        Ok(assembled)
+    }
+
+    /// Shared validation and routing for fixed-state and temperature-series
+    /// assembly. Neither caller may weaken original pointwise source matching.
+    pub(super) fn prompt_channels_for_burnup(
+        &self,
+        yields: &FissionYieldCollapse,
+        routing: PromptFissionRouting,
+        limits: BurnupLimits,
+        maximum_routing_roundoff_j: f64,
+        mut checkpoint: impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<Vec<EnergyChannels>, EndfError> {
         checkpoint()?;
         if !nonnegative(maximum_routing_roundoff_j) {
             return Err(invalid(
@@ -328,22 +359,12 @@ impl CollapsedFissionEnergy {
                 None => channels.push(EnergyChannels::default()),
             }
         }
-        let mut assembled =
-            yields.append_to_burnup(data, &channels, exported_products, limits, &mut checkpoint)?;
-        for reaction in &mut assembled.reactions[data.reactions.len()..] {
-            checkpoint()?;
-            reaction.data_id = format!(
-                "{} | {} | MF1/MT458 outgoing prompt products",
-                reaction.data_id,
-                self.evaluation().data_id()
-            );
-        }
         checkpoint()?;
-        Ok(assembled)
+        Ok(channels)
     }
 }
 
-fn same_values<T: PartialEq>(
+pub(super) fn same_values<T: PartialEq>(
     left: &[T],
     right: &[T],
     checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
