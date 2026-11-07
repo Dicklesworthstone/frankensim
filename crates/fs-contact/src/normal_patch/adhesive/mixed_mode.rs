@@ -169,8 +169,8 @@ pub struct SourceJkrMixedMode {
 }
 impl SourceJkrMixedMode {
     /// Select circular full stick and constant, mode-independent W explicitly.
-    /// No Coulomb coefficient or shear strength is fabricated. Source E and nu
-    /// are exactly those already admitted by the original normal owner.
+    /// No Coulomb coefficient or shear strength is fabricated. Source shear
+    /// moduli and Poisson ratios retain the original normal owner's elasticity.
     pub fn new(
         normal: SourceJkrSphereContact,
         envelope: JkrMixedModeEnvelope,
@@ -192,7 +192,7 @@ impl SourceJkrMixedMode {
         let elastic = normal.normal_state().elastic();
         let solids = [elastic.surface_a_state(), elastic.surface_b_state()];
         let poisson = solids.map(|s| s.poisson_ratio());
-        let shear = solids.map(|s| (0.5 * s.young_modulus_pa()) / (1.0 + s.poisson_ratio()));
+        let shear = solids.map(|s| s.elastic_state().shear_modulus_pa());
         let radius = normal.spinodal_radius_m;
         let k = fs_tribo::mindlin::full_stick_stiffness_n_per_m(radius, shear, poisson)? / radius;
         let weight = 2.0 * elastic.reduced_modulus_pa() / k;

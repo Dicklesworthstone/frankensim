@@ -205,7 +205,7 @@ impl SourceDmtMindlinContact {
         let solids = [elastic.surface_a_state(), elastic.surface_b_state()];
         let law = HertzMindlinContact::new(HertzMindlinParameters {
             effective_radius_m: normal.effective_radius_m(),
-            shear_moduli_pa: solids.map(|s| 0.5 * s.young_modulus_pa() / (1.0 + s.poisson_ratio())),
+            shear_moduli_pa: solids.map(|s| s.elastic_state().shear_modulus_pa()),
             poisson_ratios: solids.map(|s| s.poisson_ratio()),
             friction_coefficient: friction.properties()[0].value_si(),
             maximum_history_intervals,

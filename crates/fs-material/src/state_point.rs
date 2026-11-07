@@ -3366,14 +3366,48 @@ impl IsotropicSolidStatePoint {
     /// This is the standard two-half-space combination
     /// `1/E* = (1-nu_a^2)/E_a + (1-nu_b^2)/E_b`.  The returned identity binds
     /// both complete resolved material bundles in their ordered surface roles.
+    /// Independent bulk/shear sources retain their original moduli: converting
+    /// back through E and nu loses accuracy near the auxetic limit nu = -1.
     pub fn reduced_modulus_against(
         &self,
         other: &Self,
     ) -> Result<ResolvedReducedModulus, MaterialStatePointError> {
-        let compliance = (1.0 - self.poisson_ratio() * self.poisson_ratio()) / self.young_modulus_pa()
-            + (1.0 - other.poisson_ratio() * other.poisson_ratio()) / other.young_modulus_pa();
-        let value_pa = compliance.recip();
-        if !compliance.is_finite() || compliance <= 0.0 || !value_pa.is_finite() {
+        let [(modulus_a, factor_a), (modulus_b, factor_b)] = [self, other].map(|solid| {
+            let elastic = solid.elastic_state();
+            if elastic.derivation().is_some_and(|derivation| {
+                !matches!(
+                    derivation.parameters(),
+                    IsotropicElasticParameters::YoungPoisson { .. }
+                )
+            }) {
+                // Half-space compliance is factor/G. With independent K/G,
+                // factor = (3K+4G)/(4(3K+G)); normalize before the sums so
+                // neither extreme modulus ratio can overflow.
+                let shear = elastic.shear_modulus_pa();
+                let bulk = elastic.bulk_modulus_pa();
+                let factor = if bulk >= shear {
+                    let ratio = shear / bulk;
+                    (0.75 + ratio) / (3.0 + ratio)
+                } else {
+                    let ratio = bulk / shear;
+                    (0.75 * ratio + 1.0) / (3.0 * ratio + 1.0)
+                };
+                (shear, factor)
+            } else {
+                // Preserve directly sourced E/nu too. Factoring 1-nu^2
+                // avoids cancellation and does not require a derived G.
+                let poisson = solid.poisson_ratio();
+                (solid.young_modulus_pa(), (1.0 - poisson) * (1.0 + poisson))
+            }
+        });
+        // Combine the half-spaces without forming either reciprocal modulus
+        // or an overflowing sum. The smaller source modulus sets the scale.
+        let value_pa = if modulus_a <= modulus_b {
+            modulus_a / (factor_a + factor_b * (modulus_a / modulus_b))
+        } else {
+            modulus_b / (factor_b + factor_a * (modulus_b / modulus_a))
+        };
+        if !value_pa.is_finite() || value_pa <= 0.0 {
             return Err(MaterialStatePointError::InvalidDerived {
                 quantity: "hertz_reduced_modulus_pa",
             });

@@ -1,9 +1,9 @@
 //! Source-backed, constant-load Cattaneo--Mindlin tangential contact.
 //!
 //! The original normal owner supplies the circular Hertz footprint and load.
-//! Both original bulk states supply G = E / (2 (1 + nu)); the local Coulomb
-//! coefficient is explicitly selected from the ORDERED interface card. No bulk
-//! material name or normal-contact coefficient supplies a friction default.
+//! Both original bulk states supply their retained shear moduli; the local
+//! Coulomb coefficient is explicitly selected from the ORDERED interface card.
+//! No bulk material name or normal-contact coefficient supplies a friction default.
 //!
 //! This explicitly selects the classical decoupled, isotropic Hertz/Mindlin
 //! approximation. Normal/tangential elastic coupling, changing load, elliptic
@@ -197,8 +197,7 @@ impl SourceMindlinContact {
         )?;
         let solids = [elastic.surface_a_state(), elastic.surface_b_state()];
         let poisson_ratios = solids.map(|s| s.poisson_ratio());
-        let shear_moduli_pa =
-            solids.map(|s| (0.5 * s.young_modulus_pa()) / (1.0 + s.poisson_ratio()));
+        let shear_moduli_pa = solids.map(|s| s.elastic_state().shear_modulus_pa());
         let law = MindlinDeresiewiczPoint::new(MindlinPointParameters {
             normal_force_n: patch.normal_force_n,
             contact_radius_m: patch.patch_radius_m,

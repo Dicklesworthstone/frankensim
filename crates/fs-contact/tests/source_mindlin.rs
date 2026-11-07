@@ -234,6 +234,140 @@ fn original_bulk_interface_and_hertz_patch_determine_the_tangential_response() {
 }
 
 #[test]
+fn independent_bulk_shear_sources_retain_hertz_and_mindlin_stiffness_at_poisson_limits() {
+    use fs_contact::interface_binding::mindlin::loading::SourceHertzMindlinContact;
+    use fs_matdb::{ClaimSet, MaterialCard};
+    use fs_material::state_point::{
+        IsotropicElasticParameters, IsotropicSolidStatePoint, resolve_material_state_point,
+    };
+    use fs_qty::Density;
+
+    // Synthetic limiting states test the classical isotropic half-space laws,
+    // not a claim that a measured specimen has these extreme modulus ratios.
+    for bulk_to_shear in [1e-14, 1e12] {
+        let template = normal(1e7, Some(0.6), Dims::NONE, false);
+        let original = template.model().normal_state();
+        let original_elastic = original.elastic();
+        let originals = [
+            original_elastic.surface_a_state(),
+            original_elastic.surface_b_state(),
+        ];
+        let shear = [1e7, 2e7];
+        let bulk = shear.map(|g| bulk_to_shear * g);
+        let requirements = [
+            ("density", Density::DIMS),
+            ("K-source", Pressure::DIMS),
+            ("G-source", Pressure::DIMS),
+            ("yield_stress", Pressure::DIMS),
+        ]
+        .map(|(name, dims)| {
+            ScalarPropertyRequirement::try_new(
+                name,
+                dims,
+                ScalarAdmissibility::StrictlyPositive,
+            )
+            .unwrap()
+        });
+        let states: [IsotropicSolidStatePoint; 2] = core::array::from_fn(|i| {
+            let mut claims = ClaimSet::new();
+            for ((name, dims), value) in [
+                ("density", Density::DIMS),
+                ("K-source", Pressure::DIMS),
+                ("G-source", Pressure::DIMS),
+                ("yield_stress", Pressure::DIMS),
+            ]
+            .into_iter()
+            .zip([originals[i].density_kg_m3(), bulk[i], shear[i], 1e10])
+            {
+                claims
+                    .insert_claim(PropertyClaim {
+                        key: PropertyKey::new(name, dims),
+                        value: PropertyValue::Scalar { value, dims },
+                        validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0),
+                        uncertainty: UncertaintyModel::Unstated,
+                        interpolation: InterpolationPolicy::ConstantWithinValidity,
+                        observations: vec![],
+                        provenance: Provenance {
+                            source: "synthetic independent contact K/G limits".into(),
+                            license: "CC0-1.0".into(),
+                            artifact: None,
+                        },
+                    })
+                    .unwrap();
+            }
+            let card = MaterialCard::assemble(
+                originals[i].resolved().material().clone(),
+                claims,
+                vec![],
+            )
+            .unwrap();
+            let resolved = resolve_material_state_point(
+                &card,
+                &common::query(),
+                &requirements,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap();
+            let state = IsotropicSolidStatePoint::try_from_resolved_with_parameters(
+                resolved.clone(),
+                &requirements[0],
+                &IsotropicElasticParameters::BulkShear {
+                    bulk_modulus: requirements[1].clone(),
+                    shear_modulus: requirements[2].clone(),
+                },
+                &requirements[3],
+            )
+            .unwrap();
+            assert_eq!(state.resolved(), &resolved);
+            assert!(state.resolved().property("young_modulus").is_none());
+            assert!(state.resolved().property("poisson_ratio").is_none());
+            assert_eq!(state.elastic_state().shear_modulus_pa(), shear[i]);
+            assert_eq!(state.elastic_state().bulk_modulus_pa(), bulk[i]);
+            state
+        });
+        let elastic = bind_isotropic_elastic_interface(
+            original_elastic.interface(),
+            &states[0],
+            &states[1],
+        )
+        .unwrap();
+        let normal_state =
+            bind_normal_interface_state(&elastic, original.interface_state()).unwrap();
+        let model = bind_normal_contact_model(
+            &normal_state,
+            NormalContactModelSelection::SingleSupported,
+        )
+        .unwrap();
+        let source = resolve(
+            SourcePointContact::new(model, template.geometry(), template.envelope()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(source.law().parameters().shear_moduli_pa, shear);
+
+        // Independent half-space indentation moduli M = 4G(3K+G)/(3K+4G).
+        let indentation_moduli: [f64; 2] = core::array::from_fn(|i| {
+            4.0 * shear[i] * (3.0 * bulk[i] + shear[i]) / (3.0 * bulk[i] + 4.0 * shear[i])
+        });
+        let reduced = (indentation_moduli[0].recip() + indentation_moduli[1].recip()).recip();
+        let patch = source.normal_response();
+        common::close(elastic.reduced_modulus_pa(), reduced);
+        common::close(
+            patch.normal_force_n,
+            (4.0 / 3.0) * reduced * patch.patch_radius_m * 2e-5,
+        );
+        common::close(patch.reversible_energy_j, 0.4 * patch.normal_force_n * 2e-5);
+        let poisson = (3.0 * bulk_to_shear - 2.0) / (2.0 * (3.0 * bulk_to_shear + 1.0));
+        let expected_stiffness = 8.0 * patch.patch_radius_m
+            / ((2.0 - poisson) * (shear[0].recip() + shear[1].recip()));
+        common::close(source.law().initial_stiffness_n_per_m(), expected_stiffness);
+
+        // The evolving-area owner independently reconstructs Hertz elasticity
+        // from G/nu and must accept the exact original normal footprint/storage.
+        SourceHertzMindlinContact::from_fixed_source(source).unwrap();
+    }
+}
+
+#[test]
 fn prescribed_trial_uses_original_sources_and_returns_the_same_accepted_work() {
     let source = resolve(normal(1e7, Some(0.6), Dims::NONE, false)).unwrap();
     let d = source.law().gross_slip_displacement_m();

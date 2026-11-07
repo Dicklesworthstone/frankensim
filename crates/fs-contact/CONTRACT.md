@@ -289,9 +289,11 @@ source limits, lift-off, deterministic replay and atomic refusal/retry.
 `fs_tribo::TangentialLaw` using an original `SourcePointContact`, both admitted
 bulk elastic states and an explicitly selected scalar property from the same
 ordered interface card. It obtains the circular patch radius and normal load
-from the original Hertz evaluator and derives each shear modulus from its
-source E and nu. The coefficient is never inferred from a material name or
-copied from the normal model. Original property-use receipts, uncertainty,
+from the original Hertz evaluator and retains each original source shear
+modulus. Independent K/G sources feed both normal and tangential stiffness
+without a lossy reconstruction through E and nu, including near the auxetic
+and incompressible limits. The coefficient is never inferred from a material
+name or copied from the normal model. Original property-use receipts, uncertainty,
 authority and the normal operating envelope remain accessible.
 `SourceMindlinState` additionally retains the exact original normal-model and
 resolved-friction identities. Numerically equal coefficients from a different

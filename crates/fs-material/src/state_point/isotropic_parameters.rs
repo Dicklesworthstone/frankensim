@@ -245,6 +245,26 @@ impl IsotropicElasticDerivation {
 }
 
 impl IsotropicElasticStatePoint {
+    /// Shear modulus [Pa], retaining the original independent source value.
+    /// Only canonical Young/Poisson states require the E/nu conversion.
+    #[must_use]
+    pub fn shear_modulus_pa(&self) -> f64 {
+        self.derivation.as_ref().map_or_else(
+            || (0.5 * self.young_modulus_pa) / (1.0 + self.poisson_ratio),
+            |derivation| derivation.shear_modulus_pa,
+        )
+    }
+
+    /// Bulk modulus [Pa], retaining the original independent source value.
+    /// Only canonical Young/Poisson states require the E/nu conversion.
+    #[must_use]
+    pub fn bulk_modulus_pa(&self) -> f64 {
+        self.derivation.as_ref().map_or_else(
+            || (self.young_modulus_pa / 3.0) / (1.0 - 2.0 * self.poisson_ratio),
+            |derivation| derivation.bulk_modulus_pa,
+        )
+    }
+
     /// The original selected isotropic stiffness in orthonormal Mandel order.
     /// Canonical E/nu states keep their original arithmetic; alternative source
     /// pairs use their retained bulk/shear values without a lossy E/nu detour.
@@ -809,6 +829,70 @@ mod tests {
     }
 
     #[test]
+    fn g3_hertz_reduction_retains_canonical_and_mixed_parameter_scales() {
+        let young = 2e307;
+        let poisson = -0.8;
+        let shear = (0.5 * young) / (1.0 + poisson);
+        let bulk = (young / 3.0) / (1.0 - 2.0 * poisson);
+        let base = card([2500.0, young, poisson, shear, bulk]);
+        let mut claims = base.claims().clone();
+        for (name, dims, value) in [
+            (DENSITY_PROPERTY, Density::DIMS, 2500.0),
+            (YOUNG_MODULUS_PROPERTY, Pressure::DIMS, young),
+            (POISSON_RATIO_PROPERTY, Dims::NONE, poisson),
+            (YIELD_STRESS_PROPERTY, Pressure::DIMS, 100e6),
+        ] {
+            claims.insert_claim(claim(name, dims, value)).unwrap();
+        }
+        let material = MaterialCard::assemble(base.id().clone(), claims, Vec::new()).unwrap();
+        let canonical = resolve_isotropic_solid_state_point(
+            &material,
+            &point(),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        assert!(canonical.elastic_state().derivation().is_none());
+        let density = requirement(DENSITY_PROPERTY, Density::DIMS);
+        let yield_requirement = requirement(YIELD_STRESS_PROPERTY, Pressure::DIMS);
+        let independent = parameters(2);
+        let extra: Vec<_> = independent.requirements().into_iter().cloned().collect();
+        let expanded = canonical
+            .resolved()
+            .with_additional_requirements(
+                &material,
+                &extra,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap();
+        let bulk_shear = IsotropicSolidStatePoint::try_from_resolved_with_parameters(
+            expanded.clone(),
+            &density,
+            &independent,
+            &yield_requirement,
+        )
+        .unwrap();
+        let explicit_young_poisson = IsotropicSolidStatePoint::try_from_resolved_with_parameters(
+            expanded,
+            &density,
+            &IsotropicElasticParameters::YoungPoisson {
+                young_modulus: requirement(YOUNG_MODULUS_PROPERTY, Pressure::DIMS),
+                poisson_ratio: requirement(POISSON_RATIO_PROPERTY, Dims::NONE),
+            },
+            &yield_requirement,
+        )
+        .unwrap();
+        let expected = young / (2.0 * (1.0 - poisson) * (1.0 + poisson));
+        for (a, b) in [
+            (&canonical, &canonical),
+            (&canonical, &bulk_shear),
+            (&bulk_shear, &canonical),
+            (&explicit_young_poisson, &canonical),
+        ] {
+            close(a.reduced_modulus_against(b).unwrap().value_pa, expected);
+        }
+    }
+
+    #[test]
     fn g3_appending_yield_retains_original_pinned_receipts_with_competing_elastic_claims() {
         let mut claims=ClaimSet::new();
         let mut requirements=Vec::new();
@@ -1054,6 +1138,8 @@ mod tests {
                 let c = state.stiffness_mandel_pa();
                 assert_eq!(c[3][3], 2.0 * shear);
                 let derived = state.derivation().unwrap();
+                assert_eq!(state.shear_modulus_pa(), shear);
+                assert_eq!(state.bulk_modulus_pa(), derived.bulk_modulus_pa());
                 assert_eq!(c[0][0], derived.bulk_modulus_pa() + (4.0 / 3.0) * shear);
                 assert_eq!(c[0][1], derived.bulk_modulus_pa() - (2.0 / 3.0) * shear);
                 if tag == 2 {
