@@ -2429,8 +2429,9 @@ three-state ODE refinement oracle, energy return from release-shared memories,
 zero-residue geometric support, source work, limits, ownership and cancellation.
 Midpoint is passive but requires a time-resolution axis for stiff poles and
 wave phase. The complete-state held-source exponential path is available in
-`time::relaxing::exact`, as specified below. These owners do not yet compose
-spatial relaxation memories with mechanical wall states.
+`time::relaxing::exact`, as specified below. Combined mechanical and spatial
+admittance memories are available through the mechanical owners' explicit
+`prepare_*_with_walls_and_relaxing_boundaries` methods.
 
 ### Analytic dispersive mechanical walls in full-pressure resonance queries
 
@@ -2514,3 +2515,49 @@ work and no resampling, and bounded admission, ownership and cancellation.
 These regressions are authored, not claimed executed: the native dependency
 build exhausted the shared execution environment, which subsequently became
 unavailable before the final formatting command could be confirmed.
+
+### Simultaneous mechanical and spatial-admittance wall dynamics
+
+`prepare_time_with_walls_and_relaxing_boundaries` and
+`prepare_exact_time_with_walls_and_relaxing_boundaries` compose the original
+mechanical/Maxwell wall states and spatial causal-admittance memories against
+ONE complete acoustic evolution. Every original displacement, velocity,
+Maxwell memory and admittance pressure memory remains explicit. Physical
+patches have disjoint faces; independent histories at shared edges, including
+pressure-release-shared coordinates and zero residues, remain live.
+
+Sparse midpoint eliminates both boundary laws into the same original acoustic
+factor and reconstructs both histories from the same midpoint pressure. The
+combined memory cap counts the complete Maxwell and admittance trace extents.
+The exact path retains the existing fluid/mechanical pHS coordinates and adds
+raw admittance memories to one complete-generator exponential cache. No
+residue matrix is inverted or assigned fictitious positive storage. Dense
+admission counts every original state and source; its physical identity audit
+includes all four heat channels and excludes both reversible exchange forms.
+
+The public accounts distinguish fluid storage, mechanical kinetic/elastic and
+Maxwell storage, and `admittance_memory_j`. Work separates instantaneous Robin
+heat, Kelvin resistance heat, Maxwell heat, admittance heat, mechanical
+exchange, admittance exchange, and the original signed source work. Acoustic,
+mechanical, admittance and total balances are independently checked before a
+candidate is returned. Admittance q [Pa] is never confused with the mechanical
+energy-normalized Maxwell coordinate z. `state_with_all_memories` imports both
+histories explicitly; legacy wall-history imports refuse omitted admittance
+histories. The explicit zero/rest constructors initialize every history to zero.
+
+Existing preparation entry points retain their empty-admittance behavior.
+Warm steps require no new factorization or material sampling. The exact owner
+keeps the original four observation forms when no admittance arms are present,
+and six forms plus the same source observations when they are present. Source
+work remains paired to original linear/quadratic boundary and volume profiles.
+
+Eight focused regressions cover independent surface moments for all physical
+accounts, an independent six-state physical ODE with seven integrated accounts,
+full interval-partition parity, coupled spatial midpoint refinement, energy
+return from pressure-release-shared histories into fluid and mechanical walls,
+zero residues, complete memory/state limits, mixed signed sources, ownership
+and cancellation. Pinned selective formatting and whitespace checks passed.
+Independent numerical reference calculations support the test fixtures; the
+Rust regressions are not claimed executed while shared native-build resources
+remain exhausted. These are the stated linear local wall laws; they do not
+add shell bending, a moving fluid mesh or nonlinear wall constitutive physics.

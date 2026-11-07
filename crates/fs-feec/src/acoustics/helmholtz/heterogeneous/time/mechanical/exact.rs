@@ -13,6 +13,11 @@
 //! work. Neither an endpoint energy deficit nor an effective wall admittance is
 //! reported as dissipation.
 //!
+//! Spatial causal-admittance patches may share this same acoustic trajectory.
+//! Their original trace pressures obey tau q_dot + q = p, including zero-residue
+//! and pressure-release-shared coordinates. They retain their original storage,
+//! heat and reversible transfer independently of the mechanical wall accounts.
+//!
 //! Preparation is dense and explicitly bounded; warm steps reuse cached matrix
 //! contractions. Exactness concerns the semidiscrete held-input solution up to
 //! numerical exponential error. Spatial convergence, input bandwidth and output
@@ -20,10 +25,12 @@
 //! the original locally reacting law; this does not add shell bending or infer a
 //! causal realization from harmonic admittance samples.
 
+use super::super::super::SpatialRelaxingBoundary;
 use super::super::{
     PressureReleaseConstraints,
     exact::{ExactTimeLimits, ExactVelocityPort},
 };
+use super::relaxing::{self, TraceMemory};
 use super::{
     BoundaryAdmittance, BoundaryVelocitySource, C64, Coo, Csr, Dd, HeterogeneousError,
     HeterogeneousHelmholtzFe, HeterogeneousTimeEnergy, HeterogeneousTimeState, MechanicalBoundary,
@@ -38,11 +45,14 @@ use fs_phs::linear_exact::{
 };
 use fs_phs::{PortHamiltonian, PreparedStepError, QuadraticStorage};
 
+mod admittance;
+use admittance::ExactAdmittance;
+
 /// Admission counts EVERY free fluid and original wall coordinate, not modes.
 #[derive(Clone, Copy, Debug)]
 pub struct ExactMechanicalTimeLimits {
     /// Two states per free pressure DOF, two per wall trace DOF, and one per
-    /// trace DOF per Maxwell arm. Original sparse forms and full lifted acoustic
+    /// trace DOF per Maxwell arm and spatial-admittance arm. Original sparse forms and full lifted acoustic
     /// vectors are additional. The native augmented-state cap also counts inputs.
     pub max_states: usize,
     /// Native dense cache, byte and multiplication-work admission. Coordinate
@@ -71,6 +81,7 @@ pub struct ExactMechanicalTimeState<'p, 'm, 'f, 'c> {
     displacements: Vec<Vec<f64>>,
     velocities: Vec<Vec<f64>>,
     memories: Vec<Vec<Vec<f64>>>,
+    admittance_memories: Vec<Vec<f64>>,
 }
 
 impl core::fmt::Debug for ExactMechanicalTimeState<'_, '_, '_, '_> {
@@ -111,6 +122,11 @@ impl<'m, 'f, 'c> ExactMechanicalTimeState<'_, 'm, 'f, 'c> {
     pub fn wall_relaxation_memory(&self, wall: usize, arm: usize) -> Option<&[f64]> {
         self.memories.get(wall)?.get(arm).map(Vec::as_slice)
     }
+    /// Original spatial-admittance memory pressure q [Pa], in prepared trace order.
+    #[must_use]
+    pub fn admittance_memory_pressure_pa(&self, arm: usize) -> Option<&[f64]> {
+        self.admittance_memories.get(arm).map(Vec::as_slice)
+    }
 }
 
 /// Original storage changes, independently integrated heat and reversible work.
@@ -121,6 +137,7 @@ pub struct ExactMechanicalTimeWork {
     pub delta_energy_j: f64,
     pub acoustic_delta_energy_j: f64,
     pub wall_delta_energy_j: f64,
+    pub admittance_delta_energy_j: f64,
     /// All boundary and volume-source work, counted once.
     pub input_work_j: f64,
     /// Prepared boundary-source subtotal, already included in input_work_j.
@@ -132,6 +149,10 @@ pub struct ExactMechanicalTimeWork {
     pub wall_relaxation_dissipation_j: f64,
     /// Signed integral p^T W v dt; negative means the wall returns fluid energy.
     pub wall_work_j: f64,
+    /// Independently integrated sum q_j^T Cj q_j [J].
+    pub admittance_dissipation_j: f64,
+    /// Signed integral sum p^T Cj q_j [J], from fluid to admittance memories.
+    pub admittance_work_j: f64,
 }
 
 impl ExactMechanicalTimeWork {
@@ -141,17 +162,27 @@ impl ExactMechanicalTimeWork {
     }
     #[must_use]
     pub fn balance_residual_j(self) -> f64 {
-        self.delta_energy_j + self.boundary_dissipation_j + self.wall_dissipation_j()
+        self.delta_energy_j
+            + self.boundary_dissipation_j
+            + self.wall_dissipation_j()
+            + self.admittance_dissipation_j
             - self.input_work_j
     }
     #[must_use]
     pub fn acoustic_balance_residual_j(self) -> f64 {
-        self.acoustic_delta_energy_j + self.boundary_dissipation_j + self.wall_work_j
+        self.acoustic_delta_energy_j
+            + self.boundary_dissipation_j
+            + self.wall_work_j
+            + self.admittance_work_j
             - self.input_work_j
     }
     #[must_use]
     pub fn wall_balance_residual_j(self) -> f64 {
         self.wall_delta_energy_j + self.wall_dissipation_j() - self.wall_work_j
+    }
+    #[must_use]
+    pub fn admittance_balance_residual_j(self) -> f64 {
+        self.admittance_delta_energy_j + self.admittance_dissipation_j - self.admittance_work_j
     }
 }
 
@@ -192,6 +223,7 @@ pub struct PreparedExactMechanicalTime<'m, 'f, 'c> {
     potential_scale: Vec<f64>,
     fluid_mass: MassMap,
     walls: Vec<ExactWall>,
+    admittance: Vec<ExactAdmittance>,
     states: usize,
     linear_port_count: usize,
     boundary_port_count: usize,
@@ -327,7 +359,10 @@ impl MassMap {
     }
 
     // Original physical field from scaled canonical momentum.
-    pub(in crate::acoustics::helmholtz::heterogeneous::time) fn physical_map(&self, inertia_scale: f64) -> Vec<f64> {
+    pub(in crate::acoustics::helmholtz::heterogeneous::time) fn physical_map(
+        &self,
+        inertia_scale: f64,
+    ) -> Vec<f64> {
         let n = self.scales.len();
         (0..n * n)
             .map(|i| self.inverse[i] / inertia_scale / self.scales[i / n])
@@ -369,14 +404,26 @@ pub(in crate::acoustics::helmholtz::heterogeneous::time) fn pullback(
     Ok(form)
 }
 
-pub(in crate::acoustics::helmholtz::heterogeneous::time) fn put_block(target: &mut [f64], states: usize, offset: usize, block: &[f64], n: usize) {
+pub(in crate::acoustics::helmholtz::heterogeneous::time) fn put_block(
+    target: &mut [f64],
+    states: usize,
+    offset: usize,
+    block: &[f64],
+    n: usize,
+) {
     for row in 0..n {
         target[(offset + row) * states + offset..(offset + row) * states + offset + n]
             .copy_from_slice(&block[row * n..(row + 1) * n]);
     }
 }
 
-pub(in crate::acoustics::helmholtz::heterogeneous::time) fn add_skew(matrix: &mut [f64], states: usize, row: usize, col: usize, value: f64) {
+pub(in crate::acoustics::helmholtz::heterogeneous::time) fn add_skew(
+    matrix: &mut [f64],
+    states: usize,
+    row: usize,
+    col: usize,
+    value: f64,
+) {
     matrix[row * states + col] += value;
     matrix[col * states + row] -= value;
 }
@@ -444,6 +491,40 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         limits: ExactMechanicalTimeLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedExactMechanicalTime<'m, 'f, 'c>, HeterogeneousError> {
+        self.prepare_exact_time_with_walls_and_relaxing_boundaries(
+            duration_s,
+            resistive,
+            spatial_boundaries,
+            boundaries,
+            &[],
+            ports,
+            boundary_sources,
+            volume_sources,
+            pressure_release_faces,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Evolve mechanical/Maxwell walls and causal spatial admittance in ONE
+    /// complete held-source trajectory. All physical patches have disjoint faces;
+    /// adjacent patches retain independent original trace states at shared DOFs.
+    /// Every physical heat and signed exchange is integrated independently.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_exact_time_with_walls_and_relaxing_boundaries<'m>(
+        &'m self,
+        duration_s: f64,
+        resistive: &[ResistiveBoundary],
+        spatial_boundaries: &[&SpatialResistiveBoundary<'_, '_, '_>],
+        boundaries: &[MechanicalBoundary],
+        relaxing_boundaries: &[&SpatialRelaxingBoundary<'_, '_, '_>],
+        ports: &[ExactVelocityPort],
+        boundary_sources: &[&BoundaryVelocitySource<'_, '_, '_>],
+        volume_sources: &[&VolumeVelocitySource<'_, '_, '_>],
+        pressure_release_faces: &[[u32; 3]],
+        limits: ExactMechanicalTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedExactMechanicalTime<'m, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
         super::super::super::boundary_source::admit_count(boundary_sources.len())?;
         super::super::super::source::admit_count(volume_sources.len())?;
@@ -487,6 +568,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             .map(|b| &b.faces)
             .chain(spatial_boundaries.iter().map(|b| &b.faces))
             .chain(boundaries.iter().map(|b| &b.faces))
+            .chain(relaxing_boundaries.iter().map(|b| &b.instantaneous.faces))
         {
             for &face in faces {
                 poll(cancelled)?;
@@ -494,14 +576,19 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 key.sort_unstable();
                 if !seen.insert(key) {
                     return Err(invalid(
-                        "mechanical, real Robin and pressure-release faces must be disjoint",
+                        "mechanical, causal admittance, real Robin and pressure-release faces must be disjoint",
                     )
                     .into());
                 }
             }
         }
+        let physical_fields = spatial_boundaries
+            .iter()
+            .copied()
+            .chain(relaxing_boundaries.iter().map(|b| &b.instantaneous))
+            .collect::<Vec<_>>();
         let conductance =
-            self.resistive_matrix(resistive, spatial_boundaries, &pressure_release, cancelled)?;
+            self.resistive_matrix(resistive, &physical_fields, &pressure_release, cancelled)?;
         let conductance = pressure_release.restrict(&conductance, cancelled)?;
         let mut walls = Vec::new();
         for boundary in boundaries {
@@ -583,6 +670,26 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 couplings,
             });
         }
+        // The pHS backbone retains the original fluid and all mechanical states.
+        // Added raw q memories are NEVER supplied a fictitious invertible residue.
+        let base_states = states;
+        let traces = relaxing::prepare(
+            self,
+            relaxing_boundaries,
+            limits.max_states - base_states,
+            cancelled,
+        )?;
+        let mut admittance = Vec::with_capacity(traces.len());
+        for trace in traces {
+            let offset = states;
+            states = states
+                .checked_add(trace.dofs.len())
+                .ok_or_else(|| invalid("complete exact admittance state extent overflow"))?;
+            admit_extent(states, source_count, limits)?;
+            admittance.push(ExactAdmittance { trace, offset });
+        }
+        let total_states = states;
+        let states = base_states;
         let mut loads = Vec::with_capacity(source_count);
         for port in ports {
             poll(cancelled)?;
@@ -785,6 +892,26 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             }
             observations.push(observation);
         }
+        let extension = if admittance.is_empty() {
+            None
+        } else {
+            Some(admittance::extend(
+                self,
+                duration_s,
+                &pressure_release,
+                &fluid_mass,
+                &pressure_map,
+                &admittance,
+                states,
+                total_states,
+                &q,
+                &j,
+                &r,
+                &forms,
+                &observations,
+                cancelled,
+            )?)
+        };
         let storage = QuadraticStorage::new(q, states).map_err(HeterogeneousError::Propagation)?;
         let system = PortHamiltonian::new(states, source_count, j, r, g, Box::new(storage))
             .map_err(HeterogeneousError::Propagation)?;
@@ -797,15 +924,28 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             },
         )
         .map_err(HeterogeneousError::Propagation)?;
-        let flow = PreparedQuadraticFlow::new_controlled(
-            &system,
-            &split,
-            duration_s,
-            &forms,
-            &observations,
-            limits.preparation,
-            &mut *cancelled,
-        )
+        let flow = match extension {
+            None => PreparedQuadraticFlow::new_controlled(
+                &system,
+                &split,
+                duration_s,
+                &forms,
+                &observations,
+                limits.preparation,
+                &mut *cancelled,
+            ),
+            Some(extension) => PreparedQuadraticFlow::new_extended_controlled(
+                &system,
+                &split,
+                &extension.generator,
+                &extension.scales,
+                duration_s,
+                &extension.forms,
+                &extension.observations,
+                limits.preparation,
+                &mut *cancelled,
+            ),
+        }
         .map_err(propagation)?;
         poll(cancelled)?;
         Ok(PreparedExactMechanicalTime {
@@ -815,7 +955,8 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             potential_scale,
             fluid_mass,
             walls,
-            states,
+            admittance,
+            states: total_states,
             linear_port_count: ports.len(),
             boundary_port_count,
             volume_source_count: volume_sources.len(),
@@ -857,6 +998,24 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
         self.walls.get(wall).map(|w| &w.boundary)
     }
     #[must_use]
+    pub fn admittance_terms(&self) -> usize {
+        self.admittance.len()
+    }
+    #[must_use]
+    pub fn admittance_memory_dofs(&self, arm: usize) -> Option<&[usize]> {
+        self.admittance.get(arm).map(|a| a.trace.dofs.as_slice())
+    }
+    #[must_use]
+    pub fn admittance_memory_patch_and_term(&self, arm: usize) -> Option<(usize, usize)> {
+        self.admittance
+            .get(arm)
+            .map(|a| (a.trace.patch, a.trace.term))
+    }
+    #[must_use]
+    pub fn admittance_relaxation_time_s(&self, arm: usize) -> Option<f64> {
+        self.admittance.get(arm).map(|a| a.trace.tau)
+    }
+    #[must_use]
     pub fn zero_state(&self) -> ExactMechanicalTimeState<'_, 'm, 'f, 'c> {
         ExactMechanicalTimeState {
             owner: self,
@@ -871,6 +1030,11 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
                 .walls
                 .iter()
                 .map(|w| vec![vec![0.0; w.dofs.len()]; w.couplings.len()])
+                .collect(),
+            admittance_memories: self
+                .admittance
+                .iter()
+                .map(|a| vec![0.0; a.trace.dofs.len()])
                 .collect(),
         }
     }
@@ -915,6 +1079,33 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
         velocities_m_s: &[Vec<f64>],
         memories: &[Vec<Vec<f64>>],
     ) -> Result<ExactMechanicalTimeState<'_, 'm, 'f, 'c>, HeterogeneousError> {
+        if !self.admittance.is_empty() {
+            return Err(
+                invalid("complete original spatial admittance histories are required").into(),
+            );
+        }
+        self.state_with_all_memories(
+            potential,
+            pressure,
+            displacements_m,
+            velocities_m_s,
+            memories,
+            &[],
+        )
+    }
+    /// Import every original physical field and both distinct memory families.
+    /// Mechanical memories are energy-normalized z; admittance memories are q
+    /// pressures [Pa]. Neither history is reset or pressure-release projected.
+    #[allow(clippy::too_many_arguments)]
+    pub fn state_with_all_memories(
+        &self,
+        potential: &[f64],
+        pressure: &[f64],
+        displacements_m: &[Vec<f64>],
+        velocities_m_s: &[Vec<f64>],
+        memories: &[Vec<Vec<f64>>],
+        admittance_memories: &[Vec<f64>],
+    ) -> Result<ExactMechanicalTimeState<'_, 'm, 'f, 'c>, HeterogeneousError> {
         self.admit_acoustic(potential, pressure)?;
         if displacements_m.len() != self.walls.len()
             || velocities_m_s.len() != self.walls.len()
@@ -937,6 +1128,19 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
             )
             .into());
         }
+        if admittance_memories.len() != self.admittance.len()
+            || self
+                .admittance
+                .iter()
+                .zip(admittance_memories)
+                .any(|(arm, memory)| {
+                    memory.len() != arm.trace.dofs.len() || memory.iter().any(|v| !v.is_finite())
+                })
+        {
+            return Err(
+                invalid("finite complete original admittance memories are required").into(),
+            );
+        }
         Ok(ExactMechanicalTimeState {
             owner: self,
             acoustic: HeterogeneousTimeState {
@@ -947,6 +1151,7 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
             displacements: displacements_m.to_vec(),
             velocities: velocities_m_s.to_vec(),
             memories: memories.to_vec(),
+            admittance_memories: admittance_memories.to_vec(),
         })
     }
     fn admit_acoustic(
@@ -1007,6 +1212,7 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
             wall_kinetic_j: 0.0,
             wall_elastic_j: 0.0,
             wall_relaxation_j: 0.0,
+            admittance_memory_j: 0.0,
         };
         let mut roundoff = 0.5 * (rk + rm);
         for (index, wall) in self.walls.iter().enumerate() {
@@ -1026,6 +1232,11 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
                 energy.wall_relaxation_j += 0.5 * stored;
                 roundoff += 0.5 * error;
             }
+        }
+        for (arm, memory) in self.admittance.iter().zip(&state.admittance_memories) {
+            let (stored, error) = positive_form(&arm.trace.conductance, memory, cancelled)?;
+            energy.admittance_memory_j += 0.5 * arm.trace.tau * stored;
+            roundoff += 0.5 * arm.trace.tau * error;
         }
         if !energy.total_j().is_finite() || !roundoff.is_finite() {
             return Err(invalid("exact mechanical acoustic storage is unrepresentable").into());
@@ -1118,6 +1329,10 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
                 }
             }
         }
+        for (arm, memory) in self.admittance.iter().zip(&initial.admittance_memories) {
+            poll(cancelled)?;
+            x[arm.offset..arm.offset + memory.len()].copy_from_slice(memory);
+        }
         let result = self
             .flow
             .evaluate(&x, amplitudes)
@@ -1157,6 +1372,11 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
                 }
             }
         }
+        for (arm, memory) in self.admittance.iter().zip(&mut next.admittance_memories) {
+            poll(cancelled)?;
+            let count = memory.len();
+            memory.copy_from_slice(&result.state[arm.offset..arm.offset + count]);
+        }
         // All endpoint coordinates, including zero-energy gauge and relaxed
         // memory directions, must remain finite before publishing a candidate.
         if next
@@ -1167,6 +1387,7 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
             .chain(next.displacements.iter().flatten())
             .chain(next.velocities.iter().flatten())
             .chain(next.memories.iter().flatten().flatten())
+            .chain(next.admittance_memories.iter().flatten())
             .any(|v| !v.is_finite())
         {
             return Err(
@@ -1218,11 +1439,29 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
             }
         }
         let mut input = Dd::from_f64(0.0);
+        let mut admittance_change = Dd::from_f64(0.0);
+        for (index, arm) in self.admittance.iter().enumerate() {
+            admittance_change = admittance_change
+                + Dd::from_f64(arm.trace.tau)
+                    * Dd::from_f64(energy_change(
+                        &arm.trace.conductance,
+                        &initial.admittance_memories[index],
+                        &next.admittance_memories[index],
+                        cancelled,
+                    )?);
+        }
+        let source_offset = if self.admittance.is_empty() {
+            admittance::BASE_FORMS
+        } else {
+            admittance::FORM_COUNT
+        };
         let mut boundary_source_work = Dd::from_f64(0.0);
         let mut volume_work = Dd::from_f64(0.0);
         let mut absolute_work = 0.0;
-        for (index, (&amplitude, &integral)) in
-            amplitudes.iter().zip(&result.integrals[4..]).enumerate()
+        for (index, (&amplitude, &integral)) in amplitudes
+            .iter()
+            .zip(&result.integrals[source_offset..])
+            .enumerate()
         {
             let work = Dd::from_f64(amplitude) * Dd::from_f64(integral);
             input = input + work;
@@ -1236,9 +1475,11 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
         let work = ExactMechanicalTimeWork {
             initial_energy_j: initial_energy.total_j(),
             final_energy_j: final_energy.total_j(),
-            delta_energy_j: (Dd::from_f64(acoustic_change) + wall_change).to_f64(),
+            delta_energy_j: (Dd::from_f64(acoustic_change) + wall_change + admittance_change)
+                .to_f64(),
             acoustic_delta_energy_j: acoustic_change,
             wall_delta_energy_j: wall_change.to_f64(),
+            admittance_delta_energy_j: admittance_change.to_f64(),
             input_work_j: input.to_f64(),
             boundary_source_work_j: boundary_source_work.to_f64(),
             volume_source_work_j: volume_work.to_f64(),
@@ -1246,6 +1487,16 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
             wall_resistance_dissipation_j: result.integrals[1],
             wall_relaxation_dissipation_j: result.integrals[2],
             wall_work_j: result.integrals[3],
+            admittance_dissipation_j: if self.admittance.is_empty() {
+                0.0
+            } else {
+                result.integrals[admittance::HEAT]
+            },
+            admittance_work_j: if self.admittance.is_empty() {
+                0.0
+            } else {
+                result.integrals[admittance::WORK]
+            },
         };
         let physical_scale = work
             .initial_energy_j
@@ -1254,9 +1505,12 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
             .max(work.delta_energy_j.abs())
             .max(work.acoustic_delta_energy_j.abs())
             .max(work.wall_delta_energy_j.abs())
+            .max(work.admittance_delta_energy_j.abs())
             .max(absolute_work)
             .max(work.boundary_dissipation_j.abs())
             .max(work.wall_dissipation_j().abs())
+            .max(work.admittance_dissipation_j.abs())
+            .max(work.admittance_work_j.abs())
             .max(work.wall_work_j.abs());
         let limit_j = self.limits.energy_balance_tolerance * physical_scale
             + initial_roundoff
@@ -1274,6 +1528,7 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
             work.balance_residual_j(),
             work.acoustic_balance_residual_j(),
             work.wall_balance_residual_j(),
+            work.admittance_balance_residual_j(),
         ] {
             if !residual.is_finite() {
                 return Err(
@@ -1291,6 +1546,7 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
             work.boundary_dissipation_j,
             work.wall_resistance_dissipation_j,
             work.wall_relaxation_dissipation_j,
+            work.admittance_dissipation_j,
         ] {
             if heat < -limit_j {
                 return Err(HeterogeneousError::EnergyBalance {
@@ -1303,10 +1559,11 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
         Ok(ExactMechanicalTimeStep {
             state: next,
             work,
-            integrated_port_pressure_pa_m2_s: result.integrals[4..4 + self.boundary_port_count]
+            integrated_port_pressure_pa_m2_s: result.integrals
+                [source_offset..source_offset + self.boundary_port_count]
                 .to_vec(),
             integrated_volume_source_pressure_pa_s: result.integrals
-                [4 + self.boundary_port_count..]
+                [source_offset + self.boundary_port_count..]
                 .to_vec(),
         })
     }
@@ -1322,3 +1579,6 @@ fn extensions(coupling: f64, displacement: &[f64], memory: &[f64]) -> Vec<f64> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod composed_tests;
