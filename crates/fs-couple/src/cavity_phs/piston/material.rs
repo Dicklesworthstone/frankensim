@@ -4,6 +4,10 @@
 //! piston owns the translational constraint and thermal/momentum time step.
 //! Binding them does not create a second mass calculator or rigid-body solver.
 
+/// Material-derived inertia on the native resolved Euler and mixture owners.
+#[cfg(feature = "experimental-shock-loading")]
+pub mod resolved;
+
 /// Shared-state multiport flow with the original source-resolved wall inertias.
 pub mod graph;
 /// Reciprocal acoustic loads and finite-body heat retaining material inertia.
