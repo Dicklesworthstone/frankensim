@@ -11,6 +11,9 @@
 //! freezing, nucleation and interface handoff require an explicit event owner.
 //! Geometry stays fixed, and the complete split requires timestep refinement.
 
+/// Conservative completion of freezing on the complete network/phase clock.
+pub mod boundary;
+
 use super::{
     ClosedGasParcel, DepositedCell, DepositionError, DepositionSimulation, EquilibriumEvaporation,
     EquilibriumGasHeatSolve, EvaporationLaw, Event, GasEvaporationSolve,
@@ -77,6 +80,7 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog>(
         thermal_config,
         phase_config,
         None,
+        false,
         checkpoint,
     )
 }
@@ -130,6 +134,7 @@ pub fn advance_deposition_with_gas_and_heat<'thermal, 'catalog>(
                 maximum_iterations: heat_config.maximum_iterations,
             },
         )),
+        false,
         checkpoint,
     )
 }
@@ -142,6 +147,7 @@ pub(super) fn partition_report(
     surface: TimelineSurface<'_>,
     transferred_mass_kg: f64,
     mass_tolerance_kg: f64,
+    allow_completed: bool,
     checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<Option<PhaseInventoryStep>, GasEvaporationTimelineError> {
     let Some(inventory) = surface.inventory else {
@@ -176,11 +182,12 @@ pub(super) fn partition_report(
         area_m2: 0.0,
     };
     checkpoint()?;
-    Ok(Some(inventory.partition_step(
+    Ok(Some(inventory.partition_step_with_completion(
         bulk(initial_cell),
         bulk(final_cell),
         transferred_mass_kg,
         mass_tolerance_kg,
+        allow_completed,
     )?))
 }
 

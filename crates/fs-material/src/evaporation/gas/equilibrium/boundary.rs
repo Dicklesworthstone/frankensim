@@ -28,7 +28,43 @@ use super::{
     GasEvaporationError, GasEvaporationSolve, GasLiquidBinding, LiquidSurfaceState,
     PhaseInventoryStep, ThermochemicalGasModel, finish_surface, invalid, nonnegative,
 };
-use crate::evaporation::gas::{poll, prepare_surface_with_boundary};
+use crate::evaporation::gas::{admit_liquid_source, poll, prepare_surface_with_boundary};
+use fs_thermal::evaporation::{GasFilm, surface_flux};
+
+/// Admit a terminal interface with the original source/film owners. Exact
+/// saturation can turn off vapor exchange even when its coefficient is nonzero.
+/// This does not invent a liquid seed or admit a finite solid-interface step.
+pub(in crate::evaporation::gas) fn zero_flux_at_freezing<L: EvaporationLaw + ?Sized>(
+    inventory: EquilibriumEvaporation<'_>,
+    law: &L,
+    binding: &GasLiquidBinding,
+    gas: &ClosedGasParcel,
+    catalog: &ThermochemicalGasModel,
+    mass_transfer_coefficient_m_s: f64,
+    controls: GasEvaporationSolve,
+) -> Result<bool, GasEvaporationError> {
+    let caloric = inventory.caloric_with_completion(inventory.solid_at_melting_h_j_kg, true)?;
+    let source = admit_liquid_source(
+        law,
+        binding,
+        catalog,
+        caloric.temperature_k,
+        caloric.liquid_enthalpy_j_kg,
+        controls,
+    )?;
+    caloric.admit_phase(source.phase, true)?;
+    let flux = surface_flux(
+        law,
+        caloric.temperature_k,
+        GasFilm {
+            total_pressure_pa: gas.state().state().pressure,
+            vapor_partial_pressure_pa: gas.species_partial_pressure_pa(&binding.species)?,
+            temperature_k: gas.state().state().temperature,
+            mass_transfer_coefficient_m_s,
+        },
+    )?;
+    Ok(flux.mass_flux_kg_m2_s == 0.0)
+}
 
 /// Physical time consumed by the existing film and the terminal phase decision.
 #[derive(Clone, Copy, Debug, PartialEq)]

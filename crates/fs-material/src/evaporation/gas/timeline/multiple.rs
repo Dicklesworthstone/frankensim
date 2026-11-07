@@ -353,6 +353,8 @@ fn advance_deposition<'thermal, 'catalog>(
             range: [lo, hi],
             born_mass_kg: 0.0,
             inventory: None,
+            allow_solid_trials: false,
+            first_solid_step: None,
         };
         branch.check(thermal)?;
         branches.0.insert(id, branch);

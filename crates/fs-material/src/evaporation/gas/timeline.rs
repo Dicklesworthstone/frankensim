@@ -14,6 +14,7 @@ pub mod multiple;
 
 use super::equilibrium::{
     EquilibriumEvaporation, PhaseInventoryStep, advance_equilibrium_surface,
+    boundary::{advance_to_freezing, zero_flux_at_freezing},
     heat::{EquilibriumGasHeatSolve, advance_equilibrium_surface_with_heat},
 };
 use super::{
@@ -189,6 +190,10 @@ struct Branch<'a> {
     range: [f64; 2],
     born_mass_kg: f64,
     inventory: Option<EquilibriumEvaporation<'a>>,
+    allow_solid_trials: bool,
+    // First native endpoint without liquid, even if later heat would remelt it.
+    // Keep this on the transactional observer so rejected work is still returned.
+    first_solid_step: Option<(f64, f64, f64)>,
 }
 impl Branch<'_> {
     fn check_cell(
@@ -222,7 +227,8 @@ impl Branch<'_> {
             let solid_fraction = 1.0 - values.liquid_mass_fraction;
             let solid_mass = cell.mass_kg * solid_fraction;
             if !super::positive(cell.mass_kg)
-                || !super::positive(liquid_mass)
+                || !(super::positive(liquid_mass)
+                    || (self.allow_solid_trials && values.liquid_mass_fraction == 0.0))
                 || !super::nonnegative(solid_mass)
                 || (solid_fraction > 0.0 && solid_mass == 0.0)
             {
@@ -248,6 +254,10 @@ impl Branch<'_> {
 }
 impl DepositionObserver for Branch<'_> {
     type Error = DepositionError;
+    fn begin(&mut self) -> Result<(), Self::Error> {
+        self.first_solid_step = None;
+        Ok(())
+    }
     fn event(
         &mut self,
         event: &Event,
@@ -270,7 +280,16 @@ impl DepositionObserver for Branch<'_> {
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Self::Error> {
         checkpoint()?;
-        self.check(thermal)
+        self.check(thermal)?;
+        if self.allow_solid_trials && self.first_solid_step.is_none() {
+            if let (Some(inventory), Some(cell)) = (self.inventory, thermal.cells().get(&self.id)) {
+                if cell.specific_h_j_kg <= inventory.solid_at_melting_h_j_kg {
+                    self.first_solid_step =
+                        Some((thermal.time_s(), cell.specific_h_j_kg, cell.mass_kg));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -309,6 +328,7 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog>(
         thermal_config,
         phase_config,
         None,
+        false,
         checkpoint,
     )
 }
@@ -344,6 +364,7 @@ pub fn advance_deposition_with_gas_and_heat<'thermal, 'catalog>(
         thermal_config,
         phase_config,
         Some((heat_transfer_coefficient_w_m2_k, heat_config)),
+        false,
         checkpoint,
     )
 }
@@ -358,9 +379,16 @@ fn advance_deposition<'thermal, 'catalog>(
     thermal_config: StepConfig,
     phase_config: GasEvaporationSolve,
     film_heat: Option<(f64, GasFilmHeatSolve)>,
+    stop_at_freezing: bool,
     mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<GasEvaporationTimelineCandidate<'thermal, 'catalog>, GasEvaporationTimelineError> {
     checkpoint()?;
+    if stop_at_freezing && (surface.inventory.is_none() || film_heat.is_some()) {
+        return Err(DepositionError::InvalidInput(
+            "freezing completion requires the original fusion inventory and native heat lane",
+        )
+        .into());
+    }
     if let Some((coefficient, heat_config)) = film_heat {
         super::heat::validate_heat_controls(coefficient, heat_config)?;
         if heat_config.pure_liquid_enthalpy_range_j_kg != surface.enthalpy_range_j_kg {
@@ -425,6 +453,8 @@ fn advance_deposition<'thermal, 'catalog>(
         range: [lo, hi],
         born_mass_kg: 0.0,
         inventory: surface.inventory,
+        allow_solid_trials: false,
+        first_solid_step: None,
     };
     let mut known = thermal.cells().contains_key(&id);
     for (index, event) in thermal.pending_events().iter().enumerate() {
@@ -470,7 +500,8 @@ fn advance_deposition<'thermal, 'catalog>(
     };
     let mut epoch = next.time_s();
     let mut interval = 1usize;
-    while next.time_s() < target_s {
+    let mut freezing_completed = false;
+    'timeline: while next.time_s() < target_s {
         checkpoint()?;
         let start = next.time_s();
         let area = if next.cells().contains_key(&id) {
@@ -492,6 +523,18 @@ fn advance_deposition<'thermal, 'catalog>(
             return Err(DepositionError::Arithmetic.into());
         }
         let planned_stop = stop;
+        let mut freezing_search = if stop_at_freezing {
+            surface.inventory.and_then(|inventory| {
+                next.cells().get(&id).map(|cell| {
+                    equilibrium::boundary::FreezingSearch::new(
+                        start,
+                        cell.mass_kg * (cell.specific_h_j_kg - inventory.solid_at_melting_h_j_kg),
+                    )
+                })
+            })
+        } else {
+            None
+        };
         loop {
             checkpoint()?;
             let remaining = next
@@ -501,8 +544,10 @@ fn advance_deposition<'thermal, 'catalog>(
                 .ok_or(DepositionError::Budget(
                     "finite-gas evaporation thermal substeps",
                 ))?;
-            let (mut heated, observed, heat) = next.advance_observed_limited(
-                &branch,
+            let mut trial_branch = branch;
+            trial_branch.allow_solid_trials = stop_at_freezing;
+            let (mut heated, observed, mut heat) = next.advance_observed_limited(
+                &trial_branch,
                 stop,
                 thermal_config,
                 remaining,
@@ -512,6 +557,101 @@ fn advance_deposition<'thermal, 'catalog>(
                 .attempted_thermal_substeps
                 .checked_add(heat.substeps)
                 .ok_or(DepositionError::Arithmetic)?;
+            if let (Some(search), Some(inventory), Some(area)) =
+                (&mut freezing_search, surface.inventory, area)
+            {
+                let cell = &heated.cells()[&id];
+                let solid_h = inventory.solid_at_melting_h_j_kg;
+                let headroom = finite(cell.mass_kg * (cell.specific_h_j_kg - solid_h))?;
+                let first_solid = observed.first_solid_step;
+                let has_crossing = first_solid.is_some() || search.is_bracketed();
+                let inactive = area == 0.0
+                    || (has_crossing
+                        && zero_flux_at_freezing(
+                            inventory,
+                            surface.law,
+                            surface.binding,
+                            &next_gas,
+                            catalog,
+                            surface.mass_transfer_coefficient_m_s,
+                            phase_config,
+                        )?);
+                // Only a proven crossing admits a thermal terminal selection.
+                // A near-solid but stationary body must keep its real inventory.
+                let terminal_heat = inactive
+                    && has_crossing
+                    && first_solid.is_none_or(|(time, _, _)| time == stop)
+                    && headroom.abs() + heat.residual_j.abs() + audit.thermal.residual_j.abs()
+                        <= thermal_config.energy_tolerance_j;
+                if terminal_heat {
+                    // The phase owner still admits the original binding and
+                    // liquid seed. No zero-liquid film step is manufactured.
+                    let initial = &next.cells()[&id];
+                    let mut checkpoint_error = None;
+                    let admission = advance_equilibrium_surface(
+                        inventory,
+                        surface.law,
+                        surface.binding,
+                        LiquidSurfaceState {
+                            mass_kg: initial.mass_kg,
+                            specific_enthalpy_j_kg: initial.specific_h_j_kg,
+                            area_m2: area,
+                        },
+                        &next_gas,
+                        catalog,
+                        surface.mass_transfer_coefficient_m_s,
+                        0.0,
+                        phase_config,
+                        || {
+                            if let Err(error) = checkpoint() {
+                                checkpoint_error = Some(error);
+                                true
+                            } else {
+                                false
+                            }
+                        },
+                    );
+                    if let Some(error) = checkpoint_error {
+                        return Err(error.into());
+                    }
+                    admission?;
+                    let expected = cell.clone();
+                    heated.apply_condensed_exchanges(
+                        &[CondensedCellExchange {
+                            expected: expected.clone(),
+                            interval_exposed_area_m2: area,
+                            replacement: SolidSurfaceState {
+                                mass_kg: expected.mass_kg,
+                                specific_enthalpy_j_kg: solid_h,
+                                area_m2: area,
+                            },
+                            enthalpy_range_j_kg: [lo, hi],
+                            caloric_identity: *inventory.curve().identity().as_bytes(),
+                        }],
+                        &mut checkpoint,
+                    )?;
+                    // The exact source knot replaces represented storage, not
+                    // external heat. Its measured correction is a real defect.
+                    add(&mut heat.stored_energy_change_j, -headroom)?;
+                    add(&mut heat.residual_j, -headroom)?;
+                    freezing_completed = true;
+                    next = heated;
+                    branch = observed;
+                    add_heat(&mut audit.thermal, heat)?;
+                    break;
+                }
+                if let Some((time, h, mass)) = first_solid {
+                    let residual = finite(mass * (h - solid_h))?;
+                    stop = search
+                        .observe(time, residual)?
+                        .ok_or(DepositionError::Arithmetic)?;
+                    audit.rejected_intervals = audit
+                        .rejected_intervals
+                        .checked_add(1)
+                        .ok_or(DepositionError::Arithmetic)?;
+                    continue;
+                }
+            }
             if let Some(area) = area {
                 let expected = heated.cells()[&id].clone();
                 let chart_error = std::cell::RefCell::new(None);
@@ -563,9 +703,26 @@ fn advance_deposition<'thermal, 'catalog>(
                         )
                         .map(|candidate| {
                             let (bulk, gas, catalog, step, heat, _) = candidate.into_parts();
-                            (bulk, gas, catalog, step, heat.heat_into_liquid_j)
+                            (bulk, gas, catalog, step, heat.heat_into_liquid_j, None)
                         })
                     }
+                    (Some(inventory), None) if stop_at_freezing => advance_to_freezing(
+                        inventory,
+                        surface.law,
+                        surface.binding,
+                        liquid,
+                        &next_gas,
+                        catalog,
+                        surface.mass_transfer_coefficient_m_s,
+                        stop - start,
+                        phase_config,
+                        cancelled,
+                    )
+                    .map(|candidate| {
+                        let (exchange, _, boundary) = candidate.into_parts();
+                        let (bulk, gas, catalog, step) = exchange.into_parts();
+                        (bulk, gas, catalog, step, 0.0, Some(boundary))
+                    }),
                     (Some(inventory), None) => advance_equilibrium_surface(
                         inventory,
                         surface.law,
@@ -581,7 +738,7 @@ fn advance_deposition<'thermal, 'catalog>(
                     .map(|candidate| {
                         let (exchange, _) = candidate.into_parts();
                         let (bulk, gas, catalog, step) = exchange.into_parts();
-                        (bulk, gas, catalog, step, 0.0)
+                        (bulk, gas, catalog, step, 0.0, None)
                     }),
                     (None, Some((coefficient, heat_config))) => advance_surface_with_gas_and_heat(
                         surface.law,
@@ -599,7 +756,7 @@ fn advance_deposition<'thermal, 'catalog>(
                     )
                     .map(|candidate| {
                         let (liquid, gas, catalog, step, heat) = candidate.into_parts();
-                        (liquid, gas, catalog, step, heat.heat_into_liquid_j)
+                        (liquid, gas, catalog, step, heat.heat_into_liquid_j, None)
                     }),
                     (None, None) => advance_surface_with_gas(
                         surface.law,
@@ -615,7 +772,7 @@ fn advance_deposition<'thermal, 'catalog>(
                     )
                     .map(|candidate| {
                         let (liquid, gas, catalog, step) = candidate.into_parts();
-                        (liquid, gas, catalog, step, 0.0)
+                        (liquid, gas, catalog, step, 0.0, None)
                     }),
                 };
                 if let Some(error) = checkpoint_error {
@@ -647,6 +804,19 @@ fn advance_deposition<'thermal, 'catalog>(
                                 .checked_add(1)
                                 .ok_or(DepositionError::Arithmetic)?;
                             stop = retry_stop;
+                            // A constitutive step limit requires a finer physical
+                            // interval, rather than localization in the old bracket.
+                            if let (Some(search), Some(inventory)) =
+                                (&mut freezing_search, surface.inventory)
+                            {
+                                let cell = &next.cells()[&id];
+                                *search = equilibrium::boundary::FreezingSearch::new(
+                                    start,
+                                    cell.mass_kg
+                                        * (cell.specific_h_j_kg
+                                            - inventory.solid_at_melting_h_j_kg),
+                                );
+                            }
                             // `next`, `branch`, gas, birth offsets and physical
                             // audits still describe the unchanged accepted start.
                             continue;
@@ -654,7 +824,41 @@ fn advance_deposition<'thermal, 'catalog>(
                         return Err(error.into());
                     }
                 };
-                let (liquid, evolved_gas, _, step, sensible_heat) = candidate;
+                let (liquid, evolved_gas, _, step, sensible_heat, boundary) = candidate;
+                if let (Some(search), Some(inventory), Some(boundary)) =
+                    (&mut freezing_search, surface.inventory, boundary)
+                {
+                    if boundary.freezing_completed && boundary.elapsed_duration_s == stop - start {
+                        freezing_completed = true;
+                    } else {
+                        let residual = if boundary.freezing_completed {
+                            // Reconstruct the signed full-duration headroom from
+                            // the original frozen-film root. This is only a search
+                            // score: no clipped gas or network state is accepted.
+                            let initial_headroom = expected.mass_kg
+                                * (expected.specific_h_j_kg - inventory.solid_at_melting_h_j_kg);
+                            finite(
+                                initial_headroom
+                                    * ((boundary.elapsed_duration_s - (stop - start))
+                                        / boundary.elapsed_duration_s),
+                            )?
+                        } else {
+                            finite(
+                                liquid.mass_kg
+                                    * (liquid.specific_enthalpy_j_kg
+                                        - inventory.solid_at_melting_h_j_kg),
+                            )?
+                        };
+                        if let Some(retry_stop) = search.observe(stop, residual)? {
+                            audit.rejected_intervals = audit
+                                .rejected_intervals
+                                .checked_add(1)
+                                .ok_or(DepositionError::Arithmetic)?;
+                            stop = retry_stop;
+                            continue;
+                        }
+                    }
+                }
                 if let Some(inventory) = surface.inventory {
                     heated.apply_condensed_exchanges(
                         &[CondensedCellExchange {
@@ -707,6 +911,9 @@ fn advance_deposition<'thermal, 'catalog>(
             add_heat(&mut audit.thermal, heat)?;
             break;
         }
+        if freezing_completed {
+            break 'timeline;
+        }
         if empty || event_time == Some(stop) {
             epoch = stop;
             interval = 1;
@@ -748,6 +955,7 @@ fn advance_deposition<'thermal, 'catalog>(
         surface,
         audit.transferred_mass_kg,
         phase_config.gas.mass_tolerance_kg,
+        freezing_completed,
         &mut checkpoint,
     )?;
     checkpoint()?;

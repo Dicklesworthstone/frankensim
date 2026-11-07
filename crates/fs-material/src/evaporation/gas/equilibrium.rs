@@ -42,7 +42,7 @@ fn invalid(message: &'static str) -> GasEvaporationError {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EquilibriumEvaporation<'a> {
     source: SharpMeltingCaloric<'a>,
-    solid_at_melting_h_j_kg: f64,
+    pub(in crate::evaporation::gas) solid_at_melting_h_j_kg: f64,
     liquid_at_melting_h_j_kg: f64,
     liquid_at_melting_density_kg_m3: f64,
 }
@@ -136,7 +136,7 @@ impl<'a> EquilibriumEvaporation<'a> {
 
     // Only an event-owned endpoint may use the exact original solid fusion
     // knot; the liquid constituent still supplies the limiting vaporization h.
-    fn caloric_with_completion(
+    pub(in crate::evaporation::gas) fn caloric_with_completion(
         self,
         h: f64,
         allow_completed: bool,
@@ -178,7 +178,7 @@ impl<'a> EquilibriumEvaporation<'a> {
         self.state_with_completion(bulk, false)
     }
 
-    fn state_with_completion(
+    pub(in crate::evaporation::gas) fn state_with_completion(
         self,
         bulk: LiquidSurfaceState,
         allow_completed: bool,
@@ -232,7 +232,7 @@ impl<'a> EquilibriumEvaporation<'a> {
         )
     }
 
-    fn partition_step_with_completion(
+    pub(in crate::evaporation::gas) fn partition_step_with_completion(
         self,
         initial: LiquidSurfaceState,
         final_bulk: LiquidSurfaceState,

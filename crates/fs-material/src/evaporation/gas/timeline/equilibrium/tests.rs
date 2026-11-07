@@ -22,7 +22,12 @@ fn boundary(power_w: f64) -> Boundary {
     }
 }
 
-fn cell(chart: &EquilibriumEnthalpyPhaseCurve, id: u64, h: f64, power_w: f64) -> DepositedCell {
+pub(super) fn cell(
+    chart: &EquilibriumEnthalpyPhaseCurve,
+    id: u64,
+    h: f64,
+    power_w: f64,
+) -> DepositedCell {
     let initial = bulk(chart, 0.5);
     let state = chart.values_at_specific_enthalpy(h).unwrap();
     DepositedCell {
@@ -42,14 +47,14 @@ fn cell(chart: &EquilibriumEnthalpyPhaseCurve, id: u64, h: f64, power_w: f64) ->
     }
 }
 
-fn birth(time_s: f64, cell: DepositedCell) -> TimedEvent {
+pub(super) fn birth(time_s: f64, cell: DepositedCell) -> TimedEvent {
     TimedEvent {
         time_s,
         event: Event::Birth(cell),
     }
 }
 
-fn schedule(
+pub(super) fn schedule(
     chart: &EquilibriumEnthalpyPhaseCurve,
     events: Vec<TimedEvent>,
     maximum_steps: usize,
@@ -67,7 +72,7 @@ fn schedule(
     .unwrap()
 }
 
-fn selection<'a>(
+pub(super) fn selection<'a>(
     chart: &'a EquilibriumEnthalpyPhaseCurve,
     binding: &'a GasLiquidBinding,
     coefficient: f64,
@@ -81,7 +86,7 @@ fn selection<'a>(
     }
 }
 
-fn heat(dt: f64) -> StepConfig {
+pub(super) fn heat(dt: f64) -> StepConfig {
     StepConfig {
         max_dt_s: dt,
         energy_tolerance_j: 1e-6,

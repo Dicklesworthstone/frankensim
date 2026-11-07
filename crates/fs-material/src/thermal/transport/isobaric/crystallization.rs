@@ -503,4 +503,5 @@ fn invalid(reason: &'static str) -> ThermalTransportError {
 }
 
 #[cfg(test)]
+#[path = "crystallization/tests.rs"]
 mod tests;

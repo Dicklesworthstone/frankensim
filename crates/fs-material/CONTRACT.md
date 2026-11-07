@@ -12609,6 +12609,29 @@ each accepted heat and vapor endpoint; terminal freezing needs an explicit
 interface event. The full heat/phase split requires timestep refinement, and
 neither failure nor cancellation publishes either original owner's candidate.
 
+`evaporation::gas::timeline::equilibrium::boundary::advance_deposition_to_freezing`
+adds conservative completion to that same network/phase loop. Every shortened
+phase event is localized by replaying the complete native heat and vapor proposal
+from its unchanged accepted start. A clipped vapor endpoint is only a search
+bound; acceptance requires its duration to equal the complete thermal interval.
+All neighboring cells, native events and gas therefore share the accepted clock.
+The observer retains the first all-solid native substep even if later heat would
+remelt it, and rejected probes spend the original thermal substep allowance.
+Event localization also has a fixed 64-trial bound; constitutive step limits
+still request finer physical intervals through the original retry owner.
+
+Covered or zero-transfer surfaces, including an exactly saturated film, can
+complete freezing by native heat alone.
+An exact source-knot selection is admitted only after a detected crossing and
+within the original thermal joule allowance, including preceding thermal defects.
+Its represented correction enters stored energy and the thermal residual, never
+external heat. Active vapor retains its original donor, source and gas gates.
+The whole-window phase partition includes the terminal zero liquid inventory;
+the receipt returns unconsumed time for an explicit subsequent interface owner.
+Initial/scheduled liquid-seed admission and source identity remain strict.
+This endpoint belongs to the first-order split and requires timestep refinement;
+it does not infer coverage, nucleation, moving geometry or a sublimation law.
+
 ### Several retained films sharing one finite atmosphere
 
 `evaporation::gas::chamber::equilibrium` extends the original chamber reduction
