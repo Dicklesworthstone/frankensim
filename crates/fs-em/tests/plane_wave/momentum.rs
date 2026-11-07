@@ -286,15 +286,15 @@ fn distinct_exterior_fresnel_forces_match_independent_six_component_stress() {
 
 #[test]
 fn critical_and_evanescent_exit_force_matches_finite_maxwell_fields() {
+    // These dyadic values give an exact critical discriminant. The negative
+    // Nyquist mode below has the same admitted cosine, rounded to exactly 3/4.
+    let cosine = 0.75;
+    let critical_epsilon = 0.4375;
     let grid = AngularSpectrumGrid {
         width: 4,
         height: 1,
-        spacing_m: [core::f64::consts::PI / 0.6, 1.0],
+        spacing_m: [core::f64::consts::PI / det::sqrt(critical_epsilon), 1.0],
     };
-    let sine = core::f64::consts::PI / grid.spacing_m[0];
-    let cosine = det::sqrt((1.0 - sine) * (1.0 + sine));
-    // Match the owner's admitted cosine exactly, so the middle case is kz=0.
-    let critical_epsilon = (1.0 - cosine) * (1.0 + cosine);
     let outside = material(1.0, 1.0);
     let film = material(1.7, 1.0);
     let amplitude = [C64::new(0.7, 0.2), C64::new(-0.3, 0.5)];

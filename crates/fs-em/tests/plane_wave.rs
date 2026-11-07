@@ -258,6 +258,159 @@ fn identical_media_remain_transparent_arbitrarily_close_to_grazing() {
 }
 
 #[test]
+fn critical_side_retains_constitutive_product_and_incidence_roundoff() {
+    // G1/G3: the exact supplied binary numbers are on opposite sides of
+    // critical incidence although their rounded index products both equal
+    // 3/4. The residuals below follow directly from their dyadic expansions.
+    let incident = material(1.0, 1.0);
+    let increment = f64::EPSILON;
+    let cases = [
+        (0.625, 1.2, -2.0_f64.powi(-55)),
+        (
+            0.75 - 0.5 * increment,
+            1.0 + increment,
+            2.0_f64.powi(-54) - 2.0_f64.powi(-105),
+        ),
+    ];
+    for (epsilon, mu, normal_squared) in cases {
+        assert_eq!(epsilon * mu, 0.75);
+        let transmitted = material(epsilon, mu);
+        let interface = PlanarDielectricInterface::try_new(
+            &incident,
+            DielectricResponse::Lossless(&transmitted),
+        )
+        .unwrap();
+        for polarization in [Polarization::Te, Polarization::Tm] {
+            let response = interface.response(1.0, 0.5, polarization).unwrap();
+            let q = if normal_squared > 0.0 {
+                assert!(response.transmitted_power_fraction > 0.0);
+                C64::from_re(normal_squared.sqrt())
+            } else {
+                assert_eq!(response.transmitted_power_fraction, 0.0);
+                assert_ne!(response.reflected_tangential_e.im, 0.0);
+                C64::new(0.0, -(-normal_squared).sqrt())
+            };
+            complex_near(
+                response.transmitted_normal_wavenumber_rad_m,
+                q,
+                2e-15 * q.abs(),
+            );
+            let (a, b) = match polarization {
+                Polarization::Te => (C64::from_re(mu * 0.5), q),
+                Polarization::Tm => (q, C64::from_re(epsilon * 0.5)),
+            };
+            complex_near(response.reflected_tangential_e, (a - b) / (a + b), 5e-15);
+            near(
+                response.reflected_power_fraction + response.transmitted_power_fraction,
+                1.0,
+                5e-15,
+            );
+        }
+    }
+
+    // The cosine square must also survive cancellation when mu is exactly 1.
+    // For these binary f64 inputs, n^2 - 1 + c^2 = -1.3322676295501878e-17.
+    let transmitted = material(0.84, 1.0);
+    let interface =
+        PlanarDielectricInterface::try_new(&incident, DielectricResponse::Lossless(&transmitted))
+            .unwrap();
+    let response = interface.response(1.0, 0.4, Polarization::Te).unwrap();
+    near(
+        response.transmitted_normal_wavenumber_rad_m.im,
+        -1.332_267_629_550_187_8e-17_f64.sqrt(),
+        1e-23,
+    );
+    assert_eq!(response.transmitted_power_fraction, 0.0);
+}
+
+#[test]
+fn rounded_equal_indices_do_not_erase_grazing_total_internal_reflection() {
+    // (1+e)(1-e)=1-e^2, while the f64 product rounds to one. At
+    // c=e/2 the exact outgoing discriminant is -3e^2/4, not c^2.
+    let e = f64::EPSILON;
+    let incident = material(1.0, 1.0);
+    let transmitted = material(1.0 + e, 1.0 - e);
+    let interface =
+        PlanarDielectricInterface::try_new(&incident, DielectricResponse::Lossless(&transmitted))
+            .unwrap();
+    assert_eq!((1.0 + e) * (1.0 - e), 1.0);
+    for polarization in [Polarization::Te, Polarization::Tm] {
+        let response = interface.response(1.0, 0.5 * e, polarization).unwrap();
+        assert_eq!(response.transmitted_power_fraction, 0.0);
+        near(response.reflected_power_fraction, 1.0, 2e-15);
+        near(
+            response.transmitted_normal_wavenumber_rad_m.im,
+            -0.75_f64.sqrt() * e,
+            1e-30,
+        );
+        assert!(response.reflected_tangential_e.im.abs() > 0.8);
+    }
+}
+
+#[test]
+fn near_critical_film_retains_evanescent_tunnelling_and_subdivision() {
+    use fs_em::plane_wave::layers::{DielectricLayer, PlanarDielectricLayers};
+
+    // G1/G3: epsilon*mu rounds to 3/4, but its exact binary product lies
+    // below by 2^-55. A film one decay length thick must use sinh/cosh,
+    // not the exactly-critical linear-in-thickness transfer limit.
+    let incident = material(1.0, 1.0);
+    let film = material(0.625, 1.2);
+    let kappa = 2.0_f64.powi(-55).sqrt();
+    for decay_depth in [0.1, 1.0, 10.0] {
+        let thickness = decay_depth / kappa;
+        let layer = DielectricLayer {
+            response: DielectricResponse::Lossless(&film),
+            thickness_m: thickness,
+        };
+        let stack = PlanarDielectricLayers::try_new(
+            &incident,
+            DielectricResponse::Lossless(&incident),
+            1.0,
+            &[layer],
+        )
+        .unwrap();
+        let split = PlanarDielectricLayers::try_new(
+            &incident,
+            DielectricResponse::Lossless(&incident),
+            1.0,
+            &[DielectricLayer {
+                thickness_m: 0.5 * thickness,
+                ..layer
+            }; 2],
+        )
+        .unwrap();
+        for polarization in [Polarization::Te, Polarization::Tm] {
+            let y = match polarization {
+                Polarization::Te => C64::new(0.0, -kappa / (1.2 * 0.5)),
+                Polarization::Tm => C64::new(0.0, 0.625 * 0.5 / kappa),
+            };
+            let b = C64::from_re(decay_depth.sinh()) / y;
+            let c = y.scale(decay_depth.sinh());
+            let denominator = C64::from_re(2.0 * decay_depth.cosh()) + b + c;
+            let expected_transmission = C64::from_re(2.0) / denominator;
+            let expected_reflection = (b - c) / denominator;
+            let response = stack.response(0.5, polarization).unwrap();
+            let subdivided = split.response(0.5, polarization).unwrap();
+            for result in [response, subdivided] {
+                complex_near(
+                    result.transmitted_tangential_e,
+                    expected_transmission,
+                    2e-13 * expected_transmission.abs(),
+                );
+                complex_near(result.reflected_tangential_e, expected_reflection, 2e-14);
+                near(
+                    result.transmitted_power_fraction,
+                    expected_transmission.norm_sq(),
+                    4e-13 * expected_transmission.norm_sq(),
+                );
+                assert_eq!(result.absorbed_power_fraction, 0.0);
+            }
+        }
+    }
+}
+
+#[test]
 fn original_debye_response_supplies_phase_flux_and_geometry_independent_bulk_epsilon() {
     let incident = material(E, M);
     let state = source(

@@ -33,7 +33,7 @@ use fs_material::{
     },
     state_point::ResolvedMaterialStatePoint,
 };
-use fs_math::{c64::C64, det};
+use fs_math::{c64::C64, dd::Dd, det};
 
 /// Coherent finite dielectric films, with the same source laws and conventions.
 pub mod layers;
@@ -294,6 +294,10 @@ struct WaveMedium {
     epsilon_ratio: C64,
     mu_ratio: f64,
     index_squared_ratio: C64,
+    // Preserve the constitutive product before subtracting the conserved
+    // tangential wave number. A rounded n^2 can otherwise cross the critical
+    // angle or falsely identify unequal media as a grazing null interface.
+    index_squared_real_residual: f64,
 }
 impl WaveMedium {
     fn new(
@@ -320,6 +324,9 @@ impl WaveMedium {
             epsilon_ratio,
             mu_ratio,
             index_squared_ratio,
+            index_squared_real_residual: epsilon_ratio
+                .re
+                .mul_add(mu_ratio, -index_squared_ratio.re),
         })
     }
 
@@ -331,15 +338,38 @@ impl WaveMedium {
         } else {
             (self.index_squared_ratio.re - 1.0) + cosine * cosine
         };
+        // Only the cancellation neighbourhood needs the precision ladder.
+        // Away from it the ordinary scalar path stays unchanged. Inside it,
+        // retain both the material-product residual and the exact cosine
+        // square; rounding either first can erase a real TIR phase or weak
+        // positive transmission. This is numerical accuracy for the admitted
+        // material contrast, not additional accuracy of its source data.
+        let normal_real = if normal_real.abs()
+            <= 8.0 * f64::EPSILON * self.index_squared_ratio.re.abs().max(1.0)
+        {
+            let index = Dd::from_pair(
+                self.index_squared_ratio.re,
+                self.index_squared_real_residual,
+            );
+            let c = Dd::from_f64(cosine);
+            if cosine > 0.5 {
+                (index - (Dd::ONE - c) * (Dd::ONE + c)).to_f64()
+            } else {
+                ((index - Dd::ONE) + c * c).to_f64()
+            }
+        } else {
+            normal_real
+        };
         C64::new(normal_real, self.index_squared_ratio.im)
     }
 
     fn normal(self, cosine: f64) -> Result<C64, ReflectionError> {
-        let mut normal = if self.index_squared_ratio == C64::ONE {
-            C64::from_re(cosine)
-        } else {
-            self.normal_squared(cosine).sqrt()
-        };
+        let mut normal =
+            if self.index_squared_ratio == C64::ONE && self.index_squared_real_residual == 0.0 {
+                C64::from_re(cosine)
+            } else {
+                self.normal_squared(cosine).sqrt()
+            };
         // The principal square root has +i on the negative real axis; the
         // outgoing exp(+i omega t) evanescent branch instead has -i.
         if normal.im > 0.0 {

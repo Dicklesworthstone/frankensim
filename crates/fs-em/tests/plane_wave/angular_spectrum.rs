@@ -229,17 +229,17 @@ fn transmitted_evanescent_beam_decays_and_carries_no_spurious_normal_power() {
 
 #[test]
 fn critical_refraction_preserves_longitudinal_tm_and_finite_te_fields_through_films() {
-    // G1: the negative Nyquist mode has sin(theta)=0.6. Derive the source's
-    // critical contrast from the exact admitted cosine so this exercises kz=0,
-    // not an accidentally near-critical floating-point mode.
+    // G1: this negative Nyquist mode's admitted cosine rounds to exactly 3/4.
+    // Both it and epsilon=7/16 are dyadic, so the outgoing discriminant is
+    // exactly zero without relying on a rounded product to manufacture it.
+    let cosine = 0.75;
+    let epsilon_exit = 0.4375;
     let grid = AngularSpectrumGrid {
         width: 4,
         height: 1,
-        spacing_m: [core::f64::consts::PI / 0.6, 1.0],
+        spacing_m: [core::f64::consts::PI / det::sqrt(epsilon_exit), 1.0],
     };
     let sine = core::f64::consts::PI / grid.spacing_m[0];
-    let cosine = det::sqrt((1.0 - sine) * (1.0 + sine));
-    let epsilon_exit = (1.0 - cosine) * (1.0 + cosine);
     let incident = material(1.0, 1.0);
     let exit = material(epsilon_exit, 1.0);
     let film = material(1.7, 1.0);
@@ -335,14 +335,13 @@ fn critical_refraction_preserves_longitudinal_tm_and_finite_te_fields_through_fi
 #[test]
 fn propagating_and_evanescent_transmitted_fields_converge_to_the_critical_wave() {
     // G3: both physical one-sided limits approach the same finite vector field.
+    // The admitted cosine is exactly 3/4 and its critical contrast is 7/16.
+    let critical = 0.4375;
     let grid = AngularSpectrumGrid {
         width: 2,
         height: 1,
-        spacing_m: [core::f64::consts::PI / 0.6, 1.0],
+        spacing_m: [core::f64::consts::PI / det::sqrt(critical), 1.0],
     };
-    let sine = core::f64::consts::PI / grid.spacing_m[0];
-    let cosine = det::sqrt((1.0 - sine) * (1.0 + sine));
-    let critical = (1.0 - cosine) * (1.0 + cosine);
     let incident = material(1.0, 1.0);
     let input = [
         [C64::ONE, C64::new(0.3, 0.2)],

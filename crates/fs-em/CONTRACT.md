@@ -3510,6 +3510,15 @@ interface, before subsequent absorption in the half-space. Total internal
 reflection retains its complex phase and evanescent field. The exact critical
 angle avoids division by vanishing normal wavenumber.
 
+Near critical incidence, the shared isotropic medium retains the constitutive
+product and incidence-square residuals through the existing double-double
+precision rung. Only a cancellation-sized discriminant takes this path; ordinary
+angles keep the scalar calculation. This distinguishes exact critical incidence
+from adjacent propagating or evanescent waves, preserving weak transmitted flux,
+TIR phase and finite-film tunnelling. A product rounded to unit index cannot
+erase its nonzero residual. These guarantees concern the admitted binary material
+ratios and angle, without increasing the accuracy of their source data.
+
 Synthetic source-bound tests cover normal incidence, magnetic impedance,
 Brewster cancellation, independent Poynting balance, total internal reflection,
 critical incidence, grazing transparency, Debye phase and capacitor-geometry
