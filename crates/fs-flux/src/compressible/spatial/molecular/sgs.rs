@@ -159,7 +159,11 @@ enum SubgridClosure {
 
 impl SubgridTransport {
     pub(super) fn requires_no_slip_wall(&self) -> bool {
-        matches!(self.closure, SubgridClosure::ChannelDynamicThermal(_))
+        match &self.closure {
+            SubgridClosure::ChannelDynamicThermal(_) => true,
+            SubgridClosure::Lagrangian(dynamic) => dynamic.normal_axis().is_some(),
+            _ => false,
+        }
     }
 
     pub(super) fn new(flow: &Euler3d, config: SubgridConfig) -> Result<Self, MolecularError> {

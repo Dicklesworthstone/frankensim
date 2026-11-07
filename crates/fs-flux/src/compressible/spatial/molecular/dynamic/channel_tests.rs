@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "channel/lagrangian_tests.rs"]
+mod lagrangian;
 use crate::compressible::spatial::molecular::sgs::{
     ChannelDynamicScalarConfig, ChannelDynamicSgsConfig, ChannelDynamicThermalSubgridConfig,
     channel_wall_values,
@@ -161,7 +164,10 @@ fn assert_faces(
         );
         let rho_alpha = face_viscosity_reference(
             active,
-            [heat.coefficient(left).unwrap(), heat.coefficient(cell).unwrap()],
+            [
+                heat.coefficient(left).unwrap(),
+                heat.coefficient(cell).unwrap(),
+            ],
             momentum.filter_width(),
             left,
             cell,

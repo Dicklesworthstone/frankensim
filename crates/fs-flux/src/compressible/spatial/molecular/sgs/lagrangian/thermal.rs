@@ -39,7 +39,7 @@ impl SubgridTransport {
         maximum_bytes: usize,
     ) -> Result<Self, MolecularError> {
         config.validate()?;
-        Self::new_lagrangian_owner(flow, LagrangianConfig::Thermal(config), maximum_bytes)
+        Self::new_lagrangian_owner(flow, LagrangianConfig::Thermal(config), None, maximum_bytes)
     }
 
     pub(in crate::compressible::spatial::molecular) fn lagrangian_thermal_config(

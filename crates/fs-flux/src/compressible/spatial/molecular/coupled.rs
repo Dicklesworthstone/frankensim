@@ -2,6 +2,9 @@ use super::*;
 use crate::compressible::mixture::molecular::stabilized::IntervalFailure;
 use crate::compressible::molecular::stabilized::StepWork;
 
+#[cfg(feature = "experimental-sgs")]
+mod lagrangian_channel;
+
 /// One completely accepted three-dimensional molecular/Euler/molecular step.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MolecularStepReport3d {
@@ -548,8 +551,12 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                 .sgs
                 .as_mut()
                 .expect("the Lagrangian SGS owner was just selected")
-                .prepare_lagrangian(&mut filter, &self.accepted, &mut cancelled)
-            {
+                .prepare_lagrangian_with_walls(
+                    &mut filter,
+                    &self.accepted,
+                    &self.molecular.walls,
+                    &mut cancelled,
+                ) {
                 Ok(trial) => {
                     let observation =
                         self.molecular
@@ -925,7 +932,12 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     .sgs
                     .as_mut()
                     .expect("the Lagrangian SGS owner was just selected")
-                    .prepare_lagrangian(&mut filter, &self.accepted, &mut cancelled)?;
+                    .prepare_lagrangian_with_walls(
+                        &mut filter,
+                        &self.accepted,
+                        &self.molecular.walls,
+                        &mut cancelled,
+                    )?;
                 let fit = trial.reports();
                 let report = self.step_prepared(
                     maximum_duration,

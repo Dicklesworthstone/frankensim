@@ -12,12 +12,14 @@
 //!
 //! This is first-order pathline/source integration with coefficients held over
 //! a physical step. The explicit departure-distance admission remains active.
-//! Initial history uses the shared local 27-cell fit. Memory times are in seconds.
+//! Initial history uses a local 27-cell periodic or nine-cell tangent fit.
+//! Memory times are in seconds. Resolved channel histories never wrap through
+//! the physical wall pair; their two tangent axes remain periodic.
 //!
-//! Fully periodic Cartesian grids with at least three cells per axis are
-//! required. Heat may use fixed turbulent Prandtl or an independent scalar
-//! history. No wall/inflow memory, backscatter energy, isotropic SGS energy,
-//! pressure-dilatation, shock closure or DNS qualification is supplied.
+//! Cartesian grids require at least three cells per axis. Heat may use fixed
+//! turbulent Prandtl or an independent scalar history. No inflow memory,
+//! backscatter energy, isotropic SGS energy, pressure-dilatation, shock closure
+//! or DNS qualification is supplied.
 
 use super::*;
 use fs_lbm::sgs3::dynamic::lagrangian::scalar::{LagrangianDynamicScalar, LagrangianScalarTrial};
@@ -144,6 +146,7 @@ pub(super) struct LagrangianTransport {
     // None only while the coupled step or observation holds an admitted trial.
     filter: Option<LagrangianFilter>,
     filter_width: f64,
+    normal_axis: Option<usize>,
     density: Vec<f64>,
     velocity: Vec<[f64; 3]>,
     // Empty on the fixed-Prandtl path; no extra fields are allocated there.
@@ -156,6 +159,10 @@ pub(super) struct LagrangianTransport {
 impl LagrangianTransport {
     pub(super) fn filter_width(&self) -> f64 {
         self.filter_width
+    }
+
+    pub(super) fn normal_axis(&self) -> Option<usize> {
+        self.normal_axis
     }
 
     pub(super) fn fixed_prandtl_config(&self) -> Option<LagrangianSubgridConfig> {
@@ -188,30 +195,89 @@ impl SubgridTransport {
         maximum_bytes: usize,
     ) -> Result<Self, MolecularError> {
         config.validate()?;
-        Self::new_lagrangian_owner(flow, LagrangianConfig::FixedPrandtl(config), maximum_bytes)
+        Self::new_lagrangian_owner(
+            flow,
+            LagrangianConfig::FixedPrandtl(config),
+            None,
+            maximum_bytes,
+        )
+    }
+
+    pub(in crate::compressible::spatial::molecular) fn new_lagrangian_channel(
+        flow: &Euler3d,
+        config: LagrangianSubgridConfig,
+        maximum_bytes: usize,
+    ) -> Result<Self, MolecularError> {
+        config.validate()?;
+        let normal = channel_axis(&flow.grid, flow.boundaries)?;
+        Self::new_lagrangian_owner(
+            flow,
+            LagrangianConfig::FixedPrandtl(config),
+            Some(normal),
+            maximum_bytes,
+        )
+    }
+
+    pub(in crate::compressible::spatial::molecular) fn new_lagrangian_channel_thermal(
+        flow: &Euler3d,
+        config: LagrangianThermalSubgridConfig,
+        maximum_bytes: usize,
+    ) -> Result<Self, MolecularError> {
+        config.validate()?;
+        let normal = channel_axis(&flow.grid, flow.boundaries)?;
+        Self::new_lagrangian_owner(
+            flow,
+            LagrangianConfig::Thermal(config),
+            Some(normal),
+            maximum_bytes,
+        )
+    }
+
+    pub(in crate::compressible::spatial::molecular) fn lagrangian_channel_normal_axis(
+        &self,
+    ) -> Option<usize> {
+        match &self.closure {
+            SubgridClosure::Lagrangian(dynamic) => dynamic.normal_axis(),
+            _ => None,
+        }
     }
 
     fn new_lagrangian_owner(
         flow: &Euler3d,
         config: LagrangianConfig,
+        normal_axis: Option<usize>,
         maximum_bytes: usize,
     ) -> Result<Self, MolecularError> {
-        dynamic::admit_domain(flow)?;
+        if normal_axis.is_none() {
+            dynamic::admit_domain(flow)?;
+        }
         let n = flow.states.len();
         let thermal = matches!(config, LagrangianConfig::Thermal(_));
         dynamic::admit_bytes(lagrangian_bytes(n, thermal)?, maximum_bytes)?;
         let filter = if thermal {
-            LagrangianFilter::Thermal(LagrangianDynamicScalar::new(
-                flow.grid.shape,
-                flow.grid.spacing,
-                maximum_bytes,
-            )?)
+            LagrangianFilter::Thermal(match normal_axis {
+                Some(normal) => LagrangianDynamicScalar::new_channel(
+                    flow.grid.shape,
+                    flow.grid.spacing,
+                    normal,
+                    maximum_bytes,
+                )?,
+                None => {
+                    LagrangianDynamicScalar::new(flow.grid.shape, flow.grid.spacing, maximum_bytes)?
+                }
+            })
         } else {
-            LagrangianFilter::Momentum(LagrangianDynamicSgs::new(
-                flow.grid.shape,
-                flow.grid.spacing,
-                maximum_bytes,
-            )?)
+            LagrangianFilter::Momentum(match normal_axis {
+                Some(normal) => LagrangianDynamicSgs::new_channel(
+                    flow.grid.shape,
+                    flow.grid.spacing,
+                    normal,
+                    maximum_bytes,
+                )?,
+                None => {
+                    LagrangianDynamicSgs::new(flow.grid.shape, flow.grid.spacing, maximum_bytes)?
+                }
+            })
         };
         let filter_width = filter.filter_width();
         let density = allocated(n, 0.0)?;
@@ -240,6 +306,7 @@ impl SubgridTransport {
                 config,
                 filter: Some(filter),
                 filter_width,
+                normal_axis,
                 density,
                 velocity,
                 temperature,
@@ -292,17 +359,38 @@ impl SubgridTransport {
         }
     }
 
-    // The returned borrow belongs only to the detached history filter.
+    // Periodic low-level regression seam; physical consumers supply actual walls.
+    #[cfg(test)]
     pub(in crate::compressible::spatial::molecular) fn prepare_lagrangian<'a>(
         &mut self,
         filter: &'a mut LagrangianFilter,
         flow: &Euler3d,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<LagrangianTrial<'a>, MolecularError> {
+        self.prepare_lagrangian_with_walls(
+            filter,
+            flow,
+            &[MolecularWall3d::SlipAdiabatic; 6],
+            cancelled,
+        )
+    }
+
+    // The returned borrow belongs only to the detached history filter.
+    pub(in crate::compressible::spatial::molecular) fn prepare_lagrangian_with_walls<'a>(
+        &mut self,
+        filter: &'a mut LagrangianFilter,
+        flow: &Euler3d,
+        walls: &[MolecularWall3d; 6],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<LagrangianTrial<'a>, MolecularError> {
         let SubgridClosure::Lagrangian(dynamic) = &mut self.closure else {
             return Err(MolecularError::Invalid("missing Lagrangian SGS owner"));
         };
         dynamic.admit_prepared_step()?;
+        let wall_data = dynamic
+            .normal_axis
+            .map(|normal| channel_wall_values(normal, walls))
+            .transpose()?;
         for (cell, state) in flow.states.iter().enumerate() {
             if cell % 64 == 0 {
                 poll(cancelled)?;
@@ -316,24 +404,47 @@ impl SubgridTransport {
         }
         let trial = match (dynamic.config, filter) {
             (LagrangianConfig::FixedPrandtl(config), LagrangianFilter::Momentum(filter)) => {
-                LagrangianTrial::Momentum(filter.prepare(
-                    config.model,
-                    flow.time,
-                    &dynamic.density,
-                    &dynamic.velocity,
-                    &mut *cancelled,
-                )?)
+                LagrangianTrial::Momentum(match wall_data {
+                    Some((wall_velocity, _)) => filter.prepare_with_walls(
+                        config.model,
+                        flow.time,
+                        &dynamic.density,
+                        &dynamic.velocity,
+                        wall_velocity,
+                        &mut *cancelled,
+                    )?,
+                    None => filter.prepare(
+                        config.model,
+                        flow.time,
+                        &dynamic.density,
+                        &dynamic.velocity,
+                        &mut *cancelled,
+                    )?,
+                })
             }
             (LagrangianConfig::Thermal(config), LagrangianFilter::Thermal(filter)) => {
-                LagrangianTrial::Thermal(filter.prepare(
-                    config.momentum,
-                    config.heat,
-                    flow.time,
-                    &dynamic.density,
-                    &dynamic.velocity,
-                    &dynamic.temperature,
-                    &mut *cancelled,
-                )?)
+                LagrangianTrial::Thermal(match wall_data {
+                    Some((wall_velocity, scalar_walls)) => filter.prepare_with_walls(
+                        config.momentum,
+                        config.heat,
+                        flow.time,
+                        &dynamic.density,
+                        &dynamic.velocity,
+                        wall_velocity,
+                        &dynamic.temperature,
+                        scalar_walls,
+                        &mut *cancelled,
+                    )?,
+                    None => filter.prepare(
+                        config.momentum,
+                        config.heat,
+                        flow.time,
+                        &dynamic.density,
+                        &dynamic.velocity,
+                        &dynamic.temperature,
+                        &mut *cancelled,
+                    )?,
+                })
             }
             _ => {
                 return Err(MolecularError::Invalid(

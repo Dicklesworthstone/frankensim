@@ -7907,6 +7907,48 @@ SIGKILLs in earlier full and metadata-only builds. The shared core passed 68
 real-source tests. A separate executed core probe confirmed the consumer shear
 fixture has exactly zero momentum fit and positive heat/species diffusivities.
 
+### Physical-wall Lagrangian histories for frozen-composition gas
+
+The original gas `MolecularEuler3d` now provides
+`with_lagrangian_dynamic_channel_sgs` and
+`with_lagrangian_dynamic_channel_thermal_sgs`. They select momentum with
+authored turbulent Prandtl heat transport or independent momentum and
+temperature memories, respectively. The wall normal is inferred from the
+unique reflecting Euler pair; the other axes must be periodic and every
+dimension must contain at least three cells. Both original physical walls
+are explicitly no-slip, with their admitted tangential velocities and
+adiabatic/isothermal thermal laws.
+
+Accepted-start preparation reads the current molecular wall data through
+the shared channel helper. Both original molecular halves, SSP/RKL stages
+and complete retries retain the held coefficients; actual face density,
+strain and source Cp continue to update at each stage. Original wall
+heat/work remain intact, including explicitly selected equilibrium stress.
+Subsequent wall replacements retain no-slip admission and feed the next
+history sample.
+
+The same wall-aware preparation is used for vorticity observations.
+An endpoint diagnostic may evaluate a trial but never commits history,
+sample time or fit reports; success and refusal restore the accepted
+owner. Physical steps keep the original complete acceptance transaction.
+Normal history departures obey the shared half-cell wall bound; no
+opposite-wall wrapping or inflow history is introduced.
+
+Additional numerical payload remains 208 bytes/cell for momentum with
+fixed-ratio heat, or 320 bytes/cell for independent momentum/heat.
+These caps retain the gas API's existing meaning: SGS buffers only,
+excluding the original Euler/molecular storage. No new history or staging
+allocation occurs during stepping. The physical normal axis is exposed
+by `lagrangian_channel_normal_axis`.
+
+Three regression groups cover all axes/current walls/original wall flux,
+accepted-start reference fits, observation nonpublication, late RKL
+cancellation/replay, domain/storage refusals and exact zero-SGS molecular
+trajectories. All changed consumer sources passed pinned formatting/parsing
+and bounded review, but were not compiled or executed here. The shared core
+passed 74 real-source SGS tests. First-order authored-memory and exploratory
+model limits remain; no DNS, SGS-energy or shock-interaction claim is added.
+
 ### Lagrangian turbulence beside reacting and nonreacting mixture walls
 
 `MolecularEuler3d::with_lagrangian_dynamic_channel_sgs` and
