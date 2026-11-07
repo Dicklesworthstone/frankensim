@@ -7,6 +7,7 @@
 //! displaced-fluid rigid solid. The explicit [`settling`] adapter derives excess
 //! inertia from ordinary heavy solids on this same native owner.
 
+use crate::scenario_open_boundary::{BoundarySample3, ScenarioBoundary3, ScenarioBoundaryError};
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::{
     BodyFrameSampler3, BodyFrameShape3, BoundaryForcingError3, BoundaryGrid3,
@@ -17,6 +18,7 @@ use fs_lbm::d3q19::{
 use fs_lbm::material::{MaterialLbmError, MaterialScaling, plan_scaling_from_material};
 use fs_material::fluid_transport::FluidTransport;
 use fs_mbd_material::{MaterialInertiaError, ResolvedBody, VolumeMoments};
+use fs_scenario::FrameTree;
 use fs_time::lie::gyrostat::InertiaTensor3;
 use fs_time::{So3, Vec3};
 

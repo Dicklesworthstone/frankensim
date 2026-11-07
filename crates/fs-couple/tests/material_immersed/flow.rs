@@ -1,5 +1,17 @@
 //! Source-scaled fluid preparation, held loading and physical momentum transfer.
 use super::*;
+use fs_couple::scenario_open_boundary::{BoundarySample3, ScenarioBoundary3, ScenarioBoundaryError};
+use fs_couple::scenario_pressure::{PressureBoundary3, PressureReference};
+use fs_couple::scenario_velocity::ScenarioVelocityError;
+use fs_qty::QtyAny;
+use fs_scenario::payload::{
+    OrientationParity, OutsideDomainPolicy, Payload, PayloadId, PayloadMeta, QuantityContract,
+    ReferenceSemantics, SampleSource, TableInterpolation, VectorPayload,
+};
+use fs_scenario::{
+    BcKind, BcValue, BoundaryCondition, Frame, FrameId, FrameMotion, FrameTree, Physics, TimeSignal,
+    WORLD,
+};
 use fs_couple::material_immersed::dry::{ResolvedImmersedBodies, ResolvedImmersedBody};
 use fs_couple::material_immersed::settling::SubmergedSphere;
 use fs_couple::material_immersed::{FaceBoundarySi, InletFluxSi};
@@ -653,4 +665,329 @@ fn spatial_si_inlets_continue_material_body_momentum_and_clear_without_reset() {
     else { panic!("clearing changed the face kind"); };
     assert_eq!([velocity[0], velocity[1]], [0.0; 2]);
     close(velocity[2] * DX / DT, 0.0002, 2e-18);
+}
+
+fn scenario_inlet(first: [f64; 3], last: [f64; 3], frame: FrameId) -> BoundaryCondition {
+    let velocity = Dims([1, 0, -1, 0, 0, 0]);
+    let time = Dims([0, 0, 1, 0, 0, 0]);
+    let meta = PayloadMeta::new(
+        QuantityContract::Dimensions(velocity),
+        PayloadId::new("basis/frame-cartesian").unwrap(),
+        frame,
+        OrientationParity::Even,
+        ReferenceSemantics::Continuous,
+    )
+    .unwrap();
+    let source = SampleSource::table(
+        vec![QtyAny::new(0.0, time), QtyAny::new(1.0, time)],
+        vec![
+            first.map(|v| QtyAny::new(v, velocity)).to_vec(),
+            last.map(|v| QtyAny::new(v, velocity)).to_vec(),
+        ],
+        TableInterpolation::Linear,
+        OutsideDomainPolicy::Refuse,
+    )
+    .unwrap();
+    BoundaryCondition {
+        region: "inlet".into(),
+        physics: Physics::IncompressibleFlow,
+        kind: BcKind::Dirichlet,
+        compatibility: None,
+        frame: frame.0,
+        value: Some(BcValue::Typed(Payload::Vector(
+            VectorPayload::new(meta, source).unwrap(),
+        ))),
+    }
+}
+
+fn scenario_outlet(from: f64, to: f64) -> BoundaryCondition {
+    let pressure = Dims([-1, 1, -2, 0, 0, 0]);
+    BoundaryCondition {
+        region: "outlet".into(),
+        physics: Physics::IncompressibleFlow,
+        kind: BcKind::PressureOutlet,
+        compatibility: None,
+        frame: WORLD.0,
+        value: Some(BcValue::Signal(TimeSignal::Ramp {
+            t_start: 0.0,
+            t_end: 1.0,
+            from: QtyAny::new(from, pressure),
+            to: QtyAny::new(to, pressure),
+        })),
+    }
+}
+
+fn scenario_controls<'a>(
+    inlet: &'a BoundaryCondition,
+    outlet: &'a BoundaryCondition,
+    reference: PressureReference,
+) -> [Option<ScenarioBoundary3<'a>>; 6] {
+    [
+        None,
+        None,
+        None,
+        None,
+        Some(ScenarioBoundary3::Velocity(inlet)),
+        Some(ScenarioBoundary3::Pressure(PressureBoundary3 {
+            boundary: outlet,
+            reference,
+        })),
+    ]
+}
+
+fn scenario_flow<'a>(
+    liquid: &'a ResolvedLiquidState,
+    source: &'a ResolvedBody,
+    gate: &CancelGate,
+) -> RetainedFluidSpheres<'a, ResolvedLiquidState, 2> {
+    RetainedFluidSpheres::new(
+        liquid,
+        domain().with_boundaries([
+            FaceBoundarySi::Periodic,
+            FaceBoundarySi::Periodic,
+            FaceBoundarySi::Periodic,
+            FaceBoundarySi::Periodic,
+            FaceBoundarySi::Velocity {
+                velocity_m_s: [0.0; 3],
+            },
+            FaceBoundarySi::Pressure {
+                perturbation_pa: 0.0,
+            },
+        ]),
+        [AdditionalMaterialSphere::new(source, RADIUS).unwrap(); 2],
+        initial(),
+        film(),
+        gate,
+    )
+    .unwrap()
+}
+
+#[test]
+fn scenario_histories_reach_material_body_flow_without_resetting_accepted_state() {
+    let liquid = fluid(3.0, 3e-4);
+    let warmer = fluid(3.0, 6e-4);
+    let source = body(6.0);
+    let gate = CancelGate::new_clock_free();
+    let mut model = scenario_flow(&liquid, &source, &gate);
+    model
+        .rebind_uniform_fluid_force_si([1e-5, -2e-5, 3e-5], &gate)
+        .unwrap();
+    model
+        .rebind_fluid_force_field_si(&spatial_loads(0.2), &gate)
+        .unwrap();
+    model
+        .step_forces_si([[0.0; 6]; 2], [0.0; 3], &gate)
+        .unwrap();
+    model.rebind_fluid(&warmer, &gate).unwrap();
+
+    let mut frames = FrameTree::new();
+    frames.add(Frame {
+        id: FrameId(1),
+        name: "inlet_axes".into(),
+        parent: WORLD,
+        motion: FrameMotion::Fixed {
+            orientation: fs_ga::Quat::from_axis_angle(
+                fs_ga::Vec3::new(0.0, 0.0, 1.0),
+                std::f64::consts::FRAC_PI_2,
+            ),
+            translation: fs_ga::Vec3::new(100.0, -200.0, 300.0),
+        },
+    });
+    let inlet = scenario_inlet(
+        [0.0001, -0.0002, 0.0004],
+        [-0.0002, 0.0001, -0.0002],
+        FrameId(1),
+    );
+    let reference_pa = 0.125;
+    let outlet = scenario_outlet(reference_pa + 2e-6, reference_pa - 1e-6);
+    for _ in 0..2 {
+        let before = fields(model.grid());
+        let moments = physical_moments(model.grid());
+        let bodies = [model.state_si(0).unwrap(), model.state_si(1).unwrap()];
+        let steps = model.accepted_steps();
+        let time_s = steps as f64 * DT;
+        let p0 = physical_momentum_si(&model);
+        let mass0 = model.grid().total_mass();
+        let samples = model
+            .rebind_scenario_open_boundaries(
+                scenario_controls(
+                    &inlet,
+                    &outlet,
+                    PressureReference::Absolute { reference_pa },
+                ),
+                &frames,
+                time_s,
+                &gate,
+            )
+            .unwrap();
+        assert!(samples[..4].iter().all(Option::is_none));
+        let Some(BoundarySample3::Velocity(v)) = samples[4] else {
+            panic!("missing inlet");
+        };
+        let Some(BoundarySample3::Pressure(p)) = samples[5] else {
+            panic!("missing outlet");
+        };
+        assert_eq!((v.time_s, p.time_s), (time_s, time_s));
+        let expected = [
+            2e-4 - 3e-4 * time_s,
+            1e-4 - 3e-4 * time_s,
+            4e-4 - 6e-4 * time_s,
+        ];
+        for axis in 0..3 {
+            close(v.world_m_s[axis], expected[axis], 2e-18);
+            close(v.lattice[axis], expected[axis] * DT / DX, 2e-17);
+        }
+        let expected_pressure = 2e-6 - 3e-6 * time_s;
+        close(p.perturbation_pa, expected_pressure, 5e-17);
+        close(p.supplied_pa, reference_pa + expected_pressure, 5e-17);
+        close(
+            p.density_lattice,
+            1.0 + expected_pressure / (fs_lbm::CS2 * 3.0 * (DX / DT).powi(2)),
+            1e-14,
+        );
+        assert_eq!(
+            model.grid().boundaries().face(Face3::ZMin),
+            FaceBoundary3::Velocity {
+                velocity: v.lattice,
+            }
+        );
+        assert_eq!(
+            model.grid().boundaries().face(Face3::ZMax),
+            FaceBoundary3::Pressure {
+                density: p.density_lattice,
+            }
+        );
+        assert_eq!(fields(model.grid()), before);
+        assert_eq!(physical_moments(model.grid()), moments);
+        assert_eq!(
+            [model.state_si(0).unwrap(), model.state_si(1).unwrap()],
+            bodies
+        );
+        assert_eq!(model.accepted_steps(), steps);
+
+        let report = model
+            .step_forces_si([[0.0; 6]; 2], [0.0; 3], &gate)
+            .unwrap();
+        let p1 = physical_momentum_si(&model);
+        for axis in 0..3 {
+            let delivered = report.coupling.open.impulse[axis]
+                + report.coupling.walls.fluid_population_impulse[axis]
+                + report.coupling.forcing.impulse[axis];
+            close(p1[axis] - p0[axis], model.impulse_ns(delivered).unwrap(), 2e-16);
+        }
+        close(
+            model.grid().total_mass() - mass0,
+            report.coupling.open.mass_change,
+            3e-10,
+        );
+        assert!(report.coupling.open.reconstructed_cells > 0);
+        for y in 0..8 {
+            for x in 0..8 {
+                for axis in 0..3 {
+                    close(model.grid().velocity(x, y, 0)[axis], v.lattice[axis], 2e-14);
+                }
+                close(model.grid().density(x, y, 7), p.density_lattice, 2e-14);
+            }
+        }
+        assert_eq!(model.accepted_steps(), steps + 1);
+    }
+}
+
+#[test]
+fn scenario_refusals_and_unselected_profiles_preserve_material_body_history() {
+    let liquid = fluid(3.0, 3e-4);
+    let source = body(6.0);
+    let gate = CancelGate::new_clock_free();
+    let mut model = scenario_flow(&liquid, &source, &gate);
+    model
+        .step_forces_si([[0.0; 6]; 2], [0.0; 3], &gate)
+        .unwrap();
+    let frames = FrameTree::new();
+    let inlet = scenario_inlet([0.0, 0.0, 0.0004], [0.0, 0.0, -0.0002], WORLD);
+    let outlet = scenario_outlet(2e-6, -1e-6);
+    let invalid = scenario_outlet(f64::NAN, 0.0);
+    let before = fields(model.grid());
+    let moments = physical_moments(model.grid());
+    let bodies = [model.state_si(0).unwrap(), model.state_si(1).unwrap()];
+    let steps = model.accepted_steps();
+    let boundaries = model.grid().boundaries();
+    let unchanged = |model: &RetainedFluidSpheres<'_, ResolvedLiquidState, 2>| {
+        assert_eq!(model.grid().boundaries(), boundaries);
+        assert_eq!(fields(model.grid()), before);
+        assert_eq!(physical_moments(model.grid()), moments);
+        assert_eq!(
+            [model.state_si(0).unwrap(), model.state_si(1).unwrap()],
+            bodies
+        );
+        assert_eq!(model.accepted_steps(), steps);
+    };
+    assert!(matches!(
+        model.rebind_scenario_open_boundaries(
+            scenario_controls(&inlet, &invalid, PressureReference::Gauge),
+            &frames,
+            0.5,
+            &gate,
+        ),
+        Err(ScenarioBoundaryError::Pressure(_))
+    ));
+    unchanged(&model);
+    // Every component is below the original scenario bound; the full vector is not.
+    let fast = scenario_inlet([0.0007; 3], [0.0007; 3], WORLD);
+    assert!(matches!(
+        model.rebind_scenario_open_boundaries(
+            scenario_controls(&fast, &outlet, PressureReference::Gauge),
+            &frames,
+            0.5,
+            &gate,
+        ),
+        Err(ScenarioBoundaryError::Velocity(
+            ScenarioVelocityError::SpeedBound { .. }
+        ))
+    ));
+    unchanged(&model);
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert!(
+        model
+            .rebind_scenario_open_boundaries(
+                scenario_controls(&inlet, &outlet, PressureReference::Gauge),
+                &frames,
+                0.5,
+                &cancelled,
+            )
+            .is_err()
+    );
+    unchanged(&model);
+
+    model
+        .set_pressure_profile_si(Face3::ZMax, &gate, |_| Ok(1e-6))
+        .unwrap();
+    let profile = model.grid().pressure_profile(Face3::ZMax).unwrap().to_vec();
+    // The inlet has already prepared when the later selected pressure profile refuses.
+    assert!(matches!(
+        model.rebind_scenario_open_boundaries(
+            scenario_controls(&inlet, &outlet, PressureReference::Gauge),
+            &frames,
+            0.5,
+            &gate,
+        ),
+        Err(ScenarioBoundaryError::Pressure(_))
+    ));
+    unchanged(&model);
+    assert_eq!(model.grid().pressure_profile(Face3::ZMax).unwrap(), profile);
+    let mut selected = scenario_controls(&inlet, &outlet, PressureReference::Gauge);
+    selected[Face3::ZMax as usize] = None;
+    let samples = model
+        .rebind_scenario_open_boundaries(selected, &frames, 0.5, &gate)
+        .unwrap();
+    assert!(matches!(samples[4], Some(BoundarySample3::Velocity(_))));
+    assert!(samples[5].is_none());
+    assert_eq!(model.grid().pressure_profile(Face3::ZMax).unwrap(), profile);
+    assert_eq!(fields(model.grid()), before);
+    assert_eq!(physical_moments(model.grid()), moments);
+    assert_eq!(
+        [model.state_si(0).unwrap(), model.state_si(1).unwrap()],
+        bodies
+    );
+    assert_eq!(model.accepted_steps(), steps);
 }

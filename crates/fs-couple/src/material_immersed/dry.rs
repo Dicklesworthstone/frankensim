@@ -214,6 +214,20 @@ impl<'a, F: FluidTransport + ?Sized> ResolvedImmersedBody<'a, F> {
         self.native.rebind_open_boundaries_si(faces, gate)
     }
 
+    /// Sample typed inlet/outlet histories through the original material flow.
+    /// Preserves every accepted state and clock; sampling, profile refusal and
+    /// atomic publication follow [`RetainedFluidBodies::rebind_scenario_open_boundaries`].
+    pub fn rebind_scenario_open_boundaries(
+        &mut self,
+        boundaries: [Option<ScenarioBoundary3<'_>>; 6],
+        frames: &FrameTree,
+        time_s: f64,
+        gate: &CancelGate,
+    ) -> Result<[Option<BoundarySample3>; 6], ScenarioBoundaryError> {
+        self.native
+            .rebind_scenario_open_boundaries(boundaries, frames, time_s, gate)
+    }
+
     /// Hold physical cell-center inlet velocities [m/s] with the original
     /// source-scaled speed admission and native reservoir momentum accounting.
     /// Returned profile diagnostics retain their explicit lattice units.

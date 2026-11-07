@@ -70,6 +70,40 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
             .map_err(Error::Flow)
     }
 
+    /// Hold typed scenario inlet/outlet histories on this material-backed flow.
+    ///
+    /// Slots follow `Face3::ALL`; each selected slot explicitly binds a scenario
+    /// region to that native face. The shared sampler evaluates every selected
+    /// history at `time_s`, rotates velocity into WORLD/grid axes, and retains
+    /// the declared gauge/absolute pressure reference. Conversion and the full
+    /// velocity bound use this owner's current source scaling, including after
+    /// a viscosity rebind. No second material lookup or flow owner is created.
+    ///
+    /// All selected controls are admitted before one native publication. `None`
+    /// preserves a face's complete control, including a spatial profile; selecting
+    /// a face with an installed profile refuses without changing any target.
+    /// Refusal or cancellation preserves all accepted fluid/body history.
+    ///
+    /// Sampling advances no populations, forces, body state or accepted clock.
+    /// Callers schedule it at the desired native tick; the following coupled
+    /// step consumes the targets and owns reservoir transport exactly once.
+    pub fn rebind_scenario_open_boundaries(
+        &mut self,
+        boundaries: [Option<ScenarioBoundary3<'_>>; 6],
+        frames: &FrameTree,
+        time_s: f64,
+        gate: &CancelGate,
+    ) -> Result<[Option<BoundarySample3>; 6], ScenarioBoundaryError> {
+        crate::scenario_open_boundary::rebind_open_faces3(
+            &mut self.grid,
+            boundaries,
+            frames,
+            time_s,
+            &self.scaling,
+            gate,
+        )
+    }
+
     /// Hold a spatial inlet velocity profile in the fixed world/grid frame.
     ///
     /// The callback receives physical cell centers [m] in deterministic z/y/x
