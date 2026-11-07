@@ -21,8 +21,9 @@ pub const AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS: Dims = Dims([0, -1, 3, 1, 0, 0]
 pub struct ThermalInterfacePoint<'a> {
     /// Original ordered surface/medium/history system, not an unordered pair.
     pub interface: &'a InterfaceSystemCard,
-    /// Actual bulk cards in interface A/B order. Their content identities must
-    /// agree with the two phase states; named surface IDs must also agree.
+    /// Declared exposed cards in interface A/B order. Phase states must retain
+    /// their exact card identities; sensible callers check original body
+    /// evidence membership. Named surface IDs must agree on both paths.
     pub materials: [&'a MaterialCard; 2],
     /// Full interface conditions. Undeclared axes (pressure, gap, lot) stay fixed.
     pub context: &'a QueryPoint,
@@ -47,10 +48,29 @@ impl ThermalInterfacePoint<'_> {
         states: [EquilibriumPhaseState; 2],
         selection: crate::state_point::MaterialPropertySelection,
     ) -> Result<crate::state_point::ResolvedInterfaceStatePoint, ThermalMaterialError> {
+        self.resolve_at_point(self.at(states)?, selection)
+    }
+
+    /// Resolve the same original static contact source for two sensible caloric
+    /// owners. Their caller supplies actual temperatures and validates the bulk
+    /// card identities; this method invents no phase state or phase fraction.
+    /// Declaring any liquid-fraction coordinate therefore refuses this path.
+    pub fn resolve_resistance_at_temperatures(
+        &self,
+        temperatures_k: [f64; 2],
+        selection: crate::state_point::MaterialPropertySelection,
+    ) -> Result<crate::state_point::ResolvedInterfaceStatePoint, ThermalMaterialError> {
+        self.resolve_at_point(self.at_temperatures(temperatures_k)?, selection)
+    }
+
+    fn resolve_at_point(
+        &self,
+        point: QueryPoint,
+        selection: crate::state_point::MaterialPropertySelection,
+    ) -> Result<crate::state_point::ResolvedInterfaceStatePoint, ThermalMaterialError> {
         use crate::state_point::{
             ScalarAdmissibility, ScalarPropertyRequirement, resolve_interface_state_point,
         };
-        let point = self.at(states)?;
         let requirement = ScalarPropertyRequirement::try_new(
             AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
             AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
@@ -90,6 +110,54 @@ impl ThermalInterfacePoint<'_> {
     /// Both phase identities and ordered surface identities are checked before
     /// any property is queried. Aliased axes refuse instead of losing a side.
     pub fn at(&self, states: [EquilibriumPhaseState; 2]) -> Result<QueryPoint, ThermalMaterialError> {
+        self.admit_coordinates()?;
+        let mut point = self.context.clone();
+        for side in 0..2 {
+            point = ThermalMaterialPoint {
+                material: self.materials[side], context: &point,
+                temperature_axis: self.temperature_axes[side],
+                liquid_fraction_axis: self.liquid_fraction_axes[side],
+            }.at(states[side])?;
+        }
+        self.with_mean_temperature(point, states.map(|state| state.temperature_k()))
+    }
+
+    /// Rebind ordered absolute temperatures from an original sensible-storage
+    /// owner without manufacturing an equilibrium phase identity. Material-card
+    /// membership belongs to that owner; surface order and axis meanings remain
+    /// checked here. Pressure, finish and all other supplied conditions stay fixed.
+    pub fn at_temperatures(
+        &self,
+        temperatures_k: [f64; 2],
+    ) -> Result<QueryPoint, ThermalMaterialError> {
+        self.admit_coordinates()?;
+        if self.liquid_fraction_axes.iter().any(Option::is_some) {
+            return Err(ThermalMaterialError::Invalid(
+                "sensible contact has no phase-fraction coordinate owner",
+            ));
+        }
+        let absolute = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature, ValueForm::Static));
+        let mut point = self.context.clone();
+        for (side, temperature) in temperatures_k.into_iter().enumerate() {
+            let axis = self.temperature_axes[side];
+            if !temperature.is_finite() || temperature <= 0.0
+                || !point.axes().contains_key(axis)
+                || point.axis_quantities().get(axis).is_some_and(|q| {
+                    *q != absolute && *q != QuantitySpec::dimensional(Temperature::DIMS)
+                })
+            {
+                return Err(ThermalMaterialError::Invalid(
+                    "sensible contact needs positive absolute temperatures on existing temperature axes",
+                ));
+            }
+            point = point.with(axis, temperature)
+                .map_err(|error| ThermalMaterialError::Coordinate(error.to_string()))?;
+        }
+        self.with_mean_temperature(point, temperatures_k)
+    }
+
+    fn admit_coordinates(&self) -> Result<(), ThermalMaterialError> {
         let invalid = ThermalMaterialError::Invalid;
         let axes: Vec<_> = self.temperature_axes.iter().copied()
             .chain(self.liquid_fraction_axes.iter().copied().flatten())
@@ -100,25 +168,26 @@ impl ThermalInterfacePoint<'_> {
             }
         }
         let surfaces = [self.interface.surface_a(), self.interface.surface_b()];
-        let mut point = self.context.clone();
         for side in 0..2 {
             if &surfaces[side].material != self.materials[side].id() {
                 return Err(invalid("thermal interface must retain ordered bulk material identities"));
             }
-            point = ThermalMaterialPoint {
-                material: self.materials[side], context: &point,
-                temperature_axis: self.temperature_axes[side],
-                liquid_fraction_axis: self.liquid_fraction_axes[side],
-            }.at(states[side])?;
         }
+        Ok(())
+    }
+
+    fn with_mean_temperature(
+        &self, mut point: QueryPoint, temperatures_k: [f64; 2],
+    ) -> Result<QueryPoint, ThermalMaterialError> {
         if let Some(axis) = self.mean_temperature_axis {
             let absolute = QuantitySpec::semantic(SemanticType::new(
                 QuantityKind::AbsoluteTemperature, ValueForm::Static));
             if !point.axes().contains_key(axis) || point.axis_quantities().get(axis)
                 .is_some_and(|q| *q != absolute && *q != QuantitySpec::dimensional(Temperature::DIMS)) {
-                return Err(invalid("declared interface mean needs an existing absolute-temperature axis"));
+                return Err(ThermalMaterialError::Invalid(
+                    "declared interface mean needs an existing absolute-temperature axis"));
             }
-            let mean = 0.5 * states[0].temperature_k() + 0.5 * states[1].temperature_k();
+            let mean = 0.5 * temperatures_k[0] + 0.5 * temperatures_k[1];
             point = point.with(axis, mean)
                 .map_err(|e| ThermalMaterialError::Coordinate(e.to_string()))?;
         }

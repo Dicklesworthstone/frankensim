@@ -18,17 +18,18 @@ use crate::{
     ConductionError,
 };
 use fs_matdb::{
-    ClaimSelection, InterpolationPolicy, MatDbError, PreparedSurfaceResponse, PropertyKey,
-    PropertyLineSlice, PropertySupportError, PropertyValue, QueryPoint,
+    ClaimId, ClaimSelection, InterpolationPolicy, MatDbError, PreparedSurfaceResponse, PropertyKey,
+    PropertyLineSlice, PropertySupportError, PropertyValue, QueryPoint, SelectionPolicy,
 };
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, PhaseStateError};
-use fs_material::state_point::MaterialPropertySelection;
+use fs_material::state_point::{MaterialPropertySelection, ResolvedInterfaceStatePoint};
 use fs_material::thermal::interface::ThermalInterfacePoint;
 use fs_material::thermal::source::ThermalMaterialError;
+use fs_material::thermal::transport::conduction::CaloricConductionLayer;
 use fs_thermal::enthalpy::conduction::implicit::contact::{
     ImplicitContactLaw, ImplicitContactState,
 };
-use fs_thermal::enthalpy::{DepositionError, DepositionSimulation, ThermalLaw};
+use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation, ThermalLaw};
 
 /// Original preparation failures and allocation-free runtime domain diagnostics.
 #[derive(Debug)]
@@ -43,6 +44,11 @@ pub enum PreparedContactError {
     OutsideEnthalpyDomain {
         side: usize,
         enthalpy_j_kg: f64,
+        bounds_j_kg: [f64; 2],
+    },
+    OutsideEnergyDomain {
+        side: usize,
+        energy_j_kg: f64,
         bounds_j_kg: [f64; 2],
     },
     /// Index into `source_bounds`, whose original axis name remains available.
@@ -91,6 +97,26 @@ impl From<DepositionError> for PreparedContactError {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct ContactValues {
+    temperatures_k: [f64; 2],
+    liquid_mass_fractions: Option<[f64; 2]>,
+}
+impl ContactValues {
+    fn from_phase(states: [EnthalpyPhaseKnot; 2]) -> Self {
+        Self {
+            temperatures_k: states.map(|state| state.temperature_k),
+            liquid_mass_fractions: Some(states.map(|state| state.liquid_mass_fraction)),
+        }
+    }
+    fn sensible(temperatures_k: [f64; 2]) -> Self {
+        Self {
+            temperatures_k,
+            liquid_mass_fractions: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 enum Coordinate {
     Temperature(usize),
     Fraction(usize),
@@ -124,13 +150,17 @@ impl Coordinate {
                 ))
         }
     }
-    fn value(self, states: [EnthalpyPhaseKnot; 2]) -> f64 {
-        match self {
-            Self::Temperature(side) => states[side].temperature_k,
-            Self::Fraction(side) => states[side].liquid_mass_fraction,
-            Self::MeanTemperature => 0.5 * states[0].temperature_k + 0.5 * states[1].temperature_k,
+    fn value(self, values: ContactValues) -> Result<f64, PreparedContactError> {
+        Ok(match self {
+            Self::Temperature(side) => values.temperatures_k[side],
+            Self::Fraction(side) => values.liquid_mass_fractions.ok_or(
+                PreparedContactError::Invalid("contact fraction requires its original phase owner"),
+            )?[side],
+            Self::MeanTemperature => {
+                0.5 * values.temperatures_k[0] + 0.5 * values.temperatures_k[1]
+            }
             Self::Fixed(value) => value,
-        }
+        })
     }
     fn derivatives(
         self,
@@ -178,6 +208,12 @@ enum Response {
     },
 }
 
+#[derive(Clone, Debug)]
+struct PreparedContactSource {
+    response: Response,
+    constraints: Vec<Constraint>,
+}
+
 /// An original ordered interface claim on explicit, borrowed caloric domains.
 /// The complete source response and initial physical source result retain authority.
 /// Numerical trial samples are compiled responses, not fresh query receipts.
@@ -185,8 +221,7 @@ enum Response {
 pub struct PreparedMaterialContact<'a> {
     curves: [&'a EquilibriumEnthalpyPhaseCurve; 2],
     bounds: [[f64; 2]; 2],
-    response: Response,
-    constraints: Vec<Constraint>,
+    source: PreparedContactSource,
     reference: ContactInterfaceState,
 }
 
@@ -240,7 +275,89 @@ impl<'a> PreparedMaterialContact<'a> {
             reference.phases,
             MaterialPropertySelection::PinnedByProperty(vec![(RP.to_owned(), selected)]),
         )?;
-        let claim = binding.point.interface.claims().claim(selected).ok_or(
+        let source = PreparedContactSource::new(
+            binding.point, &query, ContactValues::from_phase(lower),
+            ContactValues::from_phase(upper), selected, &mut checkpoint,
+        )?;
+        let prepared = Self {
+            curves,
+            bounds: enthalpy_bounds_j_kg,
+            source,
+            reference,
+        };
+        prepared.state_at_specific_enthalpies(
+            prepared.reference.phases.map(|state| state.specific_enthalpy_j_kg()),
+        )?;
+        checkpoint()?;
+        Ok(prepared)
+    }
+
+    pub const fn caloric_curves(&self) -> [&'a EquilibriumEnthalpyPhaseCurve; 2] {
+        self.curves
+    }
+    pub const fn enthalpy_bounds_j_kg(&self) -> [[f64; 2]; 2] {
+        self.bounds
+    }
+    pub fn source_line(&self) -> Option<&PropertyLineSlice> {
+        self.source.source_line()
+    }
+    pub fn source_surface(&self) -> Option<&PreparedSurfaceResponse> {
+        self.source.source_surface()
+    }
+    /// Original physical reference query, including its exact interface pin.
+    pub fn reference(&self) -> &ContactInterfaceState {
+        &self.reference
+    }
+    /// Original applicability bounds in the order used by runtime errors.
+    pub fn source_bounds(&self) -> impl ExactSizeIterator<Item = (&str, [f64; 2])> {
+        self.source.source_bounds()
+    }
+
+    /// Exact source response and analytic chain-rule derivatives at these h values.
+    /// Source corners select right slope; the compiled upper coordinate selects
+    /// left. Surface edges/samples use the canonical first-cell tangent.
+    /// Caloric tangents likewise select left at each admitted upper h.
+    pub fn state_at_specific_enthalpies(
+        &self,
+        h: [f64; 2],
+    ) -> Result<ImplicitContactState, PreparedContactError> {
+        for side in 0..2 {
+            if !h[side].is_finite()
+                || !(self.bounds[side][0]..=self.bounds[side][1]).contains(&h[side])
+            {
+                return Err(PreparedContactError::OutsideEnthalpyDomain {
+                    side,
+                    enthalpy_j_kg: h[side],
+                    bounds_j_kg: self.bounds[side],
+                });
+            }
+        }
+        let values = ContactValues::from_phase([
+            self.curves[0].values_at_specific_enthalpy(h[0])?,
+            self.curves[1].values_at_specific_enthalpy(h[1])?,
+        ]);
+        let mut at = h;
+        for side in 0..2 {
+            if h[side] == self.bounds[side][1] {
+                at[side] = h[side].next_down();
+            }
+        }
+        self.source.state(values, |coordinate| {
+            Ok(coordinate.derivatives(self.curves, at)?)
+        })
+    }
+}
+
+impl PreparedContactSource {
+    fn new(
+        point: ThermalInterfacePoint<'_>,
+        query: &QueryPoint,
+        lower: ContactValues,
+        upper: ContactValues,
+        selected: ClaimId,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, PreparedContactError> {
+        let claim = point.interface.claims().claim(selected).ok_or(
             PreparedContactError::Invalid("selected contact source is absent"),
         )?;
         let response = if let (
@@ -249,8 +366,8 @@ impl<'a> PreparedMaterialContact<'a> {
         ) = (&claim.value, claim.interpolation)
         {
             let coordinates = [
-                Coordinate::from_axis(binding.point, &query, &axes[0])?,
-                Coordinate::from_axis(binding.point, &query, &axes[1])?,
+                Coordinate::from_axis(point, query, &axes[0])?,
+                Coordinate::from_axis(point, query, &axes[1])?,
             ];
             for (index, (_, value)) in samples.iter().enumerate() {
                 if index % 256 == 0 {
@@ -271,7 +388,7 @@ impl<'a> PreparedMaterialContact<'a> {
         } else {
             let axis = match (&claim.value, claim.interpolation) {
                 (PropertyValue::Scalar { .. }, InterpolationPolicy::ConstantWithinValidity) => {
-                    binding.point.temperature_axes[0]
+                    point.temperature_axes[0]
                 }
                 (PropertyValue::Curve { abscissa, .. }, InterpolationPolicy::LinearInside) => {
                     abscissa.as_str()
@@ -282,8 +399,8 @@ impl<'a> PreparedMaterialContact<'a> {
                     ));
                 }
             };
-            let coordinate = Coordinate::from_axis(binding.point, &query, axis)?;
-            let endpoints = [coordinate.value(lower), coordinate.value(upper)];
+            let coordinate = Coordinate::from_axis(point, query, axis)?;
+            let endpoints = [coordinate.value(lower)?, coordinate.value(upper)?];
             let line_lower = query
                 .clone()
                 .with(axis, endpoints[0])
@@ -292,7 +409,7 @@ impl<'a> PreparedMaterialContact<'a> {
                 .clone()
                 .with(axis, endpoints[1])
                 .map_err(|_| PreparedContactError::Invalid("invalid contact source coordinate"))?;
-            let source = binding.point.interface.claims().query_line_typed(
+            let source = point.interface.claims().query_line_typed(
                 &PropertyKey::new(RP, RD),
                 axis,
                 &line_lower,
@@ -337,81 +454,41 @@ impl<'a> PreparedMaterialContact<'a> {
             checkpoint()?;
             constraints.push(Constraint {
                 axis: axis.clone(),
-                coordinate: Coordinate::from_axis(binding.point, &query, axis)?,
+                coordinate: Coordinate::from_axis(point, query, axis)?,
                 bounds: [lo, hi],
             });
         }
-        let prepared = Self {
-            curves,
-            bounds: enthalpy_bounds_j_kg,
+        Ok(Self {
             response,
             constraints,
-            reference,
-        };
-        prepared.state_at_specific_enthalpies(
-            prepared
-                .reference
-                .phases
-                .map(|s| s.specific_enthalpy_j_kg()),
-        )?;
-        checkpoint()?;
-        Ok(prepared)
+        })
     }
 
-    pub const fn caloric_curves(&self) -> [&'a EquilibriumEnthalpyPhaseCurve; 2] {
-        self.curves
-    }
-    pub const fn enthalpy_bounds_j_kg(&self) -> [[f64; 2]; 2] {
-        self.bounds
-    }
-    pub fn source_line(&self) -> Option<&PropertyLineSlice> {
+    fn source_line(&self) -> Option<&PropertyLineSlice> {
         match &self.response {
             Response::Line { source, .. } => Some(source),
             Response::Surface { .. } => None,
         }
     }
-    pub fn source_surface(&self) -> Option<&PreparedSurfaceResponse> {
+    fn source_surface(&self) -> Option<&PreparedSurfaceResponse> {
         match &self.response {
             Response::Surface { source, .. } => Some(source),
             Response::Line { .. } => None,
         }
     }
-    /// Original physical reference query, including its exact interface pin.
-    pub fn reference(&self) -> &ContactInterfaceState {
-        &self.reference
-    }
-    /// Original applicability bounds in the order used by runtime errors.
-    pub fn source_bounds(&self) -> impl ExactSizeIterator<Item = (&str, [f64; 2])> {
+    fn source_bounds(&self) -> impl ExactSizeIterator<Item = (&str, [f64; 2])> {
         self.constraints
             .iter()
             .map(|bound| (bound.axis.as_str(), bound.bounds))
     }
 
-    /// Exact source response and analytic chain-rule derivatives at these h values.
-    /// Source corners select right slope; the compiled upper coordinate selects
-    /// left. Surface edges/samples use the canonical first-cell tangent.
-    /// Caloric tangents likewise select left at each admitted upper h.
-    pub fn state_at_specific_enthalpies(
+    fn state(
         &self,
-        h: [f64; 2],
+        values: ContactValues,
+        mut coordinate_derivatives: impl FnMut(Coordinate) -> Result<[f64; 2], PreparedContactError>,
     ) -> Result<ImplicitContactState, PreparedContactError> {
-        for side in 0..2 {
-            if !h[side].is_finite()
-                || !(self.bounds[side][0]..=self.bounds[side][1]).contains(&h[side])
-            {
-                return Err(PreparedContactError::OutsideEnthalpyDomain {
-                    side,
-                    enthalpy_j_kg: h[side],
-                    bounds_j_kg: self.bounds[side],
-                });
-            }
-        }
-        let values = [
-            self.curves[0].values_at_specific_enthalpy(h[0])?,
-            self.curves[1].values_at_specific_enthalpy(h[1])?,
-        ];
         for (axis, constraint) in self.constraints.iter().enumerate() {
-            let value = constraint.coordinate.value(values);
+            let value = constraint.coordinate.value(values)?;
             if !value.is_finite() || !(constraint.bounds[0]..=constraint.bounds[1]).contains(&value)
             {
                 return Err(PreparedContactError::OutsideSourceDomain {
@@ -426,8 +503,9 @@ impl<'a> PreparedMaterialContact<'a> {
                 coordinates,
                 source,
             } => {
-                let state =
-                    source.evaluate(coordinates.map(|coordinate| coordinate.value(values)))?;
+                let state = source.evaluate([
+                    coordinates[0].value(values)?, coordinates[1].value(values)?,
+                ])?;
                 (
                     state.value,
                     [
@@ -441,7 +519,7 @@ impl<'a> PreparedMaterialContact<'a> {
                 source,
                 slopes,
             } => {
-                let x = coordinate.value(values);
+                let x = coordinate.value(values)?;
                 let knots = &source.knots;
                 let first = knots
                     .first()
@@ -478,20 +556,12 @@ impl<'a> PreparedMaterialContact<'a> {
                 )
             }
         };
-        let mut at = h;
-        for side in 0..2 {
-            at[side] = if h[side] == self.bounds[side][1] {
-                h[side].next_down()
-            } else {
-                h[side]
-            };
-        }
         let mut derivatives = [0.0; 2];
         for (coordinate, slope) in terms {
             if slope == 0.0 {
                 continue;
             }
-            let coordinate_derivatives = coordinate.derivatives(self.curves, at)?;
+            let coordinate_derivatives = coordinate_derivatives(coordinate)?;
             for side in 0..2 {
                 let term = coordinate_derivatives[side] * slope;
                 if !term.is_finite() || term == 0.0 && coordinate_derivatives[side] != 0.0 {
@@ -525,6 +595,201 @@ impl ImplicitContactLaw for PreparedMaterialContact<'_> {
         h: [f64; 2],
     ) -> Result<ImplicitContactState, DepositionError> {
         self.state_at_specific_enthalpies(h)
+            .map_err(|_| DepositionError::MaterialDomain)
+    }
+}
+
+/// Original physical reference query for a contact between sensible bodies.
+/// Energies retain each body's declared storage basis; no phase is inferred.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CaloricContactInterfaceState {
+    pub link: u64,
+    pub cells: [CellId; 2],
+    pub specific_energies_j_kg: [f64; 2],
+    pub temperatures_k: [f64; 2],
+    pub interface: ResolvedInterfaceStatePoint,
+    pub area_m2: f64,
+}
+
+/// One pinned source contact between original Cp, Cv or amount-bound bodies.
+///
+/// The SAME compiled resistance engine as [`PreparedMaterialContact`] supplies
+/// source values and gradients. Each borrowed layer supplies its original
+/// inverse energy map and exact dT/de, including m_ref/C_total for an assembly.
+/// The existing native link/chain/graph owns all heat transfer and time evolution.
+#[derive(Clone, Debug)]
+pub struct PreparedCaloricContact<'l, 'a, 'm> {
+    layers: [&'l CaloricConductionLayer<'a, 'm>; 2],
+    bounds: [[f64; 2]; 2],
+    source: PreparedContactSource,
+    reference: CaloricContactInterfaceState,
+}
+
+impl<'l, 'a, 'm> PreparedCaloricContact<'l, 'a, 'm> {
+    /// Prepare at the actual endpoint energies of one original ordered contact.
+    ///
+    /// `layers` and `point.materials` follow the active link's A/B order. Each
+    /// original caloric object must be registered on that endpoint and admit
+    /// its mass/volume. For an assembly, the caller explicitly chooses its
+    /// exposed constituent or effective-conductivity card; evidence membership
+    /// does not infer exposed geometry. Declared phase-fraction axes refuse.
+    ///
+    /// Energy bounds must lie inside the original caloric/conductivity span.
+    /// They do not fill holes in a surface or widen contact-source support.
+    /// Source temperature coordinates are the declared bulk endpoint states;
+    /// pressure, gap and finish stay at the explicitly supplied conditions.
+    pub fn new(
+        thermal: &DepositionSimulation<'_>,
+        link: u64,
+        layers: [&'l CaloricConductionLayer<'a, 'm>; 2],
+        point: ThermalInterfacePoint<'_>,
+        selection: ClaimSelection,
+        energy_bounds_j_kg: [[f64; 2]; 2],
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, PreparedContactError> {
+        checkpoint()?;
+        let patch = thermal.contact_patch(link).ok_or(PreparedContactError::Invalid(
+            "sensible contact requires an active original link",
+        ))?;
+        let cells = [patch.link.a, patch.link.b];
+        let mut energies = [0.0; 2];
+        let mut temperatures = [0.0; 2];
+        let mut lower = [0.0; 2];
+        let mut upper = [0.0; 2];
+        for side in 0..2 {
+            checkpoint()?;
+            let cell = thermal.cells().get(&cells[side]).ok_or(PreparedContactError::Invalid(
+                "sensible contact endpoint is not active",
+            ))?;
+            let caloric = layers[side].caloric_law();
+            if !thermal.uses_material_law(cell.material_id, caloric)
+                || !layers[side].supports_material_card(point.materials[side].content_hash())
+            {
+                return Err(PreparedContactError::Invalid(
+                    "sensible contact requires original ordered caloric objects and surface cards",
+                ));
+            }
+            caloric.validate_cell(cell)?;
+            let [lo, hi] = energy_bounds_j_kg[side];
+            let supported = layers[side].energy_bounds_j_kg();
+            if !lo.is_finite() || !hi.is_finite() || lo >= hi
+                || lo < supported[0] || hi > supported[1]
+            {
+                return Err(PreparedContactError::Invalid(
+                    "finite increasing contact energy bounds must retain original source support",
+                ));
+            }
+            lower[side] = layers[side].state_at_specific_energy(lo)?.temperature_k;
+            upper[side] = layers[side].state_at_specific_energy(hi)?.temperature_k;
+            energies[side] = cell.specific_h_j_kg;
+            temperatures[side] = layers[side].state_at_specific_energy(energies[side])?.temperature_k;
+        }
+        let selection = match selection {
+            ClaimSelection::Pinned(id) => {
+                MaterialPropertySelection::PinnedByProperty(vec![(RP.to_owned(), id)])
+            }
+            ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly) => {
+                MaterialPropertySelection::SingleClaimOnly
+            }
+            ClaimSelection::Policy(SelectionPolicy::PreferObservationBacked) => {
+                MaterialPropertySelection::PreferObservationBacked
+            }
+        };
+        let interface = point.resolve_resistance_at_temperatures(temperatures, selection)?;
+        let selected = interface.properties()[0].answer().receipt.selected;
+        let source = PreparedContactSource::new(
+            point, &interface.query(), ContactValues::sensible(lower),
+            ContactValues::sensible(upper), selected, &mut checkpoint,
+        )?;
+        let prepared = Self {
+            layers,
+            bounds: energy_bounds_j_kg,
+            source,
+            reference: CaloricContactInterfaceState {
+                link, cells, specific_energies_j_kg: energies,
+                temperatures_k: temperatures, interface, area_m2: patch.link.area_m2,
+            },
+        };
+        prepared.state_at_specific_energies(energies)?;
+        checkpoint()?;
+        Ok(prepared)
+    }
+
+    /// Exact original caloric objects and their original storage bases.
+    pub fn caloric_laws(&self) -> [&'m dyn ThermalLaw; 2] {
+        self.layers.map(|layer| layer.caloric_law())
+    }
+    pub const fn energy_bounds_j_kg(&self) -> [[f64; 2]; 2] {
+        self.bounds
+    }
+    pub fn source_line(&self) -> Option<&PropertyLineSlice> {
+        self.source.source_line()
+    }
+    pub fn source_surface(&self) -> Option<&PreparedSurfaceResponse> {
+        self.source.source_surface()
+    }
+    pub fn source_bounds(&self) -> impl ExactSizeIterator<Item = (&str, [f64; 2])> {
+        self.source.source_bounds()
+    }
+    /// Actual initial source result; compiled trials do not fabricate receipts.
+    pub fn reference(&self) -> &CaloricContactInterfaceState {
+        &self.reference
+    }
+
+    /// Source-exact R and dR/de in each original body's energy coordinate.
+    /// Native h-labelled derivative fields retain u or sensible storage when
+    /// those are the declared bases. No endpoint/secant capacity is substituted.
+    pub fn state_at_specific_energies(
+        &self,
+        energies: [f64; 2],
+    ) -> Result<ImplicitContactState, PreparedContactError> {
+        for side in 0..2 {
+            if !energies[side].is_finite()
+                || !(self.bounds[side][0]..=self.bounds[side][1]).contains(&energies[side])
+            {
+                return Err(PreparedContactError::OutsideEnergyDomain {
+                    side, energy_j_kg: energies[side], bounds_j_kg: self.bounds[side],
+                });
+            }
+        }
+        let states = [
+            self.layers[0].state_at_specific_energy(energies[0])?,
+            self.layers[1].state_at_specific_energy(energies[1])?,
+        ];
+        self.source.state(
+            ContactValues::sensible(states.map(|state| state.temperature_k)),
+            |coordinate| {
+                let mut derivatives = [0.0; 2];
+                match coordinate {
+                    Coordinate::Temperature(side) => {
+                        derivatives[side] = states[side].temperature_slope_kg_k_j;
+                    }
+                    Coordinate::MeanTemperature => {
+                        derivatives = states.map(|state| 0.5 * state.temperature_slope_kg_k_j);
+                    }
+                    Coordinate::Fixed(_) => {}
+                    Coordinate::Fraction(_) => return Err(PreparedContactError::Invalid(
+                        "sensible contact has no phase-fraction coordinate owner",
+                    )),
+                }
+                Ok(derivatives)
+            },
+        )
+    }
+}
+
+impl ImplicitContactLaw for PreparedCaloricContact<'_, '_, '_> {
+    fn caloric_laws(&self) -> [&dyn ThermalLaw; 2] {
+        self.caloric_laws()
+    }
+    fn enthalpy_bounds_j_kg(&self) -> [[f64; 2]; 2] {
+        self.energy_bounds_j_kg()
+    }
+    fn state_at_specific_enthalpies(
+        &self,
+        energies: [f64; 2],
+    ) -> Result<ImplicitContactState, DepositionError> {
+        self.state_at_specific_energies(energies)
             .map_err(|_| DepositionError::MaterialDomain)
     }
 }

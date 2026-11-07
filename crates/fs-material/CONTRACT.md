@@ -19487,3 +19487,24 @@ inertia corrections. Kernel tests compare closed-form solid/tube limits,
 heterogeneous interface continuity, exact resultants and material-subdivision
 invariance. Source/native regression definitions add the independent two-layer
 center solution, source-role refusal and actual rod fatigue consumption.
+
+## Original sensible temperatures for ordered contact sources
+
+`thermal::interface::ThermalInterfacePoint::at_temperatures` and
+`resolve_resistance_at_temperatures` admit actual temperatures supplied by
+original sensible-storage owners without manufacturing an equilibrium phase
+state. Both temperatures must be finite positive absolute temperatures on
+distinct existing axes. Original surface A/B identities, optional declared
+mean temperature, typed fixed conditions, static-source admission and exact
+claim selection retain the existing interface owner. Any declared liquid-mass
+fraction axis refuses this path; the original phase-state methods keep their
+full phase/card checks.
+
+`CaloricConductionLayer::supports_material_card` checks exact evidence
+membership for source contacts. Cp, Cv and fixed-volume layers retain their
+original material card. An assembled body admits an original constituent card
+or its explicitly selected effective-conductivity card. The caller declares
+which card describes the exposed surface; membership alone does not infer
+surface topology, constituent exposure or a homogenization law. The native
+contact adapter in `fs-conduction` also binds the actual original caloric
+objects and validates endpoint mass/volume before using this seam.

@@ -11,6 +11,8 @@ use fs_thermal::enthalpy::backward_euler::{BackwardEulerStep, StepCoefficients};
 
 #[path = "deposition_contact/observer.rs"]
 mod observer;
+#[path = "deposition_contact/caloric.rs"]
+mod caloric;
 
 fn initial<'a>(curves: &'a [EquilibriumEnthalpyPhaseCurve;2], area:f64) -> DepositionSimulation<'a> {
     let mut events=Vec::new();

@@ -5210,3 +5210,43 @@ A scalar view-factor consumer explicitly owns its exterior diffuse-port
 approximation. Gray inputs do not become spectral measurements. Consumers
 admit actual layer temperatures against every source, supply their own Planck
 scope, and separately assess angular, spectral and spatial model errors.
+
+## Source contacts for original Cp, Cv and assembled storage
+
+`transient::deposition::contact::implicit::PreparedCaloricContact` binds an
+original ordered interface source to two `CaloricConductionLayer` objects.
+It accepts source-exact Cp enthalpy, fixed-density Cv internal energy,
+fixed-volume sensible storage and declared mass/volume assemblies. The actual
+active link determines A/B order and area; the original caloric objects must
+be registered on its cells and validate their mass/volume. Exposed material
+cards must belong to those original bodies. For assemblies, the caller
+explicitly chooses a constituent or effective-conductivity surface card;
+membership is not an inferred mixture geometry.
+
+The adapter reuses `PreparedMaterialContact`'s compiled scalar/curve/surface
+engine. One physical query at the actual initial body temperatures selects
+the original source and retains its `ResolvedInterfaceStatePoint` receipt.
+Trial evaluations preserve every applicability coordinate, source knot,
+triangulated cell and support hole without source queries or reselection.
+Temperature and optional declared mean-temperature response use the original
+inverse-storage tangent: `1/Cp`, `1/Cv`, `rho_ref/C_vol`, or
+`m_ref/C_total(T)` as appropriate. Declared phase-fraction axes refuse;
+the existing phase contact retains its original phase/fraction semantics.
+
+`energy_bounds_j_kg` and `state_at_specific_energies` retain each body's native
+energy coordinate. The historical h-labelled native trait forwards those
+same values and derivatives without promoting internal energy or assembled
+storage to enthalpy. `IntegratedCaloricLink::new_with_contact` inserts this
+resistance exactly once and applies its two energy derivatives in the existing
+integrated-conductivity residual/Jacobian. The original thermal owner remains
+responsible for conservation, entropy and accepted time evolution. Contact
+temperature coordinates refer to the declared bulk endpoint states; fixed
+pressure, gap, finish and history are not mechanically evolved. No contact
+heat inventory or additional thermal solver is introduced.
+
+The public `deposition_contact` regressions add a mixed Cv/Cp native step with
+an independent quadratic-energy, one-scalar transferred-heat oracle and exact
+flux tangents, plus mass/volume assembly scaling, original identity, support
+hole, axis and cancellation refusals. These native tests were authored but
+not executed in the implementation environment. Syntax parsing and an
+independent scalar arithmetic audit are not compilation or native execution.

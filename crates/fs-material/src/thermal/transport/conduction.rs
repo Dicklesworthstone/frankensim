@@ -33,6 +33,7 @@ use super::{
 use crate::thermal::conduction::{
     ConductivityCurve, LayerConductionConfig, LayerConductionResponse, LayerGeometry,
 };
+use fs_blake3::ContentHash;
 use fs_matdb::PropertyLineSlice;
 use fs_thermal::enthalpy::conduction::ConductiveLink;
 use fs_thermal::enthalpy::conduction::implicit::{
@@ -115,6 +116,27 @@ impl<'a, 'm> CaloricConductionLayer<'a, 'm> {
             OriginalConduction::Isochoric(law) => law.caloric(),
             OriginalConduction::FixedVolume(law) => law,
             OriginalConduction::HeatStorage(law) => law.caloric(),
+        }
+    }
+
+    /// Whether this exact original card belongs to the declared body evidence.
+    ///
+    /// An assembled body admits one of its original constituent cards or its
+    /// explicitly selected effective-conductivity card. This checks evidence
+    /// membership only: the caller still declares which material is exposed at
+    /// a contact. No surface topology or mixture rule follows from membership.
+    #[must_use]
+    pub fn supports_material_card(&self, card: ContentHash) -> bool {
+        match self.original {
+            OriginalConduction::Isobaric(law) => law.caloric().material_card_identity() == card,
+            OriginalConduction::Isochoric(law) => law.caloric().material_card_identity() == card,
+            OriginalConduction::FixedVolume(law) => law.path().material_card_identity() == card,
+            OriginalConduction::HeatStorage(law) => {
+                law.conductivity_card_identity() == card
+                    || law.caloric().storage().components().iter().any(|component| {
+                        component.material_card_identity() == card
+                    })
+            }
         }
     }
 
