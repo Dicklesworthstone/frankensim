@@ -1,5 +1,26 @@
 # fs-solid CONTRACT
 
+## Owned finite-strain membrane reference continuation
+
+`OwnedFiniteViscoMembraneMotion::change_reference` delegates to the original
+native reference transaction, then retains its complete accepted target patch,
+laws and histories without internal borrows. Original coordinates, topology,
+source/model, material axes, thickness, corner inventory and volume treatment
+remain subject to the native admission. Caller-supplied patch storage is shared;
+uniform material fields remain uniform and accepted displacement/velocity
+buffers survive.
+
+The native signed reference input, transverse loading, exact-volume constraint
+work and absolute endpoint-defect gate remain distinct. No elapsed time, heat,
+impulse or kinetic-energy change is created. Retained viscous metrics continue
+through the ordinary native motion solver after temporary target law storage
+has gone away. A late cancellation publishes no candidate.
+
+`tests/visco_membrane_owned_reference.rs` covers regional and uniform reference
+events after nonproportional history, both volume treatments and mass images,
+graded original inventory, native receipt parity, subsequent motion and refusal
+atomicity. This ownership adapter supplies no reciprocal thermal closure.
+
 ## Retained thermal porous compaction
 
 `hyper3::plastic::porous::thermal::FiniteThermalPorousTetSolid` carries the original pressure-sensitive plastic metric, accumulated flow, total deformation and temperature across native total-Lagrangian P1 tetrahedral equilibria. Each element retains its complete thermal family or original source binding. The old history is admitted at its accepted temperature before the endpoint-temperature return, so temperature-induced softening can cause further compaction under retained loads. The native total-Piola tangent includes thermal stretch.

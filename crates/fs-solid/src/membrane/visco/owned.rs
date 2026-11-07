@@ -11,6 +11,10 @@
 //! stress, pressure, energy ledger, metric, displacement and velocity survives
 //! exactly. No transverse solve, work, heat, impulse or elapsed time is created.
 
+/// Owned prescribed-reference proposals with the complete native work accounts.
+pub mod reference_change;
+pub use reference_change::OwnedFiniteViscoMembraneMotionReferenceChange;
+
 use std::sync::Arc;
 
 use fs_material::sheet::SheetError;
