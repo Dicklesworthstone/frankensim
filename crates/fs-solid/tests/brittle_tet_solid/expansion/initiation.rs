@@ -21,14 +21,18 @@ fn initiation_settings() -> TensileInitiationSettings {
 fn elastic<'a>(probe: ThermalTensileTetProbe<'a>) -> ThermalTensileElasticTetStep<'a> {
     match probe {
         ThermalTensileTetProbe::Elastic(step) => step,
-        ThermalTensileTetProbe::Onset(_) => panic!("expected an elastic thermal endpoint"),
+        ThermalTensileTetProbe::Onset(_) | ThermalTensileTetProbe::Activation(_) => {
+            panic!("expected an elastic thermal endpoint")
+        }
     }
 }
 
 fn onset<'a>(probe: ThermalTensileTetProbe<'a>) -> ThermalTensileTetOnset<'a> {
     match probe {
         ThermalTensileTetProbe::Onset(onset) => onset,
-        ThermalTensileTetProbe::Elastic(_) => panic!("expected a thermal tensile crossing"),
+        ThermalTensileTetProbe::Elastic(_) | ThermalTensileTetProbe::Activation(_) => {
+            panic!("expected a thermal tensile crossing")
+        }
     }
 }
 
@@ -281,7 +285,7 @@ fn weakening_card() -> MaterialCard {
 }
 
 #[test]
-fn thermal_coefficient_work_is_separate_and_already_critical_start_is_typed_refusal() {
+fn thermal_coefficient_work_is_separate_and_critical_start_has_its_own_activation() {
     with_cx(false, |cx| {
         let nodes = points(0.03);
         let geometry =
@@ -335,20 +339,15 @@ fn thermal_coefficient_work_is_separate_and_already_critical_start_is_typed_refu
                 assert_eq!(step.energy.fracture_dissipation_j, 0.0);
                 check_balances(&step.energy);
             } else {
-                assert!(matches!(
-                    result,
-                    Err(ThermalTensileTetInitiationError::Element {
-                        element: 0,
-                        source: ResolvedTensileInitiationError::Native(
-                            TensileInitiationError::StartNotElastic { .. }
-                        ),
-                    })
-                ));
+                assert!(matches!(result, Ok(ThermalTensileTetProbe::Activation(_))));
             }
             assert_eq!(accepted.solid.solution(), &snapshot);
         }
     });
 }
+
+#[path = "initiation/activation.rs"]
+mod activation;
 
 #[test]
 fn fully_restrained_isotropic_cooling_requires_a_physical_principal_direction_hint() {

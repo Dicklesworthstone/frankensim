@@ -14,44 +14,48 @@ This is a dry associated porous law on a compressible displacement-only P1 solid
 
 `expansion::initiation::ThermalTensileElasticTetSolid` retains virgin elastic
 prehistory on the original P1 mesh and selected thermal sources. The native
-equilibrium solver evaluates the original elastic backbone at TOTAL strain
-minus integrated free expansion. Tensile detection consumes MECHANICAL strain,
-so a freely expanding body remains stress-free while restraint or nonuniform
-expansion can select a crack plane. Reference temperature, selected expansion
-curve, source claims and nonthermal query coordinates remain authoritative.
+equilibrium solver evaluates original elasticity at TOTAL strain minus
+integrated free expansion. Tensile detection consumes MECHANICAL strain:
+free expansion is stress-free, while restraint or incompatible expansion can
+select a crack plane. Reference temperature, source claims, expansion curve
+and nonthermal query coordinates remain authoritative.
 
-Each proposed endpoint checks the new coefficients at the held old mechanical
-strain before the joint displacement/eigenstrain solve. The native Rankine
-detector then inspects the mechanical strain chord under those coefficients.
-Elastic acceptance separates signed parameter work, total-strain mechanical
-work, eigenstrain work, storage and endpoint quadrature defect through the
-existing `ThermalBrittleTetEnergy`; fracture accounts stay zero. Repeated
-principal tension requires an explicit physical direction hint.
+Each endpoint first observes the held old mechanical strain under the next
+coefficients. An already-activated state now returns a distinct
+`ThermalTensileTetProbe::Activation`, containing actual source-bound
+`ResolvedTensileActivation` observations. It supplies no elastic displacement
+predictor, strain fraction, onset temperature or event time. Finite original
+supports/forces and native Newton settings are admitted before this early
+return. Ordinary strain-chord `Onset` retains its existing diagnostics and
+strict native path admission; repeated principal tension still requires an
+explicit physical direction hint. Subcritical steps allocate no per-element
+activation or event observation arrays.
 
-An onset prediction resolves the same discovered planes and actual geometric
-V/A widths at BOTH old and proposed thermal sources. The new material source
-bridge preserves exact expansion/reference receipts during geometry preparation.
-`handoff` seeds only the OLD accepted endpoint, checking source, plane, width,
-total/mechanical strain, stress, storage and undamaged mixed-mode history.
-`replay` validates both source preparations and sends the retained request to
-`ThermalBrittleTetSolid::advance`, which owns subsequent coefficient transfer,
-eigenstrain work and irreversible fracture. No predictor work is accepted or
-charged again during handoff.
+Both triggers share one private source/state/replay request. Selected planes
+and actual V/A widths are prepared at BOTH exact source endpoints. Handoff
+seeds only the OLD accepted state and checks original source/reference,
+geometry, stress, storage and undamaged mixed-mode history. Native
+`ThermalBrittleTetSolid::advance` then owns coefficient-induced release,
+joint displacement/eigenstrain evolution and irreversible fracture. No
+prediction or preload work is accepted during handoff. Cooling or stronger
+coefficients cannot erase damage or accumulated fracture energy.
 
-Coefficient changes that already make the held mechanical start critical
-retain the native typed `StartNotElastic` refusal; they require earlier
-handoff or resolved source endpoints. Chord fractions do not identify physical
-times or temperatures. Source extrema/reversals, fixed receiving planes, the
-tensile-only criterion and small-strain domain remain explicit limitations;
-this static entry supplies no heat equation or inferred caloric heat.
+Elastic acceptance shares the same quadratic material-work recovery with
+inertial consumers. Signed coefficient work, total-strain mechanical work,
+eigenstrain work, storage and numerical endpoint defects remain separate.
+This is the original coefficient-first endpoint model, not an integration of
+an unseen temperature trajectory: source extrema/reversals and physical
+increments need resolution. The tensile-only criterion, fixed receiving
+planes and small-strain limits remain; no heat equation or caloric conversion
+is supplied.
 
-Four native regression definitions exercise free expansion across source knots,
-analytic restrained-cooling onset and native softening, conservative thermal
-handoff, separate coefficient work, coefficient-trigger refusal and repeated
-principal tension. Source/API review, focused formatting and independent
-scalar work/onset checks completed; native compilation and execution remain
-unperformed because the required distributed runners and pinned constellation
-checkouts are unavailable.
+Six native regression definitions exercise free expansion, restrained-cooling
+onset/softening, separate coefficient work and activation, repeated principal
+tension, analytically reconstructed coefficient-induced release, nonhealing
+and atomic source/reference/request refusals. Source/API/physics review,
+focused formatting and independent scalar work calculations completed.
+Native compilation and execution remain unperformed because required
+distributed runners and pinned constellation checkouts are unavailable.
 
 ## Owned membrane histories for evolving native kinetics
 

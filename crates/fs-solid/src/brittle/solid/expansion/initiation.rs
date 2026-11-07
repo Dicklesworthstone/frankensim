@@ -8,9 +8,9 @@
 //! The native Rankine detector inspects that chord, not a continuous temperature
 //! trajectory. Its fractions are neither Kelvin nor physical event times.
 //!
-//! If the next coefficients already make the held start critical, the native
-//! `StartNotElastic` error remains a refusal. Hand off earlier or resolve the
-//! declared source path; no fictitious strain ray is called a thermal event.
+//! A coefficient change that activates the held mechanical state has its own
+//! result before any displacement solve. It selects a plane at the explicitly
+//! supplied endpoint without inventing a strain chord or physical event time.
 //! Source extrema, reversals and nonlinear temperature paths need physical
 //! endpoints. This owner supplies no heat equation, caloric heat or entropy.
 //!
@@ -30,7 +30,7 @@ use fs_material::brittle::initiation::TensileInitiationSettings;
 use fs_material::brittle::source::ResolvedBrittleCrackBand;
 use fs_material::brittle::source::expansion::ResolvedThermalBrittle;
 use fs_material::brittle::source::initiation::{
-    ResolvedTensileInitiationError, ResolvedTensileOnset,
+    ResolvedTensileActivation, ResolvedTensileInitiationError, ResolvedTensileOnset,
 };
 use fs_material::tensor::contract;
 use fs_material::{MaterialAdmissibility, SmallStrainLaw, Tangent6, Voigt};
@@ -67,30 +67,57 @@ pub struct ThermalTensileElasticTetStep<'a> {
     pub energy: ThermalBrittleTetEnergy,
 }
 
-/// Accepted elastic response or a disposable thermal tensile prediction.
+/// Accepted elasticity, a strain-chord crossing, or coefficient activation.
 #[derive(Debug)]
 pub enum ThermalTensileTetProbe<'a> {
     Elastic(ThermalTensileElasticTetStep<'a>),
     Onset(ThermalTensileTetOnset<'a>),
+    /// The new coefficients activate the OLD mechanical state before solving
+    /// displacement. No candidate strain chord or event fraction is implied.
+    Activation(ThermalTensileTetActivation<'a>),
 }
 
 /// Original accepted state and candidate thermal endpoint, both source-bound.
 #[derive(Debug)]
 pub struct ThermalTensileTetOnset<'a> {
+    request: ThermalTensileTetRequest<'a>,
+    predictor: SmallStrainTetSolution<()>,
+    events: Vec<Option<ResolvedTensileOnset<'a>>>,
+    first_fraction: [f64; 2],
+    first_candidate: usize,
+}
+
+/// Tensile activation caused by an explicitly supplied coefficient endpoint.
+/// Each observation uses the held OLD mechanical strain and NEW coefficients.
+/// There is no elastic endpoint predictor, fraction, temperature or time claim.
+#[derive(Debug)]
+pub struct ThermalTensileTetActivation<'a> {
+    request: ThermalTensileTetRequest<'a>,
+    activations: Vec<Option<ResolvedTensileActivation<'a>>>,
+}
+
+/// Original source/state transfer and replay shared by both initiation stages.
+/// Only the enclosing owner assigns endpoint-force or interval-mean semantics.
+#[derive(Debug)]
+struct ThermalTensileTetRequest<'a> {
     geometry: &'a TetLoadGeometry3<'a>,
     materials: &'a [ResolvedThermalBrittle],
     next_materials: &'a [ResolvedThermalBrittle],
     budget: TetAssemblyBudget,
     initial: SmallStrainTetSolution<()>,
-    predictor: SmallStrainTetSolution<()>,
     elastic_storage_j: f64,
-    events: Vec<Option<ResolvedTensileOnset<'a>>>,
-    first_fraction: [f64; 2],
-    first_candidate: usize,
+    normals: Vec<[f64; 3]>,
     settings: TensileInitiationSettings,
     prescribed_end_m: Vec<(usize, f64)>,
     nodal_forces_end_n: Vec<(usize, f64)>,
     solver_settings: IncrementSettings,
+}
+
+/// A solved elastic endpoint is inspected without copying its nodal arrays.
+#[derive(Debug)]
+enum ThermalTensileEndpoint<'a> {
+    Elastic(SmallStrainTetSolution<()>),
+    Onset(ThermalTensileTetOnset<'a>),
 }
 
 /// Same prepared physical planes at the original and proposed temperatures.
@@ -234,8 +261,8 @@ impl<'a> ThermalTensileElasticTetSolid<'a> {
 
     /// Solve one source-bound endpoint and inspect its mechanical strain chord.
     /// The unique prescribed DOF set stays fixed; values are absolute targets.
-    /// Next-source coefficient onset at the held mechanical start returns the
-    /// native typed `StartNotElastic`, before accepting a thermal response.
+    /// Coefficient activation at the held mechanical start returns separately
+    /// before a displacement solve; neither prediction accepts physical state.
     #[allow(clippy::too_many_arguments)]
     pub fn probe<'next>(
         &self,
@@ -252,47 +279,20 @@ impl<'a> ThermalTensileElasticTetSolid<'a> {
         'a: 'next,
     {
         checkpoint(cx)?;
-        count(next_materials.len(), self.materials.len())?;
         admit_controls(controls)?;
-        let dofs = self.solution.displacement_m.len() * 3;
-        if prescribed_m.len() > dofs
-            || nodal_forces_n.len() > dofs
-            || direction_hints.is_some_and(|h| h.len() != self.materials.len())
-        {
-            return Err(ThermalTensileTetInitiationError::Invalid(
-                "endpoint arrays must fit the original DOF and element counts",
-            ));
+        let (supports, activation) = self.prepare_endpoint(
+            next_materials,
+            prescribed_m,
+            nodal_forces_n,
+            solver_settings,
+            initiation_settings,
+            direction_hints,
+            cx,
+        )?;
+        if let Some(activation) = activation {
+            return Ok(ThermalTensileTetProbe::Activation(activation));
         }
-        let mut supports: Vec<_> = prescribed_m.iter().map(|&(dof, _)| dof).collect();
-        supports.sort_unstable();
-        if supports.iter().any(|&dof| dof >= dofs)
-            || supports.windows(2).any(|p| p[0] == p[1])
-            || self.supports.as_ref().is_some_and(|old| old != &supports)
-        {
-            return Err(ThermalTensileTetInitiationError::Invalid(
-                "thermal elastic history requires the same unique prescribed DOF set",
-            ));
-        }
-        let mut laws = Vec::with_capacity(next_materials.len());
-        for (element, (old, next)) in self.materials.iter().zip(next_materials).enumerate() {
-            checkpoint(cx)?;
-            old.require_temperature_successor(next)
-                .map_err(|source| ThermalBrittleTetError::Source { element, source })?;
-            let start = mechanical(old, &self.solution.element_strain[element], element)?;
-            // Check the coefficient-only stage before performing any FE solve.
-            next.band()
-                .tensile_initiator(initiation_settings)
-                .and_then(|detector| {
-                    detector.between_controlled(
-                        &start,
-                        &start,
-                        direction_hints.and_then(|h| h[element]),
-                        &mut || cx.checkpoint().is_err(),
-                    )
-                })
-                .map_err(|source| ThermalTensileTetInitiationError::Element { element, source })?;
-            laws.push(ThermalElasticView(next));
-        }
+        let laws: Vec<_> = next_materials.iter().map(ThermalElasticView).collect();
         let problem = SmallStrainTetProblem {
             nodes_m: self.geometry.nodes_m(),
             tetrahedra: self.geometry.tetrahedra(),
@@ -308,61 +308,21 @@ impl<'a> ThermalTensileElasticTetSolid<'a> {
             &self.solution.element_states,
             cx,
         )?;
-        let mut events = Vec::with_capacity(next_materials.len());
-        let mut first_fraction = [1.0_f64; 2];
-        let mut first_candidate = None;
-        let mut smallest_upper = f64::INFINITY;
-        for element in 0..next_materials.len() {
-            checkpoint(cx)?;
-            let next: &'next ResolvedThermalBrittle = &next_materials[element];
-            let start = mechanical(
-                &self.materials[element],
-                &self.solution.element_strain[element],
-                element,
-            )?;
-            let end = mechanical(next, &solution.element_strain[element], element)?;
-            let event = next
-                .band()
-                .tensile_initiator(initiation_settings)
-                .and_then(|detector| {
-                    detector.between_controlled(
-                        &start,
-                        &end,
-                        direction_hints.and_then(|h| h[element]),
-                        &mut || cx.checkpoint().is_err(),
-                    )
-                })
-                .map_err(|source| ThermalTensileTetInitiationError::Element { element, source })?;
-            if let Some(event) = &event {
-                let bracket = event.native().fraction_bracket();
-                first_fraction[0] = first_fraction[0].min(bracket[0]);
-                first_fraction[1] = first_fraction[1].min(bracket[1]);
-                if bracket[1] < smallest_upper {
-                    smallest_upper = bracket[1];
-                    first_candidate = Some(element);
-                }
+        let solution = match self.inspect_endpoint(
+            next_materials,
+            solution,
+            prescribed_m,
+            nodal_forces_n,
+            solver_settings,
+            initiation_settings,
+            direction_hints,
+            cx,
+        )? {
+            ThermalTensileEndpoint::Elastic(solution) => solution,
+            ThermalTensileEndpoint::Onset(onset) => {
+                return Ok(ThermalTensileTetProbe::Onset(onset));
             }
-            events.push(event);
-        }
-        if let Some(first_candidate) = first_candidate {
-            checkpoint(cx)?;
-            return Ok(ThermalTensileTetProbe::Onset(ThermalTensileTetOnset {
-                geometry: self.geometry,
-                materials: self.materials,
-                next_materials,
-                budget: self.budget,
-                initial: self.solution.clone(),
-                predictor: solution,
-                elastic_storage_j: self.stored_energy_j,
-                events,
-                first_fraction,
-                first_candidate,
-                settings: initiation_settings,
-                prescribed_end_m: prescribed_m.to_vec(),
-                nodal_forces_end_n: nodal_forces_n.to_vec(),
-                solver_settings,
-            }));
-        }
+        };
         let energy = self.recover_elastic(
             next_materials,
             &solution,
@@ -387,17 +347,235 @@ impl<'a> ThermalTensileElasticTetSolid<'a> {
         ))
     }
 
-    /// Quadratic native elasticity gives the exact mean stress under the next
-    /// coefficients. This is the same work split as the original thermal owner,
-    /// without creating a dormant fracture history to obtain elastic response.
+    /// Admit the exact source/load request and inspect its coefficient stage.
+    /// Native static and inertial consumers share this check before any solve.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn prepare_endpoint<'next>(
+        &self,
+        next_materials: &'next [ResolvedThermalBrittle],
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        solver_settings: IncrementSettings,
+        initiation_settings: TensileInitiationSettings,
+        direction_hints: Option<&[Option<[f64; 3]>]>,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (Vec<usize>, Option<ThermalTensileTetActivation<'next>>),
+        ThermalTensileTetInitiationError,
+    >
+    where
+        'a: 'next,
+    {
+        checkpoint(cx)?;
+        count(next_materials.len(), self.materials.len())?;
+        // Activation can precede the FE solve; retain its native settings
+        // admission even when no matrix assembly is needed for observation.
+        if solver_settings.max_newton_iterations == 0
+            || !solver_settings.relative_tolerance.is_finite()
+            || solver_settings.relative_tolerance <= 0.0
+            || !solver_settings.linear_tolerance.is_finite()
+            || solver_settings.linear_tolerance <= 0.0
+        {
+            return Err(ThermalTensileTetInitiationError::Invalid(
+                "native Newton settings must admit the retained thermal request",
+            ));
+        }
+        let dofs = self.solution.displacement_m.len() * 3;
+        if prescribed_m.len() > dofs
+            || nodal_forces_n.len() > dofs
+            || direction_hints.is_some_and(|h| h.len() != self.materials.len())
+            || prescribed_m
+                .iter()
+                .chain(nodal_forces_n)
+                .any(|&(dof, value)| dof >= dofs || !value.is_finite())
+        {
+            return Err(ThermalTensileTetInitiationError::Invalid(
+                "finite endpoint arrays must fit the original DOF and element counts",
+            ));
+        }
+        let mut supports: Vec<_> = prescribed_m.iter().map(|&(dof, _)| dof).collect();
+        supports.sort_unstable();
+        if supports.windows(2).any(|p| p[0] == p[1])
+            || self.supports.as_ref().is_some_and(|old| old != &supports)
+        {
+            return Err(ThermalTensileTetInitiationError::Invalid(
+                "thermal elastic history requires the same unique prescribed DOF set",
+            ));
+        }
+        // Ordinary elastic steps retain no per-element activation array. Only
+        // a real activation allocates the original-order observation slots.
+        let mut activations: Vec<Option<ResolvedTensileActivation<'next>>> = Vec::new();
+        for (element, (old, next)) in self.materials.iter().zip(next_materials).enumerate() {
+            checkpoint(cx)?;
+            old.require_temperature_successor(next)
+                .map_err(|source| ThermalBrittleTetError::Source { element, source })?;
+            let start = mechanical(old, &self.solution.element_strain[element], element)?;
+            let activation = next
+                .band()
+                .tensile_initiator(initiation_settings)
+                .and_then(|detector| {
+                    detector.activation_at_controlled(
+                        &start,
+                        direction_hints.and_then(|h| h[element]),
+                        &mut || cx.checkpoint().is_err(),
+                    )
+                })
+                .map_err(|source| ThermalTensileTetInitiationError::Element { element, source })?;
+            if let Some(activation) = activation {
+                if activations.is_empty() {
+                    activations.resize_with(next_materials.len(), || None);
+                }
+                activations[element] = Some(activation);
+            }
+        }
+        let activation = if !activations.is_empty() {
+            let normals = activations
+                .iter()
+                .enumerate()
+                .map(|(element, event)| {
+                    event.as_ref().map_or_else(
+                        || self.materials[element].band().law().normal(),
+                        |event| event.native().normal(),
+                    )
+                })
+                .collect();
+            Some(ThermalTensileTetActivation {
+                request: self.initiation_request(
+                    next_materials,
+                    normals,
+                    prescribed_m,
+                    nodal_forces_n,
+                    solver_settings,
+                    initiation_settings,
+                ),
+                activations,
+            })
+        } else {
+            None
+        };
+        checkpoint(cx)?;
+        Ok((supports, activation))
+    }
+
+    /// Shared native strain-chord inspection after true endpoint stress recovery.
     #[allow(clippy::too_many_arguments)]
-    fn recover_elastic(
+    fn inspect_endpoint<'next>(
+        &self,
+        next_materials: &'next [ResolvedThermalBrittle],
+        solution: SmallStrainTetSolution<()>,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        solver_settings: IncrementSettings,
+        initiation_settings: TensileInitiationSettings,
+        direction_hints: Option<&[Option<[f64; 3]>]>,
+        cx: &Cx<'_>,
+    ) -> Result<ThermalTensileEndpoint<'next>, ThermalTensileTetInitiationError>
+    where
+        'a: 'next,
+    {
+        let mut events: Vec<Option<ResolvedTensileOnset<'next>>> = Vec::new();
+        let mut first_fraction = [1.0_f64; 2];
+        let mut first_candidate = None;
+        let mut smallest_upper = f64::INFINITY;
+        for element in 0..next_materials.len() {
+            checkpoint(cx)?;
+            let next: &'next ResolvedThermalBrittle = &next_materials[element];
+            let start = mechanical(
+                &self.materials[element],
+                &self.solution.element_strain[element],
+                element,
+            )?;
+            let end = mechanical(next, &solution.element_strain[element], element)?;
+            let event = next
+                .band()
+                .tensile_initiator(initiation_settings)
+                .and_then(|detector| {
+                    detector.between_controlled(
+                        &start,
+                        &end,
+                        direction_hints.and_then(|h| h[element]),
+                        &mut || cx.checkpoint().is_err(),
+                    )
+                })
+                .map_err(|source| ThermalTensileTetInitiationError::Element { element, source })?;
+            if let Some(event) = event {
+                let bracket = event.native().fraction_bracket();
+                first_fraction[0] = first_fraction[0].min(bracket[0]);
+                first_fraction[1] = first_fraction[1].min(bracket[1]);
+                if bracket[1] < smallest_upper {
+                    smallest_upper = bracket[1];
+                    first_candidate = Some(element);
+                }
+                if events.is_empty() {
+                    events.resize_with(next_materials.len(), || None);
+                }
+                events[element] = Some(event);
+            }
+        }
+        checkpoint(cx)?;
+        if let Some(first_candidate) = first_candidate {
+            let normals = events
+                .iter()
+                .enumerate()
+                .map(|(element, event)| {
+                    event.as_ref().map_or_else(
+                        || self.materials[element].band().law().normal(),
+                        |event| event.native().normal(),
+                    )
+                })
+                .collect();
+            return Ok(ThermalTensileEndpoint::Onset(ThermalTensileTetOnset {
+                request: self.initiation_request(
+                    next_materials,
+                    normals,
+                    prescribed_m,
+                    nodal_forces_n,
+                    solver_settings,
+                    initiation_settings,
+                ),
+                predictor: solution,
+                events,
+                first_fraction,
+                first_candidate,
+            }));
+        }
+        Ok(ThermalTensileEndpoint::Elastic(solution))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn initiation_request<'next>(
+        &self,
+        next_materials: &'next [ResolvedThermalBrittle],
+        normals: Vec<[f64; 3]>,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        solver_settings: IncrementSettings,
+        settings: TensileInitiationSettings,
+    ) -> ThermalTensileTetRequest<'next>
+    where
+        'a: 'next,
+    {
+        ThermalTensileTetRequest {
+            geometry: self.geometry,
+            materials: self.materials,
+            next_materials,
+            budget: self.budget,
+            initial: self.solution.clone(),
+            elastic_storage_j: self.stored_energy_j,
+            normals,
+            settings,
+            prescribed_end_m: prescribed_m.to_vec(),
+            nodal_forces_end_n: nodal_forces_n.to_vec(),
+            solver_settings,
+        }
+    }
+
+    /// Shared exact elastic coefficient and strain-work observations. Applied
+    /// forces, support reactions and inertia remain with the receiving owner.
+    fn elastic_material_energy(
         &self,
         next_materials: &[ResolvedThermalBrittle],
         solution: &SmallStrainTetSolution<()>,
-        prescribed_m: &[(usize, f64)],
-        nodal_forces_n: &[(usize, f64)],
-        controls: BrittleTetControls,
         cx: &Cx<'_>,
     ) -> Result<ThermalBrittleTetEnergy, ThermalTensileTetInitiationError> {
         let mut energy = ThermalBrittleTetEnergy {
@@ -451,6 +629,29 @@ impl<'a> ThermalTensileElasticTetSolid<'a> {
             energy.internal_endpoint_work_j =
                 volume.mul_add(internal_work, energy.internal_endpoint_work_j);
         }
+        energy.strain_split_error_j = energy.constitutive_strain_work_j
+            - (energy.mechanical_work_j + energy.eigenstrain_work_j);
+        energy.material_balance_error_j = energy.parameter_work_j
+            + energy.constitutive_strain_work_j
+            - (energy.stored_after_j - energy.stored_before_j);
+        energy.endpoint_work_defect_j = energy.internal_endpoint_work_j - energy.mechanical_work_j;
+        Ok(energy)
+    }
+
+    /// Quadratic native elasticity gives the exact mean stress under the next
+    /// coefficients. This is the same work split as the original thermal owner,
+    /// without creating a dormant fracture history to obtain elastic response.
+    #[allow(clippy::too_many_arguments)]
+    fn recover_elastic(
+        &self,
+        next_materials: &[ResolvedThermalBrittle],
+        solution: &SmallStrainTetSolution<()>,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        controls: BrittleTetControls,
+        cx: &Cx<'_>,
+    ) -> Result<ThermalBrittleTetEnergy, ThermalTensileTetInitiationError> {
+        let mut energy = self.elastic_material_energy(next_materials, solution, cx)?;
         let old_u = self.solution.displacement_m.as_flattened();
         let new_u = solution.displacement_m.as_flattened();
         for &(dof, force) in nodal_forces_n {
@@ -515,7 +716,7 @@ impl<'a> ThermalTensileTetOnset<'a> {
     }
     #[must_use]
     pub const fn initial_solution(&self) -> &SmallStrainTetSolution<()> {
-        &self.initial
+        &self.request.initial
     }
     /// Disposable elastic endpoint; its over-strength stress is never accepted.
     #[must_use]
@@ -532,6 +733,91 @@ impl<'a> ThermalTensileTetOnset<'a> {
         self.first_candidate
     }
 
+    /// Prepare the selected planes at both exact original source states.
+    pub fn resolve_bands(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<ThermalTensileTetBands, ThermalTensileTetInitiationError> {
+        self.request.resolve_bands(cx)
+    }
+
+    /// Preserve the OLD accepted state without charging preload work again.
+    pub fn handoff<'next>(
+        &self,
+        materials: &'next [ResolvedThermalBrittle],
+        energy_tolerance_j: f64,
+        cx: &Cx<'_>,
+    ) -> Result<ThermalBrittleTetHandoff<'next>, ThermalTensileTetInitiationError>
+    where
+        'a: 'next,
+    {
+        self.request.handoff(materials, energy_tolerance_j, cx)
+    }
+
+    /// Replay the retained source/load endpoint through native thermal fracture.
+    pub fn replay<'next>(
+        &self,
+        bands: &'next ThermalTensileTetBands,
+        controls: BrittleTetControls,
+        cx: &Cx<'_>,
+    ) -> Result<ThermalBrittleTetStep<'next>, ThermalTensileTetInitiationError>
+    where
+        'a: 'next,
+    {
+        self.request.replay(bands, controls, cx)
+    }
+}
+
+impl<'a> ThermalTensileTetActivation<'a> {
+    /// Held mechanical-strain observations in original element order. An empty
+    /// entry keeps that element's explicitly declared dormant crack plane.
+    #[must_use]
+    pub fn activations(&self) -> &[Option<ResolvedTensileActivation<'a>>] {
+        &self.activations
+    }
+
+    /// Original accepted TOTAL strain/stress and displacement, before weakening.
+    #[must_use]
+    pub const fn initial_solution(&self) -> &SmallStrainTetSolution<()> {
+        &self.request.initial
+    }
+
+    /// Prepare the selected planes at both exact original source states.
+    pub fn resolve_bands(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<ThermalTensileTetBands, ThermalTensileTetInitiationError> {
+        self.request.resolve_bands(cx)
+    }
+
+    /// Preserve the OLD accepted state without charging preload work again.
+    pub fn handoff<'next>(
+        &self,
+        materials: &'next [ResolvedThermalBrittle],
+        energy_tolerance_j: f64,
+        cx: &Cx<'_>,
+    ) -> Result<ThermalBrittleTetHandoff<'next>, ThermalTensileTetInitiationError>
+    where
+        'a: 'next,
+    {
+        self.request.handoff(materials, energy_tolerance_j, cx)
+    }
+
+    /// Replay the retained source/load endpoint through native thermal fracture.
+    pub fn replay<'next>(
+        &self,
+        bands: &'next ThermalTensileTetBands,
+        controls: BrittleTetControls,
+        cx: &Cx<'_>,
+    ) -> Result<ThermalBrittleTetStep<'next>, ThermalTensileTetInitiationError>
+    where
+        'a: 'next,
+    {
+        self.request.replay(bands, controls, cx)
+    }
+}
+
+impl<'a> ThermalTensileTetRequest<'a> {
     /// Preserve both exact thermal sources while preparing discovered planes.
     /// Untriggered elements retain their original declared planes. No source
     /// lookup, temperature interpolation or history mutation occurs here.
@@ -704,11 +990,7 @@ impl<'a> ThermalTensileTetOnset<'a> {
     {
         checkpoint(cx)?;
         admit_controls(controls)?;
-        count(bands.next.len(), self.next_materials.len())?;
-        for (element, next) in bands.next.iter().enumerate() {
-            checkpoint(cx)?;
-            self.admit_band(&self.next_materials[element], next, element)?;
-        }
+        self.admit_next_materials(&bands.next, cx)?;
         let handoff = self.handoff(&bands.initial, controls.material_energy_tolerance_j, cx)?;
         Ok(handoff.solid.advance(
             &bands.next,
@@ -720,11 +1002,21 @@ impl<'a> ThermalTensileTetOnset<'a> {
         )?)
     }
 
+    fn admit_next_materials(
+        &self,
+        materials: &[ResolvedThermalBrittle],
+        cx: &Cx<'_>,
+    ) -> Result<(), ThermalTensileTetInitiationError> {
+        count(materials.len(), self.next_materials.len())?;
+        for (element, next) in materials.iter().enumerate() {
+            checkpoint(cx)?;
+            self.admit_band(&self.next_materials[element], next, element)?;
+        }
+        Ok(())
+    }
+
     fn normal(&self, element: usize) -> [f64; 3] {
-        self.events[element].as_ref().map_or_else(
-            || self.materials[element].band().law().normal(),
-            |event| event.native().normal(),
-        )
+        self.normals[element]
     }
 
     fn admit_band(
