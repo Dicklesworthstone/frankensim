@@ -1,4 +1,7 @@
 //! Material-derived motion and actual deformation work; synthetic source data.
+#[path = "rolling/breakaway.rs"]
+mod breakaway;
+
 use fs_mbd::sphere_plane::rolling::{
     SphereRollingBinding, SphereRollingError, advance_viscoelastic_sphere_rolling,
     advance_viscoelastic_sphere_rolling_with_torque,

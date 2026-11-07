@@ -30,6 +30,13 @@ use fs_tribo::rolling_loss::{
     RollingWorkOwnership,
 };
 
+#[path = "rolling/breakaway.rs"]
+mod breakaway;
+pub use breakaway::{
+    SphereRollingBreakaway, SphereRollingEventAdvance,
+    advance_viscoelastic_sphere_rolling_until_breakaway,
+};
+
 /// Original immutable constitutive and normal-contact sources for one interval.
 #[derive(Clone, Copy, Debug)]
 pub struct SphereRollingBinding<'a> {
@@ -152,7 +159,7 @@ pub fn advance_viscoelastic_sphere_rolling<'a>(
 /// [`advance_viscoelastic_sphere_rolling`] also apply. Translation, momenta,
 /// force work and motor work integrate analytically. Changing-axis attitude
 /// follows the bounded Lie-midpoint path, including accelerated normal spin.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub fn advance_viscoelastic_sphere_rolling_with_torque<'a>(
     scene: &SpherePlane,
     state: SpherePlaneState,
@@ -161,15 +168,41 @@ pub fn advance_viscoelastic_sphere_rolling_with_torque<'a>(
     binding: SphereRollingBinding<'a>,
     duration_s: f64,
     config: SpherePlaneConfig,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<ViscoelasticSphereAdvance<'a>, SphereRollingError> {
+    advance_rolling(
+        scene,
+        state,
+        external_torque_world,
+        support_friction,
+        binding,
+        duration_s,
+        config,
+        false,
+        cancelled,
+    )
+    .map(|result| result.rolling)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn advance_rolling<'a>(
+    scene: &SpherePlane,
+    state: SpherePlaneState,
+    external_torque_world: Vec3,
+    support_friction: &FrictionLaw,
+    binding: SphereRollingBinding<'a>,
+    requested_duration_s: f64,
+    config: SpherePlaneConfig,
+    stop_at_breakaway: bool,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<SphereRollingEventAdvance<'a>, SphereRollingError> {
     poll(&mut cancelled)?;
     vector(external_torque_world)?;
-    if !duration_s.is_finite() || duration_s <= 0.0 {
+    if !requested_duration_s.is_finite() || requested_duration_s <= 0.0 {
         return Err(SpherePlaneError::Invalid("positive finite rolling duration required").into());
     }
-    progress(state.time_s, duration_s)?;
-    let end_time = finite(state.time_s + duration_s)?;
+    progress(state.time_s, requested_duration_s)?;
+    finite(state.time_s + requested_duration_s)?;
     let mut engine = Engine::new(*scene, config, support_friction)?;
     engine.velocity_scale = state.velocity_scale;
     let body = state.body;
@@ -247,9 +280,6 @@ pub fn advance_viscoelastic_sphere_rolling_with_torque<'a>(
     {
         return Err(SpherePlaneError::Unresolved("unrepresentable rolling relaxation rate").into());
     }
-    let z = finite(rate * duration_s)?;
-    let moments = exponential_moments(z);
-    let [decay, phi1, phi2, phi3, variance] = moments;
     let driving_force = if external_torque_world == Vec3::ZERO {
         engine.force_tangent_world
     } else {
@@ -259,6 +289,84 @@ pub fn advance_viscoelastic_sphere_rolling_with_torque<'a>(
     };
     let acceleration_free = driving_force.scale(effective_mass.recip());
     let initial_acceleration = acceleration_free.sub(relative0.scale(rate));
+    vector(acceleration_free)?;
+    vector(initial_acceleration)?;
+    let traction0 = initial_acceleration
+        .scale(engine.mass)
+        .sub(engine.force_tangent_world);
+    let available_n = finite(engine.support_static_mu * load)?;
+    let response_before = material_response(
+        binding,
+        radius,
+        rolling0,
+        omega0.dot(engine.n),
+        requested_duration_s,
+    )?;
+    let breakaway_time = if stop_at_breakaway {
+        breakaway::first_breakaway(
+            initial_acceleration,
+            engine.mass,
+            engine.force_tangent_world,
+            available_n,
+            rate,
+            requested_duration_s,
+            &mut cancelled,
+        )?
+    } else {
+        None
+    };
+    let duration_s = breakaway_time.unwrap_or(requested_duration_s);
+    let end_time = finite(state.time_s + duration_s)?;
+    if duration_s == 0.0 {
+        // An initially infeasible constraint consumes no physical interval.
+        // Preserve native momentum/pose bytes; only publish the mode handoff.
+        if state.mode != SpherePlaneMode::Rolling {
+            engine.event(state.time_s, SpherePlaneEventKind::Support, 0.0, Vec3::ZERO)?;
+        }
+        engine.event(state.time_s, SpherePlaneEventKind::Sliding, 0.0, Vec3::ZERO)?;
+        let event = breakaway::handoff(traction0, available_n, rolling0, moment_coefficient)?;
+        poll(&mut cancelled)?;
+        return Ok(SphereRollingEventAdvance {
+            rolling: ViscoelasticSphereAdvance {
+                motion: SpherePlaneAdvance {
+                    state_after: SpherePlaneState {
+                        body,
+                        time_s: state.time_s,
+                        mode: SpherePlaneMode::Sliding,
+                        contact_known: true,
+                        zero_normal: true,
+                        velocity_scale: engine.velocity_scale,
+                    },
+                    events: engine.events,
+                    contact_impulse_world: Vec3::ZERO,
+                    contact_angular_impulse_world: Vec3::ZERO,
+                    external_force_work: 0.0,
+                    external_torque_work: 0.0,
+                    external_torque_impulse_world: Vec3::ZERO,
+                    plane_work: 0.0,
+                    dissipated_energy: 0.0,
+                    energy_balance_residual: 0.0,
+                    linear_momentum_residual: Vec3::ZERO,
+                    angular_momentum_residual: Vec3::ZERO,
+                    gap_after: gap,
+                    sliding_substeps: 0,
+                },
+                binding,
+                response_before,
+                response_after: response_before,
+                maximum_required_traction_n: norm(traction0)?,
+                rolling_angular_impulse_world: Vec3::ZERO,
+                deformation_heat_j: 0.0,
+            },
+            accepted_duration_s: 0.0,
+            remaining_duration_s: requested_duration_s,
+            breakaway: Some(event),
+        });
+    }
+    progress(state.time_s, duration_s)?;
+    let z = finite(rate * duration_s)?;
+    let moments = exponential_moments(z);
+    let [decay, phi1, phi2, phi3, variance] = moments;
     if decay == 0.0 && initial_acceleration != Vec3::ZERO {
         return Err(
             SpherePlaneError::Unresolved("rolling exponential tail is unrepresentable").into(),
@@ -290,14 +398,14 @@ pub fn advance_viscoelastic_sphere_rolling_with_torque<'a>(
             SpherePlaneError::Unresolved("native rolling velocity is unrepresentable").into(),
         );
     }
-    let traction0 = initial_acceleration
-        .scale(engine.mass)
-        .sub(engine.force_tangent_world);
-    let traction1 = initial_acceleration
-        .scale(engine.mass * decay)
-        .sub(engine.force_tangent_world);
+    let traction1 = required_traction(
+        initial_acceleration,
+        engine.mass,
+        engine.force_tangent_world,
+        z,
+        decay,
+    );
     let required_n = norm(traction0)?.max(norm(traction1)?);
-    let available_n = finite(engine.support_static_mu * load)?;
     if required_n > available_n {
         return Err(SphereRollingError::TractionExceeded {
             required_n,
@@ -321,24 +429,13 @@ pub fn advance_viscoelastic_sphere_rolling_with_torque<'a>(
             .scale(0.5 * duration_s)
             .scale(duration_s),
     );
-    let response =
-        |rolling: Vec3, spin_rate: f64| -> Result<ViscoelasticSphereResponse, SphereRollingError> {
-            let angular_speed = norm(rolling)?;
-            Ok(binding.card.response(
-                binding.patch,
-                binding.interface,
-                RollingKinematics::new(
-                    finite(radius * angular_speed)?,
-                    angular_speed,
-                    spin_rate,
-                    binding.temperature_kelvin,
-                    binding.excitation_frequency_hz,
-                    duration_s,
-                )?,
-            )?)
-        };
-    let response_before = response(rolling0, omega0.dot(engine.n))?;
-    let response_after = response(rolling1, normal_spin1.dot(engine.n))?;
+    let response_after = material_response(
+        binding,
+        radius,
+        rolling1,
+        normal_spin1.dot(engine.n),
+        duration_s,
+    )?;
     // The nonnegative variance form integrates the actual squared rolling rate.
     // It stays positive during reversal and avoids subtracting large energy
     // or terminal-velocity terms to infer a small dissipated heat.
@@ -494,13 +591,28 @@ pub fn advance_viscoelastic_sphere_rolling_with_torque<'a>(
     if state.mode != SpherePlaneMode::Rolling {
         engine.event(state.time_s, SpherePlaneEventKind::Support, 0.0, Vec3::ZERO)?;
     }
+    let breakaway = if breakaway_time.is_some() {
+        engine.event(end_time, SpherePlaneEventKind::Sliding, 0.0, Vec3::ZERO)?;
+        Some(breakaway::handoff(
+            traction1,
+            available_n,
+            rolling1,
+            moment_coefficient,
+        )?)
+    } else {
+        None
+    };
     poll(&mut cancelled)?;
-    Ok(ViscoelasticSphereAdvance {
+    let rolling = ViscoelasticSphereAdvance {
         motion: SpherePlaneAdvance {
             state_after: SpherePlaneState {
                 body: after,
                 time_s: end_time,
-                mode: SpherePlaneMode::Rolling,
+                mode: if breakaway.is_some() {
+                    SpherePlaneMode::Sliding
+                } else {
+                    SpherePlaneMode::Rolling
+                },
                 contact_known: true,
                 zero_normal: true,
                 velocity_scale: engine.velocity_scale,
@@ -525,7 +637,52 @@ pub fn advance_viscoelastic_sphere_rolling_with_torque<'a>(
         maximum_required_traction_n: required_n,
         rolling_angular_impulse_world: rolling_impulse,
         deformation_heat_j: heat,
+    };
+    Ok(SphereRollingEventAdvance {
+        rolling,
+        accepted_duration_s: duration_s,
+        remaining_duration_s: requested_duration_s - duration_s,
+        breakaway,
     })
+}
+
+fn material_response(
+    binding: SphereRollingBinding<'_>,
+    radius: f64,
+    rolling: Vec3,
+    spin_rate: f64,
+    duration_s: f64,
+) -> Result<ViscoelasticSphereResponse, SphereRollingError> {
+    let angular_speed = norm(rolling)?;
+    Ok(binding.card.response(
+        binding.patch,
+        binding.interface,
+        RollingKinematics::new(
+            finite(radius * angular_speed)?,
+            angular_speed,
+            spin_rate,
+            binding.temperature_kelvin,
+            binding.excitation_frequency_hz,
+            duration_s,
+        )?,
+    )?)
+}
+
+fn required_traction(
+    acceleration: Vec3,
+    mass: f64,
+    force: Vec3,
+    scaled_time: f64,
+    decay: f64,
+) -> Vec3 {
+    if scaled_time < 0.5 {
+        let inertial = acceleration.scale(mass);
+        inertial
+            .sub(force)
+            .add(inertial.scale(det::expm1(-scaled_time)))
+    } else {
+        acceleration.scale(mass * decay).sub(force)
+    }
 }
 
 fn same(actual: f64, expected: f64, field: &'static str) -> Result<(), SpherePlaneError> {

@@ -3843,6 +3843,32 @@ covariance, continuation, elastic rigid-body limits, source/traction refusal,
 late cancellation and attitude refinement, including motor startup from rest
 whose rolling and normal-spin accelerations evolve differently.
 
+`advance_viscoelastic_sphere_rolling_until_breakaway` returns the complete
+requested interval or the audited physical prefix at its first static-traction
+exit. The traction path `m*a0*exp(-rate*t)-F_t` is a line segment in force space;
+the original scalar ballistic-contact owner locates its disk-boundary root.
+Capacity-scaled line distance preserves early exits, and a reverse query from
+terminal traction preserves late exits without subtracting nearly unit decay
+fractions. A boundary state that initially unloads keeps its later outward
+crossing; terminal traction on the disk is approached asymptotically. Event
+time is independent of trajectory timesteps. Shared `expm1` evaluation retains
+small early traction changes under nearly cancelling motor and force drives.
+The accepted endpoint stays on the feasible side of floating-point root
+evaluation; this is not an interval-certified enclosure.
+
+The result retains all accepted native work, material heat, source identities,
+and the remaining horizon. Breakaway adds a bounded, zero-impulse native
+`Sliding` event and supplies required static traction, capacity and instantaneous
+material rolling torque for handoff. Immediate breakaway preserves pose and
+momenta exactly, with zero duration, impulse, work and heat. Source validity
+still bounds the whole prefix, and event/attitude budget exhaustion or late
+cancellation publishes nothing. The original full-interval APIs retain strict
+traction refusal. No post-breakaway sliding is propagated: its deformation and
+surface-friction losses need a separately admitted owner, and the material
+torque is never silently discarded. Focused cases cover exact force- and
+motor-driven prefixes, immediate and inward-boundary events, early/late clocks,
+force scaling, continuation, moving-frame work, source limits and cancellation.
+
 ## Native rigid-body directional friction impulses
 
 `tangential_friction::directional::{apply_rigid_directional,
