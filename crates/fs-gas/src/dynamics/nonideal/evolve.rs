@@ -1,6 +1,6 @@
 //! Fixed-domain real-gas evolution sharing the native finite-volume machinery.
 
-use super::{RealGas, RealGasFlowError, RealGasWallOperator};
+use super::{RealGas, RealGasFlowError, RealGasWallControl, RealGasWallOperator};
 use crate::body_force::ForceChange;
 use crate::dynamics::evolve::{Stage, forward, totals};
 use crate::dynamics::{
@@ -18,6 +18,9 @@ pub enum RealGasBoundary {
     /// Mirrored velocity through the same EOS-checked HLLC/HLL kernel. Wall
     /// mass and energy flux are exactly zero; pressure traction is numerical.
     Reflecting,
+    /// Physical original-EOS pressure traction: Rankine--Hugoniot compression
+    /// or an isentropic expansion, with bounded caller-authored source paths.
+    PhysicalReflecting(RealGasWallControl),
     /// Prescribed exterior trace in this owner's SAME frozen composition and
     /// energy reference. This is a Riemann ghost state, not a reservoir law.
     Exterior(Conserved),
@@ -311,12 +314,11 @@ impl RealGasEuler1d {
                         after.array()[k] - before.array()[k] - boundary.array()[k] - source[k]
                     }));
                     if let Some(report) = &mut thermal {
-                        report.gas_wall_storage_residual_j = after.energy
-                            - before.energy
-                            - boundary.energy
-                            + report.wall_storage_change_j
-                            - report.external_heat_to_gas_j
-                            - report.mechanical_work_to_gas_j;
+                        report.gas_wall_storage_residual_j =
+                            after.energy - before.energy - boundary.energy
+                                + report.wall_storage_change_j
+                                - report.external_heat_to_gas_j
+                                - report.mechanical_work_to_gas_j;
                         if !report.gas_wall_storage_residual_j.is_finite() {
                             return Err(RealGasFlowError::Invalid(
                                 "nonfinite real-gas wall storage balance",
@@ -388,8 +390,12 @@ fn admit_boundaries(
     let mut primitive = [None; 2];
     if let RealGasBoundaries::Ends { left, right } = boundaries {
         for (i, boundary) in [left, right].into_iter().enumerate() {
-            if let RealGasBoundary::Exterior(state) = boundary {
-                primitive[i] = Some(gas.decode(state, cancelled)?);
+            match boundary {
+                RealGasBoundary::Exterior(state) => {
+                    primitive[i] = Some(gas.decode(state, cancelled)?);
+                }
+                RealGasBoundary::PhysicalReflecting(control) => control.validate(gas)?,
+                RealGasBoundary::Reflecting | RealGasBoundary::Transmissive => (),
             }
         }
     }
@@ -504,6 +510,15 @@ fn operator(
                     let mut exterior = interior;
                     match boundary {
                         RealGasBoundary::Transmissive => (),
+                        RealGasBoundary::PhysicalReflecting(control) => {
+                            faces[face] = gas.physical_wall_flux(
+                                interior.1,
+                                if face == 0 { -1.0 } else { 1.0 },
+                                control,
+                                cancelled,
+                            )?;
+                            continue;
+                        }
                         RealGasBoundary::Reflecting => {
                             exterior.0.momentum = -exterior.0.momentum;
                             exterior.1.velocity = -exterior.1.velocity;

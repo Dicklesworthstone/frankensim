@@ -1,5 +1,61 @@
 # fs-gas contract
 
+## Original real-gas pressure at impermeable end walls
+
+With `material,experimental-euler`,
+`RealGasBoundary::PhysicalReflecting(RealGasWallControl)` and
+`RealGas::reflecting_wall_flux` resolve stationary wall traction using the
+retained NASA/Peng–Robinson source. Positive velocity toward a wall uses the
+existing original-law piston Rankine–Hugoniot solve and its conservation,
+entropy and sonic admission. Retreating gas uses the original finite-entropy
+inversion along `s = constant` and solves
+`|u| = integral(rho_wall..rho_inside) a(rho,s) d(rho)/rho`.
+The logarithmic density coordinate removes the singular-looking `1/rho`
+factor. This produces a positive source pressure for strong expansions where
+the legacy mirrored HLLC/HLL traction can become tensile.
+
+Both sides return exactly zero mass and energy flux. Pressure enters the same
+face momentum balance and wave-speed CFL accounting as the interior fluxes.
+The physical boundary is evaluated at both SSP-RK2 stages; native field retries
+and cancellation still publish no partial accepted state. Left/right wall
+orientation changes the signed incoming velocity, not the positive traction.
+At equilibrium the pressure is exactly the original EOS pressure without an
+additional wall solve. Nonzero waves within the authored absolute tolerance
+or the floating-point weak-shock resolution use its acoustic impedance
+tangent. Every such continuation still admits the native isentropic density
+and temperature path, including strict endpoint direction/bracket checks. The
+authored pressure tolerance gates acoustic consistency with the native
+isentrope at the linearized density; it is not a certified error bound against
+the fully resolved wall wave. Small velocity does not bypass a source
+temperature or density boundary. The compression search extends its
+lower ratio toward unity as needed, and tightens caloric/pressure residuals
+to resolve the quadratic sonic separation; a fixed lower bracket therefore
+does not leave an unsupported gap next to the acoustic limit.
+
+Controls retain explicit compression and rarefaction source paths, caloric
+temperature bounds, velocity and quadrature tolerances, and finite work limits.
+The rarefaction endpoint must itself be on a supported homogeneous isentrope,
+even if a shorter wave would fit. The embedded three/five-point Gaussian
+quadrature uses a fixed stack, bounded depth and a divided error budget;
+original material evaluations retain their own allocations. Energy/entropy
+datums cancel in the original finite-increment owners. Source, bracket,
+quadrature or root exhaustion returns a refusal rather than pressure clipping,
+an ideal-gas fit or an extrapolated vacuum state.
+
+This is an Estimated classical single-phase shock/rarefaction boundary, not an
+entropy-stability certificate or a treatment of phase transitions/nonclassical
+waves. The caller must declare a classical rarefaction path with monotone
+characteristic speeds for the endpoint CFL bound to cover the entire fan;
+native material stability does not certify that assumption or detect every
+nonclassical source. Existing `Reflecting` explicitly retains its numerical
+mirrored-flux semantics. Physical wall controls must be selected to cover the evolving
+boundary-cell states; the native source still checks every evaluated state.
+Focused regressions in `material_nonideal_wall` cover an independent dense PR
+shock, an independently integrated dense rarefaction with a tensile numerical
+mirror, orientation, original datum invariance, the acoustic limit, closed
+field pressure/mass/energy balance, acoustic source-endpoint refusal, a sweep
+across both weak-wave transitions and bounded-path/cancellation refusal.
+
 
 ## Original real-gas heat exchange in compressive fields
 

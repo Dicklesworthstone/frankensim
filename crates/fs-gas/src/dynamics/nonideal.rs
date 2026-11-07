@@ -18,10 +18,13 @@ mod evolve;
 pub use evolve::{RealGasBoundaries, RealGasBoundary, RealGasEuler1d};
 mod thermal;
 pub use thermal::{RealGasWallContact, RealGasWallOperator, RealGasWallReport};
+mod wall;
+pub use wall::RealGasWallControl;
 
 use super::{Conserved, Error, FaceFlux, Primitive, poll, positive};
 use fs_matdb::QueryPoint;
 use fs_material::MaterialError;
+use fs_material::thermochemical_gas::energy::entropy::GasEntropyError;
 use fs_material::thermochemical_gas::energy::{GasEnergyError, GasEnergySolve};
 use fs_material::thermochemical_gas::nonideal::{
     ResolvedThermochemicalRealGasState, ThermochemicalPengRobinsonModel,
@@ -70,6 +73,10 @@ pub enum RealGasFlowError {
     Invalid(&'static str),
     Material(MaterialError),
     Energy(GasEnergyError),
+    /// Original density/entropy path for a physical wall rarefaction.
+    Entropy(GasEntropyError),
+    /// Original Rankine--Hugoniot pressure/energy/entropy wall admission.
+    Shock(Box<crate::material::nonideal_shock::RealGasShockError>),
     /// Existing geometry, shared numerical flux or CFL admission refused.
     Numerical(Error),
     /// Original implicit gas/wall source refused before publication.
@@ -97,6 +104,22 @@ impl From<GasEnergyError> for RealGasFlowError {
         match error {
             GasEnergyError::Cancelled => Self::Cancelled,
             other => Self::Energy(other),
+        }
+    }
+}
+impl From<GasEntropyError> for RealGasFlowError {
+    fn from(error: GasEntropyError) -> Self {
+        match error {
+            GasEntropyError::Cancelled => Self::Cancelled,
+            other => Self::Entropy(other),
+        }
+    }
+}
+impl From<crate::material::nonideal_shock::RealGasShockError> for RealGasFlowError {
+    fn from(error: crate::material::nonideal_shock::RealGasShockError) -> Self {
+        match error {
+            crate::material::nonideal_shock::RealGasShockError::Cancelled => Self::Cancelled,
+            other => Self::Shock(Box::new(other)),
         }
     }
 }
