@@ -11,6 +11,9 @@
 //! camera lens. Double-double seconds retain short optical delays under a large
 //! common epoch; a delay unresolved by that clock refuses. The physical path
 //! and its original numerical contact resolution remain unchanged.
+//! Explicit sequential-lens observations instead keep the clock at the sensor
+//! and prepend the lens's qualified wavelength-specific group transit to each
+//! source encounter, while continuing its complete reciprocal optical state.
 //!
 //! Geometry, media and surface laws remain frozen. This is incoherent spectral
 //! envelope transport with a narrow-band group-delay approximation. It does not
@@ -45,6 +48,7 @@ pub mod area_lights;
 pub mod exposure;
 #[cfg(feature = "volumes")]
 pub mod participating;
+mod sequential;
 
 /// Original finite source and its retarded physical clock. An emitting camera
 /// hit retains its integrated native endpoint within the contact-resolution
@@ -109,6 +113,10 @@ pub struct SurfaceEmissionHistoryBinding<'a> {
 pub enum TransientCameraError {
     Camera(CameraRadianceError),
     InvalidObservationTime,
+    /// A steady lens beam has no qualified sensor-to-scene group delay.
+    MissingLensGroupDelay,
+    /// The configured sensor analyzer must be applied before lens traversal.
+    AnalyzerMustPrecedeLens,
     InvalidExposureWindow,
     /// Unknown, duplicate, nonauthored, volume or environment source binding.
     InvalidHistoryBinding {
@@ -282,7 +290,31 @@ impl<'a, 's, 'm> TransientCurvedCameraScene<'a, 's, 'm> {
         cx.checkpoint()?;
         let observation_time_s = admit_time(observation_time_s)?;
         let beam = self.launch(ray, wavelength_nm, initial_medium)?;
-        let initial_index = phase_index(beam.medium(), wavelength_nm)?;
+        self.sample_launched_ray_at_time(
+            cx,
+            beam,
+            initial_medium,
+            observation_time_s,
+            Dd::ZERO,
+            settings,
+            seed,
+            path_id,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sample_launched_ray_at_time(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        observation_time_s: Dd,
+        launch_delay_s: Dd,
+        settings: CurvedTraceSettings,
+        seed: u64,
+        path_id: u64,
+    ) -> Result<TransientCameraSample, TransientCameraError> {
+        let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
         let mut emission = SurfaceEmission::new(self.camera, initial_index);
         let mut error = None;
         let result = self.camera.scene.trace_with_seed_events_mode(
@@ -294,7 +326,16 @@ impl<'a, 's, 'm> TransientCurvedCameraScene<'a, 's, 'm> {
             path_id,
             true,
             &self.camera.spatial_volume_emitters,
-            |event| self.observe(cx, observation_time_s, event, &mut emission, &mut error),
+            |event| {
+                self.observe_with_delay(
+                    cx,
+                    observation_time_s,
+                    launch_delay_s,
+                    event,
+                    &mut emission,
+                    &mut error,
+                )
+            },
         );
         if let Some(error) = error {
             return Err(error);
@@ -323,7 +364,29 @@ impl<'a, 's, 'm> TransientCurvedCameraScene<'a, 's, 'm> {
         cx.checkpoint()?;
         let observation_time_s = admit_time(observation_time_s)?;
         let beam = self.launch(ray, wavelength_nm, initial_medium)?;
-        let initial_index = phase_index(beam.medium(), wavelength_nm)?;
+        self.sample_launched_ray_with_samples_at_time(
+            cx,
+            beam,
+            initial_medium,
+            observation_time_s,
+            Dd::ZERO,
+            settings,
+            samples,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sample_launched_ray_with_samples_at_time(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        observation_time_s: Dd,
+        launch_delay_s: Dd,
+        settings: CurvedTraceSettings,
+        samples: impl FnMut(u32) -> [f64; 3],
+    ) -> Result<TransientCameraSample, TransientCameraError> {
+        let initial_index = phase_index(beam.medium(), beam.wavelength_nm())?;
         let mut emission = SurfaceEmission::new(self.camera, initial_index);
         let mut error = None;
         let result = self.camera.scene.trace_with_samples_events_mode(
@@ -334,7 +397,16 @@ impl<'a, 's, 'm> TransientCurvedCameraScene<'a, 's, 'm> {
             samples,
             true,
             &self.camera.spatial_volume_emitters,
-            |event| self.observe(cx, observation_time_s, event, &mut emission, &mut error),
+            |event| {
+                self.observe_with_delay(
+                    cx,
+                    observation_time_s,
+                    launch_delay_s,
+                    event,
+                    &mut emission,
+                    &mut error,
+                )
+            },
         );
         if let Some(error) = error {
             return Err(error);
@@ -354,10 +426,22 @@ impl<'a, 's, 'm> TransientCurvedCameraScene<'a, 's, 'm> {
         emission: &mut SurfaceEmission<'_, '_, '_>,
         error: &mut Option<TransientCameraError>,
     ) -> Result<(), CurvedSceneError> {
+        self.observe_with_delay(cx, observation_time_s, Dd::ZERO, event, emission, error)
+    }
+
+    fn observe_with_delay(
+        &self,
+        cx: &Cx<'_>,
+        observation_time_s: Dd,
+        launch_delay_s: Dd,
+        event: CurvedTraceEvent<'_>,
+        emission: &mut SurfaceEmission<'_, '_, '_>,
+        error: &mut Option<TransientCameraError>,
+    ) -> Result<(), CurvedSceneError> {
         match event {
             CurvedTraceEvent::Arrival(path) => {
                 let scale = self
-                    .source_scale(cx, observation_time_s, path)
+                    .source_scale_with_delay(cx, observation_time_s, launch_delay_s, path)
                     .map_err(|failure| {
                         *error = Some(failure);
                         CurvedSceneError::NumericalRange
@@ -377,7 +461,19 @@ impl<'a, 's, 'm> TransientCurvedCameraScene<'a, 's, 'm> {
         observation_time_s: Dd,
         path: &CurvedPathResult,
     ) -> Result<f64, TransientCameraError> {
-        let Some((binding, query)) = self.source_query(cx, observation_time_s, path)? else {
+        self.source_scale_with_delay(cx, observation_time_s, Dd::ZERO, path)
+    }
+
+    fn source_scale_with_delay(
+        &self,
+        cx: &Cx<'_>,
+        observation_time_s: Dd,
+        launch_delay_s: Dd,
+        path: &CurvedPathResult,
+    ) -> Result<f64, TransientCameraError> {
+        let Some((binding, query)) =
+            self.source_query_with_delay(cx, observation_time_s, launch_delay_s, path)?
+        else {
             return Ok(1.0);
         };
         sample_history(cx, binding, query)
@@ -387,6 +483,19 @@ impl<'a, 's, 'm> TransientCurvedCameraScene<'a, 's, 'm> {
         &self,
         cx: &Cx<'_>,
         observation_time_s: Dd,
+        path: &CurvedPathResult,
+    ) -> Result<
+        Option<(SurfaceEmissionHistoryBinding<'a>, SurfaceEmissionQuery)>,
+        TransientCameraError,
+    > {
+        self.source_query_with_delay(cx, observation_time_s, Dd::ZERO, path)
+    }
+
+    fn source_query_with_delay(
+        &self,
+        cx: &Cx<'_>,
+        observation_time_s: Dd,
+        launch_delay_s: Dd,
         path: &CurvedPathResult,
     ) -> Result<
         Option<(SurfaceEmissionHistoryBinding<'a>, SurfaceEmissionQuery)>,
@@ -417,6 +526,14 @@ impl<'a, 's, 'm> TransientCurvedCameraScene<'a, 's, 'm> {
         if group_m > 0.0 && !Dd::ZERO.lt(group_delay_s) {
             return Err(TransientCameraError::UnresolvedClock { object_id });
         }
+        // Keep the original observer clock. A resolved lens contributes a
+        // prefix to every encountered source's delay, not a shift of the
+        // callback's observation time or an addition of the terminal delay.
+        let group_delay_s = if launch_delay_s == Dd::ZERO {
+            group_delay_s
+        } else {
+            launch_delay_s + group_delay_s
+        };
         let emission_time_s = retarded_time(observation_time_s, group_delay_s, object_id)?;
         Ok(Some((
             binding,
@@ -471,7 +588,7 @@ fn finite_dd(time: Dd) -> bool {
     time.hi.is_finite() && time.lo.is_finite()
 }
 
-fn admit_time(time: Dd) -> Result<Dd, TransientCameraError> {
+pub(super) fn admit_time(time: Dd) -> Result<Dd, TransientCameraError> {
     if !finite_dd(time) {
         return Err(TransientCameraError::InvalidObservationTime);
     }

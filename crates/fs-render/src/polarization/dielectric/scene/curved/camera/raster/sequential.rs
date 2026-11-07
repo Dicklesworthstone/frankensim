@@ -146,6 +146,25 @@ impl CurvedCameraRaster<'_> {
         pixel: u32,
         sample: u32,
         analyzer: Option<CameraAnalyzer>,
+        trace: impl FnMut(
+            &Cx<'_>,
+            &SequentialCameraBeam,
+            usize,
+        ) -> Result<CameraRadianceSample, CameraRadianceError>,
+    ) -> Result<CurvedSequentialPixelSample, CurvedRasterError> {
+        self.sample_sequential_pixel_with_timing(cx, seed, pixel, sample, analyzer, false, trace)
+    }
+
+    // Timing is explicit: steady rendering never requests lens group indices.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn sample_sequential_pixel_with_timing(
+        &self,
+        cx: &Cx<'_>,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+        analyzer: Option<CameraAnalyzer>,
+        timed_lens: bool,
         mut trace: impl FnMut(
             &Cx<'_>,
             &SequentialCameraBeam,
@@ -162,6 +181,7 @@ impl CurvedCameraRaster<'_> {
             pixel,
             sample,
             analyzer,
+            timed_lens,
             |u| {
                 Ok(hero_wavelength_packet::<CAMERA_WAVELENGTHS>(
                     LAMBDA_MIN + u * (LAMBDA_MAX - LAMBDA_MIN),

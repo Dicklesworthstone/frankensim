@@ -340,6 +340,7 @@ impl<'a> CurvedCameraRaster<'a> {
             pixel,
             sample,
             None,
+            false,
             wavelengths,
             |cx, launch, wavelength, lane| match launch {
                 CameraLaunch::Geometric(ray) => Ok(trace(cx, ray, wavelength, lane)?),
@@ -366,6 +367,7 @@ impl<'a> CurvedCameraRaster<'a> {
         pixel: u32,
         sample: u32,
         analyzer: Option<CameraAnalyzer>,
+        timed_lens: bool,
         wavelengths: impl FnOnce(f64) -> Result<[f64; CAMERA_WAVELENGTHS], CurvedRasterError>,
         mut trace: impl FnMut(
             &Cx<'_>,
@@ -409,7 +411,29 @@ impl<'a> CurvedCameraRaster<'a> {
             None
         };
         let (launches, mut diffraction_weights) = if self.camera.sequential_lens().is_some() {
-            let beams = if let Some(analyzer) = analyzer {
+            let beams = if timed_lens {
+                if let Some(analyzer) = analyzer {
+                    self.camera
+                        .generate_sequential_spectral_timed_beams_analyzed_from_tangent_offsets(
+                            &render_cx,
+                            x_tan,
+                            y_tan,
+                            lens_sample,
+                            &wavelengths_nm,
+                            analyzer.reference_axis(),
+                            analyzer.row(),
+                        )?
+                } else {
+                    self.camera
+                        .generate_sequential_spectral_timed_beams_from_tangent_offsets(
+                            &render_cx,
+                            x_tan,
+                            y_tan,
+                            lens_sample,
+                            &wavelengths_nm,
+                        )?
+                }
+            } else if let Some(analyzer) = analyzer {
                 self.camera
                     .generate_sequential_spectral_beams_analyzed_from_tangent_offsets(
                         &render_cx,

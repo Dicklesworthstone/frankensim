@@ -12,6 +12,8 @@
 //! exposure integration, temporal interpolation or extra spectral broadening is
 //! inferred. The underlying transient scene owns its finite-source and frozen-
 //! medium assumptions; unsupported time-dependent source types remain outside it.
+//! Explicit sequential-lens entry points include authored lens group transit
+//! and place any configured analyzer at the physical sensor before the lens.
 
 use super::sensor::CurvedSensorPixelSample;
 use super::{
@@ -29,6 +31,8 @@ pub mod area_lights;
 pub mod exposure;
 #[cfg(feature = "volumes")]
 pub mod participating;
+mod sequential;
+pub use sequential::TransientSequentialPixelSample;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TransientRasterError {

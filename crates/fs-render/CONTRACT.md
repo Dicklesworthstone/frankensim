@@ -4259,8 +4259,7 @@ With `volumes`, `CurvedRayleighCameraScene` retains the same lens state through
 native molecular Mueller scattering and uniform or heterogeneous free-flight
 tracking. These scene samples include lens/analyzer transmission but exclude
 the rear-cap geometric factor; callers apply that factor exactly once during
-pixel integration. Retained scene paths start at the lens exit. Lens-aware
-transient flight timing remains a separate integration.
+pixel integration. Retained scene paths start at the lens exit.
 
 The explicit `generate_sequential_spectral_timed_beams*` entry points retain
 sensor-to-front-surface group transit in DD seconds. Every finite lens segment
@@ -4272,6 +4271,27 @@ generation admits required group laws before optical clipping and refuses
 undefined or unrepresentable transit. Phase optical length is never substituted
 for group length; interface residence times and coherent pulse reshaping remain
 outside this geometric-envelope model.
+
+`TransientCurvedCameraScene::sample_sequential_ray_at_time` and its
+original-variate counterpart continue timed beams through the original native
+source-history walk. Each source encounter adds its own scene group delay to
+the lens delay exactly once, then retards the original DD sensor observation
+clock. Source callbacks retain that sensor clock; the retained scene path and
+its group delay still begin at the physical front lens surface. Steady beams
+without qualified lens timing refuse. A raw prepared beam already owns its
+sensor response, so an independently configured scene analyzer refuses instead
+of being applied after the lens.
+
+`CurvedCameraRaster::sample_pixel_sequential_transient_at_time` and
+`sample_pixel_sensor_sequential_transient_at_time` integrate the same histories
+into visible XYZ or original-band QE and photoelectron response. Their analyzer
+is installed at the sensor during timed beam generation. Original spatial,
+pupil, spectral and surface variate addresses are retained; clipped wavelengths
+keep zero contribution and their complete proposal mass without history calls.
+Even a fully clipped packet admits the sensor clock and cancellation. Original
+source failures abort the complete observation. These entry points cover
+instantaneous finite-source histories; exposure quadrature, area-source and
+molecular transient coupling through the resolved lens remain separate work.
 
 `CurvedCameraRaster::sample_pixel_sequential` and
 `sample_pixel_sensor_sequential` integrate the same full optical seeds into

@@ -146,6 +146,27 @@ impl CurvedCameraRaster<'_> {
         pixel: u32,
         sample: u32,
         analyzer: Option<CameraAnalyzer>,
+        trace: impl FnMut(
+            &Cx<'_>,
+            &SequentialCameraBeam,
+            usize,
+        ) -> Result<CameraRadianceSample, CameraRadianceError>,
+    ) -> Result<CurvedSequentialSensorPixelSample<C>, CurvedRasterError> {
+        self.sample_sequential_sensor_with_timing(
+            cx, sensor, seed, pixel, sample, analyzer, false, trace,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in super::super) fn sample_sequential_sensor_with_timing<const C: usize>(
+        &self,
+        cx: &Cx<'_>,
+        sensor: &QuantumEfficiencySensor<C>,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+        analyzer: Option<CameraAnalyzer>,
+        timed_lens: bool,
         mut trace: impl FnMut(
             &Cx<'_>,
             &SequentialCameraBeam,
@@ -163,6 +184,7 @@ impl CurvedCameraRaster<'_> {
             pixel,
             sample,
             analyzer,
+            timed_lens,
             |u| {
                 let weights = detector_packet(sensor, u)?;
                 draws = Some(weights);
