@@ -1,7 +1,7 @@
 //! Original sparse illumination through the complete coupled crystal stack.
 use super::{Frequency, OrientedUniaxialStack, Result, StackRegion, UniaxialStackResponse, bad, kernel, poll};
-use super::super::{Incidence, spectrum::{
-    FieldSum, UniaxialIncidentMode, UniaxialSpectrumField, UniaxialSpectrumLimits,
+use super::super::{Incidence, kernel::FieldSum, spectrum::{
+    UniaxialIncidentMode, UniaxialSpectrumField, UniaxialSpectrumLimits,
 }};
 use fs_math::c64::C64;
 
@@ -104,13 +104,20 @@ fn field_at(
     modes: &[Mode],region: StackRegion,point: [f64;3],cancelled: &mut impl FnMut()->bool,
 ) -> Result<UniaxialSpectrumField> {
     poll(cancelled)?;
-    let mut sum=FieldSum::new();
+    let mut sum=if let Some(mode)=modes.first() {
+        mode.response.field_sum(region,point)?
+    } else {
+        FieldSum::at_point(point).map_err(bad)?
+    };
     for mode in modes {
         poll(cancelled)?;
-        mode.response.accumulate(&mut sum,region,point,mode.axis)?;
+        mode.response.accumulate(&mut sum,region,mode.axis)?;
     }
-    sum.finish()
+    kernel::finish_field(sum)
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod anchored_tests;

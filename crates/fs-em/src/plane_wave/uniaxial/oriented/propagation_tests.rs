@@ -688,3 +688,93 @@ fn face_anchored_evanescence_preserves_scaled_tails_and_refuses_growth() {
         assert!(growing.add_wave(&electric, &magnetic, geometry).is_err());
     }
 }
+
+#[test]
+fn compensated_local_depth_keeps_the_global_face_subtraction_residual() {
+    let depth = Dd::from_f64(1000.000_000_000_000_1) - Dd::from_f64(1.000_000_000_000_000_2);
+    assert_ne!(depth.lo, 0.0);
+    let mut sum = FieldSum::at_local_point([0.0; 2], depth).unwrap();
+    sum.add_wave(
+        &[C64::ZERO, C64::ONE, C64::ZERO],
+        &[-C64::ONE, C64::ZERO, C64::ZERO],
+        WaveGeometry {
+            tangential_wavenumber_rad_m: 0.0,
+            incidence_plane_axis: [1.0, 0.0],
+            normal_wavenumber_rad_m: C64::from_re(1e7),
+            anchor_z_m: 0.0,
+        },
+    )
+    .unwrap();
+    // Same independent 110-digit optical-path oracle as the global-face test.
+    let expected = C64::new(-0.997_175_245_490_830_3, -0.075_110_117_695_969_2);
+    complex_near(sum.finish().unwrap().electric_v_m[1], expected, 2e-16);
+}
+
+#[test]
+fn compensated_local_depth_preserves_a_standing_wave_near_its_node() {
+    let epsilon = 1e-20;
+    let depth = Dd::from_f64(1.0) - Dd::from_f64(epsilon);
+    let mut sum = FieldSum::at_local_point([0.0; 2], depth).unwrap();
+    for (electric, normal, anchor) in [(C64::ONE, 1.0, 0.0), (-C64::ONE, -1.0, 2.0)] {
+        sum.add_wave(
+            &[C64::ZERO, electric, C64::ZERO],
+            &[-C64::ONE, C64::ZERO, C64::ZERO],
+            WaveGeometry {
+                tangential_wavenumber_rad_m: 0.0,
+                incidence_plane_axis: [1.0, 0.0],
+                normal_wavenumber_rad_m: C64::from_re(normal),
+                anchor_z_m: anchor,
+            },
+        )
+        .unwrap();
+    }
+    let actual = sum.finish().unwrap();
+    // exp(-i*(1-epsilon))-exp(-i*(1+epsilon)) = 2i*exp(-i)*sin(epsilon).
+    // Rounding depth to one would replace this finite electric field by zero.
+    let carrier = C64::new(1.0_f64.cos(), -1.0_f64.sin());
+    complex_near(
+        actual.electric_v_m[1],
+        carrier * C64::new(0.0, 2.0 * epsilon),
+        6e-35,
+    );
+    complex_near(actual.magnetic_a_m[0], carrier.scale(-2.0), 5e-16);
+    assert!(actual.poynting_w_m2[2].abs() < 1e-35);
+}
+
+#[test]
+fn local_exit_depth_preserves_authored_thickness_instead_of_rounded_global_span() {
+    let entrance = 2.0_f64.powi(45);
+    let thickness = 0.1;
+    let exit = entrance + thickness;
+    assert_ne!(exit - entrance, thickness);
+    for (normal, anchor, expected) in [
+        (1.0, 0.0, C64::new(thickness.cos(), -thickness.sin())),
+        (-1.0, thickness, C64::ONE),
+    ] {
+        let mut sum = FieldSum::at_local_point([0.0; 2], Dd::from_f64(thickness)).unwrap();
+        sum.add_wave(
+            &[C64::ZERO, C64::ONE, C64::ZERO],
+            &[C64::from_re(-normal), C64::ZERO, C64::ZERO],
+            WaveGeometry {
+                tangential_wavenumber_rad_m: 0.0,
+                incidence_plane_axis: [1.0, 0.0],
+                normal_wavenumber_rad_m: C64::from_re(normal),
+                anchor_z_m: anchor,
+            },
+        )
+        .unwrap();
+        complex_near(sum.finish().unwrap().electric_v_m[1], expected, 2e-16);
+    }
+    for residue in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(
+            FieldSum::at_local_point(
+                [0.0; 2],
+                Dd {
+                    hi: 1.0,
+                    lo: residue
+                }
+            )
+            .is_err()
+        );
+    }
+}

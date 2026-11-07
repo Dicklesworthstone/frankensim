@@ -66,7 +66,8 @@ struct Carrier {
 pub(crate) struct FieldSum {
     fields: Fields,
     side: OrientedCrystalFieldSide,
-    point: [f64; 3],
+    point: [f64; 2],
+    depth: Dd,
     reference: Option<Carrier>,
 }
 
@@ -77,7 +78,8 @@ impl FieldSum {
         Self {
             fields: [ZERO; 6],
             side: OrientedCrystalFieldSide::Transmitted,
-            point: [0.0; 3],
+            point: [0.0; 2],
+            depth: Dd::ZERO,
             reference: Some(Carrier {
                 tangential: 0.0,
                 axis: [0.0; 2],
@@ -103,13 +105,26 @@ impl FieldSum {
     /// Construct a physical-point sum after the caller's region admission.
     /// Generic anchored waves need no single-interface half-space selection.
     pub(crate) fn at_point(point: [f64; 3]) -> Result<Self> {
-        if point.iter().any(|v| !v.is_finite()) {
+        Self::at_local_point([point[0], point[1]], Dd::from_f64(point[2]))
+    }
+
+    /// Retain a compensated axial coordinate in the caller's physical frame.
+    /// Layer owners can supply exact global-coordinate subtraction internally,
+    /// and their original authored thickness at an admitted exit face. Region
+    /// admission and the choice of axial origin remain entirely with them.
+    pub(crate) fn at_local_point(point: [f64; 2], depth: Dd) -> Result<Self> {
+        if point.iter().any(|v| !v.is_finite())
+            || !depth.hi.is_finite()
+            || !depth.lo.is_finite()
+            || !depth.to_f64().is_finite()
+        {
             return Err("crystal observation coordinates must be finite metres");
         }
         Ok(Self {
             fields: [ZERO; 6],
             side: OrientedCrystalFieldSide::Transmitted,
             point,
+            depth,
             reference: None,
         })
     }
@@ -143,7 +158,7 @@ impl FieldSum {
                 electric,
                 magnetic,
             },
-            Dd::from_f64(self.point[2]) - Dd::from_f64(geometry.anchor_z_m),
+            self.depth - Dd::from_f64(geometry.anchor_z_m),
         )?;
         self.add_fields(
             values,
@@ -164,7 +179,7 @@ impl FieldSum {
         boundary: &OrientedCrystalResponse,
         axis: [f64; 2],
     ) -> Result<()> {
-        let Some((values, normal)) = pair_field(boundary, self.side, self.point[2])? else {
+        let Some((values, normal)) = pair_field(boundary, self.side, self.depth)? else {
             return Ok(());
         };
         let carrier = Carrier {
@@ -181,7 +196,7 @@ impl FieldSum {
             return Ok(());
         }
         if let Some(reference) = self.reference {
-            let rotation = relative_rotation(carrier, reference, self.point)?;
+            let rotation = relative_rotation(carrier, reference, self.point, self.depth)?;
             for (sum, value) in self.fields.iter_mut().zip(values) {
                 let value = multiply(value, rotation);
                 *sum = [sum[0] + value[0], sum[1] + value[1]];
@@ -225,6 +240,7 @@ impl FieldSum {
                 anchor_z: 0.0,
             },
             self.point,
+            self.depth,
         )?;
         let rounded = self.fields.map(|value| {
             let value = multiply(value, rotation);
@@ -256,7 +272,7 @@ pub(crate) fn field(
 fn pair_field(
     boundary: &OrientedCrystalResponse,
     side: OrientedCrystalFieldSide,
-    z: f64,
+    z: Dd,
 ) -> Result<Option<(Fields, f64)>> {
     use OrientedCrystalFieldSide::{
         Extraordinary, Incident, Ordinary, Reflected, TotalIncidentSide, Transmitted,
@@ -287,7 +303,7 @@ fn pair_field(
     let mut sum = [ZERO; 6];
     let mut reference = None;
     for wave in waves.into_iter().flatten() {
-        let values = attenuated(wave, Dd::from_f64(z))?;
+        let values = attenuated(wave, z)?;
         if values.iter().all(|&v| v == ZERO) {
             continue;
         }
@@ -295,7 +311,7 @@ fn pair_field(
             // Remove the shared carrier before the two waves interfere.
             // A large absolute phase must not erase weak retardance or the
             // relative phase of an incident/reflected standing wave.
-            let relative = (Dd::from_f64(wave.normal.re) - Dd::from_f64(normal)) * Dd::from_f64(z);
+            let relative = (Dd::from_f64(wave.normal.re) - Dd::from_f64(normal)) * z;
             let rotation = phasor(relative)?;
             for (total, value) in sum.iter_mut().zip(values) {
                 let value = multiply(value, rotation);
@@ -309,7 +325,12 @@ fn pair_field(
     Ok(reference.map(|normal| (sum, normal)))
 }
 
-fn relative_rotation(carrier: Carrier, reference: Carrier, point: [f64; 3]) -> Result<Complex> {
+fn relative_rotation(
+    carrier: Carrier,
+    reference: Carrier,
+    point: [f64; 2],
+    depth: Dd,
+) -> Result<Complex> {
     let kt = Dd::from_f64(carrier.tangential);
     let reference_kt = Dd::from_f64(reference.tangential);
     let transverse = |dimension: usize| {
@@ -330,7 +351,7 @@ fn relative_rotation(carrier: Carrier, reference: Carrier, point: [f64; 3]) -> R
     // Equal k at different faces keeps its physical anchor phase; equal
     // faces retain weak retardance without subtracting huge absolute phases.
     let z = phasor(
-        (k - reference_k) * (Dd::from_f64(point[2]) - anchor)
+        (k - reference_k) * (depth - anchor)
             + reference_k * (Dd::from_f64(reference.anchor_z) - anchor),
     )?;
     Ok(multiply(multiply(x, y), z))

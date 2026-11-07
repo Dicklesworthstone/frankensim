@@ -6323,6 +6323,20 @@ therefore retain their relative phase even at very large observation
 coordinates. Workspace admission accounts for the actual shared accumulator.
 FFT-grid attachment remains outside this change.
 
+`stack::UniaxialStackResponse::field_at` and
+`stack::PreparedUniaxialStackSpectrum::field_at` use this same spatial
+propagator for the original coupled multilayer solution. Internal observations
+share a compensated layer-local depth across every incident direction, with
+forward waves anchored at zero and backward waves at the authored thickness.
+Both physical faces retain that exact authored thickness even when cumulative
+global face coordinates have rounded. Exterior observations retain global
+entrance and final-exit anchors. Relative phase, weak interference, signed
+Poynting flux and scaled evanescent tails are therefore evaluated before
+individual propagated fields round. The original layer selection, empty-mode
+region admission, source preparation, boundary solve, cancellation and
+workspace limits remain with their existing owners. Point queries perform no
+allocation or material/boundary reevaluation.
+
 
 ### Retained vector polarization on the native planar Gauss solve
 

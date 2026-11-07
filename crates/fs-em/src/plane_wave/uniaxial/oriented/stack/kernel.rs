@@ -1,14 +1,14 @@
 //! Stable layer elimination; no inverse evanescent propagation is formed.
 use super::{Frequency, ResolvedLayer, Result, bad, poll};
-use super::super::kernel::Input as ModeInput;
+use super::super::kernel::{FieldSum, Input as ModeInput, WaveGeometry};
 use super::super::{Incidence, slab::SlabWave};
 use super::super::super::kernel::UniaxialWaveKind;
 use super::super::slab::kernel::{
     combine, crystal_basis, exit_basis, finite, flux, positive, solve_boundary, tangential,
 };
-use super::super::spectrum::{FieldSum, UniaxialSpectrumField, rotate, transverse_phase};
+use super::super::spectrum::{UniaxialSpectrumField, rotate};
 use crate::plane_wave::angular_spectrum::modes::propagation;
-use fs_math::c64::C64;
+use fs_math::{c64::C64, dd::Dd};
 
 const C0: f64 = 299_792_458.0;
 type Vector = [C64; 3];
@@ -52,71 +52,96 @@ pub struct UniaxialStackResponse {
 }
 
 impl UniaxialLayerField {
-    fn add(&self, sum: &mut FieldSum, z: f64, transverse: C64) -> Result<()> {
-        if !(self.entrance_z_m..=self.exit_z_m).contains(&z) {
+    fn field_sum(&self, point: [f64; 3]) -> Result<FieldSum> {
+        if !(self.entrance_z_m..=self.exit_z_m).contains(&point[2]) {
             return Err(bad("uniaxial stack point is outside its selected layer"));
         }
         // Preserve original thickness exactly at each authored face, even when
         // cumulative global coordinates incur one rounding at layer addition.
-        let distance = if z == self.exit_z_m { self.thickness_m } else { z-self.entrance_z_m };
-        for (waves, depth, sign) in [
-            (&self.forward, distance, 1.0),
-            (&self.backward, self.thickness_m-distance, -1.0),
+        // Elsewhere retain the global subtraction residual in the local depth.
+        let depth = if point[2] == self.exit_z_m {
+            Dd::from_f64(self.thickness_m)
+        } else {
+            Dd::from_f64(point[2]) - Dd::from_f64(self.entrance_z_m)
+        };
+        FieldSum::at_local_point([point[0], point[1]], depth).map_err(bad)
+    }
+    fn add(&self, sum: &mut FieldSum, tangential: f64, axis: [f64; 2]) -> Result<()> {
+        for (waves, anchor) in [
+            (&self.forward, 0.0),
+            (&self.backward, self.thickness_m),
         ] {
             for wave in waves {
-                let phase = propagation(wave.normal_wavenumber_rad_m.scale(sign), depth)
-                    .ok_or_else(|| bad("uniaxial stack field phase is unrepresentable"))?;
-                sum.add(wave.electric_v_m, wave.magnetic_a_m, transverse*phase);
+                // Keep the signed GLOBAL root. The backward distance is
+                // depth-thickness, so its evanescence decays toward the front.
+                sum.add_wave(&wave.electric_v_m, &wave.magnetic_a_m, WaveGeometry {
+                    tangential_wavenumber_rad_m: tangential,
+                    incidence_plane_axis: axis,
+                    normal_wavenumber_rad_m: wave.normal_wavenumber_rad_m,
+                    anchor_z_m: anchor,
+                }).map_err(bad)?;
             }
         }
         Ok(())
     }
     fn face(&self, end: bool) -> Result<UniaxialSpectrumField> {
-        let mut sum = FieldSum::new();
-        self.add(&mut sum, if end { self.exit_z_m } else { self.entrance_z_m }, C64::ONE)?;
-        sum.finish()
+        let z = if end { self.exit_z_m } else { self.entrance_z_m };
+        let mut sum = self.field_sum([0.0, 0.0, z])?;
+        self.add(&mut sum, 0.0, [1.0, 0.0])?;
+        finish_field(sum)
     }
 }
 
 impl UniaxialStackResponse {
     /// All Cartesian E/H and cycle-mean Poynting at [x,y,z] [m], with no
-    /// allocation, material reevaluation or boundary solve.
+    /// allocation, material reevaluation or boundary solve. Relative phases,
+    /// face distances and coherent products remain compensated until output.
     pub fn field_at(&self, region: StackRegion, point: [f64; 3]) -> Result<UniaxialSpectrumField> {
-        let mut sum = FieldSum::new();
-        self.accumulate(&mut sum, region, point, [1.0,0.0])?;
-        sum.finish()
+        let mut sum = self.field_sum(region, point)?;
+        self.accumulate(&mut sum, region, [1.0,0.0])?;
+        finish_field(sum)
     }
-    pub(super) fn accumulate(
-        &self, sum: &mut FieldSum, region: StackRegion, point: [f64; 3], axis: [f64; 2],
-    ) -> Result<()> {
+    pub(super) fn field_sum(&self, region: StackRegion, point: [f64; 3]) -> Result<FieldSum> {
         if point.iter().any(|v| !v.is_finite()) {
             return Err(bad("finite uniaxial stack field point required"));
         }
-        let phase = transverse_phase(self.tangential_wavenumber_rad_m, axis, point)?;
         if let StackRegion::Layer(index) = region {
             return self.layers.get(index).ok_or_else(|| bad("unknown uniaxial stack layer"))?
-                .add(sum, point[2], phase);
+                .field_sum(point);
         }
         if if region == StackRegion::Transmitted { point[2] < self.thickness_m } else { point[2] > 0.0 } {
             return Err(bad("uniaxial stack point is outside its selected exterior"));
         }
-        let mut add = |e, h, k, distance| -> Result<()> {
-            let longitudinal = propagation(k, distance)
-                .ok_or_else(|| bad("uniaxial stack exterior phase is unrepresentable"))?;
-            sum.add(e, h, phase*longitudinal);
-            Ok(())
+        FieldSum::at_point(point).map_err(bad)
+    }
+    /// The caller admits one point before summing modes of this SAME stack.
+    /// Interior waves share the selected layer's compensated local coordinate.
+    pub(super) fn accumulate(
+        &self, sum: &mut FieldSum, region: StackRegion, axis: [f64; 2],
+    ) -> Result<()> {
+        if let StackRegion::Layer(index) = region {
+            return self.layers.get(index).ok_or_else(|| bad("unknown uniaxial stack layer"))?
+                .add(sum, self.tangential_wavenumber_rad_m, axis);
+        }
+        let mut add = |e: &Vector, h: &Vector, k, anchor| -> Result<()> {
+            sum.add_wave(e, h, WaveGeometry {
+                tangential_wavenumber_rad_m: self.tangential_wavenumber_rad_m,
+                incidence_plane_axis: axis,
+                normal_wavenumber_rad_m: k,
+                anchor_z_m: anchor,
+            }).map_err(bad)
         };
         if matches!(region, StackRegion::Incident | StackRegion::TotalIncidentSide) {
-            add(self.incident_electric_v_m, self.incident_magnetic_a_m,
-                C64::from_re(self.incident_normal_wavenumber_rad_m), point[2])?;
+            add(&self.incident_electric_v_m, &self.incident_magnetic_a_m,
+                C64::from_re(self.incident_normal_wavenumber_rad_m), 0.0)?;
         }
         if matches!(region, StackRegion::Reflected | StackRegion::TotalIncidentSide) {
-            add(self.reflected_electric_v_m, self.reflected_magnetic_a_m,
-                C64::from_re(-self.incident_normal_wavenumber_rad_m), point[2])?;
+            add(&self.reflected_electric_v_m, &self.reflected_magnetic_a_m,
+                C64::from_re(-self.incident_normal_wavenumber_rad_m), 0.0)?;
         }
         if region == StackRegion::Transmitted {
-            add(self.transmitted_electric_v_m, self.transmitted_magnetic_a_m,
-                self.exit_normal_wavenumber_rad_m, point[2]-self.thickness_m)?;
+            add(&self.transmitted_electric_v_m, &self.transmitted_magnetic_a_m,
+                self.exit_normal_wavenumber_rad_m, self.thickness_m)?;
         }
         Ok(())
     }
@@ -133,6 +158,15 @@ impl UniaxialStackResponse {
             }
         }
     }
+}
+
+pub(super) fn finish_field(sum: FieldSum) -> Result<UniaxialSpectrumField> {
+    let field = sum.finish().map_err(bad)?;
+    Ok(UniaxialSpectrumField {
+        electric_v_m: field.electric_v_m,
+        magnetic_a_m: field.magnetic_a_m,
+        poynting_w_m2: field.poynting_w_m2,
+    })
 }
 
 struct LayerWork {
@@ -347,3 +381,6 @@ fn boundary_gate(r: &UniaxialStackResponse, admittance: f64, cancelled: &mut imp
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod anchored_tests;
