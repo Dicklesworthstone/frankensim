@@ -287,6 +287,8 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
     /// involved. Every occupied shifted mode must remain inside the incident
     /// light cone; exactly empty unsupported bins remain dormant. Its exit may
     /// propagate, reach critical incidence, or be evanescent.
+    /// Use [`Self::prepare_modes_with_carrier`] for authored Fourier support
+    /// without analysis-FFT residuals in otherwise empty exterior bins.
     ///
     /// Carrier phases are prepared once and reused by all field queries,
     /// including film interiors, partial coherence and two-sided illumination.
@@ -331,10 +333,40 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
         limits: AngularSpectrumLimits,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, AngularSpectrumError> {
-        Self::prepare_input(
+        Self::prepare_modes_with_carrier(
             source,
             grid,
             [0.0; 2],
+            incident_tangential_modes_v_per_m,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Prepare authored Fourier coefficients at an arbitrary transverse carrier.
+    ///
+    /// Coefficients use the same signed FFT order and peak V/m normalization
+    /// as [`Self::prepare_modes`]. Each envelope bin multiplies
+    /// `exp(-i*((carrier_x+kx)*x + (carrier_y+ky)*y))` at the first film face.
+    /// The carrier is in rad/m and shifts every physical mode before the
+    /// original light-cone admission, film solve and Maxwell reconstruction.
+    /// Exactly empty unsupported bins remain empty; any nonzero unsupported
+    /// mode refuses. No analysis FFT, clipping, windowing or renormalization
+    /// is applied, including on grids finer than the source's physical support.
+    /// All original field, aperture, interior and coherent exposure queries
+    /// retain this carrier, with the same storage/work and cancellation limits.
+    pub fn prepare_modes_with_carrier(
+        source: &'s PlanarDielectricLayers<'m>,
+        grid: AngularSpectrumGrid,
+        carrier_rad_m: [f64; 2],
+        incident_tangential_modes_v_per_m: &[[C64; 2]],
+        limits: AngularSpectrumLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AngularSpectrumError> {
+        Self::prepare_input(
+            source,
+            grid,
+            carrier_rad_m,
             incident_tangential_modes_v_per_m,
             limits,
             false,
@@ -675,7 +707,11 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
         side: AngularSpectrumSide,
         distance_from_face_m: f64,
     ) -> Result<([C64; 3], [C64; 3]), AngularSpectrumError> {
-        if mode.is_dormant() {
+        // An empty incident mode has identically zero one-sided fields. Do
+        // not evaluate a meaningless propagation phase (which can overflow).
+        // Keep its valid geometry in preparation: two-sided illumination may
+        // subsequently populate the same bin from the right face.
+        if mode.is_dormant() || mode.incident_e == [C64::ZERO; 2] {
             return Ok(([C64::ZERO; 3], [C64::ZERO; 3]));
         }
         let mut e = [C64::ZERO; 3];

@@ -37,6 +37,68 @@ fn fine_grid() -> AngularSpectrumGrid {
 }
 
 #[test]
+fn g1_empty_modes_skip_unrepresentable_phases_and_still_accept_right_illumination() {
+    let medium = material(1.0, 1.0);
+    let source =
+        PlanarDielectricLayers::try_new(&medium, DielectricResponse::Lossless(&medium), 2.0, &[])
+            .unwrap();
+    let empty = [[C64::ZERO; 2]; 16];
+    let beam =
+        PlanarAngularSpectrum::prepare_modes(&source, fine_grid(), &empty, limits(), || false)
+            .unwrap();
+    for side in [
+        Side::Incident,
+        Side::Reflected,
+        Side::TotalIncidentSide,
+        Side::Transmitted,
+    ] {
+        // The nonzero wave number times this finite distance overflows, but
+        // an exactly empty mode has no propagation phase to evaluate.
+        for distance in [0.0, 1.0, f64::MAX] {
+            let field = beam.field(side, distance, || false).unwrap();
+            assert_eq!(field.normal_power_w(), 0.0);
+            assert!(
+                field
+                    .electric_v_per_m()
+                    .iter()
+                    .chain(field.magnetic_a_per_m())
+                    .all(|&value| value == [C64::ZERO; 3])
+            );
+        }
+        for invalid in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(beam.field(side, invalid, || false).is_err());
+        }
+        assert!(matches!(
+            beam.field(side, 1.0, || true),
+            Err(AngularSpectrumError::Cancelled)
+        ));
+    }
+
+    // Empty in-cone bins retain their physical port geometry: a later source
+    // from the right may populate them, independently of the original left beam.
+    let mut right = empty;
+    right[0][1] = C64::ONE;
+    let dual = beam
+        .prepare_illumination_modes(&right, dual_limits(), || false)
+        .unwrap();
+    assert_eq!(dual.power().incoming_w, [0.0, 8.0]);
+    assert_eq!(dual.power().outgoing_w, [8.0, 0.0]);
+    assert_eq!(dual.power().balance_defect_w(), 0.0);
+    for side in [DualSide::TotalLeft, DualSide::TotalRight] {
+        let field = dual.field(side, 0.0, || false).unwrap();
+        relative(field.normal_power_w(), -8.0);
+        for (&electric, &magnetic) in field
+            .electric_v_per_m()
+            .iter()
+            .zip(field.magnetic_a_per_m())
+        {
+            assert_eq!(electric, [C64::ZERO, C64::ONE, C64::ZERO]);
+            assert_eq!(magnetic, [C64::ONE, C64::ZERO, C64::ZERO]);
+        }
+    }
+}
+
+#[test]
 fn g1_oversampled_uniform_samples_retain_original_films_and_vector_fields() {
     let medium = material(1.0, 1.0);
     let film = material(4.0, 1.0);

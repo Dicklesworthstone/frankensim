@@ -3869,6 +3869,17 @@ exactly empty unsupported bins retain their positions without a film solve.
 Critical and evanescent exit waves retain their existing physical treatment.
 The original `prepare` is exactly the zero-carrier case.
 
+`prepare_modes_with_carrier` accepts the same authored peak Fourier amplitudes
+as `prepare_modes`, with an explicit carrier before physical mode admission.
+This permits exactly band-limited oblique beams on fine observation grids
+without analysis-FFT leakage into unsupported bins. It neither discards nor
+renormalizes any nonzero mode; `prepare_modes` is its exact zero-carrier case.
+One-sided field queries skip propagation of identically empty modes, while
+retaining supported port geometry so subsequent right-face illumination can
+populate those bins. Focused controls compare sparse shifted modes with
+analytic vector Fresnel fields, whole-cell power and finite-detector fringes,
+and check exact-support refusals, cancellation and right-only illumination.
+
 Carrier phases retain double-double products during argument reduction and
 are cached once, adding one complex value per point to the admitted workspace.
 Field queries add O(points) complex multiplications without new trigonometric

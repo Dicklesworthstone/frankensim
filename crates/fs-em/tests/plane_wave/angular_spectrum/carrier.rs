@@ -14,6 +14,199 @@ fn grid() -> AngularSpectrumGrid {
 }
 
 #[test]
+fn g1_authored_oblique_modes_resolve_fine_grid_fields_power_and_detector_fringes() {
+    let air = material(1.0, 1.0);
+    let glass = material(2.25, 1.0);
+    let stack =
+        PlanarDielectricLayers::try_new(&air, DielectricResponse::Lossless(&glass), 1.0, &[])
+            .unwrap();
+    let grid = AngularSpectrumGrid {
+        width: 16,
+        height: 1,
+        spacing_m: [1.0; 2],
+    };
+    let carrier = [0.23, 0.0];
+    let amplitudes = [C64::new(0.7, 0.2), C64::new(-0.4, 0.6)];
+    let mut modes = [[C64::ZERO; 2]; 16];
+    modes[1][1] = amplitudes[0];
+    modes[15][1] = amplitudes[1];
+    // Most bins of this fine grid lie outside the incident light cone. The
+    // authored support is exact: analyzing synthesized samples is unnecessary.
+    let beam = PlanarAngularSpectrum::prepare_modes_with_carrier(
+        &stack,
+        grid,
+        carrier,
+        &modes,
+        limits(),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(beam.carrier_transverse_wavenumber_rad_m(), carrier);
+
+    // Independent TE Fresnel amplitudes and Maxwell reconstruction at two
+    // distinct physical angles; these references use no native film response.
+    let transverse = [1.0, -1.0].map(|bin| carrier[0] + core::f64::consts::TAU * bin / 16.0);
+    let incident_q = transverse.map(|kx| (1.0 - kx * kx).sqrt());
+    let exit_q = transverse.map(|kx| (2.25 - kx * kx).sqrt());
+    let reflection: [f64; 2] =
+        std::array::from_fn(|i| (incident_q[i] - exit_q[i]) / (incident_q[i] + exit_q[i]));
+    let transmission: [f64; 2] =
+        std::array::from_fn(|i| 2.0 * incident_q[i] / (incident_q[i] + exit_q[i]));
+    let incident_w: f64 = (0..2)
+        .map(|i| 8.0 * incident_q[i] * amplitudes[i].norm_sq())
+        .sum();
+    let reflected_w: f64 = (0..2)
+        .map(|i| 8.0 * incident_q[i] * (amplitudes[i].scale(reflection[i])).norm_sq())
+        .sum();
+    let transmitted_w: f64 = (0..2)
+        .map(|i| 8.0 * exit_q[i] * (amplitudes[i].scale(transmission[i])).norm_sq())
+        .sum();
+    relative(beam.power().incident_w, incident_w);
+    relative(beam.power().reflected_w, reflected_w);
+    relative(beam.power().transmitted_w, transmitted_w);
+    near(beam.power().balance_defect_w(), 0.0, 5e-14);
+    for distance in [0.0, 0.73, 7.5] {
+        let field = beam.field(Side::Transmitted, distance, || false).unwrap();
+        for x in 0..16 {
+            let mut electric = [C64::ZERO; 3];
+            let mut magnetic = [C64::ZERO; 3];
+            for i in 0..2 {
+                let ey = amplitudes[i].scale(transmission[i])
+                    * phase(-transverse[i] * x as f64 - exit_q[i] * distance);
+                electric[1] = electric[1] + ey;
+                magnetic[0] = magnetic[0] - ey.scale(exit_q[i]);
+                magnetic[2] = magnetic[2] + ey.scale(transverse[i]);
+            }
+            for c in 0..3 {
+                complex_near(field.electric_v_per_m()[x][c], electric[c], 2e-13);
+                complex_near(field.magnetic_a_per_m()[x][c], magnetic[c], 2e-13);
+            }
+        }
+        relative(field.normal_power_w(), transmitted_w);
+    }
+
+    let detector = AngularSpectrumAperture::try_new([2.3, 0.2], [0.83, 0.7]).unwrap();
+    let distance = 0.73;
+    let mut expected_flux = 0.0;
+    for i in 0..2 {
+        for j in 0..2 {
+            let delta = transverse[i] - transverse[j];
+            let argument = 0.5 * delta * detector.extent_m()[0];
+            let sinc = if argument == 0.0 {
+                1.0
+            } else {
+                argument.sin() / argument
+            };
+            let center = detector.origin_m()[0] + 0.5 * detector.extent_m()[0];
+            let cross = amplitudes[i]
+                * amplitudes[j].conj()
+                * phase(-delta * center - (exit_q[i] - exit_q[j]) * distance);
+            expected_flux += 0.5 * exit_q[j] * transmission[i] * transmission[j] * sinc * cross.re;
+        }
+    }
+    let reading = beam
+        .measure_aperture(
+            Side::Transmitted,
+            distance,
+            detector,
+            AngularSpectrumApertureLimits {
+                maximum_mode_pairs: 512,
+                maximum_workspace_bytes: 4 << 20,
+            },
+            || false,
+        )
+        .unwrap();
+    relative(reading.normal_power_w, expected_flux * detector.area_m2());
+}
+
+#[test]
+fn g0_g4_modal_carriers_preserve_exact_support_zero_carrier_and_cancellation() {
+    let medium = material(1.0, 1.0);
+    let stack =
+        PlanarDielectricLayers::try_new(&medium, DielectricResponse::Lossless(&medium), 1.0, &[])
+            .unwrap();
+    let grid = AngularSpectrumGrid {
+        width: 16,
+        height: 1,
+        spacing_m: [1.0; 2],
+    };
+    let mut modes = [[C64::ZERO; 2]; 16];
+    modes[1] = [C64::new(0.2, -0.1), C64::new(0.7, 0.2)];
+    modes[15] = [C64::new(-0.3, 0.4), C64::new(-0.4, 0.6)];
+    let original =
+        PlanarAngularSpectrum::prepare_modes(&stack, grid, &modes, limits(), || false).unwrap();
+    let zero = PlanarAngularSpectrum::prepare_modes_with_carrier(
+        &stack,
+        grid,
+        [0.0; 2],
+        &modes,
+        limits(),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(original.power(), zero.power());
+    assert_eq!(original.workspace_bytes(), zero.workspace_bytes());
+    for side in [
+        Side::Incident,
+        Side::Reflected,
+        Side::TotalIncidentSide,
+        Side::Transmitted,
+    ] {
+        let a = original.field(side, 0.4, || false).unwrap();
+        let b = zero.field(side, 0.4, || false).unwrap();
+        assert_eq!(a.normal_power_w().to_bits(), b.normal_power_w().to_bits());
+        for (left, right) in a
+            .electric_v_per_m()
+            .iter()
+            .chain(a.magnetic_a_per_m())
+            .zip(b.electric_v_per_m().iter().chain(b.magnetic_a_per_m()))
+        {
+            assert_eq!(
+                left.map(|z| [z.re.to_bits(), z.im.to_bits()]),
+                right.map(|z| [z.re.to_bits(), z.im.to_bits()])
+            );
+        }
+    }
+    for tiny in [f64::from_bits(1), 1e-20, 1.0] {
+        let mut unsupported = modes;
+        unsupported[8][0] = C64::from_re(tiny);
+        assert!(matches!(
+            PlanarAngularSpectrum::prepare_modes_with_carrier(
+                &stack,
+                grid,
+                [0.23, 0.0],
+                &unsupported,
+                limits(),
+                || false,
+            ),
+            Err(AngularSpectrumError::IncidentLightCone { column: 8, row: 0 })
+        ));
+    }
+    assert!(matches!(
+        PlanarAngularSpectrum::prepare_modes_with_carrier(
+            &stack,
+            grid,
+            [0.23, 0.0],
+            &modes,
+            limits(),
+            || true,
+        ),
+        Err(AngularSpectrumError::Cancelled)
+    ));
+    assert!(
+        PlanarAngularSpectrum::prepare_modes_with_carrier(
+            &stack,
+            grid,
+            [f64::NAN, 0.0],
+            &modes,
+            limits(),
+            || false,
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn adjacent_light_cone_carriers_keep_their_axial_wavelength_and_poynting_flux() {
     let medium = material(1.0, 1.0);
     // G1/G3: independent high-precision axial cosines for the exact authored floats.
