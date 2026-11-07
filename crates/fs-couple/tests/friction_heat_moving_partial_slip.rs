@@ -14,6 +14,8 @@ use std::convert::Infallible;
 mod load_path;
 #[path = "friction_heat_moving_partial_slip/pair_temperature.rs"]
 mod pair_temperature;
+#[path = "friction_heat_moving_partial_slip/path.rs"]
+mod path;
 #[path = "friction_heat_moving_partial_slip/pressure.rs"]
 mod pressure;
 

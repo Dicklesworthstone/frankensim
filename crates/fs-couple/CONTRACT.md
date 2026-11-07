@@ -4088,6 +4088,40 @@ oracles while allowing the actual opposing grid to subdivide each pressure
 region. These synthetic constitutive tests establish no measured material
 calibration or whole-system convergence claim.
 
+## Accelerated and reversing moving shear with finite heat
+
+`MovingPartialSlip::advance_quadratic_candidate` carries the original brush,
+pressure field and two finite thermal bodies through one prescribed quadratic
+placement path. It splits at every relative-slip reversal and every reversal
+of footprint residence on either material, then at the explicit time limit.
+Returning to the starting placement therefore retains shear hysteresis,
+plastic heat and expelled elastic storage. Entering material remains unloaded;
+a returning footprint does not resurrect an earlier departed checkpoint.
+
+The existing quadratic geometry owner computes complete swept overlaps and
+the actual mean force moment. Full-path coverage includes extrema between
+the three supplied placements. The local endpoint source can read actual
+incoming/outgoing slip velocities and both native cell temperatures. Each
+regional integrated plastic heat is held as constant mean power over its
+subinterval; the original first-order transport/return-map and thermal split
+still needs time refinement. Exact overlap geometry does not certify an
+unresolved plastic-power history. The current normal pressure and footprint
+remain fixed over this path; the separate load-path entry retains its scope.
+
+All subintervals share step and nonlinear-trial caps and a cumulative energy
+budget. Per-interval work owners derive distinct IDs from the caller's parent
+interval; every physical heat, numerical return loss, elastic outflow and
+external thermal term has one account. No source payload or mechanical/thermal
+prefix publishes if a later subinterval refuses or cancellation arrives.
+
+Six G1/G3/G4 regressions cover a closed shear cycle with independently derived
+0.03875 J plastic heat despite zero net displacement; decreasing numerical
+loss without heating it; actual quadratic residence and convergence to the
+continuous power/residence integral; reversible common motion and its mean
+shear moment; non-resurrecting outflow memory; and hidden excursions, bounded
+work, late source failure and exact retry. These are numerical synthetic-law
+tests, not measured friction calibration or a native body-motion solver.
+
 ## Frequency sensitivity of an original forced periodic response
 
 `PreparedPhsPortSidebands::forced_frequency_tangent` factors at zero carrier;

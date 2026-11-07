@@ -322,49 +322,6 @@ pub struct SweptContactPatch {
     pub mean_area_m2: f64,
     pub distances_m: [f64; 2],
 }
-/// Linear endpoint values at normalized step time t in [0,1].
-fn at(line: [f64; 2], t: f64) -> f64 {
-    line[0] + t * (line[1] - line[0])
-}
-fn overlap(lines: &[[f64; 2]; 6], t: f64) -> f64 {
-    let left = at(lines[0], t).max(at(lines[2], t)).max(at(lines[4], t));
-    let right = at(lines[1], t).min(at(lines[3], t)).min(at(lines[5], t));
-    (right - left).max(0.0)
-}
-// Max/min of affine edges is piecewise affine. Split at all edge crossings,
-// then integrate each positive overlap exactly by the trapezoid rule.
-fn swept_overlap(lines: [[f64; 2]; 6]) -> Result<f64, DepositionError> {
-    let mut times = vec![0.0, 1.0];
-    for i in 0..6 {
-        for j in i + 1..6 {
-            let d0 = finite(lines[i][0] - lines[j][0])?;
-            let d1 = finite(lines[i][1] - lines[j][1])?;
-            if d0 != d1 {
-                let t = finite(d0 / finite(d0 - d1)?)?;
-                if t > 0.0 && t < 1.0 {
-                    times.push(t);
-                }
-            }
-        }
-    }
-    times.sort_by(f64::total_cmp);
-    times.dedup();
-    let mut sum = 0.0;
-    for w in times.windows(2) {
-        sum = finite(sum + 0.5 * (w[1] - w[0]) * (overlap(&lines, w[0]) + overlap(&lines, w[1])))?;
-    }
-    Ok(sum)
-}
-fn edges(span: [f64; 2], start: f64, end: f64) -> Result<[[f64; 2]; 2], DepositionError> {
-    Ok([
-        [finite(span[0] + start)?, finite(span[0] + end)?],
-        [finite(span[1] + start)?, finite(span[1] + end)?],
-    ])
-}
-fn bounds(edges: [[f64; 2]; 2]) -> [f64; 2] {
-    [edges[0][0].min(edges[0][1]), edges[1][0].max(edges[1][1])]
-}
-
 /// Complete endpoint source: local original friction work and original material data.
 pub struct MovingFrictionInput<P> {
     /// One physical work value per swept patch; never numerical damping.

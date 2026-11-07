@@ -59,15 +59,25 @@ impl Curve {
     pub(super) fn shift(self, amount: f64) -> Result<Self, TrajectoryError> {
         Ok(Self([finite(self.0[0] + amount)?, self.0[1], self.0[2]]))
     }
-    fn subtract(self, other: Self) -> Result<Self, TrajectoryError> {
+    pub(super) fn subtract(self, other: Self) -> Result<Self, TrajectoryError> {
         Ok(Self([
             finite(self.0[0] - other.0[0])?,
             finite(self.0[1] - other.0[1])?,
             finite(self.0[2] - other.0[2])?,
         ]))
     }
-    fn at(self, time: f64) -> Result<f64, TrajectoryError> {
+    pub(super) fn at(self, time: f64) -> Result<f64, TrajectoryError> {
         finite(self.0[2].mul_add(time, self.0[1]).mul_add(time, self.0[0]))
+    }
+    pub(super) fn derivative(self, time: f64) -> Result<f64, TrajectoryError> {
+        finite(self.0[2].mul_add(2.0 * time, self.0[1]))
+    }
+    pub(super) fn turning_point(self) -> Option<f64> {
+        if self.0[2] == 0.0 {
+            return None;
+        }
+        let time = -0.5 * (self.0[1] / self.0[2]);
+        (time > 0.0 && time < 1.0).then_some(time)
     }
     pub(super) fn bounds(self) -> Result<[f64; 2], TrajectoryError> {
         let a = self.at(0.0)?;

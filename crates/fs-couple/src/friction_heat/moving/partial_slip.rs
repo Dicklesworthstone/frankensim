@@ -8,7 +8,7 @@
 //!
 //! Transport precedes the local return maps (first-order Lie splitting). The
 //! resulting piecewise-constant work density is integrated over each complete
-//! linear thermal footprint path. This is a convergent time discretization of
+//! linear or quadratic thermal footprint path. This is a convergent time discretization of
 //! the declared brush model, not exact finite-step residence-time integration.
 //! Refine time independently of the original finite thermal cells. The pressure
 //! is uniform by default; an original normal owner's piecewise-constant profile
@@ -41,6 +41,8 @@ use std::convert::Infallible;
 
 mod pressure;
 pub use pressure::{MovingPressureCell, MovingPressureProfile};
+/// Accelerated paths, reversal events and shared thermal/source continuation.
+pub mod path;
 mod regions;
 
 /// One unchanged physical material parcel, measured in surface A coordinates.
@@ -129,6 +131,7 @@ pub enum MovingPartialSlipError<E = Infallible> {
     Interrupted(SolverRunProgress),
     TrialBudget,
     RegionBudget,
+    StepBudget,
 }
 impl<E> From<DepositionError> for MovingPartialSlipError<E> {
     fn from(e: DepositionError) -> Self {
@@ -431,6 +434,7 @@ impl MovingPartialSlip {
             target_s,
             end,
             self.pressure.as_ref(),
+            None,
             ownership,
             controls,
             energy_guess_j,
@@ -447,6 +451,7 @@ impl MovingPartialSlip {
         target_s: f64,
         end: MovingContactPosition,
         pressure: Option<&MovingPressureProfile>,
+        midpoint: Option<MovingContactPosition>,
         ownership: &GeneralizedWorkOwnership,
         controls: MovingPartialSlipControls,
         energy_guess_j: &[f64],
@@ -507,7 +512,23 @@ impl MovingPartialSlip {
             start: self.position,
             end,
         };
-        let heat_step = MovingFrictionHeatStep::new(thermal, target_s, &self.route, path, &check)?;
+        let curves = if let Some(midpoint) = midpoint {
+            trajectory::ContactCurves::quadratic(trajectory::QuadraticContactPath {
+                start: self.position,
+                midpoint,
+                end,
+            })
+        } else {
+            trajectory::ContactCurves::linear(path)
+        }
+        .map_err(DepositionError::from)?;
+        let heat_step = MovingFrictionHeatStep::from_trajectory(
+            thermal,
+            target_s,
+            &self.route,
+            curves,
+            &check,
+        )?;
         let shift = finite(end.footprint_offset_m - end.body_offsets_m[0])?;
         let footprint = self.route.footprint_m.map(|x| x + shift);
         let length = self.route.footprint_m[1] - self.route.footprint_m[0];
@@ -594,41 +615,35 @@ impl MovingPartialSlip {
         for patch in heat_step.patches() {
             check()?;
             trajectories.push([
-                edges(
-                    faces[0][&patch.cells[0]],
-                    path.start.body_offsets_m[0],
-                    path.end.body_offsets_m[0],
-                )?,
-                edges(
-                    faces[1][&patch.cells[1]],
-                    path.start.body_offsets_m[1],
-                    path.end.body_offsets_m[1],
-                )?,
+                trajectory::edges(faces[0][&patch.cells[0]], curves.bodies[0])
+                    .map_err(DepositionError::from)?,
+                trajectory::edges(faces[1][&patch.cells[1]], curves.bodies[1])
+                    .map_err(DepositionError::from)?,
             ]);
         }
         let mut deposition = Vec::with_capacity(regions.len());
         let mut covered = vec![0.0; heat_step.patches().len()];
         for region in &regions {
             check()?;
-            let foot = edges(
-                region.material_span_m.map(|x| x - shift),
-                path.start.footprint_offset_m,
-                path.end.footprint_offset_m,
-            )?;
-            let fb = bounds(foot);
+            let foot =
+                trajectory::edges(region.material_span_m.map(|x| x - shift), curves.footprint)
+                    .map_err(DepositionError::from)?;
+            let fb = trajectory::bounds(foot).map_err(DepositionError::from)?;
             let area = region.area_fraction * self.route.footprint_area_m2();
             let mut weights = Vec::new();
             let mut sum = 0.0;
             for (index, &[a, b]) in trajectories.iter().enumerate() {
                 check()?;
-                let ab = bounds(a);
-                let bb = bounds(b);
+                let ab = trajectory::bounds(a).map_err(DepositionError::from)?;
+                let bb = trajectory::bounds(b).map_err(DepositionError::from)?;
                 if ab[1] <= fb[0] || ab[0] >= fb[1] || bb[1] <= fb[0] || bb[0] >= fb[1] {
                     continue;
                 }
                 let overlap = finite(
                     self.route.frame.width_m
-                        * swept_overlap([a[0], a[1], b[0], b[1], foot[0], foot[1]])?,
+                        * trajectory::swept_moments([a[0], a[1], b[0], b[1], foot[0], foot[1]])
+                            .map_err(DepositionError::from)?
+                            .area,
                 )?;
                 if overlap > 0.0 {
                     sum = finite(sum + overlap)?;
@@ -742,9 +757,18 @@ impl MovingPartialSlip {
                         let centre =
                             f64::midpoint(region.material_span_m[0], region.material_span_m[1])
                                 - shift
-                                + f64::midpoint(
-                                    self.position.footprint_offset_m,
-                                    end.footprint_offset_m,
+                                + midpoint.map_or_else(
+                                    || {
+                                        f64::midpoint(
+                                            self.position.footprint_offset_m,
+                                            end.footprint_offset_m,
+                                        )
+                                    },
+                                    |mid| {
+                                        self.position.footprint_offset_m / 6.0
+                                            + (2.0 / 3.0) * mid.footprint_offset_m
+                                            + end.footprint_offset_m / 6.0
+                                    },
                                 );
                         let arm = self.route.frame.tangent.map(|t| centre * t);
                         let force = response.wrench.force_n.map(|f| a * f);

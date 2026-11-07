@@ -197,6 +197,7 @@ impl MovingPartialSlip {
             target_s,
             end,
             Some(pressure),
+            None,
             ownership,
             controls,
             energy_guess_j,
