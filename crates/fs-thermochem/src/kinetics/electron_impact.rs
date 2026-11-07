@@ -64,6 +64,8 @@ impl ForwardRateV1 {
 
 /// Binary electron-impact ionization using the actual Maxwellian integral.
 /// The target identity and threshold come from its retained cross section.
+/// Targets may be neutral or positively charged; exactly one additional
+/// electron is released. Negative-ion detachment is a distinct unsupported law.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ElectronImpactRateV1 {
     electron: SpeciesId,
@@ -133,17 +135,24 @@ impl ElectronImpactRateV1 {
             .map_err(|_| KineticsErrorV1::Invalid("impact target absent from source bank"))?;
         let masses = bank.models();
         let electron_mass = masses[electron].molar_mass().value() / AVOGADRO_PER_MOL;
+        let target_charge = bank
+            .charge_vector()
+            .get(target)
+            .expect("canonical impact target");
+        let product_charge = target_charge
+            .checked_add(1)
+            .ok_or(KineticsErrorV1::Invalid("impact charge increment overflow"))?;
         if bank.charge_vector().get(electron) != Some(-1)
             || (0..bank.elemental_matrix().row_count())
                 .any(|i| bank.elemental_matrix().get(i, electron) != Some(0))
             || ((electron_mass - ELECTRON_MASS_KG) / ELECTRON_MASS_KG).abs() > 16.0 * f64::EPSILON
-            || bank.charge_vector().get(target) != Some(0)
+            || target_charge < 0
             || fs_math::det::sqrt(
                 masses[electron].molar_mass().value() / masses[target].molar_mass().value(),
             ) > self.maximum_target_thermal_speed_ratio
         {
             return Err(KineticsErrorV1::Invalid(
-                "electron/neutral-target identity, physical mass or stationary-target approximation",
+                "electron/nonnegative-target identity, physical mass or stationary-target approximation",
             ));
         }
         let on_side = |side: &[(SpeciesId, u32)], id: &SpeciesId, order| {
@@ -155,13 +164,12 @@ impl ElectronImpactRateV1 {
             || !on_side(&reaction.reactants, &self.electron, 1)
             || !on_side(&reaction.reactants, self.cross_section.target_species(), 1)
             || !on_side(&reaction.products, &self.electron, 2)
-            || !reaction
-                .products
-                .iter()
-                .any(|(id, order)| *order == 1 && bank.charge_vector().charge(id) == Some(1))
+            || !reaction.products.iter().any(|(id, order)| {
+                *order == 1 && bank.charge_vector().charge(id) == Some(product_charge)
+            })
         {
             return Err(KineticsErrorV1::Invalid(
-                "cross-section law requires e + neutral -> 2e + singly charged ion without pressure multiplier",
+                "cross-section law requires e + A(q) -> 2e + A(q+1) without pressure multiplier",
             ));
         }
         Ok(())

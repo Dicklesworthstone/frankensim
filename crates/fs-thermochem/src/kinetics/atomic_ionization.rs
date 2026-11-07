@@ -1,7 +1,8 @@
 //! One ground-state atomic ionization channel at separate Te and Th.
 //!
-//! The retained reaction is `e + A <-> I + 2e`, with a neutral monatomic A,
-//! its singly charged ground-state ion I, Maxwellian electrons, and stationary
+//! The retained reaction is `e + A(z) <-> A(z+1) + 2e`, with a monatomic
+//! target of nonnegative charge z, its adjacent ground-state ion, Maxwellian
+//! electrons, and stationary
 //! massive heavy targets. All three active sources must have Cp/R=5/2, fixed
 //! formation constants and fixed ground-state statistical weights. Molecular
 //! internal modes, excited-state partition functions, radiation and Coulomb
@@ -28,7 +29,7 @@
 //! not an additional heat sink in the conserved energy equation. Under these
 //! assumptions the complete two-pool ideal entropy production is exactly
 //! `R*q*ln(Kc*c_A/(c_I*c_e)) >= 0`, independently of Th. Heavy translational
-//! temperature factors cancel because one heavy atom becomes one heavy ion.
+//! temperature factors cancel because one heavy particle changes charge stage.
 
 /// Original-source single-photon ionization on the validated atomic channel.
 pub mod photoionization;
@@ -57,9 +58,10 @@ pub const MAX_STATISTICAL_ENTROPY_DISCREPANCY_V1: f64 = 1e-10;
 /// two states; it is never counted again in either heavy statistical weight.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AtomicStatisticalWeightsV1 {
-    /// Neutral atomic ground-state statistical weight, greater than zero.
+    /// Lower charge-stage ground-state weight, greater than zero. The field
+    /// name also serves the original neutral-to-singly-ionized channel.
     pub neutral: u32,
-    /// Singly charged ionic ground-state statistical weight, greater than zero.
+    /// Upper charge-stage ground-state statistical weight, greater than zero.
     pub ion: u32,
 }
 
@@ -247,11 +249,27 @@ impl AtomicIonizationV1 {
     pub const fn common_temperature_mechanism(&self) -> &IdealGasKineticsV1 {
         &self.mechanism
     }
-    /// Canonical source-bank index of neutral A.
+    /// Canonical source-bank index of the lower charge stage.
+    pub const fn lower_index(&self) -> usize {
+        self.indices[0]
+    }
+    /// Canonical source-bank index of the adjacent upper charge stage.
+    pub const fn upper_index(&self) -> usize {
+        self.indices[1]
+    }
+    /// Exact source charge of the lower stage; the upper stage has charge z+1.
+    pub fn lower_charge(&self) -> i128 {
+        self.thermodynamics()
+            .charge_vector()
+            .get(self.indices[0])
+            .expect("admitted atomic charge axis")
+    }
+    /// Lower-stage index, retaining the original neutral-channel name.
+    /// Use `lower_charge` to distinguish a neutral atom from an ionic target.
     pub const fn neutral_index(&self) -> usize {
         self.indices[0]
     }
-    /// Canonical source-bank index of singly charged I.
+    /// Upper-stage index, retaining the original neutral-channel name.
     pub const fn ion_index(&self) -> usize {
         self.indices[1]
     }
@@ -283,7 +301,7 @@ impl AtomicIonizationV1 {
     pub fn heavy_energy_gap_j_mol(&self) -> f64 {
         self.formation_energies_j_mol[1] - self.formation_energies_j_mol[0]
     }
-    /// Original [neutral, ion, electron] ground-state energies [J/mol].
+    /// Original [lower stage, upper stage, electron] ground-state energies [J/mol].
     pub const fn formation_energies_j_mol(&self) -> [f64; 3] {
         self.formation_energies_j_mol
     }
@@ -308,7 +326,7 @@ impl AtomicIonizationV1 {
     }
 
     /// Allocation-free rates and analytic derivatives at actual Th,Te.
-    /// Input order is `[neutral, ion, electron]`, in mol/m³, independently of
+    /// Input order is `[lower stage, upper stage, electron]`, in mol/m³, independently of
     /// the bank's canonical order. Exact absence is allowed; no seed is inserted.
     pub fn evaluate(
         &self,

@@ -89,7 +89,7 @@ fn source(
         validity: ValidityDomain::unconstrained().with("T", 1000.0, maximum_t),
         sources: vec![],
         provenance: Provenance {
-            source: "Sackur-Tetrode ground-state analytic fixture; NIST H gap".into(),
+            source: "Sackur-Tetrode ground-state analytic fixture".into(),
             license: "analytic test fixture".into(),
             artifact: None,
         },
@@ -545,5 +545,6 @@ fn transformed_caloric_references_cannot_silently_reinterpret_raw_level_constant
     ));
 }
 
+mod charge_stages;
 mod photoionization;
 mod radiative_recombination;

@@ -3997,3 +3997,31 @@ Badnell (2017), A&A 599 A10, <https://arxiv.org/abs/1612.01017>.
 `solution::caloric::transport` supplies a molar-frame face with equal fixed partial molar volumes, original-source Cp/interaction calorics, and an explicitly authored A-minus-B heat-of-transport contrast. The two-point chemical/enthalpy split preserves the original chemical-potential-over-temperature identity. Total energy carries source partial enthalpy once; reduced heat includes reciprocal Dufour transport. Conductivity is defined at zero diffusive species flux. Unequal pure heat capacities do not fabricate Soret flow when the authored heat contrast is zero. Exact absent support is refused rather than floored.
 
 The face entropy form is nonnegative. A spatial owner must separately enforce kappa=0, convex admission over its complete temperature interval (including the possible interior interaction maximum), source D/k/Q domains, conservative finite transfers, and finite-step entropy acceptance. Changing-inventory caloric recovery stays homogeneous and uses original-source enthalpy/entropy increments without an equilibrium phase flash. Nine source-native tests cover the conjugate energy/entropy identity, reciprocal heat, variable and excess Cp, critical and trace limits, changing inventories, bounded caloric inversion, interior convexity and cancellation.
+
+
+## Adjacent atomic charge stages on original sources
+
+`ElectronImpactRateV1` and `AtomicIonizationV1` admit the single-electron
+channel `e + A(z) <-> A(z+1) + 2e` for a nonnegative integer source charge z.
+The original exact element/charge conservation, physical electron mass,
+reaction mass compatibility, positive source energy gap, ground-state
+statistics, massive-target approximation and cross-section support remain
+mandatory. Negative-ion detachment, skipped charge stages and overflowing
+charge increments refuse. No cross section or level data are inferred from
+the element name or charge number.
+
+The lower/upper stage indices and lower charge are directly inspectable.
+The existing `neutral_index` and statistical-weight `neutral` names denote
+the lower stage for compatibility with the original neutral-channel callers;
+they no longer imply that its actual source charge is zero. The source-bound
+Saha factor and three-body reverse use the two original level weights and
+masses at the actual electron temperature. Generic tabulated photoionization
+and its Milne radiative reverse use the same admitted stages and chemical gap.
+The published Verner H I convenience source continues to require actual
+neutral hydrogen and its singly charged ion; it is not reused for ionic targets.
+
+Three focused G0/G1 regressions compare higher-stage impact and Saha rates,
+their common-temperature derivatives, source charge/nucleus balance and
+generic photon/Milne energy moments against independent analytic formulas.
+These are manufactured ground-state laws, not experimental validation or a
+multilevel, continuum-lowered, dense-plasma or total-recombination model.
