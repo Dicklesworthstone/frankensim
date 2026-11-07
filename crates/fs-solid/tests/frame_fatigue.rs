@@ -22,6 +22,9 @@ use fs_solid::frame2d::fatigue::{
 };
 use fs_solid::{Frame2d, Geometry, Rayleigh, SectionModel};
 
+#[path = "frame_fatigue/shear.rs"]
+mod shear;
+
 // Material-defined annuli retain separate elastic stresses and original S-N sources.
 mod elastic_layers {
     use super::*;
@@ -30,6 +33,10 @@ mod elastic_layers {
         ClaimSelection, ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId,
         PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy,
         UncertaintyModel,
+    };
+    use fs_material::fatigue::critical_plane::findley::FindleyCalibration;
+    use fs_material::fatigue::critical_plane::findley::source::{
+        FindleyProperty, FindleySourceRequest, resolve_findley,
     };
     use fs_material::fatigue::source::{
         SnLifeMeasure, SnSourceRequest, SnStressMeasure, resolve_log_log_sn,
@@ -40,10 +47,22 @@ mod elastic_layers {
         MaterialPropertySelection, ResolvedMaterialStatePoint, ScalarAdmissibility,
         ScalarPropertyRequirement, resolve_material_state_point,
     };
-    use fs_qty::{Density, Dims, Pressure, QuantitySpec, Temperature};
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+    use fs_qty::{Density, Dims, Pressure, QuantitySpec};
     use fs_solid::frame2d::fatigue::FrameElasticFatigueGauge;
 
     fn source(young: f64, revision: u32) -> (ResolvedMaterialStatePoint, Arc<SnCurve>) {
+        let (material, curve, _) = source_bundle(young, revision);
+        (material, curve)
+    }
+    pub(super) fn source_bundle(
+        young: f64,
+        revision: u32,
+    ) -> (
+        ResolvedMaterialStatePoint,
+        Arc<SnCurve>,
+        Arc<FindleyCalibration>,
+    ) {
         let request = SnSourceRequest {
             stress_measure: SnStressMeasure::Amplitude,
             life_measure: SnLifeMeasure::Cycles,
@@ -54,7 +73,10 @@ mod elastic_layers {
             load_basis: "fully reversed normal stress amplitude".into(),
             maximum_points: 5,
         };
-        let temperature = QuantitySpec::dimensional(Temperature::DIMS);
+        let temperature = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
         let dimensionless = QuantitySpec::dimensional(Dims::NONE);
         let domain = ValidityDomain::unconstrained().with_quantity(
             &request.temperature_axis,
@@ -70,6 +92,7 @@ mod elastic_layers {
         for (name, dims, value) in [
             ("density", Density::DIMS, 7800.0),
             ("young_modulus", Pressure::DIMS, young),
+            ("shear_modulus", Pressure::DIMS, young / 2.6),
         ] {
             claims
                 .insert_claim(PropertyClaim {
@@ -112,6 +135,7 @@ mod elastic_layers {
                     dims: Pressure::DIMS,
                 },
                 validity: domain
+                    .clone()
                     .with_quantity(&request.stress_ratio_axis, dimensionless, -1.0, -1.0)
                     .with_quantity(life, dimensionless, 1.0, 10000.0),
                 interpolation: InterpolationPolicy::TabulatedOnly,
@@ -124,6 +148,26 @@ mod elastic_layers {
                 },
             })
             .unwrap();
+        for (property, dims, value) in [
+            (FindleyProperty::NormalStressSensitivity, Dims::NONE, 0.2),
+            (FindleyProperty::LimitFactor, Pressure::DIMS, 10e6),
+        ] {
+            claims
+                .insert_claim(PropertyClaim {
+                    key: property.property_key(),
+                    value: PropertyValue::Scalar { value, dims },
+                    validity: domain.clone(),
+                    interpolation: InterpolationPolicy::ConstantWithinValidity,
+                    uncertainty: UncertaintyModel::Unstated,
+                    observations: vec![],
+                    provenance: Provenance {
+                        source: "synthetic common Findley fit".into(),
+                        license: "test-only".into(),
+                        artifact: None,
+                    },
+                })
+                .unwrap();
+        }
         let card = MaterialCard::assemble(
             MaterialStateId {
                 chemistry: "synthetic layered alloy".into(),
@@ -157,7 +201,19 @@ mod elastic_layers {
             MaterialPropertySelection::SingleClaimOnly,
         )
         .unwrap();
-        (material, curve)
+        let findley = resolve_findley(
+            &card,
+            &point,
+            &FindleySourceRequest {
+                temperature_axis: request.temperature_axis,
+                surface_and_geometry: "synthetic circular coupon".into(),
+                environment: "synthetic fixed condition".into(),
+                load_basis: "synthetic common normal/transverse-shear calibration".into(),
+            },
+            [ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly); 2],
+        )
+        .unwrap();
+        (material, curve, Arc::new(findley))
     }
     fn native(youngs: [f64; 2], bending: bool) -> (Frame2d, Vec<FrameElasticFatigueGauge>, f64) {
         let mut layers = Vec::new();

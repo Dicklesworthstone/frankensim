@@ -11135,3 +11135,28 @@ The native directional-strength tests cover Q1/Q2 zero-mean local peaks,
 per-point material/temperature binding, full Tsai-Wu interaction and these
 quadrature/formulation boundaries.
 
+### Native frame full-stress Findley observation
+
+`FrameFatiguePath::new_with_findley` adds fixed material-point stress windows to
+its existing fiber and elastic S-N banks. Accepted Lobatto axial/bending strains
+supply the original layer's normal stress; the canonical Timoshenko transverse
+resultant supplies both local shear components through the shared homogeneous
+isotropic circle/annulus Saint-Venant owner. The authored shear correction is
+not a point-stress multiplier and recovered local storage is not added to the
+native frame energy. Original material identity, typed temperature and available
+calibration source pins are retained. Nonisotropic or heterogeneous elastic
+sections, viscous members and unsupported source conditions refuse.
+
+The selected annulus must satisfy the declared normal and engineering-shear
+bounds even when the observed point lies on a zero-stress contour. Findley
+fatigue-limit usage remains separate from Miner damage. Closed representative
+windows can be finished or restarted explicitly. Gauge count, aggregate retained
+samples and each original Findley work budget are bounded. Static load,
+displacement control and Newmark all observe the same accepted native steps;
+a late source, strain, budget or cancellation failure rolls back mechanics,
+scalar counters and appended tensor samples together. Tensor rollback retains
+only prefix lengths rather than copying all previous windows. Synthetic tests
+in `tests/frame_fatigue/shear.rs` cover independent off-axis stresses, correction
+invariance, Newmark equivalence, source/budget admission and transactional
+rollback. This observation supplies no variable-amplitude multiaxial life,
+plastic stress recovery, thermal recoupling or cross-section inertia correction.

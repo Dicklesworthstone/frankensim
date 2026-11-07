@@ -8,6 +8,11 @@
 //! publishes neither its mechanical block nor any counter. Unresolved cycles
 //! survive calls, clones and changes between the native loading routes.
 //!
+//! Source-bound elastic layers may also retain signed normal-stress histories
+//! and full-stress Findley windows. The latter recover circular transverse shear
+//! from the accepted native Timoshenko resultant at a fixed material point.
+//! Findley usage remains separate from scalar accumulated fatigue damage.
+//!
 //! Calibration is fixed-condition and rate-independent. The original frame
 //! does not retain provenance on raw fiber laws: an optional `FiberMaterial`
 //! is an EXPLICIT caller-supplied binding whose exact law and source conditions
@@ -18,6 +23,7 @@
 use std::sync::Arc;
 
 use fs_exec::Cx;
+use fs_material::fatigue::critical_plane::findley::FindleyError;
 use fs_material::fatigue::strain_life::{
     PairedStrainLifeMiner, StrainLifeCurve, StrainLifeMeanStress, StrainLifeMiner,
     StrainLifeSummary, StrainStressSample,
@@ -36,8 +42,12 @@ use crate::fiber::{Fiber, FiberLaw, FiberState};
 mod elastic;
 use elastic::ElasticGaugeState;
 pub use elastic::FrameElasticFatigueGauge;
+mod findley;
+use findley::FindleyGaugeState;
+pub use findley::{FrameFindleyGauge, FrameFindleySample};
 
-/// Both original material families observed on the same accepted native path.
+/// Scalar strain-life and stress-life damage on the same accepted native path.
+/// Separate representative-cycle Findley usage is available via `findley_results`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrameFatigueSummary {
     pub fibers: Vec<StrainLifeSummary>,
@@ -74,15 +84,27 @@ pub struct FrameFatigueConfig {
 pub enum FrameFatigueError {
     Invalid(&'static str),
     Budget,
-    SourceMismatch { gauge: usize, what: &'static str },
-    Gauge { gauge: usize, error: FatigueError },
+    SourceMismatch {
+        gauge: usize,
+        what: &'static str,
+    },
+    Gauge {
+        gauge: usize,
+        error: FatigueError,
+    },
+    /// Index within the Findley bank. Source mismatches instead use the combined
+    /// fiber, elastic, then Findley declaration order.
+    Findley {
+        gauge: usize,
+        error: FindleyError,
+    },
     Mechanics(SolidError),
     Cancelled,
     Finished,
 }
 impl core::fmt::Display for FrameFatigueError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "native fiber-frame fatigue refused: {self:?}")
+        write!(f, "native frame fatigue refused: {self:?}")
     }
 }
 impl std::error::Error for FrameFatigueError {}
@@ -164,6 +186,7 @@ pub struct FrameFatiguePath {
     frame: Frame2d,
     gauges: Vec<GaugeState>,
     elastic: Vec<ElasticGaugeState>,
+    findley: Vec<FindleyGaugeState>,
     config: FrameFatigueConfig,
     samples: u64,
     finished: bool,
@@ -188,18 +211,48 @@ impl FrameFatiguePath {
         config: FrameFatigueConfig,
         cx: &Cx<'_>,
     ) -> Result<Self, FrameFatigueError> {
+        Self::new_with_findley(frame, gauges, elastic_gauges, Vec::new(), 0, config, cx)
+    }
+
+    /// Add full-stress Findley gauges on original material Timoshenko members.
+    /// At least one gauge across all three banks is required. The explicit
+    /// aggregate tensor budget bounds the sum of declared per-window sample
+    /// ceilings; scalar reversal storage retains its existing separate budget.
+    /// Source temperature and stress-free reference remain fixed. Findley uses
+    /// an explicitly closed representative window, not variable-amplitude life.
+    pub fn new_with_findley(
+        frame: Frame2d,
+        gauges: Vec<FrameFiberFatigueGauge>,
+        elastic_gauges: Vec<FrameElasticFatigueGauge>,
+        findley_gauges: Vec<FrameFindleyGauge>,
+        maximum_total_findley_samples: usize,
+        config: FrameFatigueConfig,
+        cx: &Cx<'_>,
+    ) -> Result<Self, FrameFatigueError> {
         poll(cx)?;
         frame.require_untimed_materials()?;
-        let count = gauges
+        let scalar_count = gauges
             .len()
             .checked_add(elastic_gauges.len())
             .ok_or(FrameFatigueError::Budget)?;
+        let count = scalar_count
+            .checked_add(findley_gauges.len())
+            .ok_or(FrameFatigueError::Budget)?;
         if count == 0
             || count > config.maximum_gauges
-            || count
+            || config.history.maximum_samples == 0
+            || scalar_count
                 .checked_mul(config.history.maximum_residue)
                 .is_none_or(|count| count > config.maximum_total_residue)
         {
+            return Err(FrameFatigueError::Budget);
+        }
+        let retained = findley_gauges.iter().try_fold(0_usize, |total, gauge| {
+            let samples = usize::try_from(gauge.limits.maximum_samples)
+                .map_err(|_| FrameFatigueError::Budget)?;
+            total.checked_add(samples).ok_or(FrameFatigueError::Budget)
+        })?;
+        if retained > maximum_total_findley_samples {
             return Err(FrameFatigueError::Budget);
         }
         if !config.maximum_absolute_axial_strain.is_finite()
@@ -238,11 +291,19 @@ impl FrameFatiguePath {
                 cx,
             )?);
         }
+        let findley = findley::prepare(
+            &frame,
+            findley_gauges,
+            scalar_count,
+            config.maximum_absolute_axial_strain,
+            cx,
+        )?;
         poll(cx)?;
         Ok(Self {
             frame,
             gauges: prepared,
             elastic,
+            findley,
             config,
             samples: 1,
             finished: false,
@@ -355,6 +416,7 @@ impl FrameFatiguePath {
 
     /// Preview end-of-record half cycles without advancing or closing the run.
     /// These hypothetical finalized summaries must not be added across windows.
+    /// Findley windows remain unchanged; their closure must be explicit.
     pub fn preview_finish(&self, cx: &Cx<'_>) -> Result<FrameFatigueSummary, FrameFatigueError> {
         poll(cx)?;
         let mut fibers = Vec::with_capacity(self.gauges.len());
@@ -375,10 +437,15 @@ impl FrameFatiguePath {
         Ok(FrameFatigueSummary { fibers, elastic })
     }
 
-    /// Close the observation once, committing remaining half cycles atomically.
+    /// Close the observation once, committing remaining half cycles and all
+    /// declared Findley windows atomically. A nonclosed stress window refuses
+    /// the entire finalization; its trace and all scalar histories remain live.
     /// Repeated successful finalization returns the same summaries.
     pub fn finish(&mut self, cx: &Cx<'_>) -> Result<FrameFatigueSummary, FrameFatigueError> {
         poll(cx)?;
+        if self.finished {
+            return Ok(self.summaries());
+        }
         let mut proposed = self.gauges.clone();
         let mut proposed_elastic = self.elastic.clone();
         let fibers = finish_gauges(&mut proposed, cx)?;
@@ -386,7 +453,7 @@ impl FrameFatiguePath {
         for gauge in &mut proposed_elastic {
             elastic.push(gauge.finish(cx)?);
         }
-        poll(cx)?;
+        findley::finish_bank(&mut self.findley, cx)?;
         self.gauges = proposed;
         self.elastic = proposed_elastic;
         self.finished = true;
@@ -412,44 +479,66 @@ impl FrameFatiguePath {
             .checked_add(additional)
             .filter(|&n| n <= self.config.history.maximum_samples)
             .ok_or(FrameFatigueError::Budget)?;
+        for gauge in &self.findley {
+            gauge.admit_steps(additional)?;
+        }
+        // Only save append lengths and latest points. Large tensor histories
+        // stay in place and roll back their suffix if this native block fails.
+        let checkpoint: Vec<_> = self
+            .findley
+            .iter()
+            .map(FindleyGaugeState::checkpoint)
+            .collect();
         let mut frame = self.frame.clone();
         let mut gauges = self.gauges.clone();
         let mut elastic = self.elastic.clone();
         let mut failure = None;
         let mut observed = 0_usize;
-        let result = run(&mut frame, &mut |accepted| {
-            let result = observe(
-                accepted,
-                &mut gauges,
-                self.config.maximum_absolute_axial_strain,
-                cx,
-            )
-            .and_then(|()| {
-                for gauge in &mut elastic {
-                    gauge.observe(accepted, cx)?;
-                }
-                Ok(())
-            });
-            match result {
-                Ok(()) => {
-                    observed += 1;
+        let outcome = (|| {
+            let result = run(&mut frame, &mut |accepted| {
+                let result = observe(
+                    accepted,
+                    &mut gauges,
+                    self.config.maximum_absolute_axial_strain,
+                    cx,
+                )
+                .and_then(|()| {
+                    for gauge in &mut elastic {
+                        gauge.observe(accepted, cx)?;
+                    }
+                    for gauge in &mut self.findley {
+                        gauge.observe(accepted, cx)?;
+                    }
                     Ok(())
+                });
+                match result {
+                    Ok(()) => {
+                        observed += 1;
+                        Ok(())
+                    }
+                    Err(error) => {
+                        failure = Some(error);
+                        Err(SolidError::MaterialRefused {
+                            what: "native frame fatigue observation refused".into(),
+                        })
+                    }
                 }
-                Err(error) => {
-                    failure = Some(error);
-                    Err(SolidError::MaterialRefused {
-                        what: "native frame fatigue observation refused".into(),
-                    })
-                }
+            });
+            let result = result.map_err(|error| failure.unwrap_or_else(|| error.into()))?;
+            poll(cx)?;
+            if observed != steps {
+                return Err(FrameFatigueError::Invalid(
+                    "native accepted-step count differs from observation",
+                ));
             }
-        });
-        let result = result.map_err(|error| failure.unwrap_or_else(|| error.into()))?;
-        poll(cx)?;
-        if observed != steps {
-            return Err(FrameFatigueError::Invalid(
-                "native accepted-step count differs from observation",
-            ));
+            Ok(result)
+        })();
+        if outcome.is_err() {
+            for (gauge, old) in self.findley.iter_mut().zip(checkpoint) {
+                gauge.restore(old);
+            }
         }
+        let result = outcome?;
         self.frame = frame;
         self.gauges = gauges;
         self.elastic = elastic;

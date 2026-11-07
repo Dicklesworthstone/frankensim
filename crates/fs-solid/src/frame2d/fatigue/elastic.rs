@@ -13,7 +13,7 @@ use std::sync::Arc;
 use fs_exec::Cx;
 use fs_material::fatigue::strain_life::StrainStressSample;
 use fs_material::fatigue::{
-    FatigueSummary, MeanStressCorrection, RainflowLimits, RainflowMiner, SnCurve,
+    FatigueScope, FatigueSummary, MeanStressCorrection, RainflowLimits, RainflowMiner, SnCurve,
 };
 use fs_material::state_point::ResolvedMaterialStatePoint;
 use fs_qty::semantic::{QuantityKind, ValueForm};
@@ -40,12 +40,151 @@ pub struct FrameElasticFatigueGauge {
 #[derive(Debug, Clone)]
 pub(super) struct ElasticGaugeState {
     binding: FrameElasticFatigueGauge,
-    material: Arc<ResolvedMaterialStatePoint>,
-    youngs_modulus_pa: f64,
-    maximum_strain: f64,
+    point: ElasticPoint,
     index: usize,
     counter: RainflowMiner,
     sample: StrainStressSample,
+}
+
+/// Shared original-layer admission and axial/bending stress recovery. Tensor
+/// observers add their independently owned shear field to this same normal law.
+#[derive(Debug, Clone)]
+pub(super) struct ElasticPoint {
+    pub(super) material: Arc<ResolvedMaterialStatePoint>,
+    element: usize,
+    section: usize,
+    coordinates: [f64; 2],
+    outer_radius: f64,
+    youngs_modulus_pa: f64,
+    maximum_strain: f64,
+}
+
+impl ElasticPoint {
+    pub(super) fn new(
+        frame: &Frame2d,
+        indices: [usize; 3],
+        coordinates: [f64; 2],
+        maximum_strain: f64,
+    ) -> Result<Self, FrameFatigueError> {
+        let [element_index, station, layer_index] = indices;
+        let invalid = FrameFatigueError::Invalid;
+        let element = frame
+            .elements
+            .get(element_index)
+            .ok_or_else(|| invalid("elastic fatigue member is outside the original frame"))?;
+        if element.viscous_section.is_some() {
+            return Err(invalid(
+                "elastic-only fatigue cannot omit a member's material viscous stress",
+            ));
+        }
+        let section = element.material_section.as_ref().ok_or_else(|| {
+            invalid("elastic fatigue requires an original material-defined member")
+        })?;
+        if !matches!(
+            element.sections.get(station),
+            Some(SectionModel::Elastic { .. })
+        ) {
+            return Err(invalid(
+                "elastic fatigue station must be an original elastic Lobatto section",
+            ));
+        }
+        let layer = section
+            .layers()
+            .get(layer_index)
+            .ok_or_else(|| invalid("fatigue layer is outside the original concentric section"))?;
+        let [y, z] = coordinates;
+        let radius = y.hypot(z);
+        let inner = if layer_index == 0 {
+            section.inner_radius_m()
+        } else {
+            section.layers()[layer_index - 1].outer_radius_m
+        };
+        if !y.is_finite()
+            || !z.is_finite()
+            || !radius.is_finite()
+            || radius < inner
+            || radius > layer.outer_radius_m
+        {
+            return Err(invalid(
+                "fatigue point must lie within its named material annulus",
+            ));
+        }
+        Ok(Self {
+            material: Arc::new(layer.material.clone()),
+            element: element_index,
+            section: station,
+            coordinates,
+            outer_radius: layer.outer_radius_m,
+            youngs_modulus_pa: section.layer_integrals()[layer_index].young_modulus_pa(),
+            maximum_strain,
+        })
+    }
+
+    pub(super) fn sample(
+        &self,
+        frame: &Frame2d,
+        whole_annulus: bool,
+    ) -> Result<StrainStressSample, FrameFatigueError> {
+        // The path exposes only immutable mechanics; original source bindings
+        // and these accepted Lobatto station indices cannot change mid-record.
+        let (epsilon_0, curvature) = frame.elements[self.element].commit.d[self.section];
+        let strain = epsilon_0 - self.coordinates[0] * curvature;
+        let bound = if whole_annulus {
+            epsilon_0.abs() + self.outer_radius * curvature.abs()
+        } else {
+            strain.abs()
+        };
+        if !strain.is_finite() || !bound.is_finite() || bound > self.maximum_strain {
+            return Err(FrameFatigueError::Invalid(
+                "elastic fatigue strain exceeds the declared small-strain domain",
+            ));
+        }
+        let stress = self.youngs_modulus_pa * strain;
+        if !stress.is_finite() {
+            return Err(FrameFatigueError::Invalid(
+                "elastic fatigue point stress is unrepresentable",
+            ));
+        }
+        Ok(StrainStressSample {
+            mechanical_strain: strain,
+            normal_stress_pa: stress,
+        })
+    }
+}
+
+pub(super) fn admit_scope(
+    material: &ResolvedMaterialStatePoint,
+    temperature_axis: &str,
+    scope: &FatigueScope,
+    index: usize,
+) -> Result<(), FrameFatigueError> {
+    let mismatch = |what| FrameFatigueError::SourceMismatch { gauge: index, what };
+    let absolute_temperature = material
+        .axis_quantities()
+        .get(temperature_axis)
+        .is_some_and(|quantity| {
+            *quantity == QuantitySpec::dimensional(Temperature::DIMS)
+                || quantity.semantic_type().is_some_and(|semantic| {
+                    semantic.kind() == QuantityKind::AbsoluteTemperature
+                        && semantic.form() == ValueForm::Static
+                })
+        });
+    if temperature_axis.trim().is_empty()
+        || material.state_coordinate(temperature_axis) != Some(scope.temperature_k)
+        || !absolute_temperature
+    {
+        return Err(mismatch(
+            "fatigue needs the layer's actual dimensioned absolute-temperature coordinate",
+        ));
+    }
+    if scope.material != material.material().chemistry
+        || scope.process != material.material().process
+    {
+        return Err(mismatch(
+            "fatigue material/process differs from the original layer",
+        ));
+    }
+    Ok(())
 }
 
 impl ElasticGaugeState {
@@ -58,76 +197,20 @@ impl ElasticGaugeState {
         cx: &Cx<'_>,
     ) -> Result<Self, FrameFatigueError> {
         poll(cx)?;
-        let invalid = FrameFatigueError::Invalid;
         let mismatch = |what| FrameFatigueError::SourceMismatch { gauge: index, what };
-        let element = frame
-            .elements
-            .get(gauge.element)
-            .ok_or_else(|| invalid("elastic fatigue member is outside the original frame"))?;
-        if element.viscous_section.is_some() {
-            return Err(invalid(
-                "elastic-only fatigue cannot omit a member's material viscous stress",
-            ));
-        }
-        let section = element.material_section.as_ref().ok_or_else(|| {
-            invalid("elastic fatigue requires an original material-defined member")
-        })?;
-        if !matches!(
-            element.sections.get(gauge.section),
-            Some(SectionModel::Elastic { .. })
-        ) {
-            return Err(invalid(
-                "elastic fatigue station must be an original elastic Lobatto section",
-            ));
-        }
-        let layer = section
-            .layers()
-            .get(gauge.layer)
-            .ok_or_else(|| invalid("fatigue layer is outside the original concentric section"))?;
-        let [y, z] = gauge.cross_section_position_m;
-        let radius = y.hypot(z);
-        let inner = if gauge.layer == 0 {
-            section.inner_radius_m()
-        } else {
-            section.layers()[gauge.layer - 1].outer_radius_m
-        };
-        if !y.is_finite()
-            || !z.is_finite()
-            || !radius.is_finite()
-            || radius < inner
-            || radius > layer.outer_radius_m
-        {
-            return Err(invalid(
-                "fatigue point must lie within its named material annulus",
-            ));
-        }
-        let material = &layer.material;
-        let scope = gauge.curve.scope();
-        let absolute_temperature = material
-            .axis_quantities()
-            .get(&gauge.temperature_axis)
-            .is_some_and(|quantity| {
-                *quantity == QuantitySpec::dimensional(Temperature::DIMS)
-                    || quantity.semantic_type().is_some_and(|semantic| {
-                        semantic.kind() == QuantityKind::AbsoluteTemperature
-                            && semantic.form() == ValueForm::Static
-                    })
-            });
-        if gauge.temperature_axis.trim().is_empty()
-            || material.state_coordinate(&gauge.temperature_axis) != Some(scope.temperature_k)
-            || !absolute_temperature
-        {
-            return Err(mismatch(
-                "fatigue needs the layer's actual dimensioned absolute-temperature coordinate",
-            ));
-        }
-        if scope.material != material.material().chemistry
-            || scope.process != material.material().process
-        {
-            return Err(mismatch(
-                "fatigue material/process differs from the original layer",
-            ));
-        }
+        let point = ElasticPoint::new(
+            frame,
+            [gauge.element, gauge.section, gauge.layer],
+            gauge.cross_section_position_m,
+            maximum_strain,
+        )?;
+        let material = point.material.as_ref();
+        admit_scope(
+            material,
+            &gauge.temperature_axis,
+            gauge.curve.scope(),
+            index,
+        )?;
         if let Some(source) = gauge.curve.source() {
             if gauge.temperature_axis != source.request().temperature_axis
                 || !source.matches_material_state(
@@ -144,10 +227,8 @@ impl ElasticGaugeState {
         let counter = RainflowMiner::new(gauge.curve.clone(), gauge.mean_stress, limits)
             .map_err(|error| gauge_error(index, error))?;
         let mut state = Self {
-            youngs_modulus_pa: section.layer_integrals()[gauge.layer].young_modulus_pa(),
-            material: Arc::new(material.clone()),
+            point,
             binding: gauge,
-            maximum_strain,
             index,
             counter,
             sample: StrainStressSample {
@@ -165,29 +246,11 @@ impl ElasticGaugeState {
         cx: &Cx<'_>,
     ) -> Result<(), FrameFatigueError> {
         poll(cx)?;
-        // The owning path exposes only immutable native mechanics, so these
-        // bindings cannot change between admission and accepted observations.
-        let element = &frame.elements[self.binding.element];
-        let &(epsilon_0, curvature) = &element.commit.d[self.binding.section];
-        let strain = epsilon_0 - self.binding.cross_section_position_m[0] * curvature;
-        if !strain.is_finite() || strain.abs() > self.maximum_strain {
-            return Err(FrameFatigueError::Invalid(
-                "elastic fatigue point exceeds the declared small-strain domain",
-            ));
-        }
-        let stress_pa = self.youngs_modulus_pa * strain;
-        if !stress_pa.is_finite() {
-            return Err(FrameFatigueError::Invalid(
-                "elastic fatigue point stress is unrepresentable",
-            ));
-        }
+        let sample = self.point.sample(frame, false)?;
         self.counter
-            .push_with_cancel(stress_pa, &mut || cx.checkpoint().is_err())
+            .push_with_cancel(sample.normal_stress_pa, &mut || cx.checkpoint().is_err())
             .map_err(|error| gauge_error(self.index, error))?;
-        self.sample = StrainStressSample {
-            mechanical_strain: strain,
-            normal_stress_pa: stress_pa,
-        };
+        self.sample = sample;
         Ok(())
     }
 
@@ -201,7 +264,7 @@ impl ElasticGaugeState {
         &self.binding.curve
     }
     pub(super) fn material_source(&self) -> &ResolvedMaterialStatePoint {
-        &self.material
+        &self.point.material
     }
 
     pub(super) fn preview_finish(&self, cx: &Cx<'_>) -> Result<FatigueSummary, FrameFatigueError> {
