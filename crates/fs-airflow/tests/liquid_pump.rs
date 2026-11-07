@@ -1,6 +1,8 @@
 //! Synthetic pump/material data through the production cooling-network owners.
 #[path = "liquid_pump/speed.rs"]
 mod speed;
+#[path = "liquid_pump/power_limit.rs"]
+mod power_limit;
 use fs_airflow::SourceProvenance;
 use fs_airflow::graph::thermal::medium::FlowHeatGeometry;
 use fs_airflow::graph::thermal::medium::series::hydraulic::MaterialFlowResistance;

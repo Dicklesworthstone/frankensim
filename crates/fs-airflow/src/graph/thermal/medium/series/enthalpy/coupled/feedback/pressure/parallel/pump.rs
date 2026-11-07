@@ -19,6 +19,8 @@ pub mod solid;
 pub mod power;
 /// Calibrated speed slices prepared for the same operating-point/thermal paths.
 pub mod speed;
+/// Electrical source limits at the actual calibrated pump/network operating point.
+pub mod source;
 
 use power::{PumpDriveCurve, PumpPowerState};
 
