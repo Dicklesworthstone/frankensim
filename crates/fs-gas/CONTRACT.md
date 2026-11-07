@@ -668,6 +668,30 @@ moving boundaries, finite networks, chemistry and molecular/wall exchanges keep
 their existing separate composing owners. State/time-dependent source values
 need temporal refinement; no new entropy-stability theorem is asserted.
 
+### Original-source real-gas mechanical forcing
+
+With `material,experimental-euler`, `RealGasEuler1d` also exposes
+`apply_body_force` and `step_with_body_force` through the same represented
+impulse/midpoint-work kernel. Every candidate retains the original
+density-dependent NASA/Peng--Robinson calorics, pressure and sound speed;
+neither an ideal-gas closure nor a constant heat capacity substitutes for it.
+The native piecewise-constant SSP-RK2 transport and retries own the complete
+force/transport/force transaction. Two lazy cell buffers retain the first
+source endpoint and its original-source primitive cache, and are reused.
+Source-endpoint Mach and full-interval CFL checks precede publication.
+
+`step_with_walls_and_body_force` then advances the original finite-wall
+heat/drag kernel over that accepted duration. This composition with walls
+remains first order. Source impulse/work, wall impulse/heat/drive work and
+boundary transport have distinct accounts; gas plus finite-wall storage
+subtracts external body work exactly once. Cancellation or refusal publishes
+neither cells, primitive caches, wall inventories, reports nor the clock.
+Zero forcing preserves the original transport/wall path. No moving real-gas
+boundary, hydrostatic well balancing, spatial viscosity or phase flash is added.
+`tests/material_nonideal_flow/forcing.rs` checks dense-gas acceleration and
+braking, gauge invariance, force-density/volume units, uniform forced transport,
+endpoint-CFL retries, combined wall/body balances and late atomic cancellation.
+
 ### Distributed body work on moving intervals
 
 `Euler1d::step_with_moving_walls_and_body_force` and its original mixture

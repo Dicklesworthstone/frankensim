@@ -20,6 +20,8 @@ use fs_qty::{Density, Length, QuantitySpec, Temperature, Time, Velocity};
 
 const DENSE_SOUND_SPEED: f64 = 434.547_071_783_336_5;
 
+#[path = "material_nonideal_flow/forcing.rs"]
+mod forcing;
 #[path = "material_nonideal_flow/thermal.rs"]
 mod thermal;
 

@@ -1,7 +1,7 @@
 //! Fixed-domain real-gas evolution sharing the native finite-volume machinery.
 
 use super::{RealGas, RealGasFlowError, RealGasWallControl, RealGasWallOperator};
-use crate::body_force::ForceChange;
+use crate::body_force::{Accumulator, BodyForce, ForceControl};
 use crate::dynamics::evolve::{Stage, forward, totals};
 use crate::dynamics::{
     Conserved, Error, FaceFlux, Mesh1d, Primitive, Reconstruction, StepControl, StepReport, Totals,
@@ -9,6 +9,8 @@ use crate::dynamics::{
 };
 use crate::multicomponent::wall_exchange::WallControl;
 use fs_qty::{Length, Time};
+
+mod forcing;
 
 /// One end of a stationary constant-area real-gas interval.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -63,6 +65,7 @@ pub struct RealGasEuler1d {
     boundary_primitive: [Option<Primitive>; 2],
     time: f64,
     work: Workspace,
+    force_work: Option<forcing::Workspace>,
 }
 
 impl RealGasEuler1d {
@@ -135,6 +138,7 @@ impl RealGasEuler1d {
             boundary_primitive,
             time: 0.0,
             work,
+            force_work: None,
         })
     }
 
@@ -190,7 +194,7 @@ impl RealGasEuler1d {
         controls: StepControl,
         cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, RealGasFlowError> {
-        self.step_inner(maximum_duration, controls, None, cancelled)
+        self.step_inner(maximum_duration, controls, None, None, cancelled)
     }
 
     /// Advance the original wave field, then implicit wall heat/drag over the
@@ -212,6 +216,7 @@ impl RealGasEuler1d {
             maximum_duration,
             controls,
             Some((walls, wall_controls)),
+            None,
             cancelled,
         )
     }
@@ -222,6 +227,7 @@ impl RealGasEuler1d {
         maximum_duration: Time,
         controls: StepControl,
         mut walls: Option<(&mut RealGasWallOperator<'_>, WallControl)>,
+        force: Option<(BodyForce<'_>, ForceControl)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, RealGasFlowError> {
         poll(&mut cancelled)?;
@@ -238,6 +244,18 @@ impl RealGasEuler1d {
             return Err(RealGasFlowError::Invalid(
                 "positive duration, CFL <= 0.45, at most 32 halvings and FirstOrder reconstruction required",
             ));
+        }
+        let force = match force {
+            Some((source, force_controls)) => {
+                force_controls.admit::<RealGasFlowError>()?;
+                source
+                    .admit::<RealGasFlowError>(self.states.len(), &mut cancelled)?
+                    .then_some((source, force_controls))
+            }
+            None => None,
+        };
+        if force.is_some() && self.force_work.is_none() {
+            self.force_work = Some(forcing::Workspace::new(self.states.len())?);
         }
         let area = self.mesh.face_areas()[0];
         let mut rate = 0.0_f64;
@@ -261,19 +279,55 @@ impl RealGasEuler1d {
                     "time step cannot advance represented clock",
                 ));
             }
-            let result = attempt(
-                &self.gas,
-                &self.states,
-                &self.primitive,
-                &self.mesh,
-                self.boundaries,
-                self.boundary_primitive,
-                dt,
-                controls.cfl,
-                &mut self.work,
-                &mut cancelled,
-            )
-            .and_then(|(a, b)| {
+            let result = (|| {
+                let mut exchange = Accumulator::default();
+                let mut source_rate = 0.0_f64;
+                let (states, primitive) = if let Some((source, force_controls)) = force {
+                    let forced = self.force_work.as_mut().expect("admitted force workspace");
+                    forced.prepare(
+                        &self.gas,
+                        &self.states,
+                        &self.primitive,
+                        &self.mesh,
+                        source,
+                        force_controls,
+                        dt,
+                        controls.cfl,
+                        &mut exchange,
+                        &mut source_rate,
+                        &mut cancelled,
+                    )?;
+                    (&forced.states[..], &forced.primitive[..])
+                } else {
+                    (&self.states[..], &self.primitive[..])
+                };
+                let (a, b) = attempt(
+                    &self.gas,
+                    states,
+                    primitive,
+                    &self.mesh,
+                    self.boundaries,
+                    self.boundary_primitive,
+                    dt,
+                    controls.cfl,
+                    &mut self.work,
+                    &mut cancelled,
+                )?;
+                if let Some((source, force_controls)) = force {
+                    forcing::finish(
+                        &self.gas,
+                        &mut self.work.candidate,
+                        &mut self.work.candidate_primitive,
+                        &self.mesh,
+                        source,
+                        force_controls,
+                        dt,
+                        controls.cfl,
+                        &mut exchange,
+                        &mut source_rate,
+                        &mut cancelled,
+                    )?;
+                }
                 let thermal = match &mut walls {
                     Some((walls, wall_controls)) => Some(walls.prepare(
                         &mut self.work.candidate,
@@ -284,10 +338,10 @@ impl RealGasEuler1d {
                     )?),
                     None => None,
                 };
-                Ok((a, b, thermal))
-            });
+                Ok((a, b, exchange.finish(), source_rate, thermal))
+            })();
             match result {
-                Ok((a, b, mut thermal)) => {
+                Ok((a, b, force_change, source_rate, mut thermal)) => {
                     let after = totals(&self.work.candidate, self.mesh.volumes(), &mut cancelled)?;
                     let factor = 0.5 * dt * area;
                     let left = Totals::from_array(core::array::from_fn(|k| {
@@ -309,7 +363,11 @@ impl RealGasEuler1d {
                                 report.mechanical_work_to_gas_j,
                             )
                         });
-                    let source = [0.0, wall_impulse, wall_heat + wall_work];
+                    let source = [
+                        0.0,
+                        wall_impulse + force_change.impulse,
+                        wall_heat + wall_work + force_change.work,
+                    ];
                     let residual = Totals::from_array(core::array::from_fn(|k| {
                         after.array()[k] - before.array()[k] - boundary.array()[k] - source[k]
                     }));
@@ -318,7 +376,8 @@ impl RealGasEuler1d {
                             after.energy - before.energy - boundary.energy
                                 + report.wall_storage_change_j
                                 - report.external_heat_to_gas_j
-                                - report.mechanical_work_to_gas_j;
+                                - report.mechanical_work_to_gas_j
+                                - force_change.work;
                         if !report.gas_wall_storage_residual_j.is_finite() {
                             return Err(RealGasFlowError::Invalid(
                                 "nonfinite real-gas wall storage balance",
@@ -347,7 +406,7 @@ impl RealGasEuler1d {
                     }
                     return Ok(StepReport {
                         elapsed: Time::new(dt),
-                        maximum_cfl: a.signal_rate.max(b.signal_rate) * dt,
+                        maximum_cfl: a.signal_rate.max(b.signal_rate).max(source_rate) * dt,
                         halvings,
                         hll_fallback_faces: a.fallbacks + b.fallbacks,
                         limited_cells: 0,
@@ -363,7 +422,7 @@ impl RealGasEuler1d {
                         wall_momentum_impulse: wall_impulse,
                         wall_heat,
                         wall_work,
-                        source_change: ForceChange::default(),
+                        source_change: force_change,
                         conservation_residual: residual,
                     });
                 }

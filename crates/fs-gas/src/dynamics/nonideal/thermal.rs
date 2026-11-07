@@ -38,7 +38,7 @@ pub struct RealGasWallReport {
     pub drag_heating_j: f64,
     pub source_storage_residual_j: f64,
     /// Gas plus declared wall storage minus boundary transport, reservoir heat
-    /// and sliding-drive work [J]. An enthalpy wall retains its work convention;
+    /// sliding-drive work and external body-force work [J]. An enthalpy wall retains its work convention;
     /// this mixed-coordinate account is not a claim that its H is rigid-body U.
     pub gas_wall_storage_residual_j: f64,
     pub maximum_thermal_residual_j: f64,
