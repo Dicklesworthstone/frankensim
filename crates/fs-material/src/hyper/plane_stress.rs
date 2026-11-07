@@ -30,8 +30,8 @@ pub struct PlaneStressSettings {
     pub relative_tolerance: f64,
     /// Maximum accepted Newton updates, excluding the initial evaluation.
     pub max_iterations: usize,
-    /// Maximum candidate seeds if unit thickness is unstable, and maximum
-    /// trial step lengths per Newton update (1, 1/2, 1/4, ...).
+    /// Maximum candidate seeds if unit thickness is inadmissible or unstable,
+    /// and maximum trial step lengths per Newton update (1, 1/2, 1/4, ...).
     pub max_backtracks: usize,
 }
 
@@ -192,8 +192,8 @@ impl Hyperelastic {
 /// A frozen inelastic owner must keep its accepted history and physical time
 /// interval fixed throughout the solve, and commit its history only afterward.
 /// Like the native solve, this selects a local stable branch from unit thickness
-/// with bounded volume-preserving fallback seeds; failure to find an admitted
-/// seed is a refusal, not a global nonexistence claim.
+/// with bounded minimum-distortion and volume-preserving fallback seeds;
+/// failure to find an admitted seed is a refusal, not a global nonexistence claim.
 pub fn plane_stress_state<L: FiniteStrainPotential + ?Sized>(
     material: &L,
     in_plane: &[f64; 4],
@@ -272,7 +272,11 @@ impl Hyperelastic {
     /// Relax all three transverse tractions using bounded, residual-decreasing
     /// Newton steps, without forming the full 9×9 constitutive Hessian.
     ///
-    /// The initial transverse column is `[0,0,1]`. If its tangent is unstable,
+    /// The initial transverse column is `[0,0,1]`. If that state is outside the
+    /// material domain, try the positive thickness that minimizes the first
+    /// isochoric invariant for the fixed in-plane gradient and zero transverse
+    /// shear. This retains an admissible Gent branch even when unit thickness
+    /// exceeds the chain limit. If the admitted tangent is unstable,
     /// try a volume-preserving thickness; if that target leaves the material
     /// domain, bisect toward it from the admitted thickness to find a stable
     /// seed. At most `max_backtracks` candidate seeds are tried. Every trial
@@ -375,10 +379,35 @@ fn plane_stress_state_with(
     } else {
         None
     };
+    let mut seed_trials = 0;
     let (mut p, mut energy, initial_block) = match supplied {
         Some((stress, energy, block)) => (stress, energy, Ok(block)),
         None => {
-            let (stress, energy) = point(&f)?;
+            let (stress, energy) = match point(&f) {
+                Ok(data) => data,
+                Err(error @ MaterialError::State { .. }) => {
+                    // At zero transverse shear, I1bar = (|a|^2+t^2)/(det(a)t)^(2/3).
+                    // Its minimum occurs at t=|a|/sqrt(2). Unlike J=1, this
+                    // seed can enter the domain of a compressible finite-chain
+                    // law under large biaxial loading. It changes only the
+                    // initial guess; Newton still solves all three tractions.
+                    let thickness = in_plane[0]
+                        .hypot(in_plane[1])
+                        .hypot(in_plane[2])
+                        .hypot(in_plane[3])
+                        / core::f64::consts::SQRT_2;
+                    if !(thickness.is_finite() && thickness > 0.0) || thickness == f[8] {
+                        return Err(error);
+                    }
+                    let mut trial = f;
+                    trial[8] = thickness;
+                    let data = point(&trial)?;
+                    seed_trials = 1;
+                    f = trial;
+                    data
+                }
+                Err(error) => return Err(error),
+            };
             (stress, energy, transverse(&f).and_then(PositiveBlock::new))
         }
     };
@@ -389,13 +418,13 @@ fn plane_stress_state_with(
             // log-squared bulk energy can have negative thickness curvature
             // at large J even though its traction-free root is stable.
             let target = 1.0 / determinant;
-            if !(target.is_finite() && target > 0.0) || target == 1.0 {
+            if !(target.is_finite() && target > 0.0) || target == f[8] {
                 return Err(initial_error);
             }
-            let (mut toward, mut admitted) = (target, 1.0);
+            let (mut toward, mut admitted) = (target, f[8]);
             let mut candidate = target;
             let mut seed = None;
-            for _ in 0..settings.max_backtracks {
+            for _ in seed_trials..settings.max_backtracks {
                 let mut trial = f;
                 trial[8] = candidate;
                 match point(&trial) {

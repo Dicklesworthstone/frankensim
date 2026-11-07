@@ -437,6 +437,124 @@ fn thickness_root(limit: f64, equation: impl Fn(f64) -> f64) -> f64 {
 }
 
 #[test]
+fn g1_finite_chain_plane_stress_enters_the_admitted_thickness_domain() {
+    use fs_material::hyper::plane_stress::plane_stress;
+
+    let mu = 1.0;
+    let kappa = 0.01;
+    let chain_limit = 0.01;
+    for volumetric in [
+        Volumetric::Quadratic { kappa },
+        Volumetric::LogSquared { kappa },
+        Volumetric::SimoTaylor { kappa },
+    ] {
+        let law = Hyperelastic::new(
+            HyperelasticModel::Gent {
+                mu,
+                locking_invariant: chain_limit,
+                volumetric,
+            },
+            2.0,
+        )
+        .unwrap();
+        for stretch in [0.8, 1.2] {
+            let in_plane = [stretch, 0.0, 0.0, stretch];
+            let unit = [stretch, 0.0, 0.0, 0.0, stretch, 0.0, 0.0, 0.0, 1.0];
+            // Refusal of an initial guess must not be mistaken for physical
+            // nonexistence of the relaxed plane-stress state.
+            assert!(law.check_state(&unit).is_err());
+            let response = law
+                .plane_stress(&in_plane, PlaneStressSettings::default())
+                .unwrap();
+
+            // Independent Gent transverse traction for equibiaxial loading.
+            // No native energy, derivative or tangent locates this root.
+            let area = stretch * stretch;
+            let traction = |thickness: f64| {
+                let j = area * thickness;
+                let isochoric_scale = j.powf(-2.0 / 3.0);
+                let shift = (2.0 * area + thickness * thickness) * isochoric_scale - 3.0;
+                assert!(shift < chain_limit);
+                let d_shift = (4.0 / 3.0) * isochoric_scale * (thickness - area / thickness);
+                let pressure = match volumetric {
+                    Volumetric::Quadratic { .. } => kappa * (j - 1.0),
+                    Volumetric::LogSquared { .. } => kappa * j.ln() / j,
+                    Volumetric::SimoTaylor { .. } => 0.5 * kappa * (j - 1.0 / j),
+                };
+                0.5 * mu * d_shift / (1.0 - shift / chain_limit) + area * pressure
+            };
+            let (mut lo, mut hi) = (0.97 * stretch, 1.03 * stretch);
+            assert!(traction(lo) < 0.0 && traction(hi) > 0.0);
+            for _ in 0..60 {
+                let mid = 0.5 * (lo + hi);
+                if traction(mid) < 0.0 {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            let expected = 0.5 * (lo + hi);
+            close(response.deformation_gradient[8], expected, 1.0, 2e-11);
+            close(traction(response.deformation_gradient[8]), 0.0, mu, 2e-11);
+            law.check_state(&response.deformation_gradient).unwrap();
+            let generic = plane_stress(&law, &in_plane, PlaneStressSettings::default()).unwrap();
+            close(generic.deformation_gradient[8], expected, 1.0, 2e-11);
+            for i in IN_PLANE {
+                close(
+                    law.piola(&generic.deformation_gradient).unwrap()[i],
+                    law.piola(&response.deformation_gradient).unwrap()[i],
+                    mu,
+                    2e-11,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn g3_recovered_finite_chain_plane_stress_retains_work_and_consistent_tangent() {
+    let law = Hyperelastic::new(
+        HyperelasticModel::Gent {
+            mu: 1.0,
+            locking_invariant: 0.01,
+            volumetric: Volumetric::Quadratic { kappa: 0.01 },
+        },
+        2.0,
+    )
+    .unwrap();
+    let in_plane = [1.2, 0.0, 0.0, 1.2];
+    let response = law
+        .plane_stress(&in_plane, PlaneStressSettings::default())
+        .unwrap();
+    let h = 1e-6;
+    for column in 0..4 {
+        let (mut plus, mut minus) = (in_plane, in_plane);
+        plus[column] += h;
+        minus[column] -= h;
+        let plus = law
+            .plane_stress(&plus, PlaneStressSettings::default())
+            .unwrap();
+        let minus = law
+            .plane_stress(&minus, PlaneStressSettings::default())
+            .unwrap();
+        close(
+            (plus.energy_density_pa - minus.energy_density_pa) / (2.0 * h),
+            response.piola[column],
+            1.0,
+            3e-8,
+        );
+        for row in 0..4 {
+            close(
+                (plus.piola[row] - minus.piola[row]) / (2.0 * h),
+                response.tangent[row][column],
+                1.0,
+                3e-8,
+            );
+        }
+    }
+}
+
+#[test]
 fn g0_large_biaxial_loading_reaches_stable_thickness_despite_an_unstable_unit_seed() {
     for (stretch, limit, mu, lambda) in [
         (2.0, 4.0, 2.0, 40.0),
