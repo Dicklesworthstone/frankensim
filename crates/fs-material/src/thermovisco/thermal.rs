@@ -526,8 +526,12 @@ fn thermodynamics<E>(point: &Point<'_>, slope_per_k: f64, expansion_per_k: f64, 
     Ok((entropy_j_k, internal_energy_j))
 }
 
-fn admit_expansion_capacity<E>(point: &Point<'_>, curve: &EquilibriumEnthalpyPhaseCurve,
-    modulus_slope: f64, expansion: f64) -> Result<(), FeedbackError<E>> {
+fn admit_expansion_capacity<E>(
+    point: &Point<'_>,
+    curve: &EquilibriumEnthalpyPhaseCurve,
+    modulus_slope: f64,
+    expansion: f64,
+) -> Result<(), FeedbackError<E>> {
     if expansion == 0.0 { return Ok(()); }
     // At fixed total strain and viscous strains, psi_TT=alpha²*S*K0-2*alpha*b*A0,
     // K0=E_inf+sum(E_j), A0=E_inf*e+sum(E_j*q_j). Total volumetric capacity is
@@ -546,12 +550,14 @@ fn admit_expansion_capacity<E>(point: &Point<'_>, curve: &EquilibriumEnthalpyPha
     let mixed_term = product(product(2.0, product(expansion, modulus_slope)?.abs())?, stress_bound)?;
     let capacity_bound = product(temperature, finite(expansion_term+mixed_term)?)?;
     let mut caloric_capacity = f64::INFINITY;
-    for pair in curve.knots().windows(2) {
-        let dh = finite(pair[1].specific_enthalpy_j_kg-pair[0].specific_enthalpy_j_kg)?;
-        let dt = finite(pair[1].temperature_k-pair[0].temperature_k)?;
-        let cp = finite(dh/dt)?;
-        if !positive(cp) { return Err(FeedbackError::Invalid("positive caloric segment capacity required")); }
-        caloric_capacity = caloric_capacity.min(product(pair[0].bulk_density_kg_m3, cp)?);
+    for (index, pair) in curve.knots().windows(2).enumerate() {
+        // An enthalpy chord gives only the interval-average Cp. Its original
+        // affine source law can have a much smaller endpoint capacity, so the
+        // positivity certificate must retain that pointwise minimum.
+        let [minimum_cp, _] = curve
+            .sensible_heat_capacity_bounds_j_kg_k(index)
+            .map_err(FeedbackError::Caloric)?;
+        caloric_capacity = caloric_capacity.min(product(pair[0].bulk_density_kg_m3, minimum_cp)?);
     }
     if !caloric_capacity.is_finite() || caloric_capacity <= capacity_bound {
         return Err(FeedbackError::Invalid("caloric capacity does not exceed the full thermal-expansion coupling bound"));

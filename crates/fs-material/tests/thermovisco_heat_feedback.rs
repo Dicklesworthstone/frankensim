@@ -4,7 +4,7 @@ use core::convert::Infallible;
 use std::cell::Cell;
 
 use fs_blake3::ContentHash;
-use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase,
+use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, HeatCapacityKnot, SolidLiquidPhase,
     UniformEnthalpyStep, UniformEnthalpyStepInput};
 use fs_material::thermovisco::{HistoryIntegration, Limits, ThermalKnot, ThermoMaxwell};
 use fs_material::thermovisco::thermal::{CaloricPoint, FeedbackConfig, FeedbackError, MechanicalControl};
@@ -660,5 +660,76 @@ fn expansion_capacity_admission_covers_all_chart_segments_branches_and_modulus_c
             &low,0.0,MASS,VOLUME,0.001),Err(FeedbackError::Invalid(_))));
         assert!(CaloricPoint::try_new(coupled.birth(300.0,0.0).unwrap(),
             &adequate,0.0,MASS,VOLUME,0.001).is_ok());
+    }
+}
+
+#[test]
+fn expansion_capacity_admission_retains_affine_source_heat_capacity_extrema() {
+    let source_curve = |cp: [f64; 2]| {
+        EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity_exact(
+            ContentHash([26; 32]),
+            SolidLiquidPhase::Solid,
+            0.0,
+            &[(280.0, cp[0]), (320.0, cp[1])].map(
+                |(temperature_k, specific_heat_capacity_j_kg_k)| HeatCapacityKnot {
+                    temperature_k,
+                    specific_heat_capacity_j_kg_k,
+                    bulk_density_kg_m3: 1000.0,
+                },
+            ),
+        )
+        .unwrap()
+    };
+    // For constant spring scale, psi_TT=alpha²*(E_inf+sum E_j)=4 J/(m3 K²).
+    // Both original Cp laws have a large mean, yet rho*Cp-T*psi_TT is negative
+    // at their low-capacity endpoint. Starting at the opposite, stable endpoint
+    // must not admit that thermodynamically unstable part of the same chart.
+    for cp in [[0.5, 100.0], [100.0, 0.5]] {
+        let curve = source_curve(cp);
+        assert_eq!(curve.knots().len(), 2);
+        let stable_index = usize::from(cp[0] < cp[1]);
+        let stable = curve.knots()[stable_index];
+        let unstable = curve.knots()[1 - stable_index];
+        let mean_cp = 0.5 * (cp[0] + cp[1]);
+        assert!(1000.0 * mean_cp - 320.0 * 4.0 > 0.0);
+        assert!(1000.0 * cp[stable_index] - stable.temperature_k * 4.0 > 0.0);
+        assert!(1000.0 * cp[1 - stable_index] - unstable.temperature_k * 4.0 < 0.0);
+        for integration in [
+            HistoryIntegration::BackwardEuler,
+            HistoryIntegration::ExactStrainRamp,
+        ] {
+            for alpha in [-1e-4, 1e-4] {
+                let material = expanding_law(0.0, alpha, vec![(3e8, 1.0)])
+                    .with_history_integration(integration);
+                assert!(matches!(
+                    CaloricPoint::try_new(
+                        material.birth(stable.temperature_k, 0.0).unwrap(),
+                        &curve,
+                        stable.specific_enthalpy_j_kg,
+                        MASS,
+                        VOLUME,
+                        0.001,
+                    ),
+                    Err(FeedbackError::Invalid(_))
+                ));
+            }
+        }
+    }
+    // Varying Cp remains supported when its actual minimum exceeds both the
+    // expansion and mixed expansion/softening contributions to total capacity.
+    for cp in [[20.0, 100.0], [100.0, 20.0]] {
+        let curve = source_curve(cp);
+        let material = expanding_law(-0.005, 1e-4, vec![(3e8, 1.0)]);
+        assert!(
+            CaloricPoint::try_new(
+                material.birth(280.0, 0.0).unwrap(),
+                &curve,
+                0.0,
+                MASS,
+                VOLUME,
+                0.001
+            )
+            .is_ok()
+        );
     }
 }
