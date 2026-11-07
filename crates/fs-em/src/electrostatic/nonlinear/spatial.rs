@@ -13,6 +13,7 @@
 //! imposed polarization, sheet charge or infinite-domain boundary inference.
 
 mod constitutive;
+pub mod force;
 mod solve;
 pub mod tangent;
 

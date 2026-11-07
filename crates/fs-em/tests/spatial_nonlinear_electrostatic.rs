@@ -1,5 +1,8 @@
 //! Independent original-law charge, storage and tangent oracles in 3D.
 //! Authored constitutive fixtures do not represent qualified material data.
+#[path = "spatial_nonlinear_electrostatic/force.rs"]
+mod force;
+
 use fs_em::{
     electrostatic::{
         ElectrostaticControls, ElectrostaticError,

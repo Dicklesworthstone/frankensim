@@ -4411,6 +4411,22 @@ specify rotated nonlinear plates, anisotropic native-Hodge parity with space
 charge, trapped middle-conductor charge, independent extreme gauges, a
 single-conductor charged tetrahedron and source/work/cancellation bounds.
 
+The nonlinear 3D field's `shape_forces` and `virtual_work` differentiate
+that same original mixed electrical functional with voltage controls and
+floating total charges held fixed. Each tetrahedron transports its original
+total volume free charge, so its exact q/4 source moments remain fixed while
+rho changes inversely with volume. Frozen isotropic material laws retain the
+independently integrated longitudinal storage and transverse coenergy stresses;
+no E.D/2 approximation or cancellation-prone ED-W* subtraction supplies them.
+The direct work query contracts native cell gradients without assembling nodal
+forces, and local displacement differences preserve exact rigid-translation
+invariance. Returned shape forces retain their originating field. Tensor-frame
+transport, electrostriction, finite trajectories and a mechanical interpretation
+for exterior mesh vertices remain the caller's separate physics. Synthetic
+regressions compare analytic nonlinear pressures and re-solved mixed-functional
+geometry differences, including conserved space charge, rigid motion,
+cancellation and unsupported tensor laws.
+
 `electrostatic::nonlinear::axisymmetric::AxisymmetricNonlinearElectrostatics`
 uses this same prepared nonlinear Gauss/Newton and differential-capacitance
 owner on the original revolved metric. Constant cell fields integrate against
