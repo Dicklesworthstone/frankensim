@@ -732,16 +732,20 @@ impl FinalStateFunctional {
 /// The derivative of `J = w · T^N` with respect to a UNIFORM SCALE on the
 /// volumetric source, by the discrete adjoint.
 ///
-/// The forward march is `A T^{n+1} = B T^n + b` with `A = C/dt + θK` and
-/// `B = C/dt − (1−θ)K`. Differentiating with respect to a scale `s` on `b`
+/// The forward march is `A T^{n+1} = B T^n + dt b` with `A = C + θ dt K` and
+/// `B = C − (1−θ) dt K`. Differentiating with respect to a scale `s` on `b`
 /// and collecting terms gives
 ///
 /// ```text
-///   dJ/ds = Σ_{n=1..N} μ^n · (db/ds),    μ^n = A^{-T} λ^n,
+///   dJ/ds = Σ_{n=1..N} μ^n · (dt db/ds),    μ^n = A^{-T} λ^n,
 ///           λ^N = w,   λ^{n} = B^T μ^{n+1}
 /// ```
 ///
 /// so the adjoint is a BACKWARD march of the same size as the forward one.
+/// For assembly, the whole step equation is divided by `max(1, dt)`: short
+/// steps never form `1/dt`, while long steps never multiply the load by `dt`.
+/// These bounded factors preserve the discrete derivative without overflowing
+/// intermediate values for an otherwise finite heat pulse or steady limit.
 ///
 /// # No checkpointing is required, and that is a property, not an omission
 ///
@@ -877,16 +881,34 @@ fn source_scale_gradient_inner(
         None => assemble_operator(cx, mesh, boundary, material, source, reference)?,
     };
 
-    let inverse_dt = 1.0 / config.dt_s;
+    // Normalize (C + theta*dt*K) and its load dt*b by max(1, dt).
+    // Form the factors piecewise: 1/dt can overflow on a short step even
+    // though its deposited heat is finite, and dt*b can overflow on a long
+    // step even though the diffusion-limited temperature response is finite.
+    let (capacity_scale, load_scale) = if config.dt_s <= 1.0 {
+        (1.0, config.dt_s)
+    } else {
+        (config.dt_s.recip(), 1.0)
+    };
     let theta = config.theta;
-    let lhs = axpy_csr(capacitance, inverse_dt, &system.operator, theta);
+    let lhs = axpy_csr(
+        capacitance,
+        capacity_scale,
+        &system.operator,
+        theta * load_scale,
+    );
     let (a_ff, _) = reduce_matrix_and_lift(&lhs, &dofs);
-    let rhs_matrix = axpy_csr(capacitance, inverse_dt, &system.operator, -(1.0 - theta));
+    let rhs_matrix = axpy_csr(
+        capacitance,
+        capacity_scale,
+        &system.operator,
+        -(1.0 - theta) * load_scale,
+    );
     let (b_ff, _) = reduce_matrix_and_lift(&rhs_matrix, &dofs);
     let precond = spd_preconditioner(&a_ff);
     let op = CsrOp::symmetric(a_ff);
 
-    // db/ds over free dofs. Only the volumetric source is scaled; fixed
+    // The consistently scaled db/ds over free dofs. Only the source is scaled; fixed
     // Dirichlet, Robin and Neumann loads contribute no derivative. Reuse the
     // original P1 source rule with an adiabatic boundary rather than subtracting
     // potentially large environmental loads from the complete assembled load.
@@ -908,7 +930,7 @@ fn source_scale_gradient_inner(
     let load_sensitivity = dofs
         .free()
         .iter()
-        .map(|&vertex| source_system.load[vertex])
+        .map(|&vertex| load_scale * source_system.load[vertex])
         .collect::<Vec<_>>();
 
     let mut lambda = Vec::with_capacity(dofs.n());

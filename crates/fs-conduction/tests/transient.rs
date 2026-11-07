@@ -620,7 +620,10 @@ fn a_cancelled_march_publishes_no_partial_solution() {
 // ---------------------------------------------------------------------------
 
 use fs_adjoint::verify_gradient;
-use fs_conduction::transient::{FinalStateFunctional, source_scale_gradient};
+use fs_conduction::transient::{
+    FinalStateFunctional, HeatCapacity, march_with_capacity,
+    march_with_capacity_and_source_scale_gradient, source_scale_gradient,
+};
 
 /// Forward objective as a function of the source scale, for the independent
 /// finite-difference check.
@@ -812,6 +815,240 @@ fn the_transient_adjoint_preserves_extreme_but_finite_goal_scales() {
         assert!(
             (gradient / scale - expected_unscaled).abs() < 1e-12,
             "goal scale {scale}: derivative {gradient} lost its physical scale"
+        );
+    }
+}
+
+#[test]
+fn the_transient_adjoint_retains_finite_short_step_heating() {
+    // Both the deposited heat dt*b and the forward matrix C + theta*dt*K
+    // remain finite. C/dt overflows in the first case, and even 1/dt
+    // overflows in the second: neither intermediate belongs in the adjoint.
+    let mesh = unit_mesh(2);
+    let boundary = adiabatic(&mesh);
+    let material = material();
+    let density = 1e307;
+    let source = ScalarField::uniform("short heat pulse", density).unwrap();
+    let initial = vec![T_COLD; mesh.vertex_count()];
+    let functional =
+        FinalStateFunctional::new(vec![1.0 / mesh.vertex_count() as f64; mesh.vertex_count()])
+            .unwrap();
+    let steps = 3;
+
+    for (dt, capacity_density) in [(1e-306, RHO_CP), (1e-310, 2.0)] {
+        let capacity = VolumetricHeatCapacity::declared(capacity_density).unwrap();
+        let expected = (dt * density / capacity_density) * steps as f64;
+        for theta in [0.5, 0.75, 1.0] {
+            let config = TransientConfig::new(theta, dt, linear_config()).unwrap();
+            let (solution, gradient) = with_cx(|cx| {
+                march_with_capacity_and_source_scale_gradient(
+                    cx,
+                    ConductionProblem {
+                        mesh: &mesh,
+                        boundary: &boundary,
+                        material: &material,
+                        source: &source,
+                        element_materials: None,
+                    },
+                    HeatCapacity::Uniform(capacity),
+                    &config,
+                    &initial,
+                    &functional,
+                    steps,
+                )
+            })
+            .expect("finite heat pulse and its gradient");
+            assert!(
+                solution
+                    .temperature
+                    .iter()
+                    .all(|&t| { (t - (T_COLD + expected)).abs() < 2e-12 })
+            );
+            assert!(
+                (gradient / expected - 1.0).abs() < 1e-12,
+                "theta={theta}, dt={dt}: gradient {gradient} != exact heating {expected}"
+            );
+
+            let standalone = with_cx(|cx| {
+                source_scale_gradient(
+                    cx,
+                    TransientProblem {
+                        mesh: &mesh,
+                        boundary: &boundary,
+                        material: &material,
+                        source: &source,
+                        capacity,
+                    },
+                    &config,
+                    &functional,
+                    steps,
+                )
+            })
+            .expect("standalone gradient of the same finite pulse");
+            assert!((standalone / expected - 1.0).abs() < 1e-12);
+        }
+    }
+}
+
+#[test]
+fn the_transient_adjoint_retains_the_finite_long_step_diffusion_limit() {
+    // One free vertex of a unit right tetrahedron has C = rho_cp/24,
+    // K = k/2, and b = source/24. The one-step source derivative is
+    // source/(rho_cp/dt + 12*k), even when dt*b is unrepresentable.
+    let mesh = ConductionMesh::new(
+        TetComplex::from_tets(4, vec![[0, 1, 2, 3]]),
+        vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+    )
+    .unwrap();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "fixed opposite face",
+            |face| on_box_face(face.centroid.iter().sum(), 1.0),
+            ThermalBc::dirichlet(T_COLD).unwrap(),
+        )
+        .unwrap()
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    let k = 0.01;
+    let material = ConductivityModel::isotropic_declared(k).unwrap();
+    let density = 1000.0;
+    let source = ScalarField::uniform("steady heating", density).unwrap();
+    let capacity = VolumetricHeatCapacity::declared(2.0).unwrap();
+    let config = TransientConfig::backward_euler(1e308, linear_config()).unwrap();
+    let expected = density / (12.0 * k);
+    let initial = [T_COLD + expected, T_COLD, T_COLD, T_COLD];
+    let functional = FinalStateFunctional::probe(4, 0).unwrap();
+    let (solution, gradient) = with_cx(|cx| {
+        march_with_capacity_and_source_scale_gradient(
+            cx,
+            ConductionProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+                element_materials: None,
+            },
+            HeatCapacity::Uniform(capacity),
+            &config,
+            &initial,
+            &functional,
+            1,
+        )
+    })
+    .expect("finite equilibrium and source derivative");
+    assert!((solution.temperature[0] - initial[0]).abs() < 1e-10);
+    assert!((gradient / expected - 1.0).abs() < 1e-12);
+}
+
+#[test]
+fn the_short_step_adjoint_matches_finite_differences_with_heterogeneous_diffusion() {
+    use fs_conduction::material::{ElementMaterials, MaterialId, MaterialTable};
+
+    // Scale time, storage, and conductivities together so diffusion remains
+    // appreciable even though 1/dt cannot be represented. A nonuniform source,
+    // graded capacity, and a conductivity jump exercise both adjoint matrices.
+    let mesh = unit_mesh(2);
+    let boundary = cold_wall(&mesh);
+    let material = material();
+    let assigned = ElementMaterials::new(
+        MaterialTable::new([
+            (
+                MaterialId(0),
+                ConductivityModel::isotropic_declared(1e299).unwrap(),
+            ),
+            (
+                MaterialId(1),
+                ConductivityModel::isotropic_declared(8e299).unwrap(),
+            ),
+        ])
+        .unwrap(),
+        mesh.complex()
+            .tets
+            .iter()
+            .map(|tet| {
+                let mean_x = tet
+                    .iter()
+                    .map(|&v| mesh.positions()[v as usize][0])
+                    .sum::<f64>()
+                    / 4.0;
+                MaterialId(u32::from(mean_x >= 0.5))
+            })
+            .collect(),
+    )
+    .unwrap();
+    let capacities: Vec<_> = mesh
+        .positions()
+        .iter()
+        .map(|&[x, y, _]| VolumetricHeatCapacity::declared(1e-10 * (1.0 + x + 0.5 * y)).unwrap())
+        .collect();
+    let source_at = |scale: f64| {
+        ScalarField::nodal(
+            "scaled nonuniform heat pulse",
+            mesh.vertex_count(),
+            mesh.positions()
+                .iter()
+                .map(|&[x, y, _]| scale * 1e300 * (1.0 + x + 2.0 * y))
+                .collect(),
+        )
+        .unwrap()
+    };
+    let source = source_at(1.0);
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &material,
+        source: &source,
+        element_materials: Some(&assigned),
+    };
+    let initial = vec![T_COLD; mesh.vertex_count()];
+    let functional =
+        FinalStateFunctional::new(vec![1.0 / mesh.vertex_count() as f64; mesh.vertex_count()])
+            .unwrap();
+    let steps = 4;
+
+    for theta in [0.5, 0.75, 1.0] {
+        let config = TransientConfig::new(theta, 1e-310, linear_config()).unwrap();
+        let (_, gradient) = with_cx(|cx| {
+            march_with_capacity_and_source_scale_gradient(
+                cx,
+                problem,
+                HeatCapacity::Nodal(&capacities),
+                &config,
+                &initial,
+                &functional,
+                steps,
+            )
+        })
+        .expect("heterogeneous diffusion and its gradient");
+        let objective = |p: &[f64]| {
+            let source = source_at(p[0]);
+            let solution = with_cx(|cx| {
+                march_with_capacity(
+                    cx,
+                    ConductionProblem {
+                        source: &source,
+                        ..problem
+                    },
+                    HeatCapacity::Nodal(&capacities),
+                    &config,
+                    &initial,
+                    steps,
+                )
+            })
+            .unwrap();
+            functional.evaluate(&solution.temperature)
+        };
+        let verdict = verify_gradient(&objective, &[1.0], &[gradient], &[vec![1.0]], 1e-4, 1e-6);
+        assert!(
+            verdict.pass,
+            "theta={theta}: short-step adjoint disagrees with finite differences: {:?}",
+            verdict.pairs
+        );
+        assert_eq!(verdict.informative_directions, 1);
+        assert!(
+            gradient > 0.1,
+            "the diffusion response must remain appreciable"
         );
     }
 }
