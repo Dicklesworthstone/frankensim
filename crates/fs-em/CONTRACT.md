@@ -4414,11 +4414,32 @@ charges and volume sources stay fixed; reciprocity, gauge invariance and
 component charge are checked without replacing the nonlinear field by a global
 Q=C V model. Source endpoints and genuine constitutive kinks refuse an
 unspecified two-sided derivative. The native 3D snapshot has no polarization
-history, impressed P, surface-charge/flux source adapter, finite charge
-transport or inferred open-domain boundary. Six synthetic regression groups
+history, finite charge transport or inferred open-domain boundary. Six synthetic regression groups
 specify rotated nonlinear plates, anisotropic native-Hodge parity with space
 charge, trapped middle-conductor charge, independent extreme gauges, a
 single-conductor charged tetrahedron and source/work/cancellation bounds.
+
+The nonlinear 3D electrode owner also accepts
+`solve_with_sources(SpatialElectrostaticSources, displacement_faces, ...)`.
+The existing native source assembler is factored through geometry and shared
+with linear 3D electrostatics; it integrates the same exact volume/face moments
+and polarization weak loads without preparing a throwaway linear Hodge.
+Original interior free-charge sheets and outward total-D traces retain their
+physical signs and geometry admission, including conflicts with voltage or
+floating metal faces. Per-component admission closes
+Q_electrode + Q_volume + Q_sheet - Q_outward independently.
+
+Reported total displacement is D_material(E)+P_impressed; the original
+constitutive displacement, energy, coenergy and bias tangent remain separately
+available. The signed integral E.P is source work, with an independent check
+against its weak nodal pairing. The energy identity uses the original
+electrode/free-source pairing minus this polarization term. Differential
+capacitance holds all prescribed sources fixed. Nonzero impressed P, sheets
+and outward flux refuse shape motion until their transport is defined;
+explicitly zero sources preserve the existing motion path. Five additional
+synthetic regressions specify nonlinear sheet jumps, open-circuit polarization
+under an extreme common gauge, flux signs, combined native tensor/source
+parity, physical refusals and deterministic retry.
 
 The nonlinear 3D field's `shape_forces` and `virtual_work` differentiate
 that same original mixed electrical functional with voltage controls and

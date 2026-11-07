@@ -2,6 +2,8 @@
 //! Authored constitutive fixtures do not represent qualified material data.
 #[path = "spatial_nonlinear_electrostatic/force.rs"]
 mod force;
+#[path = "spatial_nonlinear_electrostatic/sources.rs"]
+mod sources;
 
 use fs_em::{
     electrostatic::{

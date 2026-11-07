@@ -9,18 +9,24 @@
 //! coexist with the original isotropic reversible D(|E|) curves. Physical
 //! storage is integral E.dD, coenergy is integral D.dE, and the analytic tangent
 //! is applied without a global matrix. Source bounds are never extrapolated.
-//! This fixed-geometry snapshot has no polarization history, charge transport,
-//! imposed polarization, sheet charge or infinite-domain boundary inference.
+//! Original volume/sheet free charge, fixed impressed polarization and outward
+//! displacement traces share the native exact tetrahedral source integrator.
+//! This snapshot infers no polarization history, charge transport, source motion
+//! or infinite-domain boundary condition.
 
 mod constitutive;
 pub mod force;
 mod solve;
+mod sources;
 pub mod tangent;
 
 use super::electrodes::{Dofs, Layout, VoltageReferences};
 use super::{
     ElectrodeControl, ElectrostaticError, Error, NonlinearElectrostaticControls,
     NonlinearElectrostaticReport, add, finite, gauss, invalid, poll, positive, weighted,
+};
+pub use crate::spatial::electrostatic::{
+    ElectrostaticChargeSheet, ElectrostaticDisplacementFace, SpatialElectrostaticSources,
 };
 use crate::spatial::{SpatialGeometry, SpatialMagneticError, prepare_geometry};
 use fs_feec::weighted::{CellWeight, WeightedAssemblyLimits};
@@ -222,6 +228,10 @@ impl SpatialNonlinearElectrostatics {
         self.geometry.exterior_normal(face)
     }
 
+    pub fn face_area_m2(&self, face: usize) -> Option<f64> {
+        self.geometry.face_area_m2(face)
+    }
+
     fn element(&self, cell: usize) -> Element<'_> {
         Element {
             vertices: &self.mesh().tets[cell],
@@ -315,9 +325,41 @@ impl<'m> SpatialNonlinearElectrodes<'m> {
         settings: NonlinearElectrostaticControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialNonlinearElectricField<'m>, Error> {
+        self.solve_with_sources(
+            SpatialElectrostaticSources {
+                free_charge_density_c_m3,
+                impressed_polarization_c_m2: None,
+                sheets: &[],
+            },
+            &[],
+            controls,
+            initial_relative_voltage_v,
+            settings,
+            cancelled,
+        )
+    }
+
+    /// Solve the original material law with prescribed free charge, fixed P and
+    /// uniform outward D.n on original exterior faces. Displacement traces may
+    /// not also prescribe an electrode's complete P1 face, including floating
+    /// electrodes. Internal free sheets do not duplicate bound charge from P.
+    ///
+    /// Storage and coenergy remain those of the constitutive law. The impressed
+    /// source's E.P pairing is reported and audited separately; no source
+    /// transport, mechanical work or additional material storage is inferred.
+    pub fn solve_with_sources(
+        &self,
+        sources: SpatialElectrostaticSources<'_>,
+        displacement_faces: &[ElectrostaticDisplacementFace],
+        controls: &[ElectrodeControl],
+        initial_relative_voltage_v: &[f64],
+        settings: NonlinearElectrostaticControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialNonlinearElectricField<'m>, Error> {
         solve::solve(
             self,
-            free_charge_density_c_m3,
+            sources,
+            displacement_faces,
             controls,
             initial_relative_voltage_v,
             settings,
@@ -352,6 +394,7 @@ pub struct SpatialNonlinearElectricField<'m> {
     terminal_charge_c: Vec<f64>,
     nodal_boundary_charge_c: Vec<Option<f64>>,
     free_charge_density_c_m3: Vec<f64>,
+    additional_sources: sources::RetainedSources,
     evaluation: Evaluation,
     volume_charge_c: f64,
     charge_balance_residual_c: f64,
@@ -359,6 +402,7 @@ pub struct SpatialNonlinearElectricField<'m> {
     maximum_free_charge_residual_c: f64,
     maximum_floating_charge_residual_c: f64,
     energy_identity_residual_j: f64,
+    maximum_component_energy_identity_residual_j: f64,
     report: NonlinearElectrostaticReport,
 }
 impl<'m> SpatialNonlinearElectricField<'m> {
@@ -419,6 +463,13 @@ impl<'m> SpatialNonlinearElectricField<'m> {
         &self.evaluation.electric
     }
     pub fn displacement_c_m2(&self) -> &[[f64; 3]] {
+        self.additional_sources
+            .total_displacement_c_m2
+            .as_deref()
+            .unwrap_or(&self.evaluation.displacement)
+    }
+    /// Original constitutive D, excluding separately impressed polarization.
+    pub fn constitutive_displacement_c_m2(&self) -> &[[f64; 3]] {
         &self.evaluation.displacement
     }
     /// Analytic dD/dE at the accepted bias. Source knots retain the source's
@@ -453,8 +504,13 @@ impl<'m> SpatialNonlinearElectricField<'m> {
     pub fn maximum_floating_charge_residual_c(&self) -> f64 {
         self.maximum_floating_charge_residual_c
     }
+    /// U + W* + integral(E.P) minus physical free-charge, outward-flux and
+    /// electrode work. Impressed-source work also has an independent audit.
     pub fn energy_identity_residual_j(&self) -> f64 {
         self.energy_identity_residual_j
+    }
+    pub fn maximum_component_energy_identity_residual_j(&self) -> f64 {
+        self.maximum_component_energy_identity_residual_j
     }
     pub fn report(&self) -> &NonlinearElectrostaticReport {
         &self.report

@@ -53,6 +53,11 @@ impl<'a, 'm> SpatialElectrostaticShapeForces<'a, 'm> {
 
 impl<'m> SpatialNonlinearElectricField<'m> {
     fn require_shape_transport(&self, cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
+        if self.has_additional_sources() {
+            return Err(invalid(
+                "shape work with impressed polarization or surface sources requires their transport law",
+            ));
+        }
         for law in &self.problem.materials {
             poll(cancelled)?;
             if !isotropic(law) {

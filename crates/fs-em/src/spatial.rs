@@ -262,6 +262,10 @@ impl SpatialGeometry {
             .filter(|geometry| geometry.cells.len() == 1)
             .map(|geometry| geometry.outward_normal)
     }
+
+    pub(crate) fn face_area_m2(&self, face: usize) -> Option<f64> {
+        self.faces.get(face).map(|geometry| geometry.area_m2)
+    }
 }
 
 pub(crate) fn prepare_geometry(
@@ -388,12 +392,20 @@ pub(crate) fn prepare_geometry(
     })
 }
 
-struct ScalarBoundary {
+pub(crate) struct ScalarBoundary {
     prescribed: Vec<Option<f64>>,
     physical_prescribed: Vec<bool>,
     flux_load_wb: Vec<f64>,
     gauges: Vec<usize>,
     references: Vec<f64>,
+}
+
+impl ScalarBoundary {
+    /// Signed native weak surface load, in the physical formulation's units.
+    /// Consuming it drops temporary trace/gauge arrays before nonlinear work.
+    pub(crate) fn into_flux_load(self) -> Vec<f64> {
+        self.flux_load_wb
+    }
 }
 
 fn prepare_scalar_boundary(
