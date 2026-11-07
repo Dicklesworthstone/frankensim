@@ -22,6 +22,8 @@ use fs_thermochem::kinetics::atomic_ionization::radiative_recombination::{
     AtomicRadiativeRecombinationV1, RadiativeRecombinationErrorV1,
 };
 
+/// Evolving populations and thermal pools with the same spectral radiation field.
+pub mod evolution;
 mod solve;
 
 /// One homogeneous slab with a retained atomic channel and actual populations.

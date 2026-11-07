@@ -1,7 +1,7 @@
 use super::*;
 use fs_math::dd::Dd;
 use fs_math::det::{exp, expm1};
-use fs_qty::Energy;
+use fs_qty::{Energy, Temperature};
 use fs_thermochem::electron_collision::AVOGADRO_PER_MOL as NA;
 use fs_thermochem::kinetics::atomic_ionization::radiative_recombination::spectrum::RecombinationSpectrumV1;
 
@@ -68,13 +68,36 @@ struct Binding<'a> {
     expected: [f64; 3], // emitted number, photon energy, captured energy
     cutoff: f64,
     tail: [f64; 3],
+    volume: f64,
 }
 struct Prepared<'a> {
     cells: Vec<Binding<'a>>,
+    area: f64,
     shared_upper: f64,
     controls: DiffuseRecombinationSolve,
     panels: usize,
     work: usize,
+}
+
+/// Raw state supplied only by an already admitted same-source evolution owner.
+#[derive(Clone, Copy, Default)]
+pub(super) struct RadiationState {
+    pub amounts: [f64; 3], // lower stage, upper stage, electron [mol]
+    pub electron_temperature_k: f64,
+}
+
+/// The frozen query and live owner share one transfer kernel and balance gates.
+/// Source/geometry bindings and all cell/observable buffers survive RHS calls.
+pub(super) struct Workspace<'a> {
+    prepared: Prepared<'a>,
+    scratch: Scratch,
+    grid: Vec<f64>,
+    fine_angles: Vec<(f64, f64)>,
+    coarse_angles: Vec<(f64, f64)>,
+    angular: usize,
+    pub cells: Vec<DiffuseRecombinationCellBalance>,
+    pub interfaces: Vec<DiffuseRecombinationFlux>,
+    pub balance: DiffuseRecombinationBalance,
 }
 
 struct Scratch {
@@ -115,58 +138,145 @@ pub(super) fn evaluate(
     controls: DiffuseRecombinationSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<DiffuseRecombinationResult, Error> {
-    let mut prepared = Prepared::new(cells, area, controls, &mut cancelled)?;
-    let mut scratch = Scratch::new(cells.len())?;
-    let (mut extent, mut refinement, mut angular) = (32.0, 1_usize, 1_usize);
-    let mut normalized = [0.0; 3];
-    if prepared.cells.iter().any(|cell| cell.expected[0] > 0.0) {
-        loop {
-            poll(&mut cancelled)?;
-            prepared.cutoffs(extent)?;
-            let grid = prepared.grid(&mut cancelled)?;
-            let fine_angles = angles(angular, &X16, &W16)?;
-            let coarse_angles = angles(angular, &X8, &W8)?;
-            prepared.integrate(
-                &grid,
-                refinement,
-                &fine_angles,
-                &coarse_angles,
-                &mut scratch,
-                &mut cancelled,
-            )?;
-            prepared.tail_vector(&mut scratch.tail);
-            normalized = prepared.errors(&scratch)?;
-            if normalized[2] > 0.25 {
-                if extent >= 1024.0
-                    || prepared
-                        .cells
-                        .iter()
-                        .all(|c| c.pair_density_volume == 0.0 || c.cutoff == prepared.shared_upper)
-                {
-                    return Err(Error::UnresolvedTail {
-                        maximum_normalized_bound: normalized[2],
-                    });
-                }
-                extent *= 2.0;
-                continue;
-            }
-            if normalized[0] > 0.25 {
-                refinement = refinement.checked_mul(2).ok_or(Error::SpectralBudget)?;
-                continue;
-            }
-            if normalized[1] > 0.25 {
-                if angular >= controls.maximum_angular_subdivisions {
-                    return Err(Error::AngularBudget);
-                }
-                angular = angular
-                    .saturating_mul(2)
-                    .min(controls.maximum_angular_subdivisions);
-                continue;
-            }
-            break;
-        }
+    let mut workspace = Workspace::new(cells, area, controls, &mut cancelled)?;
+    workspace.run(&mut cancelled)?;
+    let mut results = Vec::new();
+    results
+        .try_reserve_exact(cells.len())
+        .map_err(|_| Error::Allocation)?;
+    for (c, original) in cells.iter().enumerate() {
+        poll(&mut cancelled)?;
+        results.push(DiffuseRecombinationCellResult {
+            state: original.state.clone(),
+            source: original.source.clone(),
+            balance: workspace.cells[c],
+            emission_cutoff_j: workspace.prepared.cells[c].cutoff,
+        });
     }
-    prepared.publish(cells, area, &scratch, normalized, angular, &mut cancelled)
+    poll(&mut cancelled)?;
+    Ok(DiffuseRecombinationResult {
+        cells: results,
+        interfaces: workspace.interfaces,
+        balance: workspace.balance,
+        area,
+        controls,
+    })
+}
+
+impl<'a> Workspace<'a> {
+    pub fn new(
+        cells: &[DiffuseRecombinationCell<'a>],
+        area: Area,
+        controls: DiffuseRecombinationSolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            prepared: Prepared::new(cells, area, controls, cancelled)?,
+            scratch: Scratch::new(cells.len())?,
+            grid: Vec::new(),
+            fine_angles: Vec::new(),
+            coarse_angles: Vec::new(),
+            angular: 1,
+            cells: buffer(cells.len(), DiffuseRecombinationCellBalance::default())?,
+            interfaces: buffer(cells.len() + 1, DiffuseRecombinationFlux::default())?,
+            balance: DiffuseRecombinationBalance::default(),
+        })
+    }
+
+    pub fn preparation_work(&self) -> usize {
+        self.prepared.work
+    }
+
+    /// Refresh only actual populations and temperature; immutable source and
+    /// geometry admission has already happened. The shared work cap also
+    /// permits an outer time owner to bound all accepted/rejected RHS work.
+    pub fn evaluate(
+        &mut self,
+        states: &[RadiationState],
+        remaining_work: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        if states.len() != self.prepared.cells.len() {
+            return Err(Error::Invalid("radiation state shape"));
+        }
+        let per_query_limit = self.prepared.controls.maximum_work;
+        self.prepared.controls.maximum_work = per_query_limit.min(remaining_work);
+        self.prepared.panels = 0;
+        self.prepared.work = 0;
+        let result = self
+            .prepared
+            .refresh(states, cancelled)
+            .and_then(|()| self.run(cancelled));
+        self.prepared.controls.maximum_work = per_query_limit;
+        result
+    }
+
+    fn run(&mut self, cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
+        // A later dark query must not reuse a previous luminous field.
+        self.scratch.values.fill(Sum::default());
+        self.scratch.spectral_errors.fill(Sum::default());
+        self.scratch.angular_errors.fill(Sum::default());
+        self.scratch.tail.fill(0.0);
+        let (mut extent, mut refinement) = (32.0, 1_usize);
+        let mut normalized = [0.0; 3];
+        let prepared = &mut self.prepared;
+        if prepared.cells.iter().any(|cell| cell.expected[0] > 0.0) {
+            loop {
+                poll(cancelled)?;
+                prepared.cutoffs(extent)?;
+                prepared.grid(&mut self.grid, cancelled)?;
+                angles(self.angular, &X16, &W16, &mut self.fine_angles)?;
+                angles(self.angular, &X8, &W8, &mut self.coarse_angles)?;
+                prepared.integrate(
+                    &self.grid,
+                    refinement,
+                    &self.fine_angles,
+                    &self.coarse_angles,
+                    &mut self.scratch,
+                    cancelled,
+                )?;
+                prepared.tail_vector(&mut self.scratch.tail);
+                normalized = prepared.errors(&self.scratch)?;
+                if normalized[2] > 0.25 {
+                    if extent >= 1024.0
+                        || prepared.cells.iter().all(|c| {
+                            c.pair_density_volume == 0.0 || c.cutoff == prepared.shared_upper
+                        })
+                    {
+                        return Err(Error::UnresolvedTail {
+                            maximum_normalized_bound: normalized[2],
+                        });
+                    }
+                    extent *= 2.0;
+                    continue;
+                }
+                if normalized[0] > 0.25 {
+                    refinement = refinement.checked_mul(2).ok_or(Error::SpectralBudget)?;
+                    continue;
+                }
+                if normalized[1] > 0.25 {
+                    if self.angular >= prepared.controls.maximum_angular_subdivisions {
+                        return Err(Error::AngularBudget);
+                    }
+                    self.angular = self
+                        .angular
+                        .saturating_mul(2)
+                        .min(prepared.controls.maximum_angular_subdivisions);
+                    continue;
+                }
+                break;
+            }
+        }
+        self.balance = prepared.balances(
+            &self.scratch,
+            normalized,
+            self.angular,
+            &mut self.cells,
+            &mut self.interfaces,
+            cancelled,
+        )?;
+        Ok(())
+    }
 }
 
 impl<'a> Prepared<'a> {
@@ -199,6 +309,7 @@ impl<'a> Prepared<'a> {
         }
         let mut result = Self {
             cells: Vec::new(),
+            area: area.value(),
             shared_upper: f64::INFINITY,
             controls,
             panels: 0,
@@ -274,9 +385,73 @@ impl<'a> Prepared<'a> {
                 expected,
                 cutoff: 0.0,
                 tail: [0.0; 3],
+                volume: state.volume().value(),
             });
         }
         Ok(result)
+    }
+
+    fn refresh(
+        &mut self,
+        states: &[RadiationState],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        self.shared_upper = f64::INFINITY;
+        for (index, state) in states.iter().enumerate() {
+            poll(cancelled)?;
+            self.spend(1)?;
+            if state.amounts.iter().any(|n| !nonnegative(*n))
+                || !positive(state.electron_temperature_k)
+            {
+                return Err(Error::Invalid("raw radiation populations or temperature"));
+            }
+            let cell = &mut self.cells[index];
+            let [lower, upper, electron] = state.amounts;
+            let temperature = Temperature::new(state.electron_temperature_k);
+            cell.spectrum = cell
+                .source
+                .spectrum(temperature)
+                .map_err(|error| source_error(index, error))?;
+            cell.opacity_per_sigma = NA * (lower / self.area);
+            cell.pair_density_volume = (NA * upper) * (NA * (electron / cell.volume));
+            cell.cutoff = 0.0;
+            cell.tail = [0.0; 3];
+            cell.expected = [0.0; 3];
+            if !nonnegative(cell.opacity_per_sigma)
+                || !nonnegative(cell.pair_density_volume)
+                || (lower > 0.0 && cell.opacity_per_sigma == 0.0)
+                || (upper > 0.0 && electron > 0.0 && cell.pair_density_volume == 0.0)
+            {
+                return Err(Error::Arithmetic("refreshed radiation inventory"));
+            }
+            if cell.pair_density_volume > 0.0 {
+                let moments = cell
+                    .source
+                    .evaluate(
+                        temperature,
+                        self.controls.source_quadrature,
+                        &mut *cancelled,
+                    )
+                    .map_err(|error| source_error(index, error))?;
+                cell.expected = [
+                    moments.coefficient_m3_s,
+                    moments.emitted_photon_energy_j_m3_s,
+                    moments.captured_kinetic_energy_j_m3_s,
+                ]
+                .map(|value| value * cell.pair_density_volume);
+                if cell.expected.iter().any(|x| !nonnegative(*x))
+                    || (moments.coefficient_m3_s > 0.0 && cell.expected[0] == 0.0)
+                {
+                    return Err(Error::Arithmetic("refreshed original emission moments"));
+                }
+            }
+            if cell.opacity_per_sigma > 0.0 || cell.expected[0] > 0.0 {
+                self.shared_upper = self
+                    .shared_upper
+                    .min(cell.source.source().maximum_energy().value());
+            }
+        }
+        Ok(())
     }
 
     fn spend(&mut self, amount: usize) -> Result<(), Error> {
@@ -316,7 +491,8 @@ impl<'a> Prepared<'a> {
         Ok(())
     }
 
-    fn grid(&self, cancelled: &mut impl FnMut() -> bool) -> Result<Vec<f64>, Error> {
+    fn grid(&self, grid: &mut Vec<f64>, cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
+        grid.clear();
         let lower = self
             .cells
             .iter()
@@ -325,9 +501,8 @@ impl<'a> Prepared<'a> {
             .fold(f64::INFINITY, f64::min);
         let upper = self.cells.iter().map(|c| c.cutoff).fold(0.0, f64::max);
         if lower >= upper {
-            return Ok(Vec::new());
+            return Ok(());
         }
-        let mut grid = Vec::new();
         let mut push = |x: f64| -> Result<(), Error> {
             if x < lower || x > upper {
                 return Ok(());
@@ -367,7 +542,7 @@ impl<'a> Prepared<'a> {
         }
         grid.sort_by(f64::total_cmp);
         grid.dedup();
-        Ok(grid)
+        Ok(())
     }
 
     fn integrate(
@@ -672,31 +847,25 @@ impl<'a> Prepared<'a> {
         Ok(errors)
     }
 
-    fn publish(
+    fn balances(
         &self,
-        originals: &[DiffuseRecombinationCell<'_>],
-        area: Area,
         scratch: &Scratch,
         normalized: [f64; 3],
         angular: usize,
+        cells: &mut [DiffuseRecombinationCellBalance],
+        interfaces: &mut [DiffuseRecombinationFlux],
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<DiffuseRecombinationResult, Error> {
+    ) -> Result<DiffuseRecombinationBalance, Error> {
         let n = self.cells.len();
-        let mut interfaces = Vec::new();
-        interfaces
-            .try_reserve_exact(n + 1)
-            .map_err(|_| Error::Allocation)?;
         for face in 0..=n {
             let values = &scratch.values[CELL * n + FACE * face..CELL * n + FACE * (face + 1)];
-            interfaces.push(DiffuseRecombinationFlux {
+            interfaces[face] = DiffuseRecombinationFlux {
                 right_photons_per_s: values[0].value,
                 right_power_w: values[1].value,
                 left_photons_per_s: values[2].value,
                 left_power_w: values[3].value,
-            });
+            };
         }
-        let mut cells = Vec::new();
-        cells.try_reserve_exact(n).map_err(|_| Error::Allocation)?;
         let mut sums = [Dd::ZERO; 6];
         for (c, binding) in self.cells.iter().enumerate() {
             poll(cancelled)?;
@@ -796,12 +965,7 @@ impl<'a> Prepared<'a> {
             ]) {
                 *sum = *sum + Dd::from_f64(value);
             }
-            cells.push(DiffuseRecombinationCellResult {
-                state: originals[c].state.clone(),
-                source: originals[c].source.clone(),
-                balance,
-                emission_cutoff_j: binding.cutoff,
-            });
+            cells[c] = balance;
         }
         let escaped = Dd::from_f64(interfaces[0].left_photons_per_s)
             + Dd::from_f64(interfaces[n].right_photons_per_s);
@@ -816,29 +980,23 @@ impl<'a> Prepared<'a> {
             sums[1].to_f64(),
         )?;
         poll(cancelled)?;
-        Ok(DiffuseRecombinationResult {
-            cells,
-            interfaces,
-            area,
-            controls: self.controls,
-            balance: DiffuseRecombinationBalance {
-                emitted_photons_per_s: sums[0].to_f64(),
-                emitted_power_w: sums[1].to_f64(),
-                absorbed_photons_per_s: sums[2].to_f64(),
-                absorbed_power_w: sums[3].to_f64(),
-                escaped_photons_per_s: escaped.to_f64(),
-                escaped_power_w: escaped_power.to_f64(),
-                photon_residual_per_s: photon_residual,
-                energy_residual_w: energy_residual,
-                omitted_photon_rate_bound_per_s: sums[4].to_f64(),
-                omitted_power_bound_w: sums[5].to_f64(),
-                maximum_normalized_spectral_estimate: normalized[0],
-                maximum_normalized_angular_estimate: normalized[1],
-                maximum_normalized_tail_bound: normalized[2],
-                spectral_panels: self.panels,
-                angular_subdivisions: angular,
-                work: self.work,
-            },
+        Ok(DiffuseRecombinationBalance {
+            emitted_photons_per_s: sums[0].to_f64(),
+            emitted_power_w: sums[1].to_f64(),
+            absorbed_photons_per_s: sums[2].to_f64(),
+            absorbed_power_w: sums[3].to_f64(),
+            escaped_photons_per_s: escaped.to_f64(),
+            escaped_power_w: escaped_power.to_f64(),
+            photon_residual_per_s: photon_residual,
+            energy_residual_w: energy_residual,
+            omitted_photon_rate_bound_per_s: sums[4].to_f64(),
+            omitted_power_bound_w: sums[5].to_f64(),
+            maximum_normalized_spectral_estimate: normalized[0],
+            maximum_normalized_angular_estimate: normalized[1],
+            maximum_normalized_tail_bound: normalized[2],
+            spectral_panels: self.panels,
+            angular_subdivisions: angular,
+            work: self.work,
         })
     }
 
@@ -898,8 +1056,9 @@ fn angles<const N: usize>(
     panels: usize,
     nodes: &[f64; N],
     weights: &[f64; N],
-) -> Result<Vec<(f64, f64)>, Error> {
-    let mut output = Vec::new();
+    output: &mut Vec<(f64, f64)>,
+) -> Result<(), Error> {
+    output.clear();
     output
         .try_reserve_exact(2 * N * panels)
         .map_err(|_| Error::Allocation)?;
@@ -913,7 +1072,7 @@ fn angles<const N: usize>(
             }
         }
     }
-    Ok(output)
+    Ok(())
 }
 fn buffer<T: Clone>(n: usize, value: T) -> Result<Vec<T>, Error> {
     let mut v = Vec::new();

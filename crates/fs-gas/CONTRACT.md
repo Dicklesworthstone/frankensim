@@ -8099,3 +8099,68 @@ second-order refinement and conserved formation-reference shifts, and exercise
 neutral birth, missing-source/work/domain refusals and cancellation. Cross
 sections are manufactured test sources; these checks do not validate an
 empirical multielement plasma model or certify global temporal error.
+
+
+## Evolving diffuse recombination radiation and gas feedback
+
+`chemistry::diffuse_recombination::evolution::advance_diffuse_recombination`
+evolves the actual populations and electron energies of ordered mixed slabs
+while transporting their original spontaneous recombination spectra. Each slab
+retains one original adjacent atomic channel, fixed volume and common face
+area. Optional original neutral/Coulomb collision sources and held powers evolve
+the heavy pool through `CollisionalRadiativeThermal`. Emission changes the gas,
+changed populations alter opacity, and the evolving electron temperature
+changes subsequent emission and collision rates. Boundary escape, self
+reabsorption and illumination of other slabs are distinct physical accounts.
+
+The frozen query and live owner share the same spectral/angular transfer kernel
+and its conservation gates. A prepared workspace retains source/geometry
+bindings and reuses cell, observable, spectral-grid and angular buffers across
+raw population/temperature evaluations. No trial clones a thermodynamic bank
+or frozen state, creates a species vector, or nests a public adaptive solve.
+Bounded field evaluations and total radiation work include predictor and
+rejected-trial work; each field retains its spectral/angular/tail controls.
+
+Symmetric local collision/thermal half-steps surround an explicit-midpoint
+diffuse update. Both photon processes are excluded from those local half-steps
+to avoid double-counting emission or absorption. One full/two-half temporal
+controller includes populations, both temperatures, reaction and energy
+integrals, and every directional interface exposure. Positivity and original
+temperature support are acceptance conditions: an inadmissible radiation
+trial reduces the step instead of clipping or creating a trace carrier floor.
+This is a jointly estimated second-order composition, not an L-stable method
+or an unconditional positivity guarantee for arbitrary steps.
+
+The transfer kernel supplies direct signed net ionization, electron heating
+and gas-energy moments. Local self-recycling cancels before rounding, retaining
+escape loss even when independently rounded gross emission and absorption are
+equal. First-electron birth uses actual absorbed excess energy. Integrated
+photon and power fluxes cross the same slab interfaces as the reaction/heat
+updates. Publication independently closes actual original gas storage plus
+outer-boundary radiation loss against external pool work, and net radiative
+pair creation against escaped photons. The absolute gas-energy tolerance
+applies to each cell and once to the complete column. Caller states and sources
+remain unchanged on source, budget, conservation or cancellation refusal.
+
+This is quasi-static transport in transversely infinite plane-parallel slabs
+with vacuum boundaries and immediate electron thermalization. It adds no
+incident beam, finite light-travel delay or stored photon inventory, gas
+motion, scattering, stimulated emission, excited-level cascade, radiation
+pressure or multiple competing absorbing channels within a slab. The separate
+shared-electron network retains its maintained local field and unit-escape
+closure. Numerical time and spectral estimates do not certify spatial
+resolution, model-form error or experimental plasma accuracy. For physical
+context on diffuse ionization and heating, see Raicevic et al., MNRAS 437,
+2816 (2014), https://arxiv.org/abs/1311.0182; that different transport method
+is not a validation oracle for this implementation.
+
+Focused G1/G3/G4 cases compare an independent analytic-Milne/E3 evolving-slab
+ODE, nonlocal first-electron birth independent of an empty pool's stored
+temperature, and simultaneous impact/reverse capture, diffuse transfer,
+neutral thermal exchange and held work. Resolved timestep refinement checks
+second-order behavior. A formal optical-depth-1e20 long-exposure case retains
+finite net recombination and electron/gas cooling while gross self-recycling
+exceeds 1e17 mol. Empty/dark/zero-duration and original-source, allocation/work
+admission, step and cancellation cases retain transactional behavior. These
+manufactured numerical tests do not validate those extreme parameters as a
+physical plasma or bound the quasi-static approximation.
