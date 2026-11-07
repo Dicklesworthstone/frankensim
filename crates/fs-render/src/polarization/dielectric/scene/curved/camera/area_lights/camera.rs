@@ -70,7 +70,8 @@ pub struct AreaLightBinding<'a, 's, 'm> {
     pub receiver_object_id: u64,
     pub source_side: BoundarySide,
     pub initial_medium: usize,
-    /// Fallback basis for sources without declared polarization. A source
+    /// Fallback basis for sources without declared polarization, and the
+    /// geometric shooting chart for directional coating sources. A calibrated
     /// declaration owns its body axis even at unpolarized spectral knots.
     pub source_transverse_axis: Vec3,
     pub seeds: &'a [BundleImageSeed<'a>],
@@ -413,7 +414,7 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
         let wavelength = beam.wavelength_nm();
         for (index, binding) in self.bindings.iter().enumerate() {
             if binding.receiver_object_id != contact.object_id
-                || binding.source.emitter.evaluate(wavelength)? == 0.0 {
+                || binding.source.emitter.uniform_radiance(wavelength)? == Some(0.0) {
                 continue;
             }
             cx.checkpoint()?;
@@ -434,6 +435,7 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
             ).map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
             let mut image_options = binding.image_options;
             image_options.max_trace_evaluations = image_options.max_trace_evaluations.min(remaining);
+            let proposal_start = work.traces;
             let catalog = self.camera.scene.discover_bundle_images_from_surface_with_workspace(
                 cx, launch, source, target, settings.connection, binding.seeds,
                 image_options, &mut workspace.images,
@@ -448,7 +450,9 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
                 let connection = image.connection();
                 let bundle = connection.path().bundle();
                 let response = receiver.response(self.camera, connection, index)?;
-                if response.factor == 0.0 { continue; }
+                // A rounded unpolarized transported state must not remove a
+                // weak channel that the original thermal s/p replay retains.
+                if source_radiance.is_some() && response.factor == 0.0 { continue; }
                 let weights = if receiver.is_rough() {
                     binding.source.surface_mis_weights(sample, connection, target,
                         settings.connection.projection, response.pdf)
@@ -466,16 +470,30 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
                         connection_group_m: bundle.propagation().propagation().group_optical_path_length_m,
                     })?
                 };
-                let irradiance = weighted_irradiance_modulated(
-                    bundle, response.normal, settings.connection.projection, source_radiance,
-                    source_cosine, sample.pdf_area_per_m2(), 0.0, false, scale,
-                ).map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
-                if irradiance == 0.0 || weights.light_weight() == 0.0 { continue; }
-                if beam.power().i == 0.0 {
-                    return Err(CameraRadianceError::Unresolved(PathTermination::Extinguished).into());
+                let remaining = image_options.max_trace_evaluations
+                    .checked_sub(work.traces - proposal_start)
+                    .ok_or(AreaLightCameraError::TraceEvaluationLimit)?;
+                let policy = binding.seeds.get(image.first_seed())
+                    .ok_or(AreaLightCameraError::NumericalRange)?.policy;
+                let emission = binding.source.image_emission(cx, sample, binding.source_side,
+                    launch, connection, target, settings.connection, policy, source_radiance, remaining)
+                    .map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
+                work.add(emission.traces, emission.fields, emission.geometry)?;
+                for (channel, radiance_value) in emission.channels.into_iter().flatten() {
+                    let response = if source_radiance.is_some() { response }
+                        else { receiver.response(self.camera, &channel, index)? };
+                    if response.factor == 0.0 { continue; }
+                    let irradiance = weighted_irradiance_modulated(
+                        channel.path().bundle(), response.normal, settings.connection.projection,
+                        radiance_value, source_cosine, sample.pdf_area_per_m2(), 0.0, false, scale,
+                    ).map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
+                    if irradiance == 0.0 || weights.light_weight() == 0.0 { continue; }
+                    if beam.power().i == 0.0 {
+                        return Err(CameraRadianceError::Unresolved(PathTermination::Extinguished).into());
+                    }
+                    radiance.add(receiver.contribution(initial_index, response.factor, irradiance,
+                        weights.light_weight())?);
                 }
-                radiance.add(receiver.contribution(initial_index, response.factor, irradiance,
-                    weights.light_weight())?);
             }
         }
         Ok(())
@@ -506,7 +524,7 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
             if receiver_media(binding.interaction).is_some() {
                 for entry in self.bindings {
                     if entry.receiver_object_id == contact.object_id
-                        && entry.source.emitter.evaluate(path.beam().wavelength_nm())? > 0.0 {
+                        && entry.source.emitter.uniform_radiance(path.beam().wavelength_nm())? != Some(0.0) {
                         active_source = true;
                         break;
                     }
@@ -607,9 +625,7 @@ pub(super) fn validate_source_binding(
 ) -> Result<(), AreaLightCameraError> {
     let invalid = || AreaLightCameraError::InvalidBinding { index };
     if !core::ptr::eq(binding.source.scene, camera.scene)
-        || binding.source_side == BoundarySide::OnSurface
-        || (binding.source.emitter.sides() == super::super::EmissionSides::Front
-            && binding.source_side != BoundarySide::Positive)
+        || !binding.source.emitter.supports_side(binding.source_side)
         || binding.seeds.is_empty() || binding.seeds.len() > MAX_BUNDLE_IMAGE_SEEDS
         || binding.image_options.validate().is_err()
         || !binding.position_tolerance_m.is_finite() || binding.position_tolerance_m <= 0.0
@@ -681,7 +697,7 @@ pub(super) fn emitter_weight_for_source(
         let wavelength = path.beam().wavelength_nm();
         binding.source.emitter.admit_local_medium(
             camera.scene, sample.position_m(), path.medium_index(), wavelength)?;
-        if binding.source.emitter.evaluate(wavelength)? == 0.0 { return Ok(1.0); }
+        if binding.source.emitter.uniform_radiance(wavelength)? == Some(0.0) { return Ok(1.0); }
         cx.checkpoint()?;
         let target = anchor.target(sample.position_m(), binding.position_tolerance_m)
             .map_err(|error| connection_error(index, error))?;
@@ -725,7 +741,8 @@ pub(super) fn emitter_weight_for_source(
         // Membership and both proposal densities are geometric. Keep this
         // replay unpolarized so an exact polarized extinction cannot remove
         // an otherwise supported image; actual source contributions use the
-        // original full Stokes state in source.launch and SurfaceEmission.
+        // original full Stokes state, or the separate directional thermal
+        // channels, in source launch/replay and SurfaceEmission.
         let launch = BundleConnectionLaunch {
             ray: Ray { origin: sample.position_m(), dir: source_direction },
             transverse_axis,

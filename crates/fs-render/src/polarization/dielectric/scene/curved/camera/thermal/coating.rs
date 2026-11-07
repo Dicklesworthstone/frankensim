@@ -68,7 +68,10 @@ impl CoatingThermalEmitter {
         usize::from(self.side == BoundarySide::Negative)
     }
 
-    fn admit_scene(&self, scene: &CurvedPolarizedScene<'_>) -> Result<usize, CameraRadianceError> {
+    pub(in super::super) fn admit_scene(
+        &self,
+        scene: &CurvedPolarizedScene<'_>,
+    ) -> Result<usize, CameraRadianceError> {
         let invalid = || CameraRadianceError::InvalidEmitter {
             object_id: self.object_id,
         };

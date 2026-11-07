@@ -13,7 +13,7 @@
 //! [`camera`], using matching light-sampling and emitter-hit MIS weights.
 //! Finite authored image seeds do not establish global image completeness.
 
-use super::{CameraRadianceError, CurvedCameraScene, DiffuseThermalEmitter, EmissionSides, SurfaceEmitter};
+use super::{CameraRadianceError, CoatingThermalEmitter, CurvedCameraScene, DiffuseThermalEmitter, EmissionSides, SurfaceEmitter};
 use crate::charts::Ray;
 #[cfg(test)]
 use crate::charts::TriMesh;
@@ -50,6 +50,7 @@ use fs_math::det;
 
 mod emission;
 use emission::AreaEmission;
+mod replay;
 
 /// Reciprocal optical-image densities and complementary camera MIS weights.
 pub mod mis;
@@ -80,6 +81,8 @@ pub enum AreaEmitterError {
     ScatteringOwnerMismatch,
     EmptyImages,
     UnresolvedSeed { seed: usize, error: BundleConnectionError },
+    PolarizationReplay { channel: usize, error: BundleConnectionError },
+    ReplayTraceLimit { required: u32, remaining: u32 },
     Camera(CameraRadianceError),
     Source(CurvedBundleSceneError),
     Images(BundleImageError),
@@ -272,6 +275,33 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
         Self::prepare(cx, scene, AreaEmission::Thermal(emitter), Some(faces), limits)
     }
 
+    /// Prepare one original coating thermal face. Every optical image queries
+    /// its retained layer temperatures at the actual outgoing angle and
+    /// wavelength; its positive s/p radiances remain separate through transport.
+    pub fn try_new_coating_thermal(
+        cx: &Cx<'_>, scene: &'s CurvedPolarizedScene<'m>, emitter: CoatingThermalEmitter,
+        max_triangles: usize,
+    ) -> Result<Self, AreaEmitterError> {
+        Self::try_new_coating_thermal_with_limits(cx, scene, emitter,
+            AreaEmitterLimits { max_triangles, ..AreaEmitterLimits::default() })
+    }
+
+    /// Prepare the selected thermal side with the original geometry bounds.
+    pub fn try_new_coating_thermal_with_limits(
+        cx: &Cx<'_>, scene: &'s CurvedPolarizedScene<'m>, emitter: CoatingThermalEmitter,
+        limits: AreaEmitterLimits,
+    ) -> Result<Self, AreaEmitterError> {
+        Self::prepare(cx, scene, AreaEmission::Coating(emitter), None, limits)
+    }
+
+    /// Prepare a conditional original-face subset of one coating thermal side.
+    pub fn try_new_coating_thermal_faces(
+        cx: &Cx<'_>, scene: &'s CurvedPolarizedScene<'m>, emitter: CoatingThermalEmitter,
+        faces: &[usize], limits: AreaEmitterLimits,
+    ) -> Result<Self, AreaEmitterError> {
+        Self::prepare(cx, scene, AreaEmission::Coating(emitter), Some(faces), limits)
+    }
+
     fn prepare(
         cx: &Cx<'_>, scene: &'s CurvedPolarizedScene<'m>, emitter: AreaEmission<'e>,
         faces: Option<&[usize]>, limits: AreaEmitterLimits,
@@ -286,6 +316,9 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
             return Err(invalid());
         }
         if let AreaEmission::Thermal(thermal) = &emitter {
+            thermal.admit_scene(scene).map_err(AreaEmitterError::Camera)?;
+        }
+        if let AreaEmission::Coating(thermal) = &emitter {
             thermal.admit_scene(scene).map_err(AreaEmitterError::Camera)?;
         }
         let geometry = scene.geometry;
@@ -361,11 +394,16 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
     /// Original calibrated source, if this preparation uses one.
     /// Thermal emission has its own native owner and never fabricates a lamp.
     pub const fn source_emitter(&self) -> Option<&'e SurfaceEmitter> {
-        match self.emitter { AreaEmission::Calibrated(emitter) => Some(emitter), _ => None }
+        match &self.emitter { AreaEmission::Calibrated(emitter) => Some(*emitter), _ => None }
     }
     /// Complete retained thermal snapshot, including temperature and identity.
     pub const fn source_thermal_emitter(&self) -> Option<&DiffuseThermalEmitter> {
         match &self.emitter { AreaEmission::Thermal(emitter) => Some(emitter), _ => None }
+    }
+
+    /// Original directional source, including its emitting side and full state.
+    pub const fn source_coating_thermal_emitter(&self) -> Option<&CoatingThermalEmitter> {
+        match &self.emitter { AreaEmission::Coating(emitter) => Some(emitter), _ => None }
     }
 
     /// Atomically refresh an accepted thermal snapshot on the same object.
@@ -378,13 +416,30 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
         &mut self, cx: &Cx<'_>, emitter: DiffuseThermalEmitter,
     ) -> Result<(), AreaEmitterError> {
         cx.checkpoint()?;
-        if !matches!(self.emitter, AreaEmission::Thermal(_))
+        if !matches!(&self.emitter, AreaEmission::Thermal(_))
             || emitter.object_id() != self.emitter.object_id() {
             return Err(AreaEmitterError::InvalidEmitter { object_id: emitter.object_id() });
         }
         emitter.admit_scene(self.scene).map_err(AreaEmitterError::Camera)?;
         cx.checkpoint()?;
         self.emitter = AreaEmission::Thermal(emitter);
+        Ok(())
+    }
+
+    /// Refresh the same physical thermal face without rebuilding its original
+    /// geometry proposal. Camera bindings must use this exact new snapshot;
+    /// changed optical laws still require a matching native scene material.
+    pub fn refresh_coating_thermal_emitter(
+        &mut self, cx: &Cx<'_>, emitter: CoatingThermalEmitter,
+    ) -> Result<(), AreaEmitterError> {
+        cx.checkpoint()?;
+        if !matches!(&self.emitter, AreaEmission::Coating(original)
+            if original.object_id() == emitter.object_id() && original.side() == emitter.side()) {
+            return Err(AreaEmitterError::InvalidEmitter { object_id: emitter.object_id() });
+        }
+        emitter.admit_scene(self.scene).map_err(AreaEmitterError::Camera)?;
+        cx.checkpoint()?;
+        self.emitter = AreaEmission::Coating(emitter);
         Ok(())
     }
     pub const fn source_instance(&self) -> &'m GeometryInstance { self.instance }
@@ -519,8 +574,9 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
             cx, launch, source, target, connection, seeds, images, workspace,
         ).map_err(AreaEmitterError::Images)?;
         complete(catalog)?;
-        self.sum_images(sample, side, radiance, target, connection.projection,
-            catalog.images().iter().map(|image| (image.connection(), 0.0, false)),
+        self.sum_images(cx, sample, side, launch, radiance, target, connection,
+            seeds, images.max_trace_evaluations,
+            catalog.images().iter().map(|image| (image.first_seed(), image.connection(), 0.0, false)),
             AreaIrradianceSample { traces: catalog.trace_evaluations(),
                 fields: catalog.field_evaluations(), geometry: catalog.query_work(),
                 ..AreaIrradianceSample::default() })
@@ -551,9 +607,11 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
             cx, launch, source, target, connection, seeds, images, tracking, workspace, samples,
         ).map_err(AreaEmitterError::Survival)?;
         complete(catalog.geometric_catalog())?;
-        self.sum_images(sample, side, radiance, target, connection.projection,
-            catalog.images().iter().map(|image| (image.connection(),
-                image.log_scattering_survival(), image.ratio_tracking_zero())),
+        self.sum_images(cx, sample, side, launch, radiance, target, connection,
+            seeds, images.max_trace_evaluations,
+            catalog.geometric_catalog().images().iter().zip(catalog.images())
+                .map(|(geometric, image)| (geometric.first_seed(), image.connection(),
+                    image.log_scattering_survival(), image.ratio_tracking_zero())),
             AreaIrradianceSample { traces: catalog.trace_evaluations(),
                 fields: catalog.field_evaluations(), geometry: catalog.query_work(),
                 source_draws: catalog.free_flight_draws(),
@@ -564,14 +622,13 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
     fn launch(
         &self, sample: AreaEmitterSample<'_>, side: BoundarySide, initial_medium: usize,
         transverse_axis: Vec3, wavelength_nm: f64, seeds: &[BundleImageSeed<'_>],
-    ) -> Result<(BundleConnectionLaunch, BundleSurfaceSource, f64), AreaEmitterError> {
+    ) -> Result<(BundleConnectionLaunch, BundleSurfaceSource, Option<f64>), AreaEmitterError> {
         if !core::ptr::eq(sample.emitter, &self.emitter)
             || !core::ptr::eq(sample.instance, self.instance)
             || !core::ptr::eq(sample.support, &self.support) {
             return Err(AreaEmitterError::SampleOwnerMismatch);
         }
-        if side == BoundarySide::OnSurface
-            || (self.emitter.sides() == EmissionSides::Front && side != BoundarySide::Positive) {
+        if !self.emitter.supports_side(side) {
             return Err(AreaEmitterError::UnsupportedEmissionSide);
         }
         let seed = seeds.first().ok_or(AreaEmitterError::Images(BundleImageError::EmptySeeds))?;
@@ -579,7 +636,7 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
             .map_err(AreaEmitterError::Source)?;
         self.emitter.admit_local_medium(self.scene, sample.position_m, initial_medium, wavelength_nm)
             .map_err(AreaEmitterError::Camera)?;
-        let radiance = self.emitter.evaluate(wavelength_nm).map_err(AreaEmitterError::Camera)?;
+        let radiance = self.emitter.uniform_radiance(wavelength_nm).map_err(AreaEmitterError::Camera)?;
         let (transverse_axis, normalized_source_stokes) = self.emitter
             .polarization(self.instance, wavelength_nm, transverse_axis)
             .map_err(AreaEmitterError::Camera)?;
@@ -590,13 +647,15 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
 
     #[allow(clippy::too_many_arguments)]
     fn sum_images<'p>(
-        &self, sample: AreaEmitterSample<'_>, side: BoundarySide, radiance: f64,
-        target: BundleConnectionTarget, projection: ProjectionOptions,
-        images: impl Iterator<Item = (&'p BundleConnection, f64, bool)>,
+        &self, cx: &Cx<'_>, sample: AreaEmitterSample<'_>, side: BoundarySide,
+        launch: BundleConnectionLaunch, radiance: Option<f64>,
+        target: BundleConnectionTarget, options: BundleConnectionOptions,
+        seeds: &[BundleImageSeed<'_>], max_traces: u32,
+        images: impl Iterator<Item = (usize, &'p BundleConnection, f64, bool)>,
         mut result: AreaIrradianceSample,
     ) -> Result<AreaIrradianceSample, AreaEmitterError> {
         let mut sum = Sum::default();
-        for (connection, log_survival, ratio_zero) in images {
+        for (seed, connection, log_survival, ratio_zero) in images {
             let path = connection.path();
             let contact = path.source_contact().ok_or(AreaEmitterError::SourceContactMismatch)?;
             let bundle = path.bundle();
@@ -630,10 +689,19 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
                     normal.scale(-1.0)
                 } else { normal }
             } else { target.normal() };
-            let value = weighted_irradiance(bundle, normal, projection, radiance,
-                cosine, sample.pdf_area_per_m2, log_survival, ratio_zero)?;
-            sum.add(value);
-            result.images += 1;
+            let policy = seeds.get(seed).ok_or(AreaEmitterError::NumericalRange)?.policy;
+            let remaining = max_traces.checked_sub(result.traces).ok_or(AreaEmitterError::NumericalRange)?;
+            let emission = self.image_emission(cx, sample, side, launch, connection,
+                target, options, policy, radiance, remaining)?;
+            result.traces = result.traces.checked_add(emission.traces).ok_or(AreaEmitterError::NumericalRange)?;
+            result.fields = result.fields.checked_add(emission.fields).ok_or(AreaEmitterError::NumericalRange)?;
+            result.geometry = result.geometry.checked_add(emission.geometry).ok_or(AreaEmitterError::NumericalRange)?;
+            for (channel, radiance) in emission.channels.into_iter().flatten() {
+                let value = weighted_irradiance(channel.path().bundle(), normal, options.projection, radiance,
+                    cosine, sample.pdf_area_per_m2, log_survival, ratio_zero)?;
+                sum.add(value);
+            }
+            result.images = result.images.checked_add(1).ok_or(AreaEmitterError::NumericalRange)?;
         }
         let value = sum.value();
         if !value.is_finite() || value < 0.0 {
@@ -650,7 +718,7 @@ impl<'s, 'm> CurvedAreaEmitter<'s, 'm, 's> {
     pub fn from_camera(
         cx: &Cx<'_>, camera: &CurvedCameraScene<'s, 'm>, object_id: u64, max_triangles: usize,
     ) -> Result<Self, AreaEmitterError> {
-        let emitter = AreaEmission::from_camera(camera, object_id)?;
+        let emitter = AreaEmission::from_camera(camera, object_id, None)?;
         Self::prepare(cx, camera.scene, emitter, None,
             AreaEmitterLimits { max_triangles, ..AreaEmitterLimits::default() })
     }
@@ -660,7 +728,26 @@ impl<'s, 'm> CurvedAreaEmitter<'s, 'm, 's> {
         cx: &Cx<'_>, camera: &CurvedCameraScene<'s, 'm>, object_id: u64,
         faces: &[usize], limits: AreaEmitterLimits,
     ) -> Result<Self, AreaEmitterError> {
-        let emitter = AreaEmission::from_camera(camera, object_id)?;
+        let emitter = AreaEmission::from_camera(camera, object_id, None)?;
+        Self::prepare(cx, camera.scene, emitter, Some(faces), limits)
+    }
+
+    /// Select an original camera source side explicitly. This resolves the
+    /// physical snapshot when both coating thermal faces are bound to one object.
+    pub fn from_camera_side(
+        cx: &Cx<'_>, camera: &CurvedCameraScene<'s, 'm>, object_id: u64,
+        side: BoundarySide, limits: AreaEmitterLimits,
+    ) -> Result<Self, AreaEmitterError> {
+        let emitter = AreaEmission::from_camera(camera, object_id, Some(side))?;
+        Self::prepare(cx, camera.scene, emitter, None, limits)
+    }
+
+    /// Explicit physical side with a conditional original mesh-face proposal.
+    pub fn from_camera_side_faces(
+        cx: &Cx<'_>, camera: &CurvedCameraScene<'s, 'm>, object_id: u64,
+        side: BoundarySide, faces: &[usize], limits: AreaEmitterLimits,
+    ) -> Result<Self, AreaEmitterError> {
+        let emitter = AreaEmission::from_camera(camera, object_id, Some(side))?;
         Self::prepare(cx, camera.scene, emitter, Some(faces), limits)
     }
 }

@@ -338,4 +338,5 @@ mod mis;
 mod chart;
 mod thermal;
 mod polarized;
+mod coating_thermal;
 

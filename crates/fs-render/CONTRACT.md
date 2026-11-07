@@ -9114,10 +9114,9 @@ advancing or mutating heat. No source implies no new thermal table or solve.
 The observed mode retains the original local-index-one exterior approximation
 and finite optical support. Rough/periodic surfaces, unsupported arbitrary
 multilayer/transmitting native scene representations and nonvacuum emitting
-hosts refuse. Directional thermal sources currently enter through camera hits;
-the uniform-source finite-area proposal API does not substitute a fixed-angle
-thermal spectrum. Time-varying thermal states, directional thermal area NEE,
-and bulk birefringence remain separate work.
+hosts refuse. Directional thermal sources enter both camera hits and the native
+finite-area proposals described below. Time-varying thermal states and bulk
+birefringence remain separate work.
 
 ## Directional and spectral polarized environment observations
 
@@ -9201,3 +9200,51 @@ source support, budgets and cancellation. A native enthalpy regression checks
 local temperatures and incident/transmitted/thermal energy closure. These are
 numerical checks of the declared constitutive law, not measured beta calibration
 or evidence that other high-intensity processes can be neglected.
+
+## Directional polarized coating heat through finite-area light proposals
+
+`CurvedAreaEmitter` now admits the original `CoatingThermalEmitter` snapshot
+on its selected positive or negative source face. Camera-derived preparation
+selects an explicit face when both sides emit; complementary-hit matching
+retains exact source identity, side, geometry and body placement. Frozen source
+refresh retains the prepared area support but rechecks the original native
+smooth-conductor optical law. The existing calibrated and diffuse thermal
+source paths retain their radiance and sampling arithmetic.
+
+Shooting, image discovery and reverse MIS membership remain geometric and
+unpolarized. Each converged image evaluates the original coherent layer-work
+and Planck owner once at the actual emitted direction and vacuum wavelength.
+The retained positive s/p radiances stay separate through native transport and
+receiver response, preserving weak power that a rounded I/Q difference loses.
+The physical outgoing-ray/normal plane determines the source frame; a caller's
+shooting chart does not rotate the thermal polarization. No initial-angle
+evaluation or fixed lamp spectrum substitutes for the directional source law.
+
+Unequal nonzero s/p channels each use one fixed-ray native replay of the
+original image's branch policy. The original connection owner must accept its
+first trace; its existing replay validator checks the same branch signature
+and receiver residual. Exact-zero native interface power continues with the
+existing negative-infinity log-power marker and contributes zero; generic
+extinction/errors are not treated as successful dark paths. Representable
+near-Brewster residues remain positive. Equal channels reuse the original
+unpolarized connection, zero channels skip work, and all replay traces, field
+evaluations and geometry queries count against the original work limits.
+
+Standalone irradiance, surface NEE, molecular NEE and complementary camera
+hits share this source law. MIS densities and image counts belong to the
+geometric image, not to its two polarization replays. A molecular proposal
+reuses its original scattering-survival realization for both deterministic
+channels, without additional stochastic free-flight draws. This extension
+retains the thermal source's original finite spectral support, local-index-one
+emission domain and exactly matched native smooth-conductor/film restrictions.
+Focused native regressions cover a nonisothermal absorbing film, converged-angle
+irradiance, replay budgets, weak near-Brewster filtering, rotated emission
+frames, face/snapshot refusal, complementary hit/NEE MIS and clear molecular
+parity. They are numerical model regressions, not measured thermal calibration.
+
+Validation in this continuation is limited to pinned-nightly parsing of the
+changed Rust leaves, formatting of the new leaves, and an executed actual-source
+Fresnel/Jones probe retaining the finite near-Brewster pure-p channel. The three
+native scene regression groups are authored but unrun under the current build
+and storage limits; the numerical probe does not establish scene replay or NEE
+integration.

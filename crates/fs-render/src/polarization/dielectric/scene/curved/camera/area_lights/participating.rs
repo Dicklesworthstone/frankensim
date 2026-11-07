@@ -359,7 +359,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
     ) -> Result<(), AreaLightCameraError> {
         let beam = *path.beam();
         let wavelength = beam.wavelength_nm();
-        if binding.source.emitter.evaluate(wavelength)? == 0.0 { return Ok(()); }
+        if binding.source.emitter.uniform_radiance(wavelength)? == Some(0.0) { return Ok(()); }
         cx.checkpoint()?;
         if work.samples >= settings.area_lights.max_area_samples {
             return Err(AreaLightCameraError::AreaSampleLimit);
@@ -386,6 +386,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
             max_tracking_candidates: settings.max_source_candidates.checked_sub(tracking.candidates)
                 .ok_or(AreaLightCameraError::SourceTrackingLimit)?,
         };
+        let proposal_start = work.traces;
         let catalog = self.camera.participating_scene()
             .discover_bundle_images_from_surface_with_transmittance_samples(
                 cx, launch, source, target, settings.area_lights.connection, binding.seeds,
@@ -403,7 +404,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
             .ok_or(AreaLightCameraError::NumericalRange)?;
         tracking.candidates = tracking.candidates.checked_add(catalog.tracking_candidates())
             .ok_or(AreaLightCameraError::NumericalRange)?;
-        for tracked in catalog.images() {
+        for (image_index, tracked) in catalog.images().iter().enumerate() {
             cx.checkpoint()?;
             work.images = work.images.checked_add(1).ok_or(AreaLightCameraError::NumericalRange)?;
             let connection = tracked.connection();
@@ -412,7 +413,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
             let (normal, factor, weights) = match receiver {
                 Receiver::Surface(surface) => {
                     let response = surface.response(self.surface_camera(), connection, index)?;
-                    if response.factor == 0.0 { continue; }
+                    if source_radiance.is_some() && response.factor == 0.0 { continue; }
                     let weights = if surface.is_rough() {
                         binding.source.surface_mis_weights(sample, connection, target,
                             settings.area_lights.connection.projection, response.pdf)
@@ -436,21 +437,52 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
             };
             let weights = weights.map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
             let cosine = sample.normal().dot(bundle.propagation().initial_ray().dir).abs().min(1.0);
-            let irradiance = weighted_irradiance(bundle, normal, settings.area_lights.connection.projection,
-                source_radiance, cosine, sample.pdf_area_per_m2(), tracked.log_scattering_survival(),
-                tracked.ratio_tracking_zero())
+            let remaining = image_options.max_trace_evaluations
+                .checked_sub(work.traces - proposal_start)
+                .ok_or(AreaLightCameraError::TraceEvaluationLimit)?;
+            let image = catalog.geometric_catalog().images().get(image_index)
+                .ok_or(AreaLightCameraError::NumericalRange)?;
+            let policy = binding.seeds.get(image.first_seed())
+                .ok_or(AreaLightCameraError::NumericalRange)?.policy;
+            let emission = binding.source.image_emission(cx, sample, binding.source_side,
+                launch, connection, target, settings.area_lights.connection, policy,
+                source_radiance, remaining)
                 .map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
-            if irradiance == 0.0 || factor == 0.0 || weights.light_weight() == 0.0 { continue; }
-            if beam.power().i == 0.0 {
-                return Err(CameraRadianceError::Unresolved(PathTermination::Extinguished).into());
+            work.add(emission.traces, emission.fields, emission.geometry)?;
+            for (channel, radiance_value) in emission.channels.into_iter().flatten() {
+                let bundle = channel.path().bundle();
+                let (normal, factor) = if source_radiance.is_some() { (normal, factor) } else {
+                    match receiver {
+                        Receiver::Surface(surface) => {
+                            let response = surface.response(self.surface_camera(), &channel, index)?;
+                            (response.normal, response.factor)
+                        }
+                        Receiver::Molecular { phase } => {
+                            let endpoint = bundle.propagation().propagation();
+                            let frame = PolarizationFrame::try_new(endpoint.ray.dir, endpoint.transverse_axis)
+                                .map_err(|error| AreaLightCameraError::MolecularPhase { binding: index, error: error.into() })?;
+                            let angular = phase.rayleigh_connection_factor(beam, frame, bundle.interface_state())
+                                .map_err(|error| AreaLightCameraError::MolecularPhase { binding: index, error })?;
+                            (endpoint.ray.dir.scale(-1.0), angular)
+                        }
+                    }
+                };
+                let irradiance = weighted_irradiance(bundle, normal, settings.area_lights.connection.projection,
+                    radiance_value, cosine, sample.pdf_area_per_m2(), tracked.log_scattering_survival(),
+                    tracked.ratio_tracking_zero())
+                    .map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
+                if irradiance == 0.0 || factor == 0.0 || weights.light_weight() == 0.0 { continue; }
+                if beam.power().i == 0.0 {
+                    return Err(CameraRadianceError::Unresolved(PathTermination::Extinguished).into());
+                }
+                let value = match receiver {
+                    Receiver::Surface(surface) => surface.contribution(initial_index,
+                        factor, irradiance, weights.light_weight())?,
+                    Receiver::Molecular { .. } => directional_contribution(beam.power().i, initial_index,
+                        phase_index(beam.medium(), wavelength)?, factor, irradiance, weights.light_weight())?,
+                };
+                radiance.add(value);
             }
-            let value = match receiver {
-                Receiver::Surface(surface) => surface.contribution(initial_index,
-                    factor, irradiance, weights.light_weight())?,
-                Receiver::Molecular { .. } => directional_contribution(beam.power().i, initial_index,
-                    phase_index(beam.medium(), wavelength)?, factor, irradiance, weights.light_weight())?,
-            };
-            radiance.add(value);
         }
         Ok(())
     }
@@ -462,7 +494,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
         if !pdf.is_finite() || pdf <= 0.0 { return Err(AreaLightCameraError::NumericalRange); }
         for (slot, binding) in self.volume_bindings.iter().enumerate() {
             if binding.receiver_medium == path.medium_index()
-                && binding.source.emitter.evaluate(path.beam().wavelength_nm())? > 0.0 {
+                && binding.source.emitter.uniform_radiance(path.beam().wavelength_nm())? != Some(0.0) {
                 state.anchor = Some(ContinuationAnchor::Molecular(MolecularAnchor {
                     position: path.beam().ray().origin, medium: path.medium_index(), incoming,
                     outgoing: path.beam().ray().dir, pdf,

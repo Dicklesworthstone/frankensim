@@ -209,7 +209,7 @@ fn g1_thermal_chart_and_face_proposals_keep_original_area_and_exact_sample_owner
                 &seeds,
             )
             .unwrap();
-        near(radiance, planck(9750.0), 2e-12);
+        near(radiance.unwrap(), planck(9750.0), 2e-12);
         assert!(matches!(
             other.launch(
                 sample,
