@@ -159,10 +159,11 @@
 
 use crate::driving_point::{
     DrivingPointError, LineLadder, characteristic_line_realized_with_ladder,
+    characteristic_line_realized_with_ladder_exterior,
 };
 use crate::unilateral_contact::slit_contact_force;
 use fs_dcontact::{DContactError, Obstacle};
-use fs_duct::{Duct, MouthLoad, Termination};
+use fs_duct::{Duct, MouthLoad, TabulatedLoad, Termination};
 use fs_material::gas::GasState;
 use fs_math::det;
 use fs_phs::{PhsError, PortHamiltonian, WallPin, mass_spring_damper};
@@ -1433,6 +1434,42 @@ impl GlottalIsland {
         sample_rate_hz: u32,
         wall: Option<&WallPin>,
     ) -> Result<Self, GlottisError> {
+        Self::realize(card, two_mass, tract, gas, None, termination.into(), sample_rate_hz, wall)
+    }
+
+    /// [`GlottalIsland::new_with_wall`] for a tract filled with `gas` that radiates into a different `exterior` (breath
+    /// into room air). The mouth load is a table computed in that exterior and checked against it; the line's delay,
+    /// `zc`, propagation and loss, and the fold's flow density and viscosity, are all `gas`'s. The load is absolute, so
+    /// nothing is converted at the lips. With `exterior` equal to `gas` this is [`GlottalIsland::new_with_wall`] on that
+    /// table exactly.
+    ///
+    /// # Errors
+    /// As [`GlottalIsland::new`], or a table whose mouth or exterior gas does not match.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_wall_exterior(
+        card: FoldCard,
+        two_mass: bool,
+        tract: &Duct,
+        gas: &GasState,
+        exterior: &GasState,
+        table: &TabulatedLoad,
+        sample_rate_hz: u32,
+        wall: Option<&WallPin>,
+    ) -> Result<Self, GlottisError> {
+        Self::realize(card, two_mass, tract, gas, Some(exterior), MouthLoad::Tabulated(table), sample_rate_hz, wall)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn realize(
+        card: FoldCard,
+        two_mass: bool,
+        tract: &Duct,
+        gas: &GasState,
+        exterior: Option<&GasState>,
+        termination: MouthLoad<'_>,
+        sample_rate_hz: u32,
+        wall: Option<&WallPin>,
+    ) -> Result<Self, GlottisError> {
         card.validate()?;
         let inlet_r = tract
             .segments
@@ -1458,19 +1495,29 @@ impl GlottalIsland {
             max_taps: GLOTTAL_LINE_MAX_TAPS,
             ..LineLadder::default()
         };
-        let (line, _) = characteristic_line_realized_with_ladder(
-            tract,
-            gas,
-            termination,
-            sample_rate_hz,
-            8192,
-            zc_flow, // VOLUME-normalized zc (rho c / S) — input_impedance
-            // returns volume impedance; the specific rho*c here
-            // flattened R toward +1 (found via the tract lane)
-            wall,
-            None,
-            Some(&ladder),
-        )?;
+        let (line, _) = match (exterior, termination) {
+            (None, termination) => characteristic_line_realized_with_ladder(
+                tract,
+                gas,
+                termination,
+                sample_rate_hz,
+                8192,
+                zc_flow, // VOLUME-normalized zc (rho c / S) — input_impedance
+                // returns volume impedance; the specific rho*c here
+                // flattened R toward +1 (found via the tract lane)
+                wall,
+                None,
+                Some(&ladder),
+            )?,
+            (Some(exterior), MouthLoad::Tabulated(table)) => characteristic_line_realized_with_ladder_exterior(
+                tract, gas, exterior, table, sample_rate_hz, 8192, zc_flow, wall, None, Some(&ladder),
+            )?,
+            (Some(_), _) => {
+                return Err(GlottisError::Invalid {
+                    what: "a tract gas apart from the exterior needs a mouth load tabulated in that exterior",
+                });
+            }
+        };
         let TensionedFold {
             phs,
             linear,

@@ -51,7 +51,17 @@
 //! head_sphere <radius_m> <radius source without spaces>   (optional; the mouth as a cap on a rigid sphere)
 //! head_load cap                                           (optional, needs head_sphere and termination flanged; the lips see the sphere's load)
 //! torso_sphere <radius_m> <neck_gap_m> <source without spaces>   (optional, needs head_sphere; a torso sphere under the head)
+//! tract_gas <any `ambient` record>                        (optional, needs head_load; the gas inside the tract)
 //! ```
+//!
+//! `tract_gas` fills the tract with its own gas (breath) while `ambient` stays the exterior (the room). The island's
+//! line, the mouth-flow line, the passive formants and the glottal flow's density and viscosity take the tract gas; the
+//! lips' load table, the receiver and the head and torso spheres take `ambient`. The table is an absolute impedance
+//! (Pa s/m^3) computed in the exterior and checked against it, so nothing is converted at the lips: pressure and volume
+//! flow are continuous there. It needs `head_load`, because a declared termination would be evaluated in the tract's gas,
+//! and the two gases share one static pressure (mean flow is not modeled). The medium is stationary: the breath does not
+//! mix with the room or replace the tract's air over a note. Without the row the one `ambient` gas fills the tract and the
+//! exterior exactly as before.
 //!
 //! `head_sphere` observes the mouth as a cap of its own area on a rigid sphere of that radius, centred `radius` behind
 //! the mouth plane, instead of a disk in an infinite baffle ([`crate::pcm_wav::baffled::head::HeadSphere`]: the
@@ -171,7 +181,7 @@
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::driving_point::LineLadder;
-use crate::driving_point::outlet::mouth_flow_line;
+use crate::driving_point::outlet::{mouth_flow_line, mouth_flow_line_exterior};
 use crate::glottis::{
     FoldBody, FoldCard, FoldCardSource, FoldMode, FoldRestGap, FoldShape, GLOTTAL_LINE_MAX_TAPS, GlottalIsland,
 };
@@ -197,6 +207,8 @@ pub const VOICE_PERFORMANCE_SCHEMA: &str = "frankensim-voice-performance-v1";
 const HEAD_LOAD_NEEDS_SPHERE: &str = "head_load needs the head_sphere row: the load is that sphere's";
 const HEAD_LOAD_NEEDS_FLANGED: &str = "head_load needs `termination flanged`: it adds the sphere's change to the flanged load";
 const TORSO_NEEDS_SPHERE: &str = "torso_sphere needs the head_sphere row: the torso sits under that head";
+const TRACT_GAS_NEEDS_HEAD_LOAD: &str =
+    "tract_gas needs the head_load row: the lips' load must be computed in the exterior, not the tract's gas";
 /// Largest accepted file.
 pub const MAX_VOICE_PERFORMANCE_BYTES: usize = 1 << 20;
 const MAX_SECTIONS: usize = 1024;
@@ -215,8 +227,10 @@ pub struct VoiceDescription {
     pub mechanics_per_output: u32,
     /// Pascals mapped to PCM full scale by the command output.
     pub full_scale_pa: f64,
-    /// One immutable gas record fills the tract and the exterior.
+    /// One immutable gas record fills the exterior, and the tract too unless `tract_gas` is present.
     gas: GasRecord,
+    /// Opt-in `tract_gas`: the gas inside the tract (module doc); `None` fills the tract with `gas`.
+    tract_gas: Option<GasRecord>,
     /// `true` for the two-mass fold, `false` for the one-mass image.
     pub two_mass: bool,
     /// Lumped fold parameters.
@@ -329,7 +343,8 @@ impl VoiceDescription {
     }
 
     /// Admit legacy air, named mixtures or source-backed NASA-9 gas records.
-    /// All tract, fold-flow and radiation consumers borrow the same state;
+    /// All tract, fold-flow and radiation consumers borrow the same state,
+    /// unless a `tract_gas` row fills the tract with its own (module doc);
     /// source receipts are retained without changing its coefficients.
     /// The medium is stationary; this does not model species transport.
     ///
@@ -354,6 +369,7 @@ impl VoiceDescription {
         let mut audio = None;
         let mut full_scale = None;
         let mut gas = None;
+        let mut tract_gas = None;
         let mut fold = None;
         let mut wall = None;
         let mut termination = None;
@@ -414,6 +430,19 @@ impl VoiceDescription {
                         return Err("ambient gas contains extra fields".into());
                     }
                     once(&mut gas, record, key)?;
+                }
+                "tract_gas" => {
+                    let record_text = rest.join(" ");
+                    let mut fields = record_text.split_ascii_whitespace();
+                    if fields.clone().next() == Some("moist_air") {
+                        fields.next();
+                    }
+                    let record = read_gas_record(&mut fields, None, sources)
+                        .map_err(|e| format!("tract gas refused: {e}"))?;
+                    if fields.next().is_some() {
+                        return Err("tract gas contains extra fields".into());
+                    }
+                    once(&mut tract_gas, record, key)?;
                 }
                 "fold" => {
                     // Ten fields; an optional eleventh sets the upper-section thickness of the
@@ -713,12 +742,24 @@ impl VoiceDescription {
         if torso_sphere.is_some() && head_sphere.is_none() {
             return Err(TORSO_NEEDS_SPHERE.into());
         }
+        // In the order the fields were always refused: full scale, then the gas.
+        let full_scale_pa = full_scale.ok_or_else(|| missing("full_scale_pa"))?;
+        let gas = gas.ok_or_else(|| missing("ambient"))?;
+        if let Some(tract) = &tract_gas {
+            if head_load.is_none() {
+                return Err(TRACT_GAS_NEEDS_HEAD_LOAD.into());
+            }
+            if tract.state().pressure != gas.state().pressure {
+                return Err("tract_gas and ambient need one static pressure: mean flow is not modeled".into());
+            }
+        }
         Ok(Self {
             output_rate_hz,
             samples,
             mechanics_per_output,
-            full_scale_pa: full_scale.ok_or_else(|| missing("full_scale_pa"))?,
-            gas: gas.ok_or_else(|| missing("ambient"))?,
+            full_scale_pa,
+            gas,
+            tract_gas,
             two_mass,
             fold,
             fold_shape,
@@ -743,7 +784,7 @@ impl VoiceDescription {
         })
     }
 
-    /// The exact shared state filling the tract and the exterior.
+    /// The exact state of the exterior, which also fills the tract unless a `tract_gas` row is present.
     #[must_use]
     pub fn ambient_gas(&self) -> &GasState {
         self.gas.state()
@@ -755,13 +796,28 @@ impl VoiceDescription {
         &self.gas
     }
 
+    /// The exact state filling the tract: the `tract_gas` row's, else [`Self::ambient_gas`].
+    #[must_use]
+    pub fn tract_gas(&self) -> &GasState {
+        self.tract_gas.as_ref().map_or_else(|| self.gas.state(), GasRecord::state)
+    }
+
+    /// The `tract_gas` row's record with its source receipts; `None` when the tract holds the exterior's gas.
+    #[must_use]
+    pub const fn tract_gas_record(&self) -> Option<&GasRecord> {
+        self.tract_gas.as_ref()
+    }
+
     /// Realize the island, the tract's mouth-flow line and the microphone.
     ///
     /// # Errors
     /// Any owner's refusal: the chart licence check, the fold card, a line
     /// that does not converge or is not passive, or an under-resolved band.
     pub fn build(&self) -> Result<VoicePerformance, String> {
-        let gas = self.ambient_gas();
+        // `tract_gas`: the tract's lines, formants and glottal flow read `gas`; the lips' load, the receiver and the
+        // spheres read `exterior`. Without the row the two are one state.
+        let gas = self.tract_gas();
+        let exterior = self.ambient_gas();
         let chart = TractChart::try_new(
             self.sections.clone(),
             &self.tract_source,
@@ -784,23 +840,41 @@ impl VoiceDescription {
             }
             (true, Some(card)) => Some(
                 match &self.torso_sphere {
-                    None => head_mouth_load(card.radius_m, &duct, gas, mechanics_rate, GLOTTAL_LINE_MAX_TAPS),
+                    None => head_mouth_load(card.radius_m, &duct, exterior, mechanics_rate, GLOTTAL_LINE_MAX_TAPS),
                     Some(t) => head_torso_mouth_load(card.radius_m, t.torso, self.microphone.maximum_frequency_hz, &duct,
-                        gas, mechanics_rate, GLOTTAL_LINE_MAX_TAPS),
+                        exterior, mechanics_rate, GLOTTAL_LINE_MAX_TAPS),
                 }
                 .map_err(|e| format!("head load refused: {e}"))?,
             ),
         };
         let mouth_load = head_load.as_ref().map_or(MouthLoad::Analytic(self.termination), MouthLoad::Tabulated);
-        let island = GlottalIsland::new_with_wall(
-            self.fold,
-            self.two_mass,
-            &duct,
-            gas,
-            mouth_load,
-            mechanics_rate,
-            self.wall.as_ref(),
-        )
+        // With `tract_gas` both tract lines check the table against the exterior it was computed in.
+        let split = match (&self.tract_gas, head_load.as_ref()) {
+            (None, _) => None,
+            (Some(_), Some(table)) => Some(table),
+            (Some(_), None) => return Err(TRACT_GAS_NEEDS_HEAD_LOAD.into()),
+        };
+        let island = match split {
+            None => GlottalIsland::new_with_wall(
+                self.fold,
+                self.two_mass,
+                &duct,
+                gas,
+                mouth_load,
+                mechanics_rate,
+                self.wall.as_ref(),
+            ),
+            Some(table) => GlottalIsland::new_with_wall_exterior(
+                self.fold,
+                self.two_mass,
+                &duct,
+                gas,
+                exterior,
+                table,
+                mechanics_rate,
+                self.wall.as_ref(),
+            ),
+        }
         .and_then(|island| match self.fold_shape {
             Some(shape) => island.with_fold_shape(shape),
             None => Ok(island),
@@ -810,21 +884,33 @@ impl VoiceDescription {
             None => Ok(island),
         })
         .map_err(|e| format!("glottal island refused: {e:?}"))?;
-        let (mouth, receipt) = mouth_flow_line(
-            &duct,
-            gas,
-            mouth_load,
-            mechanics_rate,
-            island.port_impedance(),
-            self.wall.as_ref(),
-            &LineLadder::default(),
-        )
+        let (mouth, receipt) = match split {
+            None => mouth_flow_line(
+                &duct,
+                gas,
+                mouth_load,
+                mechanics_rate,
+                island.port_impedance(),
+                self.wall.as_ref(),
+                &LineLadder::default(),
+            ),
+            Some(table) => mouth_flow_line_exterior(
+                &duct,
+                gas,
+                exterior,
+                table,
+                mechanics_rate,
+                island.port_impedance(),
+                self.wall.as_ref(),
+                &LineLadder::default(),
+            ),
+        }
         .map_err(|e| format!("mouth-flow line refused: {e}"))?;
         let mouth_area = self.sections.last().map_or(0.0, |s| s.area_m2);
         let mouth_radius_m = (mouth_area / core::f64::consts::PI).sqrt();
         let medium = RayleighMedium {
-            density: gas.density,
-            sound_speed: gas.sound_speed,
+            density: exterior.density,
+            sound_speed: exterior.sound_speed,
         };
         let receiver = BaffledPressure::circular_outlet_multirate_differentiating(
             mouth_radius_m,
@@ -936,7 +1022,7 @@ pub struct VoiceInfo {
     pub glottal_radius_m: f64,
     /// Radius of the mouth-end section, also the radiating opening [m].
     pub mouth_radius_m: f64,
-    /// Speed of sound in the declared gas [m/s].
+    /// Speed of sound in the gas filling the tract (the `tract_gas` row's, else `ambient`'s) [m/s].
     pub sound_speed_m_s: f64,
     /// Whether a yielding wall was declared.
     pub has_wall: bool,
@@ -1429,7 +1515,7 @@ mod tests {
         let mut performance = description.build().expect("gas reaches all physics owners");
         assert_eq!(
             performance.info().sound_speed_m_s,
-            description.ambient_gas().sound_speed
+            description.tract_gas().sound_speed
         );
         let mut result = vec![0.0; 1200];
         for block in result.chunks_mut(37) {
@@ -2430,6 +2516,76 @@ mod tests {
         bare.torso_sphere = Some(TorsoSphereCard { torso: TorsoSphere { radius_m: 0.169, neck_gap_m: 0.053 }, source: "s".into() });
         let err = bare.build().err().expect("refused");
         assert!(err.contains("needs the head_sphere row"), "{err}");
+    }
+
+    const HEAD_LOAD: &str = "head_sphere 0.087 s\nhead_load cap\n";
+
+    /// A `tract_gas` row holding the exterior's own record takes the exterior-checked lines with one gas, which are the
+    /// old lines exactly: the receipts, the formants and the pressure are bit for bit the card's without the row.
+    #[test]
+    fn tract_gas_equal_to_ambient_is_the_card_without_the_row() {
+        let base = VoiceDescription::from_bytes(fixture(HEAD_LOAD).as_bytes()).unwrap();
+        let same = VoiceDescription::from_bytes(
+            fixture(&format!("{HEAD_LOAD}tract_gas moist_air 310.15 101325 1.0\n")).as_bytes(),
+        )
+        .unwrap();
+        assert!(base.tract_gas_record().is_none() && same.tract_gas_record().is_some());
+        assert_eq!(same.tract_gas(), same.ambient_gas());
+        assert_eq!(base.tract_gas(), base.ambient_gas());
+        let (a, b) = (base.build().unwrap(), same.build().unwrap());
+        assert_eq!(a.info(), b.info());
+        assert_eq!(pressure(&base), pressure(&same));
+    }
+
+    /// A tract gas apart from the exterior: the tract's lines and formants take its sound speed, so each passive formant
+    /// moves by the ratio of the two sound speeds to within 1 % (the lips' load stays the exterior's absolute impedance,
+    /// so the end correction seen from the tract scales with the density ratio instead), and the receiver and the head
+    /// stay the exterior's.
+    #[test]
+    fn tract_gas_moves_the_formants_by_the_sound_speed_ratio() {
+        let base = VoiceDescription::from_bytes(fixture(HEAD_LOAD).as_bytes()).unwrap();
+        let breath = VoiceDescription::from_bytes(
+            fixture(&format!("{HEAD_LOAD}tract_gas moist_air 290.15 101325 0.5\n")).as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(breath.ambient_gas(), base.ambient_gas());
+        let ratio = breath.tract_gas().sound_speed / base.ambient_gas().sound_speed;
+        assert!(ratio < 0.97, "the test gas must move the sound speed: {ratio}");
+        let (a, b) = (base.build().unwrap(), breath.build().unwrap());
+        assert_eq!(b.info().sound_speed_m_s, breath.tract_gas().sound_speed);
+        assert_eq!(b.filter_delay_samples(), a.filter_delay_samples(), "the exterior's head is unchanged");
+        let (fa, fb) = (a.info().passive_formants_hz.clone().unwrap(), b.info().passive_formants_hz.clone().unwrap());
+        assert_eq!(fa.len(), fb.len());
+        for (x, y) in fa.iter().zip(&fb) {
+            assert!((y / x / ratio - 1.0).abs() < 0.01, "formant {x} -> {y} Hz against the ratio {ratio}");
+        }
+        assert_ne!(pressure(&base), pressure(&breath));
+    }
+
+    #[test]
+    fn tract_gas_rows_are_refused_by_name() {
+        let rows: [(String, &str); 5] = [
+            ("tract_gas moist_air 310.15 101325 1.0\n".into(), "needs the head_load row"),
+            ("head_sphere 0.087 s\ntract_gas moist_air 310.15 101325 1.0\n".into(), "needs the head_load row"),
+            (format!("{HEAD_LOAD}tract_gas moist_air 310.15 90000 1.0\n"), "one static pressure"),
+            (format!("{HEAD_LOAD}tract_gas moist_air 310.15 101325 1.0 7\n"), "contains extra fields"),
+            (
+                format!("{HEAD_LOAD}tract_gas moist_air 310.15 101325 1.0\ntract_gas moist_air 300 101325 1.0\n"),
+                "only appear once",
+            ),
+        ];
+        for (row, why) in rows {
+            let err = VoiceDescription::from_bytes(fixture(&row).as_bytes()).unwrap_err();
+            assert!(err.contains(why), "{row}: {err}");
+        }
+        // The fields are public, so `build` refuses a tract gas without the head's load again.
+        let mut flipped = VoiceDescription::from_bytes(
+            fixture(&format!("{HEAD_LOAD}tract_gas moist_air 290.15 101325 0.5\n")).as_bytes(),
+        )
+        .unwrap();
+        flipped.head_load = false;
+        let err = flipped.build().err().expect("refused");
+        assert!(err.contains("needs the head_load row"), "{err}");
     }
 
     #[test]

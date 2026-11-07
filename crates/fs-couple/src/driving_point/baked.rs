@@ -90,6 +90,25 @@ pub(super) fn characteristic(
     n_fft: Option<usize>,
     ladder: Option<&LineLadder>,
 ) -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
+    characteristic_in(duct, gas, gas, table, rate, n, zc, wall, n_fft, ladder)
+}
+
+/// [`characteristic`] for a bore whose gas is not the exterior the table was computed in: the table is checked against
+/// `exterior`, and every bore quantity stays `gas`'s. The load is absolute (Pa s/m^3), so nothing is converted at the
+/// mouth. With `exterior` equal to `gas` this is [`characteristic`] exactly.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn characteristic_in(
+    duct: &Duct,
+    gas: &GasState,
+    exterior: &GasState,
+    table: &TabulatedLoad,
+    rate: u32,
+    n: usize,
+    zc: f64,
+    wall: Option<&WallPin>,
+    n_fft: Option<usize>,
+    ladder: Option<&LineLadder>,
+) -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
     let length = duct_axial_length(duct);
     let radius = duct
         .segments
@@ -97,7 +116,7 @@ pub(super) fn characteristic(
         .ok_or(DrivingPointError::Duct(DuctError::EmptyDuct))?
         .outlet_radius();
     let mouth = table
-        .validate_mouth(length, radius, gas)
+        .validate_mouth(length, radius, exterior)
         .map_err(DrivingPointError::Duct)?;
     let default_ladder = LineLadder::default();
     let ladder = ladder.unwrap_or(&default_ladder);

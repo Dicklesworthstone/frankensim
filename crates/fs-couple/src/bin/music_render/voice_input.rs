@@ -68,6 +68,7 @@ pub(super) fn run_with_gas_sources(
     let mic = description.microphone.position_m;
     let gas_sources =
         super::thermochemical::provenance(core::slice::from_ref(description.gas_record()));
+    let tract_gas = tract_gas_json(&description);
     // Rigid-end limit of this tract, mouth load and wall; see VoiceInfo::passive_formants_hz.
     let passive = match &info.passive_formants_hz {
         Ok(formants) => format!(
@@ -142,7 +143,7 @@ pub(super) fn run_with_gas_sources(
          \"passive_tract_formants_hz\":{passive},\
          \"peak_glottal_flow_m3_s\":{:e},\"min_glottal_flow_m3_s\":{:e},\"closed_fraction\":{:e},\
          \"max_force_passes\":{},\"mean_force_passes\":{:e},{jet_band}{head}\
-         \"model_scope\":\"{scope}\"}}{gas_sources}}}",
+         \"model_scope\":\"{scope}\"}}{gas_sources}{tract_gas}}}",
         description.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         info.mechanics_rate_hz, info.two_mass, info.sections, info.tract_length_m,
         info.glottal_radius_m, info.mouth_radius_m, info.sound_speed_m_s,
@@ -164,6 +165,20 @@ pub(super) fn run_with_gas_sources(
         stats.max_force_passes, stats.mean_force_passes,
     );
     Ok(())
+}
+
+/// The `tract_gas` row's block, `,"tract_gas":{...}`, or nothing without the row, so a sidecar without it is byte for
+/// byte what it was. The voice's `sound_speed_m_s` is the tract's; the record outside this block stays the exterior's.
+pub(super) fn tract_gas_json(description: &VoiceDescription) -> String {
+    description.tract_gas_record().map_or_else(String::new, |record| {
+        let (tract, exterior) = (record.state(), description.ambient_gas());
+        format!(
+            ",\"tract_gas\":{{\"sound_speed_m_s\":{:e},\"density_kg_m3\":{:e},\"dynamic_viscosity_pa_s\":{:e},\
+             \"exterior_sound_speed_m_s\":{:e},\"exterior_density_kg_m3\":{:e}{}}}",
+            tract.sound_speed, tract.density, tract.dynamic_viscosity, exterior.sound_speed, exterior.density,
+            super::thermochemical::provenance(core::slice::from_ref(record))
+        )
+    })
 }
 
 #[cfg(test)]

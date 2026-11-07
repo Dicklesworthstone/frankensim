@@ -127,16 +127,18 @@ pub fn realize_mouth_flow_ir<'a>(
     ladder: &LineLadder,
 ) -> Result<(Vec<f64>, MouthFlowRealization), DrivingPointError> {
     realize_with_dc_probes(
-        physics, gas, termination, sample_rate_hz, zc, wall, ladder, &DC_PROBE_RAD_S,
+        physics, gas, gas, termination, sample_rate_hz, zc, wall, ladder, &DC_PROBE_RAD_S,
     )
 }
 
 // The DC probe list is a parameter only so a test can rebuild the stepped-DC
-// variant beside the true-limit one and measure what the step costs.
+// variant beside the true-limit one and measure what the step costs. `exterior` is the gas a tabulated load must have
+// been computed in; every bore quantity is `gas`'s.
 #[allow(clippy::too_many_arguments)]
 fn realize_with_dc_probes<'a>(
     physics: &Duct,
     gas: &GasState,
+    exterior: &GasState,
     termination: impl Into<MouthLoad<'a>>,
     sample_rate_hz: u32,
     zc: f64,
@@ -184,7 +186,7 @@ fn realize_with_dc_probes<'a>(
                 .last()
                 .ok_or(DrivingPointError::Duct(fs_duct::DuctError::EmptyDuct))?
                 .outlet_radius();
-            let mouth = table.validate_mouth(length, radius, gas).map_err(DrivingPointError::Duct)?;
+            let mouth = table.validate_mouth(length, radius, exterior).map_err(DrivingPointError::Duct)?;
             super::baked::validate_band(table, sample_rate_hz, max_taps)?;
             Some(C64::new(mouth.dc_impedance, 0.0))
         }
@@ -275,6 +277,32 @@ pub fn mouth_flow_line<'a>(
 ) -> Result<(DelayedFilter, MouthFlowRealization), DrivingPointError> {
     let (ir, receipt) =
         realize_mouth_flow_ir(physics, gas, termination, sample_rate_hz, zc, wall, ladder)?;
+    let line = DelayedFilter::from_impulse_response(1.0 / f64::from(sample_rate_hz), ir)
+        .map_err(DrivingPointError::Discrete)?;
+    Ok((line, receipt))
+}
+
+/// [`mouth_flow_line`] for a bore filled with `gas` that radiates into a different `exterior`: only a tabulated mouth
+/// load is taken, checked against the `exterior` it was computed in. Every bore quantity (the transit, `zc`, the
+/// propagation and its loss) stays `gas`'s, and the load is absolute, so nothing is converted at the mouth. With
+/// `exterior` equal to `gas` this is [`mouth_flow_line`] on that table exactly.
+///
+/// # Errors
+/// As [`mouth_flow_line`], or a table whose mouth or exterior gas does not match.
+#[allow(clippy::too_many_arguments)]
+pub fn mouth_flow_line_exterior(
+    physics: &Duct,
+    gas: &GasState,
+    exterior: &GasState,
+    table: &fs_duct::TabulatedLoad,
+    sample_rate_hz: u32,
+    zc: f64,
+    wall: Option<&WallPin>,
+    ladder: &LineLadder,
+) -> Result<(DelayedFilter, MouthFlowRealization), DrivingPointError> {
+    let (ir, receipt) = realize_with_dc_probes(
+        physics, gas, exterior, MouthLoad::Tabulated(table), sample_rate_hz, zc, wall, ladder, &DC_PROBE_RAD_S,
+    )?;
     let line = DelayedFilter::from_impulse_response(1.0 / f64::from(sample_rate_hz), ir)
         .map_err(DrivingPointError::Discrete)?;
     Ok((line, receipt))
@@ -416,7 +444,7 @@ mod tests {
         let ladder = never_converges(65536);
         let tail = |probes: &[f64]| {
             tail_of(realize_with_dc_probes(
-                &duct, &gas, Termination::FlangedOpen, RATE, zc, None, &ladder, probes,
+                &duct, &gas, &gas, Termination::FlangedOpen, RATE, zc, None, &ladder, probes,
             ))
         };
         let stepped = tail(&[core::f64::consts::TAU * 20.0]);

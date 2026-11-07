@@ -988,6 +988,31 @@ pub fn characteristic_line_realized_with_ladder<'a>(
     )
 }
 
+/// [`characteristic_line_realized_with_ladder`] for a bore filled with `gas` that radiates into a different `exterior`
+/// (a tract of breath into room air, say). Only a tabulated mouth load is taken, checked against the `exterior` it was
+/// computed in. Every bore quantity (the delay, `zc`, the propagation and its loss) stays `gas`'s, and the load is
+/// absolute, so nothing is converted at the mouth. An analytic termination would be evaluated in the bore's gas, so it
+/// is not offered here. With `exterior` equal to `gas` this is the tabulated branch of
+/// [`characteristic_line_realized_with_ladder`] exactly.
+///
+/// # Errors
+/// As [`characteristic_line`], or a table whose mouth or exterior gas does not match.
+#[allow(clippy::too_many_arguments)]
+pub fn characteristic_line_realized_with_ladder_exterior(
+    physics: &Duct,
+    gas: &GasState,
+    exterior: &GasState,
+    table: &fs_duct::TabulatedLoad,
+    sample_rate_hz: u32,
+    n: usize,
+    zc: f64,
+    wall: Option<&WallPin>,
+    n_fft_override: Option<usize>,
+    ladder: Option<&LineLadder>,
+) -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
+    baked::characteristic_in(physics, gas, exterior, table, sample_rate_hz, n, zc, wall, n_fft_override, ladder)
+}
+
 // Both uniform and regional ports use the identical sampling, Fourier sign,
 // finite history and DelayedFilter admission; only the physical response differs.
 fn characteristic_line_response(
