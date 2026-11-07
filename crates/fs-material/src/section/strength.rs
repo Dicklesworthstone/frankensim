@@ -22,7 +22,7 @@
 use super::{ConcentricElasticSection, MaterialStatePointError, invalid, positive};
 use super::thermal::ConcentricThermoelasticSection;
 use crate::state_point::ResolvedScalarProperty;
-use fs_qty::{Pressure, QuantitySpec};
+use fs_qty::{Length, Pressure, QuantitySpec};
 
 /// Maximum principal tension under combined axial, bending and circular torsion.
 pub mod combined;
@@ -112,9 +112,15 @@ impl ConcentricElasticSection {
     /// caller's declaration; the capacity arithmetic is the same as
     /// [`Self::axial_tensile_capacity`].
     ///
+    /// Conditions remain fixed for the lifetime of the capacity. Besides the
+    /// ordinary fixed external environment, this path owns an explicitly typed,
+    /// positive `wire_diameter` [m] as the drawn wire's fixed source coordinate.
+    /// It does not freeze strain, strain rate, frequency or other live response
+    /// dependence into a constant strength.
+    ///
     /// # Errors
     /// A limit count other than the layer count, an answer for another
-    /// property or quantity, nonpositive or nonfinite limits and
+    /// property or quantity, unsupported source conditions, nonpositive or nonfinite limits and
     /// unrepresentable capacities refuse.
     pub fn axial_tensile_capacity_from_resolved(
         &self,
@@ -145,6 +151,14 @@ impl ConcentricElasticSection {
         let mut capacity_n = f64::INFINITY;
         let mut governing_layer = 0;
         for (index, (geometry, source)) in self.layer_integrals().iter().zip(&sources).enumerate() {
+            let fixed_diameter = source.has_only_owned_and_fixed_external_conditions(
+                "wire_diameter", QuantitySpec::dimensional(Length::DIMS),
+            ) && source.answer().receipt.query_point.iter().any(|(axis, value)| {
+                axis == "wire_diameter" && *value > 0.0
+            });
+            if !source.is_static_at_fixed_external_conditions() && !fixed_diameter {
+                return Err(invalid("tensile limit requires fixed external conditions or a fixed typed drawn-wire diameter; unowned rate, strain or frequency support refuses"));
+            }
             let limit = positive(source.value_si(), "positive finite tensile limit")?;
             let modulus = geometry.young_modulus_pa();
             let layer_capacity = positive(limit * axial / modulus, "layer axial-force capacity")?;

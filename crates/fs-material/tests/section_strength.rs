@@ -209,13 +209,44 @@ fn g0_fixed_moisture_strength_is_admitted_but_unowned_axes_are_not() {
     let capacity = humid.axial_tensile_capacity(LIMIT).unwrap();
     assert_eq!(capacity.layer_limits_pa(), &[225e6]);
     assert_eq!(capacity.layer_limit_sources()[0], *humid.layers()[0].material.property(LIMIT).unwrap());
+    let external = humid.axial_tensile_capacity_from_resolved(
+        LIMIT, capacity.layer_limit_sources(),
+    ).unwrap();
+    assert_eq!(external, capacity);
     for (axis, quantity) in [("moisture", QuantitySpec::dimensional(Dims::NONE)),
         ("strain", QuantitySpec::dimensional(Dims::NONE)),
+        ("strain_rate", QuantitySpec::dimensional(fs_qty::Frequency::DIMS)),
+        ("stress", QuantitySpec::dimensional(Pressure::DIMS)),
         ("omega", QuantitySpec::dimensional(fs_qty::Frequency::DIMS))] {
         for curve in [false, true] {
-            assert!(contextual_section(axis, quantity, curve).axial_tensile_capacity(LIMIT).is_err(),
+            let unsupported = contextual_section(axis, quantity, curve);
+            assert!(unsupported.axial_tensile_capacity(LIMIT).is_err(),
                 "unowned axis {axis}, curve={curve}");
+            let source = unsupported.layers()[0].material.property(LIMIT).unwrap();
+            assert!(unsupported.axial_tensile_capacity_from_resolved(
+                LIMIT, core::slice::from_ref(source),
+            ).is_err(), "resolved source must not freeze unowned axis {axis}, curve={curve}");
         }
+    }
+}
+
+#[test]
+fn g0_resolved_drawn_wire_diameter_remains_an_explicit_fixed_source_coordinate() {
+    let length = QuantitySpec::dimensional(fs_qty::Length::DIMS);
+    for curve in [false, true] {
+        let section = contextual_section("wire_diameter", length, curve);
+        let source = section.layers()[0].material.property(LIMIT).unwrap();
+        // Only the explicit external-source path owns the drawn-wire diameter.
+        assert!(section.axial_tensile_capacity(LIMIT).is_err());
+        let capacity = section.axial_tensile_capacity_from_resolved(
+            LIMIT, core::slice::from_ref(source),
+        ).unwrap();
+        assert_eq!(capacity.layer_limit_sources(), core::slice::from_ref(source));
+        assert_eq!(capacity.layer_limits_pa(), &[if curve {225e6} else {300e6}]);
+        let untyped = contextual_section("wire_diameter", QuantitySpec::dimensional(Dims::NONE), curve);
+        assert!(untyped.axial_tensile_capacity_from_resolved(
+            LIMIT, core::slice::from_ref(untyped.layers()[0].material.property(LIMIT).unwrap()),
+        ).is_err());
     }
 }
 
