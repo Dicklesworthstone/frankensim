@@ -7775,6 +7775,15 @@ dB/dH positive definite for the bounded, backtracked B-driven inverse.
 All trials start from the same accepted memory. Branch-state storage allocates
 only for the accepted field candidate, not for inverse trial responses.
 
+For very small rotating slips around a large retained polarization, rounding
+can make the analytic unsaturated return miss the original stationarity gate.
+Only that exceptional case receives bounded coordinate Newton correction of
+the actual retained-state residual. Each candidate must strictly improve that
+residual and remain inside the original saturation ball. The branch iteration
+budget and cancellation still bound all work; the final consistent tangent is
+recomputed from the retained slip. No physical tolerance is relaxed, and the
+original independent work audit still gates acceptance.
+
 Reports distinguish physical pinning heat sum(hc|delta z|), stored-energy
 change, endpoint H_new.delta B, and nonnegative numerical dissipation. The
 numerical term is not heat; endpoint work is not an exact arbitrary rotating

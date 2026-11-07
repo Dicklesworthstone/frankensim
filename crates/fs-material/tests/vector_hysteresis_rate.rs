@@ -450,3 +450,70 @@ fn duration_profile_and_cancellation_admission_preserve_accepted_history() {
     ));
     assert_eq!(previous, saved);
 }
+
+#[test]
+fn small_rotating_slip_meets_original_kkt_gate_after_retained_coordinate_correction() {
+    let material = law(2.0, 0.0);
+    let mut c = controls();
+    c.absolute_flux_tolerance_t = 1e-13;
+    c.maximum_inverse_iterations = 80;
+    c.maximum_backtracks = 48;
+    let previous = material
+        .candidate_flux_density(&material.initial_state(), [0.8, 0.0, 0.0], c, &mut || false)
+        .unwrap()
+        .state;
+    assert_eq!(
+        previous.polarizations_t()[0],
+        [0.7428571428571429, 0.0, 0.0]
+    );
+    let saved = previous.clone();
+    let h = [2.6988628932407894, 1.7230987548828127, 0.0];
+    let mut no_correction = c;
+    no_correction.maximum_branch_iterations = 0;
+    assert!(
+        material
+            .candidate_field(&previous, h, no_correction, &mut || false)
+            .is_err()
+    );
+    // This exact path reversal previously failed: rounding the biased x
+    // coordinate produced a 1.059e-11 residual against an 8.916e-12 allowance.
+    // A single representable y correction must satisfy that SAME original
+    // physical gate; no ideal/unretained slip or tolerance floor is accepted.
+    c.maximum_branch_iterations = 1;
+    let candidate = material
+        .candidate_field(&previous, h, c, &mut || false)
+        .unwrap();
+    assert_eq!(candidate.branch_iterations, 1);
+    let old = previous.polarizations_t()[0];
+    let z = candidate.state.polarizations_t()[0];
+    let dz = sub(z, old);
+    let distance = norm(dz);
+    let residual = norm(std::array::from_fn(|i| {
+        h[i] - z[i] / 0.2 - 2.0 * dz[i] / distance
+    }));
+    let tolerance = c
+        .absolute_field_tolerance_a_m
+        .max(c.relative_tolerance * (norm(h) + norm(old) / 0.2 + 2.0));
+    assert!(residual <= tolerance);
+    assert!(candidate.maximum_constitutive_residual_a_m <= tolerance);
+    assert!(norm(z) < 1.0);
+    // The reported tangent is the inverse of the original physical Hessian
+    // evaluated using this actually retained slip, not its ideal predecessor.
+    let direction = dz.map(|value| value / distance);
+    for i in 0..3 {
+        for j in 0..3 {
+            let product: f64 = (0..3)
+                .map(|k| {
+                    let hessian = (if i == k { 5.0 + 2.0 / distance } else { 0.0 })
+                        - 2.0 / distance * direction[i] * direction[k];
+                    let compliance = candidate.incremental_permeability_h_m[k][j]
+                        - if k == j { 0.01 } else { 0.0 };
+                    hessian * compliance
+                })
+                .sum();
+            near(product, if i == j { 1.0 } else { 0.0 }, 2e-11);
+        }
+    }
+    audit(&candidate);
+    assert_eq!(previous, saved);
+}

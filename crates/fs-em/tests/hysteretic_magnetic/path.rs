@@ -153,7 +153,10 @@ fn trace(flux: [f64; 2]) -> Vec<(usize, f64)> {
 #[test]
 fn vector_loading_converges_toward_independently_uniform_native_history() {
     let depth = 0.4;
-    let law = source(0.01, true);
+    // In B-control the vector-play radius is mu*chi*hc/(mu+chi).
+    // This fit retains directional memory over the four-radius excursion;
+    // mu=0.01 would exhaust it over 81 radii and compare endpoint roundoff.
+    let law = source(0.2, true);
     let mesh = TriComplex2::from_indexed_triangles(
         "magnetic-path-rotation",
         vertices()[..4].to_vec(),

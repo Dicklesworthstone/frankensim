@@ -509,7 +509,75 @@ fn branch_response(
             });
         }
     }
-    let residual = stationarity_residual(old, h, z, chi, hc, lambda, viscous_stiffness)?;
+    let mut residual = stationarity_residual(old, h, z, chi, hc, lambda, viscous_stiffness)?;
+    if lambda == 0.0 && residual.is_finite() && residual > target && norm(z) <= zs {
+        // Adding a tiny rotating slip to a large remanence quantizes its biased
+        // component. The actual retained difference can then have a direction
+        // error amplified by hc/|delta z|, despite exact analytic shrinkage.
+        // Correct that ACTUAL KKT residual, never an ideal unretained increment.
+        // Coordinate Newton steps let a well-resolved component absorb this
+        // rounding without requiring an unrepresentable change in another.
+        for _ in iterations..c.maximum_branch_iterations {
+            poll(cancelled)?;
+            iterations += 1;
+            let increment = sub(z, old);
+            let distance = finite(norm(increment))?;
+            if distance == 0.0 {
+                break;
+            }
+            let direction = increment.map(|value| value / distance);
+            let base = finite(a0 + viscous_stiffness)?;
+            let mut best = (z, residual);
+            for axis in 0..3 {
+                let dry = h[axis] - z[axis] / chi - hc * increment[axis] / distance;
+                let force = if viscous_stiffness == 0.0 {
+                    dry
+                } else {
+                    (-viscous_stiffness).mul_add(increment[axis], dry)
+                };
+                let curvature = base + hc * (1.0 - direction[axis] * direction[axis]) / distance;
+                if !curvature.is_finite() || curvature <= 0.0 {
+                    continue;
+                }
+                let mut trial = z;
+                trial[axis] += force / curvature;
+                if !trial[axis].is_finite() || trial[axis] == z[axis] || norm(trial) > zs {
+                    continue;
+                }
+                let defect = stationarity_residual(old, h, trial, chi, hc, 0.0, viscous_stiffness)?;
+                if defect < best.1 {
+                    best = (trial, defect);
+                }
+            }
+            if best.1 >= residual {
+                break;
+            }
+            (z, residual) = best;
+            if residual <= target {
+                // Invert the original local Hessian using the final retained
+                // slip. Its radial and transverse compliances are analytic;
+                // this retains the same consistent field-Newton derivative.
+                let increment = sub(z, old);
+                let distance = finite(norm(increment))?;
+                let radial = base.recip();
+                tangent = if distance == 0.0 {
+                    symmetric_matrix(|i, j| if hc == 0.0 && i == j { radial } else { 0.0 })
+                } else {
+                    let direction = increment.map(|value| value / distance);
+                    let transverse = if hc == 0.0 {
+                        radial
+                    } else {
+                        distance / finite(base * distance + hc)?
+                    };
+                    symmetric_matrix(|i, j| {
+                        (if i == j { transverse } else { 0.0 })
+                            + (radial - transverse) * direction[i] * direction[j]
+                    })
+                };
+                break;
+            }
+        }
+    }
     if !residual.is_finite() || residual > target || norm(z) > zs * (1.0 + 8.0 * f64::EPSILON) {
         return Err(invalid(
             "vector branch failed its original stationarity or saturation constraint",
