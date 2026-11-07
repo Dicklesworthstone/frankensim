@@ -2612,3 +2612,49 @@ public FE regressions cover local-pole survey traversal and P2 equivalence to th
 admitted condensed equations; they are authored, not claimed executed while
 the full `fs-feec` dependency build is unavailable. MR56 and broader IRP
 qualification beads remain open.
+
+### Distributed applied traction on coupled acoustic walls
+
+`time::mechanical::traction::WallTractionProfile` supplies a dimensionless
+spatial force shape in the ORIGINAL GLOBAL hierarchical wall trace coordinates.
+Its amplitude is pressure [Pa], positive outward like the fluid pressure on
+the wall. Omitted coefficients are zero; repeated, nonfinite or off-patch
+coordinates refuse. Pressure-release constraints remove only fluid pressure
+coordinates, never adjacent mechanical traction or memory coordinates.
+
+`PreparedMechanicalTime::prepare_wall_traction` binds the shape to the original
+wall/geometry preparation. `step_with_wall_tractions` combines coherent applied
+forces in DD before the same sparse midpoint solve and reconstructs every
+original displacement, velocity and Maxwell memory. The physical equation is
+`sigma*v_dot + r*v + K*w + sum sqrt(k_j)*e_j = p + traction`. The original
+consistent face mass projects both force and conjugate velocity. There is no
+prescribed wall motion, patch-average piston, additional fluid volume source
+or alternate mechanical solve. Prepared shapes occupy O(wall trace DOFs);
+warm forcing requires no surface assembly or factorization.
+
+`prepare_exact_time_with_wall_tractions` appends held Pa traction columns after
+the original boundary and volume inputs in the complete exponential owner.
+The native wall momentum receives W*shape; independently assembled observations
+integrate shape^T W*v over the same trajectory. Its `step_with_wall_tractions`
+returns `integrated_wall_traction_displacement_m3`: amplitude times this volume
+displacement is external work. All traction columns count against the native
+augmented-state limits; missing prepared amplitudes refuse. Spatial-admittance
+memories remain part of the same complete evolution.
+
+Both owners retain `acoustic_input_work_j` and `wall_traction_work_j` separately,
+including negative mechanical work. Total input includes each once;
+`wall_work_j` remains solely internal fluid-to-wall exchange. Weak acoustic work
+is not recovered by subtracting two large total/mechanical values. Fluid, wall,
+admittance and total physical balances are checked before candidate publication.
+Original locally reacting wall scope remains: no lateral elastic propagation,
+shell bending, moving fluid mesh or nonlinear traction law is inferred.
+
+Eight focused regressions specify a continuum translating-wall solution,
+zero-net-force spatial excitation with both memory families, original P2
+surface work and weak coherent force cancellation, an independent physical ODE
+with nine work/heat/displacement accounts, interval partition, full-state time
+refinement, source units and weak acoustic work, pressure-release-shared forcing,
+ownership, extent and cancellation. Selective pinned formatting and whitespace
+checks passed, and reciprocal source/physics review found no concrete blocker.
+Native Rust compilation and test execution remain unavailable in the exhausted
+shared build environment; these regressions are authored, not claimed executed.

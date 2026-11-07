@@ -17,6 +17,10 @@
 //! Their original trace pressures obey tau q_dot + q = p, including zero-residue
 //! and pressure-release-shared coordinates. They retain their original storage,
 //! heat and reversible transfer independently of the mechanical wall accounts.
+//! Prescribed pressure tractions may independently drive the original wall
+//! coordinates. Their input columns and velocity observations use the SAME
+//! physical surface mass, and their signed external work is separate from
+//! fluid-to-wall exchange. Warm steps do not reassemble a traction profile.
 //!
 //! Preparation is dense and explicitly bounded; warm steps reuse cached matrix
 //! contractions. Exactness concerns the semidiscrete held-input solution up to
@@ -31,6 +35,7 @@ use super::super::{
     exact::{ExactTimeLimits, ExactVelocityPort},
 };
 use super::relaxing::{self, TraceMemory};
+use super::traction::WallTractionProfile;
 use super::{
     BoundaryAdmittance, BoundaryVelocitySource, C64, Coo, Csr, Dd, HeterogeneousError,
     HeterogeneousHelmholtzFe, HeterogeneousTimeEnergy, HeterogeneousTimeState, MechanicalBoundary,
@@ -138,12 +143,18 @@ pub struct ExactMechanicalTimeWork {
     pub acoustic_delta_energy_j: f64,
     pub wall_delta_energy_j: f64,
     pub admittance_delta_energy_j: f64,
-    /// All boundary and volume-source work, counted once.
+    /// All acoustic and applied wall-traction work, counted once.
     pub input_work_j: f64,
+    /// Original fluid-source work, summed independently of mechanical forcing.
+    /// This retains weak acoustic work without subtracting large external works.
+    pub acoustic_input_work_j: f64,
     /// Prepared boundary-source subtotal, already included in input_work_j.
     pub boundary_source_work_j: f64,
     /// Volume-source subtotal, already included in input_work_j.
     pub volume_source_work_j: f64,
+    /// Applied pressure-traction work on the wall, already included in input_work_j.
+    /// This is external mechanical input, not fluid source work or wall heat.
+    pub wall_traction_work_j: f64,
     pub boundary_dissipation_j: f64,
     pub wall_resistance_dissipation_j: f64,
     pub wall_relaxation_dissipation_j: f64,
@@ -174,11 +185,13 @@ impl ExactMechanicalTimeWork {
             + self.boundary_dissipation_j
             + self.wall_work_j
             + self.admittance_work_j
-            - self.input_work_j
+            - self.acoustic_input_work_j
     }
     #[must_use]
     pub fn wall_balance_residual_j(self) -> f64 {
-        self.wall_delta_energy_j + self.wall_dissipation_j() - self.wall_work_j
+        self.wall_delta_energy_j + self.wall_dissipation_j()
+            - self.wall_work_j
+            - self.wall_traction_work_j
     }
     #[must_use]
     pub fn admittance_balance_residual_j(self) -> f64 {
@@ -196,6 +209,10 @@ pub struct ExactMechanicalTimeStep<'p, 'm, 'f, 'c> {
     pub integrated_port_pressure_pa_m2_s: Vec<f64>,
     /// Integral of each original volume source against pressure [Pa s].
     pub integrated_volume_source_pressure_pa_s: Vec<f64>,
+    /// Integral of each dimensionless traction shape against outward wall
+    /// velocity over its original surface and this interval [m^3]. Multiplying
+    /// by its held traction amplitude [Pa] gives signed external work [J].
+    pub integrated_wall_traction_displacement_m3: Vec<f64>,
 }
 
 pub(in crate::acoustics::helmholtz::heterogeneous::time) struct MassMap {
@@ -228,6 +245,7 @@ pub struct PreparedExactMechanicalTime<'m, 'f, 'c> {
     linear_port_count: usize,
     boundary_port_count: usize,
     volume_source_count: usize,
+    wall_traction_count: usize,
     flow: PreparedQuadraticFlow,
     limits: ExactMechanicalTimeLimits,
 }
@@ -525,6 +543,48 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         limits: ExactMechanicalTimeLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedExactMechanicalTime<'m, 'f, 'c>, HeterogeneousError> {
+        self.prepare_exact_time_with_wall_tractions(
+            duration_s,
+            resistive,
+            spatial_boundaries,
+            boundaries,
+            relaxing_boundaries,
+            ports,
+            boundary_sources,
+            volume_sources,
+            &[],
+            pressure_release_faces,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Prepare complete fluid/wall evolution with distributed applied tractions.
+    ///
+    /// Each dimensionless shape uses the selected wall's original GLOBAL
+    /// hierarchical trace DOFs. Its held amplitude is pressure [Pa], positive
+    /// outward in the same direction as fluid pressure on the wall. The original
+    /// consistent surface mass projects both force and conjugate volume velocity;
+    /// no prescribed motion, face averaging or alternate structural solve is used.
+    /// Several coherent traction profiles may act on the same wall, including
+    /// wall coordinates adjacent to a pressure-release face. Inputs follow all
+    /// boundary and volume-source columns and count against dense admission.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_exact_time_with_wall_tractions<'m>(
+        &'m self,
+        duration_s: f64,
+        resistive: &[ResistiveBoundary],
+        spatial_boundaries: &[&SpatialResistiveBoundary<'_, '_, '_>],
+        boundaries: &[MechanicalBoundary],
+        relaxing_boundaries: &[&SpatialRelaxingBoundary<'_, '_, '_>],
+        ports: &[ExactVelocityPort],
+        boundary_sources: &[&BoundaryVelocitySource<'_, '_, '_>],
+        volume_sources: &[&VolumeVelocitySource<'_, '_, '_>],
+        wall_tractions: &[WallTractionProfile],
+        pressure_release_faces: &[[u32; 3]],
+        limits: ExactMechanicalTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedExactMechanicalTime<'m, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
         super::super::super::boundary_source::admit_count(boundary_sources.len())?;
         super::super::super::source::admit_count(volume_sources.len())?;
@@ -546,6 +606,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             .ok_or_else(|| invalid("exact wall boundary source count overflow"))?;
         let source_count = boundary_port_count
             .checked_add(volume_sources.len())
+            .and_then(|count| count.checked_add(wall_tractions.len()))
             .ok_or_else(|| invalid("exact wall source count overflow"))?;
         if pressure_release_faces.is_empty() {
             let states = self
@@ -670,6 +731,29 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 couplings,
             });
         }
+        let mut traction_loads = Vec::with_capacity(wall_tractions.len());
+        for profile in wall_tractions {
+            poll(cancelled)?;
+            let wall = walls
+                .get(profile.wall)
+                .ok_or_else(|| invalid("exact traction references an absent mechanical wall"))?;
+            let coefficients = profile.local_coefficients(&wall.dofs, cancelled)?;
+            let mut load = Vec::with_capacity(wall.dofs.len());
+            for row in 0..wall.dofs.len() {
+                poll(cancelled)?;
+                let (columns, values) = wall.mass.row(row);
+                let mut force = Dd::from_f64(0.0);
+                for (&col, &value) in columns.iter().zip(values) {
+                    force = force + Dd::from_f64(value) * Dd::from_f64(coefficients[col]);
+                }
+                let force = force.to_f64();
+                if !force.is_finite() {
+                    return Err(invalid("original wall traction load is unrepresentable").into());
+                }
+                load.push(force);
+            }
+            traction_loads.push((profile.wall, load));
+        }
         // The pHS backbone retains the original fluid and all mechanical states.
         // Added raw q memories are NEVER supplied a fictitious invertible residue.
         let base_states = states;
@@ -759,6 +843,16 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             }
             for (source, load) in loads.iter().enumerate() {
                 g[(n + row) * source_count + source] = load[global_row] / fluid_mass.scales[row];
+            }
+        }
+        let traction_offset = boundary_port_count + volume_sources.len();
+        for (index, (wall_index, load)) in traction_loads.iter().enumerate() {
+            let wall = &walls[*wall_index];
+            let velocity_offset = wall.offset + wall.dofs.len();
+            for (row, &force) in load.iter().enumerate() {
+                poll(cancelled)?;
+                g[(velocity_offset + row) * source_count + traction_offset + index] =
+                    force / wall.inertia_scale / wall.map.scales[row];
             }
         }
         put_block(&mut q, states, n, &fluid_mass.inverse, n);
@@ -892,6 +986,25 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             }
             observations.push(observation);
         }
+        // Independently pull back the ORIGINAL shape^T W v into the native
+        // velocity coordinates. Its integral is volume displacement, not pressure.
+        for (wall_index, load) in &traction_loads {
+            poll(cancelled)?;
+            let wall = &walls[*wall_index];
+            let m = wall.dofs.len();
+            let velocity_map = wall.map.physical_map(wall.inertia_scale);
+            let mut observation = vec![0.0; states];
+            for col in 0..m {
+                poll(cancelled)?;
+                let mut value = Dd::from_f64(0.0);
+                for row in 0..m {
+                    value =
+                        value + Dd::from_f64(load[row]) * Dd::from_f64(velocity_map[row * m + col]);
+                }
+                observation[wall.offset + m + col] = value.to_f64();
+            }
+            observations.push(observation);
+        }
         let extension = if admittance.is_empty() {
             None
         } else {
@@ -960,6 +1073,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             linear_port_count: ports.len(),
             boundary_port_count,
             volume_source_count: volume_sources.len(),
+            wall_traction_count: wall_tractions.len(),
             flow,
             limits,
         })
@@ -983,6 +1097,11 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
     #[must_use]
     pub const fn volume_source_count(&self) -> usize {
         self.volume_source_count
+    }
+    /// Number of independently driven original wall-traction shapes.
+    #[must_use]
+    pub const fn wall_traction_count(&self) -> usize {
+        self.wall_traction_count
     }
     #[must_use]
     pub fn wall_count(&self) -> usize {
@@ -1264,27 +1383,47 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
         volume_flow_m3_s: &[f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ExactMechanicalTimeStep<'p, 'm, 'f, 'c>, HeterogeneousError> {
+        self.step_with_wall_tractions(initial, amplitude_m_s, volume_flow_m3_s, &[], cancelled)
+    }
+
+    /// Advance the SAME full coupled trajectory with held acoustic inputs and
+    /// applied wall tractions [Pa], in preparation order. All prepared amplitudes
+    /// must be explicit, including zero. Positive traction acts outward; signed
+    /// mechanical work uses its integrated wall-volume-displacement observation.
+    /// The original fluid-to-wall work remains an independently integrated
+    /// internal exchange. This method does no surface assembly or factorization.
+    pub fn step_with_wall_tractions<'p>(
+        &'p self,
+        initial: &ExactMechanicalTimeState<'_, '_, '_, '_>,
+        amplitude_m_s: &[f64],
+        volume_flow_m3_s: &[f64],
+        traction_pa: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ExactMechanicalTimeStep<'p, 'm, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
         self.validate(initial)?;
         if amplitude_m_s.len() != self.boundary_port_count
             || volume_flow_m3_s.len() != self.volume_source_count
+            || traction_pa.len() != self.wall_traction_count
             || amplitude_m_s
                 .iter()
                 .chain(volume_flow_m3_s)
+                .chain(traction_pa)
                 .any(|v| !v.is_finite())
         {
             return Err(invalid(
-                "complete finite held boundary and volume-source amplitudes required",
+                "complete finite held boundary, volume-source and wall-traction amplitudes required",
             )
             .into());
         }
         let combined;
-        let amplitudes = if self.volume_source_count == 0 {
+        let amplitudes = if self.volume_source_count == 0 && self.wall_traction_count == 0 {
             amplitude_m_s
         } else {
             combined = amplitude_m_s
                 .iter()
                 .chain(volume_flow_m3_s)
+                .chain(traction_pa)
                 .copied()
                 .collect::<Vec<_>>();
             &combined
@@ -1457,6 +1596,9 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
         };
         let mut boundary_source_work = Dd::from_f64(0.0);
         let mut volume_work = Dd::from_f64(0.0);
+        let mut acoustic_work = Dd::from_f64(0.0);
+        let mut traction_work = Dd::from_f64(0.0);
+        let traction_offset = self.boundary_port_count + self.volume_source_count;
         let mut absolute_work = 0.0;
         for (index, (&amplitude, &integral)) in amplitudes
             .iter()
@@ -1465,10 +1607,15 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
         {
             let work = Dd::from_f64(amplitude) * Dd::from_f64(integral);
             input = input + work;
-            if index >= self.boundary_port_count {
-                volume_work = volume_work + work;
-            } else if index >= self.linear_port_count {
-                boundary_source_work = boundary_source_work + work;
+            if index >= traction_offset {
+                traction_work = traction_work + work;
+            } else {
+                acoustic_work = acoustic_work + work;
+                if index >= self.boundary_port_count {
+                    volume_work = volume_work + work;
+                } else if index >= self.linear_port_count {
+                    boundary_source_work = boundary_source_work + work;
+                }
             }
             absolute_work += work.to_f64().abs();
         }
@@ -1481,8 +1628,10 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
             wall_delta_energy_j: wall_change.to_f64(),
             admittance_delta_energy_j: admittance_change.to_f64(),
             input_work_j: input.to_f64(),
+            acoustic_input_work_j: acoustic_work.to_f64(),
             boundary_source_work_j: boundary_source_work.to_f64(),
             volume_source_work_j: volume_work.to_f64(),
+            wall_traction_work_j: traction_work.to_f64(),
             boundary_dissipation_j: result.integrals[0],
             wall_resistance_dissipation_j: result.integrals[1],
             wall_relaxation_dissipation_j: result.integrals[2],
@@ -1506,6 +1655,8 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
             .max(work.acoustic_delta_energy_j.abs())
             .max(work.wall_delta_energy_j.abs())
             .max(work.admittance_delta_energy_j.abs())
+            .max(work.acoustic_input_work_j.abs())
+            .max(work.wall_traction_work_j.abs())
             .max(absolute_work)
             .max(work.boundary_dissipation_j.abs())
             .max(work.wall_dissipation_j().abs())
@@ -1518,8 +1669,10 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
             + 64.0 * f64::EPSILON * absolute_work;
         if !limit_j.is_finite()
             || !work.input_work_j.is_finite()
+            || !work.acoustic_input_work_j.is_finite()
             || !work.boundary_source_work_j.is_finite()
             || !work.volume_source_work_j.is_finite()
+            || !work.wall_traction_work_j.is_finite()
             || result.integrals.iter().any(|v| !v.is_finite())
         {
             return Err(invalid("exact mechanical acoustic work is unrepresentable").into());
@@ -1563,7 +1716,10 @@ impl<'m, 'f, 'c> PreparedExactMechanicalTime<'m, 'f, 'c> {
                 [source_offset..source_offset + self.boundary_port_count]
                 .to_vec(),
             integrated_volume_source_pressure_pa_s: result.integrals
-                [source_offset + self.boundary_port_count..]
+                [source_offset + self.boundary_port_count..source_offset + traction_offset]
+                .to_vec(),
+            integrated_wall_traction_displacement_m3: result.integrals
+                [source_offset + traction_offset..]
                 .to_vec(),
         })
     }
@@ -1582,3 +1738,6 @@ mod tests;
 
 #[cfg(test)]
 mod composed_tests;
+
+#[cfg(test)]
+mod traction_tests;

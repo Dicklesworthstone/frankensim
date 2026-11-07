@@ -4,7 +4,7 @@
 //! `K` [Pa/m] and resistance `r` [Pa s/m]. Positive displacement `w` and
 //! velocity `v` point OUT of the fluid. Optional original Maxwell arms retain
 //! energy-normalized memory `z_j`, with `e_j = sqrt(k_j) w - z_j`:
-//! `sigma v_dot + r v + K w + sum sqrt(k_j) e_j = p`,
+//! `sigma v_dot + r v + K w + sum sqrt(k_j) e_j = p + traction`,
 //! `tau_j z_dot_j = e_j`. Each arm stores `e_j^T W e_j/2` and dissipates
 //! `e_j^T W e_j/tau_j`; it is not an instantaneous fitted resistance.
 //! Every active original boundary coordinate retains both states. With the
@@ -44,6 +44,10 @@ use std::collections::BTreeSet;
 
 /// Complete-field exponential evolution with the original causal wall states.
 pub mod exact;
+
+/// Applied physical forces on original distributed wall coordinates.
+pub mod traction;
+use traction::PreparedMechanicalTraction;
 
 mod relaxing;
 
@@ -201,12 +205,18 @@ pub struct MechanicalTimeWork {
     pub acoustic_delta_energy_j: f64,
     pub wall_delta_energy_j: f64,
     pub admittance_delta_energy_j: f64,
-    /// Total signed boundary AND volume-source work, counted once.
+    /// Total signed fluid-source AND applied wall-traction work, counted once.
     pub input_work_j: f64,
+    /// Independently accumulated original fluid-source work. Retained directly
+    /// so weak acoustic work survives a much larger mechanical input.
+    pub acoustic_input_work_j: f64,
     /// Signed prepared boundary-source subtotal already in `input_work_j`.
     pub boundary_source_work_j: f64,
     /// Signed volume-source subtotal already included in `input_work_j`.
     pub volume_source_work_j: f64,
+    /// Signed external wall-traction work, already included in input_work_j.
+    /// This is distinct from fluid-to-wall exchange and can be negative.
+    pub wall_traction_work_j: f64,
     /// Dissipation of the original REAL Robin patches only.
     pub boundary_dissipation_j: f64,
     /// Original Kelvin resistance PLUS all original Maxwell arm dissipation,
@@ -239,11 +249,13 @@ impl MechanicalTimeWork {
             + self.boundary_dissipation_j
             + self.wall_work_j
             + self.admittance_work_j
-            - self.input_work_j
+            - self.acoustic_input_work_j
     }
     #[must_use]
     pub fn wall_balance_residual_j(self) -> f64 {
-        self.wall_delta_energy_j + self.wall_dissipation_j - self.wall_work_j
+        self.wall_delta_energy_j + self.wall_dissipation_j
+            - self.wall_work_j
+            - self.wall_traction_work_j
     }
     #[must_use]
     pub fn admittance_balance_residual_j(self) -> f64 {
@@ -828,6 +840,33 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
         sources: &[(&VolumeVelocitySource<'_, '_, '_>, f64)],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MechanicalTimeStep<'p, 'm, 'f, 'c>, HeterogeneousError> {
+        self.step_with_wall_tractions(
+            initial,
+            inward_velocity,
+            boundary_sources,
+            sources,
+            &[],
+            cancelled,
+        )
+    }
+
+    /// Evolve acoustic forcing AND applied mechanical traction on one coupled
+    /// midpoint trajectory. Traction amplitudes [Pa] act outward on their
+    /// original wall profiles; pressure feedback still determines the motion.
+    /// Repeated/coherent shapes sum before solving. Their signed work is kept
+    /// separate from fluid sources and reversible fluid-to-wall transfer.
+    /// All amplitudes are midpoint values; their temporal resolution remains
+    /// caller-owned. Cancellation or a failed physical balance publishes no state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_wall_tractions<'p>(
+        &'p self,
+        initial: &MechanicalTimeState<'_, '_, '_, '_>,
+        inward_velocity: &[RealVelocityTrace],
+        boundary_sources: &[(&BoundaryVelocitySource<'_, '_, '_>, f64)],
+        sources: &[(&VolumeVelocitySource<'_, '_, '_>, f64)],
+        tractions: &[(&PreparedMechanicalTraction<'_, '_, '_, '_>, f64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MechanicalTimeStep<'p, 'm, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
         self.validate_state(initial)?;
         let core = &self.condensed;
@@ -840,6 +879,38 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
             if !amplitude.is_finite() {
                 return Err(invalid("finite midpoint volume-flow amplitude required").into());
             }
+        }
+        admit_count(tractions.len())?;
+        let mut traction_sums = self
+            .walls
+            .iter()
+            .map(|wall| vec![Dd::ZERO; wall.dofs.len()])
+            .collect::<Vec<_>>();
+        for &(traction, amplitude) in tractions {
+            poll(cancelled)?;
+            if !core::ptr::eq(traction.owner, self) || !amplitude.is_finite() {
+                return Err(invalid(
+                    "traction needs its original wall owner and finite Pa amplitude",
+                )
+                .into());
+            }
+            for (i, (sum, &coefficient)) in traction_sums[traction.wall]
+                .iter_mut()
+                .zip(&traction.coefficients)
+                .enumerate()
+            {
+                if i.is_multiple_of(256) {
+                    poll(cancelled)?;
+                }
+                *sum = *sum + Dd::from_f64(coefficient) * Dd::from_f64(amplitude);
+            }
+        }
+        let traction_fields = traction_sums
+            .into_iter()
+            .map(|field| field.into_iter().map(Dd::to_f64).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        if traction_fields.iter().flatten().any(|p| !p.is_finite()) {
+            return Err(invalid("coherent mechanical traction overflow").into());
         }
         let h = self.duration_s();
         let mut source = core.model.geometry.boundary_linear_load(inward_velocity)?;
@@ -866,7 +937,12 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
                 .iter()
                 .zip(&initial.displacements[index])
                 .enumerate()
-                .map(|(i, (&v, &w))| wall.history(v, w, &initial.memories[index], i))
+                .map(|(i, (&v, &w))| {
+                    wall.admittance.mul_add(
+                        traction_fields[index][i],
+                        wall.history(v, w, &initial.memories[index], i),
+                    )
+                })
                 .collect::<Vec<_>>();
             let mut projected = vec![0.0; wall.dofs.len()];
             wall.mass.spmv(&history, &mut projected);
@@ -911,6 +987,8 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
         let mut wall_loss_roundoff = 0.0;
         let mut wall_work = 0.0;
         let mut wall_work_roundoff = 0.0;
+        let mut traction_work = Dd::ZERO;
+        let mut traction_roundoff = 0.0;
         let mut backward_error: f64 = 0.0;
         for (index, wall) in self.walls.iter().enumerate() {
             poll(cancelled)?;
@@ -928,7 +1006,9 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
                 let p = midpoint_p[dof];
                 let history =
                     wall.history(previous_v[i], previous_w[i], &initial.memories[index], i);
-                let v = wall.admittance.mul_add(p, history);
+                let applied = traction_fields[index][i];
+                let total_pressure = (Dd::from_f64(p) + Dd::from_f64(applied)).to_f64();
+                let v = wall.admittance.mul_add(total_pressure, history);
                 let end_v = v + (v - previous_v[i]);
                 let end_w = h.mul_add(v, previous_w[i]);
                 if !end_v.is_finite() || !end_w.is_finite() {
@@ -942,6 +1022,7 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
                 let spring =
                     Dd::from_f64(h) * Dd::from_f64(pin.stiffness_per_area) * Dd::from_f64(mid_w);
                 let force = Dd::from_f64(h) * Dd::from_f64(p);
+                let applied_force = Dd::from_f64(h) * Dd::from_f64(applied);
                 let mut hereditary = Dd::from_f64(0.0);
                 let mut hereditary_scale = 0.0;
                 for (j, arm) in wall.relaxation.iter().enumerate() {
@@ -971,9 +1052,10 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
                     // when subtracting two large midpoint memories would round.
                     middle_extensions[j].push(arm_force / arm.coupling);
                 }
-                let defect = (momentum + drag + spring + hereditary - force).to_f64();
+                let defect =
+                    (momentum + drag + spring + hereditary - force - applied_force).to_f64();
                 let scale = hereditary_scale
-                    + [momentum, drag, spring, force]
+                    + [momentum, drag, spring, force, applied_force]
                         .iter()
                         .map(|v| v.to_f64().abs())
                         .sum::<f64>();
@@ -1005,6 +1087,9 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
             let (work, rw) = paired_work(h, &pressure, &projected);
             wall_work += work;
             wall_work_roundoff += rw;
+            let (work, roundoff) = paired_work(h, &traction_fields[index], &projected);
+            traction_work = traction_work + Dd::from_f64(work);
+            traction_roundoff += roundoff;
             let (loss, rl) = positive_form(&wall.mass, &middle_v, cancelled)?;
             wall_loss += h * pin.resistance * loss;
             wall_loss_roundoff += h * pin.resistance * rl;
@@ -1109,9 +1194,11 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
             acoustic_delta_energy_j: acoustic.work.delta_energy_j,
             wall_delta_energy_j: wall_change,
             admittance_delta_energy_j: admittance.energy_change,
-            input_work_j: input,
+            input_work_j: (Dd::from_f64(input) + traction_work).to_f64(),
+            acoustic_input_work_j: input,
             boundary_source_work_j,
             volume_source_work_j,
+            wall_traction_work_j: traction_work.to_f64(),
             boundary_dissipation_j: h * boundary_loss,
             wall_dissipation_j: wall_loss,
             wall_relaxation_dissipation_j: relaxation_loss,
@@ -1122,7 +1209,8 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
         };
         let fluid_roundoff =
             initial_fluid_roundoff + final_fluid_roundoff + h * boundary_roundoff + input_roundoff;
-        let wall_roundoff = initial_wall_roundoff + final_wall_roundoff + wall_loss_roundoff;
+        let wall_roundoff =
+            initial_wall_roundoff + final_wall_roundoff + wall_loss_roundoff + traction_roundoff;
         let admittance_roundoff =
             initial_admittance_roundoff + final_admittance_roundoff + admittance.heat_roundoff;
         let tolerance = core.limits.energy_balance_tolerance;
@@ -1138,7 +1226,7 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
         )?;
         balance(
             work.wall_balance_residual_j(),
-            wall_change.abs() + wall_loss + wall_work.abs(),
+            wall_change.abs() + wall_loss + wall_work.abs() + work.wall_traction_work_j.abs(),
             wall_roundoff + wall_work_roundoff,
             tolerance,
         )?;
@@ -1154,7 +1242,8 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
                 + work.boundary_dissipation_j
                 + wall_loss
                 + admittance.heat
-                + input.abs(),
+                + input.abs()
+                + work.wall_traction_work_j.abs(),
             fluid_roundoff + wall_roundoff + admittance_roundoff,
             tolerance,
         )?;
@@ -1214,5 +1303,7 @@ mod composed_tests;
 mod pressure_release_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod traction_tests;
 #[cfg(test)]
 mod volume_source_tests;
