@@ -521,11 +521,6 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             .at(face.reference_temperature_k, face.reference_pressure_pa)
     }
 
-    /// Actual allocated fluid/solid cell count, for a caller's trial budget.
-    pub const fn cell_count(&self) -> usize {
-        self.n
-    }
-
     /// Fluid mass [kg], independent of the face bookkeeping.
     #[must_use]
     pub fn total_mass_kg(&self) -> f64 {

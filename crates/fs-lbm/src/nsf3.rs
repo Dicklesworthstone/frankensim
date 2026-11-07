@@ -2339,13 +2339,13 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     pub fn bulk_ratio_source(&self) -> &str {
         &self.spec.bulk_ratio_source
     }
-    /// Steps completed.
     /// Full allocated grid count, including masked solid cells. This is the
     /// count used by native snapshot and cell-step work admission.
     #[must_use]
     pub const fn cell_count(&self) -> usize {
         self.n
     }
+    /// Steps completed.
     #[must_use]
     pub fn steps(&self) -> usize {
         self.steps
