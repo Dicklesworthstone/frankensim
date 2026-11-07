@@ -975,7 +975,7 @@ impl PreparedWall {
     }
 }
 
-fn paired_work(h: f64, pressure: &[f64], load: &[f64]) -> (f64, f64) {
+pub(super) fn paired_work(h: f64, pressure: &[f64], load: &[f64]) -> (f64, f64) {
     let mut result = Dd::from_f64(0.0);
     let mut absolute = 0.0;
     for (&p, &b) in pressure.iter().zip(load) {
@@ -986,7 +986,7 @@ fn paired_work(h: f64, pressure: &[f64], load: &[f64]) -> (f64, f64) {
     (result.to_f64(), 64.0 * f64::EPSILON * absolute)
 }
 
-fn balance(
+pub(super) fn balance(
     residual: f64,
     scale: f64,
     roundoff: f64,

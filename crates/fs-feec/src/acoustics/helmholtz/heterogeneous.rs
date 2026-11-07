@@ -58,6 +58,9 @@ mod boundary_source;
 pub use boundary_source::{BoundaryVelocitySource, MAX_BOUNDARY_SOURCES};
 
 mod boundary_admittance;
+pub use boundary_admittance::relaxation::{
+    MAX_ADMITTANCE_RELAXATION_TERMS, SpatialRelaxingBoundary,
+};
 pub use boundary_admittance::{SpatialBoundaryAdmittance, SpatialResistiveBoundary};
 
 /// Broadband evolution in the original pressure-potential coordinates.

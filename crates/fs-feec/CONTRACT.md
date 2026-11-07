@@ -2390,3 +2390,41 @@ nonuniform wall heat, uniform-limit recovery, independent midpoint/exponential
 refinement, and separate coupled fluid/wall work balances. The law is prescribed,
 linear and memoryless; dispersive materials require their own causal states.
 Geometry, material quadrature, spatial and temporal convergence remain distinct.
+
+## Causal spatial admittance with original boundary memories
+
+`HeterogeneousHelmholtzFe::spatial_relaxing_boundary` composes explicitly
+authored nonnegative spatial fields into the positive-real law
+`Y(x,s) = Y0(x) + sum a_j(x)/(1+s tau_j)`, with one to 64 finite positive
+constant relaxation times on each physical patch. Every coefficient retains
+the same original geometry/material owner, canonical faces and quadrature.
+The fields need not be proportional. A negative residue, arbitrary frequency
+fit, spatially averaged pole or complex resonance is not inferred. The owner
+represents parallel resistive/inertive branches, not every possible wall law.
+Harmonic reuse retains the full `1/(1+i omega tau_j)` response in the original
+interior convention, including its negative susceptance, without resampling.
+
+`time::relaxing` evolves every original pressure-potential/pressure coordinate
+and every geometric trace memory `tau_j q_dot + q = p`. Zero or semidefinite
+residue forms are admitted without inversion or coordinate removal. Adjacent
+pressure-release faces constrain fluid fields only: independent memories at
+shared trace DOFs remain live and retain their original free-row coupling.
+
+Midpoint eliminates these states into ONE original sparse factor with
+`Ceff = C0 + sum h/(2 tau_j+h) Cj`; its history enters the original projected
+load with a negative sign. No factorization, material callback or surface
+assembly recurs during warm steps. Original linear/quadratic boundary motion
+and volumetric sources retain their physical amplitudes and work pairings.
+The condensate's algebraic loss is never published as physical heat.
+Independent accounts retain memory storage `sum tau_j q_j^T Cj q_j/2`,
+instantaneous heat, relaxation heat and signed fluid-to-memory exchange.
+All three fluid, memory and total work balances and the original uncondensed
+equations are checked before a candidate state is returned.
+
+The seven focused regressions include independent triangle moments for
+spatial heat/storage, harmonic/trapezoidal consistency, a separately specified
+three-state ODE refinement oracle, energy return from release-shared memories,
+zero-residue geometric support, source work, limits, ownership and cancellation.
+Midpoint is passive but requires a time-resolution axis for stiff poles and
+wave phase. This owner does not yet compose these memories with mechanical
+wall states or supply their complete-state exponential propagator.

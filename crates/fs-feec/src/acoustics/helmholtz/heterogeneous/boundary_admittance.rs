@@ -17,6 +17,8 @@ use fs_math::{c64::C64, dd::Dd};
 use fs_sparse::{Coo, Csr};
 use std::collections::BTreeSet;
 
+pub(super) mod relaxation;
+
 /// A sampled specific admittance [m/(Pa s)] on original boundary faces.
 ///
 /// The exact spatial/material owner AND frequency are retained. Subsequent

@@ -40,6 +40,9 @@ use fs_sparse::{Coo, Csr};
 /// Causal distributed mechanical walls on the original pressure trace.
 pub mod mechanical;
 
+/// Spatial passive admittance with explicit causal boundary memories.
+pub mod relaxing;
+
 /// Complete-state exponential propagation with held physical source profiles.
 /// This removes midpoint's temporal frequency warping within explicit dense
 /// preparation limits; no original spatial coordinate is truncated.
@@ -610,27 +613,8 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
     ) -> Result<HeterogeneousTimeStep<'m, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
         self.validate_state(initial)?;
-        self.admit_velocity_faces(inward_velocity, cancelled)?;
-        self.admit_boundary_sources(boundary_sources, cancelled)?;
-        super::source::admit_count(sources.len())?;
-        for &(source, amplitude) in sources {
-            source.validate(self.model)?;
-            if !amplitude.is_finite() {
-                return Err(invalid("finite midpoint volume-flow amplitude required").into());
-            }
-        }
-        let mut load = self.model.geometry.boundary_linear_load(inward_velocity)?;
-        for (row, value) in load.iter_mut().enumerate() {
-            poll(cancelled)?;
-            let mut sum = Dd::from_f64(*value);
-            for &(source, amplitude) in boundary_sources {
-                sum = sum + Dd::from_f64(source.load[row]) * Dd::from_f64(amplitude);
-            }
-            for &(source, amplitude) in sources {
-                sum = sum + Dd::from_f64(source.load[row]) * Dd::from_f64(amplitude);
-            }
-            *value = sum.to_f64();
-        }
+        let load =
+            self.projected_source_load(inward_velocity, boundary_sources, sources, cancelled)?;
         let mut result = self.step_projected(initial, &load, cancelled)?;
         let mut boundary_work = Dd::from_f64(0.0);
         for &(source, amplitude) in boundary_sources {
@@ -656,6 +640,40 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
         }
         poll(cancelled)?;
         Ok(result)
+    }
+
+    // Shared original midpoint source admission/projection for the base field
+    // and coupled boundary-memory owners. It performs no evolution or fitting.
+    fn projected_source_load(
+        &self,
+        inward_velocity: &[RealVelocityTrace],
+        boundary_sources: &[(&super::BoundaryVelocitySource<'_, '_, '_>, f64)],
+        sources: &[(&super::VolumeVelocitySource<'_, '_, '_>, f64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<f64>, HeterogeneousError> {
+        poll(cancelled)?;
+        self.admit_velocity_faces(inward_velocity, cancelled)?;
+        self.admit_boundary_sources(boundary_sources, cancelled)?;
+        super::source::admit_count(sources.len())?;
+        for &(source, amplitude) in sources {
+            source.validate(self.model)?;
+            if !amplitude.is_finite() {
+                return Err(invalid("finite midpoint volume-flow amplitude required").into());
+            }
+        }
+        let mut load = self.model.geometry.boundary_linear_load(inward_velocity)?;
+        for (row, value) in load.iter_mut().enumerate() {
+            poll(cancelled)?;
+            let mut sum = Dd::from_f64(*value);
+            for &(source, amplitude) in boundary_sources {
+                sum = sum + Dd::from_f64(source.load[row]) * Dd::from_f64(amplitude);
+            }
+            for &(source, amplitude) in sources {
+                sum = sum + Dd::from_f64(source.load[row]) * Dd::from_f64(amplitude);
+            }
+            *value = sum.to_f64();
+        }
+        Ok(load)
     }
 
     fn admit_boundary_sources(
