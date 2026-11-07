@@ -27,7 +27,7 @@ pub mod lower;
 pub use lower::*;
 mod frequency;
 pub use frequency::{
-    PlaneStressHarmonic, TensorPronyFrequencyDerivative, TensorPronyHarmonic,
+    NormalStressHarmonic, PlaneStressHarmonic, TensorPronyFrequencyDerivative, TensorPronyHarmonic,
     TensorPronyHarmonicBranch, TensorPronyHarmonicPoint,
 };
 
@@ -804,7 +804,7 @@ impl TensorProny {
         let c_out_in: [[C64; 3]; 3] = core::array::from_fn(|i| {
             core::array::from_fn(|j| c[out_idx[i]][in_idx[j]])
         });
-        let solved = solve_complex_3x3(c_out, c_out_in)?;
+        let solved = solve_complex(c_out, c_out_in)?;
         let eng_scale = [1.0, 1.0, core::f64::consts::FRAC_1_SQRT_2];
         let mut q_re_3 = [[0.0f64; 3]; 3];
         let mut q_im_3 = [[0.0f64; 3]; 3];
@@ -1048,10 +1048,32 @@ impl TensorProny {
     }
 }
 
-fn solve_complex_3x3(
-    mut a: [[C64; 3]; 3],
-    mut b: [[C64; 3]; 3],
-) -> Result<[[C64; 3]; 3], ViscoError> {
+// The original complex constraint solve serves both full plane stress and
+// the single-normal reduction. The 3x3 operation order is unchanged.
+fn solve_complex<const N: usize, const M: usize>(
+    mut a: [[C64; N]; N],
+    mut b: [[C64; M]; N],
+) -> Result<[[C64; M]; N], ViscoError> {
+    if N == 1 {
+        // A single pivot has no conditioning loss from elimination. Use
+        // the shared exponent-scaled complex division directly: scaling by
+        // a large RHS first would discard a small but resolved normal pivot.
+        let pivot = a[0][0];
+        if !pivot.re.is_finite() || !pivot.im.is_finite() || pivot == C64::ZERO {
+            return Err(ViscoError::Parameters {
+                what: "singular or non-finite normal-stress constraint",
+            });
+        }
+        for value in &mut b[0] {
+            *value = *value / pivot;
+            if !value.re.is_finite() || !value.im.is_finite() {
+                return Err(ViscoError::Parameters {
+                    what: "normal-stress constraint is not representable",
+                });
+            }
+        }
+        return Ok(b);
+    }
     let scale = a
         .iter()
         .flatten()
@@ -1062,14 +1084,12 @@ fn solve_complex_3x3(
             what: "plane-stress out-of-plane block has zero or non-finite scale",
         });
     }
-    for row in a.iter_mut().chain(b.iter_mut()) {
-        for v in row {
-            *v = C64::new(v.re / scale, v.im / scale);
-        }
+    for v in a.iter_mut().flatten().chain(b.iter_mut().flatten()) {
+        *v = C64::new(v.re / scale, v.im / scale);
     }
-    for k in 0..3 {
+    for k in 0..N {
         let mut pivot = k;
-        for i in (k + 1)..3 {
+        for i in (k + 1)..N {
             if a[i][k].abs() > a[pivot][k].abs() {
                 pivot = i;
             }
@@ -1083,22 +1103,22 @@ fn solve_complex_3x3(
         }
         a.swap(k, pivot);
         b.swap(k, pivot);
-        for i in (k + 1)..3 {
+        for i in (k + 1)..N {
             let factor = a[i][k] / a[k][k];
             a[i][k] = C64::ZERO;
-            for j in (k + 1)..3 {
+            for j in (k + 1)..N {
                 a[i][j] = a[i][j] - factor * a[k][j];
             }
-            for j in 0..3 {
+            for j in 0..M {
                 b[i][j] = b[i][j] - factor * b[k][j];
             }
         }
     }
-    let mut x = [[C64::ZERO; 3]; 3];
-    for i in (0..3).rev() {
-        for col in 0..3 {
+    let mut x = [[C64::ZERO; M]; N];
+    for i in (0..N).rev() {
+        for col in 0..M {
             let mut val = b[i][col];
-            for j in (i + 1)..3 {
+            for j in (i + 1)..N {
                 val = val - a[i][j] * x[j][col];
             }
             x[i][col] = val / a[i][i];

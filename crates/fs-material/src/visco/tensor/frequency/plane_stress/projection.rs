@@ -187,7 +187,13 @@ pub(crate) fn weighted_norms<const N: usize, const M: usize, const K: usize>(
     totals.map(Sum::value)
 }
 
-pub(super) fn project(c: &[[C64; 6]; 6], t: &[[C64; 3]; 6], i: usize, j: usize, scale: f64) -> C64 {
+pub(crate) fn project<const M: usize>(
+    c: &[[C64; 6]; 6],
+    t: &[[C64; M]; 6],
+    i: usize,
+    j: usize,
+    scale: f64,
+) -> C64 {
     let (mut real, mut imaginary) = (Sum::default(), Sum::default());
     for row in 0..6 {
         for column in 0..6 {
@@ -301,7 +307,7 @@ mod tests {
                 C64::new((i + j + 1) as f64 * 0.17, (i * j + 2) as f64 * -0.13)
             })
         });
-        let t = core::array::from_fn(|i| {
+        let t: [[C64; 3]; 6] = core::array::from_fn(|i| {
             core::array::from_fn(|j| {
                 C64::new((i + 2 * j + 1) as f64 * 0.11, (2 * i + j + 1) as f64 * 0.07)
             })

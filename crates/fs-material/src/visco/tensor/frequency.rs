@@ -5,6 +5,8 @@ use crate::visco::prony_spectrum::PronySpectrumWeights;
 use fs_math::dd::Dd;
 
 mod plane_stress;
+mod normal_stress;
+pub use normal_stress::NormalStressHarmonic;
 mod strain;
 pub use plane_stress::PlaneStressHarmonic;
 mod response;

@@ -20716,3 +20716,29 @@ linear isotropic planar normal-incidence solids with perfect bonds. Oblique
 conversion, interface compliance/slip, poroelastic frames, thermal evolution
 and measured-material qualification are not inferred; arithmetic residuals
 are not physical error certificates.
+
+## Original normal-stress-free harmonic material with retained shear
+
+`TensorProny::prepare_normal_stress_harmonic` borrows the complete original
+anisotropic Kelvin/Maxwell law and eliminates only the transverse normal stress.
+Its five engineering coordinates retain both transverse shear tractions and
+every in-plane/shear cross term. One original complex constraint supplies the
+modulus, physical exp(-i omega t) full Mandel strain recovery and analytic
+frequency tangent. Storage/loss use constrained original positive work; the
+tangent uses the same cached constraint in the complex-symmetric
+`T^T C_omega T` contraction. Shared scaled complex division, binary-factored
+contractions and passive-work admission retain their numerical ownership.
+
+The source frequency band and complete six-component whole-cycle strain ceiling
+remain binding. Prepared recovery allocates nothing and rejects imaginary DC
+strains. This is a local constitutive reduction: it supplies no shear correction,
+through-thickness trial profile, finite-element kinematics, laminate traction
+equilibration or hereditary time integration. Existing full plane stress keeps
+its three retained coordinates and original 3x3 elimination arithmetic.
+
+Six native integration regressions and one scalar-owner regression are authored
+for independent one-normal Schur/traction/work identities, all ordered planes,
+physical harmonic phase, all shear/cross terms, analytic and finite-difference
+tangents, source-domain admission, isotropic shear and extreme unrelated loss
+scales. Native compilation and execution remain unverified because the shared
+workspace is unavailable; no substitute runtime or dependency stub was used.

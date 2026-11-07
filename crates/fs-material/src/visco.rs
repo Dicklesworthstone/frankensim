@@ -54,7 +54,8 @@ pub mod temperature;
 pub mod tensor;
 pub use modified_zener::ModifiedFractionalZener;
 pub use tensor::{
-    Mandel6, PlaneStressHarmonic, PronyBranch, TensorProny, TensorPronyFrequencyDerivative,
+    Mandel6, NormalStressHarmonic, PlaneStressHarmonic, PronyBranch, TensorProny,
+    TensorPronyFrequencyDerivative,
     TensorPronyHarmonic, TensorPronyHarmonicBranch, TensorPronyHarmonicPoint, TensorPronyState,
 };
 
