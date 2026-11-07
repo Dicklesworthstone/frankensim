@@ -1,5 +1,32 @@
 # CONTRACT: fs-conduction
 
+## Material-supported and residual-checked conductivity design
+
+`ConductivityDesign` checks every tetrahedron vertex against that element's
+actual conductivity source support, including prescribed vertices and regional
+material assignments. A supported element mean cannot hide an unsupported hot
+or cold corner. Constant table-backed bonded films retain their independent
+trace-temperature domains as well. The primal, objective, gradient, retained
+Hessian goal and discrete-goal comparison all apply this same physical check.
+No source values are extrapolated to rescue an otherwise converged design.
+
+First- and second-order design paths share the existing normalized, preconditioned
+PCG solve for the symmetric linear conduction operator. Both primal and dual
+require finite solutions and independently recomputed residuals, poll cancellation
+between iterations and obey the actual iteration allowance. A stalled or failed
+adjoint returns a refusal instead of a gradient with a nonconverged report.
+The first-order gradient now assembles its operator once and uses the same
+conductivity pullback as the retained Hessian goal; no solver-iteration derivative
+or replacement heat model is introduced.
+
+Focused G1/G3 regression definitions in `tests/adjoint.rs` use the independently
+derived single-tetrahedron balance `T_free = 300 + f/(4 k rho)`. They cover
+unsupported extrema hidden by valid averages, regional overrides, bonded-film
+support and signed goal scaling from `1e-200` to `1e200` under a one-iteration
+budget. Pinned Rust syntax checks passed. These native integration regressions
+remain unexecuted here because the full external dependency build is unavailable;
+no whole-solver, continuum-error or experimental-validation claim is made.
+
 ## Mean-constrained equilibrium with live contact sources
 
 `solve::solve_mean_temperature_newton_with_contacts` joins the existing

@@ -75,10 +75,14 @@ fn finite(field: &'static str, value: f64) -> Result<f64, ConductionError> {
 
 /// Normalize RHS units before Krylov norms, measure the TRUE residual, and
 /// never accept NaN, a stalled recurrence or a merely recursive residual.
-fn solve(cx: &Cx<'_>, matrix: &fs_sparse::Csr, rhs: &[f64],
+pub(super) fn solve(cx: &Cx<'_>, matrix: &fs_sparse::Csr, rhs: &[f64],
     config: crate::LinearConfig,
 ) -> Result<(Vec<f64>,SensitivitySolve),ConductionError> {
     poll(cx,0)?;
+    if !config.tolerance.is_finite() || config.tolerance <= 0.0 || config.tolerance >= 1.0 {
+        return Err(ConductionError::Config { parameter: "linear.tolerance",
+            what: "relative tolerance must be finite and strictly between zero and one".to_string() });
+    }
     check("sensitivity right hand side",rhs,rhs.len())?;
     let scale = rhs.iter().map(|x| x.abs()).fold(0.0_f64,f64::max);
     if scale==0.0 {
@@ -176,7 +180,7 @@ impl<'m> ConductivityDesign<'m> {
         let (matrix,rhs) = self.system(cx,rho)?;
         let (free,primal) = solve(cx,&matrix,&rhs,self.linear)?;
         let temperature = self.dofs.scatter(&free);
-        self.check_temperature_support(&temperature)?;
+        self.check_temperature_support(cx,&temperature)?;
         let value = finite("conductivity goal",weights.iter().zip(&free).map(|(w,t)| w*t).sum())?;
         let (lambda,dual) = solve(cx,&matrix,weights,self.linear)?;
         let mut gradient = pullback(cx,self,&lambda,&temperature)?;

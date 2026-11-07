@@ -18,9 +18,9 @@
 //!   ∂R/∂ρ_e = K_e · T_full |_free       (exact: A is LINEAR in ρ)
 //! ```
 //!
-//! The adjoint solve runs through [`fs_adjoint::ift_gradient_matfree`],
-//! i.e. ONE transposed solve on `fs-solver`'s stack — never a
-//! differentiated Krylov iteration.
+//! First- and second-order goals share one residual-checked, preconditioned
+//! solve on `fs-solver`'s stack. The linear conductivity operator is symmetric,
+//! so its adjoint uses the same PCG operator, never differentiated iterations.
 //!
 //! # What this does NOT establish
 //!
@@ -36,9 +36,8 @@
 //!   Mesh error requires a separately constructed enriched space; a residual
 //!   on the original solved space is not a discretization estimate.
 
-use fs_adjoint::{AdjointReport, ift_gradient_matfree};
+use fs_adjoint::AdjointReport;
 use fs_exec::Cx;
-use fs_solver::{CsrOp, norm2};
 
 /// Existing sparse-proof controls and outcomes used by the public Robin
 /// analyzer. Consumers need no direct solver dependency to request this proof.
@@ -217,36 +216,14 @@ impl<'m> ConductivityDesign<'m> {
     pub fn solve(&self, cx: &Cx<'_>, rho: &[f64]) -> Result<DesignSolution, ConductionError> {
         self.check_rho(rho)?;
         let (a_ff, b_f) = self.system(cx, rho)?;
-        let op = CsrOp::symmetric(a_ff.clone());
-        let precond = crate::solve::spd_preconditioner(&a_ff);
-        let mut cg = fs_solver::CgState::new(&op, &precond, &b_f);
-        let report = cg.run(
-            &op,
-            &precond,
-            self.linear.tolerance,
-            self.linear.max_iterations,
-        );
-        let (x, iters) = (cg.x, report.iters);
-        let mut ax = vec![0.0f64; b_f.len()];
-        a_ff.spmv(&x, &mut ax);
-        let r: Vec<f64> = b_f.iter().zip(&ax).map(|(b, a)| b - a).collect();
-        let denom = norm2(&b_f).max(f64::MIN_POSITIVE);
-        let primal_relative_residual = norm2(&r) / denom;
-        if primal_relative_residual >= self.linear.tolerance {
-            return Err(ConductionError::LinearSolveFailed {
-                iteration: 0,
-                krylov_iterations: iters,
-                true_relative_residual: primal_relative_residual,
-                tolerance: self.linear.tolerance,
-            });
-        }
+        let (x, report) = second_order::solve(cx, &a_ff, &b_f, self.linear)?;
         let temperature = self.dofs.scatter(&x);
-        self.check_temperature_support(&temperature)?;
+        self.check_temperature_support(cx, &temperature)?;
         Ok(DesignSolution {
             temperature,
             free_temperature: x,
-            primal_relative_residual,
-            primal_iterations: iters,
+            primal_relative_residual: report.relative_residual,
+            primal_iterations: report.iterations,
         })
     }
 
@@ -269,19 +246,44 @@ impl<'m> ConductivityDesign<'m> {
         Ok(reduce(&system, &self.dofs))
     }
 
-    fn check_temperature_support(&self, temperature: &[f64]) -> Result<(), ConductionError> {
+    fn check_temperature_support(
+        &self,
+        cx: &Cx<'_>,
+        temperature: &[f64],
+    ) -> Result<(), ConductionError> {
+        // A P1 field reaches its extrema at vertices. A supported element
+        // average cannot license extrapolation at a hot/cold corner. Check the
+        // actual material of every incident element, including fixed vertices.
         for e in 0..self.problem.mesh.element_count() {
+            if e % crate::ASSEMBLY_TILE == 0 {
+                cx.checkpoint().map_err(|_| ConductionError::Cancelled {
+                    stage: "conductivity-design-material-support",
+                    at: e,
+                })?;
+            }
             let model = match self.element_materials {
                 Some(assigned) => assigned.model_for(e)?,
                 None => self.problem.material,
             };
-            model
-                .temperature_span()
-                .check(crate::assemble::element_temperature(
-                    self.problem.mesh,
-                    e,
-                    temperature,
-                ))?;
+            for vertex in self.problem.mesh.complex().tets[e] {
+                let t = temperature[vertex as usize];
+                crate::require_finite("conductivity design temperature", t)?;
+                model.temperature_span().check(t)?;
+            }
+        }
+        // A constant sheet can have bounded source support independently of
+        // the bulk. Its real trace temperatures must remain supported too.
+        for (index, sheet) in self.problem.boundary.surface_heat_conduction().iter().enumerate() {
+            if index % crate::ASSEMBLY_TILE == 0 {
+                cx.checkpoint().map_err(|_| ConductionError::Cancelled {
+                    stage: "conductivity-design-sheet-support",
+                    at: index,
+                })?;
+            }
+            let span = sheet.temperature_span();
+            for vertex in self.problem.mesh.boundary()[sheet.boundary_face()].vertices {
+                span.check(temperature[vertex as usize])?;
+            }
         }
         Ok(())
     }
@@ -332,7 +334,7 @@ impl<'m> ConductivityDesign<'m> {
                 });
             }
         }
-        self.check_temperature_support(&self.dofs.scatter(approximate_free_temperature))?;
+        self.check_temperature_support(cx, &self.dofs.scatter(approximate_free_temperature))?;
         let (matrix, rhs) = self.system(cx, rho)?;
         let checkpoint = |at| {
             cx.checkpoint().map_err(|_| ConductionError::Cancelled {
@@ -352,32 +354,10 @@ impl<'m> ConductivityDesign<'m> {
             });
         }
         let dual_rhs: Vec<f64> = weights.iter().map(|w| w / scale).collect();
-        let op = CsrOp::symmetric(matrix.clone());
-        let pre = crate::solve::spd_preconditioner(&matrix);
-        let mut state = fs_solver::CgState::new(&op, &pre, &dual_rhs);
-        while state.rel_residual() >= self.linear.tolerance
-            && state.iters < self.linear.max_iterations
-        {
-            checkpoint(state.iters)?;
-            let batch = (self.linear.max_iterations - state.iters).min(32);
-            state.run(&op, &pre, self.linear.tolerance, batch);
-        }
-        checkpoint(state.iters)?;
+        let (dual, report) = second_order::solve(cx, &matrix, &dual_rhs, self.linear)?;
         let mut applied = vec![0.0; self.dofs.n()];
-        matrix.spmv(&state.x, &mut applied);
-        let dual_residual: Vec<f64> = dual_rhs.iter().zip(&applied).map(|(b, a)| b - a).collect();
-        let dual_relative_residual = norm2(&dual_residual) / norm2(&dual_rhs);
-        if !dual_relative_residual.is_finite() || dual_relative_residual >= self.linear.tolerance {
-            return Err(ConductionError::LinearSolveFailed {
-                iteration: 0,
-                krylov_iterations: state.iters,
-                true_relative_residual: dual_relative_residual,
-                tolerance: self.linear.tolerance,
-            });
-        }
         matrix.spmv(approximate_free_temperature, &mut applied);
-        let free_dof_contributions: Vec<f64> = state
-            .x
+        let free_dof_contributions: Vec<f64> = dual
             .iter()
             .zip(rhs.iter().zip(&applied))
             .map(|(z, (b, a))| (z * (b - a)) * scale)
@@ -393,12 +373,12 @@ impl<'m> ConductivityDesign<'m> {
                 bits: value.to_bits(),
             });
         }
-        checkpoint(state.iters)?;
+        checkpoint(report.iterations)?;
         Ok(DiscreteGoalError {
             signed_error,
             free_dof_contributions,
-            dual_relative_residual,
-            dual_iterations: state.iters,
+            dual_relative_residual: report.relative_residual,
+            dual_iterations: report.iterations,
         })
     }
 
@@ -421,13 +401,18 @@ impl<'m> ConductivityDesign<'m> {
                 found: weights.len(),
             });
         }
+        for &weight in weights {
+            crate::require_finite("objective weights", weight)?;
+        }
         let solution = self.solve(cx, rho)?;
-        Ok(solution
+        let objective = solution
             .free_temperature
             .iter()
             .zip(weights)
             .map(|(t, w)| t * w)
-            .sum())
+            .sum();
+        crate::require_finite("conductivity objective", objective)?;
+        Ok(objective)
     }
 
     /// `dJ/dρ` by the IFT adjoint, plus the adjoint-solve report.
@@ -448,24 +433,20 @@ impl<'m> ConductivityDesign<'m> {
                 found: weights.len(),
             });
         }
-        let solution = self.solve(cx, rho)?;
-        let (a_ff, _) = self.system(cx, rho)?;
-        let op = CsrOp::symmetric(a_ff);
-        let temperature = solution.temperature.clone();
-        let pullback =
-            |lambda: &[f64]| -> Vec<f64> { self.parameter_pullback(lambda, &temperature) };
-        let (gradient, report) = ift_gradient_matfree(
-            &op,
-            weights,
-            &[],
-            &pullback,
-            self.linear.tolerance,
-            self.linear
-                .max_iterations
-                .div_ceil(self.linear.restart.max(1))
-                .max(1),
-        );
-        Ok((gradient, report))
+        // Reuse the retained goal's primal, transpose and material pullback.
+        // This assembles once and enforces the actual iteration allowance,
+        // cancellation, finite arithmetic and remeasured residual for BOTH
+        // solves; a failed adjoint can never publish a usable gradient.
+        let goal = self.linearize_goal(cx, rho, weights)?;
+        let dual = goal.dual_solve();
+        Ok((
+            goal.gradient().to_vec(),
+            AdjointReport {
+                iters: dual.iterations,
+                adjoint_residual: dual.relative_residual,
+                converged: true,
+            },
+        ))
     }
 
     /// `(∂R/∂ρ)ᵀ λ`, element by element: `λᵀ (K_e · T_full)|_free`.

@@ -1,8 +1,8 @@
 //! Adjoint consistency for the LINEAR conduction case.
 //!
 //! The design map is `K_e ← ρ_e · K`. The gradient of
-//! `J(ρ) = Σ_i w_i T_i(ρ)` comes from `fs_adjoint::ift_gradient_matfree`
-//! — one transposed solve on `fs-solver`'s stack — and is checked
+//! `J(ρ) = Σ_i w_i T_i(ρ)` comes from a residual-checked IFT solve on
+//! `fs-solver`'s stack, shared with the retained second-order goal, and is checked
 //! against central finite differences through
 //! `fs_adjoint::verify_gradient`, the crate-wide gradient gate.
 //!
@@ -434,6 +434,167 @@ fn discrete_goal_error_accepts_bounded_constant_material_without_extrapolation()
             design.discrete_goal_error(cx, &rho, &vec![900.0; weights.len()], &weights),
             Err(fs_conduction::ConductionError::OutsideTemperatureSpan { .. })
         ));
+    });
+}
+
+fn one_tet_design_fixture(source_w_m3: f64) -> Fixture {
+    let mesh = ConductionMesh::new(
+        fs_rep_mesh::TetComplex::from_tets(4, vec![[0, 1, 2, 3]]),
+        vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+    )
+    .unwrap();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "base",
+            |f| f.centroid[2] == 0.0,
+            ThermalBc::dirichlet(300.0).unwrap(),
+        )
+        .unwrap()
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    Fixture {
+        mesh,
+        boundary,
+        material: ConductivityModel::isotropic_declared(5.0).unwrap(),
+        source: ScalarField::Uniform(source_w_m3),
+    }
+}
+
+/// G1: this P1 tetrahedron has K_33=k/6 and f_3=f/24, so its only
+/// free temperature is exactly 300+f/(4k). The mean stays inside [299,301]
+/// while a physically required hot/cold vertex lies outside the source data.
+#[test]
+fn conductivity_design_rejects_unsupported_extrema_in_every_goal_path() {
+    use fs_conduction::{
+        ConductionError, ConductivityTable, ElementMaterials, MaterialId, MaterialTable,
+    };
+    for source in [-40.0, 40.0] {
+        for assigned in [false, true] {
+            let mut fixture = one_tet_design_fixture(source);
+            let bounded = ConductivityModel::isotropic(
+                ConductivityTable::declared_curve(vec![(299.0, 5.0), (301.0, 5.0)]).unwrap(),
+            );
+            let materials = ElementMaterials::new(
+                MaterialTable::new([(MaterialId(7), bounded.clone())]).unwrap(),
+                vec![MaterialId(7)],
+            )
+            .unwrap();
+            if !assigned {
+                fixture.material = bounded;
+            }
+            let mut problem = fixture.problem();
+            if assigned {
+                problem.element_materials = Some(&materials);
+            }
+            let design = ConductivityDesign::new(problem, ladder_linear_config()).unwrap();
+            let endpoint = 300.0 + source / 20.0;
+            assert!((299.0..=301.0).contains(&((900.0 + endpoint) / 4.0)));
+            with_cx(|cx| {
+                assert!(matches!(
+                    design.solve(cx, &[1.0]),
+                    Err(ConductionError::OutsideTemperatureSpan { .. })
+                ));
+                assert!(matches!(
+                    design.objective(cx, &[1.0], &[1.0]),
+                    Err(ConductionError::OutsideTemperatureSpan { .. })
+                ));
+                assert!(matches!(
+                    design.gradient(cx, &[1.0], &[1.0]),
+                    Err(ConductionError::OutsideTemperatureSpan { .. })
+                ));
+                assert!(matches!(
+                    design.linearize_goal(cx, &[1.0], &[1.0]),
+                    Err(ConductionError::OutsideTemperatureSpan { .. })
+                ));
+                assert!(matches!(
+                    design.discrete_goal_error(cx, &[1.0], &[endpoint], &[1.0]),
+                    Err(ConductionError::OutsideTemperatureSpan { .. })
+                ));
+                // The same immutable source is usable when the higher physical
+                // conductivity keeps the actual temperature within its domain.
+                let safe = design.solve(cx, &[4.0]).unwrap();
+                assert!((safe.temperature[3] - (300.0 + source / 80.0)).abs() < 1e-10);
+            });
+        }
+    }
+}
+
+/// G1: constant thin films still have their own material-data support.
+#[test]
+fn conductivity_design_checks_actual_bonded_film_temperatures() {
+    use fs_conduction::{ConductionError, ConductivityTable, SurfaceHeatConduction};
+    let mut fixture = one_tet_design_fixture(400.0);
+    let face = fixture
+        .mesh
+        .boundary()
+        .iter()
+        .position(|f| f.vertices.contains(&3))
+        .unwrap();
+    let film = SurfaceHeatConduction::from_isotropic_conductivity(
+        face,
+        ConductivityTable::declared_curve(vec![(299.0, 1.0), (301.0, 1.0)]).unwrap(),
+        0.01,
+    )
+    .unwrap();
+    with_cx(|cx| {
+        fixture.boundary = fixture
+            .boundary
+            .with_surface_heat_conduction(cx, &fixture.mesh, &[film])
+            .unwrap();
+        let design = ConductivityDesign::new(fixture.problem(), ladder_linear_config()).unwrap();
+        assert!(matches!(
+            design.solve(cx, &[1.0]),
+            Err(ConductionError::OutsideTemperatureSpan { .. })
+        ));
+        assert!(matches!(
+            design.gradient(cx, &[1.0], &[1.0]),
+            Err(ConductionError::OutsideTemperatureSpan { .. })
+        ));
+        assert!(matches!(
+            design.discrete_goal_error(cx, &[1.0], &[302.0], &[1.0]),
+            Err(ConductionError::OutsideTemperatureSpan { .. })
+        ));
+        assert!(design.solve(cx, &[100.0]).is_ok());
+    });
+}
+
+/// G1/G3: the independent single-free-node solution gives J=w*(300+2/rho)
+/// and dJ/drho=-2w/rho^2. Changing goal units cannot erase or overflow a
+/// representable gradient; both public APIs use the same bounded solve.
+#[test]
+fn conductivity_gradient_preserves_goal_scale_and_exact_work_budget() {
+    let fixture = one_tet_design_fixture(40.0);
+    let design = ConductivityDesign::new(
+        fixture.problem(),
+        LinearConfig {
+            tolerance: 1e-12,
+            max_iterations: 1,
+            restart: 1,
+        },
+    )
+    .unwrap();
+    with_cx(|cx| {
+        for weight in [1e-200, 1.0, -3.0, 1e200] {
+            let (gradient, report) = design.gradient(cx, &[2.0], &[weight]).unwrap();
+            assert!(report.converged && report.adjoint_residual < 1e-12);
+            assert!(report.iters <= 1);
+            assert!((gradient[0] / weight + 0.5).abs() < 2e-12);
+            let retained = design.linearize_goal(cx, &[2.0], &[weight]).unwrap();
+            assert_eq!(gradient, retained.gradient());
+        }
+        let (zero, report) = design.gradient(cx, &[2.0], &[0.0]).unwrap();
+        assert_eq!(zero, [0.0]);
+        assert_eq!(report.iters, 0);
+        for value in [f64::NAN, f64::INFINITY] {
+            assert!(design.gradient(cx, &[2.0], &[value]).is_err());
+            assert!(design.objective(cx, &[2.0], &[value]).is_err());
+        }
     });
 }
 
