@@ -87,6 +87,19 @@ solve checks the uniform field. Late source, support and branch-state failures
 publish no partial field. The fixtures do not certify intermediate trajectories,
 coupled thermal history, measured cyclic-hardness accuracy or fatigue life.
 
+The additional `export_hardness_field` and `export_cyclic_hardness_field` methods
+return the material owner's compact `AcceptedHardnessField` in native element
+order. They pass each ACTUAL element law alongside its accepted strain/history,
+retain one fixed original source and poll the native Cx during construction.
+Different original element laws refuse instead of becoming a homogeneous
+half-space source. Every point keeps its own alpha/H with no averaging, native
+history cloning or per-element source copy. Existing J2/cyclic test targets
+exercise real multi-element exports, complete branch retention, late history
+refusal and heterogeneous-law mismatch. This is frozen external/preconditioning
+hardness transfer: the consumer supplies an explicit original cell mapping and
+its original contact geometry, without transferring residual stress, plastic
+displacements or duplicating the bulk indentation deformation/work.
+
 ## Owned finite-strain membrane reference continuation
 
 `OwnedFiniteViscoMembraneMotion::change_reference` delegates to the original

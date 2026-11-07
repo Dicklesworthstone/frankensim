@@ -13,16 +13,19 @@
 //! when a consumer requests its original test and claim receipts. No hardness
 //! change supplies stress, stored energy, heat, damage or a fatigue-life law.
 
+use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{MaterialCard, PropertyKey, PropertyLineSlice};
 
 use super::IndentationHardnessStatePoint;
 use super::plastic_history::{
     ACCUMULATED_EQUIVALENT_PLASTIC_STRAIN_AXIS, J2HardnessError, ResolvedJ2Hardness,
 };
-use crate::plastic::chaboche::source::{ResolvedChabocheBranches, ResolvedChabocheJ2};
+use crate::plastic::chaboche::source::{
+    BackstressProperties, ResolvedChabocheBranches, ResolvedChabocheJ2,
+};
 use crate::plastic::chaboche::{ChabocheError, ChabocheJ2, ChabocheState};
 use crate::plastic::energy::EnergyError;
-use crate::plastic::source::ResolvedJ2Plasticity;
+use crate::plastic::source::{HardeningPropertyBasis, ResolvedJ2Plasticity};
 use crate::plastic::voce::source::ResolvedVoceJ2;
 use crate::state_point::MaterialPropertySelection;
 use crate::{SmallStrainLaw, Voigt};
@@ -42,6 +45,10 @@ pub trait SourceBoundHardnessLaw: SmallStrainLaw + sealed::Sealed {
     /// Exact source, native coefficients, hardening basis and branch-role order.
     fn same_hardness_source(&self, other: &Self) -> bool;
 
+    /// Complete native source and law identity, including family, strain bound
+    /// and named branch order. Equal numerical branches do not erase their roles.
+    fn hardness_source_identity(&self) -> ContentHash;
+
     /// Validate the entire native endpoint and return its accumulated strain.
     /// The explicit positive numerical yield allowance is in pascals.
     fn accepted_hardness_alpha(
@@ -60,6 +67,10 @@ impl SourceBoundHardnessLaw for ResolvedVoceJ2 {
 
     fn same_hardness_source(&self, other: &Self) -> bool {
         same_backbone(self.backbone(), other.backbone()) && self.law() == other.law()
+    }
+
+    fn hardness_source_identity(&self) -> ContentHash {
+        native_source_identity(b"voce", self.backbone(), &[])
     }
 
     fn accepted_hardness_alpha(
@@ -84,6 +95,10 @@ impl SourceBoundHardnessLaw for ResolvedChabocheJ2 {
         self.backbone().same_hardness_source(other.backbone()) && self.law() == other.law()
     }
 
+    fn hardness_source_identity(&self) -> ContentHash {
+        native_source_identity(b"chaboche-single", self.hardness_backbone(), &[])
+    }
+
     fn accepted_hardness_alpha(
         &self,
         strain: &Voigt,
@@ -106,6 +121,14 @@ impl<const N: usize> SourceBoundHardnessLaw for ResolvedChabocheBranches<N> {
             && self.properties() == other.properties()
     }
 
+    fn hardness_source_identity(&self) -> ContentHash {
+        native_source_identity(
+            b"chaboche-branches",
+            self.hardness_backbone(),
+            self.properties(),
+        )
+    }
+
     fn accepted_hardness_alpha(
         &self,
         strain: &Voigt,
@@ -120,6 +143,42 @@ fn same_backbone(a: &ResolvedJ2Plasticity, b: &ResolvedJ2Plasticity) -> bool {
     a.material().identity() == b.material().identity()
         && a.hardening_basis() == b.hardening_basis()
         && a.law() == b.law()
+}
+
+fn native_source_identity(
+    family: &[u8],
+    backbone: &ResolvedJ2Plasticity,
+    branches: &[BackstressProperties],
+) -> ContentHash {
+    let mut hash = DomainHasher::new("org.frankensim.fs-material.cyclic-hardness-native.v1");
+    hash.update(&(family.len() as u64).to_le_bytes());
+    hash.update(family);
+    // The full immutable bundle retains Q/b and every original C/gamma claim.
+    hash.update(backbone.material().identity().as_bytes());
+    hash.update(&[match backbone.hardening_basis() {
+        HardeningPropertyBasis::PlasticStrainModulus => 0,
+        HardeningPropertyBasis::MixedPlasticStrainModuli => 1,
+        HardeningPropertyBasis::UniaxialTangentModulus => 2,
+    }]);
+    let law = backbone.law();
+    for value in [
+        law.elastic.youngs,
+        law.elastic.poisson,
+        law.elastic.strain_limit,
+        law.yield_stress,
+        law.hardening,
+        law.kinematic_hardening,
+    ] {
+        hash.update(&value.to_bits().to_le_bytes());
+    }
+    hash.update(&(branches.len() as u64).to_le_bytes());
+    for branch in branches {
+        for name in [&branch.modulus, &branch.recovery] {
+            hash.update(&(name.len() as u64).to_le_bytes());
+            hash.update(name.as_bytes());
+        }
+    }
+    hash.finalize()
 }
 
 fn accepted_chaboche_alpha<const N: usize>(
@@ -158,6 +217,7 @@ fn accepted_chaboche_alpha<const N: usize>(
 pub struct ResolvedCyclicHardness<L: SourceBoundHardnessLaw> {
     plastic: L,
     prepared: ResolvedJ2Hardness,
+    identity: ContentHash,
 }
 
 impl<L: SourceBoundHardnessLaw> ResolvedCyclicHardness<L> {
@@ -178,7 +238,14 @@ impl<L: SourceBoundHardnessLaw> ResolvedCyclicHardness<L> {
             selection,
             maximum_alpha,
         )?;
-        Ok(Self { plastic, prepared })
+        let mut identity = DomainHasher::new("org.frankensim.fs-material.cyclic-hardness.v1");
+        identity.update(prepared.identity().as_bytes());
+        identity.update(plastic.hardness_source_identity().as_bytes());
+        Ok(Self {
+            plastic,
+            prepared,
+            identity: identity.finalize(),
+        })
     }
 
     /// Original full cyclic law, source conditions and ordered branch roles.
@@ -205,6 +272,13 @@ impl<L: SourceBoundHardnessLaw> ResolvedCyclicHardness<L> {
         self.prepared.maximum_accumulated_plastic_strain()
     }
 
+    /// Original native family, full branch order, fixed conditions, exact
+    /// indentation test and prepared support. Point histories do not change it.
+    #[must_use]
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
+    }
+
     /// Observe an accepted native endpoint without a second return map.
     /// Full source/branch identity, native history, instantaneous cyclic yield
     /// and the prepared support interval must all pass before a scalar returns.
@@ -215,8 +289,21 @@ impl<L: SourceBoundHardnessLaw> ResolvedCyclicHardness<L> {
         state: &L::State,
         yield_tolerance_pa: f64,
     ) -> Result<f64, CyclicHardnessError> {
+        self.accepted_values(plastic, strain, state, yield_tolerance_pa)
+            .map(|(_, hardness_pa)| hardness_pa)
+    }
+
+    // Compact field export needs alpha and H from the same single native
+    // admission. Keep this checked route private to the hardness owner modules.
+    pub(super) fn accepted_values(
+        &self,
+        plastic: &L,
+        strain: &Voigt,
+        state: &L::State,
+        yield_tolerance_pa: f64,
+    ) -> Result<(f64, f64), CyclicHardnessError> {
         let alpha = self.accepted_alpha(plastic, strain, state, yield_tolerance_pa)?;
-        Ok(self.prepared.hardness_pa_at(alpha)?)
+        Ok((alpha, self.prepared.hardness_pa_at(alpha)?))
     }
 
     /// Resolve one original typed endpoint for a contact/wear consumer.

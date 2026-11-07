@@ -11,6 +11,7 @@ use fs_matdb::{
     QueryPoint, UncertaintyModel,
 };
 use fs_material::hardness::INDENTATION_HARDNESS_QUANTITY;
+use fs_material::hardness::history_field::HardnessFieldError;
 use fs_material::hardness::plastic_history::{
     ACCUMULATED_EQUIVALENT_PLASTIC_STRAIN_AXIS as ALPHA, ResolvedJ2Hardness,
 };
@@ -23,7 +24,9 @@ use fs_material::state_point::{
     YOUNG_MODULUS_PROPERTY,
 };
 use fs_qty::{Dims, Pressure, QtyAny, QuantitySpec};
-use fs_solid::plastic3::hardness::{J2HardnessField, J2HardnessObservationError};
+use fs_solid::plastic3::hardness::{
+    HardnessFieldExportError, J2HardnessField, J2HardnessObservationError,
+};
 use fs_solid::{IncrementSettings, SmallStrainLawField, SmallStrainTetProblem, TetAssemblyBudget};
 use fs_tribo::{
     ArchardLaw, InputAuthority, InterfaceMedium, InterfaceSystemRef, LocalHardnessArchardSample,
@@ -428,5 +431,42 @@ fn late_source_refusal_keeps_native_solution_and_complete_previous_hardness_fiel
         .unwrap(),
         previous
     );
+    assert_eq!(mechanical, before);
+}
+
+#[test]
+fn compact_native_j2_export_keeps_fixed_source_and_checks_actual_element_laws() {
+    let fixture = Fixture::new();
+    let mut problem = fixture.problem(&[0.0005, 0.0035, -0.0035]);
+    let source = &fixture.sources[0];
+    problem.laws = SmallStrainLawField::Uniform(source.plastic());
+    let mechanical = with_cx(|cx| problem.solve(cx)).unwrap();
+    let before = mechanical.clone();
+    let field = with_cx(|cx| problem.export_hardness_field(
+        &mechanical, source, YIELD_TOLERANCE_PA, cx,
+    )).unwrap();
+    let scalar = with_cx(|cx| problem.observe_hardness(
+        &mechanical, J2HardnessField::Uniform(source), YIELD_TOLERANCE_PA, cx,
+    )).unwrap();
+    assert_eq!(field.len(), fixture.tets.len());
+    assert_eq!(field.source_identity(), source.identity());
+    assert_eq!(field.mechanical_source(), source.plastic().material());
+    assert_eq!(field.hardness_source().key(), source.hardness_source().key());
+    for (element, expected) in scalar.into_iter().enumerate() {
+        assert!(mechanical.element_states[element].alpha > 0.0);
+        assert_eq!(field.hardness_pa(element), Some(expected));
+        assert_eq!(field.sample(element).unwrap().alpha(), mechanical.element_states[element].alpha);
+    }
+    let mut invalid = mechanical.clone();
+    invalid.element_states[11].alpha = -1.0;
+    assert!(matches!(with_cx(|cx| problem.export_hardness_field(
+        &invalid, source, YIELD_TOLERANCE_PA, cx,
+    )), Err(HardnessFieldExportError::Field(HardnessFieldError::Point { point: 11, .. }))));
+    // A source descriptor cannot relabel the actual heterogeneous native laws
+    // as a homogeneous half-space, even with the same original elastic values.
+    problem.laws = SmallStrainLawField::PerElement(&fixture.laws);
+    assert!(matches!(with_cx(|cx| problem.export_hardness_field(
+        &mechanical, source, YIELD_TOLERANCE_PA, cx,
+    )), Err(HardnessFieldExportError::Field(HardnessFieldError::Point { point: 6, .. }))));
     assert_eq!(mechanical, before);
 }

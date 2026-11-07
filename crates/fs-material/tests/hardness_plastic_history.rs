@@ -7,6 +7,7 @@ use fs_matdb::{
     Provenance, QueryPoint, UncertaintyModel,
 };
 use fs_material::hardness::INDENTATION_HARDNESS_QUANTITY;
+use fs_material::hardness::history_field::{AcceptedHardnessField, HardnessFieldError};
 use fs_material::hardness::plastic_history::{
     ACCUMULATED_EQUIVALENT_PLASTIC_STRAIN_AXIS as ALPHA, J2HardnessError,
     ResolvedJ2Hardness,
@@ -433,4 +434,79 @@ fn g0_discrete_only_negative_interior_and_generic_strain_sources_cannot_evolve()
             .is_err()
         );
     }
+}
+
+#[test]
+fn compact_j2_field_preserves_sources_order_and_late_refusal_atomically() {
+    let (card, key) = fixture(curve(1.0), InterpolationPolicy::LinearInside, 100.0);
+    let model = prepare(&card, &key, 300.0, 0.04);
+    let virgin = model.initial_state();
+    let loaded = model
+        .advance_candidate(&virgin, &[0.006, 0.0, 0.0, 0.0, 0.0, 0.0], GATES)
+        .unwrap().state;
+    let reversed = model
+        .advance_candidate(&loaded, &[-0.006, 0.0, 0.0, 0.0, 0.0, 0.0], GATES)
+        .unwrap().state;
+    let states = [virgin, loaded, reversed];
+    let field = AcceptedHardnessField::from_j2(
+        &model,
+        states.iter().map(|state| (model.plastic(), state.strain(), state.plastic())),
+        GATES.yield_pa,
+    ).unwrap();
+    assert_eq!(field.len(), states.len());
+    assert!(!field.is_empty());
+    assert_eq!(field.source_identity(), model.identity());
+    assert_eq!(field.mechanical_source(), model.plastic().material());
+    assert_eq!(field.hardness_source(), model.hardness_source());
+    assert_eq!(field.maximum_accumulated_plastic_strain(), 0.04);
+    assert_eq!(field.mechanical_source().state_coordinate(ALPHA), None);
+    assert_eq!(field.hardness_source().resolved().state_coordinate(ALPHA), Some(0.0));
+    for (point, state) in states.iter().enumerate() {
+        assert_eq!(field.sample(point).unwrap().alpha(), state.plastic().alpha);
+        assert_eq!(field.hardness_pa(point), Some(state.hardness_pa()));
+    }
+    assert_eq!(field.sample(states.len()), None);
+    assert_eq!(field.hardness_pa(states.len()), None);
+    let reordered = AcceptedHardnessField::from_j2(
+        &model,
+        states.iter().rev().map(|state| (model.plastic(), state.strain(), state.plastic())),
+        GATES.yield_pa,
+    ).unwrap();
+    assert_eq!(field.source_identity(), reordered.source_identity());
+    assert_ne!(field.identity(), reordered.identity());
+    assert_eq!(reordered.sample(0), field.sample(2));
+
+    let before = field.clone();
+    let foreign = plastic(&card, 301.0);
+    assert!(matches!(AcceptedHardnessField::from_j2(
+        &model,
+        states.iter().enumerate().map(|(point, state)| (
+            if point == 2 { &foreign } else { model.plastic() },
+            state.strain(), state.plastic(),
+        )),
+        GATES.yield_pa,
+    ), Err(HardnessFieldError::Point { point: 2, .. })));
+    let bounded = prepare(&card, &key, 300.0, 0.5 * states[2].plastic().alpha);
+    assert!(matches!(AcceptedHardnessField::from_j2(
+        &bounded,
+        states.iter().map(|state| (bounded.plastic(), state.strain(), state.plastic())),
+        GATES.yield_pa,
+    ), Err(HardnessFieldError::Point { .. })));
+    assert!(matches!(AcceptedHardnessField::from_j2(
+        &model,
+        states[..0].iter().map(|state| (model.plastic(), state.strain(), state.plastic())),
+        GATES.yield_pa,
+    ), Err(HardnessFieldError::Invalid(_))));
+    let mut checkpoints = 0;
+    assert_eq!(AcceptedHardnessField::from_j2_checked(
+        &model,
+        (0..300).map(|_| (model.plastic(), states[0].strain(), states[0].plastic())),
+        GATES.yield_pa,
+        || {
+            checkpoints += 1;
+            if checkpoints == 3 { Err(HardnessFieldError::Interrupted) } else { Ok(()) }
+        },
+    ), Err(HardnessFieldError::Interrupted));
+    assert_eq!(checkpoints, 3);
+    assert_eq!(field, before);
 }

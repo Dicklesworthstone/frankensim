@@ -243,6 +243,13 @@ impl ResolvedJ2Hardness {
         self.maximum_alpha
     }
 
+    /// Complete original native law, fixed context, hardness test and prepared
+    /// support identity. Different accepted point histories share this owner.
+    #[must_use]
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
+    }
+
     /// Native virgin history with the original source's alpha=0 response.
     #[must_use]
     pub fn initial_state(&self) -> J2HardnessState {

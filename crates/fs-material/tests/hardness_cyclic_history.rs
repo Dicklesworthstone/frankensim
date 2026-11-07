@@ -8,6 +8,7 @@ use fs_matdb::{
 };
 use fs_material::hardness::INDENTATION_HARDNESS_QUANTITY;
 use fs_material::hardness::cyclic_history::{ResolvedCyclicHardness, SourceBoundHardnessLaw};
+use fs_material::hardness::history_field::{AcceptedHardnessField, HardnessFieldError};
 use fs_material::hardness::plastic_history::ACCUMULATED_EQUIVALENT_PLASTIC_STRAIN_AXIS as ALPHA;
 use fs_material::plastic::chaboche::source::{
     BackstressProperties, CHABOCHE_BACKSTRESS_MODULUS_PROPERTY, CHABOCHE_DYNAMIC_RECOVERY_PROPERTY,
@@ -402,4 +403,102 @@ fn complete_state_yield_and_prepared_support_refuse_before_endpoint_export() {
             .is_err()
     );
     assert_eq!(accepted, before);
+}
+
+#[test]
+fn compact_cyclic_field_binds_native_family_and_ordered_equal_branch_sources() {
+    let (card, key) = fixture(true);
+    let native = branches(&card, 300.0);
+    let model =
+        ResolvedCyclicHardness::new(native.clone(), &card, key.clone(), SELECT, 0.08).unwrap();
+    let strains = [
+        [0.007, -0.002, -0.001, 0.0015, 0.0, 0.0],
+        [0.003, 0.006, -0.002, -0.004, 0.001, 0.002],
+    ];
+    let first = native
+        .law()
+        .response(&strains[0], &native.initial_state())
+        .unwrap()
+        .state;
+    let second = native.law().response(&strains[1], &first).unwrap().state;
+    let states = [first, second];
+    let field = AcceptedHardnessField::from_cyclic(
+        &model,
+        (0..2).map(|point| (&native, &strains[point], &states[point])),
+        GATES.yield_pa,
+    )
+    .unwrap();
+    assert_eq!(field.source_identity(), model.identity());
+    assert_eq!(field.mechanical_source(), native.material());
+    assert_eq!(field.hardness_source(), model.hardness_source());
+    for point in 0..2 {
+        assert_eq!(
+            field.sample(point).unwrap().alpha(),
+            states[point].plastic.alpha
+        );
+        assert_eq!(
+            field.hardness_pa(point),
+            Some(
+                model
+                    .hardness_pa_at_accepted(
+                        &native,
+                        &strains[point],
+                        &states[point],
+                        GATES.yield_pa,
+                    )
+                    .unwrap()
+            )
+        );
+    }
+    let rebuilt =
+        ResolvedCyclicHardness::new(native.clone(), &card, key.clone(), SELECT, 0.08).unwrap();
+    assert_eq!(model.identity(), rebuilt.identity());
+    let narrower =
+        ResolvedCyclicHardness::new(native.clone(), &card, key.clone(), SELECT, 0.04).unwrap();
+    assert_ne!(model.identity(), narrower.identity());
+    let reordered = resolve_chaboche_branches(
+        &card,
+        &point(300.0),
+        SELECT,
+        BASIS,
+        0.05,
+        [
+            BackstressProperties::new("C2", "gamma2"),
+            BackstressProperties::new("C1", "gamma1"),
+        ],
+    )
+    .unwrap();
+    let reordered_model =
+        ResolvedCyclicHardness::new(reordered.clone(), &card, key.clone(), SELECT, 0.08).unwrap();
+    assert_eq!(native.law(), reordered.law());
+    assert_ne!(model.identity(), reordered_model.identity());
+    assert!(matches!(
+        AcceptedHardnessField::from_cyclic(
+            &model,
+            (0..2).map(|point| (
+                if point == 0 { &native } else { &reordered },
+                &strains[point],
+                &states[point],
+            )),
+            GATES.yield_pa,
+        ),
+        Err(HardnessFieldError::Point { point: 1, .. })
+    ));
+
+    // Same full source bundle and prepared hardness, different actual native
+    // family. The field identity must retain which complete history was checked.
+    let voce =
+        ResolvedCyclicHardness::new(native.backbone().clone(), &card, key, SELECT, 0.08).unwrap();
+    assert_eq!(voce.plastic().material(), native.material());
+    assert_ne!(voce.identity(), model.identity());
+    let virgin = voce.plastic().initial_state();
+    let voce_field = AcceptedHardnessField::from_cyclic(
+        &voce,
+        std::iter::once((voce.plastic(), &[0.0; 6], &virgin)),
+        GATES.yield_pa,
+    )
+    .unwrap();
+    assert_eq!(voce_field.source_identity(), voce.identity());
+    assert_eq!(voce_field.sample(0).unwrap().alpha(), 0.0);
+    assert_eq!(voce_field.hardness_pa(0), Some(100.0));
 }

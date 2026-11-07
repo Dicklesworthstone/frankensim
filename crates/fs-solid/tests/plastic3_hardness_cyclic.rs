@@ -12,6 +12,7 @@ use fs_matdb::{
 };
 use fs_material::hardness::INDENTATION_HARDNESS_QUANTITY;
 use fs_material::hardness::cyclic_history::ResolvedCyclicHardness;
+use fs_material::hardness::history_field::HardnessFieldError;
 use fs_material::hardness::plastic_history::ACCUMULATED_EQUIVALENT_PLASTIC_STRAIN_AXIS as ALPHA;
 use fs_material::plastic::chaboche::source::{
     BackstressProperties, ResolvedChabocheBranches, resolve_chaboche_branches,
@@ -29,7 +30,9 @@ use fs_material::state_point::{
 };
 use fs_material::{SmallStrainLaw, Voigt};
 use fs_qty::{Dims, Pressure, QtyAny, QuantitySpec};
-use fs_solid::plastic3::hardness::{CyclicHardnessField, CyclicHardnessObservationError};
+use fs_solid::plastic3::hardness::{
+    CyclicHardnessField, CyclicHardnessObservationError, HardnessFieldExportError,
+};
 use fs_solid::{IncrementSettings, SmallStrainLawField, SmallStrainTetProblem, TetAssemblyBudget};
 
 const SELECT: MaterialPropertySelection = MaterialPropertySelection::SingleClaimOnly;
@@ -349,6 +352,18 @@ fn heterogeneous_native_cyclic_equilibrium_preserves_branches_and_local_hardness
             close(typed.hardness_pa(), hardness[element], 1e-9);
         }
         assert_ne!(hardness[0], hardness[1]);
+        assert!(matches!(
+            with_cx(|cx| problem.export_cyclic_hardness_field(
+                &mechanical,
+                &sources[0],
+                YIELD_TOLERANCE_PA,
+                cx,
+            )),
+            Err(HardnessFieldExportError::Field(HardnessFieldError::Point {
+                point: 1,
+                ..
+            }))
+        ));
         let limited = ResolvedCyclicHardness::new(
             laws[1].clone(),
             &cards[1].0,
@@ -446,6 +461,16 @@ fn uniform_voce_solid_observes_its_native_saturated_endpoint() {
         )
     })
     .unwrap();
+    let exported = with_cx(|cx| {
+        problem.export_cyclic_hardness_field(&solution, &source, YIELD_TOLERANCE_PA, cx)
+    })
+    .unwrap();
+    assert_eq!(exported.source_identity(), source.identity());
+    assert_eq!(exported.hardness_pa(0), Some(field[0]));
+    assert_eq!(
+        exported.sample(0).unwrap().alpha(),
+        solution.element_states[0].alpha
+    );
     for component in 0..6 {
         close(
             solution.element_strain[0][component],
@@ -471,4 +496,95 @@ fn uniform_voce_solid_observes_its_native_saturated_endpoint() {
             )
             .is_err()
     );
+}
+
+#[test]
+fn native_chaboche_export_keeps_independent_spatial_histories_under_one_fixed_source() {
+    let (card, key) = material(0);
+    let source = source(&card, &key);
+    let native = source.plastic();
+    let initial = [
+        [0.007, -0.002, -0.001, 0.0015, 0.0, 0.0],
+        [0.003, 0.006, -0.002, -0.004, 0.001, 0.002],
+    ];
+    let targets = [
+        [0.003, 0.006, -0.002, -0.004, 0.001, 0.002],
+        [-0.006, 0.001, 0.002, 0.004, -0.002, 0.001],
+    ];
+    let old: Vec<_> = initial
+        .iter()
+        .map(|strain| {
+            native
+                .law()
+                .response(strain, &native.initial_state())
+                .unwrap()
+                .state
+        })
+        .collect();
+    let expected: Vec<_> = (0..2)
+        .map(|point| native.law().response(&targets[point], &old[point]).unwrap())
+        .collect();
+    let loads = tractions(
+        &expected
+            .iter()
+            .map(|point| point.stress_pa)
+            .collect::<Vec<_>>(),
+    );
+    let supports = supports(2);
+    let problem = SmallStrainTetProblem {
+        nodes_m: &NODES,
+        tetrahedra: &TETS,
+        laws: SmallStrainLawField::Uniform(native),
+        prescribed_m: &supports,
+        nodal_forces_n: &loads,
+        load_path: &[1.0],
+        budget: TetAssemblyBudget::default(),
+        settings: IncrementSettings::default(),
+    };
+    let u: Vec<_> = initial.into_iter().flat_map(displacement).collect();
+    let mechanical = with_cx(|cx| problem.solve_from(&u, &old, cx)).unwrap();
+    let before = mechanical.clone();
+    let field = with_cx(|cx| {
+        problem.export_cyclic_hardness_field(&mechanical, &source, YIELD_TOLERANCE_PA, cx)
+    })
+    .unwrap();
+    assert_eq!(field.len(), 2);
+    assert_ne!(field.hardness_pa(0), field.hardness_pa(1));
+    assert_eq!(field.source_identity(), source.identity());
+    assert_eq!(field.mechanical_source(), native.material());
+    assert_eq!(field.hardness_source().key(), &key);
+    for point in 0..2 {
+        let alpha = mechanical.element_states[point].plastic.alpha;
+        assert_eq!(field.sample(point).unwrap().alpha(), alpha);
+        close(alpha, expected[point].state.plastic.alpha, 2e-9);
+        close(
+            field.hardness_pa(point).unwrap(),
+            100.0 + 20_000.0 * alpha,
+            1e-9,
+        );
+        for branch in 0..2 {
+            for component in 0..6 {
+                close(
+                    mechanical.element_states[point].backstress_pa[branch][component],
+                    expected[point].state.backstress_pa[branch][component],
+                    2e-8,
+                );
+            }
+        }
+    }
+    let mut corrupt = mechanical.clone();
+    corrupt.element_states[1].backstress_pa[1][0] += 1.0;
+    assert!(matches!(
+        with_cx(|cx| problem.export_cyclic_hardness_field(
+            &corrupt,
+            &source,
+            YIELD_TOLERANCE_PA,
+            cx,
+        )),
+        Err(HardnessFieldExportError::Field(HardnessFieldError::Point {
+            point: 1,
+            ..
+        }))
+    ));
+    assert_eq!(mechanical, before);
 }

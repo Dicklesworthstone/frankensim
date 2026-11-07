@@ -11,9 +11,11 @@
 //! a supplied solution's origin or unobserved intermediate mechanical states.
 
 use fs_exec::Cx;
+use fs_material::SmallStrainLaw;
 use fs_material::hardness::cyclic_history::{
     CyclicHardnessError, ResolvedCyclicHardness, SourceBoundHardnessLaw,
 };
+use fs_material::hardness::history_field::{AcceptedHardnessField, HardnessFieldError};
 use fs_material::hardness::plastic_history::{J2HardnessError, ResolvedJ2Hardness};
 use fs_material::plastic::J2State;
 use fs_material::plastic::source::ResolvedJ2Plasticity;
@@ -205,5 +207,121 @@ impl<L: SourceBoundHardnessLaw> SmallStrainTetProblem<'_, L> {
         }
         poll()?;
         Ok(hardness_pa)
+    }
+}
+
+/// A complete source-bound field export refused without changing the native
+/// solution, its material owners or any previously exported field.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HardnessFieldExportError {
+    Invalid(&'static str),
+    Field(HardnessFieldError),
+    Cancelled,
+}
+
+impl core::fmt::Display for HardnessFieldExportError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Invalid(reason) => write!(f, "solid hardness field export: {reason}"),
+            Self::Field(error) => write!(f, "solid hardness field export: {error}"),
+            Self::Cancelled => f.write_str("solid hardness field export cancelled"),
+        }
+    }
+}
+impl std::error::Error for HardnessFieldExportError {}
+impl From<HardnessFieldError> for HardnessFieldExportError {
+    fn from(error: HardnessFieldError) -> Self {
+        match error {
+            HardnessFieldError::Interrupted => Self::Cancelled,
+            error => Self::Field(error),
+        }
+    }
+}
+
+fn validate_field_export<L: SmallStrainLaw>(
+    problem: &SmallStrainTetProblem<'_, L>,
+    solution: &SmallStrainTetSolution<L::State>,
+    cx: &Cx<'_>,
+) -> Result<(), HardnessFieldExportError> {
+    cx.checkpoint()
+        .map_err(|_| HardnessFieldExportError::Cancelled)?;
+    let count = problem.tetrahedra.len();
+    if count == 0
+        || count > problem.budget.maximum_tetrahedra
+        || problem.nodes_m.len() > problem.budget.maximum_nodes
+        || problem.laws.validate_count(count).is_err()
+        || solution.element_strain.len() != count
+        || solution.element_stress.len() != count
+        || solution.element_states.len() != count
+        || solution.displacement_m.len() != problem.nodes_m.len()
+    {
+        return Err(HardnessFieldExportError::Invalid(
+            "native solution must cover the original admitted mesh in element order",
+        ));
+    }
+    Ok(())
+}
+
+impl SmallStrainTetProblem<'_, ResolvedJ2Plasticity> {
+    /// Export one original source and compact accepted alpha/H samples in the
+    /// native tetrahedron order. Every actual element law must match the fixed
+    /// source; a heterogeneous material field cannot be relabeled homogeneous.
+    ///
+    /// This property transfer does not export residual stress, displacements or
+    /// geometry. A contact consumer owns its explicit cell-to-element map and
+    /// homogeneous half-space approximation, without duplicating indentation.
+    pub fn export_hardness_field(
+        &self,
+        solution: &SmallStrainTetSolution<J2State>,
+        source: &ResolvedJ2Hardness,
+        yield_tolerance_pa: f64,
+        cx: &Cx<'_>,
+    ) -> Result<AcceptedHardnessField, HardnessFieldExportError> {
+        validate_field_export(self, solution, cx)?;
+        let field = AcceptedHardnessField::from_j2_checked(
+            source,
+            (0..self.tetrahedra.len()).map(|element| {
+                (
+                    self.laws.at(element),
+                    &solution.element_strain[element],
+                    &solution.element_states[element],
+                )
+            }),
+            yield_tolerance_pa,
+            || cx.checkpoint().map_err(|_| HardnessFieldError::Interrupted),
+        )?;
+        cx.checkpoint()
+            .map_err(|_| HardnessFieldExportError::Cancelled)?;
+        Ok(field)
+    }
+}
+
+impl<L: SourceBoundHardnessLaw> SmallStrainTetProblem<'_, L> {
+    /// Export a fixed-source accepted Voce/Chaboche property field. Complete
+    /// actual branch histories and source roles pass the native material gate
+    /// once per point. Histories and source receipts are not cloned per element.
+    pub fn export_cyclic_hardness_field(
+        &self,
+        solution: &SmallStrainTetSolution<L::State>,
+        source: &ResolvedCyclicHardness<L>,
+        yield_tolerance_pa: f64,
+        cx: &Cx<'_>,
+    ) -> Result<AcceptedHardnessField, HardnessFieldExportError> {
+        validate_field_export(self, solution, cx)?;
+        let field = AcceptedHardnessField::from_cyclic_checked(
+            source,
+            (0..self.tetrahedra.len()).map(|element| {
+                (
+                    self.laws.at(element),
+                    &solution.element_strain[element],
+                    &solution.element_states[element],
+                )
+            }),
+            yield_tolerance_pa,
+            || cx.checkpoint().map_err(|_| HardnessFieldError::Interrupted),
+        )?;
+        cx.checkpoint()
+            .map_err(|_| HardnessFieldExportError::Cancelled)?;
+        Ok(field)
     }
 }

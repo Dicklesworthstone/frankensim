@@ -798,6 +798,21 @@ annealing kinetics, and an independent hardness change adds no work or heat.
 nonproportional recovery, full typed-source retention and atomic source/history
 refusals. These synthetic checks do not establish a fatigue-life relation.
 
+`hardness::history_field::AcceptedHardnessField` exports a compact ordered
+alpha/H snapshot from actual accepted J2, Voce or complete Chaboche tuples.
+One shared original mechanical/hardness descriptor retains fixed conditions,
+the exact test, prepared support and native family/branch order. Every actual
+point law must match that source. Construction uses the existing accepted
+checks once per point, without a return map, database query or per-point source
+cloning; late failure or a caller checkpoint publishes no partial field.
+Source identity is independent of point values, while snapshot identity also
+binds their declared ordering. Checked point lookup supplies explicit consumer
+maps without interpolation. This frozen external/preconditioning property
+transfer does not carry residual stress, plastic displacement, geometry or
+elastic compliance, and does not attest a mesh or loading trajectory. Contact
+consumers retain their own homogeneous half-space geometry and mapping; contact
+depth/recession cannot replace alpha or duplicate bulk indentation work.
+
 `hardness::thermal_history::ThermoplasticHardnessSource` observes an independent
 original H(T, accumulated-equivalent-plastic-strain) test at accepted native
 `CaloricPoint` states. J2, Voce/viscous and complete N-branch Chaboche histories

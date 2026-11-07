@@ -15,6 +15,9 @@ pub mod depth;
 /// Original hardness on complete native Voce and Chaboche cyclic histories.
 pub mod cyclic_history;
 
+/// Compact original-source hardness fields from accepted native point histories.
+pub mod history_field;
+
 /// Original hardness at accepted native thermoplastic temperature/history.
 pub mod thermal_history;
 
