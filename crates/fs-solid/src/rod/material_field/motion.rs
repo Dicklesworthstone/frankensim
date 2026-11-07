@@ -215,7 +215,9 @@ pub struct PreparedRodMotion<I = RodNodalInertia> {
 impl SpatialMaterialRod {
     /// Freeze the original centered-inertia lane. Eccentric links still refuse;
     /// use `into_spatial_motion_model` to preserve their full mass properties.
-    /// Finite source-frequency bands cannot authorize arbitrary transients.
+    /// Material temperature, pressure, composition, moisture and concentration
+    /// retain their original held context. Unowned mechanical/rate dependence
+    /// and finite source-frequency bands cannot authorize arbitrary transients.
     pub fn into_motion_model(self, root: RodRootBoundary, gate: &CancelGate)
         -> Result<PreparedRodMotion, SpatialRodError> {
         self.prepare_motion(root, gate, |source, mut inertia| {
@@ -306,7 +308,7 @@ fn admit_section(section: &ConcentricShearSection) -> Result<(), SpatialRodError
     Ok(())
 }
 fn admit_property(property: &ResolvedScalarProperty) -> Result<(), SpatialRodError> {
-    if !property.is_constant_at_fixed_temperature()
+    if !property.is_constant_at_fixed_environment()
         || property.angular_frequency_band_rad_s()?.is_some_and(|(lo, hi)| lo > 0.0 || hi < f64::MAX) {
         return Err(SpatialRodError::Invalid(
             "transient rod needs frozen elastic coefficients without a finite frequency validity band"));

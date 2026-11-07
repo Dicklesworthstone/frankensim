@@ -561,9 +561,10 @@ impl RodSection {
     /// use [`MaterialRod`] to keep the material bundles with the solved geometry.
     ///
     /// # Errors
-    /// Refuses a sampled frequency/other-state curve as a static elastic law.
-    /// Coefficients must be constants or T-only curves at fixed positive absolute
-    /// T, and any explicit frequency support must include zero (static loading).
+    /// Coefficients share the material owner's held-environment policy: typed
+    /// temperature, pressure, composition, moisture and concentration may select
+    /// a source snapshot. Unowned mechanical/rate response refuses. Any explicit
+    /// frequency support must include zero (static loading).
     pub fn try_from_concentric_material(
         section: &fs_material::section::ConcentricShearSection,
     ) -> Result<Self, SolidError> {
@@ -585,7 +586,7 @@ impl RodSection {
                 let refuse = || SolidError::MaterialRefused {
                     what: format!("rod layer {index} property {name} must support a frozen static elastic law"),
                 };
-                if !property.is_constant_at_fixed_temperature() {
+                if !property.is_constant_at_fixed_environment() {
                     return Err(refuse());
                 }
                 if let Some((lo, hi)) = property.angular_frequency_band_rad_s().map_err(|_| refuse())?

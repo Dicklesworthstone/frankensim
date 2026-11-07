@@ -80,7 +80,7 @@ impl ShearElement {
                         property.requirement().name()
                     ),
                 };
-                if !property.is_constant_at_fixed_temperature()
+                if !property.is_constant_at_fixed_environment()
                     || property
                         .angular_frequency_band_rad_s()
                         .map_err(|_| refused())?

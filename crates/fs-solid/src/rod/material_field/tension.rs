@@ -103,11 +103,11 @@ impl MaterialTensionLink {
                 "tension link needs distinct nodes, finite offsets, positive natural length/count and a strain limit in (0,1)",
             ));
         }
-        // The same resolved-property admission as the static rod: constants or
-        // fixed-temperature curves, with zero included in any frequency band.
+        // The same held-environment admission as the static rod, retaining
+        // source axes and requiring zero in any explicit frequency band.
         for index in 0..section.layers().len() {
             for property in section.elastic_source_properties(index)? {
-                if !property.is_constant_at_fixed_temperature()
+                if !property.is_constant_at_fixed_environment()
                     || property
                         .angular_frequency_band_rad_s()?
                         .is_some_and(|(lo, hi)| lo > 0.0 || hi < 0.0)

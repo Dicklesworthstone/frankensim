@@ -7117,9 +7117,13 @@ material cards, query states and receipts; no average material replaces them.
 The original force-based static, signed-modal, reference-mass, gravity and
 Newmark owners consume those coefficients. A sampled frequency/rate law is
 refused, as is a finite frequency-applicability band that this general time
-history cannot enforce. Constant or temperature-only coefficients are frozen
-at the declared state. This constructs a new stress-free reference specimen;
-it does not implement thermal expansion, live mass exchange, plasticity,
+history cannot enforce. Coefficients use the shared material policy for the
+held typed temperature, pressure, composition, moisture and concentration;
+unowned mechanical/rate response or applicability still refuses. The same
+policy reaches static rods, shear frames, tensile links and rod motion while
+retaining each owner's existing frequency restrictions. This constructs a new
+stress-free reference specimen; it does not implement thermal expansion, live
+mass exchange, plasticity,
 interlayer slip or material-derived damping. Existing planar Euler–Bernoulli
 and reference-inertia assumptions still apply. Missing data and source/geometry
 admission failures publish no partial member or added mass.

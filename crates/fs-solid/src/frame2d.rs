@@ -880,9 +880,9 @@ impl Frame2d {
     /// The selected state describes a new stress-free reference specimen, not
     /// a live temperature update, free expansion or material-exchange event.
     ///
-    /// The elastic coefficients must be constant at the retained temperature
-    /// and have no explicit frequency restriction. A sampled frequency/rate
-    /// response is not a time-domain elastic constitutive law; a bounded
+    /// Elastic coefficients use the shared material policy at their retained
+    /// typed environment and have no explicit frequency restriction. Unowned
+    /// mechanical/rate dependence refuses; a sampled frequency response or bounded
     /// frequency claim needs a separately band-limited dynamics model.
     /// Existing planar Euler–Bernoulli and reference-inertia limits apply.
     ///
@@ -910,7 +910,7 @@ impl Frame2d {
                         "frame layer {index} property {name} needs a frozen elastic coefficient without a frequency restriction"
                     ),
                 };
-                if !property.is_constant_at_fixed_temperature()
+                if !property.is_constant_at_fixed_environment()
                     || property
                         .angular_frequency_band_rad_s()
                         .map_err(|_| refused())?
