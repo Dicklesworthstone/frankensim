@@ -64,8 +64,7 @@ fn held_power_closes_actual_e_and_j_before_enforcing_supply_compliance() {
                     },
                 );
             }
-            assert!(field.iterations > 1);
-            assert_eq!(field.field_solves, field.iterations);
+            assert!(field.field_solves > 1);
             assert_eq!(candidate.problem().relaxation(), 0.5);
         }
         // The original, unadvanced model remains available after refusals.

@@ -77,6 +77,15 @@ type Result<T> = core::result::Result<T, SpatialConductionResponseError>;
 #[derive(Clone, Copy, Debug)]
 pub enum SpatialConductionResponseDrive<'a> {
     Boundary(&'a SpatialConductionBoundary),
+    /// Held positive power between two equipotential face sets. Every source
+    /// trial solves its own resistance and closes actual E/J. Supply limits
+    /// apply only after material closure, never to intermediate coefficients.
+    Power {
+        positive_faces: &'a [usize],
+        negative_faces: &'a [usize],
+        source: crate::conduction::ConductionPowerSource,
+        reference_voltage_v: f64,
+    },
     /// Signed current INTO the selected electrodes, including zero for floating
     /// electrodes. Other electrodes prescribe voltage in original terminal order;
     /// currents follow the supplied current-terminal order.
@@ -411,8 +420,14 @@ impl SpatialConductionResponse {
             ));
         }
         let drive = drive.into();
+        if let SpatialConductionResponseDrive::Power { source, .. } = drive {
+            source
+                .validate()
+                .map_err(SpatialConductionResponseError::Invalid)?;
+        }
         let solves_per_iteration = match drive {
-            SpatialConductionResponseDrive::Boundary(_) => 1,
+            SpatialConductionResponseDrive::Boundary(_)
+            | SpatialConductionResponseDrive::Power { .. } => 1,
             SpatialConductionResponseDrive::MixedTerminals { terminals, .. } => {
                 terminals.len().checked_sub(1).filter(|&n| n > 0).ok_or(
                     SpatialConductionResponseError::Invalid(
@@ -499,9 +514,35 @@ impl SpatialConductionResponse {
                     })
                 },
             )?;
+            let mut power_resistance_ohm = None;
             let field = match drive {
                 SpatialConductionResponseDrive::Boundary(boundary) => {
                     native.solve(boundary, field_controls, cancelled)?
+                }
+                SpatialConductionResponseDrive::Power {
+                    positive_faces,
+                    negative_faces,
+                    source,
+                    reference_voltage_v,
+                } => {
+                    let response = native.resistance_at_reference_voltage(
+                        positive_faces,
+                        negative_faces,
+                        reference_voltage_v,
+                        field_controls,
+                        cancelled,
+                    )?;
+                    power_resistance_ohm = Some(response.resistance_ohm());
+                    response.field_at_power(
+                        crate::conduction::ConductionPowerSource {
+                            maximum_voltage_v: f64::MAX,
+                            maximum_current_a: f64::MAX,
+                            ..source
+                        },
+                        field_controls.current_tolerance_a,
+                        field_controls.power_tolerance_w,
+                        cancelled,
+                    )?
                 }
                 SpatialConductionResponseDrive::MixedTerminals {
                     terminals,
@@ -615,6 +656,13 @@ impl SpatialConductionResponse {
             }
             check(cancelled)?;
             if converged && absolute_power <= field_controls.power_tolerance_w {
+                if let SpatialConductionResponseDrive::Power { source, .. } = drive {
+                    source
+                        .operating_point(power_resistance_ohm.ok_or(
+                            SpatialConductionResponseError::Invalid("lost power-drive resistance"),
+                        )?)
+                        .map_err(SpatialConductionResponseError::Invalid)?;
+                }
                 let report = SpatialConductionResponseReport {
                     field,
                     evaluated,

@@ -1,4 +1,6 @@
 //! Independent nonlinear 3D current, caloric balance and continuation oracles.
+#[path = "response/power.rs"]
+mod power;
 use super::*;
 use fs_couple::circuit_enthalpy::conduction::ConductionThermalError;
 use fs_em::spatial::conduction::response::{

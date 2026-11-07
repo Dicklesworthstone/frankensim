@@ -239,6 +239,17 @@ impl SpatialConductionThermalNetwork<'_> {
             .map_err(map_conduction_error)?;
         let drive = drive.into();
         let work_drive = match drive {
+            SpatialConductionResponseDrive::Power {
+                positive_faces,
+                negative_faces,
+                source,
+                reference_voltage_v,
+            } => SpatialConductionDrive::Power {
+                positive_faces,
+                negative_faces,
+                source,
+                reference_voltage_v,
+            },
             SpatialConductionResponseDrive::Boundary(boundary) => {
                 SpatialConductionDrive::Boundary(boundary)
             }
