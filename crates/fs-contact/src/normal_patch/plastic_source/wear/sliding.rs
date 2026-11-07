@@ -16,18 +16,17 @@
 //! remain separate. No thermal partition, heat evolution, or debris law is
 //! inferred, and no combined mechanical-energy theorem is claimed.
 
+mod cells;
+pub mod hardness;
 pub mod temperature;
-
-use std::collections::BTreeMap;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_matdb::QueryPoint;
 use fs_material::state_point::ResolvedInterfaceStatePoint;
-use fs_math::det;
 use fs_tribo::{
     DryTangentialState, FrictionLaw, TangentialLaw, TangentialSolveConfig, TangentialStep,
-    TangentialStepInput, WearAdvance,
+    WearAdvance,
 };
 
 use crate::interface_binding::thermal_friction::{SourceThermalCoulomb, SourceThermalCoulombError};
@@ -199,31 +198,7 @@ impl SourcePlasticSlidingWear {
         friction: &SourceThermalCoulomb,
         query: &QueryPoint,
     ) -> Result<(), SourcePlasticSlidingError> {
-        let normal = wear.contact().normal_source();
-        if friction.interface() != normal.elastic().interface() || !friction.query_axes().is_empty()
-        {
-            return Err(SourcePlasticSlidingError::Invalid(
-                "sliding requires the original ordered interface and only held temperature/local pressure",
-            ));
-        }
-        let fixed = normal.interface_state().query();
-        let pressure = friction.axes().nominal_pressure.as_deref();
-        if !query
-            .axes()
-            .iter()
-            .filter(|(name, _)| Some(name.as_str()) != pressure)
-            .eq(fixed.axes().iter())
-            || !query
-                .axis_quantities()
-                .iter()
-                .filter(|(name, _)| Some(name.as_str()) != pressure)
-                .eq(fixed.axis_quantities().iter())
-        {
-            return Err(SourcePlasticSlidingError::Invalid(
-                "sliding must retain every original fixed query coordinate and quantity",
-            ));
-        }
-        Ok(())
+        cells::admit_query(wear.contact().normal_source(), friction, query)
     }
 
     fn source_identity(
@@ -241,27 +216,14 @@ impl SourcePlasticSlidingWear {
         &self,
         temperature_k: f64,
     ) -> Result<QueryPoint, SourceThermalCoulombError> {
-        if !temperature_k.is_finite() || temperature_k <= 0.0 {
-            return Err(SourceThermalCoulombError::Invalid(
-                "sliding requires a positive absolute interface temperature",
-            ));
-        }
-        Ok(self
-            .friction
-            .initial_source()
-            .query()
-            .with(&self.friction.axes().temperature, temperature_k)?)
+        cells::query_at_temperature(&self.friction, temperature_k)
     }
 
     fn coefficients_at_pressure(
         &self,
         pressure_pa: f64,
     ) -> Result<(ResolvedInterfaceStatePoint, FrictionLaw), SourceThermalCoulombError> {
-        let mut query = self.query_at_temperature(self.temperature_k)?;
-        if let Some(axis) = &self.friction.axes().nominal_pressure {
-            query = query.with(axis, pressure_pa)?;
-        }
-        self.friction.coefficients_at_query(&query)
+        cells::coefficients_at_pressure(&self.friction, self.temperature_k, pressure_pa)
     }
 
     fn cell_normal_force(pressure_pa: f64, area_m2: f64) -> Result<f64, SourceThermalCoulombError> {
@@ -481,114 +443,34 @@ impl SourcePlasticSlidingWear {
         checkpoint(cx)?;
         self.admit(before)?;
         let pressure = before.wear.contact_state().contact_state().pressure_pa();
-        if motion.len() != pressure.len() {
-            return Err(SourcePlasticSlidingError::Invalid(
-                "sliding requires one local motion for every original grid cell",
-            ));
-        }
         let grid = self.wear.contact().model().config().grid;
         let area = grid.cell_width_m * grid.cell_depth_m;
-        let mut sources = Vec::new();
-        let mut laws = Vec::new();
-        let mut sample_indices = BTreeMap::new();
-        let mut tangential = Vec::with_capacity(pressure.len());
-        let mut cells = Vec::with_capacity(pressure.len());
-        let mut slip = Vec::with_capacity(pressure.len());
-        let mut work = 0.0;
-        let mut compensation = 0.0;
-        for (index, (&p, &input)) in pressure.iter().zip(motion).enumerate() {
-            checkpoint(cx)?;
-            let error = |error| SourcePlasticSlidingError::Cell { index, error };
-            let normal_n = Self::cell_normal_force(p, area).map_err(error)?;
-            // A detached cell needs no coefficient at an unsupported zero
-            // pressure. The native unloaded branch has zero effort and work;
-            // its receipt deliberately carries no source sample.
-            let source_index = if p == 0.0 {
-                None
-            } else {
-                let key = if self.friction.axes().nominal_pressure.is_some() {
-                    p.to_bits()
-                } else {
-                    0
-                };
-                let slot = if let Some(&slot) = sample_indices.get(&key) {
-                    slot
-                } else {
-                    let (source, law) = self.coefficients_at_pressure(p).map_err(error)?;
-                    let slot = sources.len();
-                    sources.push(source);
-                    laws.push(law);
-                    sample_indices.insert(key, slot);
-                    slot
-                };
-                Some(slot)
-            };
-            let law = source_index.map_or(&self.initial_law, |slot| &laws[slot]);
-            let native = law
-                .advance(
-                    &before.tangential[index],
-                    &TangentialStepInput {
-                        normal_n,
-                        slip_increment_m: input.released_increment_m,
-                        dt_s: duration_s,
-                        contact_temperature_k: Some(self.temperature_k),
-                        nominal_pressure_pa: self
-                            .friction
-                            .axes()
-                            .nominal_pressure
-                            .as_ref()
-                            .map(|_| p),
-                        compliance_m_per_n: input.compliance_m_per_n,
-                        solve: controls,
-                    },
-                )
-                .map_err(|e| error(SourceThermalCoulombError::Tribo(e)))?;
-            let distance = det::hypot(native.slip_increment_m[0], native.slip_increment_m[1]);
-            if !distance.is_finite() {
-                return Err(SourcePlasticSlidingError::Invalid(
-                    "finite actual local sliding distance",
-                ));
-            }
-            slip.push(distance);
-            add_compensated(&mut work, &mut compensation, native.dissipated_j);
-            tangential.push(native.state);
-            cells.push(PlasticCellSliding {
-                input,
-                pressure_pa: p,
-                source_index,
-                response: TangentialStep {
-                    state: (),
-                    traction_n: native.traction_n,
-                    slip_increment_m: native.slip_increment_m,
-                    regime: native.regime,
-                    stored_change_j: native.stored_change_j,
-                    dissipated_j: native.dissipated_j,
-                    closure_residual_j: native.closure_residual_j,
-                    compatibility_residual_m: native.compatibility_residual_m,
-                    iterations: native.iterations,
-                },
-            });
-        }
-        if !work.is_finite() || work < 0.0 {
-            return Err(SourcePlasticSlidingError::Invalid(
-                "finite summed native friction work",
-            ));
-        }
-        checkpoint(cx)?;
-        let (removed, boundary) = remove(&slip)?;
+        let sliding = cells::advance(
+            &self.friction,
+            &self.initial_law,
+            self.temperature_k,
+            &before.tangential,
+            pressure,
+            area,
+            motion,
+            duration_s,
+            controls,
+            cx,
+        )?;
+        let (removed, boundary) = remove(&sliding.unsigned_slip_m)?;
         checkpoint(cx)?;
         Ok(SourcePlasticSlidingWearAdvance {
             source_identity: self.identity,
             candidate: SourcePlasticSlidingWearState {
                 owner: self.identity,
                 wear: removed.candidate,
-                tangential,
+                tangential: sliding.tangential,
             },
-            cells,
-            friction_sources: sources,
+            cells: sliding.cells,
+            friction_sources: sliding.friction_sources,
             duration_s,
             friction_controls: controls,
-            frictional_work_j: work,
+            frictional_work_j: sliding.frictional_work_j,
             wear: removed.wear,
             recession_increment_m: removed.recession_increment_m,
             pressure_weighted_sliding_j: removed.pressure_weighted_sliding_j,

@@ -3548,8 +3548,9 @@ geometry or cancellation refusal publishes no partial history or inventory.
 Prepared continuous source profiles avoid source queries during stepping.
 External conditions and elasticity stay fixed within each wear interval;
 the temperature continuation below updates them between accepted intervals.
-This owner supplies no layered kernel, coating fracture, annealing, debris,
-friction closure or implicit wear integration. Physical slip refinement is required as hardness/pressure change.
+The depth owner supplies no layered kernel, coating fracture, annealing, debris
+or implicit wear integration; the sliding adapter below supplies native local
+Coulomb closure. Physical slip refinement is required as hardness/pressure change.
 Synthetic G1/G3 checks cover independent graded-hardness wear integrals and
 first-order refinement, separate local denominators, both native work accounts,
 constant-profile equivalence in Dense/MatrixFree/FFT lanes and exact no-op
@@ -3624,6 +3625,40 @@ Numerical regressions cover graded-cap feedback and plastic-work convergence,
 maintained-force exact-profile integration, finite-spring relaxation with coarse
 support recovery, hardness-only refinement, and atomic late refusal. They do not
 constitute empirical material validation.
+
+## Native frictional slip with depth or accepted-history hardness
+
+`wear::sliding::hardness::{SourceDepthSlidingWear,SourceHistorySlidingWear}`
+pair the complete original hardness/contact/wear owner with native signed shear
+history in unchanged cell/tangent order. Their concrete adapters and ordinary
+`SourcePlasticSlidingWear` share one original cell Coulomb closure. Each cell
+uses its actual beginning normal force p*A, prescribed released body increment,
+physical duration and independent diagonal body compliance. Only the norm of
+the native irreversible slip increment enters wear. Sticking removes no material;
+reversing travel accumulates both actual distances even at zero net signed slip.
+
+Depth wear integrates each original H(z) exactly through removal and retains
+both native recession and exposed-cap continuations. Accepted-history wear uses
+each body's explicitly mapped H and retains its original single recession
+continuation. The requested approach, force or finite spring applies throughout;
+all native boundary/work receipts and separate body inventory increments accompany
+the complete successor. Normal loading and accepted-field refresh preserve shear.
+Initial registration begins zero shear travel without resetting existing wear.
+
+Original friction samples retain pinned claims and the exact held interface
+conditions. Equal loaded-pressure queries share one sample; detached cells need
+no unsupported zero-pressure claim. Any source, local solve, wear, mechanical,
+arithmetic or cancellation failure leaves both predecessor histories intact.
+Native friction dissipation, pressure-weighted slip, irreversible indentation
+and signed normal parameter work remain separate accounts, without heat allocation
+or a whole coupled-step energy theorem.
+
+This is a beginning-pressure split. Refine physical motion when pressure changes
+appreciably; cross-cell tangential elasticity and adaptive friction/contact
+co-integration are outside this local closure. Synthetic regressions cover
+sticking, released versus actual slip, exact graded-depth removal, reversal at
+all three boundaries, mapped own-body hardness, retained field-refresh history,
+loaded-query sharing, detached cells and atomic late refusals.
 
 ## Temperature-dependent hardness through the exposed depth
 

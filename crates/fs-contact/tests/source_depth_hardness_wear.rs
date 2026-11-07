@@ -13,6 +13,9 @@ mod integration;
 #[path = "source_depth_hardness_wear/temperature.rs"]
 mod temperature;
 
+#[path = "source_depth_hardness_wear/sliding.rs"]
+mod sliding;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::hash_domain;
 use fs_contact::interface_binding::{

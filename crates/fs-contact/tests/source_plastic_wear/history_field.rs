@@ -1,6 +1,9 @@
 //! Real accepted native histories drive spatial caps, separate wear and refresh.
 //! Synthetic material curves exercise equations; no empirical calibration claim.
 
+#[path = "history_field/sliding.rs"]
+mod sliding;
+
 use std::sync::Arc;
 
 use super::*;
