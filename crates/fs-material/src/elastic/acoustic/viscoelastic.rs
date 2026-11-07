@@ -24,6 +24,9 @@ use fs_math::c64::C64;
 
 mod kernel;
 
+/// Coherent bonded solid stacks with the original loss law in every layer.
+pub mod layers;
+
 /// Bounded total number of bulk plus shear Maxwell branches at preparation.
 pub const MAX_VISCOELASTIC_SLAB_BRANCHES: usize = 64;
 
@@ -77,6 +80,63 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), ViscoelasticSlabErro
     } else {
         Ok(())
     }
+}
+
+fn source_moduli(
+    source: ViscoelasticSlabSource<'_>,
+    angular_frequency_rad_s: f64,
+    maximum_branches: usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<[C64; 2], ViscoelasticSlabError> {
+    let count = source
+        .bulk
+        .terms
+        .len()
+        .checked_add(source.shear.terms.len());
+    if maximum_branches > MAX_VISCOELASTIC_SLAB_BRANCHES
+        || count.is_none_or(|n| n > maximum_branches)
+    {
+        return Err(ViscoelasticSlabError::Budget);
+    }
+    let (lo, hi) = source.frequency_band_rad_s;
+    if !lo.is_finite()
+        || !hi.is_finite()
+        || lo < 0.0
+        || hi < lo
+        || !source.maximum_absolute_strain.is_finite()
+        || source.maximum_absolute_strain <= 0.0
+        || source.source_identity == ContentHash([0; 32])
+    {
+        return Err(ViscoelasticSlabError::Invalid(
+            "material identity and support must be explicit",
+        ));
+    }
+    if !angular_frequency_rad_s.is_finite()
+        || angular_frequency_rad_s <= 0.0
+        || angular_frequency_rad_s < lo
+        || angular_frequency_rad_s > hi
+    {
+        return Err(ViscoelasticSlabError::OutsideSourceSupport);
+    }
+    for law in [source.bulk, source.shear] {
+        if !law.e_inf.is_finite() || law.e_inf <= 0.0 {
+            return Err(ViscoelasticSlabError::Invalid(
+                "original equilibrium modulus must be positive",
+            ));
+        }
+        for &(modulus, time) in &law.terms {
+            poll(cancelled)?;
+            if !modulus.is_finite() || modulus < 0.0 || !time.is_finite() || time <= 0.0 {
+                return Err(ViscoelasticSlabError::Invalid(
+                    "original Maxwell branch is invalid",
+                ));
+            }
+        }
+    }
+    Ok([source.bulk, source.shear].map(|law| {
+        let (storage, loss) = law.modulus(angular_frequency_rad_s);
+        C64::new(storage, loss)
+    }))
 }
 
 /// One source-bound slab at one frequency, between two lossless exterior fluids.
@@ -142,51 +202,7 @@ impl<'a> ViscoelasticSlab<'a> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ViscoelasticSlabError> {
         poll(cancelled)?;
-        let count = source
-            .bulk
-            .terms
-            .len()
-            .checked_add(source.shear.terms.len());
-        if maximum_branches > MAX_VISCOELASTIC_SLAB_BRANCHES
-            || count.is_none_or(|n| n > maximum_branches)
-        {
-            return Err(ViscoelasticSlabError::Budget);
-        }
-        let (lo, hi) = source.frequency_band_rad_s;
-        if !lo.is_finite()
-            || !hi.is_finite()
-            || lo < 0.0
-            || hi < lo
-            || !source.maximum_absolute_strain.is_finite()
-            || source.maximum_absolute_strain <= 0.0
-            || source.source_identity == ContentHash([0; 32])
-        {
-            return Err(ViscoelasticSlabError::Invalid(
-                "material identity and support must be explicit",
-            ));
-        }
-        if !angular_frequency_rad_s.is_finite()
-            || angular_frequency_rad_s <= 0.0
-            || angular_frequency_rad_s < lo
-            || angular_frequency_rad_s > hi
-        {
-            return Err(ViscoelasticSlabError::OutsideSourceSupport);
-        }
-        for law in [source.bulk, source.shear] {
-            if !law.e_inf.is_finite() || law.e_inf <= 0.0 {
-                return Err(ViscoelasticSlabError::Invalid(
-                    "original equilibrium modulus must be positive",
-                ));
-            }
-            for &(modulus, time) in &law.terms {
-                poll(cancelled)?;
-                if !modulus.is_finite() || modulus < 0.0 || !time.is_finite() || time <= 0.0 {
-                    return Err(ViscoelasticSlabError::Invalid(
-                        "original Maxwell branch is invalid",
-                    ));
-                }
-            }
-        }
+        let moduli = source_moduli(source, angular_frequency_rad_s, maximum_branches, cancelled)?;
         let left = exterior_sources[0].acoustic_state()?;
         let right = if core::ptr::eq(exterior_sources[0], exterior_sources[1]) {
             left
@@ -194,10 +210,6 @@ impl<'a> ViscoelasticSlab<'a> {
             exterior_sources[1].acoustic_state()?
         };
         poll(cancelled)?;
-        let moduli = [source.bulk, source.shear].map(|law| {
-            let (storage, loss) = law.modulus(angular_frequency_rad_s);
-            C64::new(storage, loss)
-        });
         let wave = kernel::Slab::new(
             source.density_kg_m3,
             moduli,
@@ -300,7 +312,7 @@ impl DrivenViscoelasticSlab<'_, '_> {
         let field = self
             .slab
             .wave
-            .field(self.drive.inward, depth_m)
+            .field(self.drive.inward, self.drive.parity, depth_m)
             .map_err(ViscoelasticSlabError::Invalid)?;
         poll(cancelled)?;
         Ok(ViscoelasticSlabField {

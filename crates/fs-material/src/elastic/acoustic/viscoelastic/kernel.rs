@@ -7,6 +7,9 @@
 
 use fs_math::{c64::C64, dd::Dd, det};
 
+#[path = "kernel/layers.rs"]
+pub(crate) mod layers;
+
 pub(crate) type Result<T> = core::result::Result<T, &'static str>;
 
 #[derive(Clone, Copy, Debug)]
@@ -20,12 +23,17 @@ pub(crate) struct Slab {
     exterior: [f64; 2],
     pub(crate) scattering: [C64; 4],
     inward: [[C64; 2]; 2],
+    parity_factor: C64,
+    normalized_impedance: C64,
+    normalized_exterior: [f64; 2],
+    missing_one_way: C64,
     log_gram: [f64; 2],
 }
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Drive {
     pub(crate) inward: [C64; 2],
+    pub(crate) parity: [C64; 2],
     pub(crate) outgoing: [C64; 2],
     pub(crate) incident_power: [f64; 2],
     pub(crate) outgoing_power: [f64; 2],
@@ -84,6 +92,31 @@ fn propagation(k: C64, distance: f64) -> Result<C64> {
     }
     let (sine, cosine) = det::sin_cos(phase);
     Ok(C64::new(cosine, -sine).scale(magnitude))
+}
+
+// 1-exp(-i*k*d), retaining the small real loss and phase independently.
+fn missing_propagation(k: C64, distance: f64) -> Result<C64> {
+    let attenuation = det::exp(k.im * distance);
+    if attenuation == 0.0 {
+        return Ok(C64::ONE);
+    }
+    let phase = k.re * distance;
+    if !phase.is_finite() {
+        return Err("viscoelastic wave phase is unrepresentable");
+    }
+    let half_sine = det::sin_cos(0.5 * phase).0;
+    Ok(C64::new(
+        -det::expm1(k.im * distance) + 2.0 * attenuation * half_sine * half_sine,
+        attenuation * det::sin_cos(phase).0,
+    ))
+}
+
+fn weighted(a: C64, x: f64, b: C64, y: f64) -> C64 {
+    let (x, y) = (Dd::from_f64(x), Dd::from_f64(y));
+    C64::new(
+        (Dd::from_f64(a.re) * x + Dd::from_f64(b.re) * y).to_f64(),
+        (Dd::from_f64(a.im) * x + Dd::from_f64(b.im) * y).to_f64(),
+    )
 }
 
 // Eigenvalues of the exact pressure Gram integral. For thin layers, evaluate
@@ -155,21 +188,16 @@ fn wave_gram_logs(k: C64, d: f64) -> Result<[f64; 2]> {
     }
 }
 
-fn integral_log(inward: [C64; 2], log_gram: [f64; 2]) -> f64 {
-    let scale = inward[0].abs().max(inward[1].abs());
-    if scale == 0.0 {
-        return f64::NEG_INFINITY;
-    }
-    let [a, b] = inward.map(|z| divided(z, scale));
+fn integral_log(parity: [C64; 2], log_gram: [f64; 2]) -> f64 {
     let terms = [
-        log_gram[0] + 2.0 * det::ln((a + b).abs()),
-        log_gram[1] + 2.0 * det::ln((a - b).abs()),
+        log_gram[0] + 2.0 * det::ln(parity[0].abs()),
+        log_gram[1] + 2.0 * det::ln(parity[1].abs()),
     ];
     let larger = terms[0].max(terms[1]);
     if larger == f64::NEG_INFINITY {
         return larger;
     }
-    2.0 * det::ln(scale) + larger + det::ln(1.0 + det::exp(terms[0].min(terms[1]) - larger))
+    larger + det::ln(1.0 + det::exp(terms[0].min(terms[1]) - larger))
 }
 
 impl Slab {
@@ -235,17 +263,37 @@ impl Slab {
         if !finite(determinant) || determinant == C64::ZERO {
             return Err("viscoelastic boundary solve is singular or unrepresentable");
         }
-        let factor = z.scale(2.0) / determinant;
+        // Cancel the common impedance BEFORE multiplying a tiny propagation
+        // phase. Otherwise Im(Z) can erase a representable Im(g), even when
+        // the normalized transmission is simply g to working precision.
+        let reduced = C64::from_re(2.0 * (l + r)) + ((z - zl) * (z - zr) * missing_round_trip) / z;
+        let use_reduced = finite(reduced) && reduced != C64::ZERO;
+        let factor = if use_reduced {
+            C64::from_re(2.0) / reduced
+        } else {
+            z.scale(2.0) / determinant
+        };
         let inward = [
             [factor * (z + zr), -(factor * (z - zl) * g)],
             [-(factor * (z - zr) * g), factor * (z + zl)],
         ];
-        let scattering = [
-            (z.scale(2.0 * (r - l)) + (z + zl) * (z - zr) * missing_round_trip) / determinant,
-            (z * g).scale(4.0 * l) / determinant,
-            (z * g).scale(4.0 * r) / determinant,
-            (z.scale(2.0 * (l - r)) + (z + zr) * (z - zl) * missing_round_trip) / determinant,
-        ];
+        let scattering = if use_reduced {
+            [
+                (C64::from_re(2.0 * (r - l)) + ((z + zl) * (z - zr) * missing_round_trip) / z)
+                    / reduced,
+                (C64::from_re(4.0 * l) / reduced) * g,
+                (C64::from_re(4.0 * r) / reduced) * g,
+                (C64::from_re(2.0 * (l - r)) + ((z + zr) * (z - zl) * missing_round_trip) / z)
+                    / reduced,
+            ]
+        } else {
+            [
+                (z.scale(2.0 * (r - l)) + (z + zl) * (z - zr) * missing_round_trip) / determinant,
+                (z.scale(4.0 * l) / determinant) * g,
+                (z.scale(4.0 * r) / determinant) * g,
+                (z.scale(2.0 * (l - r)) + (z + zr) * (z - zl) * missing_round_trip) / determinant,
+            ]
+        };
         if inward
             .iter()
             .flatten()
@@ -264,8 +312,29 @@ impl Slab {
             exterior,
             scattering,
             inward,
+            parity_factor: factor,
+            normalized_impedance: z,
+            normalized_exterior: [l, r],
+            missing_one_way: missing_propagation(k, length)?,
             log_gram: wave_gram_logs(k, length)?,
         })
+    }
+
+    fn parity(&self, incoming: [C64; 2]) -> [C64; 2] {
+        // Evaluate A+B and A-B before their large individual wave terms round.
+        // In a thin standing wave, subtracting already-rounded A and B can
+        // erase the entire even-mode contribution to positive local heating.
+        let [a, b] = incoming;
+        let [l, r] = self.normalized_exterior;
+        let z = self.normalized_impedance;
+        let sum = weighted(a, r, b, l);
+        let difference = weighted(a, r, b, -l);
+        let z_difference = z * (a - b);
+        [
+            self.parity_factor * (sum.scale(2.0) + (z * (a + b) - sum) * self.missing_one_way),
+            self.parity_factor
+                * (z_difference.scale(2.0) - (z_difference - difference) * self.missing_one_way),
+        ]
     }
 
     fn heat(&self, log_pressure_square: f64, volume_factor: f64) -> Result<[f64; 2]> {
@@ -295,6 +364,7 @@ impl Slab {
         let inward = self
             .inward
             .map(|row| row[0] * incoming[0] + row[1] * incoming[1]);
+        let parity = self.parity(incoming);
         let outgoing = [
             self.scattering[0] * incoming[0] + self.scattering[1] * incoming[1],
             self.scattering[2] * incoming[0] + self.scattering[3] * incoming[1],
@@ -302,6 +372,7 @@ impl Slab {
         if inward
             .iter()
             .chain(outgoing.iter())
+            .chain(parity.iter())
             .any(|z| !finite(*z) || !z.abs().is_finite())
         {
             return Err("viscoelastic driven field is unrepresentable");
@@ -317,7 +388,7 @@ impl Slab {
             power(outgoing[0], self.exterior[0])?,
             power(outgoing[1], self.exterior[1])?,
         ];
-        let heat = self.heat(integral_log(inward, self.log_gram), area)?;
+        let heat = self.heat(integral_log(parity, self.log_gram), area)?;
         let positive_sum = incident_power
             .into_iter()
             .chain(outgoing_power)
@@ -348,6 +419,7 @@ impl Slab {
         };
         Ok(Drive {
             inward,
+            parity,
             outgoing,
             incident_power,
             outgoing_power,
@@ -357,16 +429,30 @@ impl Slab {
         })
     }
 
-    pub(crate) fn field(&self, inward: [C64; 2], depth: f64) -> Result<Field> {
+    pub(crate) fn field(&self, inward: [C64; 2], parity: [C64; 2], depth: f64) -> Result<Field> {
         if !depth.is_finite() || depth < 0.0 || depth > self.length || self.length == 0.0 {
             return Err(
                 "viscoelastic interior observation needs a positive slab and admitted depth",
             );
         }
-        let a = inward[0] * propagation(self.k, depth)?;
-        let b = inward[1] * propagation(self.k, self.length - depth)?;
-        let pressure = a + b;
-        let velocity = (a - b) / self.impedance;
+        let (pressure, velocity) = if self.k.abs() * self.length < 0.1 {
+            let back_depth = self.length - depth;
+            let forward_nearer = depth <= back_depth;
+            let near_depth = depth.min(back_depth);
+            let distance = depth.max(back_depth) - near_depth;
+            let g = propagation(self.k, near_depth)?;
+            let missing = missing_propagation(self.k, distance)?;
+            let even = g * (C64::ONE - missing.scale(0.5));
+            let odd = (g * missing).scale(if forward_nearer { 0.5 } else { -0.5 });
+            (
+                parity[0] * even + parity[1] * odd,
+                (parity[1] * even + parity[0] * odd) / self.impedance,
+            )
+        } else {
+            let a = inward[0] * propagation(self.k, depth)?;
+            let b = inward[1] * propagation(self.k, self.length - depth)?;
+            (a + b, (a - b) / self.impedance)
+        };
         let strain = -(pressure / self.modulus);
         if [pressure, velocity, strain].iter().any(|z| !finite(*z)) {
             return Err("viscoelastic interior field is unrepresentable");

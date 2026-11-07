@@ -20688,3 +20688,31 @@ or native regression execution was performed. Small strain, globally affine
 positive-or-absent branch moduli, fixed recovery coefficients and original
 source domains remain binding; finite cyclic forming, static recovery and
 experimental calibration are not supplied by this extension.
+
+## Coherent absorption in bonded viscoelastic solid layers
+
+`elastic::acoustic::viscoelastic::layers::ViscoelasticLayers` retains each
+layer's original bulk/shear Maxwell laws, density, thickness, source identity
+and frequency/strain support. Balanced real reference impedances are only wave
+coordinates at the exact bonded interfaces; they add no fluid gap, material,
+propagation or thermal receiver. A compensated suffix scattering recursion
+and cached internal input maps enforce coherent traction/velocity continuity
+with O(n) preparation and drive work. Repeated drives and local observations
+allocate nothing.
+
+Each physical layer uses the original positive bulk/shear strain-work integrals,
+with independent exterior power accounting. The shared slab kernel now cancels
+common impedance before applying transmission phase and evaluates even/odd wave
+amplitudes directly, preserving weak thin-layer heating under subdivision.
+Material sources remain immutable; each distinct exterior source is queried
+once. Layer/branch budgets, conservative all-depth strain limits and
+cancellation apply before publication.
+
+Focused numerical checks cover an independent global physical boundary system,
+constitutive heat quadrature, unequal-material interface continuity,
+reference-coordinate invariance, subdivision, opaque shielding, weak standing-
+wave heat, reciprocity and coherent drive scaling. The scope remains frozen
+linear isotropic planar normal-incidence solids with perfect bonds. Oblique
+conversion, interface compliance/slip, poroelastic frames, thermal evolution
+and measured-material qualification are not inferred; arithmetic residuals
+are not physical error certificates.

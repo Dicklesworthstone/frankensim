@@ -60,8 +60,8 @@ fn g1_independent_boundary_equations_and_spatial_constitutive_heat() {
         let [left, right, a, b] = boundary_solution(&slab, input);
         near(driven.outgoing[0], left, 2e-13);
         near(driven.outgoing[1], right, 2e-13);
-        let front = slab.field(driven.inward, 0.0).unwrap();
-        let back = slab.field(driven.inward, thickness).unwrap();
+        let front = slab.field(driven.inward, driven.parity, 0.0).unwrap();
+        let back = slab.field(driven.inward, driven.parity, thickness).unwrap();
         near(front.pressure, input[0] + left, 2e-13);
         near(front.velocity, (input[0] - left).scale(1.0 / 20.0), 2e-13);
         near(back.pressure, input[1] + right, 2e-13);
@@ -85,7 +85,9 @@ fn g1_independent_boundary_equations_and_spatial_constitutive_heat() {
             0.3 * (2.0 / 3.0) * 50.0 * moduli[1].im * strain_integral,
             3e-8,
         );
-        let field = slab.field(driven.inward, 0.37 * thickness).unwrap();
+        let field = slab
+            .field(driven.inward, driven.parity, 0.37 * thickness)
+            .unwrap();
         close(
             field.heat_density[0],
             0.5 * 50.0 * moduli[0].im * field.strain.norm_sq(),
@@ -131,7 +133,7 @@ fn g1_lossless_matched_delay_and_zero_thickness_interface() {
     near(driven.outgoing[1], C64::from_re(70.0 / 55.0), 2e-15);
     assert_eq!(driven.heat, [0.0; 2]);
     assert_eq!(driven.strain_bound, 0.0);
-    assert!(identity.field(driven.inward, 0.0).is_err());
+    assert!(identity.field(driven.inward, driven.parity, 0.0).is_err());
 }
 
 #[test]
@@ -193,7 +195,9 @@ fn g1_opaque_slab_uses_half_space_heat_without_growing_waves() {
         2e-13,
     );
     assert_eq!(
-        slab.field(driven.inward, 1000.0).unwrap().heat_density,
+        slab.field(driven.inward, driven.parity, 1000.0)
+            .unwrap()
+            .heat_density,
         [0.0; 2]
     );
 }
@@ -253,6 +257,6 @@ fn g0_invalid_physical_and_observation_inputs_refuse() {
     );
     let drive = slab.drive([C64::ONE, C64::ZERO], 1.0).unwrap();
     for depth in [-1.0, 0.9, f64::NAN] {
-        assert!(slab.field(drive.inward, depth).is_err());
+        assert!(slab.field(drive.inward, drive.parity, depth).is_err());
     }
 }
