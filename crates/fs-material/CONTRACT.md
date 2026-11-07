@@ -37,3 +37,7 @@ environment: the real dependency graph is blocked while compiling
 with the pinned native compiler. Neither result establishes measured-material
 qualification or replaces the original hereditary states during time
 integration; `C''/omega` here is a harmonic constitutive quantity.
+
+### Binary-liquid diffusivity at distinct endpoint temperatures
+
+`MaterialBinaryDiffusivity::resolve_nonisothermal_face` refreshes the same pinned original claim at each endpoint's own temperature/composition and at their arithmetic mean face. It preserves held external coordinates and original joint interpolation/support. Equal compositions do not reuse a receipt across unequal temperatures. The isothermal `resolve_face` delegates to this path with identical temperatures, retaining its existing semantics. Two source tests exercise distinct-temperature receipts and triangular joint support; two spatial integration tests verify the actual source face coefficient and atomic refusal when a local endpoint leaves the original source support. This adapter supplies molecular kinetics only; heat carriage and explicitly authored Soret/Dufour coefficients remain the thermochemical/spatial owner's responsibility.

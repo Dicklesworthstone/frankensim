@@ -7671,3 +7671,11 @@ advective fluxes with a complete opposite bath, and nonuniform draining species
 with conservative energy accounting and final cancellation/replay. Rustfmt
 parsing/formatting and bounded source review completed; these Rust integration
 tests were not compiled or executed in this constrained environment.
+
+### Locally nonisothermal binary-liquid diffusion
+
+`miscibility::nonisothermal` binds an accepted binary field to per-cell temperatures and the same original homogeneous caloric model. It retains both compensated component inventories and elapsed physical time. Equal fixed partial molar volumes, kappa=0, strictly positive common species support, and a convex original law over the complete authored temperature bracket are required. This lane does not localize square-gradient interface energy or perform an equilibrium flash.
+
+Each canonical face uses two implicit scalar exchanges: an entropy-conjugate chemical/enthalpy exchange with frozen original kinetic mobility and transported partial enthalpy plus authored Soret heat, then Fourier heat exchange. Both recover local temperatures through original pure and mixing calorics. Conductivity is the zero-diffusive-flux value, and the same signed heat-of-transport coefficient supplies reciprocal Dufour heat. Original D(T,x) claims are sampled at actual endpoint temperatures/compositions and the mean face outside scalar roots. Completed stages and final fields retain original source support. Exact physical zero coefficients are admitted; positive unrepresentable mobilities refuse.
+
+Every proposal checks whole-field component amounts, per-cell capacity, total enthalpy and actual entropy before publishing. The first-order split has adaptive step doubling with independent composition and temperature tolerances, accepts the two-half-step result, and applies the original conservation/entropy allowance again to the whole requested interval. Cancellation, exhausted work, source refusal or failed numerical admission leaves the input unchanged. Conductivity and heat of transport are explicitly authored fixed face data; this owner does not infer experimental coefficients, model pressure/volume work, or couple advection/mechanics.

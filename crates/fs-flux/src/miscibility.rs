@@ -10,8 +10,9 @@
 //! Pressure is held externally. Uniform prescribed temperature changes through
 //! [`temperature`] retain the evolving field and its original sources. The
 //! [`thermal`] owner additionally closes adiabatic diffusion with one evolving
-//! uniform temperature. Local heat conduction, momentum, wetting/contact-line
-//! motion and nucleation rates are not included. Prescribed incompressible
+//! uniform temperature. The [`nonisothermal`] owner couples local heat and
+//! species transport for convex, zero-gradient-energy liquids. Momentum,
+//! wetting/contact-line motion and nucleation rates are not included. Prescribed incompressible
 //! volume-flow transport is available through [`advection`].
 //!
 //! Each physical face advances through one implicit convex-split exchange.
@@ -38,6 +39,8 @@ mod solve;
 
 pub mod adaptive;
 pub mod advection;
+/// Locally nonisothermal, entropy-conjugate heat and binary species transport.
+pub mod nonisothermal;
 pub mod temperature;
 pub mod thermal;
 pub mod transport;

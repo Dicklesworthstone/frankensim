@@ -9,6 +9,9 @@ use fs_material::liquid::solution::diffusion::{
 };
 use std::sync::Arc;
 
+#[path = "diffusivity/nonisothermal.rs"]
+mod nonisothermal;
+
 fn kinetics(axis: &str, knots: Vec<(f64, f64)>, maximum_x: f64) -> MaterialBinaryDiffusivity {
     let property = PropertyKey::new("binary_ms_diffusivity", DIMS);
     let mut claims = ClaimSet::new();

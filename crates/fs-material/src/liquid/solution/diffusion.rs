@@ -209,10 +209,27 @@ impl MaterialBinaryDiffusivity {
         &self,
         temperature: Temperature,
         fractions: [[f64; 2]; 2],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ResolvedBinaryDiffusivity, BinaryLiquidError> {
+        self.resolve_nonisothermal_face([temperature; 2], fractions, cancelled)
+    }
+
+    /// Resolve the actual endpoint temperatures/compositions and their arithmetic
+    /// face state through the same original claim. Endpoint applicability is
+    /// checked at its own temperature, never at a fictitious crossed state.
+    /// This supplies molecular kinetics only; the transport owner must supply
+    /// thermodynamic heat carriage and any explicit Soret/Dufour coupling.
+    pub fn resolve_nonisothermal_face(
+        &self,
+        temperatures: [Temperature; 2],
+        fractions: [[f64; 2]; 2],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ResolvedBinaryDiffusivity, BinaryLiquidError> {
         poll(&mut cancelled)?;
-        if !temperature.value().is_finite() || temperature.value() <= 0.0 {
+        if temperatures
+            .iter()
+            .any(|t| !t.value().is_finite() || t.value() <= 0.0)
+        {
             return Err(BinaryLiquidError::Invalid(
                 "binary diffusivity requires positive finite absolute temperature",
             ));
@@ -238,7 +255,13 @@ impl MaterialBinaryDiffusivity {
             &self.property,
             ScalarAdmissibility::NonNegative,
         )?;
-        let mut at = |x: f64,
+        let face_temperature = if temperatures[0] == temperatures[1] {
+            temperatures[0]
+        } else {
+            Temperature::new(0.5 * temperatures[0].value() + 0.5 * temperatures[1].value())
+        };
+        let mut at = |temperature: Temperature,
+                      x: f64,
                       existing: Option<&ResolvedMaterialStatePoint>|
          -> Result<ResolvedMaterialStatePoint, BinaryLiquidError> {
             poll(&mut cancelled)?;
@@ -264,16 +287,23 @@ impl MaterialBinaryDiffusivity {
                 )]),
             )?)
         };
-        let left = at(fractions[0][0], None)?;
+        let left = at(temperatures[0], fractions[0][0], None)?;
         let face = at(
+            face_temperature,
             mean[0],
-            (mean[0].to_bits() == fractions[0][0].to_bits()).then_some(&left),
+            (face_temperature == temperatures[0] && mean[0].to_bits() == fractions[0][0].to_bits())
+                .then_some(&left),
         )?;
         let right = at(
+            temperatures[1],
             fractions[1][0],
-            if fractions[1][0].to_bits() == fractions[0][0].to_bits() {
+            if temperatures[1] == temperatures[0]
+                && fractions[1][0].to_bits() == fractions[0][0].to_bits()
+            {
                 Some(&left)
-            } else if fractions[1][0].to_bits() == mean[0].to_bits() {
+            } else if temperatures[1] == face_temperature
+                && fractions[1][0].to_bits() == mean[0].to_bits()
+            {
                 Some(&face)
             } else {
                 None

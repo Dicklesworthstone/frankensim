@@ -432,3 +432,7 @@ fn g4_invalid_simplex_temperature_and_cancellation_publish_no_partial_face() {
         expected
     );
 }
+
+#[path = "liquid_diffusion_source/nonisothermal.rs"]
+mod nonisothermal;
+
