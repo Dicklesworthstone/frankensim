@@ -3,9 +3,10 @@
 //! The original DDA is traversed once. At each accepted thermal substep the
 //! original caloric laws supply each intersected cell's temperature; the
 //! declared mass-absorption table supplies its spectrum. Serial Beer transport
-//! therefore updates downstream shielding as upstream cells heat. Source rates
+//! therefore updates downstream shielding as upstream cells heat. Coefficients
 //! are frozen only over that one native explicit step, giving first-order time
-//! accuracy. `advance_refined` compares complete native trajectories, including
+//! accuracy. Optional affine power schedules integrate the nonlinear optical
+//! response over that interval. `advance_refined` compares complete native trajectories, including
 //! latent enthalpy and outgoing radiation, before publishing a candidate.
 //!
 //! Geometry, density, source powers and spectral quadrature stay prescribed.
@@ -30,6 +31,8 @@ use std::sync::Arc;
 
 mod refinement;
 pub use refinement::{FeedbackConvergence, FeedbackRefinement};
+
+mod pulse;
 
 /// Source-bound two-photon absorption on the same native thermal history.
 pub mod nonlinear;
@@ -363,6 +366,7 @@ pub struct TemperatureOpticalHeating<const N: usize> {
     sums: EnergySums<N>,
     energy: OpticalEnergyBudget<N>,
     evaluations: usize,
+    pulse: Option<pulse::PulseState<N>>,
 }
 
 impl<const N: usize> TemperatureOpticalHeating<N> {
@@ -501,11 +505,13 @@ impl<const N: usize> TemperatureOpticalHeating<N> {
             sums,
             energy,
             evaluations: 0,
+            pulse: None,
         })
     }
 
     /// Rates applied over the last accepted interval (initial rates before any
-    /// advance). They are not a claim that the endpoint has the same opacity.
+    /// advance). Scheduled sources report interval means. These rates are not
+    /// a claim that the endpoint has the same opacity or instantaneous power.
     pub fn power(&self) -> &OpticalPowerBudget<N> {
         &self.power
     }
@@ -544,9 +550,23 @@ impl<const N: usize> FeedbackModel<N> {
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(OpticalPowerBudget<N>, BTreeMap<CellId, f64>), OpticalFeedbackError> {
+        self.evaluate_at_power(thermal, self.beam.incident_power_w, checkpoint)
+    }
+
+    fn evaluate_at_power(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        incident_w: [f64; N],
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(OpticalPowerBudget<N>, BTreeMap<CellId, f64>), OpticalFeedbackError> {
         let mut hash = DomainHasher::new("org.frankensim.render.temperature-beam-state.v1");
         hash.update(self.identity.as_bytes());
-        let mut transmitted = self.beam.incident_power_w;
+        if incident_w != self.beam.incident_power_w {
+            for power in incident_w {
+                hash.update(&power.to_bits().to_le_bytes());
+            }
+        }
+        let mut transmitted = incident_w;
         let mut absorbed = [CheckedSum::default(); N];
         let mut sources = BTreeMap::<CellId, CheckedSum>::new();
         for (index, segment) in self.path.iter().enumerate() {
@@ -581,11 +601,31 @@ impl<const N: usize> FeedbackModel<N> {
                 .or_default()
                 .add(heat.value()?)?;
         }
+        self.finish_power(
+            hash.finalize(),
+            incident_w,
+            transmitted,
+            absorbed,
+            sources,
+            checkpoint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_power(
+        &self,
+        identity: ContentHash,
+        incident_w: [f64; N],
+        transmitted: [f64; N],
+        absorbed: [CheckedSum; N],
+        sources: BTreeMap<CellId, CheckedSum>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(OpticalPowerBudget<N>, BTreeMap<CellId, f64>), OpticalFeedbackError> {
         let mut power = OpticalPowerBudget {
-            medium_identity: hash.finalize(),
+            medium_identity: identity,
             wavelength_bounds_nm: self.wavelength_bounds_nm,
             wavelengths_nm: self.beam.wavelengths_nm,
-            incident_w: self.beam.incident_power_w,
+            incident_w,
             transmitted_w: transmitted,
             absorbed_w: [0.0; N],
             scattered_w: [0.0; N],
@@ -629,11 +669,20 @@ impl<const N: usize> FeedbackModel<N> {
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), OpticalFeedbackError> {
+        self.check_domains_at_power(thermal, self.beam.incident_power_w, checkpoint)
+    }
+
+    fn check_domains_at_power(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        incident_w: [f64; N],
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), OpticalFeedbackError> {
         // A warmer upstream cell can admit more power into a downstream law
         // whose irradiance ceiling is lower. Check the actual endpoint path,
         // including the final endpoint when no next source query follows.
         // This pass allocates no heat map and publishes no source rates.
-        let mut incident = self.beam.incident_power_w[0];
+        let mut incident = incident_w[0];
         for (index, segment) in self.path.iter().enumerate() {
             checkpoint()?;
             let temperature = thermal.temperature_k(segment.thermal_cell)?;
@@ -655,8 +704,36 @@ impl<const N: usize> DepositionObserver for TemperatureOpticalHeating<N> {
     type Error = OpticalFeedbackError;
 
     fn begin(&mut self) -> Result<(), Self::Error> {
+        self.check_pulse_pending()?;
         self.evaluations = 0;
         Ok(())
+    }
+
+    fn requires_step_interval(&self) -> bool {
+        self.pulse.is_some()
+    }
+
+    fn next_transition_time_s(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<f64>, Self::Error> {
+        self.next_pulse_transition(thermal, checkpoint)
+    }
+
+    fn step_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        start_s: f64,
+        duration_s: f64,
+        end_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        if self.pulse.is_some() {
+            self.prepare_pulse_interval(thermal, start_s, duration_s, end_s, checkpoint)
+        } else {
+            Ok(BTreeMap::new())
+        }
     }
 
     fn sources(
@@ -665,6 +742,10 @@ impl<const N: usize> DepositionObserver for TemperatureOpticalHeating<N> {
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
         self.check_clock(thermal)?;
+        if self.pulse.is_some() {
+            checkpoint()?;
+            return Ok(BTreeMap::new());
+        }
         self.admit_evaluation()?;
         let (power, sources) = self.model.evaluate(thermal, checkpoint)?;
         self.power = power;
@@ -674,6 +755,9 @@ impl<const N: usize> DepositionObserver for TemperatureOpticalHeating<N> {
 
     fn event(&mut self, _: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
         self.check_clock(thermal)?;
+        if self.pulse.is_some() {
+            return self.check_pulse_event(thermal);
+        }
         // Final-time events are observable even when no further source query
         // follows. Validate the same bindings/domains at that accepted state.
         if self.model.two_photon.is_some() {
@@ -691,6 +775,9 @@ impl<const N: usize> DepositionObserver for TemperatureOpticalHeating<N> {
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Self::Error> {
+        if self.pulse.is_some() {
+            return self.accept_pulse_interval(start_s, duration_s, thermal, checkpoint);
+        }
         if start_s != self.time_s
             || !duration_s.is_finite()
             || duration_s <= 0.0

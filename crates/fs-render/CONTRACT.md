@@ -9662,3 +9662,31 @@ unavailable. These source-reviewed tests are not a claim of end-to-end build,
 render convergence, or experimental model validation.
 
 Four additional native-cell regression groups specify directional face ownership, layered and oblique density columns, finite support, zero-work misses, crossing budgets, cancellation and numerical-range refusal. A fifth support-distance regression specifies preserved vacuum prefixes and far-face truncation. These five core regression groups are also unexecuted after the workspace interruption; finite-column overflow refuses rather than being relabeled as an infinite uniform tail.
+
+### Pulsed temperature-dependent optical absorption
+
+`TemperatureOpticalHeating::with_power_schedule` binds the existing immutable
+`SpectralPowerSchedule` before the observer's first advance. Original beam powers
+bound each spectral lane. Native intervals stop at affine-segment boundaries,
+jumps and dark-gap boundaries; the original accepted duration owns every energy
+credit. A pending interval publishes powers, cell heat and cumulative accounts
+only with the matching accepted thermal step.
+
+Frozen linear transport uses the original kernel at the exact interval mean.
+Monochromatic two-photon transport integrates the entire affine waveform
+through the cached heterogeneous path: each prefix is a passive rational map,
+and positive analytic first/product moments yield local heat without
+substituting mean intensity into the nonlinear law. Peak transport checks
+every interior ramp irradiance; actual left/right endpoint powers check changing
+shielding and jumps, including final endpoints. Repeated evaluations retain
+O(path cells × spectral lanes) work and source-evaluation/cancellation budgets.
+
+Focused numerical regressions cover independent time quadrature, nearly equal
+shape parameters, weak-loss and opaque limits, heterogeneous cascades and
+interval subdivision. Public regressions cover spectral fluence, native
+events/restart, nonlinear ramp energy, local shielding, temperature refinement
+and transactional endpoint refusal. Exact waveform integration does not remove
+temperature feedback error: the same native explicit state and
+complete-trajectory refinement remain authoritative. Geometry, density and beam
+area stay prescribed; carrier storage, material saturation, nonlinear refraction
+and ultrafast relaxation remain unmodeled.
