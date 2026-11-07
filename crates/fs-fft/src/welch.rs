@@ -16,15 +16,16 @@
 //! record's leakage and resolution limits remain. In particular, one segment
 //! has rank one and cannot establish physical coherence by itself.
 
-use crate::{C64, Fft};
+use crate::{C64, Fft, GeneralFft, GeneralFftBudget, GeneralFftError};
 use fs_math::{dd::Dd, det};
 
 #[path = "welch/stream.rs"]
 mod stream;
 pub use stream::WelchStream;
 
-/// Bounds the uninterrupted work of one existing FFT. Cancellation is also
-/// checked during input admission and between segment/channel transforms.
+/// Bounds the physical segment length. Non-power-of-two segments use the
+/// existing Bluestein owner, whose convolution is at most twice this length.
+/// Cancellation is checked during admission and between channel transforms.
 pub const MAX_WELCH_SEGMENT_SAMPLES: usize = 65_536;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,7 +44,7 @@ pub enum WelchDetrend {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WelchConfig {
-    /// Power of two in 4..=MAX_WELCH_SEGMENT_SAMPLES. No zero padding.
+    /// Exact physical length in 4..=MAX_WELCH_SEGMENT_SAMPLES. No record padding.
     pub segment_samples: usize,
     /// Segment advance in 1..=segment_samples. Incomplete tails are reported.
     pub hop_samples: usize,
@@ -57,6 +58,7 @@ pub struct WelchConfig {
 pub struct WelchBudget {
     pub maximum_channels: usize,
     pub maximum_samples_per_channel: usize,
+    /// Number of physical channel/segment DFTs, regardless of their FFT route.
     pub maximum_transforms: usize,
     pub maximum_workspace_bytes: usize,
 }
@@ -289,8 +291,9 @@ impl WelchCrossSpectrum {
 
     /// Admit an interior bin at an observer's original frequency in Hz.
     /// Exact equality is required; no interpolation or frequency snapping is
-    /// inferred. DC and Nyquist do not represent the positive harmonic used by
-    /// peak-phasor propagation and are refused before any factor is exposed.
+    /// inferred. DC and the even-length Nyquist bin do not represent the
+    /// positive harmonic used by peak-phasor propagation and are refused.
+    /// The highest bin of an odd-length segment is an ordinary complex bin.
     pub fn peak_bin_hz(
         &self,
         bin: usize,
@@ -325,7 +328,10 @@ impl WelchCrossSpectrum {
     }
 
     fn interior_peak_bin(&self, bin: usize) -> Result<WelchPeakBin<'_>, WelchError> {
-        if bin == 0 || bin >= self.bin_count() - 1 {
+        if bin == 0
+            || bin >= self.bin_count()
+            || (self.config.segment_samples % 2 == 0 && bin == self.bin_count() - 1)
+        {
             return Err(WelchError::Invalid(
                 "peak-phasor observation requires an interior positive Welch bin",
             ));
@@ -393,7 +399,6 @@ fn admit(
     if channels == 0
         || samples < n
         || n < 4
-        || !n.is_power_of_two()
         || n > MAX_WELCH_SEGMENT_SAMPLES
         || config.hop_samples == 0
         || config.hop_samples > n
@@ -424,9 +429,13 @@ fn admit(
     let factor_count = (n / 2 + 1)
         .checked_mul(transforms)
         .ok_or(WelchError::BudgetExceeded("factor count overflow"))?;
+    // The exact-length owner includes Bluestein chirps, convolution storage,
+    // scratch and recursive six-step temporaries before any allocation.
+    let fft_workspace = GeneralFft::required_workspace_bytes(n).map_err(fft_error)?;
     let mut workspace = factor_count
         .checked_mul(core::mem::size_of::<C64>())
-        .and_then(|v| v.checked_add(n * (8 + 2 * core::mem::size_of::<C64>())))
+        .and_then(|v| v.checked_add(n * (8 + core::mem::size_of::<C64>())))
+        .and_then(|v| v.checked_add(fft_workspace))
         .ok_or(WelchError::BudgetExceeded("workspace size overflow"))?;
     if input_buffers != 0 {
         let input_bytes = n
@@ -439,12 +448,16 @@ fn admit(
             .checked_add(input_bytes)
             .ok_or(WelchError::BudgetExceeded("workspace size overflow"))?;
     }
-    // Include the original FFT plan and its optional six-step subplans.
-    let mut plan_n = n;
+    // Preserve conservative accounting for the original plan objects as well.
+    // Numeric plan tables are already counted by GeneralFft above.
+    let mut plan_n = if n.is_power_of_two() {
+        n
+    } else {
+        (2 * n - 1).next_power_of_two()
+    };
     loop {
         workspace = workspace
-            .checked_add(plan_n / 2 * core::mem::size_of::<C64>())
-            .and_then(|v| v.checked_add(core::mem::size_of::<Fft>()))
+            .checked_add(core::mem::size_of::<Fft>())
             .ok_or(WelchError::BudgetExceeded("FFT plan size overflow"))?;
         if !Fft::takes_sixstep(plan_n) {
             break;
@@ -488,9 +501,30 @@ struct SegmentTransform {
     config: WelchConfig,
     window: Vec<f64>,
     gain: f64,
-    fft: Fft,
+    fft: SegmentFft,
     buffer: Vec<C64>,
     scratch: Vec<C64>,
+}
+
+// Retain the existing power-of-two hot path, including its arithmetic and
+// input-scan count. Only new exact-length requests take the general owner.
+enum SegmentFft {
+    Direct(Fft),
+    General(GeneralFft),
+}
+
+fn fft_error(error: GeneralFftError) -> WelchError {
+    match error {
+        GeneralFftError::InvalidSize { .. } | GeneralFftError::BufferLength { .. } => {
+            WelchError::Invalid("invalid exact-length segment transform")
+        }
+        GeneralFftError::SampleLimit { .. }
+        | GeneralFftError::SizeOverflow
+        | GeneralFftError::WorkspaceBudget { .. } => {
+            WelchError::BudgetExceeded("exact-length segment transform")
+        }
+        GeneralFftError::NonFinite { .. } => WelchError::Unrepresentable,
+    }
 }
 
 impl SegmentTransform {
@@ -518,13 +552,31 @@ impl SegmentTransform {
         }
         let gain =
             det::sqrt(timestep_s) / det::sqrt(segments as f64) / det::sqrt(window_energy.to_f64());
+        let (fft, scratch_len) = if n.is_power_of_two() {
+            (SegmentFft::Direct(Fft::new(n)), n)
+        } else {
+            // admit() has already charged this complete workspace together
+            // with the retained factors and any streaming input buffers.
+            let fft = GeneralFft::new(
+                n,
+                GeneralFftBudget {
+                    max_samples: MAX_WELCH_SEGMENT_SAMPLES,
+                    max_workspace_bytes: GeneralFft::required_workspace_bytes(n)
+                        .map_err(fft_error)?,
+                },
+            )
+            .map_err(fft_error)?;
+            let scratch_len = fft.scratch_len();
+            (SegmentFft::General(fft), scratch_len)
+        };
+        poll(cancelled)?;
         Ok(Self {
             config,
             window,
             gain,
-            fft: Fft::new(n),
+            fft,
             buffer: allocate(n, C64::default())?,
-            scratch: allocate(n, C64::default())?,
+            scratch: allocate(scratch_len, C64::default())?,
         })
     }
 
@@ -575,13 +627,18 @@ impl SegmentTransform {
             }
             self.buffer[j] = C64::new(tapered, 0.0);
         }
-        self.fft.forward(&mut self.buffer, &mut self.scratch);
+        match &self.fft {
+            SegmentFft::Direct(fft) => fft.forward(&mut self.buffer, &mut self.scratch),
+            SegmentFft::General(fft) => fft
+                .forward(&mut self.buffer, &mut self.scratch)
+                .map_err(fft_error)?,
+        }
         poll(cancelled)?;
         for (bin, value) in self.buffer.iter().take(n / 2 + 1).enumerate() {
             if bin % 256 == 0 {
                 poll(cancelled)?;
             }
-            let endpoint = bin == 0 || bin == n / 2;
+            let endpoint = bin == 0 || (n % 2 == 0 && bin == n / 2);
             let gain = if endpoint {
                 self.gain
             } else {

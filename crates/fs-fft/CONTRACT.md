@@ -874,10 +874,24 @@ Keeping factors avoids a dense cross-spectral matrix and any numerical
 eigenfactorization. Storage is O(bins * segments * channels); the caller must
 admit this retained rank explicitly. Channel/sample, FFT-count and storage
 budgets are checked before allocation; storage accounting includes retained
-factors, FFT data/scratch, window and recursive plan tables. Segment lengths
-are powers of two in 4..=65536. Cancellation polls input admission and bounded
-work between the existing FFT calls. Incomplete tails are reported and still
-checked for nonfinite values; no samples are padded or interpolated.
+factors, FFT data/scratch, window, recursive plan tables and six-step temporary
+buffers. Any exact segment length in 4..=65536 is admitted. Power-of-two
+segments retain the original direct FFT arithmetic and hot path; other lengths
+reuse the cached `GeneralFft` Bluestein plan and caller scratch. Its internal
+convolution padding does not change the physical window, sample clock or bin
+spacing `1/(N*dt)`. The complete chirp/convolution workspace is charged before
+reading samples. `maximum_transforms` counts physical channel/segment DFTs;
+non-power-of-two DFTs use two convolution FFTs of length at most 131072.
+Cancellation polls input admission and bounded work between channel DFTs.
+Incomplete tails are reported and still checked for nonfinite values; no
+physical samples are padded or interpolated.
+
+Only even segment lengths have a Nyquist endpoint. The highest positive bin
+of an odd segment retains both complex components and the interior-bin factor
+of two, including when borrowed for physical peak-phasor propagation. Focused
+regressions compare odd/prime/composite cross spectra and integrated power to
+direct DFT and Parseval oracles, preserve highest-bin quadrature/cancellation,
+and check batch/stream identity, cancellation retry and convolution budgets.
 
 Per-segment scaling and double-double reductions protect representable
 fluctuations, common offsets and spectral products. Nonfinite input, lost

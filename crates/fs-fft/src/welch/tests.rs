@@ -58,7 +58,11 @@ fn oracle(channels: &[&[f64]], dt: f64, cfg: WelchConfig, bin: usize, a: usize, 
         };
         let (x, energy) = transform(a);
         let (y, _) = transform(b);
-        let sided = if bin == 0 || bin == n / 2 { 1.0 } else { 2.0 };
+        let sided = if bin == 0 || (n % 2 == 0 && bin == n / 2) {
+            1.0
+        } else {
+            2.0
+        };
         let gain = sided * dt / (count as f64 * energy);
         // conj(X_a) * X_b matches the physical exp(-i omega t) convention.
         total.re += gain * (x.re * y.re + x.im * y.im);
@@ -270,7 +274,8 @@ fn g0_admission_budgets_cancel_and_invalid_queries_do_not_publish_partial_spectr
     }
     for bad_cfg in [
         WelchConfig {
-            segment_samples: 31,
+            segment_samples: 3,
+            hop_samples: 3,
             ..cfg
         },
         WelchConfig {
@@ -492,7 +497,7 @@ fn g0_peak_conversion_preserves_representable_extremes_and_refuses_range_loss() 
         low.peak_factor(C64::new(2.0_f64.powi(-570), 0.0))
             .unwrap()
             .re,
-        2.0_f64.powi(-1070)
+        f64::from_bits(16)
     );
     assert!(matches!(
         high.peak_factor(C64::new(large, 0.0)),
@@ -858,4 +863,206 @@ fn g0_stream_admits_full_record_resources_and_never_pads_missing_samples() {
     stream.push_interleaved(&[[1.0; 2]; 63], || false).unwrap();
     assert_eq!(stream.remaining_sample_count(), 1);
     assert!(matches!(stream.finish(), Err(WelchError::Invalid(_))));
+}
+
+#[test]
+fn g1_exact_length_welch_matches_direct_cross_spectra_and_parseval() {
+    let rows: Vec<[f64; 2]> = (0..91)
+        .map(|j| {
+            let t = j as f64;
+            [
+                1.2 + (0.41 * t).cos() + 0.3 * (0.93 * t).sin(),
+                -0.7 + (0.41 * t + 0.63).cos() - 0.2 * (0.93 * t).sin(),
+            ]
+        })
+        .collect();
+    let columns: [Vec<f64>; 2] = core::array::from_fn(|c| rows.iter().map(|r| r[c]).collect());
+    let views: [&[f64]; 2] = core::array::from_fn(|c| columns[c].as_slice());
+    for n in [15, 30, 31] {
+        for window in [WelchWindow::Rectangular, WelchWindow::PeriodicHann] {
+            for detrend in [WelchDetrend::None, WelchDetrend::SegmentMean] {
+                let cfg = WelchConfig {
+                    segment_samples: n,
+                    hop_samples: n / 2,
+                    window,
+                    detrend,
+                };
+                let spectrum =
+                    WelchCrossSpectrum::estimate(&views, 0.002, cfg, budget(), || false).unwrap();
+                assert_eq!(spectrum.bin_count(), n / 2 + 1);
+                assert_eq!(spectrum.bin_width_hz(), 500.0 / n as f64);
+                assert_eq!(
+                    spectrum.used_sample_count(),
+                    (spectrum.segment_count() - 1) * cfg.hop_samples + n
+                );
+                let mut spectral_power = [0.0; 2];
+                for bin in 0..spectrum.bin_count() {
+                    for a in 0..2 {
+                        for b in 0..2 {
+                            let actual = spectrum.cross_spectrum(bin, a, b).unwrap();
+                            let expected = oracle(&views, 0.002, cfg, bin, a, b);
+                            close(actual.re, expected.re, 0.2);
+                            close(actual.im, expected.im, 0.2);
+                            if a == b {
+                                spectral_power[a] += actual.re * spectrum.bin_width_hz();
+                            }
+                        }
+                    }
+                }
+                for channel in 0..2 {
+                    let mut expected = 0.0;
+                    for segment in 0..spectrum.segment_count() {
+                        let start = segment * cfg.hop_samples;
+                        let samples = &columns[channel][start..start + n];
+                        let mean = if detrend == WelchDetrend::SegmentMean {
+                            samples.iter().sum::<f64>() / n as f64
+                        } else {
+                            0.0
+                        };
+                        let (mut energy, mut weight) = (0.0, 0.0);
+                        for (j, &value) in samples.iter().enumerate() {
+                            let w = if window == WelchWindow::Rectangular {
+                                1.0
+                            } else {
+                                0.5 - 0.5 * (TAU * j as f64 / n as f64).cos()
+                            };
+                            energy += ((value - mean) * w).powi(2);
+                            weight += w * w;
+                        }
+                        expected += energy / weight / spectrum.segment_count() as f64;
+                    }
+                    close(spectral_power[channel], expected, expected);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_odd_highest_bin_keeps_quadrature_phase_and_coherent_cancellation() {
+    // There is NO Nyquist bin for odd N. Its highest positive harmonic still
+    // has independent sine/cosine components and the full one-sided weight.
+    for n in [5, 15, 31] {
+        let bin = n / 2;
+        let rows: Vec<[f64; 3]> = (0..2 * n)
+            .map(|j| {
+                let phase = TAU * bin as f64 * j as f64 / n as f64;
+                [phase.cos(), phase.sin(), -phase.cos()]
+            })
+            .collect();
+        let cfg = WelchConfig {
+            segment_samples: n,
+            hop_samples: n,
+            window: WelchWindow::Rectangular,
+            detrend: WelchDetrend::None,
+        };
+        let spectrum =
+            WelchCrossSpectrum::estimate_interleaved(&rows, 0.001, cfg, budget(), || false)
+                .unwrap();
+        let frequency = spectrum.frequency_hz(bin).unwrap();
+        let view = spectrum.peak_bin_hz(bin, frequency).unwrap();
+        assert!(spectrum.peak_bin_rad_s(bin, TAU * frequency).is_ok());
+        let cross = spectrum.cross_spectrum(bin, 0, 1).unwrap();
+        close(cross.re * spectrum.bin_width_hz(), 0.0, 1.0);
+        close(cross.im * spectrum.bin_width_hz(), -0.5, 1.0);
+        let (mut quadrature_power, mut cancelled_power) = (0.0, 0.0);
+        for factor in view.factors() {
+            let a = view.peak_factor(factor[0]).unwrap();
+            let b = view.peak_factor(factor[1]).unwrap();
+            let opposite = view.peak_factor(factor[2]).unwrap();
+            quadrature_power += 0.5 * ((a.re + b.re).powi(2) + (a.im + b.im).powi(2));
+            cancelled_power += 0.5 * ((a.re + opposite.re).powi(2) + (a.im + opposite.im).powi(2));
+        }
+        close(quadrature_power, 1.0, 1.0);
+        assert_eq!(cancelled_power, 0.0);
+        assert!(spectrum.peak_bin_hz(bin + 1, frequency).is_err());
+    }
+    let cfg = WelchConfig {
+        segment_samples: 30,
+        hop_samples: 30,
+        window: WelchWindow::Rectangular,
+        detrend: WelchDetrend::None,
+    };
+    let spectrum =
+        WelchCrossSpectrum::estimate(&[&[0.0; 30]], 0.001, cfg, budget(), || false).unwrap();
+    assert!(spectrum.peak_bin_hz(15, 500.0).is_err());
+}
+
+#[test]
+fn g3_exact_length_streams_keep_batch_factors_through_chunking_and_cancel_retry() {
+    let rows: Vec<[f64; 2]> = (0..79)
+        .map(|j| [(0.73 * j as f64).cos(), (0.73 * j as f64 + 0.31).cos()])
+        .collect();
+    for n in [15, 30, 31] {
+        let cfg = WelchConfig {
+            segment_samples: n,
+            hop_samples: 7,
+            window: WelchWindow::PeriodicHann,
+            detrend: WelchDetrend::SegmentMean,
+        };
+        let expected =
+            WelchCrossSpectrum::estimate_interleaved(&rows, 0.002, cfg, budget(), || false)
+                .unwrap();
+        for chunk_len in [1, 11, 79] {
+            let mut stream =
+                WelchStream::new(2, rows.len(), 0.002, cfg, budget(), || false).unwrap();
+            for chunk in rows.chunks(chunk_len) {
+                stream.push_interleaved(chunk, || false).unwrap();
+            }
+            same_stream_spectrum(&stream.finish().unwrap(), &expected);
+        }
+        let mut stream = WelchStream::new(2, rows.len(), 0.002, cfg, budget(), || false).unwrap();
+        stream.push_interleaved(&rows[..17], || false).unwrap();
+        let previous_segments = stream.completed_segment_count();
+        let mut polls = 0;
+        assert!(matches!(
+            stream.push_interleaved(&rows[17..], || {
+                polls += 1;
+                polls == 35
+            }),
+            Err(WelchError::Cancelled)
+        ));
+        assert_eq!(stream.accepted_sample_count(), 17);
+        assert_eq!(stream.completed_segment_count(), previous_segments);
+        stream.push_interleaved(&rows[17..], || false).unwrap();
+        same_stream_spectrum(&stream.finish().unwrap(), &expected);
+    }
+}
+
+#[test]
+fn g0_exact_length_admission_charges_convolution_before_reading_samples() {
+    let cfg = WelchConfig {
+        segment_samples: 31,
+        hop_samples: 31,
+        window: WelchWindow::Rectangular,
+        detrend: WelchDetrend::None,
+    };
+    let limits = WelchBudget {
+        maximum_workspace_bytes: 3000,
+        ..budget()
+    };
+    assert!(matches!(
+        WelchCrossSpectrum::estimate_with(
+            1,
+            31,
+            |_, _| {
+                panic!("over-budget exact-length transform must refuse before reading input")
+            },
+            0.001,
+            cfg,
+            limits,
+            || false
+        ),
+        Err(WelchError::BudgetExceeded(_))
+    ));
+    assert!(matches!(
+        WelchStream::new(1, 31, 0.001, cfg, limits, || false),
+        Err(WelchError::BudgetExceeded(_))
+    ));
+    let direct = WelchConfig {
+        segment_samples: 32,
+        hop_samples: 32,
+        ..cfg
+    };
+    assert!(WelchCrossSpectrum::estimate(&[&[0.0; 32]], 0.001, direct, limits, || false).is_ok());
 }
