@@ -4535,3 +4535,29 @@ This retains the fully solid, compressible P1 finite-strain and first-order
 time domains, original reference mass and reference transport coefficients.
 Deformed thermal conductances, contact tooling, exterior-fluid evolution and
 experimental forming calibration are not inferred.
+
+## Inertial dielectric heat on the shared enthalpy timeline
+
+The existing `step_dielectric_field_candidate` thermal bridge accepts the native
+planar, axisymmetric and tetrahedral Lorentz candidates through
+`DielectricFieldState`. Its associated material exposes the complete original
+source snapshot and exact coefficient roles through `DielectricMaterialState`.
+Debye retains epsilon/tau/increment roles; Lorentz retains epsilon/increment,
+angular frequency and damping roles. Every selected coefficient must remain
+validity-wide constant, and the same original claims are requeried at each
+actual receiving temperature. Temperature-dependent pole changes are refused;
+this path supplies no missing parameter-work term.
+
+Only independently computed physical pole friction enters the existing local
+enthalpy residual. Instantaneous, restoring and kinetic polarization stores
+remain in the field, and the combined energy window closes against original
+electrode work. One immutable field candidate serves all thermal Newton trials;
+no trial repeats its physical history or resets its polarization current.
+Accepted field and caloric states publish together. Existing source identity,
+volume correspondence, fully solid caloric charts, failure rollback, thermal
+budgets and optional Ohmic accounting remain active.
+
+Two added integration regressions specify damped/lossless original current
+histories, source-bound thermal snapshots, combined work/storage/heat closure,
+and refusal of varying damping or cancellation without partial publication.
+They remain unexecuted without the full native `fs-couple` dependency closure.

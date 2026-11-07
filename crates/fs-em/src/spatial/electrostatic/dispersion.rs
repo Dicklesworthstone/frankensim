@@ -23,6 +23,9 @@
 
 use std::sync::Arc;
 
+/// Inertial dielectric memory on the same native tetrahedral geometry.
+pub mod lorentz;
+
 use fs_feec::{
     assembly::{incidence_to_csr, stiffness},
     weighted::{CellWeight, WeightedAssemblyLimits, WeightedError, weighted_mass_matrix},
@@ -398,7 +401,7 @@ impl SpatialDebyeDielectric {
         self.core.displacement_c_m2()
     }
     pub fn polarization_c_m2(&self) -> &[Vec<[f64; 3]>] {
-        self.core.polarization_c_m2()
+        self.core.states()
     }
     pub fn nodal_charge_c(&self) -> &[f64] {
         self.core.nodal_charge_c()
@@ -461,6 +464,7 @@ impl SpatialDebyeDielectric {
 
 impl sealed::Sealed for SpatialDebyeDielectric {}
 impl DielectricFieldState for SpatialDebyeDielectric {
+    type Material = ResolvedDebyeMaterial;
     fn materials(&self) -> &[ResolvedDebyeMaterial] {
         self.core.materials()
     }

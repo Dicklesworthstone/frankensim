@@ -1,8 +1,8 @@
-//! Distributed Debye loss and finite caloric storage on one physical interval.
+//! Distributed dielectric-memory loss and finite caloric storage on one interval.
 //!
 //! The original field history supplies polarization (and admitted Ohmic) heat.
 //! Its total local loss enters the existing enthalpy residual exactly once;
-//! instantaneous and polarization storage remain electrical energy. Constant
+//! instantaneous, restoring and kinetic storage remain electrical energy. Constant
 //! source coefficients allow one field solve to serve all thermal trial states.
 //! The original claims are nevertheless re-queried at every trial temperature.
 
@@ -10,8 +10,8 @@ use super::*;
 use fs_em::electrostatic::{
     ElectrostaticControls, ElectrostaticError,
     dispersion::{
-        DebyeFieldStep, DielectricFieldCandidate, DielectricFieldState, PlanarDebyeDielectric,
-        PreparedDebyeStep,
+        DebyeFieldStep, DielectricFieldCandidate, DielectricFieldState, DielectricMaterialState,
+        PlanarDebyeDielectric, PreparedDebyeStep,
     },
 };
 use fs_material::{
@@ -119,7 +119,7 @@ fn admit_constant_source(
             != fs_matdb::EvaluationDecision::ConstantWithinValidity
     {
         return Err(invalid(
-            "dielectric thermal bridge requires validity-wide constant storage, relaxation and DC conductivity",
+            "dielectric thermal bridge requires validity-wide constant dielectric coefficients and DC conductivity",
         ));
     }
     Ok(())
@@ -221,12 +221,14 @@ impl ConductionThermalNetwork<'_> {
     /// Accepted field and caloric histories publish together, after full energy
     /// checks; cancellation or source refusal publishes neither history.
     ///
-    /// Storage, relaxation and every explicitly selected DC conductivity must
+    /// Every dielectric coefficient and explicitly selected DC conductivity must
     /// be validity-wide constant scalar sources, including a zero-conductivity
     /// claim. All original material/source identities and their validity at the
     /// actual receiving temperature are rechecked for every thermal trial;
     /// nonthermal context stays fixed. Fully solid constant-density caloric
-    /// charts are required. No phase polarization, changing geometry or
+    /// charts are required. Lorentz restoring and kinetic stores stay in the
+    /// field; only its physical pole friction enters the thermal receiver.
+    /// No phase polarization, changing geometry or
     /// temperature-dependent electrical constitutive law is inferred.
     ///
     /// The existing field candidate is borrowed throughout thermal Newton;
@@ -330,19 +332,11 @@ impl ConductionThermalNetwork<'_> {
                     "native leakage must retain its nonnegative conductivity source",
                 ));
             }
-            let names = std::iter::once(original.high_frequency_property()).chain(
-                original.pole_properties().iter().flat_map(|pole| {
-                    [
-                        pole.permittivity_increment.as_str(),
-                        pole.relaxation_time.as_str(),
-                    ]
-                }),
-            );
-            for name in names {
+            for name in original.coefficient_properties() {
                 let property = original
                     .material()
                     .property(name)
-                    .ok_or_else(|| invalid("Debye law lost an original source role"))?;
+                    .ok_or_else(|| invalid("dielectric law lost an original source role"))?;
                 admit_constant_source(binding, property)?;
             }
             if let Some(name) = conductivity_name {

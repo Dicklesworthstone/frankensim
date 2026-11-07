@@ -6644,3 +6644,47 @@ physics, mechanical integration or a regulated-power branch. Focused manufacture
 bar regressions cover signed current, mixed floating electrodes, reordered
 terminals, contact heat and transactional refusal/reuse.
 
+## Self-consistent inertial polarization on original potential fields
+
+`electrostatic::dispersion::lorentz::{PlanarLorentzDielectric,
+AxisymmetricLorentzDielectric}` and
+`spatial::electrostatic::dispersion::lorentz::SpatialLorentzDielectric` retain
+both polarization P and current J for every original source-bound Lorentz pole.
+The same triangle/tetrahedron field kernel solves Gauss/current balance with
+`D = epsilon_infinity E + sum P`. Current is an independent inertial state,
+not an additional displacement or inferred Ohmic conductivity.
+
+The original material's passive midpoint law condenses each P/J pair locally.
+For h=dt/2 its endpoint permittivity contribution is
+`delta_epsilon (h omega0)^2 / (1 + h gamma + (h omega0)^2) >= 0`.
+This positive time-step coefficient is not a positive-real frequency-domain
+permittivity assumption: ringing, field-feedback frequency shifts and finite
+lossless resonant growth remain in the retained state. Only original potential
+DOFs enter the global solve. Fixed-size steps cache both the material coefficient
+bank and original Hodge operator; warm steps do not reprepare pole coefficients.
+The constitutive adapter delegates the equations to the material owner and
+monomorphizes Debye states without allocating unused Lorentz current vectors.
+
+Physical storage includes instantaneous electric, restoring polarization and
+kinetic polarization energy. Independent pole friction supplies nonnegative
+heat; no energy residual or kinetic store becomes heat. Original cell volumes,
+revolved metrics, electrode traces, free nodal charge, coherent voltage work,
+physical residual budgets and cancellation remain owned by the existing field
+kernel. Prepared objects require the same immutable original field owner.
+Failed candidates publish neither an endpoint nor heat. The common
+`DielectricFieldStep` account is the existing dielectric-memory account type.
+
+The new constructors are explicitly insulating, with source-fixed isotropic
+coefficients and geometry. They do not add magnetic induction, propagating
+Maxwell transients, carrier transport, thermal parameter work or changing
+material occupancy. Midpoint is second order and passive but not L-stable;
+energy balance does not replace temporal or spatial convergence.
+
+Six focused integration regressions specify held-field second-order dynamics,
+isolated-charge longitudinal resonance and voltage reversal, lossless resonant
+secular growth, oblique tetrahedral kinetic storage/charge, original revolved
+volume accounts, and empty-bank/owner/cancellation boundaries. Two receiving
+thermal regressions check physical heat deposition and source/refusal behavior.
+These full-crate tests are authored but unexecuted without the complete native
+dependency closure. Formatting and bounded source/API/physics review passed;
+material numerical tests are reported separately, not as field integration.

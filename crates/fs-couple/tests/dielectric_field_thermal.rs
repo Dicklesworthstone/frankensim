@@ -5,6 +5,9 @@
 #[path = "../../fs-conduction/tests/radiation_material/common.rs"]
 mod radiative;
 
+#[path = "dielectric_field_thermal/lorentz.rs"]
+mod lorentz;
+
 use fs_couple::{
     circuit_enthalpy::{
         CircuitEnthalpyError, CircuitEnthalpySolve,

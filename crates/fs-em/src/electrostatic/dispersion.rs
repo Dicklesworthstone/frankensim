@@ -30,6 +30,10 @@ use kernel::{DebyeGeometry, Field, Prepared};
 use std::sync::Arc;
 
 pub(crate) mod kernel;
+/// Inertial polarization on the same native potential/charge evolution.
+pub mod lorentz;
+mod source;
+pub use source::DielectricMaterialState;
 pub(crate) mod sealed {
     pub trait Sealed {}
 }
@@ -37,7 +41,8 @@ pub(crate) mod sealed {
 /// Original immutable field identity and physical cell accounts used by
 /// receiving multiphysics owners. Implementations are native admitted fields.
 pub trait DielectricFieldState: sealed::Sealed + Clone {
-    fn materials(&self) -> &[ResolvedDebyeMaterial];
+    type Material: DielectricMaterialState;
+    fn materials(&self) -> &[Self::Material];
     fn cell_volumes_m3(&self) -> &[f64];
     fn conductivity_s_m(&self) -> &[f64];
     /// None denotes the explicitly insulating constructor; Some retains the
@@ -213,6 +218,10 @@ pub struct DebyeFieldStep<const D: usize = 2> {
     pub energy_residual_j: f64,
     pub linear: Option<SolveReport>,
 }
+
+/// Shared physical charge, storage and heat accounts for dielectric memory.
+/// Lorentz and Debye field candidates use this same account type.
+pub use DebyeFieldStep as DielectricFieldStep;
 
 /// Transactional field candidate with independent physical charge/work checks.
 pub struct DielectricFieldCandidate<F, const D: usize> {
@@ -392,7 +401,7 @@ impl<const AXISYMMETRIC: bool> MeridionalDebyeDielectric<AXISYMMETRIC> {
         self.core.displacement_c_m2()
     }
     pub fn polarization_c_m2(&self) -> &[Vec<[f64; 2]>] {
-        self.core.polarization_c_m2()
+        self.core.states()
     }
     pub fn nodal_charge_c(&self) -> &[f64] {
         self.core.nodal_charge_c()
@@ -453,6 +462,7 @@ impl<const AXISYMMETRIC: bool> MeridionalDebyeDielectric<AXISYMMETRIC> {
 
 impl<const AXISYMMETRIC: bool> sealed::Sealed for MeridionalDebyeDielectric<AXISYMMETRIC> {}
 impl<const AXISYMMETRIC: bool> DielectricFieldState for MeridionalDebyeDielectric<AXISYMMETRIC> {
+    type Material = ResolvedDebyeMaterial;
     fn materials(&self) -> &[ResolvedDebyeMaterial] {
         self.core.materials()
     }

@@ -16,6 +16,9 @@ use fs_qty::Dims;
 use fs_sparse::Csr;
 use std::sync::Arc;
 
+mod memory;
+use memory::MemoryLaw;
+
 type Result<T> = core::result::Result<T, ElectrostaticError>;
 
 /// Internal geometry seam: no alternate field solver or numerical material law.
@@ -42,9 +45,9 @@ pub(crate) trait DebyeGeometry<const D: usize>: Send + Sync {
     ) -> Result<Vec<f64>>;
 }
 
-struct Problem<const D: usize> {
+struct Problem<const D: usize, M: MemoryLaw<D>> {
     geometry: Arc<dyn DebyeGeometry<D>>,
-    materials: Vec<ResolvedDebyeMaterial>,
+    materials: Vec<M>,
     conductivity_s_m: Vec<f64>,
     conductivity_properties: Vec<Option<String>>,
     has_conduction: bool,
@@ -53,13 +56,13 @@ struct Problem<const D: usize> {
 }
 
 #[derive(Clone)]
-pub(crate) struct Field<const D: usize> {
-    problem: Arc<Problem<D>>,
+pub(crate) struct Field<const D: usize, M: MemoryLaw<D> = ResolvedDebyeMaterial> {
+    problem: Arc<Problem<D, M>>,
     voltage_v: Vec<f64>,
     relative_voltage_v: Vec<f64>,
     electric_field_v_m: Vec<[f64; D]>,
     displacement_c_m2: Vec<[f64; D]>,
-    polarization_c_m2: Vec<Vec<[f64; D]>>,
+    states: Vec<Vec<M::State>>,
     nodal_charge_c: Vec<f64>,
     cell_energy_j: Vec<f64>,
     stored_energy_j: f64,
@@ -67,13 +70,14 @@ pub(crate) struct Field<const D: usize> {
     time_s: f64,
 }
 
-pub(crate) struct Prepared<const D: usize> {
-    problem: Arc<Problem<D>>,
+pub(crate) struct Prepared<const D: usize, M: MemoryLaw<D> = ResolvedDebyeMaterial> {
+    problem: Arc<Problem<D, M>>,
     dt_s: f64,
     stiffness: Csr,
+    memory: Vec<M::Preparation>,
     half_conduction_permittivity_f_m: Vec<f64>,
 }
-impl<const D: usize> Prepared<D> {
+impl<const D: usize, M: MemoryLaw<D>> Prepared<D, M> {
     pub(crate) fn time_step_s(&self) -> f64 {
         self.dt_s
     }
@@ -119,19 +123,20 @@ fn apply(matrix: &Csr, voltage: &[f64], cancelled: &mut dyn FnMut() -> bool) -> 
     Ok(result)
 }
 
-impl<const D: usize> Problem<D> {
+impl<const D: usize, M: MemoryLaw<D>> Problem<D, M> {
     fn charges(
         &self,
         relative_voltage: &[f64],
-        polarization: &[Vec<[f64; D]>],
+        states: &[Vec<M::State>],
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<Vec<f64>> {
-        let mut total_p = Vec::with_capacity(polarization.len());
-        for poles in polarization {
+        let mut total_p = Vec::with_capacity(states.len());
+        for poles in states {
             poll(cancelled)?;
             let mut sum = [0.0; D];
             let mut corrections = [0.0; D];
-            for p in poles {
+            for state in poles {
+                let p = M::polarization(state);
                 for axis in 0..D {
                     accumulate(&mut sum[axis], &mut corrections[axis], p[axis])?;
                 }
@@ -150,13 +155,13 @@ impl<const D: usize> Problem<D> {
     }
 }
 
-impl<const D: usize> Field<D> {
+impl<const D: usize, M: MemoryLaw<D>> Field<D, M> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         geometry: Arc<dyn DebyeGeometry<D>>,
-        materials: Vec<ResolvedDebyeMaterial>,
+        materials: Vec<M>,
         voltage_v: Vec<f64>,
-        polarization_c_m2: Vec<Vec<[f64; D]>>,
+        states: Vec<Vec<M::State>>,
         prescribed: Vec<Option<f64>>,
         time_s: f64,
         limits: WeightedAssemblyLimits,
@@ -173,49 +178,7 @@ impl<const D: usize> Field<D> {
             vec![0.0; count],
             vec![None; count],
             voltage_v,
-            polarization_c_m2,
-            prescribed,
-            time_s,
-            limits,
-            controls,
-            cancelled,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[cfg(feature = "resolved-leaky-dielectric")]
-    pub(crate) fn new_leaky(
-        geometry: Arc<dyn DebyeGeometry<D>>,
-        materials: Vec<ResolvedLeakyDielectric>,
-        voltage_v: Vec<f64>,
-        polarization_c_m2: Vec<Vec<[f64; D]>>,
-        prescribed: Vec<Option<f64>>,
-        time_s: f64,
-        limits: WeightedAssemblyLimits,
-        controls: ElectrostaticControls,
-        cancelled: &mut dyn FnMut() -> bool,
-    ) -> Result<Self> {
-        poll(cancelled)?;
-        if materials.len() > limits.max_cells {
-            return Err(invalid("leaky material count exceeds cell budget"));
-        }
-        let mut dielectric = Vec::with_capacity(materials.len());
-        let mut conductivity_s_m = Vec::with_capacity(materials.len());
-        let mut conductivity_properties = Vec::with_capacity(materials.len());
-        for material in materials {
-            poll(cancelled)?;
-            let (bulk, name, sigma) = material.into_parts();
-            dielectric.push(bulk);
-            conductivity_s_m.push(sigma);
-            conductivity_properties.push(Some(name));
-        }
-        Self::new_resolved(
-            geometry,
-            dielectric,
-            conductivity_s_m,
-            conductivity_properties,
-            voltage_v,
-            polarization_c_m2,
+            states,
             prescribed,
             time_s,
             limits,
@@ -227,11 +190,11 @@ impl<const D: usize> Field<D> {
     #[allow(clippy::too_many_arguments)]
     fn new_resolved(
         geometry: Arc<dyn DebyeGeometry<D>>,
-        materials: Vec<ResolvedDebyeMaterial>,
+        materials: Vec<M>,
         conductivity_s_m: Vec<f64>,
         conductivity_properties: Vec<Option<String>>,
         voltage_v: Vec<f64>,
-        polarization_c_m2: Vec<Vec<[f64; D]>>,
+        states: Vec<Vec<M::State>>,
         prescribed: Vec<Option<f64>>,
         time_s: f64,
         limits: WeightedAssemblyLimits,
@@ -245,7 +208,7 @@ impl<const D: usize> Field<D> {
             || materials.len() != geometry.cell_count()
             || geometry.volumes_m3().len() != materials.len()
             || geometry.volumes_m3().iter().any(|v| !positive(*v))
-            || polarization_c_m2.len() != materials.len()
+            || states.len() != materials.len()
             || materials.len() > limits.max_cells
             || n > limits.max_dofs
             || voltage_v.len() != n
@@ -264,7 +227,7 @@ impl<const D: usize> Field<D> {
         }
         let epsilon: Vec<_> = materials
             .iter()
-            .map(ResolvedDebyeMaterial::high_frequency_permittivity_f_m)
+            .map(|law| law.high_frequency_permittivity_f_m())
             .collect();
         let instantaneous_stiffness =
             geometry.assemble(&epsilon, ELECTRIC_PERMITTIVITY_DIMS, limits, cancelled)?;
@@ -295,7 +258,7 @@ impl<const D: usize> Field<D> {
         for (cell, law) in problem.materials.iter().enumerate() {
             poll(cancelled)?;
             let e = electric_field_v_m[cell];
-            let p = &polarization_c_m2[cell];
+            let p = &states[cell];
             displacement_c_m2.push(
                 law.displacement_c_m2(e, p)
                     .map_err(ElectrostaticError::Material)?,
@@ -310,7 +273,7 @@ impl<const D: usize> Field<D> {
             accumulate(&mut stored_energy_j, &mut correction, energy)?;
         }
         let stored_energy_j = finite(stored_energy_j + correction)?;
-        let nodal_charge_c = problem.charges(&relative_voltage_v, &polarization_c_m2, cancelled)?;
+        let nodal_charge_c = problem.charges(&relative_voltage_v, &states, cancelled)?;
         if compensated_sum(&nodal_charge_c)?.abs() > controls.charge_tolerance_c {
             return Err(invalid("initial dielectric weak charges do not close"));
         }
@@ -326,7 +289,7 @@ impl<const D: usize> Field<D> {
             relative_voltage_v,
             electric_field_v_m,
             displacement_c_m2,
-            polarization_c_m2,
+            states,
             nodal_charge_c,
             cell_energy_j,
             stored_energy_j,
@@ -346,7 +309,7 @@ impl<const D: usize> Field<D> {
     pub(crate) fn same_problem(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.problem, &other.problem)
     }
-    pub fn materials(&self) -> &[ResolvedDebyeMaterial] {
+    pub fn materials(&self) -> &[M] {
         &self.problem.materials
     }
     pub fn voltage_v(&self) -> &[f64] {
@@ -363,8 +326,8 @@ impl<const D: usize> Field<D> {
         &self.displacement_c_m2
     }
     /// Original cell order, then the original material's pole order.
-    pub fn polarization_c_m2(&self) -> &[Vec<[f64; D]>] {
-        &self.polarization_c_m2
+    pub fn states(&self) -> &[Vec<M::State>] {
+        &self.states
     }
     pub fn nodal_charge_c(&self) -> &[f64] {
         &self.nodal_charge_c
@@ -386,21 +349,26 @@ impl<const D: usize> Field<D> {
         &self,
         dt_s: f64,
         cancelled: &mut dyn FnMut() -> bool,
-    ) -> Result<Prepared<D>> {
+    ) -> Result<Prepared<D, M>> {
         poll(cancelled)?;
         if !positive(dt_s) {
-            return Err(invalid("positive finite Debye time step required"));
+            return Err(invalid("positive finite dielectric time step required"));
         }
         let mut epsilon = Vec::with_capacity(self.problem.materials.len());
+        let mut memory = Vec::with_capacity(self.problem.materials.len());
         let mut half_conduction_permittivity_f_m = Vec::with_capacity(self.problem.materials.len());
         for (cell, law) in self.problem.materials.iter().enumerate() {
             poll(cancelled)?;
             let half = half_conductivity(dt_s, self.problem.conductivity_s_m[cell])?;
+            let prepared = law
+                .prepare_memory(dt_s)
+                .map_err(ElectrostaticError::Material)?;
             epsilon.push(finite(
-                law.midpoint_permittivity_f_m(dt_s)
+                law.midpoint_permittivity_f_m(&prepared)
                     .map_err(ElectrostaticError::Material)?
                     + half,
             )?);
+            memory.push(prepared);
             half_conduction_permittivity_f_m.push(half);
         }
         let stiffness = self.problem.geometry.assemble(
@@ -414,6 +382,7 @@ impl<const D: usize> Field<D> {
             problem: Arc::clone(&self.problem),
             dt_s,
             stiffness,
+            memory,
             half_conduction_permittivity_f_m,
         })
     }
@@ -424,7 +393,7 @@ impl<const D: usize> Field<D> {
     /// partial field, polarization update, heat or advanced clock.
     pub fn step_candidate(
         &self,
-        prepared: &Prepared<D>,
+        prepared: &Prepared<D, M>,
         prescribed: Vec<Option<f64>>,
         controls: ElectrostaticControls,
         cancelled: &mut dyn FnMut() -> bool,
@@ -433,13 +402,13 @@ impl<const D: usize> Field<D> {
         admit_controls(controls)?;
         if !Arc::ptr_eq(&self.problem, &prepared.problem) {
             return Err(invalid(
-                "prepared Debye operator belongs to a different field owner",
+                "prepared dielectric operator belongs to a different field owner",
             ));
         }
         let dt = prepared.dt_s;
         let time_s = finite(self.time_s + dt)?;
         if time_s <= self.time_s {
-            return Err(invalid("Debye time step cannot advance the clock"));
+            return Err(invalid("dielectric time step cannot advance the clock"));
         }
         if prescribed.len() != self.voltage_v.len()
             || prescribed.iter().flatten().any(|value| !value.is_finite())
@@ -454,16 +423,18 @@ impl<const D: usize> Field<D> {
             .filter_map(|(v, x)| x.map(|_| v))
             .ne(self.voltage_vertices.iter().copied())
         {
-            return Err(invalid("Debye voltage-trace topology must remain fixed"));
+            return Err(invalid(
+                "dielectric voltage-trace topology must remain fixed",
+            ));
         }
         let mut history = Vec::with_capacity(self.problem.materials.len());
         for (cell, law) in self.problem.materials.iter().enumerate() {
             poll(cancelled)?;
             let mut local_history = law
                 .midpoint_history_c_m2(
-                    dt,
+                    &prepared.memory[cell],
                     self.electric_field_v_m[cell],
-                    &self.polarization_c_m2[cell],
+                    &self.states[cell],
                 )
                 .map_err(ElectrostaticError::Material)?;
             let half = prepared.half_conduction_permittivity_f_m[cell];
@@ -493,7 +464,7 @@ impl<const D: usize> Field<D> {
         )?;
         let electric_field_v_m = self.problem.geometry.fields(&solved.relative, cancelled)?;
         let cells = self.problem.materials.len();
-        let mut polarization_c_m2 = Vec::with_capacity(cells);
+        let mut states = Vec::with_capacity(cells);
         let mut displacement_c_m2 = Vec::with_capacity(cells);
         let mut cell_energy_j = Vec::with_capacity(cells);
         let mut cell_heat_j = Vec::with_capacity(cells);
@@ -507,11 +478,11 @@ impl<const D: usize> Field<D> {
         for (cell, law) in self.problem.materials.iter().enumerate() {
             poll(cancelled)?;
             let response = law
-                .step_midpoint(
-                    dt,
+                .recover_midpoint(
+                    &prepared.memory[cell],
                     self.electric_field_v_m[cell],
                     electric_field_v_m[cell],
-                    &self.polarization_c_m2[cell],
+                    &self.states[cell],
                 )
                 .map_err(ElectrostaticError::Material)?;
             let volume = self.problem.geometry.volumes_m3()[cell];
@@ -548,10 +519,9 @@ impl<const D: usize> Field<D> {
             cell_storage_change_j.push(finite(volume * response.stored_change_j_m3)?);
             let mut change = [0.0; D];
             let mut corrections = [0.0; D];
-            for (p0, p1) in self.polarization_c_m2[cell]
-                .iter()
-                .zip(&response.polarization_after_c_m2)
-            {
+            for (state0, state1) in self.states[cell].iter().zip(&response.states_after) {
+                let p0 = M::polarization(state0);
+                let p1 = M::polarization(state1);
                 for axis in 0..D {
                     accumulate(
                         &mut change[axis],
@@ -570,11 +540,9 @@ impl<const D: usize> Field<D> {
             polarization_change_c_m2.push(change);
             polarization_current_density_a_m2.push(current);
             displacement_c_m2.push(response.displacement_after_c_m2);
-            polarization_c_m2.push(response.polarization_after_c_m2);
+            states.push(response.states_after);
         }
-        let nodal_charge_c =
-            self.problem
-                .charges(&solved.relative, &polarization_c_m2, cancelled)?;
+        let nodal_charge_c = self.problem.charges(&solved.relative, &states, cancelled)?;
         // Apply the same native charge functional to endpoint increments.
         // Subtracting two large nodal charges would discard resolved source
         // work even when the local material update retains it.
@@ -716,7 +684,7 @@ impl<const D: usize> Field<D> {
                 relative_voltage_v: solved.relative,
                 electric_field_v_m,
                 displacement_c_m2,
-                polarization_c_m2,
+                states,
                 nodal_charge_c,
                 cell_energy_j,
                 stored_energy_j,
@@ -725,6 +693,50 @@ impl<const D: usize> Field<D> {
             },
             step,
         ))
+    }
+}
+
+#[cfg(feature = "resolved-leaky-dielectric")]
+impl<const D: usize> Field<D> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_leaky(
+        geometry: Arc<dyn DebyeGeometry<D>>,
+        materials: Vec<ResolvedLeakyDielectric>,
+        voltage_v: Vec<f64>,
+        polarization_c_m2: Vec<Vec<[f64; D]>>,
+        prescribed: Vec<Option<f64>>,
+        time_s: f64,
+        limits: WeightedAssemblyLimits,
+        controls: ElectrostaticControls,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<Self> {
+        poll(cancelled)?;
+        if materials.len() > limits.max_cells {
+            return Err(invalid("leaky material count exceeds cell budget"));
+        }
+        let mut dielectric = Vec::with_capacity(materials.len());
+        let mut conductivity_s_m = Vec::with_capacity(materials.len());
+        let mut conductivity_properties = Vec::with_capacity(materials.len());
+        for material in materials {
+            poll(cancelled)?;
+            let (bulk, name, sigma) = material.into_parts();
+            dielectric.push(bulk);
+            conductivity_s_m.push(sigma);
+            conductivity_properties.push(Some(name));
+        }
+        Self::new_resolved(
+            geometry,
+            dielectric,
+            conductivity_s_m,
+            conductivity_properties,
+            voltage_v,
+            polarization_c_m2,
+            prescribed,
+            time_s,
+            limits,
+            controls,
+            cancelled,
+        )
     }
 }
 
