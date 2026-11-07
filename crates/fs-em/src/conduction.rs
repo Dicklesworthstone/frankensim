@@ -69,6 +69,51 @@ pub struct ConductionCurrentTrace {
     pub inward_current_density_a_m2: f64,
 }
 
+/// Ideal held-power supply for a stationary, linear Ohmic terminal pair.
+///
+/// Power is delivered INTO the conductor. The positive electrode has positive
+/// voltage/current; swap electrodes to reverse polarity. Voltage and current
+/// compliance are hard limits: an unattainable set point is refused, never
+/// clipped while still reporting the requested power. Supply losses, storage,
+/// control dynamics and field-dependent nonlinear material laws are not modeled.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConductionPowerSource {
+    pub power_w: f64,
+    pub maximum_voltage_v: f64,
+    pub maximum_current_a: f64,
+}
+
+impl ConductionPowerSource {
+    pub(crate) fn operating_point(self, resistance_ohm: f64) -> Result<(f64, f64), &'static str> {
+        if !self.power_w.is_finite()
+            || self.power_w < 0.0
+            || !positive(self.maximum_voltage_v)
+            || !positive(self.maximum_current_a)
+            || !positive(resistance_ohm)
+        {
+            return Err(
+                "nonnegative finite power, positive finite compliance and resistance required",
+            );
+        }
+        // Separate square roots avoid overflowing P*R or P/R when both
+        // required terminal amplitudes are themselves representable.
+        let root_power = self.power_w.sqrt();
+        let root_resistance = resistance_ohm.sqrt();
+        let voltage_v = root_power * root_resistance;
+        let current_a = root_power / root_resistance;
+        if !voltage_v.is_finite()
+            || !current_a.is_finite()
+            || (self.power_w > 0.0 && (voltage_v == 0.0 || current_a == 0.0))
+        {
+            return Err("power-source operating point is not representable");
+        }
+        if voltage_v > self.maximum_voltage_v || current_a > self.maximum_current_a {
+            return Err("requested conductor power exceeds voltage or current compliance");
+        }
+        Ok((voltage_v, current_a))
+    }
+}
+
 /// Material-model, geometry, numerical or physical-balance refusal.
 #[derive(Debug)]
 pub enum ConductionError {
@@ -395,6 +440,55 @@ impl<C: PlanarOhmicResponse> PlanarConduction<C> {
         )?
         .field_at_current(
             current_a,
+            controls.current_tolerance_a,
+            controls.power_tolerance_w,
+            cancelled,
+        )
+    }
+
+    /// Solve a regulated-power drive on the actual conducting geometry. One
+    /// linear reference solve determines the resistance; actual amplitude,
+    /// terminal reactions, material validity and local Joule heat are recovered
+    /// and checked independently. Rebuild the response when material state changes.
+    pub fn solve_power(
+        &self,
+        positive_terminal: &[usize],
+        negative_terminal: &[usize],
+        source: ConductionPowerSource,
+        controls: ConductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ConductionField<'_, C>, ConductionError> {
+        self.solve_power_with_reference_voltage(
+            positive_terminal,
+            negative_terminal,
+            source,
+            1.0,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Regulated power with an explicitly admitted reference voltage, for
+    /// material domains that do not include the default one-volt basis field.
+    pub fn solve_power_with_reference_voltage(
+        &self,
+        positive_terminal: &[usize],
+        negative_terminal: &[usize],
+        source: ConductionPowerSource,
+        reference_voltage_v: f64,
+        controls: ConductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ConductionField<'_, C>, ConductionError> {
+        poll(cancelled)?;
+        self.resistance_at_reference_voltage(
+            positive_terminal,
+            negative_terminal,
+            reference_voltage_v,
+            controls,
+            cancelled,
+        )?
+        .field_at_power(
+            source,
             controls.current_tolerance_a,
             controls.power_tolerance_w,
             cancelled,
@@ -1027,6 +1121,54 @@ impl<'a, C: PlanarOhmicResponse> PlanarResistance<'a, C> {
                 current_residual_a: maximum_terminal_defect,
                 maximum_free_current_residual_a: field.maximum_free_current_residual_a,
                 power_residual_w: source_power_defect,
+            });
+        }
+        poll(cancelled)?;
+        Ok(field)
+    }
+
+    /// Recover a compliant constant-power operating point without another
+    /// linear solve. The source set point is checked against independently
+    /// integrated bulk/contact heat and both terminal current reactions.
+    /// Zero power still uses the admitted conducting pair and gives zero heat.
+    pub fn field_at_power(
+        &self,
+        source: ConductionPowerSource,
+        current_tolerance_a: f64,
+        power_tolerance_w: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ConductionField<'a, C>, ConductionError> {
+        poll(cancelled)?;
+        let (voltage_v, current_a) = source
+            .operating_point(self.resistance_ohm)
+            .map_err(ConductionError::Invalid)?;
+        let field =
+            self.field_at_voltage(voltage_v, current_tolerance_a, power_tolerance_w, cancelled)?;
+        let mut maximum_terminal_defect = 0.0_f64;
+        for (terminal, expected) in self.terminals.iter().zip([current_a, -current_a]) {
+            let mut reaction = 0.0;
+            for &vertex in terminal {
+                poll(cancelled)?;
+                reaction = finite(
+                    reaction
+                        + field.nodal_boundary_current_a[vertex].ok_or(
+                            ConductionError::Invalid("lost actual power-controlled electrode"),
+                        )?,
+                )?;
+            }
+            let defect = finite(reaction - expected)?;
+            if defect.abs() > maximum_terminal_defect.abs() {
+                maximum_terminal_defect = defect;
+            }
+        }
+        let power_defect = finite(field.power_w - source.power_w)?;
+        if maximum_terminal_defect.abs() > current_tolerance_a
+            || power_defect.abs() > power_tolerance_w
+        {
+            return Err(ConductionError::Balance {
+                current_residual_a: maximum_terminal_defect,
+                maximum_free_current_residual_a: field.maximum_free_current_residual_a,
+                power_residual_w: power_defect,
             });
         }
         poll(cancelled)?;

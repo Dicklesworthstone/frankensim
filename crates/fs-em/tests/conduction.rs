@@ -10,7 +10,8 @@ mod response;
 
 use common::{config, ends, layered, limits, near};
 use fs_em::conduction::{
-    ConductionControls, ConductionCurrentTrace, ConductionError, PlanarConduction,
+    ConductionControls, ConductionCurrentTrace, ConductionError, ConductionPowerSource,
+    PlanarConduction,
 };
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
@@ -115,6 +116,90 @@ fn slab(
         &mut || false,
     )
     .unwrap()
+}
+
+#[test]
+fn regulated_power_recovers_actual_series_fields_and_local_heat() {
+    let problem = slab(
+        conductor(4.0, ElectricalPropertyBasis::Conductivity),
+        conductor(2.0, ElectricalPropertyBasis::Resistivity),
+        0.2,
+    );
+    let response = problem
+        .resistance(&[2, 5], &[0, 3], controls(), &mut || false)
+        .unwrap();
+    // Independent series law: R=(0.5/4+0.5/2)/0.2=1.875 ohm.
+    // P=30 W requires 7.5 V and 4 A; the two materials dissipate 10/20 W.
+    let source = ConductionPowerSource {
+        power_w: 30.0,
+        maximum_voltage_v: 8.0,
+        maximum_current_a: 5.0,
+    };
+    let field = response
+        .field_at_power(source, 1e-10, 1e-10, &mut || false)
+        .unwrap();
+    near(field.voltage_v()[2], 7.5);
+    near(field.voltage_v()[1], 2.5);
+    near(field.power_w(), 30.0);
+    near(
+        field.nodal_boundary_current_a()[2].unwrap() + field.nodal_boundary_current_a()[5].unwrap(),
+        4.0,
+    );
+    for i in 0..4 {
+        near(field.cell_power_w()[i], if i < 2 { 5.0 } else { 10.0 });
+        near(field.current_density_a_m2()[i][0], -20.0);
+    }
+    let reverse = problem
+        .solve_power(&[0, 3], &[2, 5], source, controls(), &mut || false)
+        .unwrap();
+    for i in 0..4 {
+        near(reverse.current_density_a_m2()[i][0], 20.0);
+        near(reverse.cell_power_w()[i], field.cell_power_w()[i]);
+    }
+    let zero = response
+        .field_at_power(
+            ConductionPowerSource {
+                power_w: 0.0,
+                ..source
+            },
+            1e-10,
+            1e-10,
+            &mut || false,
+        )
+        .unwrap();
+    near(zero.power_w(), 0.0);
+    assert!(zero.voltage_v().iter().all(|v| *v == 0.0));
+    for invalid in [
+        ConductionPowerSource {
+            maximum_voltage_v: 7.0,
+            ..source
+        },
+        ConductionPowerSource {
+            maximum_current_a: 3.0,
+            ..source
+        },
+        ConductionPowerSource {
+            power_w: -1.0,
+            ..source
+        },
+        ConductionPowerSource {
+            power_w: f64::NAN,
+            ..source
+        },
+        ConductionPowerSource {
+            maximum_voltage_v: f64::INFINITY,
+            ..source
+        },
+    ] {
+        assert!(matches!(
+            response.field_at_power(invalid, 1e-10, 1e-10, &mut || false),
+            Err(ConductionError::Invalid(_))
+        ));
+    }
+    assert!(matches!(
+        response.field_at_power(source, 1e-10, 1e-10, &mut || true),
+        Err(ConductionError::Cancelled)
+    ));
 }
 
 #[test]

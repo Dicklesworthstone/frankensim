@@ -3,12 +3,12 @@
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
 
+#[path = "conduction_enthalpy/contacts.rs"]
+mod contacts;
 #[path = "conduction_enthalpy/heat.rs"]
 mod heat;
 #[path = "conduction_enthalpy/response.rs"]
 mod response;
-#[path = "conduction_enthalpy/contacts.rs"]
-mod contacts;
 
 use common::{config, initial, material, material_with_electrical_basis, near, point};
 use fs_couple::circuit_enthalpy::{
@@ -16,7 +16,9 @@ use fs_couple::circuit_enthalpy::{
     conduction::{ConductionDrive, ConductionRegion, ConductionThermalNetwork},
     material::{ConductionLink, MaterialCell},
 };
-use fs_em::conduction::{ConductionControls, ConductionCurrentTrace, PlanarConduction};
+use fs_em::conduction::{
+    ConductionControls, ConductionCurrentTrace, ConductionPowerSource, PlanarConduction,
+};
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_matdb::{MaterialCard, PropertyKey, QueryPoint};
 use fs_material::{
@@ -143,6 +145,123 @@ fn ends(voltage: f64, offset: f64) -> [(usize, f64); 4] {
         (2, voltage + offset),
         (5, voltage + offset),
     ]
+}
+
+#[test]
+fn regulated_power_tracks_material_resistance_with_exact_source_heat() {
+    for rho in [1.0, 2.0] {
+        let (a, ca) = material(rho, 2.0, 0.005);
+        let (b, cb) = material(rho, 2.0, 0.005);
+        let cards = [a, b];
+        let curves = [ca, cb];
+        let mut thermal = initial(&curves, 999.0, None);
+        let mut field = problem(
+            &cards,
+            [ElectricalPropertyBasis::Resistivity; 2],
+            300.0,
+            1.0,
+        );
+        let context = point(300.0);
+        let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+        let bindings = cells(&cards, &curves, &context, &key);
+        let source = ConductionPowerSource {
+            power_w: 16.0,
+            maximum_voltage_v: 12.0,
+            maximum_current_a: 10.0,
+        };
+        for step in 1..=3 {
+            let next = network(&bindings)
+                .step_driven_candidate(
+                    &thermal,
+                    step as f64 * 0.2,
+                    &field,
+                    ConductionDrive::Power {
+                        positive: &[2, 5],
+                        negative: &[0, 3],
+                        source,
+                    },
+                    limits(),
+                    field_controls(),
+                    config(),
+                    &[0.0; 2],
+                    || false,
+                )
+                .unwrap();
+            // Identical slabs each receive P/2; C=2 J/K gives exactly
+            // dT=0.2*8/2=0.8 K per step, independently of rho(T).
+            let theta = step as f64 * 0.8;
+            let resistance = 2.0 * rho * (1.0 + 0.005 * theta);
+            let voltage = (source.power_w * resistance).sqrt();
+            let electrical = &next.report().electrical;
+            near(
+                next.thermal().temperature_k(CellId(30)).unwrap(),
+                300.0 + theta,
+            );
+            near(
+                next.thermal().temperature_k(CellId(10)).unwrap(),
+                300.0 + theta,
+            );
+            near(electrical.voltage_v[2], voltage);
+            near(
+                electrical.nodal_boundary_current_a[2].unwrap()
+                    + electrical.nodal_boundary_current_a[5].unwrap(),
+                source.power_w / voltage,
+            );
+            for &power in &electrical.cell_power_w {
+                near(power, 4.0);
+            }
+            near(electrical.heat_j, 3.2);
+            near(electrical.supplied_work_j, 3.2);
+            near(next.report().deposited_joule_j, 3.2);
+            near(next.thermal().energy_j() - thermal.energy_j(), 3.2);
+            (thermal, field, _) = next.into_parts();
+        }
+    }
+}
+
+#[test]
+fn thermal_power_compliance_failure_preserves_both_accepted_owners() {
+    let (a, ca) = material(1.0, 2.0, 0.005);
+    let (b, cb) = material(1.0, 2.0, 0.005);
+    let cards = [a, b];
+    let curves = [ca, cb];
+    let thermal = initial(&curves, 999.0, None);
+    let field = problem(
+        &cards,
+        [ElectricalPropertyBasis::Resistivity; 2],
+        300.0,
+        1.0,
+    );
+    let saved = thermal.cells().clone();
+    let conductors = field.conductors().to_vec();
+    let context = point(300.0);
+    let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+    let bindings = cells(&cards, &curves, &context, &key);
+    // Initial demand needs sqrt(32)=5.65685 V. The accepted hot endpoint
+    // would need sqrt(32.128)=5.66815 V and cannot satisfy this source.
+    let failed = network(&bindings).step_driven_candidate(
+        &thermal,
+        0.2,
+        &field,
+        ConductionDrive::Power {
+            positive: &[2, 5],
+            negative: &[0, 3],
+            source: ConductionPowerSource {
+                power_w: 16.0,
+                maximum_voltage_v: 5.66,
+                maximum_current_a: 10.0,
+            },
+        },
+        limits(),
+        field_controls(),
+        config(),
+        &[0.0; 2],
+        || false,
+    );
+    assert!(failed.is_err());
+    assert_eq!(thermal.cells(), &saved);
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(field.conductors(), &conductors);
 }
 
 #[test]

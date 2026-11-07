@@ -30,7 +30,8 @@ use super::{
     },
 };
 use fs_em::conduction::{
-    ConductionControls, ConductionCurrentTrace, ConductionError, ConductionField, PlanarConduction,
+    ConductionControls, ConductionCurrentTrace, ConductionError, ConductionField,
+    ConductionPowerSource, PlanarConduction,
 };
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_material::{
@@ -55,6 +56,15 @@ pub enum ConductionDrive<'a> {
         positive: &'a [usize],
         negative: &'a [usize],
         current_a: f64,
+    },
+    /// Regulated power delivered to a stationary Ohmic conductor, with finite
+    /// voltage/current compliance. Both amplitudes follow the solved material
+    /// resistance at every thermal trial. A set point outside compliance is
+    /// refused without publishing an electrical or thermal candidate.
+    Power {
+        positive: &'a [usize],
+        negative: &'a [usize],
+        source: ConductionPowerSource,
     },
     /// Distributed prescribed inward current density on exterior edges, with
     /// voltage traces supplying the reference and any return current. These
@@ -87,11 +97,18 @@ impl ConductionDrive<'_> {
             } => problem
                 .solve_current(positive, negative, current_a, controls, cancelled)
                 .map_err(field_error),
+            Self::Power {
+                positive,
+                negative,
+                source,
+            } => problem
+                .solve_power(positive, negative, source, controls, cancelled)
+                .map_err(field_error),
         }
     }
 
-    // Ideal total-current work uses the authored current, independently of its
-    // recovered reaction. Other traces retain the original native work account.
+    // Ideal current/power work uses the authored drive, independently of its
+    // recovered reaction/heat. Other traces retain the native work account.
     fn supplied_power_w(
         self,
         voltage_v: &[f64],
@@ -99,6 +116,7 @@ impl ConductionDrive<'_> {
         power_balance_residual_w: f64,
     ) -> Result<f64, Error> {
         Ok(match self {
+            Self::Power { source, .. } => finite(source.power_w),
             Self::Current {
                 positive,
                 negative,
