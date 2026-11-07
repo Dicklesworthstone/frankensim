@@ -4,6 +4,8 @@ use super::*;
 use fs_material::liquid::solution::multicomponent::caloric::ResolvedMulticomponentLiquidEquilibriumCaloricState;
 use fs_thermal::enthalpy::ThermalLaw;
 
+#[path = "storage/coexistence.rs"]
+mod coexistence;
 #[path = "storage/conduction.rs"]
 mod conduction;
 #[path = "storage/stream.rs"]

@@ -17,6 +17,8 @@
 //! The explicit [`discovery`] child separately admits changing phase counts
 //! through the original finite search without altering fixed-branch continuation.
 
+/// Original common-tangent latent storage between two accepted phase ensembles.
+pub mod coexistence;
 /// Conserved thermal endpoints with the original bounded phase-count discovery.
 pub mod discovery;
 /// Conserved relaxation and mixing of actual homogeneous or separated inputs.

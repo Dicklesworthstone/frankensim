@@ -70,23 +70,36 @@ impl<'a> MulticomponentLiquidEquilibriumConductionLaw<'a> {
         let temperature_k = state.temperature().value();
         let capacity = state.isobaric_heat_capacity_j_per_k();
         let temperature_slope_kg_k_j = self.caloric.mass_kg() / capacity;
-        let (conductivity_w_m_k, dk_dt) = self
-            .conductivity
-            .conductivity_and_temperature_derivative(temperature_k)?;
-        let conductivity_slope_kg_w_m_k_j = dk_dt * temperature_slope_kg_k_j;
-        if !temperature_slope_kg_k_j.is_finite()
-            || temperature_slope_kg_k_j <= 0.0
-            || !conductivity_slope_kg_w_m_k_j.is_finite()
-        {
+        if temperature_slope_kg_k_j <= 0.0 {
             return Err(DepositionError::Arithmetic);
         }
-        Ok(ImplicitConductionState {
-            temperature_k,
-            temperature_slope_kg_k_j,
-            conductivity_w_m_k,
-            conductivity_slope_kg_w_m_k_j,
-        })
+        conductivity_state(&self.conductivity, temperature_k, temperature_slope_kg_k_j)
     }
+}
+
+// Both original sensible branches and exact coexistence plateaus use this
+// same chain rule. A plateau legitimately has dT/dh=0; a resolved branch's
+// caller separately requires its strictly positive inverse heat capacity.
+pub(super) fn conductivity_state(
+    conductivity: &ConductivityCurve,
+    temperature_k: f64,
+    temperature_slope_kg_k_j: f64,
+) -> Result<ImplicitConductionState, DepositionError> {
+    let (conductivity_w_m_k, dk_dt) =
+        conductivity.conductivity_and_temperature_derivative(temperature_k)?;
+    let conductivity_slope_kg_w_m_k_j = dk_dt * temperature_slope_kg_k_j;
+    if !temperature_slope_kg_k_j.is_finite()
+        || temperature_slope_kg_k_j < 0.0
+        || !conductivity_slope_kg_w_m_k_j.is_finite()
+    {
+        return Err(DepositionError::Arithmetic);
+    }
+    Ok(ImplicitConductionState {
+        temperature_k,
+        temperature_slope_kg_k_j,
+        conductivity_w_m_k,
+        conductivity_slope_kg_w_m_k_j,
+    })
 }
 
 impl ConductivityLaw for MulticomponentLiquidEquilibriumConductionLaw<'_> {

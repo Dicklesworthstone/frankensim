@@ -17,6 +17,8 @@
 //! density, viscosity or phase conductivity. Resolve accepted phases through
 //! the original material law before consuming those transport properties.
 
+/// Two original branches joined by verified common-tangent latent storage.
+pub mod coexistence;
 /// Original equilibrium calorics with explicitly declared bulk conductivity.
 pub mod conduction;
 /// Original species and enthalpy/entropy references on stationary mass flow.

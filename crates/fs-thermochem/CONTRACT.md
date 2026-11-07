@@ -696,6 +696,35 @@ across homogeneous and separated states without an absolute-entropy claim.
 Small same-inventory changes continue to use the direct original H/S increment
 methods, avoiding subtraction of anchored totals.
 
+### Original multicomponent latent storage at an offered common tangent
+
+`solution::multicomponent::caloric::equilibrium::coexistence` admits two
+original local phase ensembles from the SAME complete caloric owner, exactly
+shared temperature and conserved species feed. Every present component must
+have the same original reduced chemical potential in every retained phase,
+within the declared numerical allowance. The caller bounds retained phases
+and funds separate chemical-potential and entropy-closure tolerances; the
+actual maximum chemical-potential residual remains visible.
+
+Original phase mixing changes through the same homogeneous feed recover
+positive latent H and S before extensive reference datums enter arithmetic.
+The actual residual DeltaS-DeltaH/T is retained and must fit the stated entropy
+allowance; no source entropy is fitted to the heat. `state_at_enthalpy_increment`
+uses the actual latent lever rule and returns a borrowed inventory of both
+ensembles' original phases, with conserved species amounts and immutable
+original compositions and chemical potentials. Endpoint-zero ensembles are
+absent; a positive amount that cannot be represented refuses. The represented
+inventory's heat residual remains explicit. Plateau queries need no nonlinear
+phase solve, numerical derivative or artificial heat capacity.
+
+This is finite numerical admission of an offered common tangent, not automatic
+transition-temperature discovery, a global Gibbs-envelope proof or a kinetic
+or morphology model. Foreign owners, unmatched potentials, nonpositive latent
+storage, exhausted phase limits and cancellation publish no partial state.
+Focused regressions use the independent symmetric ternary three-phase/one-phase
+common tangent, its four-phase interior inventory, exact source latent H/S,
+large pure-reference cancellation, control limits and transactional refusals.
+
 ### Conserved mixing and relaxation into local liquid phase branches
 
 `solution::multicomponent::caloric::equilibrium::transactions` extends the SAME

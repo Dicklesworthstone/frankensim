@@ -18843,6 +18843,41 @@ respectively against rebuilt original material/thermochemical sources and
 real native dependencies. These are focused native checks, not a full
 workspace build or measured-material calibration.
 
+### Native liquid heat transport through a genuine latent interval
+
+`MulticomponentLiquidEquilibriumThermalStorage::join_coexistence` joins adjacent
+same-source, same-feed original branches only through the L1 common-tangent
+owner. `MulticomponentLiquidCoexistenceThermalStorage` supplies one continuous
+nondecreasing T(h) path with both sensible branches and the actual isothermal
+latent interval. Its h=0 datum is the lower-enthalpy coexistence endpoint,
+keeping a small latent heat out of an unrelated cold-reference offset.
+Original branch Cp, continuation limits and direct H/S increments remain;
+the latent interval has exactly zero dT/dh, including the selected one-sided
+corner tangent. A temperature-only enthalpy or Cp query at coexistence refuses
+the set-valued relation instead of choosing an unrequested phase amount.
+
+The native `ThermalLaw` entropy is its defining integral dh/T. The separate
+`specific_source_entropy_change_j_kg_k` query retains actual original phase
+entropy; the two differ only by the admitted portion of the visible original
+latent closure residual and arithmetic normalization. No source value is
+changed to satisfy the thermal account. Both sensible branches use the same
+conserved normalization mass and retain original source/domain refusals.
+
+`MulticomponentLiquidCoexistenceConductionLaw` binds this path to an explicitly
+authored bulk k(T) curve. One original inverse supplies T, dT/dh and dk/dh;
+both derivatives are exactly zero on the plateau. Native adaptive observables
+retain the upper-ensemble mass fraction while temperature is constant. Both
+ensembles are liquid: this is the named higher-enthalpy ensemble fraction,
+not vapor quality or a solid/liquid fraction. The bulk conductivity closure
+does not infer phase morphology, interphase resistance or effective transport
+from individual source conductivities.
+
+Independent ternary common-tangent and original Cp/CpT integrals exercise
+source-preserving sensible/latent inversion, actual three/four/one-phase
+inventories, source entropy closure and native two-cell implicit heat transfer.
+The join retains finite offered branch/common-tangent qualification; it does
+not turn bounded phase discovery into a global phase-selection certificate.
+
 ### Source-bound conserved phase relaxation and mixing
 
 `MulticomponentLiquidCaloricLaw::relax_homogeneous` and `mix_equilibrium` extend
