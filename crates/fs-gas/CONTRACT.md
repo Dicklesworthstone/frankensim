@@ -7536,3 +7536,55 @@ with independently integrated analytic Maxwellian/Milne/Landau moment equations
 formation-reference shifts, pure power with inactive chemistry, initial neutral
 photoelectron creation, original-source admission and cancellation. Numerical
 agreement on these manufactured laws is not experimental atom/plasma validation.
+
+
+## Photon transport with competing reactions and thermal evolution
+
+`chemistry::radiation_transport::advance_radiation_transport` couples ordered
+mixed gas cells to a finite incident photon exposure. Each cell retains one
+original reciprocal atomic source for photoionization, electron impact,
+three-body recombination and spontaneous radiative capture. Recombination can
+restore neutral opacity during illumination; each later photoionization
+consumes another incident photon. Gross photon/capture traffic remains separate
+from net pair creation. Optional per-cell `CollisionalRadiativeThermal` inputs
+use the same local thermal kernel and heavy caloric inversion described above.
+
+Symmetric composition interleaves local reaction/thermal midpoint subflows with
+exact monochromatic whole-column attenuation/depletion. The spectral bands use
+their own symmetric composition. A common adaptive full/two-half comparison
+controls the combined local second-order estimate in populations, both thermal
+pools, reaction integrals and band photon accounts. Original cross sections and
+canonical source bindings prepare once. Reused contiguous point and band
+buffers avoid trial state cloning, trial species allocation and nested adaptive
+public solves. Accepted plus rejected attempts and cell/group extents are
+explicitly bounded; no global, spatial or empirical accuracy is certified.
+
+Per-band incident/absorbed/transmitted counts close at every cell interface and
+the whole-column boundary. Photon totals retain double-double accumulation and
+direct transmission evaluation instead of subtracting nearly equal incident
+and absorbed counts. Published actual gas energy closes against separately
+accumulated beam absorption, escaping recombination photons and both external
+pool works. Internal electron/heavy exchange cancels in the column account.
+The absolute energy allowance applies to the column as well as each cell; it
+is not silently multiplied by cell count. Empty columns transmit the original
+exposure, darkness still permits chemical and thermal evolution, and exact
+electron absence requires no artificial seed.
+
+Geometry and beam area are fixed and propagation is quasi-static. The emitted
+recombination radiation has explicitly unit escape probability: its energy
+leaves the system and it is not fed back as diffuse ionizing radiation. This
+does not model photon trapping, light-travel delay, scattering, stimulated
+emission, excited states, hydrodynamic motion or a non-Maxwellian distribution.
+The supported source interval must contain the numerical split stages; a
+temperature-domain trial failure can reduce the step, while other original
+source and work refusals remain explicit. Failure leaves all caller cells and
+sources unchanged and publishes no partial column.
+
+Five focused regressions cover an independent simultaneous two-cell reaction
+and attenuation ODE; repeated photoionization and capture beyond the original
+neutral inventory; second-order refinement in a resolved lower-density fixture
+with unchanged optical depths; combined beam, neutral exchange and both pool
+powers; and darkness, empty/zero-time identities, bounded work and cancellation.
+The dense adaptive reference remains separate from the resolved fixed-step
+refinement fixture. Exact conservation alone does not establish temporal order
+or validate the declared unit-escape approximation.

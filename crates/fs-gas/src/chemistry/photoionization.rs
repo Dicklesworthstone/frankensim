@@ -31,6 +31,7 @@ pub mod spectrum;
 
 use fs_math::det::{exp, expm1, ln};
 use fs_qty::{Amount, Area, Energy, Temperature, Time};
+use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 use fs_thermochem::electron_collision::AVOGADRO_PER_MOL as NA;
 use fs_thermochem::equilibrium::composition::{
     FrozenIonizedGasStateErrorV1, FrozenIonizedGasStateV1,
@@ -38,7 +39,6 @@ use fs_thermochem::equilibrium::composition::{
 use fs_thermochem::kinetics::atomic_ionization::photoionization::{
     AtomicPhotoionizationV1, PhotoionizationErrorV1, PhotonNumberFluxV1,
 };
-use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
 /// Constant illumination of the whole declared gas column.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -116,24 +116,42 @@ pub struct PhotoionizationResult {
 }
 impl PhotoionizationResult {
     /// Accepted common gas state; no equilibrium projection was performed.
-    pub const fn state(&self) -> &FrozenIonizedGasStateV1 { &self.state }
+    pub const fn state(&self) -> &FrozenIonizedGasStateV1 {
+        &self.state
+    }
     /// Original immutable initial state.
-    pub const fn initial_state(&self) -> &FrozenIonizedGasStateV1 { &self.initial }
+    pub const fn initial_state(&self) -> &FrozenIonizedGasStateV1 {
+        &self.initial
+    }
     /// Original cross section, species bank and level-energy source.
-    pub const fn source(&self) -> &AtomicPhotoionizationV1 { &self.source }
+    pub const fn source(&self) -> &AtomicPhotoionizationV1 {
+        &self.source
+    }
     /// Applied illumination; serial transport uses the fluence-equivalent mean
     /// flux, not a claim that the downstream instantaneous flux is constant.
-    pub const fn exposure(&self) -> PhotoionizationExposure { self.exposure }
+    pub const fn exposure(&self) -> PhotoionizationExposure {
+        self.exposure
+    }
     /// Numerical publication allowances.
-    pub const fn controls(&self) -> PhotoionizationControls { self.controls }
+    pub const fn controls(&self) -> PhotoionizationControls {
+        self.controls
+    }
     /// Nonnegative number of ionization events in moles.
-    pub const fn reaction_extent(&self) -> Amount { self.extent }
+    pub const fn reaction_extent(&self) -> Amount {
+        self.extent
+    }
     /// Initial and final neutral bound-free optical depths at the beam energy.
-    pub const fn optical_depths(&self) -> [f64; 2] { self.optical_depths }
+    pub const fn optical_depths(&self) -> [f64; 2] {
+        self.optical_depths
+    }
     /// Photon and energy accounts.
-    pub const fn balance(&self) -> PhotoionizationBalance { self.balance }
+    pub const fn balance(&self) -> PhotoionizationBalance {
+        self.balance
+    }
     /// Energy supplied by absorbed photons [J].
-    pub const fn absorbed_energy(&self) -> Energy { Energy::new(self.balance.absorbed_energy_j) }
+    pub const fn absorbed_energy(&self) -> Energy {
+        Energy::new(self.balance.absorbed_energy_j)
+    }
 }
 
 /// Evolve the monochromatic, perfectly mixed column analytically.
@@ -160,34 +178,50 @@ pub fn advance_monochromatic_photoionization(
         || initial.electron_index() != Some(channel.electron_index())
         || initial.relative_charge_residual() > controls.relative_charge_tolerance
     {
-        return Err(PhotoionizationError::Invalid("state and original atomic source disagree"));
+        return Err(PhotoionizationError::Invalid(
+            "state and original atomic source disagree",
+        ));
     }
-    let sigma = source.cross_section(exposure.beam.photon_energy)
-        .map_err(PhotoionizationError::Source)?.value();
-    let [a, i, e] = [channel.neutral_index(), channel.ion_index(), channel.electron_index()];
+    let sigma = source
+        .cross_section(exposure.beam.photon_energy)
+        .map_err(PhotoionizationError::Source)?
+        .value();
+    let [a, i, e] = [
+        channel.neutral_index(),
+        channel.ion_index(),
+        channel.electron_index(),
+    ];
     let neutral = initial.amounts()[a].value();
     let electrons = initial.amounts()[e].value();
     let tau = ((sigma * NA) * neutral) / area;
     let dose = sigma * fluence;
-    if [fluence, photons, tau, dose].iter().any(|x| !nonnegative(*x)) {
-        return Err(PhotoionizationError::Arithmetic("photon exposure or optical depth"));
-    }
-    let (extent, remaining, tau_final) = if sigma == 0.0 || neutral == 0.0
-        || flux == 0.0 || time == 0.0
+    if [fluence, photons, tau, dose]
+        .iter()
+        .any(|x| !nonnegative(*x))
     {
-        (0.0, neutral, tau)
-    } else {
-        if tau == 0.0 || dose == 0.0 {
-            return Err(PhotoionizationError::Arithmetic("positive optical depth or photon dose underflow"));
-        }
-        let (fraction, remaining_fraction, final_depth) = depletion(tau, dose)?;
-        let lost = neutral * fraction;
-        let retained = neutral * remaining_fraction;
-        if lost == 0.0 || !nonnegative(lost) || !nonnegative(retained) {
-            return Err(PhotoionizationError::Arithmetic("positive ionization extent"));
-        }
-        (lost, retained, final_depth)
-    };
+        return Err(PhotoionizationError::Arithmetic(
+            "photon exposure or optical depth",
+        ));
+    }
+    let (extent, remaining, tau_final) =
+        if sigma == 0.0 || neutral == 0.0 || flux == 0.0 || time == 0.0 {
+            (0.0, neutral, tau)
+        } else {
+            if tau == 0.0 || dose == 0.0 {
+                return Err(PhotoionizationError::Arithmetic(
+                    "positive optical depth or photon dose underflow",
+                ));
+            }
+            let (fraction, remaining_fraction, final_depth) = depletion(tau, dose)?;
+            let lost = neutral * fraction;
+            let retained = neutral * remaining_fraction;
+            if lost == 0.0 || !nonnegative(lost) || !nonnegative(retained) {
+                return Err(PhotoionizationError::Arithmetic(
+                    "positive ionization extent",
+                ));
+            }
+            (lost, retained, final_depth)
+        };
     let absorbed = extent * NA;
     // The exact solution obeys both inventory and photon bounds. Only tolerate
     // last-bit account roundoff; never rescale the species to repair a violation.
@@ -200,7 +234,9 @@ pub fn advance_monochromatic_photoionization(
     // changing opacity analytically instead.
     let transmitted = transmitted_photons(photons, tau, dose);
     if !nonnegative(transmitted) || transmitted > photons + photon_allowance {
-        return Err(PhotoionizationError::Arithmetic("transmitted photon budget"));
+        return Err(PhotoionizationError::Arithmetic(
+            "transmitted photon budget",
+        ));
     }
     let mut amounts = initial.amounts().to_vec();
     amounts[a] = Amount::new(remaining);
@@ -216,7 +252,9 @@ pub fn advance_monochromatic_photoionization(
         initial_te
     } else {
         if !nonnegative(excess) {
-            return Err(PhotoionizationError::Arithmetic("photon energy below original ionization gap"));
+            return Err(PhotoionizationError::Arithmetic(
+                "photon energy below original ionization gap",
+            ));
         }
         let born_temperature = excess / cv;
         let total = electrons + extent;
@@ -229,30 +267,50 @@ pub fn advance_monochromatic_photoionization(
     let sensible = cv * (electrons * (next_te - initial_te) + extent * next_te);
     // Formation reference offsets cancel before this physical energy difference.
     let residual = sensible + (chemical - absorbed_energy);
-    if [absorbed_energy, chemical, sensible, residual].iter().any(|x| !x.is_finite()) {
-        return Err(PhotoionizationError::Arithmetic("photoelectron energy account"));
+    if [absorbed_energy, chemical, sensible, residual]
+        .iter()
+        .any(|x| !x.is_finite())
+    {
+        return Err(PhotoionizationError::Arithmetic(
+            "photoelectron energy account",
+        ));
     }
     if residual.abs() > controls.energy_tolerance_j {
-        return Err(PhotoionizationError::EnergyBalance { residual_j: residual });
+        return Err(PhotoionizationError::EnergyBalance {
+            residual_j: residual,
+        });
     }
     poll(&mut cancelled)?;
     let state = FrozenIonizedGasStateV1::new(
-        channel.thermodynamics(), &amounts, initial.volume(),
-        initial.heavy_temperature(), Temperature::new(next_te),
-        controls.relative_charge_tolerance, &mut cancelled,
-    ).map_err(|error| match error {
+        channel.thermodynamics(),
+        &amounts,
+        initial.volume(),
+        initial.heavy_temperature(),
+        Temperature::new(next_te),
+        controls.relative_charge_tolerance,
+        &mut cancelled,
+    )
+    .map_err(|error| match error {
         FrozenIonizedGasStateErrorV1::Cancelled => PhotoionizationError::Cancelled,
         error => PhotoionizationError::State(error),
     })?;
     poll(&mut cancelled)?;
     Ok(PhotoionizationResult {
-        initial: initial.clone(), state, source: source.clone(), exposure, controls,
-        extent: Amount::new(extent), optical_depths: [tau, tau_final],
+        initial: initial.clone(),
+        state,
+        source: source.clone(),
+        exposure,
+        controls,
+        extent: Amount::new(extent),
+        optical_depths: [tau, tau_final],
         balance: PhotoionizationBalance {
-            incident_photons: photons, absorbed_photons: absorbed,
-            transmitted_photons: transmitted, chemical_storage_change_j: chemical,
+            incident_photons: photons,
+            absorbed_photons: absorbed,
+            transmitted_photons: transmitted,
+            chemical_storage_change_j: chemical,
             electron_sensible_energy_change_j: sensible,
-            absorbed_energy_j: absorbed_energy, energy_residual_j: residual,
+            absorbed_energy_j: absorbed_energy,
+            energy_residual_j: residual,
         },
     })
 }
@@ -269,7 +327,9 @@ fn validate_exposure(
         || !positive(controls.relative_charge_tolerance)
         || controls.relative_charge_tolerance >= 1.0
     {
-        return Err(PhotoionizationError::Invalid("finite exposure and numerical controls"));
+        return Err(PhotoionizationError::Invalid(
+            "finite exposure and numerical controls",
+        ));
     }
     let fluence = exposure.beam.number_flux_per_m2_s * exposure.duration.value();
     let photons = fluence * exposure.illuminated_area.value();
@@ -283,7 +343,7 @@ fn validate_exposure(
 // log1p(exp(-tau) * expm1(dose)). Evaluate without overflow or subtracting
 // nearly equal photon inventories. Factor out the exponential in the small
 // tail so a large photon count can keep it representable even at tau > 745.
-fn transmitted_photons(photons: f64, tau: f64, dose: f64) -> f64 {
+pub(super) fn transmitted_photons(photons: f64, tau: f64, dose: f64) -> f64 {
     if tau == 0.0 || dose == 0.0 {
         return photons;
     }
@@ -292,7 +352,11 @@ fn transmitted_photons(photons: f64, tau: f64, dose: f64) -> f64 {
         let exposed = -expm1(-dose);
         let attenuation = exp(-gap);
         let small = attenuation * exposed;
-        let correction = if small == 0.0 { 1.0 } else { log1p(small) / small };
+        let correction = if small == 0.0 {
+            1.0
+        } else {
+            log1p(small) / small
+        };
         let scale = photons * (exposed / dose);
         let tail = if gap <= 700.0 || scale == 0.0 {
             scale * attenuation
@@ -315,14 +379,18 @@ fn log1p(x: f64) -> f64 {
 
 // Return absorbed fraction, surviving fraction and surviving optical depth.
 // Calculate the small side directly instead of subtracting it from one.
-fn depletion(tau: f64, dose: f64) -> Result<(f64, f64, f64), PhotoionizationError> {
+pub(super) fn depletion(tau: f64, dose: f64) -> Result<(f64, f64, f64), PhotoionizationError> {
     let absorbed_opacity = -expm1(-tau);
     let exposed = -expm1(-dose);
     let product = absorbed_opacity * exposed;
     let candidate = if product < 0.5 {
         // Divide before multiplying: tau*dose may underflow even when the
         // absorbed fraction (approximately dose in a thin gas) is representable.
-        let correction = if product == 0.0 { 1.0 } else { -log1p(-product) / product };
+        let correction = if product == 0.0 {
+            1.0
+        } else {
+            -log1p(-product) / product
+        };
         (absorbed_opacity / tau) * exposed * correction
     } else {
         let small = tau.min(dose);
@@ -343,18 +411,31 @@ fn depletion(tau: f64, dose: f64) -> Result<(f64, f64, f64), PhotoionizationErro
         let remaining = final_depth / tau;
         (1.0 - remaining, remaining, final_depth)
     };
-    if !nonnegative(fraction) || fraction > 1.0 || !nonnegative(remaining_fraction)
-        || remaining_fraction > 1.0 || !nonnegative(final_depth)
+    if !nonnegative(fraction)
+        || fraction > 1.0
+        || !nonnegative(remaining_fraction)
+        || remaining_fraction > 1.0
+        || !nonnegative(final_depth)
     {
-        return Err(PhotoionizationError::Arithmetic("analytic photon depletion"));
+        return Err(PhotoionizationError::Arithmetic(
+            "analytic photon depletion",
+        ));
     }
     Ok((fraction, remaining_fraction, final_depth))
 }
 
-fn positive(x: f64) -> bool { x.is_finite() && x > 0.0 }
-fn nonnegative(x: f64) -> bool { x.is_finite() && x >= 0.0 }
+fn positive(x: f64) -> bool {
+    x.is_finite() && x > 0.0
+}
+fn nonnegative(x: f64) -> bool {
+    x.is_finite() && x >= 0.0
+}
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), PhotoionizationError> {
-    if cancelled() { Err(PhotoionizationError::Cancelled) } else { Ok(()) }
+    if cancelled() {
+        Err(PhotoionizationError::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -377,7 +458,10 @@ mod tests {
             (1e-200, 1e-200, 1e-200, 1.0),
         ] {
             let (a, n, _) = depletion(tau, dose).unwrap();
-            assert!((a - absorbed).abs() <= 5e-13 * absorbed, "{tau} {dose}: {a}");
+            assert!(
+                (a - absorbed).abs() <= 5e-13 * absorbed,
+                "{tau} {dose}: {a}"
+            );
             assert!((n - neutral).abs() <= 5e-13 * neutral, "{tau} {dose}: {n}");
             assert!((a + n - 1.0).abs() <= 2e-15);
         }

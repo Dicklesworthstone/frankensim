@@ -40,6 +40,8 @@ pub mod linear;
 /// Photon-conserving ionization of a rigid uniformly mixed column.
 pub mod photoionization;
 mod prepared;
+/// Photon-conserving spatial transport with competing local ionization and capture.
+pub mod radiation_transport;
 /// Reciprocal atomic capture with escaping photon and electron-energy accounting.
 pub mod radiative_recombination;
 mod solve;
