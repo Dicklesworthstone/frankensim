@@ -253,6 +253,14 @@ impl MoistureRadial {
         &self.reference
     }
 
+    pub(super) const fn material_card(&self) -> &MaterialCard {
+        &self.card
+    }
+
+    pub(super) const fn transport_context(&self) -> &ResolvedMaterialStatePoint {
+        &self.transport
+    }
+
     fn water(&self, moisture: &[f64]) -> f64 {
         moisture
             .iter()

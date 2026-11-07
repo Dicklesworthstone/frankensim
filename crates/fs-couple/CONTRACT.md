@@ -3135,6 +3135,30 @@ eigenmode, nonlinear dry-front balance and finite surface flux define the focuse
 verification in `tests/moisture/radial.rs`; they are not measured validation or
 a continuum-error certificate for an arbitrary mesh or time step.
 
+### Radial diffusion driving native solid mechanics
+
+`moisture::solid::MoistureRadialSolid` maps every original cylindrical or
+annular water shell into a conforming three-dimensional tetrahedral mesh. Local
+transported moisture selects the original elastic law and integrated directional
+swelling source; the existing native solid owner resolves compatible displacement,
+stress, reactions, deformed geometry and the signed prestressed K_e+K_g/M pencil.
+A nonuniform water profile therefore produces compatible stress and local wet
+inertia rather than independent shell expansions. Material axes are fixed in the
+xyz mesh frame; radial/tangential grain rotation is not inferred.
+
+Each shell's exact curved dry inventory is distributed over its actual polygonal
+tetrahedral volumes. The user explicitly bounds the curved/polygonal volume
+discrepancy; the corresponding inertia-density correction vanishes under angular
+refinement. Axial, circumferential and radial mechanics still require ordinary
+mesh convergence. The water metric remains on the original reference chart:
+small deformation does not imply stress-assisted or spatially swelling diffusion.
+This owner admits cylinders and annuli; spheres require a separate native mesh
+owner. Source-domain, geometric, work, cancellation and late mechanical refusals
+leave the original moisture state untouched. Geometry tests independently check
+shell volumes, seam conformity and refinement; native integration tests define
+affine free swelling, gradient-induced stress, exact conserved wet inertia and a
+one-DOF generalized modal response using authored verification laws.
+
 ## Coating strain about a supplied static modal offset
 
 `MaterialShellImage::prepare_coating_strain_with_offset` and the corresponding

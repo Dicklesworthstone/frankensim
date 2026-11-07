@@ -7,6 +7,8 @@ use fs_solid::linear3::{TetAssemblyBudget, TetStaticSolveConfig, source::SolidSt
 
 #[path = "solid/layered.rs"]
 mod layered;
+#[path = "solid/radial.rs"]
+mod radial;
 
 fn axes() -> HygroscopicAxes {
     HygroscopicAxes {

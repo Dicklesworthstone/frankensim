@@ -21,6 +21,8 @@ mod cartesian;
 pub use cartesian::MoistureCartesianSolidStep;
 #[path = "solid/layered.rs"]
 mod layered;
+#[path = "solid/radial.rs"]
+mod radial;
 use fs_material::state_point::{
     IntegratedOrthotropicHygroscopicExpansion, integrate_orthotropic_hygroscopic_expansion,
 };
@@ -39,6 +41,7 @@ pub use layered::{
     MoistureSpatialAtmosphereCandidate, MoistureSpatialAtmosphereControls,
     MoistureSpatialAtmosphereReport, MoistureSpatialDiffusionReport,
 };
+pub use radial::{MoistureRadialSolid, MoistureRadialSolidMesh, MoistureRadialSolidStep};
 
 /// Fixed source-principal and mesh frames, independent of elastic symmetry.
 #[derive(Clone, Copy, Debug)]
@@ -178,8 +181,29 @@ impl MoistureSolidSource {
         expansion_selection: MaterialPropertySelection,
         axes: HygroscopicAxes,
     ) -> Result<Self, MoistureError> {
-        let point = field.reference.query();
-        let elastic = stiffness.resolve(field.card, &point, elastic_selection)?;
+        Self::bind_original(
+            field.card,
+            field.reference,
+            field.identity,
+            stiffness,
+            elastic_selection,
+            expansion_selection,
+            axes,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_original(
+        card: &MaterialCard,
+        reference: &ResolvedMaterialStatePoint,
+        definition: ContentHash,
+        stiffness: SolidStiffnessModel,
+        elastic_selection: MaterialPropertySelection,
+        expansion_selection: MaterialPropertySelection,
+        axes: HygroscopicAxes,
+    ) -> Result<Self, MoistureError> {
+        let point = reference.query();
+        let elastic = stiffness.resolve(card, &point, elastic_selection)?;
         if elastic
             .properties()
             .iter()
@@ -189,12 +213,8 @@ impl MoistureSolidSource {
                 "hygroelasticity needs static environmental elastic laws",
             ));
         }
-        let expansion = integrate_orthotropic_hygroscopic_expansion(
-            field.card,
-            &point,
-            &point,
-            expansion_selection,
-        )?;
+        let expansion =
+            integrate_orthotropic_hygroscopic_expansion(card, &point, &point, expansion_selection)?;
         let expansion_selection = MaterialPropertySelection::PinnedByProperty(
             expansion
                 .reference()
@@ -209,7 +229,7 @@ impl MoistureSolidSource {
                 .collect(),
         );
         Ok(Self {
-            definition: field.identity,
+            definition,
             stiffness,
             elastic,
             expansion_selection,
