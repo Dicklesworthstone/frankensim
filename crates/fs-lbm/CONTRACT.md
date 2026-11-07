@@ -4224,8 +4224,9 @@ late-cancelled updates, characteristic trials and actual-pressure source refusal
 These conditions prescribe external thermal data; they do not introduce solid
 heat storage, a turbulent wall function or a new natural-convection qualification.
 
-`preview_thermal_wall_step` now exposes one reversible original fluid step for
-finite-wall composition. Its `NsfThermalWallTrial` retains the exact grid,
+`preview_thermal_wall_step` exposes one reversible original fluid step for
+finite-wall composition; `preview_thermal_wall_interval` accepts a positive,
+explicitly bounded count of those same native steps. Its `NsfThermalWallTrial` retains the exact grid,
 complete native energy ledger, original prior energy and canonical per-face
 `NsfThermalWallExchange` joules. Positive local heat enters the fluid on either
 orientation. The starting boundary-history refresh returns its already
@@ -4236,22 +4237,42 @@ and no accepted-temperature property requery reconstructs the heat afterward.
 Only explicitly listed local faces appear in this account; unlisted global
 walls and mechanical wall work retain their distinct native accounts.
 
-The candidate always refreshes starting history under its proposed held table,
-including an unchanged table. Ordinary public setters retain their original
-unchanged-table no-op, and ordinary steps retain no extra face history. The
-trial copies the exact source-free physical state, supports existing held
-openings, gravity, body forces, local SGS and the original periodic/channel
-dynamic SGS closures. The latter retain their accepted transport and physical
-history while rebuilding deterministic filter scratch with the original
-controls and geometry, capped at the original retained workspace bytes. These
-same-state closures own no Lagrangian or time-averaged model history. The native
-wall update refits transport for each proposed boundary; only molecular heat
-crosses the wall. Manufactured volume callbacks still refuse because their
-external state cannot be copied into the transaction.
-An explicit full-grid cell cap bounds candidate storage; original native
-corrector limits and cancellation checkpoints still apply. A refused or dropped
-trial changes no accepted state or control. `accept` publishes its already
-admitted candidate without additional fallible work.
+The candidate refreshes starting history under its proposed held table once,
+including an unchanged table. Later steps carry the exact prior corrector's
+sparse flux vector together with its existing native divergence history;
+there is no intermediate accepted-temperature property requery or history
+restart. The grid is copied once for the complete interval. Per-face heat and
+all native energy-transfer terms accumulate in step order, final storage comes
+from the last step, and a multi-step residual closes the entire interval.
+One-step calls preserve their original native ledger and residual arithmetic.
+Ordinary public setters retain their unchanged-table no-op, and ordinary steps
+retain no extra face history.
+
+The trial retains the exact source-free physical state, supports existing held
+openings, gravity, body forces and molecular/local/dynamic SGS, and still refuses
+manufactured volume callbacks whose external state cannot be rolled back.
+Periodic and channel dynamic closures share their already-admitted mutex
+scratch through `Arc`, without allocating a second 200-byte/cell filter payload.
+Each fit overwrites its required scratch from the current candidate density,
+Guo velocity and temperature before consumption; these closures have no
+Lagrangian or other temporal model history. The exclusive trial borrow prevents
+concurrent access to the accepted physical owner. Accepted transport
+coefficients, controls, histories and reports remain separately retained.
+A refused/dropped trial may leave only private filter scratch overwritten, as
+an ordinary refused native step can; retry performs a complete fresh fit.
+The trial helper retains original filter geometry, controls and poisoned-lock
+refusal without a second scratch allocation. The native wall update refits
+transport for each proposed boundary; molecular heat alone crosses the wall.
+
+`cell_count()` reports the original allocated grid including masked solids.
+The preview's full-grid cell cap bounds candidate storage, and a separate
+`maximum_cell_steps` gate admits the checked product of that count with the
+requested positive step count before copying. Zero steps, work/clock overflow
+and insufficient budgets refuse. Original corrector limits remain in force;
+cancellation is polled between steps, at native work boundaries and while
+accumulating faces. A late failure discards the entire candidate, including
+any successfully computed prefix. `accept` publishes the already admitted
+complete interval without additional fallible work.
 
 This supplies the fluid side of `fs-couple::nsf_thermal`, whose original finite
 thermal cells receive the opposite actual joules and own their storage and
@@ -4259,8 +4280,14 @@ spatial conduction. That adapter separately gates local and joint energy and
 retains first-order held-endpoint thermal coupling. Native regression sources
 cover all heat-flux orientations, original direct-step equivalence for newly
 installed controls, unchanged-table continuation, optional endpoint residual
-control, work/source refusal and late cancellation. This is a coupling seam,
-not an independently calibrated turbulent or conjugate benchmark.
+control, work/source refusal and late cancellation. Interval regressions compare
+the unchanged direct native trajectory and all energy accounts, distinguish
+continuous corrector history from per-step restarts, preserve physical/dynamic
+coefficients after a dropped or late-cancelled active channel interval, exercise
+shared workspace reuse and native heat-cap refusal, and replay periodic fits.
+The same native topology, molecular wall heat and exploratory turbulence
+qualification remain authoritative. This is a coupling seam, not an
+independently calibrated turbulent or conjugate benchmark.
 
 **Prescribed open faces (pexfp.138).**
 `set_open_face(axis, high, Some(NsfOpenState))` declares the density [kg/m³],

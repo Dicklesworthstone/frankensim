@@ -1643,10 +1643,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         &mut self,
         next_body_acceleration: Option<Vec<body_force::BodyAcceleration>>,
         cancelled: &mut impl FnMut() -> bool,
-        wall_exchange: Option<(&[f64], &mut Vec<NsfThermalWallExchange>)>,
+        wall_exchange: Option<thermal_wall_trial::ThermalWallStepRecord<'_>>,
     ) -> Result<EnergyLedger, NsfError> {
         body_force::checkpoint(cancelled)?;
-        if wall_exchange.as_ref().is_some_and(|(old, _)| old.len() != self.thermal_walls.len()) {
+        if wall_exchange.as_ref().is_some_and(|record| record.previous_flux.len() != self.thermal_walls.len()) {
             return Err(NsfError::Input("thermal wall exchange history does not match its faces"));
         }
         let body_force = body_force::BodyForceStep::new(
@@ -2121,12 +2121,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let reservoir_exchanges = self.finish_reservoir_exchanges(
             open1, &reservoir_flows, &reservoir_mass_by_aperture)?;
         let local_exchange = match wall_exchange.as_ref() {
-            Some((old, _)) => {
+            Some(record) => {
                 if wall_heat_flux.len() != self.thermal_walls.len() {
                     return Err(NsfError::Input("thermal wall endpoint lost its face fluxes"));
                 }
                 let mut exchange = Vec::with_capacity(self.thermal_walls.len());
-                for ((face, &before), &after) in self.thermal_walls.iter().zip(*old).zip(&wall_heat_flux) {
+                for ((face, &before), &after) in self.thermal_walls.iter().zip(record.previous_flux).zip(&wall_heat_flux) {
                     body_force::checkpoint(cancelled)?;
                     let direction = if face.high { -1.0 } else { 1.0 };
                     let heat_into_fluid_j = unit * (direction * 0.5 * (before + after));
@@ -2142,8 +2142,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             None => None,
         };
         body_force::checkpoint(cancelled)?;
-        if let (Some((_, destination)), Some(exchange)) = (wall_exchange, local_exchange) {
-            *destination = exchange;
+        if let (Some(record), Some(exchange)) = (wall_exchange, local_exchange) {
+            *record.exchanges = exchange;
+            *record.next_flux = wall_heat_flux;
         }
         if let Some(field) = next_body_acceleration {
             self.body_acceleration = field;
@@ -2339,6 +2340,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         &self.spec.bulk_ratio_source
     }
     /// Steps completed.
+    /// Full allocated grid count, including masked solid cells. This is the
+    /// count used by native snapshot and cell-step work admission.
+    #[must_use]
+    pub const fn cell_count(&self) -> usize {
+        self.n
+    }
     #[must_use]
     pub fn steps(&self) -> usize {
         self.steps

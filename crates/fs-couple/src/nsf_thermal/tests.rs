@@ -1,4 +1,6 @@
 use super::*;
+
+mod interval;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
 use fs_lbm::d3q27::D3q27;

@@ -1698,6 +1698,17 @@ entropy, closed graph SDIRK conservation and cancellation.
 
 ## Implicit enthalpy transport on geometric conduction chains
 
+`BackwardEulerStep::new_with_duration` accepts an independently owned physical
+duration and its rounded absolute endpoint. They must agree within clock
+roundoff; the endpoint still advances and original thermal event admission
+still applies. Storage, source heat, transport and entropy quadrature all use
+that same supplied duration. This lets integer native fluid clocks retain their
+actual elapsed time at large absolute timestamps without replacing it by the
+subtraction of rounded clocks. It adds no new heat-rate or integration owner.
+A focused native regression defines three seconds of source heating where the
+representable endpoints differ by four, plus inconsistent-clock, invalid-duration
+and cancellation refusals. Execution is unverified on the current build host.
+
 `enthalpy::backward_euler::BackwardEulerStep` additionally accepts optional
 endpoint reservoir-conductance replacements through
 `evaluate_with_reservoirs` and `evaluate_with_entropy_and_reservoirs`.

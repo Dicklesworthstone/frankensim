@@ -4442,7 +4442,11 @@ feedback or changes to elastic stiffness.
 ## Resolved NSF convection against finite spatial solid storage
 
 `nsf_thermal::advance_nsf_solid` advances the original `NsfGrid3` and original
-`DepositionSimulation` together for one lattice step. Each unique native fluid
+`DepositionSimulation` together for one lattice step. The multirate
+`advance_nsf_solid_interval` entry advances a declared positive number of native
+fluid steps against one solid endpoint. Every candidate retains the original
+fluid timestep and chronological flux histories; no large fluid step or heat
+extrapolation replaces them. Each unique native fluid
 face maps to an explicitly bound solid cell and its same registered caloric
 object. The face area is the original dx²; mapped patches must fit the cell's
 exposed surface. The adapter removes their area from authored ambient exchange
@@ -4466,20 +4470,29 @@ Original local/total thermal checks, independent fluid and per-cell/interface
 transfer checks, and a combined storage/external-supply check must all pass.
 Cancellation, source refusal, exhausted work and failed energy gates preserve
 both owners. Cell/contact limits and a shared endpoint-query cap bound every
-native fluid trial, including derivative probes and final acceptance.
+native fluid trial, including derivative probes and final acceptance. An
+independent whole-call cell-step budget reserves each full native interval
+before computation, including solid cells in the fluid grid. Reports retain
+accepted fluid steps, physical duration and all reserved probe work. Each
+candidate copies the fluid state once and retains one face vector, independent
+of the number of fluid steps; it does not retain a full substep trajectory.
 
 This is fixed-geometry, fixed-inventory, first-order coupled time sampling:
-the solid endpoint boundary is held over one original fluid step. Both clocks
-use the same representable lattice timestamp. Native thermal events still
-require explicit splits/processing. Molecular/local SGS, held open controls and
-the original periodic/channel dynamic SGS closures are admitted. Dynamic trials
-retain accepted transport and flux history while rebuilding only deterministic
-filter scratch under the original controls, geometry and retained byte bound.
-Channel fits consume each proposed wall temperature; modeled heat remains on
-interior shared faces and molecular conduction owns the wall exchange exactly
-once. Manufactured fluid source callbacks still refuse because their external
-state cannot participate in the transaction. Original exploratory SGS limits,
-source calorics, fluid Mach/temperature/stability bounds and chosen spatial/lattice
+the solid endpoint boundary is held over the chosen native fluid interval.
+Both clocks use the same representable lattice timestamp; the thermal residual
+uses the original step count times lattice duration, even when subtraction of
+rounded absolute timestamps differs. Larger solid update intervals require
+independent time refinement; nonlinear tolerances do not bound that sampling
+error. Native thermal events still require explicit splits/processing.
+Molecular/local SGS, held open controls and the original periodic/channel
+dynamic SGS closures are admitted. Dynamic trials retain accepted transport
+and flux history while reusing deterministic filter scratch under the original
+controls, geometry and retained byte bound. Channel fits consume each proposed
+wall temperature; modeled heat remains on interior shared faces and molecular
+conduction owns the wall exchange exactly once. Manufactured fluid source
+callbacks still refuse because their external state cannot participate in the
+transaction. Original exploratory SGS limits, source calorics, fluid
+Mach/temperature/stability bounds and chosen spatial/lattice
 resolution remain authoritative. No moving solid, boundary-layer wall function,
 global time-error bound or experimental convection qualification is implied.
 
@@ -4487,7 +4500,10 @@ Focused native regression sources cover an independent uniform-fluid and finite
 wall capacity balance with series resistance, separate heating/cooling patches,
 solid conduction and remaining ambient area, conductivity/insulation response,
 source identity and work limits, and transactional late source/cancellation
-refusal. These regression sources have not been executed on the current
+refusal. Additional G1/G3/G4 definitions compare a multirate interval with
+independently solved per-fluid-step heat equations and two finite capacities,
+one-step equivalence, continuation, shared work exhaustion and late cancellation.
+These regression sources have not been executed on the current
 resource-constrained build host; parsing is not native numerical validation.
 
 ## Local resonance surveys of complete nonlinear forced responses

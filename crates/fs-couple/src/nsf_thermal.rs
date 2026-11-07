@@ -1,14 +1,14 @@
 //! Finite spatial solid heat storage on the original resolved NSF wall faces.
 //!
-//! One native fluid step and one original thermal backward-Euler residual share
+//! Original native fluid steps and one thermal backward-Euler residual share
 //! the SAME per-face integrated heat. The solid endpoint supplies each wall's
 //! temperature and optional material half-layer resistance; the fluid's native
 //! molecular wall solve supplies its actual heat. No boundary-layer correlation,
 //! additional gas heat capacity or replacement fluid time integrator is used.
 //!
-//! Fixed cells, fixed material laws and one original lattice step are admitted.
+//! Fixed cells, fixed material laws and an integer lattice interval are admitted.
 //! The wall temperature/resistance is held at the proposed solid endpoint during
-//! that fluid step, so the coupled time approximation remains first order.
+//! that fluid interval, so the coupled time approximation remains first order.
 //! Molecular, local and dynamic SGS use the same reversible native wall trial.
 //! Dynamic channel momentum/heat fits consume the proposed wall temperatures;
 //! molecular conduction still supplies the sole interface heat. Original
@@ -91,6 +91,17 @@ pub struct NsfThermalControls {
     pub solver: NewtonKrylovConfig,
 }
 
+/// Separate native fluid resolution from the finite solid's update interval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NsfThermalIntervalControls {
+    /// Positive number of original fluid steps in this one solid interval.
+    pub fluid_steps: usize,
+    /// Whole-call native cell-step cap, including EVERY nonlinear/derivative
+    /// probe and final acceptance. Solid cells in the fluid grid also count.
+    /// Each complete candidate reserves its entire interval before starting.
+    pub maximum_fluid_cell_steps: usize,
+}
+
 /// The native face debit and its one finite solid receiver.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NsfSolidExchange {
@@ -118,6 +129,12 @@ pub struct NsfThermalReport<T> {
     pub total_energy_residual_j: f64,
     pub maximum_cell_residual_j: f64,
     pub endpoint_evaluations: usize,
+    /// Accepted original fluid steps in this one thermal interval.
+    pub fluid_steps: usize,
+    /// Reserved native cell-steps across all candidates, including probes.
+    pub fluid_cell_steps: usize,
+    /// Physical interval from the original lattice duration, not rounded clock subtraction.
+    pub duration_s: f64,
     pub nonlinear: NewtonReport,
 }
 
@@ -131,6 +148,11 @@ pub enum NsfThermalError<E> {
     NotConverged(NewtonReport),
     WorkBudget {
         performed: usize,
+        maximum: usize,
+    },
+    FluidWorkBudget {
+        performed: usize,
+        requested: usize,
         maximum: usize,
     },
     Energy {
@@ -202,6 +224,50 @@ pub fn advance_nsf_solid<'m, L: Lattice3<27>, T, E>(
     energy_guess_j: &[f64],
     resolve: impl Fn(&Cx<'_>, &DepositionSimulation<'m>) -> Result<BoundaryStepCoefficients<T>, E>,
 ) -> Result<NsfThermalReport<T>, NsfThermalError<E>> {
+    let maximum_fluid_cell_steps = controls
+        .maximum_fluid_cells
+        .checked_mul(controls.maximum_endpoint_evaluations)
+        .ok_or(NsfThermalError::Invalid("fluid work ceiling overflow"))?;
+    advance_nsf_solid_interval(
+        cx,
+        fluid,
+        thermal,
+        contacts,
+        controls,
+        NsfThermalIntervalControls {
+            fluid_steps: 1,
+            maximum_fluid_cell_steps,
+        },
+        energy_guess_j,
+        resolve,
+    )
+}
+
+/// Advance a finite solid over several ORIGINAL native fluid steps.
+///
+/// Every candidate starts from the same accepted fluid/solid histories. The
+/// proposed solid endpoint is held while the native fluid advances at its
+/// original stable lattice timestep. Actual chronological face heat is summed
+/// and debited once in the solid's original backward-Euler residual; no heat
+/// extrapolation or larger fluid timestep is introduced. Independent solid
+/// sources and conductances are sampled at the same proposed endpoint.
+///
+/// This separates update rates, not accuracy requirements: increase the number
+/// of native steps only when the solid boundary varies slowly enough. The
+/// coupling remains first order; nonlinear convergence is not a time-error
+/// estimate. Interior thermal events require a separate interval. Shared work
+/// and energy gates cover the complete candidate, and publication is atomic.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_nsf_solid_interval<'m, L: Lattice3<27>, T, E>(
+    cx: &Cx<'_>,
+    fluid: &mut NsfGrid3<L>,
+    thermal: &mut DepositionSimulation<'m>,
+    contacts: &[NsfSolidContact<'_>],
+    controls: NsfThermalControls,
+    interval: NsfThermalIntervalControls,
+    energy_guess_j: &[f64],
+    resolve: impl Fn(&Cx<'_>, &DepositionSimulation<'m>) -> Result<BoundaryStepCoefficients<T>, E>,
+) -> Result<NsfThermalReport<T>, NsfThermalError<E>> {
     checkpoint(cx)?;
     controls
         .solver
@@ -212,6 +278,8 @@ pub fn advance_nsf_solid<'m, L: Lattice3<27>, T, E>(
         || controls.maximum_contacts == 0
         || controls.maximum_endpoint_evaluations == 0
         || controls.maximum_newton_iterations == 0
+        || interval.fluid_steps == 0
+        || interval.maximum_fluid_cell_steps == 0
         || controls
             .maximum_fluid_cells
             .checked_mul(controls.maximum_endpoint_evaluations)
@@ -238,7 +306,7 @@ pub fn advance_nsf_solid<'m, L: Lattice3<27>, T, E>(
     }
     let next_index = fluid
         .steps()
-        .checked_add(1)
+        .checked_add(interval.fluid_steps)
         .ok_or(NsfThermalError::Invalid("fluid lattice clock overflow"))?;
     if next_index as u128 > (1_u128 << 53) {
         return Err(NsfThermalError::Invalid(
@@ -248,14 +316,25 @@ pub fn advance_nsf_solid<'m, L: Lattice3<27>, T, E>(
     let dt = fluid.law().dt_s;
     let start_s = fluid.steps() as f64 * dt;
     let target_s = next_index as f64 * dt;
-    if !positive(dt) || thermal.time_s() != start_s || !target_s.is_finite() || target_s <= start_s
+    let duration_s = interval.fluid_steps as f64 * dt;
+    if !positive(dt)
+        || !positive(duration_s)
+        || thermal.time_s() != start_s
+        || !target_s.is_finite()
+        || target_s <= start_s
     {
         return Err(NsfThermalError::Invalid(
             "fluid and solid must share the original representable lattice clock",
         ));
     }
+    let cell_steps = fluid
+        .cell_count()
+        .checked_mul(interval.fluid_steps)
+        .ok_or(NsfThermalError::Invalid("native cell-step work overflow"))?;
     let prepared = Prepared::new(cx, fluid, thermal, contacts, controls.maximum_contacts)?;
-    let step = BackwardEulerStep::new(thermal, target_s, || thermal_checkpoint(cx))?;
+    let step = BackwardEulerStep::new_with_duration(thermal, target_s, duration_s, || {
+        thermal_checkpoint(cx)
+    })?;
     let count = step.cell_ids().len();
     if energy_guess_j.len() != count || energy_guess_j.iter().any(|value| !value.is_finite()) {
         return Err(NsfThermalError::Invalid(
@@ -263,12 +342,20 @@ pub fn advance_nsf_solid<'m, L: Lattice3<27>, T, E>(
         ));
     }
     let evaluations = Cell::new(0usize);
+    let fluid_work = Cell::new(0usize);
     let fluid = RefCell::new(fluid);
     let solution;
     let nonlinear;
     {
         let evaluate = |x: &[f64]| {
-            charge(cx, &evaluations, controls.maximum_endpoint_evaluations)?;
+            charge(
+                cx,
+                &evaluations,
+                controls.maximum_endpoint_evaluations,
+                &fluid_work,
+                cell_steps,
+                interval.maximum_fluid_cell_steps,
+            )?;
             let energies = physical_increments(&step, x, controls.energy_scale_j)?;
             step.evaluate_with_boundary_conductances(
                 &energies,
@@ -276,9 +363,13 @@ pub fn advance_nsf_solid<'m, L: Lattice3<27>, T, E>(
                     let (walls, mut heat) = prepared.endpoint(cx, candidate, &resolve)?;
                     let mut owner = fluid.borrow_mut();
                     let trial = owner
-                        .preview_thermal_wall_step(walls, controls.maximum_fluid_cells, || {
-                            cx.checkpoint().is_err()
-                        })
+                        .preview_thermal_wall_interval(
+                            walls,
+                            interval.fluid_steps,
+                            controls.maximum_fluid_cells,
+                            cell_steps,
+                            || cx.checkpoint().is_err(),
+                        )
                         .map_err(|error| flow_error(cx, error))?;
                     prepared.debit(cx, &trial, candidate, step.duration_s(), &mut heat)?;
                     // Numerical probes retain only the native residual; the
@@ -323,7 +414,14 @@ pub fn advance_nsf_solid<'m, L: Lattice3<27>, T, E>(
     }
     // The final source evaluation and actual fluid candidate also consume the
     // common work budget. This exact pair, not a replay, is later published.
-    charge(cx, &evaluations, controls.maximum_endpoint_evaluations)?;
+    charge(
+        cx,
+        &evaluations,
+        controls.maximum_endpoint_evaluations,
+        &fluid_work,
+        cell_steps,
+        interval.maximum_fluid_cell_steps,
+    )?;
     let energies = physical_increments(&step, &solution, controls.energy_scale_j)?;
     let fluid = fluid.into_inner();
     let final_trial = step.evaluate_with_boundary_conductances(
@@ -346,9 +444,13 @@ pub fn advance_nsf_solid<'m, L: Lattice3<27>, T, E>(
                 return Err(NsfThermalError::Invalid("external thermal heat overflowed"));
             }
             let trial = owner
-                .preview_thermal_wall_step(walls, controls.maximum_fluid_cells, || {
-                    cx.checkpoint().is_err()
-                })
+                .preview_thermal_wall_interval(
+                    walls,
+                    interval.fluid_steps,
+                    controls.maximum_fluid_cells,
+                    cell_steps,
+                    || cx.checkpoint().is_err(),
+                )
                 .map_err(|error| flow_error(cx, error))?;
             let sample = prepared.debit(cx, &trial, candidate, step.duration_s(), &mut heat)?;
             Ok::<_, NsfThermalError<E>>(BoundaryStepCoefficients {
@@ -432,6 +534,9 @@ pub fn advance_nsf_solid<'m, L: Lattice3<27>, T, E>(
         total_energy_residual_j,
         maximum_cell_residual_j,
         endpoint_evaluations: evaluations.get(),
+        fluid_steps: interval.fluid_steps,
+        fluid_cell_steps: fluid_work.get(),
+        duration_s,
         nonlinear,
     };
     // No fallible work follows either publication.
@@ -677,7 +782,14 @@ fn physical_increments<E>(
     Ok(step.resolvable_increments_j(&physical))
 }
 
-fn charge<E>(cx: &Cx<'_>, work: &Cell<usize>, maximum: usize) -> Result<(), NsfThermalError<E>> {
+fn charge<E>(
+    cx: &Cx<'_>,
+    work: &Cell<usize>,
+    maximum: usize,
+    fluid_work: &Cell<usize>,
+    cell_steps: usize,
+    maximum_cell_steps: usize,
+) -> Result<(), NsfThermalError<E>> {
     checkpoint(cx)?;
     if work.get() == maximum {
         return Err(NsfThermalError::WorkBudget {
@@ -685,7 +797,17 @@ fn charge<E>(cx: &Cx<'_>, work: &Cell<usize>, maximum: usize) -> Result<(), NsfT
             maximum,
         });
     }
+    let next_work = fluid_work
+        .get()
+        .checked_add(cell_steps)
+        .filter(|&next| next <= maximum_cell_steps)
+        .ok_or(NsfThermalError::FluidWorkBudget {
+            performed: fluid_work.get(),
+            requested: cell_steps,
+            maximum: maximum_cell_steps,
+        })?;
     work.set(work.get() + 1);
+    fluid_work.set(next_work);
     Ok(())
 }
 

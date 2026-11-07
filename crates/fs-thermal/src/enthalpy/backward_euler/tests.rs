@@ -120,6 +120,35 @@ fn near(a: f64, b: f64) {
 }
 
 #[test]
+fn g1_external_native_duration_survives_rounded_absolute_clock() {
+    let mut deposited = cell(1, 2.0, 0.0);
+    deposited.boundary.source_w = 5.0;
+    let mut old = simulation(&SENSIBLE, vec![deposited], None, vec![]);
+    // The physical interval is three seconds, while these representable
+    // absolute timestamps differ by four. Heat must use the original three.
+    old.time_s = 1e16;
+    let target = old.time_s + 3.0;
+    assert_eq!(target - old.time_s, 4.0);
+    let step = BackwardEulerStep::new_with_duration(&old, target, 3.0, || Ok(())).unwrap();
+    assert_eq!(step.duration_s(), 3.0);
+    let trial = step.evaluate(&[15.0], empty, || Ok(())).unwrap();
+    assert_eq!(trial.maximum_cell_residual_j(), 0.0);
+    let (next, (), audit) = trial.accept(0.0, 0.0, || Ok(())).unwrap();
+    assert_eq!(next.time_s(), target);
+    assert_eq!(next.cells()[&CellId(1)].specific_h_j_kg, 7.5);
+    assert_eq!(audit.stored_energy_change_j, 15.0);
+    assert_eq!(old.cells()[&CellId(1)].specific_h_j_kg, 0.0);
+    for duration in [0.0, -1.0, f64::NAN, f64::INFINITY, 32.0] {
+        assert!(BackwardEulerStep::new_with_duration(&old, target, duration, || Ok(())).is_err());
+    }
+    assert!(BackwardEulerStep::new_with_duration(&old, old.time_s, 0.5, || Ok(())).is_err());
+    assert!(matches!(
+        BackwardEulerStep::new_with_duration(&old, target, 3.0, || Err(DepositionError::Cancelled)),
+        Err(DepositionError::Cancelled)
+    ));
+}
+
+#[test]
 fn g1_heterogeneous_two_body_backward_euler_exceeds_explicit_cfl_and_conserves() {
     let old = simulation(
         &SENSIBLE,

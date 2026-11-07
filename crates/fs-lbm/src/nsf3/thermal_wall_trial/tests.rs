@@ -3,6 +3,9 @@ use crate::d3q27::D3q27;
 use crate::nsf3::{NsfCouplingControl, NsfSpec, NsfWallThermal, WallThermal};
 use fs_material::gas::GasSpec;
 
+#[path = "tests/interval.rs"]
+mod interval;
+
 fn spec() -> NsfSpec {
     NsfSpec {
         dims: [4, 4, 4],

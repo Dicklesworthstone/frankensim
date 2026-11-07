@@ -148,13 +148,38 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
     pub fn new(
         initial: &'s DepositionSimulation<'m>,
         target_s: f64,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        Self::new_with_duration(initial, target_s, target_s - initial.time_s, checkpoint)
+    }
+
+    /// Prepare an interval whose physical duration is owned by another native
+    /// clock, such as an integer number of fluid lattice steps. All heat rates
+    /// use this duration directly; subtracting rounded endpoint timestamps must
+    /// not silently change the amount of supplied or exchanged energy.
+    ///
+    /// The endpoint must agree with `initial.time_s() + duration_s` to clock
+    /// roundoff. It still advances strictly, and original event admission uses
+    /// that endpoint. The caller owns the physical duration; this constructor
+    /// does not recover missing sub-timestamp events or certify time accuracy.
+    pub fn new_with_duration(
+        initial: &'s DepositionSimulation<'m>,
+        target_s: f64,
+        duration_s: f64,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, DepositionError> {
         checkpoint()?;
-        let duration_s = target_s - initial.time_s;
-        if !target_s.is_finite() || !positive(duration_s) || initial.cells.is_empty() {
+        let rounded_target = initial.time_s + duration_s;
+        let clock_allowance = 2.0 * f64::EPSILON * target_s.abs().max(initial.time_s.abs());
+        if !target_s.is_finite()
+            || !positive(duration_s)
+            || target_s <= initial.time_s
+            || !rounded_target.is_finite()
+            || (target_s - rounded_target).abs() > clock_allowance
+            || initial.cells.is_empty()
+        {
             return Err(DepositionError::InvalidInput(
-                "implicit step needs active cells and a later finite target",
+                "implicit step needs active cells, positive duration and a matching later target",
             ));
         }
         if initial.budget.max_substeps == 0 {

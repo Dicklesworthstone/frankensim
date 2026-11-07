@@ -13,7 +13,7 @@ use crate::sgs3::dynamic::channel::{
 };
 use crate::sgs3::dynamic::scalar::{DynamicScalarConfig, PeriodicDynamicScalar};
 use crate::sgs3::dynamic::{DynamicSgsConfig, DynamicSgsError, PeriodicDynamicSgs};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Independently fitted momentum and temperature diffusivity. Coefficient and
 /// molecular-ratio bounds are admissions, not coefficient clamps.
@@ -55,87 +55,51 @@ struct ChannelWorkspace {
     heat: ChannelDynamicScalar,
 }
 
+#[derive(Clone)]
 enum DynamicState {
     Periodic {
         config: NsfDynamicThermalSgsConfig,
-        workspace: Mutex<Workspace>,
+        workspace: Arc<Mutex<Workspace>>,
     },
     Channel {
         config: NsfChannelDynamicThermalSgsConfig,
         normal_axis: usize,
-        workspace: Mutex<ChannelWorkspace>,
+        workspace: Arc<Mutex<ChannelWorkspace>>,
     },
 }
 
+#[derive(Clone)]
 pub(in crate::nsf3) struct DynamicTransport {
     // Each variant pairs its own controls and filter geometry. One lock around
     // the serial fit preserves Sync for the original parallel cell/face loops.
+    // The buffers are overwritten scratch, not accepted coefficients or a
+    // temporal model history. An exclusive native trial shares only this
+    // already-budgeted scratch; each fit prepares its own fields before use.
+    // Accepted coefficients stay on each grid's separate sgs_transport vector.
     state: DynamicState,
     bytes: usize,
 }
 
 impl DynamicTransport {
-    /// Rebuild only the nonlocal numerical scratch for an unpublished step.
+    /// Retain the original same-state closure for an unpublished interval.
     ///
-    /// These two closures fit the current fields; neither owns Lagrangian or
-    /// time-averaged model memory. Each combined preparation overwrites its
-    /// scratch and installs the actual wall velocities/scalar policies. The
-    /// grid separately retains its accepted `sgs_transport` and FV history.
-    /// A future history-bearing closure must supply its own transaction here.
-    pub(in crate::nsf3) fn fresh_for_trial(&self, shape: [usize; 3]) -> Result<Self, NsfError> {
-        let (state, bytes) = match &self.state {
-            DynamicState::Periodic { config, workspace } => {
-                if workspace.is_poisoned() {
-                    return Err(NsfError::Input("dynamic NSF workspace lock poisoned"));
-                }
-                let momentum = PeriodicDynamicSgs::new(shape, 1.0, self.bytes)
-                    .map_err(NsfError::DynamicSgs)?;
-                let heat =
-                    PeriodicDynamicScalar::new(shape, self.bytes).map_err(NsfError::DynamicSgs)?;
-                let bytes = momentum
-                    .workspace_bytes()
-                    .checked_add(heat.workspace_bytes());
-                (
-                    DynamicState::Periodic {
-                        config: *config,
-                        workspace: Mutex::new(Workspace { momentum, heat }),
-                    },
-                    bytes,
-                )
+    /// Each combined preparation overwrites its deterministic filter scratch
+    /// and installs the actual wall velocities/scalar policies. The exclusive
+    /// trial retains its own accepted `sgs_transport` and FV history, so sharing
+    /// only this already-admitted scratch needs no second filter allocation.
+    /// Neither closure owns Lagrangian or time-averaged model memory; a future
+    /// history-bearing closure must supply its own transaction here.
+    pub(in crate::nsf3) fn shared_for_trial(&self) -> Result<Self, NsfError> {
+        match &self.state {
+            DynamicState::Periodic { workspace, .. } if workspace.is_poisoned() => {
+                return Err(NsfError::Input("dynamic NSF workspace lock poisoned"));
             }
-            DynamicState::Channel {
-                config,
-                normal_axis,
-                workspace,
-            } => {
-                if workspace.is_poisoned() {
-                    return Err(NsfError::Input("channel NSF workspace lock poisoned"));
-                }
-                let momentum = ChannelDynamicSgs::new(shape, 1.0, *normal_axis, self.bytes)
-                    .map_err(NsfError::DynamicSgs)?;
-                let heat = ChannelDynamicScalar::new(shape, *normal_axis, self.bytes)
-                    .map_err(NsfError::DynamicSgs)?;
-                let bytes = momentum
-                    .workspace_bytes()
-                    .checked_add(heat.workspace_bytes());
-                (
-                    DynamicState::Channel {
-                        config: *config,
-                        normal_axis: *normal_axis,
-                        workspace: Mutex::new(ChannelWorkspace { momentum, heat }),
-                    },
-                    bytes,
-                )
+            DynamicState::Channel { workspace, .. } if workspace.is_poisoned() => {
+                return Err(NsfError::Input("channel NSF workspace lock poisoned"));
             }
-        };
-        let bytes = bytes.ok_or(NsfError::Input("NSF dynamic workspace capacity overflow"))?;
-        if bytes > self.bytes {
-            return Err(NsfError::DynamicSgs(DynamicSgsError::WorkspaceBytes {
-                required: bytes,
-                maximum: self.bytes,
-            }));
+            _ => {}
         }
-        Ok(Self { state, bytes })
+        Ok(self.clone())
     }
 }
 
@@ -206,7 +170,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.dynamic_sgs = Some(DynamicTransport {
             state: DynamicState::Periodic {
                 config,
-                workspace: Mutex::new(Workspace { momentum, heat }),
+                workspace: Arc::new(Mutex::new(Workspace { momentum, heat })),
             },
             bytes,
         });
@@ -295,7 +259,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             state: DynamicState::Channel {
                 config,
                 normal_axis,
-                workspace: Mutex::new(ChannelWorkspace { momentum, heat }),
+                workspace: Arc::new(Mutex::new(ChannelWorkspace { momentum, heat })),
             },
             bytes,
         });
