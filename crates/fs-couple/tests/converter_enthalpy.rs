@@ -1,6 +1,8 @@
 //! Native averaged/switched conversion heats the original five material bodies.
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
+#[path = "converter_enthalpy/voltage.rs"]
+mod voltage;
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitEnthalpySolve, converter::*, material::MaterialCell,
 };

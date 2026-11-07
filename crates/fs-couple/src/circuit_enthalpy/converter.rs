@@ -2,6 +2,9 @@
 //! material/enthalpy endpoint. Electrical integration stays with fs-phs;
 //! source evaluation and finite heat stay with their original owners.
 
+/// Finite voltage sources/loads and all seven material heat paths.
+pub mod voltage;
+
 use super::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
     DriverAccount, ThermalDriver, cell_driver_candidate, finite,
@@ -324,152 +327,172 @@ impl ConverterThermalNetwork<'_> {
         retained: Option<&[ConverterChannelMaterial; CONDUCTION_CHANNELS]>,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<[ConverterChannelMaterial; CONDUCTION_CHANNELS], Error> {
-        let fixed = resistances(parameters);
-        let mut seen = BTreeSet::new();
-        let mut channels = Vec::with_capacity(CONDUCTION_CHANNELS);
-        for (index, binding) in self.channels.iter().enumerate() {
-            check(cancel)?;
-            if !seen.insert(binding.cell) {
-                return Err(invalid(
-                    "converter channels need distinct original thermal receivers",
-                ));
-            }
-            let body = self
-                .cells
-                .iter()
-                .find(|c| c.cell == binding.cell)
-                .ok_or_else(|| {
-                    invalid("converter heat receiver lacks its original material binding")
-                })?;
-            let cell = thermal
-                .cells()
-                .get(&binding.cell)
-                .ok_or_else(|| invalid("converter heat receiver is inactive"))?;
-            let phase = sample
-                .cells
-                .iter()
-                .find(|c| c.cell == binding.cell)
-                .ok_or_else(|| invalid("converter receiver lacks its actual caloric phase"))?
-                .phase;
-            let query = body.point.at(phase).map_err(point)?;
-            let old = retained.map(|rows| &rows[index]);
-            let (resistance_ohm, resolved) = match &binding.resistance {
-                ConverterResistance::Fixed => (fixed[index], ChannelSource::Fixed),
-                ConverterResistance::Bulk {
-                    basis,
-                    selection,
-                    length_m,
-                    area_m2,
-                } => {
-                    let ohmic = MaterialOhmicBody {
-                        material: body.point,
-                        selection: selection.clone(),
-                        length_m: *length_m,
-                        area_m2: *area_m2,
-                    };
-                    let conductor = if let Some(old) = old {
-                        let ChannelSource::Bulk(original) = &old.source else {
-                            return Err(invalid(
-                                "converter channel cannot change its original source law",
-                            ));
-                        };
-                        let snapshot = original
-                            .material()
-                            .at_query_point(body.point.material, &query)
-                            .map_err(source)?;
-                        ohmic.conductor_from_material(
-                            phase,
-                            cell.geometry.volume_m3,
-                            snapshot,
-                            *basis,
-                        )
-                    } else {
-                        ohmic.resolve_conductor_with_basis(phase, cell.geometry.volume_m3, *basis)
-                    }
-                    .map_err(|e| {
-                        CircuitEnthalpyError::Source(ConverterThermalError::Conductor(e))
-                    })?;
-                    (conductor.resistance_ohm(), ChannelSource::Bulk(conductor))
-                }
-                ConverterResistance::Resistance { key, selection } => {
-                    if key.quantity() != QuantitySpec::dimensional(Resistance::DIMS) {
-                        return Err(invalid(
-                            "converter on-state source must be a static scalar resistance in ohms",
-                        ));
-                    }
-                    let snapshot = if let Some(old) = old {
-                        let ChannelSource::Resistance {
-                            key: original_key,
-                            material,
-                        } = &old.source
-                        else {
-                            return Err(invalid(
-                                "converter channel cannot change its original source law",
-                            ));
-                        };
-                        if original_key != *key {
-                            return Err(invalid(
-                                "converter channel cannot change its original resistance key",
-                            ));
-                        }
-                        material
-                            .at_query_point(body.point.material, &query)
-                            .map_err(source)?
-                    } else {
-                        let requirement = ScalarPropertyRequirement::try_with_key(
-                            key,
-                            ScalarAdmissibility::NonNegative,
-                        )
-                        .map_err(source)?;
-                        resolve_material_state_point(
-                            body.point.material,
-                            &query,
-                            &[requirement],
-                            selection.clone(),
-                        )
-                        .map_err(source)?
-                    };
-                    let property = snapshot.property_by_key(key).ok_or_else(|| {
-                        invalid("converter channel lost its original resistance property")
-                    })?;
-                    body.point.admit_static(property).map_err(point)?;
-                    let static_source = match body.point.liquid_fraction_axis {
-                        Some(axis) => property.has_only_owned_and_fixed_external_conditions(
-                            axis,
-                            QuantitySpec::dimensional(Dims::NONE),
-                        ),
-                        None => property.is_static_at_fixed_external_conditions(),
-                    };
-                    if !static_source {
-                        return Err(invalid(
-                            "converter resistance cannot freeze an unowned field, current, gate or frequency condition",
-                        ));
-                    }
-                    (
-                        property.value_si(),
-                        ChannelSource::Resistance {
-                            key: (*key).clone(),
-                            material: snapshot,
-                        },
-                    )
-                }
-            };
-            if !resistance_ohm.is_finite() || resistance_ohm < 0.0 {
-                return Err(invalid(
-                    "converter channel resistance is not finite and nonnegative",
-                ));
-            }
-            channels.push(ConverterChannelMaterial {
-                cell: binding.cell,
-                resistance_ohm,
-                source: resolved,
-            });
-        }
-        channels
-            .try_into()
-            .map_err(|_| invalid("all five converter heat channels are required"))
+        resolve_channels(
+            self.cells,
+            self.channels,
+            thermal,
+            sample,
+            resistances(parameters),
+            retained,
+            true,
+            cancel,
+        )
     }
+}
 
+// Both terminal-driven lanes retain the same original source-selection and
+// phase/domain rules. The original five-body API keeps its distinct-receiver
+// contract; the voltage-driven owner can explicitly aggregate several losses
+// in one finite body without dropping or duplicating any channel.
+#[allow(clippy::too_many_arguments)]
+fn resolve_channels<const N: usize>(
+    cells: &[MaterialCell<'_>],
+    bindings: &[ConverterThermalChannel<'_>; N],
+    thermal: &DepositionSimulation<'_>,
+    sample: &MaterialNetworkSample,
+    fixed: [f64; N],
+    retained: Option<&[ConverterChannelMaterial; N]>,
+    distinct_receivers: bool,
+    cancel: &RefCell<impl FnMut() -> bool>,
+) -> Result<[ConverterChannelMaterial; N], Error> {
+    let mut seen = BTreeSet::new();
+    let mut channels = Vec::with_capacity(N);
+    for (index, binding) in bindings.iter().enumerate() {
+        check(cancel)?;
+        if distinct_receivers && !seen.insert(binding.cell) {
+            return Err(invalid(
+                "converter channels need distinct original thermal receivers",
+            ));
+        }
+        let body = cells
+            .iter()
+            .find(|c| c.cell == binding.cell)
+            .ok_or_else(|| {
+                invalid("converter heat receiver lacks its original material binding")
+            })?;
+        let cell = thermal
+            .cells()
+            .get(&binding.cell)
+            .ok_or_else(|| invalid("converter heat receiver is inactive"))?;
+        let phase = sample
+            .cells
+            .iter()
+            .find(|c| c.cell == binding.cell)
+            .ok_or_else(|| invalid("converter receiver lacks its actual caloric phase"))?
+            .phase;
+        let query = body.point.at(phase).map_err(point)?;
+        let old = retained.map(|rows| &rows[index]);
+        let (resistance_ohm, resolved) = match &binding.resistance {
+            ConverterResistance::Fixed => (fixed[index], ChannelSource::Fixed),
+            ConverterResistance::Bulk {
+                basis,
+                selection,
+                length_m,
+                area_m2,
+            } => {
+                let ohmic = MaterialOhmicBody {
+                    material: body.point,
+                    selection: selection.clone(),
+                    length_m: *length_m,
+                    area_m2: *area_m2,
+                };
+                let conductor = if let Some(old) = old {
+                    let ChannelSource::Bulk(original) = &old.source else {
+                        return Err(invalid(
+                            "converter channel cannot change its original source law",
+                        ));
+                    };
+                    let snapshot = original
+                        .material()
+                        .at_query_point(body.point.material, &query)
+                        .map_err(source)?;
+                    ohmic.conductor_from_material(phase, cell.geometry.volume_m3, snapshot, *basis)
+                } else {
+                    ohmic.resolve_conductor_with_basis(phase, cell.geometry.volume_m3, *basis)
+                }
+                .map_err(|e| CircuitEnthalpyError::Source(ConverterThermalError::Conductor(e)))?;
+                (conductor.resistance_ohm(), ChannelSource::Bulk(conductor))
+            }
+            ConverterResistance::Resistance { key, selection } => {
+                if key.quantity() != QuantitySpec::dimensional(Resistance::DIMS) {
+                    return Err(invalid(
+                        "converter on-state source must be a static scalar resistance in ohms",
+                    ));
+                }
+                let snapshot = if let Some(old) = old {
+                    let ChannelSource::Resistance {
+                        key: original_key,
+                        material,
+                    } = &old.source
+                    else {
+                        return Err(invalid(
+                            "converter channel cannot change its original source law",
+                        ));
+                    };
+                    if original_key != *key {
+                        return Err(invalid(
+                            "converter channel cannot change its original resistance key",
+                        ));
+                    }
+                    material
+                        .at_query_point(body.point.material, &query)
+                        .map_err(source)?
+                } else {
+                    let requirement = ScalarPropertyRequirement::try_with_key(
+                        key,
+                        ScalarAdmissibility::NonNegative,
+                    )
+                    .map_err(source)?;
+                    resolve_material_state_point(
+                        body.point.material,
+                        &query,
+                        &[requirement],
+                        selection.clone(),
+                    )
+                    .map_err(source)?
+                };
+                let property = snapshot.property_by_key(key).ok_or_else(|| {
+                    invalid("converter channel lost its original resistance property")
+                })?;
+                body.point.admit_static(property).map_err(point)?;
+                let static_source = match body.point.liquid_fraction_axis {
+                    Some(axis) => property.has_only_owned_and_fixed_external_conditions(
+                        axis,
+                        QuantitySpec::dimensional(Dims::NONE),
+                    ),
+                    None => property.is_static_at_fixed_external_conditions(),
+                };
+                if !static_source {
+                    return Err(invalid(
+                        "converter resistance cannot freeze an unowned field, current, gate or frequency condition",
+                    ));
+                }
+                (
+                    property.value_si(),
+                    ChannelSource::Resistance {
+                        key: (*key).clone(),
+                        material: snapshot,
+                    },
+                )
+            }
+        };
+        if !resistance_ohm.is_finite() || resistance_ohm < 0.0 {
+            return Err(invalid(
+                "converter channel resistance is not finite and nonnegative",
+            ));
+        }
+        channels.push(ConverterChannelMaterial {
+            cell: binding.cell,
+            resistance_ohm,
+            source: resolved,
+        });
+    }
+    channels
+        .try_into()
+        .map_err(|_| invalid("all converter heat channels are required"))
+}
+
+impl ConverterThermalNetwork<'_> {
     /// Attach the existing native L/C and flux/charge state to actual finite
     /// material owners. Source bindings replace their corresponding numeric
     /// resistances; Fixed bindings retain them explicitly. Resistance changes
