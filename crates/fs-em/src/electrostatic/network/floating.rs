@@ -60,7 +60,7 @@ pub struct FloatingCapacitanceResponse<'m> {
     pub maximum_floating_charge_residual_c: f64,
     /// Original field energy minus one half of all terminal voltage-charge work.
     pub terminal_energy_residual_j: f64,
-    field: ElectricField<'m>,
+    pub(in crate::electrostatic) field: ElectricField<'m>,
 }
 
 impl<'m> FloatingCapacitanceResponse<'m> {

@@ -22,6 +22,9 @@
 //! [1]: https://doc.comsol.com/6.4/doc/com.comsol.help.edis/edis_ug_acdc.7.71.html
 //! [2]: https://doc.comsol.com/6.4/doc/com.comsol.help.comsol/comsol_ref_acdc.26.29.html
 
+/// Multiple physical electrodes, floating charge and native circuit storage.
+pub mod network;
+
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_material::{
     field_storage::planar::{PlanarDielectricLaw, PlanarPermittivity},
@@ -187,6 +190,11 @@ impl AxisymmetricElectrostatics {
         controls: ElectrostaticControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<AxisymmetricCapacitance<'_>, ElectrostaticError> {
+        admit_terminal_traces(
+            self.mesh(),
+            &[positive_terminal, negative_terminal],
+            cancelled,
+        )?;
         let PlanarCapacitance {
             field,
             capacitance_f,
@@ -201,6 +209,63 @@ impl AxisymmetricElectrostatics {
             capacitance_f,
         })
     }
+}
+
+// Admit each conductor separately. A zero-area axis terminal cannot borrow
+// physical support from adjacent edges belonging to a different conductor.
+// The shared scalar owner still checks disjoint, complete exterior traces.
+pub(super) fn admit_terminal_traces(
+    mesh: &TriComplex2,
+    terminals: &[&[usize]],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), ElectrostaticError> {
+    poll(cancelled)?;
+    let n = mesh.vertices().len();
+    if terminals.len() < 2 || terminals.len() > n {
+        return Err(ElectrostaticError::Invalid(
+            "at least two bounded axisymmetric electrode traces required",
+        ));
+    }
+    crate::scalar_potential::terminal_boundary(
+        mesh,
+        terminals,
+        &vec![0.0; terminals.len()],
+        cancelled,
+    )?;
+    let mut owner = vec![None; n];
+    for (terminal, vertices) in terminals.iter().enumerate() {
+        for &v in *vertices {
+            poll(cancelled)?;
+            owner[v] = Some(terminal);
+        }
+    }
+    let trace = mesh
+        .boundary_trace()
+        .map_err(|_| ElectrostaticError::Invalid("invalid axisymmetric electrode trace"))?;
+    let mut supported = vec![false; n];
+    for edge in &trace.edges {
+        poll(cancelled)?;
+        let [a, b] = edge.oriented_vertices.map(|v| v as usize);
+        if owner[a].is_some()
+            && owner[a] == owner[b]
+            && mesh
+                .edge_measure(edge.global_edge)
+                .is_some_and(|area| area > 0.0)
+        {
+            supported[a] = true;
+            supported[b] = true;
+        }
+    }
+    if owner
+        .iter()
+        .zip(supported)
+        .any(|(terminal, supported)| terminal.is_some() && !supported)
+    {
+        return Err(ElectrostaticError::Invalid(
+            "each axisymmetric electrode needs its own physical surface area, not the symmetry axis",
+        ));
+    }
+    poll(cancelled)
 }
 
 // A meridional axis edge has positive line length but zero physical surface

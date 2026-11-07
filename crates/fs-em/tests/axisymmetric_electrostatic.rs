@@ -1,6 +1,8 @@
 //! G0/G1/G3/G4: exact radial source moments and analytic rotational fields.
 //! Source cards are synthetic fixtures, not experimentally qualified materials.
 mod common;
+#[path = "axisymmetric_electrostatic/network.rs"]
+mod network;
 
 use common::{config, limits};
 use fs_em::electrostatic::{
