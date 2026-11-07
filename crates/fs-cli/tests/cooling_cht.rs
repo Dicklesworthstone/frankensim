@@ -469,10 +469,20 @@ fn radiating_transient_settles_on_the_steady_radiating_solution() {
             r#""solver": {"tolerance": 1e-8}"#,
             r#""solver": {"tolerance": 1e-8}, "transient": {"time_step_s": 2.0, "steps": 400}"#,
         );
+    let steady_scene = scene.replace(
+        r#", "transient": {"time_step_s": 2.0, "steps": 400}"#,
+        "",
+    );
+    let (code, reference, stderr) = run(&scratch("rad-steady-reference.json", &steady_scene));
+    assert_eq!(code, 0, "{stderr}");
     let (code, result, stderr) = run(&scratch("rad-warm.json", &scene));
     assert_eq!(code, 0, "{stderr}");
-    let steady = f(&result, &["max_solid_temperature_k"]);
-    let steady_radiated = f(&result, &["radiation", "radiated_w"]);
+    let steady = f(&reference, &["max_solid_temperature_k"]);
+    let steady_radiated = f(&reference, &["radiation", "radiated_w"]);
+    assert_eq!(
+        f(&result, &["max_solid_temperature_k"]),
+        f(&result, &["transient", "final_max_solid_temperature_k"])
+    );
     let last = f(&result, &["transient", "final_max_solid_temperature_k"]);
     assert!(
         (last - steady).abs() < 1e-3 * (steady - 300.0),
@@ -489,6 +499,7 @@ fn radiating_transient_settles_on_the_steady_radiating_solution() {
         .and_then(|r| r.path(&["radiated_w"]))
         .and_then(J::as_f64)
         .unwrap();
+    assert_eq!(f(&result, &["radiation", "radiated_w"]), radiated);
     assert!(steady_radiated > 0.0, "{steady_radiated}");
     assert!(
         (radiated - steady_radiated).abs() < 1e-3 * steady_radiated,
@@ -2380,8 +2391,16 @@ fn compact_junction_capacity_controls_the_cli_energy_march() {
     assert!(light_peak > heavy_peak && heavy_peak > 300.0, "{light_peak} {heavy_peak}");
     // The junction cannot retain more than the complete 0.02 W * 0.25 s input.
     assert!(light_peak <= 300.0 + 0.02 * 0.25 / 0.5 + 1e-8);
-    for result in [&light, &heavy] {
+    for (result, capacity) in [(&light, 0.5), (&heavy, 2.0)] {
         assert!(f(result, &["transient", "worst_step_closure_j"]) < 1e-8);
+        let peak = f(result, &["transient", "final_max_solid_temperature_k"]);
+        let components = result.get("components").and_then(J::as_array).unwrap();
+        let junction = f(&components[0], &["junction_temperature_k"]);
+        assert!((junction - peak).abs() < 1e-9);
+        assert_eq!(f(result, &["max_solid_temperature_k"]), peak);
+        let leaving = f(&components[0], &["case_w"]) + f(&components[0], &["board_w"]);
+        let stored_w = capacity * (junction - 300.0) / 0.25;
+        assert!((0.02 - leaving - stored_w).abs() < 1e-8);
     }
 }
 
@@ -2752,6 +2771,78 @@ fn orthotropic_board_and_interface_resistance_reach_the_solver() {
     assert!(rise > 1.5 && rise < 2.5, "{bonded} -> {joined}");
 }
 
+
+#[test]
+fn frozen_transient_exports_the_accepted_field_and_scheduled_power() {
+    let with_capacity = DUCT.replace(
+        r#""conductivity_w_m_k": 167.0}"#,
+        r#""conductivity_w_m_k": 167.0, "volumetric_heat_capacity_j_m3_k": 2.4e6}"#,
+    );
+    for scale in [0, 1] {
+        let scene = with_capacity.replace(
+            r#""solver": {"tolerance": 1e-8}"#,
+            &format!(r#""solver": {{"tolerance": 1e-8}},
+ "transient": {{"time_step_s": 0.1, "steps": 2, "power_schedule": [[0, {scale}]]}},
+ "probes": [{{"name": "chip", "at_m": [0.006, 0.0005, 0.002]}}],
+ "output": {{"vtk": "frozen-fields-{scale}.vtr"}}"#),
+        );
+        let path = scratch(&format!("frozen-fields-{scale}.json"), &scene);
+        let (code, result, stderr) = run(&path);
+        assert_eq!(code, 0, "{stderr}");
+        let peak = f(&result, &["transient", "final_max_solid_temperature_k"]);
+        assert_eq!(f(&result, &["max_solid_temperature_k"]), peak);
+        let materials = result.get("materials").and_then(J::as_array).unwrap();
+        let sources = result.get("sources").and_then(J::as_array).unwrap();
+        let probes = result.get("probes").and_then(J::as_array).unwrap();
+        assert_eq!(f(&materials[0], &["max_temperature_k"]), peak);
+        assert_eq!(f(&sources[0], &["max_temperature_k"]), peak);
+        assert_eq!(f(&sources[0], &["power_w"]), 0.1 * f64::from(scale));
+        assert!((f(&result, &["energy", "source_w"]) - 0.1 * f64::from(scale)).abs() < 1e-12);
+        let stored = f(&result, &["energy", "storage_rate_w"]);
+        let leaving = f(&result, &["energy", "physical_outflow_w"]);
+        assert!((0.1 * f64::from(scale) - stored - leaving).abs() < 1e-7);
+        let vtk = std::fs::read_to_string(
+            path.with_file_name(format!("frozen-fields-{scale}.vtr"))
+        ).unwrap();
+        let field: Vec<f64> = vtk
+            .split("Name=\"temperature_k\" format=\"ascii\">\n").nth(1).unwrap()
+            .split("</DataArray>").next().unwrap()
+            .split_whitespace().map(|v| v.parse().unwrap()).collect();
+        assert_eq!(field.len(), 192);
+        let exported_peak = field.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        assert!((exported_peak - peak).abs() < 1e-9);
+        if scale == 0 {
+            assert!(field.iter().all(|t| (t - 300.0).abs() < 1e-9));
+            assert!((f(&probes[0], &["temperature_k"]) - 300.0).abs() < 1e-9);
+        } else {
+            assert!(peak > 300.0 && peak < 301.0, "{peak}");
+            assert!(f(&probes[0], &["temperature_k"]) > 300.0);
+        }
+    }
+}
+
+#[test]
+fn frozen_transient_heats_a_sealed_system_without_a_steady_solution() {
+    // An insulated source has no steady thermal solution. The endpoint must
+    // still account for all 2 J in solid, compact and fluid storage.
+    let scene = COMPACT_TABLE_TRANSIENT.replace(
+        r#""flow":"unsteady""#, r#""flow":"frozen""#,
+    );
+    let (code, result, stderr) = run(&scratch("sealed-frozen-storage.json", &scene));
+    assert_eq!(code, 0, "{stderr}");
+    let probes = result.get("probes").and_then(J::as_array).unwrap();
+    let solid = f(&probes[0], &["temperature_k"]) - 300.0;
+    let junction = f(&probes[1], &["temperature_k"]) - 300.0;
+    let fluid = f(&probes[2], &["temperature_k"]) - 300.0;
+    let stored = 4.0 * solid + 2.0 * junction + 2.0 * junction * junction + 2.0 * fluid;
+    assert!((stored - 2.0).abs() < 1e-7, "{stored}");
+    assert!((f(&result, &["energy", "storage_rate_w"]) - 1.0).abs() < 1e-8);
+    assert!(f(&result, &["energy", "physical_outflow_w"]).abs() < 1e-9);
+    assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-8);
+    let components = result.get("components").and_then(J::as_array).unwrap();
+    assert_eq!(f(&components[0], &["junction_temperature_k"]), 300.0 + junction);
+}
+
 #[test]
 fn transient_march_warms_toward_the_steady_junction_and_closes_energy() {
     // The duct scene with heat capacities and a transient block: a long
@@ -2766,9 +2857,15 @@ fn transient_march_warms_toward_the_steady_junction_and_closes_energy() {
         r#""solver": {"tolerance": 1e-8}"#,
         r#""solver": {"tolerance": 1e-8}, "transient": {"time_step_s": 2.0, "steps": 400}"#,
     );
+    let (code, reference, stderr) = run(&scratch("warm-steady-reference.json", &with_capacity));
+    assert_eq!(code, 0, "{stderr}");
     let (code, result, stderr) = run(&scratch("warm.json", &scene));
     assert_eq!(code, 0, "{stderr}");
-    let steady = f(&result, &["max_solid_temperature_k"]);
+    let steady = f(&reference, &["max_solid_temperature_k"]);
+    assert_eq!(
+        f(&result, &["max_solid_temperature_k"]),
+        f(&result, &["transient", "final_max_solid_temperature_k"])
+    );
     let last = f(&result, &["transient", "final_max_solid_temperature_k"]);
     assert!(
         (last - steady).abs() < 1e-3 * (steady - 300.0),

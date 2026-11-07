@@ -2290,6 +2290,13 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
     }
     let started = Instant::now();
     let buoyant = scene.gravity.filter(|g| g.iter().any(|v| *v != 0.0));
+    let frozen_transient = scene.transient.as_ref().filter(|_| mean_flow.is_none());
+    if frozen_transient.is_some() && buoyant.is_some() {
+        return Err(bad(
+            "transient runs freeze the flow; a buoyant scene's flow depends on temperature",
+        ));
+    }
+    let mut march = None;
     let mut material_feedback = None;
     let (flow, energy, couplings): (FvFlow, EnergySolution, Option<usize>) =
         if scene.temperature_dependent() {
@@ -2362,79 +2369,81 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             if scene.turbulence != Turbulence::Laminar {
                 setup.eddy_conductivity_w_m_k = flow.eddy_conductivity(&scene.fluid);
             }
-            let energy = match &radiation {
-                Some(config) => {
-                    let (energy, report) = solve_energy_radiating(
+            let energy = if let Some(transient) = frozen_transient {
+                let initial = transient
+                    .initial_temperature_k
+                    .or_else(|| {
+                        scene.faces.iter().find_map(|rule| match rule {
+                            FaceRule::Inlet { temperature, .. } | FaceRule::Fan { temperature, .. } => {
+                                Some(*temperature)
+                            }
+                            FaceRule::Opening { ambient, .. } => Some(*ambient),
+                            _ => None,
+                        })
+                    })
+                    .ok_or_else(|| bad("transient.initial_temperature_k is required here"))?;
+                let config = TransientConfig {
+                    time_step_s: transient.time_step_s,
+                    steps: transient.steps,
+                    energy: scene.convection.energy_config(),
+                };
+                // The accepted endpoint owns every output. A storage problem
+                // need not have a steady solution (e.g. an insulated heater).
+                let mut solution = march_energy(
+                    &domain,
+                    &scene.fluid,
+                    &scene.materials,
+                    &flow.field,
+                    &setup,
+                    &vec![initial; domain.cell_count()],
+                    |t| transient.scale(t),
+                    &config,
+                    radiation.as_ref(),
+                    gate,
+                )
+                .map_err(|e| solver_failure(&e))?;
+                let energy = solution
+                    .final_energy
+                    .take()
+                    .ok_or_else(|| bad("transient march returned no accepted energy step"))?;
+                march = Some(solution);
+                energy
+            } else {
+                match &radiation {
+                    Some(config) => {
+                        let (energy, report) = solve_energy_radiating(
+                            &domain,
+                            &scene.fluid,
+                            &scene.materials,
+                            &flow.field,
+                            &setup,
+                            &scene.convection.energy_config(),
+                            config,
+                            gate,
+                        )
+                        .map_err(|e| solver_failure(&e))?;
+                        radiated = Some((report.radiated_w, report.iterations, report.exposed_faces));
+                        energy
+                    }
+                    None => solve_energy(
                         &domain,
                         &scene.fluid,
                         &scene.materials,
                         &flow.field,
                         &setup,
                         &scene.convection.energy_config(),
-                        config,
                         gate,
                     )
-                    .map_err(|e| solver_failure(&e))?;
-                    radiated = Some((report.radiated_w, report.iterations, report.exposed_faces));
-                    energy
+                    .map_err(|e| solver_failure(&e))?,
                 }
-                None => solve_energy(
-                    &domain,
-                    &scene.fluid,
-                    &scene.materials,
-                    &flow.field,
-                    &setup,
-                    &scene.convection.energy_config(),
-                    gate,
-                )
-                .map_err(|e| solver_failure(&e))?,
             };
             (flow, energy, None)
         };
-    // Optional transient march over the converged (forced) flow.
-    let march = match (&scene.transient, couplings) {
-        (None, _) => None,
-        (Some(_), _) if mean_flow.is_some() => None,
-        (Some(_), Some(_)) => {
-            return Err(bad(
-                "transient runs freeze the flow; a buoyant scene's flow depends on temperature",
-            ));
-        }
-        (Some(transient), None) => {
-            let initial = transient
-                .initial_temperature_k
-                .or_else(|| {
-                    scene.faces.iter().find_map(|rule| match rule {
-                        FaceRule::Inlet { temperature, .. } | FaceRule::Fan { temperature, .. } => {
-                            Some(*temperature)
-                        }
-                        FaceRule::Opening { ambient, .. } => Some(*ambient),
-                        _ => None,
-                    })
-                })
-                .ok_or_else(|| bad("transient.initial_temperature_k is required here"))?;
-            let config = TransientConfig {
-                time_step_s: transient.time_step_s,
-                steps: transient.steps,
-                energy: scene.convection.energy_config(),
-            };
-            let solution = march_energy(
-                &domain,
-                &scene.fluid,
-                &scene.materials,
-                &flow.field,
-                &setup,
-                &vec![initial; domain.cell_count()],
-                |t| transient.scale(t),
-                &config,
-                radiation.as_ref(),
-                gate,
-            )
-            .map_err(|e| solver_failure(&e))?;
-            Some(solution)
-        }
-    };
     let wall_s = started.elapsed().as_secs_f64();
+    let final_record = march.as_ref().and_then(|m| m.records.last());
+    let power_scale = frozen_transient
+        .zip(final_record)
+        .map_or(1.0, |(transient, record)| transient.scale(record.time_s));
     let temperature = &energy.temperature;
     let probes = read_probes(scene, &domain, temperature, &flow.velocity_m_s);
     if let Some(path) = &scene.vtk {
@@ -2476,7 +2485,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             })
             .map(|c| temperature[c])
             .fold(f64::NEG_INFINITY, f64::max);
-        source_rows.push((source.name.clone(), source.power_w, *count, max));
+        source_rows.push((source.name.clone(), source.power_w * power_scale, *count, max));
     }
     let hottest = (0..domain.cell_count())
         .filter(|&c| !domain.is_fluid(c))
@@ -2492,6 +2501,15 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         .fold(0.0f64, f64::max);
     let r = &flow.report;
     let b = &energy.report.balance;
+    // Storage is a physical contribution during a march, not a steady-balance
+    // defect. The shared transient ledger includes radiation and fixed cells.
+    let balance_residual = final_record.map_or(b.relative_residual, |record| {
+        let scale = record.source_j.abs()
+            .max(record.stored_energy_change_j.abs())
+            .max(record.boundary_outflow_j.abs())
+            .max(1e-30);
+        record.closure_j.abs() / scale
+    });
     let nu = scene.fluid.kinematic_viscosity_m2_s;
     let max_eddy_ratio = flow
         .eddy_viscosity_m2_s
@@ -2507,6 +2525,8 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         "fv-simplec-boussinesq"
     } else if averaged_steps.is_some() {
         "fv-simplec-unsteady-mean-flow"
+    } else if march.is_some() {
+        "fv-simplec-frozen-flow-transient"
     } else {
         "fv-simplec"
     };
@@ -2586,16 +2606,38 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         }
         let _ = write!(
             out,
-            "}},\"energy\":{{\"iterations\":{},\"relative_residual\":{},\"source_w\":{},\"boundary_outflow_w\":{},\"advective_outflow_w\":{},\"sink_outflow_w\":{},\"balance_relative_residual\":{},\"max_cell_peclet\":{}}}",
+            "}},\"energy\":{{\"iterations\":{},\"relative_residual\":{},\"source_w\":{},\"boundary_outflow_w\":{},\"advective_outflow_w\":{},\"sink_outflow_w\":{},\"balance_relative_residual\":{},\"max_cell_peclet\":{}",
             energy.report.iterations,
             num(energy.report.relative_residual)?,
             num(b.source_w)?,
             num(b.boundary_outflow_w)?,
             num(b.advective_outflow_w)?,
             num(b.sink_outflow_w)?,
-            num(b.relative_residual)?,
+            num(balance_residual)?,
             num(energy.report.max_cell_peclet)?
         );
+        if let Some(record) = final_record {
+            let dt = frozen_transient.expect("accepted frozen march").time_step_s;
+            let _ = write!(
+                out,
+                ",\"storage_rate_w\":{},\"physical_outflow_w\":{},\"closure_w\":{}",
+                num(record.stored_energy_change_j / dt)?,
+                num(record.boundary_outflow_j / dt)?,
+                num(record.closure_j / dt)?
+            );
+        }
+        out.push('}');
+        if let Some(record) = final_record
+            && radiation.is_some()
+        {
+            let _ = write!(
+                out,
+                ",\"radiation\":{{\"radiated_w\":{},\"rays_per_face\":{},\"surface_exchange\":{}}}",
+                num(record.radiated_w)?,
+                scene.rays_per_face,
+                scene.surface_exchange
+            );
+        }
         if let Some((w, iterations, faces)) = radiated {
             let _ = write!(
                 out,
@@ -2644,7 +2686,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
                     out,
                     "{{\"name\":{},\"power_w\":{},\"junction_temperature_k\":{},\"case_w\":{},\"board_w\":{}}}",
                     quote(name),
-                    num(part.power_w)?,
+                    num(part.power_w * power_scale)?,
                     num(junction.temperature_k)?,
                     num(junction.case_w)?,
                     num(junction.board_w)?
@@ -2721,7 +2763,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             r.momentum_residual,
             r.inflow_m3_s,
             r.outflow_m3_s,
-            b.relative_residual
+            balance_residual
         );
         scene.convection.append_text(&mut out);
         if let Some(evidence) = &material_feedback {
@@ -2754,6 +2796,17 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
                 record.time_s,
                 record.max_solid_temperature_k
             );
+            let dt = frozen_transient.expect("accepted frozen march").time_step_s;
+            let _ = writeln!(
+                out,
+                "energy_storage_rate_w={:e}\nenergy_physical_outflow_w={:e}\nenergy_closure_w={:e}",
+                record.stored_energy_change_j / dt,
+                record.boundary_outflow_j / dt,
+                record.closure_j / dt
+            );
+            if radiation.is_some() {
+                let _ = writeln!(out, "radiated_w={:e}", record.radiated_w);
+            }
         }
         for (name, cells, max, mean) in &material_rows {
             let _ = writeln!(
@@ -2771,7 +2824,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             let _ = writeln!(
                 out,
                 "component={name} power_w={} junction_temperature_k={:.4} case_w={:.6} board_w={:.6}",
-                part.power_w, junction.temperature_k, junction.case_w, junction.board_w
+                part.power_w * power_scale, junction.temperature_k, junction.case_w, junction.board_w
             );
         }
         if let Some((t, at)) = hottest {

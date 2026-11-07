@@ -77,11 +77,15 @@ pub struct TransientRecord {
     pub iterations: usize,
 }
 
-/// Final temperature and the step records.
+/// Final temperature, accepted energy state, and the step records.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransientSolution {
     /// Temperature per cell at the final time, K.
     pub temperature: Vec<f64>,
+    /// Complete accepted final step, including compact junction heat flows and
+    /// the physical operator report. Absent only for a zero-step march.
+    /// `temperature` remains available to callers that only consume the field.
+    pub final_energy: Option<EnergySolution>,
     /// One record per step.
     pub records: Vec<TransientRecord>,
 }
@@ -124,6 +128,7 @@ pub fn march_energy(
     let storage: Vec<f64> = capacity.iter().map(|c| c / config.time_step_s).collect();
     let solids_present = (0..cells).any(|c| !domain.is_fluid(c));
     let mut temperature = initial_temperature.to_vec();
+    let mut final_energy = None;
     let mut records = Vec::with_capacity(config.steps);
     let radiators = match radiation {
         Some(r) => Some(Radiators::build(domain, solids, r, gate)?),
@@ -147,13 +152,20 @@ pub fn march_energy(
             &temperature,
             (time_s, config.time_step_s, solids_present),
             radiators.as_ref().zip(radiation),
+            None,
             gate,
         )?;
         records.push(record);
-        temperature = next;
+        if step == config.steps {
+            temperature.clone_from(&next.temperature);
+            final_energy = Some(next);
+        } else {
+            temperature = next.temperature;
+        }
     }
     Ok(TransientSolution {
         temperature,
+        final_energy,
         records,
     })
 }
@@ -254,40 +266,7 @@ pub(super) fn junction_capacity(
     Ok(capacities)
 }
 
-/// One backward-Euler energy step on `flow` from `previous`, with its
-/// closure record. `(capacity, storage)` are `C` and `C / dt` in cell/junction order;
-/// `(time_s, dt, solids_present)` label the record.
-#[allow(clippy::too_many_arguments)] // physics inputs + step state
-pub(crate) fn energy_step(
-    domain: &VoxelDomain,
-    fluid: &FluidProperties,
-    solids: &[SolidMaterial],
-    flow: &FlowField,
-    setup: &ThermalSetup,
-    energy: &EnergyConfig,
-    (capacity, storage): (&[f64], &[f64]),
-    previous: &[f64],
-    (time_s, dt, solids_present): (f64, f64, bool),
-    radiation: Option<(&Radiators, &RadiationConfig)>,
-    gate: &CancelGate,
-) -> Result<(Vec<f64>, TransientRecord), ChtError> {
-    energy_step_with_conductivity(
-        domain,
-        fluid,
-        solids,
-        flow,
-        setup,
-        energy,
-        (capacity, storage),
-        previous,
-        (time_s, dt, solids_present),
-        radiation,
-        None,
-        gate,
-    )
-}
-
-/// The same storage, radiation and closure owner with an optional admitted
+/// One energy step returning the cell field, with an optional admitted
 /// source-material conductivity field frozen at the preceding temperature.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn energy_step_with_conductivity(
@@ -304,13 +283,37 @@ pub(crate) fn energy_step_with_conductivity(
     molecular_w_m_k: Option<&[[f64; 3]]>,
     gate: &CancelGate,
 ) -> Result<(Vec<f64>, TransientRecord), ChtError> {
+    let (next, record) = energy_step(
+        domain, fluid, solids, flow, setup, energy, (capacity, storage), previous,
+        (time_s, dt, solids_present), radiation, molecular_w_m_k, gate,
+    )?;
+    Ok((next.temperature, record))
+}
+
+/// Preserve the accepted endpoint for consumers of junctions, contacts and
+/// balance diagnostics; all marches share this same solve and storage ledger.
+#[allow(clippy::too_many_arguments)]
+fn energy_step(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    solids: &[SolidMaterial],
+    flow: &FlowField,
+    setup: &ThermalSetup,
+    energy: &EnergyConfig,
+    (capacity, storage): (&[f64], &[f64]),
+    previous: &[f64],
+    (time_s, dt, solids_present): (f64, f64, bool),
+    radiation: Option<(&Radiators, &RadiationConfig)>,
+    molecular_w_m_k: Option<&[[f64; 3]]>,
+    gate: &CancelGate,
+) -> Result<(EnergySolution, TransientRecord), ChtError> {
     let (next, radiated_w, radiation_outflow_correction_w) = solve_step(
         domain, fluid, solids, flow, setup, energy, storage, previous, dt, radiation,
         molecular_w_m_k, gate,
     )?;
     let record = storage_record(domain, setup, capacity, previous, &next,
         (time_s, dt, solids_present), (radiated_w, radiation_outflow_correction_w), gate)?;
-    Ok((next.temperature, record))
+    Ok((next, record))
 }
 
 /// One contribution per authored compact junction, in the common
