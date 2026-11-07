@@ -15,6 +15,8 @@ use fs_math::{c64::C64, dd::Dd, det};
 
 type Result<T> = core::result::Result<T, ReflectionError>;
 
+pub(super) mod two_sided;
+
 /// Actual peak fields at the entrance and final exit, and cycle-mean normal
 /// powers [W/m²]. Entrance interference is signed; film heat is nonnegative.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -64,6 +66,7 @@ pub(super) struct FilmInput {
     pub(super) thickness: f64,
 }
 struct Film {
+    source: FilmInput,
     medium: Medium,
     fields: [LayerFieldKernel; 2],
     // Dimensionless unit-incident real-reference loss modes, TM then TE.
@@ -74,7 +77,7 @@ pub(super) struct Prepared {
     incident: Medium,
     exit: Medium,
     yi: [C64; 2],
-    admittance_ref: f64,
+    reference: [f64; 4],
     reflected: [C64; 2],
     transmitted_e: [C64; 2],
     transmitted_h: [C64; 2],
@@ -93,6 +96,13 @@ struct Polarized {
 
 impl Prepared {
     pub(super) fn new(input: Input, films: &[FilmInput]) -> Result<Self> {
+        let reference = reference_scales(input.omega, input.epsilon_i, input.mu_i)?;
+        Self::with_reference(input, films, reference)
+    }
+
+    // Both source columns must use the same real reference. Independent
+    // references rotate the dissipative-mode phases and cannot be mixed.
+    fn with_reference(input: Input, films: &[FilmInput], reference: [f64; 4]) -> Result<Self> {
         positive(input.omega)?;
         if !input.kx.is_finite()
             || films.len() > MAX_LAYERS
@@ -118,8 +128,7 @@ impl Prepared {
                 "stack incident wave must carry positive power into passive films",
             ));
         }
-        let [epsilon_ref, mu_ref, wave_ref, admittance_ref] =
-            reference_scales(input.omega, input.epsilon_i, input.mu_i)?;
+        let [epsilon_ref, mu_ref, wave_ref, admittance_ref] = reference;
         let prepare_wave = |epsilon: C64, mu: f64| {
             let wave = WaveMedium::new(epsilon, mu, epsilon_ref, mu_ref)?;
             if (epsilon.re != 0.0
@@ -158,6 +167,7 @@ impl Prepared {
         let te = prepare(Polarization::Te, yi[1])?;
         let prepared_films = (0..films.len())
             .map(|i| Film {
+                source: films[i],
                 medium: media[i],
                 fields: [tm.fields[i], te.fields[i]],
                 loss_modes: [tm.loss_modes[i], te.loss_modes[i]],
@@ -168,7 +178,7 @@ impl Prepared {
             incident,
             exit,
             yi,
-            admittance_ref,
+            reference,
             reflected: [tm.reflected, te.reflected],
             transmitted_e: [tm.exit[0], te.exit[0]],
             transmitted_h: [tm.exit[1], te.exit[1]],
@@ -192,7 +202,7 @@ impl Prepared {
         let transmitted = self.exit.field(self.input.kx, et, ht)?;
         let [pi, pr, interference] = entrance_power(self.yi, self.reflected, electric, er);
         let pt = exit_power(self.exit, et, ht);
-        let weight = Dd::from_f64(self.admittance_ref) * Dd::from_f64(0.5);
+        let weight = Dd::from_f64(self.reference[3]) * Dd::from_f64(0.5);
         let mut absorbed = [0.0; MAX_LAYERS];
         let mut heat = Dd::ZERO;
         for (i, film) in self.films.iter().enumerate() {
@@ -277,30 +287,34 @@ impl Prepared {
             e[c] = trace[0] * electric[c];
             h[c] = trace[1] * electric[c];
         }
-        let field = film.medium.field(self.input.kx, e, h)?;
-        let mut flux = Dd::ZERO;
-        for c in 0..2 {
-            flux = flux
-                + (Dd::from_f64(e[c].re) * Dd::from_f64(h[c].re)
-                    + Dd::from_f64(e[c].im) * Dd::from_f64(h[c].im))
-                    * Dd::from_f64(0.5);
-        }
-        let weight = Dd::from_f64(-film.medium.omega_epsilon.im) * Dd::from_f64(0.5);
-        let heat = field
-            .electric_v_m
-            .iter()
-            .fold(Dd::ZERO, |sum, &v| sum + quadratic(weight, v))
-            .to_f64();
-        let normal_power_w_m2 = flux.to_f64();
-        if !normal_power_w_m2.is_finite() || !heat.is_finite() || heat < 0.0 {
-            return Err(bad("interior power or heat is unrepresentable"));
-        }
-        Ok(AbsorbingLayerPoint {
-            field,
-            normal_power_w_m2,
-            heating_w_m3: heat,
-        })
+        field_point(film.medium, self.input.kx, e, h)
     }
+}
+
+fn field_point(medium: Medium, kx: f64, e: [C64; 2], h: [C64; 2]) -> Result<AbsorbingLayerPoint> {
+    let field = medium.field(kx, e, h)?;
+    let mut flux = Dd::ZERO;
+    for c in 0..2 {
+        flux = flux
+            + (Dd::from_f64(e[c].re) * Dd::from_f64(h[c].re)
+                + Dd::from_f64(e[c].im) * Dd::from_f64(h[c].im))
+                * Dd::from_f64(0.5);
+    }
+    let weight = Dd::from_f64(-medium.omega_epsilon.im) * Dd::from_f64(0.5);
+    let heat = field
+        .electric_v_m
+        .iter()
+        .fold(Dd::ZERO, |sum, &v| sum + quadratic(weight, v))
+        .to_f64();
+    let normal_power_w_m2 = flux.to_f64();
+    if !normal_power_w_m2.is_finite() || !heat.is_finite() || heat < 0.0 {
+        return Err(bad("interior power or heat is unrepresentable"));
+    }
+    Ok(AbsorbingLayerPoint {
+        field,
+        normal_power_w_m2,
+        heating_w_m3: heat,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

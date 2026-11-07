@@ -1,7 +1,7 @@
 //! G1/G3: dimensional transfer matrices, full boundary fields and volume work.
 use super::*;
 
-fn input() -> Input {
+pub(super) fn input() -> Input {
     Input {
         omega: 1.7,
         kx: 0.45,
@@ -11,7 +11,7 @@ fn input() -> Input {
         mu_t: 0.9,
     }
 }
-fn films() -> [FilmInput; 3] {
+pub(super) fn films() -> [FilmInput; 3] {
     [
         FilmInput {
             epsilon: C64::new(0.9, -0.3),
@@ -30,26 +30,26 @@ fn films() -> [FilmInput; 3] {
         },
     ]
 }
-fn electric() -> [C64; 2] {
+pub(super) fn electric() -> [C64; 2] {
     [C64::new(0.7, 0.2), C64::new(-0.3, 0.5)]
 }
-fn near(a: f64, b: f64, tolerance: f64) {
+pub(super) fn near(a: f64, b: f64, tolerance: f64) {
     assert!(
         (a - b).abs() <= tolerance * (1.0 + a.abs() + b.abs()),
         "{a:e} != {b:e}"
     );
 }
-fn complex_near(a: C64, b: C64, tolerance: f64) {
+pub(super) fn complex_near(a: C64, b: C64, tolerance: f64) {
     assert!(
         (a - b).abs() <= tolerance * (1.0 + a.abs() + b.abs()),
         "{a:?} != {b:?}"
     );
 }
-fn root(data: Input, epsilon: C64, mu: f64) -> C64 {
+pub(super) fn root(data: Input, epsilon: C64, mu: f64) -> C64 {
     let q = (epsilon.scale(data.omega * data.omega * mu) - C64::from_re(data.kx * data.kx)).sqrt();
     if q.im > 0.0 { -q } else { q }
 }
-fn admittance(data: Input, epsilon: C64, mu: f64, channel: usize) -> C64 {
+pub(super) fn admittance(data: Input, epsilon: C64, mu: f64, channel: usize) -> C64 {
     let q = root(data, epsilon, mu);
     if channel == 0 {
         epsilon.scale(data.omega) / q
@@ -62,7 +62,7 @@ fn admittance(data: Input, epsilon: C64, mu: f64, channel: usize) -> C64 {
 // [E,H_conjugate] to the left face, with exp(+i omega t), exp(-i q z).
 // Direct cosh/sinh are deliberate: this test oracle is not the production
 // scaled scattering/positive-loss recurrence and is not used for opaque films.
-fn matrix(data: Input, film: FilmInput, channel: usize, distance: f64) -> [[C64; 2]; 2] {
+pub(super) fn matrix(data: Input, film: FilmInput, channel: usize, distance: f64) -> [[C64; 2]; 2] {
     let q = root(data, film.epsilon, film.mu);
     let q2 =
         film.epsilon.scale(data.omega * data.omega * film.mu) - C64::from_re(data.kx * data.kx);
@@ -88,7 +88,7 @@ fn matrix(data: Input, film: FilmInput, channel: usize, distance: f64) -> [[C64;
     let coupling = C64::new(0.0, 1.0) * sine_over_q;
     [[cosine, coupling * a], [coupling * b, cosine]]
 }
-fn product(a: [[C64; 2]; 2], b: [[C64; 2]; 2]) -> [[C64; 2]; 2] {
+pub(super) fn product(a: [[C64; 2]; 2], b: [[C64; 2]; 2]) -> [[C64; 2]; 2] {
     core::array::from_fn(|i| core::array::from_fn(|j| a[i][0] * b[0][j] + a[i][1] * b[1][j]))
 }
 fn gains(data: Input, films: &[FilmInput]) -> ([C64; 2], [C64; 2]) {
@@ -116,7 +116,12 @@ fn initial_state(data: Input, r: [C64; 2]) -> [[C64; 2]; 2] {
         ]
     })
 }
-fn propagated(data: Input, film: FilmInput, left: [[C64; 2]; 2], z: f64) -> [[C64; 2]; 2] {
+pub(super) fn propagated(
+    data: Input,
+    film: FilmInput,
+    left: [[C64; 2]; 2],
+    z: f64,
+) -> [[C64; 2]; 2] {
     core::array::from_fn(|c| {
         let m = matrix(data, film, c, -z);
         [
@@ -125,7 +130,7 @@ fn propagated(data: Input, film: FilmInput, left: [[C64; 2]; 2], z: f64) -> [[C6
         ]
     })
 }
-fn field(data: Input, film: FilmInput, state: [[C64; 2]; 2]) -> InterfaceBoundaryField {
+pub(super) fn field(data: Input, film: FilmInput, state: [[C64; 2]; 2]) -> InterfaceBoundaryField {
     InterfaceBoundaryField {
         electric_v_m: [
             state[0][0],
@@ -139,24 +144,27 @@ fn field(data: Input, film: FilmInput, state: [[C64; 2]; 2]) -> InterfaceBoundar
         ],
     }
 }
-fn field_near(a: InterfaceBoundaryField, b: InterfaceBoundaryField, tolerance: f64) {
+pub(super) fn field_near(a: InterfaceBoundaryField, b: InterfaceBoundaryField, tolerance: f64) {
     for c in 0..3 {
         complex_near(a.electric_v_m[c], b.electric_v_m[c], tolerance);
         complex_near(a.magnetic_a_m[c], b.magnetic_a_m[c], tolerance);
     }
 }
-fn power(field: InterfaceBoundaryField) -> f64 {
+pub(super) fn power(field: InterfaceBoundaryField) -> f64 {
     0.5 * (field.electric_v_m[0] * field.magnetic_a_m[1].conj()
         - field.electric_v_m[1] * field.magnetic_a_m[0].conj())
     .re
 }
-fn combined(a: InterfaceBoundaryField, b: InterfaceBoundaryField) -> InterfaceBoundaryField {
+pub(super) fn combined(
+    a: InterfaceBoundaryField,
+    b: InterfaceBoundaryField,
+) -> InterfaceBoundaryField {
     InterfaceBoundaryField {
         electric_v_m: core::array::from_fn(|c| a.electric_v_m[c] + b.electric_v_m[c]),
         magnetic_a_m: core::array::from_fn(|c| a.magnetic_a_m[c] + b.magnetic_a_m[c]),
     }
 }
-fn boundary(
+pub(super) fn boundary(
     left: InterfaceBoundaryField,
     epsilon_l: C64,
     mu_l: f64,

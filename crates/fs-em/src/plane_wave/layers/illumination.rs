@@ -89,7 +89,7 @@ fn reflection(state: [C64; 2]) -> C64 {
     (state[0] - state[1]) / (state[0] + state[1])
 }
 
-fn dot(a: [C64; 2], b: [C64; 2]) -> C64 {
+pub(super) fn dot(a: [C64; 2], b: [C64; 2]) -> C64 {
     let products = [a[0] * b[0], a[1] * b[1]];
     C64::new(
         (Dd::from_f64(products[0].re) + Dd::from_f64(products[1].re)).to_f64(),

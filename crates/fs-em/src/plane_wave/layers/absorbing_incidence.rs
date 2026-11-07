@@ -10,7 +10,7 @@
 //! allocate nothing and never reevaluate a source law or rebuild the stack.
 //! All faces are stationary, planar, isotropic and coherent at one frequency.
 //! Source amplitude is local to the entrance, not an inferred distant launch.
-//! The angular-spectrum and two-sided lossless-port owners remain separate.
+//! The angular-spectrum and lossless-port owners remain separate.
 //!
 //! Poynting and film conventions: S. J. Byrnes, "Multilayer optical
 //! calculations", §§4.1, 4.3–4.5 and Appendix B, arXiv:1603.02720v5,
@@ -22,6 +22,10 @@ use fs_math::c64::C64;
 
 mod kernel;
 pub use kernel::{AbsorbingLayerPoint, AbsorbingLayerReflection};
+
+mod two_sided;
+pub use kernel::two_sided::{AbsorbingPortPower, AbsorbingTwoSidedReflection};
+pub use two_sided::{AbsorbingTwoSidedIllumination, PreparedAbsorbingTwoSidedLayers};
 
 /// Original sources, frequency, real transverse wave number and prepared
 /// coherent fields. Lossy, evanescent and exact-critical films/exits are allowed;

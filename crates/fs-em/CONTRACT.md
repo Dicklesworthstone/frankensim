@@ -3695,11 +3695,55 @@ but its Cargo execution remains pending under this session's resource limits.
 
 This owner covers one-sided monochromatic stationary isotropic planar films.
 It supplies no finite-coherence, roughness, anisotropic, magnetic-loss,
-transient, absorbing angular-spectrum, two-sided absorbing-port or upstream
-launch model. Pure evanescent/grazing incidence, active media, unrepresentable
+transient, absorbing angular-spectrum or upstream launch model.
+Two-sided absorbing incidence uses the separate opt-in preparation below. Pure evanescent/grazing incidence, active media, unrepresentable
 contrasts/fields/powers and plasma without original whole-field drift admission
 refuse. The older angle, beam and simultaneous-illumination owners retain their
 lossless incident-port admission.
+
+### Coherent illumination from both absorbing half-spaces
+
+`PlanarAbsorbingDielectricLayers::prepare_two_sided` adds simultaneous coherent
+sources at both physical faces of the original stack. Both incoming modes must
+carry positive normal power. The existing one-sided owner continues to admit
+critical/evanescent exits, which cannot supply the second incoming wave and
+therefore refuse this opt-in preparation. Sources share frequency, signed real
+kx and clock; each actual complex peak [Ex,Ey] is specified locally at its own
+face on the same fixed Cartesian electric axes.
+
+One additional bounded sweep reverses the retained original film order using
+the SAME real numerical reference. It does not reevaluate any material law.
+The odd dissipative-mode phase reverses with the film orientation, so coherent
+source amplitudes are combined before their positive squared loss is taken.
+The right-source interior fields are reoriented from their original exact face
+traces; queries retain the original global +z direction and depth from each
+film's first face, without a rounded thickness-minus-depth phase conversion.
+Preparation and evaluation are O(films), with allocation-free repeated source
+phase/amplitude and interior queries and the existing 64-film cap.
+
+The prepared owner exposes the complex physical port admittances and the full
+fixed-axis tangential-E scattering matrix. Actual illumination returns incoming,
+outgoing and total Cartesian E/H at both faces, per-film heat, and local depth
+fields/heating. Each face reports separate nonnegative incoming/outgoing
+powers, a signed interference contribution into the stack, and signed net
+inward flux. With inward coordinates `E=a+b`, `H=Y(a-b)`, the cross flux is
+`Im(Y) Im(b conj(a))`; it includes transmission from the opposite source and
+does not require an undefined reflection ratio when a source is zero. The
+physical balance is `net_inward_first + net_inward_last = sum(film_heat)`.
+Neither cross term is relabelled as film heat or clipped. Total boundary E/H
+retain independent stable transfer numerators, including near cancellation.
+
+Native regressions cover an absorbing matched film's closed-form phase-controlled
+heating and both cross fluxes, independent dimensional two-source transfer
+matrices, six-component fields and interface continuity, integrated volume
+loss, either one-sided reduction, zero lossless-port cross flux, exact-critical
+and opaque films, weak odd-mode heat, dark fields, empty stacks and exterior
+admission. The public adapter is compiled and exercised in the native probe
+with only source-resolution/error plumbing stubbed; original Debye source-card
+and lossless-owner parity tests are present but their Cargo execution remains
+pending under the session's resource constraint. These are G1/G3 numerical
+claims for stationary coherent isotropic planar films, with no finite-coherence,
+roughness, anisotropy, magnetic loss, transient or measured-material claim.
 
 ### Coherent finite dielectric films
 

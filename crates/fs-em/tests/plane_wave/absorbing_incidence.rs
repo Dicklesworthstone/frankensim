@@ -278,3 +278,127 @@ fn original_absorbing_sources_prepare_coherent_films_and_positive_depth_heating(
         assert!(actual.layer_field(0, -0.1).is_err());
     }
 }
+
+#[test]
+fn original_absorbing_sources_support_phase_controlled_two_sided_film_heating() {
+    use fs_em::plane_wave::layers::{
+        DielectricLayer, absorbing_incidence::PlanarAbsorbingDielectricLayers,
+    };
+    let dielectric = finite_layers::debye(2.0 * E, 3.0 * E, 0.7, 0.002);
+    let source = DielectricResponse::Debye(&dielectric);
+    let layers = [DielectricLayer {
+        response: source,
+        thickness_m: 0.08,
+    }];
+    let stack =
+        PlanarAbsorbingDielectricLayers::try_new(source, source, 1e9, 0.0, &layers).unwrap();
+    let prepared = stack.prepare_two_sided().unwrap();
+    assert!(std::ptr::eq(prepared.source(), &stack));
+    assert!(std::ptr::eq(
+        prepared.source().incident_response().material(),
+        dielectric.material()
+    ));
+    assert!(std::ptr::eq(
+        prepared.source().exit_response().material(),
+        dielectric.material()
+    ));
+    for channel in 0..2 {
+        let mut amplitude = [C64::ZERO; 2];
+        amplitude[channel] = C64::ONE;
+        let even = prepared.illuminate(amplitude, amplitude).unwrap();
+        let odd = prepared
+            .illuminate(amplitude, amplitude.map(|e| -e))
+            .unwrap();
+        assert!(std::ptr::eq(even.source(), &stack));
+        assert!(even.response().absorbed_power_w_m2 > 10.0 * odd.response().absorbed_power_w_m2);
+        assert!(odd.response().absorbed_power_w_m2 > 0.0);
+        for actual in [&even, &odd] {
+            let result = actual.response();
+            near(
+                result.power.iter().map(|p| p.net_into_stack_w_m2).sum(),
+                result.absorbed_power_w_m2,
+                2e-15,
+            );
+            near(
+                actual.absorbed_power_per_layer_w_m2()[0],
+                result.absorbed_power_w_m2,
+                2e-15,
+            );
+            assert!(actual.layer_field(0, 0.02).unwrap().heating_w_m3 > 0.0);
+        }
+        let single = prepared.illuminate(amplitude, [C64::ZERO; 2]).unwrap();
+        let original = stack.illuminate(amplitude).unwrap();
+        near(
+            single.response().absorbed_power_w_m2,
+            original.response().absorbed_power_w_m2,
+            1e-15,
+        );
+    }
+}
+
+#[test]
+fn explicit_kx_two_sided_fields_reduce_to_the_original_lossless_port_owner() {
+    use fs_em::plane_wave::layers::{
+        DielectricLayer, PlanarDielectricLayers,
+        absorbing_incidence::PlanarAbsorbingDielectricLayers,
+    };
+    let incident = material(2.0 * E, 1.4 * M);
+    let exit = material(3.0 * E, 0.9 * M);
+    let dielectric = finite_layers::debye(2.0 * E, 3.0 * E, 0.7, 0.002);
+    let layers = [DielectricLayer {
+        response: DielectricResponse::Debye(&dielectric),
+        thickness_m: 0.08,
+    }];
+    let omega = 1e9;
+    let cosine = 0.8_f64;
+    let kx = omega * (2.0 * E * 1.4 * M).sqrt() * ((1.0 - cosine) * (1.0 + cosine)).sqrt();
+    let old = PlanarDielectricLayers::try_new(
+        &incident,
+        DielectricResponse::Lossless(&exit),
+        omega,
+        &layers,
+    )
+    .unwrap();
+    let stack = PlanarAbsorbingDielectricLayers::try_new(
+        DielectricResponse::Lossless(&incident),
+        DielectricResponse::Lossless(&exit),
+        omega,
+        kx,
+        &layers,
+    )
+    .unwrap();
+    let prepared = stack.prepare_two_sided().unwrap();
+    let a = C64::new(0.7, 0.2);
+    let b = C64::new(0.2, -0.4);
+    for (channel, pol) in [(0, Polarization::Tm), (1, Polarization::Te)] {
+        let prior = old.prepare_illumination(cosine, pol).unwrap();
+        let mut heat = [0.0];
+        let expected = prior.evaluate([a, b], &mut heat).unwrap();
+        let mut left = [C64::ZERO; 2];
+        left[channel] = a;
+        let mut right = [C64::ZERO; 2];
+        right[channel] = b;
+        let actual = prepared.illuminate(left, right).unwrap();
+        let response = actual.response();
+        for face in 0..2 {
+            complex_near(
+                response.outgoing[face].electric_v_m[channel],
+                expected.outgoing_tangential_e_v_m[face],
+                2e-13,
+            );
+            complex_near(
+                response.boundary[face].electric_v_m[channel],
+                expected.boundary_tangential_e_v_m[face],
+                2e-13,
+            );
+            let h = if channel == 0 {
+                response.boundary[face].magnetic_a_m[1]
+            } else {
+                -response.boundary[face].magnetic_a_m[0]
+            };
+            complex_near(h, expected.boundary_conjugate_h_a_m[face], 2e-15);
+            assert_eq!(response.power[face].interference_into_stack_w_m2, 0.0);
+        }
+        near(actual.absorbed_power_per_layer_w_m2()[0], heat[0], 2e-15);
+    }
+}
