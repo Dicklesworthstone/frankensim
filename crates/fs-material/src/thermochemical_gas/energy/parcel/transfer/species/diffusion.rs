@@ -13,6 +13,8 @@
 //! Both modes neglect thermal diffusion and external species forces. Explicit
 //! T/p difference limits bound the local face approximation; they are not an
 //! error estimate. No bulk flow, momentum law, Knudsen law or membrane selectivity.
+//! The opt-in [`thermal`] owner adds source-backed Soret/reciprocal heat and
+//! source-conjugate nonisothermal energy carriage in the mass-average frame.
 //! Primary formulation: COMSOL, Multicomponent Gas Diffusion: Maxwell-Stefan
 //! Description (equations 3-75--3-78); Cantera, MultiTransport reference.
 
@@ -22,6 +24,8 @@ pub mod network;
 pub mod dusty_gas;
 /// Positive exponential relaxation of a binary pair without an explicit diffusion CFL.
 pub mod binary;
+/// Source-conjugate nonisothermal Maxwell--Stefan, Soret and reciprocal heat.
+pub mod thermal;
 
 use super::{ClosedGasParcel, GasEnergyError, GasSpeciesExchangeCandidate,
     GasSpeciesExchangeSolve, SpeciesId, SpeciesMassTransfer, Sum, catalog, invalid, poll, positive, source_error};
