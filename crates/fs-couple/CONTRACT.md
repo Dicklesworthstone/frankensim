@@ -1,3 +1,31 @@
+## Coherent crystal absorption on native thermal cells
+
+`layered_wave_heating::substrate::crystal::PreparedCrystalWaveHeating` binds
+the original prepared uniaxial electromagnetic field to a finite planar thermal
+control column inside that same homogeneous crystal half-space. Cell area,
+depths, material-card identities and fixed query context come from the original
+thermal body. Each cell receives the analytic integral of the coherent ordinary
+and extraordinary fields in the original dielectric loss tensor. Cross terms
+survive; cell-centre sampling, independent mode-power addition and subtraction
+of nearly equal boundary powers do not determine heat.
+
+Preparation is linear in cell count with bounded work/storage and cancellation.
+Accepted intervals reuse the cached watts and the existing native thermal
+solver. Authored heat, capacity, conduction and boundaries retain their owners;
+the additional optical energy enters exactly once. Entering, leaving and
+absorbed optical energy are reported separately, and the signed numerical
+residual is never redistributed as heat. Failure leaves the supplied simulation
+unchanged.
+
+This is held monochromatic, cycle-mean heating with fixed optical coefficients
+and optic axis. The finite thermal column does not introduce a second optical
+interface, a finite crystal-film interference model, lateral temperature
+variation or temperature-dependent optical feedback. Focused native regressions
+compare coherent cell heat with independent depth quadrature, verify ordinary/
+extraordinary interference and subdivision invariance, advance actual cell
+temperatures against an independent Fourier/caloric reference, and cover
+lossless illumination, source identity, budgets and cancellation.
+
 ## Full-coordinate material shells with two-sided open radiation
 
 `tensor_shell_radiation::open::OpenTensorShellRadiation` binds the original

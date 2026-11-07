@@ -11,6 +11,9 @@ mod spatial_interference;
 #[path = "layered_wave_heating/substrate.rs"]
 mod substrate;
 
+#[path = "layered_wave_heating/substrate/crystal.rs"]
+mod crystal;
+
 use fs_couple::layered_wave_heating::{
     LayeredWaveDrive, LayeredWaveHeating, LayeredWaveHeatingError,
 };

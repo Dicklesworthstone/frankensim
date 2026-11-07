@@ -31,6 +31,9 @@ use fs_em::plane_wave::{
 };
 use fs_math::dd::Dd;
 
+/// Coherent ordinary/extraordinary absorption on the same thermal-cell owner.
+pub mod crystal;
+
 mod sealed {
     pub trait Sealed {}
     impl Sealed for super::PlanarAngularSpectrum<'_, '_> {}
@@ -366,45 +369,63 @@ impl<'p, 'b, 'a, S: SubstrateAbsorptionSource + ?Sized>
         conduction: LayerConductionConfig,
         controls: LayeredThermalSolveControls,
         workspace: &mut LayeredThermalWorkspace,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<SubstrateWaveStep<'t>, LayeredWaveHeatingError> {
-        poll(&mut cancelled)?;
-        let step = LayeredThermalStep::new(self.thermal, initial, target_s, conduction, || {
-            checkpoint(&mut cancelled)
-        })?;
-        let dt = step.duration_s();
-        let mut additions = reserve(self.cells.len())?;
-        let mut cell_energy_j = reserve(self.cells.len())?;
-        let mut absorbed = Dd::ZERO;
-        for (&id, cell) in step.cell_ids().iter().zip(&self.cells) {
-            poll(&mut cancelled)?;
-            if id != cell.cell_id {
-                return Err(invalid("substrate heat must retain native thermal cell order"));
-            }
-            let joules = physical_joules(cell.absorbed_w, dt)?;
-            additions.push(joules);
-            cell_energy_j.push((id, joules));
-            absorbed = absorbed + Dd::from_f64(joules);
-        }
-        let entering_j = physical_joules(self.power.entering_w, dt)?;
-        let leaving_j = physical_joules(self.power.leaving_w, dt)?;
-        let absorbed_j = absorbed.to_f64();
-        let residual_j =
-            (Dd::from_f64(entering_j) - Dd::from_f64(leaving_j) - absorbed).to_f64();
-        if !absorbed_j.is_finite() || !residual_j.is_finite() {
-            return Err(invalid("substrate interval energy is unrepresentable"));
-        }
-        let step = step.with_cell_energy_j(&additions, || checkpoint(&mut cancelled))?;
-        let (thermal, _, heat_report) =
-            step.solve(controls, workspace, || checkpoint(&mut cancelled))?;
-        poll(&mut cancelled)?;
-        Ok(SubstrateWaveStep {
-            thermal,
-            heat_report,
-            optical: SubstrateWaveEnergy { entering_j, leaving_j, absorbed_j, residual_j },
-            cell_energy_j,
-        })
+        advance_cells_to(self.thermal, &self.cells, self.power, initial, target_s,
+            conduction, controls, workspace, cancelled)
     }
+}
+
+// Both native electromagnetic sources deposit their cached, source-bound cell
+// watts through this one thermal path. It never evaluates or approximates light.
+#[allow(clippy::too_many_arguments)]
+fn advance_cells_to<'t>(
+    body: &BoundLayeredThermalBody<'_>,
+    cells: &[SubstrateCellPower],
+    power: SubstrateWavePower,
+    initial: &DepositionSimulation<'t>,
+    target_s: f64,
+    conduction: LayerConductionConfig,
+    controls: LayeredThermalSolveControls,
+    workspace: &mut LayeredThermalWorkspace,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<SubstrateWaveStep<'t>, LayeredWaveHeatingError> {
+    poll(&mut cancelled)?;
+    let step = LayeredThermalStep::new(body, initial, target_s, conduction, || {
+        checkpoint(&mut cancelled)
+    })?;
+    let dt = step.duration_s();
+    let mut additions = reserve(cells.len())?;
+    let mut cell_energy_j = reserve(cells.len())?;
+    let mut absorbed = Dd::ZERO;
+    for (&id, cell) in step.cell_ids().iter().zip(cells) {
+        poll(&mut cancelled)?;
+        if id != cell.cell_id {
+            return Err(invalid("substrate heat must retain native thermal cell order"));
+        }
+        let joules = physical_joules(cell.absorbed_w, dt)?;
+        additions.push(joules);
+        cell_energy_j.push((id, joules));
+        absorbed = absorbed + Dd::from_f64(joules);
+    }
+    let entering_j = physical_joules(power.entering_w, dt)?;
+    let leaving_j = physical_joules(power.leaving_w, dt)?;
+    let absorbed_j = absorbed.to_f64();
+    let residual_j =
+        (Dd::from_f64(entering_j) - Dd::from_f64(leaving_j) - absorbed).to_f64();
+    if !absorbed_j.is_finite() || !residual_j.is_finite() {
+        return Err(invalid("substrate interval energy is unrepresentable"));
+    }
+    let step = step.with_cell_energy_j(&additions, || checkpoint(&mut cancelled))?;
+    let (thermal, _, heat_report) =
+        step.solve(controls, workspace, || checkpoint(&mut cancelled))?;
+    poll(&mut cancelled)?;
+    Ok(SubstrateWaveStep {
+        thermal,
+        heat_report,
+        optical: SubstrateWaveEnergy { entering_j, leaving_j, absorbed_j, residual_j },
+        cell_energy_j,
+    })
 }
 
 fn physical_joules(watts: f64, duration_s: f64) -> Result<f64, LayeredWaveHeatingError> {
