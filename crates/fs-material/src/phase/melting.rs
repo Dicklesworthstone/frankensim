@@ -79,6 +79,64 @@ impl ResolvedMeltingCurve {
         reference_specific_enthalpy_j_kg: f64,
         maximum_interpolation_error_j_kg: f64,
     ) -> Result<Self, PhaseStateError> {
+        Self::resolve(
+            card,
+            query,
+            reference_specific_enthalpy_j_kg,
+            Some(maximum_interpolation_error_j_kg),
+            maximum_interpolation_error_j_kg,
+        )
+    }
+
+    /// Retain the original sensible Cp/density intervals and one sharp fusion
+    /// plateau without subdividing either branch to approximate enthalpy chords.
+    ///
+    /// Both branches use [`ResolvedHeatCapacityCurve::try_new_exact`], so h(T),
+    /// its inverse, derivatives and density retain the original analytical
+    /// laws. Preparation and storage depend on the source-knot count, not Cp
+    /// curvature or an interpolation tolerance. The same source-context,
+    /// continuous-support, receipt, identity and combined knot-budget checks
+    /// as [`Self::try_new`] apply. No source breakpoint is removed or extended.
+    ///
+    /// `maximum_fusion_rounding_error_j_kg` is a finite nonnegative allowance
+    /// on the difference between the represented plateau width and the source
+    /// fusion enthalpy. Zero requires that width to be exactly representable
+    /// at the declared datum. It does not bound sensible-integration roundoff
+    /// or physical source uncertainty. Fusion is inserted exactly once, and
+    /// coexistence retains additive specific volume at fixed specimen mass.
+    ///
+    /// Consumers must use the chart's caloric methods rather than interpolate
+    /// its public boundary knots. Use [`Self::try_new`] when an additional
+    /// error bound on those straight enthalpy chords is required.
+    pub fn try_new_exact(
+        card: &MaterialCard,
+        query: MeltingSourceQuery<'_>,
+        reference_specific_enthalpy_j_kg: f64,
+        maximum_fusion_rounding_error_j_kg: f64,
+    ) -> Result<Self, PhaseStateError> {
+        Self::resolve(
+            card,
+            query,
+            reference_specific_enthalpy_j_kg,
+            None,
+            maximum_fusion_rounding_error_j_kg,
+        )
+    }
+
+    fn resolve(
+        card: &MaterialCard,
+        query: MeltingSourceQuery<'_>,
+        reference_specific_enthalpy_j_kg: f64,
+        maximum_interpolation_error_j_kg: Option<f64>,
+        maximum_fusion_rounding_error_j_kg: f64,
+    ) -> Result<Self, PhaseStateError> {
+        if !maximum_fusion_rounding_error_j_kg.is_finite()
+            || maximum_fusion_rounding_error_j_kg < 0.0
+        {
+            return Err(invalid(
+                "maximum fusion rounding error must be finite and nonnegative",
+            ));
+        }
         let axis = query.solid.temperature_axis;
         if axis.is_empty() || query.liquid.temperature_axis != axis {
             return Err(invalid(
@@ -126,12 +184,16 @@ impl ResolvedMeltingCurve {
             ));
         }
 
-        let solid = ResolvedHeatCapacityCurve::try_new(
-            card,
+        let resolve_branch = |branch, phase, datum| match maximum_interpolation_error_j_kg {
+            Some(allowance) => {
+                ResolvedHeatCapacityCurve::try_new(card, branch, phase, datum, allowance)
+            }
+            None => ResolvedHeatCapacityCurve::try_new_exact(card, branch, phase, datum),
+        };
+        let solid = resolve_branch(
             query.solid,
             SolidLiquidPhase::Solid,
             reference_specific_enthalpy_j_kg,
-            maximum_interpolation_error_j_kg,
         )?;
         let solid_end_h = solid
             .curve()
@@ -150,19 +212,13 @@ impl ResolvedMeltingCurve {
             ));
         }
         if (represented_latent_heat - latent_heat_fusion_j_kg).abs()
-            > maximum_interpolation_error_j_kg
+            > maximum_fusion_rounding_error_j_kg
         {
             return Err(invalid(
                 "fusion energy rounding exceeds the declared enthalpy error allowance",
             ));
         }
-        let liquid = ResolvedHeatCapacityCurve::try_new(
-            card,
-            query.liquid,
-            SolidLiquidPhase::Liquid,
-            liquid_start_h,
-            maximum_interpolation_error_j_kg,
-        )?;
+        let liquid = resolve_branch(query.liquid, SolidLiquidPhase::Liquid, liquid_start_h)?;
         let count = solid.curve().knots().len() + liquid.curve().knots().len();
         if count > MAX_HEAT_CAPACITY_ENTHALPY_KNOTS {
             return Err(invalid(

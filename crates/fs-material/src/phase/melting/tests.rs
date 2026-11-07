@@ -205,6 +205,288 @@ fn near(actual: f64, expected: f64) {
     );
 }
 
+fn with_branch_knots(
+    original: &MaterialCard,
+    property: &str,
+    branch_knots: [Vec<(f64, f64)>; 2],
+) -> MaterialCard {
+    let mut claims = ClaimSet::new();
+    for (_, original_claim) in original.claims().claims_ordered() {
+        let mut claim = original_claim.clone();
+        if claim.key.name() == property {
+            let PropertyValue::Curve { knots, .. } = &mut claim.value else {
+                panic!("expected a sensible source curve");
+            };
+            let branch = usize::from(knots[0].0 == 400.0);
+            *knots = branch_knots[branch].clone();
+        }
+        claims.insert_claim(claim).unwrap();
+    }
+    MaterialCard::assemble(original.id().clone(), claims, vec![]).unwrap()
+}
+
+#[test]
+fn exact_melting_heating_and_cooling_preserve_original_cp_density_and_one_latent_plateau() {
+    let source = card_with_heat_capacities_and_densities(
+        Some(20_000.0),
+        true,
+        false,
+        [1000.0, 2000.0],
+        [2000.0, 4000.0],
+        [[1000.0, 900.0], [800.0, 700.0]],
+    );
+    let query = Query::new();
+    let model = ResolvedMeltingCurve::try_new_exact(&source, query.query(), 0.0, 0.0).unwrap();
+    let curve = model.curve();
+    assert_eq!(curve.knots().len(), 4);
+    assert_eq!(model.plateau_enthalpy_bounds_j_kg(), [150_000.0, 170_000.0]);
+    assert_eq!(
+        curve
+            .knots()
+            .windows(2)
+            .filter(|pair| pair[0].temperature_k == pair[1].temperature_k)
+            .count(),
+        1
+    );
+    // Independent integrals of Cp_s=1000+10(T-300) and Cp_l=2000+20(T-400).
+    let solid_h = 1000.0 * 27.5 + 5.0 * 27.5_f64.powi(2);
+    let liquid_h = 170_000.0 + 2000.0 * 83.25 + 10.0 * 83.25_f64.powi(2);
+    near(
+        curve
+            .specific_enthalpy_on_sensible_interval(0, 327.5)
+            .unwrap(),
+        solid_h,
+    );
+    near(
+        curve
+            .specific_enthalpy_on_sensible_interval(2, 483.25)
+            .unwrap(),
+        liquid_h,
+    );
+    let states = [
+        (0.0, 300.0, 0.0, 1000.0, 1.0 / 1000.0),
+        (solid_h, 327.5, 0.0, 972.5, 1.0 / 1275.0),
+        (150_000.0, 400.0, 0.0, 900.0, 0.0),
+        (
+            155_000.0,
+            400.0,
+            0.25,
+            1.0 / (0.75 / 900.0 + 0.25 / 800.0),
+            0.0,
+        ),
+        (
+            165_000.0,
+            400.0,
+            0.75,
+            1.0 / (0.25 / 900.0 + 0.75 / 800.0),
+            0.0,
+        ),
+        (170_000.0, 400.0, 1.0, 800.0, 1.0 / 2000.0),
+        (liquid_h, 483.25, 1.0, 716.75, 1.0 / 3665.0),
+        (470_000.0, 500.0, 1.0, 700.0, 1.0 / 4000.0),
+    ];
+    let mass = 0.25;
+    let pressure = 100_000.0;
+    let initial = curve.state_at_specific_enthalpy(0.0).unwrap();
+    let mut current = initial;
+    for &(h, temperature, fraction, density, derivative) in states.iter().chain(states.iter().rev())
+    {
+        let heat = mass * (h - current.specific_enthalpy_j_kg());
+        let step = curve
+            .advance_isobaric_heat(current, mass, pressure, heat)
+            .unwrap();
+        near(step.state.temperature_k(), temperature);
+        near(step.state.liquid_mass_fraction(), fraction);
+        near(step.state.bulk_density_kg_m3(), density);
+        assert!(
+            (curve
+                .temperature_derivative_at_specific_enthalpy(h)
+                .unwrap()
+                - derivative)
+                .abs()
+                < 2e-18
+        );
+        near(step.enthalpy_change_j, heat);
+        near(step.internal_energy_change_j + step.boundary_work_j, heat);
+        near(step.final_volume_m3 * step.state.bulk_density_kg_m3(), mass);
+        current = step.state;
+    }
+    assert_eq!(current, initial);
+    // The exact ingress shares the same physical chart and identity when the
+    // legacy boundary allowance happens to require no subdivision.
+    let coarse = ResolvedMeltingCurve::try_new(&source, query.query(), 0.0, 1e6).unwrap();
+    assert_eq!(&model, &coarse);
+}
+
+#[test]
+fn exact_melting_keeps_source_breakpoints_receipts_and_context_identity() {
+    let source = with_branch_knots(
+        &card(Some(20_000.0), true, false),
+        "density",
+        [
+            vec![(300.0, 1000.0), (350.0, 960.0), (400.0, 900.0)],
+            vec![(400.0, 800.0), (450.0, 760.0), (500.0, 700.0)],
+        ],
+    );
+    let query = Query::new();
+    let model = ResolvedMeltingCurve::try_new_exact(&source, query.query(), 0.0, 0.0).unwrap();
+    let curve = model.curve();
+    assert_eq!(
+        curve
+            .knots()
+            .iter()
+            .map(|k| k.temperature_k)
+            .collect::<Vec<_>>(),
+        [300.0, 350.0, 400.0, 400.0, 450.0, 500.0]
+    );
+    assert_eq!(model.receipts().len(), 14);
+    for receipt in model.receipts() {
+        source.claims().verify_receipt(receipt).unwrap();
+    }
+    assert_eq!(curve.material_card_identity(), source.content_hash());
+    assert_eq!(curve.source_receipts(), model.receipts());
+    // The density-only source breakpoints change rho(T), while the caloric law
+    // remains the original Cp integral on both sides of those knots.
+    for (h, temperature, density, cp) in [
+        (103_125.0, 375.0, 930.0, 1750.0),
+        (226_250.0, 425.0, 780.0, 2500.0),
+    ] {
+        let state = curve.state_at_specific_enthalpy(h).unwrap();
+        near(state.temperature_k(), temperature);
+        near(state.bulk_density_kg_m3(), density);
+        assert!(
+            (curve
+                .temperature_derivative_at_specific_enthalpy(h)
+                .unwrap()
+                - 1.0 / cp)
+                .abs()
+                < 2e-18
+        );
+    }
+    let mut other_pressure = Query::new();
+    for point in &mut other_pressure.points {
+        *point = point.clone().with("pressure", 200_000.0).unwrap();
+    }
+    let other =
+        ResolvedMeltingCurve::try_new_exact(&source, other_pressure.query(), 0.0, 0.0).unwrap();
+    assert_eq!(curve.knots(), other.curve().knots());
+    assert_ne!(curve.identity(), other.curve().identity());
+    assert!(
+        curve
+            .advance_specific_energy(other.curve().state_at_specific_enthalpy(0.0).unwrap(), 0.0)
+            .is_err()
+    );
+}
+
+#[test]
+fn exact_melting_admits_steep_source_cp_without_artificial_knot_budget() {
+    let source =
+        card_with_heat_capacities(Some(20_000.0), true, false, [1000.0, 1e6], [1e6, 2000.0]);
+    let query = Query::new();
+    assert!(ResolvedMeltingCurve::try_new(&source, query.query(), 0.0, 1e-6).is_err());
+    let model = ResolvedMeltingCurve::try_new_exact(&source, query.query(), 0.0, 0.0).unwrap();
+    assert_eq!(model.curve().knots().len(), 4);
+    for (h, temperature, cp) in [
+        (1000.0 * 50.0 + 0.5 * 9990.0 * 50.0 * 50.0, 350.0, 500_500.0),
+        (
+            50_070_000.0 + 1e6 * 50.0 - 0.5 * 9980.0 * 50.0 * 50.0,
+            450.0,
+            501_000.0,
+        ),
+    ] {
+        let state = model.curve().state_at_specific_enthalpy(h).unwrap();
+        near(state.temperature_k(), temperature);
+        near(
+            model
+                .curve()
+                .temperature_derivative_at_specific_enthalpy(h)
+                .unwrap()
+                * cp,
+            1.0,
+        );
+    }
+}
+
+#[test]
+fn exact_melting_retains_combined_source_knot_budget() {
+    let source = card_with_heat_capacities(Some(20_000.0), true, false, [1000.0; 2], [1000.0; 2]);
+    let query = Query::new();
+    let count = MAX_HEAT_CAPACITY_ENTHALPY_KNOTS / 2;
+    let knots = |start, n| {
+        (0..n)
+            .map(|i| (start + 100.0 * i as f64 / (n - 1) as f64, 1000.0))
+            .collect()
+    };
+    for extra in [0, 1] {
+        let source = with_branch_knots(
+            &source,
+            "specific-heat-capacity",
+            [knots(300.0, count), knots(400.0, count + extra)],
+        );
+        let result = ResolvedMeltingCurve::try_new_exact(&source, query.query(), 0.0, 0.0);
+        if extra == 0 {
+            assert_eq!(
+                result.unwrap().curve().knots().len(),
+                MAX_HEAT_CAPACITY_ENTHALPY_KNOTS
+            );
+        } else {
+            assert!(matches!(
+                result,
+                Err(PhaseStateError::InvalidCurve {
+                    what: "combined melting chart exceeds the generated-knot budget"
+                })
+            ));
+        }
+    }
+}
+
+#[test]
+fn exact_melting_fusion_rounding_allowance_is_independent_of_sensible_curvature() {
+    let query = Query::new();
+    let datum = 2.0_f64.powi(59);
+    for (latent, discrepancy) in [(100.0, 28.0_f64), (160.0, 32.0)] {
+        let source = card_with_heat_capacities(Some(latent), true, false, [1.28; 2], [1.28; 2]);
+        for allowance in [0.0, discrepancy.next_down()] {
+            assert!(matches!(
+                ResolvedMeltingCurve::try_new_exact(&source, query.query(), datum, allowance),
+                Err(PhaseStateError::InvalidCurve {
+                    what: "fusion energy rounding exceeds the declared enthalpy error allowance"
+                })
+            ));
+        }
+        let model = ResolvedMeltingCurve::try_new_exact(&source, query.query(), datum, discrepancy)
+            .unwrap();
+        let [lo, hi] = model.plateau_enthalpy_bounds_j_kg();
+        assert_eq!(hi - lo, 128.0);
+        assert_eq!(model.latent_heat_fusion_j_kg(), latent);
+        assert_eq!(((hi - lo) - latent).abs(), discrepancy);
+    }
+    let source = card(Some(20_000.0), true, false);
+    for allowance in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            ResolvedMeltingCurve::try_new_exact(&source, query.query(), 0.0, allowance).is_err()
+        );
+    }
+}
+
+#[test]
+fn exact_melting_never_extends_either_source_branch() {
+    let source = card(Some(20_000.0), true, false);
+    for (index, point) in [
+        (0, point(299.0, Some(0.0), 100_000.0)),
+        (3, point(501.0, Some(1.0), 100_000.0)),
+    ] {
+        let mut query = Query::new();
+        query.points[index] = point;
+        assert!(ResolvedMeltingCurve::try_new_exact(&source, query.query(), 0.0, 0.0).is_err());
+    }
+    let query = Query::new();
+    let model = ResolvedMeltingCurve::try_new_exact(&source, query.query(), 0.0, 0.0).unwrap();
+    for h in [-1.0, 470_001.0, f64::NAN] {
+        assert!(model.curve().state_at_specific_enthalpy(h).is_err());
+    }
+}
+
 #[test]
 fn coarse_melting_boundaries_preserve_exact_sensible_capacity_and_density() {
     let source = card_with_heat_capacities_and_densities(
@@ -629,12 +911,15 @@ fn g0_missing_density_fusion_and_discrete_capacity_refuse_without_defaults() {
         card(Some(-1.0), true, false),
     ] {
         assert!(ResolvedMeltingCurve::try_new(&source, q.query(), 0.0, 0.1).is_err());
+        assert!(ResolvedMeltingCurve::try_new_exact(&source, q.query(), 0.0, 0.1).is_err());
     }
     let source = card(Some(200_000.0), true, false);
     assert!(ResolvedMeltingCurve::try_new(&source, q.query(), 1e300, 0.1).is_err());
+    assert!(ResolvedMeltingCurve::try_new_exact(&source, q.query(), 1e300, 0.1).is_err());
     let mut wrong_units = Query::new();
     wrong_units.tm = PropertyKey::new("melting-point", fs_qty::Temperature::DIMS);
     assert!(ResolvedMeltingCurve::try_new(&source, wrong_units.query(), 0.0, 0.1).is_err());
+    assert!(ResolvedMeltingCurve::try_new_exact(&source, wrong_units.query(), 0.0, 0.1).is_err());
 }
 
 #[test]
@@ -734,6 +1019,7 @@ fn g0_transition_gaps_pressure_changes_and_phase_relabeling_refuse() {
         let mut query = Query::new();
         query.points[index] = replacement;
         assert!(ResolvedMeltingCurve::try_new(&source, query.query(), 0.0, 0.1).is_err());
+        assert!(ResolvedMeltingCurve::try_new_exact(&source, query.query(), 0.0, 0.1).is_err());
     }
     let mut query = Query::new();
     for index in [2, 3] {
@@ -744,4 +1030,5 @@ fn g0_transition_gaps_pressure_changes_and_phase_relabeling_refuse() {
     }
     // Every separate source query is admissible; their inconsistent pressure is not.
     assert!(ResolvedMeltingCurve::try_new(&source, query.query(), 0.0, 0.1).is_err());
+    assert!(ResolvedMeltingCurve::try_new_exact(&source, query.query(), 0.0, 0.1).is_err());
 }
