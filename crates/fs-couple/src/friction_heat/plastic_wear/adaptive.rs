@@ -13,7 +13,9 @@
 //! endpoint operations; neither is consumed by this march.
 
 use super::*;
+use fs_contact::normal_patch::FiniteGapPlasticState;
 use fs_thermal::enthalpy::backward_euler::BackwardEulerStep;
+use fs_tribo::DryTangentialState;
 
 /// Componentwise physical scales for the full-step/two-half-step difference.
 #[derive(Clone, Copy, Debug)]
@@ -60,15 +62,15 @@ pub struct PlasticSlidingMarchDefect {
     pub normalized: f64,
 }
 
-pub struct AcceptedPlasticSlidingHeatStep<P> {
+pub struct AcceptedPlasticSlidingHeatStep<P, M = PlasticSlidingHeatMechanics> {
     pub start_s: f64,
     pub end_s: f64,
     /// Original accepted source payload, mechanics, thermal and work receipts.
-    pub report: PlasticSlidingHeatReport<P>,
+    pub report: PlasticSlidingHeatReport<P, M>,
 }
 
-pub struct PlasticSlidingMarchReport<P> {
-    pub steps: Vec<AcceptedPlasticSlidingHeatStep<P>>,
+pub struct PlasticSlidingMarchReport<P, M = PlasticSlidingHeatMechanics> {
+    pub steps: Vec<AcceptedPlasticSlidingHeatStep<P, M>>,
     pub attempts: usize,
     pub rejected_attempts: usize,
     /// Includes coarse and rejected native solves, not just accepted work.
@@ -123,14 +125,14 @@ impl<'a, 't, P> PlasticSlidingMarchCandidate<'a, 't, P> {
 }
 
 #[derive(Debug)]
-pub enum PlasticSlidingMarchError<E = Infallible> {
+pub enum PlasticSlidingMarchError<E = Infallible, D = PlasticSlidingMarchDefect> {
     Invalid(&'static str),
     Step(PlasticSlidingHeatError<E>),
     AttemptBudget,
     AcceptedSubstepBudget,
     Unresolved {
         step_s: f64,
-        defect: PlasticSlidingMarchDefect,
+        defect: D,
     },
     Energy {
         contact_j: f64,
@@ -138,22 +140,27 @@ pub enum PlasticSlidingMarchError<E = Infallible> {
         combined_j: f64,
     },
 }
-impl<E> From<PlasticSlidingHeatError<E>> for PlasticSlidingMarchError<E> {
+impl<E, D> From<PlasticSlidingHeatError<E>> for PlasticSlidingMarchError<E, D> {
     fn from(error: PlasticSlidingHeatError<E>) -> Self {
         Self::Step(error)
     }
 }
-impl<E> From<DepositionError> for PlasticSlidingMarchError<E> {
+impl<E, D> From<DepositionError> for PlasticSlidingMarchError<E, D> {
     fn from(error: DepositionError) -> Self {
         Self::Step(PlasticSlidingHeatError::Thermal(error))
     }
 }
-impl<E: core::fmt::Debug> core::fmt::Display for PlasticSlidingMarchError<E> {
+impl<E: core::fmt::Debug, D: core::fmt::Debug> core::fmt::Display
+    for PlasticSlidingMarchError<E, D>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "adaptive hardness/sliding/heat: {self:?}")
     }
 }
-impl<E: std::error::Error + 'static> std::error::Error for PlasticSlidingMarchError<E> {}
+impl<E: std::error::Error + 'static, D: core::fmt::Debug> std::error::Error
+    for PlasticSlidingMarchError<E, D>
+{
+}
 
 impl<'a> PlasticSlidingHeatContact<'a> {
     /// Propose an entire constant-velocity span from immutable accepted owners.
@@ -179,218 +186,337 @@ impl<'a> PlasticSlidingHeatContact<'a> {
     ) -> Result<PlasticSlidingMarchCandidate<'a, 't, P>, PlasticSlidingMarchError<E>> {
         checkpoint(cx)?;
         self.admit_thermal(thermal)?;
-        let t = controls.tolerance;
-        if [
-            controls.initial_step_s,
-            controls.minimum_step_s,
-            controls.maximum_step_s,
-        ]
-        .iter()
-        .any(|v| !v.is_finite() || *v <= 0.0)
-            || controls.minimum_step_s > controls.initial_step_s
-            || controls.initial_step_s > controls.maximum_step_s
-            || controls.maximum_attempts == 0
-            || controls.maximum_accepted_substeps < 2
-            || [
-                t.cell_energy_j,
-                t.interface_temperature_k,
-                t.pressure_pa,
-                t.length_m,
-                t.work_j,
-                t.relative,
-                controls.energy_tolerance_j,
-            ]
-            .iter()
-            .any(|v| !v.is_finite() || *v < 0.0)
-            || !interface_temperature_guess_k.is_finite()
-            || interface_temperature_guess_k <= 0.0
-            || velocity_m_s.len() != self.state.tangential_states().len()
-            || velocity_m_s.iter().flatten().any(|v| !v.is_finite())
-            || thermal.cells().len() > step_controls.maximum_cells
-        {
-            return Err(PlasticSlidingMarchError::Invalid(
-                "finite prescribed velocities, ordered positive steps and bounded controls required",
-            ));
-        }
-        // Admit the WHOLE interval before allocating trials or querying sources.
-        // A pending endpoint event remains pending; an interior/start event refuses.
-        let _ = BackwardEulerStep::new(thermal, target_s, || checkpoint(cx))?;
-        let zero_energy = vec![0.0; thermal.cells().len()];
-        let mut accepted = self.clone();
-        let mut accepted_thermal = thermal.clone();
-        let mut interface_k = interface_temperature_guess_k;
-        let mut step_s = controls.initial_step_s;
-        let mut steps = Vec::new();
-        let mut attempts = 0usize;
-        let mut rejected = 0usize;
-        let mut trials = 0usize;
-        let mut maximum_defect: f64 = 0.0;
-        let mut totals = [Sum::default(); 13];
-        let mut residuals = [Sum::default(); 3];
-        while accepted.time_s < target_s {
-            checkpoint(cx)?;
-            if attempts >= controls.maximum_attempts {
-                return Err(PlasticSlidingMarchError::AttemptBudget);
-            }
-            if steps.len() > controls.maximum_accepted_substeps - 2 {
-                return Err(PlasticSlidingMarchError::AcceptedSubstepBudget);
-            }
-            let start_s = accepted.time_s;
-            let remaining_s = target_s - start_s;
-            let planned_s = step_s.min(remaining_s);
-            let end_s = if planned_s == remaining_s {
-                target_s
-            } else {
-                start_s + planned_s
-            };
-            let half_s = start_s + 0.5 * (end_s - start_s);
-            if half_s <= start_s || half_s >= end_s {
-                return Err(PlasticSlidingMarchError::Invalid(
-                    "time refinement is unrepresentable",
-                ));
-            }
-            attempts += 1;
-            let run = |contact: &PlasticSlidingHeatContact<'a>,
-                       state: &DepositionSimulation<'t>,
-                       end: f64,
-                       guess: f64| {
-                let dt = end - contact.time_s;
-                let mut motion = Vec::with_capacity(velocity_m_s.len());
-                for (i, velocity) in velocity_m_s.iter().enumerate() {
-                    if i % 64 == 0 {
-                        checkpoint(cx)?;
-                    }
-                    let released_increment_m =
-                        [finite(velocity[0] * dt)?, finite(velocity[1] * dt)?];
-                    motion.push(PlasticSlidingInput {
-                        released_increment_m,
-                        compliance_m_per_n: 0.0,
-                    });
-                }
-                contact.step_candidate(
-                    state,
-                    end,
-                    &motion,
-                    boundary,
-                    step_controls,
-                    &zero_energy,
-                    guess,
-                    &resolve,
-                    cx,
-                )
-            };
-            let coarse = run(&accepted, &accepted_thermal, end_s, interface_k)?;
-            let first = run(&accepted, &accepted_thermal, half_s, interface_k)?;
-            let fine = run(
-                first.contact(),
-                first.thermal(),
-                end_s,
-                first.report().heat.interface_temperature_k,
-            )?;
-            for count in [
-                coarse.report().trials,
-                first.report().trials,
-                fine.report().trials,
-            ] {
-                trials = trials
-                    .checked_add(count)
-                    .ok_or(PlasticSlidingMarchError::AttemptBudget)?;
-            }
-            let defect = compare(&accepted, &accepted_thermal, &coarse, &first, &fine, t, cx)?;
-            if defect.normalized > 1.0 {
-                rejected += 1;
-                let reduced_s = 0.5 * (end_s - start_s);
-                if reduced_s < controls.minimum_step_s {
-                    return Err(PlasticSlidingMarchError::Unresolved {
-                        step_s: end_s - start_s,
-                        defect,
-                    });
-                }
-                step_s = reduced_s;
-                continue;
-            }
-            maximum_defect = maximum_defect.max(defect.normalized);
-            let (_, _, first_report) = first.into_parts();
-            let (next, next_thermal, fine_report) = fine.into_parts();
-            interface_k = fine_report.heat.interface_temperature_k;
-            for (begin, end, report) in [
-                (start_s, half_s, first_report),
-                (half_s, end_s, fine_report),
-            ] {
-                let values = accounts(&report);
-                for (sum, value) in totals.iter_mut().zip(values) {
-                    sum.add(value)?;
-                }
-                // Incremental native storage avoids subtracting large baseline
-                // caloric energies or cumulative indentation work.
-                for value in [values[11], values[1], -values[5], -values[6], -values[7]] {
-                    residuals[0].add(value)?;
-                }
-                for value in [values[12], -values[0], -values[2], -values[3], -values[8]] {
-                    residuals[1].add(value)?;
-                }
-                for value in [
-                    values[11], values[12], values[4], -values[5], -values[6], -values[7],
-                    -values[0], -values[8],
-                ] {
-                    residuals[2].add(value)?;
-                }
-                steps.push(AcceptedPlasticSlidingHeatStep {
-                    start_s: begin,
-                    end_s: end,
-                    report,
-                });
-            }
-            accepted = next;
-            accepted_thermal = next_thermal;
-            if defect.normalized <= 0.25 {
-                step_s = (2.0 * (end_s - start_s)).min(controls.maximum_step_s);
-            } else {
-                step_s = end_s - start_s;
-            }
-        }
-        let [contact_j, thermal_j, combined_j] = residuals.map(|sum| sum.value);
-        if [contact_j, thermal_j, combined_j]
-            .iter()
-            .any(|v| v.abs() > controls.energy_tolerance_j)
-        {
-            return Err(PlasticSlidingMarchError::Energy {
-                contact_j,
-                thermal_j,
-                combined_j,
-            });
-        }
-        let v = totals.map(|sum| sum.value);
-        checkpoint(cx)?;
-        Ok(PlasticSlidingMarchCandidate {
-            contact: accepted,
-            thermal: accepted_thermal,
-            report: PlasticSlidingMarchReport {
-                steps,
-                attempts,
-                rejected_attempts: rejected,
-                thermal_trials: trials,
-                maximum_accepted_normalized_defect: maximum_defect,
-                frictional_work_j: v[0],
-                normal_plastic_work_j: v[1],
-                normal_plastic_heat_j: [v[2], v[3]],
-                nonthermal_plastic_work_j: v[4],
-                normal_work_j: v[5],
-                temperature_parameter_work_j: v[6],
-                wear_parameter_work_j: v[7],
-                other_heat_j: v[8],
-                body_heat_j: [v[9], v[10]],
-                contact_elastic_energy_change_j: v[11],
-                thermal_energy_change_j: v[12],
-                contact_energy_residual_j: contact_j,
-                thermal_energy_residual_j: thermal_j,
-                combined_energy_residual_j: combined_j,
+        let result = march(
+            self,
+            thermal,
+            target_s,
+            velocity_m_s,
+            self.state.tangential_states().len(),
+            step_controls.maximum_cells,
+            controls,
+            interface_temperature_guess_k,
+            |contact, state, end, motion, energy_guess, guess| {
+                contact
+                    .step_candidate(
+                        state,
+                        end,
+                        motion,
+                        boundary,
+                        step_controls,
+                        energy_guess,
+                        guess,
+                        &resolve,
+                        cx,
+                    )
+                    .map(|candidate| {
+                        let (contact, thermal, report) = candidate.into_parts();
+                        NativeStep {
+                            contact,
+                            thermal,
+                            report,
+                        }
+                    })
             },
+            |old, old_thermal, coarse, first, fine, tolerance, cx| {
+                let value = compare_common(
+                    ordinary_view(old),
+                    ordinary_view(&coarse.contact),
+                    ordinary_view(&fine.contact),
+                    old_thermal,
+                    coarse,
+                    first,
+                    fine,
+                    tolerance,
+                    accounts,
+                    cx,
+                )?;
+                Ok(MeasuredDefect {
+                    normalized: value.normalized,
+                    value,
+                })
+            },
+            accounts,
+            cx,
+        )?;
+        Ok(PlasticSlidingMarchCandidate {
+            contact: result.contact,
+            thermal: result.thermal,
+            report: result.report,
         })
     }
 }
 
+pub(super) struct NativeStep<'t, C, P, M> {
+    pub contact: C,
+    pub thermal: DepositionSimulation<'t>,
+    pub report: PlasticSlidingHeatReport<P, M>,
+}
+impl<'t, C, P, M> NativeStep<'t, C, P, M> {
+    fn contact(&self) -> &C {
+        &self.contact
+    }
+    fn thermal(&self) -> &DepositionSimulation<'t> {
+        &self.thermal
+    }
+    fn report(&self) -> &PlasticSlidingHeatReport<P, M> {
+        &self.report
+    }
+    fn into_parts(self) -> (C, DepositionSimulation<'t>, PlasticSlidingHeatReport<P, M>) {
+        (self.contact, self.thermal, self.report)
+    }
+}
+
+pub(super) struct MeasuredDefect<D> {
+    pub normalized: f64,
+    pub value: D,
+}
+
+pub(super) struct Marched<'t, C, P, M> {
+    pub contact: C,
+    pub thermal: DepositionSimulation<'t>,
+    pub report: PlasticSlidingMarchReport<P, M>,
+}
+
+/// The original controller, accounting order and budgets serve both concrete
+/// native owners. Callbacks only adapt their existing candidates and receipts.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(super) fn march<'t, C: Clone, P, E, M, D>(
+    initial: &C,
+    thermal: &DepositionSimulation<'t>,
+    target_s: f64,
+    velocity_m_s: &[[f64; 2]],
+    cell_count: usize,
+    maximum_cells: usize,
+    controls: PlasticSlidingMarchControls,
+    interface_temperature_guess_k: f64,
+    native: impl Fn(
+        &C,
+        &DepositionSimulation<'t>,
+        f64,
+        &[PlasticSlidingInput],
+        &[f64],
+        f64,
+    ) -> Result<NativeStep<'t, C, P, M>, PlasticSlidingHeatError<E>>,
+    compare: impl Fn(
+        &C,
+        &DepositionSimulation<'t>,
+        &NativeStep<'t, C, P, M>,
+        &NativeStep<'t, C, P, M>,
+        &NativeStep<'t, C, P, M>,
+        PlasticSlidingMarchTolerance,
+        &Cx<'_>,
+    ) -> Result<MeasuredDefect<D>, PlasticSlidingMarchError<E, D>>,
+    accounts: impl Fn(&PlasticSlidingHeatReport<P, M>) -> [f64; 13],
+    cx: &Cx<'_>,
+) -> Result<Marched<'t, C, P, M>, PlasticSlidingMarchError<E, D>> {
+    let t = controls.tolerance;
+    if [
+        controls.initial_step_s,
+        controls.minimum_step_s,
+        controls.maximum_step_s,
+    ]
+    .iter()
+    .any(|v| !v.is_finite() || *v <= 0.0)
+        || controls.minimum_step_s > controls.initial_step_s
+        || controls.initial_step_s > controls.maximum_step_s
+        || controls.maximum_attempts == 0
+        || controls.maximum_accepted_substeps < 2
+        || [
+            t.cell_energy_j,
+            t.interface_temperature_k,
+            t.pressure_pa,
+            t.length_m,
+            t.work_j,
+            t.relative,
+            controls.energy_tolerance_j,
+        ]
+        .iter()
+        .any(|v| !v.is_finite() || *v < 0.0)
+        || !interface_temperature_guess_k.is_finite()
+        || interface_temperature_guess_k <= 0.0
+        || velocity_m_s.len() != cell_count
+        || velocity_m_s.iter().flatten().any(|v| !v.is_finite())
+        || thermal.cells().len() > maximum_cells
+    {
+        return Err(PlasticSlidingMarchError::Invalid(
+            "finite prescribed velocities, ordered positive steps and bounded controls required",
+        ));
+    }
+    // Admit the WHOLE interval before allocating trials or querying sources.
+    // A pending endpoint event remains pending; an interior/start event refuses.
+    let _ = BackwardEulerStep::new(thermal, target_s, || checkpoint(cx))?;
+    let zero_energy = vec![0.0; thermal.cells().len()];
+    let mut accepted = initial.clone();
+    let mut accepted_thermal = thermal.clone();
+    let mut interface_k = interface_temperature_guess_k;
+    let mut step_s = controls.initial_step_s;
+    let mut steps = Vec::new();
+    let mut attempts = 0usize;
+    let mut rejected = 0usize;
+    let mut trials = 0usize;
+    let mut maximum_defect: f64 = 0.0;
+    let mut totals = [Sum::default(); 13];
+    let mut residuals = [Sum::default(); 3];
+    while accepted_thermal.time_s() < target_s {
+        checkpoint(cx)?;
+        if attempts >= controls.maximum_attempts {
+            return Err(PlasticSlidingMarchError::AttemptBudget);
+        }
+        if steps.len() > controls.maximum_accepted_substeps - 2 {
+            return Err(PlasticSlidingMarchError::AcceptedSubstepBudget);
+        }
+        let start_s = accepted_thermal.time_s();
+        let remaining_s = target_s - start_s;
+        let planned_s = step_s.min(remaining_s);
+        let end_s = if planned_s == remaining_s {
+            target_s
+        } else {
+            start_s + planned_s
+        };
+        let half_s = start_s + 0.5 * (end_s - start_s);
+        if half_s <= start_s || half_s >= end_s {
+            return Err(PlasticSlidingMarchError::Invalid(
+                "time refinement is unrepresentable",
+            ));
+        }
+        attempts += 1;
+        let run = |contact: &C, state: &DepositionSimulation<'t>, end: f64, guess: f64| {
+            let dt = end - state.time_s();
+            let mut motion = Vec::with_capacity(velocity_m_s.len());
+            for (i, velocity) in velocity_m_s.iter().enumerate() {
+                if i % 64 == 0 {
+                    checkpoint(cx)?;
+                }
+                let released_increment_m = [finite(velocity[0] * dt)?, finite(velocity[1] * dt)?];
+                motion.push(PlasticSlidingInput {
+                    released_increment_m,
+                    compliance_m_per_n: 0.0,
+                });
+            }
+            native(contact, state, end, &motion, &zero_energy, guess)
+        };
+        let coarse = run(&accepted, &accepted_thermal, end_s, interface_k)?;
+        let first = run(&accepted, &accepted_thermal, half_s, interface_k)?;
+        let fine = run(
+            first.contact(),
+            first.thermal(),
+            end_s,
+            first.report().heat.interface_temperature_k,
+        )?;
+        for count in [
+            coarse.report().trials,
+            first.report().trials,
+            fine.report().trials,
+        ] {
+            trials = trials
+                .checked_add(count)
+                .ok_or(PlasticSlidingMarchError::AttemptBudget)?;
+        }
+        let defect = compare(&accepted, &accepted_thermal, &coarse, &first, &fine, t, cx)?;
+        if defect.normalized > 1.0 {
+            rejected += 1;
+            let reduced_s = 0.5 * (end_s - start_s);
+            if reduced_s < controls.minimum_step_s {
+                return Err(PlasticSlidingMarchError::Unresolved {
+                    step_s: end_s - start_s,
+                    defect: defect.value,
+                });
+            }
+            step_s = reduced_s;
+            continue;
+        }
+        maximum_defect = maximum_defect.max(defect.normalized);
+        let (_, _, first_report) = first.into_parts();
+        let (next, next_thermal, fine_report) = fine.into_parts();
+        interface_k = fine_report.heat.interface_temperature_k;
+        for (begin, end, report) in [
+            (start_s, half_s, first_report),
+            (half_s, end_s, fine_report),
+        ] {
+            let values = accounts(&report);
+            for (sum, value) in totals.iter_mut().zip(values) {
+                sum.add(value)?;
+            }
+            // Incremental native storage avoids subtracting large baseline
+            // caloric energies or cumulative indentation work.
+            for value in [values[11], values[1], -values[5], -values[6], -values[7]] {
+                residuals[0].add(value)?;
+            }
+            for value in [values[12], -values[0], -values[2], -values[3], -values[8]] {
+                residuals[1].add(value)?;
+            }
+            for value in [
+                values[11], values[12], values[4], -values[5], -values[6], -values[7], -values[0],
+                -values[8],
+            ] {
+                residuals[2].add(value)?;
+            }
+            steps.push(AcceptedPlasticSlidingHeatStep {
+                start_s: begin,
+                end_s: end,
+                report,
+            });
+        }
+        accepted = next;
+        accepted_thermal = next_thermal;
+        if defect.normalized <= 0.25 {
+            step_s = (2.0 * (end_s - start_s)).min(controls.maximum_step_s);
+        } else {
+            step_s = end_s - start_s;
+        }
+    }
+    let [contact_j, thermal_j, combined_j] = residuals.map(|sum| sum.value);
+    if [contact_j, thermal_j, combined_j]
+        .iter()
+        .any(|v| v.abs() > controls.energy_tolerance_j)
+    {
+        return Err(PlasticSlidingMarchError::Energy {
+            contact_j,
+            thermal_j,
+            combined_j,
+        });
+    }
+    let v = totals.map(|sum| sum.value);
+    checkpoint(cx)?;
+    Ok(Marched {
+        contact: accepted,
+        thermal: accepted_thermal,
+        report: PlasticSlidingMarchReport {
+            steps,
+            attempts,
+            rejected_attempts: rejected,
+            thermal_trials: trials,
+            maximum_accepted_normalized_defect: maximum_defect,
+            frictional_work_j: v[0],
+            normal_plastic_work_j: v[1],
+            normal_plastic_heat_j: [v[2], v[3]],
+            nonthermal_plastic_work_j: v[4],
+            normal_work_j: v[5],
+            temperature_parameter_work_j: v[6],
+            wear_parameter_work_j: v[7],
+            other_heat_j: v[8],
+            body_heat_j: [v[9], v[10]],
+            contact_elastic_energy_change_j: v[11],
+            thermal_energy_change_j: v[12],
+            contact_energy_residual_j: contact_j,
+            thermal_energy_residual_j: thermal_j,
+            combined_energy_residual_j: combined_j,
+        },
+    })
+}
+
 fn accounts<P>(r: &PlasticSlidingHeatReport<P>) -> [f64; 13] {
+    account_values(
+        r,
+        r.mechanics.temperature_normal().elastic_energy_change_j
+            + r.mechanics.wear_normal().elastic_energy_change_j,
+    )
+}
+
+pub(super) fn account_values<P, M>(
+    r: &PlasticSlidingHeatReport<P, M>,
+    contact_elastic_energy_change_j: f64,
+) -> [f64; 13] {
     [
         r.frictional_work_j,
         r.normal_plastic_work_j,
@@ -403,8 +529,7 @@ fn accounts<P>(r: &PlasticSlidingHeatReport<P>) -> [f64; 13] {
         r.other_heat_j,
         r.heat.body_heat_j[0],
         r.heat.body_heat_j[1],
-        r.mechanics.temperature_normal().elastic_energy_change_j
-            + r.mechanics.wear_normal().elastic_energy_change_j,
+        contact_elastic_energy_change_j,
         r.heat.thermal.stored_energy_change_j,
     ]
 }
@@ -415,7 +540,7 @@ struct Sum {
     correction: f64,
 }
 impl Sum {
-    fn add<E>(&mut self, value: f64) -> Result<(), PlasticSlidingMarchError<E>> {
+    fn add<E, D>(&mut self, value: f64) -> Result<(), PlasticSlidingMarchError<E, D>> {
         let y = value - self.correction;
         let next = checked(self.value + y)?;
         self.correction = checked((next - self.value) - y)?;
@@ -423,7 +548,7 @@ impl Sum {
         Ok(())
     }
 }
-fn checked<E>(value: f64) -> Result<f64, PlasticSlidingMarchError<E>> {
+fn checked<E, D>(value: f64) -> Result<f64, PlasticSlidingMarchError<E, D>> {
     if value.is_finite() {
         Ok(value)
     } else {
@@ -433,29 +558,57 @@ fn checked<E>(value: f64) -> Result<f64, PlasticSlidingMarchError<E>> {
     }
 }
 
+pub(super) struct MechanicalState<'s> {
+    pub normal: &'s FiniteGapPlasticState,
+    pub recession_m: [&'s [f64]; 2],
+    pub tangential: &'s [DryTangentialState],
+}
+
+fn ordinary_view<'s>(contact: &'s PlasticSlidingHeatContact<'_>) -> MechanicalState<'s> {
+    MechanicalState {
+        normal: contact.state.wear_state().contact_state().contact_state(),
+        recession_m: contact.state.wear_state().recession_m(),
+        tangential: contact.state.tangential_states(),
+    }
+}
+
+pub(super) fn difference<E, D>(
+    a: f64,
+    b: f64,
+    origin: f64,
+    absolute: f64,
+    relative: f64,
+) -> Result<(f64, f64), PlasticSlidingMarchError<E, D>> {
+    let error = checked((a - b).abs())?;
+    let scale = checked(absolute + relative * (a - origin).abs().max((b - origin).abs()))?;
+    let normalized = if error == 0.0 {
+        0.0
+    } else if scale == 0.0 {
+        f64::INFINITY
+    } else {
+        error / scale
+    };
+    Ok((error, normalized))
+}
+
 #[allow(clippy::too_many_arguments)]
-fn compare<P, E>(
-    old: &PlasticSlidingHeatContact<'_>,
+pub(super) fn compare_common<C, P, E, M, D>(
+    old: MechanicalState<'_>,
+    coarse_state: MechanicalState<'_>,
+    fine_state: MechanicalState<'_>,
     old_thermal: &DepositionSimulation<'_>,
-    coarse: &PlasticSlidingHeatCandidate<'_, '_, P>,
-    first: &PlasticSlidingHeatCandidate<'_, '_, P>,
-    fine: &PlasticSlidingHeatCandidate<'_, '_, P>,
+    coarse: &NativeStep<'_, C, P, M>,
+    first: &NativeStep<'_, C, P, M>,
+    fine: &NativeStep<'_, C, P, M>,
     tolerance: PlasticSlidingMarchTolerance,
+    accounts: impl Fn(&PlasticSlidingHeatReport<P, M>) -> [f64; 13],
     cx: &Cx<'_>,
-) -> Result<PlasticSlidingMarchDefect, PlasticSlidingMarchError<E>> {
+) -> Result<PlasticSlidingMarchDefect, PlasticSlidingMarchError<E, D>> {
     let mut out = PlasticSlidingMarchDefect::default();
     let mut compare_value = |a: f64, b: f64, origin: f64, absolute: f64, relative: f64| {
-        let error = checked((a - b).abs())?;
-        let scale = checked(absolute + relative * (a - origin).abs().max((b - origin).abs()))?;
-        let normalized = if error == 0.0 {
-            0.0
-        } else if scale == 0.0 {
-            f64::INFINITY
-        } else {
-            error / scale
-        };
+        let (error, normalized) = difference(a, b, origin, absolute, relative)?;
         out.normalized = out.normalized.max(normalized);
-        Ok::<_, PlasticSlidingMarchError<E>>(error)
+        Ok::<_, PlasticSlidingMarchError<E, D>>(error)
     };
     for (i, (id, cell)) in old_thermal.cells().iter().enumerate() {
         if i % 64 == 0 {
@@ -478,19 +631,9 @@ fn compare<P, E>(
         tolerance.interface_temperature_k,
         0.0,
     )?;
-    let o = old.state.wear_state().contact_state().contact_state();
-    let a = coarse
-        .contact
-        .state
-        .wear_state()
-        .contact_state()
-        .contact_state();
-    let b = fine
-        .contact
-        .state
-        .wear_state()
-        .contact_state()
-        .contact_state();
+    let o = old.normal;
+    let a = coarse_state.normal;
+    let b = fine_state.normal;
     out.length_m = compare_value(
         a.approach_m(),
         b.approach_m(),
@@ -518,16 +661,16 @@ fn compare<P, E>(
         )?);
         for side in 0..2 {
             out.length_m = out.length_m.max(compare_value(
-                coarse.contact.state.wear_state().recession_m()[side][i],
-                fine.contact.state.wear_state().recession_m()[side][i],
-                old.state.wear_state().recession_m()[side][i],
+                coarse_state.recession_m[side][i],
+                fine_state.recession_m[side][i],
+                old.recession_m[side][i],
                 tolerance.length_m,
                 tolerance.relative,
             )?);
             out.length_m = out.length_m.max(compare_value(
-                coarse.contact.state.tangential_states()[i].slip_m()[side],
-                fine.contact.state.tangential_states()[i].slip_m()[side],
-                old.state.tangential_states()[i].slip_m()[side],
+                coarse_state.tangential[i].slip_m()[side],
+                fine_state.tangential[i].slip_m()[side],
+                old.tangential[i].slip_m()[side],
                 tolerance.length_m,
                 tolerance.relative,
             )?);

@@ -1192,14 +1192,14 @@ source/footprint/inventory admission, with no second contact or thermal law.
 
 Fixed and evolving active footprints retain their original geometry limits.
 Contact resistance is either explicitly fixed or resolved from the original
-interface source as described below. This owner does not add adaptive depth
-marching, lateral temperature fields or a reciprocal thermoelastic free-energy
-model. Thermal mass and geometry remain fixed within each interval, and
-cumulative removal uses the original receiving
-volumes. The regression definitions cover an independent coupled quadratic,
+interface source as described below. Adaptive native stepping is available for
+prescribed actual sliding velocities. This remains a uniform-face model without
+lateral temperature fields or a reciprocal thermoelastic free-energy model.
+Thermal mass and geometry remain fixed within each interval, and cumulative
+removal uses the original receiving volumes. The regression definitions cover
+an independent coupled quadratic,
 actual reversal under force and spring control, all three work accounts and
-transactional source, removal, iteration and cancellation refusal. Native Rust
-compilation and test execution were unavailable during this implementation.
+transactional source, removal, iteration and cancellation refusal.
 
 ### Original thermal resistance on depth-hardness contact
 
@@ -1223,6 +1223,40 @@ actual R(T,p) sampling through wear/export/reversal, zero-resistance replay and
 transactional source/support refusal. This remains a uniform-face model without
 resolved lateral constriction or third-body caloric storage.
 
+### Adaptive depth-hardness and finite-heat continuation
+
+`DepthSlidingHeatContact::march_prescribed_velocity_candidate` uses the same
+native full-step/two-half-step controller as ordinary plastic sliding. The
+velocity specifies actual local sliding with zero tangential compliance; the
+controller does not subdivide an ambiguous released-body displacement. Only the
+two complete native half-step candidates are accepted, preserving original
+source identities, both bodies' depth-hardness histories and optional sourced
+resistance. Coarse and rejected trials contribute no accepted work or wear.
+
+`DepthSlidingMarchControls` adds independent receiver-temperature and exposed
+hardness tolerances to the existing energy, pressure, length, interface
+temperature and work controls. The comparison checks each body's original
+H(T,z) at its actual recession as well as the effective pressure cap. Relative
+scales use changes from the accepted origin, so a large background temperature,
+hardness or history cannot hide a small unresolved increment. Temperature
+refresh, recession and exposed-cap normal work all enter the accepted span's
+contact, thermal and combined energy checks.
+
+Attempt, accepted-substep and minimum-step limits bound refinement. Native
+source, nonlinear, resistance and material-domain refusals remain authoritative;
+they are not hidden as ordinary accuracy rejections. Cancellation or late
+refusal returns no partial span. Interior thermal events require an explicit
+boundary, endpoint events remain pending and material export stays an explicit
+conservative operation between accepted spans.
+
+Four adaptive regression definitions compare accepted histories with native
+steps, refine against an independent continuous graded-hardness/finite-heat
+reference, exercise the body-temperature and hardness controls independently,
+and preserve predecessors on late refusal. A combined regression continues
+adaptive sourced-resistance contact through mass/enthalpy export and reversed
+actual sliding, retaining source pressure, route conductance, wear history and
+the finite capacity of the remaining bodies.
+
 ### Conservative export after depth-hardness sliding
 
 `DepthSlidingHeatContact::export_wear_candidate` removes newly worn material
@@ -1242,8 +1276,7 @@ the original contact owner. Geometry, inventory or cancellation refusal returns
 no partial state. Debris evolution and resolved remeshing remain outside this
 bounded heat-then-export approximation. Three additional regression definitions
 cover signed enthalpy, the next finite-capacity heat balance, repeated/prebinding
-export, the cumulative envelope and transactional refusal; native execution
-remains unverified because the runtime was unavailable.
+export, the cumulative envelope and transactional refusal.
 
 ## Static breakaway and kinetic sliding through joint heat and motion
 

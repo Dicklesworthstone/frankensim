@@ -6,6 +6,12 @@ mod removal;
 #[path = "depth/resistance.rs"]
 mod resistance;
 
+#[path = "depth/adaptive.rs"]
+mod adaptive;
+
+#[path = "depth/continuation.rs"]
+mod continuation;
+
 use super::*;
 use fs_contact::normal_patch::FiniteGapPlasticLinearSolver;
 use fs_contact::normal_patch::plastic_source::depth_wear::SourceDepthHardnessWear;

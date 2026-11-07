@@ -24,6 +24,9 @@ pub mod removal;
 /// Original resistance at actual final depth-contact pressure and temperature.
 pub mod resistance;
 
+/// Adaptive native heat/wear steps with per-body temperature and hardness control.
+pub mod adaptive;
+
 use fs_contact::normal_patch::plastic_source::wear::sliding::hardness::temperature::DepthSlidingThermalRefresh;
 use fs_contact::normal_patch::plastic_source::wear::sliding::hardness::{
     HardnessSlidingAdvance, HardnessSlidingContinuation, HardnessSlidingControl,
