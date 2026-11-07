@@ -111,10 +111,15 @@ impl ResolvedBrittleCrackBand {
                 property: format!("brittle temperature:{temperature_axis}"),
                 source,
             })?;
-        let mut next = Self::try_from_material(
-            self.material().at_query_point(card, &query)?,
-            self.law().settings(),
-        )?;
+        let material = self.material().at_query_point(card, &query)?;
+        let mut next = match self.law().viscosity() {
+            Some(viscosity) => Self::try_from_viscous_material(
+                material,
+                self.law().settings(),
+                viscosity.maximum_rate_m_s(),
+            ),
+            None => Self::try_from_material(material, self.law().settings()),
+        }?;
         if self.law.elastic.poisson != next.law.elastic.poisson {
             return Err(BrittleSourceError::Invalid(
                 "brittle thermal transfer cannot change the Poisson modal projection",
@@ -150,6 +155,8 @@ impl ResolvedBrittleCrackBand {
             || a.material() != b.material()
             || a.axis_quantities() != b.axis_quantities()
             || self.law().settings() != next.law().settings()
+            || self.law().viscosity().map(|v| v.maximum_rate_m_s())
+                != next.law().viscosity().map(|v| v.maximum_rate_m_s())
         {
             return Err(BrittleSourceError::Invalid(
                 "brittle temperature successor changed original source, geometry or model controls",

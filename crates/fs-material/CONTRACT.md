@@ -1,5 +1,31 @@
 # fs-material — CONTRACT
 
+## Physical rate response of original bulk fracture bonds
+
+`brittle::rate` projects the original timed cohesive law through the existing
+fixed-plane crack band. Explicit fracture-plane viscosities in Pa s/m supply
+surviving-bond traction, consistent endpoint and path-mean tangents, and the
+analytic viscous work integral. Intrinsic fracture energy, elastic storage and
+viscous loss remain separate; no second damage history or numerical relaxation
+law is introduced. Complete failure removes bond viscosity while retaining the
+independent compression response. `stress_at_rate` observes actual accepted
+strain rate without advancing history; midpoint secant stress is not silently
+reported as an instantaneous endpoint stress.
+
+`brittle::source::rate` retains the complete original strength, fracture,
+viscosity and optional reference-density receipts. The two viscosity properties
+resolve from the same card and external conditions with explicit interface
+units and a declared rate bound. Coefficient-temperature continuation retains
+that selection, original claims and intrinsic history. Bulk Pa s coefficients,
+rate-conditioned frozen values and elastic-only initiation of a viscous history
+refuse. Thermal eigenstrain still requires its own timed coupled extension.
+
+Coefficients are not inferred by dividing bulk damping by band width. Intrinsic
+Gc excludes the additional viscous loss, and arbitrary-width objectivity of
+total viscous fracture work is not claimed. Focused regressions cover exact
+work, subdivision, endpoint and path derivatives, rotation, rate observations,
+release after rupture, source units, provenance and temperature continuation.
+
 ## Resistive deposition with a finite nonisothermal gas
 
 `sublimation::gas::chamber::coating::resistance` couples existing two-temperature

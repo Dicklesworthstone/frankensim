@@ -324,3 +324,6 @@ mod dynamics;
 
 #[path = "brittle_source/expansion.rs"]
 mod expansion;
+
+#[path = "brittle_source/rate.rs"]
+mod rate;

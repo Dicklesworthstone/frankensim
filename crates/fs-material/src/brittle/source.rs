@@ -11,13 +11,17 @@
 //! [`ResolvedBrittleCrackBand::at_temperature`] and history-transfer methods
 //! retain the original source claims, damage and parameter-work accounts.
 //! Resolving a second temperature alone never authorizes replacing a law under
-//! an accepted history. Rate dependence needs a separate history/work owner.
+//! an accepted history. [`rate`] explicitly selects physical fracture-plane
+//! viscosity and the native timed work owner; intrinsic Gc excludes that loss.
 
 /// Original-source tensile onset and elastic-to-crack-band handoff.
 pub mod initiation;
 
 /// Original density and fracture coefficients for reference-mass dynamics.
 pub mod dynamics;
+
+/// Physical fracture-plane viscosity with the original intrinsic fracture data.
+pub mod rate;
 
 /// Source-integrated thermal eigenstrain with the original fracture history.
 pub mod expansion;

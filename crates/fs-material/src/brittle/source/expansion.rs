@@ -159,6 +159,7 @@ impl ResolvedThermalBrittle {
         if band.material() != self.band.material()
             || band.law().elastic() != self.band.law().elastic()
             || band.law().parameters() != self.band.law().parameters()
+            || band.law().viscosity() != self.band.law().viscosity()
         {
             return Err(BrittleSourceError::Invalid(
                 "thermal crack-plane preparation must retain the complete original source",
@@ -352,6 +353,11 @@ impl ResolvedThermalBrittle {
     }
 
     fn check_binding(&self) -> Result<(), BrittleSourceError> {
+        if self.band.law().viscosity().is_some() {
+            return Err(BrittleSourceError::Invalid(
+                "brittle thermal eigenstrain needs a timed coupled rate law before using bond viscosity",
+            ));
+        }
         let material = self.band.material();
         let current = self.expansion.current().resolved();
         coefficient(

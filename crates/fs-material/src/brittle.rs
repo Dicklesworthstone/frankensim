@@ -26,7 +26,9 @@
 //! reclosure is not a geometric contact or nonpenetration algorithm. The plane
 //! does not rotate or nucleate automatically; no multiple-crack interaction,
 //! arbitrary-mesh objectivity, fragment topology, remeshing/state transfer,
-//! friction, crushing, rate evolution or experimental qualification is claimed.
+//! friction, crushing or experimental qualification is claimed. [`rate`] adds
+//! explicitly supplied fracture-plane viscosity through the original timed
+//! cohesive owner, keeping intrinsic fracture work separate from viscous loss.
 //! Ordinary strain updates hold coefficients fixed; [`temperature`] transfers
 //! damage and energy through explicit thermal coefficient changes at fixed
 //! Poisson ratio and geometry. The caller resolves load reversals/crack events.
@@ -58,6 +60,9 @@ pub mod initiation;
 
 /// Exact path-mean stress and its native derivative for work-conjugate dynamics.
 pub mod path;
+
+/// Physical fracture-plane viscosity on the original irreversible crack band.
+pub mod rate;
 
 /// Traction-free admission of completely failed material planes for topology release.
 pub mod release;
@@ -324,11 +329,7 @@ impl BrittleCrackBand {
         step: CohesiveStep<'a>,
     ) -> Result<BrittleStep<'a>, BrittleError> {
         let width = self.settings.band_width_m;
-        let mut stress = self.parallel_stress(strain);
-        for (mode, traction) in self.modes.iter().zip(step.traction_pa) {
-            for i in 0..6 { stress[i] += mode[i]*traction; }
-        }
-        finite_voigt(&stress)?;
+        let stress = self.stress_from_modes(strain, step.traction_pa)?;
         let branch_tangent = self.tangent_from_modes(step.branch_tangent_pa_m)?;
         let classical = step.tangent_pa_m.is_some();
         let parallel_work = self.parallel_modes.iter().zip(self.parallel_moduli)
@@ -375,6 +376,17 @@ impl BrittleCrackBand {
             for i in 0..6 { stress[i] += mode[i]*value; }
         }
         stress
+    }
+
+    // The equilibrium, timed and instantaneous-rate observers share the same
+    // original work-conjugate projection; only the native traction differs.
+    fn stress_from_modes(&self, strain: &Voigt, traction: [f64; 3]) -> Result<Voigt, BrittleError> {
+        let mut stress = self.parallel_stress(strain);
+        for (mode, value) in self.modes.iter().zip(traction) {
+            for i in 0..6 { stress[i] += mode[i]*value; }
+        }
+        finite_voigt(&stress)?;
+        Ok(stress)
     }
 
     fn parallel_energy(&self, strain: &Voigt) -> f64 {
@@ -466,7 +478,8 @@ impl<'a> SmallStrainLaw for BrittleSmallStrain<'a> {
             ValidityDomain::unconstrained().with("strain-magnitude", 0.0, self.owner.settings.maximum_strain),
             vec![
                 "no automatic nucleation, evolving crack plane, fragments or geometric contact".into(),
-                "no arbitrary-mesh objectivity, crushing, friction or rate dependence; thermal transfer is an explicit fixed-projection step".into(),
+                "no arbitrary-mesh objectivity, crushing or friction; thermal transfer is an explicit fixed-projection step".into(),
+                "physical fracture-plane viscosity requires the explicit timed adapter; rate-dependent intrinsic strength is not inferred".into(),
                 "fracture-energy matching is not experimental material qualification".into(),
             ],
             // No calibration establishes a finite model-form discrepancy band.

@@ -115,6 +115,37 @@ impl CohesiveRateStep<'_> {
 }
 
 impl<'a> CohesivePoint<'a> {
+    /// Observe total traction at this accepted jump and an actual instantaneous
+    /// jump rate [m/s], without changing damage, history or energy accounts.
+    ///
+    /// This is distinct from `trial_over_time`'s endpoint traction, whose rate
+    /// is the interval secant. Original viscosity, surviving-bond integrity and
+    /// the declared rate bound are reused directly. After accepted complete
+    /// failure there is no viscous traction or adhesive rate bound. Nonfinite
+    /// rates always refuse, including on an inactive dashpot.
+    pub fn traction_at_rate(&self, jump_rate_m_s: [f64; 3]) -> Result<[f64; 3], CohesiveError> {
+        for value in jump_rate_m_s {
+            finite(value)?;
+        }
+        let mut traction = self.traction_pa();
+        if let Some(viscosity) = self.law.viscosity.filter(|_| !self.failed()) {
+            if norm(jump_rate_m_s)? > viscosity.maximum_rate_m_s {
+                return Err(CohesiveError::Invalid(
+                    "cohesive jump rate exceeds declared applicability",
+                ));
+            }
+            let intact = integrity(self);
+            let eta = viscosity.coefficients();
+            for i in 0..3 {
+                traction[i] = finite(traction[i] + intact * finite(eta[i] * jump_rate_m_s[i])?)?;
+            }
+        }
+        for value in traction {
+            finite(value)?;
+        }
+        Ok(traction)
+    }
+
     /// Advance a straight jump path at constant rate over an explicit positive dt.
     /// No dashpot memory is invented; the accepted point retains only the original
     /// separation and damage. Its `traction_pa()` remains the equilibrium traction.

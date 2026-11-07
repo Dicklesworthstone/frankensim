@@ -75,6 +75,11 @@ impl ResolvedBrittleCrackBand {
         &self,
         settings: TensileInitiationSettings,
     ) -> Result<ResolvedTensileInitiator<'_>, ResolvedTensileInitiationError> {
+        if self.law().viscosity().is_some() {
+            return Err(BrittleSourceError::Invalid(
+                "elastic-only tensile initiation cannot seed an unrepresented viscous prehistory",
+            ).into());
+        }
         let native = TensileInitiator::new(
             self.law().elastic(),
             self.law().parameters().tensile_strength_pa,
@@ -191,8 +196,10 @@ fn resolve_plane_band(
     let mut settings = source.law().settings();
     settings.normal = normal;
     settings.band_width_m = band_width_m;
-    Ok(ResolvedBrittleCrackBand::try_from_material(
-        source.material().clone(),
-        settings,
-    )?)
+    Ok(match source.law().viscosity() {
+        Some(viscosity) => ResolvedBrittleCrackBand::try_from_viscous_material(
+            source.material().clone(), settings, viscosity.maximum_rate_m_s(),
+        ),
+        None => ResolvedBrittleCrackBand::try_from_material(source.material().clone(), settings),
+    }?)
 }
