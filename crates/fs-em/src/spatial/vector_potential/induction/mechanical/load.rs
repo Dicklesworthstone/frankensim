@@ -72,8 +72,10 @@ impl SpatialLorentzLoads {
         }
         let force = placement.transform_vector(vector(self.force_n))?;
         let moment = placement.transform_vector(vector(self.torque_nm))?;
-        let reference = placement.transform_point(vector(self.reference_m))?;
-        let arm = reference - vector(moment_origin_m);
+        // Subtract a common receiving-frame translation before adding the
+        // local reference, which may be smaller than a global coordinate ulp.
+        let offset = placement.transform_vector(vector(self.reference_m))?;
+        let arm = (placement.translation() - vector(moment_origin_m)) + offset;
         let wrench = Wrench::new(moment + arm.cross(force), force);
         for value in wrench.to_array() {
             finite(value)?;

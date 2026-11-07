@@ -504,19 +504,19 @@ pub(super) fn apply(
     let torque = placement
         .transform_vector(Vec3::new(sum[0], sum[1], sum[2]))
         .map_err(frame_error)?;
-    let reference = placement
-        .transform_point(Vec3::new(
+    let offset = placement
+        .transform_vector(Vec3::new(
             shell.reference_m[0],
             shell.reference_m[1],
             shell.reference_m[2],
         ))
         .map_err(frame_error)?;
-    let shift = Vec3::new(
-        reference.x - moment_origin_m[0],
-        reference.y - moment_origin_m[1],
-        reference.z - moment_origin_m[2],
-    )
-    .cross(force);
+    // Keep the small reference arm when the mechanical frame and moment
+    // origin share a large translation.
+    let arm = (placement.translation()
+        - Vec3::new(moment_origin_m[0], moment_origin_m[1], moment_origin_m[2]))
+        + offset;
+    let shift = arm.cross(force);
     let result = Wrench::new(
         Vec3::new(torque.x + shift.x, torque.y + shift.y, torque.z + shift.z),
         force,

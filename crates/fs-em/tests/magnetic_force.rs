@@ -309,6 +309,36 @@ fn mechanical_frame_rotation_and_moment_origin_preserve_the_actual_wrench() {
     {
         near(got, expected);
     }
+
+    // The global placement need not be close to zero. The extruded conductor
+    // still has its physical half-depth lever arm about the placed mesh origin,
+    // even when that arm is smaller than an ulp of the global translation.
+    let far = [2.0_f64.powi(60), -2.0_f64.powi(61), 2.0_f64.powi(62)];
+    for (x, y) in [
+        ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+        ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
+    ] {
+        let at_zero = field
+            .maxwell_wrench(
+                &enclosed,
+                &PlanarFrame::new([0.0; 3], x, y).unwrap(),
+                [0.0; 3],
+                force_limits(),
+                &mut || false,
+            )
+            .unwrap();
+        let at_far = field
+            .maxwell_wrench(
+                &enclosed,
+                &PlanarFrame::new(far, x, y).unwrap(),
+                far,
+                force_limits(),
+                &mut || false,
+            )
+            .unwrap();
+        assert!(at_zero.torque.norm() > 1e-3);
+        assert_eq!(at_far.to_array(), at_zero.to_array());
+    }
 }
 
 #[test]

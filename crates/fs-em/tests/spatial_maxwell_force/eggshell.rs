@@ -38,6 +38,48 @@ fn applied(problem: &SpatialMagnetostatics) -> SpatialMagneticBoundary {
 }
 
 #[test]
+fn common_translation_preserves_surface_and_distributed_magnetic_torque() {
+    let problem = magnet(8);
+    let field = problem
+        .solve(&applied(&problem), controls(), &mut || false)
+        .unwrap();
+    let enclosed = region(&problem, 1.0);
+    let shell = problem
+        .prepare_eggshell(
+            &weights(problem.positions_m(), true),
+            force_limits(),
+            &mut || false,
+        )
+        .unwrap();
+    let far = Vec3::new(2.0_f64.powi(60), -2.0_f64.powi(61), 2.0_f64.powi(62));
+    let placement = Se3::from_parts(So3::identity(), far).unwrap();
+    let origin = [far.x, far.y, far.z];
+    let surface = |pose, origin| {
+        field
+            .maxwell_wrench(&enclosed, pose, origin, force_limits(), &mut || false)
+            .unwrap()
+    };
+    let distributed = |pose, origin| {
+        field
+            .eggshell_wrench(&shell, pose, origin, &mut || false)
+            .unwrap()
+    };
+    for (local, translated) in [
+        (
+            surface(&Se3::identity(), [0.0; 3]),
+            surface(&placement, origin),
+        ),
+        (
+            distributed(&Se3::identity(), [0.0; 3]),
+            distributed(&placement, origin),
+        ),
+    ] {
+        assert!(local.force.x > 0.1 && local.torque.y > 0.1);
+        assert_eq!(translated.to_array(), local.to_array());
+    }
+}
+
+#[test]
 fn distributed_cuboid_force_and_torque_improve_raw_accuracy_and_refine_without_extrapolation() {
     let expected = Wrench::new(Vec3::new(0.0, 0.4, 0.0), Vec3::new(0.7, 0.0, 0.0));
     let mut previous = None;

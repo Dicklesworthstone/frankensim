@@ -820,6 +820,8 @@ receiving frame and moment origin, ready for native `fs-mbd` inputs. Selected
 cell IDs are canonicalized; duplicate, nonconducting, over-budget and cancelled
 selections refuse without changing state. Near-source moment reduction and
 compensated accumulation limit avoidable translation and cancellation error.
+Receiving-frame origin subtraction precedes addition of the rotated local
+reference, preserving its lever arm under a large common frame translation.
 The extraction is linear in mesh vertices plus selected element work, with
 sorting and binary source lookup only for selected cells; wrench queries are O(1).
 
@@ -1724,7 +1726,10 @@ recovery, interfacial averaging or error certificate is implied.
 Actual extrusion thickness multiplies the surface load. Geometric triangle
 orientation determines outward normals for either clockwise or
 counterclockwise complexes. Force and torque use the caller's `PlanarFrame`;
-the torque origin is explicit in that same frame. The returned `fs_ga::Wrench`
+the torque origin is explicit in that same frame. Force and first moment are
+reduced about a nearby mesh reference before one final frame/origin transform.
+Common frame/origin translation is subtracted before adding the local reference,
+so it cannot erase the contour or half-depth lever arms. The returned `fs_ga::Wrench`
 is the canonical native articulated-dynamics input, not another force type or
 mechanical integrator. End-face contributions cancel in the invariant planar
 model. End fringing and distributed magnetostriction remain unsupported; the
@@ -2799,6 +2804,8 @@ nonlinear/recoil interfaces and mesh boundaries refuse. Saturated and remanent
 targets may be enclosed inside a linear collar. Canonical Se3 placement and an
 explicit receiving-frame torque origin return the native Wrench with a
 canonical compensated reduction, work budgets and cancellation.
+The final origin shift subtracts common frame/origin translation before adding
+the rotated nearby mesh reference, retaining small physical moment arms.
 
 The five focused force tests cover independent nonzero cuboid refinement on
 two surfaces, saturated-core symmetry and interface refusal, frame/origin
@@ -2870,6 +2877,8 @@ Both functionals integrate the discrete constant cell fields exactly without
 smoothing interfaces, inferring a stress inside magnetic matter, or requiring
 another field solve. Deterministic compensated reduction returns the canonical
 `fs_ga::Wrench`, transformed through the caller's SE(3) frame and moment origin.
+As in the surface integral, the final origin shift preserves the nearby mesh
+reference under common frame/origin translation.
 
 Scalar linear/recoil, scalar reversible nonlinear, current-driven linear/recoil
 vector, and current-driven nonlinear vector owners share this same sealed

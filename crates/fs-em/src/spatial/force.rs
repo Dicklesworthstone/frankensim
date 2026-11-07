@@ -267,14 +267,14 @@ pub(super) fn integrate(
     let torque = placement
         .transform_vector(Vec3::new(sum[0], sum[1], sum[2]))
         .map_err(frame_error)?;
-    let point = placement
-        .transform_point(Vec3::new(reference[0], reference[1], reference[2]))
+    let offset = placement
+        .transform_vector(Vec3::new(reference[0], reference[1], reference[2]))
         .map_err(frame_error)?;
-    let arm = Vec3::new(
-        point.x - moment_origin_m[0],
-        point.y - moment_origin_m[1],
-        point.z - moment_origin_m[2],
-    );
+    // Cancel a common frame/origin translation before adding the mesh offset:
+    // an absolute transformed point can no longer represent that small arm.
+    let arm = (placement.translation()
+        - Vec3::new(moment_origin_m[0], moment_origin_m[1], moment_origin_m[2]))
+        + offset;
     let shift = arm.cross(force);
     let result = Wrench::new(
         Vec3::new(torque.x + shift.x, torque.y + shift.y, torque.z + shift.z),

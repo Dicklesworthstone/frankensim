@@ -235,6 +235,33 @@ fn nearby_moment_reference_retains_small_torque_under_large_translation() {
 }
 
 #[test]
+fn receiving_frame_translation_preserves_lorentz_torque_and_rigid_work() {
+    // A nonzero local reference catches loss while mapping the source into a
+    // distant mechanical frame; a zero reference would hide that defect.
+    let local_offset = Vec3::new(0.25, -0.5, 0.75);
+    let positions = POSITIONS.map(|p| {
+        let p = vector(p) + local_offset;
+        [p.x, p.y, p.z]
+    });
+    let loads = fixture(&positions);
+    let local = loads.wrench(&Se3::identity(), [0.0; 3]).unwrap();
+    let far = Vec3::new(2.0_f64.powi(60), -2.0_f64.powi(61), 2.0_f64.powi(62));
+    let placement = Se3::from_parts(fs_ga::So3::identity(), far).unwrap();
+    let translated = loads.wrench(&placement, [far.x, far.y, far.z]).unwrap();
+    assert_eq!(translated.to_array(), local.to_array());
+
+    let twist = Twist::new(Vec3::new(0.7, -0.2, 0.4), Vec3::new(-0.5, 0.3, 1.1));
+    let velocities = positions.map(|p| {
+        let v = twist.linear + twist.angular.cross(vector(p));
+        [v.x, v.y, v.z]
+    });
+    near(
+        translated.pairing(twist),
+        loads.power_w(&velocities, &mut || false).unwrap(),
+    );
+}
+
+#[test]
 fn extraction_limits_cancellation_and_invalid_values_refuse_atomically() {
     let cell = || {
         [CellLoad {

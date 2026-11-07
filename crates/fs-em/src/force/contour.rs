@@ -140,6 +140,11 @@ pub(crate) fn integrate_traction(
             }
         }
     }
+    // Reduce about a nearby point in mesh coordinates. Forming every global
+    // center first can round away physical lever arms under a large common
+    // translation, and shifting opposing tractions separately amplifies error.
+    let vertex = mesh.vertices()[trace.edges[0].oriented_vertices[0] as usize];
+    let reference = [vertex[0], vertex[1], 0.5 * thickness_m];
     let mut sum = [0.0; 6];
     let mut correction = [0.0; 6];
     for edge in &trace.edges {
@@ -165,22 +170,17 @@ pub(crate) fn integrate_traction(
             ));
         }
         let local_force = traction(inner, outer, edge.oriented_vertices, normal_area)?;
-        let force = frame.vector_to_global([local_force[0], local_force[1], 0.0]);
-        let center = frame.point_to_global([
-            0.5 * a[0] + 0.5 * b[0],
-            0.5 * a[1] + 0.5 * b[1],
-            0.5 * thickness_m,
-        ]);
-        let arm = [0, 1, 2].map(|i| center[i] - moment_origin_m[i]);
-        let torque = [
-            arm[1].mul_add(force[2], -arm[2] * force[1]),
-            arm[2].mul_add(force[0], -arm[0] * force[2]),
-            arm[0].mul_add(force[1], -arm[1] * force[0]),
-        ];
+        let force = [local_force[0], local_force[1], 0.0];
+        let arm = Vec3::new(
+            0.5 * (a[0] - reference[0]) + 0.5 * (b[0] - reference[0]),
+            0.5 * (a[1] - reference[1]) + 0.5 * (b[1] - reference[1]),
+            0.0,
+        );
+        let moment = arm.cross(Vec3::new(force[0], force[1], force[2]));
+        let torque = [moment.x, moment.y, moment.z];
         if !force
             .iter()
-            .chain(&center)
-            .chain(&arm)
+            .chain(&[arm.x, arm.y, arm.z])
             .chain(&torque)
             .all(|v| v.is_finite())
         {
@@ -202,10 +202,24 @@ pub(crate) fn integrate_traction(
         }
     }
     poll(cancelled)?;
-    Ok(Wrench::new(
-        Vec3::new(sum[0], sum[1], sum[2]),
-        Vec3::new(sum[3], sum[4], sum[5]),
-    ))
+    let force = frame.vector_to_global([sum[3], sum[4], sum[5]]);
+    let torque = frame.vector_to_global([sum[0], sum[1], sum[2]]);
+    let offset = frame.vector_to_global(reference);
+    let translation = frame.point_to_global([0.0; 3]);
+    // Subtract the receiving origin before adding the small mesh offset.
+    let arm = [0, 1, 2].map(|i| (translation[i] - moment_origin_m[i]) + offset[i]);
+    let force = Vec3::new(force[0], force[1], force[2]);
+    let torque = Vec3::new(torque[0], torque[1], torque[2]);
+    let result = Wrench::new(
+        torque + Vec3::new(arm[0], arm[1], arm[2]).cross(force),
+        force,
+    );
+    if !result.to_array().iter().all(|v| v.is_finite()) {
+        return Err(ContourError::Invalid(
+            "integrated Maxwell load is not representable",
+        ));
+    }
+    Ok(result)
 }
 
 pub(crate) fn triangle_orientation(mesh: &TriComplex2, cell: usize) -> Result<f64, ContourError> {
