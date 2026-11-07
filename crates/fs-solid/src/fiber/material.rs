@@ -28,6 +28,8 @@ use fs_material::plastic::chaboche::source::{
     chaboche_branch_requirements, chaboche_requirements,
 };
 use fs_material::plastic::reduction::{UniaxialJ2, UniaxialTabulated, UniaxialVoce};
+use fs_material::plastic::tabulated::rate::axial::UniaxialTabulatedOverstress;
+use fs_material::plastic::tabulated::rate::source::ResolvedTabulatedOverstressJ2;
 use fs_material::plastic::source::{
     HardeningPropertyBasis, J2SourceError, ResolvedJ2Plasticity, j2_requirements,
 };
@@ -159,6 +161,7 @@ impl FiberMaterial {
             FiberLaw::J2(law) => Self::j2(law, density_kg_m3),
             FiberLaw::Voce(law) => Self::voce(law, density_kg_m3),
             FiberLaw::Tabulated(law) => Self::tabulated(law, density_kg_m3),
+            FiberLaw::TabulatedOverstress(law) => Self::tabulated_overstress(law, density_kg_m3),
             FiberLaw::Chaboche(law) => Self::chaboche(law, density_kg_m3),
             FiberLaw::ChabocheBranches(law) => {
                 require(
@@ -340,6 +343,54 @@ impl FiberMaterial {
             source: None,
             chaboche_branch_properties: None,
         })
+    }
+
+    /// Native measured-curve Perzyna flow with explicitly authored reference density.
+    /// A source-bound axial law retains its original curve/kinetic receipts; the
+    /// separately supplied density is not promoted to source evidence.
+    pub fn tabulated_overstress(
+        law: UniaxialTabulatedOverstress,
+        density_kg_m3: f64,
+    ) -> Result<Self> {
+        require(
+            positive(density_kg_m3),
+            "tabulated overstress fiber density must be finite and positive",
+        )?;
+        Ok(Self {
+            law: FiberLaw::TabulatedOverstress(law),
+            density_kg_m3,
+            source: None,
+            chaboche_branch_properties: None,
+        })
+    }
+
+    /// Adopt reference density from the same original fixed-condition bundle
+    /// as the elastic, measured hardening, Prager and Perzyna coefficients.
+    /// Add this density requirement before resolving the complete source; no
+    /// independently queried or numerically matching foreign density is accepted.
+    pub fn tabulated_overstress_from_source(
+        source: ResolvedTabulatedOverstressJ2,
+        density_property: &str,
+    ) -> Result<Self> {
+        let density = source.material().property(density_property).ok_or_else(|| {
+            MaterialStatePointError::InvalidRequirement {
+                property: density_property.into(),
+                reason: "tabulated overstress fiber density must belong to the original source bundle",
+            }
+        })?;
+        require(
+            density.requirement().dims() == Density::DIMS
+                && density.is_static_at_fixed_external_conditions()
+                && positive(density.value_si()),
+            "tabulated overstress fiber density must be positive static mass per reference volume",
+        )?;
+        let density_kg_m3 = density.value_si();
+        let original = source.material().clone();
+        let mut material = Self::tabulated_overstress(
+            UniaxialTabulatedOverstress::from_source(source)?, density_kg_m3,
+        )?;
+        material.source = Some(original);
+        Ok(material)
     }
 
     /// Resolve density and the original J2 coefficients at one fixed source

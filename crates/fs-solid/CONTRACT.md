@@ -11566,3 +11566,13 @@ displacement-solid and membrane domains, not alloy formability calibration.
 Scoped Rust syntax, whitespace and independent scalar arithmetic were checked;
 native Cargo regression execution remains unverified in the available shared
 build environment.
+
+## Physical-time tabulated malleability in fibers and frames
+
+`FiberMaterial::tabulated_overstress` and its source-bound constructor retain the native free-sided tabulated Perzyna law, independent Prager history and actual physical duration. The source-bound route admits density from the same original material bundle. Immutable measured knots and source evidence are shared when the duration changes; the original elastic, hardening, kinetic and source calibration cannot change underneath accepted history.
+
+The existing physical-time frame owner now admits this fiber law for quasistatic load/hold intervals and backward-Euler dynamics. Every equilibrium trial reuses the same accepted axial history and interval; a successful interval publishes the complete frame atomically. Loaded members can continue flowing, held members can relax stress, and bending members retain permanent curvature on release. Unsupported measured-strain continuation, source substitution, inconsistent durations and cancellation refuse without modifying accepted history. Clockless static, modal, Newmark and standalone pushover routes reject the timed law.
+
+`FrameInelasticEnergy` preserves the existing creep and yield-offset fields and adds a separate physical overstress channel. Native hardening remains recoverable storage. Physical dissipation is the sum of yield, creep and overstress work exactly once; material and inertial integration losses remain numerical and never become caloric heat. Existing creep conversions retain their previous values and semantics.
+
+Four structural regressions cover original-source force loading across measured knots, variable-duration hold relaxation and release; moment-driven bending and retained curvature; power-law inertial motion with both lumped and consistent reference mass; and clock, source, domain and cancellation refusals with usable retained history. The fixtures use independent scalar constitutive and momentum/work equations. Rust syntax, formatting, whitespace and those independent arithmetic checks passed. Native Cargo regression execution remains unverified in the resource-constrained shared environment. These tests establish model behavior only; they do not supply empirical alloy or forming calibration.

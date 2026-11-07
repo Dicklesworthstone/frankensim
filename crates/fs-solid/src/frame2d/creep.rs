@@ -8,7 +8,7 @@
 //!
 //! This checked path admits linear geometry, stationary supports and Norton or
 //! joint Norton/J2, with optional independent resistance recovery and sourced
-//! thermal-expansion wrappers. Temperature
+//! thermal-expansion wrappers, or measured-curve Perzyna plastic flow. Temperature
 //! is prescribed through original source-bound laws between intervals; this
 //! owner reports reciprocal heat but does not itself solve a caloric field.
 //! Nodal rotations and the sum of absolute quadrature curvature are bounded;
@@ -33,13 +33,19 @@ use fs_material::creep::thermal::uniaxial::recovery::{
     UniaxialThermalRecoveringNortonJ2State, UniaxialThermalRecoveringNortonState,
 };
 use fs_material::creep::uniaxial::{UniaxialNorton, UniaxialNortonState};
-use fs_material::creep::{CreepEnergy, CreepError, CreepTolerances, NortonCreep};
+use fs_material::creep::{CreepError, CreepTolerances, NortonCreep};
+use fs_material::plastic::energy::EnergyError;
+use fs_material::plastic::reduction::UniaxialJ2State;
+use fs_material::plastic::tabulated::rate::axial::UniaxialTabulatedOverstress;
 use fs_material::state_point::ResolvedMaterialStatePoint;
 use std::cell::Cell;
 
 /// One physical creep interval with original reference inertia and checked work.
 pub mod dynamics;
 pub use dynamics::{FrameCreepDynamicEnergy, FrameCreepDynamicStep};
+/// Original tabulated Perzyna work, kept distinct from yield and creep heat.
+pub mod overstress;
+pub use overstress::FrameInelasticEnergy;
 
 /// Independent physical-unit gates and work bound for one native frame step.
 #[derive(Clone, Copy, Debug)]
@@ -57,6 +63,7 @@ pub enum FrameCreepError {
     Invalid(&'static str),
     Mechanical(SolidError),
     Material(CreepError),
+    Plastic(EnergyError),
     Cancelled,
     Equilibrium {
         dof: usize,
@@ -82,7 +89,7 @@ pub struct FrameFiberCreepEnergy {
     pub section: usize,
     pub fiber: usize,
     pub reference_volume_m3: f64,
-    pub energy: CreepEnergy,
+    pub energy: FrameInelasticEnergy,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -93,6 +100,8 @@ pub struct FrameCreepEnergy {
     pub support_work_j: f64,
     pub creep_dissipation_j: f64,
     pub plastic_dissipation_j: f64,
+    /// Physical viscous plastic work, distinct from yield-offset heat and creep.
+    pub overstress_dissipation_j: f64,
     pub physical_dissipation_j: f64,
     /// Change in T times mechanical entropy, separate from free-energy storage.
     pub thermoelastic_storage_change_j: f64,
@@ -151,6 +160,7 @@ fn energy_gate(residual: f64, tolerance: f64) -> Result<(), FrameCreepError> {
 /// Borrow the original law and history; this dispatch adds no constitutive solve.
 #[derive(Clone, Copy)]
 enum CreepPoint<'a> {
+    TabulatedOverstress(&'a UniaxialTabulatedOverstress, &'a UniaxialJ2State),
     Norton(&'a UniaxialNorton, &'a UniaxialNortonState),
     RecoveringNorton(&'a UniaxialRecoveringNorton, &'a UniaxialRecoveringNortonState),
     NortonJ2(&'a UniaxialNortonJ2, &'a UniaxialNortonJ2State),
@@ -163,6 +173,9 @@ enum CreepPoint<'a> {
 impl<'a> CreepPoint<'a> {
     fn new(law: &'a FiberLaw, state: &'a FiberState) -> Result<Self, FrameCreepError> {
         match (law, state) {
+            (FiberLaw::TabulatedOverstress(law), FiberState::TabulatedOverstress(state)) => {
+                Ok(Self::TabulatedOverstress(law, state))
+            }
             (FiberLaw::Norton(law), FiberState::Norton(state)) => Ok(Self::Norton(law, state)),
             (FiberLaw::RecoveringNorton(law), FiberState::RecoveringNorton(state)) => {
                 Ok(Self::RecoveringNorton(law, state))
@@ -190,8 +203,8 @@ impl<'a> CreepPoint<'a> {
             )),
         }
     }
-    fn kinetics(self) -> &'a NortonCreep {
-        match self {
+    fn kinetics(self) -> Result<&'a NortonCreep, FrameCreepError> {
+        Ok(match self {
             Self::Norton(law, _) => law.backbone(),
             Self::RecoveringNorton(law, _) => law.kinetics(),
             Self::NortonJ2(law, _) => law.backbone().creep(),
@@ -200,10 +213,26 @@ impl<'a> CreepPoint<'a> {
             Self::ThermalNortonJ2(law, _) => law.kinetics(),
             Self::ThermalRecoveringNorton(law, _) => law.kinetics(),
             Self::ThermalRecoveringNortonJ2(law, _) => law.kinetics(),
+            Self::TabulatedOverstress(..) => return Err(FrameCreepError::Invalid(
+                "Norton and Perzyna physical histories cannot be interchanged",
+            )),
+        })
+    }
+    fn elastic(self) -> Result<&'a fs_material::IsotropicElastic, FrameCreepError> {
+        match self {
+            Self::TabulatedOverstress(law, _) => Ok(&law.backbone().backbone().backbone().elastic),
+            _ => Ok(self.kinetics()?.elastic()),
+        }
+    }
+    fn duration_s(self) -> Result<f64, FrameCreepError> {
+        match self {
+            Self::TabulatedOverstress(law, _) => Ok(law.duration_s()),
+            _ => Ok(self.kinetics()?.duration_s()),
         }
     }
     fn material(self) -> Option<&'a ResolvedMaterialStatePoint> {
         match self {
+            Self::TabulatedOverstress(law, _) => law.material(),
             Self::Norton(law, _) => law.material(),
             Self::RecoveringNorton(law, _) => law.material(),
             Self::NortonJ2(law, _) => law.material(),
@@ -221,11 +250,12 @@ impl<'a> CreepPoint<'a> {
             Self::ThermalRecoveringNorton(law, _) => Some(law.expansion_material()),
             Self::ThermalRecoveringNortonJ2(law, _) => Some(law.expansion_material()),
             Self::Norton(..) | Self::RecoveringNorton(..) | Self::NortonJ2(..)
-                | Self::RecoveringNortonJ2(..) => None,
+                | Self::RecoveringNortonJ2(..) | Self::TabulatedOverstress(..) => None,
         }
     }
     fn hardening(self) -> Option<f64> {
         match self {
+            Self::TabulatedOverstress(..) => None,
             Self::Norton(..) | Self::RecoveringNorton(..) | Self::ThermalNorton(..)
                 | Self::ThermalRecoveringNorton(..) => None,
             Self::NortonJ2(law, _) => Some(law.backbone().plastic().hardening),
@@ -236,6 +266,7 @@ impl<'a> CreepPoint<'a> {
     }
     fn yield_stress(self) -> Option<f64> {
         match self {
+            Self::TabulatedOverstress(law, _) => Some(law.backbone().backbone().backbone().yield_stress),
             Self::Norton(..) | Self::RecoveringNorton(..) | Self::ThermalNorton(..)
                 | Self::ThermalRecoveringNorton(..) => None,
             Self::NortonJ2(law, _) => Some(law.backbone().plastic().yield_stress),
@@ -255,6 +286,8 @@ impl<'a> CreepPoint<'a> {
     }
     fn tensor_strain(self, strain: f64) -> Result<(), FrameCreepError> {
         match self {
+            Self::TabulatedOverstress(law, state) => return law.tensor_strain(strain, state)
+                .map(|_| ()).map_err(FrameCreepError::Plastic),
             Self::Norton(law, state) => law.tensor_strain(strain, state),
             Self::RecoveringNorton(law, state) => law.tensor_strain(strain, state),
             Self::NortonJ2(law, state) => law.tensor_strain(strain, state),
@@ -273,8 +306,13 @@ impl<'a> CreepPoint<'a> {
         old_strain: f64,
         new_strain: f64,
         tolerances: CreepTolerances,
-    ) -> Result<CreepEnergy, FrameCreepError> {
-        let modulus = self.kinetics().elastic().youngs;
+    ) -> Result<FrameInelasticEnergy, FrameCreepError> {
+        if let (Self::TabulatedOverstress(law, state), Self::TabulatedOverstress(_, accepted)) =
+            (self, committed)
+        {
+            return overstress::audit(law, state, accepted, old_strain, new_strain, tolerances);
+        }
+        let modulus = self.elastic()?.youngs;
         let close = |a: &[f64; 6], b: &[f64; 6], pa: f64, pb: f64| {
             a.iter()
                 .zip(b)
@@ -359,7 +397,7 @@ impl<'a> CreepPoint<'a> {
             agrees,
             "published native history disagrees with the checked constitutive step",
         )?;
-        Ok(energy)
+        Ok(energy.into())
     }
 }
 
@@ -369,29 +407,37 @@ impl Frame2d {
     pub(super) fn require_untimed_materials(&self) -> Result<(), SolidError> {
         let has_creep = self.elements.iter().any(|element| {
             element.sections.iter().any(|section| match section {
-                SectionModel::Fiber(section) => section
-                    .fibers
-                    .iter()
-                    .any(|fiber| matches!(
-                        &fiber.law,
-                        FiberLaw::Norton(_)
-                            | FiberLaw::RecoveringNorton(_)
-                            | FiberLaw::NortonJ2(_)
-                            | FiberLaw::RecoveringNortonJ2(_)
-                            | FiberLaw::ThermalNorton(_)
-                            | FiberLaw::ThermalNortonJ2(_)
-                            | FiberLaw::ThermalRecoveringNorton(_)
-                            | FiberLaw::ThermalRecoveringNortonJ2(_)
-                    )),
+                SectionModel::Fiber(section) => section.fibers.iter()
+                    .any(|fiber| fiber.law.requires_physical_duration()),
                 SectionModel::Elastic { .. } => false,
             })
         });
         if has_creep {
             Err(SolidError::MaterialRefused {
-                what: "timed creep fibers require solve_creep_step or advance_creep_backward_euler with an explicit physical interval; untimed static/modal and Newmark paths do not own creep history".into(),
+                what: "timed inelastic fibers require solve_creep_step or advance_creep_backward_euler with an explicit physical interval; untimed static/modal and Newmark paths do not own their histories".into(),
             })
         } else {
             Ok(())
+        }
+    }
+
+    /// Read the retained Perzyna history and original source without consuming
+    /// another physical interval to observe an accepted overstressed endpoint.
+    pub fn tabulated_overstress_fiber(
+        &self,
+        element: usize,
+        section: usize,
+        fiber: usize,
+    ) -> Option<(&UniaxialTabulatedOverstress, &UniaxialJ2State)> {
+        let section = match self.elements.get(element)?.sections.get(section)? {
+            SectionModel::Fiber(section) => section,
+            SectionModel::Elastic { .. } => return None,
+        };
+        match (&section.fibers.get(fiber)?.law, section.states.get(fiber)?) {
+            (FiberLaw::TabulatedOverstress(law), FiberState::TabulatedOverstress(state)) => {
+                Some((law, state))
+            }
+            _ => None,
         }
     }
 
@@ -544,7 +590,9 @@ impl Frame2d {
     /// laws have no source coordinate. Reference geometry and inertia stay fixed.
     /// All native Norton/thermal/joint variants retain their original history
     /// family; recovering laws also retain their recovery parameters.
-    /// Sourced yield stress may follow temperature; authored yield stays fixed.
+    /// Sourced Norton yield stress may follow temperature; authored yield stays fixed.
+    /// Tabulated Perzyna fibers may change only duration, retaining their complete
+    /// original curve, kinetics, receipts and fixed external source coordinates.
     pub fn with_creep_laws<L: Clone + Into<FiberLaw>>(
         &self,
         laws: &[L],
@@ -574,71 +622,79 @@ impl Frame2d {
                         .clone()
                         .into();
                     let law = CreepPoint::new(&next_law, state)?;
-                    require(
-                        old.kinetics().elastic() == law.kinetics().elastic()
-                            && old.kinetics().parameters() == law.kinetics().parameters()
-                            && old.kinetics().strain_hardening()
-                                == law.kinetics().strain_hardening()
-                            && old.recovery_parameters() == law.recovery_parameters()
-                            && old.hardening() == law.hardening(),
-                        "creep history cannot silently change elastic/hardening storage or kinetic parameters",
-                    )?;
-                    match (old.material(), law.material()) {
-                        (None, None) => require(
-                            old.yield_stress() == law.yield_stress(),
-                            "changing authored yield requires an explicit source evolution owner",
-                        )?,
-                        (Some(a), Some(b)) => {
-                            require(
-                                a.card_identity() == b.card_identity()
-                                    && a.axis_quantities() == b.axis_quantities()
-                                    && a.properties().len() == b.properties().len()
-                                    && a.properties().iter().zip(b.properties()).all(|(a, b)| {
-                                        a.requirement() == b.requirement()
-                                            && a.answer().receipt.selected
-                                                == b.answer().receipt.selected
-                                    })
-                                    && a.query_point().len() == b.query_point().len()
-                                    && a.query_point().iter().zip(b.query_point()).all(
-                                        |((ka, va), (kb, vb))| {
-                                            ka == kb
-                                                && if ka == temperature_axis {
-                                                    *va == old.kinetics().temperature_k()
-                                                        && *vb == law.kinetics().temperature_k()
-                                                } else {
-                                                    va.to_bits() == vb.to_bits()
-                                                }
-                                        },
-                                    )
-                                    && a.state_coordinate(temperature_axis).is_some(),
-                                "creep refresh must retain the original card, claims and fixed source context",
-                            )?;
+                    if let (CreepPoint::TabulatedOverstress(a, _), CreepPoint::TabulatedOverstress(b, _)) =
+                        (old, law)
+                    {
+                        overstress::admit_rebind(a, b)?;
+                    } else {
+                        let old_kinetics = old.kinetics()?;
+                        let kinetics = law.kinetics()?;
+                        require(
+                            old_kinetics.elastic() == kinetics.elastic()
+                                && old_kinetics.parameters() == kinetics.parameters()
+                                && old_kinetics.strain_hardening()
+                                    == kinetics.strain_hardening()
+                                && old.recovery_parameters() == law.recovery_parameters()
+                                && old.hardening() == law.hardening(),
+                            "creep history cannot silently change elastic/hardening storage or kinetic parameters",
+                        )?;
+                        match (old.material(), law.material()) {
+                            (None, None) => require(
+                                old.yield_stress() == law.yield_stress(),
+                                "changing authored yield requires an explicit source evolution owner",
+                            )?,
+                            (Some(a), Some(b)) => {
+                                require(
+                                    a.card_identity() == b.card_identity()
+                                        && a.axis_quantities() == b.axis_quantities()
+                                        && a.properties().len() == b.properties().len()
+                                        && a.properties().iter().zip(b.properties()).all(|(a, b)| {
+                                            a.requirement() == b.requirement()
+                                                && a.answer().receipt.selected
+                                                    == b.answer().receipt.selected
+                                        })
+                                        && a.query_point().len() == b.query_point().len()
+                                        && a.query_point().iter().zip(b.query_point()).all(
+                                            |((ka, va), (kb, vb))| {
+                                                ka == kb
+                                                    && if ka == temperature_axis {
+                                                        *va == old_kinetics.temperature_k()
+                                                            && *vb == kinetics.temperature_k()
+                                                    } else {
+                                                        va.to_bits() == vb.to_bits()
+                                                    }
+                                            },
+                                        )
+                                        && a.state_coordinate(temperature_axis).is_some(),
+                                    "creep refresh must retain the original card, claims and fixed source context",
+                                )?;
+                            }
+                            _ => {
+                                return Err(FrameCreepError::Invalid(
+                                    "authored and sourced histories cannot be interchanged",
+                                ));
+                            }
                         }
-                        _ => {
-                            return Err(FrameCreepError::Invalid(
-                                "authored and sourced histories cannot be interchanged",
-                            ));
-                        }
-                    }
-                    match (old.expansion_material(), law.expansion_material()) {
-                        (None, None) => {}
-                        (Some(a), Some(b)) => {
-                            require(
-                                a.card_identity() == b.card_identity()
-                                    && a.axis_quantities() == b.axis_quantities()
-                                    && a.properties().len() == b.properties().len()
-                                    && a.properties().iter().zip(b.properties()).all(|(a, b)| {
-                                        a.requirement() == b.requirement()
-                                            && a.answer().receipt.selected
-                                                == b.answer().receipt.selected
-                                    }),
-                                "thermal creep refresh must retain its original expansion source",
-                            )?;
-                        }
-                        _ => {
-                            return Err(FrameCreepError::Invalid(
-                                "thermal and zero-expansion creep histories cannot be interchanged",
-                            ));
+                        match (old.expansion_material(), law.expansion_material()) {
+                            (None, None) => {}
+                            (Some(a), Some(b)) => {
+                                require(
+                                    a.card_identity() == b.card_identity()
+                                        && a.axis_quantities() == b.axis_quantities()
+                                        && a.properties().len() == b.properties().len()
+                                        && a.properties().iter().zip(b.properties()).all(|(a, b)| {
+                                            a.requirement() == b.requirement()
+                                                && a.answer().receipt.selected
+                                                    == b.answer().receipt.selected
+                                        }),
+                                    "thermal creep refresh must retain its original expansion source",
+                                )?;
+                            }
+                            _ => {
+                                return Err(FrameCreepError::Invalid(
+                                    "thermal and zero-expansion creep histories cannot be interchanged",
+                                ));
+                            }
                         }
                     }
                     law.tensor_strain(e.commit.d[p].0 - fiber.y * e.commit.d[p].1)?;
@@ -807,7 +863,7 @@ impl Frame2d {
                         positive(fiber.area) && fiber.y.is_finite(),
                         "invalid fiber area or position",
                     )?;
-                    let dt = law.kinetics().duration_s();
+                    let dt = law.duration_s()?;
                     if let Some(previous) = duration {
                         require(
                             dt == previous,
@@ -818,7 +874,7 @@ impl Frame2d {
                     }
                     let strain = e.commit.d[p].0 - fiber.y * e.commit.d[p].1;
                     law.tensor_strain(strain)?;
-                    self.admit_creep_geometry(e, law.kinetics().elastic().strain_limit)?;
+                    self.admit_creep_geometry(e, law.elastic()?.strain_limit)?;
                 }
             }
         }
@@ -847,7 +903,7 @@ impl Frame2d {
                 for (f, (fiber, state)) in section.fibers.iter().zip(&section.states).enumerate() {
                     poll(cancelled)?;
                     let law = CreepPoint::new(&fiber.law, state)?;
-                    next.admit_creep_geometry(new, law.kinetics().elastic().strain_limit)?;
+                    next.admit_creep_geometry(new, law.elastic()?.strain_limit)?;
                     let old_strain = old.commit.d[p].0 - fiber.y * old.commit.d[p].1;
                     let new_strain = new.commit.d[p].0 - fiber.y * new.commit.d[p].1;
                     let SectionModel::Fiber(committed) = &new.sections[p] else {
@@ -866,6 +922,7 @@ impl Frame2d {
                     energy.final_stored_j += volume * account.final_stored_j_m3;
                     energy.creep_dissipation_j += volume * account.creep_dissipation_j_m3;
                     energy.plastic_dissipation_j += volume * account.plastic_dissipation_j_m3;
+                    energy.overstress_dissipation_j += volume * account.overstress_dissipation_j_m3;
                     energy.physical_dissipation_j += volume * account.physical_dissipation_j_m3;
                     energy.thermoelastic_storage_change_j +=
                         volume * account.thermoelastic_storage_change_j_m3;

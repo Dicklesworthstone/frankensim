@@ -56,6 +56,13 @@ impl ForceBasedElement {
     /// # Errors
     /// [`SolidError::NewtonStalled`] if a section refuses to converge.
     pub fn tip_deflection_under_shear(&mut self, v: f64) -> Result<f64, SolidError> {
+        if self.sections.iter().any(|section| {
+            section.fibers.iter().any(|fiber| fiber.law.requires_physical_duration())
+        }) {
+            return Err(SolidError::MaterialRefused {
+                what: "timed fiber laws require the physical-interval Frame2d member solver and its work audit; clockless pushover cannot advance their histories".into(),
+            });
+        }
         let l = self.length;
         let mut defl = 0.0;
         let mut proposed = Vec::with_capacity(self.xi.len());
