@@ -16,148 +16,69 @@
 
 use super::{AffineThermalFiniteJ2, FiniteJ2ThermalError, finite};
 use crate::plastic::finite::FiniteJ2Error;
-use crate::plastic::tabulated::{HardeningPoint, TabulatedError, TabulatedHardening};
-use std::sync::Arc;
+use crate::plastic::tabulated::thermal::AffineTabulatedHardening;
+use crate::plastic::tabulated::{TabulatedError, TabulatedHardening};
 
-/// One reference curve and an explicitly supplied derivative for each ordinate.
-/// All stresses and derivatives use the native original-volume Kirchhoff basis.
+/// One reference curve and explicitly supplied derivatives on the original
+/// Kirchhoff/original-volume basis. Shared table arithmetic carries no stress
+/// conversion; this native finite wrapper retains its original interpretation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FiniteJ2ThermalTabulatedHardening {
-    prepared: Arc<Prepared>,
-}
-
-#[derive(Debug, PartialEq)]
-struct Prepared {
-    reference: TabulatedHardening,
-    yield_slopes_pa_k: Vec<f64>,
-    slope_gradients_pa_k: Vec<f64>,
-    storage_slopes_j_m3_k: Vec<f64>,
-    maximum_absolute_storage_slope_j_m3_k: f64,
+    affine: AffineTabulatedHardening,
 }
 
 impl FiniteJ2ThermalTabulatedHardening {
-    /// Prepare the signed derivative of hardening storage. The reference curve
-    /// supplies fixed strain knots; every absolute yield ordinate needs its own
-    /// finite derivative. The receiving thermal family admits the temperature
-    /// span, original initial-yield coefficients and native history bounds.
+    /// Prepare the signed derivative of hardening storage. The receiving finite
+    /// family admits its temperature span, initial yield and native history bounds.
     pub fn new(
         reference: TabulatedHardening,
         yield_stress_slopes_pa_k: Vec<f64>,
     ) -> Result<Self, FiniteJ2ThermalError> {
-        let points = reference.points();
-        if yield_stress_slopes_pa_k.len() != points.len()
-            || yield_stress_slopes_pa_k.iter().any(|s| !s.is_finite())
-        {
-            return Err(FiniteJ2ThermalError::Parameters(
-                "each fixed plastic-strain knot requires one finite absolute-yield temperature derivative",
-            ));
-        }
-        let origin = yield_stress_slopes_pa_k[0];
-        let mut gradients = Vec::with_capacity(points.len() - 1);
-        let mut storage = Vec::with_capacity(points.len());
-        let mut maximum = 0.0_f64;
-        storage.push(0.0);
-        for index in 0..points.len() - 1 {
-            let width = points[index + 1].plastic_strain - points[index].plastic_strain;
-            let lower = finite(yield_stress_slopes_pa_k[index] - origin)?;
-            let upper = finite(yield_stress_slopes_pa_k[index + 1] - origin)?;
-            let rise =
-                finite(yield_stress_slopes_pa_k[index + 1] - yield_stress_slopes_pa_k[index])?;
-            let gradient = finite(rise / width)?;
-            if rise != 0.0 && gradient == 0.0 {
-                return Err(FiniteJ2ThermalError::Numerical(
-                    "tabulated temperature derivative is below representable slope resolution",
-                ));
-            }
-            let start = storage[index];
-            let end = finite(start + finite((0.5 * lower + 0.5 * upper) * width)?)?;
-            maximum = maximum.max(end.abs());
-            // Signed primitives may have an interior extremum even when their
-            // knot values are small. Admit that extremum, not only endpoints.
-            if (lower < 0.0 && upper > 0.0) || (lower > 0.0 && upper < 0.0) {
-                let distance = -lower / gradient;
-                let extremum = finite(start + finite((0.5 * lower) * distance)?)?;
-                maximum = maximum.max(extremum.abs());
-            }
-            gradients.push(gradient);
-            storage.push(end);
-        }
-        Ok(Self {
-            prepared: Arc::new(Prepared {
-                reference,
-                yield_slopes_pa_k: yield_stress_slopes_pa_k,
-                slope_gradients_pa_k: gradients,
-                storage_slopes_j_m3_k: storage,
-                maximum_absolute_storage_slope_j_m3_k: maximum,
-            }),
-        })
+        let affine = AffineTabulatedHardening::new(reference, yield_stress_slopes_pa_k).map_err(
+            |error| match error {
+                TabulatedError::Parameters(reason) => FiniteJ2ThermalError::Parameters(reason),
+                error => native_error(error),
+            },
+        )?;
+        Ok(Self { affine })
     }
 
     /// Exact immutable curve at the receiving family's reference temperature.
     pub fn reference(&self) -> &TabulatedHardening {
-        &self.prepared.reference
+        self.affine.reference()
     }
 
     /// Explicit derivatives of the original absolute yield ordinates [Pa/K].
     pub fn yield_stress_slopes_pa_k(&self) -> &[f64] {
-        &self.prepared.yield_slopes_pa_k
+        self.affine.yield_stress_slopes_pa_k()
     }
 
-    /// `partial_T integral_0^alpha (Y(p,T)-Y(0,T)) dp` at fixed history.
-    /// The derivative is signed and independent of temperature. Its negative
-    /// contributes to mechanical entropy; no material-point allocation occurs.
+    /// Fixed-history derivative of the original Kirchhoff hardening storage.
+    /// Its negative contributes to entropy; no material-point allocation occurs.
     pub fn hardening_energy_temperature_derivative_j_m3_k(
         &self,
         alpha: f64,
     ) -> Result<f64, FiniteJ2ThermalError> {
-        let data = &self.prepared;
-        let points = data.reference.points();
-        let maximum = data.reference.maximum_plastic_strain();
-        if !alpha.is_finite() || alpha < 0.0 || alpha > maximum {
-            return Err(FiniteJ2Error::Tabulated(TabulatedError::Domain {
-                plastic_strain: alpha,
-                maximum,
-            })
-            .into());
-        }
-        if alpha == maximum {
-            return Ok(data.storage_slopes_j_m3_k[points.len() - 1]);
-        }
-        let index = points.partition_point(|point| point.plastic_strain <= alpha) - 1;
-        let width = alpha - points[index].plastic_strain;
-        finite(
-            data.storage_slopes_j_m3_k[index]
-                + ((data.yield_slopes_pa_k[index] - data.yield_slopes_pa_k[0])
-                    + 0.5 * data.slope_gradients_pa_k[index] * width)
-                    * width,
-        )
+        self.affine
+            .hardening_energy_temperature_derivative_j_m3_k(alpha)
+            .map_err(native_error)
     }
 
-    /// Prepare one endpoint outside constitutive iterations. At the reference
-    /// temperature, preserve the original curve's prepared arithmetic exactly.
+    /// Prepare an admitted finite endpoint outside constitutive iterations.
     pub(super) fn frozen_table(
         &self,
         temperature_change_k: f64,
     ) -> Result<TabulatedHardening, FiniteJ2ThermalError> {
-        if temperature_change_k == 0.0 {
-            return Ok(self.reference().clone());
-        }
-        let points: Result<Vec<HardeningPoint>, FiniteJ2ThermalError> = self
-            .reference()
-            .points()
-            .iter()
-            .zip(self.yield_stress_slopes_pa_k())
-            .map(|(point, slope)| {
-                Ok(HardeningPoint {
-                    plastic_strain: point.plastic_strain,
-                    yield_stress_pa: finite(
-                        slope.mul_add(temperature_change_k, point.yield_stress_pa),
-                    )?,
-                })
-            })
-            .collect();
-        TabulatedHardening::new(points?)
-            .map_err(|error| FiniteJ2ThermalError::Material(FiniteJ2Error::Tabulated(error)))
+        self.affine
+            .at_temperature_change(temperature_change_k)
+            .map_err(native_error)
+    }
+}
+
+fn native_error(error: TabulatedError) -> FiniteJ2ThermalError {
+    match error {
+        TabulatedError::Numerical(reason) => FiniteJ2ThermalError::Numerical(reason),
+        error => FiniteJ2Error::Tabulated(error).into(),
     }
 }
 
@@ -194,7 +115,7 @@ impl AffineThermalFiniteJ2 {
             ));
         }
         finite(
-            p.temperature_range_k[1] * hardening.prepared.maximum_absolute_storage_slope_j_m3_k,
+            p.temperature_range_k[1] * hardening.affine.maximum_absolute_storage_slope_j_m3_k(),
         )?;
         self.tabulated_hardening = Some(hardening);
         // Affine ordinate values and differences achieve extrema at these

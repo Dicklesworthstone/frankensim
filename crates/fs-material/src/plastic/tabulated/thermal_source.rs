@@ -1,4 +1,4 @@
-//! Original thermal hardening observations on the native finite J2 owner.
+//! Original thermal hardening observations on explicitly interpreted J2 owners.
 //!
 //! A complete Cartesian grid retains every measured accumulated-plastic-strain
 //! knot and every original sample receipt. The explicit receiving model makes
@@ -12,7 +12,8 @@
 //! extrapolation, fitted thermal kink, engineering-strain conversion, stress
 //! relabeling, or derivative from a single temperature is admitted.
 
-use super::source::{ACCUMULATED_PLASTIC_STRAIN_AXIS, KIRCHHOFF_YIELD_CURVE_PROPERTY};
+use super::source::{ACCUMULATED_PLASTIC_STRAIN_AXIS, YieldStressMeasure};
+use super::thermal::AffineTabulatedHardening;
 use super::{HardeningPoint, TabulatedError, TabulatedHardening};
 use crate::plastic::finite::thermal::{FiniteJ2ThermalError, FiniteJ2ThermalTabulatedHardening};
 use crate::state_point::{affine_temperature_slope, is_fixed_external_coordinate};
@@ -39,6 +40,7 @@ pub struct ThermalHardeningCurveRequest {
 pub struct ThermalHardeningCurveSource {
     card_identity: ContentHash,
     material_state: MaterialStateId,
+    stress_measure: YieldStressMeasure,
     context: QueryPoint,
     request: ThermalHardeningCurveRequest,
     selection: ClaimSelection,
@@ -54,6 +56,10 @@ impl ThermalHardeningCurveSource {
     }
     pub const fn material_state(&self) -> &MaterialStateId {
         &self.material_state
+    }
+    /// Exact original stress interpretation; no current/reference-volume conversion.
+    pub const fn stress_measure(&self) -> YieldStressMeasure {
+        self.stress_measure
     }
     /// Original reference-temperature context, excluding accumulated strain.
     pub const fn context(&self) -> &QueryPoint {
@@ -91,6 +97,23 @@ pub struct ResolvedThermalTabulatedHardening {
 
 impl ResolvedThermalTabulatedHardening {
     pub const fn hardening(&self) -> &FiniteJ2ThermalTabulatedHardening {
+        &self.hardening
+    }
+    pub const fn source(&self) -> &ThermalHardeningCurveSource {
+        &self.source
+    }
+}
+
+/// Original Cauchy yield observations and their shared affine storage preparation.
+/// This is a distinct source entry point from the original finite Kirchhoff law.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedThermalCauchyTabulatedHardening {
+    hardening: AffineTabulatedHardening,
+    source: ThermalHardeningCurveSource,
+}
+
+impl ResolvedThermalCauchyTabulatedHardening {
+    pub const fn hardening(&self) -> &AffineTabulatedHardening {
         &self.hardening
     }
     pub const fn source(&self) -> &ThermalHardeningCurveSource {
@@ -190,6 +213,50 @@ pub fn resolve_thermal_tabulated_hardening(
     request: &ThermalHardeningCurveRequest,
     selection: ClaimSelection,
 ) -> Result<ResolvedThermalTabulatedHardening, ThermalHardeningSourceError> {
+    let (reference, slopes, source) = prepare_thermal_hardening(
+        card,
+        context,
+        request,
+        selection,
+        YieldStressMeasure::Kirchhoff,
+    )?;
+    Ok(ResolvedThermalTabulatedHardening {
+        hardening: FiniteJ2ThermalTabulatedHardening::new(reference, slopes)?,
+        source,
+    })
+}
+
+/// Prepare an original Cauchy stress surface for the small-strain thermal family.
+/// The same complete-grid, affine-temperature, original-cell and receipt gates
+/// apply. Only the exact Cauchy property can supply this source; a Kirchhoff
+/// claim is never accepted as an alias or converted by assuming unit Jacobian.
+pub fn resolve_thermal_cauchy_tabulated_hardening(
+    card: &MaterialCard,
+    context: &QueryPoint,
+    request: &ThermalHardeningCurveRequest,
+    selection: ClaimSelection,
+) -> Result<ResolvedThermalCauchyTabulatedHardening, ThermalHardeningSourceError> {
+    let (reference, slopes, source) = prepare_thermal_hardening(
+        card,
+        context,
+        request,
+        selection,
+        YieldStressMeasure::Cauchy,
+    )?;
+    Ok(ResolvedThermalCauchyTabulatedHardening {
+        hardening: AffineTabulatedHardening::new(reference, slopes)?,
+        source,
+    })
+}
+
+fn prepare_thermal_hardening(
+    card: &MaterialCard,
+    context: &QueryPoint,
+    request: &ThermalHardeningCurveRequest,
+    selection: ClaimSelection,
+    stress_measure: YieldStressMeasure,
+) -> Result<(TabulatedHardening, Vec<f64>, ThermalHardeningCurveSource), ThermalHardeningSourceError>
+{
     let [lower_k, upper_k] = request.temperature_range_k;
     let reference_k = request.reference_temperature_k;
     require(
@@ -234,7 +301,7 @@ pub fn resolve_thermal_tabulated_hardening(
         .clone()
         .with(&request.temperature_axis, lower_k)?
         .with_quantity(ACCUMULATED_PLASTIC_STRAIN_AXIS, strain_quantity, 0.0)?;
-    let key = PropertyKey::new(KIRCHHOFF_YIELD_CURVE_PROPERTY, Pressure::DIMS);
+    let key = PropertyKey::new(stress_measure.property_name(), Pressure::DIMS);
     let selected = query(card, &key, &origin, selection)?;
     let claim = card.claims().claim(selected.receipt.selected).ok_or(
         ThermalHardeningSourceError::Invalid("selected thermal hardening claim is absent"),
@@ -433,8 +500,7 @@ pub fn resolve_thermal_tabulated_hardening(
             ));
         }
     };
-    let hardening =
-        FiniteJ2ThermalTabulatedHardening::new(TabulatedHardening::new(points)?, slopes)?;
+    let hardening = TabulatedHardening::new(points)?;
     let mut observations = Vec::with_capacity(samples.len());
     for (point, value) in samples {
         let at = context
@@ -453,11 +519,13 @@ pub fn resolve_thermal_tabulated_hardening(
         )?;
         observations.push((at, answer));
     }
-    Ok(ResolvedThermalTabulatedHardening {
+    Ok((
         hardening,
-        source: ThermalHardeningCurveSource {
+        slopes,
+        ThermalHardeningCurveSource {
             card_identity: card.content_hash(),
             material_state: card.id().clone(),
+            stress_measure,
             context: context.clone(),
             request: request.clone(),
             selection,
@@ -466,5 +534,5 @@ pub fn resolve_thermal_tabulated_hardening(
             observations,
             continuous_support,
         },
-    })
+    ))
 }

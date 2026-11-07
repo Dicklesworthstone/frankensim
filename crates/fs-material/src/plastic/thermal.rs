@@ -35,6 +35,8 @@ mod voce;
 use voce::VoceSelection;
 /// Source-bound backstress transport and thermal energy for cyclic hardening.
 pub mod chaboche;
+/// Original Cauchy hardening surfaces with retained caloric and plastic history.
+pub mod tabulated;
 /// Native history families sharing the original thermal and energy owners.
 pub mod family;
 use family::{ThermoplasticFamilyError, ThermoplasticFamilyIncrement, ThermoplasticSourceFamily};

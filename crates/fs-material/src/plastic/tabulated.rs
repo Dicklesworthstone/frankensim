@@ -16,6 +16,8 @@
 pub mod source;
 /// Associative Perzyna flow over the same bounded measured hardening curve.
 pub mod rate;
+/// Shared affine-temperature table storage and its exact entropy derivative.
+pub mod thermal;
 /// Original strain/temperature observations on the affine thermal finite owner.
 pub mod thermal_source;
 
@@ -655,6 +657,24 @@ impl TabulatedJ2 {
         tolerances: EnergyTolerances,
     ) -> Result<EnergyIncrement, EnergyError> {
         self.validate_committed_history(old_strain, old_state, tolerances.yield_pa)?;
+        self.advance_with_energy_from_admitted_history(old_strain, old_state, strain, tolerances)
+    }
+
+    /// Audit a thermal endpoint after its owner admitted the old history at the
+    /// old temperature. Thermal softening may place that history outside the
+    /// new yield surface; return it once without erasing its permanent strain.
+    /// The public isothermal path still requires an initially admissible state.
+    pub(crate) fn advance_with_energy_from_admitted_history(
+        &self,
+        old_strain: &Voigt,
+        old_state: &J2State,
+        strain: &Voigt,
+        tolerances: EnergyTolerances,
+    ) -> Result<EnergyIncrement, EnergyError> {
+        self.backbone.validate_overstress_history(old_strain, old_state)?;
+        self.hardening.yield_stress_pa(old_state.alpha).map_err(|_| {
+            EnergyError::Invalid("old history leaves the measured hardening domain")
+        })?;
         let (shifted, secant) = self.return_parameters(strain, old_state).map_err(|_| {
             EnergyError::Invalid(
                 "tabulated plastic return leaves its domain or is not representable",
