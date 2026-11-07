@@ -7144,6 +7144,49 @@ assumes immediate electron thermalization and escaping recombination photons;
 it supplies no trapped-radiation transport, stimulated capture, complete
 multilevel recombination or closed-gas entropy inequality.
 
+## Simultaneous local collisional and radiative ionization
+
+`chemistry::collisional_radiative::advance_collisional_radiative` evolves the
+same original ground-state atomic channel with electron-impact ionization,
+its three-body reverse, local photoionization and spontaneous radiative
+capture competing during one interval. The reciprocal photon source retains
+the same atomic bank and original rate and captured-electron-energy moments.
+Prescribed local photon fluxes are externally maintained; this entry does not
+attenuate a column or consume a finite photon inventory.
+
+An exponential-midpoint update integrates a frozen positive two-population
+production/destruction law and its energy moments. Actual electron density
+and temperature refresh its coefficients, and full/two-half comparison
+controls second-order local estimates for populations, reaction throughput
+and temperature. Original-source evaluation, source bounds, step budgets and
+cancellation remain explicit; nonlinear trials allocate no species vectors.
+Integrated event and energy accounts use cumulative ODE-state error scales;
+normalizing by each individual time-step increment would impose an artificial
+extra step restriction. This positive frozen-rate update does not make the
+remaining temperature-dependent reaction feedback unconditionally stable.
+
+Gross photon-driven creation and radiative capture remain distinct from net
+chemical change. Absorbed photon energy enters once, escaping recombination
+photons remove chemical plus captured kinetic energy, and electron sensible
+energy follows the changing number of electrons. A neutral initial state can
+acquire physical photoelectrons without an artificial seed. The final state
+retains its original thermodynamics and separate heavy/electron temperatures
+for material and electrical consumers, without an LTE projection.
+Actual published population differences independently gate the event account,
+and the gas-plus-radiation balance uses those actual endpoint differences.
+Focused cases compare all four competing channels and both radiation accounts
+with independently integrated closed-form moments, recover the analytic
+fixed-temperature Riccati limit from zero electrons through repeated turnover,
+and check refinement, formation-reference invariance and atomic refusals.
+
+This is a rigid, uniformly mixed, single-ground-state channel with fixed heavy
+temperature, immediate electron thermalization and escaping emitted photons.
+It does not supply electron/heavy thermal exchange, excited-state kinetics,
+stimulated emission, radiation trapping or a closed-gas entropy inequality.
+The rate-equation basis is NIST's FLYCHK manual, section II.B.2;
+<https://nlte.nist.gov/FLY/Doc/Manual_FLYCHK_Nov08.pdf>. Source-model uncertainty,
+conditional rate-tail bounds and estimated temporal errors remain distinct.
+
 ## Conservative isothermal gravity with evolving mixture density
 
 `multicomponent::IsothermalMixtureGravity` prepares an original-species

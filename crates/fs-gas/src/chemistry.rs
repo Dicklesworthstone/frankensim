@@ -30,6 +30,9 @@ pub mod energy;
 pub mod heat;
 /// Source-bound two-temperature atomic ionization and three-body recombination.
 pub mod ionization;
+
+/// Coupled electron-impact, photoionization and escaping radiative recombination.
+pub mod collisional_radiative;
 /// Constant-pressure evolution through the shared extent integrator.
 pub mod isobaric;
 /// Exponential evolution of admitted constant first-order chemical mechanisms.
