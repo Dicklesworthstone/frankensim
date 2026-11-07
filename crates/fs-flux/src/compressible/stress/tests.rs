@@ -1,4 +1,4 @@
-use super::{Viscosity, no_slip_traction, traction};
+use super::{GradientSample, Slip, Viscosity, no_slip_traction, traction, velocity_gradient, wall_stress};
 
 #[derive(Clone, Copy, PartialEq)]
 enum End {
@@ -6,6 +6,7 @@ enum End {
     Slip,
     Zero,
     NoSlip,
+    Navier(f64),
 }
 
 fn native<const D: usize>(
@@ -65,48 +66,80 @@ fn balance_with_walls<const D: usize>(
     let mut c = vec![[[0.0; D]; D]; n];
     let mut h = c.clone();
     let mut force = vec![[0.0; D]; n];
+    let sample = |i: usize, axis: usize, side: usize| -> GradientSample<D> {
+        let stride: usize = shape[..axis].iter().product();
+        let position = (i / stride) % shape[axis];
+        let outside = position == if side == 0 { 0 } else { shape[axis] - 1 };
+        if !outside || ends[axis][side] == End::Periodic {
+            let index = if outside {
+                if side == 0 {
+                    i + (shape[axis] - 1) * stride
+                } else {
+                    i - (shape[axis] - 1) * stride
+                }
+            } else if side == 0 {
+                i - stride
+            } else {
+                i + stride
+            };
+            GradientSample::Cell(velocity[index])
+        } else {
+            let slip = match ends[axis][side] {
+                End::Zero => return GradientSample::Cell(velocity[i]),
+                End::Slip => Slip::Free,
+                End::NoSlip => Slip::Length(0.0),
+                End::Navier(length) => Slip::Length(length),
+                End::Periodic => unreachable!(),
+            };
+            GradientSample::Wall { velocity: wall_velocity[axis][side], slip }
+        }
+    };
     for i in 0..n {
+        c[i] = velocity_gradient(spacing, velocity[i], |axis, side| sample(i, axis, side))
+            .expect("admitted test gradient");
+        // Independently recover actual fluid traces, then the face derivatives.
+        // The C/H quadratic form is not evaluated from the returned traction.
         for axis in 0..D {
-            let stride: usize = shape[..axis].iter().product();
-            let position = (i / stride) % shape[axis];
+            let distance = 0.5 * spacing[axis];
             let mut jump = [[0.0; D]; 2];
             for (side, sign) in [(0, -1.0), (1, 1.0)] {
-                let outside = position == if side == 0 { 0 } else { shape[axis] - 1 };
-                let other = if !outside || ends[axis][side] == End::Periodic {
-                    let index = if outside {
-                        if side == 0 {
-                            i + (shape[axis] - 1) * stride
-                        } else {
-                            i - (shape[axis] - 1) * stride
-                        }
-                    } else if side == 0 {
-                        i - stride
-                    } else {
-                        i + stride
-                    };
-                    velocity[index]
-                } else {
-                    let mut ghost = velocity[i];
-                    if ends[axis][side] == End::Slip {
-                        ghost[axis] = -ghost[axis];
-                    } else if ends[axis][side] == End::NoSlip {
-                        ghost = std::array::from_fn(|a| {
-                            2.0 * wall_velocity[axis][side][a] - velocity[i][a]
-                        });
-                    }
-                    ghost
-                };
                 for a in 0..D {
-                    jump[side][a] = sign * (other[a] - velocity[i][a]) / spacing[axis];
+                    jump[side][a] = match sample(i, axis, side) {
+                        GradientSample::Cell(other) => {
+                            sign * (other[a] - velocity[i][a]) / spacing[axis]
+                        }
+                        GradientSample::Wall { velocity: wall, slip } if a == axis => {
+                            let _ = slip;
+                            sign * (wall[a] - velocity[i][a]) / distance
+                        }
+                        GradientSample::Wall { velocity: wall, slip } => {
+                            let (phi, response) = match slip {
+                                Slip::Free => (0.0, 1.0),
+                                Slip::Length(length) => (
+                                    distance / (distance + length),
+                                    length / (distance + length),
+                                ),
+                            };
+                            let trace_minus_cell = phi * (wall[a] - velocity[i][a])
+                                - response * distance * sign * c[i][axis][a];
+                            sign * trace_minus_cell / distance
+                        }
+                    };
                 }
             }
             for a in 0..D {
-                c[i][a][axis] = 0.5 * (jump[0][a] + jump[1][a]);
+                let centered = 0.5 * (jump[0][a] + jump[1][a]);
+                assert!(
+                    (centered - c[i][a][axis]).abs()
+                        < 2e-14 * (1.0 + centered.abs() + c[i][a][axis].abs()),
+                    "eliminated traces must recover the centered gradient"
+                );
                 h[i][a][axis] = 0.5 * (jump[1][a] - jump[0][a]);
             }
         }
     }
     let mut wall_power = 0.0;
+    let mut interface_heat = 0.0;
     for i in 0..n {
         for axis in 0..D {
             let stride: usize = shape[..axis].iter().product();
@@ -134,37 +167,41 @@ fn balance_with_walls<const D: usize>(
                     force[k][a] -= stress[a] / spacing[axis];
                 }
             }
-            for (side, sign) in [(0, 1.0), (1, -1.0)] {
-                let outside = position == if side == 0 { 0 } else { shape[axis] - 1 };
-                if outside && ends[axis][side] == End::Slip {
-                    let mu = material[i].shear;
-                    let bulk = material[i].bulk;
-                    let normal = sign * 2.0 * velocity[i][axis] / spacing[axis];
-                    let transverse: f64 = (0..D).filter(|&j| j != axis).map(|j| c[i][j][j]).sum();
-                    let traction =
-                        ((4.0 / 3.0) * mu + bulk) * normal + (bulk - (2.0 / 3.0) * mu) * transverse;
-                    force[i][axis] -= sign * traction / spacing[axis];
-                } else if outside && ends[axis][side] == End::NoSlip {
-                    let wall = wall_velocity[axis][side];
-                    let stress = no_slip_traction(
-                        axis,
-                        -sign,
-                        0.5 * spacing[axis],
-                        velocity[i],
-                        wall,
-                        material[i],
+            for (side, sign) in [(0, -1.0), (1, 1.0)] {
+                if let GradientSample::Wall { velocity: wall, slip } = sample(i, axis, side) {
+                    let distance = 0.5 * spacing[axis];
+                    let stress = wall_stress(
+                        axis, sign, distance, velocity[i], wall, slip, material[i],
                         |a, j| c[i][a][j],
+                    ).expect("admitted test wall");
+                    let mut independent_heat = 0.0;
+                    if let Slip::Length(length) = slip {
+                        if length > 0.0 {
+                            for a in 0..D {
+                                if a == axis { continue; }
+                                let relative = wall[a] - velocity[i][a]
+                                    + sign * distance * c[i][axis][a];
+                                let trace_minus_wall = -length / (distance + length) * relative;
+                                independent_heat +=
+                                    (material[i].shear / length) * trace_minus_wall.powi(2);
+                            }
+                        }
+                    }
+                    assert!(
+                        (stress.slip_dissipation - independent_heat).abs()
+                            < 2e-14 * independent_heat.max(1.0)
                     );
+                    interface_heat += independent_heat / spacing[axis];
                     for a in 0..D {
-                        force[i][a] -= sign * stress[a] / spacing[axis];
-                        wall_power -= sign * wall[a] * stress[a] / spacing[axis];
+                        force[i][a] += sign * stress.traction[a] / spacing[axis];
+                        wall_power += sign * wall[a] * stress.traction[a] / spacing[axis];
                     }
                 }
             }
         }
     }
     let mut production = 0.0;
-    let mut dissipation = 0.0;
+    let mut dissipation = interface_heat;
     for i in 0..n {
         let mu = material[i].shear;
         let bulk = material[i].bulk;
@@ -554,5 +591,170 @@ fn variable_viscosity_wall_driven_couette_converges_to_the_resistance_integral()
             eprintln!("Couette n={n}: profile/load/local-wall refinement {ratios:?}");
         }
         previous = Some(errors);
+    }
+}
+
+fn finite_wall_balance<const D: usize>(shape: [usize; D], spacing: [f64; D]) {
+    let count: usize = shape.iter().product();
+    let velocity: Vec<[f64; D]> = (0..count)
+        .map(|i| std::array::from_fn(|a| ((11 * i + 5 * a + 1) as f64).sin()))
+        .collect();
+    let material: Vec<_> = (0..count)
+        .map(|i| Viscosity {
+            shear: if i % 5 == 4 { 0.0 } else { 10.0_f64.powf(4.0 * ((3 * i + 1) as f64).sin()) },
+            bulk: if i % 3 == 0 { 0.0 } else { 10.0_f64.powf(2.0 * ((7 * i + 2) as f64).sin()) },
+        })
+        .collect();
+    let walls = std::array::from_fn(|axis| std::array::from_fn(|side| {
+        std::array::from_fn(|a| if a == axis { 0.0 } else {
+            ((axis * 11 + side * 7 + a + 1) as f64).cos()
+        })
+    }));
+    for pattern in 0..4 {
+        let ends = std::array::from_fn(|axis| match pattern {
+            0 => [End::Navier(0.17 * (axis + 1) as f64), End::Navier(0.31)],
+            1 => if axis % 2 == 0 {
+                [End::Slip, End::Navier(0.2)]
+            } else {
+                [End::Navier(0.4), End::NoSlip]
+            },
+            2 => if axis % 2 == 0 { [End::Slip; 2] } else { [End::Navier(0.3); 2] },
+            _ => [End::Navier(1e30); 2],
+        });
+        let (rate, dissipation, _, power) =
+            balance_with_walls(shape, spacing, ends, walls, &velocity, &material, true);
+        assert!(dissipation >= 0.0);
+        let scale = (power.abs() + rate.abs() + dissipation).max(1.0);
+        assert!(
+            (power - rate - dissipation).abs() < 5e-14 * scale,
+            "Navier wall power {power}, kinetic rate {rate}, cell plus interface heat {dissipation}"
+        );
+    }
+}
+
+#[test]
+fn finite_navier_slip_closes_power_with_physical_interface_heat() {
+    finite_wall_balance([4, 3], [0.7, 1.3]);
+    finite_wall_balance([1, 1], [0.7, 1.3]);
+    finite_wall_balance([3, 2, 1], [0.7, 1.3, 0.9]);
+    finite_wall_balance([1, 3, 1], [0.7, 1.3, 0.9]);
+    finite_wall_balance([1, 1, 1], [0.7, 1.3, 0.9]);
+}
+
+#[test]
+fn extreme_finite_slip_retains_rotation_traction_and_physical_heat() {
+    // Both singleton axes are nearly singular. The antisymmetric gradient
+    // remains +/-2, while an additional wall translation dissipates O(1/b).
+    // An absolute near-zero check would miss replacing finite b by free slip.
+    let walls = [[[0.0, 1.0], [0.0, 3.0]], [[1.0, 0.0], [-1.0, 0.0]]];
+    let cell = Viscosity { shear: 2.0, bulk: 0.0 };
+    for length in [1e30, 1e200] {
+        let gradient = velocity_gradient([1.0; 2], [0.0; 2], |axis, side| {
+            GradientSample::Wall { velocity: walls[axis][side], slip: Slip::Length(length) }
+        }).unwrap();
+        assert!((gradient[1][0] - 2.0).abs() < 1e-14);
+        assert!((gradient[0][1] + 2.0).abs() < 1e-14);
+        for (side, sign) in [(0, -1.0), (1, 1.0)] {
+            let wall = walls[0][side];
+            let result = wall_stress(
+                0, sign, 0.5, [0.0; 2], wall, Slip::Length(length), cell,
+                |a, j| gradient[a][j],
+            ).unwrap();
+            let outward = sign * result.traction[1];
+            assert!(outward > 0.0 && result.slip_dissipation > 0.0);
+            assert!((outward * length - 4.0).abs() < 3e-14);
+            assert!((result.slip_dissipation * length - 8.0).abs() < 6e-14);
+
+            // Independent fluid trace from its eliminated half-cell derivative.
+            let derivative = sign * wall[1] / (length + 0.5)
+                - (length / (length + 0.5)) * gradient[0][1];
+            let trace = sign * 0.5 * derivative;
+            let slip_velocity = trace - wall[1];
+            assert!((outward * length / cell.shear + slip_velocity).abs() < 2e-14);
+            assert!(((result.slip_dissipation + outward * slip_velocity) * length).abs() < 6e-14);
+            for retained_heat in [0.0, 0.35, 1.0] {
+                let outward_energy = -wall[1] * outward
+                    + (1.0 - retained_heat) * result.slip_dissipation;
+                let gained_internal = -outward_energy - trace * outward;
+                assert!(
+                    ((gained_internal - retained_heat * result.slip_dissipation) * length).abs()
+                        < 7e-14
+                );
+            }
+        }
+    }
+    let natural = velocity_gradient([1.0; 2], [0.0; 2], |axis, side| {
+        GradientSample::Wall { velocity: walls[axis][side], slip: Slip::Free }
+    }).unwrap();
+    // Exact free slip has an unresolved singleton rigid-rotation null mode;
+    // its declared minimum-rotation representative is zero, not a friction floor.
+    assert_eq!(natural, [[0.0; 2]; 2]);
+}
+
+#[test]
+fn weak_slip_response_and_uncoupled_gradient_remain_representable() {
+    let small = 1e-30;
+    let independent = velocity_gradient([1.0; 2], [0.0; 2], |axis, side| {
+        if axis == 0 {
+            GradientSample::Cell([0.0, if side == 0 { 0.0 } else { 2.0 * small }])
+        } else {
+            GradientSample::Wall {
+                velocity: [if side == 0 { 0.0 } else { 5e30 }, 0.0],
+                slip: Slip::Length(2.0),
+            }
+        }
+    }).unwrap();
+    // alpha_0=0 means this equation is exactly uncoupled, even beside huge beta_1.
+    assert_eq!(independent[1][0], small);
+    assert!((independent[0][1] / 1e30 - 1.0).abs() < 1e-15);
+
+    let weak = velocity_gradient([1.0; 2], [0.0; 2], |axis, side| {
+        if axis == 0 {
+            GradientSample::Wall { velocity: [0.0; 2], slip: Slip::Length(5e-31) }
+        } else {
+            GradientSample::Cell([if side == 0 { 0.0 } else { 2e30 }, 0.0])
+        }
+    }).unwrap();
+    // delta_0 rounds to one, but alpha_0~1e-30 must still contribute -1 here.
+    assert!((weak[1][0] + 1.0).abs() < 1e-14);
+    assert_eq!(weak[0][1], 1e30);
+
+    let lost_response = velocity_gradient([2.0; 2], [0.0; 2], |axis, side| {
+        if axis == 0 && side == 0 {
+            GradientSample::Wall { velocity: [0.0; 2], slip: Slip::Length(f64::from_bits(1)) }
+        } else {
+            GradientSample::Cell([0.0; 2])
+        }
+    });
+    assert!(lost_response.is_err(), "finite friction must not silently become no slip");
+}
+
+#[test]
+fn zero_length_zero_shear_and_natural_free_slip_have_exact_limits() {
+    let cell = Viscosity { shear: 0.7, bulk: 0.2 };
+    let velocity = [0.3, -0.2, 0.4];
+    let gradient = [[0.1, 0.2, -0.3], [0.4, -0.5, 0.6], [-0.7, 0.8, 0.9]];
+    for axis in 0..3 {
+        let wall = std::array::from_fn(|a| if a == axis { 0.0 } else { 0.1 * (a + 1) as f64 });
+        for sign in [-1.0, 1.0] {
+            let read = |a: usize, j: usize| gradient[a][j];
+            let prescribed = no_slip_traction(axis, sign, 0.3, velocity, wall, cell, read);
+            let zero = wall_stress(
+                axis, sign, 0.3, velocity, wall, Slip::Length(0.0), cell, read,
+            ).unwrap();
+            assert_eq!(zero.traction, prescribed);
+            assert_eq!(zero.slip_dissipation, 0.0);
+            let free = wall_stress(axis, sign, 0.3, velocity, wall, Slip::Free, cell, read).unwrap();
+            let inviscid = wall_stress(
+                axis, sign, 0.3, velocity, wall, Slip::Length(0.17),
+                Viscosity::default(), read,
+            ).unwrap();
+            assert_eq!(inviscid.traction, [0.0; 3]);
+            assert_eq!(inviscid.slip_dissipation, 0.0);
+            assert_eq!(free.slip_dissipation, 0.0);
+            for a in 0..3 {
+                if a != axis { assert_eq!(free.traction[a], 0.0); }
+            }
+        }
     }
 }

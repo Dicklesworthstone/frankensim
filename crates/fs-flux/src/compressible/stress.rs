@@ -3,7 +3,8 @@
 //! With cell viscosities, centered derivatives C and half-differences H of
 //! neighboring face derivatives, wall mechanical power minus kinetic-energy rate is
 //! `2 mu |dev sym C(u)|^2 + bulk div(Cu)^2 + mu |H(u)|^2
-//!  + (bulk + mu/3) sum_j H_j(u_j)^2`, summed over cells.
+//!  + (bulk + mu/3) sum_j H_j(u_j)^2`, summed over cells, plus physical
+//! Navier interface friction heat, summed over walls.
 //! In two dimensions the deviatoric trace retains the physical third dimension.
 //! Every term is nonnegative. Expanding the adjoints gives the same compact
 //! direct-normal/centered-cross stencil as constant-coefficient Newtonian stress,
@@ -17,9 +18,20 @@
 //! uses `-U_wall dot traction`; outward wall power is `U_wall dot traction*n`.
 //! This local identity also covers corners and singleton axes, without averaging
 //! different planes' prescribed velocities. Zero-length Navier slip is the same
-//! Dirichlet case. Positive finite slip, bath and modeled equilibrium wall laws
-//! retain their original complete operator pending their own boundary derivation.
-//! This is a semidiscrete molecular identity, not a time-step or SGS theorem.
+//! Dirichlet case. Finite Navier slip eliminates the fluid trace from this
+//! positive quadratic form plus physical interface friction. Natural free slip
+//! uses the matching zero-traction elimination, including its cross derivative;
+//! it is not an even tangential ghost. Each off-diagonal derivative pair is a
+//! local two-by-two solve. Pure-free singleton axes choose zero rotation only
+//! when their provisional right-hand sides vanish.
+//!
+//! Prescribed baths and modeled equilibrium wall laws keep their complete native
+//! operator. This is a semidiscrete molecular identity, not a time-step or SGS
+//! theorem. It does not extend periodic second-order accuracy to wall traction;
+//! finite slip with cell-sampled wall viscosity may converge at first order.
+
+mod slip;
+pub(super) use slip::{GradientSample, Slip, velocity_gradient, wall_stress};
 
 /// Source-evaluated cell viscosities [Pa s]; sixteen numerical bytes per cell.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
