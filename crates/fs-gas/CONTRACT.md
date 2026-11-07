@@ -8024,3 +8024,31 @@ gas phase equilibrium or measured combustion/heat-transfer calibration. The
 original native source-domain, material-reconciliation entropy and local-error
 limitations remain unchanged. Aggregating local comparisons and residuals does
 not certify global integration accuracy or coupled passivity.
+
+
+## Direct radiative energy accounting for evolving ionization
+
+The shared collisional-radiative reaction kernel retains absorbed-minus-emitted
+photon energy as a directly accumulated signed moment. Its published
+`net_radiation_energy_j` and electron/total energy checks use this moment rather
+than subtracting gross cumulative emission and absorption. Gross photon events,
+absorbed energy and captured-electron energy remain separate physical accounts.
+The finite incident-beam owner retains the same signed moment in its cell and
+whole-column reports while keeping its independent finite-beam balances.
+
+A crate-private collision/thermal subflow excludes both photon processes when
+a spatial diffuse owner supplies the common radiation field. Signed diffuse
+increments change the original adjacent populations and electron sensible
+energy together, preserve the original heavy temperature and clock, and admit
+first-electron birth from actual photoelectron energy without a trace seed.
+Direct net event/energy closure is checked separately from gross consistency
+at the gross accounts' floating-point resolution. An inadmissible trial refuses
+instead of clipping populations or temperatures. The spectral transfer owner
+must supply its independently conserved signed moments; this seam alone is
+neither a radiation solve nor a new physical closure.
+
+Focused G0 regressions retain a finite net loss below the representable spacing
+of gross self-recycling accounts, verify first-carrier energy and transactional
+refusal, and prove that the collision subflow excludes both photon processes.
+The original simultaneous reaction/thermal and finite-beam regressions remain
+the compatibility checks for the shared kernel.

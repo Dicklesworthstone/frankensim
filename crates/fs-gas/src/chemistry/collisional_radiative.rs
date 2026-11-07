@@ -176,6 +176,9 @@ pub struct CollisionalRadiativeBalance {
     pub absorbed_radiation_energy_j: f64,
     /// Released chemical plus captured kinetic energy in escaping photons [J].
     pub emitted_radiation_energy_j: f64,
+    /// Direct absorbed minus emitted photon energy [J]; retained before
+    /// subtraction of gross cumulative accounts.
+    pub net_radiation_energy_j: f64,
     /// Original chemical formation-energy change from NET pair creation [J].
     pub chemical_storage_change_j: f64,
     /// Actual electron sensible-energy change, including population dilution [J].

@@ -32,6 +32,7 @@ pub(in crate::chemistry) struct Point {
     radiative: Sum,
     absorbed: Sum,
     captured: Sum,
+    net_radiation: Sum,
     heavy_energy: Sum,
     exchange: Sum,
     neutral_exchange: Sum,
@@ -51,6 +52,25 @@ impl Point {
     pub fn reaction_extent_mol(self) -> f64 {
         self.extent.value
     }
+    /// Signed photon energy deposited in the gas, before subtracting any
+    /// large gross emission/reabsorption accounts.
+    pub fn net_radiation_energy_j(self) -> f64 {
+        self.net_radiation.value
+    }
+}
+
+/// One already integrated diffuse field increment. Gross events remain
+/// separate from the direct signed net moments; opaque self-recycling must
+/// cancel inside the transfer kernel, before floating-point subtraction.
+#[derive(Clone, Copy, Default)]
+pub(in crate::chemistry) struct DiffuseIncrement {
+    pub net_extent_mol: f64,
+    pub net_electron_energy_j: f64,
+    pub net_gas_energy_j: f64,
+    pub absorbed_mol: f64,
+    pub captured_mol: f64,
+    pub absorbed_energy_j: f64,
+    pub captured_energy_j: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -60,6 +80,7 @@ pub(in crate::chemistry) struct Rates {
     radiative_destruction: f64,
     captured_energy_j_mol: f64,
     thermal: Option<ThermalStage>,
+    radiation: bool,
 }
 impl Rates {
     pub fn inactive(self, point: Point) -> bool {
@@ -194,9 +215,39 @@ impl<'a> Problem<'a> {
         }
     }
 
+    /// Current original-channel lower, upper and electron amounts [mol].
+    pub fn active_amounts(&self, point: Point) -> [f64; 3] {
+        [
+            point.neutral,
+            point.minor + self.excess[0],
+            point.minor + self.excess[1],
+        ]
+    }
+
     pub fn rates(
         &self,
         point: Point,
+        balance: &mut CollisionalRadiativeBalance,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Rates, CollisionalRadiativeError> {
+        self.rates_impl(point, true, balance, cancelled)
+    }
+
+    /// Impact, three-body capture and optional elastic thermal exchange only.
+    /// A diffuse owner supplies both photon processes through its common field.
+    pub fn collisional_rates(
+        &self,
+        point: Point,
+        balance: &mut CollisionalRadiativeBalance,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Rates, CollisionalRadiativeError> {
+        self.rates_impl(point, false, balance, cancelled)
+    }
+
+    fn rates_impl(
+        &self,
+        point: Point,
+        radiation: bool,
         balance: &mut CollisionalRadiativeBalance,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Rates, CollisionalRadiativeError> {
@@ -205,7 +256,7 @@ impl<'a> Problem<'a> {
         let [ni, ne] = self.excess.map(|excess| point.minor + excess);
         // At exact electron absence use the photoelectron birth-temperature
         // limit, not an arbitrary stored temperature for an empty pool.
-        let te = if ne == 0.0 && self.photon.rate_per_neutral_per_s > 0.0 {
+        let te = if radiation && ne == 0.0 && self.photon.rate_per_neutral_per_s > 0.0 {
             (NA / CV)
                 * (self.photon.electron_heating_per_neutral_w / self.photon.rate_per_neutral_per_s)
         } else {
@@ -227,23 +278,33 @@ impl<'a> Problem<'a> {
                 }
                 error => CollisionalRadiativeError::Atomic(error),
             })?;
-        let radiative = self
-            .source
-            .evaluate(
-                Temperature::new(te),
-                self.controls.quadrature,
-                &mut *cancelled,
+        let (capture, captured_energy_j_mol) = if radiation {
+            let radiative = self
+                .source
+                .evaluate(
+                    Temperature::new(te),
+                    self.controls.quadrature,
+                    &mut *cancelled,
+                )
+                .map_err(|error| match error {
+                    RadiativeRecombinationErrorV1::Cancelled => {
+                        CollisionalRadiativeError::Cancelled
+                    }
+                    error => CollisionalRadiativeError::Recombination(error),
+                })?;
+            balance.maximum_relative_quadrature_error = balance
+                .maximum_relative_quadrature_error
+                .max(radiative.relative_quadrature_error_estimate);
+            balance.maximum_relative_tail_bound = balance
+                .maximum_relative_tail_bound
+                .max(radiative.relative_tail_bound);
+            (
+                (radiative.coefficient_m3_s * NA) * (ni.max(ne) / volume),
+                radiative.mean_captured_energy_j().unwrap_or(0.0) * NA,
             )
-            .map_err(|error| match error {
-                RadiativeRecombinationErrorV1::Cancelled => CollisionalRadiativeError::Cancelled,
-                error => CollisionalRadiativeError::Recombination(error),
-            })?;
-        balance.maximum_relative_quadrature_error = balance
-            .maximum_relative_quadrature_error
-            .max(radiative.relative_quadrature_error_estimate);
-        balance.maximum_relative_tail_bound = balance
-            .maximum_relative_tail_bound
-            .max(radiative.relative_tail_bound);
+        } else {
+            (0.0, 0.0)
+        };
         // Evolve the SMALLER ion/electron inventory. Their conserved difference
         // may be nonzero because other original charged species are spectators.
         let three_body = if self.excess[0] == 0.0 {
@@ -253,7 +314,6 @@ impl<'a> Problem<'a> {
         } else {
             0.0
         };
-        let capture = (radiative.coefficient_m3_s * NA) * (ni.max(ne) / volume);
         let thermal = if let Some(thermal) = &self.thermal {
             let len = self.initial.amounts().len();
             let mut amounts = [Amount::new(0.0); MAX_EQUILIBRIUM_SPECIES_V1];
@@ -266,12 +326,16 @@ impl<'a> Problem<'a> {
             None
         };
         let result = Rates {
-            production: self.photon.rate_per_neutral_per_s
-                + atomic.concentration_derivatives_per_s[0],
+            production: if radiation {
+                self.photon.rate_per_neutral_per_s
+            } else {
+                0.0
+            } + atomic.concentration_derivatives_per_s[0],
             destruction: three_body + capture,
             radiative_destruction: capture,
-            captured_energy_j_mol: radiative.mean_captured_energy_j().unwrap_or(0.0) * NA,
+            captured_energy_j_mol,
             thermal,
+            radiation,
         };
         if [
             result.production,
@@ -298,8 +362,24 @@ impl<'a> Problem<'a> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Point, CollisionalRadiativeError> {
         let predictor = self.frozen(point, rates, 0.5 * dt, cancelled)?;
-        let middle = self.rates(predictor, balance, cancelled)?;
+        let middle = self.rates_impl(predictor, rates.radiation, balance, cancelled)?;
         self.frozen(point, middle, dt, cancelled)
+    }
+
+    pub fn collisional_midpoint(
+        &self,
+        point: Point,
+        rates: Rates,
+        dt: f64,
+        balance: &mut CollisionalRadiativeBalance,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Point, CollisionalRadiativeError> {
+        if rates.radiation {
+            return Err(CollisionalRadiativeError::Invalid(
+                "collisional stage includes radiation",
+            ));
+        }
+        self.midpoint(point, rates, dt, balance, cancelled)
     }
 
     fn frozen(
@@ -355,13 +435,25 @@ impl<'a> Problem<'a> {
             let extent = (birth * point.neutral - death * point.minor) * depleted;
             (neutral, minor, neutral_time, minor_time, extent)
         };
-        let photo = self.photon.rate_per_neutral_per_s * neutral_time;
+        let photo = if rates.radiation {
+            self.photon.rate_per_neutral_per_s * neutral_time
+        } else {
+            0.0
+        };
         let captured = rates.radiative_destruction * minor_time;
         // The coupled analytic transfer fixes NET collisional progress. Gross
         // forward/reverse traffic is never charged as chemical storage twice.
         let collisional = (extent - photo) + captured;
-        let photo_heat = (self.photon.electron_heating_per_neutral_w * NA) * neutral_time;
-        let absorbed = (self.photon.absorbed_power_per_neutral_w * NA) * neutral_time;
+        let photo_heat = if rates.radiation {
+            (self.photon.electron_heating_per_neutral_w * NA) * neutral_time
+        } else {
+            0.0
+        };
+        let absorbed = if rates.radiation {
+            (self.photon.absorbed_power_per_neutral_w * NA) * neutral_time
+        } else {
+            0.0
+        };
         let kinetic = captured * rates.captured_energy_j_mol;
         let mut sensible = photo_heat
             - self.source.source().channel().ionization_energy_j_mol() * collisional
@@ -432,6 +524,10 @@ impl<'a> Problem<'a> {
         next.radiative.add(captured);
         next.absorbed.add(absorbed);
         next.captured.add(kinetic);
+        next.net_radiation.add(absorbed);
+        next.net_radiation
+            .add(-self.source.source().channel().ionization_energy_j_mol() * captured);
+        next.net_radiation.add(-kinetic);
         if let Some(update) = thermal_update {
             next.th = update.heavy_temperature;
             next.heavy_energy.add(update.heavy_increment);
@@ -448,6 +544,7 @@ impl<'a> Problem<'a> {
             next.neutral_exchange.value,
             next.coulomb_exchange.value,
             next.elapsed.value,
+            next.net_radiation.value,
         ]
         .iter()
         .any(|v| !v.is_finite())
@@ -517,6 +614,11 @@ impl<'a> Problem<'a> {
                 start.captured.value,
                 full.captured.value,
                 next.captured.value,
+            ),
+            (
+                start.net_radiation.value,
+                full.net_radiation.value,
+                next.net_radiation.value,
             ),
             (
                 start.heavy_energy.value,
@@ -646,12 +748,144 @@ impl<'a> Problem<'a> {
         next.extent.add(absorbed_mol);
         next.photo.add(absorbed_mol);
         next.absorbed.add(absorbed_photon_energy_j);
-        if [next.extent.value, next.photo.value, next.absorbed.value]
-            .iter()
-            .any(|v| !v.is_finite())
+        next.net_radiation.add(absorbed_photon_energy_j);
+        if [
+            next.extent.value,
+            next.photo.value,
+            next.absorbed.value,
+            next.net_radiation.value,
+        ]
+        .iter()
+        .any(|v| !v.is_finite())
         {
             return Err(CollisionalRadiativeError::Arithmetic(
                 "cumulative photon increment",
+            ));
+        }
+        Ok(next)
+    }
+
+    /// Apply signed diffuse reaction and energy moments with no clock advance.
+    /// The heavy pool is unchanged: its elastic exchange belongs to the local
+    /// collisional half-steps. An inadmissible explicit radiation trial rejects
+    /// instead of clipping an inventory or inventing an electron seed.
+    pub fn apply_diffuse(
+        &self,
+        point: Point,
+        increment: DiffuseIncrement,
+    ) -> Result<Point, CollisionalRadiativeError> {
+        let DiffuseIncrement {
+            net_extent_mol: extent,
+            net_electron_energy_j: sensible,
+            net_gas_energy_j: radiation,
+            absorbed_mol: photo,
+            captured_mol: capture,
+            absorbed_energy_j: absorbed,
+            captured_energy_j: kinetic,
+        } = increment;
+        if [extent, sensible, radiation].iter().any(|v| !v.is_finite())
+            || [photo, capture, absorbed, kinetic]
+                .iter()
+                .any(|v| !nonnegative(*v))
+        {
+            return Err(CollisionalRadiativeError::Arithmetic(
+                "diffuse radiation increment",
+            ));
+        }
+        if extent > point.neutral || extent < -point.minor {
+            return Err(CollisionalRadiativeError::OutsideDomain);
+        }
+        let chi = self.source.source().channel().ionization_energy_j_mol();
+        // Gross accounts only check consistency at their own floating-point
+        // resolution. They never reconstruct the direct signed net moments.
+        let event_allowance = self.controls.absolute_amount_tolerance_mol
+            + 64.0 * f64::EPSILON * photo.max(capture).max(extent.abs());
+        let emitted = chi * capture + kinetic;
+        let gross_allowance = self.controls.energy_tolerance_j
+            + 64.0 * f64::EPSILON * absorbed.max(emitted).max(radiation.abs());
+        let net_allowance = self.controls.energy_tolerance_j
+            + 64.0
+                * f64::EPSILON
+                * sensible
+                    .abs()
+                    .max((chi * extent).abs())
+                    .max(radiation.abs());
+        let mut direct = Sum::default();
+        for value in [sensible, chi * extent, -radiation] {
+            direct.add(value);
+        }
+        let mut gross = Sum::default();
+        for value in [absorbed, -emitted, -radiation] {
+            gross.add(value);
+        }
+        if !nonnegative(emitted)
+            || !direct.value.is_finite()
+            || !gross.value.is_finite()
+            || ((photo - capture) - extent).abs() > event_allowance
+            || gross.value.abs() > gross_allowance
+            || direct.value.abs() > net_allowance
+        {
+            return Err(CollisionalRadiativeError::Invalid(
+                "diffuse photon/event/energy disagreement",
+            ));
+        }
+        let mut neutral = point.neutral - extent;
+        let mut minor = point.minor + extent;
+        if extent != 0.0 {
+            if minor <= neutral {
+                neutral = self.total - minor;
+            } else {
+                minor = self.total - neutral;
+            }
+        }
+        let electron = minor + self.excess[1];
+        let before = point.minor + self.excess[1];
+        if !nonnegative(neutral)
+            || !nonnegative(minor)
+            || !nonnegative(electron)
+            || (electron == 0.0 && (before != 0.0 || sensible != 0.0))
+        {
+            return Err(CollisionalRadiativeError::OutsideDomain);
+        }
+        let te = if electron == 0.0 {
+            point.te
+        } else if before == 0.0 {
+            sensible / (CV * electron)
+        } else {
+            let change = (sensible - CV * point.te * extent) / (CV * electron);
+            if change.is_finite() && change.abs() < 0.5 * point.te {
+                point.te + change
+            } else {
+                (CV * before * point.te + sensible) / (CV * electron)
+            }
+        };
+        self.admit_temperature(te)?;
+        let mut next = Point {
+            neutral,
+            minor,
+            te,
+            ..point
+        };
+        next.extent.add(extent);
+        next.photo.add(photo);
+        next.radiative.add(capture);
+        next.absorbed.add(absorbed);
+        next.captured.add(kinetic);
+        next.net_radiation.add(radiation);
+        if [next.extent.value, next.net_radiation.value]
+            .iter()
+            .any(|v| !v.is_finite())
+            || [
+                next.photo.value,
+                next.radiative.value,
+                next.absorbed.value,
+                next.captured.value,
+            ]
+            .iter()
+            .any(|v| !nonnegative(*v))
+        {
+            return Err(CollisionalRadiativeError::Arithmetic(
+                "cumulative diffuse radiation increment",
             ));
         }
         Ok(next)
@@ -712,8 +946,7 @@ impl<'a> Problem<'a> {
         for value in [
             sensible,
             chemical,
-            emitted,
-            -point.absorbed.value,
+            -point.net_radiation.value,
             point.exchange.value,
             -electron_work,
         ] {
@@ -780,6 +1013,7 @@ impl<'a> Problem<'a> {
         balance.emitted_photons = NA * point.radiative.value;
         balance.absorbed_radiation_energy_j = point.absorbed.value;
         balance.emitted_radiation_energy_j = emitted;
+        balance.net_radiation_energy_j = point.net_radiation.value;
         balance.chemical_storage_change_j = chemical;
         balance.electron_sensible_energy_change_j = sensible;
         balance.heavy_sensible_energy_change_j = heavy;

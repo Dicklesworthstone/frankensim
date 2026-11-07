@@ -581,7 +581,7 @@ impl<'a> Column<'a> {
             photon_energy = photon_energy + Dd::from_f64(b.absorbed_energy_j);
             group_balances.push(b);
         }
-        let mut totals = [Dd::ZERO; 17];
+        let mut totals = [Dd::ZERO; 18];
         let mut balance = CollisionalRadiativeBalance::default();
         for (c, b) in statistics.iter().enumerate() {
             if c % 256 == 0 {
@@ -605,6 +605,7 @@ impl<'a> Column<'a> {
                 b.electron_to_heavy_coulomb_energy_j,
                 b.electron_sensible_energy_residual_j,
                 b.heavy_sensible_energy_residual_j,
+                b.net_radiation_energy_j,
             ]) {
                 *sum = *sum + Dd::from_f64(value);
             }
@@ -641,6 +642,7 @@ impl<'a> Column<'a> {
         balance.emitted_photons = totals[4].to_f64();
         balance.absorbed_radiation_energy_j = photon_energy.to_f64();
         balance.emitted_radiation_energy_j = totals[6].to_f64();
+        balance.net_radiation_energy_j = totals[17].to_f64();
         balance.chemical_storage_change_j = totals[7].to_f64();
         balance.electron_sensible_energy_change_j = totals[8].to_f64();
         balance.electron_deposited_energy_j = totals[9].to_f64();

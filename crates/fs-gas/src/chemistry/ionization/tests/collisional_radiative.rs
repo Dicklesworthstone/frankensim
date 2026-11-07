@@ -1,4 +1,5 @@
 use super::{EV, KB, ME, NA, id, initial};
+mod diffuse_increment;
 mod thermal;
 use crate::chemistry::collisional_radiative::*;
 use fs_matdb::Provenance;
