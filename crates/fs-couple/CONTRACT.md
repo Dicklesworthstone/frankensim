@@ -4868,3 +4868,30 @@ Energy closure is not a time-accuracy or material-calibration certificate.
 Refine the complete physical interval for simultaneous heat/motion accuracy.
 Gas remains well mixed and frozen in composition in this solid-wall owner;
 reacting thermal compression has its separate original gas reactor owner.
+
+### Adaptive finite-solution exchange across unlike materials
+
+`FiniteMoistureSolution::advance_layered_adaptive_to` and
+`advance_layered_radial_adaptive_to` now complete a finite-bath duration using
+the original first-order step-doubling controller. Each full/half probe solves
+the native solvent-volume root and every original layer, including contact
+resistance, source sorption and unequal curved storage. Temporal comparisons
+include actual solvent mass and activity, each local material activity/content,
+and the L1 dry-mass-weighted local water discrepancy. The last comparison
+remains effective for sealed internal redistribution with constant pure-solvent
+activity and zero net uptake.
+
+Accepted fine-step receipts alone form the per-material interface accounts and
+the exterior whole-body account. The original bound-water-plus-solvent inventory
+is checked over the complete duration against one fixed tolerance. Work
+exhaustion after a successful private interval, source refusal or cancellation
+returns no partially advanced bath or body. Kinetic phases retain their native
+first-order endpoint-volume approximation; phase-component temporal error is
+not separately estimated. Fixed geometry/temperature and the equal-pressure
+vapor-equilibrium bridge retain their existing scope.
+
+Four authored regression definitions compare finite-bath time refinement with
+independent continuous references for slabs, spheres and cylinders, isolate
+physical-water-driven refinement in a sealed body, and exercise late work
+rollback. Rust formatting and analytical fixture review passed. These new
+native integration tests remain unrun in the full dependency build.

@@ -18,6 +18,7 @@ use crate::moisture::{
 
 mod radial;
 mod sdirk;
+mod solution;
 
 /// Whole-stack accuracy and water accounts, plus each original material layer.
 #[derive(Clone, Debug)]
