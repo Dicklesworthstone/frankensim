@@ -1056,6 +1056,26 @@ pipe `Z_in = +i Zc cot(kL)`.
       series with squaring, certified by a rigorous truncation bound carried
       through the squarings plus an a-posteriori halving estimate.
     - A certificate above `tol` refuses (`FS-DUCT-PROPAGATOR-CERTIFICATE`).
+    - Where the series certificate refuses with a finite value on a duct of at
+      most `SERIES_DD_MAX_DOFS = 512` DOFs, the series is re-evaluated once in
+      double-double (`dg/series_dd.rs`) against the same `tol`, never loosened:
+      `A = L dt / 2^s` is formed exactly, the Taylor series runs to a scaled
+      1-norm remainder of 1e-32, `halving` is the Frobenius distance between
+      the double-double `phi_0` at `s` and at `s + 1` squarings, and the
+      rounding of the result to f64 is counted as one ulp per entry (`2^-52`
+      times the Frobenius norm of the largest of `phi_0`, `phi_1`, `phi_2`).
+      The certificate is `max(carried, halving) + rounding`. A duct that passes
+      the f64 certificate keeps the f64 series bit for bit and never reaches
+      this path; one the double-double series cannot certify returns the f64
+      refusal with the f64 residual. Measured (dry air at 305 K, 1 element of
+      order 1, 6 mm, 60 poles over 50 Hz to 20 kHz, 244 DOFs, dt = 1/96000, 13
+      squarings): the f64 certificate is 1.03e-11, 1.10e-11 and 1.27e-11 at
+      radii 1.5, 1.55 and 1.6 mm (`halving` is the f64 rounding floor; `carried`
+      is under 4e-14) against `tol` 1e-11, the double-double certificate is
+      2.4e-15 in about 6 s of release CPU, and the f64 matrices differ from the
+      double-double ones by 5.4e-12, 6.8e-12 and 5.0e-12 (Frobenius).
+      `certificate_residual()` of a duct that took this path is the
+      double-double certificate (about 2e-15, dominated by the rounding term).
     - There is no Krylov path: more than `MAX_DG_PROPAGATOR_DOFS = 2048` DOFs
       refuse in `new` and `propagator`.
   - `DgPropagator::step` returns each port's `ΔX` and an `EnergyLedgerRow`

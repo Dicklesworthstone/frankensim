@@ -106,6 +106,7 @@ mod port_response;
 pub use port_response::{DgDenseResponseReport, DgMultiportResponse, DgPortResponse};
 mod krylov;
 pub use krylov::DgKrylovReport;
+mod series_dd;
 mod boundary_power;
 pub use boundary_power::{DgBoundaryEnergy, DgBoundaryStepOutput, PreparedDgBoundaryEnergy};
 mod side_ports;
@@ -1801,12 +1802,31 @@ impl<M: DgMedium> DgDuct<M> {
         // through 2^s squarings of a contraction. Estimated: one more halving's change.
         let carried = f64::from(1u32 << shift) * det::sqrt(n as f64) * truncation;
         let certificate = carried.max(halving);
-        if !(certificate <= tol) {
-            return Err(DuctError::PropagatorCertificate {
-                residual: certificate,
-                tol,
-            });
-        }
+        // A certificate within the tolerance keeps the f64 matrices untouched. One that refused
+        // with a finite value, on a duct small enough, is re-evaluated in double-double against
+        // the same test (`series_dd`); anything it cannot certify returns the f64 refusal.
+        let (phi0, phi1, phi2, certificate) = if certificate <= tol {
+            (phi0, phi1, phi2, certificate)
+        } else {
+            let refined = if series_dd::engages(n, certificate, tol) {
+                series_dd::refine(&self.l_tilde, n, dt, shift)
+                    .filter(|refined| refined.certificate() <= tol)
+            } else {
+                None
+            };
+            match refined {
+                Some(refined) => {
+                    let certificate = refined.certificate();
+                    (refined.phi0, refined.phi1, refined.phi2, certificate)
+                }
+                None => {
+                    return Err(DuctError::PropagatorCertificate {
+                        residual: certificate,
+                        tol,
+                    });
+                }
+            }
+        };
 
         let mut port_cols_phi1 = Vec::with_capacity(self.ports.len());
         let mut port_cols_phi2 = Vec::with_capacity(self.ports.len());
