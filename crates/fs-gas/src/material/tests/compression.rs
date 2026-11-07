@@ -6,6 +6,32 @@ use crate::material::compression::{
 };
 use fs_material::thermochemical_gas::energy::entropy::GasEntropySolve;
 
+mod adaptive;
+
+// The parent fixture deliberately uses reversible chemistry. Compression's
+// analytic exponential references require the explicitly irreversible channel
+// admitted by ExactFirstOrder; do not change the shared material test source.
+fn fixture(
+    formation: f64,
+    maximum_transport_temperature: f64,
+) -> (ThermochemicalGasModel, IdealGasKineticsV1, ClosedGasParcel) {
+    let (bank, original, parcel) = super::fixture(formation, maximum_transport_temperature);
+    let mechanism = IdealGasKineticsV1::new(
+        original.thermodynamics().clone(),
+        "manufactured-irreversible-compression-isomers",
+        1,
+        original
+            .reactions()
+            .iter()
+            .cloned()
+            .map(ElementaryReactionV1::irreversible)
+            .collect(),
+        0.0,
+    )
+    .unwrap();
+    (bank, mechanism, parcel)
+}
+
 fn compression_controls(substeps: usize) -> MaterialCompressionSolve {
     let mut kinetics = controls();
     kinetics.chemistry.method = crate::chemistry::IsochoricKineticsMethod::ExactFirstOrder {

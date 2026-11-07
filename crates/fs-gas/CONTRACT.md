@@ -7281,3 +7281,47 @@ exothermic reacting-compression solution and second-order refinement, independen
 endpoint energy/work closure, original rigid-reactor compatibility, late
 cancellation and source-domain refusal. They are numerical/physical coupling
 checks, not empirical kinetic validation.
+
+
+### Adaptive reacting material compression
+
+`material::compression::adaptive::advance_closed_parcel_compression_adaptive`
+adds caller-owned absolute
+temperature [K], original species amount [mol] and interval work [J] tolerances,
+plus a relative allowance on actual interval changes. Each trial evaluates one
+full interval and two half intervals on the original prescribed logarithmic
+volume trajectory. The SAME private original-owner interval composition serves
+fixed and adaptive calls. Original species order is bound once; allocation-free
+ordered comparisons include initially absent products without trace seeding.
+Carrier inventories, arbitrary formation-energy origins and work accumulated
+before the trial do not enlarge the local error scales.
+
+Acceptance uses raw full/fine discrepancies in all three physical channels,
+without an assumed-order divisor or Richardson extrapolation. Only the
+two-half-step material state and its physical work, energy, residual and stage
+entropy enter the accepted trajectory. The native chemistry integrator retains
+its own accuracy, source, conservation, entropy and per-call work controls.
+These local comparisons do not certify a global solution error or complete
+published-parcel entropy change. Symmetric exact-subflow composition follows
+Strang, SIAM Journal on Numerical Analysis 5(3), 506–517 (1968),
+<https://doi.org/10.1137/0705041>; it does not make approximate native subflows exact.
+
+Explicit minimum/initial/maximum time steps, at most 4096 accepted comparison
+intervals and at most 12288 coarse/fine interval evaluations bound adaptation.
+All rejected and coarse trials count against the evaluation budget; reports
+separate their chemical work from accepted fine physical totals. Distinct
+represented full/half/quarter times are required. The exact final remainder is
+integrated and the exact requested terminal volume/time retained. A minimum-step
+accuracy failure, exhausted budget, native physical/source refusal or late
+cancellation preserves the entire original parcel, including after an internally
+accepted prefix. Native physical refusals remain terminal; only comparison
+failures trigger smaller trials. Fixed volume and zero duration retain the
+original single-reactor route. External heat remains zero.
+
+Focused manufactured regressions cover independent reacting temperature/work
+solutions during compression and expansion, work-driven refinement, collision
+chemistry whose composition error is independent of caloric changes, accepted
+and rejected work bounds, exact endpoints, source-domain and late cancellation
+rollback, and fixed-volume compatibility. The exponential analytic fixture
+explicitly declares irreversible first-order A-to-B chemistry; the shared
+reversible material fixture remains unchanged.

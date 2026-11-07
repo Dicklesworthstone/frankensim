@@ -5,8 +5,8 @@
 //! This symmetric splitting resolves pressure work and reaction heat together
 //! without replacing the source calorics with a frozen heat-capacity ratio.
 //! Volume follows a constant logarithmic rate. The caller controls temporal
-//! splitting error through `substeps`; the chemistry owner still controls its
-//! own integration error. These are homogeneous gas states, without piston
+//! splitting error through `substeps`, or selects the adaptive controller in
+//! [`adaptive`]; the chemistry owner still controls its own integration error. These are homogeneous gas states, without piston
 //! inertia, shocks, wall heat transfer or phase change.
 
 use super::{
@@ -17,7 +17,10 @@ use fs_material::thermochemical_gas::energy::entropy::{GasEntropyError, GasEntro
 use fs_qty::{Time, Volume};
 use fs_thermochem::kinetics::IdealGasKineticsV1;
 
-/// Maximum prescribed trajectory intervals in one atomic update.
+/// Automatic bounded time refinement using the same physical interval owner.
+pub mod adaptive;
+
+/// Maximum prescribed trajectory intervals in one atomic fixed-step update.
 pub const MAX_COMPRESSION_SUBSTEPS: usize = 4096;
 
 /// Explicit controls for chemistry, reversible volume work and time splitting.
@@ -148,12 +151,7 @@ pub fn advance_closed_parcel_compression(
     let mut candidate = parcel.clone();
     // Admit original volume controls even for the fixed-volume/no-op path.
     candidate.set_volume_isentropic(initial_volume, controls.volume, &mut cancelled)?;
-    let mut work = (0.0, 0.0);
-    let mut energy = (0.0, 0.0);
-    let mut residual = (0.0, 0.0);
-    let mut entropy = (0.0, 0.0);
-    let mut accepted = 0;
-    let mut rejected = 0;
+    let mut totals = CompressionTotals::default();
     let mut elapsed = 0.0;
     for index in 0..steps {
         poll(&mut cancelled)?;
@@ -175,56 +173,161 @@ pub fn advance_closed_parcel_compression(
         } else {
             initial_volume * fs_math::det::exp(log_ratio * ((index + 1) as f64 / steps as f64))
         };
-        let first = candidate.set_volume_isentropic(midpoint, controls.volume, &mut cancelled)?;
-        let chemical = advance_closed_parcel_adiabatic(
+        advance_interval(
             &mut candidate,
             bank,
             mechanism,
-            Time::new(dt),
-            controls.kinetics,
+            CompressionInterval {
+                duration_s: dt,
+                midpoint_volume_m3: midpoint,
+                final_volume_m3: endpoint,
+            },
+            controls,
+            &mut totals,
             &mut cancelled,
         )?;
-        let second = candidate.set_volume_isentropic(endpoint, controls.volume, &mut cancelled)?;
-        accumulate(&mut work, -first.work_by_gas_j);
-        accumulate(&mut work, -second.work_by_gas_j);
-        accumulate(&mut energy, first.stored_energy_change_j);
-        accumulate(&mut energy, chemical.balance.energy_residual_j);
-        accumulate(&mut energy, second.stored_energy_change_j);
-        accumulate(&mut residual, chemical.balance.energy_residual_j);
-        accumulate(&mut entropy, first.entropy_change_j_k);
-        accumulate(
-            &mut entropy,
-            chemical.chemistry.balance().entropy_change_j_k,
-        );
-        accumulate(&mut entropy, second.entropy_change_j_k);
-        accepted += chemical.chemistry.balance().accepted_steps;
-        rejected += chemical.chemistry.balance().rejected_steps;
         elapsed = end_time;
     }
-    let report = MaterialCompressionStep {
-        elapsed_time: duration,
-        initial_volume_m3: initial_volume,
-        final_volume_m3: final_volume,
-        boundary_work_on_gas_j: work.0,
-        internal_energy_change_j: energy.0,
-        energy_residual_j: residual.0,
-        entropy_change_j_k: entropy.0,
-        substeps: steps,
-        chemical_accepted_steps: accepted,
-        chemical_rejected_steps: rejected,
-    };
-    if !report.boundary_work_on_gas_j.is_finite()
-        || !report.internal_energy_change_j.is_finite()
-        || !report.energy_residual_j.is_finite()
-        || !report.entropy_change_j_k.is_finite()
-    {
-        return Err(MaterialCompressionError::Invalid(
-            "accumulated work, energy or entropy is unrepresentable",
-        ));
-    }
+    let report = totals.finish(initial_volume, final_volume, duration)?;
     poll(&mut cancelled)?;
     *parcel = candidate;
     Ok(report)
+}
+
+/// A prescribed interval of the original logarithmic volume trajectory.
+#[derive(Clone, Copy)]
+struct CompressionInterval {
+    duration_s: f64,
+    midpoint_volume_m3: f64,
+    final_volume_m3: f64,
+}
+
+/// Original-owner balances; trial reductions never touch the caller's parcel.
+#[derive(Clone, Copy, Default)]
+struct CompressionTotals {
+    work: (f64, f64),
+    energy: (f64, f64),
+    residual: (f64, f64),
+    entropy: (f64, f64),
+    substeps: usize,
+    chemical_accepted: usize,
+    chemical_rejected: usize,
+}
+
+impl CompressionTotals {
+    fn add_counts(
+        &mut self,
+        substeps: usize,
+        accepted: usize,
+        rejected: usize,
+    ) -> Result<(), MaterialCompressionError> {
+        let error = MaterialCompressionError::Invalid("compression work count overflow");
+        self.substeps = self
+            .substeps
+            .checked_add(substeps)
+            .ok_or_else(|| error.clone())?;
+        self.chemical_accepted = self
+            .chemical_accepted
+            .checked_add(accepted)
+            .ok_or_else(|| error.clone())?;
+        self.chemical_rejected = self.chemical_rejected.checked_add(rejected).ok_or(error)?;
+        Ok(())
+    }
+
+    fn merge(&mut self, other: Self) -> Result<(), MaterialCompressionError> {
+        // Kahan's correction has the opposite sign of the missing low part.
+        for (into, from) in [
+            (&mut self.work, other.work),
+            (&mut self.energy, other.energy),
+            (&mut self.residual, other.residual),
+            (&mut self.entropy, other.entropy),
+        ] {
+            accumulate(into, from.0);
+            accumulate(into, -from.1);
+        }
+        self.add_counts(
+            other.substeps,
+            other.chemical_accepted,
+            other.chemical_rejected,
+        )
+    }
+
+    fn finish(
+        self,
+        initial_volume_m3: f64,
+        final_volume_m3: f64,
+        elapsed_time: Time,
+    ) -> Result<MaterialCompressionStep, MaterialCompressionError> {
+        let report = MaterialCompressionStep {
+            elapsed_time,
+            initial_volume_m3,
+            final_volume_m3,
+            boundary_work_on_gas_j: self.work.0,
+            internal_energy_change_j: self.energy.0,
+            energy_residual_j: self.residual.0,
+            entropy_change_j_k: self.entropy.0,
+            substeps: self.substeps,
+            chemical_accepted_steps: self.chemical_accepted,
+            chemical_rejected_steps: self.chemical_rejected,
+        };
+        if !report.boundary_work_on_gas_j.is_finite()
+            || !report.internal_energy_change_j.is_finite()
+            || !report.energy_residual_j.is_finite()
+            || !report.entropy_change_j_k.is_finite()
+        {
+            return Err(MaterialCompressionError::Invalid(
+                "accumulated work, energy or entropy is unrepresentable",
+            ));
+        }
+        Ok(report)
+    }
+}
+
+/// Fixed and adaptive drivers compose exactly these original source operations.
+fn advance_interval(
+    candidate: &mut ClosedGasParcel,
+    bank: &ThermochemicalGasModel,
+    mechanism: &IdealGasKineticsV1,
+    interval: CompressionInterval,
+    controls: MaterialCompressionSolve,
+    totals: &mut CompressionTotals,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), MaterialCompressionError> {
+    let first = candidate.set_volume_isentropic(
+        interval.midpoint_volume_m3,
+        controls.volume,
+        &mut *cancelled,
+    )?;
+    let chemical = advance_closed_parcel_adiabatic(
+        candidate,
+        bank,
+        mechanism,
+        Time::new(interval.duration_s),
+        controls.kinetics,
+        &mut *cancelled,
+    )?;
+    let second = candidate.set_volume_isentropic(
+        interval.final_volume_m3,
+        controls.volume,
+        &mut *cancelled,
+    )?;
+    accumulate(&mut totals.work, -first.work_by_gas_j);
+    accumulate(&mut totals.work, -second.work_by_gas_j);
+    accumulate(&mut totals.energy, first.stored_energy_change_j);
+    accumulate(&mut totals.energy, chemical.balance.energy_residual_j);
+    accumulate(&mut totals.energy, second.stored_energy_change_j);
+    accumulate(&mut totals.residual, chemical.balance.energy_residual_j);
+    accumulate(&mut totals.entropy, first.entropy_change_j_k);
+    accumulate(
+        &mut totals.entropy,
+        chemical.chemistry.balance().entropy_change_j_k,
+    );
+    accumulate(&mut totals.entropy, second.entropy_change_j_k);
+    totals.add_counts(
+        1,
+        chemical.chemistry.balance().accepted_steps,
+        chemical.chemistry.balance().rejected_steps,
+    )
 }
 
 fn accumulate((sum, correction): &mut (f64, f64), value: f64) {
