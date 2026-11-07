@@ -3063,10 +3063,24 @@ downhill crossing heat and uphill bath absorption separately. Native external
 heat includes the former and subtracts the latter. Absorbed pump energy equals
 total stored excitation plus escaped/unresolved light plus net native heat,
 within the supplied absolute local and global joule allowances. Passive
-emission-band absorption uses the existing directed transport operator. Resonant
-photon recycling and singlet/triplet coupling cannot currently be combined;
-either binding order refuses rather than silently imposing equal-energy scalar
-recycling on two different states.
+emission-band absorption uses the existing directed transport operator. The
+equal-energy scalar resonant recycler remains exclusive from singlet/triplet
+coupling. `with_singlet_triplet_recycling` instead admits explicit spectral
+photon return through `PhosphorescenceReceiver` probabilities. Every positive
+receiver branch must pay the destination-state energy, and one absorbed photon
+creates at most one excitation. Explicitly mapped unpumped receivers acquire
+real stores; omitted receivers stay passive. Source Stokes heat, incoming
+stored excitation and receiver excess/passive heat remain separate. Repeated
+returns evolve within the same interval without a bounce cutoff. The current
+native 64-state bound permits 32 active two-state cells; passive absorbers add
+no kinetic state. Immutable transport and prepared plans are shared; actual
+temperature-refreshed rates and interval duration determine plan reuse. The
+source identity binds the original transport snapshot, thermal mapping and
+explicit receiver probabilities. Absolute transport and receiver-partition
+defects are charged before they can cancel between distinct excitation cells.
+Focused cases in `tests/optical_heating/phosphorescence_recycling.rs` cover
+self-return, unpumped active receivers, passive receiver heat, closed photon
+cycles, energetically forbidden activation, retry and cancellation.
 
 Fixed-rate intervals use the existing bounded positive matrix-exponential
 owner, with a prepared plan shared across clones and reused for unchanged

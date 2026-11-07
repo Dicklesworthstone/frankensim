@@ -21,7 +21,7 @@
 pub mod absorption;
 pub mod phosphorescence;
 pub use absorption::{AbsorbingLuminescenceEnvironment, LuminescenceAbsorptionTolerance};
-pub use phosphorescence::{SingletTripletLimits, SingletTripletSource};
+pub use phosphorescence::{PhosphorescenceReceiver, SingletTripletLimits, SingletTripletSource};
 mod recycling;
 pub use fs_thermal::luminescence::recycling::RecyclingLimits;
 use phosphorescence::SingletTripletFeedback;
@@ -180,9 +180,10 @@ pub struct LuminescenceEnergy<const M: usize> {
     pub reverse_crossing_heat_absorbed_j: f64,
     /// Radiative-transition energy remaining after emitted photon energy, joules.
     pub relaxation_heat_j: f64,
-    /// Emitted radiation absorbed by explicitly passive receivers, joules.
+    /// Emitted radiation converted to receiver heat, including passive absorption
+    /// and photon energy remaining after an active receiver is excited, joules.
     pub secondary_absorption_heat_j: f64,
-    /// Emitted radiation returned to resonant excitation stores, joules.
+    /// Photon energy returned to excitation stores, including repeated absorption.
     /// This internal circulation is neither extra pump input nor heat.
     pub recycled_excitation_j: f64,
     /// Current total nonthermal excitation store, including both spin states
@@ -708,6 +709,17 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
             )?),
             None => None,
         };
+        let coupled_recycled = match &mut self.singlet_triplet {
+            Some(coupling) => coupling.advance_recycling(
+                &self.source,
+                &self.cells,
+                &scale,
+                duration_s,
+                thermal,
+                checkpoint,
+            )?,
+            None => None,
+        };
         for (index, cell) in self.cells.iter().enumerate() {
             checkpoint()?;
             let mut pump = CheckedSum::default();
@@ -718,18 +730,26 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
                 prompt.add(finite(cell.prompt_heat_w[lane] * factor * duration_s)?)?;
                 absorbed.add(finite(cell.absorbed_w[lane] * factor * duration_s)?)?;
             }
-            let coupled = match &mut self.singlet_triplet {
-                Some(coupling) => Some(coupling.advance(
-                    &self.source,
-                    cell.state_stored_j,
-                    pump.value()?,
-                    duration_s,
-                    thermal.temperature_k(cell.thermal_cell)?,
-                    checkpoint,
-                )?),
-                None => None,
+            let independent = if coupled_recycled.is_none() {
+                match &mut self.singlet_triplet {
+                    Some(coupling) => Some(coupling.advance(
+                        &self.source,
+                        cell.state_stored_j,
+                        pump.value()?,
+                        duration_s,
+                        thermal.temperature_k(cell.thermal_cell)?,
+                        checkpoint,
+                    )?),
+                    None => None,
+                }
+            } else {
+                None
             };
-            let step = match (&coupled, &recycled) {
+            let coupled = coupled_recycled
+                .as_ref()
+                .map(|network| &network.cells[index])
+                .or(independent.as_ref());
+            let step = match (coupled, &recycled) {
                 (Some(step), _) => ExcitationStep {
                     stored_energy_j: step.stored_energy_j,
                     pumped_energy_j: finite(pump.value()? * duration_s)?,
@@ -753,7 +773,7 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
                     .map_err(|_| invalid("luminescence reservoir advance refused"))?,
             };
             let prompt = prompt.value()?;
-            let (emitted, relaxation, crossing, reverse_crossing) = match &coupled {
+            let (emitted, relaxation, crossing, reverse_crossing) = match coupled {
                 Some(step) => (
                     step.emitted_energy_j,
                     step.relaxation_heat_j,
@@ -790,15 +810,20 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
                 balance.add(step.reabsorbed_energy_j[index])?;
                 accounts.recycled.add(step.reabsorbed_energy_j[index])?;
             }
+            if let Some(step) = &coupled_recycled {
+                balance.add(step.recycled_excitation_j[index])?;
+                accounts.recycled.add(step.recycled_excitation_j[index])?;
+            }
             let mut mean = [0.0; M];
             for bin in 0..M {
                 accounts.emitted[bin].add(emitted[bin])?;
                 balance.add(-emitted[bin])?;
                 mean[bin] = finite(emitted[bin] / duration_s)?;
             }
-            if recycled.is_some() {
-                // All resolved absorption already entered the coupled stores.
-                // External escape/tail totals are reduced once after this loop.
+            if recycled.is_some() || coupled_recycled.is_some() {
+                // Feedback was evolved inside this same interval. Stored
+                // reexcitation, receiver heat and outgoing radiation are
+                // accounted separately; ordinary passive routing would repeat it.
             } else if let Some(environment) = &self.emission_transport {
                 let routed = environment.route(
                     cell.grid_cell,
@@ -838,6 +863,21 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
             // Recycling is admitted only by the single-line constructor.
             accounts.escaped[0].add(step.escaped_energy_j)?;
             accounts.unresolved[0].add(step.unresolved_energy_j)?;
+        }
+        if let Some(step) = &coupled_recycled {
+            for bin in 0..M {
+                accounts.escaped[bin].add(step.escaped_j[bin])?;
+                accounts.unresolved[bin].add(step.unresolved_j[bin])?;
+            }
+            for (&receiver, &heat) in &step.secondary_heat_j {
+                checkpoint()?;
+                sources
+                    .entry(receiver)
+                    .or_default()
+                    .add(finite(heat / duration_s)?)?;
+                accounts.secondary.add(heat)?;
+            }
+            accounts.roundoff.add(step.absolute_roundoff_j)?;
         }
         if let Some(environment) = &self.emission_transport {
             let mut unresolved = CheckedSum::default();

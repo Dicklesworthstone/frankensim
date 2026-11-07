@@ -22,6 +22,9 @@ use std::{collections::BTreeMap, sync::Mutex};
 
 #[cfg(feature = "material-state")]
 mod material;
+mod photon_recycling;
+pub use photon_recycling::PhosphorescenceReceiver;
+use photon_recycling::PhotonRecyclingFeedback;
 
 /// The thermal owner's existing positive-network work and accuracy limits.
 pub use fs_thermal::luminescence::recycling::RecyclingLimits as SingletTripletLimits;
@@ -144,6 +147,7 @@ struct TemperatureCache {
 pub(super) struct SingletTripletFeedback<const M: usize> {
     pub(super) source: SingletTripletSource<M>,
     prepared: Option<Arc<Prepared>>,
+    photon_recycling: Option<PhotonRecyclingFeedback>,
     #[cfg(feature = "material-state")]
     temperatures: Mutex<TemperatureCache>,
     #[cfg(feature = "material-state")]
@@ -155,6 +159,7 @@ impl<const M: usize> Clone for SingletTripletFeedback<M> {
         Self {
             source: self.source.clone(),
             prepared: self.prepared.clone(),
+            photon_recycling: self.photon_recycling.clone(),
             // Only immutable source/propagator data are shared. A candidate
             // starts with its own empty cache, independent of accepted stores.
             #[cfg(feature = "material-state")]
@@ -165,6 +170,7 @@ impl<const M: usize> Clone for SingletTripletFeedback<M> {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 pub(super) struct CoupledStep<const M: usize> {
     pub stored_energy_j: f64,
     pub state_stored_energy_j: [f64; 2],
@@ -181,7 +187,7 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
     /// identical so the existing transport operator can carry both spectra;
     /// photon weights may differ, including zero-weight nodes in either state.
     /// State energies must obey Es >= Et. Passive emitted-light absorption is
-    /// supported; resonant recycling would require a different coupled network.
+    /// supported; explicit spin-state photon recycling can be bound afterward.
     pub fn with_singlet_triplet(
         mut self,
         coupling: SingletTripletSource<M>,
@@ -205,6 +211,7 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
         self.singlet_triplet = Some(SingletTripletFeedback {
             source: coupling,
             prepared: None,
+            photon_recycling: None,
             #[cfg(feature = "material-state")]
             temperatures: Mutex::new(TemperatureCache::default()),
             #[cfg(feature = "material-state")]
@@ -288,7 +295,17 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
                 hash.update(source.identity.as_bytes());
             }
         }
-        hash.finalize()
+        let source_identity = hash.finalize();
+        match &coupling.photon_recycling {
+            Some(recycling) => {
+                let mut hash =
+                    DomainHasher::new("org.frankensim.render.singlet-triplet-recycling-source.v1");
+                hash.update(source_identity.as_bytes());
+                hash.update(recycling.identity().as_bytes());
+                hash.finalize()
+            }
+            None => source_identity,
+        }
     }
 }
 
