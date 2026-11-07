@@ -9785,13 +9785,29 @@ The same observer consumes accepted static and Newmark states and retains each
 layer's own modulus, geometry, strength and source conditions. It performs no
 extra mechanical solve or tangent assembly.
 
+Native Kelvin--Voigt members additionally use their actual accepted nodal
+velocities and the same original reference columns as the physical damping
+operator. Each layer keeps its independent axial and bending viscosity:
+`sigma_mean_i = E_i epsilon + eta_ai epsilon_dot`, with outer-fiber amplitude
+`r_i abs(E_i kappa + eta_bi kappa_dot)`. Signed elastic and viscous curvature
+contributions combine before extrema, so unloading cancellation and a viscous
+critical layer survive. Timoshenko members use their original bending fraction;
+transverse shear rate is not substituted for curvature. Total material axial
+force and bending moment are reported, but these aggregate resultants are never
+redistributed through `E_i/EA` to recover layer stress. Their affine spatial
+variation still admits the exact two-end envelope. Actual transient source-band
+admission remains with native Newmark. No thermal, hereditary or Rayleigh
+material stress is inferred by this observer.
+
 Exact section/source matching, a preallocation layer budget and cancellation
-checks make refusals transactional. Raw-coefficient/fiber-plastic members and
-material-viscous members refuse, since their actual stresses cannot be recovered
-from the retained elastic normal-force field. G1/G3/G4 regressions in
+checks make refusals transactional. Raw-coefficient/fiber-plastic members refuse,
+since their actual stresses cannot be recovered from this source section law.
+G1/G3/G4 regression definitions in
 `tests/frame2d_tensile_strength.rs` cover signed compression/bending, layered and
 spatially varying strength, rigid rotation, inertial double curvature, exact
-budgets and foreign/unsourced refusal. This is a normal-stress observation;
+budgets and foreign/unsourced refusal. Additional accepted-Newmark cases cover
+distinct layer viscosities, reference orientation, signed unloading cancellation
+and original Timoshenko curvature. This is a normal-stress observation;
 it does not include transverse shear failure, plastic redistribution, buckling,
 fracture evolution or a validated component allowable.
 

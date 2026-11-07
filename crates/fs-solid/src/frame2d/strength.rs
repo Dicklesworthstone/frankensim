@@ -8,11 +8,20 @@
 //! averaging opposite bending moments. Large rigid rotations change neither
 //! the local section forces nor this scalar material-axis comparison.
 //!
-//! These are observations of accepted elastic material members, including
+//! Native Kelvin--Voigt members additionally use the accepted nodal velocity
+//! and original reference interpolation. A layer's normal stress is
+//! `E_i epsilon + eta_ai epsilon_dot +/- r_i |E_i kappa + eta_bi kappa_dot|`.
+//! Signed elastic and viscous bending contributions combine before taking an
+//! absolute value. Their affine spatial variation still has an exact end
+//! envelope. Distinct layer viscosities are never redistributed through E/EA.
+//!
+//! These are observations of accepted source material members, including
 //! static and Newmark endpoints. They do not model plastic redistribution,
 //! rupture, fatigue, shear failure, or buckling. Timoshenko members retain the
 //! same axial/bending equilibrium envelope, but their shear stresses are not
-//! included in this explicitly normal-stress-only criterion.
+//! included in this explicitly normal-stress-only criterion. Authored Rayleigh
+//! damping is not a source material normal stress. Native source viscosity is
+//! linear-reference Kelvin--Voigt, with no inferred thermal or history stress.
 
 use fs_exec::Cx;
 use fs_material::section::strength::{AxialTensileCapacity, ConcentricTensileAssessment};
@@ -26,8 +35,10 @@ pub struct FrameTensileSample<'a> {
     pub element: usize,
     /// Zero is the original start node, one the original end node.
     pub end: usize,
+    /// Signed section axial force, including original material viscosity.
     pub axial_force_n: f64,
-    /// Signed section bending moment, distinct from the basic nodal moment.
+    /// Signed section bending moment, including original material viscosity;
+    /// distinct from the basic elastic nodal moment.
     pub bending_moment_n_m: f64,
     pub capacity: &'a AxialTensileCapacity,
     pub assessment: ConcentricTensileAssessment,
@@ -66,9 +77,10 @@ pub enum FrameTensileError {
     SourceMismatch {
         element: usize,
     },
-    /// Material viscosity needs its own per-layer rate stresses, not E times strain.
-    ViscousMember {
+    /// Original reference geometry or accepted velocity cannot produce a rate.
+    Kinematics {
         element: usize,
+        reason: String,
     },
     Budget,
     Allocation,
@@ -96,13 +108,17 @@ impl Frame2d {
     /// capacity must retain that member's complete elastic section, geometry,
     /// material cards and physical state. A raw-coefficient or plastic fiber
     /// member refuses: its stress cannot be reconstructed from this elastic
-    /// section law. Material-viscous members also refuse because the retained
-    /// elastic force omits their per-layer rate stresses. A temperature refresh
-    /// needs a refreshed capacity, even when its scalar strength is unchanged.
+    /// section law. Native material-viscous members combine their original
+    /// axial and bending viscosities with the actual accepted velocity field,
+    /// retaining each layer's distinct signed rate stresses. Shear-deformable
+    /// members use their original Timoshenko curvature interpolation. A
+    /// temperature refresh needs a refreshed capacity, even when its scalar
+    /// strength is unchanged; no thermal or hereditary stress is inferred.
     ///
     /// `maximum_layer_samples` bounds twice the total layer count before output
     /// allocation. No tangent, constitutive update or extra solve is performed.
     /// Cancellation and all refusals leave the accepted frame unchanged.
+    #[allow(clippy::too_many_lines)]
     pub fn assess_tensile_strength<'a>(
         &self,
         capacities: &'a [AxialTensileCapacity],
@@ -120,9 +136,6 @@ impl Frame2d {
             checkpoint(cx)?;
             if member.material_section.as_ref() != Some(capacity.section()) {
                 return Err(FrameTensileError::SourceMismatch { element });
-            }
-            if member.viscous_section.is_some() {
-                return Err(FrameTensileError::ViscousMember { element });
             }
             layers = capacity
                 .section()
@@ -145,11 +158,86 @@ impl Frame2d {
         let mut largest = -1.0;
         for (element, (member, capacity)) in self.elements.iter().zip(capacities).enumerate() {
             checkpoint(cx)?;
-            let [axial_force_n, moment_i, moment_j] = member.commit.q;
-            for (end, bending_moment_n_m) in [-moment_i, moment_j].into_iter().enumerate() {
-                let assessment = capacity
-                    .assess_axial_bending(axial_force_n, [bending_moment_n_m, 0.0])
+            let [elastic_axial_force, moment_i, moment_j] = member.commit.q;
+            let viscous = if let Some(source) = &member.viscous_section {
+                // Reuse the exact work-conjugate columns used by native C v.
+                // They include rigid translation/rotation cancellation and
+                // refuse unsupported corotational viscous geometry.
+                let kinematic_error = |error: super::SolidError| FrameTensileError::Kinematics {
+                    element,
+                    reason: error.to_string(),
+                };
+                let (dofs, columns, length) = self
+                    .reference_member_coordinates(element)
+                    .map_err(kinematic_error)?;
+                let coordinate_rates = columns.map(|column| {
+                    column
+                        .into_iter()
+                        .zip(dofs)
+                        .map(|(weight, dof)| weight * self.vel[dof])
+                        .sum::<f64>()
+                });
+                let kinematics = source
+                    .reference_kinematics(length)
+                    .map_err(kinematic_error)?;
+                let measures = kinematics
+                    .strain_measures(coordinate_rates)
+                    .map_err(kinematic_error)?;
+                let symmetric =
+                    3.0 * kinematics.bending_fraction() * (coordinate_rates[1] / length / length);
+                let antisymmetric = coordinate_rates[2] / length / length;
+                let curvature_rates = [-(symmetric + antisymmetric), symmetric - antisymmetric];
+                let prepared = capacity
+                    .clone()
+                    .with_kelvin_voigt(source.axial(), source.bending())
                     .map_err(|source| FrameTensileError::Material { element, source })?;
+                Some((prepared, measures.axial_strain, curvature_rates))
+            } else {
+                None
+            };
+            for (end, elastic_moment) in [-moment_i, moment_j].into_iter().enumerate() {
+                checkpoint(cx)?;
+                let (assessment, axial_force_n, bending_moment_n_m) = match &viscous {
+                    Some((prepared, axial_rate, curvature_rates)) => {
+                        let section = capacity.section();
+                        let axial_strain = elastic_axial_force / section.axial_stiffness_n();
+                        let curvature = elastic_moment / section.bending_stiffness_n_m2();
+                        if (elastic_axial_force != 0.0 && axial_strain == 0.0)
+                            || (elastic_moment != 0.0 && curvature == 0.0)
+                        {
+                            return Err(FrameTensileError::Invalid(
+                                "elastic material section strain is unrepresentable",
+                            ));
+                        }
+                        let assessment = prepared.assess_strain_rates(
+                            axial_strain,
+                            *axial_rate,
+                            [curvature, 0.0],
+                            [curvature_rates[end], 0.0],
+                        );
+                        (
+                            assessment,
+                            prepared
+                                .axial_viscous_rigidity_n_s()
+                                .mul_add(*axial_rate, elastic_axial_force),
+                            prepared
+                                .bending_viscous_stiffness_n_m2_s()
+                                .mul_add(curvature_rates[end], elastic_moment),
+                        )
+                    }
+                    None => (
+                        capacity.assess_axial_bending(elastic_axial_force, [elastic_moment, 0.0]),
+                        elastic_axial_force,
+                        elastic_moment,
+                    ),
+                };
+                let assessment =
+                    assessment.map_err(|source| FrameTensileError::Material { element, source })?;
+                if !axial_force_n.is_finite() || !bending_moment_n_m.is_finite() {
+                    return Err(FrameTensileError::Invalid(
+                        "total material section force is unrepresentable",
+                    ));
+                }
                 if assessment.utilization() > largest {
                     largest = assessment.utilization();
                     governing_sample = Some(samples.len());
