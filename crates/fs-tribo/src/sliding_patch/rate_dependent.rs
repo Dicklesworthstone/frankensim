@@ -11,8 +11,9 @@
 //! point, without introducing a speed regularizer. Deterministic composite
 //! four-point Gauss quadrature has caller-owned radial and angular resolution;
 //! it is a convergent spatial discretization, not an error certificate.
-//! Clipped affine pure spin integrates its known active core directly, so a
-//! rapidly shrinking frictional region cannot disappear between disk nodes.
+//! Clipped affine spin and mixed motion with a contained active disk integrate
+//! that disk directly, so a rapidly shrinking frictional region cannot vanish
+//! between full-patch nodes or through subtraction of Coulomb responses.
 //!
 //! This is instantaneous prescribed gross sliding. It does not choose a static
 //! reaction, solve velocity-weakening branch selection, evolve the contact,
@@ -181,6 +182,18 @@ impl HertzFrictionPatch {
                     quadrature.radial_panels,
                 );
             }
+            let cutoff_speed = mu_zero / -slope_per_speed;
+            if speed < edge_speed && cutoff_speed <= edge_speed - speed {
+                return clipped_affine_contained(
+                    parameters,
+                    slip_velocity_m_s,
+                    spin_rad_s,
+                    speed,
+                    edge_speed,
+                    cutoff_speed,
+                    quadrature,
+                );
+            }
         }
         finite(speed + edge_speed, "hertz_friction_maximum_speed")?;
         let mut correction = Compensated::default();
@@ -316,6 +329,72 @@ impl HertzFrictionPatch {
             spin,
         )
     }
+}
+
+fn clipped_affine_contained(
+    parameters: HertzSlidingPatchParameters,
+    slip: [f64; 2],
+    spin: f64,
+    speed: f64,
+    edge_speed: f64,
+    cutoff_speed: f64,
+    quadrature: HertzFrictionQuadrature,
+) -> Result<HertzSlidingWrench, TriboError> {
+    // In unit-patch coordinates the zero-slip point is distance d from the
+    // centre. The positive-friction disk has radius k = v_cut/(a*|omega|).
+    // Use local-slip polar coordinates q=k*t, mu=mu_zero*(1-t), rather than
+    // a grid on the full Hertz disk. The caller proved d+k <= 1.
+    let d = speed / edge_speed;
+    let k = cutoff_speed / edge_speed;
+    let radial_half = 0.5 / quadrature.radial_panels as f64;
+    let angular_half = (PI / 4.0) / quadrature.angular_panels as f64;
+    let mut radial_nodes = [(0.0, 0.0); 4 * MAXIMUM_PANELS];
+    for panel in 0..quadrature.radial_panels {
+        for (i, (node, weight)) in GAUSS.into_iter().enumerate() {
+            let t = (2.0 * panel as f64 + 1.0 + node) * radial_half;
+            radial_nodes[4 * panel + i] = (t, radial_half * weight * t * (1.0 - t));
+        }
+    }
+    let mut integral = Compensated::default();
+    for panel in 0..quadrature.angular_panels {
+        for (node, weight) in GAUSS {
+            let phi = (2.0 * panel as f64 + 1.0 + node) * angular_half;
+            let (sine, cosine) = det::sin_cos(phi);
+            for &(t, radial_weight) in &radial_nodes[..4 * quadrature.radial_panels] {
+                let q = k * t;
+                let y = q * sine;
+                let near_x = d - q * cosine;
+                let far_x = d + q * cosine;
+                // Both points are inside the admitted disk. Only endpoint
+                // roundoff can make these pressure-square arguments negative.
+                let near = det::sqrt(((1.0 - near_x) * (1.0 + near_x) - y * y).max(0.0));
+                let far = det::sqrt(((1.0 - far_x) * (1.0 + far_x) - y * y).max(0.0));
+                let sum = near + far;
+                // Pair opposite local-slip directions analytically. Subtracting
+                // nearly equal pressures loses the small physical net force as
+                // the active disk shrinks; the rationalized difference does not.
+                let difference = (4.0 * d * q * cosine) / sum;
+                let weight = radial_weight * angular_half * weight;
+                integral.add([
+                    weight * cosine * difference,
+                    weight * (q * sum - d * cosine * difference),
+                    weight * t * sum,
+                ]);
+            }
+        }
+    }
+    // The reflected half-disk supplies 3/pi times the Hertz load. Multiply the
+    // dimensional scale before the small radius factors to retain tiny cores.
+    let scale =
+        (((3.0 / PI) * parameters.normal_force_n * parameters.friction_coefficient) * k) * k;
+    let force = -scale * integral.total[0];
+    finish(
+        slip.map(|v| force * (v / speed)),
+        -(scale * integral.total[1] * parameters.contact_radius_m) * spin.signum(),
+        scale * cutoff_speed * integral.total[2],
+        slip,
+        spin,
+    )
 }
 
 fn clipped_affine_spin(

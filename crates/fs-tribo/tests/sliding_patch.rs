@@ -310,12 +310,11 @@ fn rate_dependent_patch_preserves_rest_lift_off_clamping_and_refusals() {
         close(core.spin_moment_nm, -expected_heat / spin, 2e-26);
         close(core.power_residual_w, 0.0, 2e-22);
     }
-    assert!(matches!(
-        model.evaluate([0.1, 0.0], spin, rate_grid(1, 1)),
-        Err(fs_tribo::TriboError::InvalidInput {
-            field: "hertz_friction_unresolved_active_region"
-        })
-    ));
+    let moving_core = model.evaluate([0.1, 0.0], spin, rate_grid(1, 4)).unwrap();
+    assert!(moving_core.force_n[0] < 0.0);
+    assert!(moving_core.dissipated_power_w > 0.0);
+    close(moving_core.dissipated_power_w, expected_heat, 1e-16);
+    close(moving_core.power_residual_w, 0.0, 2e-22);
     for grid in [
         rate_grid(0, 1),
         rate_grid(1, 0),
@@ -347,6 +346,78 @@ fn rate_dependent_patch_preserves_rest_lift_off_clamping_and_refusals() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn shrinking_off_centre_friction_disks_keep_force_spin_transfer_and_heat() {
+    // G1: independent Taylor integration of p about the stationary point.
+    // For k=v_cut/(a*omega) << 1 and H=sqrt(1-d^2):
+    // F=-N*mu*d*k^3/(8H), D=N*mu*v_cut*k^2*H/4,
+    // M=-N*mu*a*k^3*(2-3d^2)/(8H), with relative O(k^2) error.
+    // At d>sqrt(2/3), translation feeds spin while total work stays passive.
+    let normal = 3.2;
+    let radius = 0.4;
+    let mu = 0.65;
+    let cutoff = mu / 0.9;
+    let k = 1e-6;
+    let edge = cutoff / k;
+    let spin = edge / radius;
+    let model = HertzFrictionPatch::new(normal, radius, rate_laws()[0].clone()).unwrap();
+    for d in [0.1_f64, 0.5, 0.7, 0.9] {
+        let h = (1.0 - d * d).sqrt();
+        let force = -normal * mu * d * k.powi(3) / (8.0 * h);
+        let heat = normal * mu * cutoff * k * k * h / 4.0;
+        let moment = -normal * mu * radius * k.powi(3) * (2.0 - 3.0 * d * d) / (8.0 * h);
+        let response = model
+            .evaluate([d * edge, 0.0], spin, rate_grid(2, 8))
+            .unwrap();
+        close(response.force_n[0], force, force.abs() * 1e-8);
+        assert_eq!(response.force_n[1], 0.0);
+        close(response.spin_moment_nm, moment, moment.abs() * 1e-8);
+        close(response.dissipated_power_w, heat, heat * 1e-8);
+        close(response.power_residual_w, 0.0, heat * 2e-14);
+        assert_eq!(response.spin_moment_nm > 0.0, d > (2.0_f64 / 3.0).sqrt());
+        assert_eq!(
+            response,
+            model
+                .evaluate([d * edge, 0.0], spin, rate_grid(2, 8))
+                .unwrap()
+        );
+    }
+}
+
+#[test]
+fn contained_active_disk_agrees_with_independent_full_patch_and_frame_changes() {
+    // G1/G3: ordinary-size disks, including tangency to the Hertz boundary,
+    // checked in the original patch coordinates with an unrelated rule.
+    for (d, cutoff) in [(0.35, 0.3), (0.6, 0.4)] {
+        let law = FrictionLaw::VelocityDependent {
+            static_mu: 0.8,
+            mu_zero: 0.6,
+            slope_per_speed: -0.6 / cutoff,
+        };
+        let model = HertzFrictionPatch::new(2.0, 0.4, law.clone()).unwrap();
+        let slip = [0.6 * d, -0.8 * d];
+        let response = model.evaluate(slip, 2.5, rate_grid(24, 24)).unwrap();
+        let reference = spatial_rate_law(&law, [2.0, 0.4], slip, 2.5, [512, 1024]);
+        close(response.force_n[0], reference[0], 2e-6);
+        close(response.force_n[1], reference[1], 2e-6);
+        close(response.spin_moment_nm, reference[2], 1e-6);
+        close(response.dissipated_power_w, reference[3], 2e-6);
+        close(response.power_residual_w, 0.0, 2e-16);
+        let rotated = model
+            .evaluate([-slip[1], slip[0]], 2.5, rate_grid(24, 24))
+            .unwrap();
+        assert_eq!(rotated.force_n, [-response.force_n[1], response.force_n[0]]);
+        assert_eq!(rotated.spin_moment_nm, response.spin_moment_nm);
+        assert_eq!(rotated.dissipated_power_w, response.dissipated_power_w);
+        let reversed = model
+            .evaluate(slip.map(|v| -v), -2.5, rate_grid(24, 24))
+            .unwrap();
+        assert_eq!(reversed.force_n, response.force_n.map(|f| -f));
+        assert_eq!(reversed.spin_moment_nm, -response.spin_moment_nm);
+        assert_eq!(reversed.dissipated_power_w, response.dissipated_power_w);
+    }
 }
 
 fn close(a: f64, b: f64, tolerance: f64) {

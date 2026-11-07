@@ -738,6 +738,15 @@ curve with zero Coulomb coefficient. A fully clamped patch returns exactly zero.
 Clipped affine pure spin integrates its analytically known active central radius
 directly. A small positive frictional core therefore cannot vanish between
 full-disk nodes or be lost by subtracting large Coulomb responses.
+Mixed translation/spin does the same whenever its active disk lies within the
+Hertz patch, including an off-centre stationary point. Integration follows the
+actual cutoff radius; paired local-slip directions use a rationalized pressure
+difference to retain the small net force. Local positive heat, translation force
+and spin torque share one quadrature. Spin torque may assist rotation while
+translation supplies that work; total interface power remains dissipative.
+Independent small-disk asymptotics and full-patch integration check these limits.
+Partially intersecting active disks retain the original full-patch rule and its
+explicit resolution/refusal boundary.
 
 Other cases use explicit radial/angular composite four-point Gauss resolution.
 The integrand subtracts the exact zero-speed Coulomb response, removing the
