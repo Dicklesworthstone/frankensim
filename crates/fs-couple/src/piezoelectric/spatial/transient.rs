@@ -28,7 +28,12 @@ use super::{
 };
 use fs_exec::Cx;
 use fs_material::piezoelectric::tensor::relaxation::RelaxingTensorPiezoelectric;
+use fs_math::dd::Dd;
+use fs_math::quadratic::{self, QuadraticError};
 use std::sync::Arc;
+
+mod energy;
+use energy::Products;
 
 /// Reciprocal guide loading and real incident acoustic waves on this solve.
 pub mod acoustic;
@@ -155,6 +160,27 @@ pub struct TetPiezoelectricTransientStep {
     pub iterations: usize,
     /// Independently recomputed equilibrated increment-system residual.
     pub relative_residual: f64,
+    // Preserve the original independent storage and source contractions until
+    // enclosing electrical and thermal owners finish their own work balance.
+    kinetic_change: Dd,
+    energy_change: Dd,
+    mechanical_work: Dd,
+}
+
+impl TetPiezoelectricTransientStep {
+    /// Original consistent-mass increment before diagnostic rounding [J].
+    pub const fn retained_kinetic_energy_change_j(&self) -> Dd {
+        self.kinetic_change
+    }
+    /// Kinetic plus material storage increment before diagnostic rounding [J].
+    /// This is computed from the actual endpoint states, independently of work.
+    pub const fn retained_energy_change_j(&self) -> Dd {
+        self.energy_change
+    }
+    /// Applied-force and moving-support work before diagnostic rounding [J].
+    pub const fn retained_mechanical_work_j(&self) -> Dd {
+        self.mechanical_work
+    }
 }
 
 /// Joint mechanical/electrical candidate; accepted state remains untouched.
@@ -609,7 +635,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         let mut displacement = vec![[0.0; 3]; n];
         let mut velocity = vec![[0.0; 3]; n];
         let mut acceleration = vec![[0.0; 3]; n];
-        let mut applied_force_work_j = 0.0;
+        let mut applied_force_work = Products::default();
         for node in 0..n {
             poll(cx)?;
             for axis in 0..3 {
@@ -623,8 +649,10 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
                 acceleration[node][axis] = 2.0 * inverse_dt * (2.0 * inverse_dt * delta - old_v);
                 full_midpoint[dof] = midpoint_displacement[node][axis];
                 full_endpoint[dof] = displacement[node][axis];
-                applied_force_work_j +=
-                    midpoint_nodal_forces_n[node][axis] * (displacement[node][axis] - old_u);
+                applied_force_work.add(
+                    Dd::from_f64(midpoint_nodal_forces_n[node][axis]),
+                    Dd::from_f64(displacement[node][axis]) - Dd::from_f64(old_u),
+                );
             }
             full_midpoint[nu + node] =
                 self.state.relative_voltage_v[node] + full_increment[nu + node];
@@ -762,43 +790,63 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             };
         let material_heat_j = mechanical_material_heat_j + dielectric_material_heat_j;
         let mut midpoint_support_force_n = core::mem::take(&mut midpoint.support_force_n);
-        let mut support_work_j = 0.0;
+        let mut support_work = Products::default();
         for node in 0..n {
             poll(cx)?;
             for axis in 0..3 {
                 if self.boundary.map.index[3 * node + axis].is_none() {
-                    support_work_j += midpoint_support_force_n[node][axis]
-                        * (field.displacement_m[node][axis]
-                            - self.state.field.displacement_m[node][axis]);
+                    support_work.add(
+                        Dd::from_f64(midpoint_support_force_n[node][axis]),
+                        Dd::from_f64(field.displacement_m[node][axis])
+                            - Dd::from_f64(self.state.field.displacement_m[node][axis]),
+                    );
                 } else {
                     midpoint_support_force_n[node][axis] = 0.0;
                 }
             }
         }
-        let mechanical_work_j = applied_force_work_j + support_work_j;
-        let mut electrical_work_j = 0.0;
+        let applied_force_work = applied_force_work.value();
+        let support_work = support_work.value();
+        let mechanical_work = applied_force_work + support_work;
+        let applied_force_work_j = applied_force_work.to_f64();
+        let support_work_j = support_work.to_f64();
+        let mechanical_work_j = mechanical_work.to_f64();
+        let mut electrical_work = Products::default();
         for node in 0..n {
             poll(cx)?;
-            electrical_work_j += full_midpoint[nu + node]
-                * (endpoint_nodal_free_charge_c[node] - self.state.nodal_free_charge_c[node]);
+            electrical_work.add(
+                Dd::from_f64(full_midpoint[nu + node]),
+                Dd::from_f64(endpoint_nodal_free_charge_c[node])
+                    - Dd::from_f64(self.state.nodal_free_charge_c[node]),
+            );
         }
         for (id, nodes) in self.boundary.electrode_nodes.iter().enumerate() {
             let delta_charge = match (old_conditions[id], next_conditions[id]) {
                 (ElectrodeCondition::Voltage(_), ElectrodeCondition::Voltage(_)) => {
-                    field.electrodes[id].charge_c - self.state.field.electrodes[id].charge_c
+                    Dd::from_f64(field.electrodes[id].charge_c)
+                        - Dd::from_f64(self.state.field.electrodes[id].charge_c)
                 }
-                (ElectrodeCondition::Charge(old), ElectrodeCondition::Charge(next)) => next - old,
+                (ElectrodeCondition::Charge(old), ElectrodeCondition::Charge(next)) => {
+                    Dd::from_f64(next) - Dd::from_f64(old)
+                }
                 _ => unreachable!("source types checked before normalization"),
             };
-            electrical_work_j += full_midpoint[nu + nodes[0]] * delta_charge;
+            electrical_work.add(Dd::from_f64(full_midpoint[nu + nodes[0]]), delta_charge);
         }
+        let electrical_work = electrical_work.value();
+        let electrical_work_j = electrical_work.to_f64();
         let kinetic_energy_j = kinetic_energy(self.model, &velocity, cx)?;
-        let kinetic_energy_change_j = kinetic_energy_j - self.state.kinetic_energy_j;
-        let stored_energy_change_j = field.stored_energy_j - self.state.field.stored_energy_j;
-        let energy_residual_j = kinetic_energy_change_j + stored_energy_change_j + material_heat_j
-            + acoustic_outward_work_j
-            - mechanical_work_j
-            - electrical_work_j;
+        let kinetic_change = kinetic_change(self.model, &self.state.velocity_m_s, &velocity, cx)?;
+        let stored_change = field_storage_change(self.model, &self.state.field, &field, cx)?
+            + material_update.as_ref().map_or(Dd::ZERO, |update| update.memory_energy_change);
+        let energy_change = kinetic_change + stored_change;
+        let kinetic_energy_change_j = kinetic_change.to_f64();
+        let stored_energy_change_j = stored_change.to_f64();
+        let energy_residual_j = (energy_change
+            + Dd::from_f64(mechanical_material_heat_j)
+            + Dd::from_f64(dielectric_material_heat_j)
+            + Dd::from_f64(acoustic_outward_work_j)
+            - mechanical_work - electrical_work).to_f64();
         if [
             mechanical_work_j,
             applied_force_work_j,
@@ -840,6 +888,9 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
                 .max(field.maximum_charge_residual_c),
             iterations,
             relative_residual,
+            kinetic_change,
+            energy_change,
+            mechanical_work,
         };
         let mut state = make_state(
             field,
@@ -971,21 +1022,73 @@ fn mass_action(
     cx: &Cx<'_>,
 ) -> Result<Vec<[f64; 3]>> {
     let mut applied = vec![[0.0; 3]; values.len()];
-    for (node, result) in applied.iter_mut().enumerate() {
-        poll(cx)?;
-        for (axis, value) in result.iter_mut().enumerate() {
-            let (cols, entries) = model.solid.mass.row(3 * node + axis);
-            *value = cols
-                .iter()
-                .zip(entries)
-                .map(|(&col, &entry)| entry * values[col / 3][col % 3])
-                .sum();
-            if !value.is_finite() {
-                return Err(invalid("consistent-mass response is not representable"));
-            }
+    mass_action_into(model, values.as_flattened(), applied.as_flattened_mut(), cx)?;
+    Ok(applied)
+}
+
+fn mass_action_into(
+    model: &TetPiezoelectricModel<'_>,
+    values: &[f64],
+    applied: &mut [f64],
+    cx: &Cx<'_>,
+) -> Result<()> {
+    for (row, value) in applied.iter_mut().enumerate() {
+        if row % 3 == 0 {
+            poll(cx)?;
+        }
+        let (cols, entries) = model.solid.mass.row(row);
+        *value = cols
+            .iter()
+            .zip(entries)
+            .map(|(&col, &entry)| entry * values[col])
+            .sum();
+        if !value.is_finite() {
+            return Err(invalid("consistent-mass response is not representable"));
         }
     }
-    Ok(applied)
+    Ok(())
+}
+
+fn kinetic_change(
+    model: &TetPiezoelectricModel<'_>,
+    before: &[[f64; 3]],
+    after: &[[f64; 3]],
+    cx: &Cx<'_>,
+) -> Result<Dd> {
+    quadratic::increment(
+        before.as_flattened(), after.as_flattened(),
+        |values, applied, _| mass_action_into(model, values, applied, cx),
+        &mut || cx.checkpoint().is_err(),
+    ).map(|increment| increment.change).map_err(|error| match error {
+        QuadraticError::Operator(error) => error,
+        QuadraticError::Cancelled => TetPiezoelectricError::Cancelled,
+        QuadraticError::Dimension => invalid("consistent-mass endpoint dimensions disagree"),
+        QuadraticError::NonFinite => invalid("consistent-mass increment is not representable"),
+    })
+}
+
+// Use the same original local field coordinates/tensors as material recovery.
+// Intrinsic memory storage is added from its own native increment separately.
+fn field_storage_change(
+    model: &TetPiezoelectricModel<'_>,
+    before: &TetPiezoelectricSolution,
+    after: &TetPiezoelectricSolution,
+    cx: &Cx<'_>,
+) -> Result<Dd> {
+    let mut change = Products::default();
+    for (cell, (old, new)) in before.cells.iter().zip(&after.cells).enumerate() {
+        poll(cx)?;
+        let material = &model.materials[if model.materials.len() == 1 { 0 } else { cell }];
+        let volume = Dd::from_f64(model.dielectric.volumes_m3()[cell]);
+        change.add(volume, energy::quadratic_change(
+            material.stiffness_mandel_pa(), &old.strain_mandel, &new.strain_mandel,
+        ));
+        change.add(volume, energy::quadratic_change(
+            material.permittivity_f_m(),
+            &old.response.electric_field_v_m, &new.response.electric_field_v_m,
+        ));
+    }
+    Ok(change.value())
 }
 
 fn kinetic_energy(

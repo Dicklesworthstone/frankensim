@@ -57,6 +57,14 @@ pub struct LoadedPiezoelectricStep {
     pub energy_residual_j: f64,
     /// One source-bound record per input resistor, in original order.
     pub loads: Vec<ElectrodeLoadHeat>,
+    source_work: Dd,
+}
+
+impl LoadedPiezoelectricStep {
+    /// Independent external current/voltage work before diagnostic rounding [J].
+    pub const fn retained_electrical_source_work_j(&self) -> Dd {
+        self.source_work
+    }
 }
 
 impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
@@ -177,15 +185,17 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             cx,
         )?;
         let next = &candidate.body.state;
-        let mut outgoing = vec![0.0; drives.len()];
-        let mut joule_heat_j = 0.0;
+        let mut outgoing = vec![Dd::ZERO; drives.len()];
+        let mut joule_heat = Dd::ZERO;
         for flow in &heat {
             poll(cx)?;
-            outgoing[flow.load.electrodes[0]] += flow.transferred_charge_c;
-            outgoing[flow.load.electrodes[1]] -= flow.transferred_charge_c;
-            joule_heat_j += flow.joule_heat_j;
+            outgoing[flow.load.electrodes[0]] = outgoing[flow.load.electrodes[0]]
+                + Dd::from_f64(flow.transferred_charge_c);
+            outgoing[flow.load.electrodes[1]] = outgoing[flow.load.electrodes[1]]
+                - Dd::from_f64(flow.transferred_charge_c);
+            joule_heat = joule_heat + Dd::from_f64(flow.joule_heat_j);
         }
-        let electrical_source_work_j = source_work(
+        let source_work = source_work(
             self,
             next,
             dt_s,
@@ -194,12 +204,14 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             &outgoing,
             cx,
         )?;
-        let energy_residual_j = next.total_energy_j() - self.state.total_energy_j()
-            + joule_heat_j
-            + candidate.step.material_heat_j
-            + candidate.step.acoustic_outward_work_j
-            - candidate.step.mechanical_work_j
-            - electrical_source_work_j;
+        let electrical_source_work_j = source_work.to_f64();
+        let joule_heat_j = joule_heat.to_f64();
+        let energy_residual_j = (candidate.step.retained_energy_change_j()
+            + joule_heat
+            + Dd::from_f64(candidate.step.material_heat_j)
+            + Dd::from_f64(candidate.step.acoustic_outward_work_j)
+            - candidate.step.retained_mechanical_work_j()
+            - source_work).to_f64();
         if [electrical_source_work_j, joule_heat_j, energy_residual_j]
             .iter()
             .any(|v| !v.is_finite())
@@ -221,6 +233,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
                 joule_heat_j,
                 energy_residual_j,
                 loads: heat,
+                source_work,
             },
         ))
     }
@@ -264,13 +277,14 @@ fn source_work(
     dt_s: f64,
     drives: &[ElectrodeDrive],
     endpoint_nodal_free_charge_c: &[f64],
-    outgoing: &[f64],
+    outgoing: &[Dd],
     cx: &Cx<'_>,
-) -> Result<f64> {
+) -> Result<Dd> {
     let midpoint = |node: usize| {
-        0.5 * body.state.relative_voltage_v[node] + 0.5 * next.relative_voltage_v[node]
+        Dd::from_f64(0.5 * body.state.relative_voltage_v[node])
+            + Dd::from_f64(0.5 * next.relative_voltage_v[node])
     };
-    let mut work = 0.0;
+    let mut work = Products::default();
     for (node, (&a, &b)) in body
         .state
         .nodal_free_charge_c
@@ -279,20 +293,22 @@ fn source_work(
         .enumerate()
     {
         poll(cx)?;
-        work += midpoint(node) * (b - a);
+        work.add(midpoint(node), Dd::from_f64(b) - Dd::from_f64(a));
     }
     for (id, drive) in drives.iter().enumerate() {
         poll(cx)?;
         let supplied = match *drive {
-            ElectrodeDrive::Current(i) => dt_s * i,
+            ElectrodeDrive::Current(i) => Dd::from_f64(dt_s) * Dd::from_f64(i),
             ElectrodeDrive::Voltage(_) => {
-                next.field.electrodes[id].charge_c - body.state.field.electrodes[id].charge_c
+                Dd::from_f64(next.field.electrodes[id].charge_c)
+                    - Dd::from_f64(body.state.field.electrodes[id].charge_c)
                     + outgoing[id]
             }
         };
-        work += midpoint(body.boundary.electrode_nodes[id][0]) * supplied;
+        work.add(midpoint(body.boundary.electrode_nodes[id][0]), supplied);
     }
-    if !work.is_finite() {
+    let work = work.value();
+    if !work.hi.is_finite() || !work.lo.is_finite() {
         return Err(invalid("electrode source work is not representable"));
     }
     Ok(work)

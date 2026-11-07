@@ -50,6 +50,7 @@ use fs_thermal::enthalpy::backward_euler::{
 };
 use fs_solver::{NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, SolverRunProgress};
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
+use fs_math::dd::Dd;
 
 /// One complete branch-to-cell heat destination; original graph branch indices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -332,6 +333,14 @@ pub(crate) trait ThermalDriver {
     type Step;
     fn account(&self) -> DriverAccount<'_>;
     fn into_parts(self) -> (Self::Model, Self::Step);
+    // Owners with retained endpoint/work contractions override this before
+    // diagnostic rounding. This is storage plus numerical loss minus supply,
+    // independently of physical heat deposited into the caloric owner.
+    fn retained_energy_balance_j(&self) -> Dd {
+        let account = self.account();
+        Dd::from_f64(account.stored_change_j) + Dd::from_f64(account.numerical_dissipation_j)
+            - Dd::from_f64(account.supplied_j)
+    }
     // A complete endpoint may own replacements of the native boundary G.
     // Moving the maps exactly once avoids per-trial copies. Ordinary drivers
     // return an empty set and retain their original thermal arithmetic.
@@ -351,6 +360,7 @@ impl<D: ThermalDriver> ThermalDriver for BoundaryDriver<D> {
     type Model = D::Model;
     type Step = D::Step;
     fn account(&self) -> DriverAccount<'_> { self.inner.account() }
+    fn retained_energy_balance_j(&self) -> Dd { self.inner.retained_energy_balance_j() }
     fn into_parts(self) -> (Self::Model, Self::Step) { self.inner.into_parts() }
     fn take_boundary_conductances(&mut self) -> BoundaryConductances {
         std::mem::take(&mut self.boundaries)
@@ -631,10 +641,10 @@ pub(crate) fn cell_driver_candidate_entropy_option<'m, S, E, D: ThermalDriver>(
     let maximum_cell_residual_j = trial.maximum_cell_residual_j();
     let (next, (candidate, source, deposited_joule_j, _), audit) = trial.accept(
         controls.cell_energy_tolerance_j, controls.thermal_energy_tolerance_j, checkpoint)?;
-    let non_electrical_heat_j = finite(audit.external_heat_j - deposited_joule_j)?;
-    let account = candidate.account();
-    let total = finite(account.stored_change_j + account.numerical_dissipation_j
-        + audit.stored_energy_change_j-account.supplied_j-non_electrical_heat_j)?;
+    let non_electrical_heat = Dd::from_f64(audit.external_heat_j) - Dd::from_f64(deposited_joule_j);
+    let non_electrical_heat_j = finite(non_electrical_heat.to_f64())?;
+    let total = finite((candidate.retained_energy_balance_j()
+        + Dd::from_f64(audit.stored_energy_change_j) - non_electrical_heat).to_f64())?;
     if total.abs() > controls.total_energy_tolerance_j {
         return Err(CircuitEnthalpyError::Invalid("circuit and thermal storage do not close the supplied energy"));
     }

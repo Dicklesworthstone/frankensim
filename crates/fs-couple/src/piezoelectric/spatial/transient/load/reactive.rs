@@ -99,6 +99,7 @@ pub struct ReactiveElectrodeStep {
     pub joule_heat_j: f64,
     /// Storage change plus heat minus actual voltage/charge work [J].
     pub energy_residual_j: f64,
+    stored_change: Dd,
 }
 
 /// One independent account enclosing body, reactive storage and all conductors.
@@ -290,26 +291,30 @@ impl<'model, 'mesh> ReactivePiezoelectricTransient<'model, 'mesh> {
             controls,
             cx,
         )?;
-        let mut outgoing = vec![0.0; drives.len()];
-        let mut joule_heat_j = 0.0;
+        let mut outgoing = vec![Dd::ZERO; drives.len()];
+        let mut joule_heat = Dd::ZERO;
         for flow in &resistors {
             poll(cx)?;
-            outgoing[flow.load.electrodes[0]] += flow.transferred_charge_c;
-            outgoing[flow.load.electrodes[1]] -= flow.transferred_charge_c;
-            joule_heat_j += flow.joule_heat_j;
+            outgoing[flow.load.electrodes[0]] = outgoing[flow.load.electrodes[0]]
+                + Dd::from_f64(flow.transferred_charge_c);
+            outgoing[flow.load.electrodes[1]] = outgoing[flow.load.electrodes[1]]
+                - Dd::from_f64(flow.transferred_charge_c);
+            joule_heat = joule_heat + Dd::from_f64(flow.joule_heat_j);
         }
         let mut reactive_energy_j = [0.0; 2];
+        let mut reactive_change = Dd::ZERO;
         for flow in &reactive.steps {
             poll(cx)?;
             let [a, b] = flow.load.electrodes();
-            outgoing[a] += flow.transferred_charge_c;
-            outgoing[b] -= flow.transferred_charge_c;
-            joule_heat_j += flow.joule_heat_j;
+            outgoing[a] = outgoing[a] + Dd::from_f64(flow.transferred_charge_c);
+            outgoing[b] = outgoing[b] - Dd::from_f64(flow.transferred_charge_c);
+            joule_heat = joule_heat + Dd::from_f64(flow.joule_heat_j);
+            reactive_change = reactive_change + flow.stored_change;
             for (sum, value) in reactive_energy_j.iter_mut().zip(flow.stored_energy_j) {
                 *sum += value;
             }
         }
-        let electrical_source_work_j = source_work(
+        let source_work = source_work(
             &self.body,
             &candidate.body.state,
             dt_s,
@@ -318,14 +323,14 @@ impl<'model, 'mesh> ReactivePiezoelectricTransient<'model, 'mesh> {
             &outgoing,
             cx,
         )?;
-        let energy_residual_j = candidate.body.state.total_energy_j()
-            - self.body.state.total_energy_j()
-            + reactive_energy_j[1]
-            - reactive_energy_j[0]
-            + joule_heat_j
-            + candidate.step.material_heat_j
-            - candidate.step.mechanical_work_j
-            - electrical_source_work_j;
+        let electrical_source_work_j = source_work.to_f64();
+        let joule_heat_j = joule_heat.to_f64();
+        let energy_residual_j = (candidate.step.retained_energy_change_j()
+            + reactive_change
+            + joule_heat
+            + Dd::from_f64(candidate.step.material_heat_j)
+            - candidate.step.retained_mechanical_work_j()
+            - source_work).to_f64();
         if reactive_energy_j
             .iter()
             .chain([&joule_heat_j, &energy_residual_j])
@@ -603,8 +608,25 @@ pub(in crate::piezoelectric::spatial::transient) fn recover(
             _ => unreachable!("reactive sources admitted before assembly"),
         };
         let energy = [load.energy(state)?, load.energy(next)?];
-        let change = energy[1] - energy[0];
-        let residual = change + heat - voltage * charge;
+        let (old_coordinate, new_coordinate, storage) = match (load, state, next) {
+            (ReactiveElectrodeLoad::SeriesRl { inductor, .. },
+                ReactiveElectrodeState::FluxLinkage(old), ReactiveElectrodeState::FluxLinkage(new)) =>
+                (old, new, inductor.inductance_h()),
+            (ReactiveElectrodeLoad::Capacitor { capacitor, .. },
+                ReactiveElectrodeState::Charge(old), ReactiveElectrodeState::Charge(new)) =>
+                (old, new, capacitor.capacitance_f()),
+            _ => unreachable!("reactive storage kind admitted above"),
+        };
+        let mut products = Products::default();
+        products.add(
+            (Dd::from_f64(0.5 * old_coordinate) + Dd::from_f64(0.5 * new_coordinate))
+                / Dd::from_f64(storage),
+            Dd::from_f64(new_coordinate) - Dd::from_f64(old_coordinate),
+        );
+        let stored_change = products.value();
+        let change = stored_change.to_f64();
+        let residual = (stored_change + Dd::from_f64(heat)
+            - Dd::from_f64(voltage) * Dd::from_f64(charge)).to_f64();
         if [voltage, charge, current, heat, change, residual]
             .iter()
             .any(|v| !v.is_finite())
@@ -637,6 +659,7 @@ pub(in crate::piezoelectric::spatial::transient) fn recover(
             stored_energy_change_j: change,
             joule_heat_j: heat,
             energy_residual_j: residual,
+            stored_change,
         });
     }
     update_charge_conditions(body, endpoint, normalized_endpoint, midpoint, cx)?;

@@ -365,6 +365,86 @@ fn g1_imposed_strain_supplies_harvesting_heat_and_external_capacitor_storage() {
 }
 
 #[test]
+fn g3_small_kinetic_exchange_survives_rigid_motion_through_native_and_loaded_owners() {
+    with_cx(|cx, _| {
+        let cube = cube(1);
+        let n = cube.nodes.len();
+        let materials = [material([0.0, 0.0, 12.0, 0.0, 0.0, 0.0])];
+        let model = Model::assemble(&cube.nodes, &cube.tets, &materials, FRAME, budget(), cx).unwrap();
+        let (zero, charge) = zero_source(n);
+        let fixed = (0..3 * n).map(|dof| (dof, 0.0)).collect::<Vec<_>>();
+        let original = Body::new(&model, &fixed,
+            &electrodes(&cube, 0.0, Condition::Charge(0.0)),
+            &zero, &zero, &charge, controls(), cx).unwrap();
+        let dt = 2.0_f64.powi(-20);
+        let rate = 0.25;
+        let expected_kinetic = 7500.0 * LENGTH.powi(5) * rate * rate / 6.0;
+        let tight = Controls { energy_tolerance_j: 1e-18, ..controls() };
+        let conditions = [Condition::Voltage(0.0), Condition::Charge(0.0)];
+        let drives = [ElectrodeDrive::Voltage(0.0), ElectrodeDrive::Current(0.0)];
+        let resistor = super::super::transient_load::resistor(1e4, [1, 0]);
+        let capacitor = super::super::transient_load::reactive::capacitor(2.0 * EPSILON[2] * LENGTH);
+        let mut reference = None;
+        for boost in [0.0, 2.0_f64.powi(16)] {
+            // A dyadic startup supplies the complete rigid kinetic inventory.
+            // The subsequent transverse strain has its own tiny inertia/work;
+            // the common translation must neither supply heat nor enlarge a gate.
+            let startup = (0..3 * n)
+                .map(|dof| (dof, if dof % 3 == 0 { boost } else { 0.0 }))
+                .collect::<Vec<_>>();
+            let body = original.step_with_support_motion_candidate(
+                dt, &startup, &conditions, &zero, &charge, controls(), cx,
+            ).unwrap().into_parts().0;
+            let supports = (0..3 * n).map(|dof| (dof, match dof % 3 {
+                0 => boost,
+                2 => rate * cube.nodes[dof / 3][2],
+                _ => 0.0,
+            })).collect::<Vec<_>>();
+            let native = body.step_with_support_motion_candidate(
+                dt, &supports, &conditions, &zero, &charge, tight, cx,
+            ).unwrap();
+            let (loaded, shunt) = body.step_with_loaded_support_motion_candidate(
+                dt, &supports, &drives, std::slice::from_ref(&resistor),
+                &zero, &charge, tight, cx,
+            ).unwrap();
+            let reactive = ReactivePiezoelectricTransient::new(
+                body.clone(),
+                vec![ReactiveElectrodeLoad::Capacitor {
+                    electrodes: [1, 0], capacitor: capacitor.clone(),
+                }],
+                vec![ReactiveElectrodeState::Charge(0.0)],
+                vec![resistor.clone()], tight, cx,
+            ).unwrap().step_with_support_motion_candidate(
+                dt, &supports, &drives, &zero, &charge, tight, cx,
+            ).unwrap();
+            for step in [native.step(), loaded.step(), &reactive.step().body] {
+                near(step.kinetic_energy_change_j, expected_kinetic, 1e-24, 1e-10);
+                assert!(step.energy_residual_j.abs() < tight.energy_tolerance_j);
+                assert_eq!(step.material_heat_j, 0.0);
+            }
+            assert!(shunt.joule_heat_j > 0.0);
+            assert!(reactive.step().reactive_energy_j[1] > 0.0);
+            assert!(shunt.energy_residual_j.abs() < tight.energy_tolerance_j);
+            assert!(reactive.step().energy_residual_j.abs() < tight.energy_tolerance_j);
+            let measured = [native.step().support_work_j, loaded.step().support_work_j,
+                shunt.joule_heat_j, loaded.body().state().electrodes()[1].voltage_v,
+                reactive.step().body.support_work_j, reactive.step().joule_heat_j,
+                reactive.step().reactive[0].stored_energy_change_j];
+            if let Some(reference) = reference {
+                for (actual, expected) in measured.into_iter().zip(reference) {
+                    near(actual, expected, 1e-24, 1e-9);
+                }
+                assert!(body.state().kinetic_energy_j() > 1e17 * expected_kinetic);
+            } else {
+                reference = Some(measured);
+            }
+            assert_eq!(body.state().time_s(), dt);
+            assert!(loaded.body().state().velocity_m_s().iter().all(|v| v[0] == boost));
+        }
+    });
+}
+
+#[test]
 fn g4_support_topology_and_cancelled_motion_refuse_without_mutation() {
     with_cx(|cx, gate| {
         let cube = cube(1);

@@ -35,6 +35,7 @@ use crate::piezoelectric::spatial::{
 };
 use crate::piezoelectric::spatial::transient::load::ElectrodeDrive;
 use fs_exec::Cx;
+use fs_math::dd::Dd;
 use fs_material::{
     field_storage::thermal::FieldThermalState,
     piezoelectric::{
@@ -150,11 +151,14 @@ impl<'model, 'mesh> ThermalDriver for TensorDriver<'model, 'mesh> {
             contacts: &[],
             heat_j: self.step.loads.joule_heat_j,
             numerical_dissipation_j: 0.0,
-            stored_change_j: self.step.native.kinetic_energy_change_j
-                + self.step.native.stored_energy_change_j,
-            supplied_j: self.step.native.mechanical_work_j
-                + self.step.loads.electrical_source_work_j,
+            stored_change_j: self.step.native.retained_energy_change_j().to_f64(),
+            supplied_j: (self.step.native.retained_mechanical_work_j()
+                + self.step.loads.retained_electrical_source_work_j()).to_f64(),
         }
+    }
+    fn retained_energy_balance_j(&self) -> Dd {
+        self.step.native.retained_energy_change_j() - self.step.native.retained_mechanical_work_j()
+            - self.step.loads.retained_electrical_source_work_j()
     }
     fn into_parts(self) -> (Self::Model, Self::Step) { (self.body, self.step) }
 }
@@ -535,15 +539,21 @@ impl<'model, 'mesh> ThermalTensorPiezoelectricBody<'model, 'mesh> {
             },
             cancelled,
         )?;
-        let external_heat_j = finite(coupled.non_electrical_heat_j-coupled.source.reversible_heat_j)?;
-        let total_energy_residual_j = finite(
-            coupled.source.field_internal_energy_j[1]-coupled.source.field_internal_energy_j[0]
-                + coupled.electrical.native.kinetic_energy_change_j
-                + coupled.thermal.stored_energy_change_j
-                - coupled.electrical.native.mechanical_work_j
-                - coupled.electrical.loads.electrical_source_work_j
-                - external_heat_j,
-        )?;
+        let external_heat = Dd::from_f64(coupled.non_electrical_heat_j)
+            - Dd::from_f64(coupled.source.reversible_heat_j);
+        let external_heat_j = finite(external_heat.to_f64())?;
+        let mut internal_change = Dd::ZERO;
+        for [before, after] in &coupled.source.cells {
+            check(cx)?;
+            internal_change = internal_change
+                + (Dd::from_f64(after.internal_energy_j) - Dd::from_f64(before.internal_energy_j));
+        }
+        let total_energy_residual_j = finite((internal_change
+            + coupled.electrical.native.retained_kinetic_energy_change_j()
+            + Dd::from_f64(coupled.thermal.stored_energy_change_j)
+            - coupled.electrical.native.retained_mechanical_work_j()
+            - coupled.electrical.loads.retained_electrical_source_work_j()
+            - external_heat).to_f64())?;
         if total_energy_residual_j.abs() > thermal_controls.total_energy_tolerance_j {
             return Err(invalid("full tensor field U, kinetic energy, caloric U and external supply disagree"));
         }

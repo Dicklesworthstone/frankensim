@@ -479,3 +479,85 @@ fn g1_support_work_heats_maxwell_and_debye_memory_without_external_resistors() {
 fn g1_g4_support_work_couples_separate_ceramic_and_resistor_heat_transactionally() {
     support_heating(true, true);
 }
+
+#[test]
+fn g3_finite_ceramic_and_resistor_heat_ignore_unchanged_rigid_kinetic_storage() {
+    with_cx(|cx, _| {
+        let cube = cube(1);
+        let n = cube.nodes.len();
+        let (ceramic_card, ceramic_curve, base, memory) =
+            ceramic_with_mechanical_memory(false, Some((MAXWELL_FRACTION, MAXWELL_TIME_S)));
+        let materials = [base];
+        let model = Model::assemble(&cube.nodes, &cube.tets, &materials, FRAME, budget(), cx).unwrap();
+        let zero = vec![[0.0; 3]; n];
+        let charge = vec![0.0; n];
+        let fixed = (0..3 * n).map(|dof| (dof, 0.0)).collect::<Vec<_>>();
+        let original = Body::new(&model, &fixed,
+            &electrodes(&cube, 0.0, Condition::Charge(0.0)),
+            &zero, &zero, &charge, field_controls(), cx).unwrap()
+            .with_relaxation(vec![memory], MEMORY_BUDGET, field_controls(), cx).unwrap();
+        let (resistor_card, resistor_curve) =
+            thermal_material(2.0, 4.0, RESISTANCE_ALPHA_K_INV, 400.0);
+        let cards = [ceramic_card, resistor_card];
+        let curves = [ceramic_curve, resistor_curve];
+        let context = point(300.0);
+        let cells = caloric_cells(&cards, &curves, &context);
+        let resistors = [CellResistor {
+            destination: ResistorCell { branch: LOAD.resistor_branch, cell: CELLS[1] },
+            selection: MaterialPropertySelection::SingleClaimOnly,
+            length_m: LENGTH, area_m2: AREA,
+        }];
+        let network = MaterialNetwork { cells: &cells, resistors: &resistors, links: &[] };
+        let routes = ceramic_routes(cube.tets.len());
+        let dt = 2.0_f64.powi(-20);
+        let rate = 0.25;
+        let expected_kinetic = CERAMIC_DENSITY_KG_M3 * LENGTH.powi(5) * rate * rate / 6.0;
+        let mut reference = Vec::new();
+        for boost in [0.0, 2.0_f64.powi(16)] {
+            let mut thermal = isolated_cells(&curves);
+            let prepared = network.prepare(&thermal, || false).unwrap();
+            let mut body = original.clone();
+            for (index, next_rate) in [0.0, rate, 0.0].into_iter().enumerate() {
+                let supports = (0..3 * n).map(|dof| (dof, match dof % 3 {
+                    0 => boost,
+                    2 => next_rate * cube.nodes[dof / 3][2],
+                    _ => 0.0,
+                })).collect::<Vec<_>>();
+                let candidate = body.step_with_material_thermal_support_motion_candidate(
+                    &thermal, thermal.time_s() + dt, &supports, &prepared, &[LOAD],
+                    &routes, "T", &[Drive::Voltage(0.0), Drive::Current(0.0)],
+                    &zero, &charge, field_controls(), thermal_controls(), &[0.0; 2], cx,
+                ).unwrap();
+                let report = candidate.report();
+                if index > 0 {
+                    let native = &report.electrical.native;
+                    near(native.kinetic_energy_change_j,
+                        if index == 1 { expected_kinetic } else { -expected_kinetic },
+                        1e-24, 1e-10);
+                    assert!(report.deposited_joule_j > 0.0);
+                    assert!(native.material_heat_j > 0.0);
+                    assert!(report.electrical.loads.joule_heat_j > 0.0);
+                    assert!(report.total_energy_residual_j.abs() < 1e-16);
+                    assert_eq!(report.electrical.ceramic_destinations, routes);
+                    let observed = [native.support_work_j, native.material_heat_j,
+                        report.electrical.loads.joule_heat_j, report.deposited_joule_j,
+                        candidate.body().state().electrodes()[1].voltage_v,
+                        candidate.thermal().temperature_k(CELLS[0]).unwrap(),
+                        candidate.thermal().temperature_k(CELLS[1]).unwrap()];
+                    if boost == 0.0 {
+                        reference.push(observed);
+                    } else {
+                        for (j, (actual, expected)) in observed.into_iter()
+                            .zip(reference[index - 1]).enumerate() {
+                            near(actual, expected, if j >= 5 { 1e-10 } else { 1e-23 }, 1e-9);
+                        }
+                    }
+                }
+                (thermal, body, _) = candidate.into_parts();
+            }
+            assert!(thermal.temperature_k(CELLS[0]).unwrap() > 300.0);
+            assert!(thermal.temperature_k(CELLS[1]).unwrap() > 300.0);
+            assert!(body.state().velocity_m_s().iter().all(|v| v[0] == boost));
+        }
+    });
+}

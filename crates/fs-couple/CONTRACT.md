@@ -952,6 +952,29 @@ inertia/reactions, independently condensed base-excited sensing, resistor and
 capacitor harvesting, and transactional refusals. Small-strain assumptions,
 source validity and temporal/spatial refinement obligations remain.
 
+The spatial midpoint owner evaluates kinetic increments through its unchanged
+full consistent mass and the shared `fs-math::quadratic` kernel, including all
+prescribed-support and free-coordinate cross terms. Elastic/electric increments
+use the original local `C^E` and `epsilon^S` tensors at the recovered endpoint
+fields. Native Maxwell/Debye storage increments survive integration into the
+cell account; their independently evaluated physical heat is unchanged.
+Applied-force, support-reaction and electrode work retain endpoint low words.
+The ordinary, resistive, reactive and finite-caloric gates consume those
+independent increments before scalar diagnostic rounding. They neither subtract
+large absolute kinetic inventories nor widen tolerances with background motion.
+External capacitor/winding storage remains separate from conductor heat, and
+the shared internal thermal-driver boundary retains storage minus source work
+until the caloric balance is complete. All original field, charge, source,
+amplitude, cancellation and publication checks remain authoritative.
+
+Focused G0 definitions in the private `transient/energy.rs` exercise coupled
+tensor cancellation, endpoint work and a small storage/heat exchange. G3
+definitions in the existing support-motion suites carry a small transverse
+kinetic change beside large common rigid motion through native sensing,
+resistor/capacitor harvesting, intrinsic ceramic loss and actual finite caloric
+cells. These synthetic dynamic-range fixtures do not establish material
+calibration, relativistic physics, integration error bounds or performance.
+
 ## Annular no-slip supply passages
 
 `FixedChannel::Annular` carries the original `AnnularChannel` into the shared

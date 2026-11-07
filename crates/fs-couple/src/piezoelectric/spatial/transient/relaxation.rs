@@ -21,6 +21,8 @@ pub struct CellRelaxationStep {
     /// Material memory storage before/after the window [J], already included
     /// in the body's cell and total stored energy.
     pub memory_energy_j: [f64; 2],
+    /// Native endpoint increment, retained separately from rounded inventories.
+    pub memory_energy_change_j: f64,
 }
 
 #[derive(Clone)]
@@ -293,6 +295,7 @@ pub(super) struct Update {
     pub(super) mechanical_heat_j: f64,
     pub(super) dielectric_heat_j: f64,
     pub(super) memory_energy_j: [f64; 2],
+    pub(super) memory_energy_change: Dd,
 }
 
 pub(super) fn advance(
@@ -317,6 +320,7 @@ pub(super) fn advance(
     let mut mechanical_heat_j = 0.0;
     let mut dielectric_heat_j = 0.0;
     let mut memory_energy_j = [0.0; 2];
+    let mut memory_energy_change = Products::default();
     let mut absolute_memory_residual_j = 0.0;
     for (cell, tet) in model.tetrahedra.iter().enumerate() {
         poll(cx)?;
@@ -360,7 +364,11 @@ pub(super) fn advance(
                 volume * step.memory_energy_before_j_m3,
                 volume * step.memory_energy_after_j_m3,
             ],
+            memory_energy_change_j: volume * step.memory_energy_change_j_m3,
         };
+        memory_energy_change.add(
+            Dd::from_f64(volume), Dd::from_f64(step.memory_energy_change_j_m3),
+        );
         mechanical_heat_j += report.mechanical_heat_j;
         dielectric_heat_j += report.dielectric_heat_j;
         for (sum, value) in memory_energy_j.iter_mut().zip(report.memory_energy_j) {
@@ -406,5 +414,6 @@ pub(super) fn advance(
         mechanical_heat_j,
         dielectric_heat_j,
         memory_energy_j,
+        memory_energy_change: memory_energy_change.value(),
     }))
 }

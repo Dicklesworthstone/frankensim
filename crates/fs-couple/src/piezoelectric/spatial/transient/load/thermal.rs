@@ -24,6 +24,7 @@ use crate::piezoelectric::spatial::transient::{
 };
 use crate::piezoelectric::spatial::{TetPiezoelectricControls, TetPiezoelectricError};
 use fs_exec::Cx;
+use fs_math::dd::Dd;
 use fs_thermal::enthalpy::{DepositionError, DepositionSimulation};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -124,9 +125,15 @@ impl<'model, 'mesh> ThermalDriver for LoadDriver<'model, 'mesh> {
             contacts: &[],
             heat_j: self.loads.joule_heat_j + native.material_heat_j,
             numerical_dissipation_j: 0.0,
-            stored_change_j: native.kinetic_energy_change_j + native.stored_energy_change_j,
-            supplied_j: native.mechanical_work_j + self.loads.electrical_source_work_j,
+            stored_change_j: native.retained_energy_change_j().to_f64(),
+            supplied_j: (native.retained_mechanical_work_j()
+                + self.loads.retained_electrical_source_work_j()).to_f64(),
         }
+    }
+    fn retained_energy_balance_j(&self) -> Dd {
+        let native = self.candidate.step();
+        native.retained_energy_change_j() - native.retained_mechanical_work_j()
+            - self.loads.retained_electrical_source_work_j()
     }
     fn into_parts(self) -> (Self::Model, Self::Step) {
         let mut candidate = Arc::unwrap_or_clone(self.candidate);
