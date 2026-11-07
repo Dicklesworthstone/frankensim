@@ -1,4 +1,7 @@
 //! Voltage-driven solid electrodes close saturation and finite sigma(T) feedback.
+#[path = "terminals/circuit.rs"]
+mod circuit;
+
 use super::*;
 use fs_em::spatial::vector_potential::induction::nonlinear::terminals::SpatialNonlinearTerminalInduction;
 

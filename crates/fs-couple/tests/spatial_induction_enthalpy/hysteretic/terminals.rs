@@ -1,4 +1,6 @@
 //! Total-current solid electrodes deposit physical Joule and pinning losses.
+#[path = "terminals/circuit.rs"]
+mod circuit;
 use super::*;
 #[path = "../../../../fs-em/tests/spatial_induction/terminals/hysteretic_common.rs"]
 mod reference;

@@ -1,3 +1,35 @@
+## Native electrode circuits and coupled finite-temperature feedback
+
+`spatial_induction::terminals::circuit::SpatialTerminalCircuitThermalNetwork`
+advances native circuits driving nonlinear or hysteretic solid electrodes with
+the original finite-enthalpy state. The nonlinear and hysteretic child modules
+reuse their existing field thermal residuals; no additional thermal integrator
+or approximate conductor law is introduced. The joint candidate retains the
+native circuit, complete field/magnetic memory and full thermal source receipt.
+
+Each endpoint trial resolves bulk scalar/tensor conductivity from its original
+material. Optional complete graph-resistor bindings resolve every authored R(T)
+from a separate whole-cell finite body. Accepted source identity, electrical
+basis, geometry, caloric temperature and original resistance must agree, and
+trial refresh cannot replace them. Numeric authored resistors retain explicit
+heat destinations. Graph and field histories restart together on every trial.
+
+Actual local bulk Joule and irreversible pinning heat enter the original field
+receivers; authored graph-resistor heat enters its explicit receivers once.
+Canceled numerical reference heat and numerical magnetic dissipation never
+enter caloric storage. Stable graph/magnetic storage, finite thermal storage
+and numerical loss close against original external/impressed supply and external
+heat. The nonlinear path preserves its optional source-separable magnetic
+entropy and parameter-work account. Hysteretic fits remain constant throughout
+the admitted caloric interval, while their vector memories remain retained.
+
+Complete heat-assembly adapters preserve original contact, layer, radiation and
+finite-coolant payloads, typed failures and closed-radiation accounting.
+Unowned electrical contact work refuses. Nested circuit/field trials consume
+the shared thermal budget, and cancellation or any failed source, solve or
+balance leaves all accepted histories unchanged. These adapters describe
+stationary, fixed-geometry, fully solid bodies within the existing MQS scope.
+
 ## Actual-temperature feedback into finite-strain membrane relaxation
 
 `membrane_thermal::visco::temperature::advance_candidate` feeds each original

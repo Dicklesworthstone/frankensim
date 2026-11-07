@@ -6,6 +6,9 @@
 //! electrode supply, impressed-current work, eddy heat and irreversible pinning
 //! enter one balance. Numerical dissipation remains outside physical heating.
 
+/// Native circuit storage, physical electrode currents and finite heat.
+pub mod circuit;
+
 use super::super::{
     SpatialInductionHeatError, SpatialMagneticRegion,
     heat::{HeatError, close_heat_balance, heat_error},

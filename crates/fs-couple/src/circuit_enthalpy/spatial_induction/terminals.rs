@@ -4,6 +4,9 @@
 //! residual. This shared candidate keeps field and caloric publication atomic
 //! without exposing an electrode field as an isolated conductor.
 
+/// Native electrode circuits coupled to their original finite heat receivers.
+pub mod circuit;
+
 use super::{MaterialNetworkSample, SpatialInductionThermalReport};
 use fs_thermal::enthalpy::DepositionSimulation;
 

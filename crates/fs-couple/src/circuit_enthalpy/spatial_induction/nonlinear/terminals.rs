@@ -6,6 +6,9 @@
 //! acceptance. A stationary body exchanges electrical work with its electrodes;
 //! numerical magnetic dissipation remains separate from deposited heat.
 
+/// Physical electrodes closed against native circuits and finite heat.
+pub mod circuit;
+
 pub use super::super::terminals::SpatialTerminalThermalCandidate;
 use super::super::{
     SpatialMagneticRegion,
