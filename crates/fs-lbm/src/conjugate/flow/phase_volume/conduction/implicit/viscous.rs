@@ -77,6 +77,58 @@ impl FlowField {
         })
     }
 
+    /// Conduct independent shear/bulk heat in the same implicit caloric
+    /// endpoint, then advance the prepared original material momentum once.
+    ///
+    /// Bulk coefficients [Pa s] have one slot per voxel, with fixed-solid slots
+    /// ignored, and must be evaluated at the original shear source's state.
+    /// The frozen predictor uses `2 mu dev(D) + zeta div(u) I`; its physical
+    /// heat participates in every endpoint k(T,f) and bath-flux evaluation.
+    /// This remains a first-order split without thermal-viscosity iteration.
+    ///
+    /// # Errors
+    /// Invalid bulk response or any original molecular, implicit thermal,
+    /// material or cancellation refusal publishes no endpoint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_isotropic_implicit_conductive_thermal_volume_momentum_with_bulk_viscosity_and_baths(
+        &self,
+        domain: &VoxelDomain,
+        reservoir: Option<([FlowFace; 6], StaggeredBoundaryPressure<'_>)>,
+        conductivity: &PreparedPhaseConductivity<'_>,
+        baths: &[ThermalVolumeBathFace],
+        input: ThermalVolumeMomentumInput<'_>,
+        viscosity: MaterialMomentumViscosityInput<'_>,
+        bulk_viscosity_pa_s: &[f64],
+        controls: ConductiveThermalVolumeMomentumControls,
+        viscosity_controls: MaterialViscosityControls,
+        solve: ImplicitThermalVolumeSolveControls,
+        workspace: &mut ImplicitThermalVolumeWorkspace,
+        gate: &CancelGate,
+    ) -> Result<ImplicitConductiveViscousThermalVolumeMomentumStep, ChtError> {
+        let accepted = self
+            .advance_isotropic_implicit_conjugate_thermal_volume_momentum_with_bulk_viscosity_and_baths(
+                domain,
+                reservoir,
+                conductivity,
+                baths.into(),
+                &[],
+                &[],
+                input,
+                viscosity,
+                bulk_viscosity_pa_s,
+                controls,
+                viscosity_controls,
+                solve,
+                workspace,
+                gate,
+            )?;
+        Ok(ImplicitConductiveViscousThermalVolumeMomentumStep {
+            evolution: accepted.evolution,
+            conductive_enthalpy_increment_j: accepted.conductive_enthalpy_increment_j,
+            report: accepted.report.conduction,
+        })
+    }
+
     /// Conduct authored and physical molecular heat into finite solid storage
     /// in the same implicit enthalpy graph, before native fluid transport.
     ///
@@ -108,6 +160,89 @@ impl FlowField {
         workspace: &mut ImplicitThermalVolumeWorkspace,
         gate: &CancelGate,
     ) -> Result<ImplicitConjugateViscousThermalVolumeMomentumStep, ChtError> {
+        self.advance_implicit_viscous_thermal_volume(
+            domain,
+            reservoir,
+            conductivity,
+            baths,
+            solids,
+            contacts,
+            input,
+            viscosity,
+            None,
+            controls,
+            viscosity_controls,
+            solve,
+            workspace,
+            gate,
+        )
+    }
+
+    /// Include independently supplied bulk viscosity in the same fluid/solid
+    /// implicit enthalpy graph. Shear plus bulk heat is supplied once before
+    /// evaluating fluid/solid conduction, contact resistance and bath exchange.
+    ///
+    /// Bulk coefficients follow the conductive bulk entry's original-state
+    /// convention. Actual fluid inertia, held solid inventory, physical
+    /// half-cell geometry and the shared thermal budget keep their native owners.
+    ///
+    /// # Errors
+    /// Invalid bulk response or any original source, molecular, conjugate
+    /// thermal, material or cancellation refusal returns neither endpoint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_isotropic_implicit_conjugate_thermal_volume_momentum_with_bulk_viscosity_and_baths(
+        &self,
+        domain: &VoxelDomain,
+        reservoir: Option<([FlowFace; 6], StaggeredBoundaryPressure<'_>)>,
+        conductivity: &PreparedPhaseConductivity<'_>,
+        baths: ThermalVolumeBoundaries<'_>,
+        solids: &[ThermalVolumeSolidCell<'_, '_>],
+        contacts: &[ThermalVolumeContact<'_>],
+        input: ThermalVolumeMomentumInput<'_>,
+        viscosity: MaterialMomentumViscosityInput<'_>,
+        bulk_viscosity_pa_s: &[f64],
+        controls: ConductiveThermalVolumeMomentumControls,
+        viscosity_controls: MaterialViscosityControls,
+        solve: ImplicitThermalVolumeSolveControls,
+        workspace: &mut ImplicitThermalVolumeWorkspace,
+        gate: &CancelGate,
+    ) -> Result<ImplicitConjugateViscousThermalVolumeMomentumStep, ChtError> {
+        self.advance_implicit_viscous_thermal_volume(
+            domain,
+            reservoir,
+            conductivity,
+            baths,
+            solids,
+            contacts,
+            input,
+            viscosity,
+            Some(bulk_viscosity_pa_s),
+            controls,
+            viscosity_controls,
+            solve,
+            workspace,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn advance_implicit_viscous_thermal_volume(
+        &self,
+        domain: &VoxelDomain,
+        reservoir: Option<([FlowFace; 6], StaggeredBoundaryPressure<'_>)>,
+        conductivity: &PreparedPhaseConductivity<'_>,
+        baths: ThermalVolumeBoundaries<'_>,
+        solids: &[ThermalVolumeSolidCell<'_, '_>],
+        contacts: &[ThermalVolumeContact<'_>],
+        input: ThermalVolumeMomentumInput<'_>,
+        viscosity: MaterialMomentumViscosityInput<'_>,
+        bulk_viscosity_pa_s: Option<&[f64]>,
+        controls: ConductiveThermalVolumeMomentumControls,
+        viscosity_controls: MaterialViscosityControls,
+        solve: ImplicitThermalVolumeSolveControls,
+        workspace: &mut ImplicitThermalVolumeWorkspace,
+        gate: &CancelGate,
+    ) -> Result<ImplicitConjugateViscousThermalVolumeMomentumStep, ChtError> {
         poll(gate)?;
         let (faces, profile, mouth) = match reservoir {
             Some((faces, profile)) => (
@@ -128,7 +263,7 @@ impl FlowField {
             conductivity.caloric_curve(),
             input,
             viscosity,
-            None,
+            bulk_viscosity_pa_s,
             controls.evolution,
             viscosity_controls,
             gate,

@@ -408,3 +408,107 @@ fn source_mismatch_phase_exit_and_cancellation_preserve_input_and_retry() {
     assert_eq!(momentum, [[2.0, 0.0, 0.0]]);
     assert_eq!(run(input, false, &gate, &mut 0).unwrap(), expected);
 }
+
+#[test]
+fn mac_bulk_source_rheology_keeps_native_rate_and_longitudinal_heat() {
+    let (card, melting) = fixture(false, true);
+    let curve = melting.curve();
+    let law = MushyPhaseLaw::try_from_melting_curve(&melting, 1e-8).unwrap();
+    let domain = VoxelDomain::new(3, 1, 1, 1.0).unwrap();
+    let field = FlowField::quiescent(&domain);
+    let phase = curve.state_at_specific_enthalpy(0.5).unwrap();
+    let phases = [Some(phase); 3];
+    let mass = [2.0; 3];
+    let momentum = [[0.2, 0.0, 0.0], [0.0; 3], [-0.2, 0.0, 0.0]];
+    let original_rate = (4.0_f64 / 3.0).sqrt() * 0.05;
+    let rates = [original_rate, 2.0 * original_rate, original_rate];
+    // The original source has nu(gamma)=1/4+gamma/8 and rho=2.
+    let mu = rates.map(|rate| 0.5 + 0.25 * rate);
+    for reservoir in [false, true] {
+        let mut faces = [FlowFace::Wall; 6];
+        let mut boundaries = [FvBoundary::Symmetry; 6];
+        let mut data = input(&mass, &phases, &momentum, &[0.0; 3], &[[0.0; 3]; 3]);
+        if reservoir {
+            faces[..2].fill(FlowFace::Free);
+            boundaries[..2].fill(FvBoundary::Outlet);
+            data.volume.boundary_inflow[..2].fill(Some(phase));
+            data.boundary_velocity_m_s[..2].fill(Some([0.0; 3]));
+        }
+        for bulk in [0.0, 2.0] {
+            let mut calls = [0; 3];
+            let resolve_at = |cell: usize, state: &EquilibriumPhaseState, rate: f64| {
+                calls[cell] += 1;
+                assert_eq!(state, &phase);
+                close(rate, rates[cell]);
+                resolve(&card, &law, state.specific_enthalpy_j_kg(), rate)
+            };
+            let gate = CancelGate::new_clock_free();
+            let result = if reservoir {
+                field.advance_piecewise_thermal_volume_momentum_with_source_rheology_and_bulk_viscosity_and_pressure_profile(
+                    &domain,
+                    faces,
+                    StaggeredBoundaryPressure {
+                        x_pa: &[Some(0.0), None, None, Some(0.0)],
+                        y_pa: &[None; 6],
+                        z_pa: &[None; 6],
+                    },
+                    curve,
+                    data,
+                    boundaries,
+                    &[bulk; 3],
+                    controls(),
+                    viscous_controls(),
+                    &gate,
+                    resolve_at,
+                )
+            } else {
+                field.advance_piecewise_thermal_volume_momentum_with_source_rheology_and_bulk_viscosity(
+                    &domain, curve, data, boundaries, &[bulk; 3],
+                    controls(), viscous_controls(), &gate, resolve_at,
+                )
+            }.unwrap();
+            assert_eq!(calls, [1; 3]);
+            for cell in 0..3 {
+                close(result.original_shear_rate_per_s[cell], rates[cell]);
+                close(
+                    result.original_sources[cell]
+                        .as_ref()
+                        .unwrap()
+                        .transport_state()
+                        .unwrap()
+                        .dynamic_viscosity_pa_s(),
+                    mu[cell],
+                );
+            }
+            let q0 = 0.5 * ((4.0 / 3.0) * mu[0] + bulk);
+            let q1 = 0.5 * ((4.0 / 3.0) * mu[1] + bulk);
+            let expected_heat = if reservoir {
+                // Native masses [1,2,2,1]. The two independent rows are
+                // (1+q0)*a-q0*b=.1 and -q0*a+(2+q0+2*q1)*b=.1.
+                let b = 0.1 * (1.0 + 2.0 * q0) / (2.0 + 3.0 * q0 + 2.0 * q1 + 2.0 * q0 * q1);
+                let a = (0.1 + q0 * b) / (1.0 + q0);
+                2.0 * q0 * (a - b).powi(2) + 4.0 * q1 * b * b
+            } else {
+                // Interior mass=2 and original speed=.05. The source's
+                // unequal viscosities are frozen at the ORIGINAL strain.
+                let b = 0.05 / (1.0 + 0.5 * q0 + q1);
+                (2.0 * q0 + 4.0 * q1) * b * b
+            };
+            close(result.evolution.viscosity.molecular_heat_j, expected_heat);
+            close(
+                result
+                    .evolution
+                    .evolution
+                    .thermal
+                    .volume
+                    .report
+                    .requested_enthalpy_increment_j,
+                expected_heat,
+            );
+            close(result.evolution.viscosity.energy_defect_j, 0.0);
+        }
+    }
+    assert_eq!(field, FlowField::quiescent(&domain));
+    assert_eq!(mass, [2.0; 3]);
+    assert_eq!(phases, [Some(phase); 3]);
+}

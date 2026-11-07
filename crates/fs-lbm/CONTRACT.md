@@ -12424,6 +12424,15 @@ actual M/V inertia, mirrored reservoir half cells, separate numerical losses
 and atomic refusal gates remain unchanged. Both coefficients are frozen during
 the original split; no EOS or bulk law is inferred from shear viscosity.
 
+The rheology-resolved thermal-volume and implicit conductive/conjugate entries
+also provide explicit bulk-viscosity variants. The rheology path observes the
+original physical deviatoric rate before resolving shear from its source; bulk
+is independently supplied at that same original state. The implicit thermal
+paths add the predictor's matching shear-plus-bulk heat once to the existing
+fluid, bath and finite-wall caloric graph. The molecular impulse is not applied
+again after conduction. Both viscosities remain frozen over this first-order
+split; implicit conduction does not imply implicit viscosity-temperature feedback.
+
 Four source-bound regressions cover graded actual inertia distinct from source
 reference density, original liquid-viscosity changes, moving-wall work and
 physical heat, current-state reconstruction, quiescent compatibility and atomic
