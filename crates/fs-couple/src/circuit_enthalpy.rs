@@ -38,6 +38,8 @@ pub mod eddy;
 pub mod spatial_induction;
 /// Piezoelectric motion, electrical load and finite resistor heating.
 pub mod piezoelectric;
+/// Reciprocal rotor actuation, winding resistance and finite motor/bridge heat.
+pub mod motor;
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
