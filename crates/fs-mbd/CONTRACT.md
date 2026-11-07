@@ -8074,3 +8074,32 @@ calculation before adding the world origin. Conservative coupled storage gates
 can use its negative as the body gravitational-potential change without
 subtracting large absolute pose potentials. The integration equations, force
 stages and momentum reconstruction are unchanged.
+
+## Adhesive rolling spring on a native rigid pair
+
+`tangential_friction::adhesive::rolling` connects an original
+`SourceJkrRollingContact` to the actual finite-body inverse inertias along the
+contact frame's longitudinal bending axis. An analytic elastic midpoint
+predictor is accepted only after one unchanged source evaluation confirms its
+residual and absence of yield. Other cases use a bounded monotone scalar solve.
+Both paths couple the source's exact work-mean moment to a discrete-gradient midpoint
+impulse phase. Both bodies receive equal/opposite free angular impulses through
+the existing native resultant path. No normal or tangential force is invented.
+
+Sealed history binds source, pair indices, material arms, frame, poses and mass
+properties. A changed geometry cannot inherit old elastic rolling storage.
+Source evaluation and native preparation never mutate accepted state; the
+publication helper commits both momenta and rolling memory after cancellation,
+angle, velocity, individual/pair momentum and work checks. Compensated actual
+kinetic change retains weak rolling work beside large common translation.
+Recoverable rolling energy and irreversible yield loss remain separate, and
+neither includes the original normal JKR storage or an assumed heat partition.
+
+The constitutive increment is a monotone scalar path. The inertial update is a
+time discretization, and every nonzero endpoint rate reversal refuses for
+refinement: a hidden turning point can yield despite an elastic net-angle trial.
+This phase does not enforce no-slip rolling, integrate poses,
+evolve normal area, transport memory or supply general vector rolling. G1/G3/G4
+cases in `tests/adhesive_rolling.rs` cover analytic elastic pair recoil, tensile
+yielding, full inertia in rotated frames, weak work beside common translation,
+and atomic cancellation, geometry and numerical-budget refusals.

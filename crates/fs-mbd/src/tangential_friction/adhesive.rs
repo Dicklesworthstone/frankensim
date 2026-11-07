@@ -35,6 +35,9 @@ pub mod jkr_normal_motion;
 /// Coupled full-stick JKR normal/shear recoil on the actual finite body pair.
 pub mod jkr_mixed_mode;
 
+/// Fixed-axis JKR rolling spring and yield on the actual finite body pair.
+pub mod rolling;
+
 use fs_contact::interface_binding::adhesive_shear::spinning::SourceAdhesiveSlidingPatch;
 use fs_exec::CancelGate;
 use fs_tribo::adhesive::spinning::contact::{
