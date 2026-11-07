@@ -8,6 +8,9 @@ mod phase_layers;
 #[path = "density_layer_tests.rs"]
 mod density_layers;
 
+#[path = "current_geometry_tests.rs"]
+mod current_geometry;
+
 struct Sensible;
 impl ThermalLaw for Sensible {
     fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
@@ -610,3 +613,4 @@ fn unsupported_geometry_source_cancellation_and_budget_leave_original_state_unch
     assert_eq!(next.cells(), &before);
     assert_eq!(audit.external_heat_j, 0.0);
 }
+

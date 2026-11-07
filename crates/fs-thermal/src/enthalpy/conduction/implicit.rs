@@ -363,6 +363,11 @@ impl<'a> ImplicitConductionChain<'a> {
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, ImplicitConductionError> {
         checkpoint()?;
+        if conduction.current_geometry.is_some() {
+            return Err(ImplicitConductionError::Invalid(
+                "current mechanical face metrics require the observed explicit timeline",
+            ));
+        }
         let ids: Vec<_> = thermal.cells.keys().copied().collect();
         if ids.is_empty() || laws.len() != thermal.materials.len() {
             return Err(ImplicitConductionError::Invalid(
@@ -1584,3 +1589,4 @@ mod tests;
 #[cfg(test)]
 #[path = "implicit/density_tests.rs"]
 mod density_tests;
+

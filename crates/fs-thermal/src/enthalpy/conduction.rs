@@ -30,6 +30,10 @@ use super::*;
 #[path = "conduction/implicit.rs"]
 pub mod implicit;
 
+/// Explicit current face metrics while reference inventory stays immutable.
+pub mod geometry;
+pub use geometry::{CurrentConductionGeometry, CurrentConductiveBoundary, CurrentConductiveLink};
+
 /// Immutable, explicitly bound scalar conductivity on an enthalpy domain.
 /// A physical material owner supplies pressure, phase fractions, source data and
 /// any effective-medium closure. Zero is an explicit insulating state.
@@ -156,6 +160,8 @@ pub struct ConductionObserver<'a> {
     ambient_values: BTreeMap<CellId, f64>,
     has_phase_layers: bool,
     has_material_density_layers: bool,
+    // Complete current transport metrics; original face bindings stay intact.
+    current_geometry: Option<CurrentConductionGeometry>,
     prepared: bool,
 }
 
@@ -190,6 +196,7 @@ impl<'a> ConductionObserver<'a> {
             ambient_values: BTreeMap::new(),
             has_phase_layers: false,
             has_material_density_layers: false,
+            current_geometry: None,
             prepared: false,
         };
         for (i, &(id, law)) in laws.iter().enumerate() {
@@ -289,6 +296,11 @@ impl<'a> ConductionObserver<'a> {
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, DepositionError> {
         checkpoint()?;
+        if self.current_geometry.is_some() && !layers.is_empty() {
+            return Err(DepositionError::InvalidInput(
+                "mechanical face metrics and planar phase geometry need one explicit combined owner",
+            ));
+        }
         if layers.len() > self.cells.len() {
             return Err(DepositionError::InvalidInput(
                 "planar phase bindings exceed existing conduction cells",
@@ -420,6 +432,11 @@ impl<'a> ConductionObserver<'a> {
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, DepositionError> {
         checkpoint()?;
+        if self.current_geometry.is_some() && !faces.is_empty() {
+            return Err(DepositionError::InvalidInput(
+                "bind every ambient face before supplying complete current metrics",
+            ));
+        }
         if faces.len() > thermal.cells.len().saturating_sub(self.ambient_faces.len()) {
             return Err(DepositionError::InvalidInput(
                 "ambient conduction bindings exceed active thermal owner",
@@ -590,9 +607,10 @@ impl<'a> ConductionObserver<'a> {
                     "spatial conduction link binding changed",
                 ));
             }
-            if self.has_phase_layers
-                && (self.cells[&link.a].phase_layer.is_some()
-                    || self.cells[&link.b].phase_layer.is_some())
+            if (self.current_geometry.is_some()
+                || self.has_phase_layers
+                    && (self.cells[&link.a].phase_layer.is_some()
+                        || self.cells[&link.b].phase_layer.is_some()))
                 && thermal.contact_areas(link) != binding.covered_area_m2
             {
                 return Err(DepositionError::InvalidInput(
@@ -600,12 +618,22 @@ impl<'a> ConductionObserver<'a> {
                 ));
             }
             let geometry = binding.geometry;
+            let (area_m2, half_distances_m) = match &self.current_geometry {
+                Some(current) => {
+                    let metric = current.links[&id];
+                    (metric.area_m2, metric.half_distances_m)
+                }
+                None => (
+                    binding.area_m2,
+                    [
+                        self.half_distance(binding.a, geometry.half_distances_m[0]),
+                        self.half_distance(binding.b, geometry.half_distances_m[1]),
+                    ],
+                ),
+            };
             let g = series_contact_conductance_w_k(
-                binding.area_m2,
-                [
-                    self.half_distance(binding.a, geometry.half_distances_m[0]),
-                    self.half_distance(binding.b, geometry.half_distances_m[1]),
-                ],
+                area_m2,
+                half_distances_m,
                 [self.conductivity[&binding.a], self.conductivity[&binding.b]],
                 geometry.contact_resistance_m2_k_w,
             )?;
@@ -629,9 +657,16 @@ impl<'a> ConductionObserver<'a> {
             }
             let k = self.conductivity[&id];
             let geometry = binding.geometry;
+            let (area_m2, half_distance_m) = match &self.current_geometry {
+                Some(current) => {
+                    let metric = current.reservoirs[&id];
+                    (metric.area_m2, metric.half_distance_m)
+                }
+                None => (binding.area_m2, self.half_distance(id, geometry.half_distance_m)),
+            };
             let g = surface_conductance_w_k(
-                binding.area_m2,
-                self.half_distance(id, geometry.half_distance_m),
+                area_m2,
+                half_distance_m,
                 k,
                 geometry.surface_resistance_m2_k_w,
             )?;
@@ -641,9 +676,16 @@ impl<'a> ConductionObserver<'a> {
         for (&id, binding) in &self.ambient_faces {
             checkpoint()?;
             let geometry = binding.geometry;
+            let (area_m2, half_distance_m) = match &self.current_geometry {
+                Some(current) => {
+                    let metric = current.ambient_faces[&id];
+                    (metric.area_m2, metric.half_distance_m)
+                }
+                None => (binding.area_m2, self.half_distance(id, geometry.half_distance_m)),
+            };
             let g = surface_conductance_w_k(
-                binding.area_m2,
-                self.half_distance(id, geometry.half_distance_m),
+                area_m2,
+                half_distance_m,
                 self.conductivity[&id],
                 geometry.surface_resistance_m2_k_w,
             )?;
@@ -841,6 +883,12 @@ impl DepositionObserver for ConductionObserver<'_> {
         // Event hooks receive the already-updated candidate. Check even at the
         // final endpoint, when no later coefficient query would expose a change.
         self.admit_ambient_areas(thermal, &mut || Ok(()))?;
+        if self.current_geometry.is_some() {
+            // Also check a final-time topology/coverage event, even when no
+            // subsequent heat substep would otherwise revisit every binding.
+            self.prepare(thermal, &mut || Ok(()))?;
+            self.prepared = false;
+        }
         Ok(())
     }
     fn step(
@@ -904,3 +952,4 @@ fn surface_conductance_w_k(
 #[cfg(test)]
 #[path = "conduction/tests.rs"]
 mod tests;
+

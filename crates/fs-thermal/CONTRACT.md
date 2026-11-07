@@ -3352,3 +3352,26 @@ not a rigorous error enclosure. Whole-interval conservation independently
 uses the original linear owner's relative allowance and compensated net
 thermal exchange. Linear coefficients and optical transport stay fixed
 within the interval; thermal feedback still requires outer time refinement.
+
+
+### Current conduction measures on retained material inventory
+
+`ConductionObserver::with_current_geometry` retains original cell, material,
+mass, reference geometry and channel bindings while a complete ordered
+`CurrentConductionGeometry` supplies current link, reservoir and ambient areas
+and positive normal half-distances. The original series resistance, signed
+flux, entropy, source refresh, CFL, event and transactional owners consume those
+metrics; no caloric or density remap occurs. The independent mechanical or
+geometric owner supplies these measures, held for one proposed interval.
+
+Normal two-point flow, unchanged topology and coverage, and first-order
+physical-interval/substep refinement remain explicit assumptions. Arbitrary
+skewed-tetrahedron Fourier accuracy, opening contacts, remeshing and anisotropy
+are not inferred. Phase-density geometry cannot silently compose with these
+metrics. The implicit chain/graph paths refuse this binding rather than use
+stale reference measures.
+
+Two synthetic regression definitions cover independent mixed-channel heat,
+reference inventory, native CFL/entropy, and failed-admission retry. Focused
+Rust parsing/formatting and independent scalar heat calculations passed; native
+compilation and test execution remain unverified in this environment.
