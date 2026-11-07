@@ -25,6 +25,8 @@ pub mod ductile;
 pub mod electrical;
 /// Finite source gas, actual loaded plastic history and reciprocal cell heat.
 pub mod gas;
+/// Sourced indentation hardness on the original accepted spatial history.
+pub mod hardness;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
@@ -487,6 +489,40 @@ impl<'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticSolid<'a, S> {
             .collect()
     }
 
+    // Share inventory admission with readouts of already accepted material
+    // state, which do not need another mechanical source-coefficient refresh.
+    fn checked_thermal_cell<'t, E>(
+        &self,
+        bound: &BoundCell<S>,
+        thermal: &'t DepositionSimulation<'_>,
+        accepted: bool,
+    ) -> Result<&'t DepositedCell, ThermoplasticError<E>> {
+        let old = &bound.accepted;
+        let cell = thermal
+            .cells()
+            .get(&old.id)
+            .ok_or(ThermoplasticError::Invalid(
+                "structural cell became inactive",
+            ))?;
+        if cell.id != old.id
+            || cell.segment_id != old.segment_id
+            || cell.body_id != old.body_id
+            || cell.material_id != old.material_id
+            || cell.geometry != old.geometry
+            || cell.mass_kg.to_bits() != old.mass_kg.to_bits()
+            || accepted && cell.specific_h_j_kg.to_bits() != old.specific_h_j_kg.to_bits()
+            || !thermal.uses_material_law(
+                cell.material_id,
+                bound.source.thermal_source().caloric_source().curve() as &dyn ThermalLaw,
+            )
+        {
+            return Err(ThermoplasticError::Invalid(
+                "structural identity, reference geometry, mass or accepted enthalpy changed",
+            ));
+        }
+        Ok(cell)
+    }
+
     fn enthalpies<E>(
         &self,
         thermal: &DepositionSimulation<'_>,
@@ -496,29 +532,7 @@ impl<'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticSolid<'a, S> {
         let mut enthalpies = Vec::with_capacity(self.cells.len());
         for bound in &self.cells {
             poll(cx)?;
-            let old = &bound.accepted;
-            let cell = thermal
-                .cells()
-                .get(&old.id)
-                .ok_or(ThermoplasticError::Invalid(
-                    "structural cell became inactive",
-                ))?;
-            if cell.id != old.id
-                || cell.segment_id != old.segment_id
-                || cell.body_id != old.body_id
-                || cell.material_id != old.material_id
-                || cell.geometry != old.geometry
-                || cell.mass_kg.to_bits() != old.mass_kg.to_bits()
-                || accepted && cell.specific_h_j_kg.to_bits() != old.specific_h_j_kg.to_bits()
-                || !thermal.uses_material_law(
-                    cell.material_id,
-                    bound.source.thermal_source().caloric_source().curve() as &dyn ThermalLaw,
-                )
-            {
-                return Err(ThermoplasticError::Invalid(
-                    "structural identity, reference geometry, mass or accepted enthalpy changed",
-                ));
-            }
+            let cell = self.checked_thermal_cell(bound, thermal, accepted)?;
             bound
                 .source
                 .thermal_source()

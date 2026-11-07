@@ -2190,6 +2190,34 @@ Physical sources and facet bindings are shared immutably; borrowed endpoint sect
 
 Four focused synthetic regressions cover an independent heated uniaxial plastic membrane/permanent-set oracle, layer-gradient thermal moment reversal with original conduction, late-refusal checkpoint preservation, and prescribed plastic motion with an independent P1 kinetic integral, incorrect eccentric mass rejection and no heat from numerical stopping loss. They also exercise a cold reference binding whose free-coordinate budget is smaller than its total physical coordinate count. Formatting and source checks do not substitute for execution of these native numerical tests.
 
+## Spatial thermoplastic indentation hardness
+
+`solid_enthalpy::plastic::hardness` binds one independently selected original
+indentation test to each tetrahedron of an accepted `ThermoplasticSolid`.
+`bind_hardness_field` bounds point count and retains original mesh, ordered cell,
+caloric source and test identity. `at_accepted` observes each actual caloric
+temperature and native accumulated equivalent plastic strain, retaining complete
+source receipts in original element order. It preserves full J2/Voce/viscous and
+N-branch Chaboche histories, including reverse loading and thermal branch transport.
+There is no averaged temperature, yield-to-hardness conversion, repeated return
+map, repeated mechanical coefficient refresh or second mechanical history.
+
+`check_candidate` admits an existing native thermoplastic proposal and returns
+that unchanged proposal with its complete hardness field. Source coverage,
+inventory, clock, original-mesh and cancellation refusals publish no partial
+field or advanced physical owners; callers adopt both outputs together. These
+are endpoint observations, with no assertion of coverage between physical
+times. Consumers still own spatial projection, contact/indentation scale and
+avoiding duplicate resolved and reduced indentation energy; no additional
+pressure cap, wear law, annealing kinetics or heat term is introduced.
+
+The focused synthetic `solid_plastic_enthalpy::hardness` regressions specify
+heterogeneous element responses against an independent uniaxial plastic/heat
+oracle, complete cyclic branch and native work preservation, and late endpoint
+coverage refusal with accepted-owner preservation. They also exercise bounded
+point count and original-mesh/clock admission. These are numerical source/history
+checks, not measured material calibration.
+
 ## Ductile initiation on coupled thermal plastic solids and motion
 
 `solid_enthalpy::plastic::ductile` adds `advance_with_ductility` to the original

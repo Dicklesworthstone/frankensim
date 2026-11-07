@@ -489,6 +489,13 @@ no annealing kinetics, yield-to-hardness conversion or additional heat. Focused
 reports under heating, reversal and viscous cyclic loading, and exercise source,
 coverage and cancellation refusals. These are synthetic regressions.
 
+`try_from_native_state` / `at_native_state` share the same source admission with
+spatial physical owners. The actual caloric chart, original mechanical card,
+complete selected mechanical claims, hardening convention and resolved thermal
+context must agree before observing the complete native history. This borrowed
+ingress repeats no constitutive solve or mechanical coefficient refresh; the
+calling physical owner remains responsible for accepted equilibrium and history.
+
 `hardness::IndentationHardnessStatePoint` selects a positive static
 pressure-valued `IndentationHardness` claim from an original material bundle.
 It retains the exact apparatus, load/dwell, protocol, specimen and source

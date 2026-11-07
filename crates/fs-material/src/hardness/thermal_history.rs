@@ -27,7 +27,7 @@ use fs_qty::{Dims, QuantitySpec};
 
 use super::IndentationHardnessStatePoint;
 use super::plastic_history::ACCUMULATED_EQUIVALENT_PLASTIC_STRAIN_AXIS as ALPHA;
-use crate::phase::{UniformEnthalpyStep, UniformEnthalpyStepInput};
+use crate::phase::{EquilibriumPhaseState, UniformEnthalpyStep, UniformEnthalpyStepInput};
 use crate::plastic::J2State;
 use crate::plastic::chaboche::ChabocheState;
 use crate::plastic::source::ResolvedJ2Plasticity;
@@ -106,8 +106,33 @@ where
         hardness_key: PropertyKey,
         selection: MaterialPropertySelection,
     ) -> Result<Self, ThermoplasticHardnessError> {
-        let query = hardness_query(point)?;
-        let thermal = point.thermal_source().thermal_material_point();
+        Self::try_from_native_state(
+            point.thermal_source(),
+            point.resolved(),
+            *point.caloric_state(),
+            point.history(),
+            hardness_key,
+            selection,
+        )
+    }
+
+    /// Bind the same observation to an existing spatial/native physical owner.
+    ///
+    /// The caller supplies its original thermal source, accepted resolved
+    /// mechanics, actual caloric state and complete native history. Their card,
+    /// selected mechanical claims, hardening convention and actual query must
+    /// agree. This observes that state; the physical owner remains responsible
+    /// for equilibrium/history admission and must not substitute trial values.
+    pub fn try_from_native_state(
+        original: &ThermoplasticSource<'a>,
+        material: &ResolvedJ2Plasticity,
+        caloric: EquilibriumPhaseState,
+        history: &<S::Material as SmallStrainLaw>::State,
+        hardness_key: PropertyKey,
+        selection: MaterialPropertySelection,
+    ) -> Result<Self, ThermoplasticHardnessError> {
+        let query = hardness_query(original, material, caloric, history)?;
+        let thermal = original.thermal_material_point();
         let requirement = ScalarPropertyRequirement::try_with_key(
             &hardness_key,
             ScalarAdmissibility::StrictlyPositive,
@@ -119,8 +144,8 @@ where
         admit(thermal, &query, &source)?;
         Ok(Self {
             source,
-            reference: point.thermal_source().reference().clone(),
-            caloric_identity: point.caloric_state().phase_curve_identity(),
+            reference: original.reference().clone(),
+            caloric_identity: caloric.phase_curve_identity(),
             family: PhantomData,
         })
     }
@@ -138,15 +163,34 @@ where
         &self,
         point: &CaloricPoint<'a, S>,
     ) -> Result<IndentationHardnessStatePoint, ThermoplasticHardnessError> {
-        if point.thermal_source().reference() != &self.reference
-            || point.caloric_state().phase_curve_identity() != self.caloric_identity
+        self.at_native_state(
+            point.thermal_source(),
+            point.resolved(),
+            *point.caloric_state(),
+            point.history(),
+        )
+    }
+
+    /// Observe an accepted native spatial point under the original source pins.
+    /// No return map, coefficient refresh or caloric solve is repeated. The
+    /// complete original mechanical selection and actual state context are
+    /// checked before querying the independently selected indentation test.
+    pub fn at_native_state(
+        &self,
+        original: &ThermoplasticSource<'a>,
+        material: &ResolvedJ2Plasticity,
+        caloric: EquilibriumPhaseState,
+        history: &<S::Material as SmallStrainLaw>::State,
+    ) -> Result<IndentationHardnessStatePoint, ThermoplasticHardnessError> {
+        if original.reference() != &self.reference
+            || caloric.phase_curve_identity() != self.caloric_identity
         {
             return Err(ThermoplasticHardnessError::Invalid(
                 "accepted point belongs to a different original mechanical or caloric source",
             ));
         }
-        let query = hardness_query(point)?;
-        let thermal = point.thermal_source().thermal_material_point();
+        let query = hardness_query(original, material, caloric, history)?;
+        let thermal = original.thermal_material_point();
         let source = self.source.at_query_point(thermal.material, &query)?;
         admit(thermal, &query, &source)?;
         Ok(source)
@@ -194,22 +238,40 @@ where
     }
 }
 
-fn hardness_query<'a, S>(
-    point: &CaloricPoint<'a, S>,
-) -> Result<QueryPoint, ThermoplasticHardnessError>
-where
-    S: ThermoplasticSourceFamily<'a>,
-    <S::Material as SmallStrainLaw>::State: AccumulatedPlasticHistory,
-{
-    let alpha = point.history().accumulated_equivalent_plastic_strain();
+fn hardness_query(
+    original: &ThermoplasticSource<'_>,
+    material: &ResolvedJ2Plasticity,
+    caloric: EquilibriumPhaseState,
+    history: &impl AccumulatedPlasticHistory,
+) -> Result<QueryPoint, ThermoplasticHardnessError> {
+    let alpha = history.accumulated_equivalent_plastic_strain();
     if !alpha.is_finite() || alpha < 0.0 {
         return Err(ThermoplasticHardnessError::Invalid(
             "native accumulated equivalent plastic strain must be finite and nonnegative",
         ));
     }
-    let thermal = point.thermal_source().thermal_material_point();
-    let query = thermal.at(*point.caloric_state())?;
-    if point.resolved().material().query() != query {
+    let reference = original.reference();
+    let old_properties = reference.material().properties();
+    let actual_properties = material.material().properties();
+    if caloric.phase_curve_identity() != original.caloric_source().curve().identity()
+        || material.material().card_identity() != reference.material().card_identity()
+        || material.hardening_basis() != reference.hardening_basis()
+        || actual_properties.len() != old_properties.len()
+        || actual_properties
+            .iter()
+            .zip(old_properties)
+            .any(|(actual, old)| {
+                actual.requirement() != old.requirement()
+                    || actual.answer().receipt.selected != old.answer().receipt.selected
+            })
+    {
+        return Err(ThermoplasticHardnessError::Invalid(
+            "native hardness observation requires the original caloric and complete mechanical source selection",
+        ));
+    }
+    let thermal = original.thermal_material_point();
+    let query = thermal.at(caloric)?;
+    if material.material().query() != query {
         return Err(ThermoplasticHardnessError::Invalid(
             "accepted mechanics and caloric state must have the same original context",
         ));

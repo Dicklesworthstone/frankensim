@@ -24,6 +24,8 @@ mod chaboche;
 mod chaboche_dynamics;
 #[path = "solid_plastic_enthalpy/shell.rs"]
 mod shell;
+#[path = "solid_plastic_enthalpy/hardness.rs"]
+mod hardness;
 
 use std::collections::BTreeMap;
 
