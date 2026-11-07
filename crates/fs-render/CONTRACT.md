@@ -4361,6 +4361,23 @@ and source/cancellation failures abort the complete observation. Frozen media
 and finite surface-source histories remain the original scope; fluorescent
 lifetimes and evolving volume sources are not supplied.
 
+The same molecular camera's `sample_sequential_ray_during_exposure` and its
+uniform/heterogeneous original-variate counterparts integrate source histories
+on one frozen refracted/scattered path. Every emitting hit receives its original
+interval-average query with both sensor shutter endpoints retarded by that
+hit's own lens-plus-scene group delay. Source integration adds no temporal
+quadrature, transport draws or path replays. The visible
+`sample_pixel_sequential_rayleigh_during_exposure` and original-band
+`sample_pixel_sensor_sequential_rayleigh_during_exposure` retain the complete
+sensor-side analyzer, optional clipped lanes, proposal mass and per-wavelength
+collision/flight counts. Their defaulted generic exposure payloads preserve
+existing mandatory-ray callers; QE energy and expected photoelectrons share
+the original DD-duration integrator. Source, work-limit and cancellation errors
+abort the observation. Frozen media, instantaneous molecular events and finite
+surface histories retain the scope above. G1/G3/G4 regressions cover two-turn
+chromatic source intervals at a large DD epoch, clipped analyzed packets, and
+shared infrared QE paths with integrated energy/electron response.
+
 The motion path reconstructs only the supplied interpolation model. It does not
 invent mechanical bandwidth, unwrap rotations absent from keyframes, smooth a
 declared contact/terminal discontinuity, validate the source dynamics, or claim

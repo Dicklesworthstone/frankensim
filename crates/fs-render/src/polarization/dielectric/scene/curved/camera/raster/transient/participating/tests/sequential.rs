@@ -8,6 +8,8 @@ use crate::polarization::dielectric::scene::curved::camera::CameraAnalyzer;
 use fs_geom::{Point3, Vec3};
 use std::sync::Mutex;
 
+mod exposure;
+
 const SEED: u64 = 79;
 const SAMPLE: u32 = 6;
 const C0: f64 = 299_792_458.0;

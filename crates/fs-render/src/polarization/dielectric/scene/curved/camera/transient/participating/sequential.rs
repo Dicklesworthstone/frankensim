@@ -4,6 +4,8 @@ use super::super::sequential::lens_delay;
 use super::*;
 use crate::camera::SequentialCameraBeam;
 
+mod exposure;
+
 impl TransientCurvedRayleighCameraScene<'_, '_, '_, '_, '_> {
     /// Continue the complete lens detector state with the original independent
     /// surface and flight counters. Every source retains the supplied sensor

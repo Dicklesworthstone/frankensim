@@ -8,6 +8,8 @@ use crate::polarization::dielectric::scene::curved::camera::transient::{
     TransientCameraError, admit_time,
 };
 
+mod exposure;
+
 /// A complete sensor-clock sequential-lens observation with original work.
 /// Optional optical lanes retain their proposal mass. Clipped lanes have no
 /// native path, no history queries, and zero volume/flight counts.

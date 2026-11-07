@@ -4,6 +4,8 @@ use crate::camera::{
 };
 use crate::polarization::dielectric::scene::curved::camera::CameraAnalyzer;
 
+mod exposure;
+
 fn lens(exterior: DielectricGlass) -> PhysicalCamera {
     let interior = DielectricGlass::new(
         CauchyIor::try_new(1.9, 0.006, 0.0).unwrap(),

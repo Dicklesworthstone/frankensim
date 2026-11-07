@@ -52,9 +52,33 @@ impl TransientCurvedRayleighCameraScene<'_, '_, '_, '_, '_> {
         path_id: u64,
     ) -> Result<ExposureRayleighCameraSample, TransientCameraError> {
         cx.checkpoint()?;
-        let camera = self.camera.source_camera();
         let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
-        let index = phase_index(beam.medium(), wavelength_nm)?;
+        self.sample_launched_ray_during_exposure(
+            cx,
+            beam,
+            initial_medium,
+            window,
+            Dd::ZERO,
+            settings,
+            seed,
+            path_id,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn sample_launched_ray_during_exposure(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        window: ExposureWindow,
+        launch_delay_s: Dd,
+        settings: CurvedRayleighTraceSettings,
+        seed: u64,
+        path_id: u64,
+    ) -> Result<ExposureRayleighCameraSample, TransientCameraError> {
+        let camera = self.camera.source_camera();
+        let index = phase_index(beam.medium(), beam.wavelength_nm())?;
         let mut emission = SurfaceEmission::new(camera, index);
         let mut error = None;
         let result = self.scattering.for_camera().trace_events_observed(
@@ -65,7 +89,9 @@ impl TransientCurvedRayleighCameraScene<'_, '_, '_, '_, '_> {
             seed,
             path_id,
             &camera.spatial_volume_emitters,
-            |event| self.observe_exposure(cx, window, event, &mut emission, &mut error),
+            |event| {
+                self.observe_exposure(cx, window, launch_delay_s, event, &mut emission, &mut error)
+            },
         );
         self.finish_exposure(cx, window, index, emission, result, error)
     }
@@ -84,9 +110,33 @@ impl TransientCurvedRayleighCameraScene<'_, '_, '_, '_, '_> {
         flight_samples: impl FnMut(u32) -> [f64; 3],
     ) -> Result<ExposureRayleighCameraSample, TransientCameraError> {
         cx.checkpoint()?;
-        let camera = self.camera.source_camera();
         let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
-        let index = phase_index(beam.medium(), wavelength_nm)?;
+        self.sample_launched_ray_with_samples_during_exposure(
+            cx,
+            beam,
+            initial_medium,
+            window,
+            Dd::ZERO,
+            settings,
+            surface_samples,
+            flight_samples,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn sample_launched_ray_with_samples_during_exposure(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        window: ExposureWindow,
+        launch_delay_s: Dd,
+        settings: CurvedRayleighTraceSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
+        flight_samples: impl FnMut(u32) -> [f64; 3],
+    ) -> Result<ExposureRayleighCameraSample, TransientCameraError> {
+        let camera = self.camera.source_camera();
+        let index = phase_index(beam.medium(), beam.wavelength_nm())?;
         let mut emission = SurfaceEmission::new(camera, index);
         let mut error = None;
         let result = self
@@ -100,7 +150,16 @@ impl TransientCurvedRayleighCameraScene<'_, '_, '_, '_, '_> {
                 surface_samples,
                 flight_samples,
                 &camera.spatial_volume_emitters,
-                |event| self.observe_exposure(cx, window, event, &mut emission, &mut error),
+                |event| {
+                    self.observe_exposure(
+                        cx,
+                        window,
+                        launch_delay_s,
+                        event,
+                        &mut emission,
+                        &mut error,
+                    )
+                },
             );
         self.finish_exposure(cx, window, index, emission, result, error)
     }
@@ -120,9 +179,33 @@ impl TransientCurvedRayleighCameraScene<'_, '_, '_, '_, '_> {
         flight_samples: impl FnMut(u32) -> [f64; 4],
     ) -> Result<ExposureRayleighCameraSample, TransientCameraError> {
         cx.checkpoint()?;
-        let camera = self.camera.source_camera();
         let beam = self.camera.launch(ray, wavelength_nm, initial_medium)?;
-        let index = phase_index(beam.medium(), wavelength_nm)?;
+        self.sample_launched_ray_with_tracking_samples_during_exposure(
+            cx,
+            beam,
+            initial_medium,
+            window,
+            Dd::ZERO,
+            settings,
+            surface_samples,
+            flight_samples,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn sample_launched_ray_with_tracking_samples_during_exposure(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        window: ExposureWindow,
+        launch_delay_s: Dd,
+        settings: CurvedRayleighTraceSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
+        flight_samples: impl FnMut(u32) -> [f64; 4],
+    ) -> Result<ExposureRayleighCameraSample, TransientCameraError> {
+        let camera = self.camera.source_camera();
+        let index = phase_index(beam.medium(), beam.wavelength_nm())?;
         let mut emission = SurfaceEmission::new(camera, index);
         let mut error = None;
         let result = self
@@ -136,7 +219,16 @@ impl TransientCurvedRayleighCameraScene<'_, '_, '_, '_, '_> {
                 surface_samples,
                 flight_samples,
                 &camera.spatial_volume_emitters,
-                |event| self.observe_exposure(cx, window, event, &mut emission, &mut error),
+                |event| {
+                    self.observe_exposure(
+                        cx,
+                        window,
+                        launch_delay_s,
+                        event,
+                        &mut emission,
+                        &mut error,
+                    )
+                },
             );
         self.finish_exposure(cx, window, index, emission, result, error)
     }
@@ -145,14 +237,20 @@ impl TransientCurvedRayleighCameraScene<'_, '_, '_, '_, '_> {
         &self,
         cx: &Cx<'_>,
         window: ExposureWindow,
+        launch_delay_s: Dd,
         event: CurvedRayleighEvent<'_>,
         emission: &mut SurfaceEmission<'_, '_, '_>,
         error: &mut Option<TransientCameraError>,
     ) -> Result<(), CurvedSceneError> {
         match event {
-            CurvedRayleighEvent::Surface(event) => self
-                .camera
-                .observe_exposure(cx, window, event, emission, error),
+            CurvedRayleighEvent::Surface(event) => self.camera.observe_exposure_with_delay(
+                cx,
+                window,
+                launch_delay_s,
+                event,
+                emission,
+                error,
+            ),
             event => emission.observe_rayleigh_event(event),
         }
     }

@@ -11,20 +11,20 @@ use super::*;
 use crate::polarization::dielectric::scene::curved::camera::transient::exposure::ExposureWindow;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ExposureRayleighPixelSample {
-    sample: ExposurePixelSample,
+pub struct ExposureRayleighPixelSample<P = CurvedPixelSample> {
+    sample: ExposurePixelSample<P>,
     volume_events: [u32; CAMERA_WAVELENGTHS],
     free_flight_draws: [u32; CAMERA_WAVELENGTHS],
 }
 
-impl ExposureRayleighPixelSample {
-    pub const fn exposure_sample(&self) -> &ExposurePixelSample {
+impl<P> ExposureRayleighPixelSample<P> {
+    pub const fn exposure_sample(&self) -> &ExposurePixelSample<P> {
         &self.sample
     }
     pub const fn window(&self) -> ExposureWindow {
         self.sample.window()
     }
-    pub const fn mean_pixel_sample(&self) -> &CurvedPixelSample {
+    pub const fn mean_pixel_sample(&self) -> &P {
         self.sample.mean_pixel_sample()
     }
     pub const fn volume_events(&self) -> &[u32; CAMERA_WAVELENGTHS] {
@@ -33,23 +33,38 @@ impl ExposureRayleighPixelSample {
     pub const fn free_flight_draws(&self) -> &[u32; CAMERA_WAVELENGTHS] {
         &self.free_flight_draws
     }
+
+    pub(super) fn with_work(
+        sample: ExposurePixelSample<P>,
+        volume_events: [u32; CAMERA_WAVELENGTHS],
+        free_flight_draws: [u32; CAMERA_WAVELENGTHS],
+    ) -> Self {
+        Self {
+            sample,
+            volume_events,
+            free_flight_draws,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ExposureRayleighSensorPixelSample<const CHANNELS: usize> {
-    sample: ExposureSensorPixelSample<CHANNELS>,
+pub struct ExposureRayleighSensorPixelSample<
+    const CHANNELS: usize,
+    P = CurvedSensorPixelSample<CHANNELS>,
+> {
+    sample: ExposureSensorPixelSample<CHANNELS, P>,
     volume_events: [u32; CAMERA_WAVELENGTHS],
     free_flight_draws: [u32; CAMERA_WAVELENGTHS],
 }
 
-impl<const C: usize> ExposureRayleighSensorPixelSample<C> {
-    pub const fn exposure_sample(&self) -> &ExposureSensorPixelSample<C> {
+impl<const C: usize, P> ExposureRayleighSensorPixelSample<C, P> {
+    pub const fn exposure_sample(&self) -> &ExposureSensorPixelSample<C, P> {
         &self.sample
     }
     pub const fn window(&self) -> ExposureWindow {
         self.sample.window()
     }
-    pub const fn mean_pixel_sample(&self) -> &CurvedSensorPixelSample<C> {
+    pub const fn mean_pixel_sample(&self) -> &P {
         self.sample.mean_pixel_sample()
     }
     pub const fn qe_weighted_energy_j_m2_sr(&self) -> &[f64; C] {
@@ -63,6 +78,18 @@ impl<const C: usize> ExposureRayleighSensorPixelSample<C> {
     }
     pub const fn free_flight_draws(&self) -> &[u32; CAMERA_WAVELENGTHS] {
         &self.free_flight_draws
+    }
+
+    pub(super) fn with_work(
+        sample: ExposureSensorPixelSample<C, P>,
+        volume_events: [u32; CAMERA_WAVELENGTHS],
+        free_flight_draws: [u32; CAMERA_WAVELENGTHS],
+    ) -> Self {
+        Self {
+            sample,
+            volume_events,
+            free_flight_draws,
+        }
     }
 }
 
@@ -122,11 +149,11 @@ impl CurvedCameraRaster<'_> {
         if let Some(error) = source_error {
             return Err(TransientRasterError::Source(error));
         }
-        Ok(ExposureRayleighPixelSample {
-            sample: finish_pixel(window, result?),
+        Ok(ExposureRayleighPixelSample::with_work(
+            finish_pixel(window, result?),
             volume_events,
             free_flight_draws,
-        })
+        ))
     }
 
     /// Original source-bounded QE means and integrated energy/electron counts,
@@ -189,10 +216,10 @@ impl CurvedCameraRaster<'_> {
         if let Some(error) = source_error {
             return Err(TransientRasterError::Source(error));
         }
-        Ok(ExposureRayleighSensorPixelSample {
-            sample: finish_sensor(window, result?)?,
+        Ok(ExposureRayleighSensorPixelSample::with_work(
+            finish_sensor(window, result?)?,
             volume_events,
             free_flight_draws,
-        })
+        ))
     }
 }
