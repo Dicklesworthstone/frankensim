@@ -58,6 +58,8 @@ use crate::thermochemical_gas::ResolvedThermochemicalGasState;
 pub mod bulk;
 /// Bounded native declarations of the same species/reservoir laws.
 pub mod input;
+/// Analytic causal continuation of the original molecular reservoirs.
+pub mod laplace;
 
 /// The ISO terrestrial-air admission policy, shared with
 /// [`crate::iso9613::TerrestrialAir`].
