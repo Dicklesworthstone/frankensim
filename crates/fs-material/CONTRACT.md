@@ -9135,6 +9135,23 @@ geometry, source-domain and late-cancellation refusal with exact replay. These
 are numerical model checks on synthetic source cards, not measured-material
 validation.
 
+## Integrated conductivity for volumetric and assembled storage
+
+`CaloricConductionLayer::from_fixed_volume` retains an original
+`FixedVolumeThermalLaw`, and `from_heat_storage` retains an original
+`HeatStorageConductionLaw`. These use the same integrated link, film,
+gray-boundary and surface-interface owners with `dT/de = rho_ref/C_vol(T)` or
+`m_ref/C_total(T)`, respectively. Both the original reference-amount admission
+and `DeclaredSensibleStorage` basis survive; no Cp/Cv meaning or conductivity
+homogenization is inferred. Each conductivity integral retains only its
+original k(T) knots, independently of the capacity grid, and many faces borrow
+that one preparation. The public `caloric_storage_basis` regression checks
+both storage models through native implicit film cooling against an independent
+piecewise-conductivity and energy balance, including the full tangent, entropy,
+supported material faces beside an out-of-span bath, original-amount refusal,
+replay and cancellation. This new regression is authored but unexecuted under
+the current native build limits.
+
 ## State-dependent contact on original Cp/Cv integrated faces
 
 `IntegratedCaloricLink::new_with_contact` binds an original two-sided

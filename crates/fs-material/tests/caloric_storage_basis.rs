@@ -5,7 +5,9 @@ use fs_matdb::{
     ClaimSelection, ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim,
     PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy, UncertaintyModel,
 };
+use fs_material::thermal::conduction::LayerConductionConfig;
 use fs_material::thermal::transport::{
+    conduction::{CaloricConductionLayer, IntegratedCaloricBoundary},
     storage::{
         HeatStorageAmount, HeatStorageComponentQuery, HeatStorageThermalLaw, PreparedHeatStorage,
         conduction::HeatStorageConductionLaw,
@@ -19,13 +21,14 @@ use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QuantitySpec, Temperature};
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
-    DepositionSimulation, Event, MaterialId, StepConfig, ThermalLaw, ThermalLink, ThermalStorageBasis,
+    DepositionSimulation, Event, MaterialId, Reservoir, StepConfig, ThermalLaw, ThermalLink, ThermalStorageBasis,
     TimedEvent,
     advection::{Advected, MassBoundary, MassFlow},
-    conduction::{ConductionObserver, ConductiveLink, ConductivityLaw},
+    conduction::{ConductionObserver, ConductiveLink, ConductiveReservoir, ConductivityLaw},
     conduction::implicit::{
         ImplicitConductionControls, ImplicitConductionError, ImplicitConductionGraph,
         ImplicitConductionLaw, ImplicitConductionLinearControls, ImplicitConductionWorkspace,
+        boundary::{ImplicitBoundaryGeometry, ImplicitBoundaryLaw},
     },
     evaporation::LiquidCellExchange,
 };
@@ -529,4 +532,155 @@ fn g1_assembly_native_graph_conserves_nonlinear_storage_across_a_conductivity_kn
     assert_eq!(old.time_s(), 0.0);
     assert_eq!(old.cells()[&CellId(0)].specific_h_j_kg, 136.8 / 2.0);
     assert_eq!(old.cells()[&CellId(1)].specific_h_j_kg, 8.8 / 2.0);
+}
+
+#[test]
+fn g1_integrated_storage_cools_through_source_conductivity_and_a_supported_film() {
+    let (card, path, storage) = sources();
+    let volume = FixedVolumeThermalLaw::try_new(&path, 10.0, 300.0)
+        .unwrap()
+        .with_sensible_entropy();
+    let assembly = HeatStorageThermalLaw::try_new(&storage, 2.0, 300.0)
+        .unwrap()
+        .with_sensible_entropy();
+    let assembly_conduction = HeatStorageConductionLaw::try_new(
+        &card,
+        &assembly,
+        &PropertyKey::new("conductivity", Dims([1, 1, -3, -1, 0, 0])),
+        "T",
+        &temperature_point(300.0),
+        &temperature_point(320.0),
+        ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly),
+    ).unwrap();
+    let layers = [
+        CaloricConductionLayer::from_fixed_volume(&volume).unwrap(),
+        CaloricConductionLayer::from_heat_storage(&assembly_conduction).unwrap(),
+    ];
+    let caloric: [&dyn ThermalLaw; 2] = [&volume, &assembly];
+    let conduction: [&dyn ConductivityLaw; 2] = [&volume, &assembly_conduction];
+    let implicit: [&dyn ImplicitConductionLaw; 2] = [&volume, &assembly_conduction];
+    let geometry = ImplicitBoundaryGeometry {
+        area_m2: 0.2, half_distance_m: 0.5, surface_resistance_m2_k_w: 0.16,
+    };
+    let flux_controls = LayerConductionConfig {
+        max_iterations: 128, absolute_heat_tolerance_w: 1e-11, relative_heat_tolerance: 1e-12,
+    };
+    let (initial_energy, dt, bath) = (136.8, 5.0, 295.0);
+
+    // Independent coupled storage/film solution. K is the exact piecewise
+    // integral of the fixture k(T), and T(E) inverts total C=4+0.4*(T-300).
+    // The 0.4 m * 0.5 m * 1 m body has V=0.2 m³, A=0.2 m² and L_half=0.5 m.
+    // In the surface coordinate, P=(Ts-Tbath)/R and E_new=E_old-dt*P,
+    // with total film resistance R=0.16/A=0.8 K/W.
+    let integrated_k = |t: f64| {
+        if t <= 307.0 {
+            let x = t - 300.0;
+            x + x * x / 14.0
+        } else {
+            let x = t - 307.0;
+            10.5 + 2.0 * x + x * x / 26.0
+        }
+    };
+    let temperature = |energy: f64| 300.0 + 2.0 * energy / (4.0 + (16.0 + 0.8 * energy).sqrt());
+    let k = |t: f64| if t < 307.0 { 1.0 + (t - 300.0) / 7.0 } else { 2.0 + (t - 307.0) / 13.0 };
+    let mut bracket = [300.0, 307.0];
+    for _ in 0..80 {
+        let surface = 0.5 * (bracket[0] + bracket[1]);
+        let power = (surface - bath) / 0.8;
+        let bulk = temperature(initial_energy - dt * power);
+        if integrated_k(bulk) - integrated_k(surface) - 2.5 * power > 0.0 {
+            bracket[0] = surface;
+        } else {
+            bracket[1] = surface;
+        }
+    }
+    let expected_surface = 0.5 * (bracket[0] + bracket[1]);
+    let expected_power = (expected_surface - bath) / 0.8;
+    let expected_energy = initial_energy - dt * expected_power;
+    let expected_temperature = temperature(expected_energy);
+    assert!(expected_surface > 300.0 && expected_surface < 307.0);
+    assert!(expected_temperature > 307.0);
+    let point_k_power = (expected_temperature - bath) / (2.5 / k(expected_temperature) + 0.8);
+    assert!((point_k_power - expected_power).abs() > 0.5);
+
+    for (side, layer) in layers.iter().enumerate() {
+        assert!(core::ptr::addr_eq(
+            layer.caloric_law() as *const dyn ThermalLaw,
+            caloric[side] as *const dyn ThermalLaw,
+        ));
+        assert_eq!(layer.caloric_law().storage_basis(), ThermalStorageBasis::DeclaredSensibleStorage);
+        assert_eq!(layer.energy_bounds_j_kg(), implicit[side].enthalpy_bounds_j_kg());
+        assert_eq!(
+            layer.source_line().knots.iter().map(|knot| knot.0).collect::<Vec<_>>(),
+            vec![300.0, 307.0, 320.0],
+        );
+        let mut cell = initial(caloric[side], 1, 0.0).cells()[&CellId(0)].clone();
+        cell.specific_h_j_kg = initial_energy / cell.mass_kg;
+        cell.geometry.end_m = [1.0, 0.0, 0.0];
+        cell.geometry.surface_area_m2 = 2.2;
+        cell.boundary.reservoir = Some(Reservoir {
+            area_m2: 0.2, conductance_w_k: 999.0, temperature_k: bath,
+        });
+        let old = DepositionSimulation::new(
+            vec![TimedEvent { time_s: 0.0, event: Event::Birth(cell.clone()) }],
+            &[(MaterialId(1), caloric[side])],
+            DepositionBudget { max_cells: 1, max_links: 0, max_events: 1, max_substeps: 16 },
+        ).unwrap().advance_to(0.0, step(), || Ok(())).unwrap().0;
+        // No integrated layer may replace the original amount/volume admission.
+        cell.mass_kg = 3.0;
+        assert!(layer.caloric_law().validate_cell(&cell).is_err());
+        let boundary = IntegratedCaloricBoundary::new(layer, geometry, flux_controls).unwrap();
+        let observer = ConductionObserver::new(
+            &old, &[(MaterialId(1), conduction[side])], &[],
+            &[ConductiveReservoir {
+                cell_id: CellId(0), half_distance_m: 0.5, surface_resistance_m2_k_w: 0.16,
+            }], || Ok(()),
+        ).unwrap();
+        let graph = ImplicitConductionGraph::new(
+            &old, &observer, &[(MaterialId(1), implicit[side])],
+            ImplicitConductionLinearControls::default(), || Ok(()),
+        ).unwrap().with_boundary_laws(&old, &[(CellId(0), &boundary)], &[], || Ok(())).unwrap();
+        let controls = ImplicitConductionControls {
+            maximum_dt_s: dt, maximum_halvings: 0,
+            cell_tolerance_j: 1e-8, total_tolerance_j: 1e-7,
+            ..ImplicitConductionControls::default()
+        };
+        let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+        let (next, report) = graph.advance_to(&old, dt, controls, &mut workspace, || Ok(())).unwrap();
+        let energy = next.cells()[&CellId(0)].specific_h_j_kg;
+        assert!((next.temperature_k(CellId(0)).unwrap() - expected_temperature).abs() < 2e-8);
+        assert!((2.0 * energy - expected_energy).abs() < 2e-7);
+        let response = boundary.response_at_specific_energy(energy, bath, &mut || Ok(())).unwrap();
+        assert!((response.material_face_temperature_k - expected_surface).abs() < 2e-8);
+        assert!((response.power_to_reservoir_w - expected_power).abs() < 2e-8);
+        let tangent = boundary.state_at_specific_enthalpy(energy, bath, geometry, &mut || Ok(())).unwrap();
+        let expected_tangent = 0.2 * k(expected_temperature) / (0.5 + 0.16 * k(expected_surface))
+            * 2.0 / (4.0 + 0.4 * (expected_temperature - 300.0));
+        assert!((tangent.power_enthalpy_derivative_w_kg_j - expected_tangent).abs() < 2e-9);
+        assert_eq!(report.energy.substeps, 1);
+        assert!((report.energy.external_heat_j + dt * expected_power).abs() < 2e-7);
+        assert!((report.energy.stored_energy_change_j + dt * expected_power).abs() < 2e-7);
+        assert!(report.energy.residual_j.abs() < 1e-7);
+        let entropy = 0.4 * (expected_temperature - 318.0)
+            - 116.0 * (expected_temperature / 318.0).ln();
+        assert!((report.entropy.thermal_storage_change_j_k - entropy).abs() < 2e-9);
+        assert!((report.entropy.reservoir_entropy_input_j_k + dt * expected_power / bath).abs() < 2e-9);
+        assert!(entropy - report.entropy.reservoir_entropy_input_j_k > 0.0);
+
+        // A bath outside source support is admissible only while the actual
+        // material surface stays supported. Removing the film must refuse.
+        let perfect = IntegratedCaloricBoundary::new(
+            layer, ImplicitBoundaryGeometry { surface_resistance_m2_k_w: 0.0, ..geometry }, flux_controls,
+        ).unwrap();
+        assert!(perfect.response_at_specific_energy(energy, bath, &mut || Ok(())).is_err());
+        let replay = graph.advance_to(&old, dt, controls, &mut workspace, || Ok(())).unwrap();
+        assert_eq!(replay.0.cells(), next.cells());
+        assert_eq!(replay.1, report);
+        assert!(matches!(
+            graph.advance_to(&old, dt, controls, &mut workspace, || Err(DepositionError::Cancelled)),
+            Err(ImplicitConductionError::Thermal(DepositionError::Cancelled))
+        ));
+        assert_eq!(old.time_s(), 0.0);
+        assert_eq!(old.cells()[&CellId(0)].specific_h_j_kg, initial_energy / 2.0);
+    }
 }

@@ -20,6 +20,18 @@ use fs_thermal::enthalpy::conduction::implicit::{
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
 
 impl FixedVolumeThermalLaw<'_> {
+    pub(in crate::thermal::transport) fn integrated_conductivity_curve(
+        &self,
+    ) -> Result<crate::thermal::conduction::ConductivityCurve, DepositionError> {
+        crate::thermal::conduction::ConductivityCurve::new(
+            self.path().source_lines()[1]
+                .knots
+                .iter()
+                .map(|(temperature, answer)| [*temperature, answer.evidence.value.value])
+                .collect(),
+        )
+    }
+
     /// Evaluate original storage, conductivity and exact caloric tangents once.
     ///
     /// Original affine C_vol is integrated and inverted analytically; it is

@@ -1,8 +1,9 @@
-//! Source-integrated heat exchange with the original Cp(T) and Cv(T) storage.
+//! Source-integrated heat exchange with the original nonlinear caloric storage.
 //!
 //! The existing Kirchhoff layer kernel supplies one signed heat transfer and
 //! its analytic temperature derivatives. This adapter chains those derivatives
-//! through each ORIGINAL caloric inverse, retaining h for Cp and u for Cv.
+//! through each ORIGINAL caloric inverse, retaining h for Cp, u for Cv and
+//! specific sensible storage for amount-bound or volumetric capacities.
 //! It neither resamples a caloric chart nor integrates a second thermal state.
 
 /// Source-integrated material surfaces and their original reservoir/ambient film.
@@ -27,6 +28,7 @@ pub use surface_link::IntegratedCaloricSurfaceLink;
 
 use super::{
     isobaric::conduction::IsobaricConductionLaw, isochoric::conduction::IsochoricConductionLaw,
+    storage::conduction::HeatStorageConductionLaw, volumetric::timeline::FixedVolumeThermalLaw,
 };
 use crate::thermal::conduction::{
     ConductivityCurve, LayerConductionConfig, LayerConductionResponse, LayerGeometry,
@@ -44,14 +46,16 @@ use fs_thermal::enthalpy::{ContactPatch, DepositionError, DepositionSimulation, 
 enum OriginalConduction<'a, 'm> {
     Isobaric(&'a IsobaricConductionLaw<'m>),
     Isochoric(&'a IsochoricConductionLaw<'m>),
+    FixedVolume(&'m FixedVolumeThermalLaw<'m>),
+    HeatStorage(&'a HeatStorageConductionLaw<'m, 'm>),
 }
 
 /// One original caloric/conductivity source prepared for integrated layer fluxes.
 ///
 /// Preparation copies only its original k(T) knots into the existing bounded
-/// conductivity-integral owner. It retains the exact Cp or Cv object and source
-/// receipts. Many faces can borrow this same prepared layer; face construction
-/// never copies its tables. Bulk trial evaluation allocates nothing and queries
+/// conductivity-integral owner. It retains the exact caloric object, storage
+/// basis and source receipts. Many faces can borrow this same prepared layer;
+/// face construction never copies its tables. Bulk trial evaluation allocates nothing and queries
 /// no material card; a separately bound contact retains its own evaluation costs.
 /// The separate integral-knot bound never narrows the original point law.
 #[derive(Debug)]
@@ -77,12 +81,40 @@ impl<'a, 'm> CaloricConductionLayer<'a, 'm> {
         })
     }
 
+    /// Retain the original volumetric capacity, fixed density and volume admission.
+    ///
+    /// This same law supplies both native storage and point conductivity. Its
+    /// original conductivity source is integrated without resampling onto the
+    /// capacity grid; the caloric derivative remains rho_ref/C_vol(T).
+    pub fn from_fixed_volume(law: &'m FixedVolumeThermalLaw<'m>) -> Result<Self, DepositionError> {
+        Ok(Self {
+            original: OriginalConduction::FixedVolume(law),
+            conductivity: law.integrated_conductivity_curve()?,
+        })
+    }
+
+    /// Retain a mass/volume assembly and its explicitly selected effective k(T).
+    ///
+    /// The original total capacity gives dT/de = m_ref/C_total(T). Neither the
+    /// conductivity nor a Cp/Cv constraint is inferred from the constituents.
+    /// Fixed reference mass and optional sensible entropy retain their owner.
+    pub fn from_heat_storage(
+        law: &'a HeatStorageConductionLaw<'m, 'm>,
+    ) -> Result<Self, DepositionError> {
+        Ok(Self {
+            original: OriginalConduction::HeatStorage(law),
+            conductivity: law.integrated_conductivity_curve()?,
+        })
+    }
+
     /// The exact caloric object registered on the original thermal timeline.
     #[must_use]
     pub fn caloric_law(&self) -> &'m dyn ThermalLaw {
         match self.original {
             OriginalConduction::Isobaric(law) => law.caloric(),
             OriginalConduction::Isochoric(law) => law.caloric(),
+            OriginalConduction::FixedVolume(law) => law,
+            OriginalConduction::HeatStorage(law) => law.caloric(),
         }
     }
 
@@ -98,19 +130,23 @@ impl<'a, 'm> CaloricConductionLayer<'a, 'm> {
         match self.original {
             OriginalConduction::Isobaric(law) => law.source_line(),
             OriginalConduction::Isochoric(law) => law.source_line(),
+            OriginalConduction::FixedVolume(law) => &law.path().source_lines()[1],
+            OriginalConduction::HeatStorage(law) => law.source_line(),
         }
     }
 
-    /// Original specific h or u support, selected by `caloric_law().storage_basis()`.
+    /// Original specific-energy support, selected by `caloric_law().storage_basis()`.
     #[must_use]
     pub fn energy_bounds_j_kg(&self) -> [f64; 2] {
         match self.original {
             OriginalConduction::Isobaric(law) => law.enthalpy_bounds_j_kg(),
             OriginalConduction::Isochoric(law) => law.enthalpy_bounds_j_kg(),
+            OriginalConduction::FixedVolume(law) => law.specific_storage_span_j_kg(),
+            OriginalConduction::HeatStorage(law) => law.enthalpy_bounds_j_kg(),
         }
     }
 
-    /// Original inverse and analytic derivatives with respect to that SAME h or u.
+    /// Original inverse and analytic derivatives in that SAME storage coordinate.
     pub fn state_at_specific_energy(
         &self,
         energy: f64,
@@ -118,6 +154,8 @@ impl<'a, 'm> CaloricConductionLayer<'a, 'm> {
         match self.original {
             OriginalConduction::Isobaric(law) => law.state_at_specific_enthalpy(energy),
             OriginalConduction::Isochoric(law) => law.state_at_specific_internal_energy(energy),
+            OriginalConduction::FixedVolume(law) => law.conduction_state_at_specific_storage(energy),
+            OriginalConduction::HeatStorage(law) => law.state_at_specific_storage(energy),
         }
         .map_err(|_| DepositionError::MaterialDomain)
     }
@@ -171,7 +209,8 @@ fn admit_original_link(
 /// with each scalar conductivity and fixed planar/radial geometry. The native
 /// timeline owns all finite-cell storage, mass, entropy and accepted time steps.
 /// Layers add no separate heat inventory, convection or mechanical work.
-/// Either ordered side may use Cp or Cv: heat exchange does not equate h with u.
+/// Each ordered side retains its declared storage: heat exchange does not
+/// equate h with u or promote an assembled capacity to either potential.
 #[derive(Debug)]
 pub struct IntegratedCaloricLink<'l, 'a, 'm> {
     layers: [&'l CaloricConductionLayer<'a, 'm>; 2],

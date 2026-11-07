@@ -98,6 +98,12 @@ impl<'law, 'storage> HeatStorageConductionLaw<'law, 'storage> {
         self.conductivity.source_line()
     }
 
+    pub(in crate::thermal::transport) fn integrated_conductivity_curve(
+        &self,
+    ) -> Result<crate::thermal::conduction::ConductivityCurve, DepositionError> {
+        self.conductivity.integrated_curve()
+    }
+
     #[must_use]
     pub const fn identity(&self) -> ContentHash {
         self.identity
