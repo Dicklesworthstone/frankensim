@@ -4491,6 +4491,11 @@ The full energy gate sums opaque boundaries, gas and every material layer.
 The same directed dependency admission rejects indeterminate lossless cycles.
 The prepared material response retains angular memory inside each stack;
 exterior coupling uses the enclosure's explicit diffuse approximation.
+Sourced common-index Fresnel slabs also retain their original reflectance in
+the factored boundary equations and surface residual. Reflected power feeds
+the enclosure, while internally trapped modes remain in the original layer
+heat coefficients; neither is deposited a second time at the exterior ports.
+The same gray, spectral and native thermal paths consume this response.
 
 `SpectralOptics::new_with_slab_bands` requires genuine band sources for
 non-port faces and each physical material layer. Every band retains identical

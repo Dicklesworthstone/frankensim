@@ -5257,9 +5257,25 @@ coefficient discrepancy and incident-energy partition residual are numerical
 diagnostics, not certified material or continuum error bounds. A finite
 positive thickness/absorption product that overflows takes the opaque limit.
 
-All material layers and exterior fields use refractive index one. There is no
-scattering, Fresnel reflection, refraction or coherent interference. Incident
-radiance is diffuse; emergent hemispherical power is generally not Lambertian.
+The default constructor uses refractive index one. `new_refractive` accepts a
+sourced real index n >= 1, common to the entire stack, in an index-one exterior.
+It preserves Snell refraction and the separate s/p Fresnel reflection series
+before averaging unpolarized power. All incoherent round trips are summed
+analytically, including boundary-return paths between nonisothermal layers.
+Total-internal-reflection modes remain in the internal exchange, with the n²
+radiance/etendue factor; adjacent opaque layers therefore exchange n² times
+their vacuum blackbody-exitance difference. The common-index stack has equal
+front/back reflectance, while individual layer escape fractions can differ.
+Both reflection and transmission enter the incident partition diagnostic.
+
+G0/G1/G3 tests compare transparent two-interface reflection, opaque n² exchange,
+independent polarized boundary-return ray sweeps, isothermal subdivision,
+reversal, and equilibrium. The index source must support the layer temperature
+intervals and declared gray/band scope. Real-index Fresnel boundaries assume
+negligible interfacial extinction: this is not a conductor model. There is no
+scattering, internal index gradient, rough interface, coherent interference or
+evanescent tunnelling. Incident radiance is diffuse; emergent hemispherical
+power is generally not Lambertian.
 A scalar view-factor consumer explicitly owns its exterior diffuse-port
 approximation. Gray inputs do not become spectral measurements. Consumers
 admit actual layer temperatures against every source, supply their own Planck
