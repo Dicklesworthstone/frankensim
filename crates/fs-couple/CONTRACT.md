@@ -3463,3 +3463,25 @@ native nonlinear Duffing/Maxwell storage, nonlinear port harmonics, full mutual
 nonreciprocal loads, DC work and power-conjugate unit changes, plus admission
 and cancellation. Rust syntax/formatting were checked; native execution remains
 unverified in the current dependency/resource environment.
+
+## Exact source-bound Maxwell wall memory
+
+`WallRelaxation::with_network_sampling(ExactHeldFlow)` carries an explicit time
+representation from the original generalized-Maxwell source into its acoustic
+shunt. The shared material-file selector `maxwell-exact` takes the same modulus
+and time property pairs as `maxwell`, and reaches both reed and flue network
+walls. The selected material snapshot, claims, applicability, geometry, mass,
+equilibrium stiffness and all positive source arms remain unchanged.
+
+Exact branches use the solved held wall flow, continuous mean stress pressure
+in the reciprocal port equation, and independently integrated physical heat.
+The network may therefore admit poles faster than its step without midpoint
+ringing. Its base inertial membrane still uses midpoint and must satisfy the
+independent instantaneous-frequency limit. `MAX_DT_OVER_TAU` remains part of
+the source declaration and still governs distributed FE midpoint memory; DG
+retains its existing coupled propagator. The original `maxwell` selection is
+unchanged. Pinned source refresh preserves the selected sampling, and a live
+history transfer refuses a change of time rule. Focused source-card, clock and
+full wave-network tests compare analytic branch decay, mean pressure, membrane
+momentum, spring storage and resistor heat. No within-step flow resolution,
+nonlocal shell coupling or full voice qualification is implied.

@@ -10,7 +10,7 @@ use fs_material::state_point::{
     ScalarPropertyRequirement as Requirement, MAX_MATERIAL_PROPERTY_NAME_BYTES,
 };
 use fs_qty::{Density, Dims, DynViscosity, Pressure};
-use fs_vfit::relaxation::MAX_RELAXATION_BRANCHES;
+use fs_vfit::relaxation::{RelaxationSampling, MAX_RELAXATION_BRANCHES};
 use std::str::SplitAsciiWhitespace;
 
 /// One source selection shared by material assemblies, DG, graph reed and jet
@@ -142,6 +142,18 @@ pub enum WallMaterialLossSource {
         /// Declared angular-step limit, in `(0, 1]`.
         max_angular_step: f64,
     },
+    /// The same original Maxwell spectrum with exact held-flow memory in the
+    /// acoustic network. The base membrane remains midpoint; other consumers
+    /// retain their own integration and the declared temporal allowances.
+    MaxwellExact {
+        /// Exact relaxing-modulus and relaxation-time property pairs.
+        properties: Vec<(String, String)>,
+        /// Retained midpoint-consumer time limit, in `(0, 2]`; exact network
+        /// memory does not need this relaxation-time restriction.
+        max_dt_over_tau: f64,
+        /// Independent instantaneous membrane angular-step limit, in `(0, 1]`.
+        max_angular_step: f64,
+    },
 }
 
 impl WallMaterialLossSource {
@@ -151,7 +163,7 @@ impl WallMaterialLossSource {
         match fields.next() {
             Some("elastic") => Ok(Self::Elastic),
             Some("kelvin-voigt") => Ok(Self::KelvinVoigt),
-            Some("maxwell") => {
+            Some(kind @ ("maxwell" | "maxwell-exact")) => {
                 let count = fields.next().and_then(|s| s.parse::<usize>().ok())
                     .filter(|n| (1..=MAX_RELAXATION_BRANCHES).contains(n))
                     .ok_or("Maxwell wall needs 1..=8 explicit material-property pairs")?;
@@ -172,14 +184,16 @@ impl WallMaterialLossSource {
                     }
                     properties.push((modulus.to_owned(), time.to_owned()));
                 }
-                Ok(Self::Maxwell { properties, max_dt_over_tau, max_angular_step })
+                Ok(if kind == "maxwell-exact" {
+                    Self::MaxwellExact { properties, max_dt_over_tau, max_angular_step }
+                } else { Self::Maxwell { properties, max_dt_over_tau, max_angular_step } })
             }
-            _ => Err("wall loss requires elastic, kelvin-voigt, or maxwell COUNT MAX_DT_OVER_TAU MAX_ANGULAR_STEP MODULUS TIME ..."),
+            _ => Err("wall loss requires elastic, kelvin-voigt, or maxwell|maxwell-exact COUNT MAX_DT_OVER_TAU MAX_ANGULAR_STEP MODULUS TIME ..."),
         }
     }
 
     pub(crate) fn requirements(&self) -> Result<Vec<Requirement>, MaterialStatePointError> {
-        if let Self::Maxwell { properties, .. } = self
+        if let Self::Maxwell { properties, .. } | Self::MaxwellExact { properties, .. } = self
             && !(1..=MAX_RELAXATION_BRANCHES).contains(&properties.len())
         {
             return Err(MaterialStatePointError::InvalidRequirement {
@@ -197,7 +211,7 @@ impl WallMaterialLossSource {
             Self::Elastic => {}
             Self::KelvinVoigt => required.push(Requirement::try_new(
                 YOUNG_VISCOSITY_PROPERTY, DynViscosity::DIMS, Admit::NonNegative)?),
-            Self::Maxwell { properties, .. } => {
+            Self::Maxwell { properties, .. } | Self::MaxwellExact { properties, .. } => {
                 for (modulus, time) in properties {
                     // One source query per distinct property; every declared
                     // branch still enters the constitutive spectrum separately.
@@ -220,9 +234,15 @@ impl WallMaterialLossSource {
         match self {
             Self::Elastic => Ok(WallMaterialLoss::Elastic),
             Self::KelvinVoigt => Ok(WallMaterialLoss::KelvinVoigt),
-            Self::Maxwell { properties, max_dt_over_tau, max_angular_step } => {
+            Self::Maxwell { properties, max_dt_over_tau, max_angular_step }
+            | Self::MaxwellExact { properties, max_dt_over_tau, max_angular_step } => {
                 WallRelaxation::from_state_point(material, properties, band_hz,
-                    *max_dt_over_tau, *max_angular_step).map(WallMaterialLoss::Maxwell)
+                    *max_dt_over_tau, *max_angular_step).map(|source| {
+                        let source = if matches!(self, Self::MaxwellExact { .. }) {
+                            source.with_network_sampling(RelaxationSampling::ExactHeldFlow)
+                        } else { source };
+                        WallMaterialLoss::Maxwell(source)
+                    })
             }
         }
     }

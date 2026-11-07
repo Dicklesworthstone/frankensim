@@ -9,10 +9,12 @@ use fs_material::visco::GeneralizedMaxwell;
 use fs_material::state_point::ResolvedMaterialStatePoint;
 use fs_matdb::ClaimId;
 use fs_qty::{Dims, Pressure};
-use fs_vfit::relaxation::{ComplianceRelaxationTerm, RelaxationImpedanceSpec, MAX_RELAXATION_BRANCHES};
+use fs_vfit::relaxation::{ComplianceRelaxationTerm, RelaxationImpedanceSpec, RelaxationSampling, MAX_RELAXATION_BRANCHES};
 use fs_vfit::waveguide::network::{NetworkNode, WaveguideNetwork};
 
 mod normal;
+#[cfg(test)]
+mod exact_tests;
 
 /// Immutable source spectrum at the original wall's fixed material state.
 /// This retains a supplied material law, not a fit from the desired sound.
@@ -26,6 +28,7 @@ pub struct WallRelaxation {
     band_hz: [f64; 2],
     max_dt_over_tau: f64,
     max_angular_step: f64,
+    network_sampling: RelaxationSampling,
 }
 
 /// The identity of an internal variable comes from its original property pair
@@ -45,6 +48,7 @@ impl PartialEq for WallRelaxation {
             && self.normal_history == other.normal_history
             && self.band_hz == other.band_hz
             && self.max_dt_over_tau == other.max_dt_over_tau && self.max_angular_step == other.max_angular_step
+            && self.network_sampling == other.network_sampling
     }
 }
 impl WallRelaxation {
@@ -120,7 +124,8 @@ impl WallRelaxation {
         let material = GeneralizedMaxwell::new(material.e_inf, material.terms)
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         Ok(Self { material, provenance, source_identity: None, source_arms: None,
-            normal_history: None, band_hz, max_dt_over_tau, max_angular_step })
+            normal_history: None, band_hz, max_dt_over_tau, max_angular_step,
+            network_sampling: RelaxationSampling::BilinearMidpoint })
     }
     /// Exact original material law; zero arms remain in the source record.
     #[must_use]
@@ -134,6 +139,22 @@ impl WallRelaxation {
     /// Original material applicability [Hz].
     #[must_use]
     pub const fn band_hz(&self) -> [f64; 2] { self.band_hz }
+
+    /// Select the acoustic network's branch time representation before binding.
+    /// ExactHeldFlow integrates the declared material memories under the solved
+    /// held wall flow, so the network no longer needs the midpoint dt/tau bound.
+    /// The independent instantaneous membrane-frequency guard still applies.
+    /// Other consumers retain their own integration and time admission; this is
+    /// not a request to change the distributed FE midpoint owner.
+    #[must_use]
+    pub fn with_network_sampling(mut self, sampling: RelaxationSampling) -> Self {
+        self.network_sampling = sampling;
+        self
+    }
+
+    /// Branch sampling carried by this source's acoustic shunt declaration.
+    #[must_use]
+    pub const fn network_sampling(&self) -> RelaxationSampling { self.network_sampling }
 
     /// Resolve the SAME source-pair spectrum at a refreshed complete material
     /// snapshot. The thermal owner pins every original query requirement before
@@ -173,10 +194,11 @@ impl WallRelaxation {
         let properties = arms.iter().map(|arm| {
             (arm.modulus_property.clone(), arm.time_property.clone())
         }).collect::<Vec<_>>();
-        let next = Self::from_state_point(
+        let mut next = Self::from_state_point(
             replacement, &properties, self.band_hz,
             self.max_dt_over_tau, self.max_angular_step,
         )?;
+        next.network_sampling = self.network_sampling;
         // This checks the original property-pair claims and refuses a change
         // in active history support, rather than matching by current numbers.
         self.history_correspondence(&next)?;
@@ -189,6 +211,9 @@ impl WallRelaxation {
     pub(super) fn history_correspondence(&self, replacement: &Self)
         -> Result<Vec<(usize, usize)>, AcousticRealizeError>
     {
+        if self.network_sampling != replacement.network_sampling {
+            return Err(invalid("live Maxwell update must retain its network memory sampling"));
+        }
         let (Some(old), Some(new)) = (&self.source_arms, &replacement.source_arms) else {
             return Err(invalid("live Maxwell history requires source-resolved arm identities"));
         };
@@ -225,9 +250,22 @@ impl WallRelaxation {
         Ok(())
     }
 
-    // Shared admission for the graph and distributed FE midpoint owners.
-    // Surface units remove patch area without changing either temporal limit.
+    // Distributed FE still uses midpoint memory even when this source selects
+    // exact network sampling. Its original dt/tau admission remains necessary.
     pub(crate) fn validate_local_time_step(&self, wall: fs_phs::WallPin, dt: f64)
+        -> Result<(), AcousticRealizeError>
+    {
+        self.validate_time_step_for(wall, dt, true)
+    }
+
+    fn validate_network_time_step(&self, wall: fs_phs::WallPin, dt: f64)
+        -> Result<(), AcousticRealizeError>
+    {
+        self.validate_time_step_for(wall, dt,
+            self.network_sampling == RelaxationSampling::BilinearMidpoint)
+    }
+
+    fn validate_time_step_for(&self, wall: fs_phs::WallPin, dt: f64, midpoint_memory: bool)
         -> Result<(), AcousticRealizeError>
     {
         if !dt.is_finite() || dt <= 0.0 {
@@ -237,7 +275,7 @@ impl WallRelaxation {
         let factor = instantaneous / self.material.e_inf;
         for &(modulus, tau) in &self.material.terms {
             if modulus == 0.0 { continue; }
-            if dt / tau > self.max_dt_over_tau {
+            if midpoint_memory && dt / tau > self.max_dt_over_tau {
                 return Err(invalid("material wall clock does not resolve a retained relaxation time"));
             }
             instantaneous += factor * modulus;
@@ -268,6 +306,7 @@ impl WallRelaxation {
         }
         RelaxationImpedanceSpec::new(patch.impedance()?, &[])
             .and_then(|load| load.with_compliance_terms(&terms[..count]))
+            .map(|load| load.with_sampling(self.network_sampling))
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))
     }
 }
@@ -285,11 +324,11 @@ impl BoundMaterialWall {
     /// This is a declared local accuracy admission, not a global error bound.
     ///
     /// # Errors
-    /// Invalid dt, unresolved relaxation time or local instantaneous resonance.
+    /// Invalid dt, unresolved midpoint memory or local instantaneous resonance.
     pub fn validate_time_step(&self, dt: f64) -> Result<(), AcousticRealizeError> {
         if !dt.is_finite() || dt <= 0.0 { return Err(invalid("material wall clock must be positive and finite")); }
         if let WallMaterialLoss::Maxwell(source) = &self.source.loss {
-            source.validate_local_time_step(self.patch.wall, dt)?;
+            source.validate_network_time_step(self.patch.wall, dt)?;
         }
         Ok(())
     }

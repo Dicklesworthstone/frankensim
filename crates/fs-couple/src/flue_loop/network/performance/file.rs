@@ -298,6 +298,10 @@ impl FlueFilePerformance {
     /// pairs in Pa and seconds, with `young_modulus` as the equilibrium modulus.
     /// Each coefficient must cover the wall band; the actual mechanics clock
     /// must resolve the declared time and instantaneous-frequency limits.
+    /// Replacing `maxwell` with `maxwell-exact` selects exact held-flow branch
+    /// memory in the acoustic network. Its base membrane remains midpoint and
+    /// must satisfy MAX_ANGULAR_STEP; MAX_DT_OVER_TAU still applies to consumers
+    /// that use midpoint memory. Source coefficients and applicability are unchanged.
     /// Alternatively `wall NODE orthotropic PACK T_K OMEGA_RAD_S THICKNESS_M
     /// AXIAL HOOP_AXIS AXIAL_AXIS LOSS` uses distinct one-based principal axes
     /// following the local cylindrical directions. Its LOSS is `elastic`,
