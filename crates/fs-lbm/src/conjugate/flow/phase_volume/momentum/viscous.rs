@@ -1,6 +1,8 @@
 //! Original shear and optional bulk stress heat the chart that owns material volume.
 
 mod rheology;
+#[cfg(feature = "implicit-enthalpy-coupling")]
+pub(in crate::conjugate::flow) use rheology::resolve_endpoint_rheology_sources;
 pub use rheology::{
     EndpointRheologyThermalVolumeMomentumStep, ResolvedViscousThermalVolumeMomentumStep,
 };

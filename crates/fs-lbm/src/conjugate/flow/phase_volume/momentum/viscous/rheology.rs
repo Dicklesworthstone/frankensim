@@ -2,6 +2,8 @@
 
 mod endpoint;
 pub use endpoint::EndpointRheologyThermalVolumeMomentumStep;
+#[cfg(feature = "implicit-enthalpy-coupling")]
+pub(in crate::conjugate::flow) use endpoint::resolve_endpoint_rheology_sources;
 
 use super::*;
 use crate::conjugate::FvBoundary;

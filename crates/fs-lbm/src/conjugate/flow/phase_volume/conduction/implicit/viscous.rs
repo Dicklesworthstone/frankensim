@@ -2,6 +2,7 @@
 
 mod feedback;
 pub use feedback::{
+    ImplicitThermorheologicalThermalVolumeMomentumStep,
     ImplicitThermoviscousThermalVolumeMomentumStep, ThermalViscosityFeedbackControls,
     ThermalViscosityFeedbackReport,
 };

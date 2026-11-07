@@ -29,6 +29,7 @@ mod viscous;
 pub use viscous::{
     ImplicitConductiveViscousThermalVolumeMomentumStep,
     ImplicitConjugateViscousThermalVolumeMomentumStep,
+    ImplicitThermorheologicalThermalVolumeMomentumStep,
     ImplicitThermoviscousThermalVolumeMomentumStep, ThermalViscosityFeedbackControls,
     ThermalViscosityFeedbackReport,
 };

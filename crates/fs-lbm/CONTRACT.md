@@ -12790,6 +12790,25 @@ the complete nonlinear solve, and source, support, work or cancellation refusal
 publishes no endpoint. No rate cutoff, extrapolation or phase resistance is
 introduced; this entry requires fully liquid mobile material.
 
+The joint implicit entry
+`advance_isotropic_implicit_conjugate_thermorheological_thermal_volume_momentum_with_baths`
+closes both temperature and native shear-rate dependence. Each outer heat trial
+samples its exact pretransport fluid phase once, then closes the native momentum
+rows using shear and independent bulk responses at that phase and the current
+native rate. Original M/P, actual inertia and fluid/finite-solid histories stay
+fixed across both iterations. The same shared heat driver compares the inner
+solve's physical molecular heat with the heat supplied to the implicit graph;
+only acceptance permits one pressure/material advance. The temperature-only
+entry retains its existing exact-coefficient cache, while the joint entry
+performs a fresh nonlinear momentum solve at each thermal trial. Total source
+queries, coefficient-field updates, native sweeps/Krylov work and thermal work
+include the original predictor and rejected trials. The existing sweep and
+thermal-work ceilings apply to the whole call. Returned rates, original material
+receipts, used/actual heat and separate residuals describe the same accepted
+constitutive endpoint. Fully liquid fluid support and the original first-order
+pressure/advection split remain explicit; no hidden time steps or convergence
+guarantee is introduced.
+
 Four source-bound regressions cover graded actual inertia distinct from source
 reference density, original liquid-viscosity changes, moving-wall work and
 physical heat, current-state reconstruction, quiescent compatibility and atomic

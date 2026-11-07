@@ -1,5 +1,7 @@
 //! Thermal viscosity must close on the native heat endpoint and original history.
 
+mod rheology;
+
 use super::*;
 use crate::conjugate::flow::ThermalViscosityFeedbackControls;
 use fs_material::liquid::{KINEMATIC_VISCOSITY_DIMS, KINEMATIC_VISCOSITY_PROPERTY as NU_KEY};
@@ -36,6 +38,10 @@ fn material_point(temperature: f64) -> QueryPoint {
 /// Manufactured, finite-support original source: rho=2, Cp=1, k=2,
 /// T=300+h, mu(h)=1/8+6(h-1), with NO viscosity extrapolation.
 fn thermal_material() -> (MaterialCard, ResolvedMeltingCurve) {
+    thermal_material_with_rate(false)
+}
+
+fn thermal_material_with_rate(rate_dependent: bool) -> (MaterialCard, ResolvedMeltingCurve) {
     let cp = QuantitySpec::dimensional(SPECIFIC_HEAT_CAPACITY_DIMS);
     let rho = QuantitySpec::dimensional(Density::DIMS);
     let latent = QuantitySpec::dimensional(Dims([2, 0, -2, 0, 0, 0]));
@@ -63,11 +69,30 @@ fn thermal_material() -> (MaterialCard, ResolvedMeltingCurve) {
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::with_quantity(name, quantity),
-                value: PropertyValue::Curve {
-                    abscissa: "T".into(),
-                    abscissa_dims: Temperature::DIMS,
-                    knots: vec![(range[0], values[0]), (range[1], values[1])],
-                    dims: quantity.dims(),
+                value: if rate_dependent && name == NU_KEY {
+                    // rho=2; mu=1/8+4*(T-301)+(sqrt(3)/8)*rate.
+                    let nu = |t: f64, rate: f64| {
+                        1.0 / 16.0 + 2.0 * (t - 301.0) + 3.0_f64.sqrt() * rate / 16.0
+                    };
+                    PropertyValue::Surface2D {
+                        axes: ["T".into(), "rate".into()],
+                        axis_dims: [Temperature::DIMS, Frequency::DIMS],
+                        samples: vec![
+                            ([range[0], 0.0], nu(range[0], 0.0)),
+                            ([range[1], 0.0], nu(range[1], 0.0)),
+                            ([range[0], 4.0], nu(range[0], 4.0)),
+                            ([range[1], 4.0], nu(range[1], 4.0)),
+                        ],
+                        triangles: vec![[0, 1, 2], [1, 3, 2]],
+                        dims: quantity.dims(),
+                    }
+                } else {
+                    PropertyValue::Curve {
+                        abscissa: "T".into(),
+                        abscissa_dims: Temperature::DIMS,
+                        knots: vec![(range[0], values[0]), (range[1], values[1])],
+                        dims: quantity.dims(),
+                    }
                 },
                 validity: ValidityDomain::unconstrained()
                     .with_quantity("T", absolute_temperature(), range[0], range[1])
