@@ -340,7 +340,7 @@ where
                         + Dd::from_f64(0.5 * after_kick.joint_velocity_after[dof]));
         }
         if let Some((_, work)) = after_kick.support {
-            load_support_work = load_support_work + Dd::from_f64(work);
+            load_support_work = load_support_work + work.total();
         }
         add_response(
             &response,
