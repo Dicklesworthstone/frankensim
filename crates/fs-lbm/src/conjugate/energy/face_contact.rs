@@ -30,6 +30,25 @@ pub(super) fn prepare(
     compact_owner: &[usize],
     gate: &CancelGate,
 ) -> Result<BTreeMap<(usize, usize), f64>, ChtError> {
+    prepare_inner(domain, Some(flow), setup, compact_owner, gate)
+}
+
+/// The conduction-only owner has no through-flow or collapsed package cells.
+pub(crate) fn prepare_conduction(
+    domain: &VoxelDomain,
+    setup: &ThermalSetup,
+    gate: &CancelGate,
+) -> Result<BTreeMap<(usize, usize), f64>, ChtError> {
+    prepare_inner(domain, None, setup, &[], gate)
+}
+
+fn prepare_inner(
+    domain: &VoxelDomain,
+    flow: Option<&FlowField>,
+    setup: &ThermalSetup,
+    compact_owner: &[usize],
+    gate: &CancelGate,
+) -> Result<BTreeMap<(usize, usize), f64>, ChtError> {
     super::super::poll(gate)?;
     let refuse = |reason: String| ChtError::InvalidInput {
         field: "thermal.face_contacts", reason,
@@ -64,7 +83,7 @@ pub(super) fn prepare(
             return Err(refuse(format!("contact {index}: face also has a material-pair contact law")));
         }
         compact_face(domain, setup, compact_owner, contact.cells)?;
-        if flow.outward(domain, a, face) != 0.0 {
+        if flow.is_some_and(|flow| flow.outward(domain, a, face) != 0.0) {
             return Err(refuse(format!("contact {index}: stationary thermal contacts cannot carry through-flow")));
         }
     }

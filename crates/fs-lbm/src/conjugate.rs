@@ -40,7 +40,12 @@
 //!    conductivity law. A material interface shares one heat flux, with its
 //!    declared contact resistance determining the surface temperature jump.
 //!
-//! The linear system is an M-matrix (non-positive off-diagonals, weakly
+//! The separate [`solve_tensor_conduction`] API admits frozen full SPD tensors,
+//! finite contacts and actual face traces on the same native grid. It uses a
+//! hybrid face-temperature energy and has no maximum-principle guarantee for
+//! general rotated anisotropy; it does not infer advective transport.
+//!
+//! The scalar/axis-aligned energy linear system is an M-matrix (non-positive off-diagonals, weakly
 //! diagonally dominant for a divergence-free flux field), so the discrete
 //! solution obeys a maximum principle. It is solved by ILU(0)-preconditioned
 //! BiCGStab on the Jacobi-row-scaled system; the reported residual is the
@@ -122,6 +127,7 @@ mod radiation;
 pub(crate) use radiation::Radiators;
 mod simple;
 mod transient;
+mod tensor_conduction;
 pub mod turbulence;
 pub(crate) mod unsteady;
 
@@ -189,6 +195,9 @@ pub use simple::{
     InternalFan, MomentumReconstruction, PressureSolver, SimpleConfig, SimpleReport, TimeScheme,
     Turbulence, simple_flow, simple_flow_with_material_resistance, simple_flow_with_viscosity,
     simple_flow_with_viscosity_and_force,
+};
+pub use tensor_conduction::{
+    ConductivityTensor, TensorConductionReport, TensorConductionSolution, solve_tensor_conduction,
 };
 pub use transient::{TransientConfig, TransientRecord, TransientSolution, march_energy};
 pub use unsteady::{

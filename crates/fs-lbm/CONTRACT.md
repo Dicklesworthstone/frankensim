@@ -1,5 +1,39 @@
 # CONTRACT: fs-lbm
 
+## Conservative full-tensor conduction on the native box grid
+
+The opt-in `solve_tensor_conduction` owner admits one frozen finite symmetric
+positive-definite Cartesian conductivity tensor per voxel on the native graded
+grid. A hybrid face-temperature energy retains every tensor component,
+reproduces affine fluxes, and reduces to native harmonic half-cell/contact
+resistances for diagonal tensors. Local cell condensation leaves shared
+perfect-interface traces or two finite-contact traces joined by A/R''.
+Temperature, heat-flux, adiabatic and film boundaries, fixed cells, sources,
+and linear sinks use their actual physical faces and loads.
+
+`TensorConductionSolution` publishes cell-outward heat and both contact surface
+temperatures. Its solid-to-fluid heat observer sums those actual face fluxes;
+no scalar conductance is invented for a rotated tensor. Native k(T), source
+contacts, eddy additions, compact components and advection remain with their
+explicit owners and are refused by this frozen-field entry.
+
+At most eight same-matrix residual refinements share the declared native
+Krylov budget. Acceptance checks the recomputed returned-trace algebraic
+residual and local cell/interface/contact/boundary heat closure, with native
+arithmetic roundoff allowances, positive finite Kelvin endpoints and bounded
+cancellation. General rotated anisotropy has no discrete maximum-principle
+guarantee. The private cell-only storage seam retains original old
+temperatures for a physical transient owner; face traces store no energy.
+
+The Cartesian energy follows Droniou, Eymard, Gallouet and Herbin,
+M3AS 20 (2010), doi:10.1142/S0218202510004222, equations 2.17--2.21.
+Four exact production-kernel native Rust tests passed on the final local
+operator: rotated affine cross-flux, diagonal/contact reduction, condensed
+energy/source consistency, and tensor/geometry admission. Full native
+pipeline regressions cover graded heterogeneous/contact patches, actual
+solid-to-fluid heat, native diagonal parity and unsupported-owner refusals.
+Those integration definitions have not run in this incomplete native build.
+
 ## Kinetic storage across tetrahedral liquid projection
 
 Tetrahedral liquid ingress evaluates its kinetic change from the original P1

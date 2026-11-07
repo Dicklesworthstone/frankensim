@@ -34,7 +34,7 @@ mod enthalpy_field;
 mod constant_cp;
 mod nonlinear;
 pub use enthalpy_field::{AdvectiveEnthalpyField, AffineSpecificEnthalpy};
-mod face_contact;
+pub(super) mod face_contact;
 pub use face_contact::FaceContactResistance;
 mod source_contact;
 pub use source_contact::{SourceContactControls, SourceContactState, SourceFaceContact};
@@ -1748,7 +1748,7 @@ fn solve_energy_field_kernel(
 /// explicitly accumulated products. An unrelated hot cell or opposing residual
 /// elsewhere supplies no local allowance. The allowance grows with this row's
 /// compact links, in addition to the fixed six-face stencil, sinks and storage.
-fn heat_residual_ratio(
+pub(super) fn heat_residual_ratio(
     residual: f64, throughput: f64, arithmetic: f64, compact_links: usize,
 ) -> Result<f64, ChtError> {
     if !residual.is_finite() || !throughput.is_finite() || !arithmetic.is_finite() {
