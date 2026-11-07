@@ -49,7 +49,7 @@ impl CurvedCameraScene<'_, '_> {
         self.sample_launched_ray_with_samples(cx, beam, initial_medium, settings, samples)
     }
 
-    fn launch_sequential(
+    pub(super) fn launch_sequential(
         &self,
         optical: &SequentialCameraBeam,
         initial_medium: usize,
@@ -63,7 +63,7 @@ impl CurvedCameraScene<'_, '_> {
         )?;
         // Query the original local material, including its spectral support.
         // A coincident geometric boundary cannot stand in for this admission.
-        if phase_index(beam.medium(), beam.wavelength_nm())? != 1.0 {
+        if phase_index(beam.medium(), beam.wavelength_nm())? != optical.scene_phase_index() {
             return Err(CameraRadianceError::IncompatibleLensExterior);
         }
         Ok(beam)

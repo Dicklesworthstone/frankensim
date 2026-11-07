@@ -373,8 +373,8 @@ pub enum CameraRadianceError {
     InvalidSpectrum,
     InvalidPolarization,
     InvalidEnvironmentScale,
-    /// The authored sequential lens exits into index one; the original scene
-    /// must resolve that same phase index at the actual outgoing ray origin.
+    /// The original scene must resolve the lens's authored exterior phase
+    /// index at the actual outgoing ray origin and wavelength.
     IncompatibleLensExterior,
     InvalidEmitter {
         object_id: u64,

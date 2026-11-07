@@ -4196,14 +4196,17 @@ for compiling or running the full camera/tracer integration tests.
 
 With `tracer`, `LensSurface` and `SequentialLens` admit up to 32 explicitly
 positioned spherical caps or planes, each with a clear radius and the original
-scene-side `DielectricGlass`. Sensor and scene exterior phase indices are one.
+scene-side `DielectricGlass`. The original constructor retains vacuum ports.
+`try_new_with_sensor_medium` admits an authored sensor-side medium and the final
+surface's authored scene exterior, including immersed optical systems.
 Disjoint axial cap bounds preserve surface order; an unchanged-medium plane
 acts as an internal aperture stop. Native phase-index and absorption laws keep
 their original spectral bands and query refusals. Construction never invents
 an optical prescription or measured glass data.
 
 `PhysicalCamera::with_sequential_lens` places the sensor at the camera eye and
-derives reference focal/focus diagnostics from the thick-system ABCD matrix.
+derives reference focal/focus diagnostics from the thick-system ABCD matrix,
+using the actual sensor and scene indices for the physical focal distances.
 Actual rays use spherical intersections and vector Snell refraction, retaining
 chromatic and spherical aberration, finite thickness, skew rays, clipping, TIR,
 and absorption over the actual distance inside each glass. Cumulative Stokes
@@ -4217,7 +4220,10 @@ Clipped wavelengths retain zero sample mass. The native cinematic path tracer
 continues every surviving wavelength independently and sums the original packet
 measure, including native surface/volume transport and contribution AOVs. AOV
 primary geometry follows the hero lane, including an absent clipped hero.
-Camera continuity includes every surface and its full native glass identity.
+Camera continuity includes every surface and its full native glass identity,
+plus the complete sensor-medium law when explicitly authored. Cinematic paths
+validate the outgoing wavelength's exterior against their original initial
+medium stack before transport.
 Depth is axial distance from the sensor, and surface normal/albedo AOVs remain
 available. Motion stays unavailable until a lens-aware inverse mapping exists.
 
@@ -4232,7 +4238,11 @@ The rear sampling aperture is not an entrance-pupil measurement, so no f-number
 is inferred.
 
 `SequentialCameraBeam` retains one immutable wavelength, world ray/frame,
-complete reciprocal detector Stokes state, and a separate geometric weight.
+complete reciprocal detector Stokes state, outgoing scene phase index, and a
+separate geometric weight. Generated detector power includes the endpoint
+`(n_sensor/n_scene)^2` radiance factor exactly once; it may exceed one without
+violating passive power transmission. Raw `trace_ray` transmission excludes
+this endpoint factor and remains power-normalized.
 Identity and analyzed spectral generators share the original lens traversal.
 An authored passive analyzer is placed at the physical sensor before the
 lens. Reciprocal U reversal and the camera basis's separate U/V handedness
@@ -4243,13 +4253,25 @@ while aperture and TIR clipping remain explicit absent samples.
 `CurvedCameraScene::sample_sequential_ray` and its original-variate counterpart
 continue those complete beams through native curved refraction, scene Fresnel
 responses, Beer paths, polarized sources and thermal emission. The original
-scene must resolve index one at the actual front-surface launch point.
+scene must resolve the authored exterior index at the actual front-surface
+launch point and wavelength.
 With `volumes`, `CurvedRayleighCameraScene` retains the same lens state through
 native molecular Mueller scattering and uniform or heterogeneous free-flight
 tracking. These scene samples include lens/analyzer transmission but exclude
 the rear-cap geometric factor; callers apply that factor exactly once during
 pixel integration. Retained scene paths start at the lens exit. Lens-aware
 transient flight timing remains a separate integration.
+
+The explicit `generate_sequential_spectral_timed_beams*` entry points retain
+sensor-to-front-surface group transit in DD seconds. Every finite lens segment
+uses its original positive group index and actual geometric length, divided by
+the exact SI light speed. The final exterior has no lens segment and does not
+acquire a lens group-index requirement. Steady generation remains independent
+of group derivatives, including at an authored phase-table cusp. Timed
+generation admits required group laws before optical clipping and refuses
+undefined or unrepresentable transit. Phase optical length is never substituted
+for group length; interface residence times and coherent pulse reshaping remain
+outside this geometric-envelope model.
 
 `CurvedCameraRaster::sample_pixel_sequential` and
 `sample_pixel_sensor_sequential` integrate the same full optical seeds into

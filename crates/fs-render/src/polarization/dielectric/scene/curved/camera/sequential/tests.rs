@@ -286,6 +286,78 @@ fn original_exterior_admission_and_cancellation_precede_scene_transport() {
     });
 }
 
+#[test]
+fn immersion_lens_uses_original_scene_medium_and_sensor_radiance_measure() {
+    with_cx(|cx, _| {
+        let geometry = InstanceScene::try_new(vec![plane(7, 1.0)]).unwrap();
+        let outside = glass(1.33, 0.3);
+        let media = [SceneMedium::Homogeneous(&outside)];
+        let native =
+            CurvedPolarizedScene::try_new(cx, &geometry, &media, vec![opaque(7)], 100000).unwrap();
+        let emitters = [emitter()];
+        let scene = CurvedCameraScene::try_new(cx, &native, &emitters, None).unwrap();
+        let interface_power = |a: f64, b: f64| 4.0 * a * b / ((a + b) * (a + b));
+        for sensor_index in [1.0, 1.2, 1.6] {
+            let lens = SequentialLens::try_new_with_sensor_medium(
+                550.0,
+                Some(glass(sensor_index, 0.2)),
+                &[
+                    LensSurface::try_new(0.08, 20.0, 0.012, Some(glass(2.0, 0.7))).unwrap(),
+                    LensSurface::try_new(0.09, -20.0, 0.012, Some(outside)).unwrap(),
+                ],
+            )
+            .unwrap();
+            let physical = camera().with_sequential_lens(lens).unwrap();
+            let optical = physical
+                .generate_sequential_spectral_beams_from_tangent_offsets(
+                    cx,
+                    0.0,
+                    0.0,
+                    LensSample::CENTER,
+                    &[550.0],
+                )
+                .unwrap()[0]
+                .unwrap();
+            let result = scene
+                .sample_sequential_ray_with_samples(cx, &optical, 0, settings(), |_| {
+                    panic!("opaque source needs no sampling")
+                })
+                .unwrap();
+            // Normal-incidence Fresnel power, Beer loss in three physical
+            // segments, and the sensor/source radiance endpoint ratio. The
+            // scene exterior is already in the original native medium owner.
+            let ratio = sensor_index / 1.33;
+            let expected = 2.0
+                * interface_power(sensor_index, 2.0)
+                * interface_power(2.0, 1.33)
+                * f64::exp(-0.2 * 0.08 - 0.7 * 0.01 - 0.3 * 0.91)
+                * ratio
+                * ratio;
+            near(result.radiance_w_m2_sr_nm(), expected, 2e-7);
+            near(result.path().traveled_m(), 0.91, 2e-7);
+            assert_eq!(result.launch_phase_index(), 1.33);
+            assert_eq!(optical.scene_phase_index(), 1.33);
+            if sensor_index == 1.6 {
+                // A reciprocal radiance weight may exceed one even though
+                // every physical power-transmission coefficient is passive.
+                assert!(optical.power().i > 1.0);
+            }
+            let wrong_exterior = glass(1.31, 0.3);
+            let wrong_media = [SceneMedium::Homogeneous(&wrong_exterior)];
+            let wrong_native =
+                CurvedPolarizedScene::try_new(cx, &geometry, &wrong_media, vec![opaque(7)], 100000)
+                    .unwrap();
+            let wrong = CurvedCameraScene::try_new(cx, &wrong_native, &emitters, None).unwrap();
+            assert_eq!(
+                wrong.sample_sequential_ray_with_samples(cx, &optical, 0, settings(), |_| {
+                    panic!("mismatched authored exterior must refuse before transport")
+                }),
+                Err(CameraRadianceError::IncompatibleLensExterior)
+            );
+        }
+    });
+}
+
 #[cfg(feature = "volumes")]
 #[test]
 fn zero_scattering_preserves_complete_lens_seed_and_surface_sample_bits() {

@@ -10046,6 +10046,14 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
     if let Some(lens) = camera.sequential_lens() {
         hasher.update(b"native-sequential-spectral-lens.v2");
         update_continuity_f64(hasher, lens.reference_wavelength_nm());
+        if let Some(glass) = lens.sensor_medium() {
+            // Preserve the original vacuum prescription's identity while
+            // retaining the full immersed sensor law, including absorption.
+            hasher.update(b"native-sequential-sensor-medium.v1");
+            hasher.update(Material::Dielectric {
+                glass: *glass, surface: DielectricSurface::SMOOTH,
+            }.content_identity().as_bytes());
+        }
         hasher.update(&(lens.surfaces().len() as u64).to_le_bytes());
         for surface in lens.surfaces() {
             update_continuity_f64s(hasher, [
@@ -13881,7 +13889,7 @@ fn trace_path_with_regions<'scene>(
                             .stack(scene, cx, optical.ray.origin, ray_time)?;
                         if medium_ior(
                             medium_stack.last().map(|entry| *entry.glass), lambdas[lane],
-                        )? != 1.0 {
+                        )? != optical.scene_phase_index {
                             return Err(CameraError::SequentialLensOutsideModel.into());
                         }
                         let mut throughput = [0.0; PACKET];
