@@ -15,6 +15,9 @@ const GAMMA: f64 = 1.0 - core::f64::consts::FRAC_1_SQRT_2;
 #[path = "sdirk/adaptive.rs"]
 mod time_control;
 
+#[path = "sdirk/entropy.rs"]
+mod entropy;
+
 impl ImplicitConductionChain<'_> {
     // Check the complete requested window BEFORE an adaptive controller can
     // process events. Source/bath/native-Robin jumps preserve prepared bindings;
@@ -112,11 +115,25 @@ impl ImplicitConductionChain<'_> {
             checkpoint,
         )?;
         let first_maximum = first.maximum_cell_residual_j();
-        let (_, _, _, heat) = first.accept_with_stage_heat(
+        // The passive Clausius check has complete thermal-bath semantics only
+        // in this scope. General two-bath callbacks do not assert passivity;
+        // source/work and advective entropy require their own closures.
+        let passive = self.advection.is_none()
+            && self.heat_sources.is_empty()
+            && self.reservoir_exchanges.is_empty()
+            && self.ambient_exchanges.is_empty()
+            && first
+                .entropy_audit()
+                .is_some_and(|audit| !audit.has_unclassified_sources);
+        let (_, first_endpoint, _, heat) = first.accept_with_stage_heat(
             controls.cell_tolerance_j,
             controls.total_tolerance_j,
             &mut *checkpoint,
         )?;
+        // Retain already evaluated coefficients only in the admitted scope.
+        // They are used for an uncertainty reduction only if entropy decreases;
+        // no additional constitutive solve or caloric integral is introduced.
+        let first_endpoint = passive.then_some(first_endpoint);
         let carried = heat.scaled((1.0 - GAMMA) / GAMMA, &mut *checkpoint)?;
         let second = self.solve_stage(
             thermal,
@@ -133,6 +150,16 @@ impl ImplicitConductionChain<'_> {
             report,
             checkpoint,
         )?;
+        if let Some(first_endpoint) = &first_endpoint {
+            self.admit_passive_sdirk2_entropy(
+                thermal,
+                first_endpoint,
+                &second,
+                dt,
+                controls.cell_tolerance_j,
+                checkpoint,
+            )?;
+        }
         let (next, energy, entropy, maximum) = accept_trial(second, controls, checkpoint)?;
         Ok((next, energy, entropy, first_maximum.max(maximum)))
     }
@@ -168,10 +195,18 @@ impl ImplicitConductionChain<'_> {
     /// Exact caloric storage and the signed temporal defect remain separate;
     /// no chemical entropy or constitutive fluid dissipation is inferred.
     ///
+    /// Passive networks without advection, source laws, unclassified power or
+    /// generalized two-bath callbacks additionally admit the exact cell entropy
+    /// change minus the actual bath entropy input. A decrease beyond the local
+    /// joule-residual and summation allowance retries the whole interval. This
+    /// includes passive single-bath laws in their existing thermal-bath
+    /// convention; it does not infer photon entropy or change their closure.
+    ///
     /// Each accepted physical interval counts once in `energy.substeps`; all
     /// stage/retry work consumes the existing residual and linear budgets.
-    /// Failed intervals may be halved for nonlinear convergence, without
-    /// publishing either stage. This is not adaptive time-error control.
+    /// Failed intervals may be halved for convergence or passive entropy
+    /// admission, without publishing either stage. This is not adaptive
+    /// time-error control.
     /// Second-order accuracy requires a smooth admitted solution and independent
     /// time refinement within each event interval; constitutive/phase/limiter
     /// corners can reduce the observed order.
@@ -268,6 +303,7 @@ impl ImplicitConductionChain<'_> {
                     }
                     Err(
                         error @ (ImplicitConductionError::NotConverged { .. }
+                        | ImplicitConductionError::EntropyDecrease { .. }
                         | ImplicitConductionError::KrylovNotConverged { .. }
                         | ImplicitConductionError::Linear(TridiagonalError::Singular {
                             ..

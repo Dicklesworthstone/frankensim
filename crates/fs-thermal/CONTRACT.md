@@ -1575,12 +1575,37 @@ The same whole-call step and nonlinear work budgets cover every event interval;
 events never renew them. The nonadaptive constant-boundary path avoids event
 processing/cloning at steps where no event is due. External source observers
 and moving mass remain outside this entry point. Complete-interval halving in
-`advance_sdirk2_to` handles nonlinear failure; it does not estimate temporal
-accuracy. Second-order time accuracy
+`advance_sdirk2_to` handles nonlinear failure and the passive entropy admission
+below; it does not estimate temporal accuracy. Second-order time accuracy
 requires a smooth admitted solution and independent timestep refinement;
 constitutive/phase/limiter corners may lower it. L-stability is not unconditional
 positivity, monotonicity or a maximum-principle guarantee: every stage retains
 the original material-domain checks, without temperature/heat clipping.
+
+For passive thermal networks, a converged positive-temperature endpoint must
+also retain nonnegative **cell-plus-bath** entropy change within the existing
+algebraic/roundoff allowance. The check subtracts the actual stage-weighted bath
+entropy input from the original exact caloric storage change; ordinary cooling
+may decrease cell entropy while increasing total entropy. Nonnegative-conductance
+links, contacts and single-bath boundary laws retain their original ownership.
+Any attached advection, heat-source law, unclassified source power or generalized
+two-bath exchange callback excludes this check: those callbacks do not assert
+passivity, and no missing source/work/stream entropy is inferred. Passive
+radiative laws keep their existing bulk/bath convention, without a claim about
+photon entropy or an additional radiative field closure.
+
+The allowance converts the two stages' absolute local joule acceptance envelope
+`n * cell_tolerance_j / gamma` through the minimum actual initial/stage/bath
+temperature. A compensated absolute-exchanged-heat reduction supplies a small
+floating-point allowance, counting both entropy endpoints of each transfer.
+Neither an absolute enthalpy nor an entropy reference datum sets this scale.
+Only a negative candidate needs these extra coefficient/coverage reductions;
+already evaluated stage laws are reused without another caloric integral or
+nonlinear constitutive solve. `EntropyDecrease` retries the original complete
+interval through both fixed and adaptive controllers, and exhausted retries
+publish neither a state nor its accounts. Stored heat, temperatures, reported
+entropy and the signed temporal defect are never repaired. This finite-step
+admission is separate from temporal accuracy and maximum-principle guarantees.
 
 An attached `with_implicit_advection` binding now participates in both stages,
 including `with_implicit_advection_reconstruction` on the graph. Its prescribed

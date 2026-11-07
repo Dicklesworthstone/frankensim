@@ -68,7 +68,8 @@ pub struct ImplicitConductionTimeError {
 pub struct AdaptiveImplicitConductionReport {
     /// Energy, entropy, events and accepted substeps describe only the fine
     /// trajectory. Nonlinear iterations and residual evaluations include ALL
-    /// work. Rejected intervals include accuracy and nonlinear rejections.
+    /// work. Rejected intervals include accuracy, nonlinear and passive
+    /// SDIRK2 entropy rejections.
     pub solve: ImplicitConductionReport,
     pub comparisons: usize,
     pub accepted_comparisons: usize,
@@ -372,6 +373,7 @@ pub trait AdaptiveConductionStepper: Sized {
                 }
                 Err(
                     error @ (ImplicitConductionError::NotConverged { .. }
+                    | ImplicitConductionError::EntropyDecrease { .. }
                     | ImplicitConductionError::KrylovNotConverged { .. }
                     | ImplicitConductionError::Linear(TridiagonalError::Singular { .. })),
                 ) => (error.into(), 0.5),

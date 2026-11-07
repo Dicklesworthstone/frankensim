@@ -176,6 +176,13 @@ pub enum ImplicitConductionError {
     NotConverged {
         maximum_residual_j: f64,
     },
+    /// A passive SDIRK2 interval loses cell-plus-bath entropy beyond its
+    /// local joule-residual and floating-point allowance. Retrying may reduce
+    /// the physical interval; neither state nor entropy is repaired.
+    EntropyDecrease {
+        entropy_change_j_k: f64,
+        allowance_j_k: f64,
+    },
     /// A graph Newton direction exhausted its restart cycles or broke down.
     KrylovNotConverged {
         /// Last completed cycle's true relative Euclidean linear residual.

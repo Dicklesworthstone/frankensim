@@ -9,12 +9,16 @@ mod source_schedule;
 #[path = "boundary_schedule_tests.rs"]
 mod boundary_schedule;
 
+#[path = "entropy_tests.rs"]
+mod entropy;
+
 struct Law {
     cp: f64,
     k: f64,
     datum: f64,
     nonlinear: bool,
     latent: bool,
+    coordinate_bounds: [f64; 2],
 }
 impl Law {
     fn constant(cp: f64, k: f64) -> Self {
@@ -24,6 +28,7 @@ impl Law {
             datum: 0.0,
             nonlinear: false,
             latent: false,
+            coordinate_bounds: [100.0, 1000.0],
         }
     }
     fn coordinate(&self, h: f64) -> f64 {
@@ -33,7 +38,7 @@ impl Law {
 impl ThermalLaw for Law {
     fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
         let x = self.coordinate(h);
-        if !x.is_finite() || !(100.0..=1000.0).contains(&x) {
+        if !x.is_finite() || !(self.coordinate_bounds[0]..=self.coordinate_bounds[1]).contains(&x) {
             return Err(DepositionError::MaterialDomain);
         }
         Ok(if !self.latent || x < 300.0 {
@@ -85,7 +90,7 @@ impl ImplicitConductionLaw for Law {
         self
     }
     fn enthalpy_bounds_j_kg(&self) -> [f64; 2] {
-        [self.datum + 100.0 * self.cp, self.datum + 1000.0 * self.cp]
+        self.coordinate_bounds.map(|x| self.datum + x * self.cp)
     }
     fn state_at_specific_enthalpy(
         &self,
