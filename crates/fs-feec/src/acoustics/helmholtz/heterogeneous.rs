@@ -42,8 +42,10 @@ mod harmonic;
 pub use harmonic::{
     BoundaryAdmittance, BoundaryAdmittanceFrequencySample, HarmonicLimits,
     HeterogeneousFrequencyResponse, HeterogeneousPressureField, MAX_HARMONIC_DOFS,
-    PreparedHeterogeneous, ResonanceSurvey, ResonanceSurveyControls, ResonanceSurveyError,
-    VelocityTrace,
+    MechanicalHarmonicField, MechanicalHarmonicFrequencyResponse, MechanicalHarmonicLimits,
+    MechanicalWallAccounting, MechanicalWallFrequencyDerivative, MechanicalWallPhasors,
+    PreparedHeterogeneous, PreparedMechanicalHarmonic, ResonanceSurvey, ResonanceSurveyControls,
+    ResonanceSurveyError, VelocityTrace,
 };
 
 mod observation;

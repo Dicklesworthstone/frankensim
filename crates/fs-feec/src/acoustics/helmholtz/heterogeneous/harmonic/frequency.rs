@@ -10,11 +10,21 @@ use fs_la::eigen_complex::{LuComplex, LuComplexError};
 use fs_math::{c64::C64, dd::Dd};
 use fs_sparse::Csr;
 
+pub(crate) mod coupled;
+
 #[derive(Debug)]
 pub(super) enum PressureError {
     Invalid(&'static str),
     Factor(LuComplexError),
-    Residual { observed: f64, limit: f64 },
+    Residual {
+        observed: f64,
+        limit: f64,
+    },
+    Limit {
+        what: &'static str,
+        requested: usize,
+        maximum: usize,
+    },
     Cancelled,
 }
 
@@ -33,7 +43,9 @@ pub(super) struct PressureSolution {
     pub(super) backward_error: f64,
 }
 
-/// Borrowed from one prepared field. Its factor is for `S A_ff S`, with
+/// Borrowed from one original physical pencil. The coupled wall owner also
+/// uses these real polynomial blocks, without assuming symmetric or positive
+/// blocks outside the fluid equations. Its factor is for `S A_ff S`, with
 /// `scales = diag(S)` in the same ascending `free_dofs` order. The original
 /// preparation owner establishes this binding; it is not a public raw API.
 pub(super) struct PressurePencil<'a> {
@@ -66,6 +78,52 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), PressureError> {
 
 fn finite(value: C64) -> bool {
     value.re.is_finite() && value.im.is_finite()
+}
+
+/// Real part of a complete original complex bilinear form and the magnitude
+/// of its separate summands. Peak-phasor work/energy factors belong to callers.
+fn real_form(
+    matrix: &Csr,
+    left: &[C64],
+    right: &[C64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(f64, f64), PressureError> {
+    if left.len() != matrix.nrows() || right.len() != matrix.ncols() {
+        return Err(PressureError::Invalid("physical form dimensions disagree"));
+    }
+    let mut sum = Dd::from_f64(0.0);
+    let mut absolute = 0.0;
+    for (row, p) in left.iter().enumerate() {
+        poll(cancelled)?;
+        let (cols, values) = matrix.row(row);
+        for (&col, &coefficient) in cols.iter().zip(values) {
+            let q = right[col];
+            sum = sum
+                + Dd::from_f64(coefficient)
+                    * (Dd::from_f64(p.re) * Dd::from_f64(q.re)
+                        + Dd::from_f64(p.im) * Dd::from_f64(q.im));
+            absolute += coefficient.abs() * p.abs() * q.abs();
+        }
+    }
+    let value = sum.to_f64();
+    if !value.is_finite() || !absolute.is_finite() {
+        return Err(PressureError::Invalid(
+            "unrepresentable physical energy or work form",
+        ));
+    }
+    Ok((value, absolute))
+}
+
+pub(super) fn quadratic_nonnegative(
+    matrix: &Csr,
+    field: &[C64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, PressureError> {
+    let (value, absolute) = real_form(matrix, field, field, cancelled)?;
+    if value < -64.0 * f64::EPSILON * absolute {
+        return Err(PressureError::Invalid("nonpositive physical energy form"));
+    }
+    Ok(value.max(0.0))
 }
 
 /// Harmonic image of the original surface mass, equilibrium spring, Kelvin

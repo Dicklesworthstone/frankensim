@@ -14,6 +14,12 @@ use std::collections::BTreeSet;
 mod dispersive;
 pub use dispersive::BoundaryAdmittanceFrequencySample;
 mod frequency;
+mod mechanical;
+pub use mechanical::{
+    MechanicalHarmonicField, MechanicalHarmonicFrequencyResponse, MechanicalHarmonicLimits,
+    MechanicalWallAccounting, MechanicalWallFrequencyDerivative, MechanicalWallPhasors,
+    PreparedMechanicalHarmonic,
+};
 mod resonance;
 pub use resonance::{ResonanceSurvey, ResonanceSurveyControls, ResonanceSurveyError};
 
@@ -25,6 +31,15 @@ impl From<frequency::PressureError> for HeterogeneousError {
             frequency::PressureError::Residual { observed, limit } => {
                 Self::Residual { observed, limit }
             }
+            frequency::PressureError::Limit {
+                what,
+                requested,
+                maximum,
+            } => Self::Limit {
+                what,
+                requested,
+                maximum,
+            },
             frequency::PressureError::Cancelled => Self::Cancelled,
         }
     }
@@ -659,20 +674,38 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<C64>, HeterogeneousError> {
+        Self::project_sources_for(
+            self.model,
+            &self.pressure_release,
+            inward_velocity,
+            boundary_sources,
+            volume_sources,
+            cancelled,
+        )
+    }
+
+    pub(super) fn project_sources_for(
+        model: &HeterogeneousHelmholtzFe<'_, '_>,
+        pressure_release: &PressureReleaseConstraints,
+        inward_velocity: &[VelocityTrace],
+        boundary_sources: &[(&BoundaryVelocitySource<'_, '_, '_>, C64)],
+        volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<C64>, HeterogeneousError> {
         poll(cancelled)?;
-        self.admit_velocity_faces(inward_velocity, cancelled)?;
+        Self::admit_velocity_faces_for(pressure_release, inward_velocity, cancelled)?;
         super::boundary_source::admit_count(boundary_sources.len())?;
         super::source::admit_count(volume_sources.len())?;
         for &(source, amplitude) in boundary_sources {
             poll(cancelled)?;
-            source.validate(self.model)?;
+            source.validate(model)?;
             if !finite(amplitude) {
                 return Err(invalid("finite harmonic boundary-velocity amplitude required").into());
             }
-            if !self.pressure_release.faces.is_empty() {
+            if !pressure_release.faces.is_empty() {
                 for face in &source.faces {
                     poll(cancelled)?;
-                    if self.pressure_release.faces.contains(face) {
+                    if pressure_release.faces.contains(face) {
                         return Err(invalid(
                             "pressure-release and prepared boundary-source faces must not overlap",
                         )
@@ -683,12 +716,12 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         }
         for &(source, amplitude) in volume_sources {
             poll(cancelled)?;
-            source.validate(self.model)?;
+            source.validate(model)?;
             if !finite(amplitude) {
                 return Err(invalid("finite harmonic volume-flow amplitude required").into());
             }
         }
-        let mut load = self.model.velocity_load(inward_velocity, cancelled)?;
+        let mut load = model.velocity_load(inward_velocity, cancelled)?;
         for (row, value) in load.iter_mut().enumerate() {
             poll(cancelled)?;
             let mut real = Dd::from_f64(value.re);
@@ -706,7 +739,7 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         Ok(load)
     }
 
-    fn source_work(
+    pub(super) fn source_work(
         field: &mut HeterogeneousPressureField,
         boundary_sources: &[(&BoundaryVelocitySource<'_, '_, '_>, C64)],
         volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
@@ -742,14 +775,22 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         traces: &[VelocityTrace],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), HeterogeneousError> {
-        if self.pressure_release.faces.is_empty() {
+        Self::admit_velocity_faces_for(&self.pressure_release, traces, cancelled)
+    }
+
+    fn admit_velocity_faces_for(
+        pressure_release: &PressureReleaseConstraints,
+        traces: &[VelocityTrace],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), HeterogeneousError> {
+        if pressure_release.faces.is_empty() {
             return Ok(());
         }
         for &(face, _) in traces {
             poll(cancelled)?;
             let mut key = face;
             key.sort_unstable();
-            if self.pressure_release.faces.contains(&key) {
+            if pressure_release.faces.contains(&key) {
                 return Err(invalid(
                     "pressure-release and imposed-velocity faces must not overlap",
                 )
@@ -793,6 +834,26 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         backward_error: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<HeterogeneousPressureField, HeterogeneousError> {
+        Self::field_for(
+            self.model,
+            self.omega,
+            &self.conductance,
+            pressure_pa,
+            load,
+            backward_error,
+            cancelled,
+        )
+    }
+
+    pub(super) fn field_for(
+        model: &HeterogeneousHelmholtzFe<'_, '_>,
+        omega: f64,
+        conductance: &Csr,
+        pressure_pa: Vec<C64>,
+        load: &[C64],
+        backward_error: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<HeterogeneousPressureField, HeterogeneousError> {
         let mut work = Dd::from_f64(0.0);
         for (p, v) in pressure_pa.iter().zip(load) {
             work = work
@@ -801,13 +862,13 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         }
         let input_power_w = 0.5 * work.to_f64();
         let boundary_dissipation_w =
-            0.5 * quadratic_nonnegative(&self.conductance, &pressure_pa, cancelled)?;
+            0.5 * quadratic_nonnegative(conductance, &pressure_pa, cancelled)?;
         let kinetic_energy_j = 0.25
-            * quadratic_nonnegative(&self.model.stiffness, &pressure_pa, cancelled)?
-            / self.omega
-            / self.omega;
+            * quadratic_nonnegative(&model.stiffness, &pressure_pa, cancelled)?
+            / omega
+            / omega;
         let compressional_energy_j =
-            0.25 * quadratic_nonnegative(&self.model.mass, &pressure_pa, cancelled)?;
+            0.25 * quadratic_nonnegative(&model.mass, &pressure_pa, cancelled)?;
         if [
             input_power_w,
             boundary_dissipation_w,
@@ -841,25 +902,7 @@ fn quadratic_nonnegative(
     field: &[C64],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, HeterogeneousError> {
-    let mut sum = Dd::from_f64(0.0);
-    let mut absolute = 0.0;
-    for (row, p) in field.iter().enumerate() {
-        poll(cancelled)?;
-        let (cols, values) = matrix.row(row);
-        for (&col, &coefficient) in cols.iter().zip(values) {
-            let q = field[col];
-            sum = sum
-                + Dd::from_f64(coefficient)
-                    * (Dd::from_f64(p.re) * Dd::from_f64(q.re)
-                        + Dd::from_f64(p.im) * Dd::from_f64(q.im));
-            absolute += coefficient.abs() * p.abs() * q.abs();
-        }
-    }
-    let value = sum.to_f64();
-    if !value.is_finite() || !absolute.is_finite() || value < -64.0 * f64::EPSILON * absolute {
-        return Err(invalid("nonpositive or unrepresentable acoustic energy form").into());
-    }
-    Ok(value.max(0.0))
+    frequency::quadratic_nonnegative(matrix, field, cancelled).map_err(Into::into)
 }
 
 #[cfg(test)]

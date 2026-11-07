@@ -2561,3 +2561,54 @@ Independent numerical reference calculations support the test fixtures; the
 Rust regressions are not claimed executed while shared native-build resources
 remain exhausted. These are the stated linear local wall laws; they do not
 add shell bending, a moving fluid mesh or nonlinear wall constitutive physics.
+
+### Complete harmonic pressure and causal mechanical wall states
+
+`prepare_with_coupled_mechanical_walls` retains the original pressure space,
+every original wall displacement and outward velocity, and every Maxwell memory.
+The original consistent face mass `W=integral(phi_i phi_j)` enters both
+`+i omega W v` in the fluid pressure equation and `-W p` in wall momentum.
+No face-average piston, diagonal surface mass, modal reduction or reciprocal
+wall impedance replaces these equations. Exact pressure-release elimination
+applies only to fluid pressure; all adjacent wall coordinates remain present.
+Uniform memoryless `ResistiveBoundary` and original `MechanicalBoundary`
+inputs preserve the time owner's material admission and physical units.
+
+The complete sparse blocks form `A0+i omega A1-omega^2 A2`. One bounded
+original complex LU, with the existing equilibration, double-double residual
+correction and analytic frequency-tangent owner, solves the complete system.
+Limits count every free pressure, displacement, velocity and memory coordinate,
+with the existing harmonic hard cap. Original coherent linear, prepared
+boundary and volume-source projection, source derivatives and signed source
+work are reused. Derivatives are per fundamental angular frequency in rad/s.
+
+The invertible internal coordinate `e=sqrt(k)w-z` preserves small physical
+relaxation extensions without removing a memory. Original `z` and `dz/domega`
+are returned; at large `omega*tau` the original memory ODE recovers them without
+subtracting nearly equal phasors. Independent physical accounts report wall
+kinetic, equilibrium elastic and Maxwell storage; Kelvin and Maxwell heat;
+and signed `Re(p^H W v)/2` exchange. Stored energies use the peak-phasor factor
+1/4 and powers 1/2. Total and separate fluid/wall power residuals are observable,
+without defining heat from an energy or input-power deficit.
+
+A local lossless `Z=0` no longer causes refusal when the complete coupled
+operator is regular. Genuine coupled singularities still fail the native
+factor/residual gate; no artificial loss or discarded dark wall state hides
+them. `survey_pressure_resonances_with_coupled_mechanical_walls` uses the existing
+shared peak search with fixed coherent sources and original point observations.
+It can cross a regular local `Z=0`; its grid-resolved peaks do not certify a
+complete mode census, linewidth or decay Q. The older condensed API retains its
+explicit finite-nonzero-impedance scope. Bulk medium/geometry and the declared
+local wall coefficients remain frozen; lateral shell bending, nonmatching mortar
+and exterior radiation are not inferred.
+
+Native validation executed the actual complete numerical modules against real
+`fs_math`, `fs_sparse` and complex-LU owners: 14 tests passed. Four new tests cover
+regular local `Z=0` motion/storage/tangent, genuine coupled singularity refusal,
+non-diagonal surface mass and an independent original-z Maxwell formulation
+with every storage/heat/work channel (including nearly frozen memory recovery),
+and complete-state limits, release constraints and cancellation replay. Two
+public FE regressions cover local-pole survey traversal and P2 equivalence to the
+admitted condensed equations; they are authored, not claimed executed while
+the full `fs-feec` dependency build is unavailable. MR56 and broader IRP
+qualification beads remain open.
