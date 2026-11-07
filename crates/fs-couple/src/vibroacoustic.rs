@@ -61,6 +61,12 @@
 //! https://docs.software.vt.edu/abaqusv2025/English/SIMACAETHERefMap/simathe-c-acouststruct.htm
 //! with the source-owned complex compressibility in its pressure mass term.
 //!
+//! [`CavityBoundaryAdmittance`] adds locally reacting cavity boundaries at
+//! their original quadrature: outward velocity `v_n = Y p`, specific
+//! admittance in `exp(-i omega t)`. Its full modal matrix retains cross-mode
+//! coupling. Boundary work is recovered from physical surface pressure,
+//! separately from bulk loss, and enters the same reciprocal solve.
+//!
 //! POWER ACCOUNTING (the audit surface this module exists to make
 //! real): at every solved frequency the response carries the complete
 //! per-channel steady-state power breakdown —
@@ -92,12 +98,17 @@ use fs_material::gas::{GasSpec, GasState};
 use fs_material::relaxation::RelaxationState;
 use fs_math::c64::C64;
 
+mod boundary;
+pub use boundary::CavityBoundaryAdmittance;
+
 const ROOM_TEMPERATURE_K: f64 = 293.15;
 const STANDARD_ATMOSPHERE_PA: f64 = 101_325.0;
 
 /// Typed refusals with stable `FS-COUPLE-VIBRO-*` codes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum VibroError {
+    /// Boundary preparation was cancelled before publishing a load.
+    Cancelled,
     /// A parameter is non-finite, non-positive, or out of range.
     BadParameter {
         /// Which parameter refused.
@@ -129,6 +140,7 @@ pub enum VibroError {
 impl core::fmt::Display for VibroError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            VibroError::Cancelled => write!(f, "FS-COUPLE-VIBRO-CANCELLED"),
             VibroError::BadParameter { what } => {
                 write!(f, "FS-COUPLE-VIBRO-BAD-PARAMETER: {what}")
             }
@@ -404,7 +416,11 @@ fn rectangular_mode_indices(
                 + (indices[2] as f64 / lengths[2]).powi(2);
             let omega = sound_speed * core::f64::consts::PI * k2.sqrt();
             frontier.push(RectangularMode {
-                omega: if omega.is_finite() { omega } else { f64::INFINITY },
+                omega: if omega.is_finite() {
+                    omega
+                } else {
+                    f64::INFINITY
+                },
                 indices,
             });
         }
@@ -635,8 +651,12 @@ pub struct PowerBreakdown {
     pub structural: f64,
     /// Power flowing through the interface into the cavity.
     pub interface: f64,
-    /// Cavity dissipation from the selected hysteretic or molecular law.
+    /// Total outward cavity power: bulk loss plus `cavity_boundary`.
     pub cavity: f64,
+    /// Power delivered to the locally reacting boundary, computed from
+    /// surface pressure and `Re(Y)`. Included once in `cavity`; depending on
+    /// the supplied boundary owner this may be absorption or outward radiation.
+    pub cavity_boundary: f64,
     /// Exterior radiated power `1/2 Re (v^H Zm v)` (zero without a
     /// radiation matrix).
     pub radiated: f64,
@@ -686,6 +706,7 @@ pub struct VibroacousticModel {
     rho_c2: f64,
     medium_a: AcousticMedium,
     cavity_relaxation: Option<RelaxationState>,
+    cavity_boundary: Option<CavityBoundaryAdmittance>,
     coupling: Vec<f64>,
     z_modal: Option<Vec<C64>>,
 }
@@ -793,6 +814,7 @@ impl VibroacousticModel {
                 c0: cavity.c0,
             },
             cavity_relaxation: None,
+            cavity_boundary: None,
             coupling,
             z_modal,
         })
@@ -891,7 +913,7 @@ impl VibroacousticModel {
     /// squaring its condition number or balancing a nonnormal pressure /
     /// displacement pencil. Rescaling a cavity eigenfunction and its norm
     /// leaves the physical frequencies unchanged. Radiation and loss
-    /// factors and molecular relaxation are ignored; this is the equilibrium
+    /// factors, boundary admittance and molecular relaxation are ignored; this is the equilibrium
     /// gas reference. Use the loaded FRF for dissipative/dispersive resonances.
     ///
     /// # Errors
@@ -1059,6 +1081,15 @@ impl VibroacousticModel {
                 what: "frequency must be positive and finite",
             });
         }
+        if self
+            .cavity_boundary
+            .as_ref()
+            .is_some_and(|boundary| boundary.omega != omega)
+        {
+            return Err(VibroError::BadParameter {
+                what: "cavity boundary admittance must be evaluated at the solved angular frequency",
+            });
+        }
         let n_s_full = self.omegas_s.len();
         let n_a_full = self.omegas_a.len();
         if modal_force.len() != n_s_full {
@@ -1148,6 +1179,16 @@ impl VibroacousticModel {
             for r in 0..keep_s {
                 mat[row * n + r] = C64::from_re(-scale * self.coupling[r * n_a_full + q]);
             }
+            if let Some(boundary) = &self.cavity_boundary {
+                // Q_out = B a replaces prescribed inward Q by Q - B a.
+                // The exp(-i omega t) weak boundary term is -i omega B,
+                // normalized by the SAME equilibrium K/Lambda as sources.
+                let rate = C64::new(0.0, -omega * (self.rho_c2 / self.lambdas[q]));
+                for s in 0..keep_a {
+                    mat[row * n + keep_s + s] =
+                        mat[row * n + keep_s + s] + rate * boundary.matrix[q * n_a_full + s];
+                }
+            }
         }
         let mut rhs = vec![C64::ZERO; n];
         rhs[..keep_s].copy_from_slice(&modal_force[..keep_s]);
@@ -1225,6 +1266,11 @@ impl VibroacousticModel {
             };
             cavity += coefficient * aq.norm_sq();
         }
+        let cavity_boundary = self
+            .cavity_boundary
+            .as_ref()
+            .map_or(0.0, |boundary| boundary.outward_power(&a));
+        cavity += cavity_boundary;
         let mut radiated = 0.0;
         if let Some(z) = &self.z_modal {
             for r in 0..keep_s {
@@ -1259,6 +1305,7 @@ impl VibroacousticModel {
                 structural,
                 interface,
                 cavity,
+                cavity_boundary,
                 radiated,
                 balance_residual: balance / denom,
                 interface_residual: (interface + acoustic_input - cavity) / iface_denom,
