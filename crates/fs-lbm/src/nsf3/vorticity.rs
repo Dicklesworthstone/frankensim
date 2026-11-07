@@ -18,6 +18,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// nonperiodic boundary interrupting this stencil refuses: neither a zero
     /// ghost nor an invented thermodynamic wall condition is substituted.
     /// The existing `kinematics` field remains available at those boundaries.
+    /// One-cell periodic axes are homogeneous; two-cell axes refuse because
+    /// their centered neighbors alias and cannot resolve a derivative.
     ///
     /// Seven fixed-size population reductions, no allocation or state change.
     /// For SI use `sample.to_physical(self.law().dt_s)`; all source terms
@@ -43,6 +45,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let mut density_gradient = [0.0; 3];
         let mut pressure_gradient = [0.0; 3];
         for axis in 0..3 {
+            if self.spec.dims[axis] == 2 {
+                return Err(KinematicsError::Input("two-cell vorticity derivative is unresolved"));
+            }
             let low = self.fluid_at(cell, axis, -1).ok_or(KinematicsError::Input(
                 "vorticity sources require two fluid neighbours per axis",
             ))?;
@@ -220,6 +225,28 @@ mod tests {
                 near(rate, 0.0, 2e-17);
             }
         }
+    }
+
+    #[test]
+    fn periodic_two_cell_axes_refuse_the_aliased_source_stencil() {
+        for axis in 0..3 {
+            let mut dims = [3; 3];
+            dims[axis] = 2;
+            let grid = NsfGrid3::<D3q27>::new(
+                spec(dims, [true; 3]),
+                |_| false,
+                |x| (1.0, [0.01 * x[axis] as f64, 0.0, 0.0], 293.15),
+            ).unwrap();
+            let before = grid.state_hash();
+            assert!(grid.vorticity_budget([0; 3]).is_err());
+            assert_eq!(before, grid.state_hash());
+        }
+        let homogeneous = NsfGrid3::<D3q27>::new(
+            spec([1, 3, 3], [true; 3]),
+            |_| false,
+            |_| (1.0, [0.0; 3], 293.15),
+        ).unwrap();
+        assert_eq!(homogeneous.vorticity_budget([0; 3]).unwrap().flow.vorticity(), [0.0; 3]);
     }
 
     #[test]

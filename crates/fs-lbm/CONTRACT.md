@@ -3518,6 +3518,38 @@ orientations against prescribed Couette/Poiseuille profiles with moving walls
 and current spatial half-force correction, signed tractions, physical power,
 thermal law evaluation, rigid rotation, independent bulk loss and source refusal.
 
+### Resolved vorticity on the native planar flow owner
+
+`core2::Grid::kinematics` and `kinematics_with_moving_walls` expose the full
+D2Q9 spatial gradient using `KinematicsWorkspace3` with `[nx, ny, 1]`. The
+planar tensor has homogeneous z, signed `omega_z = dv/dx - du/dy`, enstrophy,
+divergence, Q, and exactly zero stretching; the symmetric collision stress
+cannot supply this rotation information. Each native physical velocity,
+including gravity and spatial Guo half-force correction, is cached once.
+Interior/periodic derivatives are centered second order; halfway boundaries
+use the same quadratic wall/center/opposite-neighbor reconstruction as 3D.
+Moving-wall arrays use the native streaming operator's wall-only full-grid
+layout. Missing nonperiodic neighbors remain stationary halfway faces.
+`to_physical(dt_s)` supplies SI scaling with the accepted state's timestep.
+
+The adapter samples Fluid/Wall topology and explicitly refuses Gas/Interface
+cells; it does not invent wall conditions at a free surface. Curved-link
+bounce-back is outside this halfway-wall geometry. One-cell periodic axes
+are homogeneous; two-cell periodic axes refuse an unresolved aliased
+stencil. Walls return `None`. Repeated calls allocate no buffers, poll at
+most every 64 cells, and return data only on success. Invalid mutable grid
+buffers, invalid wall velocities and cancellation leave flow state unchanged.
+NSF inviscid vorticity budgets also refuse two-cell aliased source stencils,
+matching their existing body-acceleration-curl query.
+
+`tests/kinematics2.rs` checks analytic rotation/strain/shear/dilation with
+spatial forcing and Galilean shifts; both orientations of linear/quadratic
+moving-wall profiles including one-fluid-cell gaps; stationary exterior
+Poiseuille walls; a three-rung periodic Taylor--Green curl convergence ladder;
+and viscous Taylor--Green enstrophy decay through native D2Q9 stepping.
+Free-surface, cancellation, invalid state and underresolved stencil refusals
+are covered separately. No collision, forcing or transport law is changed.
+
 ### Source-resolved rheology with local and dynamic SGS
 
 `lattice3::rheology::RheologySgs3` selects a local closure, periodic dynamic

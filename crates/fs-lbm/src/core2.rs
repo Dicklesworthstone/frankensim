@@ -16,6 +16,7 @@ pub mod moving_disk;
 
 mod forcing;
 mod impulse;
+mod kinematics;
 pub use forcing::{ForceRebindError2, ForceStepError2};
 
 const MAX_REGULARIZED_BOUNDARY_SPEED_SQ: f64 = 0.03;
