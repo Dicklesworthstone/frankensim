@@ -7292,6 +7292,24 @@ when this extension was introduced. This Estimated output does not certify
 shock derivatives, exact discrete circulation, viscous torque, applied-force
 curl, or unresolved turbulent production.
 
+### Evolving-composition vorticity
+
+`MixtureEuler3d::vorticity` reuses this same workspace, physical derivative
+and inviscid budget on the original accepted multicomponent cells. Each cell
+is recovered once through its actual mixture EOS, retaining evolving species
+densities, energy references and temperature-dependent heat capacities.
+Composition affects pressure-density misalignment through that EOS; no
+separate composition torque is added. Storage is independent of species
+count, and repeated queries allocate no field buffers. Byte caps, physical
+grid identity, unresolved-axis refusals and cancellation remain explicit.
+
+The mixture regressions cover all three baroclinic orientations, rotating and
+expanding affine flow, a barotropic mixture with varying composition, and
+baroclinic onset through the native conservative time step under refinement.
+They also cover transactional cancellation, workspace reuse and admission.
+These observations retain the smooth inviscid limitations above; molecular,
+applied-force and modeled stress production require their own contributions.
+
 ## Dynamic mixture SGS face stress
 
 Under `experimental-sgs`, periodic and planar-channel Favre dynamic mixture

@@ -33,6 +33,8 @@ pub mod forcing;
 pub mod molecular;
 /// Original finite-rate chemistry coupled atomically to this volumetric field.
 pub mod reactive;
+/// Native vorticity and production using the evolving composition's calorics.
+pub mod vorticity;
 pub use forcing::ForcingWorkspace3d;
 mod reservoir;
 pub use reservoir::ReservoirBoundary;

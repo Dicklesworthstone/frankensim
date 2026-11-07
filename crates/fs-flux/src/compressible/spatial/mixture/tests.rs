@@ -11,6 +11,7 @@ mod molecular;
 mod pressure_outlet;
 mod reservoir;
 mod reservoir_profiles;
+mod vorticity;
 
 const PERIODIC: Boundaries3d = Boundaries3d {
     x: AxisBoundaries::Periodic,

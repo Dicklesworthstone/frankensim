@@ -22,6 +22,7 @@
 use super::{
     AxisBoundaries, Boundaries3d, CartesianGrid, Error, Euler3d, Primitive, allocated, poll,
 };
+use crate::compressible::cartesian::Failure;
 
 /// Local physical curl and separately observable inviscid production terms.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -54,9 +55,9 @@ impl VorticityBudget3d {
 /// A failed evaluation may change scratch, but cannot expose partial results
 /// or change the flow's cells, time, accepted loads or step report.
 pub struct VorticityWorkspace3d {
-    grid: CartesianGrid,
-    primitive: Vec<Primitive>,
-    output: Vec<VorticityBudget3d>,
+    pub(super) grid: CartesianGrid,
+    pub(super) primitive: Vec<Primitive>,
+    pub(super) output: Vec<VorticityBudget3d>,
 }
 
 impl VorticityWorkspace3d {
@@ -85,7 +86,7 @@ impl Euler3d {
     /// is admitted as homogeneous extrusion. Nonperiodic derivatives use only
     /// the interior, independently of exterior reservoir or wall prescriptions.
     pub fn vorticity_workspace(&self, maximum_bytes: usize) -> Result<VorticityWorkspace3d, Error> {
-        admit_axes(&self.grid, self.boundaries)?;
+        admit_axes::<Error>(&self.grid, self.boundaries)?;
         if self.required_vorticity_workspace_bytes()? > maximum_bytes {
             return Err(Error::Invalid(
                 "vorticity workspace exceeds its byte budget",
@@ -117,7 +118,7 @@ impl Euler3d {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<&'a [VorticityBudget3d], Error> {
         poll(&mut cancelled)?;
-        admit_axes(&self.grid, self.boundaries)?;
+        admit_axes::<Error>(&self.grid, self.boundaries)?;
         if work.grid != self.grid {
             return Err(Error::Invalid(
                 "vorticity workspace and physical grid differ",
@@ -133,18 +134,21 @@ impl Euler3d {
             if cell % 64 == 0 {
                 poll(&mut cancelled)?;
             }
-            *output = budget(&self.grid, self.boundaries, &work.primitive, cell)?;
+            *output = budget::<Error>(&self.grid, self.boundaries, &work.primitive, cell)?;
         }
         poll(&mut cancelled)?;
         Ok(&work.output)
     }
 }
 
-pub(super) fn admit_axes(grid: &CartesianGrid, boundaries: Boundaries3d) -> Result<(), Error> {
+pub(super) fn admit_axes<E: Failure>(
+    grid: &CartesianGrid,
+    boundaries: Boundaries3d,
+) -> Result<(), E> {
     for axis in 0..3 {
         let count = grid.shape[axis];
         if count < 3 && !(count == 1 && boundaries.axis(axis) == AxisBoundaries::Periodic) {
-            return Err(Error::Invalid(
+            return Err(E::invalid(
                 "vorticity needs three cells per resolved axis or one periodic cell",
             ));
         }
@@ -197,12 +201,12 @@ pub(super) fn derivative<const N: usize>(
     })
 }
 
-pub(super) fn budget(
+pub(super) fn budget<E: Failure>(
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
     primitive: &[Primitive],
     cell: usize,
-) -> Result<VorticityBudget3d, Error> {
+) -> Result<VorticityBudget3d, E> {
     let mut gradient = [[0.0; 3]; 5];
     for axis in 0..3 {
         let column = derivative(grid, boundaries, cell, axis, |other| {
@@ -213,9 +217,7 @@ pub(super) fn budget(
         }
     }
     if !gradient.iter().flatten().all(|value| value.is_finite()) {
-        return Err(Error::Invalid(
-            "unrepresentable physical vorticity gradient",
-        ));
+        return Err(E::invalid("unrepresentable physical vorticity gradient"));
     }
     let omega = [
         gradient[3][1] - gradient[2][2],
@@ -250,7 +252,7 @@ pub(super) fn budget(
         .chain(result.inviscid_material_rate())
         .all(f64::is_finite)
     {
-        return Err(Error::Invalid("unrepresentable physical vorticity budget"));
+        return Err(E::invalid("unrepresentable physical vorticity budget"));
     }
     Ok(result)
 }

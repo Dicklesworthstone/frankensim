@@ -81,7 +81,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         &self,
         maximum_bytes: usize,
     ) -> Result<StressVorticityWorkspace3d, MolecularError> {
-        inviscid::admit_axes(&self.grid, self.boundaries)?;
+        inviscid::admit_axes::<Error>(&self.grid, self.boundaries)?;
         if self.required_vorticity_workspace_bytes()? > maximum_bytes {
             return Err(MolecularError::Invalid(
                 "stress vorticity workspace exceeds its byte budget",
@@ -118,7 +118,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<&'a [StressVorticityBudget3d], MolecularError> {
         poll(&mut cancelled)?;
-        inviscid::admit_axes(&self.grid, self.boundaries)?;
+        inviscid::admit_axes::<Error>(&self.grid, self.boundaries)?;
         if self.gas != flow.gas || self.grid != flow.grid || self.boundaries != flow.boundaries {
             return Err(MolecularError::Invalid(
                 "molecular vorticity operator and flow differ",
@@ -179,7 +179,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             };
             let [x, y, z] = [column(0), column(1), column(2)];
             let result = StressVorticityBudget3d {
-                inviscid: inviscid::budget(
+                inviscid: inviscid::budget::<Error>(
                     &self.grid,
                     self.boundaries,
                     &self.work.primitive,
