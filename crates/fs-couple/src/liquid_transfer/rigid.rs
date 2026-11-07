@@ -11,6 +11,7 @@
 //! Melting kinetics, stress relaxation, density-change volume work, capillarity
 //! and a pressure projection need their own admitted physical owners.
 
+mod kinetic;
 /// Selected-cell release with a source-bound rigid remainder outside the grid.
 pub mod partial;
 
@@ -147,6 +148,16 @@ pub struct RigidLiquidReleaseReport {
     pub gravitational_projection_change_j: f64,
     /// Actual receiver mass*h minus original rigid matter's mass*h [J].
     pub enthalpy_error_j: f64,
+    kinetic_change: Dd,
+}
+
+impl RigidLiquidReleaseReport {
+    /// Actual native liquid minus original rigid storage before rounding [J].
+    /// Retains both the independently checked rigid-to-P1 discrepancy and the
+    /// native remap increment, for composition with surviving rigid matter.
+    pub const fn retained_kinetic_projection_change_j(&self) -> Dd {
+        self.kinetic_change
+    }
 }
 
 /// Return an ordinary thermal VOF candidate at the original rigid body's clock.
@@ -315,11 +326,27 @@ pub fn release_rigid_liquid<'s, 'm>(
             gate,
         ),
     }?;
+    let reference = array(source.motion.center_of_mass_velocity_world(properties)?);
+    let p1 = transfer
+        .mechanical
+        .source_kinetic_in_frame(reference)
+        .map_err(TetEnthalpyTransferError::Transfer)?;
+    let source_kinetic_change = kinetic::p1_change(
+        rigid_storage(source.frame, source.motion),
+        reference,
+        p1.mass_kg,
+        p1.relative_momentum_kg_m_s,
+        p1.relative_kinetic_energy_j,
+    )
+    .ok_or(RigidLiquidReleaseError::Invalid(
+        "original rigid-to-P1 kinetic change is unrepresentable",
+    ))?;
     let source_balance = audit(
         rigid,
         rigid_enthalpy_j,
         transfer.mechanical.source,
         transfer.source_enthalpy_j,
+        source_kinetic_change,
         domain.gravity_m_s2,
         controls,
         RigidLiquidBalanceStage::TetrahedralKinematics,
@@ -329,6 +356,7 @@ pub fn release_rigid_liquid<'s, 'm>(
         rigid_enthalpy_j,
         transfer.mechanical.target,
         transfer.target_enthalpy_j,
+        source_kinetic_change + transfer.mechanical.retained_kinetic_energy_change_j(),
         domain.gravity_m_s2,
         controls,
         RigidLiquidBalanceStage::NativeLiquid,
@@ -342,11 +370,12 @@ pub fn release_rigid_liquid<'s, 'm>(
             rigid,
             rigid_enthalpy_j,
             transfer,
-            source_kinetic_error_j: source_balance.kinetic_j,
+            source_kinetic_error_j: source_balance.kinetic_j.to_f64(),
             source_centroid_error_m: source_balance.centroid_m,
-            kinetic_projection_change_j: target_balance.kinetic_j,
+            kinetic_projection_change_j: target_balance.kinetic_j.to_f64(),
             gravitational_projection_change_j: target_balance.gravity_j,
             enthalpy_error_j: target_balance.enthalpy_j,
+            kinetic_change: target_balance.kinetic_j,
         },
     ))
 }
@@ -367,9 +396,12 @@ fn admit_reference_density(
     for vertex in geometry.vertices() {
         check(cx, gate)?;
         let original = vertex.material();
-        let original_density = original.property(DENSITY_PROPERTY).ok_or(
-            RigidLiquidReleaseError::Invalid("original vertex lost its density source"),
-        )?;
+        let original_density =
+            original
+                .property(DENSITY_PROPERTY)
+                .ok_or(RigidLiquidReleaseError::Invalid(
+                    "original vertex lost its density source",
+                ))?;
         if original.card_identity() != material.card_identity()
             || original_density.answer().receipt.selected != density.answer().receipt.selected
             || vertex.density_kg_m3().to_bits() != scaling.material().density_kg_m3().to_bits()
@@ -418,18 +450,32 @@ fn rigid_moments(
     Ok(moments)
 }
 
+fn rigid_storage(frame: &PrincipalFrame, motion: RigidBodyState) -> kinetic::RigidStorage {
+    // PrincipalFrame lowers the original full tensor into these exact native
+    // body axes. Do not derive a new inertia from the projected liquid grid.
+    let properties = frame.properties();
+    kinetic::RigidStorage {
+        mass: properties.mass(),
+        momentum_world: array(motion.linear_momentum_world()),
+        principal_moments: array(properties.principal_inertia_body()),
+        spin_principal: array(motion.angular_momentum_body()),
+    }
+}
+
 struct Balance {
     centroid_m: [f64; 3],
-    kinetic_j: f64,
+    kinetic_j: Dd,
     gravity_j: f64,
     enthalpy_j: f64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn audit(
     original: LiquidTransferMoments,
     original_h: f64,
     actual: LiquidTransferMoments,
     actual_h: f64,
+    kinetic_change: Dd,
     gravity: [f64; 3],
     controls: RigidLiquidReleaseControls,
     stage: RigidLiquidBalanceStage,
@@ -444,7 +490,7 @@ fn audit(
         actual.first_mass_moment_kg_m[axis] / actual.mass_kg
             - original.first_mass_moment_kg_m[axis] / original.mass_kg
     });
-    let kinetic_error_j = actual.kinetic_energy_j - original.kinetic_energy_j;
+    let kinetic_error_j = kinetic_change.to_f64();
     let gravitational_error_j = (0..3)
         .fold(Dd::ZERO, |sum, axis| {
             sum - Dd::from_f64(gravity[axis])
@@ -455,17 +501,19 @@ fn audit(
     let enthalpy_error_j = actual_h - original_h;
     let limits = controls.transfer.mechanical;
     let (centroid_limit, energy_ok) = match stage {
-        RigidLiquidBalanceStage::RigidPartition | RigidLiquidBalanceStage::TetrahedralKinematics => (
+        RigidLiquidBalanceStage::RigidPartition
+        | RigidLiquidBalanceStage::TetrahedralKinematics => (
             controls.source_centroid_tolerance_m,
-            kinetic_error_j.abs() <= controls.source_kinetic_tolerance_j,
+            !Dd::from_f64(controls.source_kinetic_tolerance_j).lt(kinetic_change.abs()),
         ),
         RigidLiquidBalanceStage::NativeLiquid => (
             limits.maximum_centroid_shift_m,
-            kinetic_error_j.abs() + gravitational_error_j.abs()
-                <= limits.maximum_projection_energy_change_j,
+            !Dd::from_f64(limits.maximum_projection_energy_change_j)
+                .lt(kinetic_change.abs() + Dd::from_f64(gravitational_error_j.abs())),
         ),
     };
     if !finite_moments(actual)
+        || !kinetic_change.lo.is_finite()
         || ![
             mass_error_kg,
             kinetic_error_j,
@@ -495,7 +543,7 @@ fn audit(
     }
     Ok(Balance {
         centroid_m: centroid_error_m,
-        kinetic_j: kinetic_error_j,
+        kinetic_j: kinetic_change,
         gravity_j: gravitational_error_j,
         enthalpy_j: enthalpy_error_j,
     })

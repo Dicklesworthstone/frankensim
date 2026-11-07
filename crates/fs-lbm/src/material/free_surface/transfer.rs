@@ -30,6 +30,7 @@ mod components;
 mod kinetic;
 mod momentum;
 pub use components::TetLiquidComponentTransfer;
+pub use kinetic::LiquidKineticFrame;
 
 use fs_exec::Cx;
 use fs_la::factor::lu;
@@ -117,6 +118,26 @@ pub struct TetLiquidTransferReport {
     /// Every piece independently preserves mass and both momenta. These are
     /// ingress lineage and audits, not persistent labels after native merging.
     pub components: Vec<TetLiquidComponentTransfer>,
+    source_kinetic: kinetic::Inventory,
+    kinetic_change: Dd,
+}
+
+impl TetLiquidTransferReport {
+    /// Original integrated P1 storage in a fixed velocity reference. The
+    /// retained mass and relative momentum also keep any actual representation
+    /// discrepancy when another owner compares its original kinetic inventory.
+    pub fn source_kinetic_in_frame(
+        &self,
+        reference_velocity_m_s: [f64; 3],
+    ) -> Result<LiquidKineticFrame, TetLiquidTransferError> {
+        self.source_kinetic.in_frame(reference_velocity_m_s)
+            .ok_or_else(|| invalid("source kinetic inventory cannot use this velocity reference"))
+    }
+
+    /// Native target minus original P1 storage before diagnostic rounding [J].
+    pub const fn retained_kinetic_energy_change_j(&self) -> Dd {
+        self.kinetic_change
+    }
 }
 
 /// A geometric, physical, projection, budget or cancellation refusal.
@@ -565,12 +586,18 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                 "native mass ledger and initialized physical cells disagree",
             ));
         }
+        let kinetic_change = kinetic_change(&thermal.source_kinetic, &candidate_kinetic, cx)?;
         let (centroid_shift_m, kinetic_energy_change_j, gravitational_energy_change_j) =
             check_projection(
-                &original, &actual,
-                kinetic_change(&thermal.source_kinetic, &candidate_kinetic, cx)?,
+                &original, &actual, kinetic_change,
                 domain.gravity_m_s2, limits,
             )?;
+        let mut source_kinetic = thermal.source_kinetic[0].empty_like();
+        for inventory in &thermal.source_kinetic {
+            checkpoint(cx)?;
+            source_kinetic.add_inventory(*inventory)
+                .ok_or_else(|| invalid("combined source kinetic inventory is unrepresentable"))?;
+        }
         let components = components::reports(
             components, actual_components, &thermal.source_kinetic, &candidate_kinetic,
             &initial, domain.gravity_m_s2, limits, cx,
@@ -588,6 +615,8 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                 overlap_tests,
                 wet_cells: initial.len(),
                 components,
+                source_kinetic,
+                kinetic_change,
             },
             thermal,
         ))

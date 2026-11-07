@@ -10,7 +10,8 @@ use super::{
     MaterialFreeSurfaceEnthalpy3, MaterialFreeSurfaceScaling, PrincipalFrame, PrincipalFrameError,
     RigidBodyState, RigidLiquidBalanceStage, RigidLiquidReleaseControls, RigidLiquidReleaseError,
     RigidLiquidReleaseReport, RigidTetrahedralLiquidState, TetrahedralDensityBody,
-    admit_reference_density, array, audit, check, release_rigid_liquid, reserved, rigid_moments,
+    admit_reference_density, array, audit, check, kinetic, release_rigid_liquid, reserved,
+    rigid_moments, rigid_storage,
 };
 use fs_ga::Se3;
 use fs_mbd::{Pose, UnitQuaternion};
@@ -88,6 +89,15 @@ pub struct PartialRigidLiquidReleaseReport {
     /// Whole-source phase checks plus the native selected-piece source queries,
     /// together bounded by the caller's one `max_source_queries` ceiling.
     pub source_queries: usize,
+    kinetic_change: Dd,
+}
+
+impl PartialRigidLiquidReleaseReport {
+    /// Liquid plus retained rigid storage minus the original body, retaining
+    /// the separate partition and full release increments before rounding [J].
+    pub const fn retained_kinetic_projection_change_j(&self) -> Dd {
+        self.kinetic_change
+    }
 }
 
 /// Every refusal leaves the original state available and returns neither child.
@@ -263,11 +273,27 @@ pub fn release_rigid_liquid_cells<'s, 'm>(
     let retained_moments = rigid_moments(&retained.frame, retained.motion, grid_origin_m)?;
     let selected_h = integrated_enthalpy(selected.as_source(), cx, gate)?;
     let retained_h = integrated_enthalpy(retained.as_source(), cx, gate)?;
+    let partition_kinetic_change = kinetic::partition_change(
+        rigid_storage(source.frame, source.motion),
+        &[
+            rigid_storage(&selected.frame, selected.motion),
+            rigid_storage(&retained.frame, retained.motion),
+        ],
+        array(
+            source
+                .motion
+                .center_of_mass_velocity_world(source.frame.properties())?,
+        ),
+    )
+    .ok_or(PartialRigidLiquidReleaseError::Invalid(
+        "original rigid-partition kinetic change is unrepresentable",
+    ))?;
     let partition = audit(
         original,
         original_h,
         add_moments(selected_moments, retained_moments),
         add(selected_h, retained_h),
+        partition_kinetic_change,
         domain.gravity_m_s2,
         release,
         RigidLiquidBalanceStage::RigidPartition,
@@ -299,6 +325,7 @@ pub fn release_rigid_liquid_cells<'s, 'm>(
         original_h,
         combined_target,
         add(released.transfer.target_enthalpy_j, retained_h),
+        partition_kinetic_change + released.retained_kinetic_projection_change_j(),
         domain.gravity_m_s2,
         release,
         RigidLiquidBalanceStage::NativeLiquid,
@@ -321,13 +348,14 @@ pub fn release_rigid_liquid_cells<'s, 'm>(
             retained: retained_moments,
             retained_enthalpy_j: retained_h,
             released,
-            rigid_partition_kinetic_error_j: partition.kinetic_j,
+            rigid_partition_kinetic_error_j: partition.kinetic_j.to_f64(),
             rigid_partition_centroid_error_m: partition.centroid_m,
             combined_target,
-            kinetic_projection_change_j: endpoint.kinetic_j,
+            kinetic_projection_change_j: endpoint.kinetic_j.to_f64(),
             gravitational_projection_change_j: endpoint.gravity_j,
             enthalpy_error_j: endpoint.enthalpy_j,
             source_queries,
+            kinetic_change: endpoint.kinetic_j,
         },
     ))
 }

@@ -22,11 +22,20 @@ Native readback uses the original tracked interface mass or full-cell
 population mass, never density times a rounded/clamped fill fraction. The
 same mass supplies the post-attachment component enthalpy audit.
 
+The completed transfer receipt exposes a retained native kinetic increment and
+the independently integrated original P1 inventory in a caller-specified fixed
+velocity reference. Reframing carries mass and relative momentum as well as
+component kinetic storage. Rigid release can therefore compare its original
+momentum/inertia storage and compose this transfer stage without reconstructing
+a difference from rounded endpoint diagnostics. Thermal attachment refreshes
+the native increment from its actual final readback.
+
 The storage kernel uses fixed local arrays and one retained source/candidate
 inventory per component; prediction scratch is reused for native readback.
-Five executed production-leaf tests cover P1 variance beneath common motion,
+Seven executed production-leaf tests cover P1 variance beneath common motion,
 consistent-mass cross terms, actual mass/momentum defects, separate component
-errors and invalid inventories. Full native ingress/mass-owner regression
+errors, reference changes, component merging and invalid inventories. Full
+native ingress/mass-owner regression
 sources are also present; their execution remains pending an admitted full
 dependency build. This is a projection-accounting extension, not a
 conservative kinetic remap, subcell energy model or physical heating law.

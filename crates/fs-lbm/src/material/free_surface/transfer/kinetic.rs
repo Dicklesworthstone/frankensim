@@ -11,7 +11,23 @@
 
 use fs_math::dd::Dd;
 
-#[derive(Clone, Copy, Debug)]
+/// Retained original P1 mass, relative momentum and component kinetic storage.
+///
+/// Values refer to the declared fixed world velocity `reference_velocity_m_s`.
+/// They support composition with another physical representation without
+/// subtracting rounded absolute energies. This view supplies storage, not a
+/// force, heat source, exact-arithmetic certificate or new physical frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LiquidKineticFrame {
+    pub reference_velocity_m_s: [f64; 3],
+    pub mass_kg: Dd,
+    /// Integral rho*(v-U) [kg m/s], in the original world axes.
+    pub relative_momentum_kg_m_s: [Dd; 3],
+    /// Integral rho*(v_axis-U_axis)^2/2 [J], one value per world axis.
+    pub relative_kinetic_energy_j: [Dd; 3],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Inventory {
     reference: [f64; 3],
     mass: Dd,
@@ -31,6 +47,42 @@ impl Inventory {
 
     pub(super) const fn empty_like(self) -> Self {
         Self::new(self.reference)
+    }
+
+    pub(super) fn in_frame(self, reference: [f64; 3]) -> Option<LiquidKineticFrame> {
+        if !self.finite() || !reference.into_iter().all(f64::is_finite) {
+            return None;
+        }
+        let mut momentum = self.momentum;
+        let mut kinetic = self.kinetic;
+        for axis in 0..3 {
+            let shift = Dd::from_f64(self.reference[axis]) - Dd::from_f64(reference[axis]);
+            momentum[axis] = momentum[axis] + self.mass * shift;
+            kinetic[axis] = kinetic[axis]
+                + shift * self.momentum[axis]
+                + Dd::from_f64(0.5) * self.mass * shift * shift;
+        }
+        momentum
+            .iter()
+            .chain(&kinetic)
+            .all(|value| value.hi.is_finite() && value.lo.is_finite())
+            .then_some(LiquidKineticFrame {
+                reference_velocity_m_s: reference,
+                mass_kg: self.mass,
+                relative_momentum_kg_m_s: momentum,
+                relative_kinetic_energy_j: kinetic,
+            })
+    }
+
+    /// Merge independently integrated pieces at one common velocity reference.
+    pub(super) fn add_inventory(&mut self, other: Self) -> Option<()> {
+        let other = other.in_frame(self.reference)?;
+        self.mass = self.mass + other.mass_kg;
+        for axis in 0..3 {
+            self.momentum[axis] = self.momentum[axis] + other.relative_momentum_kg_m_s[axis];
+            self.kinetic[axis] = self.kinetic[axis] + other.relative_kinetic_energy_j[axis];
+        }
+        self.finite().then_some(())
     }
 
     /// Exact P1 simplex mass form: integral N_i N_j = V (1+delta_ij)/20.
@@ -184,5 +236,44 @@ mod tests {
         let mut nonfinite = blank;
         nonfinite.add_cell(1.0, [f64::INFINITY, 0.0, 0.0]);
         assert!(source.change_to(nonfinite).is_none());
+    }
+
+    #[test]
+    fn reframed_source_keeps_relative_storage_and_transport_defects() {
+        let mut source = Inventory::new([4.0, -2.0, 0.0]);
+        source.add_tetrahedron(40.0, [[5.0, -1.0, 0.0]; 4]);
+        let at_mean = source.in_frame([5.0, -1.0, 0.0]).unwrap();
+        assert_eq!(at_mean.mass_kg, Dd::from_f64(40.0));
+        assert_eq!(at_mean.relative_momentum_kg_m_s, [Dd::ZERO; 3]);
+        assert_eq!(at_mean.relative_kinetic_energy_j, [Dd::ZERO; 3]);
+        let at_rest = source.in_frame([0.0; 3]).unwrap();
+        assert_eq!(
+            at_rest.relative_momentum_kg_m_s,
+            [200.0, -40.0, 0.0].map(Dd::from_f64)
+        );
+        assert_eq!(
+            at_rest.relative_kinetic_energy_j,
+            [500.0, 20.0, 0.0].map(Dd::from_f64)
+        );
+        assert!(source.in_frame([f64::NAN, 0.0, 0.0]).is_none());
+    }
+
+    #[test]
+    fn merged_components_do_not_lose_their_own_reference_velocities() {
+        let mean = [2.0_f64.powi(40), 0.0, 0.0];
+        let mut a = Inventory::new([mean[0] - 1.0, 0.0, 0.0]);
+        a.add_cell(2.0, [mean[0] - 1.0, 3.0, 0.0]);
+        let mut b = Inventory::new([mean[0] + 1.0, 0.0, 0.0]);
+        b.add_cell(2.0, [mean[0] + 1.0, -3.0, 0.0]);
+        let mut total = Inventory::new(mean);
+        total.add_inventory(a).unwrap();
+        total.add_inventory(b).unwrap();
+        let frame = total.in_frame(mean).unwrap();
+        assert_eq!(frame.mass_kg, Dd::from_f64(4.0));
+        assert_eq!(frame.relative_momentum_kg_m_s, [Dd::ZERO; 3]);
+        assert_eq!(
+            frame.relative_kinetic_energy_j,
+            [2.0, 18.0, 0.0].map(Dd::from_f64)
+        );
     }
 }

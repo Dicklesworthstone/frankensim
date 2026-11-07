@@ -62,6 +62,23 @@ separate owners.
 agreement, self-heating at three timestep rungs, heterogeneous WLF/Arrhenius
 regions, event/continuation equality and late whole-call refusals.
 
+## Retained kinetic storage through full and partial rigid liquid release
+
+Rigid liquid release compares original native momentum/inertia storage with
+the independently integrated P1 field at a fixed COM velocity reference,
+retaining mass and momentum defects. Its final gate adds the native transfer's
+retained P1-to-cell increment. Selected-cell release independently checks the
+actual native rigid partition, then composes that increment with the complete
+selected-piece release. Successive releases can consume retained increments
+without subtracting rounded totals. Original inertia, mass/momentum, caloric
+state and independent remap budgets remain unchanged; numerical loss never
+becomes heat or release work. Four executed production-leaf tests cover hidden
+spin/orbital storage, actual mass/momentum defects and invalid inertia. Native
+whole/partial regression assertions additionally cover analytic P1 spin,
+thermal attachment and successive releases; full native execution is pending.
+The source remains an already-liquid no-storage rigid constraint, not a
+stressed solid whose constitutive history can be discarded.
+
 ## Physical nonlinear and hysteretic electrodes with finite heat
 
 ## Finite-strain Maxwell membrane relaxation into original enthalpy cells

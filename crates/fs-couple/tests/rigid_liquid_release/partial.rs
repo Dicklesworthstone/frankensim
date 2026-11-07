@@ -315,6 +315,15 @@ fn g1_partial_release_retains_full_inertia_motion_heat_and_native_continuation()
                     - report.original.kinetic_energy_j,
                 2e-20,
             );
+            // The unchanged remainder cancels through native retained
+            // increments, without subtracting its absolute kinetic inventory.
+            close(
+                (report.retained_kinetic_projection_change_j()
+                    - report.released.retained_kinetic_projection_change_j())
+                .to_f64(),
+                report.rigid_partition_kinetic_error_j,
+                1e-30,
+            );
             close(retained.time_s, source.time_s, 0.0);
             close(liquid.physical_time_s(), source.time_s, 0.0);
             let step = RigidBodyIntegrator::new(Gravity::ZERO)
@@ -460,9 +469,10 @@ fn g1_successive_partial_then_full_releases_keep_original_lineage_and_world_mome
         close(extensive_h, a.original_enthalpy_j, 3e-10);
         close(
             kinetic - a.original.kinetic_energy_j,
-            a.kinetic_projection_change_j
-                + b.kinetic_projection_change_j
-                + c.kinetic_projection_change_j,
+            (a.retained_kinetic_projection_change_j()
+                + b.retained_kinetic_projection_change_j()
+                + c.retained_kinetic_projection_change_j())
+            .to_f64(),
             3e-20,
         );
     });

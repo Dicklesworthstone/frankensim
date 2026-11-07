@@ -103,9 +103,10 @@ pub(super) fn admit_receiver_moments(
     {
         return Err(invalid("initial constitutive attachment changed the native mass ledger").into());
     }
+    let kinetic_change = kinetic_change(source_kinetic, &actual_kinetic, cx)?;
     let (centroid_shift_m, kinetic_energy_change_j, gravitational_energy_change_j) =
         check_projection(
-            &report.source, &total, kinetic_change(source_kinetic, &actual_kinetic, cx)?,
+            &report.source, &total, kinetic_change,
             gravity, limits,
         )?;
     let components = components::reports(
@@ -115,6 +116,7 @@ pub(super) fn admit_receiver_moments(
     report.target = total;
     report.centroid_shift_m = centroid_shift_m;
     report.kinetic_energy_change_j = kinetic_energy_change_j;
+    report.kinetic_change = kinetic_change;
     report.gravitational_energy_change_j = gravitational_energy_change_j;
     report.components = components;
     Ok(())

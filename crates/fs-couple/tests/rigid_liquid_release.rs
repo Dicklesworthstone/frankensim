@@ -26,6 +26,7 @@ use fs_material::liquid::surface::{LiquidCapillarity, resolve_liquid_surface_sta
 use fs_material::liquid_temperature::{LiquidTemperatureLaw, LiquidViscosityBasis};
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase};
 use fs_material::state_point::MaterialPropertySelection;
+use fs_math::dd::Dd;
 use fs_mbd::RigidBodyState;
 use fs_mbd_material::density_field::{DensityVertexBinding, TetrahedralDensityBody};
 use fs_mbd_material::principal::PrincipalFrame;
@@ -361,6 +362,26 @@ fn g1_full_inertia_world_spin_heat_and_clock_survive_release_and_native_continua
                 close_vector(actual.angular_momentum_kg_m2_s, expected_l, 2e-21);
                 close(actual.kinetic_energy_j, expected_k, 2e-20);
             }
+            // Independent rectangular-volume spin energy survives in the
+            // source P1 inventory with COM translation removed. This receipt
+            // supplies the rigid identity gate after native thermal attachment.
+            let p1 = report
+                .transfer
+                .mechanical
+                .source_kinetic_in_frame(array(velocity))
+                .unwrap();
+            close(p1.mass_kg.to_f64(), mass, 2e-18);
+            for relative in p1.relative_momentum_kg_m_s {
+                close(relative.to_f64(), 0.0, 2e-19);
+            }
+            close(
+                p1.relative_kinetic_energy_j
+                    .into_iter()
+                    .fold(Dd::ZERO, |a, b| a + b)
+                    .to_f64(),
+                0.5 * world_spin.dot(spin),
+                2e-20,
+            );
             let mut actual_p = GaVec3::new(0.0, 0.0, 0.0);
             let mut actual_l = actual_p;
             let (mut actual_mass, mut actual_h) = (0.0, 0.0);
@@ -388,6 +409,16 @@ fn g1_full_inertia_world_spin_heat_and_clock_survive_release_and_native_continua
                 report.kinetic_projection_change_j,
                 report.transfer.mechanical.target.kinetic_energy_j - expected_k,
                 2e-20,
+            );
+            close(
+                (report.retained_kinetic_projection_change_j()
+                    - report
+                        .transfer
+                        .mechanical
+                        .retained_kinetic_energy_change_j())
+                .to_f64(),
+                report.source_kinetic_error_j,
+                1e-30,
             );
             close(liquid.physical_time_s(), source.time_s, 0.0);
             assert_eq!(liquid.accepted_steps(), 0);
