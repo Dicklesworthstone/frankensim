@@ -1,5 +1,49 @@
 # fs-phs — Contract
 
+## Squirrel-cage induction motor and generator
+
+`circuit::induction::InductionMotor` retains seven original states: two
+stator-fixed flux linkages, two referred rotor-fixed flux linkages, relative
+mechanical angle, and finite rotor/stator momenta. All electrical axes use the
+power-invariant Clarke convention; physical phase power needs no extra 3/2
+factor. With `R=rotation(pole_pairs*theta)`, the winding law is
+`lambda_s=(Lls+Lm)*i_s+Lm*R*i_r`,
+`lambda_r=(Llr+Lm)*i_r+Lm*R^T*i_s`. Positive stator and rotor leakage are required;
+perfect coupling is not silently regularized. Zero magnetizing inductance
+admits the independent-winding limit.
+
+The determinant is formed as `D=Lls*Llr+Lm*(Lls+Llr)` with scale normalization.
+Original magnetic storage uses the nonnegative decomposition
+`Hmag=(Llr*|lambda_s|²+Lls*|lambda_r|²+Lm*|lambda_s-R*lambda_r|²)/(2D)`.
+The same energy supplies winding currents and
+`tau=pole_pairs*Lm*cross(R*i_r,i_s)`. Its constant skew map gives equal/opposite
+rotor/stator torque. The shorted rotor obeys `lambda_r_dot=-Rr*i_r`, retaining
+induced cage currents, slip, and rotor loss at standstill, motoring, and
+generating speeds. No prescribed slip/torque curve replaces those states.
+
+A symmetric flux/angle discrete gradient uses trigonometric divided differences
+and an analytic endpoint action, including the continuous zero-angle limit.
+The original polarized energy independently supplies the accounting remainder.
+Native `StepWorkspace` advances all seven states together; its prepared warm
+path allocates nothing. The four ports are stator alpha/beta voltage and the
+two shaft torques. `into_system` retains the original storage and tangent for
+finite-bus/converter interconnection through `interconnect_mapped`.
+
+Step reporting separates stator copper heat, referred rotor copper heat,
+internal bearing heat, electrical work, shaft work, and signed angular impulses.
+The heat is the dissipation of the accepted discrete step, not an exact-flow
+quadrature claim. Refusal or cancellation preserves caller state and outputs.
+`tests/circuit_induction.rs` checks independent steady-state cage phasors and
+slip-power relations, second-order rotating-state convergence, original energy
+and torque, analytic tangents, lossless energy/momentum, decoupled RL dynamics,
+finite DC bus reciprocity, and atomic cancellation/retry.
+
+This is a numerical reduced induction-machine lane with sinusoidal balanced
+windings and constant referred inductances/resistances. It does not resolve
+slot/bar harmonics, cage-bar skin effect, saturation/hysteresis, temperature
+feedback, neutral current or 3D field geometry, and makes no experimental
+validation claim. The deferred whole-machine induction flagship remains open.
+
 ## Original-flux synchronous saturation
 
 `SynchronousMotor::with_flux_curves` admits two existing immutable

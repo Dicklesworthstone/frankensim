@@ -58,6 +58,8 @@ pub mod conductance;
 pub mod converter;
 /// Bounded current/flux laws on the original inductor coordinates.
 pub mod inductance;
+/// Original-flux squirrel-cage induction with separate rotor/stator loss.
+pub mod induction;
 /// Reciprocal motor/generator exchange with finite rotor and stator inertia.
 pub mod motor;
 /// Power-invariant synchronous PM/saliency torque with native nonlinear storage.
