@@ -799,6 +799,39 @@ mod evolving_materials {
     }
 
     #[test]
+    fn g1_compact_source_cp_liquid_uses_two_original_knots_for_actual_channel_heat() {
+        let name = "compact-source-cp-liquid.fsmcdpk";
+        let bytes = pack_with_cp_slope(true, 0.0, 310.0, 0.01);
+        let policy = CALORIC_POLICY.replace(",\"maximum_interpolation_error_j_kg\":1e-8", "");
+        let input = caloric_channel(&CALORIC_LIQUID.replace("PACK", name), &policy, false);
+        let path = scratch("compact-source-cp-liquid.json", &input);
+        let pack_path = path.with_file_name(name);
+        std::fs::write(&pack_path, &bytes).unwrap();
+        let (code, result, error) = run(&path);
+        assert_eq!(code, 0, "{error}");
+        let caloric = result.path(&["material_feedback", "fluid_enthalpy"]).unwrap();
+        assert_eq!(caloric.get("maximum_interpolation_error_j_kg"), Some(&J::Null));
+        assert_eq!(f(caloric, &["chart_knots"]), 2.0);
+        let probe = &result.get("probes").unwrap().as_array().unwrap()[0];
+        let theta = f(probe, &["temperature_k"]) - 300.0;
+        // Independent source integral and boundary half-cell conduction:
+        // 11 W = 2*theta + .1*(2*theta + .005*theta^2).
+        let expected = 22.0 / (2.2 + (2.2_f64.powi(2) + 0.022).sqrt());
+        assert!((theta - expected).abs() < 1e-7);
+        let advected = 0.1 * (2.0 * theta + 0.005 * theta * theta);
+        assert!((f(&result, &["energy", "advective_outflow_w"]) - advected).abs() < 2e-8);
+        assert!((2.0 * theta + advected - 11.0).abs() < 2e-7);
+        let tight = input.replace("\"maximum_flux_defect_w\":1e-10",
+            "\"maximum_interpolation_error_j_kg\":1e-16,\"maximum_flux_defect_w\":1e-10");
+        let (code, refused, error) = run(&scratch("compact-source-cp-liquid-chord-limit.json", &tight));
+        assert_ne!(code, 0);
+        assert_eq!(refused.str_field("code"), Some("cooling-cht-input"));
+        assert!(error.contains("knot budget"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), input);
+        assert_eq!(std::fs::read(&pack_path).unwrap(), bytes);
+    }
+
+    #[test]
     fn source_enthalpy_named_gas_keeps_its_pressure_composition_and_native_heat_balance() {
         let policy = CALORIC_POLICY.replace(",\"maximum_interpolation_error_j_kg\":1e-8", "");
         let input = caloric_channel(CALORIC_GAS, &policy, false);
@@ -879,8 +912,8 @@ mod evolving_materials {
                 "temperature span containing the fluid reference",
             ),
             (
-                base.replace(",\"maximum_interpolation_error_j_kg\":1e-8", ""),
-                "maximum_interpolation_error_j_kg is required",
+                base.replace("\"maximum_interpolation_error_j_kg\":1e-8", "\"maximum_interpolation_error_j_kg\":0"),
+                "positive liquid interpolation tolerance",
             ),
             (
                 base.replace(
@@ -954,7 +987,7 @@ mod evolving_materials {
     fn source_enthalpy_unsteady_storage_closes_each_native_step() {
         let bytes = pack_with_cp_slope(true, 0.0, 310.0, 0.01);
         let fluid = CALORIC_LIQUID.replace("PACK", "source-enthalpy-unsteady.fsmcdpk");
-        let policy = CALORIC_POLICY.replacen(
+        let policy = CALORIC_POLICY.replace(",\"maximum_interpolation_error_j_kg\":1e-8", "").replacen(
             '{',
             r#"{"transient_controls":{
           "maximum_passes_per_step":80,"maximum_energy_solves":200,
@@ -1024,6 +1057,8 @@ mod evolving_materials {
         let caloric = result
             .path(&["material_feedback", "fluid_enthalpy"])
             .unwrap();
+        assert_eq!(caloric.get("maximum_interpolation_error_j_kg"), Some(&J::Null));
+        assert_eq!(f(caloric, &["chart_knots"]), 2.0);
         assert_eq!(
             caloric.str_field("storage"),
             Some("source-enthalpy-backward-euler")

@@ -26,7 +26,6 @@ these bounds do not authorize extrapolation or establish phase stability.
   "steps": 8,
   "temperature_min_k": 290.0,
   "temperature_max_k": 350.0,
-  "enthalpy_interpolation_error_j_kg": 0.00001,
   "energy_absolute_tolerance_j": 0.0000001,
   "energy_relative_tolerance": 0.000000001,
   "schedule": [[1, 1.0, 1.0], [5, 0.0, 1.0]]
@@ -56,7 +55,17 @@ Each material must additionally supply `density` [kg/m3] and
 `specific_heat_capacity` [J/(kg K)] under the existing dimensional property
 schemas. The existing `ResolvedHeatCapacityCurve` resolves the complete source
 context over the requested interval, retains the selected Cp/density receipts,
-and constructs its bounded single-phase enthalpy chart. The explicit scene role
+and constructs its single-phase enthalpy chart from original source intervals.
+Omitting `enthalpy_interpolation_error_j_kg` selects this compact analytical
+representation: affine source Cp is integrated and inverted directly, with no
+artificial temperature subdivision. Storage, transport and entropy use the
+chart's original caloric methods. Material output reports `storage_chart_knots`.
+
+An optional positive `enthalpy_interpolation_error_j_kg` additionally bounds
+the straight chords between public chart knots and retains their existing
+generated-knot budget. It is unnecessary for the native caloric evaluation;
+neither mode quantifies source uncertainty or floating-point roundoff.
+The explicit scene role
 chooses solid or fluid storage; it does not discover phase stability. Reference
 enthalpy is zero at the lower endpoint; only changes enter the energy equation.
 This is not a mixture with an independent absolute-enthalpy source.
@@ -186,7 +195,8 @@ AC current, uncertainty propagation or experimental qualification.
 Exterior gray radiation uses its existing explicitly admitted source-backed
 owner. The declared single phase is a caller assumption,
 not a phase-boundary discovery. Generated-chart interpolation and source error
-remain separate, and tighter chart tolerance can exhaust the existing knot cap.
+remain separate. An explicitly requested chord tolerance can exhaust the
+generated-knot cap; the default compact mode is bounded by original source knots.
 The selected enthalpy reconstruction does not change first-order backward-Euler
 time accuracy or establish a universal multidimensional maximum principle.
 Spatial and timestep accuracy require refinement studies. No arbitrary-law

@@ -300,7 +300,7 @@ experimental validation.
 An evolving fluid can use its original caloric law for transported heat by
 adding a top-level `fluid_enthalpy` object. This also selects source-law fluid
 storage in a native unsteady scene. For a liquid material pack, declare the
-supported temperature span, the caloric interpolation accuracy and a local
+supported temperature span and a local
 heat-flux convergence tolerance explicitly:
 
 ```json
@@ -308,7 +308,6 @@ heat-flux convergence tolerance explicitly:
   "fluid_enthalpy": {
     "minimum_temperature_k": 290,
     "maximum_temperature_k": 315,
-    "maximum_interpolation_error_j_kg": 0.001,
     "maximum_flux_defect_w": 1e-7
   }
 }
@@ -317,10 +316,17 @@ heat-flux convergence tolerance explicitly:
 The span must contain the fluid's original reference temperature, every inlet
 and potential backflow temperature, and every thermal trial. Bounds must fit
 the original source support. Liquid `Cp(T)` is integrated into the existing
-bounded caloric chart from the same material pack, fixed pressure/composition
-coordinates and pinned source claims. The declared interpolation tolerance
-controls its specific-enthalpy approximation in J/kg; an accuracy request that
-exceeds the chart's finite knot budget refuses. Density and transport still
+caloric chart from the same material pack, fixed pressure/composition
+coordinates and pinned source claims. By default it retains only original
+Cp/density intervals and evaluates their analytical integral, inverse and
+capacity directly. No artificial refinement is needed, including for transient
+storage. The liquid report includes `chart_knots`.
+
+An optional positive `maximum_interpolation_error_j_kg` additionally bounds
+the straight chords between public chart knots. This retains the generated-knot
+budget and its explicit refusal when the requested chord tolerance would exceed
+it. Both modes use the original Cp law for physical evaluation; the allowance
+does not bound source uncertainty or roundoff. Density and transport still
 come from the original liquid law at their native material time level.
 
 For a gas, supply the same temperature and flux fields but **omit
@@ -405,7 +411,6 @@ the same object:
   "fluid_enthalpy": {
     "minimum_temperature_k": 290,
     "maximum_temperature_k": 315,
-    "maximum_interpolation_error_j_kg": 0.001,
     "maximum_flux_defect_w": 1e-7,
     "transient_controls": {
       "maximum_passes_per_step": 40,

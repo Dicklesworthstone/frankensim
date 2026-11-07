@@ -18,7 +18,7 @@ use fs_material::thermal::transport::isobaric::{
 };
 use fs_qty::{Density, Temperature};
 
-/// The source span and approximation/acceptance tolerances are scene inputs.
+/// The source span, optional boundary-chord allowance and solve tolerances.
 #[derive(Clone, Debug)]
 pub(in crate::cht_command) struct Input {
     minimum_temperature_k: f64,
@@ -26,7 +26,7 @@ pub(in crate::cht_command) struct Input {
     maximum_interpolation_error_j_kg: Option<f64>,
     maximum_flux_defect_w: f64,
     transient: Option<TransientControls>,
-    /// Opt-in exact original Cp integration; the existing chart path remains unchanged.
+    /// Explicit thermodynamic convention, independent of chart subdivision.
     basis: Basis,
 }
 
@@ -100,7 +100,8 @@ pub(in crate::cht_command) fn parse(
         }
         None
     } else { match source {
-        FluidSource::Liquid { .. } => Some(number("maximum_interpolation_error_j_kg")?),
+        FluidSource::Liquid { .. } => value.get("maximum_interpolation_error_j_kg")
+            .map(|_| number("maximum_interpolation_error_j_kg")).transpose()?,
         FluidSource::Gas { .. } => {
             if value.get("maximum_interpolation_error_j_kg").is_some() {
                 return Err(bad(
@@ -121,7 +122,7 @@ pub(in crate::cht_command) fn parse(
         || maximum_interpolation_error_j_kg.is_some_and(|v| v <= 0.0)
     {
         return Err(bad(
-            "fluid_enthalpy requires a positive increasing temperature span containing the fluid reference, nonnegative flux tolerance and positive liquid interpolation tolerance",
+            "fluid_enthalpy requires a positive increasing temperature span containing the fluid reference, nonnegative flux tolerance and a positive liquid interpolation tolerance when provided",
         ));
     }
     let transient = match (is_transient, value.get("transient_controls")) {
@@ -282,27 +283,24 @@ impl Input {
                         fluid.evolving_reference_temperature().expect("evolving fluid admitted"),
                     ).map_err(|error| bad(error.to_string()))?)
                 } else {
-                Source::Liquid(
-                    ResolvedHeatCapacityCurve::try_new(
-                        pack.card(),
-                        HeatCapacitySourceQuery {
-                            heat_capacity: &PropertyKey::new(
-                                SPECIFIC_HEAT_CAPACITY_PROPERTY,
-                                SPECIFIC_HEAT_CAPACITY_DIMS,
-                            ),
-                            density: &PropertyKey::new(DENSITY_PROPERTY, Density::DIMS),
-                            temperature_axis: axis,
-                            lower: &lower,
-                            upper: &upper,
-                            selection: SelectionPolicy::SingleClaimOnly,
-                        },
-                        SolidLiquidPhase::Liquid,
-                        0.0,
-                        self.maximum_interpolation_error_j_kg
-                            .expect("liquid chart tolerance admitted"),
-                    )
-                    .map_err(|error| bad(error.to_string()))?,
-                )
+                let heat_capacity = PropertyKey::new(
+                    SPECIFIC_HEAT_CAPACITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS,
+                );
+                let density = PropertyKey::new(DENSITY_PROPERTY, Density::DIMS);
+                let query = HeatCapacitySourceQuery {
+                    heat_capacity: &heat_capacity, density: &density,
+                    temperature_axis: axis, lower: &lower, upper: &upper,
+                    selection: SelectionPolicy::SingleClaimOnly,
+                };
+                let curve = match self.maximum_interpolation_error_j_kg {
+                    Some(tolerance) => ResolvedHeatCapacityCurve::try_new(
+                        pack.card(), query, SolidLiquidPhase::Liquid, 0.0, tolerance,
+                    ),
+                    None => ResolvedHeatCapacityCurve::try_new_exact(
+                        pack.card(), query, SolidLiquidPhase::Liquid, 0.0,
+                    ),
+                }.map_err(|error| bad(error.to_string()))?;
+                Source::Liquid(curve)
                 }
             }
             _ => {
@@ -401,7 +399,10 @@ impl Bound<'_> {
                         number(law.reference().state().pressure)?)
                 } else { String::new() },
             ),
-            Source::Liquid(law) => (super::super::quote(&law.curve().identity().to_hex()), String::new()),
+            Source::Liquid(law) => (
+                super::super::quote(&law.curve().identity().to_hex()),
+                format!(",\"chart_knots\":{}", law.curve().knots().len()),
+            ),
             Source::IsobaricCp(law) => (
                 "null".into(),
                 format!(",\"basis\":\"isobaric-cp\",\"caloric_identity\":{},\"pressure_pa\":{}",

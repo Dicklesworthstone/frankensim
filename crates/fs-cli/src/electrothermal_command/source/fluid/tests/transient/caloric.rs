@@ -261,6 +261,41 @@ fn analytic_step(old: [f64; 3], beta: f64, power: f64) -> ([f64; 3], f64, f64) {
 }
 
 #[test]
+fn g1_compact_source_cp_transient_retains_original_intervals_and_physical_heat() {
+    let p = variable_cp_problem(0.08);
+    let compact = request_text().replace(
+        ",\"enthalpy_interpolation_error_j_kg\":0.00001", "",
+    );
+    let r = request(&compact, 3);
+    let result = march(&p, &r, &CancelGate::new()).unwrap();
+    let output = render(&p, &result, true);
+    let value = J::parse(&output).unwrap();
+    let material = &value.get("materials").unwrap().as_array().unwrap()[0];
+    assert_eq!(material.f64_field("storage_chart_knots"), Some(4.0));
+    let mut theta = [0.0; 3];
+    for (step, row) in value.get("records").unwrap().as_array().unwrap().iter().enumerate() {
+        let (next, stored, outflow) = analytic_step(theta, 0.08, if step < 4 { 4.5 } else { 0.0 });
+        assert!((row.f64_field("stored_energy_change_j").unwrap() - stored).abs() < 2e-7);
+        assert!((row.f64_field("physical_outflow_j").unwrap() - outflow).abs() < 2e-7);
+        assert!(row.f64_field("closure_j").unwrap().abs() < 2e-7);
+        theta = next;
+    }
+    for (actual, expected) in temperatures(&value).into_iter().zip(theta) {
+        assert!((actual - 300.0 - expected).abs() < 2e-7);
+    }
+    assert_eq!(output, render(&p, &march(&p, &r, &CancelGate::new()).unwrap(), true));
+    // An explicitly requested chord representation retains its real resource
+    // limit. The compact source law needs no such approximation/refinement.
+    let tight = request_text().replace(
+        "\"enthalpy_interpolation_error_j_kg\":0.00001",
+        "\"enthalpy_interpolation_error_j_kg\":1e-16",
+    );
+    let error = march(&p, &request(&tight, 3), &CancelGate::new()).err().unwrap();
+    assert!(error.to_string().contains("knot budget"));
+    assert_eq!(p.initial_temperature, vec![300.0; 3]);
+}
+
+#[test]
 fn g1_transient_caloric_endpoint_requires_local_heat_with_loose_iteration_controls() {
     let mut p = variable_cp_problem(0.08);
     // Loose iteration-change and integrated-energy allowances must not admit

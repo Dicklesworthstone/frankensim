@@ -19,14 +19,16 @@ use fs_qty::Density;
 use super::{Problem, ResultField, invalid, poll};
 use super::super::{J, array, budget, fields, integer, number, positive, quote, read, scalar, string, values};
 
-const NO_CLAIM: &str = "fixed-mass fixed-geometry single-solid-phase backward-Euler electrothermal evolution; nominal source data with bounded Cp-chart interpolation and optional exterior gray radiation to black isothermal unit-view reservoirs, no propagated uncertainty, phase change, thermal deformation, fluid transport or experimental qualification; temporal accuracy requires time-step refinement";
+const NO_CLAIM: &str = "fixed-mass fixed-geometry single-solid-phase backward-Euler electrothermal evolution; original source Cp integration and optional exterior gray radiation to black isothermal unit-view reservoirs, no propagated uncertainty, phase change, thermal deformation, fluid transport or experimental qualification; temporal accuracy requires time-step refinement";
 
 pub(crate) struct Request {
     dt: f64,
     steps: usize,
     lower_k: f64,
     upper_k: f64,
-    interpolation_j_kg: f64,
+    // None retains only original Cp/density intervals. An explicit allowance
+    // additionally bounds the optional straight boundary-chord representation.
+    interpolation_j_kg: Option<f64>,
     absolute_j: f64,
     relative: f64,
     // First step (1-based), scale of all electrode drives, scale of authored power.
@@ -49,7 +51,8 @@ pub(crate) fn load(path: &Path, cells: usize) -> Result<Request, String> {
     let lower_k = positive(&root, "temperature_min_k")?;
     let upper_k = positive(&root, "temperature_max_k")?;
     if lower_k >= upper_k { return Err("storage temperature range must strictly increase".into()); }
-    let interpolation_j_kg = positive(&root, "enthalpy_interpolation_error_j_kg")?;
+    let interpolation_j_kg = root.get("enthalpy_interpolation_error_j_kg")
+        .map(|_| positive(&root, "enthalpy_interpolation_error_j_kg")).transpose()?;
     let absolute_j = positive(&root, "energy_absolute_tolerance_j")?;
     let relative = scalar(&root, "energy_relative_tolerance")?;
     if !(0.0..1.0).contains(&relative) { return Err("energy relative tolerance must be in [0,1)".into()); }
@@ -161,13 +164,22 @@ pub(crate) fn march(problem: &Problem, request: &Request, gate: &CancelGate) -> 
         } else {
             SolidLiquidPhase::Solid
         };
-        curves.push(ResolvedHeatCapacityCurve::try_new(
-            source.pack.card(), HeatCapacitySourceQuery {
-                heat_capacity: &cp_key, density: &density_key,
-                temperature_axis: &source.temperature_axis, lower: &lower, upper: &upper,
-                selection: SelectionPolicy::SingleClaimOnly,
-            }, phase, 0.0, request.interpolation_j_kg,
-        ).map_err(|e| invalid("material.storage", e))?);
+        let query = HeatCapacitySourceQuery {
+            heat_capacity: &cp_key, density: &density_key,
+            temperature_axis: &source.temperature_axis, lower: &lower, upper: &upper,
+            selection: SelectionPolicy::SingleClaimOnly,
+        };
+        // Storage, entropy and face transport all consume original caloric
+        // methods, so a dense straight-chord chart is unnecessary by default.
+        let curve = match request.interpolation_j_kg {
+            Some(tolerance) => ResolvedHeatCapacityCurve::try_new(
+                source.pack.card(), query, phase, 0.0, tolerance,
+            ),
+            None => ResolvedHeatCapacityCurve::try_new_exact(
+                source.pack.card(), query, phase, 0.0,
+            ),
+        }.map_err(|e| invalid("material.storage", e))?;
+        curves.push(curve);
     }
     let mut masses = Vec::with_capacity(problem.domain.cell_count());
     let mut mass_states = Vec::with_capacity(problem.domain.cell_count());
@@ -273,9 +285,9 @@ pub(crate) fn render(problem: &Problem, trajectory: &Trajectory, json: bool) -> 
         r.time_s, r.max_temperature_k, r.stored_energy_change_j, r.source_j, r.boundary_outflow_j, r.closure_j, r.radiated_w,
     )).collect::<Vec<_>>().join(",");
     let materials = problem.materials.iter().zip(&trajectory.curves).map(|(source, chart)| format!(
-        "{{\"pack_identity\":{},\"card_identity\":{},\"storage_chart_identity\":{},\"storage_receipts\":{},\"thermal_conductivity\":{}}}",
+        "{{\"pack_identity\":{},\"card_identity\":{},\"storage_chart_identity\":{},\"storage_chart_knots\":{},\"storage_receipts\":{},\"thermal_conductivity\":{}}}",
         quote(&source.pack.content_hash().to_hex()), quote(&source.pack.card().content_hash().to_hex()),
-        quote(&chart.curve().identity().to_hex()), chart.receipts().len(), source.conductivity.render(),
+        quote(&chart.curve().identity().to_hex()), chart.curve().knots().len(), chart.receipts().len(), source.conductivity.render(),
     )).collect::<Vec<_>>().join(",");
     let source_states = trajectory.last.sources.iter().enumerate().map(|(cell, state)| format!(
         "{{\"material_index\":{},\"initial_mass_state\":{},\"thermal_state\":{},\"electrical_state\":{}}}",

@@ -544,9 +544,10 @@ pointwise emission remains unsupported.
 evolving gas or liquid source. It binds calorics to the same immutable fluid
 law/card, thermodynamic pressure, composition and source selection used for
 transport. The caller declares minimum/maximum temperatures and a finite
-nonnegative local heat-flux tolerance. Liquids also require a positive
-specific-enthalpy interpolation tolerance for the existing bounded Cp chart;
-analytic gas calorics reject that inapplicable field. The source reference,
+nonnegative local heat-flux tolerance. Liquids default to analytical original
+Cp/density intervals; an optional positive specific-enthalpy interpolation
+tolerance additionally bounds public boundary chords. Analytic gas calorics
+reject that inapplicable field. The source reference,
 inlets, potential backflow and every queried trial must remain in the declared
 and original supported domains. Unknown caloric fields refuse.
 
@@ -3848,6 +3849,20 @@ transient heat balances with nonzero limited face corrections, compares the
 upwind field, and checks unchanged-input replay. File-driven coverage exercises
 scheme selection, reporting and input refusal. These new endpoint/minmod
 regressions are source/syntax checked but unexecuted in the current workspace.
+
+### Compact original-source calorics in application paths
+
+Electrothermal transients and source-caloric liquid CHT now use
+`ResolvedHeatCapacityCurve::try_new_exact` when their optional chord-tolerance
+field is omitted. Native storage, face tangents and entropy use original caloric
+methods, never interpolation of public knot chords. This removes artificial
+subdivision from preparation and crossed-interval evaluation; original source
+knots, selection, supported domains and resource limits remain authoritative.
+Explicit positive chord tolerances preserve their bounded representation and
+refusal semantics. Reports expose the actual liquid `chart_knots` or material
+`storage_chart_knots`. Independent channel and driven/cooling regressions use
+two- and four-knot charts, and native unsteady CHT checks original Cp storage.
+These added/extended regressions are syntax checked but unexecuted here.
 
 ## Source-defined orthotropic electrothermal transport
 
