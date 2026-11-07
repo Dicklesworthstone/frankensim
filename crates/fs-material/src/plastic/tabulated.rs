@@ -43,6 +43,7 @@ pub struct TabulatedHardening {
     points: Arc<[HardeningPoint]>,
     slopes: Arc<[f64]>,
     stored: Arc<[f64]>,
+    maximum_slope_pa: f64,
 }
 
 /// Invalid data, a measured-domain exit, or unrepresentable arithmetic.
@@ -130,10 +131,12 @@ impl TabulatedHardening {
             slopes.push(slope);
             stored.push(cumulative);
         }
+        let maximum_slope_pa = slopes.iter().copied().fold(0.0, f64::max);
         Ok(Self {
             points: points.into(),
             slopes: slopes.into(),
             stored: stored.into(),
+            maximum_slope_pa,
         })
     }
 
@@ -154,7 +157,7 @@ impl TabulatedHardening {
 
     /// Largest prepared slope, for admission of a consumer's return stiffness.
     pub fn maximum_tangent_pa(&self) -> f64 {
-        self.slopes.iter().copied().fold(0.0, f64::max)
+        self.maximum_slope_pa
     }
 
     fn segment(&self, alpha: f64) -> Result<usize, TabulatedError> {

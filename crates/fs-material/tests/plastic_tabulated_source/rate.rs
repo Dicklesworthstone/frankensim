@@ -1,9 +1,11 @@
 //! Original hardening and independent kinetics drive native timed deformation.
 use super::*;
+use fs_material::fiber::Uniaxial;
 use fs_material::plastic::rate::{
     OVERSTRESS_EXPONENT_PROPERTY, OVERSTRESS_STRESS_SCALE_PROPERTY, OVERSTRESS_VISCOSITY_DIMS,
     OVERSTRESS_VISCOSITY_PROPERTY,
 };
+use fs_material::plastic::tabulated::rate::axial::UniaxialTabulatedOverstress;
 use fs_material::plastic::tabulated::rate::source::{
     ResolvedTabulatedOverstressJ2, TabulatedOverstressKinetics, TabulatedOverstressSourceRequest,
     resolve_tabulated_overstress_j2, tabulated_overstress_requirements,
@@ -298,4 +300,48 @@ fn source_kinetic_units_bounds_and_complete_bundle_are_required() {
         .is_err(),
         "adopting a bundle must not query omitted kinetic roles implicitly"
     );
+}
+
+#[test]
+fn sourced_axial_flow_preserves_original_curve_and_kinetics_across_physical_steps() {
+    let card = card(timed_properties(true));
+    let source = resolved(&card, TabulatedOverstressKinetics::PowerLaw);
+    let law = UniaxialTabulatedOverstress::from_source(source.clone()).unwrap();
+    let old = law.initial_state();
+    let alpha = 0.009;
+    let viscous = SCALE * (ETA * alpha / (DT * SCALE)).powf(1.0 / EXPONENT);
+    let strain = ((1200.0 + 160.0) * alpha + 5.5 + viscous) / 1200.0;
+    let next = law.response(strain, &old).unwrap();
+    near(next.state.equivalent_plastic_strain(), alpha, 2e-14);
+    near(next.state.plastic_strain(), alpha, 2e-14);
+    near(next.stress_pa, 5.5 + 160.0 * alpha + viscous, 2e-11);
+    assert_eq!(law.material(), Some(source.material()));
+    assert!(std::ptr::eq(
+        law.source().unwrap().source(),
+        source.source()
+    ));
+    let rebound = law.for_duration(0.7).unwrap();
+    assert!(std::ptr::eq(
+        rebound.source().unwrap().source(),
+        source.source()
+    ));
+    assert!(std::ptr::eq(
+        rebound.backbone().backbone().hardening().points(),
+        law.backbone().backbone().hardening().points()
+    ));
+    assert_eq!(rebound.source().unwrap().duration_s(), 0.7);
+    assert_eq!(law.source().unwrap().duration_s(), DT);
+    let relaxed = rebound.response(strain, &next.state).unwrap();
+    assert!(relaxed.state.equivalent_plastic_strain() > next.state.equivalent_plastic_strain());
+    assert!(relaxed.stress_pa < next.stress_pa);
+    let increment = rebound
+        .advance_with_energy(strain, &next.state, strain, TOL)
+        .unwrap();
+    near(increment.energy.mechanical_work_j_m3, 0.0, 2e-12);
+    near(increment.energy.residual_j_m3, 0.0, 2e-12);
+    for stress in &increment.stress_pa[1..] {
+        near(*stress, 0.0, TOL.yield_pa);
+    }
+    assert_eq!(old.plastic_strain(), 0.0);
+    assert_eq!(old.equivalent_plastic_strain(), 0.0);
 }

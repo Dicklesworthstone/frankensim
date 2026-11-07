@@ -27,8 +27,8 @@ pub struct UniaxialJ2 {
 /// uniaxial-flow subspace; general six-component histories use the 3-D owner.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UniaxialJ2State {
-    plastic_strain: f64,
-    equivalent_plastic_strain: f64,
+    pub(super) plastic_strain: f64,
+    pub(super) equivalent_plastic_strain: f64,
 }
 impl UniaxialJ2State {
     /// Signed axial plastic strain; it can decrease during reversed plastic flow.

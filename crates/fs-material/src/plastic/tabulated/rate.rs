@@ -29,6 +29,8 @@ use fs_math::det;
 
 /// Same-card measured hardening and independently selected flow kinetics.
 pub mod source;
+/// Exact free-sided reduction with the original native axial J2 history.
+pub mod axial;
 
 /// One immutable table and one explicitly selected physical flow interval.
 /// Preparing a later interval does not reset the original native J2 history.
