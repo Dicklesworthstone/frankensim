@@ -10,6 +10,7 @@ use fs_lbm::material::free_surface::enthalpy::{
 use fs_material::liquid::surface::ResolvedLiquidSurfaceState;
 use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve};
 
+#[path = "slab_volume/heat.rs"]
 mod heat;
 
 #[derive(Clone, Copy)]

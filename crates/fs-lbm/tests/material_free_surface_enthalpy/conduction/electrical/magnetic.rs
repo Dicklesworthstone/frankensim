@@ -3,6 +3,7 @@
 use super::*;
 use fs_lbm::material::free_surface::enthalpy::conduction::electrical::FreeSurfaceMagneticInput;
 
+#[path = "magnetic/isolated.rs"]
 mod isolated;
 
 fn field(bz: f64, maximum_change: f64) -> FreeSurfaceMagneticInput {

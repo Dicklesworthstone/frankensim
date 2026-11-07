@@ -19,8 +19,13 @@ fn g1_g4_heated_molecular_wetting_uses_source_temperature_and_refuses_atomically
     let chart = caloric(&liquid);
     let gate = CancelGate::new_clock_free();
 
-    for (maximum_temperature_k, activation_temperature_k) in
-        [(500.0, 0.0), (410.0, 0.0), (500.0, 2000.0), (410.0, 2000.0)]
+    for (maximum_temperature_k, activation_temperature_k, reference_frequency_per_s) in [
+        (500.0, 0.0, 1e12),
+        (410.0, 0.0, 1e12),
+        (500.0, 2000.0, 1e12),
+        (410.0, 2000.0, 1e12),
+        (500.0, 0.0, 1e9),
+    ]
     {
         with_cx(&gate, |cx| {
             let initial = cells().into_iter().map(|mut cell| {
@@ -34,8 +39,12 @@ fn g1_g4_heated_molecular_wetting_uses_source_temperature_and_refuses_atomically
             let controls = MolecularKineticControls {
                 // Synthetic model calibration, deliberately separate from the
                 // material card and the static contact-angle measurements.
+                // At 1 THz, 2*lambda*K_ref = 1000 m/s. With sigma=0.004 N/m
+                // and theta_0=1.2, both signs remain angle-admissible below
+                // 46 m/s throughout 400..500 K, including activated kinetics.
+                // The original 1 GHz calibration remains a refusal case.
                 jump_length_m: 5e-10,
-                equilibrium_jump_frequency_per_s: 1e9,
+                equilibrium_jump_frequency_per_s: reference_frequency_per_s,
                 minimum_temperature_k: 300.0,
                 maximum_temperature_k,
                 maximum_speed_m_s: 100.0,
@@ -69,14 +78,21 @@ fn g1_g4_heated_molecular_wetting_uses_source_temperature_and_refuses_atomically
             let supplied = heat.iter().map(|entry| entry.energy_j).sum::<f64>();
             let result = thermal.step_with_heat(&heat, &gate);
 
-            if maximum_temperature_k == 410.0 {
+            let expected_refusal = if maximum_temperature_k == 410.0 {
+                Some("temperature")
+            } else if reference_frequency_per_s == 1e9 {
+                Some("requested speed has no finite contact angle")
+            } else {
+                None
+            };
+            if let Some(expected_reason) = expected_refusal {
                 assert!(matches!(
                     result,
                     Err(FreeSurfaceEnthalpyError::Wetting(
                         FreeSurfaceWettingError::MolecularKinetic(
-                            MolecularKineticError::OutsideDomain(_)
+                            MolecularKineticError::OutsideDomain(reason)
                         )
-                    ))
+                    )) if reason == expected_reason
                 ));
                 assert_eq!(thermal.total_enthalpy_j().unwrap(), before);
                 assert_eq!(thermal.flow().ledger_mass_kg().unwrap(), mass);
@@ -111,11 +127,14 @@ fn g1_g4_heated_molecular_wetting_uses_source_temperature_and_refuses_atomically
                 }
                 let frequency_ratio = (activation_temperature_k
                     * (1.0 / 400.0 - 1.0 / prediction.temperature_k)).exp();
-                near(prediction.equilibrium_jump_frequency_per_s, 1e9 * frequency_ratio, 2e-12);
+                let expected_frequency = reference_frequency_per_s * frequency_ratio;
+                near(prediction.equilibrium_jump_frequency_per_s, expected_frequency, 2e-12);
+                let velocity_scale = 2.0 * controls.jump_length_m * expected_frequency;
                 let expected_force = 2.0 * 1.380_649e-23 * prediction.temperature_k
-                    / 5e-10_f64.powi(2)
-                    * (prediction.signed_speed_m_s / frequency_ratio).asinh();
+                    / controls.jump_length_m.powi(2)
+                    * (prediction.signed_speed_m_s / velocity_scale).asinh();
                 near(prediction.driving_force_per_length_n_m, expected_force, 2e-12);
+                assert!(prediction.signed_speed_m_s.abs() < 46.0);
                 assert_eq!(prediction.applied_angle_radians, sample.applied_angle_radians);
                 assert!(prediction.dissipation_per_length_w_m >= 0.0);
                 if sample.regime == ContactLineRegime2::Pinned {

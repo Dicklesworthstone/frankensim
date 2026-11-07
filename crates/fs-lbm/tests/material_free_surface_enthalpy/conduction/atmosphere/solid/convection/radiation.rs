@@ -11,7 +11,7 @@ fn emissivity(t: f64) -> f64 {
 // Independent temperature bisection with the explicit affine-k primitive and
 // fourth-power radiation. Product code solves in the material power coordinate.
 fn shared_surface(cell: f64, gas: f64, radiant: f64, h: f64) -> f64 {
-    let (mut low, mut high) = (300.0, 500.0);
+    let (mut low, mut high) = (300.0_f64, 500.0_f64);
     for _ in 0..100 {
         let t = 0.5 * low + 0.5 * high;
         let solid = AREA * 0.25 / 0.0005

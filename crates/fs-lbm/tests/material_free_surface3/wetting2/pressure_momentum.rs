@@ -3,6 +3,19 @@ use super::*;
 use fs_lbm::freesurface::{ConversionRedistribution2, FreeSurfacePressureError2};
 use fs_lbm::material::free_surface::MaterialFreeSurfaceMomentumError2;
 
+// Canonical D2Q9 ordering, kept independent of the native velocity sampler.
+const DIRECTIONS: [(i32, i32); 9] = [
+    (0, 0),
+    (1, 0),
+    (0, 1),
+    (-1, 0),
+    (0, -1),
+    (1, 1),
+    (-1, 1),
+    (-1, -1),
+    (1, -1),
+];
+
 #[test]
 fn g1_angular_pressure_conversion_uses_original_material_units_and_guo_velocity() {
     let bulk = liquid(0, 300.0, None);
@@ -90,7 +103,7 @@ fn g1_angular_pressure_conversion_uses_original_material_units_and_guo_velocity(
                 for d in 0..2 {
                     let raw = native.grid.f[i]
                         .iter()
-                        .zip(fs_lbm::E)
+                        .zip(DIRECTIONS)
                         .map(|(f, e)| f * f64::from([e.0, e.1][d]))
                         .sum::<f64>();
                     let force = native.grid.g[d].mul_add(rho, native.grid.fext[i][d]);

@@ -365,8 +365,8 @@ fn g1_patch_thresholds_keep_equilibrium_sources_through_thermal_and_rate_feedbac
                     let mut reference_gas = gas.clone();
                     thermal
                         .step_with_finite_gas_environment(
-                            &heat(&initial),
                             &[],
+                            &heat(&initial),
                             controls(),
                             &mut [],
                             &[],
@@ -380,8 +380,8 @@ fn g1_patch_thresholds_keep_equilibrium_sources_through_thermal_and_rate_feedbac
                         .unwrap();
                     reference
                         .step_with_finite_gas_environment(
-                            &heat(&initial),
                             &[],
+                            &heat(&initial),
                             controls(),
                             &mut [],
                             &[],
