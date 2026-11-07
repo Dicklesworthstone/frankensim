@@ -152,7 +152,11 @@ fn every_projected_time_preserves_original_spatial_and_channel_storage() {
     }
 }
 
-fn phs(omega2: &[f64], image: &ModalShellRelaxation, gate: &CancelGate) -> PortHamiltonian {
+pub(super) fn phs(
+    omega2: &[f64],
+    image: &ModalShellRelaxation,
+    gate: &CancelGate,
+) -> PortHamiltonian {
     let n = omega2.len();
     let dimension = 2 * n;
     let mut storage = vec![0.0; dimension * dimension];
@@ -210,7 +214,13 @@ fn derivative(x: &[f64], omega2: &[f64], image: &ModalShellRelaxation, force: &[
     out
 }
 
-fn rk4(x: &mut [f64], omega2: &[f64], image: &ModalShellRelaxation, force: &[f64], dt: f64) {
+pub(super) fn rk4(
+    x: &mut [f64],
+    omega2: &[f64],
+    image: &ModalShellRelaxation,
+    force: &[f64],
+    dt: f64,
+) {
     let stage = |rate: &[f64], scale: f64| {
         x.iter()
             .zip(rate)

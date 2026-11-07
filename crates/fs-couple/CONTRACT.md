@@ -3686,3 +3686,29 @@ and cancellation refusals; and an autonomous-clock refusal. They are authored
 but unexecuted without the complete constellation dependency closure. Targeted
 formatting and API review passed; neither full integration nor continuum,
 branch-selection, Floquet or forward-error qualification is inferred.
+
+## Independent MITC material spectra in the shared memory runtime
+
+`ModalShellRelaxation::from_mitc_shell` carries arbitrary passive per-facet
+A/B/D and transverse-shear increments into the same complete Maxwell memory
+owner used by CST/DKT. The original sparse mass admits every input basis Gram
+entry, including consistent or lumped reference-surface inertia and its first
+mass moment. Original support frames and elastic bubble condensation remain
+owned by the retained MITC model. Eigenvalues and mode shapes are not refitted.
+
+Every exactly equal material time is factored from its complete projected
+stiffness in original units. Its channel has storage `(c.q-z)^2/2` and physical
+heat rate `(c.q-z)^2/tau`; all resolved tensor directions and modal cross terms
+remain. The existing `branches` bridge and cold `attach_to` path supply the
+original fs-phs/coupled runtime, including its relaxed/unrelaxed initial
+history and prohibition on double-counted intrinsic scalar damping. No new
+time integrator or material viscosity surrogate is introduced.
+
+The cold MITC adapter admits up to 1024 original modes and 8192 material
+coordinates subject to checked full projection, mass-Gram and factor work.
+The selected runtime retains its own tighter state, work, frequency and
+initial-energy ceilings. Source bands and the interpretation as increments
+above relaxed equilibrium remain caller declarations. Tests compare full
+source strain storage, original mass choices, support-frame and basis
+covariance, both initial histories, and actual fs-phs motion, independently
+integrated heat and input work against refined continuous Maxwell equations.

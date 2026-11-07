@@ -1,4 +1,4 @@
-//! Full hereditary CST/DKT material loss in the existing modal-memory owner.
+//! Full hereditary shell material loss in the existing modal-memory owner.
 //!
 //! The equilibrium pencil is unchanged. Each projected excess stiffness is
 //! factored in its original units and enters the original first-order material
@@ -17,6 +17,10 @@ use fs_plate::shell::relaxation::{
 use fs_plate::shell::viscosity::ShellViscosityBudget;
 use fs_plate::shell::{ShellMesh, ShellModel};
 use std::collections::BTreeSet;
+
+// The primary shear-deformable shell supplies the same projected spectra and
+// existing memory runtime as the CST/DKT model-form rung.
+mod mitc;
 
 /// Complete positive material strain channels on the unchanged shell basis.
 /// Each row c [1/s] has storage `(c.q-z)^2/2` [J] and heat rate
@@ -144,6 +148,18 @@ impl ModalShellRelaxation {
             fs_plate::PlateError::Cancelled => AcousticRealizeError::Cancelled,
             other => owner(other),
         })?;
+        Self::from_projected(projected, n, limits, gate)
+    }
+
+    // Shared by the original CST/DKT and MITC physical projection owners.
+    // Both callers admit their original basis and complete setup work before
+    // material stiffness is converted into existing Maxwell coordinates.
+    fn from_projected(
+        projected: Vec<ProjectedShellRelaxationBranch>,
+        n: usize,
+        limits: PlateRelaxationLimits,
+        gate: &CancelGate,
+    ) -> Result<Self, AcousticRealizeError> {
         let mut rows = Vec::new();
         let mut times = Vec::new();
         for branch in &projected {
