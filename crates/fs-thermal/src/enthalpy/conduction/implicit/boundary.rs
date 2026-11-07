@@ -42,7 +42,8 @@ pub struct ImplicitBoundaryGeometry {
 /// Passive outward heat flux and its complete original-enthalpy derivative.
 /// The native owner applies `Q_out = G * (T_cell - T_bath)` and retains its
 /// original heat and entropy accounts. The derivative differentiates Q_out,
-/// not G, with the bath temperature and geometry held fixed.
+/// not G, with the bath temperature held fixed. The ordinary query also holds
+/// geometry fixed; the geometry-aware query includes its half-distance chain rule.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImplicitBoundaryState {
     pub conductance_w_k: f64,
@@ -78,6 +79,23 @@ pub trait ImplicitBoundaryLaw {
         geometry: ImplicitBoundaryGeometry,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<ImplicitBoundaryState, DepositionError>;
+
+    /// Original flux and COMPLETE dQ_out/dh for a density-driven half-distance.
+    /// The supplied derivative is (dd/dh)/d [kg/J]; geometry contains the
+    /// current positive distance. Bath temperature, area and coating/film
+    /// resistance are held fixed. Resolve the same original face balance once,
+    /// including its geometry chain rule without adding heat or pressure work.
+    /// None leaves moving half-distance geometry explicitly unsupported.
+    fn state_at_specific_enthalpy_with_geometry_tangent(
+        &self,
+        _specific_h_j_kg: f64,
+        _bath_temperature_k: f64,
+        _geometry: ImplicitBoundaryGeometry,
+        _half_distance_relative_enthalpy_derivative_kg_j: f64,
+        _checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<ImplicitBoundaryState>, DepositionError> {
+        Ok(None)
+    }
 }
 
 /// Two signed reservoir exchanges through one original physical boundary face.
@@ -86,8 +104,9 @@ pub trait ImplicitBoundaryLaw {
 /// their separate temperatures determine the reservoir entropy exchange. They
 /// can oppose each other and remain nonzero when the cell receives no net heat.
 /// The derivative differentiates their SUM with respect to the original h,
-/// with both prescribed temperatures and geometry fixed. This is not two
-/// independently conducted faces or an extra volumetric heat source.
+/// with both prescribed temperatures fixed. The ordinary query holds geometry
+/// fixed; its geometry-aware counterpart includes the shared half-distance
+/// response. This is not two independently conducted faces or an extra heat source.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImplicitBoundaryExchangeState {
     pub baths: [PrescribedBathHeat; 2],
@@ -129,6 +148,23 @@ pub trait ImplicitBoundaryExchangeLaw {
         geometry: ImplicitBoundaryGeometry,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<ImplicitBoundaryExchangeState, DepositionError>;
+
+    /// The same two actual bath powers and their TOTAL d(Q_0+Q_1)/dh when
+    /// the shared half-distance evolves. The supplied derivative is
+    /// (dd/dh)/d [kg/J], and geometry contains its current value. Both bath
+    /// temperatures, area and coating resistance remain fixed; their separate
+    /// entropy accounts and original shared surface solve are retained.
+    /// None leaves this density/geometry coupling explicitly unsupported.
+    fn state_at_specific_enthalpy_with_geometry_tangent(
+        &self,
+        _specific_h_j_kg: f64,
+        _bath_temperature_k: f64,
+        _geometry: ImplicitBoundaryGeometry,
+        _half_distance_relative_enthalpy_derivative_kg_j: f64,
+        _checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<ImplicitBoundaryExchangeState>, DepositionError> {
+        Ok(None)
+    }
 }
 
 impl<'a> ImplicitConductionChain<'a> {

@@ -517,3 +517,6 @@ fn integrated_fluxes_refuse_density_feedback_without_geometry_tangents() {
     refused(build().with_boundary_exchanges(&initial, &[(CellId(0), &EXPANDING)], &[], || Ok(())));
     refused(build().with_boundary_exchanges(&initial, &[], &[(CellId(0), &EXPANDING)], || Ok(())));
 }
+
+#[path = "density_tests/gray.rs"]
+mod gray;

@@ -72,7 +72,9 @@ pub struct GrayRadiativeResponse {
 /// enclosure solver, profile-integrated k(T), source-dependent emissivity,
 /// near-field radiation or participating-medium transport is introduced.
 /// The face kernel allocates nothing; a supplied source law retains its own
-/// evaluation costs and is queried once per enthalpy trial.
+/// evaluation costs and is queried once per enthalpy trial. The geometry-aware
+/// trait query includes each cell's density-driven half-thickness in the same
+/// balance; area, view, coatings and independently authored gap remain fixed.
 pub struct GrayRadiativeLink<'a> {
     materials: [&'a dyn ImplicitConductionLaw; 2],
     effective_emissivity: f64,
@@ -185,6 +187,17 @@ impl<'a> GrayRadiativeLink<'a> {
         patch: ContactPatch,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<GrayRadiativeResponse, DepositionError> {
+        self.evaluate_with_geometry_tangent(enthalpies_j_kg, geometry, patch, [0.0; 2], checkpoint)
+    }
+
+    fn evaluate_with_geometry_tangent(
+        &self,
+        enthalpies_j_kg: [f64; 2],
+        geometry: ConductiveLink,
+        patch: ContactPatch,
+        relative_distance_slopes_kg_j: [f64; 2],
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<GrayRadiativeResponse, DepositionError> {
         checkpoint()?;
         let area = patch.link.area_m2;
         if geometry.link_id != patch.link.id
@@ -193,6 +206,9 @@ impl<'a> GrayRadiativeLink<'a> {
             || patch.covered_area_m2 != [area; 2]
             || geometry.half_distances_m.iter().any(|d| !positive(*d))
             || geometry.contact_resistance_m2_k_w != 0.0
+            || relative_distance_slopes_kg_j
+                .iter()
+                .any(|slope| !slope.is_finite())
         {
             return Err(DepositionError::InvalidInput(
                 "gray link needs equal physical face areas and explicit per-side coating resistance",
@@ -273,31 +289,33 @@ impl<'a> GrayRadiativeLink<'a> {
             let denominator =
                 bulk / scale + weights[0] * (slopes[0] / scale) + weights[1] * (slopes[1] / scale);
             if residual.abs().max((conducted - surface_power).abs()) <= allowance {
-                // q=f(Ta-ra*q,Tb+rb*q); ra'=-(da/ka)*(ka'/ka).
-                // Differentiate this original balance, including the two k(h)
-                // slopes even when either caloric temperature slope is zero.
+                // q=f(Ta-ra*q,Tb+rb*q); r_i'=(d_i/k_i)*(d_i'/d_i-k_i'/k_i).
+                // Differentiate this same balance, including original density
+                // and conductivity changes even on an isothermal plateau.
                 let full_drop = fraction(surface_g, bulk) * delta;
-                let conductivity_terms = [
+                let resistance_terms = [
                     finite(
                         (bulk_resistances[0] / resistance)
                             * full_drop
-                            * (states[0].conductivity_slope_kg_w_m_k_j / conductivities[0]),
+                            * (states[0].conductivity_slope_kg_w_m_k_j / conductivities[0]
+                                - relative_distance_slopes_kg_j[0]),
                     )?,
                     finite(
                         (bulk_resistances[1] / resistance)
                             * full_drop
-                            * (states[1].conductivity_slope_kg_w_m_k_j / conductivities[1]),
+                            * (states[1].conductivity_slope_kg_w_m_k_j / conductivities[1]
+                                - relative_distance_slopes_kg_j[1]),
                     )?,
                 ];
                 let mut derivatives = [
                     finite(
                         area * (bulk * (slopes[0] / scale) / denominator)
-                            * finite(states[0].temperature_slope_kg_k_j + conductivity_terms[0])?,
+                            * finite(states[0].temperature_slope_kg_k_j + resistance_terms[0])?,
                     )?,
                     finite(
                         -area
                             * (bulk * (slopes[1] / scale) / denominator)
-                            * finite(states[1].temperature_slope_kg_k_j - conductivity_terms[1])?,
+                            * finite(states[1].temperature_slope_kg_k_j - resistance_terms[1])?,
                     )?,
                 ];
                 if let Some(state) = gap_state {
@@ -438,6 +456,24 @@ impl ImplicitLinkLaw for GrayRadiativeLink<'_> {
     ) -> Result<ImplicitLinkState, DepositionError> {
         self.evaluate(enthalpies_j_kg, geometry, patch, checkpoint)
             .map(|r| r.link)
+    }
+
+    fn state_at_specific_enthalpies_with_geometry_tangent(
+        &self,
+        enthalpies_j_kg: [f64; 2],
+        geometry: ConductiveLink,
+        patch: ContactPatch,
+        half_distance_relative_enthalpy_derivatives_kg_j: [f64; 2],
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<ImplicitLinkState>, DepositionError> {
+        self.evaluate_with_geometry_tangent(
+            enthalpies_j_kg,
+            geometry,
+            patch,
+            half_distance_relative_enthalpy_derivatives_kg_j,
+            checkpoint,
+        )
+        .map(|response| Some(response.link))
     }
 }
 

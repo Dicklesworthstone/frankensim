@@ -74,6 +74,8 @@ pub struct GrayAmbientResponse {
 /// the exterior surface; convection htc is supplied separately and counted
 /// once. No moving area or surface heat capacity is introduced. The face
 /// kernel allocates nothing; a source law retains its own evaluation costs.
+/// The geometry-aware trait query includes original density-driven thickness
+/// in this same surface solve, including on an isothermal phase plateau.
 pub struct GrayAmbientBoundary<'a> {
     material: &'a dyn ImplicitConductionLaw,
     emissivity: f64,
@@ -138,11 +140,29 @@ impl<'a> GrayAmbientBoundary<'a> {
         geometry: ImplicitBoundaryGeometry,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<GrayAmbientResponse, DepositionError> {
+        self.evaluate_with_geometry_tangent(
+            specific_h_j_kg,
+            bath_temperature_k,
+            geometry,
+            0.0,
+            checkpoint,
+        )
+    }
+
+    fn evaluate_with_geometry_tangent(
+        &self,
+        specific_h_j_kg: f64,
+        bath_temperature_k: f64,
+        geometry: ImplicitBoundaryGeometry,
+        relative_distance_slope_kg_j: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<GrayAmbientResponse, DepositionError> {
         checkpoint()?;
         if !positive(bath_temperature_k)
             || !nonnegative(geometry.area_m2)
             || !positive(geometry.half_distance_m)
             || !nonnegative(geometry.surface_resistance_m2_k_w)
+            || !relative_distance_slope_kg_j.is_finite()
         {
             return Err(DepositionError::InvalidInput(
                 "invalid gray boundary temperature or geometry",
@@ -219,10 +239,12 @@ impl<'a> GrayAmbientBoundary<'a> {
             )?;
             if residual.abs().max((conducted - surface_power).abs()) <= allowance {
                 // dQ/dh = A F'(Ts)/(a+F'(Ts)) * [a T'(h)+a'(h)(Tc-Ts)].
-                // a'=a*(bulk R / total R)*(k'/k); no apparent Cp on a plateau.
+                // a'=a*(bulk R / total R)*(k'/k-d'/d). The original
+                // density can change thickness even on a latent plateau.
                 let bulk_derivative = finite(
                     bulk * (bulk_resistance / resistance)
-                        * (state.conductivity_slope_kg_w_m_k_j / k),
+                        * (state.conductivity_slope_kg_w_m_k_j / k
+                            - relative_distance_slope_kg_j),
                 )?;
                 let mut derivative = finite(
                     geometry.area_m2
@@ -321,6 +343,24 @@ impl ImplicitBoundaryLaw for GrayAmbientBoundary<'_> {
     ) -> Result<ImplicitBoundaryState, DepositionError> {
         self.evaluate(specific_h_j_kg, bath_temperature_k, geometry, checkpoint)
             .map(|response| response.boundary)
+    }
+
+    fn state_at_specific_enthalpy_with_geometry_tangent(
+        &self,
+        specific_h_j_kg: f64,
+        bath_temperature_k: f64,
+        geometry: ImplicitBoundaryGeometry,
+        half_distance_relative_enthalpy_derivative_kg_j: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<ImplicitBoundaryState>, DepositionError> {
+        self.evaluate_with_geometry_tangent(
+            specific_h_j_kg,
+            bath_temperature_k,
+            geometry,
+            half_distance_relative_enthalpy_derivative_kg_j,
+            checkpoint,
+        )
+        .map(|response| Some(response.boundary))
     }
 }
 

@@ -23,14 +23,14 @@
 //! Selected planar layers may expand or contract at fixed mass and footprint.
 //! Their original density and specific-volume tangent update every native
 //! Fourier/contact/surface resistance and its Jacobian, including on latent
-//! plateaus. Integrated custom flux laws with fixed-geometry tangents refuse
-//! those material-density layers.
+//! plateaus. Custom flux owners may explicitly supply the same geometry chain
+//! rule; owners that supply only fixed-geometry tangents still refuse.
 
 use super::*;
 use crate::enthalpy::backward_euler::{
-    BackwardEulerStep, BackwardEulerTrial, BoundaryConductances, BoundaryStepCoefficients,
-    BoundaryExchangeStepCoefficients, BoundaryExchanges,
-    StageQuadrature, StepCoefficients, TransportStepCoefficients, resolvable_increment_j,
+    BackwardEulerStep, BackwardEulerTrial, BoundaryConductances, BoundaryExchangeStepCoefficients,
+    BoundaryExchanges, BoundaryStepCoefficients, StageQuadrature, StepCoefficients,
+    TransportStepCoefficients, resolvable_increment_j,
 };
 use crate::enthalpy::entropy::EntropyAudit;
 use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
@@ -331,6 +331,12 @@ fn endpoint_distance(
         })
 }
 
+fn require_geometry_tangent<T>(state: Option<T>) -> Result<T, ImplicitConductionError> {
+    state.ok_or(ImplicitConductionError::Invalid(
+        "integrated flux laws do not supply material-density geometry derivatives",
+    ))
+}
+
 impl<'a> ImplicitConductionChain<'a> {
     pub fn new(
         thermal: &DepositionSimulation<'_>,
@@ -411,22 +417,14 @@ impl<'a> ImplicitConductionChain<'a> {
         &self.ids
     }
 
-    fn admit_fixed_flux_geometry(&self, id: CellId) -> Result<(), ImplicitConductionError> {
-        if !self.conduction.has_material_density_layers {
-            return Ok(());
-        }
-        if self
-            .conduction
-            .cells
-            .get(&id)
-            .and_then(|cell| cell.phase_layer)
-            .is_some_and(|layer| layer.uses_material_density)
-        {
-            return Err(ImplicitConductionError::Invalid(
-                "integrated flux laws do not supply material-density geometry derivatives",
-            ));
-        }
-        Ok(())
+    fn has_material_density_geometry(&self, id: CellId) -> bool {
+        self.conduction.has_material_density_layers
+            && self
+                .conduction
+                .cells
+                .get(&id)
+                .and_then(|cell| cell.phase_layer)
+                .is_some_and(|layer| layer.uses_material_density)
     }
 
     fn admit(
@@ -618,28 +616,39 @@ impl<'a> ImplicitConductionChain<'a> {
             checkpoint()?;
             let ia = self.index[&binding.a];
             let ib = self.index[&binding.b];
-            let mut geometry = binding.geometry;
-            for (side, index) in [ia, ib].into_iter().enumerate() {
-                geometry.half_distances_m[side] = endpoint_distance(
-                    &layer_distances, index, geometry.half_distances_m[side],
-                ).value_m;
-            }
+            let distances = [
+                endpoint_distance(&layer_distances, ia, binding.geometry.half_distances_m[0]),
+                endpoint_distance(&layer_distances, ib, binding.geometry.half_distances_m[1]),
+            ];
+            let geometry = ConductiveLink {
+                half_distances_m: distances.map(|distance| distance.value_m),
+                ..binding.geometry
+            };
             if let Some(law) = self.link_laws.get(&id) {
-                self.admit_fixed_flux_geometry(binding.a)?;
-                self.admit_fixed_flux_geometry(binding.b)?;
-                let state = law.state_at_specific_enthalpies(
-                    [
-                        thermal.cells[&binding.a].specific_h_j_kg,
-                        thermal.cells[&binding.b].specific_h_j_kg,
-                    ],
-                    geometry,
-                    thermal
-                        .contact_patch(id)
-                        .ok_or(ImplicitConductionError::Invalid(
-                            "implicit flux link disappeared",
-                        ))?,
-                    checkpoint,
-                )?;
+                let enthalpies = [
+                    thermal.cells[&binding.a].specific_h_j_kg,
+                    thermal.cells[&binding.b].specific_h_j_kg,
+                ];
+                let patch = thermal
+                    .contact_patch(id)
+                    .ok_or(ImplicitConductionError::Invalid(
+                        "implicit flux link disappeared",
+                    ))?;
+                let state = if self.has_material_density_geometry(binding.a)
+                    || self.has_material_density_geometry(binding.b)
+                {
+                    require_geometry_tangent(
+                        law.state_at_specific_enthalpies_with_geometry_tangent(
+                            enthalpies,
+                            geometry,
+                            patch,
+                            distances.map(|distance| distance.relative_enthalpy_slope_kg_j),
+                            checkpoint,
+                        )?,
+                    )?
+                } else {
+                    law.state_at_specific_enthalpies(enthalpies, geometry, patch, checkpoint)?
+                };
                 state.admit()?;
                 link_values.insert(id, state.conductance_w_k);
                 link_states.insert(id, state);
@@ -686,31 +695,45 @@ impl<'a> ImplicitConductionChain<'a> {
         for (&id, binding) in &self.conduction.reservoirs {
             checkpoint()?;
             let index = self.index[&id];
-            let distance = endpoint_distance(
-                &layer_distances, index, binding.geometry.half_distance_m,
-            ).value_m;
+            let distance =
+                endpoint_distance(&layer_distances, index, binding.geometry.half_distance_m);
+            let geometry = ImplicitBoundaryGeometry {
+                area_m2: binding.area_m2,
+                half_distance_m: distance.value_m,
+                surface_resistance_m2_k_w: binding.geometry.surface_resistance_m2_k_w,
+            };
             if let Some(law) = self.reservoir_exchanges.get(&id) {
-                self.admit_fixed_flux_geometry(id)?;
                 let cell = &thermal.cells[&id];
-                let reservoir = cell.boundary.reservoir.ok_or(ImplicitConductionError::Invalid(
-                    "implicit exchange reservoir disappeared",
-                ))?;
-                let state = law.state_at_specific_enthalpy(
-                    cell.specific_h_j_kg,
-                    reservoir.temperature_k,
-                    ImplicitBoundaryGeometry {
-                        area_m2: binding.area_m2,
-                        half_distance_m: distance,
-                        surface_resistance_m2_k_w: binding.geometry.surface_resistance_m2_k_w,
-                    },
-                    checkpoint,
-                )?.validate()?;
+                let reservoir = cell
+                    .boundary
+                    .reservoir
+                    .ok_or(ImplicitConductionError::Invalid(
+                        "implicit exchange reservoir disappeared",
+                    ))?;
+                let state = if self.has_material_density_geometry(id) {
+                    require_geometry_tangent(
+                        law.state_at_specific_enthalpy_with_geometry_tangent(
+                            cell.specific_h_j_kg,
+                            reservoir.temperature_k,
+                            geometry,
+                            distance.relative_enthalpy_slope_kg_j,
+                            checkpoint,
+                        )?,
+                    )?
+                } else {
+                    law.state_at_specific_enthalpy(
+                        cell.specific_h_j_kg,
+                        reservoir.temperature_k,
+                        geometry,
+                        checkpoint,
+                    )?
+                }
+                .validate()?;
                 exchange_values.reservoir.insert(id, state.baths);
                 reservoir_exchange_states.insert(id, state);
                 continue;
             }
             if let Some(law) = self.reservoir_laws.get(&id) {
-                self.admit_fixed_flux_geometry(id)?;
                 let cell = &thermal.cells[&id];
                 let reservoir = cell
                     .boundary
@@ -718,16 +741,24 @@ impl<'a> ImplicitConductionChain<'a> {
                     .ok_or(ImplicitConductionError::Invalid(
                         "implicit flux reservoir disappeared",
                     ))?;
-                let state = law.state_at_specific_enthalpy(
-                    cell.specific_h_j_kg,
-                    reservoir.temperature_k,
-                    ImplicitBoundaryGeometry {
-                        area_m2: binding.area_m2,
-                        half_distance_m: distance,
-                        surface_resistance_m2_k_w: binding.geometry.surface_resistance_m2_k_w,
-                    },
-                    checkpoint,
-                )?;
+                let state = if self.has_material_density_geometry(id) {
+                    require_geometry_tangent(
+                        law.state_at_specific_enthalpy_with_geometry_tangent(
+                            cell.specific_h_j_kg,
+                            reservoir.temperature_k,
+                            geometry,
+                            distance.relative_enthalpy_slope_kg_j,
+                            checkpoint,
+                        )?,
+                    )?
+                } else {
+                    law.state_at_specific_enthalpy(
+                        cell.specific_h_j_kg,
+                        reservoir.temperature_k,
+                        geometry,
+                        checkpoint,
+                    )?
+                };
                 state.admit()?;
                 boundary_values
                     .reservoir_w_k
@@ -738,7 +769,7 @@ impl<'a> ImplicitConductionChain<'a> {
             let k = states[index].conductivity_w_m_k;
             let g = surface_conductance_w_k(
                 binding.area_m2,
-                distance,
+                distance.value_m,
                 k,
                 binding.geometry.surface_resistance_m2_k_w,
             )?;
@@ -747,39 +778,58 @@ impl<'a> ImplicitConductionChain<'a> {
         for (&id, binding) in &self.conduction.ambient_faces {
             checkpoint()?;
             let index = self.index[&id];
-            let distance = endpoint_distance(
-                &layer_distances, index, binding.geometry.half_distance_m,
-            ).value_m;
+            let distance =
+                endpoint_distance(&layer_distances, index, binding.geometry.half_distance_m);
+            let geometry = ImplicitBoundaryGeometry {
+                area_m2: binding.area_m2,
+                half_distance_m: distance.value_m,
+                surface_resistance_m2_k_w: binding.geometry.surface_resistance_m2_k_w,
+            };
             if let Some(law) = self.ambient_exchanges.get(&id) {
-                self.admit_fixed_flux_geometry(id)?;
                 let cell = &thermal.cells[&id];
-                let state = law.state_at_specific_enthalpy(
-                    cell.specific_h_j_kg,
-                    cell.boundary.ambient_k,
-                    ImplicitBoundaryGeometry {
-                        area_m2: binding.area_m2,
-                        half_distance_m: distance,
-                        surface_resistance_m2_k_w: binding.geometry.surface_resistance_m2_k_w,
-                    },
-                    checkpoint,
-                )?.validate()?;
+                let state = if self.has_material_density_geometry(id) {
+                    require_geometry_tangent(
+                        law.state_at_specific_enthalpy_with_geometry_tangent(
+                            cell.specific_h_j_kg,
+                            cell.boundary.ambient_k,
+                            geometry,
+                            distance.relative_enthalpy_slope_kg_j,
+                            checkpoint,
+                        )?,
+                    )?
+                } else {
+                    law.state_at_specific_enthalpy(
+                        cell.specific_h_j_kg,
+                        cell.boundary.ambient_k,
+                        geometry,
+                        checkpoint,
+                    )?
+                }
+                .validate()?;
                 exchange_values.ambient.insert(id, state.baths);
                 ambient_exchange_states.insert(id, state);
                 continue;
             }
             if let Some(law) = self.ambient_laws.get(&id) {
-                self.admit_fixed_flux_geometry(id)?;
                 let cell = &thermal.cells[&id];
-                let state = law.state_at_specific_enthalpy(
-                    cell.specific_h_j_kg,
-                    cell.boundary.ambient_k,
-                    ImplicitBoundaryGeometry {
-                        area_m2: binding.area_m2,
-                        half_distance_m: distance,
-                        surface_resistance_m2_k_w: binding.geometry.surface_resistance_m2_k_w,
-                    },
-                    checkpoint,
-                )?;
+                let state = if self.has_material_density_geometry(id) {
+                    require_geometry_tangent(
+                        law.state_at_specific_enthalpy_with_geometry_tangent(
+                            cell.specific_h_j_kg,
+                            cell.boundary.ambient_k,
+                            geometry,
+                            distance.relative_enthalpy_slope_kg_j,
+                            checkpoint,
+                        )?,
+                    )?
+                } else {
+                    law.state_at_specific_enthalpy(
+                        cell.specific_h_j_kg,
+                        cell.boundary.ambient_k,
+                        geometry,
+                        checkpoint,
+                    )?
+                };
                 state.admit()?;
                 boundary_values
                     .ambient_w_k
@@ -789,7 +839,7 @@ impl<'a> ImplicitConductionChain<'a> {
             }
             let g = surface_conductance_w_k(
                 binding.area_m2,
-                distance,
+                distance.value_m,
                 states[index].conductivity_w_m_k,
                 binding.geometry.surface_resistance_m2_k_w,
             )?;

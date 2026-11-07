@@ -1,5 +1,6 @@
 //! Source material density reaches both modal front doors and their derivatives.
 
+#[path = "material_modal/density_sensitivity.rs"]
 mod density_sensitivity;
 
 use std::ops::ControlFlow;

@@ -16,6 +16,8 @@ pub use surface::{ImplicitSurfaceExchangeLaw, ImplicitSurfaceExchangeState};
 /// One passive link flux and its full derivatives at the same trial state.
 /// Positive power is from A to B: `Q = G * (T_A - T_B)`. The derivatives
 /// differentiate this complete Q, not G, with the other enthalpy held fixed.
+/// The ordinary query holds geometry fixed; the geometry-aware query includes
+/// the explicitly supplied half-distance derivatives in these same entries.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImplicitLinkState {
     pub conductance_w_k: f64,
@@ -56,6 +58,31 @@ pub trait ImplicitLinkLaw {
         patch: ContactPatch,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<ImplicitLinkState, DepositionError>;
+
+    /// Complete flux and enthalpy tangents when the normal half-distances
+    /// evolve with their respective cells' original specific enthalpies.
+    ///
+    /// Each supplied entry is (dd_i/dh_i)/d_i [kg/J], at fixed mass and
+    /// footprint. The geometry already contains the CURRENT distances. Return
+    /// the full derivatives dQ/dh_i, including that geometric chain rule and
+    /// all existing source responses, from the same original face solve.
+    /// Area, coverage, coatings and independent gap geometry remain fixed.
+    /// This adds no energy storage, pressure work or separate heat transfer.
+    ///
+    /// None explicitly leaves density-driven geometry unsupported. It must
+    /// not be replaced by a fixed-geometry tangent, even if a local volume
+    /// derivative happens to vanish. Existing fixed-geometry callers use
+    /// state_at_specific_enthalpies unchanged.
+    fn state_at_specific_enthalpies_with_geometry_tangent(
+        &self,
+        _enthalpies_j_kg: [f64; 2],
+        _geometry: ConductiveLink,
+        _patch: ContactPatch,
+        _half_distance_relative_enthalpy_derivatives_kg_j: [f64; 2],
+        _checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<ImplicitLinkState>, DepositionError> {
+        Ok(None)
+    }
 }
 
 impl<'a> ImplicitConductionChain<'a> {

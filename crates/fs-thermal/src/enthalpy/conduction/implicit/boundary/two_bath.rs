@@ -49,7 +49,9 @@ pub struct GrayTwoBathResponse {
 /// This is a gray full-view boundary, not a finite radiosity enclosure or a
 /// spectral photon-entropy model. The surface kernel allocates no memory; a
 /// source law retains its own evaluation costs. Gas boundary events obey native
-/// time integrator's admission rules.
+/// time integrator's admission rules. The geometry-aware trait query admits
+/// original density-driven half-thickness while retaining both actual bath
+/// powers, their distinct temperatures and the same shared surface balance.
 pub struct GrayTwoBathBoundary<'a> {
     material: &'a dyn ImplicitConductionLaw,
     emissivity: f64,
@@ -113,11 +115,29 @@ impl<'a> GrayTwoBathBoundary<'a> {
         geometry: ImplicitBoundaryGeometry,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<GrayTwoBathResponse, DepositionError> {
+        self.evaluate_with_geometry_tangent(
+            specific_h_j_kg,
+            gas_temperature_k,
+            geometry,
+            0.0,
+            checkpoint,
+        )
+    }
+
+    fn evaluate_with_geometry_tangent(
+        &self,
+        specific_h_j_kg: f64,
+        gas_temperature_k: f64,
+        geometry: ImplicitBoundaryGeometry,
+        relative_distance_slope_kg_j: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<GrayTwoBathResponse, DepositionError> {
         checkpoint()?;
         if !positive(gas_temperature_k)
             || !nonnegative(geometry.area_m2)
             || !positive(geometry.half_distance_m)
             || !nonnegative(geometry.surface_resistance_m2_k_w)
+            || !relative_distance_slope_kg_j.is_finite()
         {
             return Err(DepositionError::InvalidInput(
                 "invalid two-bath gray boundary temperature or geometry",
@@ -204,10 +224,13 @@ impl<'a> GrayTwoBathBoundary<'a> {
                 let bulk_derivative = if k == 0.0 {
                     0.0
                 } else {
-                    finite(bulk * conductivity_weight * (state.conductivity_slope_kg_w_m_k_j / k))?
+                    finite(bulk * conductivity_weight
+                        * (state.conductivity_slope_kg_w_m_k_j / k
+                            - relative_distance_slope_kg_j))?
                 };
                 // Qh=A*f'(Ts)/(a+f'(Ts))*[a*Th+a_h*(Tc-Ts)]. Both bath
-                // temperatures are held fixed; no apparent heat capacity is used.
+                // temperatures are held fixed; a_h includes the original
+                // k'/k-d'/d response without an apparent heat capacity.
                 let mut derivative = finite(
                     geometry.area_m2
                         * fraction(surface_slope, bulk)
@@ -329,6 +352,24 @@ impl ImplicitBoundaryExchangeLaw for GrayTwoBathBoundary<'_> {
     ) -> Result<ImplicitBoundaryExchangeState, DepositionError> {
         self.evaluate(specific_h_j_kg, bath_temperature_k, geometry, checkpoint)
             .map(|response| response.boundary)
+    }
+
+    fn state_at_specific_enthalpy_with_geometry_tangent(
+        &self,
+        specific_h_j_kg: f64,
+        bath_temperature_k: f64,
+        geometry: ImplicitBoundaryGeometry,
+        half_distance_relative_enthalpy_derivative_kg_j: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<ImplicitBoundaryExchangeState>, DepositionError> {
+        self.evaluate_with_geometry_tangent(
+            specific_h_j_kg,
+            bath_temperature_k,
+            geometry,
+            half_distance_relative_enthalpy_derivative_kg_j,
+            checkpoint,
+        )
+        .map(|response| Some(response.boundary))
     }
 }
 

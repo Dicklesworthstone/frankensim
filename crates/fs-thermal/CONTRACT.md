@@ -1548,8 +1548,27 @@ state-dependent contact resistance composes with this same derivative. No
 mass is reconstructed from the reference mesh and no second pressure-work
 term is added. The same endpoint serves backward Euler, SDIRK2 and their graph
 owners. Fixed-density layers need no extra tangent. Missing density tangents
-and integrated custom link/boundary/exchange laws with fixed-geometry tangent
-contracts refuse; their omitted geometric derivatives are never guessed.
+still refuse.
+
+Custom link, boundary and two-bath owners may implement their optional
+`state_at_specific_enthalpies_with_geometry_tangent` or
+`state_at_specific_enthalpy_with_geometry_tangent` query. It receives the
+CURRENT normal half-distances and each local `(dd/dh)/d` in kg/J, and returns
+the complete original flux tangent including that chain rule. The existing
+fixed-geometry query remains unchanged; `None` explicitly refuses density
+coupling even where a local slope happens to vanish. Unsupported prepared
+source-integrated geometry is not silently substituted or differentiated.
+
+`GrayAmbientBoundary`, `GrayTwoBathBoundary` and `GrayRadiativeLink` provide
+this geometry-aware response through their SAME bounded surface solve. Their
+half-cell resistance derivative uses `k'/k-d'/d`, including on latent plateaus,
+and composes with original surface-coefficient and gap-resistance derivatives.
+The geometric chain rule uses the existing source samples and adds no heat
+account or pressure-work term.
+Separate bath powers/temperatures and equal/opposite finite-body transfers
+retain the native energy and entropy owners. Area, coverage, coatings, view
+and independently declared gap geometry stay fixed; no gap displacement or
+mechanical motion is inferred from a changing half-thickness.
 
 G0/G1/G3 tests in `conduction/density_layer_tests.rs` cover a heating trajectory
 with evolving resistance, both external faces, one density query per cell,
@@ -1562,6 +1581,10 @@ Jacobian, fixed-density reduction, closed chain/graph SDIRK conservation and
 unsupported-law refusal. `fs-material/tests/phase_conductivity/density.rs`
 drives a latent-density endpoint through the original source adapter and
 checks its independently eliminated energy equation.
+`implicit/density_tests/gray.rs` checks an analytic latent convection tangent,
+nonlinear gray surface/gap finite differences, single original surface/gap queries,
+both boundary channels against an implicit energy equation, distinct-bath
+entropy, closed graph SDIRK conservation and cancellation.
 
 
 ## Implicit enthalpy transport on geometric conduction chains
@@ -2486,7 +2509,8 @@ return no response or accepted thermal candidate.
 
 This uses the native cellwise conductivity approximation, not an integrated
 within-cell `k(T)` profile. It assumes an opaque gray surface with a complete
-view of one isothermal surrounding, fixed geometry and no surface heat capacity.
+view of one isothermal surrounding, fixed area and no surface heat capacity.
+Normal half-thickness may follow the explicit material-density closure above.
 Separate radiative/convective bath temperatures and original-enthalpy surface
 response use the closures below. Finite enclosure reflections and spectral
 photon entropy require their own closures.
@@ -2528,8 +2552,9 @@ SDIRK stage references, gas-bath events, partially covered ambient faces with
 internal conduction, and transactional ownership/refusals.
 These and the five prior radiation regressions passed in a focused build of
 the complete production thermal library and original numerical dependencies.
-This remains fixed-geometry, cellwise-conductivity, gray full-view exchange
-without surface storage or spectral radiation entropy.
+This remains fixed-area, cellwise-conductivity, gray full-view exchange
+without surface storage or spectral radiation entropy. Normal half-thickness
+may follow the explicit original-density closure above.
 
 ### Original enthalpy-dependent gray surface response
 
@@ -2862,7 +2887,9 @@ retain near-equilibrium heat. The returned secant applies one equal/opposite
 power; the original surface residual is retained without reallocating heat.
 
 Both analytic endpoint derivatives include their original `dT/dh` and `dk/dh`,
-including phase-dependent conductivity on an exact latent plateau. The existing
+including phase-dependent conductivity on an exact latent plateau. The
+geometry-aware query also includes original density-driven `d'/d` on each
+side, with the same fixed-area, fixed-gap reduction described above. The existing
 BE/SDIRK residuals, stage quadrature, Newton gates, finite-body thermal entropy
 and energy owners remain unchanged. Zero bulk conductivity insulates this link;
 undetermined disconnected massless surface temperatures are reported as `None`.
