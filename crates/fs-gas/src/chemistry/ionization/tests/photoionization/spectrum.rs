@@ -1,4 +1,6 @@
 //! G1/G3 spectral attenuation, conservative heating and time/order refinement.
+mod column;
+
 use super::*;
 use crate::chemistry::photoionization::spectrum::{
     SpectralPhotoionizationError, SpectralPhotoionizationResult, SpectralPhotoionizationSolve,

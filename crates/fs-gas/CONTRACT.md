@@ -7078,6 +7078,39 @@ propagation and immediate photoelectron thermalization. It does not infer
 spectral quadrature accuracy, spatial multigroup fronts, secondary ionization,
 recombination during the exposure, or empirical/global error bounds.
 
+## Spatial spectral ionization and evolving shielding
+
+`chemistry::photoionization::spectrum::column::advance_spectral_column`
+propagates the original discrete photon groups through ordered, individually
+mixed cells of a common beam area. Every cell retains its own atomic source,
+thermodynamic bank and actual populations. Each complete monochromatic column
+subflow passes the integrated escaping photons into the next cell using the
+original depletion/transmission kernels. Its fluence solution accounts for
+changing upstream opacity; downstream fluence-equivalent means are not treated
+as simultaneous constant illumination during a multigroup exposure.
+
+Symmetric composition of those whole-column band flows resolves concurrent
+spectral hardening. Adaptive full/two-half comparison controls local estimated
+population, electron-temperature and individual band-transfer errors. Prepared
+cross sections and reusable band-major buffers keep trial work linear in the
+cell/group product without per-trial allocations or nonlinear solves. Explicit
+cell, group, cell/group-product and step limits bound work and storage.
+
+Per-cell incoming/absorbed/outgoing band accounts close across each interface;
+per-band and whole-column reductions independently account for exiting light,
+chemical storage and electron sensible energy. Actual midpoint/end source
+temperatures, original charge admission, energy allowances and cancellation
+gate one complete publication. Inputs remain unchanged on every refusal.
+Focused controls cover the monochromatic-column and single-cell limits,
+independent coupled ODE evolution, downstream hardening, temporal refinement,
+interface/global conservation, dark bands and transactional refusal.
+
+The model retains fixed geometry, quasi-static propagation, local mixing and
+immediate photoelectron thermalization. Spatially distinct cells resolve
+shielding but do not resolve structure within a cell. Recombination during
+transport, finite light-travel time, scattering, secondary ionization and
+spectral-quadrature or empirical accuracy remain separate capabilities.
+
 ## Radiative capture with escaping photon energy
 
 `chemistry::radiative_recombination::advance_radiative_recombination`

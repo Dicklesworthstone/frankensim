@@ -19,6 +19,8 @@
 //! stationary heavy targets and absence of other absorbers/recombination apply.
 //! Splitting error estimates are not global or empirical error certificates.
 
+pub mod column;
+
 use super::*;
 use fs_math::dd::Dd;
 use fs_thermochem::kinetics::atomic_ionization::photoionization::MAX_PHOTON_GROUPS_V1;
