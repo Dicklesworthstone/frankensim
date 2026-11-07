@@ -349,6 +349,7 @@ pub fn advance_soluble_surface(
                 &after[..count],
                 laws,
                 areas_m2,
+                areas_m2,
                 &surface,
                 &trial,
                 offset,
@@ -390,6 +391,7 @@ pub fn advance_soluble_surface(
         bulk.solute_moles(),
         &inventory[..count],
         laws,
+        areas_m2,
         areas_m2,
         amounts_mol,
         &surface,
@@ -588,13 +590,16 @@ impl Exchange<'_> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn energy_change(
+// Shared original endpoint account: a moving consumer supplies both actual
+// areas without freezing the final amount on an inadmissible old geometry.
+pub(in crate::capillary::surface) fn energy_change(
     bulk: &AqueousSolution,
     species: usize,
     before_bulk: &[f64],
     after_bulk: &[f64],
     laws: &[SurfactantLaw],
-    areas: &[f64],
+    before_areas: &[f64],
+    after_areas: &[f64],
     before: &[f64],
     after: &[f64],
     offset: f64,
@@ -622,9 +627,10 @@ fn energy_change(
             * det::ln(model.reference_concentration_mol_m3())
             * (after_bulk[species] - before_bulk[species]),
     )?);
-    for (face, ((&law, &area), (&old, &new))) in laws
+    for (face, (((&law, &before_area), &after_area), (&old, &new))) in laws
         .iter()
-        .zip(areas)
+        .zip(before_areas)
+        .zip(after_areas)
         .zip(before.iter().zip(after))
         .enumerate()
     {
@@ -634,7 +640,7 @@ fn energy_change(
                 law,
                 amount_mol: old,
             }
-            .energy_change_at_fixed_area(area, new)
+            .energy_change(before_area, after_area, new)
             .map_err(|error| SolubleSurfaceError::Surface { face, error })?,
         );
         change.add(finite(offset * (new - old))?);

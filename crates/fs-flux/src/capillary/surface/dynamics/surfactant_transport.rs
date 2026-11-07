@@ -29,6 +29,10 @@ use super::super::surfactant::{
 };
 use super::*;
 
+/// Finite aqueous adsorption/desorption on the original moving material faces.
+#[cfg(feature = "surface-soluble")]
+pub mod soluble;
+
 /// One homogeneous isothermal coating and its held physical diffusion graph.
 #[derive(Clone, Copy, Debug)]
 pub struct SurfaceSurfactantTransport<'a> {

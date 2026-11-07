@@ -183,6 +183,52 @@ impl SurfactantField<'_> {
 }
 
 impl SurfactantFace {
+    /// Original free-energy increment when both area and amount change [J].
+    ///
+    /// Both physical endpoints must obey the EOS. The evaluation combines the
+    /// existing exact amount and area secants through the smaller endpoint
+    /// amount, which fits both areas whenever the endpoints are admitted.
+    /// This avoids an artificial packing refusal during expansion/adsorption
+    /// or contraction/desorption and does not subtract large clean energies.
+    /// It is an endpoint account, not an assumed kinetic or mechanical path.
+    pub fn energy_change(
+        self,
+        before_area_m2: f64,
+        after_area_m2: f64,
+        after_amount_mol: f64,
+    ) -> Result<f64, SurfactantError> {
+        if before_area_m2 == after_area_m2 {
+            return self.energy_change_at_fixed_area(before_area_m2, after_amount_mol);
+        }
+        self.at_area(before_area_m2)?;
+        Self {
+            amount_mol: after_amount_mol,
+            ..self
+        }
+        .at_area(after_area_m2)?;
+        let common = Self {
+            amount_mol: self.amount_mol.min(after_amount_mol),
+            ..self
+        };
+        let area_change = if common.amount_mol == 0.0 {
+            common.law.parameters().0 * (after_area_m2 - before_area_m2)
+        } else {
+            let first = common.at_area(before_area_m2)?;
+            let last = common.at_area(after_area_m2)?;
+            let (secant, _) = area_secant(common, before_area_m2, after_area_m2, first, last)?;
+            secant * (after_area_m2 - before_area_m2)
+        };
+        let mut change = Sum::default();
+        change.add(self.energy_change_at_fixed_area(before_area_m2, common.amount_mol)?);
+        change.add(area_change);
+        change.add(common.energy_change_at_fixed_area(after_area_m2, after_amount_mol)?);
+        let change = change.value();
+        if !change.is_finite() {
+            return Err(SurfactantError::Unrepresentable);
+        }
+        Ok(change)
+    }
+
     /// Evaluate the same free-energy law used by forces, without an area
     /// reference or inferred amount. Zero inventory recovers the clean surface.
     pub fn at_area(self, area_m2: f64) -> Result<SurfactantState, SurfactantError> {

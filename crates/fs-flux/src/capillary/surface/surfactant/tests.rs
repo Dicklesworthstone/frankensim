@@ -46,6 +46,88 @@ fn energy(law: SurfactantLaw, area: f64, n: f64) -> f64 {
 }
 
 #[test]
+fn joint_area_and_amount_energy_needs_only_the_two_physical_packing_states() {
+    for (a0, n0, a1, n1) in [
+        (0.2, 0.1, 2.0, 1.6),
+        (2.0, 1.6, 0.2, 0.1),
+        (0.2, 0.0, 2.0, 1.6),
+        (2.0, 1.6, 0.2, 0.0),
+    ] {
+        for law in laws() {
+            let face = SurfactantFace {
+                law,
+                amount_mol: n0,
+            };
+            let increment = face.energy_change(a0, a1, n1).unwrap();
+            close(increment, energy(law, a1, n1) - energy(law, a0, n0), 8e-15);
+            close(
+                SurfactantFace {
+                    law,
+                    amount_mol: n1,
+                }
+                .energy_change(a1, a0, n0)
+                .unwrap(),
+                -increment,
+                8e-15,
+            );
+        }
+    }
+    let law = laws()[1];
+    assert!(
+        SurfactantFace {
+            law,
+            amount_mol: 1.6
+        }
+        .at_area(0.2)
+        .is_err()
+    );
+    assert!(
+        SurfactantFace {
+            law,
+            amount_mol: 0.1
+        }
+        .energy_change(0.2, 0.1, 0.2)
+        .is_err()
+    );
+}
+
+#[test]
+fn joint_energy_keeps_small_mixing_changes_beside_a_large_clean_background() {
+    let a0 = 1.0;
+    let a1 = 1.0 + f64::EPSILON;
+    let n0 = 0.12;
+    let n1 = 0.17;
+    for law in [
+        SurfactantLaw::IdealDilute {
+            clean_tension_n_m: 1e16,
+            thermal_energy_j_mol: 0.7,
+            reference_concentration_mol_m2: 1.0,
+        },
+        SurfactantLaw::Langmuir {
+            clean_tension_n_m: 1e16,
+            thermal_energy_j_mol: 0.7,
+            saturation_concentration_mol_m2: 1.0,
+        },
+    ] {
+        let mixing = |area: f64, n: f64| match law {
+            SurfactantLaw::IdealDilute { .. } => n * ((n / area).ln() - 1.0),
+            SurfactantLaw::Langmuir { .. } => {
+                n * (n / area).ln() + (area - n) * (-n / area).ln_1p()
+            }
+        };
+        let expected = 1e16 * (a1 - a0) + 0.7 * (mixing(a1, n1) - mixing(a0, n0));
+        let actual = SurfactantFace {
+            law,
+            amount_mol: n0,
+        }
+        .energy_change(a0, a1, n1)
+        .unwrap();
+        close(actual, expected, 2e-15);
+        assert!((actual - (energy(law, a1, n1) - energy(law, a0, n0))).abs() > 0.01);
+    }
+}
+
+#[test]
 fn g1_equations_of_state_follow_the_free_energy_area_and_amount_derivatives() {
     for law in laws() {
         let face = SurfactantFace {

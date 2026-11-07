@@ -8137,3 +8137,31 @@ These owner regressions passed source parsing/formatting and bounded review,
 but were not compiled or executed in this environment. The shared kernel's
 nine native tests establish the numerical wall identity and the separately
 qualified Couette refinement evidence.
+
+## Finite aqueous exchange on moving material surfaces
+
+With `continuum` and `surface-soluble`,
+`CapillarySurfaceDynamics::advance_soluble_surfactant` composes the original
+finite-bath adsorption/desorption and lateral surface diffusion with the native
+mechanical trial. Chemical half steps use the actual initial and solved face
+areas. Mechanics carries the same intermediate face amounts, so dilution,
+packing and capillary force follow the original surface free energy. One
+original aqueous candidate supplies both halves and publishes with the complete
+trajectory and face amounts after all checks.
+
+The whole endpoint independently balances bulk plus surface amount and original
+bulk/surface free-energy change. Geometric capillary work, chemical change,
+adsorption and lateral-diffusion losses, surface viscosity and external work
+stay separate. Substep, scalar-root and pair-application budgets span both
+chemical halves. A stable joint area/amount energy increment uses only admitted
+physical endpoints and exact existing secants; expansion/adsorption need not
+fit the final amount on the old area. Equal-area calls retain the original
+stationary fast path. Late work, source, balance or cancellation refusal leaves
+all three original states unchanged.
+
+The complete composition remains first order because adsorption uses backward
+Euler. Temperature, well-mixed solvent volume, topology, coefficients and nodal
+reference masses are held. This is an inertia-free dilute coating exchanging
+with an independently held-volume bath; enclosed volume feedback, solvent
+displacement, osmotic traction, solute momentum and adsorption heat need their
+own physical owners. Isothermal free-energy loss is not automatic heat deposition.
