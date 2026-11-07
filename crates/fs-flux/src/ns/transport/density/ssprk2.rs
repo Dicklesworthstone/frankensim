@@ -79,6 +79,11 @@ impl<'m> PreparedDensityTransport<'m> {
         let ne = self.volume_rates.len();
         let linear_cells = if self.linear.is_some() { nc } else { 0 };
         let linear_edges = if self.linear.is_some() { ne } else { 0 };
+        let inventory_cells = if self.reconstruct_inventories && N > 0 {
+            nc
+        } else {
+            0
+        };
         admit_storage(
             &[
                 (nc, size_of::<DensityTransportCell<N>>()),
@@ -102,6 +107,9 @@ impl<'m> PreparedDensityTransport<'m> {
                     size_of::<[f64; 2]>(),
                 ),
                 (linear_edges, size_of::<[f64; 2]>() + size_of::<[Mean; 2]>()),
+                (inventory_cells, size_of::<[[f64; 3]; N]>()),
+                (inventory_cells, size_of::<[[f64; 2]; N]>()),
+                (inventory_cells, size_of::<f64>()),
             ],
             max_storage_bytes,
         )?;

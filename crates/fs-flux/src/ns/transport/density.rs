@@ -9,8 +9,8 @@
 //! In particular it is not a changing-density Navier–Stokes time integrator.
 //!
 //! Synchronous donor-cell Euler is the default and is first order in space.
-//! An opt-in bounded linear reconstruction reduces smooth-density diffusion
-//! while retaining the same directional mass transfers and momentum owner.
+//! Opt-in bounded linear reconstructions reduce smooth-density diffusion and,
+//! optionally, heat/species diffusion using the same directional mass transfers.
 //! Positive remaining donor mass uses a volume Courant cap below one for the
 //! default, or one third of that allowance for bounded linear density.
 //! No accepted-density clipping, mass repair, or interface sharpening
@@ -29,6 +29,7 @@ pub mod remap;
 /// Conservative second-order time stages with the selected spatial density flux.
 pub mod ssprk2;
 
+mod inventory;
 mod linear;
 
 /// Spatial density trace used by the original conservative transport owners.
@@ -43,6 +44,12 @@ pub enum DensityReconstruction {
     /// Specific inventories retain their original donor-cell reconstruction.
     /// A sufficient positivity CFL is one THIRD of the donor-cell allowance.
     BoundedLinear,
+    /// The same bounded linear density, with mass-centered linear specific
+    /// quantities. A common limiter bounds both outgoing traces and retained
+    /// donor inventories, preserving complementary species to roundoff.
+    /// Density-weighted face quadrature retains both reversing streams. This
+    /// uses the same mass flux and CFL as `BoundedLinear`; no state is clipped.
+    BoundedLinearInventories,
 }
 
 /// Cell-average density and N quantities per unit mass. Components may have
@@ -167,6 +174,7 @@ pub struct PreparedDensityTransport<'m> {
     maximum_outgoing_rate_s: f64,
     maximum_relative_volume_divergence: f64,
     linear: Option<linear::LinearReconstruction>,
+    reconstruct_inventories: bool,
 }
 
 /// Caller-owned reusable scratch. A warm step allocates no heap storage.
@@ -181,6 +189,9 @@ pub struct DensityTransportWorkspace<const N: usize> {
     vertex_densities: Vec<[f64; 3]>,
     vertex_bounds: Vec<[f64; 2]>,
     face_densities: Vec<[f64; 2]>,
+    specific_deviations: Vec<[[f64; 3]; N]>,
+    specific_margins: Vec<[[f64; 2]; N]>,
+    specific_limiter: Vec<f64>,
     accepted: bool,
 }
 
@@ -251,10 +262,9 @@ impl<'m> FluxSystem<'m> {
             }
             .into());
         }
-        let linear_cells =
-            usize::from(self.density_reconstruction == DensityReconstruction::BoundedLinear) * nc;
-        let linear_edges =
-            usize::from(self.density_reconstruction == DensityReconstruction::BoundedLinear) * ne;
+        let reconstruct_linear = self.density_reconstruction != DensityReconstruction::DonorCell;
+        let linear_cells = usize::from(reconstruct_linear) * nc;
+        let linear_edges = usize::from(reconstruct_linear) * ne;
         admit_storage(
             &[
                 (nc, size_of::<f64>() + 2 * size_of::<Sum>()),
@@ -263,7 +273,7 @@ impl<'m> FluxSystem<'m> {
                     size_of::<EdgeVolumeTransport>() + 2 * size_of::<[f64; 2]>(),
                 ),
                 (linear_cells, size_of::<linear::LinearCell>()),
-                (linear_edges, size_of::<[f64; 2]>()),
+                (linear_edges, size_of::<[[f64; 2]; 2]>()),
             ],
             max_storage_bytes,
         )?;
@@ -363,7 +373,7 @@ impl<'m> FluxSystem<'m> {
             maximum_outgoing_rate_s =
                 maximum_outgoing_rate_s.max(quotient(outgoing, mesh.areas[cell])?);
         }
-        let linear = if self.density_reconstruction == DensityReconstruction::BoundedLinear {
+        let linear = if reconstruct_linear {
             Some(linear::LinearReconstruction::prepare(
                 mesh,
                 &velocity_moments,
@@ -383,6 +393,8 @@ impl<'m> FluxSystem<'m> {
             maximum_outgoing_rate_s,
             maximum_relative_volume_divergence,
             linear,
+            reconstruct_inventories: self.density_reconstruction
+                == DensityReconstruction::BoundedLinearInventories,
         })
     }
 }
@@ -462,6 +474,11 @@ impl PreparedDensityTransport<'_> {
     ) -> Result<DensityTransportWorkspace<N>> {
         let nc = self.volumes.len();
         let ne = self.volume_rates.len();
+        let inventory_cells = if self.reconstruct_inventories && N > 0 {
+            nc
+        } else {
+            0
+        };
         admit_storage(
             &[
                 (
@@ -488,6 +505,9 @@ impl PreparedDensityTransport<'_> {
                     if self.linear.is_some() { ne } else { 0 },
                     size_of::<[f64; 2]>(),
                 ),
+                (inventory_cells, size_of::<[[f64; 3]; N]>()),
+                (inventory_cells, size_of::<[[f64; 2]; N]>()),
+                (inventory_cells, size_of::<f64>()),
             ],
             max_storage_bytes,
         )?;
@@ -507,6 +527,9 @@ impl PreparedDensityTransport<'_> {
                 [0.0; 2],
             )?,
             face_densities: allocate(if self.linear.is_some() { ne } else { 0 }, [0.0; 2])?,
+            specific_deviations: allocate(inventory_cells, [[0.0; 3]; N])?,
+            specific_margins: allocate(inventory_cells, [[0.0; 2]; N])?,
+            specific_limiter: allocate(inventory_cells, 1.0)?,
             accepted: false,
         })
     }
@@ -526,8 +549,11 @@ impl PreparedDensityTransport<'_> {
     /// local volume balance; numerical divergence is not erased.
     /// Bounded linear density uses one third of `maximum_courant` as its
     /// sufficient volume limit; reports still contain the actual volume CFL.
-    /// Specific inventories use the same accepted reconstructed mass transfers
-    /// with their original donor values, preserving a convex specific mixture.
+    /// Density-only reconstruction retains donor-cell specific quantities.
+    /// `BoundedLinearInventories` instead reconstructs their mass-centered
+    /// traces and bounds each donor's retained inventory before transferring
+    /// equal/opposite corrections. Its updated specific state remains a convex
+    /// mixture of bounded retained/incoming states, including signed enthalpy.
     ///
     /// Work is O((cells+edges)*N), with no warm heap allocation. Scratch can be
     /// reused across equal-sized plans. Output is unchanged on any refusal or
@@ -677,18 +703,28 @@ impl PreparedDensityTransport<'_> {
                         scratch.specific_change[receiver][component]
                             .add(finite(change, "incoming specific-inventory increment")?)?;
                     }
-                    if donor == usize::MAX {
-                        carried_in[component].add(value)?;
-                        carried_residual[component].add(-value)?;
-                        absolute_boundary[component].add(value.abs())?;
-                    } else if receiver == usize::MAX {
-                        carried_out[component].add(value)?;
-                        carried_residual[component].add(value)?;
-                        absolute_boundary[component].add(value.abs())?;
-                    }
                 }
             }
             scratch.transfers[index] = transfer;
+        }
+        if self.reconstruct_inventories && N > 0 {
+            self.reconstruct_carried_inventories(cells, inflow, scratch, &mut cancelled)?;
+        }
+        // Account the accepted carried amounts, including any bounded outgoing
+        // correction. Exterior inlet states are never reconstructed.
+        for (index, edge) in self.mesh.edges.iter().enumerate() {
+            poll(&mut cancelled)?;
+            if edge.tris.1 == usize::MAX {
+                let [outgoing, incoming] = scratch.transfers[index].carried;
+                for component in 0..N {
+                    carried_in[component].add(incoming[component])?;
+                    carried_out[component].add(outgoing[component])?;
+                    carried_residual[component].add(outgoing[component])?;
+                    carried_residual[component].add(-incoming[component])?;
+                    absolute_boundary[component].add(outgoing[component].abs())?;
+                    absolute_boundary[component].add(incoming[component].abs())?;
+                }
+            }
         }
         let mut mass_after = Sum::default();
         let mut carried_after = [Sum::default(); N];
@@ -807,13 +843,21 @@ impl PreparedDensityTransport<'_> {
     ) -> Result<f64> {
         let mut outgoing = Sum::default();
         let mut inventory = Sum::default();
+        let mut correction = Sum::default();
         for &(edge, sign) in &self.mesh.tri_edges[cell] {
             let out = usize::from(sign < 0.0);
             outgoing.add(transfers[edge].mass_kg[out])?;
             inventory.add(transfers[edge].carried[1 - out][component])?;
+            if self.reconstruct_inventories {
+                correction.add(transfers[edge].carried[out][component])?;
+                correction.add(-transfers[edge].mass_kg[out] * specific)?;
+            }
         }
         let retained = positive_value(old_mass - outgoing.value()?, "retained donor mass")?;
         inventory.add(finite(retained * specific, "retained carried inventory")?)?;
+        if self.reconstruct_inventories {
+            inventory.add(-correction.value()?)?;
+        }
         finite(inventory.value()? / new_mass, "mixed specific quantity")
     }
 }

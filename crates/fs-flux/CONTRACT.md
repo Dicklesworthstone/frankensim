@@ -1258,7 +1258,8 @@ survive a reversing face. Specific inventories keep their original donor values
 and use those SAME mass transfers, so constant specific states and convex
 specific bounds are preserved. This raises density's smooth spatial accuracy;
 it does not raise the spatial order of specific enthalpy/species transport or
-the temporal order of native BDF1 momentum.
+the temporal order of native BDF1 momentum. The optional carried-inventory
+reconstruction below addresses the spatial heat/species limitation.
 
 For a triangle, the mean of the three affine vertex densities is the stored
 cell density. Every nonnegative vertex value is therefore at most three cell
@@ -1290,6 +1291,41 @@ affine counterflow integration, positivity and carried-inventory bounds across
 a large density jump, and every accepted Euler/RK face transfer against its
 momentum flux. `tests/density_momentum/ssprk2.rs` also checks reconstructed-density
 free streams and the closed native kinetic-energy identity.
+
+### Bounded linear heat and species on the accepted mass flux
+
+`DensityReconstruction::BoundedLinearInventories` retains the same bounded
+density, directional mass transfers, native momentum coupling and sufficient
+Courant limit, while reconstructing the carried specific quantities. The
+original least-squares stencil supplies linear specific variations, centered
+to have zero **mass-weighted** triangle mean under the reconstructed density.
+Each original sign interval uses its density-weighted flux centroid; this
+exactly integrates the selected affine density/specific traces against the
+affine normal velocity, including their cubic covariance term. Physical affine
+specific fields sampled as variable-density mass means need not be reproduced
+exactly by the geometric-centroid slope stencil.
+
+A single cell limiter bounds all components at the original vertex patches
+and bounds the retained donor inventory. For retained mass `r=m-sum(M_out)`
+and reconstructed outgoing correction `C=sum(M_out*delta_s)`, it admits only
+`s-theta*C/r` within the patch bounds. The updated state is therefore a
+positive mixture of bounded retained and incoming states. Before emission,
+actual represented face corrections are checked against those inventory
+margins; at most eight common slope contractions precede donor-cell fallback
+if roundoff cannot resolve a bounded correction. Equal/opposite corrections
+conserve each extensive inventory, and common limiting preserves complementary
+species sums to roundoff. Constant specifics remain exact. No accepted-state
+clipping, species renormalization or change to the mass flux occurs.
+
+Euler, subcycling and SSPRK2 use the same reconstruction and transfer accounts.
+Work is linear in component count and native mesh size, with bounded local
+roundoff retries and no warm heap allocation; all extra scratch is budgeted.
+`tests/density_transport/linear.rs` checks spatial thermal-pulse refinement at
+matched time steps, reduced heat diffusion, independent signed cubic face
+quadrature, large-density-contrast species bounds/sums, flux compatibility and
+transactional cancellation. Limiter activation can reduce local accuracy;
+this adds neither sharp interfaces nor diffusion, reactions, pressure work or
+thermodynamic closure.
 
 ### Conservative SSPRK2 density stages and accepted flux weights
 

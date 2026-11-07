@@ -14,8 +14,8 @@ pub(super) struct LinearCell {
 
 pub(super) struct LinearReconstruction {
     cells: Vec<LinearCell>,
-    // Volume-flux centroids along each original edge, separately for both signs.
-    fractions: Vec<[f64; 2]>,
+    // Volume-flux [centroid, variance] along each edge, for each sign interval.
+    fractions: Vec<[[f64; 2]; 2]>,
 }
 
 fn invalid(message: &'static str) -> DensityTransportError {
@@ -42,7 +42,7 @@ fn centroid(points: [[f64; 2]; 3]) -> [f64; 2] {
     })
 }
 
-fn neighbor(mesh: &TriMesh, cell: usize, edge: usize) -> usize {
+pub(super) fn neighbor(mesh: &TriMesh, cell: usize, edge: usize) -> usize {
     let (a, b) = mesh.edges[edge].tris;
     if a == cell { b } else { a }
 }
@@ -124,12 +124,51 @@ impl LinearReconstruction {
                 }
             }
         }
-        let mut fractions = allocate(mesh.edges.len(), [0.5; 2])?;
+        let mut fractions = allocate(mesh.edges.len(), [[0.5, 1.0 / 12.0]; 2])?;
         for (edge, target) in fractions.iter_mut().enumerate() {
             poll(cancelled)?;
             *target = flux_centroids(moments[edge]);
         }
         Ok(Self { cells, fractions })
+    }
+
+    pub(super) fn deviations(&self, cell: usize, differences: [f64; 3]) -> [f64; 3] {
+        let mut deviation = [0.0; 3];
+        for (value, weights) in deviation[..2].iter_mut().zip(&self.cells[cell].variation) {
+            *value = weights[0].mul_add(
+                differences[0],
+                weights[1].mul_add(differences[1], weights[2] * differences[2]),
+            );
+        }
+        deviation[2] = -deviation[0] - deviation[1];
+        deviation
+    }
+
+    /// A specific value is a MASS mean. Shift the affine variation so its
+    /// density-weighted triangle mean is zero: integral(rho*delta)/mass
+    /// equals sum(rho_vertex*delta_vertex)/(4*sum(rho_vertex)).
+    pub(super) fn specific_deviations(
+        &self,
+        cell: usize,
+        differences: [f64; 3],
+        density: [f64; 3],
+    ) -> [f64; 3] {
+        let deviation = self.deviations(cell, differences);
+        let scale = density.into_iter().fold(0.0_f64, f64::max);
+        let rho = density.map(|value| value / scale);
+        let shift = (rho[0] - rho[2]).mul_add(deviation[0], (rho[1] - rho[2]) * deviation[1])
+            / (4.0 * (rho[0] + rho[1] + rho[2]));
+        deviation.map(|value| value - shift)
+    }
+
+    /// Covariance shifts the volume centroid to the mass centroid. Evaluating
+    /// an affine specific trace here exactly integrates rho*s*u_n, a cubic,
+    /// on this original sign interval; using the volume centroid loses that term.
+    pub(super) fn mass_centroid(&self, edge: usize, direction: usize, rho: [f64; 2]) -> f64 {
+        let [mean, variance] = self.fractions[edge][direction];
+        let scale = rho[0].max(rho[1]);
+        let [a, b] = rho.map(|value| value / scale);
+        mean + (b - a) * variance / ((1.0 - mean) * a + mean * b)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -221,14 +260,7 @@ impl LinearReconstruction {
                 continue;
             }
             let differences = samples.map(|value| (value - rho) / upper);
-            let mut deviation = [0.0; 3];
-            for (value, weights) in deviation[..2].iter_mut().zip(&self.cells[cell].variation) {
-                *value = weights[0].mul_add(
-                    differences[0],
-                    weights[1].mul_add(differences[1], weights[2] * differences[2]),
-                );
-            }
-            deviation[2] = -deviation[0] - deviation[1];
+            let deviation = self.deviations(cell, differences);
             let mut theta = 1.0_f64;
             for (&value, bound) in deviation.iter().zip(bounds) {
                 if value > 0.0 {
@@ -274,7 +306,7 @@ impl LinearReconstruction {
                     if first == second {
                         first
                     } else {
-                        let s = self.fractions[edge][direction];
+                        let s = self.fractions[edge][direction][0];
                         positive_value(
                             (1.0 - s) * first + s * second,
                             "directional reconstructed density",
@@ -287,25 +319,30 @@ impl LinearReconstruction {
     }
 }
 
-// Exact |linear normal velocity|-weighted centroid of each sign interval.
-// Evaluating a linear density here integrates its directional mass flux exactly.
-fn flux_centroids(moments: [f64; 2]) -> [f64; 2] {
+// Exact |linear normal velocity|-weighted centroid and variance on each sign
+// interval. Variance also supplies the density-specific covariance term.
+fn flux_centroids(moments: [f64; 2]) -> [[f64; 2]; 2] {
     let scale = moments[0].abs().max(moments[1].abs());
     if scale == 0.0 {
-        return [0.5; 2];
+        return [[0.5, 1.0 / 12.0]; 2];
     }
     let mean = moments[0] / scale;
     let slope = 6.0 * (moments[1] / scale);
     let (left, right) = (mean - slope, mean + slope);
-    let mut result = [0.5; 2];
+    let mut result = [[0.5, 1.0 / 12.0]; 2];
     if (left < 0.0 && right > 0.0) || (left > 0.0 && right < 0.0) {
         let split = left.abs() / (left.abs() + right.abs());
-        result[usize::from(left < 0.0)] = split / 3.0;
-        result[usize::from(right < 0.0)] = split + (1.0 - split) * (2.0 / 3.0);
+        let width = 1.0 - split;
+        result[usize::from(left < 0.0)] = [split / 3.0, split * split / 18.0];
+        result[usize::from(right < 0.0)] = [split + width * (2.0 / 3.0), width * width / 18.0];
     } else {
         let (a, b) = (left.abs(), right.abs());
         let direction = usize::from(left < 0.0 || right < 0.0);
-        result[direction] = (a + 2.0 * b) / (3.0 * (a + b));
+        let weight = a / (a + b);
+        result[direction] = [
+            (a + 2.0 * b) / (3.0 * (a + b)),
+            (1.0 + 2.0 * weight * (1.0 - weight)) / 18.0,
+        ];
     }
     result
 }
