@@ -6,6 +6,7 @@ use crate::bernoulli_aperture::performance::file::material_modal::dg::MaterialMo
 use crate::pcm_wav::observation::PressureRenderer;
 
 mod finite_gas;
+mod reed;
 
 const INPUT: &str = include_str!("../../../../../../examples/material_modal_valve/paired-dg.performance");
 const TENSOR: &str = "loss tensor eta11 eta22 eta66 eta12 eta16 eta26 1 1000000";

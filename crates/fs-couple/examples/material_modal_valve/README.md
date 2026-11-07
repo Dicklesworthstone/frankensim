@@ -1241,3 +1241,39 @@ curved contact normals, evolving/follower geometry, resolved moving-channel
 flow and source thermal evolution require their own physical extensions.
 Modal, surface quadrature, time and nonlinear refinement are still required.
 
+
+# Typed lumped reed on the DG bore
+
+The `reed` block replaces `loss` and `blades` (and every plate record, and `solid`), immediately after `contact`.
+It carries ONE lumped reed: the six numbers of a reed-performance file's `reed` row and the token of the
+description rows that sourced them, so a DG bore plays the reed a modal-bore page plays and the bore is the only
+thing that changes.
+
+```text
+reed HEIGHT WIDTH CLOSING_PA MASS STIFFNESS ZETA SOURCE_TOKEN
+```
+
+The reed is one structural mode of the same exact `ModalAperture` the plates use (exact zero-order hold, the
+file's `contact`, Bernoulli slit flow, swept volume, the file's `limits`). The gap is HEIGHT plus the mode
+coordinate. The pressure area is `(STIFFNESS / CLOSING_PA) * HEIGHT` and the damping `2 ZETA sqrt(STIFFNESS MASS)`,
+associated exactly as the live reed derives them, so both routes carry the same bits. Nothing is inferred:
+
+- HEIGHT, WIDTH, CLOSING_PA, MASS and STIFFNESS must be positive. The reed-performance file's zero-means-derived
+  mass and stiffness are refused; ZETA is not negative.
+- HEIGHT must equal the `valve` REST_GAP, and `slit_length` must be `none`.
+- SOURCE_TOKEN is one printable ASCII token of at most 256 bytes. It names the description rows; the basis words
+  (derived, ASSUMED, BORROWED) stay in those rows.
+- `wetted_surfaces`, `pressure_shapes`, `closure`, `source_forces` and `source_pressures` are plate records and are
+  refused; `blades` and `solid` do not mix with `reed`.
+- The `contact` row is the lay of a lumped reed and is the writer's to state. The reed-performance file gives a
+  massive reed `contact 1e7*WIDTH 2 CHI` with `CHI = 2 ZETA sqrt(STIFFNESS MASS) / (1e7 WIDTH HEIGHT^2)`.
+
+`data/instruments/descriptions/lower_reed_dg.py DESCRIPTION.tsv TEMPLATE.performance OUT.performance` lowers the
+reed from a wind description through `lower_reed_performance.reed_record()` (the same six numbers), writes that
+`contact` row, sets `slit_length none` and the `valve` row, and keeps every other row of the DG-valve TEMPLATE
+(bore, gas, radiation, observation, limits, schedule) byte for byte. It prints the description rows that sourced the
+reed verbatim, with their status and source columns.
+
+The sidecar reports the record as `typed_reed` with its model scope. Mesh, section, material memory, traction,
+closure and force ports do not exist for this source; DG spatial and nonlinear time refinement remain separate, and
+the reed is a lumped single-reed model, not a measured instrument.

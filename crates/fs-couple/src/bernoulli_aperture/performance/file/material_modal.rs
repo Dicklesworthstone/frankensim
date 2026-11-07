@@ -58,6 +58,8 @@
 pub mod dg;
 /// Original three-dimensional source geometry and complete material selections.
 pub mod solid;
+/// One typed, sourced lumped reed in place of the material plate of the DG-valve file.
+pub mod reed;
 
 mod plate;
 mod boundaries;

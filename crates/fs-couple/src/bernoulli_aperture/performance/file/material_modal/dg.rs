@@ -37,6 +37,11 @@
 //! an explicitly admitted frozen K/full C enter the same pressure/contact/DG clock. Source
 //! geometry supplies opening and wetted-face pressure; no DKT chart is invented.
 //! Original solid material records and approximation bounds remain inspectable.
+//!
+//! Or `reed HEIGHT WIDTH CLOSING_PA MASS STIFFNESS ZETA SOURCE_TOKEN` replaces `loss`/`blades` and every
+//! plate record with ONE typed, sourced lumped reed (the six numbers of a reed-performance `reed` row), so a
+//! DG bore plays the reed a modal-bore page plays. See `reed`; it has no mesh, material, closure or force
+//! port, requires `slit_length none` and HEIGHT equal to the `valve` REST_GAP.
 
 use super::{
     BladePropagator, BladeState, LossSelection, MaterialCache,
@@ -44,7 +49,7 @@ use super::{
     NormalizedMaterialCardPack, Obstacle, PairedApertureLimits,
     PlateValveInputError, Reader, MAX_CONTROLS, MAX_PLATE_VALVE_PERFORMANCE_BYTES,
     bad, checkpoint, closure, forces, gas, optional_positive, plate, pressure,
-    read_propagator, read_receiver, solid, wetted, SupplyInput,
+    read_propagator, read_receiver, reed, solid, wetted, SupplyInput,
 };
 use crate::bernoulli_aperture::dg::LoadedApertureDg;
 use crate::bernoulli_aperture::dg::loaded::performance::LoadedDgPerformance;
@@ -73,6 +78,7 @@ pub struct MaterialModalDgValvePerformance {
     wall: DgMaterialWallLayout,
     upstream_wall: Option<DgMaterialWallLayout>,
     solid: Option<solid::SolidValveRecord>,
+    reed: Option<reed::ReedRecord>,
 }
 
 impl MaterialModalDgValvePerformance {
@@ -264,14 +270,24 @@ impl MaterialModalDgValvePerformance {
             .map_err(|error| PlateValveInputError::Physics(
                 crate::acoustic_realize::AcousticRealizeError::Nonlinear(error.to_string()),
             ))?;
-        let solid = if rows.lines.clone().next().and_then(|line|
+        let reed = if rows.lines.clone().next().and_then(|line|
+            line.split_ascii_whitespace().next()) == Some("reed")
+        {
+            if slit.is_some() {
+                return Err(bad(rows.line + 1,
+                    "a typed reed carries no viscous slit: declare slit_length none"));
+            }
+            Some(reed::read(&mut rows, rest_opening)?)
+        } else { None };
+        let solid = if reed.is_none() && rows.lines.clone().next().and_then(|line|
             line.split_ascii_whitespace().next()) == Some("solid")
         {
             Some(solid::read(&mut rows, rest_opening, &mut cache, &mut load_material, gate)?)
         } else { None };
-        let loss = if solid.is_some() { LossSelection::Elastic }
+        let source_is_not_a_plate = solid.is_some() || reed.is_some();
+        let loss = if source_is_not_a_plate { LossSelection::Elastic }
             else { LossSelection::read(&mut rows)? };
-        let blades = if solid.is_some() { 1 } else { rows.count("blades", 2)? };
+        let blades = if source_is_not_a_plate { 1 } else { rows.count("blades", 2)? };
         if blades == 0 {
             return Err(bad(rows.line, "one or two independently supplied material blades are required"));
         }
@@ -279,7 +295,7 @@ impl MaterialModalDgValvePerformance {
         let mut states = Vec::<BladeState>::new();
         let mut materials = Vec::new();
         let (mut nodes, mut triangles) = (0, 0);
-        for blade in 0..if solid.is_some() { 0 } else { blades } {
+        for blade in 0..if source_is_not_a_plate { 0 } else { blades } {
             let (source, options, initial, records) = plate::read(
                 &mut rows, blade, states.len(), &loss, &mut cache, &mut load_material, gate,
             )?;
@@ -292,7 +308,14 @@ impl MaterialModalDgValvePerformance {
         let modes = if let Some(source) = &solid {
             nodes = source.image.node_count();
             source.image.mode_count()
-        } else { states.len() };
+        } else if reed.is_some() { 1 } else { states.len() };
+        if reed.is_some() && matches!(rows.lines.clone().next().and_then(|line|
+            line.split_ascii_whitespace().next()),
+            Some("wetted_surfaces" | "pressure_shapes" | "closure" | "source_forces" | "source_pressures"))
+        {
+            return Err(bad(rows.line + 1,
+                "a typed reed has no plate: wetted surfaces, pressure shapes, closure, source forces and source pressures are plate records"));
+        }
         if solid.is_some() && matches!(rows.lines.clone().next().and_then(|line|
             line.split_ascii_whitespace().next()), Some("wetted_surfaces" | "pressure_shapes" | "closure"))
         {
@@ -356,6 +379,15 @@ impl MaterialModalDgValvePerformance {
                 contact, gate,
             )?;
             (valve, Some(record))
+        } else if let Some(record) = &reed {
+            let valve = record.into_aperture(
+                reed::ReedHost {
+                    density_kg_m3: inlet.density, impedance_pa_s_m3: impedance,
+                    time_step_s: dt, max_steps: samples, limits,
+                },
+                contact, propagator,
+            ).map_err(PlateValveInputError::Physics)?;
+            (valve, None)
         } else {
             let valve = ModalAperture::from_material_images_with_wetted(
                 prepared_plates, wetted_surfaces, rest_opening, inlet, impedance, dt,
@@ -422,7 +454,7 @@ impl MaterialModalDgValvePerformance {
                 mechanics_rate_hz: mechanics, propagator, output_rate_hz: output,
                 samples, full_scale_pa, blades, modes, nodes, triangles,
             },
-            renderer, materials, gases, ambient, wall, upstream_wall, solid,
+            renderer, materials, gases, ambient, wall, upstream_wall, solid, reed,
         })
     }
 
@@ -435,6 +467,9 @@ impl MaterialModalDgValvePerformance {
     /// Original volume mesh/material records, when this source selects a solid.
     /// Plate material records are empty for this distinct structural family.
     pub const fn solid_record(&self) -> Option<&solid::SolidValveRecord> { self.solid.as_ref() }
+    /// The typed lumped reed and its source token, when this source selects one.
+    /// Plate and solid records are then empty: there is no plate.
+    pub const fn reed_record(&self) -> Option<&reed::ReedRecord> { self.reed.as_ref() }
     /// Ambient, prescribed local and computed exterior material receipts.
     pub fn gas_records(&self) -> &[GasRecord] { &self.gases }
     /// Original material wall source, shared with any plate using the same pack.
