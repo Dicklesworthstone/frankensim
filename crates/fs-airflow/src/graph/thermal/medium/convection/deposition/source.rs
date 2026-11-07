@@ -232,6 +232,25 @@ pub struct SourceConvectiveCell {
     pub law: SourceCellConvectionLaw,
 }
 
+impl SourceConvectiveCell {
+    // Admit authored inputs without querying fluid properties or a not-yet-born
+    // cell. The observer uses the same checks for its complete future roster.
+    fn admit(&self) -> Result<(), ConvectionSourceError> {
+        self.law.admit_property_temperature(self.property_temperature)?;
+        self.law.admit_geometry(self.characteristic_length)?;
+        if !self.reference_temperature.value().is_finite()
+            || self.reference_temperature.value() <= 0.0
+            || !self.characteristic_length.value().is_finite()
+            || self.characteristic_length.value() <= 0.0
+        {
+            return Err(ConvectionSourceError::Invalid(
+                "source convection needs positive finite reservoir temperature and length",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Concrete material owner and its checked numerical view at this trial.
 #[derive(Debug)]
 pub struct CellConvectionMaterialSample<F> {
@@ -271,6 +290,40 @@ pub(crate) fn material_at<F: ThermalFluidTransport, E>(
         ).into());
     }
     Ok(SurfaceConvectionMaterialSample { material, thermal })
+}
+
+// Resolve one physical wall state, independently of contact/event ordering.
+// Birth admission uses this same material path but never applies a heat rate
+// at the provisional surface area before same-time contacts have been applied.
+fn resolve_cell_material<F: ThermalFluidTransport, E>(
+    binding: &SourceConvectiveCell,
+    wall: f64,
+    resolve: &mut impl FnMut(&SourceConvectiveCell, Temperature) -> Result<F, E>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<CellConvectionMaterialSample<F>, SourceCellConvectionError<E>> {
+    check(cancelled)?;
+    let property_temperature_k = match binding.property_temperature {
+        ConvectionPropertyTemperature::Reservoir => binding.reference_temperature.value(),
+        ConvectionPropertyTemperature::FilmMean => {
+            0.5 * wall + 0.5 * binding.reference_temperature.value()
+        }
+    };
+    let primary = material_at(binding.cell, property_temperature_k, || {
+        resolve(binding, Temperature::new(property_temperature_k))
+    })?;
+    let surface = if binding.law.needs_surface_viscosity() {
+        check(cancelled)?;
+        Some(material_at(binding.cell, wall, || {
+            resolve(binding, Temperature::new(wall))
+        })?)
+    } else { None };
+    Ok(CellConvectionMaterialSample {
+        cell: binding.cell,
+        property_temperature_k,
+        material: primary.material,
+        thermal: primary.thermal,
+        surface,
+    })
 }
 
 /// Original heat-source result together with every retained material source.
@@ -355,10 +408,7 @@ pub fn evaluate_source_cell_convection<F: ThermalFluidTransport, E>(
     let mut ordered = Vec::with_capacity(bindings.len());
     for binding in bindings {
         check(&mut cancelled)?;
-        binding
-            .law
-            .admit_property_temperature(binding.property_temperature)?;
-        binding.law.admit_geometry(binding.characteristic_length)?;
+        binding.admit()?;
         if !ids.insert(binding.cell) {
             return Err(ConvectionSourceError::Invalid("duplicate convective cell").into());
         }
@@ -372,16 +422,6 @@ pub fn evaluate_source_cell_convection<F: ThermalFluidTransport, E>(
             )
             .into());
         }
-        if !binding.reference_temperature.value().is_finite()
-            || binding.reference_temperature.value() <= 0.0
-            || !binding.characteristic_length.value().is_finite()
-            || binding.characteristic_length.value() <= 0.0
-        {
-            return Err(ConvectionSourceError::Invalid(
-                "source convection needs positive finite reservoir temperature and length",
-            )
-            .into());
-        }
         ordered.push(binding);
     }
     ordered.sort_by_key(|binding| binding.cell);
@@ -391,28 +431,7 @@ pub fn evaluate_source_cell_convection<F: ThermalFluidTransport, E>(
         let wall = thermal
             .temperature_k(binding.cell)
             .map_err(ConvectionSourceError::from)?;
-        let property_temperature_k = match binding.property_temperature {
-            ConvectionPropertyTemperature::Reservoir => binding.reference_temperature.value(),
-            ConvectionPropertyTemperature::FilmMean => {
-                0.5 * wall + 0.5 * binding.reference_temperature.value()
-            }
-        };
-        let primary = material_at(binding.cell, property_temperature_k, || {
-            resolve(binding, Temperature::new(property_temperature_k))
-        })?;
-        let surface = if binding.law.needs_surface_viscosity() {
-            check(&mut cancelled)?;
-            Some(material_at(binding.cell, wall, || {
-                resolve(binding, Temperature::new(wall))
-            })?)
-        } else { None };
-        materials.push(CellConvectionMaterialSample {
-            cell: binding.cell,
-            property_temperature_k,
-            material: primary.material,
-            thermal: primary.thermal,
-            surface,
-        });
+        materials.push(resolve_cell_material(binding, wall, &mut resolve, &mut cancelled)?);
     }
     let mut resolved = Vec::with_capacity(ordered.len());
     for (binding, material) in ordered.iter().zip(&materials) {

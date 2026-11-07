@@ -760,6 +760,29 @@ interval heat is a share of the existing external-heat audit, never a second
 energy addition. Endpoint source refusal or cancellation discards both proposed
 histories. Resolver cloning must preserve the native observer's rollback rules.
 
+One observer may bind the complete progressively deposited assembly. Its total
+binding count (active plus future) is bounded by `maximum_cells`; duplicate
+IDs refuse before any source query. On the first source query of each advance,
+unborn IDs must match native scheduled births. This schedule scan is checked
+once, with cancellation points, and is not repeated on thermal substeps.
+The lazy `new` constructor cannot validate unknown IDs during empty spans or
+zero-time endpoints, where the native timeline performs no source query.
+`new_for_timeline` admits the same complete roster immediately, with caller
+checkpoints and no fluid-property queries, before either kind of advance.
+Every new advance resets schedule admission against its actual thermal input;
+the immutable binding index is reused, not a previous timeline's future roster.
+Unborn cells contribute no heat, CFL restriction or fluid-property query.
+The birth callback admits only that cell's actual material/correlation state,
+including when an advance ends exactly at birth. Unsupported incoming states
+discard the candidate advance. Same-time contacts may still change exposure:
+the birth check neither applies provisional-area heat nor validates coverage
+before those contacts arrive. Actual source and timestep evaluation follow all
+same-time events and retain the original exposed-area and boundary-ownership
+checks. Retained endpoint samples remain invalidated by events. Focused
+`film_source::observer` tests cover staggered and simultaneous births, independent
+piecewise heat/CFL balances, supported contact coverage, future-source domain
+refusal at birth, roster budgets and cancellation.
+
 The same start-state hA now tightens native subcycling through
 `DepositionSimulation::limit_timestep_for_additional_conductances`, using the
 original caloric slope bound and cell mass. Its additional decay rate composes

@@ -1,7 +1,7 @@
 //! Material convection on the original explicit enthalpy substeps.
 //! The timeline owns integration, events, caloric storage and acceptance.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use fs_conduction::transient::deposition::{
@@ -10,10 +10,10 @@ use fs_conduction::transient::deposition::{
 use fs_material::fluid_transport::ThermalFluidTransport;
 use fs_qty::Temperature;
 
-use super::super::ConvectionSourceError;
+use super::super::{ConvectionSourceError, evaluate_convection_state};
 use super::{
     ResolvedCellConvectionSources, SourceCellConvectionError, SourceConvectiveCell,
-    evaluate_source_cell_convection,
+    evaluate_source_cell_convection, resolve_cell_material,
 };
 
 /// Re-query fluid material properties on the SAME thermal timeline as other
@@ -36,12 +36,22 @@ use super::{
 /// Its start-state hA tightens the native conductive timestep through the same
 /// caloric slope/mass bound. This is only a frozen-coefficient bound, not a
 /// general nonlinear-stability or time-error guarantee: still refine
-/// `StepConfig::max_dt_s` for the convective source. Bindings must name
-/// active cells whenever sources are evaluated. Events invalidate the retained
-/// sample; the next substep reads the updated contact coverage and boundaries.
+/// `StepConfig::max_dt_s` for the convective source. Bindings may name active
+/// cells or scheduled births. Future cells have no heat, timestep restriction or
+/// material query before birth; their actual birth temperature is admitted at
+/// the event, including when the advance ends there. Only born cells contribute
+/// to subsequent source queries. The complete binding count, including future
+/// cells, must fit `maximum_cells`. Duplicate IDs refuse before source queries;
+/// unknown IDs refuse when the source roster is first queried. The native
+/// timeline skips source queries on empty spans and zero-time endpoints, so use
+/// [`Self::new_for_timeline`] to admit all IDs before any advance.
+/// Events invalidate the retained sample; the next substep reads the updated
+/// contact coverage and boundaries after all same-time events.
 pub struct SourceConvectionObserver<'b, R, F> {
     bindings: &'b [SourceConvectiveCell],
     maximum_cells: usize,
+    binding_indices: Option<Arc<BTreeMap<CellId, usize>>>,
+    scheduled_cells: Option<BTreeSet<CellId>>,
     resolve: R,
     sample: Option<Arc<ResolvedCellConvectionSources<F>>>,
     source_epoch: Option<(f64, f64)>,
@@ -56,6 +66,8 @@ impl<R: Clone, F> Clone for SourceConvectionObserver<'_, R, F> {
         Self {
             bindings: self.bindings,
             maximum_cells: self.maximum_cells,
+            binding_indices: self.binding_indices.clone(),
+            scheduled_cells: self.scheduled_cells.clone(),
             resolve: self.resolve.clone(),
             sample: self.sample.clone(),
             source_epoch: self.source_epoch,
@@ -67,11 +79,17 @@ impl<R: Clone, F> Clone for SourceConvectionObserver<'_, R, F> {
 
 impl<'b, R, F> SourceConvectionObserver<'b, R, F> {
     /// Bind the existing source evaluator without advancing thermal state.
-    /// Physical admission occurs at the actual native source/endpoint queries.
+    /// Physical source admission occurs at births and actual native source/
+    /// endpoint queries. A future binding keeps the same resolver and law when
+    /// its cell becomes active; the caller need not rebuild this observer.
+    /// Roster admission is lazy: empty/zero-time advances need not query it.
+    /// Use [`Self::new_for_timeline`] for immediate active/pending-ID validation.
     pub fn new(bindings: &'b [SourceConvectiveCell], maximum_cells: usize, resolve: R) -> Self {
         Self {
             bindings,
             maximum_cells,
+            binding_indices: None,
+            scheduled_cells: None,
             resolve,
             sample: None,
             source_epoch: None,
@@ -98,19 +116,109 @@ fn invalid<E>(message: &'static str) -> SourceCellConvectionError<E> {
     SourceCellConvectionError::Convection(ConvectionSourceError::Invalid(message))
 }
 
-impl<R, F, E> SourceConvectionObserver<'_, R, F>
+impl<'b, R, F, E> SourceConvectionObserver<'b, R, F>
 where
     R: FnMut(&SourceConvectiveCell, Temperature) -> Result<F, E>,
     F: ThermalFluidTransport,
 {
+    /// Bind and admit every ID against active cells or the actual birth schedule.
+    ///
+    /// This checked constructor also works before any cell is born and before
+    /// a zero-duration advance. It checks the complete binding count, authored
+    /// inputs and pending IDs with the caller's cancellation/budget checkpoints.
+    /// It never queries fluid properties, applies heat or advances either owner.
+    /// Birth and source hooks still admit their actual material temperatures.
+    /// Each new advance revalidates the roster against its own thermal input.
+    pub fn new_for_timeline(
+        thermal: &DepositionSimulation<'_>,
+        bindings: &'b [SourceConvectiveCell],
+        maximum_cells: usize,
+        resolve: R,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, SourceCellConvectionError<E>> {
+        let mut observer = Self::new(bindings, maximum_cells, resolve);
+        observer.admit_schedule(thermal, &mut checkpoint)?;
+        Ok(observer)
+    }
+
+    fn prepare_bindings(
+        &mut self,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), SourceCellConvectionError<E>> {
+        checkpoint()?;
+        if self.binding_indices.is_some() { return Ok(()); }
+        if self.bindings.len() > self.maximum_cells {
+            return Err(invalid("convective cells exceed their explicit work bound"));
+        }
+        let mut indices = BTreeMap::new();
+        for (index, binding) in self.bindings.iter().enumerate() {
+            checkpoint()?;
+            binding.admit()?;
+            if indices.insert(binding.cell, index).is_some() {
+                return Err(invalid("duplicate convective cell"));
+            }
+        }
+        checkpoint()?;
+        self.binding_indices = Some(Arc::new(indices));
+        Ok(())
+    }
+
+    // The native schedule is immutable during an advance. Admit it only once,
+    // with cancellation checks, rather than rescanning for each cell/substep.
+    fn admit_schedule(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), SourceCellConvectionError<E>> {
+        self.prepare_bindings(checkpoint)?;
+        if self.scheduled_cells.is_some() { return Ok(()); }
+        let mut missing = BTreeSet::new();
+        for &id in self.binding_indices.as_ref().expect("prepared bindings").keys() {
+            checkpoint()?;
+            if !thermal.cells().contains_key(&id) { missing.insert(id); }
+        }
+        let mut scheduled = BTreeSet::new();
+        if !missing.is_empty() {
+            for timed in thermal.pending_events() {
+                checkpoint()?;
+                if let Event::Birth(cell) = &timed.event {
+                    if missing.remove(&cell.id) { scheduled.insert(cell.id); }
+                }
+                if missing.is_empty() { break; }
+            }
+        }
+        if !missing.is_empty() {
+            return Err(invalid("convective binding has no active cell or scheduled birth"));
+        }
+        checkpoint()?;
+        self.scheduled_cells = Some(scheduled);
+        Ok(())
+    }
+
     fn resolve_checked(
         &mut self,
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<ResolvedCellConvectionSources<F>, SourceCellConvectionError<E>> {
+        self.admit_schedule(thermal, checkpoint)?;
+        let scheduled = self.scheduled_cells.as_mut().expect("admitted schedule");
+        // The common all-active case keeps the original borrowed evaluator path.
+        if scheduled.is_empty() {
+            return with_checkpoint(checkpoint, |cancelled| evaluate_source_cell_convection(
+                thermal, self.bindings, self.maximum_cells, &mut self.resolve, cancelled));
+        }
+        let mut active = Vec::with_capacity(self.bindings.len().min(thermal.cells().len()));
+        for binding in self.bindings {
+            checkpoint()?;
+            if thermal.cells().contains_key(&binding.cell) {
+                scheduled.remove(&binding.cell);
+                active.push(*binding);
+            } else if !scheduled.contains(&binding.cell) {
+                return Err(invalid("previously active convective cell is missing"));
+            }
+        }
         with_checkpoint(checkpoint, |cancelled| evaluate_source_cell_convection(
-            thermal, self.bindings, self.maximum_cells, &mut self.resolve, cancelled))
-
+            thermal, &active, self.maximum_cells, &mut self.resolve, cancelled))
     }
 }
 
@@ -122,6 +230,8 @@ where
     type Error = SourceCellConvectionError<E>;
 
     fn begin(&mut self) -> Result<(), Self::Error> {
+        self.prepare_bindings(&mut || Ok(()))?;
+        self.scheduled_cells = None;
         self.source_epoch = None;
         self.source_conductances_w_k.clear();
         self.external_heat_j = 0.0;
@@ -166,9 +276,31 @@ where
         )?)
     }
 
-    fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
-        // Events arrive individually, including consecutive same-time births.
-        // Do not query an incomplete active set between those events.
+    fn event(&mut self, event: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
+        // Admit only this birth, not an incomplete set of same-time births.
+        // Even an advance ending exactly at birth must reject an unsupported
+        // incoming film/wall state. Heat and CFL still wait for sources(), after
+        // the native timeline has finished all same-time contact changes.
+        if let Event::Birth(cell) = event {
+            self.prepare_bindings(&mut || Ok(()))?;
+            if let Some(&index) = self.binding_indices.as_ref()
+                .expect("prepared bindings").get(&cell.id)
+            {
+                let binding = &self.bindings[index];
+                let wall = thermal.temperature_k(cell.id)?;
+                let material = resolve_cell_material(
+                    binding, wall, &mut self.resolve, &mut || false,
+                )?;
+                let law = binding.law.resolve(&material.thermal,
+                    material.surface.as_ref().map(|sample| &sample.thermal))?;
+                evaluate_convection_state(&material.thermal.transport(), wall,
+                    binding.reference_temperature, binding.characteristic_length, law)
+                    .map_err(ConvectionSourceError::Material)?;
+                if let Some(scheduled) = &mut self.scheduled_cells {
+                    scheduled.remove(&cell.id);
+                }
+            }
+        }
         self.sample = None;
         self.source_epoch = None;
         self.source_conductances_w_k.clear();

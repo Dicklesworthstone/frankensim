@@ -392,3 +392,242 @@ fn convection_step_bound_requires_a_current_source_and_is_invalidated_by_events(
     assert!(observer.limit_timestep_s(&thermal, 1.0, &mut || Ok(())).is_err());
     assert_eq!(thermal.time_s(), 0.0);
 }
+
+fn staged_births<'a>(
+    chart: &'a EquilibriumEnthalpyPhaseCurve,
+    temperatures: [f64; 2],
+    times: [f64; 2],
+) -> DepositionSimulation<'a> {
+    let base = initial(chart, temperatures, 0.0, 0.002);
+    let mut events = IDS.into_iter().zip(times).map(|(id, time_s)| TimedEvent {
+        time_s,
+        event: Event::Birth(base.cells()[&id].clone()),
+    }).collect::<Vec<_>>();
+    events.push(TimedEvent {
+        time_s: times[1],
+        event: Event::Contact(base.links()[&5]),
+    });
+    DepositionSimulation::new(events, &[(MaterialId(0), chart as &dyn ThermalLaw)],
+        DepositionBudget { max_cells: 2, max_links: 1, max_events: 3, max_substeps: 100 })
+        .unwrap()
+}
+
+fn forced_binding(cell: CellId) -> SourceConvectiveCell {
+    SourceConvectiveCell {
+        law: SourceCellConvectionLaw::Forced {
+            correlation: CorrelationId::FlatPlateLaminarAverage,
+            speed_m_s: 1.0,
+            settings: ForcedConvectionSettings::default(),
+        },
+        ..film(cell)
+    }
+}
+
+#[test]
+fn scheduled_deposits_join_convection_at_birth_with_native_contact_area_and_energy() {
+    let chart = curve();
+    let thermal = staged_births(&chart, [310.0, 290.0], [0.0, 0.015]);
+    let bindings = IDS.map(forced_binding);
+    let fluid = FluidTransportState::try_new(1.0, 1000.0, 0.02, 2e-5).unwrap();
+    let observer = SourceConvectionObserver::new(
+        &bindings, 2, |_: &SourceConvectiveCell, t: Temperature| {
+            ThermalFluidTransportState::try_new(fluid, t.value(), None)
+        },
+    );
+    let (next, accepted, audit) = thermal.advance_observed(
+        &observer, 0.04, controls(0.02), || Ok(()),
+    ).unwrap();
+
+    // Independent mean laminar-plate law: Pr=1 and Re=5000. Before the
+    // second birth only the first body stores/cools; the new contact reduces
+    // both exposed areas at precisely 0.015 s, with no pre-birth cooling.
+    let h = 0.664 * 5000.0_f64.sqrt() * 0.02 / 0.1;
+    let capacity = MASS * CP;
+    let mut expected = [310.0, 290.0];
+    let mut heat = 0.015 * h * AREA * (300.0 - expected[0]);
+    expected[0] += heat / capacity;
+    let g = h * (AREA - 0.002);
+    let dt_bound = 1.0 / (1.0 / 0.02 + g / (0.8 * capacity));
+    let mut time = 0.015;
+    let mut steps = 1;
+    while time < 0.04 {
+        let dt = dt_bound.min(0.04 - time);
+        let q = expected.map(|t| g * (300.0 - t));
+        for i in 0..2 { expected[i] += dt * q[i] / capacity; }
+        heat += dt * (q[0] + q[1]);
+        time += dt;
+        steps += 1;
+    }
+    for (id, t) in IDS.into_iter().zip(expected) {
+        near(next.temperature_k(id).unwrap(), t, 1e-11);
+    }
+    assert_eq!(audit.substeps, steps);
+    assert_eq!(audit.events, 3);
+    near(audit.incoming_mass_kg, 2.0 * MASS, 1e-15);
+    near(audit.external_heat_j, heat, 1e-11);
+    near(accepted.external_heat_j(), heat, 1e-11);
+    near(next.energy_j() - audit.incoming_energy_j, heat, 1e-10);
+    for sample in accepted.sample().unwrap().convection().samples() {
+        near(sample.exposed_area_m2, AREA - 0.002, 1e-15);
+    }
+    assert!(thermal.cells().is_empty());
+    assert_eq!(thermal.pending_events().len(), 3);
+    assert!(observer.sample().is_none());
+}
+
+#[test]
+fn simultaneous_births_admit_materials_before_final_same_time_exposure() {
+    let chart = curve();
+    let thermal = staged_births(&chart, [310.0, 290.0], [0.015, 0.015]);
+    let bindings = IDS.map(|cell| SourceConvectiveCell {
+        law: SourceCellConvectionLaw::ForcedSphere { speed_m_s: 1.0 },
+        property_temperature: ConvectionPropertyTemperature::Reservoir,
+        characteristic_length: Length::new(0.055),
+        ..film(cell)
+    });
+    // The provisional birth area exceeds pi D^2; the same-time contact makes
+    // the actual exposed area valid. Birth admission must not apply that
+    // provisional area to a source before the contact has been processed.
+    let sphere_area = core::f64::consts::PI * 0.055 * 0.055;
+    assert!(AREA > sphere_area && AREA - 0.002 < sphere_area);
+    let fluid = FluidTransportState::try_new(1.0, 1000.0, 0.02, 2e-5).unwrap();
+    let observer = SourceConvectionObserver::new(
+        &bindings, 2, |_: &SourceConvectiveCell, t: Temperature| {
+            ThermalFluidTransportState::try_new(fluid, t.value(), None)
+        },
+    );
+    let (born, accepted, audit) = thermal.advance_observed(
+        &observer, 0.015, controls(0.02), || Ok(()),
+    ).unwrap();
+    assert_eq!(audit.substeps, 0);
+    assert_eq!(audit.events, 3);
+    assert_eq!(accepted.external_heat_j(), 0.0);
+    assert!(accepted.sample().is_none());
+    assert_eq!(born.temperature_k(IDS[0]).unwrap(), 310.0);
+    assert_eq!(born.temperature_k(IDS[1]).unwrap(), 290.0);
+    let (next, cooled, _) = born.advance_observed(
+        &accepted, 0.025, controls(0.02), || Ok(()),
+    ).unwrap();
+    assert!(next.temperature_k(IDS[0]).unwrap() < 310.0);
+    assert!(next.temperature_k(IDS[1]).unwrap() > 290.0);
+    assert_eq!(cooled.sample().unwrap().materials().len(), 2);
+    for sample in cooled.sample().unwrap().convection().samples() {
+        near(sample.exposed_area_m2, AREA - 0.002, 1e-15);
+    }
+}
+
+#[test]
+fn future_source_stays_inert_until_its_birth_and_refuses_an_unsupported_birth_endpoint() {
+    let chart = curve();
+    let thermal = staged_births(&chart, [290.0, 310.0], [0.0, 0.015]);
+    let bindings = IDS.map(forced_binding);
+    let card = liquid_card(0.5, 0.01, 303.0);
+    let law = liquid_law(&card);
+    let observer = SourceConvectionObserver::new(
+        &bindings, 2, |_: &SourceConvectiveCell, t: Temperature| law.at_temperature(t),
+    );
+    // The future body's 305 K film is already outside source support, but has
+    // no physical surface yet and must not be queried before its birth.
+    let (before, accepted, _) = thermal.advance_observed(
+        &observer, 0.01, controls(0.02), || Ok(()),
+    ).unwrap();
+    assert_eq!(before.cells().len(), 1);
+    let samples = accepted.sample().unwrap().materials();
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples[0].cell, IDS[0]);
+    let saved = before.cells().clone();
+    let events = before.pending_events().to_vec();
+    let heat = accepted.external_heat_j();
+    assert!(matches!(before.advance_observed(
+        &accepted, 0.015, controls(0.02), || Ok(()),
+    ), Err(SourceCellConvectionError::Source {
+        cell: CellId(10), property_temperature_k, ..
+    }) if property_temperature_k == 305.0));
+    assert_eq!(before.cells(), &saved);
+    assert_eq!(before.pending_events(), events.as_slice());
+    assert_eq!(accepted.external_heat_j(), heat);
+    assert_eq!(accepted.sample().unwrap().materials().len(), 1);
+}
+
+#[test]
+fn future_bindings_share_the_work_bound_and_require_unique_scheduled_cells() {
+    let chart = curve();
+    let thermal = staged_births(&chart, [310.0, 290.0], [0.0, 0.015])
+        .advance_to(0.0, controls(0.02), || Ok(())).unwrap().0;
+    for (bindings, maximum) in [
+        (vec![forced_binding(IDS[0]), forced_binding(CellId(99))], 2),
+        (vec![forced_binding(IDS[1]), forced_binding(IDS[1])], 2),
+        (IDS.map(forced_binding).to_vec(), 1),
+    ] {
+        let mut observer = SourceConvectionObserver::new(
+            &bindings, maximum,
+            |_: &SourceConvectiveCell, _: Temperature|
+                -> Result<ThermalFluidTransportState, &'static str> {
+                panic!("invalid roster must refuse before a material query")
+            },
+        );
+        assert!(matches!(observer.sources(&thermal, &mut || Ok(())),
+            Err(SourceCellConvectionError::Convection(ConvectionSourceError::Invalid(_)))));
+    }
+    let bindings = IDS.map(forced_binding);
+    let fluid = FluidTransportState::try_new(1.0, 1000.0, 0.02, 2e-5).unwrap();
+    let mut observer = SourceConvectionObserver::new(
+        &bindings, 2, |_: &SourceConvectiveCell, t: Temperature| {
+            ThermalFluidTransportState::try_new(fluid, t.value(), None)
+        },
+    );
+    observer.begin().unwrap();
+    let mut polls = 0;
+    assert!(matches!(observer.sources(&thermal, &mut || {
+        polls += 1;
+        if polls == 4 { Err(DepositionError::Budget("scheduled source scan")) } else { Ok(()) }
+    }), Err(SourceCellConvectionError::Convection(ConvectionSourceError::Thermal(
+        DepositionError::Budget("scheduled source scan"),
+    )))));
+    // A refused roster preparation leaves no partially admitted schedule.
+    let sources = observer.sources(&thermal, &mut || Ok(())).unwrap();
+    assert_eq!(sources.len(), 1);
+    assert!(sources.contains_key(&IDS[0]));
+    assert!(!sources.contains_key(&IDS[1]));
+}
+
+#[test]
+fn timeline_constructor_admits_empty_and_zero_time_rosters_without_future_source_queries() {
+    let chart = curve();
+    let thermal = staged_births(&chart, [310.0, 290.0], [0.015, 0.015]);
+    let resolve = |_: &SourceConvectiveCell, _: Temperature|
+        -> Result<ThermalFluidTransportState, &'static str> {
+        panic!("no fluid source exists before the scheduled births")
+    };
+    let unknown = [forced_binding(CellId(99))];
+    assert!(matches!(SourceConvectionObserver::new_for_timeline(
+        &thermal, &unknown, 1, resolve, || Ok(()),
+    ), Err(SourceCellConvectionError::Convection(ConvectionSourceError::Invalid(_)))));
+
+    let bindings = IDS.map(forced_binding);
+    let observer = SourceConvectionObserver::new_for_timeline(
+        &thermal, &bindings, 2, resolve, || Ok(()),
+    ).unwrap();
+    let (zero, at_zero, zero_audit) = thermal.advance_observed(
+        &observer, 0.0, controls(0.02), || Ok(()),
+    ).unwrap();
+    let (empty, before_birth, empty_audit) = zero.advance_observed(
+        &at_zero, 0.01, controls(0.02), || Ok(()),
+    ).unwrap();
+    assert!(zero.cells().is_empty());
+    assert!(empty.cells().is_empty());
+    assert_eq!(empty.time_s(), 0.01);
+    assert_eq!(zero_audit.substeps, 0);
+    assert_eq!(empty_audit.substeps, 0);
+    assert_eq!(empty_audit.external_heat_j, 0.0);
+    assert_eq!(empty.pending_events(), thermal.pending_events());
+    assert!(before_birth.sample().is_none());
+
+    // A later native query may not inherit another timeline's admitted future
+    // IDs. power_balance_observed begins a fresh query even on an empty state.
+    let no_births = DepositionSimulation::new(
+        Vec::new(), &[(MaterialId(0), &chart as &dyn ThermalLaw)], thermal.budget(),
+    ).unwrap();
+    assert!(matches!(no_births.power_balance_observed(&observer, || Ok(())),
+        Err(SourceCellConvectionError::Convection(ConvectionSourceError::Invalid(_)))));
+}
