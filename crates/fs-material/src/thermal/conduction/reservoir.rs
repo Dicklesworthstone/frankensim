@@ -18,6 +18,19 @@ pub struct ReservoirLayerGeometry {
     surface_area_m2: f64,
 }
 impl ReservoirLayerGeometry {
+    /// Bind an explicit source-free geometric multiplier `C = 1/integral(ds/A)`.
+    ///
+    /// `multiplier_m` has units of metres; `surface_area_m2` is the actual
+    /// contacted face area. The caller owns the physical metric. This preserves
+    /// mass-derived thin-shell geometry without reconstructing rounded radii
+    /// or relabeling an equivalent resistance distance as a physical thickness.
+    pub fn from_geometric_multiplier(
+        multiplier_m: f64,
+        surface_area_m2: f64,
+    ) -> Result<Self, DepositionError> {
+        Self::new(multiplier_m, surface_area_m2)
+    }
+
     /// Source-free planar layer, with the stated area and actual thickness.
     pub fn planar(area_m2: f64, thickness_m: f64) -> Result<Self, DepositionError> {
         if !positive(area_m2) || !positive(thickness_m) {

@@ -16,6 +16,8 @@
 
 /// Accuracy-controlled histories carrying both condensed temperatures and one gas.
 pub mod advance;
+/// Original conductivity integrals and the actual inner coating contact.
+pub mod conductive;
 /// Explicit heat/power inputs with the original conservative history owner.
 pub mod driven;
 /// Mass-derived exposed area and material conductivity in that same adaptive history.

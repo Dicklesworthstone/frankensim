@@ -214,6 +214,34 @@ nonfinite/unrepresentable work, exhausted work, source failures and cancellation
 publish no candidate. This is prescribed-power evolution, not an imposed
 temperature thermostat, feedback controller or unbounded gas reservoir.
 
+### Original conductivity integrals across the coating and its contact
+
+`ConductiveCoatingInterface` binds an actual positive coating mass, the original
+positive conductivity curve and the fixed inner contact area. The original
+material/film owner integrates conductivity across the actual coating temperature
+drop and solves the coating-side contact-face temperature. Positive power leaves
+the support and enters the deposit; the contact jump and coating flux share that
+same power. The two-temperature deposition kernel uses this law inside its
+existing caloric balance instead of freezing conductivity at a bulk trace.
+
+The adapter reuses the original planar/radial geometric multiplier, including
+mass-derived sub-ULP shell thicknesses. Areal contact resistance is divided by
+the fixed inner area once. The deposit and solved coating face must remain in
+the conductivity source domain. A finite contact jump may admit a support
+temperature outside that domain without treating support material as coating.
+Perfect contact requires both material traces to be supported. The caller owns
+the identity of the borrowed conductivity curve and its consistency with the
+deposit; borrowing knots alone does not establish source/material identity.
+
+Binding and successful flux queries allocate no storage and perform no
+material-card resolution. Original knot limits and the explicit contact-solve
+budget bound work; a borrowed checkpoint can interrupt original inner trials.
+The richer response retains heat continuity, actual face temperature and
+endpoint derivatives, while the low-level thermal trait preserves cancellation
+and budget refusal. This is source-free, isotropic, quasi-steady conduction
+through a layer with two original lumped caloric inventories. It does not add
+another heat store or resolve a spatial transient temperature field.
+
 ## Source-bound finite membrane entropy and thermal stress
 
 `HyperelasticMembrane::thermoelastic_state` prepares the original expansion
