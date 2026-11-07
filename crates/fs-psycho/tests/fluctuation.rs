@@ -7,9 +7,10 @@ use fs_psycho::fluctuation::{FS_FRAME, bark_z, fluctuation_strength_frame};
 
 const SR: f64 = 48_000.0;
 
-// Note: `level_db` pins the CARRIER level (overall SPL at m = 1 is
-// +1.76 dB); the convention is shared by calibration and validation,
-// so the 1-vacil anchor absorbs it (review NIT, disclosed).
+// `level_db` pins the carrier's RMS SPL; at m = 1 the long-term total
+// is about 1.76 dB higher. Keep this existing calibration convention:
+// the paper specifies SPL but does not supply the normalization recipe.
+// Passing the reference gate is not a claim of exact waveform agreement.
 fn am_tone(fc: f64, level_db: f64, fmod: f64, m: f64) -> Vec<f64> {
     let a = fs_math::det::sqrt(2.0) * 2.0e-5 * fs_math::det::pow(10.0, level_db / 20.0);
     (0..FS_FRAME)
@@ -76,11 +77,40 @@ fn reference_stimulus_reads_one_vacil() {
     assert!((fs - 1.0).abs() < 1.0e-9, "reference: {fs:.17}");
 }
 
+/// Near 1 kHz the threshold-in-quiet table is above 3 dB SPL and a0
+/// is 0 dB. Each of these two bin-centred components has a known RMS
+/// level: 1 dB must remain inaudible, while 5 dB admits both components
+/// and their ~4 Hz beat. Using peak pressure as SPL adds 3.0103 dB and
+/// incorrectly admits the lower pair, even after calibrating C_FS.
+#[test]
+fn hearing_threshold_uses_component_rms_pressure() {
+    let beat_pair = |component_level_db: f64| {
+        let peak = core::f64::consts::SQRT_2
+            * 20.0e-6
+            * fs_math::det::pow(10.0, component_level_db / 20.0);
+        (0..FS_FRAME)
+            .map(|i| {
+                let bin_phase = core::f64::consts::TAU * i as f64 / FS_FRAME as f64;
+                peak * (fs_math::det::sin(2731.0 * bin_phase)
+                    + fs_math::det::sin(2742.0 * bin_phase))
+            })
+            .collect::<Vec<_>>()
+    };
+    let below = fluctuation_strength_frame(&beat_pair(1.0), SR).expect("below threshold");
+    assert_eq!(
+        below.to_bits(),
+        0.0_f64.to_bits(),
+        "subthreshold components must not generate a beat"
+    );
+    let above = fluctuation_strength_frame(&beat_pair(5.0), SR).expect("above threshold");
+    assert!(above.is_finite() && above > 0.1, "audible beat: {above}");
+}
+
 /// The published AM-tone curve (Fastl-Zwicker values as reproduced
 /// in the ICA2016 paper's Table 1; single-source transcription with
 /// the 1-vacil anchor independently corroborated — provenance in the
 /// module doc): every point within the authored envelope
-/// +-(0.05 + 25%), measured worst -18% at 4-8 Hz (the model's level
+/// +-(0.05 + 25%), about 12-13% low at 4-8 Hz (the model's level
 /// growth 60->70 dB is weaker than published — disclosed), plus the
 /// discriminating shape assertions a flat model cannot pass.
 #[test]
@@ -127,11 +157,10 @@ fn am_tone_curve_matches_published_within_envelope() {
 }
 
 /// FM tones: qualitative gates only — the paper's OWN model
-/// overestimates FM above 4 Hz; this realisation overestimates FM
-/// across the band (measured 1.5x at the 4 Hz point: 3.02 vs the
-/// published 2.00; worst 3.9x at 16 Hz: 1.05 vs 0.27) — values
-/// REPORTED, the claims gated are the bandpass collapse and
-/// finiteness.
+/// overestimates FM above 4 Hz; this realisation reads about 1.6x
+/// at the checked 4 Hz point (3.195 vs the published 2.00). Values
+/// are REPORTED; the claims gated are the bandpass collapse and
+/// finiteness, not absolute FM agreement.
 #[test]
 fn fm_tone_behavior() {
     let f4 = fluctuation_strength_frame(&fm_tone(1500.0, 70.0, 4.0, 700.0), SR).expect("fs");

@@ -114,7 +114,15 @@ test).
   corners FITTED to the published AM curve per the paper's own
   methodology (1st-order HP 1.7 Hz, 3rd-order LP 13 Hz), `C_FS`
   re-derived on the paper's 1-vacil reference, DW threshold table
-  reuse, edge-channel single-factor rule.
+  reuse, edge-channel single-factor rule. Component thresholds and
+  excitation slopes use RMS SPL (`sqrt(2) |X[k]|/N` for interior
+  real-signal bins), not peak pressure. Ear transmission and spreading
+  scale the original complex FFT coefficients directly, preserving pressure
+  and phase without repeating magnitude calculations for all 47 channels.
+  The existing reference fixture pins carrier RMS SPL; full modulation
+  raises its long-term overall SPL by about 1.76 dB. That disclosed fixture
+  convention is retained, rather than claiming the paper supplies its exact
+  carrier-to-total normalization recipe.
 - `LISTENING_LAW` — the not-a-substitute statement as data, so its
   removal breaks a test.
 - `receipt::ListeningReceipt` (music bead 3ez8g.1.2) — the human half of
@@ -214,17 +222,17 @@ test).
     EXACTLY 1.0 (calibration regression, bitwise-stable); the
     published AM-tone curve (Fastl-Zwicker values via the paper's
     Table 1) is reproduced within +-(0.05 + 25%) per point —
-    measured worst -18% at 4-8 Hz, a LEVEL-GROWTH deficit (60->70 dB
+    about 12-13% low at 4-8 Hz, a LEVEL-GROWTH deficit (60->70 dB
     growth weaker than published) disclosed with direction asserted;
     shape gates (bandpass peak at 4-8 Hz, monotone rise, 32 Hz
     collapse) discriminate flat models; FM values are REPORTED with
     the overestimation disclosed (the paper's own model
-    overestimates FM > 4 Hz; this realisation reads ~1.5x at the
+    overestimates FM > 4 Hz; this realisation reads ~1.6x at the
     4 Hz FM point) and gated qualitatively; the Bark formula
     cross-checks the independent Daniel-Weber BARK_FREQS table
     within 0.35 Bark; AM BROADBAND NOISE (the decorrelated-channel
     class that exercises the Eq 9 cross covariance — review-executed:
-    a k := 1 mutant passed every tone gate) reads 1.849 vacil at the
+    a k := 1 mutant passed every tone gate) reads 1.845 vacil at the
     published 1.80 point (envelope 0.9..2.7 + bandpass shape); the
     paper's 3:1 compression worked example (0.85 -> 0.75) is pinned
     directly (the tone battery never crosses the knee —
@@ -264,10 +272,13 @@ None.
 
 ## Conformance tests
 
-`tests/fluctuation.rs` (8 + 2 ignored probes): reference
+`tests/fluctuation.rs` (9 + 2 ignored probes): reference
 calibration; published AM curve + shape; FM behavior; AM broadband
 noise (cross-covariance discriminator); compression-knee pin;
-smoothness; Bark cross-check; refusals + determinism.
+smoothness; Bark cross-check; refusals + determinism; subthreshold versus
+audible two-tone beats at known component RMS levels. Two private stage tests
+also check known-RMS FFT coefficients across phase and physical-pressure
+reconstruction through ear/spreading gains and an inverse FFT.
 
 `tests/psycho.rs` (20 + 1 ignored provenance tool): ISO signal-1
 exactness; cross-path tone
@@ -300,7 +311,7 @@ independent of the stationary loudness filterbank's skip interval.
 
 - Fluctuation strength: single-frame API v1 (no 90%-overlap frame
   train); level growth with SPL is weaker than published (measured
-  -18% at 70 dB mid-band — the AM envelope gates carry it,
+  about 12-13% at 70 dB mid-band — the AM envelope gates carry it,
   disclosed); FM absolute values overestimate (reported, gated
   qualitatively); NOT in `pareto_metrics` (its 2.73-s frame exceeds
   the batch block contract — recorded decision).

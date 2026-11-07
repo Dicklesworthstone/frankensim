@@ -1,7 +1,7 @@
 //! Fluctuation strength [vacil] — implemented from the PUBLISHED
 //! model equations of Osses Vecchi, García León & Kohlrausch,
 //! "Modelling the sensation of fluctuation strength", ICA 2016 paper
-//! ICA2016-113 (openly hosted; PDF archived in the session record).
+//! [ICA2016-113](https://pure.tue.nl/ws/files/52366479/Osses_Garcia_Kohlrausch_ICA2016_ID113.pdf).
 //! NO reference code was ported: the only open implementations are
 //! CC BY-NC (SQAT) or unlicensed (fluctuation-strength-TUe), so this
 //! module implements the paper's equations directly — methods are
@@ -23,6 +23,15 @@
 //! normalised cross covariance between channels i and i±2, and
 //! `g(z)` falling linearly 1 -> 0.5 over 15..23.5 Bark.
 //!
+//! Component levels use RMS sound pressure relative to 20 µPa (the
+//! [NIST SPL convention](https://nvlpubs.nist.gov/nistpubs/Legacy/IR/nbsir75-938.pdf)).
+//! An interior real-signal FFT bin has RMS pressure `sqrt(2) |X[k]| / N`;
+//! its peak pressure would overstate both audibility and the level-dependent
+//! spreading by 3.0103 dB. Excitation spectra retain the original complex
+//! coefficients and apply only the transmission and spreading gains, so
+//! reconstruction preserves physical pressure and phase without another
+//! peak/RMS conversion.
+//!
 //! Stated deviations / choices the paper leaves open (all disclosed;
 //! the gates in the conformance tests measure their net effect
 //! against the published values):
@@ -39,7 +48,11 @@
 //! - `C_FS` is re-derived on the paper's own reference stimulus
 //!   (1 kHz, 60 dB, m = 1, fmod = 4 Hz := 1.00 vacil) because the
 //!   published 0.2490 is specific to their unstated filter; the
-//!   paper itself fixes the constant this way.
+//!   paper itself fixes the constant this way. The existing fixture pins
+//!   the carrier's RMS SPL: at full modulation its overall level is about
+//!   1.76 dB higher. That convention is retained; the paper does not give
+//!   an explicit carrier-to-total normalization recipe, so this is not a
+//!   claim of exact absolute agreement with its reference waveform.
 //! - The absolute-threshold gate reuses the Daniel-Weber
 //!   threshold-in-quiet table ([`crate::dw_tables`]) — the chain the
 //!   model is adapted from.
@@ -53,6 +66,20 @@ use crate::dw_tables::{A0_BARK, A0_DB, LTQ_R_BARK, LTQ_R_DB};
 use crate::{PsychoError, tables_interp};
 use fs_fft::{C64, Fft};
 use fs_math::det;
+
+/// RMS pressure of an interior bin from an unnormalized real-signal FFT.
+/// The DC and Nyquist bins have different weights and are not used here.
+fn component_rms_pressure_pa(coefficient: C64, sample_count: f64) -> f64 {
+    det::hypot(coefficient.re, coefficient.im) * (core::f64::consts::SQRT_2 / sample_count)
+}
+
+/// A pressure-level gain acts on the complex coefficient without changing
+/// its phase or converting it to an RMS phasor. The inverse FFT retains its
+/// original 1/N normalization.
+fn apply_pressure_gain(coefficient: C64, gain_db: f64) -> C64 {
+    let gain = det::pow(10.0, gain_db / 20.0);
+    C64::new(coefficient.re * gain, coefficient.im * gain)
+}
 
 /// Analysis frame length (samples): 2.73 s at 48 kHz, `Delta f`
 /// = 0.366 Hz (the paper: 2 s / 0.5 Hz; power-of-two deviation
@@ -84,7 +111,7 @@ const F_LP: f64 = 13.0;
 /// pin — re-derivation itself lives in the ignored calibration
 /// probe). The paper's own 0.2490 belongs to their unstated filter
 /// realisation.
-pub const C_FS: f64 = 0.12753996479900015;
+pub const C_FS: f64 = 0.13631494788258172;
 
 /// Zwicker-Terhardt critical-band rate [Bark] (paper Eq. 3; the
 /// canonical 7.6e-4 coefficient — the ICA PDF's OCR renders it
@@ -200,7 +227,8 @@ pub fn fluctuation_strength_frame(pcm_pa: &[f64], sample_rate: f64) -> Result<f6
     fft.forward(&mut buf, &mut scratch);
     let half = n / 2;
     // --- Component levels with a0 transmission, thresholded. ---
-    // Amplitude of component k: 2/N * |X_k| (one-sided real signal).
+    // Interior-bin RMS pressure: sqrt(2)/N * |X_k|. Thresholds and
+    // the level-dependent excitation slope use RMS SPL, not peak pressure.
     let mut level = vec![f64::NEG_INFINITY; half];
     let mut zk = vec![0.0f64; half];
     let mut audible: Vec<usize> = Vec::new();
@@ -209,22 +237,29 @@ pub fn fluctuation_strength_frame(pcm_pa: &[f64], sample_rate: f64) -> Result<f6
         let f = k as f64 * fs / nf;
         let z = bark_z(f);
         zk[k] = z;
-        let amp = 2.0 * det::sqrt(buf[k].norm_sq()) / nf;
-        if amp <= 0.0 {
+        let rms_pa = component_rms_pressure_pa(buf[k], nf);
+        if rms_pa <= 0.0 {
             continue;
         }
         let a0_db = tables_interp(z, &A0_BARK, &A0_DB);
-        let l = 20.0 * det::ln(amp / 2.0e-5) / det::ln(10.0) + a0_db;
+        let l = 20.0 * det::ln(rms_pa / 2.0e-5) / det::ln(10.0) + a0_db;
         level[k] = l;
         let thr = tables_interp(z, &LTQ_R_BARK, &LTQ_R_DB);
         if l > thr {
             audible.push(k);
+            // Prepare the transmitted complex coefficient once. The channel
+            // bank below only applies its additional spreading attenuation.
+            buf[k] = apply_pressure_gain(buf[k], a0_db);
         }
     }
     if audible.is_empty() {
         return Ok(0.0);
     }
     // --- Per-channel excitation, envelope, modulation depth. ---
+    // The modulation filter is identical for all channels. Evaluate its
+    // nonredundant frequency weights once, then reuse them and their mirror.
+    #[allow(clippy::cast_precision_loss)]
+    let modulation_weights: Vec<f64> = (0..=half).map(|k| h_mod(k as f64 * fs / nf)).collect();
     let mut h_bp: Vec<Vec<f64>> = Vec::with_capacity(N_CHANNEL);
     let mut m_star = [0.0f64; N_CHANNEL];
     let mut exc = vec![C64::new(0.0, 0.0); n];
@@ -253,23 +288,19 @@ pub fn fluctuation_strength_frame(pcm_pa: &[f64], sample_rate: f64) -> Result<f6
             if l_contrib <= -80.0 {
                 continue; // negligible tail (numerical economy)
             }
-            let amp = 2.0e-5 * det::pow(10.0, l_contrib / 20.0);
-            // Keep the component's phase (paper: "keeping the same
-            // phase of the component at k").
-            let mag = det::sqrt(buf[k].norm_sq());
-            if mag > 0.0 {
-                let scale = amp * nf / 2.0 / mag;
-                exc[k] = C64::new(buf[k].re * scale, buf[k].im * scale);
-            }
+            // Scale the original phase-bearing FFT coefficient, already
+            // weighted by a0. This is equivalent to reconstructing an RMS
+            // level with |X_k| = N * p_rms / sqrt(2), without recalculating
+            // magnitudes or losing a peak/RMS factor in every channel.
+            exc[k] = apply_pressure_gain(buf[k], l_contrib - lk);
         }
         // Hermitian mirror so the IFFT is real.
         for k in 1..half {
             exc[n - k] = C64::new(exc[k].re, -exc[k].im);
         }
-        let mut tmp = exc.clone();
-        fft.inverse(&mut tmp, &mut scratch);
+        fft.inverse(&mut exc, &mut scratch);
         // Full-wave rectified envelope and its DC value (Eq. 6).
-        for (e, t) in env.iter_mut().zip(&tmp) {
+        for (e, t) in env.iter_mut().zip(&exc) {
             *e = C64::new(t.re.abs(), 0.0);
         }
         let h0 = env.iter().map(|c| c.re).sum::<f64>() / nf;
@@ -277,10 +308,8 @@ pub fn fluctuation_strength_frame(pcm_pa: &[f64], sample_rate: f64) -> Result<f6
         // domain, zero-phase.
         fft.forward(&mut env, &mut scratch);
         for (k, e) in env.iter_mut().enumerate() {
-            let kk = if k <= n / 2 { k } else { n - k };
-            #[allow(clippy::cast_precision_loss)]
-            let fmod = kk as f64 * fs / nf;
-            let w = h_mod(fmod);
+            let kk = if k <= half { k } else { n - k };
+            let w = modulation_weights[kk];
             *e = C64::new(e.re * w, e.im * w);
         }
         fft.inverse(&mut env, &mut scratch);
@@ -312,4 +341,68 @@ pub fn fluctuation_strength_frame(pcm_pa: &[f64], sample_rate: f64) -> Result<f6
         total += det::pow(m_star[ch], P_M) * det::pow(k_factor, P_K) * g_weight(zi);
     }
     Ok(C_FS * total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{C64, Fft, apply_pressure_gain, component_rms_pressure_pa, det};
+
+    #[test]
+    fn fft_component_pressure_matches_known_rms_at_every_phase() {
+        let n = 128;
+        let nf = n as f64;
+        let bin = 9;
+        let fft = Fft::new(n);
+        let mut scratch = vec![C64::default(); n];
+        for rms_pa in [20.0e-6, 0.02, 1.0] {
+            for phase in [0.0, 0.7, 2.1, -1.2] {
+                let mut spectrum: Vec<C64> = (0..n)
+                    .map(|i| {
+                        let angle = core::f64::consts::TAU * bin as f64 * i as f64 / nf + phase;
+                        C64::new(core::f64::consts::SQRT_2 * rms_pa * det::cos(angle), 0.0)
+                    })
+                    .collect();
+                fft.forward(&mut spectrum, &mut scratch);
+                let measured = component_rms_pressure_pa(spectrum[bin], nf);
+                assert!(
+                    (measured / rms_pa - 1.0).abs() < 2.0e-14,
+                    "RMS pressure {rms_pa}, phase {phase}: got {measured}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn excitation_gains_preserve_pressure_and_phase_through_inverse_fft() {
+        let n = 128;
+        let nf = n as f64;
+        let bin = 9;
+        let fft = Fft::new(n);
+        let mut scratch = vec![C64::default(); n];
+        let rms_pa = 0.02;
+        for phase in [0.0, 0.7, 2.1, -1.2] {
+            let samples: Vec<f64> = (0..n)
+                .map(|i| {
+                    let angle = core::f64::consts::TAU * bin as f64 * i as f64 / nf + phase;
+                    core::f64::consts::SQRT_2 * rms_pa * det::cos(angle)
+                })
+                .collect();
+            let mut spectrum: Vec<C64> = samples.iter().map(|&p| C64::new(p, 0.0)).collect();
+            fft.forward(&mut spectrum, &mut scratch);
+            for (transmission_db, spreading_db) in [(0.0, 0.0), (6.0, -12.0), (-3.0, -7.0)] {
+                let transmitted = apply_pressure_gain(spectrum[bin], transmission_db);
+                let excitation = apply_pressure_gain(transmitted, spreading_db);
+                let mut reconstructed = vec![C64::default(); n];
+                reconstructed[bin] = excitation;
+                reconstructed[n - bin] = excitation.conj();
+                fft.inverse(&mut reconstructed, &mut scratch);
+                let expected_gain = det::pow(10.0, (transmission_db + spreading_db) / 20.0);
+                let expected_peak = core::f64::consts::SQRT_2 * rms_pa * expected_gain;
+                for (&sample, value) in samples.iter().zip(&reconstructed) {
+                    assert!((value.re - sample * expected_gain).abs() < 2.0e-14 * expected_peak);
+                    assert!(value.im.abs() < 2.0e-14 * expected_peak);
+                }
+            }
+        }
+    }
 }
