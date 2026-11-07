@@ -4245,6 +4245,29 @@ never extend the solid source into the liquid interval or vice versa. All
 original caloric, conductivity and reference-density receipts remain available;
 the combined identity includes the explicit coexistence closure.
 
+`MaterialMeltingTransport::from_isotropic_card_exact` consumes
+`ExactMaterialMeltingSource` to retain only the original Cp/density boundaries
+and fusion plateau. Each sensible temperature, inverse and tangent still uses
+the original affine Cp integral. It does not interpolate T linearly between
+those compact public knots. The separate absolute fusion-rounding allowance
+admits only the represented plateau width at the selected enthalpy datum;
+it is not a sensible interpolation or source-uncertainty bound.
+
+Both ingresses share the same conductivity preparation, source-domain checks,
+phase-volume closure and frozen reference inventory. The resulting owner
+feeds the original uniform/regional, scheduled, adaptive, BE/SDIRK2 and adjoint
+paths without a separate field operator. Original conductivity knots and their
+classical-adjoint refusals remain present even when the caloric chart is compact.
+This removes artificial caloric subdivisions, not physical source transitions,
+spatial discretization error or material uncertainty.
+
+Four focused regression definitions in `tests/material_melting/exact.rs`
+check independent affine-Cp inverses and conductivity tangents, compact versus
+refined source representations, mixed-phase spatial residual/Jacobian columns,
+native BE/SDIRK2 heating and freezing with fixed reference mass, and retained
+source/corner refusals. These new definitions passed syntax parsing but were
+not natively executed in the resource-exhausted implementation environment.
+
 At coexistence the caller chooses a parallel arithmetic or series harmonic
 conductivity mixture in **volume** fraction. The liquid volume fraction is
 computed from the original liquid mass fraction and the two sourced densities

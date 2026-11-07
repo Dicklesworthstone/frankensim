@@ -59,6 +59,44 @@ pub struct MaterialMeltingSource<'a> {
     pub coexistence: CoexistenceConductivity,
 }
 
+/// Original solid/liquid sources without artificial sensible-chart subdivisions.
+///
+/// Only original Cp/density boundaries and the sharp fusion plateau are kept.
+/// Temperature and its tangent come from the original affine Cp integral and
+/// inverse; public boundary knots are not a piecewise-linear T(h) approximation.
+#[derive(Debug, Clone, Copy)]
+pub struct ExactMaterialMeltingSource<'a> {
+    pub caloric: MeltingSourceQuery<'a>,
+    /// Solid then liquid isotropic conductivity keys from the SAME card.
+    pub conductivity: [&'a PropertyKey; 2],
+    /// Explicit single-phase state supplying the frozen reference mass density.
+    pub reference_phase: SolidLiquidPhase,
+    pub reference: &'a QueryPoint,
+    pub lower_specific_enthalpy_j_kg: f64,
+    /// Absolute allowed rounding of the represented fusion width [J/kg].
+    /// Zero requires exact representation at this datum. This is neither a
+    /// sensible-chord allowance nor physical material/source uncertainty.
+    pub maximum_fusion_rounding_error_j_kg: f64,
+    pub coexistence: CoexistenceConductivity,
+}
+
+impl<'a> MaterialMeltingSource<'a> {
+    fn into_parts(self) -> (ExactMaterialMeltingSource<'a>, f64) {
+        (
+            ExactMaterialMeltingSource {
+                caloric: self.caloric,
+                conductivity: self.conductivity,
+                reference_phase: self.reference_phase,
+                reference: self.reference,
+                lower_specific_enthalpy_j_kg: self.lower_specific_enthalpy_j_kg,
+                maximum_fusion_rounding_error_j_kg: self.maximum_interpolation_error_j_kg,
+                coexistence: self.coexistence,
+            },
+            self.maximum_interpolation_error_j_kg,
+        )
+    }
+}
+
 /// One conductivity value and its exact one-sided admitted-chart tangent.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MeltingConductivitySample {
@@ -93,12 +131,44 @@ impl MaterialMeltingTransport {
         card: &MaterialCard,
         source: MaterialMeltingSource<'_>,
     ) -> Result<Self, MaterialEnthalpyError> {
-        let caloric = ResolvedMeltingCurve::try_new(
-            card,
-            source.caloric,
-            source.lower_specific_enthalpy_j_kg,
-            source.maximum_interpolation_error_j_kg,
-        )
+        let (source, maximum_error) = source.into_parts();
+        Self::from_isotropic_source(card, source, Some(maximum_error))
+    }
+
+    /// Resolve compact original calorics for the native spatial melting owner.
+    ///
+    /// This uses the same source conductivity, coexistence closure, exact dk/dh,
+    /// reference inventory and physical admission as `from_isotropic_card`.
+    /// Original Cp/rho knots and the fusion plateau are retained without
+    /// tolerance-driven sensible subdivision. Uniform, regional, scheduled,
+    /// adaptive and adjoint consumers use the same resulting material owner.
+    /// This changes the caloric representation, not the spatial discretization.
+    pub fn from_isotropic_card_exact(
+        card: &MaterialCard,
+        source: ExactMaterialMeltingSource<'_>,
+    ) -> Result<Self, MaterialEnthalpyError> {
+        Self::from_isotropic_source(card, source, None)
+    }
+
+    fn from_isotropic_source(
+        card: &MaterialCard,
+        source: ExactMaterialMeltingSource<'_>,
+        maximum_interpolation_error_j_kg: Option<f64>,
+    ) -> Result<Self, MaterialEnthalpyError> {
+        let caloric = match maximum_interpolation_error_j_kg {
+            Some(maximum_error) => ResolvedMeltingCurve::try_new(
+                card,
+                source.caloric,
+                source.lower_specific_enthalpy_j_kg,
+                maximum_error,
+            ),
+            None => ResolvedMeltingCurve::try_new_exact(
+                card,
+                source.caloric,
+                source.lower_specific_enthalpy_j_kg,
+                source.maximum_fusion_rounding_error_j_kg,
+            ),
+        }
         .map_err(MaterialEnthalpyError::Caloric)?;
         let branches = [source.caloric.solid, source.caloric.liquid];
         let table = |index: usize| {

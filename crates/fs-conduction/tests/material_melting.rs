@@ -2,6 +2,8 @@
 mod support;
 #[path = "material_melting/heterogeneous.rs"]
 mod heterogeneous;
+#[path = "material_melting/exact.rs"]
+mod exact;
 
 use fs_conduction::lumped::{
     BiotGate, LumpedEnthalpyBody, LumpedEnthalpyMarchConfig, solve_lumped_enthalpy,
@@ -64,6 +66,14 @@ fn point(t: f64, phase: Option<f64>, pressure: f64) -> QueryPoint {
 }
 
 fn card(liquid_conductivity: bool, conductivity_kink: bool) -> MaterialCard {
+    card_with_capacities(liquid_conductivity, conductivity_kink, [[2.0; 2], [4.0; 2]])
+}
+
+fn card_with_capacities(
+    liquid_conductivity: bool,
+    conductivity_kink: bool,
+    cp: [[f64; 2]; 2],
+) -> MaterialCard {
     let mut claims = ClaimSet::new();
     let pressure = || {
         ValidityDomain::unconstrained().with_quantity(
@@ -74,11 +84,11 @@ fn card(liquid_conductivity: bool, conductivity_kink: bool) -> MaterialCard {
         )
     };
     for (phase, lo, hi, cp, density, ks) in [
-        (0.0, 300.0, 350.0, 2.0, 2.0, [2.0, 4.0]),
-        (1.0, 350.0, 450.0, 4.0, 1.0, [8.0, 12.0]),
+        (0.0, 300.0, 350.0, cp[0], 2.0, [2.0, 4.0]),
+        (1.0, 350.0, 450.0, cp[1], 1.0, [8.0, 12.0]),
     ] {
         for (name, dims, values) in [
-            ("cp", CP, [cp, cp]),
+            ("cp", CP, cp),
             ("rho", RHO, [density, density]),
             ("k", K, ks),
         ] {
