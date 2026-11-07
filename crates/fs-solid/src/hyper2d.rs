@@ -13,6 +13,10 @@
 //! exactly this recipe.
 //! Equilibrium and the Newton equation use relative residuals, so changing
 //! the common scale of stiffness and dead traction cannot erase deformation.
+//! Reference and current P1/Q1 maps must preserve orientation at every corner;
+//! positive constitutive Jacobians at quadrature sites alone cannot admit a
+//! folded quadrilateral. The same geometry refusal governs energy line searches,
+//! force probes, tangents and fully prescribed equilibria.
 //!
 //! [`mean_dilatation`] adds an explicit Q1 condensed-volumetric formulation
 //! for quasi-incompressible finite compression, sharing this Newton driver.
@@ -21,7 +25,9 @@
 //! continua and uses the corresponding reduced energy and consistent tangent.
 
 use crate::SolidError;
-use crate::mesh2::{Mesh2, Patch, quad_points, shapes_at};
+use crate::mesh2::{
+    Mesh2, Patch, checked_reference_element, positive_deformed_orientation, quad_points, shapes_at,
+};
 use fs_exec::Cx;
 use fs_material::hyper::Hyperelastic;
 use fs_material::hyper::cards::{
@@ -366,6 +372,13 @@ impl HyperProblem<'_> {
                     });
                 }
             };
+            if checked_reference_element(&self.mesh.nodes, conn).is_none() {
+                return Err(SolidError::InvalidInput {
+                    what: format!(
+                        "finite-strain reference element {element} has invalid connectivity or a folded, reversed or nonfinite map"
+                    ),
+                });
+            }
             let points = self.material.material_point_count(element);
             if let Some(points) = points
                 && (count.is_none() || points != expected)
@@ -389,6 +402,34 @@ impl HyperProblem<'_> {
                         ),
                     })?;
             }
+        }
+        Ok(())
+    }
+
+    fn validate_displacement(&self, displacement: &[f64]) -> Result<(), SolidError> {
+        if self.mesh.nodes.len().checked_mul(2) != Some(displacement.len())
+            || displacement.iter().any(|value| !value.is_finite())
+        {
+            return Err(SolidError::InvalidInput {
+                what: "finite-strain displacement must contain one finite xy pair per mesh node"
+                    .into(),
+            });
+        }
+        Ok(())
+    }
+
+    fn admit_current_element(
+        &self,
+        element: usize,
+        conn: &[usize],
+        displacement: &[f64],
+    ) -> Result<(), SolidError> {
+        if !positive_deformed_orientation(&self.mesh.nodes, conn, displacement) {
+            return Err(SolidError::MaterialRefused {
+                what: format!(
+                    "finite-strain current element {element} is folded, reversed or unrepresentable"
+                ),
+            });
         }
         Ok(())
     }
@@ -786,8 +827,10 @@ impl HyperProblem<'_> {
     }
 
     fn force_residual(&self, u: &[f64], load: f64) -> Result<Vec<f64>, SolidError> {
+        self.validate_displacement(u)?;
         let mut resid = vec![0.0; u.len()];
         for (element, conn) in self.mesh.elems.iter().enumerate() {
+            self.admit_current_element(element, conn, u)?;
             for (point, &(xi, eta, w)) in material_quadrature(conn.len()).iter().enumerate() {
                 let material = self.point_material(element, point)?;
                 let (_, grads, det) = shapes_at(&self.mesh.nodes, conn, xi, eta);
@@ -869,10 +912,12 @@ impl HyperProblem<'_> {
         load: f64,
         fixed: &BTreeMap<usize, f64>,
     ) -> Result<(Vec<f64>, fs_sparse::Csr), SolidError> {
+        self.validate_displacement(u)?;
         let ndof = u.len();
         let mut resid = vec![0.0f64; ndof];
         let mut coo = Coo::new(ndof, ndof);
         for (element, conn) in self.mesh.elems.iter().enumerate() {
+            self.admit_current_element(element, conn, u)?;
             let nn = conn.len();
             for (point, &(xi, eta, w)) in material_quadrature(nn).iter().enumerate() {
                 let material = self.point_material(element, point)?;
@@ -958,8 +1003,10 @@ impl HyperProblem<'_> {
     /// Total potential energy (None when the material refuses the
     /// state — the line search treats that as "worse").
     fn try_energy(&self, u: &[f64], load: f64) -> Option<f64> {
+        self.validate_displacement(u).ok()?;
         let mut internal = 0.0f64;
         for (element, conn) in self.mesh.elems.iter().enumerate() {
+            self.admit_current_element(element, conn, u).ok()?;
             for (point, &(xi, eta, w)) in material_quadrature(conn.len()).iter().enumerate() {
                 let material = self.point_material(element, point).ok()?;
                 let (_, grads, det) = shapes_at(&self.mesh.nodes, conn, xi, eta);
@@ -1065,6 +1112,118 @@ fn norm(v: &[f64]) -> f64 {
 mod tests {
     use super::*;
     use fs_material::hyper::{FibreInvariants, HyperelasticModel, OgdenTerm, Volumetric};
+
+    /// G0/G1: quadrature-positive elasticity must not authorize a folded body,
+    /// including when every displacement is prescribed and the free residual
+    /// would otherwise vanish without evaluating an energy line search.
+    #[test]
+    fn plane_strain_rejects_fold_hidden_between_gauss_points_and_boundary() {
+        let mesh = Mesh2::quads(1.0, 1.0, 1, 1);
+        let material = Hyperelastic::new(
+            HyperelasticModel::NeoHookean {
+                mu: 2.0,
+                lambda: 5.0,
+            },
+            100.0,
+        )
+        .unwrap();
+        let prescribed = |x: f64, y: f64| [1.2 * (1.0 - x) * y, 0.0];
+        let displacement: Vec<f64> = mesh
+            .nodes
+            .iter()
+            .flat_map(|&[x, y]| prescribed(x, y))
+            .collect();
+        let problem = HyperProblem {
+            mesh: &mesh,
+            material: &material,
+            dirichlet: vec![
+                (Patch::Left, &prescribed),
+                (Patch::Right, &prescribed),
+                (Patch::Top, &prescribed),
+                (Patch::Bottom, &prescribed),
+            ],
+            traction: vec![],
+            settings: NewtonSettings::default(),
+        };
+        // Independent map: x' = x + 1.2 (1-x)y, y'=y, det F=1-1.2y.
+        // Both Gauss y coordinates are below 5/6; the entire top edge is
+        // reversed. The original pointwise material calls all admit this.
+        for (xi, eta, _) in quad_points(4) {
+            let (_, gradients, _) = shapes_at(&mesh.nodes, &mesh.elems[0], xi, eta);
+            let f = HyperProblem::def_grad(&gradients, &mesh.elems[0], &displacement);
+            let expected = 1.0 - 1.2 * (0.5 * (eta + 1.0));
+            assert!(expected > 0.0);
+            assert!((f[0] * f[4] - f[1] * f[3] - expected).abs() < 1e-14);
+            material.first_piola(&f).unwrap();
+        }
+        assert!(matches!(
+            problem.unconstrained_residual(&displacement, 1.0),
+            Err(SolidError::MaterialRefused { .. })
+        ));
+        assert!(matches!(
+            problem.residual_and_tangent(&displacement, 1.0),
+            Err(SolidError::MaterialRefused { .. })
+        ));
+        assert!(problem.potential_energy(&displacement, 1.0).is_none());
+        assert!(matches!(
+            problem.solve(),
+            Err(SolidError::MaterialRefused { .. })
+        ));
+    }
+
+    /// G0: original reference charts cannot introduce negative elastic storage
+    /// or panic through connectivity before the current material is evaluated.
+    #[test]
+    fn plane_strain_rejects_invalid_reference_charts_and_incomplete_motion() {
+        let material = Hyperelastic::new(
+            HyperelasticModel::NeoHookean {
+                mu: 2.0,
+                lambda: 5.0,
+            },
+            3.0,
+        )
+        .unwrap();
+        for kind in 0..3 {
+            let mut mesh = Mesh2::quads(1.0, 1.0, 1, 1);
+            match kind {
+                0 => mesh.elems[0].reverse(),
+                1 => mesh.elems[0][0] = mesh.nodes.len(),
+                _ => mesh.nodes[2][0] = 1.2,
+            }
+            let problem = HyperProblem {
+                mesh: &mesh,
+                material: &material,
+                dirichlet: vec![],
+                traction: vec![],
+                settings: NewtonSettings::default(),
+            };
+            let u = vec![0.0; 2 * mesh.node_count()];
+            assert!(matches!(
+                problem.residual_and_tangent(&u, 0.0),
+                Err(SolidError::InvalidInput { .. })
+            ));
+            assert!(problem.potential_energy(&u, 0.0).is_none());
+        }
+        let mesh = Mesh2::quads(1.0, 1.0, 1, 1);
+        let problem = HyperProblem {
+            mesh: &mesh,
+            material: &material,
+            dirichlet: vec![],
+            traction: vec![],
+            settings: NewtonSettings::default(),
+        };
+        for u in [vec![0.0; 7], vec![0.0; 9], vec![f64::NAN; 8]] {
+            assert!(matches!(
+                problem.unconstrained_residual(&u, 0.0),
+                Err(SolidError::InvalidInput { .. })
+            ));
+            assert!(matches!(
+                problem.residual_and_tangent(&u, 0.0),
+                Err(SolidError::InvalidInput { .. })
+            ));
+            assert!(problem.potential_energy(&u, 0.0).is_none());
+        }
+    }
 
     /// G3: force-unit normalization must precede products, including the true
     /// residual action on a recovered Krylov iterate larger than one.

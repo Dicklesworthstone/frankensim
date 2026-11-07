@@ -206,6 +206,34 @@ pub(crate) fn checked_reference_element(
     Some(reference)
 }
 
+/// Test the current orientation of an already admitted P1/Q1 reference cell.
+/// Connectivity and the complete finite displacement vector must be checked
+/// by the caller. Reference and displacement edges are formed separately, so
+/// a common coordinate origin or rigid translation cannot create deformation.
+///
+/// A Q1 map's determinant is affine in the two reference coordinates (the
+/// mixed term cancels). Positive corner determinants therefore exclude a
+/// reversed region hidden between the Gauss points and the boundary. P1 has
+/// a constant determinant. This is local orientation admission, not a global
+/// self-intersection or floating-point enclosure certificate.
+pub(crate) fn positive_deformed_orientation(
+    nodes: &[[f64; 2]],
+    conn: &[usize],
+    displacement: &[f64],
+) -> bool {
+    let arity = conn.len();
+    (0..arity).all(|a| {
+        let b = (a + 1) % arity;
+        let c = (a + arity - 1) % arity;
+        let edge = |v: usize, i: usize| {
+            (nodes[conn[v]][i] - nodes[conn[a]][i])
+                + (displacement[2 * conn[v] + i] - displacement[2 * conn[a] + i])
+        };
+        let cross = edge(b, 0) * edge(c, 1) - edge(b, 1) * edge(c, 0);
+        cross.is_finite() && cross > 0.0
+    })
+}
+
 /// Shape values and reference-gradients for one element at a
 /// quadrature point; returns (N, dN/dx, jacobian-weight).
 #[must_use]
@@ -299,6 +327,66 @@ pub fn quad_points(arity: usize) -> Vec<(f64, f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// G0/G1: a Q1 corner can fold while every quadrature determinant is positive.
+    #[test]
+    fn deformed_orientation_covers_the_full_bilinear_cell() {
+        let m = Mesh2::quads(1.0, 1.0, 1, 1);
+        for displacement_at_corner in [0.75, 1.0, 1.2] {
+            let u: Vec<f64> = m
+                .nodes
+                .iter()
+                .flat_map(|&[x, y]| [displacement_at_corner * (1.0 - x) * y, 0.0])
+                .collect();
+            assert!(checked_reference_element(&m.nodes, &m.elems[0]).is_some());
+            for (_, eta, _) in quad_points(4) {
+                assert!(1.0 - displacement_at_corner * (eta + 1.0) * 0.5 > 0.0);
+            }
+            assert_eq!(
+                positive_deformed_orientation(&m.nodes, &m.elems[0], &u),
+                displacement_at_corner < 1.0
+            );
+        }
+    }
+
+    /// G3: orientation uses relative motion, with no strain or coordinate floor.
+    #[test]
+    fn current_orientation_allows_compression_rotations_and_common_translations() {
+        for m in [
+            Mesh2::quads(1.0, 1.0, 1, 1),
+            Mesh2::triangles(1.0, 1.0, 1, 1),
+        ] {
+            for scale in [1e-8, 1.0, 1e8] {
+                let nodes = m
+                    .nodes
+                    .iter()
+                    .map(|p| p.map(|x| scale * x))
+                    .collect::<Vec<_>>();
+                // A 90-degree rotation after 50% uniform compression.
+                let u = nodes
+                    .iter()
+                    .flat_map(|&[x, y]| [-0.5 * y - x, 0.5 * x - y])
+                    .collect::<Vec<_>>();
+                for conn in &m.elems {
+                    assert!(positive_deformed_orientation(&nodes, conn, &u));
+                }
+            }
+            let offset = 2.0_f64.powi(40);
+            let shifted = m
+                .nodes
+                .iter()
+                .map(|&[x, y]| [x + offset, y - offset])
+                .collect::<Vec<_>>();
+            let u = m
+                .nodes
+                .iter()
+                .flat_map(|&[x, y]| [-0.5 * y - x + offset, 0.5 * x - y - offset])
+                .collect::<Vec<_>>();
+            for conn in &m.elems {
+                assert!(positive_deformed_orientation(&shifted, conn, &u));
+            }
+        }
+    }
 
     #[test]
     fn quad_mesh_area_is_exact() {
