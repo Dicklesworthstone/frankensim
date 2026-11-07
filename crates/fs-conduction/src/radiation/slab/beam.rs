@@ -24,7 +24,15 @@ pub struct SlabBeamResponse {
     reflectance: [f64; 2],
     transmittance: f64,
     absorptance: Arc<[[f64; 2]]>,
+    layer_fields: Arc<[BeamLayerFields]>,
     partition_residual: [f64; 2],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BeamLayerFields {
+    direction_cosine: f64,
+    // [forward@front, backward@back] per unit [front, back] irradiation.
+    endpoints: [[f64; 2]; 2],
 }
 
 /// Outgoing beam power per slab area, with no thermal-emission contribution.
@@ -88,13 +96,14 @@ impl SlabBeamResponse {
                     + (direction_cosine / index).powi(2))
                 .sqrt()
             };
-            let depth = layer.optical_depth() / mu[i + 1];
+            let depth = optical_path(layer.absorption_m_inv(), layer.thickness_m(), mu[i + 1]);
             t[i] = remaining_fraction(depth);
             a[i] = decayed_fraction(depth);
         }
         let channels = 3 + 2 * n;
         let mut output = [0.0; 3 + 2 * MAX_SLAB_LAYERS];
         let mut correction = output;
+        let mut fields = [[[0.0; 2]; 2]; MAX_SLAB_LAYERS];
         for (pol, weight) in [s_power_fraction, 1.0 - s_power_fraction]
             .into_iter()
             .enumerate()
@@ -124,6 +133,7 @@ impl SlabBeamResponse {
                 weight,
                 &mut output[..channels],
                 &mut correction[..channels],
+                Some(&mut fields[..n]),
             );
         }
         let reflectance = [output[channels - 2], output[channels - 1]];
@@ -136,6 +146,11 @@ impl SlabBeamResponse {
         if output[..channels]
             .iter()
             .any(|x| !nonnegative(*x) || *x > 1.0 + allowance)
+            || fields[..n]
+                .iter()
+                .flatten()
+                .flatten()
+                .any(|x| !nonnegative(*x))
         {
             return Err(invalid("unrepresentable directional slab coefficient"));
         }
@@ -161,6 +176,12 @@ impl SlabBeamResponse {
             reflectance,
             transmittance,
             absorptance,
+            layer_fields: (0..n)
+                .map(|i| BeamLayerFields {
+                    direction_cosine: mu[i + 1],
+                    endpoints: fields[i],
+                })
+                .collect(),
             partition_residual,
         })
     }
@@ -186,6 +207,96 @@ impl SlabBeamResponse {
     }
     pub const fn partition_residual(&self) -> [f64; 2] {
         self.partition_residual
+    }
+
+    /// Original Snell-adjusted direction cosine inside a physical layer.
+    pub fn layer_direction_cosine(&self, layer: usize) -> Option<f64> {
+        self.layer_fields
+            .get(layer)
+            .map(|field| field.direction_cosine)
+    }
+
+    /// Nonnegative [forward, backward] directional fluxes [W/m² of slab area]
+    /// inside the original layer, at depth measured from its front face.
+    /// Forward points toward the slab back; backward points toward its front.
+    /// Their difference is signed normal flux. At an interface, the requested
+    /// layer selects the material-side values; no interface is averaged.
+    ///
+    /// Both incident fluxes are already projected onto slab area and mutually
+    /// incoherent. All s/p-weighted internal returns are cached. Evaluation is
+    /// O(1), without allocation, quadrature, a ray solve or thermal emission.
+    pub fn layer_fluxes_at_depth(
+        &self,
+        layer: usize,
+        depth_m: f64,
+        irradiation_w_m2: [f64; 2],
+    ) -> Result<[f64; 2], ConductionError> {
+        let (material, field) = self.admit_depth_interval(layer, [depth_m; 2], irradiation_w_m2)?;
+        let distances = [depth_m, material.thickness_m() - depth_m];
+        let mut result = [0.0; 2];
+        for direction in 0..2 {
+            let attenuation = remaining_fraction(optical_path(
+                material.absorption_m_inv(),
+                distances[direction],
+                field.direction_cosine,
+            ));
+            result[direction] = finite(
+                field.endpoints[direction][0] * attenuation * irradiation_w_m2[0]
+                    + field.endpoints[direction][1] * attenuation * irradiation_w_m2[1],
+            )?;
+        }
+        Ok(result)
+    }
+
+    /// Positive beam power absorbed in the depth interval [lo, hi] [W/m²],
+    /// measured inside one original layer. Dividing by positive hi-lo gives
+    /// cell-average volumetric heating [W/m³]. A zero-width interval is zero.
+    ///
+    /// Exact Beer interval integration uses expm1 and positive endpoint fields,
+    /// never a difference of nearly equal incoming/outgoing fluxes. Narrow and
+    /// weakly absorbing cells retain heat without subdividing the optical stack.
+    /// Preparation and query complexity are unchanged from the point query.
+    pub fn layer_absorbed_flux(
+        &self,
+        layer: usize,
+        interval_m: [f64; 2],
+        irradiation_w_m2: [f64; 2],
+    ) -> Result<f64, ConductionError> {
+        let (material, field) = self.admit_depth_interval(layer, interval_m, irradiation_w_m2)?;
+        let [lo, hi] = interval_m;
+        let alpha = material.absorption_m_inv();
+        let mu = field.direction_cosine;
+        let absorbed = decayed_fraction(optical_path(alpha, hi - lo, mu));
+        let forward = remaining_fraction(optical_path(alpha, lo, mu));
+        let backward = remaining_fraction(optical_path(alpha, material.thickness_m() - hi, mu));
+        let fractions: [f64; 2] = core::array::from_fn(|side| {
+            absorbed * (field.endpoints[0][side] * forward + field.endpoints[1][side] * backward)
+        });
+        finite(fractions[0] * irradiation_w_m2[0] + fractions[1] * irradiation_w_m2[1])
+    }
+
+    fn admit_depth_interval(
+        &self,
+        layer: usize,
+        interval: [f64; 2],
+        irradiation: [f64; 2],
+    ) -> Result<(&AbsorbingLayer, &BeamLayerFields), ConductionError> {
+        let material = self
+            .layers
+            .get(layer)
+            .ok_or_else(|| invalid("beam depth query needs an original layer index"))?;
+        if interval
+            .iter()
+            .chain(&irradiation)
+            .any(|x| !nonnegative(*x))
+            || interval[1] < interval[0]
+            || interval[1] > material.thickness_m()
+        {
+            return Err(invalid(
+                "beam depth query needs an ordered interval within the layer and nonnegative finite irradiation",
+            ));
+        }
+        Ok((material, &self.layer_fields[layer]))
     }
 
     /// Apply nonnegative incident fluxes [front, back] in W/m² of slab area.
@@ -237,6 +348,17 @@ impl SlabBeamResponse {
             absorbed_w_m2,
             balance_residual_w_m2,
         })
+    }
+}
+
+// Use original finite coefficients, not possibly infinite total optical depth
+// times a depth fraction. Divide the smaller factor first to retain weak
+// grazing attenuation. Overflow is an opaque optical path, not a material input.
+fn optical_path(absorption: f64, distance: f64, mu: f64) -> f64 {
+    if absorption == 0.0 || distance == 0.0 {
+        0.0
+    } else {
+        (absorption.min(distance) / mu) * absorption.max(distance)
     }
 }
 

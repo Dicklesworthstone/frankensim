@@ -5408,6 +5408,20 @@ Focused regressions compare independent dense boundary equations, Beer and
 Brewster limits, directional integration against the original diffuse response,
 reversal/subdivision, thermal superposition, weak loss and transactional refusal.
 
+`layer_fluxes_at_depth` resolves forward/backward beam flux inside an original
+material layer; interface queries select that layer's side. `layer_absorbed_flux`
+integrates positive heating over a caller-owned depth interval, giving W/m² of
+slab area or cell-average W/m³ after division by interval thickness. Preparation
+retains the Snell cosine and both endpoint fluxes for each incident side, with
+separate s/p histories combined only by their supplied power weights. Each query
+costs O(1), without rebuilding rays, integrating angles or subdividing material.
+Interval heat uses positive Beer attenuation and expm1 loss, not subtraction of
+nearly equal fluxes. Original finite absorption and queried distance retain shallow
+penetration even when the whole layer's optical depth overflows. These beam-only
+profiles add no inferred diffuse thermal depth distribution. Regressions compare
+the original independent dense two-stream fields, whole-layer heat, additive
+intervals, subdivision/reversal, weak narrow cells and shallow opaque profiles.
+
 G0/G1/G3 tests compare transparent two-interface reflection, opaque n² exchange,
 independent polarized boundary-return ray sweeps, isothermal subdivision,
 reversal, and equilibrium. The index source must support the layer temperature

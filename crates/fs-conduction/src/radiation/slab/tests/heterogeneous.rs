@@ -30,6 +30,18 @@ pub(super) fn ray(
     b: &[f64],
     h: [f64; 2],
 ) -> (Vec<f64>, [f64; 2]) {
+    let (heat, outgoing, _) = ray_with_fields(depths, indices, p, pol, b, h);
+    (heat, outgoing)
+}
+
+pub(super) fn ray_with_fields(
+    depths: &[f64],
+    indices: &[f64],
+    p: f64,
+    pol: usize,
+    b: &[f64],
+    h: [f64; 2],
+) -> (Vec<f64>, [f64; 2], Vec<[f64; 2]>) {
     let n = depths.len();
     let mut all = vec![1.0];
     all.extend_from_slice(indices);
@@ -128,7 +140,10 @@ pub(super) fn ray(
     } else {
         [0.0; 2]
     };
-    (heat, outgoing)
+    let fields = (0..n)
+        .map(|i| [matrix[2 * i][size], matrix[2 * i + 1][size]])
+        .collect();
+    (heat, outgoing, fields)
 }
 
 fn reference(

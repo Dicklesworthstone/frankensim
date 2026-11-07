@@ -97,6 +97,7 @@ pub(super) fn rule(
                     0.5 * q,
                     output,
                     correction,
+                    None,
                 );
             }
             *evaluations += 1;
@@ -129,6 +130,7 @@ pub(super) fn accumulate(
     q: f64,
     output: &mut [f64],
     correction: &mut [f64],
+    mut beam_fields: Option<&mut [[[f64; 2]; 2]]>,
 ) {
     let n = a.len();
     let mut left = [0.0; MAX_SLAB_LAYERS];
@@ -170,6 +172,11 @@ pub(super) fn accumulate(
             q * front,
         );
         for i in 0..n {
+            if let Some(fields) = beam_fields.as_deref_mut() {
+                // Direction [forward@front, backward@back], incident side.
+                fields[i][0][0] += q * field;
+                fields[i][1][0] += q * (t[i] * right[i] * field);
+            }
             let channel = 1 + 2 * i;
             let absorbed = a[i] * (1.0 + t[i] * right[i]) * field;
             add(&mut output[channel], &mut correction[channel], q * absorbed);
@@ -194,6 +201,10 @@ pub(super) fn accumulate(
             q * back,
         );
         for i in (0..n).rev() {
+            if let Some(fields) = beam_fields.as_deref_mut() {
+                fields[i][1][1] += q * field;
+                fields[i][0][1] += q * (t[i] * left[i] * field);
+            }
             let channel = 2 + 2 * i;
             let absorbed = a[i] * (1.0 + t[i] * left[i]) * field;
             add(&mut output[channel], &mut correction[channel], q * absorbed);
