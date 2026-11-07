@@ -19,8 +19,9 @@
 //! same bulk amount is debited once. Half surface-diffusion sweeps surround
 //! each exchange step. Backward Euler makes the complete composition FIRST
 //! order in time, despite the symmetric diffusion arrangement. Refine the
-//! explicit maximum step; no temporal-error or global accuracy certificate is
-//! claimed. Areas, temperature, solvent volume, topology and coefficients stay
+//! explicit maximum step or use [`adaptive`] for local step-doubling control
+//! of the same map; neither certifies global accuracy. Areas, temperature,
+//! solvent volume, topology and coefficients stay
 //! fixed. There is no bulk spatial transport, micellization, ionic adsorption,
 //! adsorption heat or mechanical motion in this adapter.
 //!
@@ -38,6 +39,9 @@ use super::{Sum, SurfactantError, SurfactantFace, SurfactantLaw, det};
 use fs_material::adsorption::competitive::sites::scalar::{ScalarSiteError, backward_euler_site};
 use fs_material::osmosis::{AqueousSolution, MAX_OSMOTIC_SOLUTES, OsmosisError};
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
+
+/// Accuracy-controlled whole-duration evolution of this same finite bath.
+pub mod adaptive;
 
 /// Original species layout and explicit kinetic/chemical coupling.
 #[derive(Clone, Copy, Debug)]

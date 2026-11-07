@@ -8219,3 +8219,37 @@ reference masses are held. This is an inertia-free dilute coating exchanging
 with an independently held-volume bath; enclosed volume feedback, solvent
 displacement, osmotic traction, solute momentum and adsorption heat need their
 own physical owners. Isothermal free-energy loss is not automatic heat deposition.
+
+## Adaptive finite-bath soluble surface transport
+
+`surfactant::soluble::adaptive::advance_soluble_surface_adaptive` now completes
+a held finite-bath duration with local error control on every surface amount,
+the selected bulk-species amount and its original nonideal dimensionless
+activity. Each comparison uses one native BE adsorption step against two half
+steps. The first-order fine-error factor is one for equal halves; the existing
+surface-only diffusion controller keeps its second-order factor of one third
+through a shared private schedule. Accepted states are the unextrapolated
+physical fine endpoints. The original source datum and co-solute interactions
+remain intact, with a log-space activity comparison that avoids overflow under
+admitted reference changes.
+
+All coarse, fine and rejected probes spend the same global substep, root and
+pair-exchange allowances. Only accepted fine-path gross adsorption/desorption
+and chemical/lateral losses enter the physical report. Before publication,
+original-to-final combined amount and free energy are independently checked
+against the fixed whole-duration allowances. Cancellation or a late failure
+preserves both the original aqueous inventory and every surface amount.
+
+Areas, temperature, solvent volume, topology and coefficients remain fixed.
+This controller estimates local temporal error; it does not certify global or
+spatial accuracy or add a moving mechanical macro controller. Six new
+regressions cover exact finite depletion/desorption, nonideal noncommuting graph
+dynamics against an independent ODE, first-order rejection and fine-state
+recovery, equilibrium gross turnover, whole-call work and cancellation rollback,
+and activity-only control through an extreme admitted reference change.
+
+A focused Rust build using the actual surface, aqueous, adsorption and mechanical
+source closure passed all 74 tests, including the prior 68 and these six new
+regressions. The existing stationary adaptive diffusion tests also passed after
+schedule extraction. This is focused native validation, not a full Cargo
+workspace build.

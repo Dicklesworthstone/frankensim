@@ -17,9 +17,11 @@
 
 use super::{
     Material, Sum, SurfaceDiffusionControls, SurfaceDiffusionEdge, SurfaceDiffusionError,
-    SurfaceDiffusionReport, SurfacePartitionDiffusionEdge, SurfactantFace, SurfactantLaw, det,
-    diffuse, finite, poll, poll_at,
+    SurfaceDiffusionReport, SurfacePartitionDiffusionEdge, SurfactantFace, SurfactantLaw, diffuse,
+    finite, poll, poll_at,
 };
+
+use super::super::time_control::{self, Limits, Order, Schedule};
 
 /// Explicit time-error, physical, storage and whole-call work limits.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -223,14 +225,20 @@ fn advance(
         .ok_or(SurfaceDiffusionError::WorkBudget)?;
     let mut coarse = copied(&current, &mut cancelled)?;
     let mut fine = copied(&current, &mut cancelled)?;
-    let mut elapsed = 0.0;
-    while elapsed < duration_s {
+    let mut schedule = Schedule::new(
+        duration_s,
+        Limits {
+            initial_step_s: controls.initial_step_s,
+            minimum_step_s: controls.minimum_step_s,
+            maximum_step_s: controls.maximum_step_s,
+            maximum_trials: controls.maximum_trials,
+        },
+        Order::Second,
+    )
+    .map_err(schedule_error)?;
+    while !schedule.complete() {
         poll(&mut cancelled)?;
-        if report.trials >= controls.maximum_trials {
-            return Err(AdaptiveSurfaceDiffusionError::TrialBudget {
-                completed_trials: report.trials,
-            });
-        }
+        schedule.check_trial_budget().map_err(schedule_error)?;
         if trial_work
             > controls
                 .maximum_pair_exchanges
@@ -241,31 +249,19 @@ fn advance(
                 required: trial_work,
             });
         }
-        let remaining = duration_s - elapsed;
-        let end = if report.suggested_next_step_s >= remaining {
-            duration_s
-        } else {
-            elapsed + report.suggested_next_step_s
-        };
-        let span = end - elapsed;
-        let first_half = 0.5 * span;
-        let second_half = span - first_half;
-        if end <= elapsed || end > duration_s || first_half <= 0.0 || second_half <= 0.0 {
-            return Err(AdaptiveSurfaceDiffusionError::TimeResolution { elapsed_s: elapsed });
-        }
+        let trial = schedule.begin().map_err(schedule_error)?;
         copy_into(&current, &mut coarse, &mut cancelled)?;
         copy_into(&current, &mut fine, &mut cancelled)?;
-        report.trials += 1;
         report.evaluated_pair_exchanges += trial_work;
         diffuse(
             material,
             areas,
             &mut coarse,
-            span,
-            controls.step(span),
+            trial.span_s,
+            controls.step(trial.span_s),
             &mut cancelled,
         )?;
-        for half in [first_half, second_half] {
+        for half in trial.halves_s {
             diffuse(
                 material,
                 areas,
@@ -275,46 +271,25 @@ fn advance(
                 &mut cancelled,
             )?;
         }
-        // (a³+b³)/(3ab(a+b)), scaled without cubing dimensional seconds.
-        let ratio = first_half.min(second_half) / first_half.max(second_half);
-        let correction = (1.0 - ratio + ratio * ratio) / (3.0 * ratio);
         let error = error_norm(
             &current,
             &coarse,
             &fine,
             areas,
-            correction,
+            trial.fine_error_factor,
             controls,
             &mut cancelled,
         )?;
-        if error > 1.0 {
-            report.rejected_intervals += 1;
-            let smaller = (span * factor(error).min(0.8)).max(controls.minimum_step_s);
-            if span <= controls.minimum_step_s
-                || smaller >= span
-                || smaller >= report.suggested_next_step_s
-            {
-                return Err(AdaptiveSurfaceDiffusionError::TemporalAccuracy {
-                    step_s: span,
-                    normalized_error: error,
-                });
-            }
-            report.suggested_next_step_s = smaller;
-            continue;
+        if schedule.consider(trial, error).map_err(schedule_error)? {
+            std::mem::swap(&mut current, &mut fine);
         }
-        std::mem::swap(&mut current, &mut fine);
-        report.accepted_intervals += 1;
-        report.maximum_accepted_normalized_error =
-            report.maximum_accepted_normalized_error.max(error);
-        elapsed = end;
-        // Clamp before multiplication so a finite maximum cannot overflow.
-        let growth = factor(error);
-        report.suggested_next_step_s = if span >= controls.maximum_step_s / growth {
-            controls.maximum_step_s
-        } else {
-            (span * growth).max(controls.minimum_step_s)
-        };
     }
+    report.trials = schedule.statistics.trials;
+    report.accepted_intervals = schedule.statistics.accepted_intervals;
+    report.rejected_intervals = schedule.statistics.rejected_intervals;
+    report.maximum_accepted_normalized_error =
+        schedule.statistics.maximum_accepted_normalized_error;
+    report.suggested_next_step_s = schedule.statistics.suggested_next_step_s;
     report.diffusion = account(
         material,
         areas,
@@ -391,13 +366,25 @@ fn error_norm(
     Ok(error)
 }
 
-fn factor(error: f64) -> f64 {
-    if error == 0.0 {
-        2.0
-    } else if error.is_infinite() {
-        0.2
-    } else {
-        (0.9 * det::pow(error, -1.0 / 3.0)).clamp(0.2, 2.0)
+fn schedule_error(error: time_control::Error) -> AdaptiveSurfaceDiffusionError {
+    match error {
+        time_control::Error::Invalid => SurfaceDiffusionError::InvalidInput(
+            "finite duration and positive ordered adaptive time/accuracy/work controls required",
+        )
+        .into(),
+        time_control::Error::TrialBudget { completed_trials } => {
+            AdaptiveSurfaceDiffusionError::TrialBudget { completed_trials }
+        }
+        time_control::Error::TemporalAccuracy {
+            step_s,
+            normalized_error,
+        } => AdaptiveSurfaceDiffusionError::TemporalAccuracy {
+            step_s,
+            normalized_error,
+        },
+        time_control::Error::TimeResolution { elapsed_s } => {
+            AdaptiveSurfaceDiffusionError::TimeResolution { elapsed_s }
+        }
     }
 }
 
