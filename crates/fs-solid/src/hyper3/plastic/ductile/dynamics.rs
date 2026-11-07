@@ -49,6 +49,8 @@ where
     /// Native force evidence, including consistent inertia on moving supports.
     pub equilibrium: IncrementRecord,
     pub material_energy: FiniteDuctileTetEnergy,
+    /// Unchanged original per-element reference-volume material work receipts.
+    pub element_energy: Vec<FiniteDuctileEnergy>,
     pub inertia: InertialEnergy,
     /// External/support work minus material, kinetic and numerical work terms.
     pub balance_error_j: f64,
@@ -183,6 +185,7 @@ where
             },
             equilibrium: step.equilibrium,
             material_energy: step.energy,
+            element_energy: step.element_energy,
             inertia,
             balance_error_j,
         })

@@ -15,6 +15,7 @@
 //! remeshing, thermal feedback or fragment transfer. P1 volumetric locking and
 //! the parent's displacement-only applicability limits remain in force.
 
+use core::cell::RefCell;
 use core::fmt::Debug;
 use std::sync::Arc;
 
@@ -22,7 +23,7 @@ use fs_exec::Cx;
 use fs_material::Voigt;
 use fs_material::ductile::evolution::{DifferentiableDuctileInitiationLaw, DuctileJ2Conditions};
 use fs_material::plastic::finite::ductile::{
-    FiniteDuctileError, FiniteDuctileJ2, FiniteDuctileState,
+    FiniteDuctileEnergy, FiniteDuctileError, FiniteDuctileJ2, FiniteDuctileState,
 };
 use fs_sparse::{Coo, Csr};
 
@@ -40,6 +41,8 @@ use crate::plastic3::{IncrementRecord, IncrementSettings, SmallStrainTetError};
 
 /// Consistent reference inertia on the same nonpotential finite ductile solve.
 pub mod dynamics;
+/// Bounded physical-interval continuation through native finite softening.
+pub mod path;
 
 type Motion = (Vec<[f64; 3]>, InertialEnergy);
 
@@ -180,6 +183,9 @@ where
     /// Reactions follow the input prescribed-DOF order.
     pub equilibrium: IncrementRecord,
     pub energy: FiniteDuctileTetEnergy,
+    /// Original final material proposals, per reference volume in element order.
+    /// Coupled consumers need not difference cumulative loss or repeat a return.
+    pub element_energy: Vec<FiniteDuctileEnergy>,
 }
 
 struct Operator<'s, 'm, L>
@@ -192,12 +198,31 @@ where
     conditions: &'s [DuctileJ2Conditions],
     inertia: Option<&'s BackwardEulerInertia<'s>>,
     dofs: usize,
+    /// Only the CURRENT failed evaluation; successful trials clear this record.
+    /// Preserve typed damage/source refusals across the shared solver boundary.
+    refusal: RefCell<Option<(usize, FiniteDuctileError)>>,
 }
 
 impl<'m, L> Operator<'_, 'm, L>
 where
     L: DifferentiableDuctileInitiationLaw + Clone + Debug + PartialEq,
 {
+    fn material_refusal(&self, element: usize, source: FiniteDuctileError) -> SmallStrainTetError {
+        let error = invalid(format!("finite ductile element {element}: {source}"));
+        *self.refusal.borrow_mut() = Some((element, source));
+        error
+    }
+
+    fn endpoint_refusal(&self, error: SmallStrainTetError) -> FiniteDuctileTetError {
+        if matches!(error, SmallStrainTetError::Cancelled) {
+            return error.into();
+        }
+        match self.refusal.borrow_mut().take() {
+            Some((element, source)) => FiniteDuctileTetError::Material { element, source },
+            None => error.into(),
+        }
+    }
+
     fn assemble(
         &self,
         states: &[FiniteDuctileState<'m, L>],
@@ -206,6 +231,7 @@ where
         tangent: bool,
         cx: &Cx<'_>,
     ) -> Result<(Vec<f64>, f64, Option<Csr>), SmallStrainTetError> {
+        *self.refusal.borrow_mut() = None;
         checkpoint(cx)?;
         if states.len() != self.elements.len()
             || u.len() != self.dofs
@@ -223,7 +249,7 @@ where
                 checkpoint(cx)?;
             }
             let f = HyperTetProblem::<FrozenPoint<'_>>::deformation_gradient(element, u);
-            let refused = |error| invalid(format!("finite ductile element {e}: {error}"));
+            let refused = |error| self.material_refusal(e, error);
             let (p, derivative) = if tangent {
                 let step = self.materials[e]
                     .trial(&f, &states[e], self.conditions[e])
@@ -328,6 +354,7 @@ where
         _stress: Option<&mut Vec<Voigt>>,
         cx: &Cx<'_>,
     ) -> Result<usize, SmallStrainTetError> {
+        *self.refusal.borrow_mut() = None;
         let mut changed = 0;
         for (e, (element, state)) in self.elements.iter().zip(states).enumerate() {
             if e % 128 == 0 {
@@ -336,7 +363,7 @@ where
             let f = HyperTetProblem::<FrozenPoint<'_>>::deformation_gradient(element, u);
             let step = self.materials[e]
                 .trial(&f, state, self.conditions[e])
-                .map_err(|error| invalid(format!("finite ductile element {e}: {error}")))?;
+                .map_err(|error| self.material_refusal(e, error))?;
             changed += usize::from(
                 step.state.native_state() != state.native_state()
                     || step.state.damage() != state.damage(),
@@ -594,6 +621,7 @@ where
             conditions: &point_conditions,
             inertia,
             dofs: self.state.nodes_m.len() * 3,
+            refusal: RefCell::new(None),
         };
         let solved = increment::solve(
             &operator,
@@ -610,7 +638,8 @@ where
             )),
             inertia,
             cx,
-        )?;
+        )
+        .map_err(|error| operator.endpoint_refusal(error))?;
         let motion = inertia
             .map(|inertia| inertia.motion(&solved.displacement_m, cx))
             .transpose()
@@ -625,6 +654,7 @@ where
         }
         let mut deformation = Vec::with_capacity(count);
         let mut piola = Vec::with_capacity(count);
+        let mut element_energy = Vec::with_capacity(count);
         let mut totals = [Sum::default(); 7];
         for (e, element) in self.state.elements.iter().enumerate() {
             if e % 128 == 0 {
@@ -659,6 +689,7 @@ where
             }
             deformation.push(f);
             piola.push(step.first_piola_pa);
+            element_energy.push(step.energy);
         }
         let values = totals.map(Sum::value);
         if values.iter().any(|v| !v.is_finite()) || values[..3].iter().any(|v| *v < 0.0) {
@@ -741,6 +772,7 @@ where
                 },
                 equilibrium: record,
                 energy,
+                element_energy,
             },
             motion,
         ))

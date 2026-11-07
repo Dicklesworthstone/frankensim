@@ -10040,8 +10040,9 @@ rotations with opposing signed defects, and geometric/damage/cancellation
 refusals. The build executes the original material, reference geometry,
 Newton/FGMRES, allocation and cancellation owners; unrelated modules and unused
 hyperelastic generic defaults are omitted. This is not the full workspace
-Cargo or constellation gate. The quasistatic entry advances one physical
-interval; callers refine refused increments. Evolving caloric feedback, crack
+Cargo or constellation gate. The quasistatic endpoint advances one physical
+interval; the bounded path API below automates subdivision. Evolving caloric
+feedback, crack
 topology, erosion and fragment/contact transfer remain outside this owner.
 MR63's post-failure topology requirements remain open.
 
@@ -10080,8 +10081,59 @@ forced free coordinate with simultaneous damage and inertia at two physical
 durations, moving-support work, independent material/kinetic loss refusals,
 replay, refined retry and cancellation rollback. This is one backward-Euler
 interval with held temperature and original reference inventory. It adds no
-adaptive path controller, impulses, evolving caloric feedback or fragment
+impulses, evolving caloric feedback or fragment
 transfer, and the loss budgets do not certify trajectory accuracy.
+
+### Adaptive finite ductile physical intervals
+
+`hyper3::plastic::ductile::path` adds `advance_path` to the original finite
+ductile solid and motion owners. One shared controller advances their existing
+endpoint solves; it adds no constitutive, equilibrium or inertia solver.
+Supports interpolate from the actual accepted coordinates to explicit final
+coordinates. Dead nodal and referential body loads interpolate between explicit
+initial and final values. Quasistatic initial free equations must satisfy the
+original force/load assembly; moving specimens retain incoming velocity and
+may begin with physical acceleration. Held uniform or per-element temperature
+and the original geometry, material, directional bands and reference mass
+remain fixed through the interval.
+
+Every attempted fraction supplies its actual physical duration to both native
+momentum and rate-sensitive initiation. Only typed Newton/linear failures,
+material/controller damage-increment limits, summed absolute material-work
+defects and numerical kinetic-loss excess trigger subdivision. Material
+source/domain/history refusals and cancellation stay terminal. Failed material
+evaluations retain their typed cause across the native Newton boundary;
+successful evaluations cannot inherit a rejected backtracking trial's cause.
+Rejected endpoints consume neither physical time nor accepted history.
+
+Material absolute-defect, kinetic-loss and equilibrium-work allowances are
+whole-interval budgets apportioned by actual subinterval size. Bounded growth
+uses accepted damage and independent loss margins. Explicit minimum/maximum
+fractions, total trials and accepted-record counts bound work and storage.
+Compensated whole-interval accounts separately check material storage/loss,
+external/support work, signed defects, absolute defects and kinetic work.
+Neither signed cancellation nor another loss account can hide an exceeded
+material or kinetic budget. A failed whole request publishes no private prefix.
+
+Results retain the last complete native endpoint plus compact accepted records
+and whole-interval accounts. Original endpoint results also retain scalar
+`element_energy` receipts from their existing final material audit, allowing
+coupled consumers to read physical losses without repeating a return map or
+differencing cumulative histories. A path endpoint's per-element receipts
+describe only its LAST substep. Load reversals require separate intervals;
+this controller provides no arc-length method, trajectory-error certificate,
+thermal evolution, crack topology or fragment transfer. MR63 remains open.
+
+All four new `tests/finite_ductile/path.rs` regressions and the eight original
+finite static/motion regressions pass in focused actual-source verification.
+Independent references cover axisymmetric stress/work through softening,
+accepted-partition replay, nonzero-velocity free acceleration and kinetic-loss
+refinement, and a genuinely free rate-sensitive J2/Johnson--Cook coordinate
+with consistent inertia at two physical durations. Initial-force/domain
+refusal, failure after a privately accepted prefix, distinct loss-budget
+exhaustion and cancellation preserve original state. This executes the original
+material, structural, inertia, Newton/FGMRES and cancellation owners; it does
+not establish the full-workspace Cargo or constellation gate.
 
 ## Adaptive brittle load intervals
 
