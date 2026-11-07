@@ -57,6 +57,9 @@ pub mod creep;
 /// Strain-life observation on accepted native static and inertial fiber states.
 pub mod fatigue;
 
+/// Source-bound axial/bending tensile limits on accepted material-frame forces.
+pub mod strength;
+
 /// Full forced resonance of the original elastic frame and its material losses.
 pub mod harmonic;
 

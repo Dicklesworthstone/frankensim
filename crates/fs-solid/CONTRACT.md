@@ -9554,6 +9554,28 @@ The gate stops at damage initiation: it supplies no stress erosion, fracture
 energy, characteristic length, crack insertion, fragments or post-failure
 load transfer, and does not close the broader regularized-fracture bead.
 
+## Tensile strength on accepted material-frame states
+
+`Frame2d::assess_tensile_strength` compares every original material member's
+accepted basic forces with source-bound `AxialTensileCapacity` layer limits.
+Signed axial force is retained; the actual section end moments are `-M_i` and
+`M_j`. Their two assessments bound the native prismatic member's affine
+axial/bending normal-stress field: compression can coexist with tensile outer
+fibers, and opposite end moments cannot average away double-curvature demand.
+The same observer consumes accepted static and Newmark states and retains each
+layer's own modulus, geometry, strength and source conditions. It performs no
+extra mechanical solve or tangent assembly.
+
+Exact section/source matching, a preallocation layer budget and cancellation
+checks make refusals transactional. Raw-coefficient/fiber-plastic members and
+material-viscous members refuse, since their actual stresses cannot be recovered
+from the retained elastic normal-force field. G1/G3/G4 regressions in
+`tests/frame2d_tensile_strength.rs` cover signed compression/bending, layered and
+spatially varying strength, rigid rotation, inertial double curvature, exact
+budgets and foreign/unsourced refusal. This is a normal-stress observation;
+it does not include transverse shear failure, plastic redistribution, buckling,
+fracture evolution or a validated component allowable.
+
 ## Material-bound tensile strength on native solid stresses
 
 `strength::TensileMaterialBinding` binds an explicitly selected isotropic
