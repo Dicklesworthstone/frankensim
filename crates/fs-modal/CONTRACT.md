@@ -1226,3 +1226,34 @@ coherence, or a general near-null accuracy certificate. Native regressions use
 independent real trajectories and finite mixed ensembles, exact duplicate
 cancellation versus independent factors, proper beats and DC, real/unitary
 factor-basis changes, coherent parity, and explicit resource/cancellation gates.
+
+### Prescribed harmonic supports on the original pencil
+
+`harmonic::PreparedSupportedHarmonicResponse` retains full M/C/K and a strictly
+increasing original-coordinate support map. Under `exp(-i omega t)`, it solves
+`A_ff q_f = F_f - A_fc q_c`, where `A = K-omega^2 M-i omega C`. Cross inertia,
+viscous coupling and signed gyroscopic entries survive support elimination.
+The original source passes the existing binary-scaled SPD/PSD admission; only
+the free block is factored. Rigid full-body stiffness modes therefore remain
+compatible with supported DC response. Empty and all-prescribed maps work;
+singular free blocks refuse without invented mass, damping or penalty springs.
+
+Full displacement/velocity and `R_c=(Aq-F)_c` are returned in the source chart.
+Reactions are forces BY supports ON the structure; externally applied forces
+at supported coordinates are subtracted once. Applied and support cycle work
+and full symmetric-C viscous power are independently contracted in DD on the
+shared scaled pencil. Gyroscopic coupling creates no heat, support power may
+be signed, and cancellation in the work balance is not clipped. The original
+free-row residual is checked after the solve. Repeated amplitudes and phases
+reuse the same factor without changing accepted source state.
+
+The complete source is bounded by the existing dense work cap and by
+`320*n*n+512*n` numerical bytes, including full admission, retained full/free
+operators, free LU and one solve. Allocation metadata/caller inputs are
+excluded. Cancellation is polled during assembly, support elimination, solves
+and observation. This is a finite-dimensional particular harmonic solution,
+not a startup transient, actuator model, spatial/material certificate or a
+forward-error guarantee near a pole. `tests/harmonic_supports.rs` independently
+checks consistent cross-mass base excitation, relative support phases,
+gyroscopic work, applied support-force redistribution, stationary parity,
+DC, all-prescribed motion, singular free resonance and admission/cancellation.

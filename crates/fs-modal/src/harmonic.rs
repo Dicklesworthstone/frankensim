@@ -50,6 +50,8 @@ pub use interference::{
     HarmonicInterferenceMoments, MAX_ENSEMBLE_FORCE_TONES, MAX_INTERFERENCE_FACTORS,
     MAX_INTERFERENCE_TONES, PreparedHarmonicInterference, PreparedHarmonicInterferenceEnsemble,
 };
+mod supports;
+pub use supports::{PreparedSupportedHarmonicResponse, SupportedHarmonicResponse};
 /// Local driven-response extrema and half-magnitude-squared linewidths.
 pub mod resonance;
 
@@ -226,6 +228,7 @@ impl PreparedHarmonicResponse {
             None,
             None,
             MatrixLayout::Dense,
+            true,
         )
     }
 
@@ -267,6 +270,7 @@ impl PreparedHarmonicResponse {
             None,
             Some(load),
             MatrixLayout::Dense,
+            true,
         )
     }
 
@@ -282,6 +286,7 @@ impl PreparedHarmonicResponse {
         modal_frequencies: Option<&[f64]>,
         port_load: Option<PreparedPortImpedance>,
         layout: MatrixLayout,
+        factorize: bool,
     ) -> Result<Self, HarmonicResponseError> {
         poll(cx)?;
         admit_layout(n, controls, layout)?;
@@ -437,28 +442,7 @@ impl PreparedHarmonicResponse {
                 cx,
             )?;
         }
-        let diagonal = layout == MatrixLayout::Diagonal
-            || (0..n).all(|i| (0..n).all(|j| i == j || operator[i * n + j] == C64::ZERO));
-        let factor = if compact_port_factor.is_some() {
-            None
-        } else if diagonal {
-            for i in 0..n {
-                if operator[layout.index(i, i, n)] == C64::ZERO {
-                    return Err(HarmonicResponseError::Singular {
-                        angular_frequency_rad_s,
-                        pivot: i,
-                    });
-                }
-            }
-            None
-        } else {
-            Some(
-                lu_complex_blocked_with_cancel(&operator, n, 1, || cx.checkpoint().is_err())
-                    .map_err(|e| lu_error(e, angular_frequency_rad_s))?,
-            )
-        };
-        poll(cx)?;
-        Ok(Self {
+        let mut prepared = Self {
             n,
             layout,
             angular_frequency_rad_s,
@@ -469,11 +453,45 @@ impl PreparedHarmonicResponse {
             scaled_mass: m,
             scaled_damping: c,
             damping: damping.to_vec(),
-            factor,
+            factor: None,
             compact_port_factor,
             port_load,
             maximum_relative_residual: controls.maximum_relative_residual,
-        })
+        };
+        if factorize {
+            prepared.factorize(cx)?;
+        }
+        poll(cx)?;
+        Ok(prepared)
+    }
+
+    // Supports first admit the complete physical pencil, then factor only its
+    // free principal block. A rigid full-body mode must not prevent a supported
+    // static solve, and the reaction rows must retain the original operator.
+    fn factorize(&mut self, cx: &Cx<'_>) -> Result<(), HarmonicResponseError> {
+        poll(cx)?;
+        if self.compact_port_factor.is_some() {
+            return Ok(());
+        }
+        let n = self.n;
+        let diagonal = self.layout == MatrixLayout::Diagonal
+            || (0..n).all(|i| (0..n).all(|j| i == j || self.operator[i * n + j] == C64::ZERO));
+        if diagonal {
+            for i in 0..n {
+                if self.operator[self.layout.index(i, i, n)] == C64::ZERO {
+                    return Err(HarmonicResponseError::Singular {
+                        angular_frequency_rad_s: self.angular_frequency_rad_s,
+                        pivot: i,
+                    });
+                }
+            }
+        } else {
+            self.factor = Some(
+                lu_complex_blocked_with_cancel(&self.operator, n, 1, || cx.checkpoint().is_err())
+                    .map_err(|e| lu_error(e, self.angular_frequency_rad_s))?,
+            );
+        }
+        poll(cx)
     }
 
     /// Convenience for mass-normalized modes: `M=I`, `K=diag(omega_i^2)`.
@@ -710,6 +728,7 @@ impl PreparedHarmonicResponse {
             Some(natural_frequencies_rad_s),
             port_load,
             layout,
+            true,
         )
     }
 
