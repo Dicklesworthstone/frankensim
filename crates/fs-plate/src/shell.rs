@@ -475,6 +475,15 @@ fn local_bending_stiffness_with_alpha<S: Section>(g:&FacetGeometry, s:&S, elemen
     let slots=DKT_SHELL_SLOTS;
     let signs=DKT_SHELL_SIGNS;
     for i in 0..9 { for j in 0..9 { k[slots[i]*18+slots[j]]+=signs[i]*kb[9*i+j]*signs[j]; }}
+    add_drilling_stiffness(g, a[8], drilling_alpha, &mut k);
+    Ok(k)
+}
+
+// Shared unchanged numerical gauge. Dispersive material consumers retain this
+// source contribution directly rather than subtracting large elastic matrices.
+fn add_drilling_stiffness(g: &FacetGeometry, membrane_shear: f64, drilling_alpha: f64,
+    k: &mut [f64; 324])
+{
     // Positive penalty on theta_z - (v_x-u_y)/2. Its lumped three-point
     // integration also controls nonconstant drilling modes without grounding
     // the mean rigid rotation. The old diagonal theta_z spring did not.
@@ -482,10 +491,9 @@ fn local_bending_stiffness_with_alpha<S: Section>(g:&FacetGeometry, s:&S, elemen
         let mut spin=[0.0;18];
         spin[6*node+5]=1.0;
         for i in 0..3 { spin[6*i]=0.5*g.gradient[i][1]; spin[6*i+1]=-0.5*g.gradient[i][0]; }
-        let scale=drilling_alpha*a[8]*g.area_m2/3.0;
+        let scale=drilling_alpha*membrane_shear*g.area_m2/3.0;
         for i in 0..18 { for j in 0..18 { k[18*i+j]+=scale*spin[i]*spin[j]; }}
     }
-    Ok(k)
 }
 
 /// Certified generalized modes in the angular-frequency-squared window.

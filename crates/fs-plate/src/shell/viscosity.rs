@@ -19,6 +19,9 @@ use fs_math::{
 };
 use fs_sparse::{Coo, Csr};
 
+/// Source-bound hereditary material response on the original CST/DKT shell.
+pub mod harmonic;
+
 fn bad(what: &'static str) -> PlateError {
     PlateError::BadSection { what }
 }
@@ -399,4 +402,76 @@ pub fn project_viscosity(
         return Err(PlateError::Cancelled);
     }
     Ok(out)
+}
+
+// A constitutive increment or frequency derivative is signed, not a passive
+// viscosity. Integrate it on the SAME physical strain rows and support map;
+// never project it through a positive factor or a separate shell operator.
+fn assemble_signed_constitutive_operator(
+    mesh: &ShellMesh,
+    sections: &[([f64; 9], [f64; 9], [f64; 9])],
+    model: &ShellModel,
+    budget: ShellViscosityBudget,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<Csr, PlateError> {
+    if cancelled() {
+        return Err(PlateError::Cancelled);
+    }
+    admit(mesh, sections.len(), model, budget, 18)?;
+    let mut coo = Coo::new(model.free, model.free);
+    for (element, (tri, &(a, b, d))) in mesh.tris.iter().zip(sections).enumerate() {
+        if cancelled() {
+            return Err(PlateError::Cancelled);
+        }
+        for matrix in [&a, &b, &d] {
+            if matrix.iter().any(|v| !v.is_finite())
+                || (0..3).any(|i| (0..i).any(|j| matrix[3*i+j] != matrix[3*j+i]))
+            {
+                return Err(bad("signed shell resultants must be finite and symmetric"));
+            }
+        }
+        let g = mesh.facet(element)?;
+        let rows = strain_rows(&g, element)?;
+        let mut local = [[0.0; 18]; 18];
+        for point in rows {
+            let strains: [[f64; 6]; 18] = core::array::from_fn(|i| {
+                let base = 6 * (i / 6) + 3 * ((i % 6) / 3);
+                core::array::from_fn(|r| {
+                    compensated_products((0..3).map(|p| (g.frame[p][i % 3], point[r][base + p])))
+                })
+            });
+            for i in 0..18 {
+                let stress: [f64; 6] = core::array::from_fn(|r| {
+                    compensated_products((0..6).map(|s| {
+                        let matrix = if r < 3 && s < 3 { &a }
+                            else if r >= 3 && s >= 3 { &d } else { &b };
+                        (matrix[3 * (r % 3) + s % 3], strains[i][s])
+                    }))
+                });
+                for j in i..18 {
+                    local[i][j] += (g.area_m2 / 3.0)
+                        * compensated_products((0..6).map(|r| (stress[r], strains[j][r])));
+                    if !local[i][j].is_finite() {
+                        return Err(bad("signed shell constitutive assembly overflow"));
+                    }
+                }
+            }
+        }
+        for i in 0..18 {
+            let Some(row) = model.dof_map[6 * tri[i / 6] + i % 6] else { continue; };
+            for j in i..18 {
+                let Some(column) = model.dof_map[6 * tri[j / 6] + j % 6] else { continue; };
+                if local[i][j] != 0.0 {
+                    coo.push(row, column, local[i][j]);
+                    if i != j { coo.push(column, row, local[i][j]); }
+                }
+            }
+        }
+    }
+    let matrix = coo.assemble();
+    if (0..model.free).any(|r| matrix.row(r).1.iter().any(|v| !v.is_finite())) {
+        return Err(bad("signed shell constitutive assembly overflow"));
+    }
+    if cancelled() { return Err(PlateError::Cancelled); }
+    Ok(matrix)
 }

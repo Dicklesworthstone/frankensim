@@ -2103,3 +2103,65 @@ signs and heterogeneous/equal facet times, correlated weak stiffness beside
 rigid/drilling nulls, and source, budget and cancellation refusals. The three
 new focused native tests and all six existing shell-viscosity tests passed
 with the original numerical owners after sharing the strain contraction.
+## Source-bound tensor-Prony harmonic CST/DKT shells
+
+`shell::viscosity::harmonic::TensorPronyShell` assembles an original native shell
+from retained per-facet `TensorPronyShellSection` laws, thicknesses and reference
+densities. Its reference pencil uses the existing CST/DKT assembly, strong
+supports, physical axial-rotation convention and selected consistent or lumped
+inertia. One explicit reference frequency determines the unchanged numerical
+drilling stiffness. The complete source geometry, material and support map are
+retained together; matching dimensions of unrelated public models is not
+accepted as source identity.
+
+At each positive admitted frequency, the original material owner prepares the
+full complex plane-stress constraint, including transverse normal/shear
+coupling. The existing physical shell strain owner integrates the complete
+anisotropic membrane and bending storage and loss. Current positive physical
+storage is assembled directly beside a separately retained original drilling
+operator. Subtracting a stiff reference physical matrix to recover soft
+low-frequency storage is avoided. Drilling acquires neither material heat nor
+frequency dispersion. Original mass is unchanged and never diagonalized.
+
+The shared `fs-modal::harmonic` factor solves
+`[K'(omega) - omega^2 M - i K''(omega)] q = f` with peak phasors under
+`exp(-i omega t)`. Its optional full physical `B/Z` boundary load enters that
+same factorization; all mutual and reactive entries survive. The shared result's
+`average_viscous_power_w` is intrinsic material heat from the original Prony and
+Kelvin source, counted once. Boundary absorbed work is reported separately.
+The equivalent `C_eff = K''/omega` is a frequency-domain identity only, not a
+memoryless replacement for hereditary material time integration.
+
+Prepared material reductions recover all six Mandel strain phasors before a
+response is published. The original strain ceiling applies to the exact maximum
+norm over the complete phase cycle. Both section surfaces and all triangle
+vertices are admitted: CST membrane strain is constant, DKT curvature is affine
+over the facet, and the homogeneous strain is affine through thickness, so
+convexity bounds this finite-element strain field. The original DKT midpoint
+ordering supplies vertex extrapolation without a second curvature operator.
+
+`with_frequency_derivative` reuses the same structural factor and the original
+complex plane-stress material frequency derivative. Signed storage and
+effective-viscosity derivatives retain every spatial cross term; neither is
+forced to be a passive operator. Double-double arithmetic evaluates the
+loss/omega quotient derivative from the original material values. Authored force
+and complete attachment/impedance slopes enter the shared total-parameter solve,
+along with explicit inertia and velocity frequency terms. Motion, intrinsic
+heat and boundary-work slopes retain independent residual/power checks.
+
+Explicit element/full/free-coordinate and per-assembly work ceilings bound the
+native spatial operations. Separate dense numerical payload ceilings include
+source matrices and material/resultant arrays before allocation; port and
+tangent work retain the shared harmonic owner's own budgets. Cancellation or
+source/numerical refusal publishes no partial response. Repeated excitations at
+one frequency reuse the material reductions and factor.
+
+This capability is a centered homogeneous CST/DKT thin-shell model. It does not
+supply MITC transverse-shear dispersion, laminate membrane/bending coupling,
+nonlinear or prestressed/tied assembly response, moving supports, DC, startup
+transients, spatial convergence or experimental validation. The six focused
+regressions in `tests/shell_prony_harmonic.rs` define analytic motion/heat/slopes,
+full anisotropic loaded frequency changes, undamped drilling, strongly separated
+reference/target moduli, whole-facet strain admission and source/budget/cancel
+refusals. Native execution remains pending in an environment that can build the
+original dependency graph.
