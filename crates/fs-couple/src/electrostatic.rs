@@ -17,7 +17,10 @@
 /// Resolved moving capacitor geometry and reciprocal guided-body work.
 pub mod motion;
 
-use fs_em::spatial::electrostatic::SpatialElectricField;
+use fs_em::{
+    electrostatic::nonlinear::spatial::SpatialNonlinearElectricField,
+    spatial::electrostatic::SpatialElectricField,
+};
 use fs_exec::Cx;
 use fs_solid::loads3::{LoadError3, TetLoadCase3, TetLoadGeometry3, VolumeLoad3};
 
@@ -52,17 +55,77 @@ pub fn spatial_coulomb_volume_load<'g, 'm>(
     charged_cells: &[usize],
     cx: &Cx<'_>,
 ) -> Result<TetLoadCase3<'g, 'm>, LoadError3> {
-    poll(cx)?;
     let source = field.problem();
-    let source_tets = &source.mesh().tets;
+    assemble_coulomb_volume_load(
+        SpatialCoulombData {
+            positions_m: source.positions_m(),
+            tetrahedra: &source.mesh().tets,
+            free_charge_density_c_m3: field.free_charge_density_c_m3(),
+            electric_field_v_m: field.electric_field_v_m(),
+        },
+        geometry,
+        charged_cells,
+        cx,
+    )
+}
+
+/// Integrate `rho_free E` from an accepted native nonlinear tetrahedral field.
+///
+/// This uses the actual field at its accepted material operating point and the
+/// original free volume charge. Constitutive polarization, electrode charge and
+/// internal-interface forces are not reclassified as volume charge. The exact
+/// mesh/frame checks, cell selection and native solid P1 integration are the
+/// same as [`spatial_coulomb_volume_load`], including forces on fixed nodes.
+///
+/// The result is an instantaneous load on mechanically bound free charge. It
+/// does not advance the electric state or its geometry, infer charge transport,
+/// or close a deformation-dependent energy trajectory. An enclosing Maxwell
+/// load that already includes these charges must not be added a second time.
+pub fn spatial_nonlinear_coulomb_volume_load<'g, 'm>(
+    field: &SpatialNonlinearElectricField<'_>,
+    geometry: &'g TetLoadGeometry3<'m>,
+    charged_cells: &[usize],
+    cx: &Cx<'_>,
+) -> Result<TetLoadCase3<'g, 'm>, LoadError3> {
+    let source = field.problem();
+    assemble_coulomb_volume_load(
+        SpatialCoulombData {
+            positions_m: source.positions_m(),
+            tetrahedra: &source.mesh().tets,
+            free_charge_density_c_m3: field.free_charge_density_c_m3(),
+            electric_field_v_m: field.electric_field_v_m(),
+        },
+        geometry,
+        charged_cells,
+        cx,
+    )
+}
+
+// Only accepted native field owners construct this view. The common adapter
+// cannot accept independent caller-authored E/rho arrays or a substitute mesh.
+struct SpatialCoulombData<'a> {
+    positions_m: &'a [[f64; 3]],
+    tetrahedra: &'a [[u32; 4]],
+    free_charge_density_c_m3: &'a [f64],
+    electric_field_v_m: &'a [[f64; 3]],
+}
+
+fn assemble_coulomb_volume_load<'g, 'm>(
+    source: SpatialCoulombData<'_>,
+    geometry: &'g TetLoadGeometry3<'m>,
+    charged_cells: &[usize],
+    cx: &Cx<'_>,
+) -> Result<TetLoadCase3<'g, 'm>, LoadError3> {
+    poll(cx)?;
+    let source_tets = source.tetrahedra;
     let nodes = geometry.nodes_m();
     let tets = geometry.tetrahedra();
-    if source.positions_m().len() != nodes.len() || source_tets.len() != tets.len() {
+    if source.positions_m.len() != nodes.len() || source_tets.len() != tets.len() {
         return Err(LoadError3::Invalid(
             "electrostatic body loads require the original reference volume mesh",
         ));
     }
-    for (electric, mechanical) in source.positions_m().iter().zip(nodes) {
+    for (electric, mechanical) in source.positions_m.iter().zip(nodes) {
         poll(cx)?;
         if electric != mechanical {
             return Err(LoadError3::Invalid(
@@ -91,8 +154,8 @@ pub fn spatial_coulomb_volume_load<'g, 'm>(
             ));
         }
         previous = Some(cell);
-        let rho = field.free_charge_density_c_m3()[cell];
-        let electric = field.electric_field_v_m()[cell];
+        let rho = source.free_charge_density_c_m3[cell];
+        let electric = source.electric_field_v_m[cell];
         let density = electric.map(|component| rho * component);
         let nodal_volume = geometry.element_volumes_m3()[cell] / 4.0;
         for axis in 0..3 {

@@ -1,3 +1,22 @@
+## Nonlinear electrostatic volume forces on native solids
+
+`electrostatic::spatial_nonlinear_coulomb_volume_load` transfers the accepted
+native tetrahedral nonlinear electric field into the existing solid P1 load
+owner. It shares the original linear adapter's exact mesh/frame/connectivity
+admission and integrates only the selected original free-volume-charge term
+rho E. Each nodal contribution is Volume*rho*E/4; original cell order, force
+resultant, first moment, affine-displacement work and fixed-DOF reactions are
+retained without remeshing or a separate electric solve.
+
+The source field retains its full material response and all sources of E.
+Only free volume charge assigned mechanically to the selected material enters
+this adapter. Electrode/interface/polarization forces and electrostriction are
+separate contributions; an overlapping enclosing stress load must not count
+the same charge again. This is an instantaneous load snapshot, with no implicit
+charge transport or field/mechanical time integration. Cancellation and mesh
+refusal leave the field reusable. Synthetic nonlinear charged-tetrahedron
+regressions specify force, torque, affine work and transactional refusals.
+
 ## Finite-temperature feedback on the three-dimensional induction rotor
 
 `SpatialMagneticThermalNetwork::step_rotor_candidate` advances the original

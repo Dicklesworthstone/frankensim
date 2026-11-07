@@ -1,6 +1,9 @@
 //! G1/G3/G4: accepted dielectric fields feed the native solid volume-load owner.
 //! Materials are synthetic SI fixtures, not experimentally validated specimens.
 
+#[path = "electrostatic_loads/nonlinear.rs"]
+mod nonlinear;
+
 use fs_blake3::ContentHash;
 use fs_couple::electrostatic::spatial_coulomb_volume_load;
 use fs_em::{
