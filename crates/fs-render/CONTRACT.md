@@ -3043,8 +3043,8 @@ shared thermal receivers, source-domain refusal and transactional cancellation.
 
 `LuminescentOpticalHeating::with_singlet_triplet` explicitly binds a
 `phosphorescence::SingletTripletSource` to the existing singlet pump owner.
-The two emitting states retain independent intrinsic lifetimes, photon yields,
-quenching laws and normalized photon spectra. Their common discrete wavelength
+The authored lifetime form retains independent intrinsic lifetimes, photon
+yields, quenching laws and normalized photon spectra. Their common discrete wavelength
 grid can contain zero-weight nodes in either spectrum; only populated spectral
 nodes must lie below that state's excitation energy. Neither yield is applied
 twice: radiative, dark and intersystem-crossing transitions compete in the
@@ -3084,6 +3084,35 @@ This is a dilute molecular singlet/triplet mechanism with explicitly supplied
 rates. It does not claim finite ground-state depletion, triplet annihilation,
 trap-mediated persistent phosphors, coherent spin dynamics, oxygen transport,
 measured material constants or an automatically enforced detailed-balance law.
+
+With `material-state`, `SingletTripletSource::try_material_temperature`
+binds a complete `fs_material::phosphorescence::PhosphorescenceStatePoint`
+and its immutable original card directly to this same owner. The six native
+rates remain authoritative, including exact zero rates and stable stores.
+Spectrum descriptors supply conditional photon fractions and validity domains;
+their legacy scalar quantum yields are not applied to the native rate model.
+No finite lifetime or branching yield is fabricated. The returned singlet
+descriptor must be paired with its original coupling.
+
+The native thermal owner controls one explicitly typed static absolute-
+temperature coordinate. It refreshes the original selected material claims at
+the actual cell temperature while retaining every other supplied condition,
+including quencher concentration. The same original state energies must remain
+fixed: selected energy models depending on that temperature coordinate refuse
+at binding, and every refreshed snapshot rechecks the original energies.
+Changing an occupied energy level would require separate parameter-work
+accounting. Source-domain or identity mismatches refuse.
+
+Temperature snapshots are cached within an interval with a cell-count-bounded
+cache; numerical plans still reuse the original positive-network propagation.
+The cache carries no physical history and cannot change accepted populations,
+heat or source authority. The material card, initial complete context and owned
+temperature coordinate contribute to the emission source identity. Manufactured
+integration regressions check stable triplet storage, actual-temperature rate
+refresh, fixed quencher conditions affecting both afterglow and heat, and
+unaccounted energy-work or mismatched-singlet refusal. The runnable
+`phosphorescent_afterglow` example demonstrates a synthetic finite pump pulse,
+nanosecond singlet and second-scale triplet through native heat and radiance.
 
 ### Temperature-dependent optical heating
 

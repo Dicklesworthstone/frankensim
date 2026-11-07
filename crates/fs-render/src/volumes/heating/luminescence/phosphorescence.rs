@@ -1,4 +1,4 @@
-//! Authored singlet/triplet crossing on the existing optical/thermal timeline.
+//! Singlet/triplet crossing on the existing optical/thermal timeline.
 //!
 //! The pump excites the original singlet source. Intersystem crossing transfers
 //! actual populations to a separate triplet store; reverse crossing takes the
@@ -17,20 +17,35 @@ use fs_thermal::luminescence::transfer::{
     SingletTripletDecay, SingletTripletError, SingletTripletPlan,
 };
 use std::sync::Arc;
+#[cfg(feature = "material-state")]
+use std::{collections::BTreeMap, sync::Mutex};
+
+#[cfg(feature = "material-state")]
+mod material;
 
 /// The thermal owner's existing positive-network work and accuracy limits.
 pub use fs_thermal::luminescence::recycling::RecyclingLimits as SingletTripletLimits;
 
 const HC_J_NM: f64 = 6.626_070_15e-34 * 299_792_458.0 * 1e9;
 
-/// Explicit triplet source and forward/reverse intersystem-crossing laws.
-/// Both scalar lifetimes describe intrinsic radiative plus dark removal;
-/// crossing is added as a competing channel, never counted inside either one.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
+enum RateLaw {
+    Intrinsic {
+        forward_crossing_s: f64,
+        reverse_crossing: ArrheniusQuenching,
+    },
+    #[cfg(feature = "material-state")]
+    Material(Arc<material::MaterialTemperaturePhosphor>),
+}
+
+/// Explicit triplet spectrum and competing singlet/triplet transition laws.
+/// Authored scalar lifetimes exclude crossing. Original material laws instead
+/// supply all six native rates directly, including exactly stable states.
+#[derive(Clone, Debug)]
 pub struct SingletTripletSource<const M: usize> {
     triplet: LuminescenceSource<M>,
-    forward_crossing_s: f64,
-    reverse_crossing: ArrheniusQuenching,
+    rates: RateLaw,
+    expected_singlet: Option<LuminescenceSource<M>>,
     limits: SingletTripletLimits,
 }
 
@@ -45,8 +60,10 @@ impl<const M: usize> SingletTripletSource<M> {
         reverse_crossing: ArrheniusQuenching,
         limits: SingletTripletLimits,
     ) -> Result<Self, OpticalHeatingError> {
-        if !forward_crossing_s.is_finite() || forward_crossing_s < 0.0 {
-            return Err(invalid("invalid singlet-to-triplet crossing rate"));
+        if !forward_crossing_s.is_finite() || forward_crossing_s < 0.0 || triplet.decay.is_none() {
+            return Err(invalid(
+                "authored crossing requires a finite intrinsic triplet decay",
+            ));
         }
         // Keep numerical admission with the existing evolution owner. Actual
         // source energies and temperature-dependent rates are checked on bind.
@@ -55,25 +72,57 @@ impl<const M: usize> SingletTripletSource<M> {
             .map_err(|_| invalid("invalid singlet/triplet evolution limits"))?;
         Ok(Self {
             triplet,
-            forward_crossing_s,
-            reverse_crossing,
+            rates: RateLaw::Intrinsic {
+                forward_crossing_s,
+                reverse_crossing,
+            },
+            expected_singlet: None,
             limits,
         })
     }
 
-    /// Original sourced triplet emission and intrinsic decay law.
+    /// Original triplet spectrum; native material rates need no scalar lifetime.
     pub const fn triplet(&self) -> &LuminescenceSource<M> {
         &self.triplet
     }
 
-    /// Authored fixed singlet-to-triplet rate, inverse seconds.
-    pub const fn forward_crossing_s(&self) -> f64 {
-        self.forward_crossing_s
+    /// Authored fixed singlet-to-triplet rate, inverse seconds. Native
+    /// material rates refresh at the actual thermal temperature instead.
+    pub fn forward_crossing_s(&self) -> Option<f64> {
+        match &self.rates {
+            RateLaw::Intrinsic {
+                forward_crossing_s, ..
+            } => Some(*forward_crossing_s),
+            #[cfg(feature = "material-state")]
+            RateLaw::Material(_) => None,
+        }
     }
 
-    /// Authored reverse-crossing thermal activation law.
-    pub const fn reverse_crossing(&self) -> ArrheniusQuenching {
-        self.reverse_crossing
+    /// Authored reverse-crossing activation law, absent for native material
+    /// rates. A sampled material curve is never replaced with an Arrhenius fit.
+    pub fn reverse_crossing(&self) -> Option<ArrheniusQuenching> {
+        match &self.rates {
+            RateLaw::Intrinsic {
+                reverse_crossing, ..
+            } => Some(*reverse_crossing),
+            #[cfg(feature = "material-state")]
+            RateLaw::Material(_) => None,
+        }
+    }
+
+    fn admit_singlet(&self, singlet: &LuminescenceSource<M>) -> Result<(), OpticalHeatingError> {
+        if let Some(expected) = &self.expected_singlet {
+            if singlet != expected {
+                return Err(invalid(
+                    "native phosphorescence requires its original singlet spectrum and energy, without additional quenching",
+                ));
+            }
+        } else if singlet.decay.is_none() {
+            return Err(invalid(
+                "authored crossing requires an intrinsic singlet decay",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -84,10 +133,36 @@ struct Prepared {
     plan: SingletTripletPlan,
 }
 
-#[derive(Clone, Debug)]
+#[cfg(feature = "material-state")]
+#[derive(Debug, Default)]
+struct TemperatureCache {
+    interval_start_bits: Option<u64>,
+    models: BTreeMap<u64, SingletTripletDecay>,
+}
+
+#[derive(Debug)]
 pub(super) struct SingletTripletFeedback<const M: usize> {
     pub(super) source: SingletTripletSource<M>,
     prepared: Option<Arc<Prepared>>,
+    #[cfg(feature = "material-state")]
+    temperatures: Mutex<TemperatureCache>,
+    #[cfg(feature = "material-state")]
+    maximum_cached_temperatures: usize,
+}
+
+impl<const M: usize> Clone for SingletTripletFeedback<M> {
+    fn clone(&self) -> Self {
+        Self {
+            source: self.source.clone(),
+            prepared: self.prepared.clone(),
+            // Only immutable source/propagator data are shared. A candidate
+            // starts with its own empty cache, independent of accepted stores.
+            #[cfg(feature = "material-state")]
+            temperatures: Mutex::new(TemperatureCache::default()),
+            #[cfg(feature = "material-state")]
+            maximum_cached_temperatures: self.maximum_cached_temperatures,
+        }
+    }
 }
 
 pub(super) struct CoupledStep<const M: usize> {
@@ -126,15 +201,20 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
                 "singlet/triplet coupling requires an unadvanced supported common-grid source",
             ));
         }
+        coupling.admit_singlet(&self.source)?;
         self.singlet_triplet = Some(SingletTripletFeedback {
             source: coupling,
             prepared: None,
+            #[cfg(feature = "material-state")]
+            temperatures: Mutex::new(TemperatureCache::default()),
+            #[cfg(feature = "material-state")]
+            maximum_cached_temperatures: self.cells.len().saturating_mul(2).max(1),
         });
         self.check_state(thermal, true, &mut checkpoint)?;
         Ok(self)
     }
 
-    /// Authored triplet/crossing source, when explicitly bound.
+    /// Bound triplet spectrum and crossing/rate source.
     pub fn singlet_triplet_source(&self) -> Option<&SingletTripletSource<M>> {
         self.singlet_triplet
             .as_ref()
@@ -148,21 +228,27 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
         let Some(coupling) = &self.singlet_triplet else {
             return self.source.fluorescence().source_identity();
         };
-        let mut hash = DomainHasher::new("org.frankensim.render.singlet-triplet-source.v1");
+        let mut hash = DomainHasher::new("org.frankensim.render.singlet-triplet-source.v2");
         for source in [&self.source, &coupling.source.triplet] {
             hash.update(source.fluorescence().source_identity().as_bytes());
             let (pump_lo, pump_hi) = source.fluorescence().excitation_bounds_nm();
             let (temp_lo, temp_hi) = source.fluorescence().temperature_bounds_k();
             for value in [
                 source.excitation_wavelength_nm(),
-                source.decay.lifetime_s(),
-                source.decay.quantum_yield(),
                 pump_lo,
                 pump_hi,
                 temp_lo,
                 temp_hi,
             ] {
                 hash.update(&value.to_bits().to_le_bytes());
+            }
+            match source.decay {
+                Some(decay) => {
+                    hash.update(&[1]);
+                    hash.update(&decay.lifetime_s().to_bits().to_le_bytes());
+                    hash.update(&decay.quantum_yield().to_bits().to_le_bytes());
+                }
+                None => hash.update(&[0]),
             }
             for value in source
                 .fluorescence()
@@ -181,33 +267,86 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
                 None => hash.update(&[0]),
             }
         }
-        hash.update(&coupling.source.forward_crossing_s.to_bits().to_le_bytes());
-        hash.update(
-            &coupling
-                .source
-                .reverse_crossing
-                .prefactor_rate_s()
-                .to_bits()
-                .to_le_bytes(),
-        );
-        hash.update(
-            &coupling
-                .source
-                .reverse_crossing
-                .activation_energy_j()
-                .to_bits()
-                .to_le_bytes(),
-        );
+        match &coupling.source.rates {
+            RateLaw::Intrinsic {
+                forward_crossing_s,
+                reverse_crossing,
+            } => {
+                hash.update(&[0]);
+                hash.update(&forward_crossing_s.to_bits().to_le_bytes());
+                hash.update(&reverse_crossing.prefactor_rate_s().to_bits().to_le_bytes());
+                hash.update(
+                    &reverse_crossing
+                        .activation_energy_j()
+                        .to_bits()
+                        .to_le_bytes(),
+                );
+            }
+            #[cfg(feature = "material-state")]
+            RateLaw::Material(source) => {
+                hash.update(&[1]);
+                hash.update(source.identity.as_bytes());
+            }
+        }
         hash.finalize()
     }
 }
 
 impl<const M: usize> SingletTripletFeedback<M> {
+    /// Memoized constitutive data have no physical state and need no rollback.
+    /// Retrying at the same accepted start retains already admitted temperatures.
+    pub(super) fn begin_interval(&mut self, start_s: f64) {
+        #[cfg(feature = "material-state")]
+        {
+            if self.temperatures.is_poisoned() {
+                self.temperatures = Mutex::new(TemperatureCache::default());
+            }
+            let cache = self
+                .temperatures
+                .get_mut()
+                .expect("unpoisoned source cache");
+            if cache.interval_start_bits != Some(start_s.to_bits()) {
+                cache.models.clear();
+                cache.interval_start_bits = Some(start_s.to_bits());
+            }
+        }
+        #[cfg(not(feature = "material-state"))]
+        let _ = start_s;
+    }
+
     pub(super) fn model_at_temperature(
         &self,
         singlet: &LuminescenceSource<M>,
         temperature_k: f64,
     ) -> Result<SingletTripletDecay, OpticalHeatingError> {
+        self.source.admit_singlet(singlet)?;
+        singlet.check_temperature(temperature_k)?;
+        self.source.triplet.check_temperature(temperature_k)?;
+        #[cfg(feature = "material-state")]
+        if let RateLaw::Material(source) = &self.source.rates {
+            let mut cache = self
+                .temperatures
+                .lock()
+                .map_err(|_| invalid("material temperature cache was interrupted"))?;
+            let key = temperature_k.to_bits();
+            if let Some(model) = cache.models.get(&key) {
+                return Ok(*model);
+            }
+            let model = source.model_at_temperature(temperature_k)?;
+            if cache.models.len() == self.maximum_cached_temperatures {
+                cache.models.clear();
+            }
+            cache.models.insert(key, model);
+            return Ok(model);
+        }
+        let (forward_crossing_s, reverse_crossing) = match &self.source.rates {
+            RateLaw::Intrinsic {
+                forward_crossing_s,
+                reverse_crossing,
+            } => (*forward_crossing_s, *reverse_crossing),
+            #[cfg(feature = "material-state")]
+            RateLaw::Material(_) => unreachable!("material rate dispatch returned above"),
+        };
         let decays = [
             singlet.decay_at_temperature(temperature_k)?,
             self.source.triplet.decay_at_temperature(temperature_k)?,
@@ -225,9 +364,7 @@ impl<const M: usize> SingletTripletFeedback<M> {
                 ));
             }
         }
-        let reverse = self
-            .source
-            .reverse_crossing
+        let reverse = reverse_crossing
             .rate_at_temperature(temperature_k)
             .map_err(|_| invalid("unrepresentable reverse intersystem crossing rate"))?;
         SingletTripletDecay::try_new(
@@ -237,7 +374,7 @@ impl<const M: usize> SingletTripletFeedback<M> {
             ],
             radiative,
             nonradiative,
-            [self.source.forward_crossing_s, reverse],
+            [forward_crossing_s, reverse],
         )
         .map_err(|_| invalid("invalid singlet/triplet rates or energies"))
     }

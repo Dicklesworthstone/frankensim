@@ -1,4 +1,4 @@
-//! Finite-lifetime luminescence on the original conservative thermal clock.
+//! Delayed luminescence on the original conservative thermal clock.
 //!
 //! Absorption first relaxes to an explicitly authored emitting-state energy.
 //! That prompt energy difference heats the absorbing cell. The remaining
@@ -44,12 +44,13 @@ use fs_thermal::luminescence::{ArrheniusQuenching, ExcitationDecay, ExcitationSt
 use std::collections::BTreeMap;
 
 /// One sourced emitting state, with a discrete photon spectrum.
-/// The source's quantum yield and `lifetime_s` specify the unquenched state.
+/// A scalar source uses quantum yield and lifetime; a material-bound source
+/// takes its independent native transition rates from the coupled owner.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LuminescenceSource<const M: usize> {
     fluorescence: FluorescenceSource<M>,
     excitation_wavelength_nm: f64,
-    decay: ExcitationDecay,
+    decay: Option<ExcitationDecay>,
     quenching: Option<ArrheniusQuenching>,
 }
 
@@ -63,6 +64,20 @@ impl<const M: usize> LuminescenceSource<M> {
         excitation_wavelength_nm: f64,
         lifetime_s: f64,
     ) -> Result<Self, OpticalHeatingError> {
+        let mut source = Self::try_native_spectrum(fluorescence, excitation_wavelength_nm)?;
+        source.decay = Some(
+            ExcitationDecay::try_new(lifetime_s, fluorescence.quantum_yield())
+                .map_err(|_| invalid("invalid luminescence lifetime or quantum yield"))?,
+        );
+        Ok(source)
+    }
+
+    // Native material rates may describe stable states, for which a finite
+    // scalar lifetime does not exist. Keep spectral admission independent.
+    fn try_native_spectrum(
+        fluorescence: FluorescenceSource<M>,
+        excitation_wavelength_nm: f64,
+    ) -> Result<Self, OpticalHeatingError> {
         if !excitation_wavelength_nm.is_finite()
             || excitation_wavelength_nm < fluorescence.excitation_bounds_nm().1
             || fluorescence
@@ -75,12 +90,10 @@ impl<const M: usize> LuminescenceSource<M> {
                 "stored excitation must lie energetically between pump and every emission node",
             ));
         }
-        let decay = ExcitationDecay::try_new(lifetime_s, fluorescence.quantum_yield())
-            .map_err(|_| invalid("invalid luminescence lifetime or quantum yield"))?;
         Ok(Self {
             fluorescence,
             excitation_wavelength_nm,
-            decay,
+            decay: None,
             quenching: None,
         })
     }
@@ -93,7 +106,9 @@ impl<const M: usize> LuminescenceSource<M> {
         self
     }
 
-    /// Original photon spectrum, unquenched yield and source validity domains.
+    /// Original photon spectrum and source validity domains. The stored scalar
+    /// yield applies only to a scalar lifetime source; material-bound spectra
+    /// take their radiative branching from the independent native rates.
     pub const fn fluorescence(&self) -> &FluorescenceSource<M> {
         &self.fluorescence
     }
@@ -102,26 +117,36 @@ impl<const M: usize> LuminescenceSource<M> {
         self.excitation_wavelength_nm
     }
 
-    /// Effective decay at an admitted native material temperature. Rates are
-    /// frozen at the start of each accepted thermal substep; refine that step
-    /// to assess temperature feedback, independently of the analytic decay.
-    pub fn decay_at_temperature(
-        &self,
-        temperature_k: f64,
-    ) -> Result<ExcitationDecay, OpticalHeatingError> {
+    fn check_temperature(&self, temperature_k: f64) -> Result<(), OpticalHeatingError> {
         let (lo, hi) = self.fluorescence.temperature_bounds_k();
         if !temperature_k.is_finite() || !(lo..=hi).contains(&temperature_k) {
             return Err(invalid(
                 "temperature exceeds the luminescence source domain",
             ));
         }
+        Ok(())
+    }
+
+    /// Effective scalar decay at an admitted native material temperature.
+    /// Material-bound sources instead use their independent coupled rates and
+    /// refuse this scalar accessor, including when a state is perfectly stable.
+    /// Rates are frozen at each thermal substep; refine that step to assess
+    /// temperature feedback independently of the analytic decay.
+    pub fn decay_at_temperature(
+        &self,
+        temperature_k: f64,
+    ) -> Result<ExcitationDecay, OpticalHeatingError> {
+        self.check_temperature(temperature_k)?;
+        let decay = self.decay.ok_or_else(|| {
+            invalid("material-bound emission requires its native singlet/triplet kinetics")
+        })?;
         match self.quenching {
-            None => Ok(self.decay),
+            None => Ok(decay),
             Some(law) => {
                 let rate = law
                     .rate_at_temperature(temperature_k)
                     .map_err(|_| invalid("unrepresentable luminescence quenching rate"))?;
-                self.decay
+                decay
                     .with_nonradiative_rate(rate)
                     .map_err(|_| invalid("unrepresentable quenched luminescence lifetime"))
             }
@@ -417,7 +442,7 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
             if let Some(environment) = &emission_transport {
                 environment.check_emitter(deposited.cell_index, thermal_cell)?;
             }
-            source.decay_at_temperature(thermal.temperature_k(thermal_cell)?)?;
+            source.check_temperature(thermal.temperature_k(thermal_cell)?)?;
             let mut reservoir_pump_w = [0.0; N];
             let mut prompt_heat_w = [0.0; N];
             for lane in 0..N {
@@ -564,13 +589,11 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
             if !thermal.cells().contains_key(&cell.thermal_cell) {
                 return Err(OpticalHeatingError::InactiveCell(cell.thermal_cell));
             }
-            self.source
-                .decay_at_temperature(thermal.temperature_k(cell.thermal_cell)?)?;
+            let temperature = thermal.temperature_k(cell.thermal_cell)?;
             if let Some(coupling) = &self.singlet_triplet {
-                coupling.model_at_temperature(
-                    &self.source,
-                    thermal.temperature_k(cell.thermal_cell)?,
-                )?;
+                coupling.model_at_temperature(&self.source, temperature)?;
+            } else {
+                self.source.decay_at_temperature(temperature)?;
             }
         }
         if let Some(environment) = &self.emission_transport {
@@ -616,6 +639,9 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
         end_s: f64,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        if let Some(coupling) = &mut self.singlet_triplet {
+            coupling.begin_interval(start_s);
+        }
         self.check_state(thermal, true, checkpoint)?;
         if start_s != self.time_s
             || !duration_s.is_finite()

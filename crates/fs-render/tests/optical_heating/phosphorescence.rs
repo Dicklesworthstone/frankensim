@@ -406,3 +406,337 @@ fn g1_no_crossing_recovers_the_original_single_state_history() {
         partition(&paired);
     });
 }
+
+#[cfg(feature = "material-state")]
+mod material_rates {
+    use super::*;
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{
+        ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
+        PropertyValue, Provenance, QueryPoint, UncertaintyModel,
+    };
+    use fs_material::phosphorescence::*;
+    use fs_material::state_point::MaterialPropertySelection;
+    use fs_qty::{
+        QuantitySpec, Temperature,
+        semantic::{QuantityKind, SemanticType, ValueForm},
+    };
+    use std::sync::Arc;
+
+    const HC_J_NM: f64 = 6.626_070_15e-34 * 299_792_458.0 * 1e9;
+
+    fn claims() -> Vec<PropertyClaim> {
+        [
+            (
+                PHOSPHORESCENCE_ENERGY_PROPERTIES,
+                PHOSPHORESCENCE_ENERGY_DIMS,
+                [HC_J_NM / 500.0, HC_J_NM / 600.0],
+            ),
+            (
+                PHOSPHORESCENCE_RADIATIVE_RATE_PROPERTIES,
+                PHOSPHORESCENCE_RATE_DIMS,
+                [1.0, 0.1],
+            ),
+            (
+                PHOSPHORESCENCE_NONRADIATIVE_RATE_PROPERTIES,
+                PHOSPHORESCENCE_RATE_DIMS,
+                [0.0, 0.1],
+            ),
+            (
+                PHOSPHORESCENCE_CROSSING_RATE_PROPERTIES,
+                PHOSPHORESCENCE_RATE_DIMS,
+                [3.0, 0.0],
+            ),
+        ]
+        .into_iter()
+        .flat_map(|(names, dims, values)| {
+            names
+                .into_iter()
+                .zip(values)
+                .map(move |(name, value)| PropertyClaim {
+                    key: PropertyKey::new(name, dims),
+                    value: PropertyValue::Scalar { value, dims },
+                    validity: ValidityDomain::unconstrained(),
+                    interpolation: InterpolationPolicy::ConstantWithinValidity,
+                    uncertainty: UncertaintyModel::Unstated,
+                    observations: Vec::new(),
+                    provenance: Provenance {
+                        source: format!("manufactured emitting material: {name}"),
+                        license: "internal-test-use".into(),
+                        artifact: None,
+                    },
+                })
+        })
+        .collect()
+    }
+
+    fn card(claims: Vec<PropertyClaim>) -> Arc<MaterialCard> {
+        let mut set = ClaimSet::new();
+        for claim in claims {
+            set.insert_claim(claim).unwrap();
+        }
+        Arc::new(
+            MaterialCard::assemble(
+                MaterialStateId {
+                    chemistry: "synthetic coupled phosphorescence".into(),
+                    phase: "solid".into(),
+                    process: "manufactured integration".into(),
+                    revision: 0,
+                },
+                set,
+                Vec::new(),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn point() -> QueryPoint {
+        let temperature = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        QueryPoint::new()
+            .with_quantity("T", temperature, 300.0)
+            .unwrap()
+    }
+
+    fn native_sources(
+        card: Arc<MaterialCard>,
+        point: &QueryPoint,
+    ) -> Result<
+        (LuminescenceSource<2>, SingletTripletSource<2>),
+        fs_render::volumes::heating::OpticalHeatingError,
+    > {
+        let material = PhosphorescenceStatePoint::resolve(
+            &card,
+            point,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        // Deliberately inconsistent scalar yields prove the original native
+        // radiative/dark rates, not a spectrum's legacy yield, own the kinetics.
+        let singlet = FluorescenceSource::try_new(
+            ContentHash([201; 32]),
+            (380.0, 500.0),
+            (290.0, 800.0),
+            0.0,
+            [650.0, 800.0],
+            [1.0, 0.0],
+        )
+        .unwrap();
+        let triplet = FluorescenceSource::try_new(
+            ContentHash([202; 32]),
+            (380.0, 500.0),
+            (290.0, 800.0),
+            1.0,
+            [650.0, 800.0],
+            [0.0, 1.0],
+        )
+        .unwrap();
+        SingletTripletSource::try_material_temperature(
+            card,
+            material,
+            "T",
+            singlet,
+            triplet,
+            SingletTripletLimits::default(),
+        )
+    }
+
+    fn bind(
+        heating: Heating,
+        coupling: SingletTripletSource<2>,
+        thermal: &DepositionSimulation<'_>,
+    ) -> Heating {
+        heating
+            .with_singlet_triplet(coupling, thermal, || Ok(()))
+            .unwrap()
+    }
+
+    fn charged_for(beta: f64, t: f64) -> [f64; 2] {
+        [
+            2.0 * (1.0 - (-4.0 * t).exp()),
+            (500.0 / 600.0)
+                * 6.0
+                * ((1.0 - (-beta * t).exp()) / beta
+                    - ((-beta * t).exp() - (-4.0 * t).exp()) / (4.0 - beta)),
+        ]
+    }
+
+    fn dark_for(initial: [f64; 2], beta: f64, t: f64) -> [f64; 2] {
+        let fast = (-4.0 * t).exp();
+        let slow = (-beta * t).exp();
+        [
+            initial[0] * fast,
+            initial[1] * slow + (500.0 / 600.0) * 3.0 * initial[0] * (slow - fast) / (4.0 - beta),
+        ]
+    }
+
+    #[test]
+    fn g1_source_backed_stable_triplet_stores_energy_without_a_fake_lifetime() {
+        with_cx(|cx| {
+            let mut data = claims();
+            for index in [3, 5] {
+                data[index].value = PropertyValue::Scalar {
+                    value: 0.0,
+                    dims: PHOSPHORESCENCE_RATE_DIMS,
+                };
+            }
+            let (singlet, coupling) = native_sources(card(data), &point()).unwrap();
+            assert!(singlet.decay_at_temperature(300.0).is_err());
+            assert!(coupling.triplet().decay_at_temperature(300.0).is_err());
+            let (thermal, heating) = setup(cx, singlet);
+            let heating = pulse(bind(heating, coupling, &thermal), 1.0);
+            let (_, accepted, _) = thermal
+                .advance_observed(&heating, 20.0, config(20.0), || Ok(()))
+                .unwrap();
+            let stores = accepted.state_stored_energy_j(0).unwrap();
+            close(stores[0], 0.0);
+            // 8 J into S, 3/4 of S transitions populate T, Et/Es=5/6.
+            close(stores[1], 5.0);
+            close(accepted.cell_emission_w()[0].1[1], 0.0);
+            close(accepted.energy().emitted_j[1], 0.0);
+            assert!(accepted.energy().emitted_j[0] > 0.0);
+            partition(&accepted);
+        });
+    }
+
+    #[test]
+    fn g1_material_rates_refresh_at_the_actual_thermal_temperature() {
+        with_cx(|cx| {
+            let mut data = claims();
+            data[3].value = PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: Temperature::DIMS,
+                knots: vec![(300.0, 0.1), (400.0, 1.1)],
+                dims: PHOSPHORESCENCE_RATE_DIMS,
+            };
+            data[3].validity = ValidityDomain::unconstrained().with("T", 300.0, 400.0);
+            data[3].interpolation = InterpolationPolicy::LinearInside;
+            let (singlet, coupling) = native_sources(card(data), &point()).unwrap();
+            let (thermal, heating) = setup(cx, singlet);
+            let heating = pulse(bind(heating, coupling, &thermal), 1.0);
+            let (warm, charged, _) = thermal
+                .advance_observed(&heating, 1.0, config(1.0), || Ok(()))
+                .unwrap();
+            let expected = charged_for(0.2, 1.0);
+            let stores = charged.state_stored_energy_j(0).unwrap();
+            close(stores[0], expected[0]);
+            close(stores[1], expected[1]);
+            let temperature = warm.temperature_k(CellId(1)).unwrap();
+            assert!(temperature > 300.0);
+            let kr = 0.1 + 0.01 * (temperature - 300.0);
+            close(
+                charged.cell_emission_w()[0].1[1],
+                stores[1] * kr * 600.0 / 800.0,
+            );
+            let (_, dark, _) = warm
+                .advance_observed(&charged, 2.0, config(1.0), || Ok(()))
+                .unwrap();
+            let expected = dark_for(stores, kr + 0.1, 1.0);
+            let actual = dark.state_stored_energy_j(0).unwrap();
+            close(actual[0], expected[0]);
+            close(actual[1], expected[1]);
+            partition(&charged);
+            partition(&dark);
+        });
+    }
+
+    #[test]
+    fn g1_sourced_quencher_conditions_change_afterglow_and_native_heat() {
+        with_cx(|cx| {
+            let oxygen = QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::AmountConcentration,
+                ValueForm::Static,
+            ));
+            let mut data = claims();
+            data[5].value = PropertyValue::Curve {
+                abscissa: "dissolved_O2".into(),
+                abscissa_dims: oxygen.dims(),
+                knots: vec![(0.0, 0.1), (4.0, 2.1)],
+                dims: PHOSPHORESCENCE_RATE_DIMS,
+            };
+            data[5].validity =
+                ValidityDomain::unconstrained().with_quantity("dissolved_O2", oxygen, 0.0, 4.0);
+            data[5].interpolation = InterpolationPolicy::LinearInside;
+            let card = card(data);
+            let mut results = Vec::new();
+            for concentration in [0.0, 4.0] {
+                let point = point()
+                    .with_quantity("dissolved_O2", oxygen, concentration)
+                    .unwrap();
+                let (singlet, coupling) = native_sources(card.clone(), &point).unwrap();
+                let (thermal, heating) = setup(cx, singlet);
+                let heating = pulse(bind(heating, coupling, &thermal), 1.0);
+                let (_, accepted, _) = thermal
+                    .advance_observed(&heating, 5.0, config(1.0), || Ok(()))
+                    .unwrap();
+                let beta = 0.2 + 0.5 * concentration;
+                let expected = dark_for(charged_for(beta, 1.0), beta, 4.0);
+                let actual = accepted.state_stored_energy_j(0).unwrap();
+                close(actual[0], expected[0]);
+                close(actual[1], expected[1]);
+                close(
+                    accepted.cell_emission_w()[0].1[1],
+                    expected[1] * 0.1 * 600.0 / 800.0,
+                );
+                partition(&accepted);
+                results.push(accepted);
+            }
+            assert!(
+                results[1].energy().stored_excitation_j < results[0].energy().stored_excitation_j
+            );
+            assert!(
+                results[1].energy().nonradiative_heat_j > results[0].energy().nonradiative_heat_j
+            );
+            assert!(results[1].energy().emitted_j[1] < results[0].energy().emitted_j[1]);
+            assert_ne!(
+                results[0].emission_source_identity(),
+                results[1].emission_source_identity()
+            );
+        });
+    }
+
+    #[test]
+    fn g0_material_binding_refuses_unaccounted_level_work_and_wrong_singlet() {
+        let mut data = claims();
+        data[0].value = PropertyValue::Curve {
+            abscissa: "T".into(),
+            abscissa_dims: Temperature::DIMS,
+            knots: vec![(300.0, HC_J_NM / 500.0), (400.0, 0.9 * HC_J_NM / 500.0)],
+            dims: PHOSPHORESCENCE_ENERGY_DIMS,
+        };
+        data[0].validity = ValidityDomain::unconstrained().with("T", 300.0, 400.0);
+        data[0].interpolation = InterpolationPolicy::LinearInside;
+        assert!(native_sources(card(data), &point()).is_err());
+
+        // A second temperature axis cannot silently remain frozen while the
+        // native thermal owner advances an unrelated coordinate named T.
+        let mut data = claims();
+        data[3].value = PropertyValue::Curve {
+            abscissa: "T_material".into(),
+            abscissa_dims: Temperature::DIMS,
+            knots: vec![(300.0, 0.1), (400.0, 1.1)],
+            dims: PHOSPHORESCENCE_RATE_DIMS,
+        };
+        data[3].validity = ValidityDomain::unconstrained().with("T_material", 300.0, 400.0);
+        data[3].interpolation = InterpolationPolicy::LinearInside;
+        let absolute = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        let two_temperatures = point()
+            .with_quantity("T_material", absolute, 300.0)
+            .unwrap();
+        assert!(native_sources(card(data), &two_temperatures).is_err());
+        with_cx(|cx| {
+            let (_, coupling) = native_sources(card(claims()), &point()).unwrap();
+            let (thermal, wrong) = setup(cx, singlet());
+            assert!(
+                wrong
+                    .with_singlet_triplet(coupling, &thermal, || Ok(()))
+                    .is_err()
+            );
+        });
+    }
+}
