@@ -55,6 +55,31 @@ fn near(actual: f64, expected: f64, tolerance: f64) {
     );
 }
 
+fn assert_same_mass(left: &FreeSurface3, right: &FreeSurface3) {
+    let [nx, ny, nz] = left.domain_cells();
+    assert_eq!(left.domain_cells(), right.domain_cells());
+    assert_eq!(left.carry().to_bits(), right.carry().to_bits());
+    for z in 0..nz {
+        for y in 0..ny {
+            for x in 0..nx {
+                assert_eq!(
+                    left.sample_at(x, y, z).map(|sample| sample.cell),
+                    right.sample_at(x, y, z).map(|sample| sample.cell),
+                    "cell kind at ({x}, {y}, {z})"
+                );
+                // A one-cell region retains the actual interface mass, even
+                // when its sampled fill fraction is clamped to zero or one.
+                let cell = |a, b, c| (a, b, c) == (x, y, z);
+                assert_eq!(
+                    left.region_mass(cell).to_bits(),
+                    right.region_mass(cell).to_bits(),
+                    "cell mass at ({x}, {y}, {z})"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn actual_material_density_gravity_stays_at_rest_in_all_six_directions() {
     let source = liquid(0, 300.0, None);
@@ -135,10 +160,7 @@ fn zero_gravity_is_the_original_uniform_pressure_initial_state() {
             balanced.lattice().grid().state_bits(),
             ordinary.lattice().grid().state_bits()
         );
-        assert_eq!(
-            balanced.lattice().mass_snapshot(),
-            ordinary.lattice().mass_snapshot()
-        );
+        assert_same_mass(balanced.lattice(), ordinary.lattice());
         balanced.step().unwrap();
         ordinary.step().unwrap();
     }
@@ -171,10 +193,7 @@ fn changing_the_absolute_pressure_datum_does_not_change_rest_or_loading() {
             low.lattice().grid().state_bits(),
             high.lattice().grid().state_bits()
         );
-        assert_eq!(
-            low.lattice().mass_snapshot(),
-            high.lattice().mass_snapshot()
-        );
+        assert_same_mass(low.lattice(), high.lattice());
         let rho = low.lattice().sample_at(3, 3, 0).unwrap().density;
         near(
             high.scaling().absolute_pressure_si(rho).unwrap()
