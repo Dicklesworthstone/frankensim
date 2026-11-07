@@ -289,3 +289,124 @@ fn malformed_mesh_and_unrepresentable_physical_mass_are_refused() {
         Err(MaterialElasticityError::UnrepresentableElement { cell: 0 })
     ));
 }
+
+#[test]
+fn graded_reference_density_retains_mass_center_and_rotational_inertia() {
+    let (mesh, positions) = single_tet();
+    let material = TetElasticMaterial::try_new(100.0, 120.0, 0.27, [7; 32]).unwrap();
+    // rho = 2 + 3x + y + 2z on the Cartesian unit simplex. The nominal
+    // material density deliberately differs from this authored inventory.
+    let mut density = vec![2.0, 5.0, 3.0, 4.0];
+    let operator = DensityElasticity::with_material_field_and_nodal_reference_density(
+        &mesh,
+        &positions,
+        TetMaterialField::Uniform(&material),
+        &density,
+        &|_| false,
+    )
+    .unwrap();
+    density.fill(99.0);
+    assert_eq!(
+        operator.nodal_reference_density_kg_m3(),
+        Some([2.0, 5.0, 3.0, 4.0].as_slice())
+    );
+    assert_eq!(operator.material_density_kg_m3(0), Some(100.0));
+    assert_eq!(operator.reference_density_kg_m3(0), Some(3.5));
+    assert_eq!(operator.reference_density_kg_m3(1), None);
+    close(operator.reference_cell_masses_kg().unwrap()[0], 7.0 / 12.0);
+    let translation: Vec<_> = (0..12)
+        .map(|d| if d % 3 == 0 { 1.0 } else { 0.0 })
+        .collect();
+    let mut momentum = vec![0.0; 12];
+    operator.apply_mass(&[3.5], &translation, &mut momentum);
+    close(dot(&translation, &momentum), 7.0 / 12.0);
+    // Independent Cartesian monomial integrals: integral x^a y^b z^c
+    // over this simplex = a! b! c! / (a+b+c+3)!.
+    for (axis, expected) in [19.0 / 120.0, 17.0 / 120.0, 3.0 / 20.0]
+        .into_iter()
+        .enumerate()
+    {
+        let first_moment: f64 = positions
+            .iter()
+            .enumerate()
+            .map(|(node, point)| point[axis] * momentum[3 * node])
+            .sum();
+        close(first_moment, expected);
+    }
+    let rotation: Vec<_> = positions.iter().flat_map(|p| [-p[1], p[0], 0.0]).collect();
+    operator.apply_mass(&[3.5], &rotation, &mut momentum);
+    close(dot(&rotation, &momentum), 11.0 / 90.0);
+    assert!((dot(&rotation, &momentum) - 7.0 / 60.0).abs() > 0.005);
+
+    // Connectivity permutations do not change the physical field or moments.
+    let permuted = TetComplex::from_tets(4, vec![[2, 0, 3, 1]]);
+    let reordered = DensityElasticity::with_material_field_and_nodal_reference_density(
+        &permuted,
+        &positions,
+        TetMaterialField::Uniform(&material),
+        &[2.0, 5.0, 3.0, 4.0],
+        &|_| false,
+    )
+    .unwrap();
+    let (_, expected, _) = operator.assemble_dense(&[3.5]);
+    let (_, actual, _) = reordered.assemble_dense(&[3.5]);
+    for (&a, &b) in actual.iter().zip(&expected) {
+        close(a, b);
+    }
+}
+
+#[test]
+fn constant_nodal_inventory_preserves_mass_tiles_and_rejects_invalid_fields() {
+    let (mesh, positions) = single_tet();
+    let material = TetElasticMaterial::try_new(6.0, 120.0, 0.27, [7; 32]).unwrap();
+    let uniform = DensityElasticity::with_material_field(
+        &mesh,
+        &positions,
+        TetMaterialField::Uniform(&material),
+        &|_| false,
+    )
+    .unwrap();
+    let nodal = DensityElasticity::with_material_field_and_nodal_reference_density(
+        &mesh,
+        &positions,
+        TetMaterialField::Uniform(&material),
+        &[6.0; 4],
+        &|_| false,
+    )
+    .unwrap();
+    assert_eq!(uniform.assemble_dense(&[6.0]), nodal.assemble_dense(&[6.0]));
+    assert_eq!(
+        uniform.reference_cell_masses_kg(),
+        nodal.reference_cell_masses_kg()
+    );
+    assert!(matches!(
+        DensityElasticity::with_material_field_and_nodal_reference_density(
+            &mesh,
+            &positions,
+            TetMaterialField::Uniform(&material),
+            &[1e-322; 4],
+            &|_| false,
+        ),
+        Err(MaterialElasticityError::UnrepresentableElement { cell: 0 })
+    ));
+    for values in [
+        &[][..],
+        &[1.0, 2.0, 3.0][..],
+        &[1.0, 0.0, 2.0, 3.0][..],
+        &[1.0, f64::NAN, 2.0, 3.0][..],
+        &[1.0, f64::INFINITY, 2.0, 3.0][..],
+    ] {
+        assert!(matches!(
+            DensityElasticity::with_material_field_and_nodal_reference_density(
+                &mesh,
+                &positions,
+                TetMaterialField::Uniform(&material),
+                values,
+                &|_| false,
+            ),
+            Err(MaterialElasticityError::Solid(
+                TetElasticError::InvalidMaterial { .. }
+            ))
+        ));
+    }
+}

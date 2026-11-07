@@ -21,6 +21,18 @@ cubical homology), so the optimization stack lives here.
   exact chain rule; Dirichlet dofs handled by identity-on-fixed
   masking (SPD on the full vector space); `cell_energies` =
   uᵀK_c u per cell (the compliance sensitivity kernel).
+- `DensityElasticity::with_material_field_and_nodal_reference_density`
+  keeps an authored positive P1 density field on the original vertices.
+  Cubic barycentric integration retains its center of mass and rotational
+  inertia. Mass tiles are normalized by the exact cell mean; dense,
+  matrix-free and thermal-prestress modal paths multiply by that same mean,
+  including in design gradients. Material tensors and source identities are
+  unchanged. Physical mass objectives use the retained full reference-cell
+  inventory, including fixed nodes. Uniform fields preserve the existing
+  mass tiles. G0 Cartesian mass/moment oracles and G3 mode scaling, solver
+  parity and finite-difference sensitivities exercise this path. Density is
+  prescribed reference data; no thermal expansion or density-design adjoint
+  is inferred from the nodal field.
 - `DensityFilter` — Helmholtz filter: volume-weighted cell→vertex
   scatter, (M + r²K)⁻¹M solve on the FULL vertex space (natural BCs —
   the correct filter behavior: no boundary droop), vertex→cell

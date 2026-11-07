@@ -21,9 +21,10 @@ pub use material::MaterialElasticityError;
 pub struct DensityElasticity {
     /// Per-cell 12×12 reference-material element stiffness (row-major).
     ke: Vec<[f64; 144]>,
-    /// Per-cell 12×12 unit-density consistent mass (row-major):
-    /// the P1 tet pattern (|V|/20)·(1 + δ_ab) per displacement
-    /// component — kept separate like `ke` for exact chain rules.
+    /// Per-cell 12×12 consistent mass normalized by mean reference density
+    /// (row-major). Uniform density gives the P1 tet pattern
+    /// (|V|/20)·(1 + δ_ab); a retained nodal field keeps its spatial moments.
+    /// Kept separate like `ke` for exact design chain rules.
     me: Vec<[f64; 144]>,
     /// Per-cell C·B products (6×12 row-major): reference-material stress
     /// recovery σ = CB·u_local (constant per P1 tet).
@@ -43,6 +44,8 @@ pub struct DensityElasticity {
     pub moduli: Vec<f64>,
     /// Owned native material states; absent in the legacy scalar constructor.
     materials: Option<material::OwnedMaterialField>,
+    /// Authored reference inventory, independent of the constitutive samples.
+    nodal_reference_density: Option<material::NodalReferenceDensity>,
     /// Full physical mass of each reference cell, independent of fixed DOFs.
     reference_cell_masses_kg: Option<Vec<f64>>,
 }
@@ -173,6 +176,7 @@ impl DensityElasticity {
             free,
             moduli: vec![1.0; complex.tets.len()],
             materials: None,
+            nodal_reference_density: None,
             reference_cell_masses_kg: None,
         }
     }
@@ -285,8 +289,9 @@ impl DensityElasticity {
         rhs
     }
 
-    /// Per-cell KINETIC quadratic form m_c = uᵀ·M_c·u (unit density —
-    /// multiply by the mass-interpolation slope outside).
+    /// Per-cell KINETIC quadratic form m_c = uᵀ·M_c·u, normalized by the
+    /// mean reference density. Multiply by that mean and the design mass
+    /// interpolation outside. A graded field retains its spatial moments.
     #[must_use]
     pub fn cell_kinetic(&self, u: &[f64]) -> Vec<f64> {
         self.cell_quadratic(&self.me, u)

@@ -99,7 +99,7 @@ pub fn lowest_eigenpairs(
 /// RAW design through the full pipeline chain:
 /// dλ/dρ̄_c = φᵀ(E′·K_c − λ·m′·M_c)φ (φ M-normalized), then the
 /// projection/filter pullback. The mass derivative includes the assigned
-/// material's reference density (unit density for the legacy constructor).
+/// retained reference density (unit density for the legacy constructor).
 /// `phi_full` is the free-dof vector scattered to full length and must be
 /// normalized with that same physical mass model.
 #[must_use]
@@ -127,7 +127,7 @@ pub fn eigenvalue_gradient(
         .map(|(cell, (&rb, (&s, &m)))| {
             let rc = rb.clamp(0.0, 1.0);
             let dsimp = (1.0 - p.e_min) * p.penal * fs_math::det::pow(rc.max(1e-12), p.penal - 1.0);
-            let dmass = elasticity.material_density_kg_m3(cell).unwrap_or(1.0)
+            let dmass = elasticity.reference_density_kg_m3(cell).unwrap_or(1.0)
                 * mass_interp_derivative(rb);
             dsimp.mul_add(s, -(lambda * dmass * m))
         })
@@ -170,8 +170,9 @@ pub fn scatter_full(phi_free: &[f64], free_idx: &[usize], n: usize) -> Vec<f64> 
 
 /// Full smooth-min eigenfrequency objective and its exact design
 /// gradient through the whole chain: returns (λ_agg, dλ_agg/dρ).
-/// Assigned materials supply both stiffness and per-cell physical density;
-/// the legacy elasticity constructor retains its unit-density mass model.
+/// Assigned materials supply stiffness; the retained reference inventory
+/// supplies the full density-weighted mass, including authored nodal grading.
+/// The legacy elasticity constructor retains its unit-density mass model.
 pub fn eigenfrequency_objective(
     pipeline: &DesignPipeline,
     elasticity: &mut DensityElasticity,
@@ -189,7 +190,7 @@ pub fn eigenfrequency_objective(
     let mass: Vec<f64> = rho_bar
         .iter()
         .enumerate()
-        .map(|(cell, &r)| elasticity.material_density_kg_m3(cell).unwrap_or(1.0) * mass_interp(r))
+        .map(|(cell, &r)| elasticity.reference_density_kg_m3(cell).unwrap_or(1.0) * mass_interp(r))
         .collect();
     let (lambdas, phis, free_idx) = lowest_eigenpairs(elasticity, &mass, cluster);
     let (agg, weights) = smooth_min(&lambdas, agg_beta);

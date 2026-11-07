@@ -279,3 +279,76 @@ fn bound_material_density_cannot_be_rescaled_by_modal_options() {
     assert_eq!(elasticity.moduli, previous);
     assert_eq!(control.work().linear_solves, 0);
 }
+
+#[test]
+fn graded_reference_mass_reaches_both_modal_solvers_and_the_design_gradient() {
+    let (mesh, positions) = mesh();
+    let material = material(99.0, 17.0, 0.28, 8);
+    let density: Vec<_> = positions.iter().map(|p| 2.0 + 3.0 * p[0] + p[1]).collect();
+    let build = |values: &[f64]| {
+        DensityElasticity::with_material_field_and_nodal_reference_density(
+            &mesh,
+            &positions,
+            TetMaterialField::Uniform(&material),
+            values,
+            &|p| p[0] == 0.0,
+        )
+        .unwrap()
+    };
+    let mut elasticity = build(&density);
+    let mut heavy = build(&density.iter().map(|r| 2.0 * r).collect::<Vec<_>>());
+    let pipeline = pipeline(&mesh, &positions, 3.0);
+    let rho: Vec<_> = (0..elasticity.cells())
+        .map(|i| 0.42 + 0.035 * i as f64)
+        .collect();
+    let (dense, gradient) = eigenfrequency_objective(&pipeline, &mut elasticity, &rho, 1, 2.0);
+    let native = matrix_free(&pipeline, &mut elasticity, &rho, 1);
+    close(native.aggregate, dense, 1e-7);
+    vectors_close(&native.gradient, &gradient, 2e-6);
+    let (heavy_value, heavy_gradient) =
+        eigenfrequency_objective(&pipeline, &mut heavy, &rho, 1, 2.0);
+    close(heavy_value, 0.5 * dense, 1e-8);
+    vectors_close(
+        &heavy_gradient,
+        &gradient.iter().map(|g| 0.5 * g).collect::<Vec<_>>(),
+        1e-7,
+    );
+
+    let direction = [0.8, -0.3, 0.5, -0.6, 0.2, 0.7];
+    let step = 1e-5;
+    let plus: Vec<_> = rho
+        .iter()
+        .zip(direction)
+        .map(|(r, d)| r + step * d)
+        .collect();
+    let minus: Vec<_> = rho
+        .iter()
+        .zip(direction)
+        .map(|(r, d)| r - step * d)
+        .collect();
+    let high = eigenfrequency_objective(&pipeline, &mut elasticity, &plus, 1, 2.0).0;
+    let low = eigenfrequency_objective(&pipeline, &mut elasticity, &minus, 1, 2.0).0;
+    let derivative: f64 = gradient.iter().zip(direction).map(|(g, d)| g * d).sum();
+    close(derivative, (high - low) / (2.0 * step), 2e-4);
+
+    // Total physical mass uses linear occupancy, not the modal void penalty,
+    // and includes the inventory associated with clamped nodes.
+    let (mass, mass_gradient) = pipeline.mass_and_gradient(&elasticity, &rho);
+    let (_, projected, _) = pipeline.forward(&rho);
+    let expected: f64 = elasticity
+        .reference_cell_masses_kg()
+        .unwrap()
+        .iter()
+        .zip(projected)
+        .map(|(m, r)| m * r)
+        .sum();
+    close(mass, expected, 1e-12);
+    let high = pipeline.mass_and_gradient(&elasticity, &plus).0;
+    let low = pipeline.mass_and_gradient(&elasticity, &minus).0;
+    let derivative: f64 = mass_gradient
+        .iter()
+        .zip(direction)
+        .map(|(g, d)| g * d)
+        .sum();
+    close(derivative, (high - low) / (2.0 * step), 2e-5);
+}

@@ -237,7 +237,7 @@ pub fn controlled_matrix_free_eigenfrequency_objective(
         let reference_densities: Vec<f64> = (0..elasticity.cells())
             .map(|cell| {
                 elasticity
-                    .material_density_kg_m3(cell)
+                    .reference_density_kg_m3(cell)
                     .unwrap_or(options.reference_density)
             })
             .collect();

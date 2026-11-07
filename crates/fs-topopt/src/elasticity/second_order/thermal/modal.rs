@@ -322,7 +322,7 @@ impl<'a> ThermalComplianceGoal<'a> {
             }
             mass.push(finite(
                 mass_fractions[cell]
-                    * el.material_density_kg_m3(cell)
+                    * el.reference_density_kg_m3(cell)
                         .expect("original thermal material"),
                 "thermal reference mass",
             )?);
@@ -444,7 +444,7 @@ impl<'a> ThermalComplianceGoal<'a> {
                         - weight
                             * lambda
                             * kinetic
-                            * el.material_density_kg_m3(cell)
+                            * el.reference_density_kg_m3(cell)
                                 .expect("original thermal material"),
                     "thermal frequency reference mass gradient",
                 )?;

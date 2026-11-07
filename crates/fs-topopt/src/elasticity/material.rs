@@ -1,9 +1,10 @@
 //! Native elastic material fields in the existing density-design operator.
 //!
 //! Constitutive tensors and reference densities keep their original native
-//! material-state identities. SIMP weights multiply the reference stiffness;
-//! the consistent mass blocks remain unit-density so existing mass interpolation
-//! and its derivative can use the same operator without hidden double weighting.
+//! material-state identities. SIMP weights multiply the reference stiffness.
+//! An explicitly authored nodal reference density retains its exact cubic
+//! mass moments, normalized by each cell's mean density. Both modal front doors
+//! and their derivatives use that same mean and mass tile.
 
 use super::DensityElasticity;
 use fs_feec::whitney::{ElementGeometryError, try_element_geometry};
@@ -58,6 +59,11 @@ pub(super) enum OwnedMaterialField {
     Uniform(TetElasticMaterial),
     PerElement(Vec<TetElasticMaterial>),
 }
+
+pub(super) struct NodalReferenceDensity {
+    values_kg_m3: Vec<f64>,
+    means_kg_m3: Vec<f64>,
+}
 impl OwnedMaterialField {
     fn new(field: TetMaterialField<'_>, cells: usize) -> Result<Self, TetElasticError> {
         // Public density and identity fields can be edited after initial native
@@ -101,6 +107,102 @@ impl OwnedMaterialField {
 }
 
 impl DensityElasticity {
+    /// Retain an original P1 nodal reference density alongside native stiffness.
+    ///
+    /// The supplied positive densities [kg/m³] follow the original mesh vertex
+    /// order and are interpolated with its barycentric basis. They determine
+    /// the closed reference inventory; material states still determine stiffness
+    /// and keep their source identities. Neither a later design interpolation
+    /// nor prescribed thermal strain requeries or changes this density field.
+    /// This is an authored mass distribution, not a thermal expansion law.
+    ///
+    /// Integrating `rho N_a N_b` exactly retains center-of-mass and rotational
+    /// inertia effects that replacing density by its centroid value would lose.
+    /// Preparation is O(cells); all existing dense and matrix-free mass actions
+    /// reuse the same 12×12 tiles without extra work during a solver iteration.
+    /// Low-level mass weights multiply tiles normalized by
+    /// [`Self::reference_density_kg_m3`], rather than the nominal material density.
+    pub fn with_material_field_and_nodal_reference_density(
+        complex: &TetComplex,
+        positions: &[[f64; 3]],
+        materials: TetMaterialField<'_>,
+        reference_density_kg_m3: &[f64],
+        fixed: &dyn Fn([f64; 3]) -> bool,
+    ) -> Result<Self, MaterialElasticityError> {
+        if reference_density_kg_m3.len() != complex.vertex_count
+            || reference_density_kg_m3
+                .iter()
+                .any(|rho| !rho.is_finite() || *rho <= 0.0)
+        {
+            return Err(TetElasticError::InvalidMaterial {
+                what: "one positive finite reference density per mesh vertex required",
+            }
+            .into());
+        }
+        let mut result = Self::with_material_field(complex, positions, materials, fixed)?;
+        let mut means = Vec::with_capacity(result.cells());
+        let mut masses = Vec::with_capacity(result.cells());
+        for (cell, tet) in result.tets.iter().enumerate() {
+            let rho = tet.map(|vertex| reference_density_kg_m3[vertex as usize]);
+            let scale = rho.into_iter().fold(0.0_f64, f64::max);
+            let scaled = rho.map(|value| value / scale);
+            let sum: f64 = scaled.iter().sum();
+            let uniform = rho.iter().all(|value| value.to_bits() == rho[0].to_bits());
+            let mean = if uniform {
+                rho[0]
+            } else {
+                scale * (0.25 * sum)
+            };
+            let mass = result.volumes[cell] * mean;
+            if !mean.is_finite() || mean <= 0.0 || !mass.is_finite() || mass <= 0.0 {
+                return Err(MaterialElasticityError::UnrepresentableElement { cell });
+            }
+            // Exact barycentric moments: diagonal V*(sum(rho)+2*rho_a)/60,
+            // off-diagonal V*(sum(rho)+rho_a+rho_b)/120. Normalize before
+            // summing so the mean does not overflow for large finite samples.
+            // Uniform cells retain the original unit-density tile bit for bit.
+            if !uniform {
+                let fractions = scaled.map(|value| value / sum);
+                for a in 0..4 {
+                    for b in a..4 {
+                        let value = if a == b {
+                            (result.volumes[cell] / 15.0) * (1.0 + 2.0 * fractions[a])
+                        } else {
+                            (result.volumes[cell] / 30.0) * (1.0 + (fractions[a] + fractions[b]))
+                        };
+                        if !value.is_finite() || value <= 0.0 {
+                            return Err(MaterialElasticityError::UnrepresentableElement { cell });
+                        }
+                        for component in 0..3 {
+                            let row = 3 * a + component;
+                            let column = 3 * b + component;
+                            result.me[cell][12 * row + column] = value;
+                            result.me[cell][12 * column + row] = value;
+                        }
+                    }
+                }
+            }
+            // A representable cell total does not guarantee representable
+            // consistent entries, including for a uniform subnormal density.
+            for a in 0..4 {
+                for b in a..4 {
+                    let physical = result.me[cell][36 * a + 3 * b] * mean;
+                    if !physical.is_finite() || physical <= 0.0 {
+                        return Err(MaterialElasticityError::UnrepresentableElement { cell });
+                    }
+                }
+            }
+            means.push(mean);
+            masses.push(mass);
+        }
+        result.nodal_reference_density = Some(NodalReferenceDensity {
+            values_kg_m3: reference_density_kg_m3.to_vec(),
+            means_kg_m3: means,
+        });
+        result.reference_cell_masses_kg = Some(masses);
+        Ok(result)
+    }
+
     /// Build the existing design operator from complete native material states.
     ///
     /// The material field is copied once and remains immutable. Its full global
@@ -113,7 +215,7 @@ impl DensityElasticity {
     /// Both rows and columns are scaled, preserving shear stress and energy.
     /// Initial stiffness weights are one; later weights are dimensionless.
     /// Consistent mass blocks remain unit-density. Consumers obtain physical
-    /// density from material_density_kg_m3 before their mass interpolation.
+    /// density from reference_density_kg_m3 before their mass interpolation.
     ///
     /// # Errors
     /// Empty, malformed or unrepresentable meshes; incomplete or invalid
@@ -201,8 +303,10 @@ impl DensityElasticity {
         self.materials.as_ref().map(OwnedMaterialField::borrowed)
     }
 
-    /// Physical reference density [kg/m³], or None for an invalid cell index
-    /// or a legacy model with no explicit density/material-state binding.
+    /// Nominal density [kg/m³] of the retained material state, or None for an
+    /// invalid cell or an unbound legacy model. An authored nodal inventory
+    /// leaves this source datum unchanged; mass consumers use
+    /// [`Self::reference_density_kg_m3`].
     #[must_use]
     pub fn material_density_kg_m3(&self, cell: usize) -> Option<f64> {
         if cell >= self.cells() {
@@ -211,6 +315,27 @@ impl DensityElasticity {
         self.materials
             .as_ref()
             .map(|materials| materials.at(cell).density_kg_m3)
+    }
+
+    /// Mean physical reference density [kg/m³] for the prepared mass tile.
+    /// An authored nodal field takes precedence over the nominal material
+    /// density. Multiplying this mean by the normalized tile recovers the
+    /// exact original density-weighted mass, including its spatial moments.
+    /// Returns None for an invalid cell or a legacy unit-density model.
+    #[must_use]
+    pub fn reference_density_kg_m3(&self, cell: usize) -> Option<f64> {
+        match &self.nodal_reference_density {
+            Some(field) => field.means_kg_m3.get(cell).copied(),
+            None => self.material_density_kg_m3(cell),
+        }
+    }
+
+    /// Original immutable nodal reference inventory, if explicitly supplied.
+    #[must_use]
+    pub fn nodal_reference_density_kg_m3(&self) -> Option<&[f64]> {
+        self.nodal_reference_density
+            .as_ref()
+            .map(|field| field.values_kg_m3.as_slice())
     }
 
     /// Full reference-cell masses [kg], before design interpolation and without
