@@ -172,6 +172,7 @@ impl MultiFrictionModalSystem {
             .ok_or_else(|| invalid("normal material sources require bound obstacles"))?;
         let velocities: Vec<_> = self.components().iter().flat_map(|m|
             m.states().iter().map(|s| s.velocity_m_sqrt_kg_per_s)).collect();
+        let accepted = if set.has_residual() { set.accepted_reactions() } else { Vec::new() };
         for (entry, (index, source)) in sources.iter().enumerate() {
             poll(Some(gate))?;
             let point = set.points.get(*index)
@@ -187,8 +188,13 @@ impl MultiFrictionModalSystem {
                 || point.config.maximum_penetration_m > source.envelope().maximum_indentation_m {
                 return Err(invalid("normal obstacle law and penetration ceiling must retain the material source").into());
             }
+            let mut x = extension(self.components(), &point.column, 0.0)?;
+            // A released preload may already have deflected the omitted modes
+            // at sample zero. Source admission uses the accepted physical closure,
+            // never the retained displacement alone or a failed trial's scratch.
+            if set.has_residual() { x = finite(x-set.lag(*index, &accepted)?)?; }
             let offset = set.motion.as_ref().map_or(0.0, |m| m.accepted[*index]);
-            let x = finite(extension(self.components(), &point.column, 0.0)? - offset)?;
+            x = finite(x-offset)?;
             source.validate_kinematics(point.penetration(x)?, dot(&point.column, &velocities)?,
                 self.sample_period_s()).map_err(ModalCouplingError::ContactMaterial)?;
         }

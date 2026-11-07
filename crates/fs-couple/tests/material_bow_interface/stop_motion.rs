@@ -116,3 +116,88 @@ fn malformed_motion_and_invalid_callbacks_never_advance_geometry() {
         assert!(performance.with_stop_motion(motion_program(), gate).is_err());
     });
 }
+
+
+/// Keep the real material/body/source path while condensing its omitted modes.
+fn residual_stopped(cx: &Cx<'_>, gate: &CancelGate) -> MultiBowStringBank {
+    let binding = interface(0.4, 10.0);
+    build(cx, gate, binding.clone())
+        .with_residual_flexibility(gate).unwrap()
+        .with_additional_bows(vec![MaterialBowContact {
+            location: StringBowLocation { string: 0, station_fraction: 0.31 },
+            law: binding.card().friction_law().clone(),
+            friction: options().friction,
+        }], MultiFrictionConfig {
+            max_ports: 4, max_sweeps: 128, max_setup_terms: 100_000,
+        }, gate).unwrap()
+        .with_bow_interface(1, binding).unwrap()
+        .with_string_stops(vec![stop()], limits(), gate).unwrap()
+}
+
+#[test]
+fn condensed_material_stops_preserve_motion_work_and_scheduled_pressure() {
+    with_cx(|cx, gate| {
+        let mut direct = residual_stopped(cx, gate)
+            .with_stop_motion(motion_program().limits, gate).unwrap();
+        let compliance = direct.system().obstacle_residual_compliance().unwrap()[0];
+        assert!(compliance > 0.0);
+        let column = direct.system().obstacle_normal_column(0).unwrap().to_vec();
+        let source = direct.source().stops()[0].law.clone();
+        let load = forced(&direct, gate);
+        let zero = vec![0.0; load.len()];
+        let (mut previous_reaction, mut previous_offset) = (0.0, 0.0);
+        let mut expected = Vec::new();
+        let mut supplied_work = false;
+        let mut residual_storage = false;
+        for sample in 0..96 {
+            let endpoint = offset(sample + 1);
+            let frame = direct.step_with_stop_offsets(
+                if sample < 64 { &load } else { &zero }, &drivers(), &[endpoint],
+            ).unwrap().clone();
+            let normal = direct.system().last_obstacle_frames().unwrap()[0];
+            let retained_closure: f64 = direct.system().components().iter()
+                .flat_map(|model| model.states())
+                .zip(&column)
+                .map(|(state, shape)| shape * state.displacement_m_sqrt_kg)
+                .sum();
+            let closure = retained_closure - compliance * normal.normal_force_n - endpoint;
+            let penetration = (closure - source.gaps()[0]).max(0.0);
+            let stored = 0.5 * source.stiffness() * penetration * penetration;
+            assert!((normal.penetration_m - penetration).abs() < 1e-12);
+            assert!((normal.stored_energy_j - stored).abs() < 1e-13);
+            let reaction_change = normal.normal_force_n - previous_reaction;
+            assert!((frame.obstacle_residual_energy_j
+                - 0.5 * compliance * normal.normal_force_n.powi(2)).abs() < 1e-13);
+            assert!((frame.obstacle_residual_loss_j
+                - 0.5 * compliance * reaction_change.powi(2)).abs() < 1e-13);
+            assert!((frame.obstacle_work_j
+                + normal.normal_force_n * (endpoint - previous_offset)).abs() < 1e-13);
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+            supplied_work |= frame.obstacle_work_j != 0.0;
+            residual_storage |= frame.obstacle_residual_energy_j > 0.0;
+            expected.push(frame.observer_pressure_pa.to_bits());
+            (previous_reaction, previous_offset) = (normal.normal_force_n, endpoint);
+        }
+        assert!(supplied_work && residual_storage);
+        assert!(direct.system().components()[1].states().iter()
+            .any(|state| state.velocity_m_sqrt_kg_per_s != 0.0));
+
+        for partition in [1, 37, 64] {
+            let mut performance = residual_stopped(cx, gate)
+                .into_scheduled(schedule(), vec!["first".into(), "second".into()],
+                    MultiBowPerformanceConfig {
+                        samples: 96, max_block: 64, max_work: 10_000, max_events: 64,
+                    }).unwrap()
+                .with_string_forces(program(ForceInitialization::RetainState), gate).unwrap()
+                .with_stop_motion(motion_program(), gate).unwrap();
+            let mut output = vec![0.0; 96];
+            for block in output.chunks_mut(partition) { performance.block(block).unwrap(); }
+            assert_eq!(output.iter().map(|value| value.to_bits()).collect::<Vec<_>>(), expected);
+            assert_eq!(performance.bank().system().obstacle_offsets_m().unwrap(), &[0.0]);
+            assert_eq!(performance.bank().system().obstacle_residual_compliance().unwrap(), &[compliance]);
+            for port in 0..2 {
+                assert_eq!(performance.bank().bow_interface(port), Some(&interface(0.4, 10.0)));
+            }
+        }
+    });
+}

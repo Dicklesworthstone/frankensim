@@ -130,3 +130,61 @@ fn mismatched_coefficients_point_weight_initial_rate_and_clock_refuse() {
     assert!(base().with_obstacles(vec![contact(&short, 0.0)], limits(), &gate).unwrap()
         .with_obstacle_sources(vec![(0, short)], &gate).is_err());
 }
+
+
+#[test]
+fn material_binding_after_condensed_preload_uses_the_accepted_contact_indentation() {
+    let gate = CancelGate::new_clock_free();
+    let material = source(1e7, 0.2);
+    let indentation = 5e-6_f64;
+    let compliance = 0.01;
+    let reaction = material.stiffness_n_per_m_3_2() * indentation.powf(1.5);
+    let displacement = indentation + compliance * reaction;
+    let load = [100.0_f64.powi(2) * displacement + reaction];
+    // The retained coordinate alone lies outside the material's admissible
+    // indentation. The actual source contact, in series with G, lies inside it.
+    assert!(displacement > material.envelope().maximum_indentation_m);
+    assert!(indentation < material.envelope().maximum_indentation_m);
+
+    let prepare = |bind_first: bool| {
+        let mut system = multi(friction(network(1e6)))
+            .with_obstacles(vec![contact(&material, 0.0)], limits(), &gate).unwrap()
+            .with_obstacle_residual_compliance(vec![compliance], &gate).unwrap();
+        if bind_first {
+            system = system.with_obstacle_sources(vec![(0, material.clone())], &gate).unwrap();
+        }
+        system.initialize_released_equilibrium(&load, &gate).unwrap();
+        system
+    };
+    let early = prepare(true);
+    let late = prepare(false);
+    let retained = late.components()[0].states()[0].displacement_m_sqrt_kg;
+    assert!((retained - displacement).abs() < 1e-10);
+    let accepted = late.obstacles.as_ref().unwrap().accepted_reactions()[0];
+    assert!((retained - compliance * accepted - indentation).abs() < 1e-10);
+    let late = late.with_obstacle_sources(vec![(0, material.clone())], &gate).unwrap();
+    assert_eq!(states(&early), states(&late));
+    assert_eq!(early.total_energy_j().unwrap(), late.total_energy_j().unwrap());
+    assert_eq!(late.obstacle_source(0), Some(&material));
+    assert_eq!(late.samples_rendered(), 0);
+    assert!(late.last_frame().is_none());
+
+    // Continue through the same source-checked moving support transaction.
+    let motion = ObstacleMotionLimits {
+        maximum_abs_offset_m: 0.001, maximum_speed_m_s: 1.0,
+    };
+    let mut early = early.with_obstacle_motion(motion, &gate).unwrap();
+    let mut late = late.with_obstacle_motion(motion, &gate).unwrap();
+    for step in 1..=32 {
+        let offset = [-1e-8 * f64::from(step)];
+        let expected = early.step_with_obstacle_offsets(&load, &[released()], &offset)
+            .unwrap().clone();
+        let actual = late.step_with_obstacle_offsets(&load, &[released()], &offset)
+            .unwrap().clone();
+        assert_eq!(actual, expected);
+        assert_eq!(states(&late), states(&early));
+        assert!(actual.energy_residual_j.abs() <= actual.energy_tolerance_j);
+        assert!(late.last_obstacle_frames().unwrap()[0].penetration_m
+            < material.envelope().maximum_indentation_m);
+    }
+}

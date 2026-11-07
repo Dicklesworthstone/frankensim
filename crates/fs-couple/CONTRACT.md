@@ -3249,8 +3249,11 @@ A normal stop lowers its native reference clearance to
 material-bank stop retains its authored clearance, coefficients, quadrature
 weight, physical loss and provenance. Native potential/secant evaluation,
 penetration/material admission and released static preload use the same
-lowered law. Negative effective clearance represents initial interference and
-retains its contact energy; it is never clamped away.
+lowered law. Source binding after preload checks the complete accepted closure,
+including the omitted modes' displacement from the accepted reactions. It
+cannot validate retained displacement alone or read disposable trial reactions.
+Negative effective clearance represents initial interference and retains its
+contact energy; it is never clamped away.
 
 A fixed offset cancels analytically from bow/shear-film slip increments. It
 adds no artificial initial shear strain, dissipation or actuator work. The
