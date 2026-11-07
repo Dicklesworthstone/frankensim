@@ -28,9 +28,10 @@ pub mod species;
 #[path = "advection/entropy.rs"]
 pub mod entropy;
 
-/// Bounded axial reconstruction for the original implicit transport residual.
+/// Bounded axial reconstruction for the original explicit and implicit transport.
 #[path = "advection/reconstruction.rs"]
 pub mod reconstruction;
+pub use reconstruction::ReconstructedAdvected;
 #[path = "advection/schedule.rs"]
 pub mod schedule;
 

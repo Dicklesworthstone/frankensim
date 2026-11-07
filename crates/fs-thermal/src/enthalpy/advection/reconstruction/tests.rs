@@ -9,6 +9,8 @@ use crate::enthalpy::{
 
 #[path = "entropy_tests.rs"]
 mod entropy;
+#[path = "observer_tests.rs"]
+mod observer;
 
 struct Law {
     datum: f64,

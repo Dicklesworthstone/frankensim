@@ -2762,6 +2762,55 @@ flow, unsupported histories and late cancellation preserve the original state.
 These are analytic numerical conformance checks, not full fluid second-law or
 experimental accuracy certificates.
 
+## Limited axial convection on the original explicit timeline
+
+`Advected::with_reconstruction` binds a shared `LimitedEnthalpyReconstruction`
+to `ReconstructedAdvected<O>`, an observer of the existing explicit thermal
+timeline. `with_optional_reconstruction(None)` and empty plans delegate exactly
+to the original upwind flux, timestep and audit paths. Nonempty plans use the
+same actual centreline distances, signed donor selection, minmod face trace and
+optional bulk thermal entropy face limiter as the native implicit residual.
+Only the original advective transfer suffix is replaced; inner-observer paired
+heat, sources, interval sources, conductance overrides, source transitions,
+events and accepted histories retain their original owners. One represented
+face power still debits and credits the original cells. The gross transport
+audit observes that actual correction; external heat is never counted twice.
+
+For cell lengths `L_previous, L_cell, L_next`, the two limited half-cell
+variations use `L_cell/(L_previous+L_cell)` and
+`L_cell/(L_cell+L_next)`. Both opposite traces lie between the original neighbor
+means, including nonuniform cells and flow reversal. With
+`lambda_f=dt*mass_rate_f/cell_mass`, pure bulk transport can be written as
+`(1-2*sum_out(lambda_f))*h_cell + sum_out(lambda_f*(h_cell-delta_f))
++ sum_in(lambda_f*h_upstream_face)`. Fixed-mass continuity makes these weights
+sum to one; the bound `sum_out(lambda_f)<=1/2` makes them nonnegative. Any
+selected thermal entropy face limit only shortens the bounded correction.
+The original explicit owner therefore adds one further outgoing-mass decay
+budget to its existing combined conduction/advection restriction:
+`dt<=0.8/(a+2*b)`, where `a` is the decay represented by the prior native/wrapped
+observer bound and `b=max_cell(outgoing_mass_rate/cell_mass)`. The physical
+`maximum_courant` diagnostic remains `dt*b`, without doubling its units or value.
+Event and transition clipping still happens after this combined restriction.
+
+The immutable plan/flow topology, both-neighbor, junction and external-gradient
+admissions run once at construction. Original active-cell, geometry and pinned
+mass/material bindings are rechecked at each source epoch, and native caloric
+and mass-balance admissions still evaluate the actual state. No per-step
+neighbor map or plan clone is needed. The stationary-skeleton
+liquid carrier uses its original `h_liquid=max(h,h_liquidus)` with slope in
+`[0,1]`; it never transports stationary-solid latent inventory. Stationary
+species, selective streams and reconstructed explicit entropy histories remain
+unsupported. Bulk thermal entropy face limiting supplies a local flux condition,
+not a finite-step entropy account. Explicit time integration remains first-order;
+arbitrary nonlinear-source stiffness, temporal convergence and experimental
+accuracy are not certified by the geometric face limiter. Native candidate
+cloning discards thermal and observer work together on refusal or cancellation.
+
+Focused numerical regressions exercise signed bounded pulse transport against
+exact translation at matched time steps, original conductive cooling on the
+combined CFL, interval heat and source-transition/event forwarding, unchanged
+upwind selections, liquid/bulk limits, caloric refusal and late rollback.
+
 ## Limited axial convection in the native implicit graph
 
 `ImplicitConductionGraph::with_implicit_advection_reconstruction` binds the

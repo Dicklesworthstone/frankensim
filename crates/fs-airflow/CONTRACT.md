@@ -3762,19 +3762,28 @@ endpoint-query count includes numerical derivatives and final physical
 acceptance. Heat callbacks supply nonadvective coefficients; native internal
 transfers and external stream enthalpy are included once.
 
-A nonempty reconstruction cannot enter the old explicit observer or linear
-implicit shortcuts: those entrypoints refuse it explicitly. Storage, original
-caloric identities, source support, scheduled-event splits and independent
-local/global joule acceptance remain authoritative. The original state and
-payload remain unpublished on nonlinear failure, source refusal, cancellation
+The same authored plan now reaches the native explicit timeline through
+`GraphEnthalpyTransport::wrap_observer` and `advance_to`. The shared
+`ReconstructedAdvected` observer applies the original signed face correction
+while retaining source/conduction work, scheduled events, native calorics and
+the combined convection/conduction step restriction. No extra heat integrator
+or per-step reconstruction-plan clone is introduced. A missing or empty plan
+uses the original upwind arithmetic. Nonuniform affine transport with original
+external heating, both flow signs and rest has a direct regression source.
+
+A nonempty reconstruction still cannot enter the linear implicit shortcut:
+its upwind Jacobian does not describe the nonlinear limited flux. Storage,
+original caloric identities, source support, scheduled-event splits and
+independent local/global joule acceptance remain authoritative. The original
+state and payload remain unpublished on failure, source refusal, cancellation
 or exhausted work.
 
 Regression sources compare smooth-front transport against an independent
 continuous plug-flow profile, connect prescribed and coupled native owners, and
 check reversal, rest, datum shifts and transactional refusal. The limiter bounds
 individual face traces; it does not establish a global maximum principle for
-arbitrary coupled sources or unstructured junctions. Backward Euler remains
-first order in time. Spatial/time refinement, including reversal resolution,
+arbitrary coupled sources or unstructured junctions. Both the native explicit
+stepper and backward Euler remain first order in time. Spatial/time refinement, including reversal resolution,
 remains necessary; no measured throughput or unconditional nonlinear convergence
 is claimed.
 

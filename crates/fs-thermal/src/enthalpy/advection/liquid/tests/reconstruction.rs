@@ -61,6 +61,38 @@ fn liquid_reconstruction_does_not_advect_stationary_solid_latent_inventory() {
 }
 
 #[test]
+fn explicit_liquid_reconstruction_keeps_stationary_latent_inventory_and_bulk_limit() {
+    for datum in [0.0, 1_099_511_627_776.0] {
+        let law = PhaseLaw { datum, identity: 7, melting_range_k: 0.0 };
+        for values in [[20.0, 50.0, 80.0], [120.0, 160.0, 210.0]] {
+            let initial = prepare(&law, &values, 2.0);
+            for rate in [-2.0, 2.0] {
+                let flow = liquid_flow(&law, rate).with_reconstruction(plan(&initial)).unwrap();
+                let (next, observed, audit) = initial.advance_observed(
+                    &flow, 0.125, StepConfig { max_dt_s: 1.0, energy_tolerance_j: 1e-3 },
+                    || Ok(()),
+                ).unwrap();
+                assert_eq!(audit.external_heat_j, 0.0);
+                assert!(observed.audit().maximum_courant <= 0.4);
+                if values[0] < 100.0 {
+                    assert_eq!(next.cells(), initial.cells());
+                    assert_eq!(audit.stored_energy_change_j, 0.0);
+                } else {
+                    let bulk = Advected::new((), flows(3, rate), 3).unwrap()
+                        .with_reconstruction(plan(&initial)).unwrap();
+                    let (expected, _, expected_audit) = initial.advance_observed(
+                        &bulk, 0.125, StepConfig { max_dt_s: 1.0, energy_tolerance_j: 1e-3 },
+                        || Ok(()),
+                    ).unwrap();
+                    assert_eq!(next.cells(), expected.cells());
+                    assert_eq!(audit, expected_audit);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn liquid_reconstruction_recovers_affine_bulk_traces_on_unequal_cells_and_reversal() {
     for datum in [0.0, 1_099_511_627_776.0] {
         let law = PhaseLaw { datum, identity: 7, melting_range_k: 0.0 };

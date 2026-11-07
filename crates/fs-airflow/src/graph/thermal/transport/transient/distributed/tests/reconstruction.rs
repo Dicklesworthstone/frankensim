@@ -19,6 +19,8 @@ use fs_solver::NewtonKrylovConfig;
 use fs_thermal::enthalpy::backward_euler::{BoundaryStepCoefficients, StepCoefficients};
 use std::cell::Cell;
 
+mod explicit;
+
 fn controls() -> ImplicitTransportControls {
     ImplicitTransportControls {
         solver: NewtonKrylovConfig {
@@ -337,7 +339,7 @@ fn g1_native_quasi_steady_and_retained_momentum_share_the_limited_endpoint() {
 }
 
 #[test]
-fn g0_g4_limited_mode_cannot_silently_use_linear_upwind_or_publish_a_failed_source() {
+fn g0_g4_limited_explicit_mode_retains_linear_implicit_refusal_and_failed_source_rollback() {
     with_cx(|cx| {
         let law = law(0.0);
         let n = 5;
@@ -373,20 +375,28 @@ fn g0_g4_limited_mode_cannot_silently_use_linear_upwind_or_publish_a_failed_sour
                 .bind(cx, &graph, &[q], &initial, external, 16)
                 .unwrap();
             assert!(binding.endpoint_transport(cx, &initial).is_ok());
-            assert!(binding.wrap_observer(()).is_err());
-            assert!(
-                binding
-                    .advance_to(
-                        cx,
-                        &initial,
-                        0.1,
-                        StepConfig {
-                            max_dt_s: 0.01,
-                            energy_tolerance_j: 1e-6
-                        }
-                    )
-                    .is_err()
-            );
+            assert!(binding.wrap_observer(()).is_ok());
+            let (explicit, energy, transport) = binding
+                .advance_to(
+                    cx,
+                    &initial,
+                    0.1,
+                    StepConfig {
+                        max_dt_s: 0.01,
+                        energy_tolerance_j: 1e-6,
+                    },
+                )
+                .unwrap();
+            assert_eq!(explicit.time_s(), 0.1);
+            near(energy.residual_j, 0.0, 1e-6);
+            near(energy.external_heat_j, transport.external_enthalpy_j, 1e-6);
+            for (&id, old) in initial.cells() {
+                let temperature = explicit.temperature_k(id).unwrap();
+                assert!((310.0 - 1e-8..=350.0 + 1e-8).contains(&temperature));
+                if q == 0.0 {
+                    assert_eq!(explicit.cells()[&id].specific_h_j_kg, old.specific_h_j_kg);
+                }
+            }
             assert!(
                 binding
                     .advance_advection_implicit(cx, &initial, 0.1, 1e-6, 1e-6)

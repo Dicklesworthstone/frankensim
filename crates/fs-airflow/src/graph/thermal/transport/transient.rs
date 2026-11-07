@@ -3,7 +3,8 @@
 //! Hydraulic nodes are explicitly bound to caller-owned thermal control
 //! volumes. Their original mass, geometry, caloric law and enthalpy remain the
 //! storage authority. Signed reference-volume flow becomes signed mass flow;
-//! native upwind transfers move that enthalpy without a second heat integrator.
+//! native conservative transfers move that enthalpy without a second heat
+//! integrator. Authored axial stencils may reconstruct its interior face traces.
 //! A pressure datum supplies no fluid or heat. Every external mass connection
 //! is explicit and every storage cell must balance mass, including datums.
 //!
@@ -20,7 +21,9 @@ use std::sync::Arc;
 use fs_exec::Cx;
 use fs_qty::Density;
 use fs_thermal::enthalpy::advection::reconstruction::LimitedEnthalpyReconstruction;
-use fs_thermal::enthalpy::advection::{Advected, AdvectionAudit, MassBoundary, MassFlow};
+use fs_thermal::enthalpy::advection::{
+    Advected, AdvectionAudit, MassBoundary, MassFlow, ReconstructedAdvected,
+};
 use fs_thermal::enthalpy::backward_euler::{BackwardEulerStep, TransportStepCoefficients};
 use fs_thermal::enthalpy::{
     CellGeometry, CellId, DepositionError, DepositionSimulation, EnergyAudit, MaterialId,
@@ -285,7 +288,7 @@ impl GraphEnthalpyTransport {
             .is_some_and(|plan| !plan.is_empty())
         {
             return Err(DepositionError::InvalidInput(
-                "limited pipe reconstruction requires the nonlinear endpoint transport path",
+                "limited pipe reconstruction requires the nonlinear implicit transport path",
             ));
         }
         Ok(())
@@ -293,11 +296,14 @@ impl GraphEnthalpyTransport {
 
     /// Compose with the native source/conduction observer instead of creating
     /// a parallel time owner. Its existing budgets, combined CFL restriction,
-    /// transactional histories and material domains remain authoritative.
-    pub fn wrap_observer<O>(&self, inner: O) -> Result<Advected<O>, DepositionError> {
-        self.require_upwind()?;
+    /// transactional histories and material domains remain authoritative. An
+    /// authored reconstruction shares its original geometry and material
+    /// bindings; unstencilled junctions retain donor-cell transport. The native
+    /// explicit time integration remains first order.
+    pub fn wrap_observer<O>(&self, inner: O) -> Result<ReconstructedAdvected<O>, DepositionError> {
         Advected::new(inner, self.advection.flows().to_vec(), self.max_connections)?
-            .with_boundaries(self.advection.boundaries().to_vec(), self.max_connections)
+            .with_boundaries(self.advection.boundaries().to_vec(), self.max_connections)?
+            .with_optional_reconstruction(self.reconstruction.clone())
     }
 
     /// Advance the original thermal state using its existing conservative
@@ -312,11 +318,11 @@ impl GraphEnthalpyTransport {
         config: StepConfig,
     ) -> Result<(DepositionSimulation<'m>, EnergyAudit, AdvectionAudit), TransientTransportError>
     {
-        self.require_upwind()?;
         self.validate_storage(cx, thermal)?;
+        let observer = self.wrap_observer(())?;
         let (next, advected, energy) =
             thermal
-                .advance_observed(&self.advection, target_s, config, || thermal_checkpoint(cx))?;
+                .advance_observed(&observer, target_s, config, || thermal_checkpoint(cx))?;
         self.validate_storage(cx, &next)?;
         Ok((next, energy, advected.audit()))
     }

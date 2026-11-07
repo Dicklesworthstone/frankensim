@@ -1,4 +1,4 @@
-//! Limited axial enthalpy reconstruction on the original implicit transport.
+//! Limited axial enthalpy reconstruction on the original thermal transport.
 //!
 //! A cell's two one-sided axial derivatives are limited by minmod. The actual
 //! signed flow selects its upstream cell and the corresponding face trace.
@@ -6,11 +6,13 @@
 //! `d_left=(L_previous+L_cell)/2`, `d_right=(L_cell+L_next)/2`.
 //! Each trace lies between the centre and its adjacent sample; an extremum has
 //! exactly zero slope. One identical reconstructed power debits and credits the
-//! original native transfer. Sources, continuity, calorics and the implicit
+//! original native transfer. Sources, continuity, calorics and the thermal
 //! energy residual remain owned by the existing timeline.
 //!
-//! This is an endpoint spatial reconstruction, not an explicit time integrator
-//! or a blanket TVD/convergence certificate for a coupled nonlinear solve.
+//! [`ReconstructedAdvected`] applies the same traces on the explicit timeline
+//! with a combined conduction/advection stability bound. The endpoint query
+//! supplies the original implicit residual. Neither is a blanket TVD/convergence
+//! certificate for a coupled nonlinear solve.
 //! Without the optional thermal entropy limiter, smooth interior affine fields
 //! are reconstructed exactly (up to roundoff);
 //! absent stencils, junctions and extrema retain the original upwind trace.
@@ -33,6 +35,9 @@ use std::collections::BTreeMap;
 
 #[path = "reconstruction/entropy.rs"]
 mod entropy;
+#[path = "reconstruction/observer.rs"]
+mod observer;
+pub use observer::ReconstructedAdvected;
 
 /// Original endpoint temperature and dT/dh, supplied by the native implicit
 /// caloric owner. Explicit flux queries do not need a derivative callback.
@@ -210,11 +215,20 @@ impl LimitedEnthalpyReconstruction {
         self.thermal_entropy_limit
     }
 
-    fn admit(
+    fn admit<O>(
         &self,
         thermal: &DepositionSimulation<'_>,
-        flow: &Advected<()>,
-        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+        flow: &Advected<O>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), DepositionError> {
+        self.admit_cells(thermal, checkpoint)?;
+        self.admit_flow(flow, checkpoint)
+    }
+
+    fn admit_cells(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), DepositionError> {
         for (&id, bound) in &self.cells {
             checkpoint()?;
@@ -233,19 +247,15 @@ impl LimitedEnthalpyReconstruction {
                 ));
             }
         }
-        if flow.stationary_species.is_some()
-            || !flow.selective_outlets.is_empty()
-            || flow.entropy.is_some()
-        {
-            return Err(invalid(
-                "limited enthalpy reconstruction has no species or entropy-mixing closure",
-            ));
-        }
-        if self.thermal_entropy_limit && flow.liquid_carrier.is_some() {
-            return Err(invalid(
-                "thermal entropy face limiting requires ordinary bulk carriage",
-            ));
-        }
+        Ok(())
+    }
+
+    fn admit_flow<O>(
+        &self,
+        flow: &Advected<O>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), DepositionError> {
+        self.admit_flow_model(flow)?;
         let mut neighbors: BTreeMap<_, u8> = self.stencils.keys().map(|&id| (id, 0)).collect();
         for edge in &flow.flows {
             checkpoint()?;
@@ -282,10 +292,27 @@ impl LimitedEnthalpyReconstruction {
         Ok(())
     }
 
-    fn face_increment(
+    fn admit_flow_model<O>(&self, flow: &Advected<O>) -> Result<(), DepositionError> {
+        if flow.stationary_species.is_some()
+            || !flow.selective_outlets.is_empty()
+            || flow.entropy.is_some()
+        {
+            return Err(invalid(
+                "limited enthalpy reconstruction has no species or entropy-mixing closure",
+            ));
+        }
+        if self.thermal_entropy_limit && flow.liquid_carrier.is_some() {
+            return Err(invalid(
+                "thermal entropy face limiting requires ordinary bulk carriage",
+            ));
+        }
+        Ok(())
+    }
+
+    fn face_increment<O>(
         &self,
         thermal: &DepositionSimulation<'_>,
-        flow: &Advected<()>,
+        flow: &Advected<O>,
         up: CellId,
         down: CellId,
     ) -> Result<FaceIncrement, DepositionError> {
