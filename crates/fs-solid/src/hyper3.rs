@@ -77,6 +77,7 @@
 use fs_exec::Cx;
 use fs_material::hyper::Hyperelastic;
 use fs_material::hyper::cards::FiniteStrainPotential;
+use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_math::dd::Dd;
 use fs_solver::krylov::{PminresState, StallDiagnosis};
 use fs_solver::nonlinear::{FgmresState, SolverRunProgress};
@@ -250,7 +251,7 @@ pub struct HyperTetSolution {
 
 /// Joint equilibrium of the original solid and its ordered sealed gas stores.
 #[derive(Debug)]
-pub struct HyperTetCavitiesSolution {
+pub struct HyperTetCavitiesSolution<G = ClosedGasParcel> {
     /// Converged displacement, material potential and full support reactions.
     pub solid: HyperTetSolution,
     /// Accepted gas loads in the same order as the input cavity bindings.
@@ -259,7 +260,7 @@ pub struct HyperTetCavitiesSolution {
     /// including each gas inventory, volume, pressure, potential and tangent.
     /// Returning them does not repeat a thermodynamic solve. An empty input
     /// produces an empty vector and the native non-cavity solid result.
-    pub cavities: Vec<pressure::cavity::TetCavityGasLoad>,
+    pub cavities: Vec<pressure::cavity::TetCavityGasLoad<G>>,
 }
 
 /// Structured refusal.
@@ -1137,10 +1138,10 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
     /// # Errors
     /// A mismatched cavity chart/reference parcel, source-domain exit, invalid
     /// exterior pressure or entropy controls, or native equilibrium refusal.
-    pub fn solve_with_adiabatic_cavity(
+    pub fn solve_with_adiabatic_cavity<G: pressure::cavity::AdiabaticCavityGas>(
         &self,
         cavity: &pressure::cavity::ClosedTetCavity,
-        gas: &fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel,
+        gas: &G,
         exterior_pressure_pa: f64,
         controls: fs_material::thermochemical_gas::energy::entropy::GasEntropySolve,
         cx: &Cx<'_>,
@@ -1169,9 +1170,9 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
     /// # Errors
     /// A mismatched reference chart, invalid gas/density/pressure source,
     /// source-domain exit, cancellation or native equilibrium refusal.
-    pub fn solve_with_adiabatic_cavity_loads(
+    pub fn solve_with_adiabatic_cavity_loads<G: pressure::cavity::AdiabaticCavityGas>(
         &self,
-        cavity: pressure::cavity::AdiabaticCavity<'_>,
+        cavity: pressure::cavity::AdiabaticCavity<'_, G>,
         gravity: Option<(
             gravity::ReferenceGravityDensity<'_>,
             gravity::StationaryGravity3<'_>,
@@ -1196,6 +1197,9 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
     /// increments in compensated precision, alongside material, gravity and
     /// optional boundary-pressure work. Accepted gas states are returned without
     /// a final source re-evaluation, in the caller's fixed order.
+    /// Both original ideal and Peng–Robinson parcels use this same solver. The
+    /// returned inventory retains its concrete source type; nonideal pressure,
+    /// density-dependent stored energy and acoustic stiffness remain together.
     ///
     /// All cavities must bind this exact reference chart and distinct boundary
     /// faces. This prevents counting one gas boundary twice; it does not add a
@@ -1206,9 +1210,9 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
     /// A mismatched reference chart, overlapping cavity boundaries, invalid
     /// source, domain exit, cancellation or native equilibrium refusal. All
     /// borrowed gas inventories remain unchanged if any chamber refuses.
-    pub fn solve_with_adiabatic_cavities(
+    pub fn solve_with_adiabatic_cavities<G: pressure::cavity::AdiabaticCavityGas>(
         &self,
-        cavities: &[pressure::cavity::AdiabaticCavity<'_>],
+        cavities: &[pressure::cavity::AdiabaticCavity<'_, G>],
         gravity: Option<(
             gravity::ReferenceGravityDensity<'_>,
             gravity::StationaryGravity3<'_>,
@@ -1218,7 +1222,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
             pressure::TetPressure<'_>,
         )>,
         cx: &Cx<'_>,
-    ) -> Result<HyperTetCavitiesSolution, HyperTetError> {
+    ) -> Result<HyperTetCavitiesSolution<G>, HyperTetError> {
         checkpoint(cx)?;
         let mut occupied = std::collections::BTreeSet::new();
         for (index, source) in cavities.iter().enumerate() {
@@ -1403,7 +1407,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         } else {
             None
         };
-        self.solve_loaded_from_with_cavities(
+        self.solve_loaded_from_with_cavities::<ClosedGasParcel>(
             None, None, pressure, Some((reference_density, source)), None, &[], cx,
         ).map(|solution| solution.solid)
     }
@@ -1438,7 +1442,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
         cx: &Cx<'_>,
     ) -> Result<HyperTetSolution, HyperTetError> {
-        self.solve_loaded_from_with_cavities(
+        self.solve_loaded_from_with_cavities::<ClosedGasParcel>(
             initial_displacement, prepared_elements, pressure,
             gravity.map(|(density, field)| (density, gravity::StationaryGravity3::from_samples(field))),
             inertia, &[], cx,
@@ -1446,7 +1450,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
     }
 
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // one native Newton owner
-    fn solve_loaded_from_with_cavities(
+    fn solve_loaded_from_with_cavities<G: pressure::cavity::AdiabaticCavityGas>(
         &self,
         initial_displacement: Option<&[f64]>,
         prepared_elements: Option<&[Element]>,
@@ -1459,9 +1463,9 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
             gravity::StationaryGravity3<'_>,
         )>,
         inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
-        cavities: &[pressure::cavity::AdiabaticCavity<'_>],
+        cavities: &[pressure::cavity::AdiabaticCavity<'_, G>],
         cx: &Cx<'_>,
-    ) -> Result<HyperTetCavitiesSolution, HyperTetError> {
+    ) -> Result<HyperTetCavitiesSolution<G>, HyperTetError> {
         checkpoint(cx)?;
         self.validate_inputs()?;
         if inertia.is_some()
@@ -1583,7 +1587,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
             // Its geometry admits the current volume together with the force;
             // interval pressure work is evaluated by that same owner below.
             let loaded = |displacement: &[f64], before: Option<&[f64]>| -> Result<
-                (Vec<f64>, f64, Option<Dd>, Vec<pressure::cavity::TetCavityGasLoad>), HyperTetError,
+                (Vec<f64>, f64, Option<Dd>, Vec<pressure::cavity::TetCavityGasLoad<G>>), HyperTetError,
             > {
                 let mut force = f_dead.clone();
                 let mut volume = 0.0;

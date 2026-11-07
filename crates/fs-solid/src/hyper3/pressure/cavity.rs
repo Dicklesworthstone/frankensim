@@ -34,6 +34,8 @@ use fs_sparse::{Coo, Csr};
 
 mod tangent;
 pub use tangent::TetCavityGasTangent;
+mod constitutive;
+pub use constitutive::AdiabaticCavityGas;
 pub(crate) mod equilibrium;
 pub use equilibrium::AdiabaticCavity;
 
@@ -77,9 +79,9 @@ pub struct TetCavityVolume<'a> {
 /// The endpoint gas is reconstructed from the original parcel at the actual
 /// cavity volume. The tangent includes both geometry and acoustic dp/dV terms.
 #[derive(Debug)]
-pub struct TetCavityGasLoad {
+pub struct TetCavityGasLoad<G = ClosedGasParcel> {
     /// Gas endpoint at exactly `volume_m3`, retaining the original source model.
-    pub gas: ClosedGasParcel,
+    pub gas: G,
     /// Actual enclosed gas volume [m^3].
     pub volume_m3: f64,
     /// Gas pressure minus the fixed exterior pressure [Pa].
@@ -318,15 +320,17 @@ impl ClosedTetCavity {
     /// reversible adiabatic path to the CURRENT cavity volume, and then uses the
     /// common acoustic mechanical-load owner for pressure and dp/dV. This avoids
     /// a fixed-gamma or frozen-pressure surrogate and keeps source, force,
-    /// acoustic stiffness and solid geometry on one state.
-    pub fn adiabatic_gas_load(
+    /// acoustic stiffness and solid geometry on one state. Both original ideal
+    /// and Peng–Robinson parcels use this same geometry and mechanical pullback.
+    /// Nonideal storage and acoustic response retain their EOS contributions.
+    pub fn adiabatic_gas_load<G: AdiabaticCavityGas>(
         &self,
         displacement_m: &[f64],
-        gas: &ClosedGasParcel,
+        gas: &G,
         exterior_pressure_pa: f64,
         controls: GasEntropySolve,
         cx: &Cx<'_>,
-    ) -> Result<TetCavityGasLoad, HyperTetError> {
+    ) -> Result<TetCavityGasLoad<G>, HyperTetError> {
         checkpoint(cx)?;
         if gas.volume_m3().to_bits() != self.reference_volume_m3.to_bits()
             || !exterior_pressure_pa.is_finite()
@@ -337,9 +341,8 @@ impl ClosedTetCavity {
             ));
         }
         let geometry = self.evaluate(displacement_m, cx)?;
-        let mut endpoint = gas.clone();
         let mut was_cancelled = false;
-        let volume_step = endpoint.set_volume_isentropic(
+        let proposed = gas.at_volume_isentropic(
             geometry.volume_m3,
             controls,
             || {
@@ -351,8 +354,8 @@ impl ClosedTetCavity {
                 }
             },
         );
-        let volume_step = match volume_step {
-            Ok(step) => step,
+        let (endpoint, volume_step) = match proposed {
+            Ok(candidate) => candidate,
             Err(_) if was_cancelled => return Err(HyperTetError::Cancelled),
             Err(error) => return Err(invalid(&format!("adiabatic cavity gas refused state: {error}"))),
         };

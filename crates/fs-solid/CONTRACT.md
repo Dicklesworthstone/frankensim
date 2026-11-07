@@ -7412,6 +7412,28 @@ compression with gravity and ambient pressure, and the second chamber's volume
 and temperature response when the first is heated. Source ordering, inventory,
 force balance, empty/single reductions and boundary ownership are checked.
 
+The same geometry and static equilibrium path accept native
+`ClosedRealGasParcel` inventories through the sealed `AdiabaticCavityGas` seam.
+`AdiabaticCavity`, `TetCavityGasLoad` and `HyperTetCavitiesSolution` retain the
+concrete parcel type, defaulting to the existing ideal source. Peng–Robinson
+endpoints retain the original temperature/density-dependent calorics, source
+cards and homogeneous-branch admission. Gas storage increments include both
+NASA and PR departures, while force tangents use the same-state `rho*c^2/V`;
+`gamma*p/V` is not substituted for dense-fluid compressibility. Both sources
+use the original `GasMechanicalLoad`, selected-face geometric tangent and
+independent acoustic factors. There is no dynamic dispatch in boundary or
+Krylov loops and no second equation of state or equilibrium implementation.
+
+Four focused real-gas regressions use an independent scalar PR/Helmholtz
+reference for finite-volume energy, entropy, pressure and acoustic bulk modulus;
+check the full force tangent and potential work; solve a manufactured 4%
+compression of the native hollow solid under ambient pressure; and heat one of
+two mechanically connected dense-gas chambers. They retain distinct calorics,
+large formation datums and original inventory/source identity, and exercise
+source-domain refusal and cancellation. The manufactured gas is synthetic;
+these checks do not supply empirical calibration, phase equilibrium, heat
+transfer during deformation or time integration.
+
 
 Preparation rejects duplicate, out-of-range, open, disconnected and outer-shell
 selections. Each evaluation admits every material tetrahedron and requires

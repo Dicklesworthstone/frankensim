@@ -9,32 +9,39 @@ use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_math::dd::Dd;
 use fs_solver::op::{CsrOp, LinearOp};
 
-use super::{ClosedTetCavity, HyperTetError, TetCavityGasLoad, checkpoint, finite, invalid};
+use super::{AdiabaticCavityGas, ClosedTetCavity, HyperTetError, TetCavityGasLoad, checkpoint, finite, invalid};
 
 /// One stationary sealed-gas source bound to its original cavity geometry.
 ///
 /// Every endpoint is reconstructed from `reference` through the same admitted
 /// source isentrope. Other loads can share the native solid equilibrium solve;
 /// this binding introduces neither a second gas model nor a separate solver.
-#[derive(Debug, Clone, Copy)]
-pub struct AdiabaticCavity<'a> {
+/// `G` retains the original ideal or Peng–Robinson parcel and its complete state.
+#[derive(Debug)]
+pub struct AdiabaticCavity<'a, G = ClosedGasParcel> {
     /// Prepared closed inner boundary of the complete reference solid.
     pub cavity: &'a ClosedTetCavity,
     /// Original gas inventory at the undeformed cavity volume.
-    pub reference: &'a ClosedGasParcel,
+    pub reference: &'a G,
     /// Fixed exterior absolute pressure [Pa], finite and nonnegative.
     pub exterior_pressure_pa: f64,
     /// Original source temperature bracket, entropy tolerance and work bound.
     pub controls: GasEntropySolve,
 }
 
-impl AdiabaticCavity<'_> {
+// Copying a borrowed binding does not copy or require Copy on its gas store.
+impl<G> Copy for AdiabaticCavity<'_, G> {}
+impl<G> Clone for AdiabaticCavity<'_, G> {
+    fn clone(&self) -> Self { *self }
+}
+
+impl<G: AdiabaticCavityGas> AdiabaticCavity<'_, G> {
     /// Resolve this same gas source on the admitted current solid geometry.
     pub fn evaluate(
         &self,
         displacement: &[f64],
         cx: &Cx<'_>,
-    ) -> Result<TetCavityGasLoad, HyperTetError> {
+    ) -> Result<TetCavityGasLoad<G>, HyperTetError> {
         self.cavity.adiabatic_gas_load(
             displacement,
             self.reference,
@@ -52,8 +59,8 @@ impl AdiabaticCavity<'_> {
     /// their accuracy remains controlled by the declared entropy solve.
     pub(crate) fn potential_increment(
         &self,
-        before: &TetCavityGasLoad,
-        after: &TetCavityGasLoad,
+        before: &TetCavityGasLoad<G>,
+        after: &TetCavityGasLoad<G>,
         cx: &Cx<'_>,
     ) -> Result<Dd, HyperTetError> {
         checkpoint(cx)?;

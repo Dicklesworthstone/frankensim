@@ -15,6 +15,8 @@ mod gas_fixture;
 mod composed_loads;
 #[path = "hyper3_cavity/multiple.rs"]
 mod multiple;
+#[path = "hyper3_cavity/real_gas.rs"]
+mod real_gas;
 
 fn with_cx<R>(f: impl FnOnce(&CancelGate, &Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();

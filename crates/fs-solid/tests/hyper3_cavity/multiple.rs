@@ -20,7 +20,7 @@ fn controls() -> GasEntropySolve {
 /// Reflect the existing conforming hollow tetrahedron across its outer z=0
 /// face. Shared vertices and the shared triangle are genuine solid connectivity;
 /// only the two inner boundaries remain separate pressure surfaces.
-fn connected_shells() -> (Vec<[f64; 3]>, Vec<[usize; 4]>) {
+pub(super) fn connected_shells() -> (Vec<[f64; 3]>, Vec<[usize; 4]>) {
     let (mut nodes, mut tets) = shell();
     let reflected = [0, 1, 2, 8, 9, 10, 11, 12];
     for node in [3, 4, 5, 6, 7] {
@@ -36,7 +36,7 @@ fn connected_shells() -> (Vec<[f64; 3]>, Vec<[usize; 4]>) {
     (nodes, tets)
 }
 
-fn cavities(nodes: &[[f64; 3]], tets: &[[usize; 4]], cx: &Cx<'_>) -> [ClosedTetCavity; 2] {
+pub(super) fn cavities(nodes: &[[f64; 3]], tets: &[[usize; 4]], cx: &Cx<'_>) -> [ClosedTetCavity; 2] {
     let surface = surface(nodes, tets, cx);
     assert_eq!(
         surface.faces().len(),
@@ -73,7 +73,7 @@ fn bindings<'a>(
     })
 }
 
-fn problem<'a>(
+pub(super) fn problem<'a>(
     nodes: &'a [[f64; 3]],
     tets: &'a [[usize; 4]],
     material: &'a Hyperelastic,
@@ -360,7 +360,7 @@ fn g0_multiple_cavity_reductions_and_geometry_ownership_are_explicit() {
         .unwrap();
         let problem = problem(&nodes, &tets, &material, &[]);
         let empty = problem
-            .solve_with_adiabatic_cavities(&[], None, None, cx)
+            .solve_with_adiabatic_cavities::<ClosedGasParcel>(&[], None, None, cx)
             .unwrap();
         assert_eq!(empty.solid, problem.solve(cx).unwrap());
         assert!(empty.cavities.is_empty());
