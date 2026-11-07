@@ -95,6 +95,12 @@ pub struct ProjectedShellRelaxationBranch {
 }
 
 impl ProjectedShellRelaxationBranch {
+    // Both original shell element owners publish already admitted complete
+    // modal Grams through this one immutable result type.
+    pub(super) fn from_projected(relaxation_time_s: f64, matrix: Vec<f64>) -> Self {
+        Self { relaxation_time_s, matrix }
+    }
+
     pub const fn relaxation_time_s(&self) -> f64 {
         self.relaxation_time_s
     }
@@ -285,10 +291,9 @@ pub fn project_relaxation(
                 matrix[n * j + i] = matrix[n * i + j];
             }
         }
-        projected.push(ProjectedShellRelaxationBranch {
-            relaxation_time_s: f64::from_bits(time),
-            matrix,
-        });
+        projected.push(ProjectedShellRelaxationBranch::from_projected(
+            f64::from_bits(time), matrix,
+        ));
     }
     if cancelled() {
         return Err(PlateError::Cancelled);

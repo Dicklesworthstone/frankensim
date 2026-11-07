@@ -28,7 +28,7 @@ pub(super) struct ShearDissipation {
 }
 
 impl ShearDissipation {
-    fn channels(&self, membrane: [f64; 3], bending: [f64; 3], shear: [f64; 2]) -> [f64; 12] {
+    pub(super) fn channels(&self, membrane: [f64; 3], bending: [f64; 3], shear: [f64; 2]) -> [f64; 12] {
         let strain = [membrane[0], membrane[1], membrane[2], bending[0], bending[1], bending[2]];
         let mut channels = [0.0; 12];
         for column in 0..6 {
@@ -76,11 +76,15 @@ fn admit3(v: &[f64; 9]) -> Result<(), PlateError> {
 impl ShearShellViscosity {
     pub(super) fn dissipation(&self) -> Result<ShearDissipation, PlateError> {
         let [a, b, c] = self.shear;
+        // Shear uses the same original-unit passive resultant factor as A/B/D.
+        // Normalizing a nearly rank-one shear tensor before an eigensolve can
+        // corrupt a resolved weak transverse channel through cancellation.
+        let shear = super::factor_coupled_block(
+            &[a, b, 0.0, b, c, 0.0, 0.0, 0.0, 0.0], &[0.0; 9], &[0.0; 9], true,
+        )?;
         Ok(ShearDissipation {
             coupled: super::factor_coupled_block(&self.membrane, &self.coupling, &self.bending, true)?,
-            shear: fs_material::plane_stress_viscosity::factor_passive_resultant(
-                &[a, b, 0.0, b, c, 0.0, 0.0, 0.0, 0.0],
-            ).map_err(|_| bad("shell shear viscosity factor is unrepresentable"))?,
+            shear: core::array::from_fn(|row| shear[row]),
         })
     }
 
@@ -143,6 +147,43 @@ pub fn projection_terms(nodes: usize, triangles: usize, modes: usize) -> Option<
         .checked_add(6usize.checked_mul(nodes)?.checked_mul(modes)?)
 }
 
+pub(super) type PhysicalStrain = ([f64; 3], [f64; 3], [f64; 2]);
+
+// One physical contraction for instantaneous and hereditary resultants.
+// The original element supplies every basis strain and its elastic bubble
+// expansion; neither material law re-condenses its own trial space.
+pub(super) fn projected_strains(
+    field: &element::PreparedStrainField,
+    local: &[[f64; 20]],
+    lambda: [f64; 3],
+    output: &mut [PhysicalStrain],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), PlateError> {
+    let basis: [PhysicalStrain; 20] = core::array::from_fn(|column| {
+        let mut unit = [0.0; 20];
+        unit[column] = 1.0;
+        field.eval(&unit, lambda[1], lambda[2])
+    });
+    for (rate, strain) in local.iter().zip(output) {
+        if cancelled() { return Err(PlateError::Cancelled); }
+        let mut membrane = [0.0; 3];
+        let mut bending = [0.0; 3];
+        let mut shear = [0.0; 2];
+        for (column, &value) in rate.iter().enumerate() {
+            for k in 0..3 {
+                membrane[k] += basis[column].0[k] * value;
+                bending[k] += basis[column].1[k] * value;
+            }
+            for k in 0..2 { shear[k] += basis[column].2[k] * value; }
+        }
+        if membrane.iter().chain(&bending).chain(&shear).any(|v| !v.is_finite()) {
+            return Err(bad("shell projected physical strain overflow"));
+        }
+        *strain = (membrane, bending, shear);
+    }
+    Ok(())
+}
+
 /// Project complete physical material dissipation on already expanded global
 /// displacement/rotation vectors. For M-orthonormal modes the result is C [1/s].
 /// Work-conjugate support frames must be expanded by MitcShellModel::expand,
@@ -197,29 +238,16 @@ pub fn project_viscosity(
             return Err(bad("shell viscosity elastic expansion overflow"));
         }
         let mut channels = vec![[0.0; 12]; n];
+        let mut strains = vec![([0.0; 3], [0.0; 3], [0.0; 2]); n];
         for (lambda, weight) in element::stiffness_rule() {
             if cancelled() { return Err(PlateError::Cancelled); }
             // Evaluate the ORIGINAL strain map once per quadrature point.
             // Form strain before constitutive factors: dense C assembly followed
             // by a modal contraction can erase resolved weak material channels.
-            let basis: [([f64; 3], [f64; 3], [f64; 2]); 20] = core::array::from_fn(|column| {
-                let mut unit = [0.0; 20];
-                unit[column] = 1.0;
-                field.eval(&unit, lambda[1], lambda[2])
-            });
+            projected_strains(&field, &local, lambda, &mut strains, &mut cancelled)?;
             let scale = det::sqrt(g.area_m2) * det::sqrt(weight);
-            for (mode, rate) in local.iter().enumerate() {
+            for (mode, &(membrane, bending, shear)) in strains.iter().enumerate() {
                 if cancelled() { return Err(PlateError::Cancelled); }
-                let mut membrane = [0.0; 3];
-                let mut bending = [0.0; 3];
-                let mut shear = [0.0; 2];
-                for (column, &value) in rate.iter().enumerate() {
-                    for k in 0..3 {
-                        membrane[k] += basis[column].0[k] * value;
-                        bending[k] += basis[column].1[k] * value;
-                    }
-                    for k in 0..2 { shear[k] += basis[column].2[k] * value; }
-                }
                 channels[mode] = law.channels(membrane, bending, shear).map(|v| scale*v);
                 if channels[mode].iter().any(|v| !v.is_finite()) {
                     return Err(bad("shell viscosity strain channel overflow"));

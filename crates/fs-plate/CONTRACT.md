@@ -2165,3 +2165,32 @@ full anisotropic loaded frequency changes, undamped drilling, strongly separated
 reference/target moduli, whole-facet strain admission and source/budget/cancel
 refusals. Native execution remains pending in an environment that can build the
 original dependency graph.
+
+## Independent hereditary MITC resultants
+
+`shell::mitc::relaxation` admits a separate passive excess A/B/D and full
+transverse-shear tensor with each positive material relaxation time on each
+facet. Signed membrane/bending coupling is admitted through the complete
+original-unit passive work matrix. Zero and directional increments are legal;
+material tensors do not include numerical drilling. The supplied increments
+are above the relaxed equilibrium section, with source frequency/temperature
+support remaining explicit caller data.
+
+Projection is bound to the retained `MitcShellModel`: its mesh, directors,
+elastic sections, support frames and original equilibrium director-bubble map
+are reused. Reduced vectors expand through that model's work-conjugate support
+owner. Geometry and equilibrium condensation are prepared once per active
+facet; physical strains are evaluated once at each original positive
+seven-point quadrature site across the complete spectrum. Instantaneous
+viscosity and hereditary projection share the same strain contraction.
+Compensated Gram sums aggregate only exactly equal positive f64 times and keep
+all cross-mode work. The original mass and elastic pencil are unchanged.
+
+This is hereditary material on the original fixed condensed trial space. It
+does not perform frequency-dependent elimination of independent bubbles or
+add a second mechanical state owner. Explicit mesh, mode, source-branch,
+distinct-time and scalar-work ceilings precede physical expansion and modal
+square allocation; arithmetic overflow and cancellation refuse the image.
+Focused tests compare original dimensional tensor work, varied directors,
+oblique supports, signed A/B/D and independent shear spectra, rigid/drilling
+nulls, resolved weak shear, zero spectra and admission bounds.
