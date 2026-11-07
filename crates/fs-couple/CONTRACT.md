@@ -3561,6 +3561,41 @@ existing pure-shear, fixed-load, fixed-width and first-order transport/contact
 composition is retained; zero-pressure gaps require a separate normal/contact
 topology, and no resolved continuum traction or measured calibration is inferred.
 
+### Evolving normal load and pressure without resetting moving shear
+
+`MovingPartialSlip::step_candidate_with_pressure_profile` accepts the original
+normal owner's next positive load and piecewise-constant pressure field on the
+same footprint. The native partial-slip checkpoint admission retains exact
+patch/model/source/authority and ordered-interface lineage. Semiaxes, pressure
+moment, shear stiffness and its source stay fixed. New pressure intervals must
+cover the unchanged physical footprint and integrate to the supplied new load;
+no coefficient or pressure rescaling repairs an inconsistent receipt.
+
+Transported material strains and kinetic branches enter the original regional
+return map unchanged. Unloading can release stored shear at zero imposed slip;
+only its native plastic dissipation heats the original finite thermal bodies.
+Numerical return loss and elastic outflow remain separate. Increasing load
+retains the surviving strains without inventing preload. Local source queries
+receive the new regional pressures together with both actual caloric cells and
+their solved interface temperatures. Pressure, all material histories and heat
+publish atomically. `normal_patch()` exposes the accepted normal receipt, while
+`reference()` retains the original construction checkpoint; ordinary subsequent
+steps continue with the accepted pressure automatically.
+
+This is a first-order endpoint-pressure split. Normal-path refinement is
+independent of pressure-cell and thermal-mesh refinement. Normal indentation,
+normal storage and actuator work belong to the supplied normal owner; this
+brush neither infers nor thermalizes them. Separation, footprint growth,
+pressure-dependent shear stiffness and a coupled normal equilibrium solve
+remain outside this path.
+
+Five G1/G3/G4 regressions verify analytic unloading/reloading, local pressure
+redistribution at constant total load, convergence of physical heat under
+16/32/64 load subdivisions, lineage/geometry/load refusal before source work,
+and atomic late refusal, cancellation, budget exhaustion and retry. Together
+with the preceding moving-memory, pressure and two-temperature regressions,
+all 22 focused native tests pass. No measured calibration is inferred.
+
 ## CST/DKT hereditary material memory on the original modal basis
 
 `plate_viscosity::shell::relaxation::ModalShellRelaxation` projects per-facet

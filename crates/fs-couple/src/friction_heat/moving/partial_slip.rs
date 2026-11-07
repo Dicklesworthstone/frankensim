@@ -19,8 +19,12 @@
 //! These are endpoint source values; time refinement still resolves transit
 //! across a changing interface. A reference ellipse
 //! supplies the native shear law's area and total load, not an elliptical
-//! pressure field. Torsion, changing normal load,
-//! adhesion, recirculated outflow memory and native body dynamics are absent.
+//! pressure field. Supplied normal-load/pressure updates retain the fixed
+//! footprint, original normal lineage and shear storage law. The endpoint
+//! pressure is held over each split interval; refine an evolving normal path.
+//! Torsion, adhesion, recirculated outflow memory and native body dynamics are
+//! absent. Normal indentation, its storage and actuator work remain with the
+//! original normal owner and are not inferred from its pressure receipt.
 
 use super::*;
 use fs_math::dd::Dd;
@@ -168,6 +172,9 @@ pub struct MovingPartialSlipReport<P> {
     pub mechanical_work_j: f64,
     pub storage_before_j: f64,
     pub storage_after_j: f64,
+    /// Original admitted normal loads before and after this split interval.
+    pub normal_load_before_n: f64,
+    pub normal_load_after_n: f64,
     pub elastic_outflow_j: f64,
     pub numerical_dissipation_j: f64,
     /// Delta(U_contact + H_thermal) + D_numerical + U_out - W - Q_other.
@@ -376,6 +383,14 @@ impl MovingPartialSlip {
     pub const fn pressure_profile(&self) -> Option<&MovingPressureProfile> {
         self.pressure.as_ref()
     }
+    /// Most recently accepted original normal receipt. The construction
+    /// checkpoint remains unchanged when a pressure continuation is accepted.
+    pub fn normal_patch(&self) -> &NormalPatchView {
+        self.pressure.as_ref().map_or_else(
+            || self.reference.normal_patch(),
+            MovingPressureProfile::normal_patch,
+        )
+    }
     pub fn stored_energy_j(&self) -> Result<f64, DepositionError> {
         let length = self.route.footprint_m[1] - self.route.footprint_m[0];
         self.parcels.iter().try_fold(0.0, |sum, p| {
@@ -399,6 +414,39 @@ impl MovingPartialSlip {
         thermal: &DepositionSimulation<'m>,
         target_s: f64,
         end: MovingContactPosition,
+        ownership: &GeneralizedWorkOwnership,
+        controls: MovingPartialSlipControls,
+        energy_guess_j: &[f64],
+        interface_temperature_guess_k: f64,
+        resolve: impl Fn(
+            &DepositionSimulation<'m>,
+            &[MovingSlipRegion],
+            &[SweptContactPatch],
+            &[f64],
+        ) -> Result<MovingPartialSlipSource<P>, E>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MovingPartialSlipCandidate<'m, P>, MovingPartialSlipError<E>> {
+        self.step_candidate_for_pressure(
+            thermal,
+            target_s,
+            end,
+            self.pressure.as_ref(),
+            ownership,
+            controls,
+            energy_guess_j,
+            interface_temperature_guess_k,
+            resolve,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn step_candidate_for_pressure<'m, P, E>(
+        &self,
+        thermal: &DepositionSimulation<'m>,
+        target_s: f64,
+        end: MovingContactPosition,
+        pressure: Option<&MovingPressureProfile>,
         ownership: &GeneralizedWorkOwnership,
         controls: MovingPartialSlipControls,
         energy_guess_j: &[f64],
@@ -445,13 +493,16 @@ impl MovingPartialSlip {
                 "synchronized finite bounded moving contact solve required",
             ));
         }
-        if self
-            .pressure
-            .as_ref()
-            .is_some_and(|profile| profile.cells().len() > controls.maximum_regions)
-        {
+        if pressure.is_some_and(|profile| profile.cells().len() > controls.maximum_regions) {
             return Err(MovingPartialSlipError::RegionBudget);
         }
+        if let Some(profile) = pressure {
+            profile.validate_continuation(self)?;
+        }
+        let normal = pressure.map_or_else(
+            || self.reference.normal_patch(),
+            MovingPressureProfile::normal_patch,
+        );
         let path = MovingContactPath {
             start: self.position,
             end,
@@ -503,6 +554,7 @@ impl MovingPartialSlip {
         // material strain and kinetic branch survives every intersection.
         let regions = regions::partition(
             self,
+            pressure,
             &transported,
             end,
             heat_step.patches(),
@@ -515,7 +567,7 @@ impl MovingPartialSlip {
                 .fold(Dd::ZERO, |sum, r| sum + Dd::from_f64(r.normal_load_n))
                 .to_f64(),
         )?;
-        if !close(normal_load, self.reference.normal_patch().normal_load_n()) {
+        if !close(normal_load, normal.normal_load_n()) {
             return Err(MovingPartialSlipError::Invalid(
                 "material regions lost original pressure or normal-load coverage",
             ));
@@ -785,10 +837,15 @@ impl MovingPartialSlip {
             });
         }
         check()?;
-        let mut contact = self.clone();
-        contact.parcels = parcels;
-        contact.position = end;
-        contact.time_s = target_s;
+        let contact = Self {
+            route: self.route.clone(),
+            reference: self.reference.clone(),
+            parcels,
+            position: end,
+            time_s: target_s,
+            frame: self.frame,
+            pressure: pressure.cloned(),
+        };
         Ok(MovingPartialSlipCandidate {
             contact,
             thermal,
@@ -804,6 +861,8 @@ impl MovingPartialSlip {
                 mechanical_work_j: staged.work,
                 storage_before_j: before,
                 storage_after_j: staged.storage,
+                normal_load_before_n: self.normal_patch().normal_load_n(),
+                normal_load_after_n: normal.normal_load_n(),
                 elastic_outflow_j: outflow,
                 numerical_dissipation_j: staged.numerical,
                 total_energy_residual_j: total,

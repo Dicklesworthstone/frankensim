@@ -10,6 +10,7 @@ fn shifted(span: [f64; 2], offset: f64) -> Result<[f64; 2], DepositionError> {
 
 pub(super) fn partition<E>(
     contact: &MovingPartialSlip,
+    profile: Option<&MovingPressureProfile>,
     transported: &[MaterialSlipParcel],
     end: MovingContactPosition,
     patches: &[SweptContactPatch],
@@ -22,7 +23,7 @@ pub(super) fn partition<E>(
     let footprint_shift = finite(end.footprint_offset_m - end.body_offsets_m[0])?;
     let b_shift = finite(end.body_offsets_m[1] - end.body_offsets_m[0])?;
     let mut pressure = Vec::new();
-    if let Some(profile) = &contact.pressure {
+    if let Some(profile) = profile {
         for cell in profile.cells() {
             checkpoint()?;
             pressure.push((
