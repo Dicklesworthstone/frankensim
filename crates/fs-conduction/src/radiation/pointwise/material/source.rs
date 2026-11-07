@@ -341,16 +341,23 @@ impl<'a> MaterialEmissivitySource<'a> {
         let upper = knots
             .partition_point(|knot| knot.specific_enthalpy_j_kg <= h)
             .min(knots.len() - 1);
-        let slopes = |a: usize, b: usize| {
+        let slopes = |a: usize, b: usize, endpoint: usize| {
             let dh = knots[b].specific_enthalpy_j_kg - knots[a].specific_enthalpy_j_kg;
+            // Compare ORIGINAL one-sided caloric derivatives at a knot.
+            // Off knots only zero/nonzero coordinate motion is used below;
+            // resolve() obtains the actual point derivative for the tangent.
+            let dt = self.curve.sensible_heat_capacities_on_interval(a).map_or_else(
+                || (knots[b].temperature_k - knots[a].temperature_k) / dh,
+                |cp| 1.0 / cp[endpoint],
+            );
             (
-                (knots[b].temperature_k - knots[a].temperature_k) / dh,
+                dt,
                 (knots[b].liquid_mass_fraction - knots[a].liquid_mass_fraction) / dh,
             )
         };
-        let (dt, df) = slopes(upper - 1, upper);
+        let (dt, df) = slopes(upper - 1, upper, 0);
         if h == knots[upper - 1].specific_enthalpy_j_kg && upper > 1 {
-            let before = slopes(upper - 2, upper - 1);
+            let before = slopes(upper - 2, upper - 1, 1);
             if before.0 != dt || self.material.liquid_fraction_axis.is_some() && before.1 != df {
                 return Err(E::ChartKink {
                     vertex,

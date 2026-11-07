@@ -407,6 +407,103 @@ fn sensible_scalar_and_temperature_curve_controls_match_resolved_source_finite_d
 }
 
 #[test]
+fn g1_continuous_original_cp_at_a_redundant_knot_admits_material_radiation_adjoints() {
+    use fs_material::phase::{HeatCapacityKnot, SolidLiquidPhase};
+
+    let mesh = mesh();
+    let boundary = boundary(&mesh);
+    let card = source_card(Some("T"), &[0.2, 0.8]);
+    let curve = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity_exact(
+        card.content_hash(), SolidLiquidPhase::Solid, 0.0,
+        &[300.0, 400.0, 500.0].map(|t| HeatCapacityKnot {
+            temperature_k: t, specific_heat_capacity_j_kg_k: 1.0 + (t - 300.0) / 100.0,
+            bulk_density_kg_m3: RHO,
+        }),
+    ).unwrap();
+    let context = context();
+    let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+    let bath = 350.0_f64;
+    let dt = 0.02;
+    let old = [150.0; 4]; // h(400 K), exactly the redundant original Cp knot.
+    assert_eq!(curve.knots()[1].specific_enthalpy_j_kg, old[0]);
+    let face_heat = AREA / 3.0 * 0.5 * STEFAN_BOLTZMANN_W_M2_K4
+        * (400.0_f64.powi(4) - bath.powi(4));
+    // The tetrahedron's source matrix is (I+11^T)/120. These independently
+    // manufactured P1 values give [face_heat;3] and zero at the apex, holding
+    // the actual accepted state exactly at the knot despite nonzero radiation.
+    let source = ScalarField::Nodal(vec![
+        48.0 * face_heat, 48.0 * face_heat, 48.0 * face_heat, -72.0 * face_heat,
+    ]);
+    let problem = ConductionProblem {
+        mesh: &mesh, boundary: &boundary, material: &material, source: &source,
+        element_materials: None,
+    };
+    with_cx(|cx| {
+        let radiation = MaterialPointwiseAmbientRadiation::new(
+            cx, &mesh, &boundary, &[patch(&card, &curve, &context, bath)],
+        ).unwrap();
+        let engine = EnthalpyBackwardEuler::uniform(cx, &mesh, &curve, RHO, budget()).unwrap();
+        let accepted = engine.advance_with_material_ambient_radiation(
+            cx, problem, None, &old, dt, config(), &radiation,
+        ).unwrap();
+        assert_eq!(accepted.specific_enthalpy_j_kg, old);
+        close(accepted.pointwise_radiation.as_ref().unwrap().outward_heat_w,
+            3.0 * face_heat, 1e-10);
+        let bound = engine.linearize_accepted_with_material_ambient_radiation(
+            cx, problem, None, &old, dt, config(), &radiation, accepted, 1e-8,
+            radiation.adjoint_workspace_entries().unwrap(),
+        ).unwrap();
+
+        // Independent inverse of h=theta+theta^2/200, analytic tetrahedron
+        // gradients, and degree-six simplex moments for epsilon(T)*T^4.
+        // This is the original physical residual, not production assembly.
+        let residual = |h: &[f64; 4]| -> [f64; 4] {
+            let temperature = (*h).map(|h|
+                300.0 + 2.0 * h / (1.0 + (1.0 + 0.02 * h).sqrt()));
+            let radiation = exact_face_load(
+                [temperature[0], temperature[1], temperature[2]],
+                [temperature[0], temperature[1], temperature[2]]
+                    .map(|t| 0.2 + 0.003 * (t - 300.0)),
+                bath,
+            );
+            let gradient: [f64; 3] = std::array::from_fn(|i|
+                temperature[i + 1] - temperature[0]);
+            let bulk = [-gradient.iter().sum::<f64>() / 3.0,
+                gradient[0] / 3.0, gradient[1] / 3.0, gradient[2] / 3.0];
+            std::array::from_fn(|i| h[i] - old[i]
+                + dt * (bulk[i] + if i < 3 { radiation[i] - face_heat } else { 0.0 }))
+        };
+        let action = bound.apply_jacobian(cx, &DIRECTION).unwrap();
+        let transpose = bound.apply_jacobian_transpose(cx, &SEED).unwrap();
+        for epsilon in [1e-3, 5e-4] {
+            let plus = residual(&std::array::from_fn(|i| old[i] + epsilon * DIRECTION[i]));
+            let minus = residual(&std::array::from_fn(|i| old[i] - epsilon * DIRECTION[i]));
+            for i in 0..4 {
+                close(action[i], (plus[i] - minus[i]) / (2.0 * epsilon), 2e-8);
+                let mut plus = old;
+                let mut minus = old;
+                plus[i] += epsilon;
+                minus[i] -= epsilon;
+                let difference = (dot(&SEED, &residual(&plus)) - dot(&SEED, &residual(&minus)))
+                    / (2.0 * epsilon);
+                close(transpose[i], difference, 2e-8);
+            }
+        }
+        let gradient = bound.pullback_with_material_ambient_controls(cx, &SEED, linear()).unwrap();
+        let shifted_objective = |offset: f64| {
+            let previous: [f64; 4] = std::array::from_fn(|i| old[i] + offset * DIRECTION[i]);
+            let step = engine.advance_with_material_ambient_radiation(
+                cx, problem, None, &previous, dt, config(), &radiation,
+            ).unwrap();
+            dot(&SEED, &step.specific_enthalpy_j_kg)
+        };
+        let epsilon = 0.01;
+        close(dot(&gradient.thermal.previous_specific_enthalpy, &DIRECTION),
+            (shifted_objective(epsilon) - shifted_objective(-epsilon)) / (2.0 * epsilon), 3e-7);
+    });
+}
+
+#[test]
 fn moving_source_and_chart_corners_refuse_but_constant_coordinates_admit() {
     let mesh = mesh();
     let boundary = boundary(&mesh);

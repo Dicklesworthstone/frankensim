@@ -440,6 +440,86 @@ fn local_latent_fraction_laws_retain_both_materials_and_exact_trace_chain_rule()
 }
 
 #[test]
+fn g1_continuous_original_cp_at_a_redundant_knot_admits_contact_adjoints() {
+    use fs_material::phase::{HeatCapacityKnot, SolidLiquidPhase};
+
+    with_cx(|cx| {
+        let mesh = tetrahedra();
+        let boundary = ThermalBoundaryBuilder::new(&mesh)
+            .adiabatic_remainder().finish().unwrap();
+        let cards = [common::bulk("sensible A"), common::bulk("sensible B")];
+        let curves = std::array::from_fn(|side| {
+            EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity_exact(
+                cards[side].content_hash(), SolidLiquidPhase::Solid, 0.0,
+                &[300.0, 400.0, 500.0].map(|t| HeatCapacityKnot {
+                    temperature_k: t, specific_heat_capacity_j_kg_k: 1.0 + (t - 300.0) / 100.0,
+                    bulk_density_kg_m3: 1.0,
+                }),
+            ).unwrap()
+        });
+        let engine = engine(cx, &mesh, &curves, 4);
+        let source = source(&cards, 1.0, true, false, 1.0);
+        let point = point();
+        // Cp=1+theta/100; h=theta+theta^2/200. Both true one-sided
+        // derivatives at 400 K are 1/2, while h/T chords give 2/3 and 2/5.
+        let h = [150.0, 150.0, 150.0, 150.0, 262.5, 262.5, 262.5, 262.5];
+        assert_eq!(curves[0].knots()[1].specific_enthalpy_j_kg, h[0]);
+        let direction = [0.7, -0.4, 0.2, 0.0, -0.1, 0.5, -0.3, 0.0];
+        let dual = [0.3, -0.4, 0.5, 0.2, -0.6, 0.7, -0.8, 0.1];
+        for mode in 0..2 {
+            let contacts = contacts(
+                cx, &mesh, &boundary, &cards, &curves, &source, &point,
+                sides(&mesh, 4, 2, 0.0), mode, false,
+            );
+            let linear = contacts
+                .linearize_enthalpy(cx, &boundary, &engine, &h, 10000).unwrap();
+            // Independent inverse, P1 face quadrature and original source R.
+            // Mean-law and pointwise-law variants share the same flat endpoint
+            // but have their own physical perturbed face response.
+            let load = |hs: &[f64; 8]| {
+                let temperature = (*hs).map(|h| 300.0 + 2.0 * h / (1.0 + (1.0 + 0.02 * h).sqrt()));
+                let mean_a = temperature[..3].iter().sum::<f64>() / 3.0;
+                let mut result = [0.0; 8];
+                for corner in 0..3 {
+                    let shape: [f64; 3] = std::array::from_fn(|i|
+                        if i == corner { 2.0 / 3.0 } else { 1.0 / 6.0 });
+                    let a: f64 = (0..3).map(|i| shape[i] * temperature[i]).sum();
+                    let b: f64 = (0..3).map(|i| shape[i] * temperature[i + 4]).sum();
+                    let source_temperature = if mode == 0 { mean_a } else { a };
+                    let resistance = 1.0 + 0.01 * (source_temperature - 350.0);
+                    let heat = (a - b) / resistance / 6.0;
+                    for i in 0..3 {
+                        result[i] += shape[i] * heat;
+                        result[i + 4] -= shape[i] * heat;
+                    }
+                }
+                result
+            };
+            let actual = linear.nodal_outflow_w();
+            for (a, expected) in actual.iter().zip(load(&h)) { near(*a, expected, 2e-12); }
+            let action = linear.apply_enthalpy(cx, &direction).unwrap();
+            let adjoint = linear.apply_enthalpy_transpose(cx, &dual).unwrap();
+            for epsilon in [1e-3, 5e-4] {
+                let plus = load(&std::array::from_fn(|i| h[i] + epsilon * direction[i]));
+                let minus = load(&std::array::from_fn(|i| h[i] - epsilon * direction[i]));
+                for row in 0..8 {
+                    near(action[row], (plus[row] - minus[row]) / (2.0 * epsilon), 2e-8);
+                }
+                for column in 0..8 {
+                    let mut plus = h;
+                    let mut minus = h;
+                    plus[column] += epsilon;
+                    minus[column] -= epsilon;
+                    let difference = (dot(&dual, &load(&plus)) - dot(&dual, &load(&minus)))
+                        / (2.0 * epsilon);
+                    near(adjoint[column], difference, 2e-8);
+                }
+            }
+        }
+    });
+}
+
+#[test]
 fn native_phase_contact_solve_and_adjoint_match_an_independent_latent_quadratic() {
     with_cx(|cx| {
         let mesh = tetrahedra();

@@ -66,6 +66,26 @@ and compares time refinement with an independent temperature-coordinate ODE.
 The new regression is source/syntax checked but unexecuted in the current
 workspace; no native runtime or full-workspace verdict is claimed here.
 
+## Original Cp continuity in contact and radiation adjoints
+
+Contact and material pointwise-radiation derivative admission compare the
+original one-sided `dT/dh = 1/Cp(T)` at a sensible caloric boundary. Different
+average h/T chords do not create a derivative discontinuity when the original
+Cp is continuous. The numerical tangent still uses the original pointwise
+caloric derivative. Authored affine laws, true temperature/fraction corners,
+latent boundaries, source knots and source-domain limits retain their existing
+strict admission; no material smoothing or source extrapolation is introduced.
+
+Focused regressions place a nonconstant-Cp material exactly at a redundant
+source knot. Contact actions and transposes are compared with finite
+differences of independently evaluated P1 heat transfer. A radiating spatial
+endpoint with nonzero heat exchange is manufactured at that same knot; its
+complete tangent and transpose are compared with an independent caloric
+inverse, tetrahedron gradients and exact simplex moments. The history
+pullback is also compared with a forward-perturbation reference. These regression
+definitions are syntax checked but unexecuted in the current workspace;
+native execution remains required and no runtime verification is claimed.
+
 ## Source-surface contact with evolving material radiation
 
 `TemperatureContacts::advance_enthalpy_with_material_ambient_radiation` and

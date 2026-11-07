@@ -422,15 +422,21 @@ pub(super) fn admit_chart_derivative(
         .partition_point(|knot| knot.specific_enthalpy_j_kg <= h)
         .min(knots.len() - 1);
     if upper > 1 && h == knots[upper - 1].specific_enthalpy_j_kg {
-        let slope = |a: usize, b: usize| {
+        let slope = |a: usize, b: usize, endpoint: usize| {
             let dh = knots[b].specific_enthalpy_j_kg - knots[a].specific_enthalpy_j_kg;
+            // A source Cp(T) interval is nonlinear in h. Its boundary chord
+            // does not give the one-sided derivative at this shared node.
+            let dt = curve.sensible_heat_capacities_on_interval(a).map_or_else(
+                || (knots[b].temperature_k - knots[a].temperature_k) / dh,
+                |cp| 1.0 / cp[endpoint],
+            );
             [
-                (knots[b].temperature_k - knots[a].temperature_k) / dh,
+                dt,
                 (knots[b].liquid_mass_fraction - knots[a].liquid_mass_fraction) / dh,
             ]
         };
-        let left = slope(upper - 2, upper - 1);
-        let right = slope(upper - 1, upper);
+        let left = slope(upper - 2, upper - 1, 1);
+        let right = slope(upper - 1, upper, 0);
         if left[0] != right[0] || fraction && left[1] != right[1] {
             return Err(invalid(
                 "<contact-adjoint>",
