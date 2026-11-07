@@ -12,8 +12,10 @@ use crate::d3q19::freesurface3::{
 impl FreeSurface3 {
     /// Propose one wall-driven VOF tick with explicit WALE/Vreman viscosity.
     ///
-    /// The accepted interior liquid velocity supplies the full gradient, held
-    /// for this tick; no wall-law gradient or subgrid wall stress is inferred.
+    /// Accepted force-centered liquid velocity and this tick's prescribed
+    /// halfway face velocity supply the full gradient. Quadratic reconstruction
+    /// uses the actual wall distance, including a two-layer liquid film; a
+    /// one-cell wall/gas film still refuses. No subgrid wall law is inferred.
     /// Empty interface carriers keep molecular relaxation. Occupied cells retain
     /// the gradient closure's second-order support and viscosity-ratio gates.
     ///
@@ -44,7 +46,9 @@ impl FreeSurface3 {
             self.domain_cells(),
             motion.tangential_velocity.len(),
         )?;
-        let sgs = self.prepare_gradient_sgs(gate, config, kinematics, workspace)?;
+        let sgs = self.prepare_gradient_sgs_with_wall(
+            gate, config, Some(motion), kinematics, workspace,
+        )?;
         let tau = (config.model.coefficient() != 0.0).then_some(&workspace.tau);
         let (candidate, wall) =
             self.planar_wall_field_candidate_with_relaxation(motion, controls, tau, gate)?;

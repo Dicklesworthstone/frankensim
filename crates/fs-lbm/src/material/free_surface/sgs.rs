@@ -206,8 +206,9 @@ impl MaterialFreeSurface3<'_> {
     /// Propose one source-bound moving-wall WALE/Vreman step in physical units.
     ///
     /// The original molecular material, force frame, capillarity and scaling
-    /// remain authoritative. Accepted interior liquid velocities provide the
-    /// gradient; no wall-law derivative or unresolved wall turbulence is added.
+    /// remain authoritative. Accepted liquid velocities and the prescribed
+    /// halfway wall-face velocity provide the gradient; no unresolved wall
+    /// turbulence or empirical wall law is added.
     /// The original fixed, fully flooded, tangential wall-field rules apply.
     ///
     /// Both wall exchange and SGS SI conversions, source-scenario speed limits,

@@ -13343,13 +13343,21 @@ retry. Their coefficient evidence carries an estimate and no calibrated model.
 ## Moving-wall WALE/Vreman with material SI receipts
 
 `planar_wall_velocity_field_gradient_sgs_candidate` and its publishing entry
-prepare the explicit full-gradient closure from accepted interior liquid
-velocities, then pass its local relaxation map into the original face-field wall
-candidate. The same collision supplies reflected populations and actual wall
-impulse, torque, residual couple and actuator work. Empty interface carriers
-retain molecular relaxation; occupied-liquid stencil and viscosity-ratio
-refusals remain unchanged. Zero coefficient passes no local tau map, preserving
-original wall trajectories and receipts on admitted support.
+prepare the full-gradient closure from accepted force-centered liquid velocities
+and the SAME prescribed halfway wall-face velocity used by native reflection.
+Quadratic wall/center/interior reconstruction supplies second-order support at
+the wall-adjacent cell and both centers of a two-layer liquid film. Gas, empty
+interfaces, inactive solids and piston slabs remain absent velocity samples;
+a single occupied wall/gas center still refuses. The public liquid-only
+kinematics observer keeps its existing stencil semantics.
+
+The resulting WALE/Vreman viscosity directly supplies the existing local
+collision relaxation map. That same collision produces reflected populations
+and actual wall impulse, torque, residual couple and actuator work. Empty
+interface carriers retain molecular relaxation, and the viscosity-ratio gates
+remain active. Zero coefficient passes no local tau map, preserving original
+wall trajectories and receipts on admitted support. The native collision family,
+independent molecular bulk rate and source-rheology integration are retained.
 
 The corresponding `MaterialFreeSurface3` SI entries retain the original
 material, force frame, capillarity, pressure datum and source/scenario limits.
@@ -13360,13 +13368,15 @@ quantities lost to conversion underflow and nonfinite receipts refuse.
 One native clone is used; no thermal route history is allocated.
 
 The scope remains a fixed, fully flooded tangential wall, with gradients
-reconstructed from interior liquid. This supplies neither a wall model nor heat
-deposition or turbulence validation. Four focused regression groups cover
-disabled-coefficient BGK/TRT parity, enabled physical evolution and reciprocal
-wrench/work with independent SI conversions, stencil/budget/cancellation refusal,
-and a late SI conversion failure preserving the accepted native flow.
-Native compilation, formatting and execution of these new regressions were
-unavailable when this extension was committed.
+reconstructed from liquid and the prescribed halfway face. No empirical wall
+function, heat deposition or turbulence validation is inferred. Existing
+material regression groups cover disabled-coefficient BGK/TRT parity, enabled
+physical evolution and reciprocal wrench/work with independent SI conversions,
+stencil/budget/cancellation refusal, and late SI-conversion rollback.
+`sgs::gradient::wall_tests` adds all six wall orientations, quadratic shear and
+rigid rotation, force/Galilean invariance, two-layer films, and actual BGK/TRT
+and independent-bulk collision populations and wall impulses compared with an
+independently prescribed analytic-gradient relaxation map (G0/G3).
 
 ## Source-resolved Newtonian films
 

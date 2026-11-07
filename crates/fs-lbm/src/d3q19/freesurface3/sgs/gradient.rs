@@ -3,7 +3,7 @@
 use super::*;
 use crate::d3q19::freesurface3::{
     FreeSurfaceKinematics3, FreeSurfaceKinematicsError3, FreeSurfaceKinematicsWorkspace3,
-    WetGradientStencil3,
+    PlanarWallVelocityField3, WetGradientStencil3,
 };
 
 impl From<FreeSurfaceKinematicsError3> for FreeSurfaceSgsError3 {
@@ -47,6 +47,20 @@ impl FreeSurface3 {
         kinematics: &mut FreeSurfaceKinematicsWorkspace3,
         workspace: &mut FreeSurfaceSgsWorkspace3,
     ) -> Result<FreeSurfaceSgsReport3, FreeSurfaceSgsError3> {
+        self.prepare_gradient_sgs_with_wall(gate, config, None, kinematics, workspace)
+    }
+
+    // The moving-wall transaction supplies the same face velocities to this
+    // resolved gradient and to native reflection. Other callers retain the
+    // original liquid-only closure and its explicit free-surface refusals.
+    pub(super) fn prepare_gradient_sgs_with_wall(
+        &self,
+        gate: &CancelGate,
+        config: SgsConfig,
+        wall: Option<PlanarWallVelocityField3<'_>>,
+        kinematics: &mut FreeSurfaceKinematicsWorkspace3,
+        workspace: &mut FreeSurfaceSgsWorkspace3,
+    ) -> Result<FreeSurfaceSgsReport3, FreeSurfaceSgsError3> {
         check_cancel(gate)?;
         config.validate()?;
         if !matches!(
@@ -63,7 +77,7 @@ impl FreeSurface3 {
         if !molecular_nu.is_finite() || molecular_nu <= 0.0 {
             return Err(SgsError::InvalidMolecularViscosity { cell: 0 }.into());
         }
-        let field = self.kinematics(gate, kinematics)?;
+        let field = self.kinematics_with_wall(gate, kinematics, wall)?;
         workspace.tau.retain(|&(key, lane), _| {
             self.tiles
                 .get(&key)
@@ -195,3 +209,6 @@ impl FreeSurface3 {
         Ok((candidate, report))
     }
 }
+
+#[cfg(test)]
+mod wall_tests;

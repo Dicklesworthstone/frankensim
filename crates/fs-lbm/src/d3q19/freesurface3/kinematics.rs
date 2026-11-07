@@ -1,12 +1,14 @@
 //! Resolved liquid velocity gradients on the original sparse VOF owner.
 //!
-//! Only occupied liquid cell centers enter the stencil. Gas, empty interface
+//! Public observations use only occupied liquid cell centers. Gas, empty interface
 //! cells, solid/inactive tiles and the current piston slab are missing samples,
 //! never stationary fluid. One-sided derivatives use contiguous liquid centers
 //! and expose their order; an unresolvable axis refuses instead of inventing a
-//! zero derivative. This does not prescribe a velocity at a free surface or wall.
+//! zero derivative. The native wall/SGS transaction additionally supplies its
+//! explicit halfway face velocity; a free-surface velocity is never invented.
 
-use super::{CancelGate, Cell3, FreeSurface3, TILE_CELLS};
+use super::{CS2_3, CancelGate, Cell3, FreeSurface3, PlanarWallVelocityField3, TILE_CELLS};
+use crate::MACH_LIMIT;
 use crate::kinematics::{FlowKinematics3, KinematicsError, checkpoint};
 
 /// Actual spatial stencil for one column of the liquid velocity gradient.
@@ -17,6 +19,11 @@ pub enum WetGradientStencil3 {
     BackwardSecondOrder,
     ForwardFirstOrder,
     BackwardFirstOrder,
+    /// Quadratic reconstruction through the prescribed lower halfway wall
+    /// and two occupied liquid centers; neither center is a gas ghost.
+    LowerWallSecondOrder,
+    /// The same reconstruction at an upper domain wall.
+    UpperWallSecondOrder,
 }
 
 /// Resolved kinematics in lattice units, with per-axis reconstruction order.
@@ -97,6 +104,9 @@ pub struct FreeSurfaceKinematics3<'a> {
     owner: &'a FreeSurface3,
     gate: &'a CancelGate,
     velocity: &'a [Option<[f64; 3]>],
+    // Only the native wall/SGS transaction supplies this boundary epoch.
+    // Public liquid-only observations retain their original stencil semantics.
+    wall: Option<PlanarWallVelocityField3<'a>>,
 }
 
 impl FreeSurface3 {
@@ -108,7 +118,38 @@ impl FreeSurface3 {
         gate: &'a CancelGate,
         workspace: &'a mut FreeSurfaceKinematicsWorkspace3,
     ) -> Result<FreeSurfaceKinematics3<'a>, FreeSurfaceKinematicsError3> {
+        self.kinematics_with_wall(gate, workspace, None)
+    }
+
+    pub(crate) fn kinematics_with_wall<'a>(
+        &'a self,
+        gate: &'a CancelGate,
+        workspace: &'a mut FreeSurfaceKinematicsWorkspace3,
+        wall: Option<PlanarWallVelocityField3<'a>>,
+    ) -> Result<FreeSurfaceKinematics3<'a>, FreeSurfaceKinematicsError3> {
         checkpoint(gate)?;
+        if let Some(wall) = wall {
+            let cells = self.domain_cells();
+            let axis = wall.wall.axis();
+            let faces = cells[(axis + 1) % 3].checked_mul(cells[(axis + 2) % 3]);
+            if faces != Some(wall.tangential_velocity.len()) {
+                return Err(
+                    KinematicsError::Input("wall gradient face-field shape differs").into(),
+                );
+            }
+            for (i, tangent) in wall.tangential_velocity.iter().enumerate() {
+                if i % 64 == 0 {
+                    checkpoint(gate)?;
+                }
+                let speed = tangent[0].hypot(tangent[1]);
+                if !speed.is_finite() || speed / CS2_3.sqrt() >= MACH_LIMIT {
+                    return Err(KinematicsError::Input(
+                        "wall gradient velocity exceeds the native Mach domain",
+                    )
+                    .into());
+                }
+            }
+        }
         let active_tiles = self.grid.active_keys().len();
         if active_tiles > workspace.velocity.len() / TILE_CELLS {
             return Err(KinematicsError::Budget {
@@ -150,6 +191,7 @@ impl FreeSurface3 {
             owner: self,
             gate,
             velocity: &workspace.velocity[..active_tiles * TILE_CELLS],
+            wall,
         })
     }
 }
@@ -182,6 +224,31 @@ impl FreeSurfaceKinematics3<'_> {
             minus[axis] -= 1;
             let left = self.velocity_at(minus);
             let right = self.velocity_at(plus);
+            // A prescribed wall value is located halfway from the adjacent
+            // liquid center, not at the absent solid/gas lattice node. The
+            // quadratic fit therefore has unequal spacings (1/2, 1).
+            if let Some(wall) = self.wall_velocity_at(minus, axis) {
+                let Some(inward) = right else {
+                    return Err(FreeSurfaceKinematicsError3::MissingDerivative { cell, axis });
+                };
+                for component in 0..3 {
+                    gradient[component][axis] = (center[component] - wall[component])
+                        + (inward[component] - wall[component]) / 3.0;
+                }
+                stencils[axis] = WetGradientStencil3::LowerWallSecondOrder;
+                continue;
+            }
+            if let Some(wall) = self.wall_velocity_at(plus, axis) {
+                let Some(inward) = left else {
+                    return Err(FreeSurfaceKinematicsError3::MissingDerivative { cell, axis });
+                };
+                for component in 0..3 {
+                    gradient[component][axis] = -(center[component] - wall[component])
+                        - (inward[component] - wall[component]) / 3.0;
+                }
+                stencils[axis] = WetGradientStencil3::UpperWallSecondOrder;
+                continue;
+            }
             let (column, stencil): ([f64; 3], WetGradientStencil3) = match (left, right) {
                 (Some(left), Some(right)) => (
                     core::array::from_fn(|a| 0.5 * (right[a] - left[a])),
@@ -202,6 +269,23 @@ impl FreeSurfaceKinematics3<'_> {
                                 WetGradientStencil3::ForwardSecondOrder
                             } else {
                                 WetGradientStencil3::BackwardSecondOrder
+                            },
+                        )
+                    } else if let Some(wall) = self.wall_velocity_at(next, axis) {
+                        // The last center in a two-layer liquid film still
+                        // has three physical samples: itself, the first
+                        // center one cell away, and the wall 3/2 cells away.
+                        // This supplies a second-order one-sided derivative
+                        // without using the missing free-surface gas velocity.
+                        (
+                            core::array::from_fn(|a| {
+                                sign * (3.0 * (first[a] - center[a])
+                                    - (4.0 / 3.0) * (wall[a] - center[a]))
+                            }),
+                            if forward {
+                                WetGradientStencil3::UpperWallSecondOrder
+                            } else {
+                                WetGradientStencil3::LowerWallSecondOrder
                             },
                         )
                     } else {
@@ -266,5 +350,37 @@ impl FreeSurfaceKinematics3<'_> {
             .grid
             .resolve_source(position[0], position[1], position[2])?;
         self.velocity[slot * TILE_CELLS + lane]
+    }
+
+    // Recognize ONLY the explicitly prescribed domain plane. Inactive tiles,
+    // piston slabs, other walls and gas cells retain the liquid-only fallback.
+    // The returned velocity belongs to the Cartesian face center used by the
+    // original moving-wall reflection, with exactly zero normal component.
+    fn wall_velocity_at(&self, position: [i64; 3], axis: usize) -> Option<[f64; 3]> {
+        let wall = self.wall?;
+        if axis != wall.wall.axis() {
+            return None;
+        }
+        let cells = self.owner.domain_cells();
+        let boundary = if wall.wall.upper() {
+            cells[axis] as i64
+        } else {
+            -1
+        };
+        if position[axis] != boundary {
+            return None;
+        }
+        let a = (axis + 1) % 3;
+        let b = (axis + 2) % 3;
+        let ia = usize::try_from(position[a]).ok()?;
+        let ib = usize::try_from(position[b]).ok()?;
+        if ia >= cells[a] || ib >= cells[b] {
+            return None;
+        }
+        let tangent = wall.tangential_velocity[ib * cells[a] + ia];
+        let mut velocity = [0.0; 3];
+        velocity[a] = tangent[0];
+        velocity[b] = tangent[1];
+        Some(velocity)
     }
 }
