@@ -86,6 +86,9 @@ pub struct AdhesiveTractionProfile {
     contact_radius_m: f64,
     interaction_radius_m: f64,
     normal_force_n: f64,
+    // Canonical full-stick shear effort from the same mixed-mode evaluation.
+    // Normal JKR and Maugis owners retain exactly zero here.
+    tangential_force_n: [f64; 2],
     distribution: Distribution,
 }
 
@@ -141,8 +144,9 @@ impl AdhesiveTractionProfile {
     /// the shear energy release a second time and give the wrong normal load.
     /// The profile retains the complete mixed-mode identity and can use the
     /// existing annular/polar transfers without resampling the singular rim.
-    /// It carries normal traction only: tangential load and elastic storage
-    /// remain with that same original mixed-mode owner.
+    /// Existing normal queries remain normal-only. Explicit vector queries
+    /// additionally export the same owner's Mindlin full-stick shear field;
+    /// coupled elastic storage remains with the original mixed-mode owner.
     pub fn jkr_mixed_mode_displacement(
         source: &SourceJkrMixedMode,
         indentation_m: f64,
@@ -196,6 +200,7 @@ impl AdhesiveTractionProfile {
             contact_radius_m: a,
             interaction_radius_m: a,
             normal_force_n: response.normal_force_n,
+            tangential_force_n: response.tangential_force_n,
             distribution: Distribution::Jkr {
                 hertz_peak_pa,
                 tensile_pa,
@@ -228,6 +233,7 @@ impl AdhesiveTractionProfile {
             contact_radius_m: a,
             interaction_radius_m: a,
             normal_force_n: response.normal_force_n,
+            tangential_force_n: [0.0; 2],
             distribution: Distribution::Jkr {
                 hertz_peak_pa,
                 tensile_pa,
@@ -261,6 +267,7 @@ impl AdhesiveTractionProfile {
             contact_radius_m: a,
             interaction_radius_m: equilibrium.cohesive_radius_m(),
             normal_force_n: equilibrium.normal_force_n(),
+            tangential_force_n: [0.0; 2],
             distribution: Distribution::Maugis {
                 hertz_peak_pa,
                 stress_pa,
@@ -298,6 +305,12 @@ impl AdhesiveTractionProfile {
     #[must_use]
     pub const fn normal_force_n(&self) -> f64 {
         self.normal_force_n
+    }
+    /// Original full-stick shear effort in the profile's local x,y directions,
+    /// N. Exactly zero for the ordinary normal-only JKR and Maugis sources.
+    #[must_use]
+    pub const fn tangential_force_n(&self) -> [f64; 2] {
+        self.tangential_force_n
     }
 
     /// Pointwise continuum pressure, positive in compression. At an ideal JKR

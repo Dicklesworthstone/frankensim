@@ -2,6 +2,9 @@
 #[path = "source_point/common.rs"]
 mod common;
 
+#[path = "adhesive_traction/vector.rs"]
+mod vector;
+
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::mixed_mode::{JkrMixedModeEnvelope, SourceJkrMixedMode};
 use fs_contact::normal_patch::{adhesive::*, maugis::*, traction::*};
@@ -226,7 +229,19 @@ fn mixed_mode_spatial_zero_shear_rotation_and_source_refusals() {
     let rotated =
         AdhesiveTractionProfile::jkr_mixed_mode_displacement(&source, delta, [0.0, -displacement])
             .unwrap();
-    assert_eq!(first, rotated);
+    // Rotation leaves the original normal field invariant, while the opaque
+    // profile now also retains the distinct canonical vector shear effort.
+    assert_eq!(first.model_identity(), rotated.model_identity());
+    assert_eq!(first.normal_state_identity(), rotated.normal_state_identity());
+    assert_eq!(first.authority(), rotated.authority());
+    assert_eq!(first.contact_radius_m(), rotated.contact_radius_m());
+    assert_eq!(first.normal_force_n(), rotated.normal_force_n());
+    for fraction in [0.0, 0.3, 0.9] {
+        let radius = fraction * first.contact_radius_m();
+        assert_eq!(first.pressure_pa(radius), rotated.pressure_pa(radius));
+    }
+    assert_eq!(rotated.tangential_force_n(), [0.0, -first.tangential_force_n()[0]]);
+    assert_ne!(first, rotated);
     let fold =
         AdhesiveTractionProfile::jkr_mixed_mode_displacement(&source, delta, [critical, 0.0])
             .unwrap();

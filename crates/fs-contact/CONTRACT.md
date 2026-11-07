@@ -3689,3 +3689,32 @@ beginning pressure, k and mapped H; refine slip when pressure changes appreciabl
 Numerical regressions cover heterogeneous mapped caps and separate wear,
 external softening with retained dent/work, maintained force and spring storage,
 fixed counterfaces, and atomic source/mapping/history/control refusals.
+
+## Full-stick vector traction transfer
+
+The explicit vector queries in `normal_patch::traction::sectors::vector`
+carry the same mixed-mode JKR disk's original shear efforts as well as its
+normal pressure. Mindlin's circular full-stick field is
+`q_i(r)=T_i/(2*pi*a*sqrt(a*a-r*r))`
+([Mindlin 1949, equations 76 and 78](https://cybra.lodz.pl/Content/6930/vol_16_No_3.pdf)).
+The immutable profile retains canonical shear from its original equilibrium;
+ordinary normal JKR and Maugis sources carry exactly zero shear.
+
+Sector forces and all first moments integrate the singular field analytically.
+The existing tensile flat-punch centroid is cached once per ring and shared
+with the shear calculation; angular factors are shared by all three traction
+components. Complete-grid publication checks the full force vector and every
+first moment under the caller's absolute norm gates. Cancellation and refusal
+leave caller output unchanged. Normal-only APIs retain their original behavior.
+
+Local component order is x shear, y shear, normal. Vector affine work includes
+all translation and gradient components, and the wrench includes each sector's
+in-plane shear couple. No moment is divided by a possibly zero normal force.
+Original source identity, authority, applicability and control-dependent peeling
+admission persist. This exports the selected reversible circular full-stick
+model; partial slip, torsional compliance, finite-body equilibrium and a new
+fracture law are outside this transfer.
+
+The vector regressions specify dimensional Mindlin fields and quarter-disk
+moments, rigid and general affine work, complete-grid resultants, one-ULP edge
+rings, tangential rotation, zero-shear and finite-gap limits, and atomic refusal.

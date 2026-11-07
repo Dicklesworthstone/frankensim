@@ -9,6 +9,9 @@
 
 mod centroid;
 
+/// Explicit full-stick vector efforts, moments and affine-work transfer.
+pub mod vector;
+
 use super::{
     AdhesiveTractionError, AdhesiveTractionProfile, AnnularAdhesiveTraction, Distribution,
     edge_root, finite, mean_cohesive_angle,
@@ -56,6 +59,12 @@ pub enum SectorTractionError {
     Resultant {
         force_residual_n: f64,
         first_moment_residual_n_m: [f64; 2],
+    },
+    /// The complete normal/shear resultant or its first moments fail the
+    /// caller's original vector-norm gate. Components are local x,y,normal.
+    VectorResultant {
+        force_residual_n: [f64; 3],
+        first_moment_residual_n_m: [[f64; 2]; 3],
     },
 }
 impl From<AdhesiveTractionError> for SectorTractionError {
@@ -127,6 +136,8 @@ pub struct PolarRingScratch {
     ring: AnnularAdhesiveTraction,
     first_moment_n_m: f64,
     error_estimate_n_m: f64,
+    // Reuse the exact singular-field centroid in explicit shear transfers.
+    tensile_centroid_m: f64,
 }
 impl Default for PolarRingScratch {
     fn default() -> Self {
@@ -141,6 +152,7 @@ impl Default for PolarRingScratch {
             },
             first_moment_n_m: 0.0,
             error_estimate_n_m: 0.0,
+            tensile_centroid_m: 0.0,
         }
     }
 }
@@ -301,8 +313,10 @@ impl AdhesiveTractionProfile {
         let mut hertz = 0.0;
         let mut adhesive = Dd::from_f64(0.0);
         let mut error = 0.0;
+        let mut tensile_centroid_m = 0.0;
         if hi > lo {
             let means = centroid::jkr(a, lo, hi).ok_or(SectorTractionError::MomentUnresolved)?;
+            tensile_centroid_m = means[1];
             hertz = finite(ring.hertz_force_n * (means[0] / TAU))?;
             match self.distribution {
                 Distribution::Jkr { .. } => {
@@ -377,13 +391,13 @@ impl AdhesiveTractionProfile {
             ring,
             first_moment_n_m: finite((Dd::from_f64(hertz) + adhesive).to_f64())?,
             error_estimate_n_m: error,
+            tensile_centroid_m,
         })
     }
 }
 
-fn sector_load(radial: PolarRingScratch, start: f64, end: f64) -> SectorAdhesiveTraction {
+fn sector_geometry(start: f64, end: f64) -> (f64, [f64; 2]) {
     let width = end - start;
-    let fraction = width / TAU;
     let angular = if width == TAU {
         [0.0, 0.0]
     } else {
@@ -391,6 +405,17 @@ fn sector_load(radial: PolarRingScratch, start: f64, end: f64) -> SectorAdhesive
         let mid = 0.5 * start + 0.5 * end;
         [amplitude * mid.cos(), amplitude * mid.sin()]
     };
+    (width / TAU, angular)
+}
+fn sector_load(radial: PolarRingScratch, start: f64, end: f64) -> SectorAdhesiveTraction {
+    let (fraction, angular) = sector_geometry(start, end);
+    sector_with_geometry(radial, fraction, angular)
+}
+fn sector_with_geometry(
+    radial: PolarRingScratch,
+    fraction: f64,
+    angular: [f64; 2],
+) -> SectorAdhesiveTraction {
     SectorAdhesiveTraction {
         area_m2: radial.ring.area_m2 * fraction,
         solid_contact_area_m2: radial.ring.solid_contact_area_m2 * fraction,
