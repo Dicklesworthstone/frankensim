@@ -1,7 +1,7 @@
 //! Reusable local irreversible heat waveforms from the original film fields.
 //!
 //! Settled source harmonics retain their physical source clock. Ohmic and
-//! Debye friction channels are sums of squared REAL reservoir fields; their
+//! Debye/Lorentz friction channels are sums of squared REAL reservoir fields; their
 //! sum/difference tones are prepared by the shared analytic spectrum owner.
 //! Reversible electromagnetic/polarization storage is deliberately separate.
 
@@ -19,9 +19,11 @@ pub enum AngularSpectrumExposureHeatChannel {
     Ohmic,
     /// One original Debye pole, using its original material ordering.
     DebyePole { index: usize },
-    /// Sum of all original Debye friction reservoirs.
+    /// One original Lorentz pole, using its original material ordering.
+    LorentzPole { index: usize },
+    /// Sum of all original polarization friction reservoirs.
     Polarization,
-    /// Ohmic plus all Debye friction heat, with no reversible storage rate.
+    /// Ohmic plus all polarization friction heat, with no reversible storage rate.
     Total,
 }
 
@@ -165,8 +167,12 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         if point_index >= self.anchor.modes.len() {
             return Err(bad("heat spectrum point is outside the original grid"));
         }
-        let (first_reservoir, reservoirs) =
-            reservoir_range(channel, self.law.conductivity, self.law.poles.len())?;
+        let (first_reservoir, reservoirs) = reservoir_range(
+            channel,
+            self.law.conductivity,
+            self.law.debye_poles.len(),
+            self.law.lorentz_poles.len(),
+        )?;
         let mut products = 0usize;
         let mut generated = 0usize;
         let mut line_count = 0usize;
@@ -335,14 +341,20 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
 pub(super) fn reservoir_range(
     channel: AngularSpectrumExposureHeatChannel,
     sigma: f64,
-    poles: usize,
+    debye_poles: usize,
+    lorentz_poles: usize,
 ) -> Result<(usize, usize), AngularSpectrumError> {
     use AngularSpectrumExposureHeatChannel as Channel;
+    let poles = debye_poles + lorentz_poles;
     match channel {
         Channel::Ohmic => Ok((0, usize::from(sigma > 0.0))),
-        Channel::DebyePole { index } if index < poles => Ok((index + 1, 1)),
+        Channel::DebyePole { index } if index < debye_poles => Ok((index + 1, 1)),
         Channel::DebyePole { .. } => Err(bad(
             "heat spectrum Debye pole is outside the original material",
+        )),
+        Channel::LorentzPole { index } if index < lorentz_poles => Ok((debye_poles + index + 1, 1)),
+        Channel::LorentzPole { .. } => Err(bad(
+            "heat spectrum Lorentz pole is outside the original material",
         )),
         Channel::Polarization => Ok((1, poles)),
         Channel::Total => Ok((usize::from(sigma == 0.0), poles + usize::from(sigma > 0.0))),

@@ -6287,14 +6287,45 @@ scattering through resonance, homogeneous-film subdivision, independent Ohmic
 loss, complete-source identity refusal, and lossless negative-permittivity
 reflection/tunneling without heat. Their real material-card/quantity fixtures
 compile; the full EM tests are authored but unexecuted in the incomplete
-constellation dependency environment. The ten native production oscillator
+constellation dependency environment. Fifteen native production oscillator
 tests establish the underlying constitutive dynamics, not full EM integration.
 
-Finite-window film heat explicitly refuses these new variants until the
-original inertial polarization reservoirs are connected to that time-domain
-account. Steady Poynting absorption is not substituted for missing finite-window
-storage/work. Temperature feedback, material dispersion derivatives and a
-transient Maxwell discretization are outside this adapter's scope.
+### Finite-window Lorentz heat and reversible storage
+
+The original prepared exposure-layer owner now admits Lorentz and
+LorentzWithOhmic media. Each frequency caches the original restoring coordinate
+`P/sqrt(delta_epsilon)`, kinetic coordinate `Pdot/(omega0*sqrt(delta_epsilon))`
+and friction channel `sqrt(gamma)*Pdot/(omega0*sqrt(delta_epsilon))`. The shared
+finite-window products contract complete coherent fields before averaging.
+Both restoring and kinetic coordinates contribute their reversible storage
+rates; only squared real friction channels become heat. Independent Ohmic heat
+enters once. Real and explicitly proper source statistics retain their original
+sum/difference-frequency semantics, clock and detector weighting.
+
+`AngularSpectrumExposureHeatChannel::LorentzPole` selects one original pole.
+Polarization and Total channels flow through the existing local heat spectrum
+and spatially integrated thermal-load owners. Debye and Lorentz selectors never
+alias one another. Original material identity, physical volume/support, depth
+quadrature, cancellation and spectrum limits remain active. Transfer evaluation
+occurs once per source frequency; repeated depths reuse the film/transfer caches.
+Pair budgets charge `N*sum(F_r^2)*(3+D+2*L)`, plus existing carrier work, and
+workspace admission includes the extra kinetic scratch and retained transfers.
+The Debye path does not allocate or contract kinetic scratch.
+
+Three kernel regressions specify original P/current energy balance, proper
+slow beats under a large carrier, and lossless/cancellation behavior. Two
+original-film integration regressions specify subcycle real-time oracles,
+uniform and triangular windows, instantaneous heat spectra, physical volume
+loads, zero-loss negative-permittivity storage and the live kinetic work cap.
+These five EM regressions are authored but unexecuted without the complete
+constellation dependency closure; formatting and bounded source/API review
+passed. The separately executed native material tests do not qualify the full
+film reconstruction.
+
+This observes settled prescribed harmonics over finite windows. It does not
+add switch-on Maxwell transients, temperature-dependent parameter work or
+material-frequency derivatives. Steady Poynting absorption is not substituted
+for finite-window storage/work.
 
 ### Coherent angular spectra in transparent crystals
 

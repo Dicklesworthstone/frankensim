@@ -1,7 +1,7 @@
 //! Finite-window local film heat and reversible field/polarization storage.
 //!
 //! These are settled prescribed harmonics through the original film operator,
-//! not a switch-on transient. Ohmic and each original Debye reservoir dissipate
+//! not a switch-on transient. Ohmic and each original polarization reservoir dissipate
 //! after all spatial and temporal interference. Boundary power loss also
 //! contains the signed change of electromagnetic/polarization storage.
 
@@ -32,7 +32,7 @@ pub struct AngularSpectrumExposureLayerLimits {
     pub maximum_frequency_groups: usize,
     pub maximum_frequency_layer_mode_pairs: usize,
     pub maximum_point_line_pairs: usize,
-    /// N * sum(F_r²) * (3 + P), with P original Debye poles, plus
+    /// N * sum(F_r²) * (3 + D + 2*L), with D Debye and L Lorentz poles, plus
     /// sum_real F_r*N*(width+height) for a nonzero common carrier. The three
     /// base channels cover the vector field and its instantaneous E/H stores.
     pub maximum_point_reservoir_frequency_pairs: usize,
@@ -42,7 +42,9 @@ pub struct AngularSpectrumExposureLayerLimits {
 
 /// Mean local irreversible heat and signed reversible storage rate [W/m³].
 /// Storage includes epsilon_infinity |E|²/2, mu |H|²/2 and each
-/// |P_p|²/(2 Delta_epsilon_p). It excludes thermal energy and parameter work.
+/// |P_p|²/(2 Delta_epsilon_p), plus each Lorentz pole's
+/// |P_dot_p|²/(2 omega0_p² Delta_epsilon_p). It excludes thermal energy
+/// and parameter work. Real fields are contracted before window averaging.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AngularSpectrumExposureLayerDissipation {
     /// Window/ensemble mean of sigma |E_real|², always nonnegative.
@@ -172,6 +174,11 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             .layer(layer_index)
             .ok_or_else(|| bad("selected field layer is outside the original stack"))?;
         let law = LossLaw::new(selected.response)?;
+        let inertial_scratch_bytes = if law.has_inertial_storage() {
+            core::mem::size_of::<[C64; 3]>()
+        } else {
+            0
+        };
         let n = anchor.modes.len();
         let mut groups = 0_usize;
         let mut point_line_pairs = 0_usize;
@@ -225,7 +232,9 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
                 .and_then(|v| v.checked_mul(extra_kernel_bytes))
                 .and_then(|v| {
                     v.checked_add(f.checked_mul(
-                        core::mem::size_of::<usize>() + core::mem::size_of::<[C64; 6]>(),
+                        core::mem::size_of::<usize>()
+                            + core::mem::size_of::<[C64; 6]>()
+                            + inertial_scratch_bytes,
                     )?)
                 })
                 .and_then(|v| v.checked_add(bank.workspace_bytes()))
@@ -233,7 +242,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             query_workspace = query_workspace.max(scratch);
         }
         let point_reservoir_frequency_pairs = pairs
-            .checked_mul(law.poles.len() + 3)
+            .checked_mul(law.reservoir_pair_channels() + 3)
             .and_then(|v| v.checked_add(carrier_pairs))
             .ok_or_else(|| bad("film exposure reservoir work overflow"))?;
         let index_bytes = groups
@@ -296,8 +305,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             .and_then(|v| v.checked_mul(one_sided_count))
             .ok_or_else(|| bad("film exposure workspace overflow"))?;
         let cache_bytes = law
-            .poles
-            .len()
+            .pole_count()
             .checked_mul(core::mem::size_of::<PoleTransfer>())
             .and_then(|v| v.checked_add(core::mem::size_of::<FrequencyLayer<'_, '_, '_>>()))
             .and_then(|v| v.checked_mul(count))
@@ -334,10 +342,13 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             let omega = beam.source().angular_frequency_rad_s();
             let mut poles = Vec::new();
             poles
-                .try_reserve_exact(law.poles.len())
+                .try_reserve_exact(law.pole_count())
                 .map_err(|_| bad("film exposure reservoir allocation failed"))?;
-            for &pole in law.poles {
+            for &pole in law.debye_poles {
                 poles.push(PoleTransfer::new(pole, omega)?);
+            }
+            for &pole in law.lorentz_poles {
+                poles.push(PoleTransfer::lorentz(pole, omega)?);
             }
             let layer = if line.is_two_sided() {
                 None
@@ -551,6 +562,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         let mut mapping = Vec::new();
         let mut fields = Vec::new();
         let mut filtered = Vec::new();
+        let mut kinetic = Vec::new();
         mapping
             .try_reserve_exact(f)
             .map_err(|_| bad("film exposure index allocation failed"))?;
@@ -560,6 +572,11 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         filtered
             .try_reserve_exact(f)
             .map_err(|_| bad("film exposure reservoir field allocation failed"))?;
+        if self.law.has_inertial_storage() {
+            kinetic
+                .try_reserve_exact(f)
+                .map_err(|_| bad("film exposure inertial field allocation failed"))?;
+        }
         for group in 0..f {
             poll(cancelled)?;
             let index = self
@@ -574,6 +591,9 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             );
             mapping.push(index);
             filtered.push([C64::ZERO; 6]);
+            if self.law.has_inertial_storage() {
+                kinetic.push([C64::ZERO; 3]);
+            }
         }
         let normal_power = {
             let carrier = bank.carrier_fields(&fields, proper, cancelled)?;
@@ -610,7 +630,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             )
             .map_err(moment_error)?;
             let mut polarization_heat = Dd::ZERO;
-            for pole in 0..self.law.poles.len() {
+            for pole in 0..self.law.pole_count() {
                 poll(cancelled)?;
                 for i in 0..f {
                     if i % 64 == 0 {
@@ -620,10 +640,19 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
                     for c in 0..3 {
                         filtered[i][c] = fields[i][point][c] * transfer.heat;
                         filtered[i][c + 3] = fields[i][point][c] * transfer.storage;
+                        if !kinetic.is_empty() {
+                            kinetic[i][c] = fields[i][point][c] * transfer.kinetic_storage;
+                        }
                     }
                 }
-                let (heat, rate) =
-                    pole_moments(&kernels, &filtered, &product, cancelled).map_err(moment_error)?;
+                let (heat, rate) = pole_moments(
+                    &kernels,
+                    &filtered,
+                    (!kinetic.is_empty()).then_some(kinetic.as_slice()),
+                    &product,
+                    cancelled,
+                )
+                .map_err(moment_error)?;
                 polarization_heat = polarization_heat + heat;
                 storage = storage + rate;
             }
@@ -686,10 +715,14 @@ fn instantaneous_storage_rate<P: Copy>(
 fn pole_moments<P: Copy>(
     kernels: &[MomentKernel<P>],
     fields: &[[C64; 6]],
+    kinetic: Option<&[[C64; 3]]>,
     product: impl Fn(P, C64, C64) -> Result<Dd, MomentError>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Dd, Dd), MomentError> {
     let f = fields.len();
+    if kinetic.is_some_and(|values| values.len() != f) {
+        return Err(MomentError::Unrepresentable);
+    }
     let mut heat = Dd::ZERO;
     let mut storage = Dd::ZERO;
     for (i, a) in fields.iter().enumerate() {
@@ -703,6 +736,11 @@ fn pole_moments<P: Copy>(
                 storage = storage
                     + product(kernel.product, rotate_i(a[c + 3]), b[c + 3])?
                         * kernel.storage_frequency;
+                if let Some(values) = kinetic {
+                    storage = storage
+                        + product(kernel.product, rotate_i(values[i][c]), values[j][c])?
+                            * kernel.storage_frequency;
+                }
             }
         }
     }
@@ -711,6 +749,9 @@ fn pole_moments<P: Copy>(
     }
     Ok((heat, storage))
 }
+
+#[cfg(test)]
+mod lorentz_tests;
 
 #[cfg(test)]
 mod tests {
@@ -811,7 +852,8 @@ mod tests {
                 ]
             })
             .collect::<Vec<_>>();
-        let (heat, storage) = pole_moments(&kernels, &filtered, product, &mut || false).unwrap();
+        let (heat, storage) =
+            pole_moments(&kernels, &filtered, None, product, &mut || false).unwrap();
         let mut electrical_work = Dd::ZERO;
         for i in 0..2 {
             for j in 0..2 {

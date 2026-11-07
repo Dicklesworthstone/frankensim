@@ -1,30 +1,44 @@
-//! Original instantaneous and Debye reservoirs for settled harmonic fields.
+//! Original instantaneous, Debye and inertial Lorentz reservoirs for settled fields.
 //!
 //! tau P_dot + P = Delta_epsilon E implies
 //! E dot P_dot = (tau/Delta_epsilon)|P_dot|²
 //!               + d(|P|²/(2 Delta_epsilon))/dt.
 //! Heat is formed from each reservoir's actual phased current, not from the
 //! magnitudes of per-frequency complex permittivity or boundary flux loss.
+//! Lorentz poles additionally retain P_dot/(omega0 sqrt(Delta_epsilon)); its
+//! squared real field is twice the kinetic storage, and gamma times that
+//! square is the independent frictional heat.
 
 use super::*;
-use crate::plane_wave::{DielectricResponse, ohmic_conductivity, shared_ohmic_conductivity};
+use crate::plane_wave::{
+    DielectricResponse, ohmic_conductivity, shared_lorentz_ohmic_conductivity,
+    shared_ohmic_conductivity,
+};
 use fs_material::field_storage::{
-    dielectric::DebyePole, linear_electric_permittivity, linear_magnetic_permeability,
+    dielectric::{DebyePole, lorentz::LorentzPole},
+    linear_electric_permittivity, linear_magnetic_permeability,
 };
 
 pub(super) struct LossLaw<'m> {
     pub epsilon_infinity: f64,
     pub permeability: f64,
     pub conductivity: f64,
-    pub poles: &'m [DebyePole],
+    pub debye_poles: &'m [DebyePole],
+    pub lorentz_poles: &'m [LorentzPole],
 }
 
 impl<'m> LossLaw<'m> {
     pub fn new(response: DielectricResponse<'m>) -> Result<Self, AngularSpectrumError> {
-        let (epsilon_infinity, conductivity, poles): (f64, f64, &'m [DebyePole]) = match response {
+        let (epsilon_infinity, conductivity, debye_poles, lorentz_poles): (
+            f64,
+            f64,
+            &'m [DebyePole],
+            &'m [LorentzPole],
+        ) = match response {
             DielectricResponse::Lossless(material) => (
                 linear_electric_permittivity(material).map_err(ReflectionError::from)?,
                 0.0,
+                &[],
                 &[],
             ),
             DielectricResponse::Ohmic(conductor) => (
@@ -32,11 +46,13 @@ impl<'m> LossLaw<'m> {
                     .map_err(ReflectionError::from)?,
                 ohmic_conductivity(conductor)?,
                 &[],
+                &[],
             ),
             DielectricResponse::Debye(dielectric) => (
                 dielectric.high_frequency_permittivity_f_m(),
                 0.0,
                 dielectric.poles(),
+                &[],
             ),
             DielectricResponse::DebyeWithOhmic {
                 dielectric,
@@ -45,12 +61,23 @@ impl<'m> LossLaw<'m> {
                 dielectric.high_frequency_permittivity_f_m(),
                 shared_ohmic_conductivity(dielectric, conductor)?,
                 dielectric.poles(),
+                &[],
             ),
-            DielectricResponse::Lorentz(_) | DielectricResponse::LorentzWithOhmic { .. } => {
-                return Err(bad(
-                    "finite-window film heat has not yet connected the original inertial Lorentz reservoirs",
-                ));
-            }
+            DielectricResponse::Lorentz(dielectric) => (
+                dielectric.high_frequency_permittivity_f_m(),
+                0.0,
+                &[],
+                dielectric.poles(),
+            ),
+            DielectricResponse::LorentzWithOhmic {
+                dielectric,
+                conductor,
+            } => (
+                dielectric.high_frequency_permittivity_f_m(),
+                shared_lorentz_ohmic_conductivity(dielectric, conductor)?,
+                &[],
+                dielectric.poles(),
+            ),
             DielectricResponse::OpticalConductor(_)
             | DielectricResponse::OpticalMaterial(_)
             | DielectricResponse::SpectralOptical(_)
@@ -68,8 +95,22 @@ impl<'m> LossLaw<'m> {
             epsilon_infinity,
             permeability,
             conductivity,
-            poles,
+            debye_poles,
+            lorentz_poles,
         })
+    }
+
+    pub fn pole_count(&self) -> usize {
+        self.debye_poles.len() + self.lorentz_poles.len()
+    }
+
+    // Lorentz poles require one additional storage contraction per pair.
+    pub fn reservoir_pair_channels(&self) -> usize {
+        self.debye_poles.len() + 2 * self.lorentz_poles.len()
+    }
+
+    pub fn has_inertial_storage(&self) -> bool {
+        !self.lorentz_poles.is_empty()
     }
 }
 
@@ -77,6 +118,8 @@ impl<'m> LossLaw<'m> {
 pub(super) struct PoleTransfer {
     // P/sqrt(Delta_epsilon), so its squared real field stores twice the energy.
     pub storage: C64,
+    // P_dot/(omega0 sqrt(Delta_epsilon)); zero for a Debye reservoir.
+    pub kinetic_storage: C64,
     // sqrt(tau/Delta_epsilon) P_dot, whose squared real field is heat.
     pub heat: C64,
 }
@@ -120,7 +163,23 @@ impl PoleTransfer {
         if !finite(storage) || !finite(heat) {
             return Err(bad("settled Debye transfer is unrepresentable"));
         }
-        Ok(Self { storage, heat })
+        Ok(Self {
+            storage,
+            kinetic_storage: C64::ZERO,
+            heat,
+        })
+    }
+
+    pub fn lorentz(pole: LorentzPole, omega: f64) -> Result<Self, AngularSpectrumError> {
+        let transfer = pole
+            .harmonic_transfer(omega)
+            .map_err(fs_material::field_storage::FieldStorageError::from)
+            .map_err(ReflectionError::from)?;
+        Ok(Self {
+            storage: transfer.restoring,
+            kinetic_storage: transfer.kinetic,
+            heat: transfer.heat,
+        })
     }
 }
 

@@ -39,7 +39,7 @@ fn spectrum(
     input: &[(HarmonicProductLaw, Electric)],
     channel: AngularSpectrumExposureHeatChannel,
 ) -> PreparedHarmonicProductSpectrum {
-    let (first, count) = reservoir_range(channel, SIGMA, poles().len()).unwrap();
+    let (first, count) = reservoir_range(channel, SIGMA, poles().len(), 0).unwrap();
     let mut fields = Vec::new();
     let mut banks = Vec::new();
     for &(law, electric) in input {
@@ -225,8 +225,22 @@ fn g3_proper_real_quadratures_native_carrier_beats_and_refusals() {
     for time in [-0.2, 0.0, 0.17, 3.0] {
         close(beat.evaluate(time).unwrap(), 1.0 - (0.25_f64 * time).sin());
     }
-    assert!(reservoir_range(Channel::DebyePole { index: 2 }, SIGMA, 2).is_err());
-    assert_eq!(reservoir_range(Channel::Ohmic, 0.0, 2).unwrap(), (0, 0));
+    assert!(reservoir_range(Channel::DebyePole { index: 2 }, SIGMA, 2, 0).is_err());
+    assert_eq!(reservoir_range(Channel::Ohmic, 0.0, 2, 0).unwrap(), (0, 0));
+    assert!(reservoir_range(Channel::LorentzPole { index: 0 }, SIGMA, 2, 0).is_err());
+    assert!(reservoir_range(Channel::DebyePole { index: 0 }, SIGMA, 0, 2).is_err());
+    assert_eq!(
+        reservoir_range(Channel::LorentzPole { index: 1 }, SIGMA, 0, 2).unwrap(),
+        (2, 1)
+    );
+    assert_eq!(
+        reservoir_range(Channel::Polarization, SIGMA, 0, 2).unwrap(),
+        (1, 2)
+    );
+    assert_eq!(
+        reservoir_range(Channel::Total, SIGMA, 0, 2).unwrap(),
+        (0, 3)
+    );
     assert!(
         prepare_products(
             &banks,

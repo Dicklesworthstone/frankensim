@@ -75,7 +75,7 @@ fn prepared(
                 .collect()
         })
         .collect();
-    let (first, count) = reservoir_range(channel, SIGMA, 2).unwrap();
+    let (first, count) = reservoir_range(channel, SIGMA, 2, 0).unwrap();
     let mut terms = Vec::new();
     let mut field_calls = 0;
     for bank in 0..3 {
@@ -205,7 +205,7 @@ fn spatial_spectrum(
                 .collect()
         })
         .collect();
-    let (first, count) = reservoir_range(channel, SIGMA, 2).unwrap();
+    let (first, count) = reservoir_range(channel, SIGMA, 2, 0).unwrap();
     let mut terms = Vec::new();
     contract_bank(
         frequencies,

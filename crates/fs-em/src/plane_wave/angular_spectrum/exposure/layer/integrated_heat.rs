@@ -235,8 +235,12 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             quadrature,
             &mut cancelled,
         )?;
-        let (first, reservoirs) =
-            reservoir_range(channel, self.law.conductivity, self.law.poles.len())?;
+        let (first, reservoirs) = reservoir_range(
+            channel,
+            self.law.conductivity,
+            self.law.debye_poles.len(),
+            self.law.lorentz_poles.len(),
+        )?;
         let active = reservoirs != 0 && volume.area_m2.to_f64() > 0.0;
         let depths = if active {
             quadrature.depth_samples.len()
