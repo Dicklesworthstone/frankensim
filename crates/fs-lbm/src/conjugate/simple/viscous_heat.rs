@@ -20,6 +20,9 @@
 //! conductances supply traction work and local fluid heat; fixed internal walls
 //! supply zero work. Solid voxels receive no fluid dissipation. No residual,
 //! upwind diffusion or pressure-constraint work is converted into heat.
+//! The material-momentum bulk opt-in replaces the cell normal contribution with
+//! `2 mu sum_a(dev(D)_aa^2) V + zeta div(u)^2 V`; reciprocal shear-edge and
+//! tangential-wall terms retain their original coefficients and work account.
 
 use super::*;
 
@@ -44,6 +47,49 @@ struct MolecularPower {
 #[cfg(test)]
 mod strain_tests {
     use super::*;
+    use fs_material::fluid_transport::viscous::{DeformationRate, NewtonianViscosity};
+
+    #[test]
+    fn mac_bulk_power_matches_the_original_material_response() {
+        let domain = VoxelDomain::new(5, 5, 5, 1.0).unwrap();
+        let config = SimpleConfig::new([FvBoundary::Symmetry; 6]);
+        let fluid = FluidProperties {
+            density_kg_m3: 1.0,
+            specific_heat_j_kg_k: 1.0,
+            conductivity_w_m_k: 1.0,
+            kinematic_viscosity_m2_s: 1.0,
+        };
+        let gate = CancelGate::new_clock_free();
+        let mut sampler = material_solver(
+            &domain, &fluid, &[1.0; 125], None, None, &config, &gate,
+        ).unwrap();
+        let center = 2 + 5 * (2 + 5 * 2);
+        for gradient in [
+            [[0.003, 0.0, 0.0], [0.0, 0.003, 0.0], [0.0, 0.0, 0.003]],
+            [[0.0, -0.004, 0.0], [0.004, 0.0, 0.0], [0.0, 0.0, 0.0]],
+            [[-0.002, 0.006, 0.0], [0.0, -0.002, 0.0], [0.0, 0.0, -0.002]],
+            [[0.004, 0.0, 0.0], [0.0, -0.002, 0.0], [0.0, 0.0, -0.002]],
+        ] {
+            for a in 0..3 {
+                for index in 0..sampler.vel[a].len() {
+                    let at = sampler.comps[a].coords(index);
+                    sampler.vel[a][index] = (0..3).map(|d| {
+                        gradient[a][d] * (at[d] as f64 + if a == d { 0.0 } else { 0.5 })
+                    }).sum();
+                }
+            }
+            let rate = DeformationRate::from_velocity_gradient(gradient).unwrap();
+            for bulk in [0.0, 0.4, 7.0] {
+                sampler.molecular_bulk_viscosity = vec![bulk; 125];
+                let expected = NewtonianViscosity::new(1.0, bulk).unwrap()
+                    .evaluate(rate).unwrap().dissipation_w_m3();
+                let actual = sampler.sample_molecular_power::<false>(&gate).unwrap().heat[center];
+                assert!((actual - expected).abs() < 2e-14);
+                let observed = sampler.molecular_shear_rates(&gate).unwrap()[center];
+                assert!((observed - rate.shear_rate_per_s()).abs() < 2e-14);
+            }
+        }
+    }
 
     /// G0/G3: source observation removes spherical strain before squaring,
     /// while the existing full-stress operator retains its volumetric power.
@@ -602,10 +648,16 @@ impl Solver<'_> {
                     - self.vel[a][self.cell_face(a, at, false)])
                     / domain.width(a, at[a])
             });
-            // Kinematic source observation removes volumetric strain before
-            // squaring. The physical stress-power path retains the original
-            // full-stress operator, including its prescribed bulk response.
-            let normal = if DEVIATORIC {
+            // Observe shear without spherical strain. An explicit bulk law
+            // likewise separates its nonnegative heat from deviatoric heat;
+            // the legacy full-stress path retains its original arithmetic.
+            if !DEVIATORIC && let Some(&bulk) = self.molecular_bulk_viscosity.get(c) {
+                let divergence: f64 = normal.iter().sum();
+                let power = (bulk * divergence) * divergence * domain.volume(c);
+                add(cell_heat, power)?;
+                add(&mut quadrature_w, power)?;
+            }
+            let normal = if DEVIATORIC || !self.molecular_bulk_viscosity.is_empty() {
                 core::array::from_fn(|a| {
                     (normal[a] - normal[(a + 1) % 3]) / 3.0
                         + (normal[a] - normal[(a + 2) % 3]) / 3.0

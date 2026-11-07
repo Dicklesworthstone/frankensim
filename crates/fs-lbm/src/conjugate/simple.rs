@@ -781,6 +781,9 @@ pub(super) struct Solver<'a> {
     /// Admitted laminar molecular viscosity per cell. Either a molecular field
     /// or an eddy field selects the complete symmetric stress.
     molecular_viscosity: Vec<f64>,
+    /// Explicit independent bulk viscosity for the material momentum split.
+    /// Empty retains 2 mu D; otherwise stress is 2 mu dev(D) + zeta div(u) I.
+    molecular_bulk_viscosity: Vec<f64>,
     /// Explicit Stokes reduction; all ordinary SIMPLE entries keep convection.
     creeping: bool,
     /// Opt-in reservoir normal traction and zero tangential trace on one
@@ -1150,6 +1153,7 @@ impl<'a> Solver<'a> {
             rho: density_kg_m3,
             mu: dynamic_viscosity_pa_s,
             molecular_viscosity: Vec::new(),
+            molecular_bulk_viscosity: Vec::new(),
             creeping: false,
             pressure_work_axis: None,
             comps,
@@ -2022,12 +2026,35 @@ impl<'a> Solver<'a> {
                         // Diffusion across the cell between the two faces.
                         let side_cell = if plus { plus_cell } else { minus_cell };
                         // A variable molecular OR eddy viscosity requires the
-                        // full stress: normal stress is 2 mu_eff du_a/dx_a.
+                        // full stress: without independent bulk, normal stress
+                        // is 2 mu_eff du_a/dx_a.
                         // The legacy constant-viscosity Laplacian keeps its
                         // arithmetic; div(grad(u)^T)=0 for incompressible flow.
-                        let normal = if self.symmetric_stress() { 2.0 } else { 1.0 };
-                        let mut diff =
-                            normal * self.mu_eff(side_cell) * face_area / width(a, side_cell[a]);
+                        let mu = self.mu_eff(side_cell);
+                        let normal = if let Some(&bulk) = self
+                            .molecular_bulk_viscosity
+                            .get(cell_of(self.n, side_cell))
+                        {
+                            // The diagonal part of 2 mu dev(D) + zeta div(u) I.
+                            // Other normal derivatives are reciprocal coupled
+                            // terms, sampled at this SAME original cell.
+                            let other_divergence: f64 = (0..3)
+                                .filter(|&b| b != a)
+                                .map(|b| {
+                                    (self.vel[b][self.cell_face(b, side_cell, true)]
+                                        - self.vel[b][self.cell_face(b, side_cell, false)])
+                                        / width(b, side_cell[b])
+                                })
+                                .sum();
+                            let weight = if pressure_mouth_row { 2.0 } else { 1.0 };
+                            rhs += weight * s * face_area * (bulk - (2.0 / 3.0) * mu)
+                                * other_divergence;
+                            (4.0 / 3.0) * mu + bulk
+                        } else {
+                            let factor = if self.symmetric_stress() { 2.0 } else { 1.0 };
+                            factor * mu
+                        };
+                        let mut diff = normal * face_area / width(a, side_cell[a]);
                         // This mirrored row represents a physical HALF volume.
                         // Doubling its interior normal stress gives the same
                         // derivative of mu*(du_n/dn)^2*V as the interior row.

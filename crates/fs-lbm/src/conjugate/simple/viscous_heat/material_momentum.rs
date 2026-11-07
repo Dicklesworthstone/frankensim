@@ -1,10 +1,12 @@
 //! Molecular momentum diffusion on the original MAC stress and Krylov owners.
 //!
 //! Pressure, convection and calorics remain separate physical substeps. This
-//! predictor uses actual M/V face inertia and the existing full symmetric
-//! molecular stress, including harmonic material jumps and half-cell walls.
+//! predictor uses actual M/V face inertia and either the original 2 mu D stress
+//! or the explicit independent-bulk response 2 mu dev(D) + zeta div(u) I.
+//! Both retain harmonic material jumps, half-cell walls and matching heat.
 
 use super::*;
+use fs_material::fluid_transport::viscous::NewtonianViscosity;
 use fs_math::dd::Dd;
 
 /// Work and independent physical-unit gates for one native viscosity substep.
@@ -59,6 +61,8 @@ pub(in crate::conjugate) struct NativeMaterialViscosityInput<'a> {
     pub mass_kg: &'a [f64],
     pub momentum_kg_m_s: &'a [[f64; 3]],
     pub viscosity_pa_s: &'a [f64],
+    /// None retains 2 mu D; Some selects independent physical bulk response.
+    pub bulk_viscosity_pa_s: Option<&'a [f64]>,
     /// Produced by the ORIGINAL density projection's face_dual_mass.
     pub face_mass_kg: [Vec<f64>; 3],
     pub boundaries: [FvBoundary; 6],
@@ -184,6 +188,7 @@ pub(in crate::conjugate) fn kick(
         || input.mass_kg.len() != n
         || input.momentum_kg_m_s.len() != n
         || input.viscosity_pa_s.len() != n
+        || input.bulk_viscosity_pa_s.is_some_and(|bulk| bulk.len() != n)
     {
         return Err(refuse("viscosity requires bounded original cells"));
     }
@@ -215,6 +220,27 @@ pub(in crate::conjugate) fn kick(
         &config,
     );
     solver.set_material_transport(input.viscosity_pa_s, None, gate)?;
+    if let Some(bulk) = input.bulk_viscosity_pa_s {
+        solver.molecular_bulk_viscosity = vec![0.0; n];
+        for (cell, &value) in bulk.iter().enumerate() {
+            if cell % 256 == 0 {
+                poll(gate)?;
+            }
+            if !domain.is_fluid(cell) {
+                continue;
+            }
+            let law = NewtonianViscosity::new(input.viscosity_pa_s[cell], value)
+                .map_err(|error| ChtError::InvalidInput {
+                    field: "flow.bulk_viscosity_source",
+                    reason: format!("cell {cell}: {error}"),
+                })?;
+            finite_positive(
+                "flow.longitudinal_viscosity",
+                (4.0 / 3.0) * law.shear_viscosity_pa_s() + law.bulk_viscosity_pa_s(),
+            )?;
+            solver.molecular_bulk_viscosity[cell] = law.bulk_viscosity_pa_s();
+        }
+    }
     solver.pressure_work_axis = input.pressure_mouth_axis;
     // This is only molecular diffusion. The enclosing owner subsequently
     // applies body force, pressure and material convection, each once.

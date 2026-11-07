@@ -169,6 +169,7 @@ impl FlowField {
             input.volume.mass_kg,
             input.momentum_kg_m_s,
             boundaries,
+            None,
             controls.mechanics.reconstruction,
             controls.mechanics.projection.duration_s,
             viscosity_controls,

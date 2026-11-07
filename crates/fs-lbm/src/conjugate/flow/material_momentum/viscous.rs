@@ -1,4 +1,5 @@
 //! Source-viscosity diffusion and physical heating before the original advance.
+//! Existing entries retain 2 mu D; the bulk opt-in admits independent zeta.
 
 use super::super::density_projection::face_dual_mass;
 use super::super::{DensityMomentumReconstructionControls, StaggeredBoundaryPressure};
@@ -75,7 +76,9 @@ impl FlowField {
     /// This is a first-order split on closed fixed geometry. Source mu is
     /// frozen over the step; viscosity feedback, time/space convergence and
     /// consistent evaluation of current material state remain caller-owned.
-    /// There is no added EOS, phase mobility, bulk-viscosity law, turbulence,
+    /// This original entry retains `2 mu D`; the bulk-viscosity entry below
+    /// admits an independently supplied volumetric response. There is no added
+    /// EOS, phase mobility, turbulence,
     /// pressure-opening work model or complete Navier-Stokes accuracy claim.
     ///
     /// # Errors
@@ -97,9 +100,41 @@ impl FlowField {
             None,
             input,
             viscosity,
+            None,
             controls,
             viscosity_controls,
             gate,
+        )
+    }
+
+    /// Advance with independently supplied bulk viscosity [Pa s] in addition
+    /// to the original transport source's dynamic shear viscosity.
+    ///
+    /// Each mobile cell uses `2 mu dev(D) + zeta div(u) I` and deposits only
+    /// `2 mu dev(D):dev(D) + zeta div(u)^2` as physical heat. Bulk viscosity
+    /// must be finite and nonnegative; choosing zero is explicit. The slice
+    /// has one slot per voxel; fixed-solid slots are ignored. The caller
+    /// resolves zeta at the same material state as the original shear source.
+    /// No bulk law is inferred from shear viscosity or thermodynamic pressure.
+    /// Both coefficients remain frozen during the original first-order split.
+    ///
+    /// # Errors
+    /// Invalid coefficients or any original source, solve, work, heat-insertion
+    /// or cancellation refusal returns no candidate and changes no input.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_material_momentum_with_bulk_viscosity(
+        &self,
+        domain: &VoxelDomain,
+        input: MaterialMomentumAdvanceInput<'_>,
+        viscosity: MaterialMomentumViscosityInput<'_>,
+        bulk_viscosity_pa_s: &[f64],
+        controls: MaterialMomentumAdvanceControls,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
+    ) -> Result<ViscousMaterialMomentumAdvance, ChtError> {
+        self.advance_viscous_material(
+            domain, [FlowFace::Wall; 6], None, None, input, viscosity,
+            Some(bulk_viscosity_pa_s), controls, viscosity_controls, gate,
         )
     }
 
@@ -154,9 +189,41 @@ impl FlowField {
             Some(axis),
             input,
             viscosity,
+            None,
             controls,
             viscosity_controls,
             gate,
+        )
+    }
+
+    /// The independent shear/bulk response with the same opposed reservoir
+    /// normal traction and zero tangential trace as the existing pressure entry.
+    /// The viscous stage uses zero total normal traction, including bulk stress;
+    /// the following pressure stage owns the authored reservoir load once.
+    ///
+    /// # Errors
+    /// The bulk, boundary, source and physical-work gates are identical to the
+    /// closed bulk entry and the original reservoir entry; refusal is atomic.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_material_momentum_with_bulk_viscosity_and_pressure_profile(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        profile: StaggeredBoundaryPressure<'_>,
+        input: MaterialMomentumAdvanceInput<'_>,
+        viscosity: MaterialMomentumViscosityInput<'_>,
+        bulk_viscosity_pa_s: &[f64],
+        controls: MaterialMomentumAdvanceControls,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
+    ) -> Result<ViscousMaterialMomentumAdvance, ChtError> {
+        poll(gate)?;
+        let axis = Self::admit_material_viscosity_pressure_mouth(
+            faces, viscosity.boundaries, input.boundary_velocity_m_s,
+        )?;
+        self.advance_viscous_material(
+            domain, faces, Some(profile), Some(axis), input, viscosity,
+            Some(bulk_viscosity_pa_s), controls, viscosity_controls, gate,
         )
     }
 
@@ -169,6 +236,7 @@ impl FlowField {
         pressure_mouth_axis: Option<usize>,
         input: MaterialMomentumAdvanceInput<'_>,
         viscosity: MaterialMomentumViscosityInput<'_>,
+        bulk_viscosity_pa_s: Option<&[f64]>,
         controls: MaterialMomentumAdvanceControls,
         viscosity_controls: MaterialViscosityControls,
         gate: &CancelGate,
@@ -196,6 +264,7 @@ impl FlowField {
             input.material.mass_kg,
             input.momentum_kg_m_s,
             viscosity,
+            bulk_viscosity_pa_s,
             controls.mechanics.reconstruction,
             duration,
             viscosity_controls,
@@ -303,6 +372,7 @@ impl FlowField {
         mass_kg: &[f64],
         momentum_kg_m_s: &[[f64; 3]],
         viscosity: MaterialMomentumViscosityInput<'_>,
+        bulk_viscosity_pa_s: Option<&[f64]>,
         reconstruction_controls: DensityMomentumReconstructionControls,
         duration_s: f64,
         viscosity_controls: MaterialViscosityControls,
@@ -311,7 +381,9 @@ impl FlowField {
     ) -> Result<PreparedMaterialViscosity, ChtError> {
         poll(gate)?;
         let n = domain.cell_count();
-        if viscosity.sources.len() != n {
+        if viscosity.sources.len() != n
+            || bulk_viscosity_pa_s.is_some_and(|bulk| bulk.len() != n)
+        {
             return Err(refuse("viscosity needs bounded original inventory"));
         }
         self.prepare_material_viscosity_with_source(
@@ -321,6 +393,7 @@ impl FlowField {
             mass_kg,
             momentum_kg_m_s,
             viscosity.boundaries,
+            bulk_viscosity_pa_s,
             reconstruction_controls,
             duration_s,
             viscosity_controls,
@@ -367,6 +440,7 @@ impl FlowField {
         mass_kg: &[f64],
         momentum_kg_m_s: &[[f64; 3]],
         boundaries: [FvBoundary; 6],
+        bulk_viscosity_pa_s: Option<&[f64]>,
         reconstruction_controls: DensityMomentumReconstructionControls,
         duration_s: f64,
         viscosity_controls: MaterialViscosityControls,
@@ -378,6 +452,7 @@ impl FlowField {
         if n > viscosity_controls.max_cells
             || n > reconstruction_controls.max_cells
             || mass_kg.len() != n
+            || bulk_viscosity_pa_s.is_some_and(|bulk| bulk.len() != n)
         {
             return Err(refuse("viscosity needs bounded original inventory"));
         }
@@ -449,6 +524,7 @@ impl FlowField {
                 mass_kg,
                 momentum_kg_m_s,
                 viscosity_pa_s: &molecular,
+                bulk_viscosity_pa_s,
                 face_mass_kg: face_mass,
                 boundaries,
                 pressure_mouth_axis,

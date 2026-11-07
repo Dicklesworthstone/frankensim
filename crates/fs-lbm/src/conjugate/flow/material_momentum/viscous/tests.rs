@@ -487,6 +487,110 @@ fn reservoir_boundaries() -> [FvBoundary; 6] {
 }
 
 #[test]
+fn mac_bulk_longitudinal_and_transverse_modes_use_the_same_stress_and_heat() {
+    let domain = VoxelDomain::new(2, 2, 1, 1.0).unwrap();
+    let (rho, mu, amplitude, dt) = (1.7, 0.8, 0.2, 0.2);
+    let mass = [rho; 4];
+    for longitudinal in [true, false] {
+        let sign = if longitudinal { 1.0 } else { -1.0 };
+        let field = FlowField::from_face_velocity(&domain, [FlowFace::Wall; 6], |a, p| {
+            match a {
+                0 if p[0] == 1.0 => if p[1] < 1.0 { amplitude } else { -amplitude },
+                1 if p[1] == 1.0 => sign * if p[0] < 1.0 { amplitude } else { -amplitude },
+                _ => 0.0,
+            }
+        }).unwrap();
+        let original: [[f64; 3]; 4] = core::array::from_fn(|cell| {
+            let p = domain.coords(cell);
+            [rho * if p[1] == 0 { amplitude } else { -amplitude },
+                sign * rho * if p[0] == 0 { amplitude } else { -amplitude }, 0.0]
+        });
+        for bulk in [0.0, 0.7, 3.0] {
+            let next = kick(
+                &domain,
+                NativeMaterialViscosityInput {
+                    field: &field,
+                    mass_kg: &mass,
+                    momentum_kg_m_s: &original,
+                    viscosity_pa_s: &[mu; 4],
+                    bulk_viscosity_pa_s: Some(&[bulk; 4]),
+                    face_mass_kg: field.face_arrays().map(|faces| vec![rho; faces.len()]),
+                    boundaries: [FvBoundary::Symmetry; 6],
+                    pressure_mouth_axis: None,
+                    duration_s: dt,
+                },
+                viscous_controls(),
+                &CancelGate::new_clock_free(),
+            ).unwrap();
+            // These exact discrete MAC modes have eigenvalue 4. Normal
+            // cross derivatives are essential: longitudinal decay uses
+            // 4 mu/3 + zeta, while the solenoidal mode uses ONLY mu.
+            let coefficient = if longitudinal { (4.0 / 3.0) * mu + bulk } else { mu };
+            let accepted = amplitude / (1.0 + 4.0 * dt * coefficient / rho);
+            for (old, new) in original.iter().zip(&next.momentum_kg_m_s) {
+                for a in 0..2 {
+                    close(new[a], old[a] * 0.5 * (1.0 + accepted / amplitude));
+                }
+            }
+            close(next.report.molecular_heat_j, 16.0 * dt * coefficient * accepted.powi(2));
+            close(next.report.backward_euler_loss_j, 2.0 * rho * (accepted - amplitude).powi(2));
+            close(next.report.native_kinetic_energy_change_j,
+                2.0 * rho * (accepted.powi(2) - amplitude.powi(2)));
+            close(next.report.wall_work_j, 0.0);
+            close(next.report.energy_defect_j, 0.0);
+        }
+    }
+}
+
+#[test]
+fn mac_bulk_sources_use_graded_inertia_and_refuse_atomically() {
+    let domain = VoxelDomain::graded([vec![1.0, 3.0], vec![2.0], vec![1.0]]).unwrap();
+    let field = FlowField::quiescent(&domain);
+    let mass = [4.0, 36.0];
+    let h = [10.0, 30.0];
+    let momentum = [[4.0, 0.0, 0.0], [36.0, 0.0, 0.0]];
+    let slow = liquid(1.0);
+    let fast = liquid(3.0);
+    let sources: [Option<&dyn FluidTransport>; 2] = [Some(&slow), Some(&fast)];
+    let bulk = [0.2, 4.0];
+    let run = |bulk: &[f64], h: &[f64; 2], gate: &CancelGate| {
+        field.advance_material_momentum_with_bulk_viscosity(
+            &domain, input(&mass, h, &momentum),
+            MaterialMomentumViscosityInput {
+                sources: &sources, boundaries: [FvBoundary::Symmetry; 6],
+            }, bulk, controls(), viscous_controls(), gate,
+        )
+    };
+    let accepted = run(&bulk, &h, &CancelGate::new_clock_free()).unwrap();
+    let longitudinal = [(4.0 / 3.0) + bulk[0], 4.0 + bulk[1]];
+    // Original face inertia is (4+36)/2=20, unrelated to source rho=1000.
+    let stiffness = 2.0 * (longitudinal[0] + longitudinal[1] / 3.0);
+    let speed = 20.0 / (20.0 + 0.5 * stiffness);
+    close(accepted.viscosity.face_impulse_kg_m_s[0], 20.0 * (speed - 1.0));
+    for c in 0..2 {
+        let width: f64 = if c == 0 { 1.0 } else { 3.0 };
+        let heat = 0.5 * longitudinal[c] * domain.volume(c) * (speed / width).powi(2);
+        close(accepted.viscosity.cell_molecular_heat_j[c], heat);
+        close(accepted.advance.transport.specific_enthalpy_j_kg[c], h[c] + heat / mass[c]);
+    }
+    close(accepted.viscosity.energy_defect_j, 0.0);
+    for invalid in [&[0.0][..], &[-1.0, 0.0], &[0.0, f64::NAN], &[f64::INFINITY, 0.0]] {
+        assert!(run(invalid, &h, &CancelGate::new_clock_free()).is_err());
+    }
+    // A late caloric representation failure must not publish the already
+    // solved bulk impulse or turn unrepresentable heat into numerical loss.
+    assert!(run(&bulk, &[1e30; 2], &CancelGate::new_clock_free()).is_err());
+    let gate = CancelGate::new_clock_free();
+    gate.request();
+    assert!(matches!(run(&bulk, &h, &gate), Err(ChtError::Cancelled)));
+    assert_eq!(field, FlowField::quiescent(&domain));
+    assert_eq!(mass, [4.0, 36.0]);
+    assert_eq!(h, [10.0, 30.0]);
+    assert_eq!(momentum, [[4.0, 0.0, 0.0], [36.0, 0.0, 0.0]]);
+    assert_eq!(run(&bulk, &h, &CancelGate::new_clock_free()).unwrap(), accepted);
+}
+
+#[test]
 fn reservoir_viscosity_uses_physical_half_cell_inertia_and_work() {
     let domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
     let field = FlowField::from_face_velocity(&domain, reservoir_faces(), |axis, position| {
@@ -510,6 +614,7 @@ fn reservoir_viscosity_uses_physical_half_cell_inertia_and_work() {
             mass_kg: &mass,
             momentum_kg_m_s: &original,
             viscosity_pa_s: &[1.0, 3.0],
+            bulk_viscosity_pa_s: None,
             face_mass_kg: [vec![1.0, 4.0, 3.0], vec![0.0; 4], vec![0.0; 4]],
             boundaries: reservoir_boundaries(),
             pressure_mouth_axis: Some(0),

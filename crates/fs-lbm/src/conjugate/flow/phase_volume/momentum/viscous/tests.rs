@@ -4,7 +4,7 @@ use super::super::tests::{close, controls as momentum_controls};
 use super::*;
 use crate::conjugate::FvBoundary;
 use crate::conjugate::flow::{
-    CoexistenceVolumeInput, MaterialAdvectionInput, MaterialMomentumAdvanceControls,
+    AdvectedMaterial, CoexistenceVolumeInput, MaterialAdvectionInput, MaterialMomentumAdvanceControls,
     MaterialMomentumAdvanceInput, MaterialVolumeSource,
 };
 use fs_blake3::ContentHash;
@@ -60,6 +60,117 @@ fn mouths(axis: usize) -> ([FlowFace; 6], [FvBoundary; 6]) {
         boundaries[2 * ((axis + 1) % 3) + side] = FvBoundary::Wall { velocity: [0.0; 3] };
     }
     (faces, boundaries)
+}
+
+#[test]
+fn mac_bulk_heat_drives_the_original_caloric_volume_with_correct_mouth_inertia() {
+    let domain = VoxelDomain::new(3, 1, 1, 1.0).unwrap();
+    let field = FlowField::quiescent(&domain);
+    let mass = [2.0; 3];
+    let momentum = [[0.2, 0.0, 0.0], [0.0; 3], [-0.2, 0.0, 0.0]];
+    let source = FluidTransportState::try_new(2.0, 1.0, 1.0, 1.0).unwrap();
+    let sources: [Option<&dyn FluidTransport>; 3] = [Some(&source); 3];
+    let profile = StaggeredBoundaryPressure {
+        x_pa: &[Some(0.0), None, None, Some(0.0)],
+        y_pa: &[None; 6],
+        z_pa: &[None; 6],
+    };
+    for expanding in [false, true] {
+        let curve = liquid_curve(expanding);
+        let state = curve.state_at_specific_enthalpy(0.0).unwrap();
+        let phases = [Some(state); 3];
+        let mut faces = [FlowFace::Wall; 6];
+        let mut boundaries = [FvBoundary::Symmetry; 6];
+        let mut input = ThermalVolumeMomentumInput {
+            volume: CoexistenceVolumeInput {
+                mass_kg: &mass,
+                phase_states: &phases,
+                net_enthalpy_increment_j: &[0.0; 3],
+                boundary_inflow: [None; 6],
+            },
+            momentum_kg_m_s: &momentum,
+            acceleration_m_s2: [0.0; 3],
+            force_density_n_m3: &[[0.0; 3]; 3],
+            boundary_velocity_m_s: [None; 6],
+        };
+        if expanding {
+            for f in 0..2 {
+                faces[f] = FlowFace::Free;
+                boundaries[f] = FvBoundary::Outlet;
+                input.volume.boundary_inflow[f] = Some(state);
+                input.boundary_velocity_m_s[f] = Some([0.0; 3]);
+            }
+        }
+        let viscosity = MaterialMomentumViscosityInput { sources: &sources, boundaries };
+        for bulk in [0.0, 2.0] {
+            let coefficients = [bulk; 3];
+            let controls = controls();
+            let gate = CancelGate::new_clock_free();
+            let result = if expanding {
+                field.advance_piecewise_thermal_volume_momentum_with_bulk_viscosity_and_pressure_profile(
+                    &domain, faces, profile, &curve, input, viscosity, &coefficients,
+                    controls, viscosity_controls(), &gate,
+                )
+            } else {
+                field.advance_piecewise_thermal_volume_momentum_with_bulk_viscosity(
+                    &domain, &curve, input, viscosity, &coefficients,
+                    controls, viscosity_controls(), &gate,
+                )
+            }.unwrap();
+            let q = 0.5 * ((4.0 / 3.0) + bulk);
+            let expected_heat = if expanding {
+                // Physical mouth/interior masses [1,2,2,1] and initial
+                // velocities [.1,.05,-.05,-.1]. The two distinct BE rows
+                // are (1+q)a-q*b=.1 and -q*a+(2+3q)b=.1.
+                let b = 0.1 * (1.0 + 2.0 * q) / (2.0 + 5.0 * q + 2.0 * q * q);
+                let a = (0.1 + q * b) / (1.0 + q);
+                q * (2.0 * (a - b).powi(2) + 4.0 * b * b)
+            } else {
+                // Closed normals leave two interior faces with mass 2.
+                let b = 0.05 / (1.0 + 1.5 * q);
+                6.0 * q * b * b
+            };
+            close(result.viscosity.molecular_heat_j, expected_heat);
+            close(result.viscosity.energy_defect_j, 0.0);
+            let volume = &result.evolution.thermal.volume;
+            close(volume.report.requested_enthalpy_increment_j, expected_heat);
+            // Original chart v(h)=1/2+h/4: each deposited joule creates
+            // 1/4 m^3 before transport; with dt=1/2 this is Q/2 m^3/s.
+            close(volume.volume_source_m3_s.iter().sum(),
+                if expanding { 0.5 * expected_heat } else { 0.0 });
+            if expanding {
+                let raw = field.advance_material_momentum_with_bulk_viscosity_and_pressure_profile(
+                    &domain, faces, profile,
+                    MaterialMomentumAdvanceInput {
+                        material: MaterialAdvectionInput {
+                            mass_kg: &mass,
+                            specific_enthalpy_j_kg: &[0.0; 3],
+                            volume_sources: &[MaterialVolumeSource::None; 3],
+                            boundary_inflow: core::array::from_fn(|f| (f < 2).then_some(AdvectedMaterial {
+                                density_kg_m3: 2.0, specific_enthalpy_j_kg: 0.0,
+                            })),
+                        },
+                        momentum_kg_m_s: &momentum,
+                        acceleration_m_s2: [0.0; 3],
+                        force_density_n_m3: &[[0.0; 3]; 3],
+                        source_velocity_m_s: &[None; 3],
+                        boundary_velocity_m_s: input.boundary_velocity_m_s,
+                    },
+                    viscosity, &coefficients,
+                    MaterialMomentumAdvanceControls {
+                        mechanics: controls.mechanics,
+                        material: controls.volume.thermal.volume.transport,
+                        momentum: controls.momentum,
+                    },
+                    viscosity_controls(), &gate,
+                ).unwrap();
+                assert_eq!(raw.viscosity, result.viscosity);
+            }
+        }
+    }
+    assert_eq!(field, FlowField::quiescent(&domain));
+    assert_eq!(mass, [2.0; 3]);
+    assert_eq!(momentum, [[0.2, 0.0, 0.0], [0.0; 3], [-0.2, 0.0, 0.0]]);
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! Original molecular stress heats the same chart that owns material volume.
+//! Original shear and optional bulk stress heat the chart that owns material volume.
 
 mod rheology;
 pub use rheology::ResolvedViscousThermalVolumeMomentumStep;
@@ -105,9 +105,39 @@ impl FlowField {
             curve,
             input,
             viscosity,
+            None,
             controls,
             viscosity_controls,
             gate,
+        )
+    }
+
+    /// Use independent nonnegative bulk viscosity [Pa s] in the original
+    /// thermal-volume split. Shear remains owned by `viscosity.sources`;
+    /// the caller resolves one bulk coefficient per voxel at the same state.
+    /// Fixed-solid slots are ignored. Stress is `2 mu dev(D) + zeta div(u) I`.
+    /// Its matching shear plus bulk heat enters the original caloric chart
+    /// once, so density/occupied-volume feedback uses that same physical loss.
+    /// The original entry retains its `2 mu D` constitutive assumption.
+    ///
+    /// # Errors
+    /// Invalid bulk response or any original source/chart, work, volume,
+    /// transport or cancellation refusal returns no endpoint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_piecewise_thermal_volume_momentum_with_bulk_viscosity(
+        &self,
+        domain: &VoxelDomain,
+        curve: &EquilibriumEnthalpyPhaseCurve,
+        input: ThermalVolumeMomentumInput<'_>,
+        viscosity: MaterialMomentumViscosityInput<'_>,
+        bulk_viscosity_pa_s: &[f64],
+        controls: ThermalVolumeMomentumControls,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
+    ) -> Result<ViscousThermalVolumeMomentumStep, ChtError> {
+        self.advance_viscous_thermal_volume(
+            domain, [FlowFace::Wall; 6], None, None, curve, input, viscosity,
+            Some(bulk_viscosity_pa_s), controls, viscosity_controls, gate,
         )
     }
 
@@ -148,9 +178,42 @@ impl FlowField {
             curve,
             input,
             viscosity,
+            None,
             controls,
             viscosity_controls,
             gate,
+        )
+    }
+
+    /// Independent shear/bulk stress and caloric-volume feedback through the
+    /// existing opposed reservoir pair. Zero total viscous normal traction
+    /// and the original half-cell inertia include the bulk response; authored
+    /// reservoir pressure remains owned by the subsequent pressure stage.
+    ///
+    /// # Errors
+    /// The same bulk, source/chart, boundary and physical-balance gates as the
+    /// closed bulk entry and original pressure entry apply atomically.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_piecewise_thermal_volume_momentum_with_bulk_viscosity_and_pressure_profile(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        profile: StaggeredBoundaryPressure<'_>,
+        curve: &EquilibriumEnthalpyPhaseCurve,
+        input: ThermalVolumeMomentumInput<'_>,
+        viscosity: MaterialMomentumViscosityInput<'_>,
+        bulk_viscosity_pa_s: &[f64],
+        controls: ThermalVolumeMomentumControls,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
+    ) -> Result<ViscousThermalVolumeMomentumStep, ChtError> {
+        poll(gate)?;
+        let axis = Self::admit_material_viscosity_pressure_mouth(
+            faces, viscosity.boundaries, input.boundary_velocity_m_s,
+        )?;
+        self.advance_viscous_thermal_volume(
+            domain, faces, Some(profile), Some(axis), curve, input, viscosity,
+            Some(bulk_viscosity_pa_s), controls, viscosity_controls, gate,
         )
     }
 
@@ -164,6 +227,7 @@ impl FlowField {
         curve: &EquilibriumEnthalpyPhaseCurve,
         input: ThermalVolumeMomentumInput<'_>,
         viscosity: MaterialMomentumViscosityInput<'_>,
+        bulk_viscosity_pa_s: Option<&[f64]>,
         controls: ThermalVolumeMomentumControls,
         viscosity_controls: MaterialViscosityControls,
         gate: &CancelGate,
@@ -175,6 +239,7 @@ impl FlowField {
             curve,
             input,
             viscosity,
+            bulk_viscosity_pa_s,
             controls,
             viscosity_controls,
             gate,
@@ -204,6 +269,7 @@ impl FlowField {
         curve: &EquilibriumEnthalpyPhaseCurve,
         input: ThermalVolumeMomentumInput<'_>,
         viscosity: MaterialMomentumViscosityInput<'_>,
+        bulk_viscosity_pa_s: Option<&[f64]>,
         controls: ThermalVolumeMomentumControls,
         viscosity_controls: MaterialViscosityControls,
         gate: &CancelGate,
@@ -212,7 +278,8 @@ impl FlowField {
         let transport = controls.volume.thermal.volume.transport;
         let viscous = self.prepare_material_viscosity(
             domain, faces, pressure_mouth_axis, input.volume.mass_kg,
-            input.momentum_kg_m_s, viscosity, controls.mechanics.reconstruction,
+            input.momentum_kg_m_s, viscosity, bulk_viscosity_pa_s,
+            controls.mechanics.reconstruction,
             transport.projection.duration_s, viscosity_controls, gate,
             |cell, source| {
                 let phase = input.volume.phase_states[cell]

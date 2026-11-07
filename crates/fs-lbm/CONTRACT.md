@@ -12323,12 +12323,26 @@ the transport-stage field; endpoint state is the actual returned M, h and P.
 A later call reconstructs current momentum and consumes newly evaluated sources.
 
 Scope is closed, fixed geometry and a first-order frozen-viscosity split.
-There is no added EOS, phase mobility, bulk-viscosity law, turbulence,
+The original entry retains `2 mu D`, with no independently supplied bulk law.
+There is no added EOS, phase mobility, turbulence,
 pressure-opening work model or implicit viscosity-temperature feedback.
 Cell and sweep ceilings bound work: each sweep has three existing momentum
 solves, each capped at 20,000 Krylov iterations, and a frozen coupled residual
 readback. Numerical storage is linear in original cells/faces. Any source,
 solve, balance, heat-insertion or cancellation refusal returns no candidate.
+
+`advance_material_momentum_with_bulk_viscosity` and
+`advance_piecewise_thermal_volume_momentum_with_bulk_viscosity`, including their
+pressure-profile variants, opt into `2 mu dev(D) + zeta div(u) I`. The caller
+supplies one finite nonnegative bulk coefficient per mobile cell at the same
+state as the original shear source; fixed-solid slots are ignored. Admission
+uses the existing `NewtonianViscosity` law, including explicit zero bulk.
+Normal rows use `4 mu/3 + zeta` and reciprocal `zeta - 2 mu/3` cross derivatives.
+The matching physical heat is `2 mu dev(D):dev(D) + zeta div(u)^2`, entering the
+same enthalpy or phase-density chart once. Existing shear-edge transmission,
+actual M/V inertia, mirrored reservoir half cells, separate numerical losses
+and atomic refusal gates remain unchanged. Both coefficients are frozen during
+the original split; no EOS or bulk law is inferred from shear viscosity.
 
 Four source-bound regressions cover graded actual inertia distinct from source
 reference density, original liquid-viscosity changes, moving-wall work and

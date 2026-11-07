@@ -128,6 +128,7 @@ impl FlowField {
             conductivity.caloric_curve(),
             input,
             viscosity,
+            None,
             controls.evolution,
             viscosity_controls,
             gate,
