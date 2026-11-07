@@ -1,5 +1,18 @@
 # CONTRACT: fs-conduction
 
+## Conductivity design across fixed thermal contacts
+
+`ConductivityDesign::with_interfaces` retains a checked, immutable matching
+or nonmatching thermal-contact binding in the same operator used by primal,
+adjoint, discrete-goal and retained Hessian solves. Bulk multipliers scale
+only their element conductivity tensors; contact and boundary conductances
+remain fixed, and the complete Dirichlet lift is retained. This design hook
+does not differentiate temperature-, pressure- or design-dependent contact-law
+updates. Its contact regressions use an independent series-resistance
+temperature/gradient/curvature reference, interface side relabeling, and
+per-element Hessian finite differences. These native integration regressions
+are defined but still require execution in a complete native build.
+
 ## Material-supported and residual-checked conductivity design
 
 `ConductivityDesign` checks every tetrahedron vertex against that element's

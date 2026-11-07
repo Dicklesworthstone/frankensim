@@ -1,7 +1,9 @@
 //! Conductivity-design gradients and discrete thermal goal comparisons.
 //!
 //! [`ConductivityDesign`] computes `dJ/dρ` for a LINEAR conduction solve
-//! whose design parameters are per-element conductivity multipliers.
+//! whose design parameters are per-element conductivity multipliers. Fixed
+//! matching or nonmatching thermal contacts can be retained through
+//! [`ConductivityDesign::with_interfaces`]; their resistance is not scaled by ρ.
 //! [`compare_discrete_goal`] also supports nonlinear k(T) and matching
 //! contacts, retaining the finite linearization remainder explicitly.
 //!
@@ -15,7 +17,7 @@
 //!
 //! ```text
 //!   dJ/dρ_e = ∂J/∂ρ_e − λᵀ (∂R/∂ρ_e),   (∂R/∂T)ᵀ λ = ∂J/∂T
-//!   ∂R/∂ρ_e = K_e · T_full |_free       (exact: A is LINEAR in ρ)
+//!   ∂R/∂ρ_e = K_e · T_full |_free       (exact: A is AFFINE in ρ)
 //! ```
 //!
 //! First- and second-order goals share one residual-checked, preconditioned
@@ -49,6 +51,7 @@ use crate::ConductionError;
 use crate::assemble::{
     DofMap, assemble_operator_scaled_with_interfaces, element_stiffness, reduce,
 };
+use crate::interface::ThermalInterfaces;
 use crate::material::{ElementMaterials, TemperatureSpan};
 use crate::solve::{ConductionProblem, LinearConfig};
 
@@ -59,6 +62,8 @@ pub struct ConductivityDesign<'m> {
     dofs: DofMap,
     linear: LinearConfig,
     element_materials: Option<&'m ElementMaterials>,
+    /// Fixed contact conductances, independent of the bulk design multipliers.
+    interfaces: Option<&'m ThermalInterfaces>,
     /// Per-element LINEAR conductivity tensor at construction. A
     /// temperature-dependent model is refused, so this is not a
     /// linearization of `k(T)`.
@@ -174,9 +179,30 @@ impl<'m> ConductivityDesign<'m> {
             dofs,
             linear,
             element_materials: materials,
+            interfaces: None,
             element_tensors,
             reference_temperature,
         })
+    }
+
+    /// Bind fixed matching or nonmatching thermal contacts to the design.
+    ///
+    /// Their currently bound resistance coefficients enter every primal,
+    /// adjoint, discrete-goal and Hessian solve, including the Dirichlet lift.
+    /// Only the bulk tensors are multiplied by `ρ_e`; the contact operator
+    /// and its geometry remain fixed. Temperature-, pressure- or
+    /// design-dependent contact-law updates are not differentiated here.
+    ///
+    /// # Errors
+    /// Refuses an interface bound to another mesh or incompatible boundary,
+    /// using the same validation as the native contact assembler.
+    pub fn with_interfaces(
+        mut self,
+        interfaces: &'m ThermalInterfaces,
+    ) -> Result<Self, ConductionError> {
+        interfaces.validate_for(self.problem.mesh, self.problem.boundary)?;
+        self.interfaces = Some(interfaces);
+        Ok(self)
     }
 
     /// One design parameter per element.
@@ -240,7 +266,7 @@ impl<'m> ConductivityDesign<'m> {
             self.problem.source,
             &self.reference_temperature,
             Some(rho),
-            None,
+            self.interfaces,
             self.element_materials,
         )?;
         Ok(reduce(&system, &self.dofs))
@@ -450,7 +476,8 @@ impl<'m> ConductivityDesign<'m> {
     }
 
     /// `(∂R/∂ρ)ᵀ λ`, element by element: `λᵀ (K_e · T_full)|_free`.
-    /// Exact, because the assembled operator is LINEAR in `ρ`.
+    /// Exact, because the bulk operator is LINEAR in `ρ`; fixed contact and
+    /// boundary operators have zero parameter derivative.
     #[must_use]
     pub fn parameter_pullback(&self, lambda: &[f64], temperature: &[f64]) -> Vec<f64> {
         let mesh = self.problem.mesh;

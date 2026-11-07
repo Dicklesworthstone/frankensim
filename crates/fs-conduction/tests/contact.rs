@@ -2131,3 +2131,198 @@ fn g0_source_card_slab_refuses_invalid_property_state_and_geometry() {
         assert!(resolve(0.02, geometry, &card, &property, &in_domain).is_err());
     }
 }
+
+/// G1/G3: fixed contact resistance participates in the complete design
+/// operator, while only the two bulk conductivities change with rho.
+#[test]
+fn conductivity_design_with_contact_matches_series_gradients_and_hessian() {
+    use fs_conduction::adjoint::ConductivityDesign;
+
+    let (mesh, left_vertices) = two_slab_mesh(1);
+    let boundary = boundary(&mesh);
+    let card = contact_card(UncertaintyModel::Unstated);
+    let material = ConductivityModel::isotropic_declared(K).unwrap();
+    let source = ScalarField::Uniform(0.0);
+    let left: Vec<_> = mesh
+        .complex()
+        .tets
+        .iter()
+        .map(|tet| (tet[0] as usize) < left_vertices)
+        .collect();
+    let scales = [2.0_f64, 0.5_f64];
+    let step = [0.3_f64, -0.2_f64];
+    let rho: Vec<_> = left.iter().map(|&a| scales[usize::from(!a)]).collect();
+    let direction: Vec<_> = left.iter().map(|&a| step[usize::from(!a)]).collect();
+    let bulk = [1.0 / (K * scales[0]), 1.0 / (K * scales[1])];
+    let total_resistance = bulk[0] + AREA_SPECIFIC_RESISTANCE + bulk[1];
+    let heat = (T_HOT - T_COLD) / total_resistance;
+    // J is the temperature jump across the fixed unit-area bondline.
+    let exact_goal = heat * AREA_SPECIFIC_RESISTANCE;
+    let numerator = (T_HOT - T_COLD) * AREA_SPECIFIC_RESISTANCE;
+
+    for reversed in [false, true] {
+        let pairs = oriented_pairs(&mesh)
+            .into_iter()
+            .map(|pair| {
+                if reversed {
+                    InterfaceFacePair {
+                        side_a: pair.side_b,
+                        side_b: pair.side_a,
+                    }
+                } else {
+                    pair
+                }
+            })
+            .collect();
+        let interfaces = ThermalInterfaces::new(
+            &mesh,
+            &boundary,
+            vec![InterfaceSurface::new("bondline", pairs, resistance(&card)).unwrap()],
+        )
+        .unwrap();
+        let design = ConductivityDesign::new(
+            ConductionProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+                element_materials: None,
+            },
+            config().linear,
+        )
+        .unwrap()
+        .with_interfaces(&interfaces)
+        .unwrap();
+        // This one-cell-per-body mesh has only the eight trace vertices free.
+        assert_eq!(design.dofs().n(), 8);
+        let weights: Vec<_> = design
+            .dofs()
+            .free()
+            .iter()
+            .map(|&v| if v < left_vertices { 0.25 } else { -0.25 })
+            .collect();
+
+        with_cx(|cx| {
+            let solved = design.solve(cx, &rho).unwrap();
+            for (v, point) in mesh.positions().iter().enumerate() {
+                let exact = if v < left_vertices {
+                    T_HOT - heat * point[0] * bulk[0]
+                } else {
+                    T_COLD + heat * (2.0 - point[0]) * bulk[1]
+                };
+                assert!((solved.temperature[v] - exact).abs() < 1e-8);
+            }
+            let flux = interfaces.fluxes(&solved.temperature).unwrap();
+            let signed_heat = if reversed { -heat } else { heat };
+            assert!((flux[0].heat_rate_a_to_b_w - signed_heat).abs() < 1e-7);
+            assert!((design.objective(cx, &rho, &weights).unwrap() - exact_goal).abs() < 1e-8);
+            let (gradient, report) = design.gradient(cx, &rho, &weights).unwrap();
+            assert!(report.converged);
+            for (side, &scale) in scales.iter().enumerate() {
+                let summed: f64 = gradient
+                    .iter()
+                    .zip(&left)
+                    .filter(|(_, a)| usize::from(!**a) == side)
+                    .map(|(g, _)| g)
+                    .sum();
+                let exact = numerator / (K * scale.powi(2) * total_resistance.powi(2));
+                assert!((summed - exact).abs() < 1e-8 * exact.abs().max(1.0));
+            }
+
+            let goal = design.linearize_goal(cx, &rho, &weights).unwrap();
+            assert!((goal.value() - exact_goal).abs() < 1e-8);
+            for (&retained, &direct) in goal.gradient().iter().zip(&gradient) {
+                assert!((retained - direct).abs() < 1e-10);
+            }
+            let discrepancy = design
+                .discrete_goal_error(cx, &rho, &vec![315.0; weights.len()], &weights)
+                .unwrap();
+            assert!((discrepancy.signed_error - exact_goal).abs() < 1e-8);
+
+            let hv = goal.hessian_vector_product(cx, &direction).unwrap();
+            // Independently differentiate J = delta_T * R_contact / R_total.
+            let dr = -step[0] / (K * scales[0].powi(2)) - step[1] / (K * scales[1].powi(2));
+            let ddr = 2.0 * step[0].powi(2) / (K * scales[0].powi(3))
+                + 2.0 * step[1].powi(2) / (K * scales[1].powi(3));
+            let exact_curvature = numerator
+                * (2.0 * dr.powi(2) / total_resistance.powi(3) - ddr / total_resistance.powi(2));
+            let curvature: f64 = direction.iter().zip(&hv.values).map(|(v, h)| v * h).sum();
+            assert!(exact_curvature.abs() > 0.1, "nonvacuous curvature");
+            assert!((curvature - exact_curvature).abs() < 1e-7);
+
+            // Check every element response, including cross-body coupling.
+            let epsilon = 1e-4;
+            let plus: Vec<_> = rho
+                .iter()
+                .zip(&direction)
+                .map(|(r, v)| r + epsilon * v)
+                .collect();
+            let minus: Vec<_> = rho
+                .iter()
+                .zip(&direction)
+                .map(|(r, v)| r - epsilon * v)
+                .collect();
+            let gp = design.gradient(cx, &plus, &weights).unwrap().0;
+            let gm = design.gradient(cx, &minus, &weights).unwrap().0;
+            let mut error_sq = 0.0;
+            let mut norm_sq = 0.0;
+            for ((&actual, a), b) in hv.values.iter().zip(gp).zip(gm) {
+                error_sq += (actual - (a - b) / (2.0 * epsilon)).powi(2);
+                norm_sq += actual.powi(2);
+            }
+            assert!(norm_sq > 0.0);
+            assert!((error_sq / norm_sq).sqrt() < 2e-6);
+        });
+    }
+}
+
+#[test]
+fn conductivity_design_contact_binding_rejects_changed_mesh_and_occupied_boundary() {
+    use fs_conduction::adjoint::ConductivityDesign;
+
+    let (mesh, _) = two_slab_mesh(1);
+    let original_boundary = boundary(&mesh);
+    let card = contact_card(UncertaintyModel::Unstated);
+    let interfaces = ThermalInterfaces::new(
+        &mesh,
+        &original_boundary,
+        vec![InterfaceSurface::new("bondline", oriented_pairs(&mesh), resistance(&card)).unwrap()],
+    )
+    .unwrap();
+    let occupied = boundary_with_occupied_interface(&mesh);
+    let (fine_mesh, _) = two_slab_mesh(2);
+    let fine_boundary = boundary(&fine_mesh);
+    let material = ConductivityModel::isotropic_declared(K).unwrap();
+    let source = ScalarField::Uniform(0.0);
+    for (mesh, boundary, name, diagnosis) in [
+        (
+            &mesh,
+            &occupied,
+            "bondline",
+            "now carries an external boundary condition",
+        ),
+        (
+            &fine_mesh,
+            &fine_boundary,
+            "<binding>",
+            "face set does not match",
+        ),
+    ] {
+        let result = ConductivityDesign::new(
+            ConductionProblem {
+                mesh,
+                boundary,
+                material: &material,
+                source: &source,
+                element_materials: None,
+            },
+            config().linear,
+        )
+        .unwrap()
+        .with_interfaces(&interfaces);
+        match result {
+            Err(error) => assert_interface_refusal(error, name, diagnosis),
+            Ok(_) => panic!("a changed contact binding must refuse at design construction"),
+        }
+    }
+}
