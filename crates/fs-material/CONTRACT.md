@@ -19375,3 +19375,26 @@ plateau returns, analytical scalar relations, independent tensor derivatives,
 history under reversal, energy partition, and domain refusals in
 `plastic_tabulated`, `plastic_tabulated_reduction`, and
 `plastic_finite_tabulated`.
+
+### Bonded common-Poisson circular transverse shear
+
+`section::transverse_stress::layered::LayeredCircularTransverseShearRecovery`
+retains distinct original E/G and material identities in perfectly bonded
+concentric isotropic layers. All layers must explicitly share one Poisson
+ratio. Exact radial warping and shear-traction transmission use the shared
+pivoted tridiagonal owner in O(layers) preparation; each material-point query
+is allocation-free O(1). Original bore/exterior radial tractions vanish, the
+integrated stress recovers the supplied transverse resultant, and each side
+of an interface retains its own strain and stress. The whole selected annulus
+engineering-shear bound includes analytic interior extrema of both stress-map
+eigenvalues. Unsupported or numerically unresolved input refuses without
+clipping, homogenizing moduli or changing original shear correction factors.
+
+The original homogeneous owner retains its admission boundary. The layered
+owner is an explicit alternative for prismatic small-strain observations; it
+does not replace reduced mechanical storage or supply varying-Poisson-ratio,
+interface slip, plasticity, thermal mismatch, end effects or cross-section
+inertia corrections. Kernel tests compare closed-form solid/tube limits,
+heterogeneous interface continuity, exact resultants and material-subdivision
+invariance. Source/native regression definitions add the independent two-layer
+center solution, source-role refusal and actual rod fatigue consumption.

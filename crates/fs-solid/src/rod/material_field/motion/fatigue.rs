@@ -6,6 +6,7 @@ use fs_exec::CancelGate;
 
 use super::super::fatigue::{
     RodFatigueConfig, RodFatigueError, RodFatigueGauge, RodFatigueObservation, RodFindleyGauge,
+    TransverseModel,
 };
 use super::{PreparedRodMotion, RodMotionPose};
 use crate::rod::derivatives::analytic::Kinematics;
@@ -27,7 +28,14 @@ impl RodFatigueObservation {
         config: RodFatigueConfig,
         gate: &CancelGate,
     ) -> Result<Self, RodFatigueError> {
-        let mut bank = Self::prepare(model.source(), gauges, findley, config, false, gate)?;
+        let mut bank = Self::prepare(
+            model.source(),
+            gauges,
+            findley,
+            config,
+            TransverseModel::Omitted,
+            gate,
+        )?;
         bank.motion_source = Some(Arc::clone(&model.source));
         bank.observe_motion(model, pose, gate)?;
         Ok(bank)
@@ -45,7 +53,37 @@ impl RodFatigueObservation {
         config: RodFatigueConfig,
         gate: &CancelGate,
     ) -> Result<Self, RodFatigueError> {
-        let mut bank = Self::prepare(model.source(), gauges, findley, config, true, gate)?;
+        let mut bank = Self::prepare(
+            model.source(),
+            gauges,
+            findley,
+            config,
+            TransverseModel::Homogeneous,
+            gate,
+        )?;
+        bank.motion_source = Some(Arc::clone(&model.source));
+        bank.observe_motion(model, pose, gate)?;
+        Ok(bank)
+    }
+
+    /// Observe the same accepted motion with exact bonded common-nu circular
+    /// layer transmission; see [`Self::new_with_layered_transverse_shear`].
+    pub fn new_motion_with_layered_transverse_shear<I>(
+        model: &PreparedRodMotion<I>,
+        pose: &RodMotionPose,
+        gauges: Vec<RodFatigueGauge>,
+        findley: Vec<RodFindleyGauge>,
+        config: RodFatigueConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, RodFatigueError> {
+        let mut bank = Self::prepare(
+            model.source(),
+            gauges,
+            findley,
+            config,
+            TransverseModel::LayeredCommonPoisson,
+            gate,
+        )?;
         bank.motion_source = Some(Arc::clone(&model.source));
         bank.observe_motion(model, pose, gate)?;
         Ok(bank)

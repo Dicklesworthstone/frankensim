@@ -113,6 +113,30 @@ impl<I: RodMotionInertia> RodMotionFatiguePath<I> {
     pub fn motion(&self) -> &RodMotion<I> {
         &self.motion
     }
+
+    /// Include transverse stress from bonded circular layers with different
+    /// original E/G and one common isotropic nu. The same native trajectory,
+    /// source pins, whole-layer strain bounds and fatigue acceptance remain.
+    pub fn new_with_layered_transverse_shear(
+        motion: RodMotion<I>,
+        gauges: Vec<RodFatigueGauge>,
+        findley: Vec<RodFindleyGauge>,
+        config: RodFatigueConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, RodMotionFatigueError> {
+        let observation = RodFatigueObservation::new_motion_with_layered_transverse_shear(
+            motion.model(),
+            motion.pose(),
+            gauges,
+            findley,
+            config,
+            gate,
+        )?;
+        Ok(Self {
+            motion,
+            observation,
+        })
+    }
     pub fn observation(&self) -> &RodFatigueObservation {
         &self.observation
     }

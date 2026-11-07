@@ -22,6 +22,36 @@ use std::sync::Arc;
 use super::{ConcentricShearSection, MaterialStatePointError, invalid};
 use crate::state_point::ResolvedIsotropicElasticModuli;
 
+/// Bonded concentric elastic layers with an explicitly common Poisson ratio.
+pub mod layered;
+
+fn original_moduli(
+    section: &ConcentricShearSection,
+    index: usize,
+) -> Result<(f64, f64, f64), MaterialStatePointError> {
+    let elastic = section.elastic();
+    let bindings = elastic.isotropic_parameters().ok_or_else(|| {
+        invalid("circular transverse stress requires explicit original isotropic source roles")
+    })?;
+    let moduli = ResolvedIsotropicElasticModuli::try_from_resolved(
+        elastic.layers()[index].material.clone(),
+        &bindings[index].parameters,
+    )?;
+    let coefficients = (
+        moduli.young_modulus_pa(),
+        moduli.shear_modulus_pa(),
+        moduli.poisson_ratio(),
+    );
+    if coefficients.0 != elastic.layer_integrals()[index].young_modulus_pa()
+        || coefficients.1 != section.layer_shear_modulus_pa(index)?
+    {
+        return Err(invalid(
+            "circular transverse stress must retain the original E/G roles",
+        ));
+    }
+    Ok(coefficients)
+}
+
 /// Prepared exact circular-section field with the complete original sources.
 /// Admission is O(layers); point recovery is allocation-free and O(1).
 #[derive(Clone, Debug, PartialEq)]
@@ -70,24 +100,10 @@ impl CircularTransverseShearRecovery {
     /// elastic layers refuse rather than receiving a homogenized stress field.
     pub fn try_new(section: Arc<ConcentricShearSection>) -> Result<Self, MaterialStatePointError> {
         let elastic = section.elastic();
-        let bindings = elastic.isotropic_parameters().ok_or_else(|| {
-            invalid("circular transverse stress requires explicit original isotropic source roles")
-        })?;
         let mut reference = None;
-        for (index, (layer, binding)) in elastic.layers().iter().zip(bindings).enumerate() {
-            let moduli = ResolvedIsotropicElasticModuli::try_from_resolved(
-                layer.material.clone(),
-                &binding.parameters,
-            )?;
-            let coefficients = (
-                moduli.young_modulus_pa(),
-                moduli.shear_modulus_pa(),
-                moduli.poisson_ratio(),
-            );
-            if coefficients.0 != elastic.layer_integrals()[index].young_modulus_pa()
-                || coefficients.1 != section.layer_shear_modulus_pa(index)?
-                || reference.is_some_and(|original| original != coefficients)
-            {
+        for index in 0..elastic.layers().len() {
+            let coefficients = original_moduli(&section, index)?;
+            if reference.is_some_and(|original| original != coefficients) {
                 return Err(invalid(
                     "circular transverse stress requires one homogeneous original isotropic elastic law",
                 ));

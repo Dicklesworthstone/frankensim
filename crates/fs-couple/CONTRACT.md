@@ -2797,3 +2797,12 @@ observer without radiation loading or common propagation delay; ideal force,
 release and parameter-jump impulses require a resolved transition and are not
 reconstructed. Analytic high-band amplitude/phase, two-grid public-runtime,
 damped held-load and material/gas-update regressions cover the changed behavior.
+
+### Coupled rod fatigue with bonded layered transverse shear
+
+`RodMotionFatiguePath::new_with_layered_transverse_shear` selects the original
+solid observation owner's bonded common-Poisson circular recovery for native
+motion. Distinct original layer moduli and source identities reach the same
+S-N and Findley tensor histories. The wrapper retains the existing mechanical
+trajectory, accepted-pose observer, work and rollback owners; it supplies no
+new integrator, averaged material law or additional mechanical energy.

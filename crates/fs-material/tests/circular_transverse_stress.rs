@@ -9,6 +9,7 @@ use fs_matdb::{
     PropertyValue, Provenance, QueryPoint, UncertaintyModel,
 };
 use fs_material::section::transverse_stress::CircularTransverseShearRecovery;
+use fs_material::section::transverse_stress::layered::LayeredCircularTransverseShearRecovery;
 use fs_material::section::{
     ConcentricElasticSection, ConcentricMaterialLayer, ConcentricShearSection,
     LayerIsotropicParameters,
@@ -20,6 +21,103 @@ use fs_material::state_point::{
 use fs_qty::{Density, Pressure};
 
 const G: f64 = 2e8;
+
+#[test]
+fn bonded_layered_sources_keep_traction_strain_and_independent_two_layer_center_stress() {
+    let original = section(0.0, 0.25, 0.8, true, true, true);
+    assert!(CircularTransverseShearRecovery::try_new(Arc::clone(&original)).is_err());
+    let field = LayeredCircularTransverseShearRecovery::try_new(Arc::clone(&original)).unwrap();
+    assert_eq!(field.section(), original.as_ref());
+    // Independent three-equation core/sleeve transmission solution, G2=2G1.
+    let t = 0.6_f64;
+    let c = 3.5 / 4.0;
+    let b_sleeve = -c * (1.0 - t * t) * t * t / (3.0 - t * t);
+    let a_core = b_sleeve - c + b_sleeve / (t * t);
+    let center_factor = -2.0 * a_core / (1.25 * (2.0 - t.powi(4)));
+    let center = field.evaluate(0, [0.0; 2], [2.0, -1.0], 0.01).unwrap();
+    for (stress, q) in center.shear_stress_pa.into_iter().zip([2.0, -1.0]) {
+        near(stress, center_factor * q / core::f64::consts::PI, 1.0);
+    }
+    for point in [[t, 0.0], [0.0, t]] {
+        let core = field.evaluate(0, point, [2.0, -1.0], 0.01).unwrap();
+        let sleeve = field.evaluate(1, point, [2.0, -1.0], 0.01).unwrap();
+        let dot = |values: [f64; 2]| values[0] * point[0] + values[1] * point[1];
+        let tangent = |values: [f64; 2]| -values[0] * point[1] + values[1] * point[0];
+        near(dot(core.shear_stress_pa), dot(sleeve.shear_stress_pa), 1.0);
+        near(
+            tangent(core.engineering_shear_strain),
+            tangent(sleeve.engineering_shear_strain),
+            1e-8,
+        );
+        assert!(
+            core.maximum_layer_engineering_shear
+                >= core.engineering_shear_strain[0].hypot(core.engineering_shear_strain[1])
+        );
+    }
+    let corrected =
+        LayeredCircularTransverseShearRecovery::try_new(section(0.0, 0.25, 0.3, true, true, true))
+            .unwrap();
+    assert_eq!(
+        center,
+        corrected.evaluate(0, [0.0; 2], [2.0, -1.0], 0.01).unwrap()
+    );
+    // Querying a contour with zero traction cannot conceal an overstressed layer.
+    assert!(field.evaluate(1, [1.0, 0.0], [2.0, 0.0], 1e-12).is_err());
+    assert!(field.evaluate(2, [0.0; 2], [0.0; 2], 0.01).is_err());
+    assert!(field.evaluate(0, [0.8, 0.0], [0.0; 2], 0.01).is_err());
+    assert!(
+        LayeredCircularTransverseShearRecovery::try_new(section(0.0, 0.25, 0.8, true, true, false))
+            .is_err()
+    );
+}
+
+#[test]
+fn layered_homogeneous_limit_and_common_poisson_source_boundary_are_explicit() {
+    for bore in [0.0, 0.3] {
+        for nu in [-0.75, 0.0, 0.25, 0.49] {
+            let source = section(bore, nu, 0.8, true, false, true);
+            let homogeneous =
+                CircularTransverseShearRecovery::try_new(Arc::clone(&source)).unwrap();
+            let layered = LayeredCircularTransverseShearRecovery::try_new(source).unwrap();
+            for (i, p) in [(0, [(bore + 0.6) / 2.0, 0.0]), (1, [0.0, 0.8])] {
+                let a = homogeneous.evaluate(i, p, [1.0, -0.3], 0.01).unwrap();
+                let b = layered.evaluate(i, p, [1.0, -0.3], 0.01).unwrap();
+                for (x, y) in a.shear_stress_pa.into_iter().zip(b.shear_stress_pa) {
+                    near(x, y, 1.0);
+                }
+                near(
+                    a.maximum_layer_engineering_shear,
+                    b.maximum_layer_engineering_shear,
+                    1e-8,
+                );
+            }
+        }
+    }
+    let a = section(0.0, 0.25, 0.8, true, false, true);
+    let b = section(0.0, 0.3, 0.8, true, true, true);
+    let layers = vec![
+        a.elastic().layers()[0].clone(),
+        b.elastic().layers()[1].clone(),
+    ];
+    let bindings = layers
+        .iter()
+        .map(|layer| {
+            let role = |name| layer.material.property(name).unwrap().requirement().clone();
+            LayerIsotropicParameters {
+                density: role("density"),
+                parameters: IsotropicElasticParameters::YoungShear {
+                    young_modulus: role("young_modulus"),
+                    shear_modulus: role("shear_modulus"),
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+    let mixed = ConcentricElasticSection::try_new_with_isotropic_parameters(0.0, layers, &bindings)
+        .unwrap()
+        .with_isotropic_shear(0.8)
+        .unwrap();
+    assert!(LayeredCircularTransverseShearRecovery::try_new(Arc::new(mixed)).is_err());
+}
 
 fn section(
     bore: f64,

@@ -11160,3 +11160,17 @@ in `tests/frame_fatigue/shear.rs` cover independent off-axis stresses, correctio
 invariance, Newmark equivalence, source/budget admission and transactional
 rollback. This observation supplies no variable-amplitude multiaxial life,
 plastic stress recovery, thermal recoupling or cross-section inertia correction.
+
+### Native rod fatigue with bonded layered transverse shear
+
+Explicit `new_with_layered_transverse_shear` and
+`new_motion_with_layered_transverse_shear` constructors connect original
+static and accepted-motion transverse resultants to the shared bonded
+common-Poisson circular stress owner. Each original layer retains its E/G,
+point, material source and fatigue calibration. Recovered transverse stress
+joins the existing axial/bending/torsion tensor for signed S-N projections and
+Findley windows. Existing source pins, combined whole-layer strain bounds and
+atomic mechanical/history acceptance remain authoritative. Earlier homogeneous
+and explicitly unassessed modes retain their original behavior. The new
+independent two-layer native regression is in `tests/rod_fatigue.rs`; this
+observation does not alter native stiffness, work, inertia or stored energy.

@@ -8,7 +8,8 @@
 //!
 //! Scalar S-N rainflow and representative-cycle Findley evaluation reuse the
 //! material owners. Transverse-force shear is either explicitly unassessed or
-//! recovered through the opt-in homogeneous circular Saint-Venant owner; Q/A is
+//! recovered through an opt-in circular Saint-Venant owner, homogeneous or
+//! bonded layered with a common original Poisson ratio; Q/A is
 //! never used as a local stress field. No plasticity, variable-temperature calibration transfer,
 //! notch correction, life qualification or fatigue-to-stiffness/heat law is
 //! inferred. Caller-selected load endpoints must resolve physical extrema.
@@ -26,6 +27,8 @@ use fs_material::fatigue::{
 };
 use fs_material::section::ConcentricShearSection;
 use fs_material::section::transverse_stress::CircularTransverseShearRecovery;
+use fs_material::section::transverse_stress::TransverseShearStressPoint;
+use fs_material::section::transverse_stress::layered::LayeredCircularTransverseShearRecovery;
 use fs_material::state_point::ResolvedMaterialStatePoint;
 use fs_qty::semantic::{QuantityKind, ValueForm};
 use fs_qty::{QuantitySpec, Temperature};
@@ -154,7 +157,34 @@ struct PointBinding {
 struct SegmentBinding {
     segment: usize,
     section: Arc<ConcentricShearSection>,
-    transverse: Option<CircularTransverseShearRecovery>,
+    transverse: Option<TransverseRecovery>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum TransverseModel {
+    Omitted,
+    Homogeneous,
+    LayeredCommonPoisson,
+}
+
+#[derive(Debug, Clone)]
+enum TransverseRecovery {
+    Homogeneous(CircularTransverseShearRecovery),
+    Layered(LayeredCircularTransverseShearRecovery),
+}
+impl TransverseRecovery {
+    fn evaluate(
+        &self,
+        layer: usize,
+        point: [f64; 2],
+        force: [f64; 2],
+        bound: f64,
+    ) -> Result<TransverseShearStressPoint, fs_material::state_point::MaterialStatePointError> {
+        match self {
+            Self::Homogeneous(source) => source.evaluate(layer, point, force, bound),
+            Self::Layered(source) => source.evaluate(layer, point, force, bound),
+        }
+    }
 }
 #[derive(Debug, Clone, Copy, Default)]
 struct SegmentSample {
@@ -203,7 +233,7 @@ impl RodFatigueObservation {
         config: RodFatigueConfig,
         gate: &CancelGate,
     ) -> Result<Self, RodFatigueError> {
-        let mut bank = Self::prepare(rod, gauges, findley, config, false, gate)?;
+        let mut bank = Self::prepare(rod, gauges, findley, config, TransverseModel::Omitted, gate)?;
         bank.observe_native(rod, gate)?;
         Ok(bank)
     }
@@ -222,7 +252,38 @@ impl RodFatigueObservation {
         config: RodFatigueConfig,
         gate: &CancelGate,
     ) -> Result<Self, RodFatigueError> {
-        let mut bank = Self::prepare(rod, gauges, findley, config, true, gate)?;
+        let mut bank = Self::prepare(
+            rod,
+            gauges,
+            findley,
+            config,
+            TransverseModel::Homogeneous,
+            gate,
+        )?;
+        bank.observe_native(rod, gate)?;
+        Ok(bank)
+    }
+
+    /// Resolve bonded circular layers with different original E/G but one
+    /// common explicitly isotropic Poisson ratio. Exact warping/traction
+    /// transmission supplies each layer's own stress; no homogenized G is
+    /// inserted into its fatigue tensor. The original mechanics and atomic
+    /// history retain their existing owners and small-strain bounds.
+    pub fn new_with_layered_transverse_shear(
+        rod: &SpatialMaterialRod,
+        gauges: Vec<RodFatigueGauge>,
+        findley: Vec<RodFindleyGauge>,
+        config: RodFatigueConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, RodFatigueError> {
+        let mut bank = Self::prepare(
+            rod,
+            gauges,
+            findley,
+            config,
+            TransverseModel::LayeredCommonPoisson,
+            gate,
+        )?;
         bank.observe_native(rod, gate)?;
         Ok(bank)
     }
@@ -232,7 +293,7 @@ impl RodFatigueObservation {
         gauges: Vec<RodFatigueGauge>,
         findley: Vec<RodFindleyGauge>,
         config: RodFatigueConfig,
-        transverse_shear: bool,
+        transverse_shear: TransverseModel,
         gate: &CancelGate,
     ) -> Result<Self, RodFatigueError> {
         poll(gate)?;
@@ -355,7 +416,7 @@ impl RodFatigueObservation {
         &mut self,
         rod: &SpatialMaterialRod,
         point: RodFatiguePoint,
-        transverse_shear: bool,
+        transverse_shear: TransverseModel,
         gate: &CancelGate,
     ) -> Result<(), RodFatigueError> {
         poll(gate)?;
@@ -376,13 +437,16 @@ impl RodFatigueObservation {
             Some(slot) => slot,
             None => {
                 let section = Arc::new(section.clone());
-                let transverse = if transverse_shear {
-                    Some(
+                let transverse = match transverse_shear {
+                    TransverseModel::Omitted => None,
+                    TransverseModel::Homogeneous => Some(TransverseRecovery::Homogeneous(
                         CircularTransverseShearRecovery::try_new(Arc::clone(&section))
                             .map_err(SpatialRodError::from)?,
-                    )
-                } else {
-                    None
+                    )),
+                    TransverseModel::LayeredCommonPoisson => Some(TransverseRecovery::Layered(
+                        LayeredCircularTransverseShearRecovery::try_new(Arc::clone(&section))
+                            .map_err(SpatialRodError::from)?,
+                    )),
                 };
                 self.segments.push(SegmentBinding {
                     segment: point.segment,
@@ -809,6 +873,20 @@ impl SpatialRodFatiguePath {
     ) -> Result<Self, RodFatigueError> {
         let observation =
             RodFatigueObservation::new_with_transverse_shear(&rod, gauges, findley, config, gate)?;
+        Ok(Self { rod, observation })
+    }
+
+    /// Original equilibrium cycles with bonded common-nu layer transmission.
+    pub fn new_with_layered_transverse_shear(
+        rod: SpatialMaterialRod,
+        gauges: Vec<RodFatigueGauge>,
+        findley: Vec<RodFindleyGauge>,
+        config: RodFatigueConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, RodFatigueError> {
+        let observation = RodFatigueObservation::new_with_layered_transverse_shear(
+            &rod, gauges, findley, config, gate,
+        )?;
         Ok(Self { rod, observation })
     }
     pub fn rod(&self) -> &SpatialMaterialRod {

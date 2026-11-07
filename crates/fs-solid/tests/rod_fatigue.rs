@@ -523,6 +523,62 @@ fn transverse_recovery_refuses_foreign_family_and_combined_overstrain_atomically
 }
 
 #[test]
+fn bonded_layer_shear_drives_the_original_native_fatigue_history() {
+    let gate = CancelGate::new();
+    let rod = isotropic_native(&[E, 2.0 * E]);
+    let center = gauge(0, [0.0; 2], [1.0, 1.0, 0.0]);
+    let mut limits = config();
+    limits.maximum_unassessed_transverse_force_n = 0.0;
+    let mut path = SpatialRodFatiguePath::new_with_layered_transverse_shear(
+        rod.clone(),
+        vec![center.clone()],
+        vec![findley(center.point)],
+        limits,
+        &gate,
+    )
+    .unwrap();
+    let t = 0.5_f64;
+    let b = -(3.5 / 4.0) * (1.0 - t * t) * t * t / (3.0 - t * t);
+    let a_core = b - 3.5 / 4.0 + b / (t * t);
+    let factor = -2.0 * a_core / (1.25 * (2.0 - t.powi(4)));
+    let load = |force| WorldTipLoad {
+        force: [0.0, force, 0.0],
+        moment: [0.0; 3],
+    };
+    for force in [0.5, -0.5] {
+        path.advance_world(&[load(force)], TOLERANCE, &gate)
+            .unwrap();
+        let (resultant, _) = path.rod().segment_resultants(0).unwrap();
+        let sample = path.observation().normal_samples()[0];
+        near(
+            sample.stress_pa[3],
+            factor * resultant[1] / (core::f64::consts::PI * R * R),
+            2e-11,
+        );
+        near(
+            sample.stress_pa[5],
+            factor * resultant[2] / (core::f64::consts::PI * R * R),
+            2e-11,
+        );
+        assert_eq!(sample.unassessed_transverse_force_n, [0.0; 2]);
+        assert_eq!(
+            sample.stress_pa,
+            path.observation().findley_samples()[0].stress_pa
+        );
+    }
+    path.advance_world_and_close_findley_cycle(&[load(0.0)], TOLERANCE, &gate)
+        .unwrap();
+    assert!(
+        path.observation().findley_results()[0]
+            .unwrap()
+            .usage_factor
+            > 0.0
+    );
+    assert!(path.finish(&gate).unwrap()[0].miner_damage > 0.0);
+    assert_eq!(path.rod().sections(), rod.sections());
+}
+
+#[test]
 fn pure_bending_preserves_opposite_material_point_histories() {
     let gate = CancelGate::new();
     let rod = native(&[E]);
