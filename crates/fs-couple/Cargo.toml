@@ -115,6 +115,8 @@ superfluid = ["fs-duct/superfluid"]
 experimental-stokes-motion = ["dep:fs-flux", "fs-flux/continuum"]
 # Coherent finite-film absorption on the original spatial thermal timeline.
 layered-wave-heating = ["fs-em/plane-wave"]
+# Original magnetized carrier absorption on finite electron/heavy gas storage.
+ionized-wave-heating = ["fs-em/plane-wave", "dep:fs-gas"]
 # Bounded single-bubble dynamics coupled to native compact acoustic observation.
 cavitation = ["dep:fs-flux", "fs-flux/cavitation"]
 # Frontier rod-motion composition; native conformance remains explicitly gated.

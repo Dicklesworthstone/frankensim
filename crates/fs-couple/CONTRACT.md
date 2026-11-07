@@ -2403,3 +2403,38 @@ retained plastic memory, transverse contraction/shear, endpoint temperature,
 physical heat and permanent dimensions. Source fixtures are authored numerical
 cases. Scope remains fully solid, fixed material metric/frame and small strain
 and rotation; the original source, geometry, step and energy refusals apply.
+
+## Magnetized plasma absorption on finite electron/heavy gas energy
+
+With `ionized-wave-heating`, `MagnetizedIonizedGasHeating` binds the original
+magnetized half-space slab absorption to the exact original frozen gas parcel.
+Its physical area/depth volume must equal the retained gas volume to roundoff;
+no density, area or heat rescaling is inferred. The parcel is explicitly
+uniformly mixed, while its original wave absorption is integrated exactly.
+
+The native `fs-gas::chemistry::energy` owner receives the two signed carrier
+powers once over a declared positive held-field interval. Original species
+calorics supply energy differences and heat capacities; every present neutral
+thermal target comes from the SAME retained electron momentum cross section.
+Effective scalar electron drag alone is refused because it cannot identify
+target-resolved energy transfer. The original Coulomb law supplies baseline
+thermal exchange, while its signed drift correction is already in the wave
+pool powers. Internal exchange cancels; coherent carrier kinetic storage,
+background field storage and gyroscopic reactive power are never heat.
+
+Native adaptive implicit exchange, source/domain and energy admission, and
+physical versus numerical entropy accounts remain intact. Caller-declared
+temperature increments bound the held-source step. Publication refreshes every
+original carrier source and the original bound-charge card at actual Th/Te/p,
+preserving immutable claims and source limits; failure or cancellation returns
+no partial thermal/material result. The returned transport and background can
+seed a new Maxwell solve with its own complete-field drift checks.
+
+This is a fixed-volume, frozen-population, cycle-averaged interval with endpoint
+source refresh. It does not assert continuous implicit field/thermal feedback,
+source validity along an unexamined material path, a second film interface,
+species evolution, spatial thermal conduction, flow or transient carrier
+energy dynamics. Five authored regressions cover Maxwell-to-caloric closure
+and a new field solve, signed Coulomb allocations and internal exchange,
+zero-field thermal relaxation, original source/volume/domain binding,
+temperature limits, cancellation and refusal of scalar-only electron drag.

@@ -236,6 +236,9 @@ pub mod laminate_thermal;
 /// Coherent finite-film absorption deposited once into original thermal cells.
 #[cfg(feature = "layered-wave-heating")]
 pub mod layered_wave_heating;
+/// Original circular-wave absorption evolving source-bound electron/heavy gas energy.
+#[cfg(feature = "ionized-wave-heating")]
+pub mod ionized_wave_heating;
 /// Analytic porous acoustic absorption deposited once into existing thermal cells.
 pub mod porous_heating;
 /// Finite dry-skeleton recoil under native periodic Darcy--Forchheimer resistance.
