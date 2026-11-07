@@ -17,7 +17,7 @@
   ],
   "physics_missing": [
     "A recording of this pipe: the clip is a 16 ft Principal at St. Jakobus, Ilmenau, key B5, sounding 482.85 Hz. Different pipe, so it's family likeness only with no count, and nothing about it went into the card. The 35.2 c between them isn't a fault",
-    "Noise: the harmonics-to-noise gap to the recording is 56.7 dB. The card has no jet noise: that row's gate opens at a flue Reynolds number of 700, and this flue runs near 400. The real pipe's floor may also come from its blower, valve or room",
+    "Noise: the harmonics-to-noise gap to the recording is 56.7 dB. The card has no jet noise: that row's gate opens at a flue Reynolds number of 700, and this flue runs near 400. The real pipe's floor may also come from its blower, valve or room. A resolved 3-D slot-jet run at about this flue's Reynolds number (410, cut-up 28 jet heights), made to see whether the jet turns broadband, refused itself early in its settling: the lattice stopped on a non-positive density at the inlet end (x = 3), so this pipe has no jet noise from resolved turbulence yet",
     "Even harmonics: odd stand +1.9 dB over even, against -10.9 dB in the recording. H2 is still about 14 dB under even the two lower microphones on the real pipe, and it leans on the borrowed offset",
     "Prompt speech: the attack takes 228 ms, 10 to 90 %, against 16.6 ms. The card's ramp reaches 360 Pa at 45 ms, so it isn't the ramp, and the cause is unexplained",
     "The right first sound: a tone near 1530 Hz, the pipe's third mode, leads from 20 to 120 ms. The recording opens on its own second harmonic at 966 Hz",
