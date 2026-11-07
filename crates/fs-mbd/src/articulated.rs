@@ -34,6 +34,7 @@ pub use prescribed_impulse::{
 };
 
 use core::fmt;
+use crate::kinetic_energy::{MomentumWork, accumulate_spatial_change};
 use fs_ga::{GaError, Mat3, Mat6, Se3, Twist, Vec3, Wrench};
 use fs_math::dd::Dd;
 
@@ -1042,6 +1043,24 @@ pub struct FreeFloatingImpulseResponse {
     pub impulse_work: f64,
     /// Actual kinetic-energy change minus impulse work, in joules.
     pub kinetic_work_residual: f64,
+    pub(crate) kinetic_change: MomentumWork,
+    pub(crate) work: MomentumWork,
+}
+
+impl FreeFloatingImpulseResponse {
+    /// Original full-inertia endpoint change before diagnostic rounding, in J.
+    /// Use this when combining an event with other storage or source accounts.
+    #[must_use]
+    pub fn retained_kinetic_energy_change_j(&self) -> Dd {
+        self.kinetic_change.total()
+    }
+
+    /// Original applied impulses paired with actual mean endpoint rates, in J.
+    /// This is independently evaluated, not inferred from kinetic storage.
+    #[must_use]
+    pub fn retained_impulse_work_j(&self) -> Dd {
+        self.work.total()
+    }
 }
 
 /// Convert a body-coordinate Featherstone spatial acceleration into the
@@ -1503,18 +1522,16 @@ fn momentum_increment_from_kinematics(
     model: &ArticulatedModel,
     before: &Kinematics,
     after: &Kinematics,
-) -> Result<ArticulatedMomentum, ArticulatedError> {
+) -> Result<(ArticulatedMomentum, MomentumWork), ArticulatedError> {
     let mut linear = [Dd::ZERO; 3];
     let mut angular = [Dd::ZERO; 3];
-    let mut energy = Dd::ZERO;
+    let mut energy = MomentumWork::default();
     for (index, link) in model.links.iter().enumerate() {
         let old = before.body_twist[index];
         let new = after.body_twist[index];
         let delta = Twist::new(new.angular - old.angular, new.linear - old.linear);
         let center = link.inertia.center_of_mass;
         let delta_center = delta.linear + delta.angular.cross(center);
-        let old_center = old.linear + old.angular.cross(center);
-        let new_center = new.linear + new.angular.cross(center);
         let delta_linear_body = delta_center.scale(link.inertia.mass);
         let delta_spin_body = link.inertia.inertia_com.apply(delta.angular);
         let pose = before.world_from_link[index];
@@ -1537,34 +1554,19 @@ fn momentum_increment_from_kinematics(
                 *sum = *sum + Dd::from_f64(value);
             }
         }
-        for ((old, new), impulse) in [
-            old_center.x,
-            old_center.y,
-            old_center.z,
-            old.angular.x,
-            old.angular.y,
-            old.angular.z,
-        ]
-        .into_iter()
-        .zip([
-            new_center.x,
-            new_center.y,
-            new_center.z,
-            new.angular.x,
-            new.angular.y,
-            new.angular.z,
-        ])
-        .zip([
-            delta_linear_body.x,
-            delta_linear_body.y,
-            delta_linear_body.z,
-            delta_spin_body.x,
-            delta_spin_body.y,
-            delta_spin_body.z,
-        ]) {
-            energy = energy
-                + Dd::from_f64(impulse) * (Dd::from_f64(0.5 * old) + Dd::from_f64(0.5 * new));
-        }
+        // Evaluate the original spatial metric on the actual returned twists.
+        // Retain differences and COM cross products before multiplication by
+        // a large common rate; the native f64 momentum action above remains an
+        // independent momentum observation, not a substitute for storage.
+        accumulate_spatial_change(
+            &mut energy,
+            link.inertia.mass,
+            [center.x, center.y, center.z],
+            link.inertia.inertia_com.m,
+            old.to_array(),
+            link.inertia.inertia_com.m,
+            new.to_array(),
+        );
     }
     let change = ArticulatedMomentum {
         linear_momentum_world: Vec3::new(
@@ -1577,7 +1579,7 @@ fn momentum_increment_from_kinematics(
             angular[1].to_f64(),
             angular[2].to_f64(),
         ),
-        kinetic_energy: energy.to_f64(),
+        kinetic_energy: energy.total().to_f64(),
     };
     validate_vec3(
         change.linear_momentum_world,
@@ -1588,7 +1590,7 @@ fn momentum_increment_from_kinematics(
         "impulse.angular_momentum_change",
     )?;
     ensure_finite_scalar(change.kinetic_energy, "impulse.kinetic_energy_change", 0)?;
-    Ok(change)
+    Ok((change, energy))
 }
 
 /// Apply specified impulses to a freely moving articulated tree in O(n) work.
@@ -1654,9 +1656,10 @@ pub fn apply_free_floating_impulses(
     )?;
     let momentum_before = momentum_from_kinematics(model, &before)?;
     let momentum_after = momentum_from_kinematics(model, &after)?;
-    let momentum_change = momentum_increment_from_kinematics(model, &before, &after)?;
+    let (momentum_change, kinetic_change) =
+        momentum_increment_from_kinematics(model, &before, &after)?;
     let mut external = [Dd::ZERO; 6];
-    let mut work = Dd::ZERO;
+    let mut work = MomentumWork::default();
     for (index, impulse) in body_impulses.iter().enumerate() {
         let pose = before.world_from_link[index];
         let force = pose.rotation().rotate(impulse.force)?;
@@ -1680,22 +1683,25 @@ pub fn apply_free_floating_impulses(
             .zip(after.body_twist[index].to_array())
             .zip(impulse.to_array())
         {
-            work =
-                work + (Dd::from_f64(0.5 * old) + Dd::from_f64(0.5 * new)) * Dd::from_f64(applied);
+            work.add_product(
+                Dd::from_f64(0.5 * old) + Dd::from_f64(0.5 * new),
+                Dd::from_f64(applied),
+            );
         }
-        ensure_finite_scalar(work.to_f64(), "impulse.work", index)?;
+        ensure_finite_scalar(work.total().to_f64(), "impulse.work", index)?;
     }
     for (index, impulse) in joint_impulses.iter().enumerate() {
-        work = work
-            + Dd::from_f64(*impulse)
-                * (Dd::from_f64(0.5 * joint_velocity[index])
-                    + Dd::from_f64(0.5 * joint_velocity_after[index]));
-        ensure_finite_scalar(work.to_f64(), "impulse.work", index)?;
+        work.add_product(
+            Dd::from_f64(0.5 * joint_velocity[index])
+                + Dd::from_f64(0.5 * joint_velocity_after[index]),
+            Dd::from_f64(*impulse),
+        );
+        ensure_finite_scalar(work.total().to_f64(), "impulse.work", index)?;
     }
     let impulse_world = wrench_from_array(external.map(Dd::to_f64));
     validate_wrench(impulse_world, "impulse.external_world")?;
-    let impulse_work = work.to_f64();
-    let kinetic_work_residual = momentum_change.kinetic_energy - impulse_work;
+    let impulse_work = work.total().to_f64();
+    let kinetic_work_residual = kinetic_change.difference(work).to_f64();
     ensure_finite_scalar(kinetic_work_residual, "impulse.kinetic_work_residual", 0)?;
     Ok(FreeFloatingImpulseResponse {
         base_after,
@@ -1709,6 +1715,8 @@ pub fn apply_free_floating_impulses(
         external_angular_impulse_world: impulse_world.torque,
         impulse_work,
         kinetic_work_residual,
+        kinetic_change,
+        work,
     })
 }
 

@@ -27,6 +27,7 @@ use fs_contact::frictional_multicontact::elliptic::EllipticFriction;
 use fs_contact::frictional_multicontact::{FrictionalContactConfig, FrictionalContactResult};
 use fs_contact::multicontact::MultiImpactConfig;
 use fs_ga::{Twist, Vec3, Wrench};
+use crate::kinetic_energy::MomentumWork;
 
 /// Physical boundary on one original articulated tree during the impulse.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -195,10 +196,10 @@ pub(super) struct ImpulseView<'a> {
     pub joint_velocity_after: &'a [f64],
     pub momentum_before: ArticulatedMomentum,
     pub momentum_after: ArticulatedMomentum,
-    pub kinetic_energy_change: f64,
+    pub kinetic_energy_change: MomentumWork,
     pub linear_momentum_change_world: Vec3,
     pub angular_momentum_change_world: Vec3,
-    pub support: Option<(Wrench, f64)>,
+    pub support: Option<(Wrench, MomentumWork)>,
 }
 
 pub(super) trait ContactResponse {
@@ -231,7 +232,7 @@ impl ContactResponse for FreeFloatingImpulseResponse {
             joint_velocity_after: &self.joint_velocity_after,
             momentum_before: self.momentum_before,
             momentum_after: self.momentum_after,
-            kinetic_energy_change: self.kinetic_energy_change,
+            kinetic_energy_change: self.kinetic_change,
             linear_momentum_change_world: self.linear_momentum_change_world,
             angular_momentum_change_world: self.angular_momentum_change_world,
             support: None,
@@ -246,10 +247,10 @@ impl ContactResponse for PrescribedBaseImpulseResponse {
             joint_velocity_after: &self.joint_velocity_after,
             momentum_before: self.momentum_before,
             momentum_after: self.momentum_after,
-            kinetic_energy_change: self.kinetic_energy_change,
+            kinetic_energy_change: self.kinetic_change,
             linear_momentum_change_world: self.linear_momentum_change_world,
             angular_momentum_change_world: self.angular_momentum_change_world,
-            support: Some((self.support_impulse_world, self.support_work)),
+            support: Some((self.support_impulse_world, self.support_work_retained)),
         }
     }
 }

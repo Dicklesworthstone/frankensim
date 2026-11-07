@@ -8,7 +8,7 @@ use fs_math::dd::Dd;
 
 // Reduce product precision layers before combining. Opposite large transfers
 // can cancel while a smaller cross or trailing product remains physical.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct MomentumWork {
     leading: Dd,
     cross: Dd,
@@ -22,7 +22,7 @@ impl MomentumWork {
         }
     }
 
-    fn add_product(&mut self, mean: Dd, delta: Dd) {
+    pub(super) fn add_product(&mut self, mean: Dd, delta: Dd) {
         self.leading = self.leading + Dd::from_f64(mean.hi) * Dd::from_f64(delta.hi);
         self.cross = self.cross
             + Dd::from_f64(mean.hi) * Dd::from_f64(delta.lo)
@@ -276,6 +276,28 @@ pub(super) fn spatial_inventory_decomposition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn original_spatial_storage_resolves_a_rounded_velocity_impulse() {
+        let mass = 2.0_f64.powi(54);
+        let old = 2.0_f64.powi(-54);
+        let tensor = [mass, 0.0, 0.0, 0.0, mass, 0.0, 0.0, 0.0, mass];
+        let mut energy = MomentumWork::default();
+        accumulate_spatial_change(
+            &mut energy, mass, [0.0; 3], tensor,
+            [0.0, 0.0, 0.0, old, 0.0, 0.0], tensor,
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        );
+        let mut work = MomentumWork::default();
+        work.add_product(
+            Dd::from_f64(0.5 * old) + Dd::from_f64(0.5),
+            Dd::from_f64(mass),
+        );
+        assert_eq!(energy.total().to_f64(), work.total().to_f64());
+        assert_eq!(energy.difference(work).to_f64(), -0.5);
+        assert_eq!((energy.total() - Dd::from_f64(0.5 * mass)).to_f64(), -0.5 * old);
+        assert_eq!((work.total() - Dd::from_f64(0.5 * mass)).to_f64(), 0.5);
+    }
 
     const IDENTITY: [f64; 4] = [1.0, 0.0, 0.0, 0.0];
 

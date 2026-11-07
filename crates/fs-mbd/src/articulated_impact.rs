@@ -12,6 +12,7 @@ use fs_contact::impact::{
     NormalImpactError, NormalImpactInput, NormalImpactResult, solve_normal_impact,
 };
 use fs_ga::{GaError, Twist, Vec3, Wrench};
+use fs_math::dd::Dd;
 
 use crate::articulated::{
     ArticulatedError, ArticulatedModel, BaseState, FreeFloatingBaseState,
@@ -19,6 +20,7 @@ use crate::articulated::{
     apply_free_floating_impulses, apply_prescribed_base_impulses, forward_kinematics,
     free_floating_impulse_delta, prescribed_base_impulse_delta,
 };
+use crate::kinetic_energy::MomentumWork;
 
 /// One link-fixed point and the prescribed plane it may strike.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -310,10 +312,15 @@ fn resolve_plane_impact<Response: PlaneImpulseResponse>(
             return Err(NormalImpactError::UnresolvedVelocityResponse.into());
         }
     }
-    let plane_work = finite(magnitude * plane_speed, "plane_work")?;
-    let support_work = response.support_work();
+    let mut boundary_work = MomentumWork::default();
+    boundary_work.add_product(Dd::from_f64(plane_speed), Dd::from_f64(magnitude));
+    let plane_work = finite(boundary_work.total().to_f64(), "plane_work")?;
+    let support = response.support_work();
+    let support_work = finite(support.total().to_f64(), "support_work")?;
+    boundary_work.merge(support);
     let energy_balance_residual = finite(
-        response.kinetic_energy_change() - plane_work - support_work + normal_law.dissipated_energy,
+        (response.kinetic_energy_change().difference(boundary_work)
+            + Dd::from_f64(normal_law.dissipated_energy)).to_f64(),
         "energy_balance_residual",
     )?;
     Ok(ArticulatedPlaneImpactResult {
@@ -333,8 +340,8 @@ fn resolve_plane_impact<Response: PlaneImpulseResponse>(
 trait PlaneImpulseResponse {
     fn base_after(&self) -> BaseState;
     fn joint_velocity_after(&self) -> &[f64];
-    fn kinetic_energy_change(&self) -> f64;
-    fn support_work(&self) -> f64;
+    fn kinetic_energy_change(&self) -> MomentumWork;
+    fn support_work(&self) -> MomentumWork;
 }
 
 impl PlaneImpulseResponse for FreeFloatingImpulseResponse {
@@ -348,11 +355,11 @@ impl PlaneImpulseResponse for FreeFloatingImpulseResponse {
     fn joint_velocity_after(&self) -> &[f64] {
         &self.joint_velocity_after
     }
-    fn kinetic_energy_change(&self) -> f64 {
-        self.kinetic_energy_change
+    fn kinetic_energy_change(&self) -> MomentumWork {
+        self.kinetic_change
     }
-    fn support_work(&self) -> f64 {
-        0.0
+    fn support_work(&self) -> MomentumWork {
+        MomentumWork::default()
     }
 }
 
@@ -363,11 +370,11 @@ impl PlaneImpulseResponse for PrescribedBaseImpulseResponse {
     fn joint_velocity_after(&self) -> &[f64] {
         &self.joint_velocity_after
     }
-    fn kinetic_energy_change(&self) -> f64 {
-        self.kinetic_energy_change
+    fn kinetic_energy_change(&self) -> MomentumWork {
+        self.kinetic_change
     }
-    fn support_work(&self) -> f64 {
-        self.support_work
+    fn support_work(&self) -> MomentumWork {
+        self.support_work_retained
     }
 }
 

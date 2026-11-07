@@ -8,7 +8,7 @@
 
 use super::{
     ArticulatedError, ArticulatedModel, ArticulatedMomentum, BaseState, Dd, GaError,
-    ImpulseVelocityChange, PRESCRIBED_ABA_FIELDS, Se3, Twist, Vec3, Wrench, articulated_body_pass,
+    ImpulseVelocityChange, MomentumWork, PRESCRIBED_ABA_FIELDS, Se3, Twist, Vec3, Wrench, articulated_body_pass,
     ensure_finite_scalar, forward_kinematics, momentum_from_kinematics,
     momentum_increment_from_kinematics, propagate_aba_accelerations, require_len, validate_vec3,
     validate_wrench, wrench_from_array,
@@ -57,6 +57,30 @@ pub struct PrescribedBaseImpulseResponse {
     pub linear_momentum_residual_world: Vec3,
     /// Actual angular increment minus external and support impulses, N m s.
     pub angular_momentum_residual_world: Vec3,
+    pub(crate) kinetic_change: MomentumWork,
+    pub(crate) work: MomentumWork,
+    pub(crate) support_work_retained: MomentumWork,
+}
+
+impl PrescribedBaseImpulseResponse {
+    /// Original full-inertia endpoint change before diagnostic rounding, in J.
+    #[must_use]
+    pub fn retained_kinetic_energy_change_j(&self) -> Dd {
+        self.kinetic_change.total()
+    }
+
+    /// Applied and support impulses paired with their actual mean rates, in J.
+    /// This independent work remains separate from the storage calculation.
+    #[must_use]
+    pub fn retained_impulse_work_j(&self) -> Dd {
+        self.work.total()
+    }
+
+    /// Signed support reaction work before diagnostic rounding, in J.
+    #[must_use]
+    pub fn retained_support_work_j(&self) -> Dd {
+        self.support_work_retained.total()
+    }
 }
 
 /// Apply external spatial and joint impulses with a prescribed base boundary.
@@ -134,10 +158,10 @@ pub fn apply_prescribed_base_impulses(
     }
     let momentum_before = momentum_from_kinematics(model, &before)?;
     let momentum_after = momentum_from_kinematics(model, &after)?;
-    let change = momentum_increment_from_kinematics(model, &before, &after)?;
+    let (change, kinetic_change) = momentum_increment_from_kinematics(model, &before, &after)?;
 
     let mut external = [Dd::ZERO; 6];
-    let mut work = Dd::ZERO;
+    let mut work = MomentumWork::default();
     for (index, impulse) in body_impulses.iter().enumerate() {
         add_world_impulse(&mut external, *impulse, before.world_from_link[index])?;
         for ((old, new), applied) in before.body_twist[index]
@@ -146,15 +170,18 @@ pub fn apply_prescribed_base_impulses(
             .zip(after.body_twist[index].to_array())
             .zip(impulse.to_array())
         {
-            work =
-                work + (Dd::from_f64(0.5 * old) + Dd::from_f64(0.5 * new)) * Dd::from_f64(applied);
+            work.add_product(
+                Dd::from_f64(0.5 * old) + Dd::from_f64(0.5 * new),
+                Dd::from_f64(applied),
+            );
         }
     }
     for (index, impulse) in joint_impulses.iter().enumerate() {
-        work = work
-            + Dd::from_f64(*impulse)
-                * (Dd::from_f64(0.5 * joint_velocity[index])
-                    + Dd::from_f64(0.5 * joint_velocity_after[index]));
+        work.add_product(
+            Dd::from_f64(0.5 * joint_velocity[index])
+                + Dd::from_f64(0.5 * joint_velocity_after[index]),
+            Dd::from_f64(*impulse),
+        );
     }
     let external_impulse_world = wrench_from_array(external.map(Dd::to_f64));
     validate_wrench(external_impulse_world, "prescribed_impulse.external_world")?;
@@ -164,9 +191,10 @@ pub fn apply_prescribed_base_impulses(
     let support_impulse_world = wrench_from_array(support.map(Dd::to_f64));
     validate_wrench(support_impulse_world, "prescribed_impulse.support_world")?;
     let support_work = pairing(support_impulse_body, base.twist_body);
-    let total_work = work + support_work;
-    let residual = Dd::from_f64(change.kinetic_energy) - total_work;
-    for value in [work, support_work, total_work, residual] {
+    let mut total_work = work;
+    total_work.merge(support_work);
+    let residual = kinetic_change.difference(total_work);
+    for value in [work.total(), support_work.total(), total_work.total(), residual] {
         ensure_finite_scalar(value.to_f64(), "prescribed_impulse.work", 0)?;
     }
     let actual = Wrench::new(change.angular_momentum_world, change.linear_momentum_world);
@@ -193,12 +221,15 @@ pub fn apply_prescribed_base_impulses(
         external_impulse_world,
         support_impulse_body,
         support_impulse_world,
-        applied_impulse_work: work.to_f64(),
-        support_work: support_work.to_f64(),
-        impulse_work: total_work.to_f64(),
+        applied_impulse_work: work.total().to_f64(),
+        support_work: support_work.total().to_f64(),
+        impulse_work: total_work.total().to_f64(),
         kinetic_work_residual: residual.to_f64(),
         linear_momentum_residual_world: momentum_residual.force,
         angular_momentum_residual_world: momentum_residual.torque,
+        kinetic_change,
+        work: total_work,
+        support_work_retained: support_work,
     })
 }
 
@@ -265,13 +296,14 @@ pub fn prescribed_base_impulse_delta(
     })
 }
 
-fn pairing(impulse: Wrench, velocity: Twist) -> Dd {
+fn pairing(impulse: Wrench, velocity: Twist) -> MomentumWork {
     impulse
         .to_array()
         .into_iter()
         .zip(velocity.to_array())
-        .fold(Dd::ZERO, |sum, (p, v)| {
-            sum + Dd::from_f64(p) * Dd::from_f64(v)
+        .fold(MomentumWork::default(), |mut sum, (p, v)| {
+            sum.add_product(Dd::from_f64(v), Dd::from_f64(p));
+            sum
         })
 }
 

@@ -34,6 +34,7 @@ use fs_math::dd::Dd;
 use fs_tribo::TriboError;
 use mixed::{ContactResponse, ContactSystem};
 use std::collections::BTreeMap;
+use crate::kinetic_energy::MomentumWork;
 
 #[cfg(test)]
 mod momentum_tests;
@@ -486,8 +487,8 @@ impl EventWorkspace {
         law: EventResponse<'_>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<EventResult<S::Response>, ArticulatedContactError> {
-        let mut plane_work_sum = Dd::ZERO;
-        let mut support_work_sum = Dd::ZERO;
+        let mut plane_work_sum = MomentumWork::default();
+        let mut support_work_sum = MomentumWork::default();
         let mut external_linear = VectorSum::default();
         let mut external_angular = VectorSum::default();
         // Scratch grows with touched links, not with every link in every tree.
@@ -521,17 +522,19 @@ impl EventWorkspace {
                 let linear = contact.axis_world.scale(impulse);
                 external_linear.add(linear)?;
                 external_angular.add(contact.world_point.cross(linear))?;
-                plane_work_sum =
-                    plane_work_sum + Dd::from_f64(finite(impulse * contact.plane_speed)?);
+                plane_work_sum.add_product(
+                    Dd::from_f64(contact.plane_speed),
+                    Dd::from_f64(impulse),
+                );
             }
         }
         for ((system, link), resultant) in resultants {
             self.loads[system][link] = resultant.value()?;
         }
-        let plane_work = finite(plane_work_sum.to_f64())?;
+        let plane_work = finite(plane_work_sum.total().to_f64())?;
         let mut responses = Vec::with_capacity(systems.len());
         let mut after = Vec::with_capacity(systems.len());
-        let mut energy_change_sum = Dd::ZERO;
+        let mut energy_change_sum = MomentumWork::default();
         let mut energy_scale =
             plane_work.abs() + law.dissipated_energy.abs() + law.stored_energy_change.abs();
         let mut linear_change = VectorSum::default();
@@ -557,9 +560,12 @@ impl EventWorkspace {
             )?);
             let initial = view.momentum_before;
             let final_state = view.momentum_after;
-            energy_change_sum = energy_change_sum + Dd::from_f64(view.kinetic_energy_change);
+            energy_change_sum.merge(view.kinetic_energy_change);
+            // The accuracy allowance belongs to this event's energy exchange.
+            // An unchanged translating/spinning inventory must not license a
+            // wrong contact loss or unmodeled gain of energy.
             energy_scale = finite(
-                energy_scale + initial.kinetic_energy.abs() + final_state.kinetic_energy.abs(),
+                energy_scale + view.kinetic_energy_change.total().to_f64().abs(),
             )?;
             linear_change.add(view.linear_momentum_change_world)?;
             angular_change.add(view.angular_momentum_change_world)?;
@@ -570,8 +576,8 @@ impl EventWorkspace {
                 external_angular.add(impulse.torque)?;
                 linear_scale = finite(linear_scale + magnitude(impulse.force))?;
                 angular_scale = finite(angular_scale + magnitude(impulse.torque))?;
-                support_work_sum = support_work_sum + Dd::from_f64(finite(work)?);
-                energy_scale = finite(energy_scale + work.abs())?;
+                support_work_sum.merge(work);
+                energy_scale = finite(energy_scale + finite(work.total().to_f64())?.abs())?;
             }
             linear_scale = finite(
                 linear_scale
@@ -636,11 +642,12 @@ impl EventWorkspace {
             endpoint_velocity_residual = endpoint_velocity_residual.max((actual - predicted).abs());
             speeds_after.push(actual);
         }
-        let energy_change = finite(energy_change_sum.to_f64())?;
-        let boundary_work_sum = plane_work_sum + support_work_sum;
-        let boundary_work = finite(boundary_work_sum.to_f64())?;
+        let energy_change = finite(energy_change_sum.total().to_f64())?;
+        let mut boundary_work_sum = plane_work_sum;
+        boundary_work_sum.merge(support_work_sum);
+        let boundary_work = finite(boundary_work_sum.total().to_f64())?;
         let stored_and_mechanical_sum =
-            energy_change_sum - boundary_work_sum + Dd::from_f64(law.stored_energy_change);
+            energy_change_sum.difference(boundary_work_sum) + Dd::from_f64(law.stored_energy_change);
         let stored_and_mechanical_work = finite(stored_and_mechanical_sum.to_f64())?;
         let energy_balance_residual =
             finite((stored_and_mechanical_sum + Dd::from_f64(law.dissipated_energy)).to_f64())?;
@@ -666,7 +673,7 @@ impl EventWorkspace {
             responses,
             speeds_after,
             plane_work,
-            support_work: finite(support_work_sum.to_f64())?,
+            support_work: finite(support_work_sum.total().to_f64())?,
             boundary_work,
             kinetic_energy_change: energy_change,
             energy_balance_residual,

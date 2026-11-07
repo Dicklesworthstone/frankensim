@@ -223,3 +223,87 @@ fn moving_support_work_cancellation_retains_one_joule_through_the_contact_solver
         }
     }
 }
+
+/// Two contacts on the first tree give 2^55 + 1/2 J, while the second tree
+/// loses 2^55 J. Rounding the first native receipt before global reduction
+/// would erase its resolved inelastic energy and report a false -1/2 J defect.
+#[test]
+fn simultaneous_contacts_keep_sub_ulp_storage_inside_each_native_tree() {
+    let model = body(2.0_f64.powi(54));
+    let slow = 2.0_f64.powi(-27);
+    let systems = [
+        system(&model, Vec3::default(), Vec3::default()),
+        system(&model, Vec3::new(3.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0)),
+    ];
+    let contact = |index, normal, velocity, restitution| ArticulatedNormalContact {
+        point: LinkContactPoint {
+            system_index: index,
+            link_index: 0,
+            point_body: Vec3::default(),
+        },
+        other: ContactCounterpart::PrescribedPlane {
+            point_world: if index == 0 { Vec3::default() } else { Vec3::new(3.0, 0.0, 0.0) },
+            velocity_world: velocity,
+        },
+        normal_world: normal,
+        activation_tolerance: 1e-10,
+        restitution,
+    };
+    let contacts = [
+        contact(0, Vec3::new(1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0),
+        contact(0, Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, slow, 0.0), 0.0),
+        contact(1, Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0),
+    ];
+    for order in [[0, 1, 2], [2, 1, 0], [1, 0, 2]] {
+        let result = resolve_articulated_contacts(
+            &systems, &order.map(|index| contacts[index]), MultiImpactConfig::default(), || false,
+        ).unwrap();
+        assert_eq!(result.responses[0].base_after.twist_body.linear, Vec3::new(2.0, slow, 0.0));
+        assert_eq!(result.responses[1].base_after.twist_body.linear, Vec3::default());
+        assert_eq!(result.responses[0].kinetic_energy_change, 2.0_f64.powi(55));
+        assert_eq!(
+            (result.responses[0].retained_kinetic_energy_change_j()
+                + result.responses[1].retained_kinetic_energy_change_j()).to_f64(),
+            0.5,
+        );
+        assert_eq!(result.plane_work, 1.0);
+        assert_eq!(result.dissipated_energy, 0.5);
+        assert_eq!(result.energy_balance_residual, 0.0);
+    }
+}
+
+/// A massive coasting spectator changes no contact, impulse or loss. Its
+/// absolute kinetic inventory must not enlarge the event's energy allowance.
+#[test]
+fn unchanged_kinetic_inventory_cannot_admit_a_wrong_contact_loss() {
+    let model = body(2.0);
+    let spectator = body(2.0_f64.powi(80));
+    let systems = [
+        system(&model, Vec3::default(), Vec3::new(-1.0, 0.0, 0.0)),
+        system(&spectator, Vec3::new(4.0, 0.0, 0.0), Vec3::new(0.0, 0.125, 0.0)),
+    ];
+    let workspace = EventWorkspace::new(&systems, &mut || false).unwrap();
+    let axis = Vec3::new(1.0, 0.0, 0.0);
+    let (first, world_point) = prepare_point(
+        LinkContactPoint { system_index: 0, link_index: 0, point_body: Vec3::default() },
+        axis, &workspace.before,
+    ).unwrap();
+    let prepared = [Prepared {
+        first, second: None, axis_world: axis, world_point,
+        plane_speed: 0.0, minimum_speed: Some(0.0),
+    }];
+    let law = |dissipated_energy| EventResponse {
+        impulses: &[2.0], predicted_speeds: &[0.0], stored_energy_change: 0.0,
+        dissipated_energy, velocity_tolerance: 1e-10, energy_tolerance: 1e-10,
+    };
+    let correct = workspace.clone().apply(&systems, &prepared, law(1.0), &mut || false).unwrap();
+    assert_eq!(correct.kinetic_energy_change, -1.0);
+    assert_eq!(correct.energy_balance_residual, 0.0);
+    assert_eq!(correct.responses[1].base_after, systems[1].base);
+    for false_loss in [0.0, 0.25, 1.25, 2.0] {
+        assert!(matches!(
+            workspace.clone().apply(&systems, &prepared, law(false_loss), &mut || false),
+            Err(ArticulatedContactError::Unresolved("actual global kinetic and contact energy failed admission")),
+        ));
+    }
+}

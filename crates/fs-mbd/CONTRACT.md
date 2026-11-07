@@ -1856,12 +1856,19 @@ with the existing double-double scalar owner. This retains small physical work
 and recoil alongside a large unchanged translation or orbital momentum. The
 reported increment is not the requested load or an inverse-mass probe: a load
 too small to change the stored endpoint remains visible in the work residual.
-The single-plane impact and shared normal/frictional/stateful contact mechanics
-consume these increments rather than subtracting whole-tree totals. Native
-velocity updates, endpoint speed limits, constitutive tolerances and existing
-roundoff allowances remain unchanged. Focused regressions cover boosted contact
-loss, offset-world angular impulse, internal joint work and recoil, and an
-unrepresentable requested velocity increment.
+Free and prescribed impulse owners now use the shared original spatial-inertia
+kernel before rounding differences, COM velocity cross terms or link sums.
+Independent impulse work retains the mean-rate product layers through its
+comparison with storage. The public `retained_kinetic_energy_change_j` and
+`retained_impulse_work_j` accessors expose the retained scalar values; supported
+events also expose `retained_support_work_j`. Their f64 fields remain diagnostic
+roundings. Single-plane and shared normal/frictional/stateful contact mechanics
+retain the native product layers across systems and source work. Native velocity
+updates, endpoint speed limits and constitutive tolerances remain unchanged.
+Focused regressions cover boosted contact loss, offset-world angular impulse,
+internal joint work and recoil, an unrepresentable requested velocity increment,
+and a partially rounded velocity jump whose independent work defect remains
+nonzero even when the printed kinetic change and work agree.
 
 ## Continuous free-floating articulated trajectories
 
@@ -2661,6 +2668,16 @@ kinetic-energy change minus that work plus the contact loss must close within
 the declared numerical energy allowance and roundoff. A failed body update,
 contact-law refusal, unresolved balance, or cancellation publishes no candidate
 state; input positions and borrowed velocities remain unchanged.
+
+The roundoff allowance scales with actual event storage increments, moving-plane
+and prescribed-support work, constitutive storage change and physical loss. It
+does not scale with unchanged absolute kinetic inventories. A massive coasting
+spectator cannot excuse an incorrect contact loss. Original full-inertia energy
+and support work remain retained until the assembled comparison; a small resolved
+transfer inside a tree survives cancellation with another tree's larger signed
+transfer. This changes event admission, without inferring heat from a numerical
+work defect. Focused `articulated_contacts::momentum_tests` cases exercise both
+of these boundaries through the native response and simultaneous solve.
 
 Independent analytic regressions cover two and three coupled contacts on one
 body, an unequal-mass three-body impact chain, an internal prismatic-link pair,

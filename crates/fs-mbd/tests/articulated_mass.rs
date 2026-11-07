@@ -2,7 +2,8 @@
 use fs_ga::{Mat3, Se3, So3, So3Tangent, Twist, Vec3, Wrench};
 use fs_mbd::articulated::{
     ArticulatedError, ArticulatedModel, BaseState, FreeFloatingBaseState, JointLimits, JointModel,
-    Link, SpatialInertia, apply_free_floating_impulses, forward_dynamics, free_floating_momentum,
+    Link, SpatialInertia, apply_free_floating_impulses, apply_prescribed_base_impulses,
+    forward_dynamics, free_floating_momentum,
     stationary_base_joint_momentum, stationary_base_joint_velocity,
 };
 
@@ -118,6 +119,60 @@ fn close_vector(actual: Vec3, expected: Vec3) {
     assert!(
         (actual - expected).norm() < 2e-12,
         "{actual:?} != {expected:?}"
+    );
+}
+
+/// G0: an accepted native velocity can round off part of a requested impulse.
+/// The independent storage law must retain that defect, even when both printed
+/// energy and work round to the same number. Velocities stay below 1 m/s; the
+/// large, exactly represented mass makes the missed work half a joule.
+#[test]
+fn native_free_and_supported_impulses_retain_the_actual_endpoint_work_defect() {
+    use fs_math::dd::Dd;
+    let mass = 2.0_f64.powi(54);
+    let initial = 2.0_f64.powi(-54);
+    let inertia = SpatialInertia::new(
+        mass,
+        Vec3::default(),
+        Mat3 { m: [mass, 0.0, 0.0, 0.0, mass, 0.0, 0.0, 0.0, mass] },
+    ).unwrap();
+    let make = |joint| ArticulatedModel::new(vec![Link::new(
+        "body", None, Se3::identity(), joint, inertia,
+    )]).unwrap();
+    let impulse = Wrench::new(Vec3::default(), Vec3::new(mass, 0.0, 0.0));
+    let free = apply_free_floating_impulses(
+        &make(JointModel::FIXED),
+        FreeFloatingBaseState::new(
+            Se3::identity(),
+            Twist::new(Vec3::default(), Vec3::new(initial, 0.0, 0.0)),
+        ),
+        &[], &[], &[], &[impulse],
+    ).unwrap();
+    assert_eq!(free.base_after.twist_body.linear.x, 1.0);
+    assert_eq!(free.kinetic_energy_change, free.impulse_work);
+    assert_eq!(free.kinetic_work_residual, -0.5);
+    assert_eq!(
+        (free.retained_impulse_work_j() - Dd::from_f64(0.5 * mass)).to_f64(),
+        0.5,
+    );
+    assert_eq!(
+        (free.retained_kinetic_energy_change_j() - Dd::from_f64(0.5 * mass)).to_f64(),
+        -0.5 * initial,
+    );
+
+    let supported = apply_prescribed_base_impulses(
+        &make(JointModel::prismatic(Vec3::new(1.0, 0.0, 0.0), None).unwrap()),
+        BaseState::stationary(Se3::identity()),
+        &[0.0], &[initial], &[0.0], &[impulse],
+    ).unwrap();
+    assert_eq!(supported.joint_velocity_after, [1.0]);
+    assert_eq!(supported.kinetic_energy_change, supported.impulse_work);
+    assert_eq!(supported.kinetic_work_residual, -0.5);
+    assert_eq!(supported.retained_support_work_j(), Dd::ZERO);
+    assert_eq!(supported.retained_impulse_work_j(), free.retained_impulse_work_j());
+    assert_eq!(
+        supported.retained_kinetic_energy_change_j(),
+        free.retained_kinetic_energy_change_j(),
     );
 }
 

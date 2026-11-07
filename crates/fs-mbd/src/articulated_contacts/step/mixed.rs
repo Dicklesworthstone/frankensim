@@ -782,7 +782,7 @@ fn add_response(
         view.angular_momentum_change_world,
         origin,
     );
-    *kinetic = *kinetic + Dd::from_f64(view.kinetic_energy_change);
+    *kinetic = *kinetic + view.kinetic_energy_change.total();
     match response {
         MixedArticulatedImpulseResponse::Free(response) => sources.add(
             response.external_linear_impulse_world,
