@@ -113,6 +113,15 @@ impl Modes {
         self.kinetic.map(|row| row[0] * v + row[1] * w)
     }
 
+    /// Uncancelled pressure projection norm for floating-point balance budgets.
+    /// A thermal state can have zero physical pressure while both modal
+    /// pressure contributions are nonzero. Preserve that arithmetic scale.
+    pub fn pressure_summation_scale_pa(self, values: [f64; 2]) -> f64 {
+        ((self.thermodynamic[0][0] * values[0]).abs()
+            + (self.thermodynamic[1][0] * values[1]).abs())
+            / self.pressure_scale
+    }
+
     pub fn cell(self, state: &TwoFluidState, values: [f64; 2]) -> CellSample {
         let pressure = (self.thermodynamic[0][0] * values[0]
             + self.thermodynamic[1][0] * values[1])

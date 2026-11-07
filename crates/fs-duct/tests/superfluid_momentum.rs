@@ -493,3 +493,64 @@ fn forcing_cannot_silently_close_an_already_moving_endpoint() {
     );
     assert_eq!(snapshot(&duct), before);
 }
+
+#[test]
+fn sourced_helium_uniform_thermal_state_survives_pressure_cancellation() {
+    use fs_duct::superfluid::BoundaryVelocities;
+    use fs_material::superfluid::helium::HeliumSvpReference;
+
+    let material = *HeliumSvpReference::at_1_8_k().unwrap().state();
+    let mut channel = TwoFluidChannel::try_new(
+        material,
+        0.05,
+        1e-6,
+        24,
+        LinearizationLimits {
+            max_pressure_perturbation_pa: 1.0,
+            max_temperature_perturbation_k: 1e-4,
+            max_component_speed_m_s: 0.01,
+        },
+    )
+    .unwrap();
+    let temperature = 1e-6;
+    channel
+        .initialize(
+            &[0.0; 24],
+            &[temperature; 24],
+            &[0.0; 25],
+            &[0.0; 25],
+            || false,
+        )
+        .unwrap();
+    let initial_energy = channel.wave_energy_j().unwrap();
+    let dt = 0.4 * channel.maximum_step_s();
+    // This is an exactly stationary discrete solution. With the sourced
+    // thermal expansion, nonzero thermodynamic modes cancel to zero pressure.
+    // The previous momentum audit scaled only the cancelled physical result
+    // and refused the first step even though its defect was about 4e-39 N*s.
+    let roundoff = 65536.0 * f64::EPSILON;
+    let pressure_tolerance =
+        roundoff * material.density_kg_m3() * material.entropy_j_kg_k() * temperature;
+    let speed_tolerance =
+        roundoff * material.sound_modes().fast_m_s * temperature / material.temperature_k();
+    for _ in 0..32 {
+        channel
+            .step(dt, BoundaryVelocities::CLOSED, MutualFriction::None, || {
+                false
+            })
+            .unwrap();
+        for i in 0..channel.cells() {
+            let cell = channel.cell(i).unwrap();
+            assert!(cell.pressure_perturbation_pa.abs() <= pressure_tolerance);
+            assert!(
+                (cell.temperature_perturbation_k - temperature).abs() <= roundoff * temperature
+            );
+        }
+        for i in 0..=channel.cells() {
+            let face = channel.face(i).unwrap();
+            assert!(face.normal_velocity_m_s.abs() <= speed_tolerance);
+            assert!(face.superfluid_velocity_m_s.abs() <= speed_tolerance);
+        }
+    }
+    assert!((channel.wave_energy_j().unwrap() - initial_energy).abs() <= roundoff * initial_energy);
+}

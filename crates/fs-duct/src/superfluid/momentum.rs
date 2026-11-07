@@ -349,6 +349,27 @@ impl TwoFluidChannel {
                 scale += force.impulse_scale(i, &self.material, dt, self.cell_volume);
             }
         }
+        // The midpoint gradient subtracts adjacent pressures after each
+        // pressure has been reconstructed from two thermodynamic modes.
+        // Account for those uncancelled terms, including interior faces:
+        // telescoping is exact algebraically, but not after floating-point
+        // projection/subtraction. A uniform thermal state may have p'=0
+        // with a nonzero pressure summation norm. No absolute floor is used.
+        let n = self.cells();
+        for i in 0..n {
+            if i % 128 == 0 {
+                poll(cancelled)?;
+            }
+            let incidence = f64::from(u8::from(i > 0) + u8::from(i + 1 < n));
+            let old = self.modes.pressure_summation_scale_pa([
+                self.accepted[0].cells[i],
+                self.accepted[1].cells[i],
+            ]);
+            let new = self
+                .modes
+                .pressure_summation_scale_pa([self.pending[0].cells[i], self.pending[1].cells[i]]);
+            scale += dt * self.area_m2 * incidence * (0.5 * old + 0.5 * new);
+        }
         let defect = (after - before)
             - body
             - (pressure_impulse[0] + pressure_impulse[1])

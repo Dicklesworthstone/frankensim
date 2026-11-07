@@ -3979,6 +3979,11 @@ J_right=−A integral(p_last_cell)−V_half integral(f_right).
 Their negatives are the wall reactions. Full-domain trapezoidal momentum then
 changes by body impulse plus both wall impulses. Roundoff scales retain the
 uncancelled component momenta and impulses, including pure counterflow cases.
+The resolved audit also retains the uncancelled modal pressure terms in every
+interior midpoint pressure gradient, with each cell weighted by its incident
+interior faces. This admits sourced helium thermal states whose modal pressure
+terms cancel to zero physical pressure. The physical defect and relative
+roundoff multiplier are unchanged; there is no absolute tolerance floor.
 
 `ChannelStep::boundary_pressure_impulse_n_s` separately exposes the adjacent-cell
 numerical port efforts for mechanical composition. They are not absolute wall
