@@ -15,6 +15,8 @@
 //! backward-Euler momentum owner. No contact, thermal coupling or mixed-pressure
 //! element is added here.
 
+/// Sealed gas inventories coupled to retained porous compaction.
+pub mod cavity;
 pub mod dynamics;
 /// Retained thermal expansion, softening and reciprocal compaction heat.
 pub mod thermal;
@@ -76,9 +78,9 @@ pub struct FinitePorousPressureEnergy {
     pub work_j: f64,
     /// `work_j - endpoint_work_j`, a signed geometric quadrature correction.
     pub endpoint_work_correction_j: f64,
-    /// Dead/support endpoint work plus exact held-pressure work, minus storage
-    /// change, physical plastic loss and any inertial endpoint work, excluding
-    /// equilibrium error.
+    /// Material endpoint defect plus this pressure's signed work correction,
+    /// excluding equilibrium error and any attached inertial endpoint work.
+    /// A cavity-coupled step adds its source corrections in its combined account.
     pub external_work_defect_j: f64,
 }
 
@@ -390,20 +392,7 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
             }
             surface.validate_pressure(field, cx)?;
         }
-        for (element, state) in self.state.element_states.iter().enumerate() {
-            if element % 1024 == 0 {
-                checkpoint(cx)?;
-            }
-            self.material
-                .at(element)
-                .finite_porous()
-                .validate_committed(
-                    &self.state.element_deformation[element],
-                    state,
-                    controls.yield_tolerance_pa,
-                )
-                .map_err(|source| FinitePorousTetError::Material { element, source })?;
-        }
+        self.validate_accepted_history(controls, cx)?;
         let frozen = Self::freeze(&self.material, &self.state.element_states, cx)?;
         let (equilibrium, force) = if pressure.is_some() {
             let problem = HyperTetProblem {
@@ -436,6 +425,47 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
                 cx,
             )?
         };
+        self.accept_endpoint(equilibrium, &force, controls, inertia, pressure, None, cx)
+    }
+
+    fn validate_accepted_history(
+        &self,
+        controls: FinitePlasticStepControls,
+        cx: &Cx<'_>,
+    ) -> Result<(), FinitePorousTetError> {
+        for (element, state) in self.state.element_states.iter().enumerate() {
+            if element % 1024 == 0 {
+                checkpoint(cx)?;
+            }
+            self.material
+                .at(element)
+                .finite_porous()
+                .validate_committed(
+                    &self.state.element_deformation[element],
+                    state,
+                    controls.yield_tolerance_pa,
+                )
+                .map_err(|source| FinitePorousTetError::Material { element, source })?;
+        }
+        checkpoint(cx)?;
+        Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        clippy::type_complexity
+    )]
+    fn accept_endpoint(
+        &self,
+        equilibrium: HyperTetSolution,
+        force: &[f64],
+        controls: FinitePlasticStepControls,
+        inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
+        pressure: Option<(&ClosedTetPressureSurface, TetPressure<'_>)>,
+        cavity: Option<cavity::CavityEndpointWork>,
+        cx: &Cx<'_>,
+    ) -> Result<(FinitePorousTetStep<'a, L>, Option<AcceptedMotion>), FinitePorousTetError> {
         let new_u = equilibrium.displacement_m.as_flattened();
         let motion = inertia
             .map(|inertia| inertia.motion(new_u, cx))
@@ -497,7 +527,7 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
         }
         let work = self.state.endpoint_work(
             &equilibrium,
-            &force,
+            force,
             &element_deformation,
             &element_first_piola_pa,
             motion.as_ref().map(|(_, account)| account.inertial_work_j),
@@ -541,6 +571,21 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
                 })
             })
             .transpose()?;
+        if let Some(cavity) = cavity {
+            energy.equilibrium_work_residual_j += cavity.endpoint_work_j;
+            // Every source keeps its own quadrature error. Opposite chamber
+            // corrections cannot cancel one another or the material defect.
+            let pressure_correction = pressure
+                .as_ref()
+                .map_or(0.0, |work| work.endpoint_work_correction_j.abs());
+            energy_gate(
+                "porous cavity/pressure/constitutive endpoint integration defect",
+                energy.endpoint_work_defect_j.abs()
+                    + pressure_correction
+                    + cavity.absolute_correction_j,
+                controls.maximum_endpoint_work_defect_j,
+            )?;
+        }
         energy_gate(
             "porous assembled incremental-potential consistency",
             equilibrium.strain_energy_j - energy.incremental_potential_j,

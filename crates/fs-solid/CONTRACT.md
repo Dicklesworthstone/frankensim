@@ -11242,3 +11242,41 @@ a nonsymmetric one-face pressure patch, support reactions with off-diagonal
 mass coupling, retained history, exact pressure work, late refusal and retry.
 The scope is prescribed-pressure motion at fixed material conditions; sealed
 cavity and spatial-gravity inertia remain outside this entry point.
+
+## Sealed cavities with retained porous compaction
+
+`hyper3::plastic::porous::FinitePorousTetSolid::advance_with_cavities`
+couples independently sealed, explicitly resolved gas cavities to the original
+retained finite porous material history. It reuses the native cavity batch,
+current-area force and geometric tangent, independent acoustic rank-one factors,
+and original Newton/globalization owner. Every constitutive trial starts from
+the same accepted plastic metric.
+
+Each cavity binds the exact original solid reference chart and an unchanged gas
+parcel at its undeformed cavity volume. Original ideal and Peng--Robinson source
+owners supply calorics, phase-domain admission, entropy closure and acoustic
+compressibility. Accepted deformed parcels are output evidence, not replacement
+undeformed reference states. Distinct chamber inventories do not mix.
+
+Per increment, gas work on the solid is `-delta U_gas` from the original source's
+direct stored-energy increment; fixed exterior work is
+`-p_exterior * delta V_gas` from retained compact geometry. Their compensated sum
+is separate from physical porous yield loss. Each source records its endpoint
+force work and signed work correction. The existing work budget bounds the sum
+of absolute material, held-pressure and individual cavity corrections, so
+opposing chamber errors cannot conceal an under-resolved increment. The common
+equilibrium account includes all cavity endpoint work.
+
+Gas endpoints, material histories and the complete next solid are returned only
+after every source, material, equilibrium, work and cancellation gate passes.
+Any refusal leaves accepted state and borrowed inventories unchanged. Empty
+cavity input preserves the original advance path. Optional held boundary
+pressure remains an explicit additional load; callers must account for its
+boundary separately from a cavity's declared exterior pressure.
+
+This is a quasistatic reversible adiabatic gas closure coupled to irreversible
+solid compaction. It adds no gas transport, heat exchange, phase split, physical
+time integration, unresolved pore-fluid model, evolving porosity, or measured
+foam calibration. The `hyper_porous_cavity` regressions specify native pressure
+feedback, permanent compaction and elastic unloading, direct variable-caloric
+work with large energy datums, independent connected chambers, and atomic refusal.
