@@ -119,7 +119,7 @@ fn g1_signed_layer_viscosity_and_memory_use_actual_sparse_modes_and_support_velo
                         hereditary,
                         gate,
                     );
-                    let run = loaded.prepare(config_at(RATE), gate).unwrap();
+                    let run = loaded.clone().prepare(config_at(RATE), gate).unwrap();
                     let memory_count = if hereditary { modes.len() + 1 } else { 0 };
                     assert_eq!(run.system().relaxation_branch_count(), memory_count);
                     assert_eq!(
