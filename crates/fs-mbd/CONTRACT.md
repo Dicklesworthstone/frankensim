@@ -1160,6 +1160,46 @@ shared drift and real moving-plane work. Together with the existing native
 sphere-plane suites, 71 tests pass. These are bounded model checks, not physical
 calibration, full-workspace Cargo or performance qualification.
 
+## One finite-patch trajectory through impact and sustained support
+
+`sphere_plane::hertz_contact` composes the original Hertz impulse event and
+sustained Hertz shear/spin driver inside the same native event loop. Impact
+and support retain separately declared radii, coefficients and dimensioned
+controls. Neither law is inferred from the other. The original normal impulse,
+restitution and event timing remain unchanged; the actual angular and linear
+momenta after each impact start the subsequent support phase. No second
+impulse, body reconstruction or external event-splitting clock joins them.
+
+The original impact phase, solve and independent unscaled endpoint/work audit
+are shared with `hertz_impacts`. The original support candidate, capture/reversal
+logic, static-work account and whole-motion geometry/momentum/energy gates are
+shared with `hertz_support`. Mixed support still requires first-order time
+refinement. Impact receipts retain their original pressure-impulse assumption;
+support retains its independently supplied load/radius and force law.
+
+`advance_sphere_plane_hertz_contact_with` stages two independent source-history
+types and preserves their original callback/error types. Actual event ordering
+determines which owner is queried. Both histories are cloned once, after control
+admission. The complete trajectory and final cancellation check must succeed
+before either caller history changes; both swaps finish before a displaced
+history can run its destructor. A later support, impact, source or native
+refusal therefore cannot publish an earlier event's history. Caller-owned
+callback effects retain their original boundary.
+
+The returned `support.motion` is the single accepted native trajectory. Its
+physical loss already includes both `support.impact_loss_j` and
+`support.sustained_friction_loss_j`; event receipts are not added again as heat.
+The composition adds no heat partition, finite impact duration, normal
+compliance, measured calibration or new constitutive approximation.
+
+Three G1/G3/G4 integration regressions verify analytic flight, detected impact,
+support spin arrest and attitude with distinct radii and 6.6 J total physical
+loss; inclusive-event split continuation without a duplicate impact; actual
+post-impact source kinematics and both-history rollback after late support
+refusal/cancellation; and a second-bounce source refusal followed by exact
+retry. All 74 tests in the complete focused native sphere-plane target pass,
+including the original impact and sustained-support regressions.
+
 ## Directional friction on moving sphere/plane trajectories
 
 `sphere_plane::directional` advances the original sphere's position,

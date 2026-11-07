@@ -159,20 +159,7 @@ pub fn advance_sphere_plane_hertz_impacts_with<S: Clone, E>(
         &mut cancelled,
         |_, _, _, _, _, _, _| Ok(None),
         |engine, body, time, normal_before, normal, slip, cancel| {
-            let phase = SpherePlaneHertzImpactPhase {
-                time_s: time,
-                body,
-                contact_point_world_m: body.pose().position_world().add(engine.arm),
-                normal_world: engine.n,
-                tangent_axes_world: engine.tangent,
-                normal_velocity_before_m_s: normal_before,
-                normal_velocity_after_m_s: normal.relative_normal_speed_after,
-                normal_impulse_ns: normal.normal_impulse,
-                slip_velocity_before_m_s: slip,
-                spin_before_rad_s: finite(world_spin(body).dot(engine.n) / engine.inertia)?,
-                tangent_mobility_per_kg: engine.inverse_tangent_mass,
-                spin_mobility_per_kg_m2: engine.inertia.recip(),
-            };
+            let phase = phase(engine, body, time, normal_before, normal, slip)?;
             let (patch, next) = match resolve(&candidate, &phase, &mut || cancel()) {
                 Ok(result) => result,
                 Err(error) => {
@@ -180,36 +167,17 @@ pub fn advance_sphere_plane_hertz_impacts_with<S: Clone, E>(
                     return Err(SpherePlaneError::Unresolved("Hertz impact source refused"));
                 }
             };
-            poll(cancel)?;
-            let radius = patch.radius_m();
-            let spin_response = finite((radius / engine.inertia) * radius)?;
-            if spin_response <= 0.0 {
-                return Err(SpherePlaneError::Invalid(
-                    "unrepresentable Hertz spin response",
-                ));
-            }
-            let w = engine.inverse_tangent_mass;
-            let input = HertzImpulseInput {
-                normal_impulse_ns: normal.normal_impulse,
-                velocity_before_m_s: slip,
-                spin_before_rad_s: phase.spin_before_rad_s,
-                scaled_mobility_per_kg: [[w, 0.0, 0.0], [0.0, w, 0.0], [0.0, 0.0, spin_response]],
-            };
-            let response = match patch.solve(&input, controls.impulse, &mut || cancel()) {
-                Ok(result) => result,
-                Err(error) => {
-                    source_error = Some(SpherePlaneHertzImpactError::Law(error));
-                    return Err(SpherePlaneError::Unresolved("Hertz impact law refused"));
-                }
-            };
-            let accepted = admit_impact(&phase, radius, &response, controls.impulse)?;
-            poll(cancel)?;
-            impacts.push(SpherePlaneHertzImpactEvent {
-                phase,
-                patch,
-                input,
-                response,
-            });
+            let (accepted, event) =
+                match solve_event(engine, phase, patch, controls.impulse, cancel) {
+                    Ok(result) => result,
+                    Err(SpherePlaneHertzImpactError::Mechanics(error)) => return Err(error),
+                    Err(SpherePlaneHertzImpactError::Law(error)) => {
+                        source_error = Some(SpherePlaneHertzImpactError::Law(error));
+                        return Err(SpherePlaneError::Unresolved("Hertz impact law refused"));
+                    }
+                    Err(SpherePlaneHertzImpactError::Source(never)) => match never {},
+                };
+            impacts.push(event);
             candidate = next;
             Ok(Some(accepted))
         },
@@ -225,6 +193,71 @@ pub fn advance_sphere_plane_hertz_impacts_with<S: Clone, E>(
         impacts,
         impact_loss_j,
     })
+}
+
+/// Original incoming event description shared by native trajectory consumers.
+pub(super) fn phase(
+    engine: &Engine,
+    body: RigidBodyState,
+    time: f64,
+    normal_before: f64,
+    normal: &NormalImpactResult,
+    slip: [f64; 2],
+) -> Result<SpherePlaneHertzImpactPhase, SpherePlaneError> {
+    Ok(SpherePlaneHertzImpactPhase {
+        time_s: time,
+        body,
+        contact_point_world_m: body.pose().position_world().add(engine.arm),
+        normal_world: engine.n,
+        tangent_axes_world: engine.tangent,
+        normal_velocity_before_m_s: normal_before,
+        normal_velocity_after_m_s: normal.relative_normal_speed_after,
+        normal_impulse_ns: normal.normal_impulse,
+        slip_velocity_before_m_s: slip,
+        spin_before_rad_s: finite(world_spin(body).dot(engine.n) / engine.inertia)?,
+        tangent_mobility_per_kg: engine.inverse_tangent_mass,
+        spin_mobility_per_kg_m2: engine.inertia.recip(),
+    })
+}
+
+/// Solve and independently admit one original finite-patch impact.
+/// The phase must come from this same native engine. Keeping its original
+/// inertia preserves the existing radius/mobility arithmetic exactly; no
+/// inertia is reconstructed from a rounded reciprocal in the public phase.
+pub(super) fn solve_event(
+    engine: &Engine,
+    phase: SpherePlaneHertzImpactPhase,
+    patch: HertzImpulsePatch,
+    controls: HertzImpulseControls,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(TangentialImpactAdvance, SpherePlaneHertzImpactEvent), SpherePlaneHertzImpactError> {
+    poll(cancelled)?;
+    let radius = patch.radius_m();
+    let spin_response = finite((radius / engine.inertia) * radius)?;
+    if spin_response <= 0.0 {
+        return Err(SpherePlaneError::Invalid("unrepresentable Hertz spin response").into());
+    }
+    let w = engine.inverse_tangent_mass;
+    let input = HertzImpulseInput {
+        normal_impulse_ns: phase.normal_impulse_ns,
+        velocity_before_m_s: phase.slip_velocity_before_m_s,
+        spin_before_rad_s: phase.spin_before_rad_s,
+        scaled_mobility_per_kg: [[w, 0.0, 0.0], [0.0, w, 0.0], [0.0, 0.0, spin_response]],
+    };
+    let response = patch
+        .solve(&input, controls, &mut || cancelled())
+        .map_err(SpherePlaneHertzImpactError::Law)?;
+    let accepted = admit_impact(&phase, radius, &response, controls)?;
+    poll(cancelled)?;
+    Ok((
+        accepted,
+        SpherePlaneHertzImpactEvent {
+            phase,
+            patch,
+            input,
+            response,
+        },
+    ))
 }
 
 /// Reconstruct the unscaled conjugate ports independently of radius conversion

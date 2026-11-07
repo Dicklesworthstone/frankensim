@@ -186,7 +186,7 @@ pub fn advance_sphere_plane_hertz_support_with<S: Clone, E>(
     history: &mut S,
     duration_s: f64,
     controls: SpherePlaneHertzSupportControls,
-    mut resolve: impl FnMut(
+    resolve: impl FnMut(
         &S,
         &SpherePlaneHertzSupportPhase,
         &mut dyn FnMut() -> bool,
@@ -194,6 +194,25 @@ pub fn advance_sphere_plane_hertz_support_with<S: Clone, E>(
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<SpherePlaneHertzSupportAdvance, SpherePlaneHertzSupportError<E>> {
     poll(&mut cancelled)?;
+    validate_controls(controls)?;
+    let (result, candidate) = candidate_with_impact(
+        scene,
+        state,
+        torque_world_nm,
+        history.clone(),
+        duration_s,
+        controls,
+        resolve,
+        |_, _, _, _, _, _, _| Ok(None),
+        cancelled,
+    )?;
+    *history = candidate;
+    Ok(result)
+}
+
+pub(super) fn validate_controls<E>(
+    controls: SpherePlaneHertzSupportControls,
+) -> Result<(), SpherePlaneHertzSupportError<E>> {
     controls
         .wrench
         .validate()
@@ -213,7 +232,38 @@ pub fn advance_sphere_plane_hertz_support_with<S: Clone, E>(
     {
         return Err(SpherePlaneError::Invalid("Hertz support phase or residual limits").into());
     }
-    let mut candidate_history = history.clone();
+    Ok(())
+}
+
+// Both public trajectories use this same support driver and original complete
+// motion audit. Returning the staged source lets a coupled impact owner accept
+// its independent history in the same transaction without cloning it twice.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn candidate_with_impact<S, E, C: FnMut() -> bool>(
+    scene: &SpherePlane,
+    state: SpherePlaneHertzState,
+    torque_world_nm: Vec3,
+    mut candidate_history: S,
+    duration_s: f64,
+    controls: SpherePlaneHertzSupportControls,
+    mut resolve: impl FnMut(
+        &S,
+        &SpherePlaneHertzSupportPhase,
+        &mut dyn FnMut() -> bool,
+    ) -> Result<(HertzWrenchContact, S), E>,
+    mut impact: impl FnMut(
+        &Engine,
+        RigidBodyState,
+        f64,
+        f64,
+        &NormalImpactResult,
+        [f64; 2],
+        &mut C,
+    ) -> Result<Option<TangentialImpactAdvance>, SpherePlaneError>,
+    mut cancelled: C,
+) -> Result<(SpherePlaneHertzSupportAdvance, S), SpherePlaneHertzSupportError<E>> {
+    poll(&mut cancelled)?;
+    validate_controls(controls)?;
     let mut source_error = None;
     let resting = Cell::new(state.zero_motion);
     let sticking = Cell::new(state.patch_sticking);
@@ -426,12 +476,12 @@ pub fn advance_sphere_plane_hertz_support_with<S: Clone, E>(
                 duration_s: dt,
             }))
         },
-        |_, _, _, _, _, _, _| {
+        |engine, body, time, normal_before, normal, slip, cancel| {
             // An impact is a distinct constitutive event. Its actual endpoint
             // is freshly classified on support; it cannot inherit capture.
             resting.set(false);
             sticking.set(false);
-            Ok(None)
+            impact(engine, body, time, normal_before, normal, slip, cancel)
         },
     );
     if let Some(error) = source_error {
@@ -444,20 +494,22 @@ pub fn advance_sphere_plane_hertz_support_with<S: Clone, E>(
         zero_motion: resting.get() && motion.state_after.mode != SpherePlaneMode::Flight,
         patch_sticking: sticking.get() && motion.state_after.mode != SpherePlaneMode::Flight,
     };
-    *history = candidate_history;
-    Ok(SpherePlaneHertzSupportAdvance {
-        state_after,
-        motion,
-        sustained_friction_loss_j: loss,
-        impact_loss_j,
-        absolute_static_work_residual_j: absolute_static_work,
-        support_slip_m: slip,
-        support_spin_angle_rad: spin_angle,
-        support_spin_impulse_world_nms: spin_impulse,
-        support_phases: phases,
-        support_segments: segments,
-        transitions,
-    })
+    Ok((
+        SpherePlaneHertzSupportAdvance {
+            state_after,
+            motion,
+            sustained_friction_loss_j: loss,
+            impact_loss_j,
+            absolute_static_work_residual_j: absolute_static_work,
+            support_slip_m: slip,
+            support_spin_angle_rad: spin_angle,
+            support_spin_impulse_world_nms: spin_impulse,
+            support_phases: phases,
+            support_segments: segments,
+            transitions,
+        },
+        candidate_history,
+    ))
 }
 
 fn contact_velocity(

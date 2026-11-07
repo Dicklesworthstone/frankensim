@@ -32,6 +32,10 @@ pub mod hertz_impacts;
 #[path = "sphere_plane/hertz_support.rs"]
 pub mod hertz_support;
 
+/// One native trajectory with distinct finite-patch impact and support laws.
+#[path = "sphere_plane/hertz_contact.rs"]
+pub mod hertz_contact;
+
 use crate::{DynamicsError, MassProperties, Pose, RigidBodyState, Vec3};
 use core::fmt;
 use fs_contact::ballistic::{
