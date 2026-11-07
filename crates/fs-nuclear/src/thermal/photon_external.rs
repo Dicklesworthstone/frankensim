@@ -4,8 +4,9 @@
 //! inventories. Each final thermal interval integrates its affine power history
 //! analytically, applies the original immutable photon response, and credits
 //! absorbed joules once. The existing thermal owner retains calorics, conduction,
-//! boundaries and atomic rollback. Transport is steady and its material kernels
-//! remain fixed: pulse flight time and temperature-dependent opacity are absent.
+//! boundaries and atomic rollback. Transport is steady; optional original
+//! temperature tables refresh its material kernel at native step boundaries.
+//! Photon flight time and evolving density/geometry are not inferred.
 
 use super::photon::{photon_call, photon_material_input};
 use super::radiation::bind_receivers;
@@ -23,6 +24,10 @@ use fs_math::dd::Dd;
 
 mod affine;
 use affine::{affine_energy, interpolate};
+
+mod feedback;
+pub use feedback::{PhotonFeedbackBudget, PhotonFeedbackWork, TemperaturePhotonSlabLayer};
+use feedback::{PhotonFeedbackCandidate, PhotonTemperatureFeedback};
 
 const MAX_SCHEDULE_VALUES: usize = 1_048_576;
 
@@ -262,6 +267,7 @@ struct PhotonPending {
     end_s: f64,
     account: PhotonAccount,
     audit: ExternalPhotonHeatingAudit,
+    transport: Option<PhotonFeedbackCandidate>,
 }
 
 /// External photon heating without an artificial nuclear inventory or cell emitter.
@@ -277,6 +283,7 @@ pub struct ExternalPhotonHeating {
     account: PhotonAccount,
     audit: ExternalPhotonHeatingAudit,
     pending: Option<PhotonPending>,
+    feedback: Option<PhotonTemperatureFeedback>,
 }
 
 impl ExternalPhotonHeating {
@@ -322,6 +329,7 @@ impl ExternalPhotonHeating {
             account: PhotonAccount::default(),
             audit: ExternalPhotonHeatingAudit::default(),
             pending: None,
+            feedback: None,
         })
     }
 
@@ -442,7 +450,9 @@ impl ExternalPhotonHeating {
     pub fn audit(&self) -> ExternalPhotonHeatingAudit {
         self.audit
     }
-    /// Original immutable transport response.
+    /// Most recently applied immutable transport response. For temperature
+    /// feedback, `prepared_temperatures_k` identifies its native start state;
+    /// the endpoint is validated but its unused response is prepared lazily.
     pub fn response(&self) -> &Arc<GroupedRadiationResponse> {
         &self.response
     }
@@ -486,6 +496,9 @@ impl ExternalPhotonHeating {
             binding.validate(thermal, id)?;
             thermal.temperature_k(id)?;
         }
+        if let Some(feedback) = &self.feedback {
+            feedback.validate_temperature_support(thermal, checkpoint)?;
+        }
         Ok(())
     }
 
@@ -517,6 +530,9 @@ impl DepositionObserver for ExternalPhotonHeating {
         }
         self.account = PhotonAccount::default();
         self.audit = ExternalPhotonHeatingAudit::default();
+        if let Some(feedback) = &mut self.feedback {
+            feedback.begin();
+        }
         Ok(())
     }
     fn requires_step_interval(&self) -> bool {
@@ -569,15 +585,33 @@ impl DepositionObserver for ExternalPhotonHeating {
             .iter()
             .map(|(id, values)| (*id, values.as_slice()))
             .collect();
+        // A response refresh belongs to this tentative interval. Publishing it
+        // before the thermal endpoint is accepted would leak a failed trial's
+        // cache and preparation budget into later source calls.
+        let illuminated = energies
+            .iter()
+            .any(|(_, groups)| groups.iter().any(|&energy| energy > 0.0));
+        let transport = if illuminated {
+            self.feedback
+                .as_ref()
+                .map(|feedback| feedback.candidate(thermal, checkpoint))
+                .transpose()?
+                .flatten()
+        } else {
+            // Dark intervals still validate original material support, but
+            // spend no transport solve on photons that were never supplied.
+            None
+        };
+        let response = transport
+            .as_ref()
+            .map_or(&self.response, |prepared| &prepared.response);
         let mut checkpoint_error = None;
-        let deposition = self
-            .response
-            .apply(&borrowed, self.budget.energy_tolerance_j, || {
-                checkpoint().map_err(|error| {
-                    checkpoint_error = Some(error);
-                    RadiationError::Cancelled
-                })
-            });
+        let deposition = response.apply(&borrowed, self.budget.energy_tolerance_j, || {
+            checkpoint().map_err(|error| {
+                checkpoint_error = Some(error);
+                RadiationError::Cancelled
+            })
+        });
         if let Some(error) = checkpoint_error {
             return Err(error.into());
         }
@@ -611,6 +645,7 @@ impl DepositionObserver for ExternalPhotonHeating {
             end_s,
             account,
             audit,
+            transport,
         });
         Ok(watts)
     }
@@ -641,6 +676,10 @@ impl DepositionObserver for ExternalPhotonHeating {
         self.time_s = pending.end_s;
         self.account = pending.account;
         self.audit = pending.audit;
+        if let Some(transport) = pending.transport {
+            self.response = transport.response;
+            self.feedback = Some(transport.feedback);
+        }
         Ok(())
     }
 }

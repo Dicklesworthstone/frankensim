@@ -32,17 +32,18 @@ use crate::{EnergyChannels, FissionError, FissionState};
 mod source;
 pub use source::{FluxDrivenHeatSource, NuclearHeatSource};
 mod radiation;
-pub use radiation::RadiationReceiver;
 use radiation::BoundRadiation;
+pub use radiation::RadiationReceiver;
 mod spectral;
-pub use spectral::{DecayRadiationEmitter, DecayRadiationHeatSource};
 use spectral::BoundSpectralRadiation;
+pub use spectral::{DecayRadiationEmitter, DecayRadiationHeatSource};
 mod photon;
 pub use photon::{PhotonSlabGeometry, PhotonSlabLayer};
 mod photon_external;
 pub use photon_external::{
-    ExternalPhotonHeating, ExternalPhotonHeatingAudit, PhotonHeatingBudget, PhotonIllumination,
-    PhotonPowerKnot, PhotonPowerSchedule,
+    ExternalPhotonHeating, ExternalPhotonHeatingAudit, PhotonFeedbackBudget, PhotonFeedbackWork,
+    PhotonHeatingBudget, PhotonIllumination, PhotonPowerKnot, PhotonPowerSchedule,
+    TemperaturePhotonSlabLayer,
 };
 mod irradiation;
 pub use irradiation::{
@@ -285,6 +286,17 @@ pub enum FissionThermalError {
     },
     /// Material calorics, mass, geometry or physical correspondence changed.
     BindingChanged(CellId),
+    /// A native material temperature left its explicitly supplied photon table.
+    PhotonTemperatureDomain {
+        /// Original receiving material cell.
+        cell_id: CellId,
+        /// Native caloric-law temperature that was refused [K].
+        temperature_k: f64,
+        /// Source-declared lower supported temperature [K].
+        minimum_k: f64,
+        /// Source-declared upper supported temperature [K].
+        maximum_k: f64,
+    },
     /// Independently advanced owners no longer represent the same physical time.
     ClockMismatch {
         /// Current thermal time [s].
@@ -421,7 +433,10 @@ impl ThermalBinding {
         id: CellId,
         material_id: MaterialId,
     ) -> Result<Self, FissionThermalError> {
-        let cell = thermal.cells().get(&id).ok_or(FissionThermalError::InactiveCell(id))?;
+        let cell = thermal
+            .cells()
+            .get(&id)
+            .ok_or(FissionThermalError::InactiveCell(id))?;
         if cell.material_id != material_id {
             return Err(FissionThermalError::MaterialMismatch {
                 cell_id: id,
@@ -445,7 +460,10 @@ impl ThermalBinding {
         thermal: &DepositionSimulation<'_>,
         id: CellId,
     ) -> Result<(), FissionThermalError> {
-        let cell = thermal.cells().get(&id).ok_or(FissionThermalError::InactiveCell(id))?;
+        let cell = thermal
+            .cells()
+            .get(&id)
+            .ok_or(FissionThermalError::InactiveCell(id))?;
         if cell.material_id != self.material_id {
             return Err(FissionThermalError::MaterialMismatch {
                 cell_id: id,
@@ -815,7 +833,8 @@ impl<S: NuclearHeatSource> DepositionObserver for NuclearHeating<S> {
         // This also covers receivers with no nuclear inventory and self-return.
         for (id, energy) in heat_j {
             checkpoint()?;
-            let power = account.credit_heat(energy.value()?, energy.export_roundoff()?, duration_s)?;
+            let power =
+                account.credit_heat(energy.value()?, energy.export_roundoff()?, duration_s)?;
             watts.insert(id, power);
         }
         account.substeps = account

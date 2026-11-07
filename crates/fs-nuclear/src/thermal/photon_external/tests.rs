@@ -27,6 +27,8 @@ impl ThermalLaw for Calorics {
 static LAW: Calorics = Calorics { maximum_k: 1e6 };
 static LIMITED: Calorics = Calorics { maximum_k: 300.01 };
 
+mod feedback;
+
 fn controls(dt: f64) -> StepConfig {
     StepConfig {
         max_dt_s: dt,

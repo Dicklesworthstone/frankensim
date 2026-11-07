@@ -3032,10 +3032,41 @@ remain separate. Immutable schedules and responses are shared across trial
 clones; accepted clock and accounts publish only after the original thermal step
 and binding checks succeed. Other sources compose through `CoupledObservers`.
 
-Transport remains steady with fixed material coefficients. Photon flight-time
-storage, changing opacity, thermal expansion and charged-particle transport are
-not inferred. Exact source integration does not eliminate native thermal
+The default constructors retain fixed material coefficients; the temperature
+feedback constructor below supplies explicit changing opacity. Transport remains
+steady. Photon flight-time storage, thermal expansion and charged-particle
+transport are not inferred. Exact source integration does not eliminate native thermal
 timestep or photon spatial/angular/energy discretization errors. Focused kernel
 and owning integration regressions cover affine energy, spectral pulse
 calorimetry, independent identities, refinement, restart, zero-heat scattering,
 and atomic refusal; their numerical checks do not qualify measured source data.
+
+## Temperature-dependent photon absorption and shielding
+
+`TemperaturePhotonMassMaterial` retains complete original photon mass kernels
+at ordered temperature knots. Total collision, local heat and outgoing photon
+energy coefficients interpolate together on one original material identity,
+radiation kind and exact energy grid. Exact knots retain their source objects;
+interior samples pass the original closure/downscatter admission without
+renormalization. The closed kelvin domain never extrapolates.
+
+`ExternalPhotonHeating::from_temperature_slab` evaluates these kernels from
+the original native caloric temperatures. Stored mass and geometry still
+supply reference density and layer depth. Changed illuminated start states
+rebuild the original multigroup slab response, optionally through its existing
+spatial refinement. Unchanged temperatures and dark intervals reuse the
+prepared response. `prepared_temperatures_k` identifies the response's actual
+start-state temperatures.
+
+The existing source schedules, absorbed/escaped/credited accounts, thermal
+storage and atomic observer transaction remain authoritative. Pending response,
+cache and work updates publish only with an accepted thermal endpoint.
+Endpoints and events validate every table's supported temperature, including
+final endpoints with no subsequent source query. Aggregate table storage,
+preparation count and cumulative transport work have explicit bounds.
+
+Coefficients are frozen over each native explicit interval. Thermal timestep
+refinement remains necessary; accounting tolerance and spatial response
+agreement do not certify temporal error. This extension does not infer
+temperature-dependent density, phase mixtures, expansion, photon flight time,
+electron transport or measured material qualification.

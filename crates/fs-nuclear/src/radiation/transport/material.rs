@@ -13,6 +13,9 @@ use super::{PhotonCollision, PhotonSlabCell, PhotonSlabLimits, validate_coeffici
 use crate::endf::decay::spectra::DecayRadiation;
 use crate::radiation::{RadiationError, nonnegative, product};
 
+/// Source-bound temperature interpolation of the complete photon energy kernel.
+pub mod temperature;
+
 /// One incident photon group's supplied mass energy coefficients [m²/kg].
 #[derive(Clone, Debug, PartialEq)]
 pub struct PhotonMassCollision {
