@@ -7,7 +7,9 @@
 //! Thermal storage and physical time remain with the caller's thermal owner.
 
 use super::response::ScalarConductorResponse;
-use super::{ConductorError, ElectricalPropertyBasis, ResolvedConductor, ResolvedConductorState};
+use super::{
+    ConductorError, ElectricalPropertyBasis, OhmicDrive, ResolvedConductor, ResolvedConductorState,
+};
 use crate::graph::{
     Differentiability, EnergyBehavior, GraphError, LawNode, NodeDeclaration, NodeOutput, NodeRole,
     Port, TimeParity,
@@ -23,6 +25,7 @@ use fs_qty::{Dims, Temperature};
 
 mod phase;
 use phase::PreparedOhmicPhase;
+mod feedback;
 
 const LAW: &str = "source-bound-uniform-ohmic";
 const CURRENT: Dims = Dims([0, 0, 0, 0, 1, 0]);
@@ -398,6 +401,10 @@ impl MaterialOhmicNode {
     pub fn source(&self) -> &ScalarConductorResponse {
         &self.response
     }
+    /// Original source coordinate owning the admitted absolute temperature.
+    pub fn temperature_axis(&self) -> &str {
+        &self.temperature_axis
+    }
     /// Original absolute temperature defining zero `temperature_change` [K].
     pub const fn reference_temperature_k(&self) -> f64 {
         self.reference_temperature_k
@@ -406,6 +413,63 @@ impl MaterialOhmicNode {
     pub const fn temperature_range_k(&self) -> [f64; 2] {
         self.temperature_range_k
     }
+
+    /// Upper bound on positive ideal-drive `dP_Joule/dT` over the complete
+    /// admitted temperature interval [W/K]. The original piecewise-affine
+    /// source and native conductor powers determine the bound; no fitted
+    /// temperature coefficient or finite-difference tangent is introduced.
+    ///
+    /// Fixed-current resistivity and fixed-voltage conductivity give power
+    /// proportional to the source ordinate. The other two cases use its
+    /// reciprocal. Every original source knot is admitted through the native
+    /// current and power owners, including zero drive and nonpositive feedback.
+    /// Callers may prepare this once per drive, then combine it with their
+    /// original caloric `dT/dh` bound and physical mass on the thermal clock.
+    ///
+    /// This bounds the declared source model with outward floating-point
+    /// rounding; it adds no uncertainty or measured-material authority.
+    /// Phase dependence and free expansion require a coupled bound and refuse.
+    pub fn maximum_positive_joule_temperature_slope_w_k(
+        &self,
+        drive: OhmicDrive,
+    ) -> Result<f64, ConductorError> {
+        if self.phase.is_some() || self.free_expansion.is_some() {
+            return Err(invalid(
+                "positive Joule bound requires fixed geometry and temperature-only source",
+            ));
+        }
+        let inverse = matches!(
+            (self.response.original().source_basis(), drive),
+            (ElectricalPropertyBasis::Resistivity, OhmicDrive::Voltage(_))
+                | (
+                    ElectricalPropertyBasis::Conductivity,
+                    OhmicDrive::Current(_)
+                )
+        );
+        let power_at = |temperature| {
+            let conductor = self.resolve_at_temperature_k(temperature)?;
+            let current = conductor.current_a_for_drive(drive)?;
+            conductor.joule_power_w(current)
+        };
+        let mut left_power = power_at(self.source_line[0].0)?;
+        let mut bound: f64 = 0.0;
+        for pair in self.source_line.windows(2) {
+            let right_power = power_at(pair[1].0)?;
+            let slope = feedback::positive_segment_slope_w_k(
+                pair[1].0 - pair[0].0,
+                [pair[0].1, pair[1].1],
+                [left_power, right_power],
+                inverse,
+            )
+            .ok_or(ConductorError::InvalidDerived {
+                quantity: "positive Joule temperature slope",
+            })?;
+            bound = bound.max(slope);
+            left_power = right_power;
+        }
+        Ok(bound)
+    }
+
     /// Source fraction defining zero on the optional phase-change graph input.
     pub fn reference_liquid_mass_fraction(&self) -> Option<f64> {
         self.phase.as_ref().map(|phase| phase.reference)

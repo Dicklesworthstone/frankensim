@@ -1,9 +1,10 @@
-//! Original lumped enthalpy and boundary powers without an inner thermal solve.
+//! Original lumped enthalpy and boundary powers for coupled thermal sources.
 //!
 //! Preparation retains the original geometry, transport sources, caloric chart
 //! and Biot admission. A coupled owner may vary the endpoint ambient temperature
-//! and integrated internal heat while solving its other stores. These samples
-//! are residual evaluations, not accepted trajectories or substitute wall laws.
+//! and integrated internal heat while solving its other stores. A driven step
+//! delegates its implicit source feedback to the original bounded enthalpy
+//! solver; read-only samples do not themselves accept a trajectory.
 
 use super::*;
 use fs_material::phase::UniformEnthalpyStepInput;
@@ -12,6 +13,8 @@ use fs_material::phase::UniformEnthalpyStepInput;
 pub struct LumpedEnthalpyEndpoint<'a> {
     body: LumpedEnthalpyBody<'a>,
     config: LumpedEnthalpyMarchConfig,
+    initial: EquilibriumPhaseState,
+    maximum_thermal_residual_j: f64,
 }
 
 /// Original endpoint calorics and integrated boundary powers, in SI units.
@@ -24,6 +27,19 @@ pub struct LumpedEnthalpyEndpointSample {
     pub radiation_heat_j: f64,
     /// Actual storage minus the original endpoint net power times duration.
     pub residual_j: f64,
+}
+
+/// One implicit proposal with an additional caloric-state-dependent source.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrivenLumpedEnthalpyStep {
+    /// Original caloric state; latent heat remains in its enthalpy chart.
+    pub state: EquilibriumPhaseState,
+    /// Native storage, convection, radiation and complete source residual.
+    pub endpoint: LumpedEnthalpyEndpointSample,
+    /// Additional endpoint source power times the physical duration [J].
+    pub additional_internal_heat_j: f64,
+    /// Source calls, bounded by native bisection iterations plus two endpoints.
+    pub source_evaluations: usize,
 }
 
 impl LumpedThermalEnvironment {
@@ -68,6 +84,12 @@ impl LumpedThermalEnvironment {
             maximum_steps: 1,
             enthalpy_tolerance_j_kg: self.enthalpy_tolerance_j_kg,
         };
+        if input.internal_heat_j != 0.0 && config.internal_power_w == 0.0 {
+            return Err(lumped_error(
+                &body.name,
+                "nonzero prepared source underflows to zero power".to_owned(),
+            ));
+        }
         validate_enthalpy_config(&body, config)?;
         let maximum_biot = body.maximum_biot(config.radiation_temperature_k);
         let gate = BiotGate::corpus_default();
@@ -81,7 +103,12 @@ impl LumpedThermalEnvironment {
             ));
         }
         phase_state(&body, config.initial_specific_enthalpy_j_kg)?;
-        Ok(LumpedEnthalpyEndpoint { body, config })
+        Ok(LumpedEnthalpyEndpoint {
+            body,
+            config,
+            initial: input.initial,
+            maximum_thermal_residual_j: self.maximum_thermal_residual_j,
+        })
     }
 }
 
@@ -91,6 +118,157 @@ impl LumpedEnthalpyEndpoint<'_> {
     #[must_use]
     pub fn maximum_biot(&self) -> f64 {
         self.body.maximum_biot(self.config.radiation_temperature_k)
+    }
+
+    /// Sufficient implicit step bound for native radiation and an extra source.
+    ///
+    /// The supplied bound is the maximum positive source-power slope with
+    /// respect to TOTAL body energy [W/J], throughout the original chart.
+    /// Combining it with the native radiation bound retains a residual slope
+    /// of at least half the stored-energy slope. Infinity admits every finite
+    /// duration; this bound alone does not certify temporal accuracy.
+    pub fn maximum_step_s_for_internal_power(
+        &self,
+        maximum_positive_feedback_w_per_j: f64,
+        mut checkpoint: impl FnMut() -> Result<(), ConductionError>,
+    ) -> Result<f64, ConductionError> {
+        checkpoint()?;
+        if !maximum_positive_feedback_w_per_j.is_finite() || maximum_positive_feedback_w_per_j < 0.0
+        {
+            return Err(lumped_error(
+                &self.body.name,
+                "source feedback bound must be finite and nonnegative [W/J]".to_owned(),
+            ));
+        }
+        let native = monotone_enthalpy_step_limit_s(
+            &self.body,
+            self.config.radiation_temperature_k,
+            &mut checkpoint,
+        )?;
+        let limit = if maximum_positive_feedback_w_per_j == 0.0 {
+            native
+        } else {
+            let source = (0.5 / maximum_positive_feedback_w_per_j).next_down();
+            // Harmonic combination avoids overflowing twice the source slope.
+            let smaller = native.min(source);
+            let larger = native.max(source);
+            if larger.is_infinite() {
+                smaller
+            } else {
+                let denominator = (1.0 + (smaller / larger).next_up()).next_up();
+                (smaller / denominator).next_down()
+            }
+        };
+        if limit <= 0.0 || limit.is_nan() {
+            return Err(lumped_error(
+                &self.body.name,
+                "combined thermal/source step bound is not representable".to_owned(),
+            ));
+        }
+        checkpoint()?;
+        Ok(limit)
+    }
+
+    /// Solve the native backward-Euler balance with an additional source [W].
+    ///
+    /// `source(h, temperature)` must return the same signed power at the same
+    /// caloric state and must not mutate an external reservoir. Its positive
+    /// slope against total body energy must obey the supplied whole-chart
+    /// bound. Passing h retains the phase coordinate on latent plateaus.
+    /// Prepared internal power remains included; source and boundary powers
+    /// use the SAME endpoint. No state is published or mutated by this proposal.
+    pub fn solve_with_internal_power(
+        &self,
+        maximum_positive_feedback_w_per_j: f64,
+        mut source: impl FnMut(f64, f64) -> Result<f64, ConductionError>,
+        mut checkpoint: impl FnMut() -> Result<(), ConductionError>,
+    ) -> Result<DrivenLumpedEnthalpyStep, ConductionError> {
+        let limit = self.maximum_step_s_for_internal_power(
+            maximum_positive_feedback_w_per_j,
+            &mut checkpoint,
+        )?;
+        let dt = self.config.duration_s;
+        if dt > limit {
+            return Err(lumped_error(&self.body.name,
+                "combined source/radiative feedback exceeds the monotone implicit step bound; reduce the physical interval".to_owned()));
+        }
+        let energy_tolerance_j = self
+            .maximum_thermal_residual_j
+            .min(self.body.mass_kg * self.config.enthalpy_tolerance_j_kg);
+        let mut source_evaluations = 0;
+        // Cache the sign endpoints, including adjacent-float termination,
+        // without allocating or evaluating the accepted source a second time.
+        let mut negative = None;
+        let mut positive = None;
+        let h = bisect_enthalpy_step(
+            &self.body,
+            self.config.initial_specific_enthalpy_j_kg,
+            self.config.enthalpy_tolerance_j_kg,
+            energy_tolerance_j,
+            |h| {
+                checkpoint()?;
+                let values = self
+                    .body
+                    .phase_curve
+                    .values_at_specific_enthalpy(h)
+                    .map_err(|error| lumped_error(&self.body.name, error.to_string()))?;
+                source_evaluations += 1;
+                let power = source(h, values.temperature_k)?;
+                checkpoint()?;
+                let heat = dt * power;
+                let total_power = self.config.internal_power_w + power;
+                if !power.is_finite()
+                    || !heat.is_finite()
+                    || !total_power.is_finite()
+                    || (power != 0.0 && heat == 0.0)
+                {
+                    return Err(lumped_error(
+                        &self.body.name,
+                        "driven source power or heat is not representable".to_owned(),
+                    ));
+                }
+                let sample = self.evaluate_native_power(
+                    h,
+                    values.temperature_k,
+                    self.config.ambient_temperature_k,
+                    total_power,
+                )?;
+                if sample.residual_j <= 0.0 {
+                    negative = Some((sample, heat));
+                } else {
+                    positive = Some((sample, heat));
+                }
+                Ok(sample.residual_j)
+            },
+        )?;
+        let (endpoint, additional_internal_heat_j) = [negative, positive]
+            .into_iter()
+            .flatten()
+            .find(|(sample, _)| sample.specific_enthalpy_j_kg == h)
+            .ok_or_else(|| {
+                lumped_error(
+                    &self.body.name,
+                    "native enthalpy solution has no retained source sample".to_owned(),
+                )
+            })?;
+        if endpoint.residual_j.abs() > energy_tolerance_j {
+            return Err(lumped_error(
+                &self.body.name,
+                "driven endpoint does not close its original energy budget".to_owned(),
+            ));
+        }
+        let state = if h == self.initial.specific_enthalpy_j_kg() {
+            self.initial
+        } else {
+            phase_state(&self.body, h)?
+        };
+        checkpoint()?;
+        Ok(DrivenLumpedEnthalpyStep {
+            state,
+            endpoint,
+            additional_internal_heat_j,
+            source_evaluations,
+        })
     }
 
     /// Evaluate native backward-Euler storage and source/boundary powers.
@@ -142,24 +320,39 @@ impl LumpedEnthalpyEndpoint<'_> {
                 "nonfinite endpoint heat or invalid ambient temperature".to_owned(),
             ));
         }
-        let h0 = self.config.initial_specific_enthalpy_j_kg;
         let h = specific_enthalpy_j_kg;
         let values = self
             .body
             .phase_curve
             .values_at_specific_enthalpy(h)
             .map_err(|error| lumped_error(&self.body.name, error.to_string()))?;
-        let mut config = self.config;
-        config.ambient_temperature_k = ambient_temperature_k;
-        config.internal_power_w = internal_heat_j / config.duration_s;
-        if internal_heat_j != 0.0 && config.internal_power_w == 0.0 {
+        let internal_power_w = internal_heat_j / self.config.duration_s;
+        if internal_heat_j != 0.0 && internal_power_w == 0.0 {
             return Err(lumped_error(
                 &self.body.name,
                 "nonzero endpoint source underflows to zero power".to_owned(),
             ));
         }
-        let (convection, radiation, net) =
-            enthalpy_power(&self.body, config, values.temperature_k)?;
+        self.evaluate_native_power(
+            h,
+            values.temperature_k,
+            ambient_temperature_k,
+            internal_power_w,
+        )
+    }
+
+    fn evaluate_native_power(
+        &self,
+        h: f64,
+        temperature_k: f64,
+        ambient_temperature_k: f64,
+        internal_power_w: f64,
+    ) -> Result<LumpedEnthalpyEndpointSample, ConductionError> {
+        let h0 = self.config.initial_specific_enthalpy_j_kg;
+        let mut config = self.config;
+        config.ambient_temperature_k = ambient_temperature_k;
+        config.internal_power_w = internal_power_w;
+        let (convection, radiation, net) = enthalpy_power(&self.body, config, temperature_k)?;
         let stored_energy_change_j = self.body.mass_kg * (h - h0);
         let convection_heat_j = config.duration_s * convection;
         let radiation_heat_j = config.duration_s * radiation;
@@ -180,7 +373,7 @@ impl LumpedEnthalpyEndpoint<'_> {
         }
         Ok(LumpedEnthalpyEndpointSample {
             specific_enthalpy_j_kg: h,
-            temperature_k: values.temperature_k,
+            temperature_k,
             stored_energy_change_j,
             convection_heat_j,
             radiation_heat_j,

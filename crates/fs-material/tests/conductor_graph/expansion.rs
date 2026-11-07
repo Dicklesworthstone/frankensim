@@ -112,6 +112,10 @@ fn native_and_graph_geometry_share_the_same_pre_resolved_temperature_bundle() {
         .unwrap()
         .with_free_expansion(path, 0)
         .unwrap();
+    assert!(
+        law.maximum_positive_joule_temperature_slope_w_k(OhmicDrive::Voltage(1.0))
+            .is_err()
+    );
     let query = law
         .source()
         .original()

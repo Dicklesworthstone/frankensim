@@ -3965,6 +3965,16 @@ authority.
   finite-store accounts. The original `advance` still supplies the accepted
   wall trajectory, followed by the enclosing owner's actual-endpoint recheck.
   This seam adds no wall heat-capacity approximation or independent source law.
+  `LumpedEnthalpyEndpoint::solve_with_internal_power` now delegates an
+  additional signed endpoint source to the original bounded enthalpy bisection.
+  Its callback receives original h and temperature, preserving latent phase
+  coordinates; prepared baseline heat remains included exactly once. The
+  caller supplies a whole-chart positive-feedback bound in W/J of total body
+  energy. `maximum_step_s_for_internal_power` combines that bound with native
+  emissivity feedback before a solve, without replacing source data or choosing
+  a temporal-accuracy tolerance. The returned native endpoint closes both the
+  environment's joule budget and mass times its enthalpy tolerance. Cancellation,
+  unrepresentable heat and chart escape refuse without publishing state.
   `solve_lumped_contact_step` adds finite-body exchange with signed supplied heat through
   the existing `SeriesThermalResistance`. Backward Euler solves one signed
   heat transfer jointly with both supplied energies and returns both enthalpy/temperature/phase states together;

@@ -9,7 +9,7 @@ use fs_matdb::{
     PropertyValue, Provenance, QueryPoint, UncertaintyModel,
 };
 use fs_material::conductor::{
-    ElectricalPropertyBasis, ResolvedConductorState, graph::MaterialOhmicNode,
+    ElectricalPropertyBasis, OhmicDrive, ResolvedConductorState, graph::MaterialOhmicNode,
 };
 use fs_material::graph::{ConstitutiveGraph, GraphError, LawNode, check_consistent_tangent};
 use fs_material::state_point::{
@@ -144,6 +144,76 @@ fn curve(
 }
 fn node(card: &MaterialCard, state: ResolvedConductorState) -> MaterialOhmicNode {
     MaterialOhmicNode::try_new(card, state, "T", [300.0, 400.0], 2.0, 0.5).unwrap()
+}
+
+#[test]
+fn g1_positive_joule_feedback_uses_all_original_knots_and_both_drive_bases() {
+    for basis in [
+        ElectricalPropertyBasis::Resistivity,
+        ElectricalPropertyBasis::Conductivity,
+    ] {
+        let (card, original) = curve(basis, vec![(300.0, 4.0), (350.0, 2.0), (400.0, 3.0)]);
+        let law = node(&card, original.clone());
+        let (current_expected, voltage_expected) = match basis {
+            ElectricalPropertyBasis::Resistivity => (0.72, 0.36),
+            ElectricalPropertyBasis::Conductivity => (0.36, 0.72),
+        };
+        for (drive, expected) in [
+            (OhmicDrive::Current(-3.0), current_expected),
+            (OhmicDrive::Voltage(-12.0), voltage_expected),
+        ] {
+            let bound = law
+                .maximum_positive_joule_temperature_slope_w_k(drive)
+                .unwrap();
+            assert!(bound >= expected);
+            near(bound, expected);
+        }
+        assert_eq!(law.source().original(), &original);
+        assert_eq!(
+            law.source().original().material().card_identity(),
+            card.content_hash()
+        );
+    }
+}
+
+#[test]
+fn g0_joule_feedback_admits_native_power_even_for_zero_or_constant_slope() {
+    let (card, original) = curve(
+        ElectricalPropertyBasis::Resistivity,
+        vec![(300.0, 2.0), (400.0, 2.0)],
+    );
+    let law = node(&card, original);
+    for drive in [OhmicDrive::Current(0.0), OhmicDrive::Voltage(0.0)] {
+        assert_eq!(
+            law.maximum_positive_joule_temperature_slope_w_k(drive)
+                .unwrap(),
+            0.0
+        );
+    }
+    for drive in [
+        OhmicDrive::Current(f64::NAN),
+        OhmicDrive::Voltage(f64::NAN),
+        OhmicDrive::Current(f64::MAX),
+    ] {
+        assert!(
+            law.maximum_positive_joule_temperature_slope_w_k(drive)
+                .is_err()
+        );
+    }
+    // The original knot remains finite; the final native power overflows.
+    let (card, original) = curve(
+        ElectricalPropertyBasis::Resistivity,
+        vec![(300.0, 1.0), (400.0, 10.0)],
+    );
+    let law = node(&card, original);
+    assert!(
+        law.maximum_positive_joule_temperature_slope_w_k(OhmicDrive::Current(1.0e153))
+            .is_ok()
+    );
+    assert!(
+        law.maximum_positive_joule_temperature_slope_w_k(OhmicDrive::Current(3.0e153))
+            .is_err()
+    );
 }
 
 #[test]
