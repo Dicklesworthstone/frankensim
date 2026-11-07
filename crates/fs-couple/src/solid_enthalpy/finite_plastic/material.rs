@@ -3,7 +3,7 @@
 mod caloric;
 pub use caloric::{ReferenceCaloricMaterial, ReferenceCaloricQuery};
 
-use fs_matdb::{MaterialCard, QueryPoint};
+use fs_matdb::{ClaimSelection, MaterialCard, QueryPoint};
 use fs_material::phase::{EquilibriumPhaseState, ResolvedHeatCapacityCurve};
 use fs_material::plastic::finite::thermal::source::ResolvedAffineThermalFiniteJ2;
 use fs_material::plastic::finite::thermal::{AffineThermalFiniteJ2, FiniteThermalJ2Material};
@@ -57,6 +57,36 @@ impl<'a> FiniteThermoplasticMaterial<'a> {
             &query.temperature_axis,
         )
         .map_err(|e| FiniteThermoplasticError::Source(e.to_string()))?;
+        Self::from_family(query, initial_specific_enthalpy_j_kg, family)
+    }
+
+    /// Admit original same-card temperature/plastic-strain observations and the
+    /// original caloric chart on the existing reciprocal energy owner. The
+    /// tabulated thermal law must be selected explicitly by its model card.
+    pub fn try_new_with_tabulated_hardening(
+        query: FiniteThermoplasticQuery<'a>,
+        initial_specific_enthalpy_j_kg: f64,
+        curve_selection: ClaimSelection,
+        maximum_source_samples: usize,
+    ) -> Result<Self, FiniteThermoplasticError> {
+        let family = ResolvedAffineThermalFiniteJ2::try_from_material_card_at(
+            query.card,
+            query.model_index,
+            &query.context,
+            &query.temperature_axis,
+            curve_selection,
+            maximum_source_samples,
+        )
+        .map_err(|e| FiniteThermoplasticError::Source(e.to_string()))?;
+        Self::from_family(query, initial_specific_enthalpy_j_kg, family)
+    }
+
+    fn from_family(
+        query: FiniteThermoplasticQuery<'a>,
+        initial_specific_enthalpy_j_kg: f64,
+        family: ResolvedAffineThermalFiniteJ2,
+    ) -> Result<Self, FiniteThermoplasticError> {
+        let invalid = FiniteThermoplasticError::Invalid;
         let parameters = family.law().parameters();
         let caloric = ReferenceCaloricMaterial::try_new(
             ReferenceCaloricQuery {

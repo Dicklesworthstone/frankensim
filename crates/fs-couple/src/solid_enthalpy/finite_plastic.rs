@@ -47,6 +47,7 @@ use std::convert::Infallible;
 use crate::iqn_ils::{IqnIlsError, driver::CouplingMethod};
 use fs_exec::Cx;
 use fs_material::phase::PhaseStateError;
+use fs_matdb::ClaimSelection;
 use fs_solid::hyper2d::plastic::thermal::FiniteThermoplasticSheetError;
 use fs_solid::hyper3::plastic::FinitePlasticLawField;
 use fs_solid::hyper3::plastic::thermal::{
@@ -135,6 +136,45 @@ impl<'a> FiniteThermoplasticSolid<'a> {
         budget: TetAssemblyBudget,
         cx: &Cx<'_>,
     ) -> Result<Self, FiniteThermoplasticError> {
+        Self::prepare_sources(
+            thermal, nodes_m, tetrahedra, sources, budget, cx,
+            FiniteThermoplasticMaterial::try_new,
+        )
+    }
+
+    /// Bind original thermal hardening surfaces and caloric cells to the same
+    /// native equilibrium/reciprocal-heat owner. Every source must explicitly
+    /// select a tabulated thermal model. Selection and preparation budgets apply
+    /// independently to each original material card before mechanical stepping.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_tabulated_hardening(
+        thermal: &DepositionSimulation<'_>,
+        nodes_m: &'a [[f64; 3]],
+        tetrahedra: &'a [[usize; 4]],
+        sources: Vec<FiniteThermoplasticCell<'a>>,
+        curve_selection: ClaimSelection,
+        maximum_source_samples: usize,
+        budget: TetAssemblyBudget,
+        cx: &Cx<'_>,
+    ) -> Result<Self, FiniteThermoplasticError> {
+        Self::prepare_sources(
+            thermal, nodes_m, tetrahedra, sources, budget, cx,
+            |query, enthalpy| FiniteThermoplasticMaterial::try_new_with_tabulated_hardening(
+                query, enthalpy, curve_selection, maximum_source_samples,
+            ),
+        )
+    }
+
+    fn prepare_sources(
+        thermal: &DepositionSimulation<'_>,
+        nodes_m: &'a [[f64; 3]],
+        tetrahedra: &'a [[usize; 4]],
+        sources: Vec<FiniteThermoplasticCell<'a>>,
+        budget: TetAssemblyBudget,
+        cx: &Cx<'_>,
+        mut prepare: impl FnMut(FiniteThermoplasticQuery<'a>, f64)
+            -> Result<FiniteThermoplasticMaterial<'a>, FiniteThermoplasticError>,
+    ) -> Result<Self, FiniteThermoplasticError> {
         poll(cx)?;
         if sources.len() != tetrahedra.len() {
             return Err(FiniteThermoplasticError::Invalid(
@@ -164,8 +204,7 @@ impl<'a> FiniteThermoplasticSolid<'a> {
                     "unique cell mapping and exact original caloric object required",
                 ));
             }
-            let material =
-                FiniteThermoplasticMaterial::try_new(source.query, cell.specific_h_j_kg)?;
+            let material = prepare(source.query, cell.specific_h_j_kg)?;
             temperatures.push(
                 material
                     .state_at_specific_enthalpy(cell.specific_h_j_kg)

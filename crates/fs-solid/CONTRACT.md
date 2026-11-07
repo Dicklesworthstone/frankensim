@@ -11447,3 +11447,27 @@ responses, and budget/cancellation/full-cycle refusals. The existing primal
 one-coordinate resource boundary is updated from 280 to 296 bytes. These native
 regressions remain unexecuted pending the real dependency graph's build resource
 blocker; no measured material, modal-truncation or throughput claim follows.
+
+## Thermal measured-curve forming and retained shape
+
+The existing native finite thermoplastic tetrahedron and P1/Q1 plane-stress
+sheet accept affine-temperature tabulated Kirchhoff hardening through the
+shared `FiniteThermalJ2Material` family. All original plastic metric and
+accumulation history, temperature, coefficient work, entropy, mechanical internal
+energy and signed caloric transfer remain with those owners. The sheet still
+solves transverse equilibrium and thickness locally; heating does not prescribe
+a global scale or reset an existing plastic state.
+
+Two structural regressions apply an unchanged nominal dead load through loading,
+heating, cooling and release. Independent free-sided Hencky equations distinguish
+nominal from Kirchhoff stress and predict further yielding on heating, a
+hardening-knot crossing, lateral motion, sheet thickness and stress-free
+permanent shape. They exercise one tetrahedron and both triangular and
+quadrilateral sheets. Unsupported temperature or measured strain support refuses
+without changing accepted history, geometry or energy.
+
+These are synthetic constitutive/structural fixtures within the existing
+displacement-solid and membrane domains, not alloy formability calibration.
+Scoped Rust syntax, whitespace and independent scalar arithmetic were checked;
+native Cargo regression execution remains unverified in the available shared
+build environment.

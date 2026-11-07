@@ -2998,3 +2998,36 @@ native snapshot containment and transactional admission/refusal. Their complete
 source-material/modal fixture remains unexecuted in the available dependency
 environment. The underlying native shell bound passed five focused numerical
 tests, including complete-domain containment, degeneracies and extreme scaling.
+
+## Original thermal hardening surfaces on reciprocal caloric solids
+
+`FiniteThermoplasticMaterial::try_new_with_tabulated_hardening` binds an
+explicit tabulated finite thermal model and its original strain/temperature
+observations to the exact same-card caloric chart. The complete original
+hardening source and every selected observation remain inspectable through the
+resolved family. Original density at the stress-free reference temperature still
+sets reference mass; expansion and density metadata cannot change that inventory.
+Both scalar and tabulated constructors use the same caloric source/context and
+positive-total-heat-capacity admission.
+
+`FiniteThermoplasticSolid::try_new_with_tabulated_hardening` prepares these
+families through the same cell mapping and native tetrahedral constructor.
+Explicit claim selection and a per-source preparation budget are supplied by
+the caller. Existing equilibrium, retained inertia, accepted-state transactions,
+physical interval and reciprocal heat iteration remain the only step owners.
+The prepared material can also enter the existing native finite thermal sheet
+and `FiniteThermoplasticSheetCoupling`; no second heat solver is introduced.
+
+Heating can cross a measured hardening knot and advance plastic strain before
+melting. Its hardening-entropy change is retained in signed reversible caloric
+exchange, independently from positive physical plastic heat. Numerical endpoint
+work defects remain separate. The same accepted plastic metric, accumulations,
+temperature and caloric inventory start every feedback proposal.
+
+Two coupled regressions author an independent coaxial table/entropy oracle,
+solve a free displacement with temperature, cross a hardening knot on heating,
+and cool/unload to retained permanent shape. They also check original receipts,
+foreign caloric rejection, bounded temperature/strain support, complete
+nonvirgin state retention after refusal, and successful retry. Their independent
+scalar energy identities and Rust syntax were checked; native regression
+execution remains unverified in the resource-constrained session.

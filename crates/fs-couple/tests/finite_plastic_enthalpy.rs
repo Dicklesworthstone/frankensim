@@ -14,6 +14,8 @@ mod ductile;
 mod rate;
 #[path = "finite_plastic_enthalpy/sheet.rs"]
 mod sheet;
+#[path = "finite_plastic_enthalpy/tabulated.rs"]
+mod tabulated;
 
 use std::collections::BTreeMap;
 
