@@ -78,6 +78,8 @@ pub mod iso9613;
 /// Equilibrium charge carriers and sourced DC/harmonic collisional transport.
 pub mod ionized_gas;
 pub mod phase;
+/// Original singlet/triplet energies and transition rates for delayed light.
+pub mod phosphorescence;
 /// Source-bound reciprocal longitudinal piezoelectric stress, field and storage.
 pub mod piezoelectric;
 /// Source-bound reciprocal incremental magnetostriction about a declared bias.

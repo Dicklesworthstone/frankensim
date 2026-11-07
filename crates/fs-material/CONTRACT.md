@@ -19024,3 +19024,11 @@ refusals. `tests/plastic_hill_thermal/mixed.rs` covers native section reversals,
 independent tensor storage/entropy through C=0, original claim pins and corrupt
 history refusal. These authored conformance cases do not establish nonlinear
 recovery, texture evolution, rate dependence or measured-alloy calibration.
+
+## Source-bound phosphorescence kinetics
+
+`phosphorescence::PhosphorescenceStatePoint` resolves the original singlet and triplet excitation energies and six independent first-order rates into the existing `fs_thermal::luminescence::transfer::SingletTripletDecay`. Energies use joules per excitation relative to the same ground state, with `E_s >= E_t > 0`; radiative, nonradiative and forward/reverse crossing rates use inverse seconds. An explicitly zero rate is admitted, including a stable store. Missing rates never receive defaults, and lifetimes or branching yields are not independently invented. The native kinetics owner retains positive evolution, integrated events, crossing heat and reverse-crossing thermal withdrawal.
+
+The adapter preserves the complete original material bundle and its receipts, including unrelated optical/thermal properties. Exact scalar quantities and fixed external source contexts are rechecked on ingress. Original temperature and explicitly typed concentration/composition curves or surfaces may supply changing rates, including quencher-dependent nonradiative loss. Refresh pins the same card, coordinates, requirements and selected claims. An excited-history owner must retain fixed state energies or account for their parameter work. Source authors own the physical validity of reverse rates. Nonradiative channels mean locally thermalized loss; excited-quencher storage and chemistry are absent.
+
+This is a dilute two-state constitutive snapshot, with no trap distribution, population saturation, annihilation, bleaching or measured-material claim. Photon absorption, spectra and transport remain their existing owners. Source resolution occurs at preparation/refresh; reading the native law allocates nothing and performs no source query. Focused manufactured tests in `tests/phosphorescence.rs` check exact roles, complete-bundle retention, pinned thermal refresh, Stern–Volmer-type quenching against independent exponential decay, explicit stable stores and wrong-unit/history/source-domain refusals.
