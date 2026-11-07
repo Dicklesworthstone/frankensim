@@ -667,3 +667,102 @@ fn cancellation_stops_at_block_boundaries_and_resume_is_bitwise() {
         "cancel/resume diverged at sample {first_diff:?}"
     );
 }
+
+fn modal_voice_at_rate(rate: u32) -> ModalStringVoice {
+    let model = ModalAcousticTimeModel::try_new(
+        rate,
+        controlled_modal_model().modes().to_vec(),
+        ModalAcousticTimeBudget::audible_reference(),
+    )
+    .unwrap();
+    ModalStringVoice::new(model, vec![0.5, -0.25]).unwrap()
+}
+
+/// G0: a shared sample index must denote the same elapsed physical time even
+/// when a caller renders directly, without constructing an audio sink.
+#[test]
+fn mixed_voice_clocks_refuse_before_controls_or_any_physics_moves() {
+    let mut context = RenderContext::new(
+        vec![
+            RenderVoice::ReedBore(reed_voice()),
+            RenderVoice::ModalString(modal_voice_at_rate(RATE / 2)),
+        ],
+        16,
+    );
+    let outgoing = context.reed_voice(0).unwrap().outgoing_pressure_pa().to_bits();
+    assert!(matches!(
+        context.apply_controls(&[ControlDelta::SetBlowingPressure {
+            voice: 0,
+            pressure_pa: 0.0,
+        }]),
+        Err(RenderError::Control { .. })
+    ));
+    assert!(context.control_log().is_empty());
+    assert!(matches!(
+        context.validate_sample_rate(RATE),
+        Err(RenderError::Control { .. })
+    ));
+    let mut untouched = [123.0; 16];
+    assert!(matches!(
+        context.block(&mut untouched),
+        Err(RenderError::Control { .. })
+    ));
+    assert_eq!(untouched.map(f64::to_bits), [123.0_f64.to_bits(); 16]);
+    assert_eq!(context.samples_rendered(), 0);
+    assert_eq!(context.blocks_rendered(), 0);
+    let reed = context.reed_voice(0).unwrap();
+    assert_eq!(reed.samples_rendered(), 0);
+    assert_eq!(reed.outgoing_pressure_pa().to_bits(), outgoing);
+
+    // Generic schedule construction must enforce the same invariant, including
+    // an empty event list which never asks a sink to validate its sample rate.
+    assert!(matches!(
+        fs_couple::render::schedule::ScheduledRenderer::new(context, vec![], 0),
+        Err(RenderError::Control { .. })
+    ));
+}
+
+/// G0/G5: admitting one clock leaves both original physics paths and their
+/// pressure sum unchanged across callback partitions.
+#[test]
+fn shared_voice_clock_preserves_native_pressure_and_partition_invariance() {
+    let mut reed = reed_voice();
+    let mut modal = modal_voice_at_rate(RATE);
+    let mut reed_pressure = [0.0; 256];
+    let mut modal_pressure = [0.0; 256];
+    reed.step_block(&mut reed_pressure).unwrap();
+    modal.step_block(&mut modal_pressure).unwrap();
+    assert!(reed_pressure.iter().any(|p| p.abs() > 1e-8));
+    assert!(modal_pressure.iter().any(|p| p.abs() > 1e-8));
+    let expected: Vec<_> = reed_pressure.iter().zip(modal_pressure)
+        .map(|(&reed, modal)| (0.0 + reed + modal).to_bits())
+        .collect();
+    for block_len in [1, 37, 256] {
+        let mut context = RenderContext::new(
+            vec![
+                RenderVoice::ReedBore(reed_voice()),
+                RenderVoice::ModalString(modal_voice_at_rate(RATE)),
+            ],
+            256,
+        );
+        context.validate_sample_rate(RATE).unwrap();
+        assert!(context.validate_sample_rate(RATE / 2).is_err());
+        let mut output = [0.0; 256];
+        for block in output.chunks_mut(block_len) {
+            context.block(block).unwrap();
+        }
+        assert_eq!(
+            output.iter().map(|p| p.to_bits()).collect::<Vec<_>>(),
+            expected,
+            "callback length {block_len}",
+        );
+        assert_eq!(context.samples_rendered(), 256);
+    }
+
+    let mut silence = RenderContext::new(vec![], 8);
+    assert!(silence.validate_sample_rate(0).is_err());
+    silence.validate_sample_rate(RATE).unwrap();
+    let mut output = [123.0; 8];
+    silence.block(&mut output).unwrap();
+    assert_eq!(output, [0.0; 8]);
+}

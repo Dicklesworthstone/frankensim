@@ -1374,9 +1374,27 @@ pub enum RenderVoice {
     MultiContactModal(Box<MultiContactModalVoice>),
 }
 
+impl RenderVoice {
+    /// The original mechanics clock; observation never retunes a source.
+    fn sample_period_s(&self) -> f64 {
+        match self {
+            Self::FrictionModal(network) => network.sample_period_s(),
+            Self::BowedString(bow) => f64::from(bow.state().sample_rate_hz()).recip(),
+            Self::MultiContactModal(network) => network.sample_period_s(),
+            Self::ContactModal(network) => network.sample_period_s(),
+            Self::CoupledModal(network) => network.sample_period_s(),
+            Self::CompactPlate(plate) => plate.sample_period_s(),
+            Self::ReedBore(reed) => reed.dt,
+            Self::ModalString(string) => string.model.sample_period_s(),
+        }
+    }
+}
+
 /// The block render context: a set of voices summed into one observer
 /// channel, advanced a block at a time, with controls applied only at
 /// block boundaries and cancellation polled only between blocks.
+/// Every hosted voice must use the same physical sample period. Control and
+/// callback admission enforce this even when no audio sink is attached.
 pub struct RenderContext {
     voices: Vec<RenderVoice>,
     /// Scratch buffer reused across blocks so summation allocates nothing
@@ -1391,6 +1409,8 @@ pub struct RenderContext {
 impl RenderContext {
     /// Build a context over admitted voices, pre-sizing the scratch buffer
     /// to `max_block` samples (larger blocks refuse rather than allocate).
+    /// Mixed physical sample periods refuse at control or callback admission,
+    /// before any voice advances. No source is retuned or implicitly resampled.
     #[must_use]
     pub fn new(voices: Vec<RenderVoice>, max_block: usize) -> Self {
         Self {
@@ -1456,15 +1476,58 @@ impl RenderContext {
         }
     }
 
+    /// Validate a sink clock using the same physical periods as direct rendering.
+    /// Empty contexts can produce silence at any positive rate. This never
+    /// retunes a voice or resamples its retained pressure history.
+    pub fn validate_sample_rate(&self, sample_rate_hz: u32) -> Result<(), RenderError> {
+        self.validate_controls(&[])?;
+        if sample_rate_hz == 0 {
+            return Err(RenderError::Control {
+                what: "output sample rate must be positive",
+            });
+        }
+        let expected = f64::from(sample_rate_hz).recip().to_bits();
+        if self
+            .voices
+            .first()
+            .is_some_and(|voice| voice.sample_period_s().to_bits() != expected)
+        {
+            return Err(RenderError::Control {
+                what: "audio sink sample rate must match every hosted voice",
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_voice_clocks(&self) -> Result<(), RenderError> {
+        if self.poisoned {
+            return Err(RenderError::Poisoned);
+        }
+        let Some(first) = self.voices.first() else {
+            return Ok(());
+        };
+        let expected = first.sample_period_s();
+        if !expected.is_finite()
+            || expected <= 0.0
+            || self
+                .voices
+                .iter()
+                .any(|voice| voice.sample_period_s().to_bits() != expected.to_bits())
+        {
+            return Err(RenderError::Control {
+                what: "all hosted voices must share one positive finite physical sample period",
+            });
+        }
+        Ok(())
+    }
+
     /// Check an entire control batch without changing inputs, state or logs.
     ///
     /// # Errors
     /// A poisoned context, unknown voice index, or a delta the voice kind
     /// cannot accept.
     pub fn validate_controls(&self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
-        if self.poisoned {
-            return Err(RenderError::Poisoned);
-        }
+        self.validate_voice_clocks()?;
         for voice in &self.voices {
             if let RenderVoice::BowedString(bow) = voice {
                 if !bow.state().has_radiation() {
@@ -1706,6 +1769,7 @@ impl RenderContext {
                 what: "render sample or block clock would overflow",
             });
         }
+        self.validate_voice_clocks()?;
         // Admit every bow's complete callback before another voice advances or
         // output is cleared. A horizon/capacity refusal is not a physics failure.
         for voice in &self.voices {

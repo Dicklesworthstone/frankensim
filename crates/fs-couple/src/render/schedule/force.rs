@@ -91,27 +91,7 @@ impl ScheduledRenderer {
     /// Check the output clock against every hosted voice before connecting an
     /// audio sink. This never retunes a model or resamples its pressure history.
     pub fn validate_sample_rate(&self, sample_rate_hz: u32) -> Result<(), RenderError> {
-        self.context.validate_controls(&[])?;
-        if sample_rate_hz == 0 {
-            return Err(control("output sample rate must be positive"));
-        }
-        let expected = f64::from(sample_rate_hz).recip().to_bits();
-        for voice in &self.context.voices {
-            let period = match voice {
-                RenderVoice::FrictionModal(network) => network.sample_period_s(),
-                RenderVoice::BowedString(bow) => f64::from(bow.state().sample_rate_hz()).recip(),
-                RenderVoice::MultiContactModal(network) => network.sample_period_s(),
-                RenderVoice::ContactModal(network) => network.sample_period_s(),
-                RenderVoice::CoupledModal(network) => network.sample_period_s(),
-                RenderVoice::CompactPlate(plate) => plate.sample_period_s(),
-                RenderVoice::ReedBore(reed) => reed.dt,
-                RenderVoice::ModalString(string) => string.model.sample_period_s(),
-            };
-            if period.to_bits() != expected {
-                return Err(control("audio sink sample rate must match every hosted voice"));
-            }
-        }
-        Ok(())
+        self.context.validate_sample_rate(sample_rate_hz)
     }
 
     /// Admit a whole future pressure window before a sink writes its prefix.
