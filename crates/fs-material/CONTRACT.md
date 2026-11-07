@@ -12485,6 +12485,18 @@ accepted state and inventory. Complete volume updates publish only after source
 admission, entropy/work consistency and the final cancellation check. The same
 homogeneous-branch limitations and original transport-card bounds apply.
 
+`ClosedRealGasParcel::stored_energy_change_to` compares two already admitted
+endpoints using the original NASA caloric integral and PR departure increment
+at both endpoint densities. Exact conserved mass, the complete source model,
+auxiliary query coordinates and quantity conventions must agree. Common
+formation references cancel before evaluation. A real-fluid expansion can cool
+at unchanged internal energy; this API reports the state difference without
+assigning a heat/work split or imposing an adiabatic path. Cancellation and
+refusal leave both endpoints unchanged. `at_volume_isentropic` exposes the
+existing immutable proposal directly, avoiding a preliminary parcel clone in
+mechanical consumers. Focused tests check independent PR compression work,
+isoenergetic cooling, small work under large formation datums and source identity.
+
 Independent high-precision binary-mixture regressions cover isentropic
 compression pressure, temperature and work, constant-internal-energy expansion
 cooling and entropy increase, partitioned work and reversal, shared material

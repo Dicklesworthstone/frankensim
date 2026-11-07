@@ -82,6 +82,59 @@ impl ClosedRealGasParcel {
         self.parcel.point()
     }
 
+    /// Actual stored-energy change to another accepted endpoint of this parcel.
+    ///
+    /// Conserved mass, the complete NASA/PR source model, and every auxiliary
+    /// query coordinate and quantity convention must agree. The original
+    /// caloric owner integrates the ideal-reference contribution and evaluates
+    /// the finite PR departure using BOTH endpoint densities and temperatures.
+    /// Common formation references cancel before evaluation; neither absolute
+    /// stored energies nor a fixed-density surrogate are subtracted.
+    ///
+    /// This is a state difference, not a heat/work split or an assertion that
+    /// the connecting path is adiabatic. A real-fluid volume and temperature
+    /// change can have zero Delta U. Both endpoints are already source-admitted;
+    /// the caller still owns the continuous homogeneous-branch assumption.
+    pub fn stored_energy_change_to(
+        &self,
+        after: &Self,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, GasEnergyError> {
+        poll(&mut cancelled)?;
+        fn auxiliary(point: &QueryPoint) -> impl Iterator<Item = (&str, u64)> {
+            point
+                .axes()
+                .iter()
+                .filter(|(axis, _)| axis.as_str() != "temperature" && axis.as_str() != "pressure")
+                .map(|(axis, value)| (axis.as_str(), value.to_bits()))
+        }
+        if self.mass_kg().to_bits() != after.mass_kg().to_bits()
+            || self.model() != after.model()
+            || self.point().axis_quantities() != after.point().axis_quantities()
+            || !auxiliary(self.point()).eq(auxiliary(after.point()))
+        {
+            return Err(GasEnergyError::Invalid(
+                "stored real-gas increment needs unchanged mass, source model and auxiliary conditions",
+            ));
+        }
+        let specific = self
+            .model()
+            .specific_internal_energy_change_between_densities(
+                self.density_kg_m3(),
+                self.state().temperature_k(),
+                after.density_kg_m3(),
+                after.state().temperature_k(),
+            )?;
+        let change = self.mass_kg() * specific;
+        if !change.is_finite() || (specific != 0.0 && change == 0.0) {
+            return Err(GasEnergyError::Invalid(
+                "stored real-gas energy increment is unrepresentable",
+            ));
+        }
+        poll(&mut cancelled)?;
+        Ok(change)
+    }
+
     /// Signed heat [J] at the current held volume, through the existing owner.
     pub fn add_heat(
         &mut self,
@@ -228,6 +281,24 @@ impl ClosedRealGasParcel {
         Ok((Self::from_isochoric(parcel), stored))
     }
 
+    /// Immutable reversible adiabatic volume endpoint from the same source.
+    ///
+    /// This reuses the original parcel's entropy reconstruction and creates one
+    /// candidate, without first cloning an accepted parcel for mutation. The
+    /// original state remains available for force/potential comparisons, and
+    /// every refusal or cancellation leaves it unchanged. The homogeneous
+    /// phase-path and work semantics are the same as `set_volume_isentropic`.
+    pub fn at_volume_isentropic(
+        &self,
+        volume_m3: f64,
+        controls: GasEntropySolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(Self, GasVolumeStep), GasEntropyError> {
+        self.parcel
+            .at_volume_isentropic(volume_m3, controls, cancelled)
+            .map(|(parcel, report)| (Self::from_isochoric(parcel), report))
+    }
+
     /// Reversible adiabatic compression/expansion at conserved mass and entropy.
     ///
     /// Work delivered by the gas is `-m Delta u` on the admitted isentrope.
@@ -240,11 +311,9 @@ impl ClosedRealGasParcel {
         controls: GasEntropySolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<GasVolumeStep, GasEntropyError> {
-        let (candidate, report) =
-            self.parcel
-                .at_volume_isentropic(volume_m3, controls, &mut cancelled)?;
+        let (candidate, report) = self.at_volume_isentropic(volume_m3, controls, &mut cancelled)?;
         poll(&mut cancelled).map_err(map_context)?;
-        self.parcel = candidate;
+        *self = candidate;
         Ok(report)
     }
 }
