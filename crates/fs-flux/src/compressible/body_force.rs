@@ -69,6 +69,24 @@ pub enum BodyForce<'a, const D: usize> {
         /// Non-Coriolis acceleration [m/s²], uniform or cellwise.
         acceleration: &'a [[f64; D]],
     },
+    /// Exact held-coefficient Coriolis flow, including the integrated physical
+    /// acceleration. Each slice independently broadcasts one vector or supplies
+    /// one per original cell, with the same units and geometry as
+    /// [`Self::CoriolisSpatial`].
+    ///
+    /// The analytic rotation removes the midpoint source's inertial-phase
+    /// error. Pure rotation supplies zero work; driven work is the represented
+    /// kinetic-energy change. No source subcycling, coefficient copies or
+    /// per-cell allocations are required. Zero spin retains the original
+    /// acceleration arithmetic. The complete transport/source split remains
+    /// second order, so accuracy of spatial transport and changing coefficients
+    /// still requires time refinement.
+    CoriolisExact {
+        /// Local angular velocity [rad/s], uniform or cellwise.
+        angular_velocity: &'a [[f64; 3]],
+        /// Non-Coriolis acceleration [m/s²], uniform or cellwise.
+        acceleration: &'a [[f64; D]],
+    },
 }
 
 impl<const D: usize> BodyForce<'_, D> {
@@ -86,7 +104,8 @@ impl<const D: usize> BodyForce<'_, D> {
                 acceleration: field,
                 ..
             } => field[cell],
-            Self::CoriolisSpatial { acceleration, .. } => {
+            Self::CoriolisSpatial { acceleration, .. }
+            | Self::CoriolisExact { acceleration, .. } => {
                 acceleration[if acceleration.len() == 1 { 0 } else { cell }]
             }
         }
@@ -102,6 +121,9 @@ impl<const D: usize> BodyForce<'_, D> {
             } => Some(angular_velocity),
             Self::CoriolisSpatial {
                 angular_velocity, ..
+            }
+            | Self::CoriolisExact {
+                angular_velocity, ..
             } => Some(angular_velocity[if angular_velocity.len() == 1 { 0 } else { cell }]),
             _ => None,
         }
@@ -114,6 +136,10 @@ impl<const D: usize> BodyForce<'_, D> {
     ) -> Result<bool, E> {
         poll::<E>(cancelled)?;
         if let Self::CoriolisSpatial {
+            angular_velocity,
+            acceleration,
+        }
+        | Self::CoriolisExact {
             angular_velocity,
             acceleration,
         } = self
@@ -170,7 +196,9 @@ impl<const D: usize> BodyForce<'_, D> {
                 acceleration: field,
                 ..
             } => field,
-            Self::CoriolisSpatial { .. } => unreachable!("spatial fields admitted above"),
+            Self::CoriolisSpatial { .. } | Self::CoriolisExact { .. } => {
+                unreachable!("spatial fields admitted above")
+            }
         };
         if field.len() != cells {
             return Err(E::invalid(
@@ -256,8 +284,8 @@ pub(super) struct Kick<const D: usize> {
 }
 
 /// Held-source flow map. Prescribed forces use their exact constant impulse;
-/// Coriolis uses an analytic skew midpoint solve. Work uses the represented
-/// momentum increment, except that pure Coriolis supplies exactly zero work:
+/// Coriolis uses the selected midpoint or exact analytic flow. Work uses the
+/// represented momentum increment, except that pure Coriolis supplies zero work:
 /// an increment lost to momentum rounding cannot silently become heat.
 pub(super) fn kick<E: Failure, const D: usize>(
     force: BodyForce<'_, D>,
@@ -280,9 +308,12 @@ pub(super) fn kick<E: Failure, const D: usize>(
     if let Some(omega) = force.angular_velocity(cell) {
         admit_rotation::<E, D>(omega)?;
         if omega.into_iter().any(|x| x != 0.0) {
-            return coriolis_kick::<E, D>(
-                omega, value, density, momentum, energy, duration,
-            );
+            if matches!(force, BodyForce::CoriolisExact { .. }) {
+                return exact_coriolis_kick::<E, D>(
+                    omega, value, density, momentum, energy, duration,
+                );
+            }
+            return coriolis_kick::<E, D>(omega, value, density, momentum, energy, duration);
         }
     }
     let acceleration = matches!(
@@ -292,6 +323,7 @@ pub(super) fn kick<E: Failure, const D: usize>(
             | BodyForce::Coriolis { .. }
             | BodyForce::CoriolisField { .. }
             | BodyForce::CoriolisSpatial { .. }
+            | BodyForce::CoriolisExact { .. }
     );
     let mut result = Kick {
         momentum,
@@ -380,9 +412,7 @@ fn coriolis_kick<E: Failure, const D: usize>(
     {
         return Err(E::invalid("unrepresentable Coriolis source coefficients"));
     }
-    let m: [f64; 3] = core::array::from_fn(|axis| {
-        if axis < D { momentum[axis] } else { 0.0 }
-    });
+    let m: [f64; 3] = core::array::from_fn(|axis| if axis < D { momentum[axis] } else { 0.0 });
     let drive: [f64; 3] = core::array::from_fn(|axis| {
         if axis < D {
             (duration * acceleration[axis]) * density
@@ -411,10 +441,102 @@ fn coriolis_kick<E: Failure, const D: usize>(
     let increment: [f64; 3] = core::array::from_fn(|axis| {
         w[axis].mul_add(projection, rhs[axis] - skew[axis]) / denominator
     });
+    let driven = drive.into_iter().any(|value| value != 0.0);
+    finish_coriolis_kick::<E, D>(density, momentum, energy, increment, driven)
+}
+
+/// Integrate the held affine rotation with phi_1(-2 h [omega]x).
+/// Acting on the initial NET source impulse retains a represented geostrophic
+/// equilibrium without subtracting two large independently rotated states.
+fn exact_coriolis_kick<E: Failure, const D: usize>(
+    omega: [f64; 3],
+    acceleration: [f64; D],
+    density: f64,
+    momentum: [f64; D],
+    energy: f64,
+    duration: f64,
+) -> Result<Kick<D>, E> {
+    let w = omega.map(|v| duration * v);
+    let magnitude = w[0].hypot(w[1]).hypot(w[2]);
+    let angle = 2.0 * magnitude;
+    if !angle.is_finite() || !acceleration.into_iter().all(f64::is_finite) {
+        return Err(E::invalid(
+            "unrepresentable exact Coriolis source coefficients",
+        ));
+    }
+    if magnitude == 0.0 {
+        // A representable spin may round away only after multiplication by h.
+        // Its limiting flow is the ordinary acceleration kick.
+        return kick::<E, D>(
+            BodyForce::UniformAcceleration(acceleration),
+            0,
+            density,
+            momentum,
+            energy,
+            duration,
+        );
+    }
+    let axis = w.map(|v| v / magnitude);
+    let m = core::array::from_fn(|a| if a < D { momentum[a] } else { 0.0 });
+    let drive: [f64; 3] = core::array::from_fn(|a| {
+        if a < D {
+            (duration * acceleration[a]) * density
+        } else {
+            0.0
+        }
+    });
+    let rotation = cross3(w, m);
+    let rhs: [f64; 3] = core::array::from_fn(|a| (-2.0_f64).mul_add(rotation[a], drive[a]));
+    if !drive.into_iter().chain(rhs).all(f64::is_finite) {
+        return Err(E::invalid("unrepresentable exact Coriolis source impulse"));
+    }
+    if rhs.into_iter().all(|value| value == 0.0) {
+        return Ok(Kick {
+            momentum,
+            energy,
+            impulse_density: [0.0; D],
+            work_density: 0.0,
+        });
+    }
+    let (sinc, cosc) = if angle < 1.0e-4 {
+        let square = angle * angle;
+        (
+            1.0 + square * (-1.0 / 6.0 + square / 120.0),
+            angle * (0.5 + square * (-1.0 / 24.0 + square / 720.0)),
+        )
+    } else {
+        // Half-angle identities give both coefficients with one sin_cos and
+        // no cancellation in 1-cos(angle), including near complete turns.
+        let (sine, cosine) = magnitude.sin_cos();
+        (sine * cosine / magnitude, sine * sine / magnitude)
+    };
+    // Rotation cannot supply axial impulse: use only the physical drive to
+    // avoid a spurious axial component from dot(axis, cross(w, m)) roundoff.
+    let projection = dot3(axis, drive);
+    let skew = cross3(axis, rhs);
+    let increment = core::array::from_fn(|a| {
+        let parallel = axis[a] * projection;
+        sinc.mul_add(rhs[a] - parallel, parallel - cosc * skew[a])
+    });
+    finish_coriolis_kick::<E, D>(
+        density,
+        momentum,
+        energy,
+        increment,
+        drive.into_iter().any(|v| v != 0.0),
+    )
+}
+
+fn finish_coriolis_kick<E: Failure, const D: usize>(
+    density: f64,
+    momentum: [f64; D],
+    energy: f64,
+    increment: [f64; 3],
+    driven: bool,
+) -> Result<Kick<D>, E> {
     if !increment.into_iter().all(f64::is_finite) {
         return Err(E::invalid("unrepresentable Coriolis source impulse"));
     }
-    let driven = drive.into_iter().any(|value| value != 0.0);
     let mut result = Kick {
         momentum,
         energy,
@@ -454,3 +576,6 @@ fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
         a[0].mul_add(b[1], -a[1] * b[0]),
     ]
 }
+
+#[cfg(test)]
+mod exact_tests;

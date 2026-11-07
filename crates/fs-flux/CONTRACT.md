@@ -2869,6 +2869,35 @@ cover hemispheric sign/equatorial rest, heterogeneous density/axis/drive,
 periodic conservative transport, allocation reuse, full-field admission and
 atomic cancellation/retry.
 
+### Exact held Coriolis source flow
+
+`BodyForce::CoriolisExact` integrates the same physical source
+`dm/dt = rho*a - 2*Omega cross m` with its exact held-coefficient affine flow.
+Its borrowed angular-velocity and acceleration slices independently broadcast
+one vector or supply one per original cell. It uses the current source-stage
+density and the existing planar normal-axis/spatial arbitrary-axis admission.
+All existing compressible forcing consumers can select it; the midpoint
+variants retain their original arithmetic.
+
+The source acts on the net initial impulse with the analytic rotation integral.
+This preserves represented geostrophic rest, resolves the inertial phase
+`2*|Omega|*dt` to roundoff, and integrates both parallel and transverse drive.
+Small-angle series and half-angle trigonometry avoid subtracting nearly equal
+cosines. Each cell needs at most one `sin_cos`, fixed stack storage, and no
+source subcycling. Zero spin retains the original acceleration path. Pure
+rotation reports zero work and retains conservative-energy bits; a driven
+source adds only its represented kinetic-energy change, without a thermal or
+chemical source. Unrepresentable states and coefficients are refused.
+
+The complete transport/source composition remains second order and retains
+native Mach/CFL checks, retries, cancellation and workspaces. Exact local
+rotation does not remove time-refinement needs for transport or changing
+fields, nor add a pressure/Coriolis well-balanced discretization. Regressions
+cover physical phase over many turns, speed and axial momentum, analytic
+constant-drive work, the affine flow composition law, geostrophic and zero-spin
+identities, broadcast/planar admission, and the original Euler trajectory with
+variable heat capacity and full impulse/energy accounts.
+
 ### Three-dimensional Newtonian stress, Fourier heat and the coupled field
 
 `spatial::molecular::MolecularTransport3d` binds the original gas's exact species
