@@ -6,6 +6,7 @@ use fs_solid::hyper3::plastic::ductile::dynamics::{
 };
 
 const RHO: f64 = 12.0;
+const GRADED_RHO: [f64; 4] = [3.0, 7.0, 14.0, 24.0];
 const VOLUME: f64 = 1.0 / 6.0;
 
 fn motion_controls() -> FiniteDuctileMotionControls {
@@ -54,102 +55,151 @@ fn free_body_uses_original_uniform_acceleration_and_retains_mass_through_continu
         let bands = [TetCrackBandGeometry::from_element(&geometry, 0, [1.0, 0.0, 0.0]).unwrap()];
         let material = model(bands[0].band_width_m(), 0.04);
         let materials = [&material];
-        let solid = FiniteDuctileTetSolid::try_new(
-            &geometry,
-            &materials,
-            &bands,
-            TetAssemblyBudget::standard(),
-            cx,
-        )
-        .unwrap();
-        let v0 = [0.25, -0.125, 0.0625];
-        let moving = FiniteDuctileTetMotion::try_new(solid, &[RHO], &[v0; 4], cx).unwrap();
-        let dt = 0.125;
-        let acceleration = [0.5, -0.25, 0.125];
-        let body = acceleration.map(|a| RHO * a);
-        let first = moving
-            .advance(
-                &[],
-                &[],
-                body,
-                at(dt),
-                IncrementSettings::default(),
-                motion_controls(),
+        for density in [None, Some([RHO; 4]), Some(GRADED_RHO)] {
+            let solid = FiniteDuctileTetSolid::try_new(
+                &geometry,
+                &materials,
+                &bands,
+                TetAssemblyBudget::standard(),
                 cx,
             )
             .unwrap();
-        let v1 = core::array::from_fn(|i| v0[i] + dt * acceleration[i]);
-        for (u, v) in first
-            .motion
-            .solid()
-            .displacement_m()
-            .iter()
-            .zip(first.motion.velocity_mps())
-        {
-            for axis in 0..3 {
-                near(u[axis], dt * v1[axis]);
-                near(v[axis], v1[axis]);
+            let v0 = [0.25, -0.125, 0.0625];
+            let moving = match density {
+                None => FiniteDuctileTetMotion::try_new(solid, &[RHO], &[v0; 4], cx),
+                Some(values) => {
+                    FiniteDuctileTetMotion::try_new_with_nodal_density(solid, &values, &[v0; 4], cx)
+                }
             }
-        }
-        let mass = RHO * VOLUME;
-        near(first.inertia.kinetic_before_j, 0.5 * mass * dot3(v0, v0));
-        near(first.inertia.kinetic_after_j, 0.5 * mass * dot3(v1, v1));
-        near(
-            first.inertia.numerical_loss_j,
-            0.5 * mass * dt * dt * dot3(acceleration, acceleration),
-        );
-        let work = mass * dt * dot3(acceleration, v1);
-        near(first.inertia.inertial_work_j, work);
-        near(first.material_energy.dead_load_endpoint_work_j, work);
-        near(first.material_energy.support_endpoint_work_j, 0.0);
-        near(first.material_energy.plastic_dissipation_j, 0.0);
-        near(first.material_energy.damage_release_j, 0.0);
-        near(first.balance_error_j, 0.0);
-        assert!(first.equilibrium.reactions_n.is_empty());
-        assert_eq!(
-            first.motion.solid().element_states()[0].native_state(),
-            material.initial_state().native_state()
-        );
-        near(first.motion.solid().element_states()[0].integrity(), 1.0);
-        for (actual, expected) in first.motion.solid().element_deformation()[0]
-            .iter()
-            .zip([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
-        {
-            near(*actual, expected);
-        }
-        assert!(core::ptr::eq(
-            moving.reference_density_kg_m3(),
-            first.motion.reference_density_kg_m3()
-        ));
-        near(first.motion.reference_mass_kg(), mass);
-        let second = first
-            .motion
-            .advance(
-                &[],
-                &[],
-                body,
-                at(dt),
-                IncrementSettings::default(),
-                motion_controls(),
-                cx,
-            )
             .unwrap();
-        let v2 = core::array::from_fn::<_, 3, _>(|i| v1[i] + dt * acceleration[i]);
-        for (u, v) in second
-            .motion
-            .solid()
-            .displacement_m()
-            .iter()
-            .zip(second.motion.velocity_mps())
-        {
-            for axis in 0..3 {
-                near(u[axis], dt * (v1[axis] + v2[axis]));
-                near(v[axis], v2[axis]);
+            let dt = 0.125;
+            let acceleration = [0.5, -0.25, 0.125];
+            let projected = moving
+                .reference_acceleration_load_n(&[acceleration; 4], cx)
+                .unwrap();
+            // Exact integral rho_0*N_a: the four force shares follow the ORIGINAL
+            // mass centroid even though all three inputs have the same total mass.
+            let nodal = density.unwrap_or([RHO; 4]);
+            let sum: f64 = nodal.iter().sum();
+            assert_eq!(projected.len(), 12);
+            for &(dof, force) in &projected {
+                near(
+                    force,
+                    VOLUME * (sum + nodal[dof / 3]) / 20.0 * acceleration[dof % 3],
+                );
             }
+            let loads = if density.is_some() {
+                projected.as_slice()
+            } else {
+                &[]
+            };
+            let body = if density.is_some() {
+                [0.0; 3]
+            } else {
+                acceleration.map(|a| RHO * a)
+            };
+            let first = moving
+                .advance(
+                    &[],
+                    loads,
+                    body,
+                    at(dt),
+                    IncrementSettings::default(),
+                    motion_controls(),
+                    cx,
+                )
+                .unwrap();
+            let v1 = core::array::from_fn(|i| v0[i] + dt * acceleration[i]);
+            for (u, v) in first
+                .motion
+                .solid()
+                .displacement_m()
+                .iter()
+                .zip(first.motion.velocity_mps())
+            {
+                for axis in 0..3 {
+                    near(u[axis], dt * v1[axis]);
+                    near(v[axis], v1[axis]);
+                }
+            }
+            let mass = RHO * VOLUME;
+            near(first.inertia.kinetic_before_j, 0.5 * mass * dot3(v0, v0));
+            near(first.inertia.kinetic_after_j, 0.5 * mass * dot3(v1, v1));
+            near(
+                first.inertia.numerical_loss_j,
+                0.5 * mass * dt * dt * dot3(acceleration, acceleration),
+            );
+            let work = mass * dt * dot3(acceleration, v1);
+            near(first.inertia.inertial_work_j, work);
+            near(first.material_energy.dead_load_endpoint_work_j, work);
+            near(first.material_energy.support_endpoint_work_j, 0.0);
+            near(first.material_energy.plastic_dissipation_j, 0.0);
+            near(first.material_energy.damage_release_j, 0.0);
+            near(first.balance_error_j, 0.0);
+            assert!(first.equilibrium.reactions_n.is_empty());
+            assert_eq!(
+                first.motion.solid().element_states()[0].native_state(),
+                material.initial_state().native_state()
+            );
+            near(first.motion.solid().element_states()[0].integrity(), 1.0);
+            for (actual, expected) in first.motion.solid().element_deformation()[0]
+                .iter()
+                .zip([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
+            {
+                near(*actual, expected);
+            }
+            assert!(core::ptr::eq(
+                moving.reference_density_kg_m3(),
+                first.motion.reference_density_kg_m3()
+            ));
+            near(first.motion.reference_mass_kg(), mass);
+            assert_eq!(
+                moving.reference_nodal_density_kg_m3(),
+                density.as_ref().map(|v| v.as_slice())
+            );
+            assert_eq!(
+                first.motion.reference_nodal_density_kg_m3(),
+                moving.reference_nodal_density_kg_m3()
+            );
+            if let Some(original) = moving.reference_nodal_density_kg_m3() {
+                assert!(core::ptr::eq(
+                    original,
+                    first.motion.reference_nodal_density_kg_m3().unwrap()
+                ));
+            }
+            let second = first
+                .motion
+                .advance(
+                    &[],
+                    loads,
+                    body,
+                    at(dt),
+                    IncrementSettings::default(),
+                    motion_controls(),
+                    cx,
+                )
+                .unwrap();
+            let v2 = core::array::from_fn::<_, 3, _>(|i| v1[i] + dt * acceleration[i]);
+            for (u, v) in second
+                .motion
+                .solid()
+                .displacement_m()
+                .iter()
+                .zip(second.motion.velocity_mps())
+            {
+                for axis in 0..3 {
+                    near(u[axis], dt * (v1[axis] + v2[axis]));
+                    near(v[axis], v2[axis]);
+                }
+            }
+            near(second.motion.reference_mass_kg(), mass);
+            assert_eq!(
+                second.motion.reference_nodal_density_kg_m3(),
+                moving.reference_nodal_density_kg_m3()
+            );
+            assert_eq!(moving.velocity_mps(), &[v0; 4]);
+            assert_eq!(moving.solid().displacement_m(), &[[0.0; 3]; 4]);
         }
-        near(second.motion.reference_mass_kg(), mass);
-        assert_eq!(moving.velocity_mps(), &[v0; 4]);
-        assert_eq!(moving.solid().displacement_m(), &[[0.0; 3]; 4]);
     });
 }
 
@@ -167,7 +217,8 @@ fn free_coordinate_solves_rate_sensitive_damage_and_inertia_in_one_physical_inte
             .collect();
         let lambda = 1.02_f64;
         let alpha = (1000.0 * lambda.ln() - 3.0) / 1500.0;
-        let effective_mass = RHO * VOLUME / 10.0;
+        let density_sum: f64 = GRADED_RHO.iter().sum();
+        let effective_mass = VOLUME * (density_sum + 2.0 * GRADED_RHO[1]) / 60.0;
         let mut integrities = Vec::new();
         for dt in [0.0625, 0.125] {
             let solid = FiniteDuctileTetSolid::try_new(
@@ -178,10 +229,18 @@ fn free_coordinate_solves_rate_sensitive_damage_and_inertia_in_one_physical_inte
                 cx,
             )
             .unwrap();
-            let moving =
-                FiniteDuctileTetMotion::try_new(solid, &[RHO], &[[0.0; 3]; 4], cx).unwrap();
+            let moving = FiniteDuctileTetMotion::try_new_with_nodal_density(
+                solid,
+                &GRADED_RHO,
+                &[[0.0; 3]; 4],
+                cx,
+            )
+            .unwrap();
+            let gravity = [[0.0, 0.0, -9.81]; 4];
+            let original_gravity = moving.reference_acceleration_load_n(&gravity, cx).unwrap();
             // Independent confined logarithmic J2 plus authored JC onset.
-            // Constant reference rho gives M_11=rho*V/10 for this free DOF.
+            // Exact cubic integral M_11=V*(sum(rho)+2*rho_1)/60.
+            // Its cell mean is the legacy RHO, but its inertia is different.
             let onset = ONSET * (1.0 + 0.05 * (alpha / dt).ln());
             let g = (-bands[0].band_width_m() * 3.0 * (alpha - onset) / GP).exp();
             let piola = g * (1000.0 * lambda.ln() + 2.0) / lambda;
@@ -234,7 +293,24 @@ fn free_coordinate_solves_rate_sensitive_damage_and_inertia_in_one_physical_inte
                 .find(|((dof, _), _)| *dof == 6)
                 .unwrap()
                 .1;
-            near(*reaction, RHO * VOLUME / 20.0 * acceleration);
+            near(
+                *reaction,
+                VOLUME * (density_sum + GRADED_RHO[1] + GRADED_RHO[2]) / 120.0 * acceleration,
+            );
+            near(step.motion.reference_mass_kg(), RHO * VOLUME);
+            assert_eq!(step.motion.reference_density_kg_m3(), &[RHO]);
+            assert_eq!(
+                step.motion.reference_nodal_density_kg_m3(),
+                Some(&GRADED_RHO[..])
+            );
+            // Current volume is lambda*V and integrity has fallen, but gravity
+            // still acts on the complete original mass, without either factor.
+            assert_eq!(
+                step.motion
+                    .reference_acceleration_load_n(&gravity, cx)
+                    .unwrap(),
+                original_gravity
+            );
             integrities.push(g);
 
             let strict_material = FiniteDuctileMotionControls {
@@ -304,6 +380,18 @@ fn free_coordinate_solves_rate_sensitive_damage_and_inertia_in_one_physical_inte
             near(stopped.inertia.kinetic_change_j, -kinetic);
             near(stopped.inertia.numerical_loss_j, kinetic);
             near(stopped.balance_error_j, 0.0);
+            near(stopped.motion.reference_mass_kg(), RHO * VOLUME);
+            assert_eq!(
+                stopped.motion.reference_nodal_density_kg_m3(),
+                Some(&GRADED_RHO[..])
+            );
+            assert_eq!(
+                stopped
+                    .motion
+                    .reference_acceleration_load_n(&gravity, cx)
+                    .unwrap(),
+                original_gravity
+            );
         }
         assert!((integrities[0] - integrities[1]).abs() > 1e-4);
     });
@@ -393,7 +481,53 @@ fn kinetic_budget_damage_and_cancellation_refuse_the_complete_motion_with_refine
         };
         assert!(FiniteDuctileTetMotion::try_new(fresh(), &[RHO], &[[0.0; 3]; 3], cx).is_err());
         assert!(FiniteDuctileTetMotion::try_new(fresh(), &[RHO], &[[f64::NAN; 3]; 4], cx).is_err());
+        for density in [
+            vec![],
+            vec![RHO; 3],
+            vec![RHO, RHO, RHO, 0.0],
+            vec![RHO, RHO, RHO, -1.0],
+            vec![RHO, RHO, RHO, f64::NAN],
+            vec![RHO, RHO, RHO, f64::INFINITY],
+        ] {
+            assert!(
+                FiniteDuctileTetMotion::try_new_with_nodal_density(
+                    fresh(),
+                    &density,
+                    &[[0.0; 3]; 4],
+                    cx,
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            FiniteDuctileTetMotion::try_new_with_nodal_density(
+                fresh(),
+                &GRADED_RHO,
+                &[[0.0; 3]; 3],
+                cx,
+            )
+            .is_err()
+        );
+        assert!(
+            FiniteDuctileTetMotion::try_new_with_nodal_density(
+                fresh(),
+                &GRADED_RHO,
+                &[[f64::NAN; 3]; 4],
+                cx,
+            )
+            .is_err()
+        );
         let moving = FiniteDuctileTetMotion::try_new(fresh(), &[RHO], &[[0.0; 3]; 4], cx).unwrap();
+        assert!(
+            moving
+                .reference_acceleration_load_n(&[[0.0; 3]; 3], cx)
+                .is_err()
+        );
+        assert!(
+            moving
+                .reference_acceleration_load_n(&[[f64::NAN; 3]; 4], cx)
+                .is_err()
+        );
         let states = moving.solid().element_states().to_vec();
         let dt = 0.125;
         let body = [RHO, 0.0, 0.0];
@@ -460,6 +594,12 @@ fn kinetic_budget_damage_and_cancellation_refuse_the_complete_motion_with_refine
         assert_eq!(moving.solid().displacement_m(), &[[0.0; 3]; 4]);
         assert_eq!(moving.velocity_mps(), &[[0.0; 3]; 4]);
         gate.request();
+        assert!(matches!(
+            moving.reference_acceleration_load_n(&[[0.0; 3]; 4], cx),
+            Err(FiniteDuctileTetError::Solve(
+                fs_solid::plastic3::SmallStrainTetError::Cancelled
+            ))
+        ));
         assert!(matches!(
             moving.advance(
                 &[],

@@ -36,6 +36,7 @@ where
     solid: FiniteDuctileTetSolid<'g, 'm, L>,
     velocity_mps: Vec<[f64; 3]>,
     reference_density_kg_m3: Arc<[f64]>,
+    reference_nodal_density_kg_m3: Option<Arc<[f64]>>,
     mass: Arc<P1ReferenceMass>,
 }
 
@@ -98,6 +99,57 @@ where
             solid,
             velocity_mps: velocity_mps.to_vec(),
             reference_density_kg_m3: Arc::from(reference_density_kg_m3),
+            reference_nodal_density_kg_m3: None,
+            mass: Arc::new(mass),
+        })
+    }
+
+    /// Bind a positive P1 nodal density on the ORIGINAL material tetrahedra.
+    ///
+    /// The shared reference-mass owner integrates rho_0*N_a*N_b exactly.
+    /// Neither cell means nor damage-scaled stiffness replace that mass.
+    /// Its immutable nodal inventory and operator survive every accepted
+    /// deformation and damage step. With no matter transfer, current density
+    /// is rho_0/J; it is not another multiplier on the reference mass.
+    /// Density is an authored inventory, not a material-calibration claim.
+    ///
+    /// # Errors
+    /// Invalid nodal density/velocity, unrepresentable mass, or cancellation.
+    pub fn try_new_with_nodal_density(
+        solid: FiniteDuctileTetSolid<'g, 'm, L>,
+        reference_nodal_density_kg_m3: &[f64],
+        velocity_mps: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<Self, FiniteDuctileTetError> {
+        checkpoint(cx)?;
+        if velocity_mps.len() != solid.state.displacement_m.len()
+            || velocity_mps
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite())
+        {
+            return Err(invalid(
+                "one finite initial velocity vector per original finite ductile node required",
+            )
+            .into());
+        }
+        let (mass, means) = P1ReferenceMass::from_nodal_density(
+            solid
+                .state
+                .elements
+                .iter()
+                .map(|element| (element.nodes, element.volume)),
+            reference_nodal_density_kg_m3,
+            solid.state.displacement_m.as_flattened().len(),
+            cx,
+        )
+        .map_err(SmallStrainTetError::from)?;
+        checkpoint(cx)?;
+        Ok(Self {
+            solid,
+            velocity_mps: velocity_mps.to_vec(),
+            reference_density_kg_m3: Arc::from(means),
+            reference_nodal_density_kg_m3: Some(Arc::from(reference_nodal_density_kg_m3)),
             mass: Arc::new(mass),
         })
     }
@@ -108,18 +160,73 @@ where
     pub fn velocity_mps(&self) -> &[[f64; 3]] {
         &self.velocity_mps
     }
-    /// Exact original density values, in reference tetrahedron order.
+    /// Original cell-average density, in reference tetrahedron order. Scalar
+    /// inputs retain their exact values. Nodal inputs also retain their complete
+    /// field through [`Self::reference_nodal_density_kg_m3`]; these reporting means
+    /// never replace the density field in momentum or acceleration loads.
     pub fn reference_density_kg_m3(&self) -> &[f64] {
         &self.reference_density_kg_m3
+    }
+    /// Complete original nodal density, or `None` for cellwise density inputs.
+    pub fn reference_nodal_density_kg_m3(&self) -> Option<&[f64]> {
+        self.reference_nodal_density_kg_m3.as_deref()
     }
     /// Original total mass, independent of current deformation and damage.
     pub fn reference_mass_kg(&self) -> f64 {
         self.mass.reference_mass_kg()
     }
 
+    /// Project a prescribed P1 world acceleration [m/s²] through the SAME
+    /// original consistent mass used by the momentum solve.
+    ///
+    /// The returned nonzero DOF/force pairs are held nodal loads for `advance`.
+    /// Uniform gravity retains the graded mass distribution and its moment,
+    /// including supported nodes. Plastic flow, damage and current volume do
+    /// not rescale this closed material inventory. Do not also supply the same
+    /// acceleration as `body_force_n_m3`. Position-dependent field evolution,
+    /// its potential and its tangent remain with the external field owner.
+    ///
+    /// # Errors
+    /// Wrong shape, nonfinite acceleration/force, or cancellation.
+    pub fn reference_acceleration_load_n(
+        &self,
+        acceleration_m_s2: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<(usize, f64)>, FiniteDuctileTetError> {
+        checkpoint(cx)?;
+        if acceleration_m_s2.len() != self.velocity_mps.len()
+            || acceleration_m_s2
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite())
+        {
+            return Err(invalid(
+                "one finite acceleration vector per original finite ductile node required",
+            )
+            .into());
+        }
+        let forces = self
+            .mass
+            .action(acceleration_m_s2.as_flattened(), cx)
+            .map_err(SmallStrainTetError::from)?;
+        let mut loads = Vec::with_capacity(forces.len());
+        for (dof, force) in forces.into_iter().enumerate() {
+            if dof % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            if force != 0.0 {
+                loads.push((dof, force));
+            }
+        }
+        checkpoint(cx)?;
+        Ok(loads)
+    }
+
     /// Advance one original physical interval with absolute displacement targets
-    /// and held nodal/body loads. Free bodies require no artificial supports.
-    /// The same `conditions.duration_s` sets momentum and initiation rate.
+    /// and held nodal/body loads. Body force is per ORIGINAL reference volume;
+    /// use [`Self::reference_acceleration_load_n`] for gravity on graded inventory.
+    /// Free bodies require no artificial supports. The same
+    /// `conditions.duration_s` sets momentum and initiation rate.
     #[allow(clippy::too_many_arguments)]
     pub fn advance(
         &self,
@@ -181,6 +288,10 @@ where
                 solid: step.solid,
                 velocity_mps,
                 reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
+                reference_nodal_density_kg_m3: self
+                    .reference_nodal_density_kg_m3
+                    .as_ref()
+                    .map(Arc::clone),
                 mass: Arc::clone(&self.mass),
             },
             equilibrium: step.equilibrium,

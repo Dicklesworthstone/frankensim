@@ -10432,6 +10432,17 @@ density are admitted once and shared across accepted endpoints; neither damage
 nor current volume changes the inventory. Free bodies require no artificial
 supports. Nonzero initial velocity and moving prescribed supports are retained.
 
+`try_new_with_nodal_density` admits the original positive P1 density field and
+reuses the exact cubic reference-mass integration. Complete nodal values and
+the prepared mass are shared across accepted endpoints; cell-average densities
+are reporting values only. `reference_acceleration_load_n` uses that same full
+mass to project a prescribed P1 acceleration into held nodal forces, including
+supported nodes and the graded mass centroid. Neither the deformation Jacobian
+nor the damage/integrity multiplier changes this original inventory. Current
+density obeys rho_0/J in this closed body; `body_force_n_m3` remains force per
+original volume. Position-dependent field evolution and potential work belong
+to their external owner; no mass transfer or fragment removal is introduced.
+
 The original `BackwardEulerInertia` supplies momentum forces, the mass tangent,
 endpoint velocity and kinetic work. Material and momentum share the SAME
 nonpotential Newton/FGMRES solve. The inertia residual and derivative enter
@@ -10450,13 +10461,16 @@ and histories publish together. Numerical losses never become heating or
 fracture energy. Refusal leaves the original complete motion available for
 deterministic retry or physical-interval refinement.
 
-All four new regressions in `tests/finite_ductile/dynamics.rs` pass alongside the
-four affected quasistatic regressions in the same actual-source build. They
-exercise nonzero-velocity free acceleration and retained mass, an independently
-forced free coordinate with simultaneous damage and inertia at two physical
-durations, moving-support work, independent material/kinetic loss refusals,
-replay, refined retry and cancellation rollback. This is one backward-Euler
-interval with held temperature and original reference inventory. It adds no
+The four regressions in `tests/finite_ductile/dynamics.rs` cover nonzero-velocity
+free acceleration and retained mass, an independently forced free coordinate
+with simultaneous damage and inertia at two physical durations, moving-support
+work, independent material/kinetic loss refusals, replay, refined retry and
+cancellation rollback. The added density cases compare constant and graded
+inventories with equal total mass, exact original nodal gravity shares and
+cubic inertia/reactions through finite deformation and damage. The original
+regressions passed their earlier actual-source build; the added graded-density
+cases have not been executed in the disk-exhausted implementation environment.
+This is one backward-Euler interval with held temperature and original reference inventory. It adds no
 impulses, evolving caloric feedback or fragment
 transfer, and the loss budgets do not certify trajectory accuracy.
 
