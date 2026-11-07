@@ -242,13 +242,50 @@ stage vectors are reserved fallibly. Initial/midpoint/endpoint vortices must
 remain outside the section and its 1e-12 unit-chord contact layer. This is a
 sampled clearance check, not continuous collision detection. Any numerical,
 body-contact, input or allocation refusal preserves the wake, history, angle
-and accepted panel state. No asynchronous cancellation receipt is claimed.
+and accepted panel state. The original step APIs do not accept a cancellation
+callback.
+
+`step_panel_coupled_with_transport` refines that same interval into an explicit
+positive number of midpoint substeps. It emits one packet at the original
+release position before transport, retains every old packet's circulation,
+and uses the previous interval's bound circulation as the Kelvin target at
+EVERY initial/midpoint solve. There is no additional shedding between substeps.
+Only the final endpoint solve and one history row publish. Incidence remains
+held throughout the interval. One unguarded substep retains the original
+physical arithmetic, including the start-of-interval peak-speed diagnostic.
+
+`PanelWakeTransportOptions::max_coupled_solves` admits the complete
+`2 * substeps + 1` coupled boundary evaluations before candidate allocation;
+each evaluation makes two solves with the existing LU. The original panel and
+particle ceilings continue to bound each solve and field sweep. Particle,
+midpoint and body-clearance buffers are allocated once per interval and reused.
+Existing panel solves retain their bounded internal coefficient/surface-vector
+allocations; neither an allocation-free solve nor a new speed claim is inferred.
+
+An optional fraction in (0,1] limits each full-substep predicted displacement
+`h*|u|` at both stages against the smaller of the vortex core radius and the
+sampled distance to the airfoil polygon. The existing exterior-admission pass
+supplies that clearance, including the newborn's shorter trailing-edge distance.
+Excessive motion refuses the whole interval; the caller can increase substeps.
+The report records the largest ratio and the completed substep/solve counts.
+This is explicit transport refinement and a resolution guard, not an embedded
+error estimate, adaptive controller, continuous collision certificate, or
+refinement of panel geometry, core regularization or the shedding schedule.
+
+The controlled entry accepts a cancellation callback, checked within
+source-copy/incident loops, before each wake-velocity query, before/after
+coupled boundary solves and immediately before publication. A dense solve
+itself remains noninterruptible at the original panel ceiling. No wall-time
+or asynchronous cancellation-latency certificate is claimed. Cancellation,
+work refusal and failed resolution leave all accepted physical state intact.
 
 Traces identify this mode as `inviscid-panel-kelvin`. It supplies no unsteady
 Bernoulli pressure/load, viscous wall production, separation or measured
 Wagner/Theodorsen validation. `tests/panel_wake.rs` checks actual endpoint
 boundary reconstruction, Kelvin conservation and old-strength retention,
-prescribed incidence, geometric normalization and refusal; the native module
+prescribed incidence, geometric normalization, fixed-schedule second-order
+substep refinement, single emission, near-body/core resolution, budget and
+cancellation rollback, and refusal; the native module
 also exercises rollback on a body-contact candidate (G0/G3).
 
 ## Purpose and layer

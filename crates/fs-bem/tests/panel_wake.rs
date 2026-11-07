@@ -1,7 +1,8 @@
 //! Native boundary/Kelvin closure, accepted-geometry coupling and frame tests.
 
+use fs_bem::BemError;
 use fs_bem::panel2d::{Airfoil2d, PreparedPanel2d, naca4_symmetric, solve};
-use fs_bem::wake2d::WakeSim;
+use fs_bem::wake2d::{PanelWakeTransportOptions, WakeSim};
 
 fn circulation(wake: &WakeSim) -> f64 {
     let mut sum = wake.history().last().map_or(0.0, |row| row.bound);
@@ -168,4 +169,192 @@ fn refused_incidence_preserves_accepted_wake_panel_state_and_history() {
     legacy.step().unwrap();
     assert!(legacy.panel_state().is_none());
     assert!(legacy.trace_json(1).unwrap().contains("inviscid-screening"));
+}
+
+fn transport(substeps: usize) -> PanelWakeTransportOptions {
+    PanelWakeTransportOptions {
+        substeps,
+        max_coupled_solves: 2 * substeps + 1,
+        max_displacement_fraction: None,
+    }
+}
+
+fn assert_same_native_state(a: &WakeSim, b: &WakeSim) {
+    assert_eq!(a.trace_json(1).unwrap(), b.trace_json(1).unwrap());
+    assert_eq!(
+        a.steady_circulation().to_bits(),
+        b.steady_circulation().to_bits()
+    );
+    assert_eq!(a.wake().len(), b.wake().len());
+    for (a, b) in a.wake().iter().zip(b.wake()) {
+        assert_eq!(a.pos.map(f64::to_bits), b.pos.map(f64::to_bits));
+        assert_eq!(a.gamma.to_bits(), b.gamma.to_bits());
+    }
+    let a = a.panel_state().unwrap();
+    let b = b.panel_state().unwrap();
+    assert_eq!(a.sources, b.sources);
+    assert_eq!(a.tangential_velocity, b.tangential_velocity);
+    assert_eq!(a.bound_circulation.to_bits(), b.bound_circulation.to_bits());
+    assert_eq!(
+        a.max_normal_residual.to_bits(),
+        b.max_normal_residual.to_bits()
+    );
+    assert_eq!(a.kutta_residual.to_bits(), b.kutta_residual.to_bits());
+}
+
+#[test]
+fn transport_refinement_keeps_the_release_schedule_and_converges_at_second_order() {
+    let foil = naca4_symmetric(0.12, 24).unwrap();
+    let panels = PreparedPanel2d::new(&foil).unwrap();
+    let (alpha, dt, core) = (0.08, 0.02, 0.04);
+    let mut start = WakeSim::new_panel_coupled(&foil, alpha, dt, core).unwrap();
+    for _ in 0..3 {
+        start.step().unwrap();
+    }
+    let previous_strengths: Vec<_> = start.wake().iter().map(|v| v.gamma.to_bits()).collect();
+    let mut reference = start.clone();
+    reference
+        .step_panel_coupled_with_transport(0.12, transport(128), || false)
+        .unwrap();
+    let mut errors = Vec::new();
+    for substeps in [1, 2, 4, 8] {
+        let mut result = start.clone();
+        let report = result
+            .step_panel_coupled_with_transport(0.12, transport(substeps), || false)
+            .unwrap();
+        assert_eq!(report.substeps, substeps);
+        assert_eq!(report.coupled_solves, 2 * substeps + 1);
+        assert_eq!(result.history().len(), start.history().len() + 1);
+        assert_eq!(result.wake().len(), start.wake().len() + 1);
+        assert_eq!(result.history().last().unwrap().t, 4.0 * dt);
+        for (particle, old) in result.wake().iter().zip(&previous_strengths) {
+            assert_eq!(particle.gamma.to_bits(), *old);
+        }
+        assert_boundary(&result, &panels, 0.12, core);
+        let error = result
+            .wake()
+            .iter()
+            .zip(reference.wake())
+            .map(|(a, b)| (a.pos[0] - b.pos[0]).hypot(a.pos[1] - b.pos[1]))
+            .fold(0.0_f64, f64::max);
+        errors.push(error);
+        if substeps == 1 {
+            let mut original = start.clone();
+            original.step_panel_coupled_at_angle(0.12).unwrap();
+            assert_same_native_state(&original, &result);
+        }
+    }
+    assert!(
+        errors[0] > 1e-9,
+        "fixture must resolve transport error: {errors:?}"
+    );
+    for pair in errors.windows(2) {
+        assert!(
+            pair[1] < 0.4 * pair[0],
+            "midpoint refinement must converge: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn core_and_newborn_body_clearance_guard_can_be_resolved_with_substeps() {
+    let foil = naca4_symmetric(0.12, 24).unwrap();
+    let panels = PreparedPanel2d::new(&foil).unwrap();
+    let mut start = WakeSim::new_panel_coupled(&foil, 0.08, 0.02, 0.03).unwrap();
+    start.step().unwrap();
+    let mut guarded = start.clone();
+    let mut options = transport(1);
+    options.max_displacement_fraction = Some(0.5);
+    assert!(matches!(
+        guarded.step_panel_coupled_with_transport(0.08, options, || false),
+        Err(BemError::InvalidScalar {
+            name: "panel wake stage displacement fraction",
+            ..
+        })
+    ));
+    assert_same_native_state(&guarded, &start);
+    options.substeps = 32;
+    options.max_coupled_solves = 65;
+    let report = guarded
+        .step_panel_coupled_with_transport(0.08, options, || false)
+        .unwrap();
+    assert!(report.max_displacement_fraction > 0.0);
+    assert!(report.max_displacement_fraction <= 0.5);
+    assert_eq!(guarded.history().len(), start.history().len() + 1);
+    assert_eq!(guarded.wake().len(), start.wake().len() + 1);
+    assert_boundary(&guarded, &panels, 0.08, 0.03);
+}
+
+#[test]
+fn transport_budget_and_cancellation_refuse_the_whole_interval() {
+    let foil = naca4_symmetric(0.12, 24).unwrap();
+    let mut start = WakeSim::new_panel_coupled(&foil, 0.08, 0.02, 0.03).unwrap();
+    start.step().unwrap();
+    let mut result = start.clone();
+    let mut options = transport(4);
+    options.max_coupled_solves -= 1;
+    assert!(matches!(
+        result.step_panel_coupled_with_transport(0.12, options, || false),
+        Err(BemError::WorkEnvelopeExceeded {
+            operation: "panel wake coupled solves",
+            requested: 9,
+            max: 8,
+        })
+    ));
+    assert_same_native_state(&result, &start);
+    let mut polls = 0usize;
+    result
+        .step_panel_coupled_with_transport(0.12, transport(4), || {
+            polls += 1;
+            false
+        })
+        .unwrap();
+    for stop in [1, polls / 2, polls] {
+        let mut candidate = start.clone();
+        let mut visits = 0usize;
+        assert!(matches!(
+            candidate.step_panel_coupled_with_transport(0.12, transport(4), || {
+                visits += 1;
+                visits == stop
+            }),
+            Err(BemError::Cancelled {
+                operation: "panel wake transport"
+            })
+        ));
+        assert_eq!(visits, stop);
+        assert_same_native_state(&candidate, &start);
+    }
+}
+
+#[test]
+fn invalid_transport_settings_leave_the_native_state_unchanged() {
+    let foil = naca4_symmetric(0.12, 24).unwrap();
+    let mut start = WakeSim::new_panel_coupled(&foil, 0.08, 0.02, 0.03).unwrap();
+    start.step().unwrap();
+    let mut options = vec![
+        PanelWakeTransportOptions {
+            substeps: 0,
+            ..transport(1)
+        },
+        PanelWakeTransportOptions {
+            substeps: usize::MAX,
+            max_coupled_solves: usize::MAX,
+            ..transport(1)
+        },
+    ];
+    options.extend([f64::NAN, f64::INFINITY, 0.0, -1.0, 1.01].map(|fraction| {
+        PanelWakeTransportOptions {
+            max_displacement_fraction: Some(fraction),
+            ..transport(1)
+        }
+    }));
+    for options in options {
+        let mut result = start.clone();
+        assert!(
+            result
+                .step_panel_coupled_with_transport(0.12, options, || false)
+                .is_err()
+        );
+        assert_same_native_state(&result, &start);
+    }
 }

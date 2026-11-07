@@ -155,6 +155,11 @@ pub enum BemError {
         /// Operation that produced it.
         operation: &'static str,
     },
+    /// A caller cancelled an operation before its private result was published.
+    Cancelled {
+        /// Operation being interrupted.
+        operation: &'static str,
+    },
     /// Trace downsampling requires a nonzero stride.
     InvalidTraceStride,
 }
@@ -226,6 +231,7 @@ impl core::fmt::Display for BemError {
             Self::NonFiniteResult { operation } => {
                 write!(f, "{operation} produced a non-finite result")
             }
+            Self::Cancelled { operation } => write!(f, "{operation} was cancelled"),
             Self::InvalidTraceStride => f.write_str("wake trace stride must be nonzero"),
         }
     }
