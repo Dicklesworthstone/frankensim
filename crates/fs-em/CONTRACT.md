@@ -6050,8 +6050,37 @@ classification and weak positive transmission. Queries allocate nothing.
 The scope is one homogeneous principal-plane half-space interface, including
 an exact isotropic constitutive limit. It does not extend the existing isotropic
 film, angular-spectrum or rendering owners to arbitrary anisotropic media.
-Out-of-plane axes, biaxial crystals, absorbing anisotropy, mode-coupled films
-and dispersive group-delay magnitudes require separate capabilities.
+Biaxial crystals, absorbing anisotropy, mode-coupled films and dispersive
+group-delay magnitudes require separate capabilities.
+
+### Arbitrarily oriented transparent crystals
+
+`uniaxial::oriented::OrientedUniaxialInterface` retains the same original
+incident law and two-axis `UniaxialOpticalResponse`, and admits an authored
+Cartesian optic axis with any azimuth. Each frequency query resolves both
+original spectral laws and permeability before solving. Caller-supplied complex
+tangential [Ex,Ey] fields retain absolute V/m, elliptical polarization and phase.
+The ordinary and extraordinary eigenmodes are solved together with both
+Cartesian tangential E and H boundary conditions. An out-of-plane axis can
+therefore produce reflected cross-polarization and split the transmitted
+energy into two differently directed rays.
+
+The response contains full SI electric and magnetic boundary vectors, normal
+wavenumbers, independently calculated Poynting power, and separate phase and
+energy directions for each transmitted eigenmode. The conserved signed
+`kx/k0` query admits exact critical inputs and their adjacent representable
+neighbors. Either mode may become evanescent; its decaying field is retained
+without publishing a fictitious bulk ray. Exact isotropic and optic-axis
+alignment limits use a deterministic nonsingular polarization basis.
+
+This fixed-size, allocation-free solve eliminates reflection analytically to
+leave a complex 2x2 transmission system. Power-of-two index scaling and
+factored double-double dispersion discriminants protect critical classification.
+Tests reconstruct both Maxwell curls from the dimensional constitutive tensor,
+verify Cartesian boundary continuity and independent normal power, and compare
+principal sections against the existing decoupled owner. This extension remains
+one lossless planar half-space; it does not claim general anisotropic film,
+beam, absorbing-medium, geometric traversal or group-speed support.
 
 
 ### Retained vector polarization on the native planar Gauss solve

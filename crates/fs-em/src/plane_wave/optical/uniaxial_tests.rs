@@ -373,3 +373,84 @@ fn invalid_axis_and_absorbing_incident_port_are_not_admitted_as_lossless() {
             .is_err()
     );
 }
+
+#[test]
+fn oriented_crystal_retains_original_sources_dispersion_and_refusal_domains() {
+    use crate::plane_wave::uniaxial::oriented::OrientedUniaxialInterface;
+    let (ordinary, extraordinary) = axes(
+        [1.4, 1.6],
+        [1.8, 2.0],
+        [0.0; 2],
+        Some(MU),
+        [400.0, 800.0],
+        0,
+    );
+    let crystal = UniaxialOpticalResponse::try_new(&ordinary, &extraordinary, SPAN).unwrap();
+    let outside = incident(1.0, MU);
+    let interface = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside),
+        crystal,
+        [1.0, 2.0, 3.0],
+    )
+    .unwrap();
+    assert!(core::ptr::eq(
+        interface.incident_response().material(),
+        &outside
+    ));
+    assert!(core::ptr::eq(
+        interface.crystal_response().ordinary_source(),
+        &ordinary
+    ));
+    assert!(core::ptr::eq(
+        interface.crystal_response().extraordinary_source(),
+        &extraordinary
+    ));
+    let illumination = [C64::new(0.3, -0.5), C64::new(0.7, 0.2)];
+    for wavelength in [400.0, 550.0, 800.0] {
+        let omega = frequency(wavelength);
+        let [no, _] = crystal.phase_indices(omega).unwrap();
+        let r = interface.response(omega, 0.8, illumination).unwrap();
+        let qo = r.transmitted[0].normal_wavenumber_rad_m.re * C0 / omega;
+        let p = r.tangential_wavenumber_rad_m * C0 / omega;
+        near(qo * qo + p * p, no * no, 4e-15);
+        near(
+            r.reflected_power_fraction + r.transmitted_power_fraction,
+            1.0,
+            2e-14,
+        );
+        for j in 0..2 {
+            complex_near(r.incident_electric_v_m[j], illumination[j], 1e-16);
+        }
+        let signed = interface
+            .response_at_tangential_index(omega, -0.6, illumination)
+            .unwrap();
+        assert!(signed.tangential_wavenumber_rad_m < 0.0);
+        near(
+            signed.reflected_power_fraction + signed.transmitted_power_fraction,
+            1.0,
+            2e-14,
+        );
+    }
+    for wavelength in [399.0, 801.0] {
+        assert!(
+            interface
+                .response(frequency(wavelength), 0.8, illumination)
+                .is_err()
+        );
+    }
+    for loss in [[1e-12, 0.0], [0.0, 1e-12]] {
+        let (o, e) = axes([1.5; 2], [1.9; 2], loss, Some(MU), [400.0, 800.0], 0);
+        let lossy = UniaxialOpticalResponse::try_new(&o, &e, SPAN).unwrap();
+        let interface = OrientedUniaxialInterface::try_new(
+            DielectricResponse::Lossless(&outside),
+            lossy,
+            [1.0, 2.0, 3.0],
+        )
+        .unwrap();
+        assert!(
+            interface
+                .response(frequency(550.0), 0.8, illumination)
+                .is_err()
+        );
+    }
+}

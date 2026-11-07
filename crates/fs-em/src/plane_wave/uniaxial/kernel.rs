@@ -119,7 +119,7 @@ fn finite(z: C64) -> bool {
 
 // A power-of-two scale does not round normal index values. Its square is
 // never formed: all squared-index work happens at order-one magnitude.
-fn binary_scale(x: f64) -> f64 {
+pub(super) fn binary_scale(x: f64) -> f64 {
     let exponent = x.to_bits() & 0x7ff0_0000_0000_0000;
     if exponent == 0 {
         f64::MIN_POSITIVE
@@ -128,7 +128,7 @@ fn binary_scale(x: f64) -> f64 {
     }
 }
 
-fn outgoing_root(value: Dd) -> Result<(C64, UniaxialWaveKind), &'static str> {
+pub(super) fn outgoing_root(value: Dd) -> Result<(C64, UniaxialWaveKind), &'static str> {
     if !value.hi.is_finite() || !value.lo.is_finite() {
         return Err("uniaxial normal discriminant is unrepresentable");
     }

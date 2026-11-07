@@ -13,8 +13,9 @@
 //! isotropic plane-wave owner. A negative tangential query changes incidence,
 //! not the authored crystal axis. At normal incidence x is caller-selected.
 //!
-//! This is one homogeneous half-space interface. Arbitrary out-of-plane axes,
-//! biaxial crystals, absorbing anisotropy, mode-coupled multilayers, spatial
+//! This is one homogeneous half-space interface. The [`oriented`] owner
+//! additionally resolves out-of-plane axes and coupled vector polarization.
+//! Biaxial crystals, absorbing anisotropy, mode-coupled multilayers, spatial
 //! ray traversal and dispersive group-delay magnitudes require other owners.
 //! The existing isotropic interface/film/beam APIs retain their own domain.
 
@@ -27,6 +28,9 @@ use fs_math::det;
 
 mod kernel;
 pub use kernel::{UniaxialInterfaceResponse, UniaxialMode, UniaxialWaveKind};
+
+/// Coupled ordinary/extraordinary transmission for an arbitrary crystal axis.
+pub mod oriented;
 
 /// One original isotropic incident law, one two-axis crystal source, and one
 /// fixed geometry-authored optic axis in the principal incidence section.

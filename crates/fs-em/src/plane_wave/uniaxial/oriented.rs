@@ -1,0 +1,116 @@
+//! Vector Maxwell refraction into an arbitrarily oriented transparent crystal.
+//!
+//! Coordinates and time convention match the principal-plane owner: z>0 is
+//! crystal, the incident wavevector lies in x-z, and exp(+i omega t-i k.r).
+//! The source supplies both principal indices and scalar permeability. An
+//! out-of-plane optic axis couples the two incident polarizations; solving
+//! both tangential E and H conditions retains this coupling and both outgoing
+//! eigenmodes. Eigenmode phase and energy directions need not coincide.
+//!
+//! This is one planar, lossless, homogeneous half-space. It does not supply
+//! absorbing/biaxial crystals, multilayers, transient fields or ray traversal.
+//! Maxwell's anisotropic dispersion and eigenvectors: MIT 6.974 §2.8,
+//! <https://ocw.mit.edu/courses/6-974-fundamentals-of-photonics-quantum-electronics-spring-2006/8e54d1625e9e71eb5b4e4998e6967e4e_chapter2.pdf>.
+
+use super::kernel::Incidence;
+use super::{DielectricResponse, ReflectionError, UniaxialOpticalResponse, positive};
+use fs_material::field_storage::linear_magnetic_permeability;
+use fs_math::{c64::C64, det};
+
+mod kernel;
+use kernel::Input;
+pub use kernel::{OrientedCrystalMode, OrientedCrystalResponse};
+
+const C0: f64 = 299_792_458.0;
+type Result<T> = core::result::Result<T, ReflectionError>;
+
+/// Original source laws and an explicitly authored Cartesian optic axis.
+pub struct OrientedUniaxialInterface<'a> {
+    incident: DielectricResponse<'a>,
+    crystal: UniaxialOpticalResponse<'a>,
+    incident_mu_h_m: f64,
+    optic_axis: [f64; 3],
+}
+
+impl<'a> OrientedUniaxialInterface<'a> {
+    pub fn try_new(
+        incident: DielectricResponse<'a>,
+        crystal: UniaxialOpticalResponse<'a>,
+        optic_axis: [f64; 3],
+    ) -> Result<Self> {
+        let incident_mu_h_m = linear_magnetic_permeability(incident.material())?;
+        Ok(Self {
+            incident,
+            crystal,
+            incident_mu_h_m,
+            optic_axis: kernel::unit(optic_axis).map_err(ReflectionError::Invalid)?,
+        })
+    }
+
+    pub const fn incident_response(&self) -> DielectricResponse<'a> {
+        self.incident
+    }
+    pub const fn crystal_response(&self) -> UniaxialOpticalResponse<'a> {
+        self.crystal
+    }
+    pub const fn optic_axis(&self) -> [f64; 3] {
+        self.optic_axis
+    }
+
+    /// Positive incident cosine, kx>=0, and complex tangential [Ex,Ey] [V/m].
+    /// The input retains arbitrary linear/elliptical polarization and phase.
+    /// Zero illumination, exact grazing and unsupported spectral data refuse.
+    /// Evaluation is fixed-size and allocation-free.
+    pub fn response(
+        &self,
+        omega_rad_s: f64,
+        incidence_cosine: f64,
+        incident_tangential_e_v_m: [C64; 2],
+    ) -> Result<OrientedCrystalResponse> {
+        self.evaluate(
+            omega_rad_s,
+            Incidence::Cosine(incidence_cosine),
+            incident_tangential_e_v_m,
+        )
+    }
+
+    /// Signed conserved kx/k0 and complex tangential [Ex,Ey] [V/m].
+    /// This admits exact critical indices without an angle round-trip. Its
+    /// magnitude must remain below the original incident phase index.
+    pub fn response_at_tangential_index(
+        &self,
+        omega_rad_s: f64,
+        tangential_index: f64,
+        incident_tangential_e_v_m: [C64; 2],
+    ) -> Result<OrientedCrystalResponse> {
+        self.evaluate(
+            omega_rad_s,
+            Incidence::TangentialIndex(tangential_index),
+            incident_tangential_e_v_m,
+        )
+    }
+
+    fn evaluate(
+        &self,
+        omega_rad_s: f64,
+        incidence: Incidence,
+        incident_tangential_e_v_m: [C64; 2],
+    ) -> Result<OrientedCrystalResponse> {
+        let omega = positive(omega_rad_s)?;
+        let epsilon = self.incident.lossless_permittivity(omega)?;
+        let ni = positive((C0 * det::sqrt(self.incident_mu_h_m)) * det::sqrt(epsilon))?;
+        let [no, ne] = self.crystal.phase_indices(omega)?;
+        kernel::solve(Input {
+            omega,
+            ni,
+            no,
+            ne,
+            mui: self.incident_mu_h_m,
+            mut_: self.crystal.permeability_h_m(),
+            axis: self.optic_axis,
+            incidence,
+            electric: incident_tangential_e_v_m,
+        })
+        .map_err(ReflectionError::Invalid)
+    }
+}
