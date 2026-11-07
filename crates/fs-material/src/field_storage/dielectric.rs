@@ -31,6 +31,8 @@ pub mod thermal;
 pub mod bulk;
 /// Source-backed Debye storage and independent DC Ohmic charge leakage.
 pub mod leaky;
+/// Bound-charge resonance with original polarization inertia and physical heat.
+pub mod lorentz;
 /// Opt-in rate-independent polarization switching with explicit retained history.
 #[cfg(feature = "experimental-dielectric-hysteresis")]
 pub mod hysteresis;

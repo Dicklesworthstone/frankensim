@@ -56,6 +56,8 @@ pub enum FieldStorageError {
     Material(MaterialStatePointError),
     /// Unsupported model, geometry or unrepresentable storage.
     Invalid(&'static str),
+    /// Resonant polarization admission, exact evolution or singular response.
+    Lorentz(dielectric::lorentz::oscillator::LorentzError),
 }
 
 impl From<MaterialStatePointError> for FieldStorageError {

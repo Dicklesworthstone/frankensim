@@ -2094,6 +2094,7 @@ dependencies = [
  "fs-la",
  "fs-matdb",
  "fs-math",
+ "fs-modal",
  "fs-qty",
  "fs-rand",
  "fs-solver",
