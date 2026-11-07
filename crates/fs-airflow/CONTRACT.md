@@ -108,7 +108,7 @@ attached laminar, dilute weak-transfer and frozen-strip approximations remain;
 no turbulence, Stefan/Soret correction, nucleation, moving velocity field or
 additional gas-side heat law is inferred.
 
-## Original coolant inlet and wall linearization
+## Original coolant inlet, wall, flow and conductance linearization
 
 `CaloricAirPath::linearize` prepares the complete inlet/wall temperature
 response during one native source-Cp march. It retains each original
@@ -128,6 +128,17 @@ perform no material re-query, caloric inversion, finite difference, dense
 Jacobian assembly or additional nonlinear solve. Preparation owns O(segments)
 coefficients and the returned native march.
 
+`apply_with_flow` additionally accepts a prescribed mass-flow direction in
+kg/s and one h*A direction in W/K per original segment.
+`apply_transpose_with_flow` returns their objective gradients along with the
+original inlet/wall gradients. Both differentiate the same source-integrated
+enthalpy equation: the flow response includes the direct change of transported
+mass as well as residence-time feedback. The stable original moments retain
+`T_wall-T_out` and `T_out-T_mean` before absolute-temperature rounding; weak
+flow sensitivity and saturated conductance sensitivity are not recovered by
+subtracting nearly equal heat transfers. These actions retain linear work,
+caller-owned scratch outputs and allocation-free repeated application.
+
 Weak heat derivatives use the retained gain complement instead of subtracting
 nearly equal endpoint enthalpy tangents. Total heat tangents use a compensated
 sum of the same local watt changes. The original positive mean-response
@@ -135,14 +146,19 @@ moments retain small wall sensitivity and the exact equilibrium limit.
 Cancellation and invalid input return no physical state change; action output
 is explicitly scratch storage and may be partly written on error.
 
-This is the derivative of the prescribed-flow channel at fixed geometry,
-pressure, composition and film coefficients. Solid response, hydraulic or
-mass-flow feedback, return-loop controls and coupled design adjoints require
-their own existing owners; they are not inferred by this channel operator.
+This is the derivative of the original single-phase channel at fixed pressure,
+composition and source law. Flow and h*A are independent prescribed inputs;
+hydraulic, geometric or correlation owners must supply any design-to-input
+derivatives. Solid response, return-loop controls and coupled design adjoints
+retain their own owners; they are not inferred by this channel operator.
 Regressions cover independent variable-Cp channel integrals, inlet and wall
 actions, transpose gradients, weak transfer, equilibrium, source admission
-and cancellation. Pinned parser and arithmetic checks are distinct from
-native execution; native tests were not run in this environment.
+and cancellation. Flow-control regressions additionally compare independent
+variable-Cp channel integrals, every control gradient, the Robin heat tangent,
+simultaneous flow/conductance scaling and weak/equilibrium/saturated limits.
+The original numerical kernel and all five action regressions pass in a focused
+harness with fixture path/material containers and execution checkpoints;
+whole-crate integration and the native cancellation runtime remain unverified.
 
 ## Source-caloric thermal networks
 

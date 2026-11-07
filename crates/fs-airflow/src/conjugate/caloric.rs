@@ -9,15 +9,18 @@
 //! Mass flow, pressure, composition and h are prescribed. Only actual fluid
 //! temperatures require source support; a hotter or colder wall may lie outside
 //! it. This does not add pressure work, phase change, h(T), hydraulic feedback,
-//! mixing junctions or hydraulic/solid feedback derivatives. Its inlet and wall
-//! responses differentiate this same original source-caloric march. The
+//! mixing junctions or hydraulic/solid feedback derivatives. Its inlet, wall,
+//! prescribed mass-flow and conductance responses differentiate this same
+//! original source-caloric march. The
 //! constant-Cp adjoint/transfer APIs accept `AirPath`, never this distinct path.
 
 /// Finite, source-caloric co-current and counterflow heat exchangers.
 pub mod exchanger;
 
 mod linearization;
-pub use linearization::{CaloricPathLinearization, CaloricPathTangent, CaloricSegmentTangent};
+pub use linearization::{
+    CaloricFlowGradient, CaloricPathLinearization, CaloricPathTangent, CaloricSegmentTangent,
+};
 
 use std::sync::Arc;
 

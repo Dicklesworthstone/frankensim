@@ -7,12 +7,25 @@ use fs_airflow::conjugate::caloric::{CaloricPathTangent, CaloricSegmentTangent};
 // closed-form exchange primitive in relative travel z, then integrate Cp
 // directly. This reference invokes no production material or marching API.
 fn reference(inlet: f64, walls: &[f64]) -> (Vec<[f64; 3]>, [f64; 2]) {
-    let conductance = 40.0 / walls.len() as f64;
-    let exposure = conductance / 0.02;
+    reference_controls(
+        inlet,
+        walls,
+        0.02,
+        &vec![40.0 / walls.len() as f64; walls.len()],
+    )
+}
+
+fn reference_controls(
+    inlet: f64,
+    walls: &[f64],
+    mass_flow: f64,
+    conductances: &[f64],
+) -> (Vec<[f64; 3]>, [f64; 2]) {
     let mut previous = inlet;
     let mut heat = 0.0;
     let mut segments = Vec::with_capacity(walls.len());
-    for &wall in walls {
+    for (&wall, &conductance) in walls.iter().zip(conductances) {
+        let exposure = conductance / mass_flow;
         let (mut low, mut high) = (0.0, 1.0);
         for _ in 0..80 {
             let z: f64 = 0.5 * (low + high);
@@ -24,7 +37,7 @@ fn reference(inlet: f64, walls: &[f64]) -> (Vec<[f64; 3]>, [f64; 2]) {
             }
         }
         let outlet = previous + (wall - previous) * (0.5 * (low + high));
-        let local_heat = 0.02 * (outlet - previous) * (800.0 + previous + outlet);
+        let local_heat = mass_flow * (outlet - previous) * (800.0 + previous + outlet);
         segments.push([outlet, local_heat, wall - local_heat / conductance]);
         heat += local_heat;
         previous = outlet;
@@ -39,6 +52,15 @@ fn objective(
     terminal: CaloricPathTangent,
 ) -> f64 {
     let (segments, final_state) = reference(inlet, walls);
+    weighted_outputs(&segments, final_state, seeds, terminal)
+}
+
+fn weighted_outputs(
+    segments: &[[f64; 3]],
+    final_state: [f64; 2],
+    seeds: &[CaloricSegmentTangent],
+    terminal: CaloricPathTangent,
+) -> f64 {
     segments
         .iter()
         .zip(seeds)
@@ -50,6 +72,201 @@ fn objective(
         .sum::<f64>()
         + terminal.outlet_temperature_k * final_state[0]
         + terminal.total_heat_rate_w * final_state[1]
+}
+
+#[test]
+fn g1_variable_cp_flow_and_conductance_actions_match_independent_channel_physics() {
+    let law = source(&[(250.0, 1300.0), (400.0, 1600.0), (650.0, 2100.0)], 300.0);
+    let original = path(law, 300.0, 4);
+    let walls = [620.0, 270.0, 590.0, 310.0];
+    let wall_direction = [0.2, -0.7, 0.5, 1.1];
+    let conductances = [10.0; 4];
+    let conductance_direction = [2.0, -3.0, 4.0, -1.0];
+    let mass_flow = 0.02;
+    let mass_direction = 0.006;
+    let inlet_direction = -0.4;
+    let epsilon = 1e-5;
+    let seeds = core::array::from_fn::<_, 4, _>(|i| CaloricSegmentTangent {
+        outlet_temperature_k: 0.2 * (i + 1) as f64,
+        heat_rate_w: [0.01, -0.02, 0.03, -0.04][i],
+        reference_temperature_k: [-0.7, 0.5, -0.3, 0.1][i],
+    });
+    let terminal = CaloricPathTangent {
+        outlet_temperature_k: 0.6,
+        total_heat_rate_w: 0.025,
+    };
+    with_cx(|cx| {
+        let (march, linear) = original.linearize(cx, &walls).unwrap();
+        let mut output = [CaloricSegmentTangent::default(); 4];
+        let total = linear
+            .apply_with_flow(
+                cx,
+                inlet_direction,
+                mass_direction,
+                &wall_direction,
+                &conductance_direction,
+                &mut output,
+            )
+            .unwrap();
+        let evaluate = |sign: f64| {
+            reference_controls(
+                300.0 + sign * epsilon * inlet_direction,
+                &core::array::from_fn::<_, 4, _>(|i| walls[i] + sign * epsilon * wall_direction[i]),
+                mass_flow + sign * epsilon * mass_direction,
+                &core::array::from_fn::<_, 4, _>(|i| {
+                    conductances[i] + sign * epsilon * conductance_direction[i]
+                }),
+            )
+        };
+        let (plus, plus_total) = evaluate(1.0);
+        let (minus, minus_total) = evaluate(-1.0);
+        for (i, state) in output.iter().enumerate() {
+            for (component, actual) in [
+                (0, state.outlet_temperature_k),
+                (1, state.heat_rate_w),
+                (2, state.reference_temperature_k),
+            ] {
+                near(
+                    actual,
+                    (plus[i][component] - minus[i][component]) / (2.0 * epsilon),
+                    3e-6,
+                );
+            }
+            // The same derivative closes the original wall heat and stream heat.
+            let robin = conductance_direction[i]
+                * (walls[i] - march.segments[i].reference_temperature_k)
+                + conductances[i] * (wall_direction[i] - state.reference_temperature_k);
+            near(state.heat_rate_w, robin, 3e-11);
+        }
+        near(
+            total.outlet_temperature_k,
+            (plus_total[0] - minus_total[0]) / (2.0 * epsilon),
+            3e-6,
+        );
+        near(
+            total.total_heat_rate_w,
+            (plus_total[1] - minus_total[1]) / (2.0 * epsilon),
+            5e-6,
+        );
+
+        let mut wall_gradient = [0.0; 4];
+        let mut conductance_gradient = [0.0; 4];
+        let gradient = linear
+            .apply_transpose_with_flow(
+                cx,
+                &seeds,
+                terminal,
+                &mut wall_gradient,
+                &mut conductance_gradient,
+            )
+            .unwrap();
+        for input in 0..10 {
+            let step = if input == 1 {
+                mass_flow * epsilon
+            } else {
+                epsilon
+            };
+            let sample = |sign: f64| {
+                let (mut inlet, mut mass, mut wall, mut conductance) =
+                    (300.0, mass_flow, walls, conductances);
+                match input {
+                    0 => inlet += sign * step,
+                    1 => mass += sign * step,
+                    2..=5 => wall[input - 2] += sign * step,
+                    _ => conductance[input - 6] += sign * step,
+                }
+                let (states, end) = reference_controls(inlet, &wall, mass, &conductance);
+                weighted_outputs(&states, end, &seeds, terminal)
+            };
+            let expected = (sample(1.0) - sample(-1.0)) / (2.0 * step);
+            let actual = match input {
+                0 => gradient.inlet_temperature,
+                1 => gradient.mass_flow,
+                2..=5 => wall_gradient[input - 2],
+                _ => conductance_gradient[input - 6],
+            };
+            near(actual, expected, 2e-6 * expected.abs().max(1.0));
+        }
+        let forward_pairing = weighted_outputs(
+            &output.map(|v| {
+                [
+                    v.outlet_temperature_k,
+                    v.heat_rate_w,
+                    v.reference_temperature_k,
+                ]
+            }),
+            [total.outlet_temperature_k, total.total_heat_rate_w],
+            &seeds,
+            terminal,
+        );
+        let reverse_pairing = gradient.inlet_temperature * inlet_direction
+            + gradient.mass_flow * mass_direction
+            + (0..4)
+                .map(|i| {
+                    wall_gradient[i] * wall_direction[i]
+                        + conductance_gradient[i] * conductance_direction[i]
+                })
+                .sum::<f64>();
+        near(forward_pairing, reverse_pairing, 3e-11);
+
+        // Scaling all UA and mass flow equally preserves every fluid temperature,
+        // while the transported heat scales by that same factor.
+        let scaled = linear
+            .apply_with_flow(cx, 0.0, mass_flow, &[0.0; 4], &conductances, &mut output)
+            .unwrap();
+        near(scaled.outlet_temperature_k, 0.0, 1e-14);
+        near(scaled.total_heat_rate_w, march.total_heat_rate_w, 3e-10);
+        for (state, original) in output.iter().zip(&march.segments) {
+            near(state.outlet_temperature_k, 0.0, 1e-14);
+            near(state.reference_temperature_k, 0.0, 1e-14);
+            near(state.heat_rate_w, original.heat_rate_w, 3e-10);
+        }
+    });
+}
+
+#[test]
+fn g1_flow_controls_retain_weak_and_saturated_enthalpy_response() {
+    let law = source(&[(250.0, 1005.0), (650.0, 1005.0)], 300.0);
+    let mass_flow = 0.02;
+    let capacity_rate = mass_flow * 1005.0;
+    for ntu in [1e-12_f64, 1e-5, 2.0, 80.0] {
+        let gain = (-ntu).exp();
+        let loss = -(-ntu).exp_m1();
+        let mean_response = if ntu < 1e-3 {
+            ntu * (0.5 - ntu * (1.0 / 3.0 - ntu * (1.0 / 8.0 - ntu * (1.0 / 30.0 - ntu / 144.0))))
+        } else {
+            loss / ntu - gain
+        };
+        for (inlet, wall) in [(300.0, 480.0), (560.0, 280.0), (400.0, 400.0)] {
+            let conductance = capacity_rate * ntu;
+            let original = CaloricAirPath::new(
+                inlet,
+                mass_flow,
+                law.clone(),
+                vec![AirSegment::new("controlled wall", 1.0, conductance).unwrap()],
+            )
+            .unwrap();
+            let walls = [wall];
+            let remaining = (wall - inlet) * gain;
+            let mean = (wall - inlet) * mean_response;
+            with_cx(|cx| {
+                let (_, linear) = original.linearize(cx, &walls).unwrap();
+                let mut output = [CaloricSegmentTangent::default()];
+                linear
+                    .apply_with_flow(cx, 0.0, mass_flow, &[0.0], &[0.0], &mut output)
+                    .unwrap();
+                relative(output[0].outlet_temperature_k, -ntu * remaining);
+                relative(output[0].heat_rate_w, conductance * mean);
+                relative(output[0].reference_temperature_k, -mean);
+                linear
+                    .apply_with_flow(cx, 0.0, 0.0, &[0.0], &[conductance], &mut output)
+                    .unwrap();
+                relative(output[0].outlet_temperature_k, ntu * remaining);
+                relative(output[0].heat_rate_w, conductance * remaining);
+                relative(output[0].reference_temperature_k, mean);
+            });
+        }
+    }
 }
 
 #[test]
@@ -268,6 +485,7 @@ fn g4_source_endpoints_shapes_nonfinite_directions_and_cancellation_refuse_witho
     let (_, linear) = with_cx(|cx| original.linearize(cx, &walls)).unwrap();
     let mut output = [CaloricSegmentTangent::default(); 2];
     let mut gradient = [0.0; 2];
+    let mut conductance_gradient = [0.0; 2];
     let seeds = [CaloricSegmentTangent::default(); 2];
     let terminal = CaloricPathTangent::default();
     with_cx(|cx| {
@@ -276,6 +494,32 @@ fn g4_source_endpoints_shapes_nonfinite_directions_and_cancellation_refuse_witho
         assert!(linear.apply(cx, 0.0, &[1.0], &mut output).is_err());
         assert!(linear.apply(cx, 0.0, &[1.0; 2], &mut output[..1]).is_err());
         assert!(linear.apply(cx, f64::NAN, &[1.0; 2], &mut output).is_err());
+        assert!(
+            linear
+                .apply_with_flow(cx, 0.0, f64::NAN, &[0.0; 2], &[0.0; 2], &mut output)
+                .is_err()
+        );
+        assert!(
+            linear
+                .apply_with_flow(cx, 0.0, 0.0, &[0.0; 2], &[1.0], &mut output)
+                .is_err()
+        );
+        assert!(
+            linear
+                .apply_with_flow(cx, 0.0, 0.0, &[0.0; 2], &[0.0, f64::INFINITY], &mut output)
+                .is_err()
+        );
+        assert!(
+            linear
+                .apply_transpose_with_flow(
+                    cx,
+                    &seeds,
+                    terminal,
+                    &mut gradient,
+                    &mut conductance_gradient[..1]
+                )
+                .is_err()
+        );
         assert!(
             linear
                 .apply(cx, 0.0, &[1.0, f64::INFINITY], &mut output)
@@ -340,6 +584,20 @@ fn g4_source_endpoints_shapes_nonfinite_directions_and_cancellation_refuse_witho
         ));
         assert!(matches!(
             linear.apply_transpose(cx, &seeds, terminal, &mut gradient),
+            Err(AirflowError::Cancelled { .. })
+        ));
+        assert!(matches!(
+            linear.apply_with_flow(cx, 0.0, 0.01, &[0.0; 2], &[1.0; 2], &mut output),
+            Err(AirflowError::Cancelled { .. })
+        ));
+        assert!(matches!(
+            linear.apply_transpose_with_flow(
+                cx,
+                &seeds,
+                terminal,
+                &mut gradient,
+                &mut conductance_gradient
+            ),
             Err(AirflowError::Cancelled { .. })
         ));
     });
