@@ -191,3 +191,7 @@ required-features = ["superfluid"]
 name = "superfluid_caloric"
 required-features = ["superfluid"]
 
+
+[[test]]
+name = "superfluid_connection"
+required-features = ["superfluid"]

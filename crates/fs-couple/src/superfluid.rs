@@ -37,6 +37,9 @@ pub mod counterflow;
 /// Reciprocal heat transport between two finite native thermal cells.
 pub mod counterflow_pair;
 
+/// Serial channels and junction inertia with atomic native caloric heat acceptance.
+pub mod connection;
+
 /// Original thermal stepping controls plus explicit heat and combined-account gates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrictionHeatControls {

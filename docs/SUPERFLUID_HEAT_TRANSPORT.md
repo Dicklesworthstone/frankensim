@@ -531,6 +531,37 @@ The focused regressions cover split/unsplit waves, unequal-area component
 currents, fountain equilibrium and flow direction, half-volume forcing,
 profile-memory rollback, and the instantaneous junction speed gate.
 
+
+## Connected-channel dissipation on the native thermal timeline
+
+`fs_couple::superfluid::connection::advance_connected_friction_heat` advances
+two connected channels, their finite-inertia junction and one original
+`DepositionSimulation` as a single accepted interval. Supply one explicit heat
+destination per channel cell, with distinct active destinations across both
+routes. Both outer ends must be closed; the internal connection may be open or
+an ideal superleak.
+
+The first thermal candidate advances authored sources, contacts and events to
+the common endpoint. The second route accepts its actual per-cell dissipative
+joules at that same endpoint, so external thermal sources advance once. Neither
+channel's cumulative heat is replayed. Junction kinetic energy, boundary wave
+work and body-force work remain in the original mechanical account; only
+dissipative heat crosses into the caloric receivers.
+
+The report retains both native heat-intake/march reports and the connection
+report. Its combined residual adds thermal and transfer residuals to the
+connection account without counting either channel wave residual twice.
+Rejection by the second caloric law, an energy gate or the final cancellation
+poll preserves both channels, connection and thermal simulation. Retrying
+therefore cannot deposit an earlier rejected proposal.
+
+This remains an endpoint heat split with the original caloric law's storage
+convention and frozen wave reference. It does not feed the receiving cells'
+finite temperatures back into the linear two-fluid coefficients. The
+`fs-couple` `superfluid_connection` target exercises repeated acceptance with
+native sources, second-route caloric refusal, final cancellation and retry,
+overlapping-route rejection and refusal of unhandled outer transport.
+
 ## Discrete sourced helium reference temperatures
 
 `HeliumSvpReference::at_temperature_k` now admits exactly 1.4, 1.6, 1.8 and
