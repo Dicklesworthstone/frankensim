@@ -20,6 +20,9 @@ use crate::moisture::layered::{
 };
 use fs_material::state_point::MonotoneMoistureSorption;
 
+/// Original finite vapor inventories coupled to complete coated radial bodies.
+pub mod atmosphere;
+
 /// One native radial material field and its explicitly associated isotherm.
 #[derive(Clone, Debug)]
 pub struct MoistureRadialLayer {

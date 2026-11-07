@@ -3288,6 +3288,25 @@ into the solid. Five focused authored regressions define analytic curved uptake
 and release, concentration feedback, unequal-shell shared conservation/order,
 second-order convergence, finite crystal buffering and transactional refusal.
 
+### Finite vapor exchange with coated radial bodies
+
+`moisture::radial::layered::atmosphere` couples single or shared coated spheres
+and cylinders to the original finite-vapor inventory. Each humidity trial
+advances the complete original body with every material-specific sorption,
+nonlinear diffusion and interface law intact. Compensated local moisture
+increments, weighted by the actual unequal dry shell masses, supply one gas
+water account. Canonical specimen IDs give deterministic shared summation and
+result order. An interior material interface is never an atmospheric port.
+
+Exterior source receipts resolve the pinned end-material sorption claim at the
+accepted solid-side surface activity; explicit film resistance can separate it
+from gas humidity. Authored exterior seals remain sealed while internal
+redistribution continues. Source/context, common clock/temperature, zero-area
+center and total cell budget admission precede the original water/carrier/total
+mass checks and atomic publication. Temperature, free gas volume and reference
+geometry stay fixed; this path supplies no condensation, carrier permeation,
+hysteresis or thermal feedback.
+
 ### Finite atmosphere exchange on radial geometry
 
 `FiniteMoistureAtmosphere::advance_radial`, `advance_shared_radial` and

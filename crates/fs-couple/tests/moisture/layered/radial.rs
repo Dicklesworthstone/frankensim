@@ -5,6 +5,9 @@ use fs_couple::moisture::radial::{
     layered::{MoistureLayeredRadial, MoistureRadialLayer},
 };
 
+#[path = "radial/atmosphere.rs"]
+mod atmosphere;
+
 fn radial_layer(
     card: MaterialCard,
     symmetry: RadialMoistureSymmetry,
