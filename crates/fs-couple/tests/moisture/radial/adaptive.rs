@@ -5,6 +5,8 @@ use fs_couple::moisture::adaptive::*;
 
 #[path = "adaptive/finite.rs"]
 mod finite;
+#[path = "adaptive/solution.rs"]
+mod solution;
 
 fn controls(step_s: f64, tolerance: f64) -> MoistureTimeControls {
     MoistureTimeControls {

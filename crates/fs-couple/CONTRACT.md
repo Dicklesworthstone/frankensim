@@ -3398,6 +3398,30 @@ require explicit cuts. Six focused native regressions use unequal-shell modes,
 nonlinear dry-front solutions, an independent mass-weighted error ratio and
 work/cancellation rollback.
 
+### Adaptive radial diffusion with a finite solution
+
+`FiniteMoistureSolution::advance_radial_adaptive_to` and
+`advance_radial_sdirk2_adaptive_to` use the original bounded duration controller
+with complete native finite-solution backward-Euler or SDIRK2 endpoints.
+Every trial solves actual solvent-volume/activity feedback with the original
+curved transport paths. Error estimates compare each shell content, the
+dry-mass-weighted L1 shell water discrepancy, finite solvent mass and solution
+activity. Opposing shell errors cannot cancel, and pure-solvent uptake remains
+controlled even when its activity stays one.
+
+Only accepted fine endpoint exchanges enter the cumulative boundary account.
+The original-to-final shell/face balance and combined solvent/shell water balance
+must each meet one fixed whole-duration tolerance. Both SDIRK stages count
+against the work budget, and any late failure discards the entire candidate.
+Adaptive radial solid wrappers resolve shape, stress and wet inertia once from
+the accepted final moisture, then publish the complete dependent result together.
+
+The existing prescribed-temperature, equilibrated vapor bridge remains in use;
+these methods do not add liquid immersion or osmotic traction. Native kinetic
+phase evolution remains first order under BE and is refused by SDIRK2. Individual
+phase-component errors and phase heat are not separately controlled. Local
+step-doubling estimates do not promise a global accuracy bound.
+
 ### Radial sorption energy and finite-solution mechanics
 
 `FiniteMoistureAtmosphere::advance_radial_with_sorption_energy` and its SDIRK2

@@ -4,6 +4,7 @@ use super::*;
 use crate::moisture::radial::MoistureRadial;
 
 mod finite;
+mod solution;
 
 fn snapshot(state: &MoistureRadial) -> Result<Snapshot<'_>, MoistureError> {
     Ok(Snapshot {
