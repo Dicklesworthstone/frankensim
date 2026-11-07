@@ -1,4 +1,4 @@
-//! Attached low-Tabor adhesive microslip driving the original modal network.
+//! Low-Tabor adhesive release, recontact and microslip on the native network.
 //!
 //! The source retains DMT normal potential and Hertz--Mindlin shear memory.
 //! Two complete work columns retain the FULL reciprocal normal/shear response.
@@ -7,9 +7,11 @@
 //! No contact history is allocated until replay on the actual native endpoint.
 //!
 //! Coordinates and source conditions are fixed over a step, with affine local
-//! paths and one proportional shear direction. Endpoints must remain attached
-//! (indentation >= 0). The caller supplies the root bracket and resolves loading
-//! reversals. A bracketed root is not a uniqueness or snap-stability certificate.
+//! paths and one proportional shear direction. Signed indentation admits gaps,
+//! release and reattachment; the original path owner integrates only the active
+//! contact interval and retains total slip during flight. The caller supplies
+//! the signed root bracket and resolves loading reversals. A bracketed root is
+//! not a uniqueness or snap-stability certificate.
 
 use super::{
     CancelGate, CoupledModalSystem, Dd, MaterialStateId, ModalAcousticTimeModel,
@@ -117,6 +119,10 @@ pub struct AdhesiveDmtMindlinFrame {
     pub endpoint_shear_force_n: f64,
     pub history_intervals: usize,
     pub normal_response: DmtResponse,
+    /// Fraction of this affine step with positive contact indentation.
+    pub contact_fraction: f64,
+    /// Normalized active-contact start/end; [0,0] for a wholly separated path.
+    pub contact_interval_fraction: [f64; 2],
     pub compatibility_residual_m: [f64; 2],
     pub compatibility_tolerance_m: [f64; 2],
     pub constitutive_residual_n: [f64; 2],
@@ -271,7 +277,7 @@ impl<'a> AdhesiveDmtMindlinModalSystem<'a> {
         )?)
     }
 
-    /// The explicit nonnegative bracket selects an attached root. Both bodies,
+    /// The explicit signed bracket selects a source-admitted root. Both bodies,
     /// all connections and the normal/shear cross response participate. Actual
     /// source and mechanical path limits apply to every constitutive proposal.
     pub fn step(
@@ -383,8 +389,8 @@ impl<'a> AdhesiveDmtMindlinModalSystem<'a> {
         bracket: [f64; 2],
         gate: &CancelGate,
     ) -> Result<(Probe, usize), AdhesiveDmtMindlinError> {
-        if bracket.iter().any(|x| !x.is_finite() || *x < 0.0) || bracket[0] > bracket[1] {
-            return Err(invalid("finite ordered attached indentation bracket").into());
+        if bracket.iter().any(|x| !x.is_finite()) || bracket[0] > bracket[1] {
+            return Err(invalid("finite ordered signed indentation bracket").into());
         }
         let mut a = self.probe(bracket[0], free, gate)?;
         if a.residual.abs() <= a.tolerance {
@@ -670,6 +676,8 @@ impl<'a> AdhesiveDmtMindlinModalSystem<'a> {
             endpoint_shear_force_n: actual.tangential.state.endpoint_force_n(),
             history_intervals: actual.tangential.state.history_intervals(),
             normal_response: actual.normal_response,
+            contact_fraction: actual.contact_fraction,
+            contact_interval_fraction: actual.contact_interval_fraction,
             compatibility_residual_m: compatibility,
             compatibility_tolerance_m: tolerance,
             constitutive_residual_n: constitutive,

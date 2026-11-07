@@ -5370,3 +5370,24 @@ late conductivity-domain rollback/retry, and patch coverage/identity admission.
 They retain the existing first-order heat-before-motion and thermal-substep
 accuracy boundaries; energy closure is not a time-accuracy or calibration
 claim. Validation status is reported with the implementation commit.
+
+
+## Native signed adhesive release and recontact (G1/G3)
+
+The existing DMT--Mindlin native owner accepts finite ordered signed indentation
+brackets. The source's original affine contact-window integration owns release,
+zero-load flight and reattachment; normal adhesive attraction may persist
+while the Hertz contact radius and friction vanish. Native observers retain the
+active contact fraction and normalized interval independently of endpoint
+force. Total macroscopic slip includes flight, while physical microslip heat
+and branch evolution belong only to actual contact.
+
+All normal/shear cross compliance, actual-body force/work gates and atomic
+history publication remain active. The whole-step mean force drives the
+original bodies; active-window force is not applied for the whole timestep.
+G1/G3 regressions in `tests/adhesive_dmt_modal/mindlin/gaps.rs` compare complete
+release/flight/recontact and reversal trajectories with an independent coupled
+two-mass solution, preserving all three momenta and complete work. Initially
+separated contact also supports receiver refusal and late-cancellation replay.
+Paths remain affine with one proportional shear direction; callers resolve
+within-step reversals and supply the physical root bracket.

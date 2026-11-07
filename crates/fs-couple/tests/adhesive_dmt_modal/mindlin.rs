@@ -12,6 +12,9 @@ use fs_exec::CancelGate;
 use fs_math::det;
 use fs_tribo::TangentialSolveConfig;
 
+#[path = "mindlin/gaps.rs"]
+mod gaps;
+
 const Z: f64 = 1e-9;
 const MU: f64 = 0.6;
 const L: [f64; 3] = [0.7, 0.3, -0.2];
@@ -355,7 +358,7 @@ fn g4_bad_brackets_receiver_refusal_and_late_cancellation_preserve_the_accepted_
         (target - initial + c[0][0] * f[0] + c[0][1] * f[1]) / h,
         (slip + c[1][0] * f[0] + c[1][1] * f[1]) / h,
     ];
-    for bracket in [[-Z, Z], [Z, 0.0], [0.0, 0.0]] {
+    for bracket in [[f64::NAN, Z], [Z, 0.0], [0.0, 0.0]] {
         assert!(owner.step(&[0.0; 6], rate, bracket).is_err());
         assert_eq!(owner.state(), &state);
         assert_eq!(all_states(&owner), native);
