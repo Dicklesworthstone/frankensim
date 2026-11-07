@@ -13,6 +13,9 @@
 //! Thin coatings share the substrate temperature and authored reference area.
 //! Nucleation, internal film resistance, moving geometry and liquid exchange are
 //! not inferred from a bare surface or from the depositing species' name.
+//! The opt-in single-coating lifecycle path integrates molecular turnover and
+//! finite-vapor backpressure through exact zero-film boundaries inside the same
+//! split, with an explicitly admitted zero-residence bare-surface closure.
 
 /// Error-controlled complete heat/coating/gas histories, including bare surfaces.
 #[path = "coating/adaptive.rs"]
@@ -25,6 +28,7 @@ use super::super::accommodation::ThermalAccommodation;
 use super::super::chamber::coating::{
     GasSupportedChamberSolve, GasSupportedSurface, GasSupportedSurfaceStep,
     advance_supported_chamber, advance_supported_chamber_with_films,
+    lifecycle::{GasSupportedLifecycleSolve, advance_supported_lifecycle},
 };
 use super::super::{GasSurfaceBinding, GasSurfaceError, compatibility, phase_at, species_snapshot};
 use super::{GasCellAudit, GasTimelineAudit, HeatTotals, Sum, ThermalWork, add, finite};
@@ -42,6 +46,23 @@ use fs_thermal::sublimation::{SublimationError, VaporReservoir, coating::Support
 pub struct GasCoatingTimelineSurface<'a> {
     pub cell_id: CellId,
     pub binding: &'a GasSurfaceBinding,
+}
+
+// Both transfer choices share the original event clock, heat owner, storage
+// publication and whole-window balances. The integrated single-surface mode
+// changes only molecular inventory evolution inside an admitted interval.
+#[derive(Clone, Copy)]
+enum CoatingExchange {
+    Explicit(GasSupportedChamberSolve),
+    Lifecycle(GasSupportedLifecycleSolve),
+}
+impl CoatingExchange {
+    fn controls(self) -> GasSupportedChamberSolve {
+        match self {
+            Self::Explicit(controls) => controls,
+            Self::Lifecycle(controls) => controls.chamber_controls(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -128,7 +149,7 @@ fn accept_endpoints(
     endpoints: &[GasSupportedSurfaceStep],
     gas: &ClosedGasParcel,
     catalog: &ThermochemicalGasModel,
-    latent_tolerance_j_kg: f64,
+    exchange_mode: CoatingExchange,
     checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<(), GasCoatingTimelineError> {
     let mut observations = BTreeMap::new();
@@ -166,7 +187,7 @@ fn accept_endpoints(
                 binding.solid_enthalpy_offset_j_kg,
                 phase.latent_heat_j_kg,
                 temperature,
-                latent_tolerance_j_kg,
+                exchange_mode.controls().chamber.surface.latent_compatibility_tolerance_j_kg,
             )?;
             SupportedSurfaceState {
                 substrate_mass_kg: substrate.mass_kg,
@@ -175,6 +196,22 @@ fn accept_endpoints(
                 area_m2: 0.0,
             }
         };
+        if let CoatingExchange::Lifecycle(controls) = exchange_mode {
+            // Newborn and zero-window endpoints also obey the fixed-accessible-
+            // volume approximation; they cannot bypass it by having no exposure.
+            let temperature = coating.temperature_at_specific_enthalpy_k(
+                id, replacement.substrate_specific_enthalpy_j_kg,
+            )?;
+            let phase = phase_at(coating.coating_surfaces()[&id].law, temperature, source.molar_mass)?;
+            let fraction = replacement.deposit_mass_kg / phase.solid_density_kg_m3 / gas.volume_m3();
+            if !fraction.is_finite() || fraction < 0.0
+                || fraction > controls.maximum_deposit_volume_fraction
+            {
+                return Err(GasSurfaceError::Invalid(
+                    "coating lifecycle exceeds its fixed-gas-volume admission",
+                ).into());
+            }
+        }
         changes.push(CoatingCellExchange {
             expected_substrate: substrate.clone(),
             expected_coating: *state,
@@ -215,7 +252,41 @@ pub fn advance_coatings_with_gas<'thermal, 'catalog>(
     checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<GasCoatingTimelineCandidate<'thermal, 'catalog>, GasCoatingTimelineError> {
     advance_coatings_metered(coating, surfaces, accommodation, gas, catalog,
-        target_s, thermal_config, controls, None, checkpoint)
+        target_s, thermal_config, CoatingExchange::Explicit(controls), None, checkpoint)
+}
+
+/// Evolve one coating through bare growth and complete evaporation on the
+/// original heat/contact/event timeline, with one finite nonisothermal gas.
+///
+/// The molecular owner integrates changing vapor backpressure and repeated
+/// molecular turnover at the interval's frozen temperatures. A bare surface
+/// has zero residence time: incoming sticking molecules that cannot grow a
+/// stable film immediately re-emit at its temperature. This explicit ideal
+/// heterogeneous-exchange assumption supplies no nucleation barrier or finite
+/// adsorbate storage. The nonvolatile substrate persists after extinction.
+///
+/// There must be exactly one registered coating, though the heat network may
+/// contain other nonvolatile cells. Its original film coefficient, charts,
+/// event-clipped exposed area and substrate storage are retained. Nonsticking
+/// and carrier molecules reflect specularly. Heat still precedes molecular
+/// exchange, so refinement controls this first-order splitting and changing
+/// temperatures; frozen-temperature extinction times are not exact thermal
+/// event times. Use the adaptive entry point for a local temporal estimate.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_coating_lifecycle_with_gas<'thermal, 'catalog>(
+    coating: &CoatingSimulation<'thermal>,
+    surface: GasCoatingTimelineSurface<'_>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    target_s: f64,
+    thermal_config: StepConfig,
+    controls: GasSupportedLifecycleSolve,
+    checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<GasCoatingTimelineCandidate<'thermal, 'catalog>, GasCoatingTimelineError> {
+    advance_coatings_metered(
+        coating, &[surface], None, gas, catalog, target_s, thermal_config,
+        CoatingExchange::Lifecycle(controls), None, checkpoint,
+    )
 }
 
 // Share the original physical march with adaptive coarse/fine probes. Completed
@@ -229,11 +300,20 @@ fn advance_coatings_metered<'thermal, 'catalog>(
     catalog: &'catalog ThermochemicalGasModel,
     target_s: f64,
     thermal_config: StepConfig,
-    controls: GasSupportedChamberSolve,
+    exchange_mode: CoatingExchange,
     work: Option<&ThermalWork>,
     mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<GasCoatingTimelineCandidate<'thermal, 'catalog>, GasCoatingTimelineError> {
     checkpoint()?;
+    let controls = exchange_mode.controls();
+    if let CoatingExchange::Lifecycle(lifecycle) = exchange_mode {
+        lifecycle.validate()?;
+        if surfaces.len() != 1 || accommodation.is_some() {
+            return Err(DepositionError::InvalidInput(
+                "integrated coating lifecycle requires one selected coating and specular reflection",
+            ).into());
+        }
+    }
     if !target_s.is_finite()
         || target_s < coating.time_s()
         || !thermal_config.max_dt_s.is_finite()
@@ -329,7 +409,7 @@ fn advance_coatings_metered<'thermal, 'catalog>(
         &[],
         &next_gas,
         catalog,
-        controls.chamber.surface.latent_compatibility_tolerance_j_kg,
+        exchange_mode,
         &mut checkpoint,
     )?;
     let mut accounts: BTreeMap<_, _> = bindings
@@ -400,7 +480,7 @@ fn advance_coatings_metered<'thermal, 'catalog>(
                 &[],
                 &next_gas,
                 catalog,
-                controls.chamber.surface.latent_compatibility_tolerance_j_kg,
+                exchange_mode,
                 &mut checkpoint,
             )?;
             continue;
@@ -454,22 +534,34 @@ fn advance_coatings_metered<'thermal, 'catalog>(
             })
             .collect();
         let mut refusal = None;
-        let exchange = advance_supported_chamber_with_films(
-            &inputs,
-            accommodation.map(|_| &active_accommodation),
-            &film_coefficients,
-            &next_gas,
-            catalog,
-            stop - start,
-            controls,
-            || match checkpoint() {
+        let mut cancelled = || match checkpoint() {
                 Ok(()) => false,
                 Err(error) => {
                     refusal = Some(error);
                     true
                 }
-            },
-        );
+            };
+        let exchange = match exchange_mode {
+            CoatingExchange::Explicit(_) => advance_supported_chamber_with_films(
+                &inputs,
+                accommodation.map(|_| &active_accommodation),
+                &film_coefficients,
+                &next_gas,
+                catalog,
+                stop - start,
+                controls,
+                &mut cancelled,
+            ),
+            CoatingExchange::Lifecycle(lifecycle) => advance_supported_lifecycle(
+                &inputs[0],
+                film_coefficients.get(&inputs[0].id).copied(),
+                &next_gas,
+                catalog,
+                stop - start,
+                lifecycle,
+                &mut cancelled,
+            ).map(|candidate| candidate.into_endpoint()),
+        };
         drop(inputs);
         drop(calorics);
         if let Some(error) = refusal {
@@ -501,7 +593,7 @@ fn advance_coatings_metered<'thermal, 'catalog>(
             candidate.surfaces(),
             candidate.gas(),
             catalog,
-            controls.chamber.surface.latent_compatibility_tolerance_j_kg,
+            exchange_mode,
             &mut checkpoint,
         )?;
         let (endpoints, accepted_gas, _, report) = candidate.into_parts();
@@ -651,3 +743,7 @@ fn advance_coatings_metered<'thermal, 'catalog>(
 #[cfg(test)]
 #[path = "coating/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "coating/lifecycle_tests.rs"]
+mod lifecycle_tests;

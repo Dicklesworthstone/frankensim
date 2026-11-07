@@ -10,6 +10,9 @@
 //! a spatial coating model. The original fixed-area, common-temperature and
 //! molecular/film assumptions remain. Only inventory refusals are retryable;
 //! unsupported source/caloric states retain their original refusal.
+//! The opt-in lifecycle entry point uses integrated finite-vapor turnover for
+//! one coating, allowing prompt return of newborn material and complete film
+//! extinction without changing this controller or its accepted-history owner.
 
 use super::super::{
     GasTimelineAudit, HeatTotals, Sum, ThermalWork,
@@ -17,8 +20,9 @@ use super::super::{
     finite,
 };
 use super::{
-    GasCoatingTimelineCandidate, GasCoatingTimelineError, GasCoatingTimelineSurface,
-    GasSupportedChamberSolve, ThermalAccommodation, advance_coatings_metered,
+    CoatingExchange, GasCoatingTimelineCandidate, GasCoatingTimelineError,
+    GasCoatingTimelineSurface, GasSupportedChamberSolve, GasSupportedLifecycleSolve,
+    ThermalAccommodation, advance_coatings_metered,
 };
 use crate::sublimation::gas::GasSurfaceError;
 use crate::thermochemical_gas::{ThermochemicalGasModel, energy::parcel::ClosedGasParcel};
@@ -469,9 +473,63 @@ pub fn advance_coatings_adaptive_with_gas<'thermal, 'catalog>(
     thermal_config: StepConfig,
     phase_config: GasSupportedChamberSolve,
     controls: GasTimelineAdaptiveSolve,
+    checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<GasCoatingAdaptiveCandidate<'thermal, 'catalog>, GasCoatingAdaptiveError> {
+    advance_coatings_adaptive(
+        coating, surfaces, accommodation, gas, catalog, target_s, thermal_config,
+        CoatingExchange::Explicit(phase_config), controls, checkpoint,
+    )
+}
+
+/// Adapt the original heat/contact/event history through coating birth and
+/// extinction using integrated finite-vapor molecular turnover.
+///
+/// Exactly one coating is registered; other nonvolatile thermal cells and
+/// contacts retain the original owner. The same local norm controls actual
+/// coating mass, every species, both temperatures and original caloric changes.
+/// Each physical half step refreshes the gas and surface, including at zero
+/// coating mass, so a newborn never needs an artificial seed or a fractional
+/// gross-inventory timestep. Only accepted fine histories enter the balances.
+///
+/// The zero-residence bare-surface closure and fixed-volume/area assumptions of
+/// `advance_coating_lifecycle_with_gas` apply. This controls temporal error in
+/// that first-order model; it does not determine nucleation or certify the
+/// physical time of extinction. Unsupported sources still refuse immediately.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_coating_lifecycle_adaptive_with_gas<'thermal, 'catalog>(
+    coating: &CoatingSimulation<'thermal>,
+    surface: GasCoatingTimelineSurface<'_>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    target_s: f64,
+    thermal_config: StepConfig,
+    phase_config: GasSupportedLifecycleSolve,
+    controls: GasTimelineAdaptiveSolve,
+    checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<GasCoatingAdaptiveCandidate<'thermal, 'catalog>, GasCoatingAdaptiveError> {
+    advance_coatings_adaptive(
+        coating, &[surface], None, gas, catalog, target_s, thermal_config,
+        CoatingExchange::Lifecycle(phase_config), controls, checkpoint,
+    )
+}
+
+// One retry loop, event clock, error norm and work meter serve both molecular
+// inventory models. Changing a phase kernel cannot change acceptance semantics.
+#[allow(clippy::too_many_arguments)]
+fn advance_coatings_adaptive<'thermal, 'catalog>(
+    coating: &CoatingSimulation<'thermal>,
+    surfaces: &[GasCoatingTimelineSurface<'_>],
+    accommodation: Option<&BTreeMap<CellId, ThermalAccommodation>>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    target_s: f64,
+    thermal_config: StepConfig,
+    exchange_mode: CoatingExchange,
+    controls: GasTimelineAdaptiveSolve,
     mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<GasCoatingAdaptiveCandidate<'thermal, 'catalog>, GasCoatingAdaptiveError> {
     checkpoint()?;
+    let phase_config = exchange_mode.controls();
     if !target_s.is_finite()
         || target_s < coating.time_s()
         || !positive(controls.absolute_mass_tolerance_kg)
@@ -497,7 +555,7 @@ pub fn advance_coatings_adaptive_with_gas<'thermal, 'catalog>(
         catalog,
         coating.time_s(),
         thermal_config,
-        phase_config,
+        exchange_mode,
         Some(&meter),
         &mut checkpoint,
     )?;
@@ -534,7 +592,7 @@ pub fn advance_coatings_adaptive_with_gas<'thermal, 'catalog>(
                 catalog,
                 event_stop,
                 thermal_config,
-                phase_config,
+                exchange_mode,
                 Some(&meter),
                 &mut checkpoint,
             )?;
@@ -570,7 +628,7 @@ pub fn advance_coatings_adaptive_with_gas<'thermal, 'catalog>(
                     max_dt_s: end - state.coating().time_s(),
                     ..thermal_config
                 },
-                phase_config,
+                exchange_mode,
                 Some(&meter),
                 &mut checkpoint,
             )

@@ -478,6 +478,36 @@ geometry are not inferred. The focused coating regressions include an independen
 simultaneous-rate reference, birth shielding, datum/mass-scale invariance, and
 shared-budget/cancellation behavior.
 
+### Integrated coating lifecycle on the original timeline
+
+`timeline::coating::advance_coating_lifecycle_with_gas` and
+`adaptive::advance_coating_lifecycle_adaptive_with_gas` select the original
+supported-film lifecycle interval inside this SAME heat/event/controller owner.
+Exactly one coating is registered; other nonvolatile thermal cells and contacts
+remain available. The registered original mass-transfer film, caloric charts,
+source identity and event-clipped exposed area are retained. Bare growth,
+prompt molecular return and complete coating extinction no longer depend on
+withdrawing only a fraction of the old film. Its nonvolatile substrate, heat
+sources and contacts continue after its coating reaches exactly zero.
+
+The same whole-window species and energy balances, accepted-fine histories,
+local state norm, cancellation and total attempted-heat-work budget apply.
+Scheduled births receive no earlier exposure; endpoint births and zero-duration
+calls still admit original sources and the declared deposit-volume fraction.
+An integrated phase step reconstructs the original gas once. Coarse and rejected
+probes never enter accepted molecular or external-source totals.
+
+The opt-in zero-residence heterogeneous boundary and specular nonsticking/carrier
+assumptions of the lifecycle interval remain explicit. Temperatures evolve
+through the original first-order heat/molecular split; an analytical event of
+the frozen-temperature mass subproblem is not an exact thermally coupled event.
+No multi-surface analytical reservoir, nucleation barrier, adsorbate storage,
+finite coating resistance, moving morphology or global error bound is claimed.
+The five G0/G1 regressions specify bare undersaturation, growth followed by a
+scheduled heat pulse and extinction with continuing contact, accepted manual
+half-step equivalence, delayed birth and transactional source/cancellation
+admission. Their independent storage check reads actual thermal and gas states.
+
 ## Thermal finite porous compression
 
 `plastic::finite::porous::thermal::AffineThermalFinitePorous` extends the
