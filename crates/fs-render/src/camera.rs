@@ -2,7 +2,7 @@
 //!
 //! The default optical model is an ideal thin lens. Its focus distance is the
 //! positive axial distance from the lens plane, not along each raster ray.
-//! Opt-in circular, annular and bladed pupil diffraction covers incoherent, paraxial,
+//! Opt-in circular, annular, rectangular and bladed diffraction covers incoherent, paraxial,
 //! focused, declared-plane and separated multi-plane defocused imaging. With
 //! `tracer`, native material laws can explicitly drive longitudinal thin-lens
 //! dispersion. Explicit pupil-wave queries also preserve coherent and partially
@@ -90,7 +90,7 @@ pub enum CameraError {
     InvalidExposureMetadata,
     /// A lens coordinate was outside the half-open unit square.
     InvalidLensSample,
-    /// Diffraction needs a circular, annular or bladed pupil, a valid phase budget, and a
+    /// Diffraction needs a finite pupil, a valid phase budget, and a
     /// supported opaque diffuse primary surface or distant environment.
     InvalidDiffraction,
     /// A diffraction camera requires wavelength-aware ray generation.
@@ -219,7 +219,7 @@ impl CameraError {
         const DIFFRACTION: &[CameraFix] = &[CameraFix {
             rank: 1,
             code: "pupil_diffraction",
-            message: "use spectral rays and a nonzero circular, annular or regular bladed pupil with opaque diffuse sources and no additional pupil occlusion in the declared depth model",
+            message: "use spectral rays and a nonzero circular, annular, rectangular or regular bladed pupil with opaque diffuse sources and no additional pupil occlusion in the declared depth model",
         }];
         const DISPERSIVE_LENS: &[CameraFix] = &[CameraFix {
             rank: 1,
@@ -544,12 +544,23 @@ enum ApertureKind {
         rotation_rad: f64,
         vertices: Vec<[f64; 2]>,
     },
+    Rectangular {
+        radius_m: f64,
+        dimensions_m: [f64; 2],
+        rotation_rad: f64,
+        half_axes: [[f64; 2]; 2],
+        vertices: Vec<[f64; 2]>,
+    },
 }
 
 impl Aperture {
     /// Numerical/sampling admission for a centrally obscured circular pupil.
     /// Narrower rings need a separately conditioned propagation model.
     pub const MAX_ANNULAR_OBSCURATION_RATIO: f64 = 0.95;
+
+    /// Conditioning limit for rectangular/slit pupil boundary propagation.
+    /// More slender openings require a separately qualified numerical chart.
+    pub const MAX_RECTANGULAR_ASPECT_RATIO: f64 = 1024.0;
 
     /// Admit a circular aperture. A radius of exactly zero is canonical pinhole.
     pub fn try_circular(radius_m: f64) -> Result<Self, CameraError> {
@@ -645,20 +656,78 @@ impl Aperture {
         })
     }
 
+    /// Admit a uniformly transmitting rectangular pupil, including a finite
+    /// slit, with full width and height [m] and counterclockwise rotation [rad].
+    /// Both dimensions must be positive and their ratio at most 1024. Zero-area
+    /// slits are not normalized as finite pupils. Focused, defocused, layered
+    /// and coherent diffraction all use this same physical opening.
+    pub fn try_rectangular(
+        width_m: f64,
+        height_m: f64,
+        rotation_rad: f64,
+    ) -> Result<Self, CameraError> {
+        let area = width_m * height_m;
+        if !width_m.is_finite()
+            || !height_m.is_finite()
+            || width_m <= 0.0
+            || height_m <= 0.0
+            || !area.is_finite()
+            || area <= 0.0
+            || !rotation_rad.is_finite()
+            || width_m.max(height_m) / width_m.min(height_m) > Self::MAX_RECTANGULAR_ASPECT_RATIO
+        {
+            return Err(CameraError::InvalidAperture);
+        }
+        let rotation_rad = canonical_zero(rotation_rad.rem_euclid(2.0 * PI));
+        let (sin, cos) = det::sin_cos(rotation_rad);
+        let half_axes = [
+            [0.5 * width_m * cos, 0.5 * width_m * sin],
+            [-0.5 * height_m * sin, 0.5 * height_m * cos],
+        ];
+        let radius_m = det::hypot(0.5 * width_m, 0.5 * height_m);
+        let vertices = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]]
+            .map(|sign| {
+                [
+                    sign[0] * half_axes[0][0] + sign[1] * half_axes[1][0],
+                    sign[0] * half_axes[0][1] + sign[1] * half_axes[1][1],
+                ]
+            })
+            .to_vec();
+        Ok(Self {
+            kind: ApertureKind::Rectangular {
+                radius_m,
+                dimensions_m: [width_m, height_m],
+                rotation_rad,
+                half_axes,
+                vertices,
+            },
+        })
+    }
+
+    /// Full rectangular dimensions [m], before the authored rotation.
+    #[must_use]
+    pub const fn rectangular_dimensions_m(&self) -> Option<[f64; 2]> {
+        match &self.kind {
+            ApertureKind::Rectangular { dimensions_m, .. } => Some(*dimensions_m),
+            _ => None,
+        }
+    }
+
     /// Whether this is the exact pinhole limit.
     #[must_use]
     pub const fn is_pinhole(&self) -> bool {
         matches!(&self.kind, ApertureKind::Pinhole)
     }
 
-    /// Outer aperture radius (m), or circumradius for a regular polygon.
+    /// Outer aperture radius (m), or circumradius for a polygon or rectangle.
     #[must_use]
     pub const fn radius_m(&self) -> f64 {
         match &self.kind {
             ApertureKind::Pinhole => 0.0,
             ApertureKind::Circular { radius_m }
             | ApertureKind::Annular { radius_m, .. }
-            | ApertureKind::RegularPolygon { radius_m, .. } => *radius_m,
+            | ApertureKind::RegularPolygon { radius_m, .. }
+            | ApertureKind::Rectangular { radius_m, .. } => *radius_m,
         }
     }
 
@@ -702,6 +771,7 @@ impl Aperture {
                 radius_m,
                 inner_radius_m,
             } => (PI * (radius_m - inner_radius_m)) * (radius_m + inner_radius_m),
+            ApertureKind::Rectangular { dimensions_m, .. } => dimensions_m[0] * dimensions_m[1],
             ApertureKind::RegularPolygon {
                 radius_m, vertices, ..
             } => {
@@ -727,15 +797,17 @@ impl Aperture {
             ApertureKind::RegularPolygon { blades, .. } => Some(*blades),
             ApertureKind::Pinhole
             | ApertureKind::Circular { .. }
-            | ApertureKind::Annular { .. } => None,
+            | ApertureKind::Annular { .. }
+            | ApertureKind::Rectangular { .. } => None,
         }
     }
 
-    /// Canonical blade rotation (rad) for a regular polygon aperture.
+    /// Canonical rotation (rad) for a regular polygon or rectangular aperture.
     #[must_use]
     pub const fn rotation_rad(&self) -> Option<f64> {
         match &self.kind {
-            ApertureKind::RegularPolygon { rotation_rad, .. } => Some(*rotation_rad),
+            ApertureKind::RegularPolygon { rotation_rad, .. }
+            | ApertureKind::Rectangular { rotation_rad, .. } => Some(*rotation_rad),
             ApertureKind::Pinhole
             | ApertureKind::Circular { .. }
             | ApertureKind::Annular { .. } => None,
@@ -745,6 +817,12 @@ impl Aperture {
     fn sample(&self, sample: LensSample) -> [f64; 2] {
         match &self.kind {
             ApertureKind::Pinhole => [0.0, 0.0],
+            ApertureKind::Rectangular { half_axes, .. } => {
+                let coordinates = [2.0 * sample.u - 1.0, 2.0 * sample.v - 1.0];
+                core::array::from_fn(|axis| {
+                    coordinates[0] * half_axes[0][axis] + coordinates[1] * half_axes[1][axis]
+                })
+            }
             ApertureKind::Circular { radius_m } => {
                 let sx = 2.0 * sample.u - 1.0;
                 let sy = 2.0 * sample.v - 1.0;

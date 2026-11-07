@@ -70,7 +70,7 @@ use polygon::PolygonPupil;
 const PI: f64 = core::f64::consts::PI;
 const PROPOSAL_RADIUS: f64 = 2.0;
 
-/// Explicit in-focus scalar diffraction for circular, annular and bladed pupils.
+/// Explicit in-focus scalar diffraction for circular, annular, rectangular and bladed pupils.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FocusedDiffraction {
     maximum_defocus_phase_rad: f64,
@@ -181,6 +181,23 @@ enum AmplitudePupil<'a> {
     Polygon { pupil: PolygonPupil<'a>, phase: f64 },
 }
 
+impl super::Aperture {
+    fn polygon_pupil(&self) -> Option<PolygonPupil<'_>> {
+        match &self.kind {
+            ApertureKind::RegularPolygon {
+                radius_m, vertices, ..
+            } => Some(PolygonPupil::new(*radius_m, vertices)),
+            ApertureKind::Rectangular {
+                radius_m,
+                vertices,
+                half_axes,
+                ..
+            } => Some(PolygonPupil::rectangular(*radius_m, vertices, *half_axes)),
+            _ => None,
+        }
+    }
+}
+
 impl<'a> PreparedDiffractionAmplitude<'a> {
     pub(super) fn new(camera: &'a PhysicalCamera, wavelength_nm: f64) -> Result<Self, CameraError> {
         if camera.diffraction.is_none() && camera.defocused_diffraction.is_none() {
@@ -204,10 +221,15 @@ impl<'a> PreparedDiffractionAmplitude<'a> {
                 camera.aperture.obscuration_ratio(),
                 phase,
             )),
-            ApertureKind::RegularPolygon { vertices, .. } => AmplitudePupil::Polygon {
-                pupil: PolygonPupil::new(camera.aperture.radius_m(), vertices),
-                phase,
-            },
+            ApertureKind::RegularPolygon { .. } | ApertureKind::Rectangular { .. } => {
+                AmplitudePupil::Polygon {
+                    pupil: camera
+                        .aperture
+                        .polygon_pupil()
+                        .ok_or(CameraError::InvalidDiffraction)?,
+                    phase,
+                }
+            }
             ApertureKind::Pinhole => return Err(CameraError::InvalidDiffraction),
         };
         Ok(Self { scale, pupil })
@@ -238,7 +260,7 @@ impl<'a> PreparedDiffractionAmplitude<'a> {
 }
 
 impl PhysicalCamera {
-    /// Select in-focus diffraction for a nonzero circular, annular or bladed pupil. The rendered
+    /// Select in-focus diffraction for a nonzero finite pupil. The rendered
     /// raster retains the camera's declared angular field of view. The pupil
     /// sets optical resolution; it is not also sampled for geometric defocus.
     /// A declared physical focal length requires focus beyond that length,
@@ -268,7 +290,7 @@ impl PhysicalCamera {
         self.diffraction
     }
 
-    /// Select finite-defocus propagation through a circular, annular or bladed pupil.
+    /// Select finite-defocus propagation through a circular, annular, rectangular or bladed pupil.
     /// The sensor remains at the conjugate of the camera's focus distance;
     /// the declared object plane may lie in front of or behind that focus.
     /// The wavelength-dependent rim phase must remain within 16 radians.
@@ -397,8 +419,7 @@ impl PhysicalCamera {
             )
         } else if let Some(policy) = self.defocused_diffraction {
             let reference_phase = self.defocus_phase(policy, reference_nm)?;
-            if let ApertureKind::RegularPolygon { vertices, .. } = &self.aperture.kind {
-                let pupil = PolygonPupil::new(self.aperture.radius_m(), vertices);
+            if let Some(pupil) = self.aperture.polygon_pupil() {
                 let (q, proposal) = pupil.sample_defocused(
                     [diffraction_sample.u(), diffraction_sample.v()],
                     reference_phase,
@@ -443,8 +464,7 @@ impl PhysicalCamera {
                     weights,
                 )
             }
-        } else if let ApertureKind::RegularPolygon { vertices, .. } = &self.aperture.kind {
-            let pupil = PolygonPupil::new(self.aperture.radius_m(), vertices);
+        } else if let Some(pupil) = self.aperture.polygon_pupil() {
             let (q, proposal) = pupil.sample([diffraction_sample.u(), diffraction_sample.v()]);
             let mut weights = [0.0; N];
             for (weight, &wavelength_nm) in weights.iter_mut().zip(wavelengths_nm) {
@@ -529,9 +549,11 @@ impl PhysicalCamera {
                 AnnularPupil::new(self.aperture.obscuration_ratio(), 0.0)
                     .density(det::sqrt(radius_squared))
             }
-            ApertureKind::RegularPolygon { vertices, .. } => {
-                PolygonPupil::new(self.aperture.radius_m(), vertices).density(q)
-            }
+            ApertureKind::RegularPolygon { .. } | ApertureKind::Rectangular { .. } => self
+                .aperture
+                .polygon_pupil()
+                .ok_or(CameraError::InvalidDiffraction)?
+                .density(q),
             ApertureKind::Pinhole => return Err(CameraError::InvalidDiffraction),
         } / scale
             / scale;
@@ -593,11 +615,12 @@ impl PhysicalCamera {
         }
         let phase = self.defocus_phase(policy, wavelength_nm)?;
         let density = match &self.aperture.kind {
-            ApertureKind::RegularPolygon { vertices, .. } => {
-                PolygonPupil::new(self.aperture.radius_m(), vertices)
-                    .defocused_density(q, phase)
-                    .ok_or(CameraError::InvalidDiffraction)?
-            }
+            ApertureKind::RegularPolygon { .. } | ApertureKind::Rectangular { .. } => self
+                .aperture
+                .polygon_pupil()
+                .ok_or(CameraError::InvalidDiffraction)?
+                .defocused_density(q, phase)
+                .ok_or(CameraError::InvalidDiffraction)?,
             ApertureKind::Circular { .. } => CircularDefocus::new(phase).density(radius),
             ApertureKind::Annular { .. } => {
                 AnnularPupil::new(self.aperture.obscuration_ratio(), phase).density(radius)
@@ -729,6 +752,9 @@ impl PhysicalCamera {
             ApertureKind::RegularPolygon {
                 radius_m, blades, ..
             } => radius_m * det::cos(PI / f64::from(*blades)),
+            ApertureKind::Rectangular { dimensions_m, .. } => {
+                0.5 * dimensions_m[0].min(dimensions_m[1])
+            }
             _ => self.aperture.radius_m(),
         };
         let (mut minimum, mut maximum) = (f64::INFINITY, 0.0_f64);

@@ -9986,12 +9986,15 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
     }
     update_continuity_f64(hasher, camera.focus_distance_m());
     let aperture = camera.aperture();
+    let rectangular_dimensions = aperture.rectangular_dimensions_m();
     let aperture_tag = if aperture.is_pinhole() {
         0
     } else if aperture.is_annular() {
         3
     } else if aperture.blades().is_some() {
         2
+    } else if rectangular_dimensions.is_some() {
+        4
     } else {
         1
     };
@@ -10003,6 +10006,11 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
         // The obscuration changes both geometric bokeh and the coherent
         // pupil transform. Keep existing clear-pupil continuity bytes intact.
         update_continuity_f64(hasher, aperture.inner_radius_m());
+    }
+    if let Some(dimensions) = rectangular_dimensions {
+        // Equal diagonals do not imply equal geometric or diffracted images.
+        // Append dimensions only for rectangles, retaining old-shape bytes.
+        update_continuity_f64s(hasher, dimensions);
     }
     let exposure = camera.exposure_metadata();
     update_continuity_f64(hasher, exposure.sensitivity_iso());
@@ -17507,6 +17515,36 @@ mod tests {
             qmc_values: [0.0; PATH_QMC_DIMENSIONS],
             qmc_valid: false,
         }
+    }
+
+    #[test]
+    fn g0_rectangular_pupils_rekey_continuity_for_equal_diagonals() {
+        use crate::camera::CameraProjection;
+
+        let identity = |aperture: Aperture| {
+            let camera = PhysicalCamera::try_look_at(
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(0.0, 0.0, 1.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                CameraProjection::try_focal_sensor(0.05, 0.024).unwrap(),
+                1.0,
+                aperture,
+            )
+            .unwrap();
+            let mut hasher = DomainHasher::new("org.frankensim.render.rectangular-camera-test.v1");
+            update_physical_camera_continuity(&mut hasher, &camera);
+            hasher.finalize()
+        };
+        // Both Pythagorean rectangles have exactly the same binary64
+        // circumradius, but different transmitting areas and diffraction zeros.
+        let wide = Aperture::try_rectangular(15.0 / 1024.0, 20.0 / 1024.0, 0.0).unwrap();
+        let narrow = Aperture::try_rectangular(7.0 / 1024.0, 24.0 / 1024.0, 0.0).unwrap();
+        assert_eq!(wide.radius_m().to_bits(), narrow.radius_m().to_bits());
+        let circle = Aperture::try_circular(wide.radius_m()).unwrap();
+        let wide_identity = identity(wide.clone());
+        assert_ne!(wide_identity, identity(narrow));
+        assert_ne!(wide_identity, identity(circle));
+        assert_eq!(wide_identity, identity(wide));
     }
 
     #[test]

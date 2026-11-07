@@ -7,7 +7,7 @@
 
 use super::{
     AnnularPupil, ApertureKind, CameraError, CircularDefocus, LensSample, PhysicalCamera,
-    PolygonPupil, SpectralCameraRay, annular, direct_unit,
+    SpectralCameraRay, annular, direct_unit,
 };
 use crate::charts::Ray;
 use fs_exec::Cx;
@@ -237,10 +237,11 @@ impl PhysicalCamera {
         #[cfg(not(feature = "tracer"))]
         let phase = self.layered_maximum_phase(reference_nm)?;
         let (q, proposal) = match &self.aperture.kind {
-            ApertureKind::RegularPolygon { vertices, .. } => {
-                PolygonPupil::new(self.aperture.radius_m(), vertices)
-                    .sample_phase_range([diffraction_sample.u(), diffraction_sample.v()], phase)
-            }
+            ApertureKind::RegularPolygon { .. } | ApertureKind::Rectangular { .. } => self
+                .aperture
+                .polygon_pupil()
+                .ok_or(CameraError::InvalidDiffraction)?
+                .sample_phase_range([diffraction_sample.u(), diffraction_sample.v()], phase),
             _ => {
                 let (radius, proposal) = annular::sample_radius(
                     self.aperture.obscuration_ratio(),
@@ -360,11 +361,12 @@ impl PhysicalCamera {
             ApertureKind::Annular { .. } => {
                 Ok(AnnularPupil::new(self.aperture.obscuration_ratio(), phase).density(radius))
             }
-            ApertureKind::RegularPolygon { vertices, .. } => {
-                PolygonPupil::new(self.aperture.radius_m(), vertices)
-                    .defocused_density(q, phase)
-                    .ok_or(CameraError::InvalidDiffraction)
-            }
+            ApertureKind::RegularPolygon { .. } | ApertureKind::Rectangular { .. } => self
+                .aperture
+                .polygon_pupil()
+                .ok_or(CameraError::InvalidDiffraction)?
+                .defocused_density(q, phase)
+                .ok_or(CameraError::InvalidDiffraction),
             ApertureKind::Pinhole => Err(CameraError::InvalidDiffraction),
         }
     }

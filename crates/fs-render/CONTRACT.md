@@ -3597,9 +3597,28 @@ broader provenance closure.
 
 ### Focused pupil diffraction
 
+`Aperture::try_rectangular(width_m, height_m, rotation_rad)` admits a finite
+rectangular or slit pupil with two positive full dimensions, finite positive
+area and aspect ratio at most 1024. The circumscribed radius supplies the
+existing defocus phase; the shorter dimension supplies scalar-wavelength
+admission. Geometric rays uniformly sample the same rotated rectangle.
+Focused propagation evaluates the signed separable sinc amplitude exactly
+within the scalar Fraunhofer model, normalized by the actual transmitting
+area. A product-Cauchy proposal in the two aperture-phase coordinates retains
+the full anisotropic tails with its inverse-transpose Jacobian. No image-grid
+FFT, slit-width blur fit or tail cutoff is introduced. Finite defocus reuses
+the existing bounded polygon Fresnel boundary integral, with the rectangle's
+actual moments at small phase. The same pupil enters source-depth layers,
+dispersive lenses, coherent/Jones amplitudes and their finite-pixel/exposure
+owners. Existing phase, numerical-aperture and visibility limits still apply;
+zero-width or subwavelength slits and vector/high-NA diffraction are outside
+this model. `tests/camera/rectangular.rs` compares signed lobes, physical
+normalization and rotated Fresnel fields against independent separable
+integrals; the pupil unit test integrates spectral power over complete tails.
+
 `PhysicalCamera::with_in_focus_diffraction(FocusedDiffraction)` opts the
 cinematic spectral tracer into scalar, paraxial, incoherent pupil imaging.
-It requires a nonzero circular, annular or regular 3–64-blade aperture,
+It requires a nonzero circular, annular, rectangular or regular 3–64-blade aperture,
 `lambda/(2*inradius) <= 0.01` for circles/polygons or
 `lambda/(a-b) <= 0.01` for an annulus, and an explicit
 maximum pupil-rim defocus phase between zero and 0.1 radians. A physical

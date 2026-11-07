@@ -24,7 +24,7 @@
 use std::sync::Arc;
 
 use super::super::{CameraError, PhysicalCamera};
-use super::{LensSample, PolygonPupil, SpectralCameraRay, annular};
+use super::{LensSample, SpectralCameraRay, annular};
 use crate::dielectric::DielectricIor;
 use fs_exec::Cx;
 use fs_math::{dd::Dd, det};
@@ -772,10 +772,12 @@ impl PhysicalCamera {
         self.admit_dispersive_raster(raster_tangents[0], raster_tangents[1])?;
         let maximum_phase = self.dispersive_proposal_phase(wavelengths_nm, reference_nm)?;
         let (q, proposal) = match &self.aperture.kind {
-            super::super::ApertureKind::RegularPolygon { vertices, .. } => {
-                PolygonPupil::new(self.aperture.radius_m(), vertices)
-                    .sample_phase_range([sample.u(), sample.v()], maximum_phase)
-            }
+            super::super::ApertureKind::RegularPolygon { .. }
+            | super::super::ApertureKind::Rectangular { .. } => self
+                .aperture
+                .polygon_pupil()
+                .ok_or(CameraError::InvalidDiffraction)?
+                .sample_phase_range([sample.u(), sample.v()], maximum_phase),
             _ => {
                 let (radius, proposal) = annular::sample_radius(
                     self.aperture.obscuration_ratio(),

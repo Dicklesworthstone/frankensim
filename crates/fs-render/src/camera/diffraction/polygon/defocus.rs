@@ -37,6 +37,13 @@ impl PolygonPupil<'_> {
         }
         let normalization = 4.0 * PI * PI * self.area;
         if radius < 1.0e-5 && phase.abs() < 1.0e-5 {
+            if self.rectangle_half_axes.is_some() {
+                // Rectangles have different x/y moments. Integrate the same
+                // bounded pupil polynomial used by the coherent amplitude;
+                // a regular-polygon radial moment would erase slit anisotropy.
+                let amplitude = self.small_phase_transform(q, phase);
+                return Some(amplitude.norm_sq() / normalization);
+            }
             // For independent uniform pupil points, intensity/area² is the
             // expectation of cos(S(r)-S(r')). The fourth-order remainder is
             // <=[2*(|q|+|phi|)]^4/24 <1.07e-19 in this branch.
@@ -442,6 +449,69 @@ mod tests {
                 [cos, sin]
             })
             .collect()
+    }
+
+    /// G1: independent separable area integrals exercise thin rotated slits,
+    /// both signs of defocus, the DC limit, and both boundary-integral charts.
+    #[test]
+    fn rectangular_fresnel_matches_separable_area_integrals() {
+        fn rotate(q: [f64; 2], angle: f64) -> [f64; 2] {
+            let (sin, cos) = angle.sin_cos();
+            [cos * q[0] - sin * q[1], sin * q[0] + cos * q[1]]
+        }
+
+        fn average(curvature: f64, frequency: f64) -> C64 {
+            const INTERVALS: usize = 4096;
+            let mut sum = C64::ZERO;
+            for i in 0..=INTERVALS {
+                let t = -1.0 + 2.0 * i as f64 / INTERVALS as f64;
+                let (sin, cos) = (curvature * t * t - frequency * t).sin_cos();
+                let weight = if i == 0 || i == INTERVALS {
+                    1.0
+                } else if i % 2 == 0 {
+                    2.0
+                } else {
+                    4.0
+                };
+                sum = sum + C64::new(cos, sin).scale(weight);
+            }
+            sum.scale(1.0 / (3.0 * INTERVALS as f64))
+        }
+
+        for aspect in [1.0, 4.0, 64.0, 1024.0] {
+            let hx = 1.0 / (1.0_f64 + 1.0 / (aspect * aspect)).sqrt();
+            let hy = hx / aspect;
+            let a = rotate([hx, 0.0], 0.37);
+            let b = rotate([0.0, hy], 0.37);
+            let vertices = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]]
+                .map(|s| [s[0] * a[0] + s[1] * b[0], s[0] * a[1] + s[1] * b[1]]);
+            let pupil = PolygonPupil::rectangular(1.0, &vertices, [a, b]);
+            let peak = (4.0 * hx * hy).sqrt() / (2.0 * PI);
+            for phase in [0.0, 1.0e-6, -7.0, 16.0] {
+                for principal_q in [
+                    [0.0; 2],
+                    [2.0e-7, -3.0e-7],
+                    [0.4, -1.1],
+                    [20.0, 1.0],
+                    [0.4, 1.1 / hy],
+                ] {
+                    let q = rotate(principal_q, 0.37);
+                    let expected = (average(phase * hx * hx, principal_q[0] * hx)
+                        * average(phase * hy * hy, principal_q[1] * hy))
+                    .scale(peak);
+                    let actual = pupil.normalized_defocused_amplitude(q, phase).unwrap();
+                    assert!(
+                        (actual - expected).abs() <= 4.0e-10 * peak,
+                        "aspect={aspect}, phase={phase}, q={principal_q:?}: {actual:?} != {expected:?}"
+                    );
+                    let density = pupil.defocused_density(q, phase).unwrap();
+                    assert!(
+                        (density - actual.norm_sq()).abs() <= 4.0e-12 * peak * peak,
+                        "incoherent/coherent mismatch at aspect={aspect}, phase={phase}, q={principal_q:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

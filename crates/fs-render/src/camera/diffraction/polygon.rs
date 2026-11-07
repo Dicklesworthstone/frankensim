@@ -1,4 +1,4 @@
-//! Focused diffraction of a uniformly illuminated regular polygon pupil.
+//! Focused diffraction of a uniformly illuminated regular polygon or rectangle.
 //!
 //! Coordinates are normalized by the physical circumradius. For unit-pupil
 //! area A and Fourier transform F(q), Parseval gives the unit-integral density
@@ -27,6 +27,7 @@ pub(super) struct PolygonPupil<'a> {
     area: f64,
     second_moment: f64,
     frames: usize,
+    rectangle_half_axes: Option<[[f64; 2]; 2]>,
 }
 
 impl<'a> PolygonPupil<'a> {
@@ -55,14 +56,29 @@ impl<'a> PolygonPupil<'a> {
             } else {
                 count
             },
+            rectangle_half_axes: None,
         }
+    }
+
+    /// Rectangle coordinates are r=u*a+v*b, -1<=u,v<=1. Its focused Fourier
+    /// transform separates exactly; the same vertices supply Fresnel defocus.
+    pub(super) fn rectangular(
+        radius_m: f64,
+        vertices: &'a [[f64; 2]],
+        half_axes_m: [[f64; 2]; 2],
+    ) -> Self {
+        let mut pupil = Self::new(radius_m, vertices);
+        let axes = half_axes_m.map(|axis| axis.map(|v| v / radius_m));
+        pupil.area = 4.0 * cross(axes[0], axes[1]);
+        pupil.rectangle_half_axes = Some(axes);
+        pupil
     }
 
     /// Density with respect to dqx dqy, where q=2*pi*a*theta/lambda.
     pub(super) fn density(&self, q: [f64; 2]) -> f64 {
         let radius_squared = dot(q, q);
         let normalization = 4.0 * PI * PI * self.area;
-        if radius_squared < 1.0e-8 {
+        if radius_squared < 1.0e-8 && self.rectangle_half_axes.is_none() {
             // Odd moments only affect the imaginary amplitude; their squared
             // contribution starts at sixth order. The omitted fourth-order
             // intensity term here is below f64 rounding at this threshold.
@@ -76,7 +92,7 @@ impl<'a> PolygonPupil<'a> {
     /// Fourier pupil transfer with exp(-i*q.r), normalized per square-root
     /// dqx dqy. Odd-blade pupils retain their nonzero imaginary transform.
     pub(super) fn normalized_amplitude(&self, q: [f64; 2]) -> C64 {
-        let amplitude = if dot(q, q) < 1.0e-8 {
+        let amplitude = if dot(q, q) < 1.0e-8 && self.rectangle_half_axes.is_none() {
             self.small_phase_transform(q, 0.0)
         } else {
             self.focused_transform(q)
@@ -85,6 +101,9 @@ impl<'a> PolygonPupil<'a> {
     }
 
     fn focused_transform(&self, q: [f64; 2]) -> C64 {
+        if let Some(axes) = self.rectangle_half_axes {
+            return C64::from_re(self.area * sinc(dot(q, axes[0])) * sinc(dot(q, axes[1])));
+        }
         let radius_squared = dot(q, q);
         let mut real = 0.0;
         let mut imaginary = 0.0;
@@ -122,6 +141,19 @@ impl<'a> PolygonPupil<'a> {
     /// two independent unit variates; no rejection loop or authored tail cutoff.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub(super) fn sample(&self, sample: [f64; 2]) -> ([f64; 2], f64) {
+        if let Some([a, b]) = self.rectangle_half_axes {
+            // Sample the two independent aperture phases, then transform by
+            // the inverse transpose. A narrow slit needs a broad frequency
+            // proposal in its narrow direction, not an isotropic blur radius.
+            let x = cauchy(sample[0]);
+            let y = cauchy(sample[1]);
+            let determinant = cross(a, b);
+            let q = [
+                (b[1] * x - a[1] * y) / determinant,
+                (a[0] * y - b[0] * x) / determinant,
+            ];
+            return (q, self.proposal_density(q));
+        }
         let component = sample[0] * self.frames as f64;
         let index = component as usize;
         let x = cauchy(component - index as f64);
@@ -165,6 +197,13 @@ impl<'a> PolygonPupil<'a> {
     }
 
     fn proposal_density(&self, q: [f64; 2]) -> f64 {
+        if let Some([a, b]) = self.rectangle_half_axes {
+            let x = dot(q, a) / PROPOSAL_SCALE;
+            let y = dot(q, b) / PROPOSAL_SCALE;
+            return cross(a, b) / (PI * PI * PROPOSAL_SCALE * PROPOSAL_SCALE)
+                * (1.0 / (1.0 + x * x))
+                * (1.0 / (1.0 + y * y));
+        }
         let mut density = 0.0;
         for index in 0..self.frames {
             let normal = self.normal(index);
@@ -363,6 +402,42 @@ mod tests {
             for phase in [-16.0, 0.0, 16.0] {
                 let weight = pupil.defocused_density(q, phase).unwrap() / proposal;
                 assert!(weight.is_finite() && weight >= 0.0);
+            }
+        }
+    }
+
+    /// G3: anisotropic importance sampling retains the complete sinc tails
+    /// and normalized power across slit aspect ratios and packet wavelengths.
+    #[test]
+    fn rectangular_proposal_conserves_spectral_power() {
+        const SAMPLES: u32 = 32_768;
+        for aspect in [1.0, 8.0, 256.0, 1024.0] {
+            let half = [1.0 / det::sqrt(1.0 + 1.0 / (aspect * aspect)), 0.0];
+            let a = rotate(half, 0.37);
+            let b = rotate([0.0, half[0] / aspect], 0.37);
+            let vertices = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]]
+                .map(|s| [s[0] * a[0] + s[1] * b[0], s[0] * a[1] + s[1] * b[1]]);
+            let pupil = PolygonPupil::rectangular(1.0, &vertices, [a, b]);
+            let mut totals = [0.0; 3];
+            for i in 0..SAMPLES {
+                let u = (f64::from(i) + 0.5) / f64::from(SAMPLES);
+                let v = f64::from(i.reverse_bits()) / 4_294_967_296.0 + 0.5 / f64::from(SAMPLES);
+                let (q, proposal) = pupil.sample([u, v]);
+                for (sum, ratio) in totals.iter_mut().zip([550.0 / 400.0, 1.0, 550.0 / 700.0]) {
+                    *sum += ratio * ratio * pupil.density(q.map(|v| ratio * v)) / proposal;
+                }
+            }
+            for total in totals {
+                assert!(
+                    (total / f64::from(SAMPLES) - 1.0).abs() < 0.005,
+                    "aspect {aspect}: {total}"
+                );
+            }
+            for sample in [[0.0; 2], [0.5; 2], [1.0_f64.next_down(); 2]] {
+                let (q, proposal) = pupil.sample(sample);
+                assert!(q.iter().all(|v| v.is_finite()));
+                assert!(proposal.is_finite() && proposal > 0.0);
+                assert!((pupil.density(q) / proposal).is_finite());
             }
         }
     }
