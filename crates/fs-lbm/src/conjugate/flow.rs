@@ -46,6 +46,7 @@ pub use material_momentum::{
 };
 mod phase_volume;
 pub use phase_volume::{
+    EndpointRheologyThermalVolumeMomentumStep,
     CoexistenceVolumeControls, CoexistenceVolumeInput, CoexistenceVolumeReport,
     CoexistenceVolumeStep, ConductiveResistiveThermalVolumeMomentumControls,
     ConductiveResistiveThermalVolumeMomentumStep, ConductiveThermalVolumeControls,

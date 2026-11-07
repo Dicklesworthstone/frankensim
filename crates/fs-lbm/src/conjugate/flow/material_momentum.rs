@@ -17,7 +17,9 @@ pub use resistance::{
     ResistiveMaterialMomentumAdvance, ResolvedPhaseResistanceMomentumStep,
 };
 mod viscous;
-pub(in crate::conjugate::flow) use viscous::PreparedMaterialViscosity;
+pub(in crate::conjugate::flow) use viscous::{
+    PreparedMaterialRheology, PreparedMaterialViscosity,
+};
 pub use viscous::{
     MaterialMomentumViscosityInput, MaterialViscosityControls, MaterialViscosityReport,
     ViscousMaterialMomentumAdvance,

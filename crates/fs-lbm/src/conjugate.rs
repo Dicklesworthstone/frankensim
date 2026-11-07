@@ -151,6 +151,7 @@ pub use energy::{
     SourceFaceContact, ThermalFace, ThermalSetup, solve_energy,
 };
 pub use flow::{
+    EndpointRheologyThermalVolumeMomentumStep,
     AdvectedMaterial, CoexistenceVolumeControls, CoexistenceVolumeInput, CoexistenceVolumeReport,
     CoexistenceVolumeStep, ConductiveResistiveThermalVolumeMomentumControls,
     ConductiveResistiveThermalVolumeMomentumStep, ConductiveThermalVolumeControls,

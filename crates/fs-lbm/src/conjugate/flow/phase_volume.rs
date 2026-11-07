@@ -24,6 +24,7 @@ pub use conduction::{
 };
 mod momentum;
 pub use momentum::{
+    EndpointRheologyThermalVolumeMomentumStep,
     ResistiveThermalVolumeMomentumControls, ResistiveThermalVolumeMomentumStep,
     ResolvedResistiveThermalVolumeMomentumStep, ResolvedViscousThermalVolumeMomentumStep,
     ThermalResistanceCouplingReport, ThermalVolumeMomentumControls, ThermalVolumeMomentumInput,

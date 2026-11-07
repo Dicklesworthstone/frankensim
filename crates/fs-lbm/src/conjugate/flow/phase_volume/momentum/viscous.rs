@@ -1,7 +1,9 @@
 //! Original shear and optional bulk stress heat the chart that owns material volume.
 
 mod rheology;
-pub use rheology::ResolvedViscousThermalVolumeMomentumStep;
+pub use rheology::{
+    EndpointRheologyThermalVolumeMomentumStep, ResolvedViscousThermalVolumeMomentumStep,
+};
 
 use super::*;
 use crate::conjugate::flow::material_momentum::PreparedMaterialViscosity;

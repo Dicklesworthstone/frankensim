@@ -2,14 +2,17 @@
 //! Existing entries retain 2 mu D; the bulk opt-in admits independent zeta.
 
 use super::super::density_projection::face_dual_mass;
-use super::super::{DensityMomentumReconstructionControls, StaggeredBoundaryPressure};
+use super::super::{
+    DensityMomentumReconstruction, DensityMomentumReconstructionControls, StaggeredBoundaryPressure,
+};
 use super::*;
 use crate::conjugate::simple::FvBoundary;
 pub use crate::conjugate::simple::viscous_heat::material_momentum::{
     MaterialViscosityControls, MaterialViscosityReport,
 };
 use crate::conjugate::simple::viscous_heat::material_momentum::{
-    NativeMaterialViscosityInput, kick,
+    NativeMaterialRheologyInput, NativeMaterialRheologyStep, NativeMaterialViscosityInput,
+    kick, kick_with_source,
 };
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_math::dd::Dd;
@@ -37,6 +40,16 @@ pub(in crate::conjugate::flow) struct PreparedMaterialViscosity {
     pub momentum_kg_m_s: Vec<[f64; 3]>,
     pub report: MaterialViscosityReport,
     pub reconstruction: DensityMomentumReconstructionReport,
+}
+
+/// One endpoint-rheology solve on original native material inertia.
+pub(in crate::conjugate::flow) struct PreparedMaterialRheology {
+    pub viscosity: PreparedMaterialViscosity,
+    /// Native physical rates at the accepted molecular endpoint, before
+    /// scattering to cells or applying pressure/material transport.
+    pub endpoint_shear_rate_per_s: Vec<f64>,
+    /// Includes initial and all post-sweep source resolutions.
+    pub source_updates: usize,
 }
 
 /// One atomic molecular-viscosity/force/pressure/material-advection candidate.
@@ -486,37 +499,8 @@ impl FlowField {
                 *mu = reference;
             }
         }
-        let mut face_mass: [Vec<f64>; 3] =
-            std::array::from_fn(|a| vec![0.0; reconstructed.field.face_arrays()[a].len()]);
-        for c in 0..n {
-            poll_every(gate, c)?;
-            if !domain.is_fluid(c) {
-                continue;
-            }
-            for (a, masses) in face_mass.iter_mut().enumerate() {
-                let face = 2 * a + 1;
-                if let Some(neighbor) = domain.neighbor(c, face).filter(|&p| domain.is_fluid(p)) {
-                    let (slot, _) = reconstructed.field.slot(domain, c, face);
-                    masses[slot] = face_dual_mass(
-                        domain,
-                        &reconstructed.density_kg_m3,
-                        c,
-                        face,
-                        Some(neighbor),
-                    );
-                }
-                if pressure_mouth_axis == Some(a) {
-                    for side in 0..2 {
-                        let f = 2 * a + side;
-                        if domain.neighbor(c, f).is_none() {
-                            let (slot, _) = reconstructed.field.slot(domain, c, f);
-                            masses[slot] =
-                                face_dual_mass(domain, &reconstructed.density_kg_m3, c, f, None);
-                        }
-                    }
-                }
-            }
-        }
+        let face_mass =
+            material_viscosity_face_masses(domain, &reconstructed, pressure_mouth_axis, gate)?;
         let viscous = kick(
             domain,
             NativeMaterialViscosityInput {
@@ -539,6 +523,121 @@ impl FlowField {
             reconstruction: reconstructed.report,
         })
     }
+
+    /// Resolve generalized-Newtonian shear and independent bulk response on
+    /// the exact retained native endpoint velocity. Source owners validate
+    /// their phase/chart/context and retain receipts in the callback.
+    ///
+    /// Both returned coefficient vectors have one slot per voxel; immobile
+    /// slots are ignored. All native coupled sweeps, Krylov work, physical
+    /// impulse, heat and numerical losses belong to this ONE original M/P
+    /// solve. No scattered-cell velocity is inverted to obtain source rates.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::conjugate::flow) fn prepare_material_rheology_with_source(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        pressure_mouth_axis: Option<usize>,
+        mass_kg: &[f64],
+        momentum_kg_m_s: &[[f64; 3]],
+        boundaries: [FvBoundary; 6],
+        reconstruction_controls: DensityMomentumReconstructionControls,
+        duration_s: f64,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
+        resolve: impl FnMut(&[f64]) -> Result<(Vec<f64>, Vec<f64>), ChtError>,
+    ) -> Result<PreparedMaterialRheology, ChtError> {
+        poll(gate)?;
+        let n = domain.cell_count();
+        if n > viscosity_controls.max_cells
+            || n > reconstruction_controls.max_cells
+            || mass_kg.len() != n
+        {
+            return Err(refuse("rheology needs bounded original inventory"));
+        }
+        finite_positive("flow.viscosity_duration", duration_s)?;
+        let reconstructed = self.reconstruct_material_momentum(
+            domain,
+            faces,
+            mass_kg,
+            momentum_kg_m_s,
+            reconstruction_controls,
+            gate,
+        )?;
+        let face_mass =
+            material_viscosity_face_masses(domain, &reconstructed, pressure_mouth_axis, gate)?;
+        let NativeMaterialRheologyStep {
+            viscosity,
+            endpoint_shear_rate_per_s,
+            source_updates,
+        } = kick_with_source(
+            domain,
+            NativeMaterialRheologyInput {
+                field: &reconstructed.field,
+                mass_kg,
+                momentum_kg_m_s,
+                face_mass_kg: face_mass,
+                boundaries,
+                pressure_mouth_axis,
+                duration_s,
+            },
+            viscosity_controls,
+            gate,
+            resolve,
+        )?;
+        Ok(PreparedMaterialRheology {
+            viscosity: PreparedMaterialViscosity {
+                momentum_kg_m_s: viscosity.momentum_kg_m_s,
+                report: viscosity.report,
+                reconstruction: reconstructed.report,
+            },
+            endpoint_shear_rate_per_s,
+            source_updates,
+        })
+    }
+}
+
+/// Original density-projection half-cell inertia, shared by frozen and
+/// endpoint constitutive preparation without another M/P reconstruction.
+fn material_viscosity_face_masses(
+    domain: &VoxelDomain,
+    reconstructed: &DensityMomentumReconstruction,
+    pressure_mouth_axis: Option<usize>,
+    gate: &CancelGate,
+) -> Result<[Vec<f64>; 3], ChtError> {
+    let n = domain.cell_count();
+    let mut face_mass: [Vec<f64>; 3] =
+        std::array::from_fn(|a| vec![0.0; reconstructed.field.face_arrays()[a].len()]);
+    for c in 0..n {
+        poll_every(gate, c)?;
+        if !domain.is_fluid(c) {
+            continue;
+        }
+        for (a, masses) in face_mass.iter_mut().enumerate() {
+            let face = 2 * a + 1;
+            if let Some(neighbor) = domain.neighbor(c, face).filter(|&p| domain.is_fluid(p)) {
+                let (slot, _) = reconstructed.field.slot(domain, c, face);
+                masses[slot] = face_dual_mass(
+                    domain,
+                    &reconstructed.density_kg_m3,
+                    c,
+                    face,
+                    Some(neighbor),
+                );
+            }
+            if pressure_mouth_axis == Some(a) {
+                for side in 0..2 {
+                    let f = 2 * a + side;
+                    if domain.neighbor(c, f).is_none() {
+                        let (slot, _) = reconstructed.field.slot(domain, c, f);
+                        masses[slot] =
+                            face_dual_mass(domain, &reconstructed.density_kg_m3, c, f, None);
+                    }
+                }
+            }
+        }
+    }
+    Ok(face_mass)
 }
 
 #[cfg(test)]

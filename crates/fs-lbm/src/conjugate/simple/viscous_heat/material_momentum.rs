@@ -4,6 +4,12 @@
 //! predictor uses actual M/V face inertia and either the original 2 mu D stress
 //! or the explicit independent-bulk response 2 mu dev(D) + zeta div(u) I.
 //! Both retain harmonic material jumps, half-cell walls and matching heat.
+//! The source opt-in resolves viscosity at the accepted native endpoint shear.
+
+mod rheology;
+pub(in crate::conjugate) use rheology::{
+    NativeMaterialRheologyInput, NativeMaterialRheologyStep, kick_with_source,
+};
 
 use super::*;
 use fs_material::fluid_transport::viscous::NewtonianViscosity;
@@ -14,7 +20,9 @@ use fs_math::dd::Dd;
 pub struct MaterialViscosityControls {
     pub max_cells: usize,
     /// Each sweep uses the original three momentum solves, each bounded by
-    /// its native 20,000 Krylov iterations, and one frozen residual readback.
+    /// its native 20,000 Krylov iterations, and one same-velocity residual
+    /// readback. The endpoint-rheology entry refreshes its exact source
+    /// coefficients before that readback; this bounds the entire native solve.
     pub max_sweeps: usize,
     pub relative_tolerance: f64,
     pub maximum_impulse_defect_kg_m_s: f64,
@@ -174,12 +182,25 @@ fn torque(position: [f64; 3], impulse: [Dd; 3]) -> [Dd; 3] {
     ]
 }
 
-#[allow(clippy::too_many_lines)] // one bounded native solve and acceptance
 pub(in crate::conjugate) fn kick(
     domain: &VoxelDomain,
     input: NativeMaterialViscosityInput<'_>,
     controls: MaterialViscosityControls,
     gate: &CancelGate,
+) -> Result<NativeMaterialViscosityStep, ChtError> {
+    kick_with_refresh(domain, input, controls, gate, |_| Ok(()))
+}
+
+/// Retain one original native time level through every coupled sweep.
+/// The frozen owner supplies a no-op; a constitutive owner refreshes exact
+/// endpoint coefficients before all three residual rows and the same audit.
+#[allow(clippy::too_many_lines)]
+fn kick_with_refresh(
+    domain: &VoxelDomain,
+    input: NativeMaterialViscosityInput<'_>,
+    controls: MaterialViscosityControls,
+    gate: &CancelGate,
+    mut refresh: impl FnMut(&mut Solver<'_>) -> Result<(), ChtError>,
 ) -> Result<NativeMaterialViscosityStep, ChtError> {
     poll(gate)?;
     let n = domain.cell_count();
@@ -221,25 +242,7 @@ pub(in crate::conjugate) fn kick(
     );
     solver.set_material_transport(input.viscosity_pa_s, None, gate)?;
     if let Some(bulk) = input.bulk_viscosity_pa_s {
-        solver.molecular_bulk_viscosity = vec![0.0; n];
-        for (cell, &value) in bulk.iter().enumerate() {
-            if cell % 256 == 0 {
-                poll(gate)?;
-            }
-            if !domain.is_fluid(cell) {
-                continue;
-            }
-            let law = NewtonianViscosity::new(input.viscosity_pa_s[cell], value)
-                .map_err(|error| ChtError::InvalidInput {
-                    field: "flow.bulk_viscosity_source",
-                    reason: format!("cell {cell}: {error}"),
-                })?;
-            finite_positive(
-                "flow.longitudinal_viscosity",
-                (4.0 / 3.0) * law.shear_viscosity_pa_s() + law.bulk_viscosity_pa_s(),
-            )?;
-            solver.molecular_bulk_viscosity[cell] = law.bulk_viscosity_pa_s();
-        }
+        set_bulk_viscosity(&mut solver, input.viscosity_pa_s, bulk, gate)?;
     }
     solver.pressure_work_axis = input.pressure_mouth_axis;
     // This is only molecular diffusion. The enclosing owner subsequently
@@ -287,6 +290,7 @@ pub(in crate::conjugate) fn kick(
         older: None,
         face_mass_kg: Some(face_mass),
     });
+    refresh(&mut solver)?;
     let mut relative = f64::INFINITY;
     let mut residual_impulse = f64::INFINITY;
     for sweep in 1..=controls.max_sweeps {
@@ -296,6 +300,7 @@ pub(in crate::conjugate) fn kick(
             solver.momentum(a, true, gate)?;
         }
         solver.guard_finite()?;
+        refresh(&mut solver)?;
         let mut rms = 0.0_f64;
         let mut absolute = Dd::ZERO;
         // All three residuals see the SAME final coupled velocity, including
@@ -335,6 +340,41 @@ pub(in crate::conjugate) fn kick(
         residual_impulse,
         gate,
     )
+}
+
+/// Refresh independent bulk response while retaining the original time level
+/// and the complete existing shear/volumetric operator. Solid slots are inert.
+fn set_bulk_viscosity(
+    solver: &mut Solver<'_>,
+    shear: &[f64],
+    bulk: &[f64],
+    gate: &CancelGate,
+) -> Result<(), ChtError> {
+    let n = solver.domain.cell_count();
+    if shear.len() != n || bulk.len() != n {
+        return Err(refuse("shear and bulk viscosity must match the original grid"));
+    }
+    solver.molecular_bulk_viscosity.resize(n, 0.0);
+    for (cell, &value) in bulk.iter().enumerate() {
+        if cell % 256 == 0 {
+            poll(gate)?;
+        }
+        if !solver.domain.is_fluid(cell) {
+            solver.molecular_bulk_viscosity[cell] = 0.0;
+            continue;
+        }
+        let law = NewtonianViscosity::new(shear[cell], value)
+            .map_err(|error| ChtError::InvalidInput {
+                field: "flow.bulk_viscosity_source",
+                reason: format!("cell {cell}: {error}"),
+            })?;
+        finite_positive(
+            "flow.longitudinal_viscosity",
+            (4.0 / 3.0) * law.shear_viscosity_pa_s() + law.bulk_viscosity_pa_s(),
+        )?;
+        solver.molecular_bulk_viscosity[cell] = law.bulk_viscosity_pa_s();
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]

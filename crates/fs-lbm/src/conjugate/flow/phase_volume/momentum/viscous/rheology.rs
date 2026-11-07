@@ -1,5 +1,8 @@
 //! Native physical shear and original phase sources on evolving liquid density.
 
+mod endpoint;
+pub use endpoint::EndpointRheologyThermalVolumeMomentumStep;
+
 use super::*;
 use crate::conjugate::FvBoundary;
 use crate::conjugate::flow::poll_every;

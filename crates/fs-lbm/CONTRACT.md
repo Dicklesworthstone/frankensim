@@ -12712,6 +12712,25 @@ momentum solve. This couples temperature-dependent viscosity within the existing
 first-order split; it does not claim simultaneous endpoint shear rheology,
 unconditional fixed-point convergence or an inferred bulk constitutive law.
 
+The endpoint shear-rheology entry
+`advance_piecewise_thermal_volume_momentum_with_endpoint_rheology` resolves the
+original phase/material source on each native coupled momentum sweep. Its
+physical RMS deviatoric rate is measured on the retained MAC velocity before
+impulse scatter; source shear and independent bulk viscosities are refreshed
+before all three nonlinear momentum residuals and the molecular heat audit.
+Original time levels and actual M/V face inertia remain fixed throughout.
+Acceptance requires both the relative row residual and the absolute physical
+impulse residual, plus the existing angular-impulse and energy budgets. A small
+coefficient change alone is not an acceptance criterion. Physical heat and wall
+work use the same final coefficients; backward-Euler and scatter losses stay
+separate. The original thermal phase is held for this constitutive solve, then
+physical heat, pressure and conservative material transport advance once.
+Retained endpoint rates, original source receipts and total source-update counts
+make the operating point explicit. The original viscosity sweep limit bounds
+the complete nonlinear solve, and source, support, work or cancellation refusal
+publishes no endpoint. No rate cutoff, extrapolation or phase resistance is
+introduced; this entry requires fully liquid mobile material.
+
 Four source-bound regressions cover graded actual inertia distinct from source
 reference density, original liquid-viscosity changes, moving-wall work and
 physical heat, current-state reconstruction, quiescent compatibility and atomic

@@ -3,7 +3,10 @@
 mod viscous;
 #[cfg(feature = "implicit-enthalpy-coupling")]
 pub(in crate::conjugate::flow) use viscous::admit_viscous_thermal_input;
-pub use viscous::{ResolvedViscousThermalVolumeMomentumStep, ViscousThermalVolumeMomentumStep};
+pub use viscous::{
+    EndpointRheologyThermalVolumeMomentumStep, ResolvedViscousThermalVolumeMomentumStep,
+    ViscousThermalVolumeMomentumStep,
+};
 mod resistance;
 pub use resistance::{
     ResistiveThermalVolumeMomentumControls, ResistiveThermalVolumeMomentumStep,
