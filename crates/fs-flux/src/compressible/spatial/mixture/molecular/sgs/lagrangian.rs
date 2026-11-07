@@ -9,7 +9,7 @@
 //! diffusive mass and carry their own referenced enthalpy; no separate viscous
 //! or chemical heat source is added.
 //!
-//! Only the complete nonreacting physical interval commits the history and its
+//! Only the complete physical interval commits the history and its
 //! report. Internal molecular clocks and rejected intervals cannot age it. The
 //! next sample uses the previous ACTUAL accepted duration, including shortening.
 //! This is first-order pathline/coefficient integration with an explicit memory
@@ -61,7 +61,7 @@ enum LagrangianConfig {
 
 // The complete physical split detaches exactly one trajectory owner. The
 // independent variant owns all three histories and cannot advance one alone.
-pub(in crate::compressible::spatial::mixture::molecular) enum LagrangianFilter {
+pub(in crate::compressible::spatial::mixture) enum LagrangianFilter {
     Momentum(LagrangianDynamicSgs),
     Species(LagrangianDynamicComponents),
 }
@@ -89,14 +89,14 @@ impl LagrangianFilter {
     }
 }
 
-pub(in crate::compressible::spatial::mixture::molecular) type LagrangianReports = (
+pub(in crate::compressible::spatial::mixture) type LagrangianReports = (
     DynamicSgsReport,
     Option<DynamicScalarReport>,
     Option<DynamicScalarReport>,
 );
 
 /// The borrow belongs only to the detached history, leaving face scratch free.
-pub(in crate::compressible::spatial::mixture::molecular) enum LagrangianTrial<'a> {
+pub(in crate::compressible::spatial::mixture) enum LagrangianTrial<'a> {
     Momentum(LagrangianSgsTrial<'a>),
     Species(LagrangianComponentsTrial<'a>),
 }
@@ -109,7 +109,7 @@ impl LagrangianTrial<'_> {
         }
     }
 
-    pub(in crate::compressible::spatial::mixture::molecular) fn reports(
+    pub(in crate::compressible::spatial::mixture) fn reports(
         &self,
     ) -> LagrangianReports {
         match self {
@@ -152,7 +152,7 @@ impl LagrangianTrial<'_> {
         }
     }
 
-    pub(in crate::compressible::spatial::mixture::molecular) fn commit(self) {
+    pub(in crate::compressible::spatial::mixture) fn commit(self) {
         match self {
             Self::Momentum(trial) => trial.commit(),
             Self::Species(trial) => trial.commit(),

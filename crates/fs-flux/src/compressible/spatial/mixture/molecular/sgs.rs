@@ -47,7 +47,7 @@ use fs_qty::Temperature;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
 mod dynamic;
-mod lagrangian;
+pub(in crate::compressible::spatial::mixture) mod lagrangian;
 pub use lagrangian::{
     LagrangianComponentsConfig, LagrangianScalarConfig, MixtureLagrangianSpeciesSubgridConfig,
     MixtureLagrangianSubgridConfig,

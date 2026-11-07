@@ -2,6 +2,8 @@ use super::*;
 
 mod driving;
 mod inertia;
+#[cfg(feature = "experimental-sgs")]
+mod lagrangian;
 mod navier_slip;
 mod stabilized;
 mod timed;

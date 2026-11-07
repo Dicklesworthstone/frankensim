@@ -7829,6 +7829,42 @@ completed; these gas integration tests were not compiled or executed here.
 Periodic-domain, smooth-field, exploration-only and unqualified turbulence/model
 boundaries remain; no wall/inflow memory or compressible SGS-energy model is added.
 
+### Lagrangian turbulence in the complete reacting mixture step
+
+`ReactingEuler3d::attach_lagrangian_dynamic_sgs` and
+`attach_lagrangian_dynamic_species_sgs` attach fresh periodic histories to
+the original borrowed molecular operator. The latter fits momentum,
+temperature and a common all-species Germano objective independently.
+The complete diffusion/chemistry/advection/chemistry/diffusion transaction
+samples the accepted physical START state once. Every chemistry solve,
+molecular SSP/RKL stage and whole-interval retry uses those held fits;
+only complete physical acceptance publishes histories and fit reports.
+The next sample uses the actual elapsed accepted duration.
+
+The original chemical mechanism, finite-rate source integration,
+Maxwell--Stefan/Soret/Dufour fluxes, evolving heat capacities, mass-frame
+closure and referenced species enthalpies remain with their existing
+owners. This supplies subgrid transport alongside resolved finite-rate
+chemistry; it does not model turbulent reaction rates, unresolved flame
+structure, scalar variance, SGS energy or shock interaction.
+
+Attachment validates gas/grid/boundary ownership and complete current
+reactor/operator capacities before publishing anything. Detached history
+remains included in the byte budget; the added payload remains 216
+bytes/cell for fixed transport ratios or 448 bytes/cell for three
+independent histories, without species-count-dependent storage.
+Cancellation and refusal preserve the prior accepted physical state,
+loads, sample time and all fit reports. Public reports live on the
+molecular operator that owns the history. Standalone molecular steps
+cannot advance it outside a prepared physical interval.
+
+Focused regression sources cover active finite-rate reaction and
+conservative balances, accepted-start sampling, shortened/rejected
+intervals and cancellation replay, source/budget refusals, fixed-ratio
+compatibility and the zero-fit molecular limit. Source review and pinned
+Rust formatting/parsing completed; the full consumer test target was
+not compiled or executed in the constrained environment.
+
 ### Independent Lagrangian heat and species mixing in evolving mixtures
 
 `MolecularEuler3d::with_lagrangian_dynamic_species_sgs` accepts

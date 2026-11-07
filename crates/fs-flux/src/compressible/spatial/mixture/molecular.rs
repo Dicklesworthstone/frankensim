@@ -48,6 +48,8 @@ pub use stabilized::StabilizedMolecularReport;
 pub mod sgs;
 #[cfg(feature = "experimental-sgs")]
 use sgs::SubgridTransport;
+#[cfg(feature = "experimental-sgs")]
+mod reactive_lagrangian;
 
 /// Molecular behavior of one physical reflecting wall, in three dimensions.
 /// The original public path retains the shared planar/spatial wall condition.

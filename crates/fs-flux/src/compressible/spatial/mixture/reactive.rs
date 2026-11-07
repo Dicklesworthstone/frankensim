@@ -592,8 +592,74 @@ impl ReactingEuler3d {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, unused_mut)]
     fn step_impl<L: TransportLaw>(
+        &mut self,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        mut operator: Option<&mut MolecularTransport3d<L>>,
+        dissipation_controls: DissipationControl,
+        maximum_workspace_bytes: usize,
+        forcing: Option<forcing::Context<'_, '_>>,
+        stabilization: Option<&mut StepWork>,
+        accelerations: &[WallAcceleration3d],
+        profiles: Option<&mut Context<'_>>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveStepReport3d, ReactiveError> {
+        #[cfg(feature = "experimental-sgs")]
+        if let Some(mut filter) = operator
+            .as_deref_mut()
+            .and_then(MolecularTransport3d::take_lagrangian_history)
+        {
+            // One accepted START sample precedes the entire D/C/A/C/D split.
+            // The detached trial borrows only history, so both native molecular
+            // halves can use the same held coefficients while chemistry changes
+            // current temperature/composition. Rejected complete trials never
+            // resample, and no fallible work follows flow/history acceptance.
+            let result: Result<_, ReactiveError> = (|| {
+                let trial = operator
+                    .as_deref_mut()
+                    .expect("the reacting Lagrangian operator was just selected")
+                    .prepare_lagrangian_history(&mut filter, &self.accepted, &mut cancelled)?;
+                let fit = trial.reports();
+                let report = self.step_prepared(
+                    maximum_duration,
+                    controls,
+                    operator.as_deref_mut(),
+                    dissipation_controls,
+                    maximum_workspace_bytes,
+                    forcing,
+                    stabilization,
+                    accelerations,
+                    profiles,
+                    &mut cancelled,
+                )?;
+                trial.commit();
+                Ok((report, fit))
+            })();
+            let committed_fit = result.as_ref().ok().map(|(_, fit)| *fit);
+            operator
+                .as_deref_mut()
+                .expect("a reacting step retains its original Lagrangian operator")
+                .restore_lagrangian_history(filter, committed_fit);
+            return result.map(|(report, _)| report);
+        }
+        self.step_prepared(
+            maximum_duration,
+            controls,
+            operator,
+            dissipation_controls,
+            maximum_workspace_bytes,
+            forcing,
+            stabilization,
+            accelerations,
+            profiles,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_prepared<L: TransportLaw>(
         &mut self,
         maximum_duration: Time,
         controls: ReactiveStepControl,
