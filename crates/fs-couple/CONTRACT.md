@@ -4788,7 +4788,7 @@ new native integration tests remain unrun in the full dependency build.
 ### Heat exchange through retained finite porous gas cavities
 
 `solid_enthalpy::finite_plastic::porous::cavity::heat::ThermalPorousGasSystem`
-retains original ideal-gas inventories, actual prepared closed cavities,
+retains original ideal or Peng--Robinson gas inventories, actual prepared closed cavities,
 finite thermal porous solid history and explicit fixed gas-wall conductances.
 This adds heat transfer to the native finite-geometry compression path. It
 does not replace the source calorics, material return map, pressure tangent,
@@ -4917,3 +4917,38 @@ With `experimental-shock-loading`, `cavity_phs::piston::material::resolved::Mate
 Frozen and evolving-mixture entries delegate the original free or suspended piston solves unchanged. Mixture contact-equilibrium variants retain caller-owned scratch and the native signed/absolute numerical-defect account. Source calorics, species references, midpoint pressure impulse/work, spring storage, damping loss, acceptance budgets and final publication retain their existing owners. Duration arguments are upper bounds; native reports supply the accepted interval. Cancellation and refusal preserve all accepted physical state.
 
 The retained body is a guided rigid axial specimen: gas heating does not re-query density or silently heat the wall, and rotational inertia is not substituted for total translational mass. This binding does not supply shell deformation, changing area or multidimensional FSI. Three focused regression definitions cover source-density response and native frozen/suspended identity, all four mixture report/field paths, and warmed-state final cancellation/refusal/retry. They are authored but have not been compiled or executed in the unavailable session executor.
+
+
+#### Native real-gas heat and retained compression
+
+
+The retained gas-wall heat owner is parameterized by the original gas parcel:
+`ThermalPorousGasSystem<'a, G = ClosedGasParcel>` and its cavity/candidate/report
+types preserve the ideal default and also admit `ClosedRealGasParcel`.
+The tiny sealed `ThermalCavityGas` seam adds only original temperature, conserved
+mass and native fixed-volume `add_heat` to `AdiabaticCavityGas`. Both owners
+return the same original `GasHeatStep` and `GasEnergyError`; zero-heat behavior,
+caloric energy datums, cancellation and atomic refusal remain native. Dense
+Peng--Robinson parcels retain their actual density-dependent caloric departures,
+homogeneous-phase admission and acoustic `rho*c^2`; no ideal or constant-Cv
+approximation enters the heat solve. The shared geometry anchors, nonlinear
+heat closure, wall observer and complete energy accounts are unchanged.
+
+
+Two focused coupled regressions in
+`tests/finite_porous_enthalpy/cavity/heat/real_gas.rs` use independent pure-fluid
+PR Helmholtz derivatives. A finite gas/wall heat balance checks density-dependent
+caloric storage, the true acoustic bulk modulus and invariance under a 1e24 J/kg
+formation-energy shift. A retained two-interval heated compression checks each
+new physical entropy epoch, density-dependent work, original inventory and
+source identities, geometric volume agreement and source-failure rollback.
+The fixtures are explicitly synthetic, not measured methane calibration.
+
+An independent scalar calculation gives the rigid fixture gas temperature
+300.742136567 K and wall temperature 300.253455915 K; signed gas and wall energy
+changes are -0.529154483 J and +0.549154483 J for +0.02 J external heat. Its
+acoustic bulk modulus differs from gamma times pressure by about 8.6 percent,
+so an ideal-gas stiffness substitution is detectable. These reference
+calculations and source reviews do not replace native execution: the host
+remained unavailable, including a final bounded compiler-availability check.
+No new formatting, compilation or native regression pass is claimed.

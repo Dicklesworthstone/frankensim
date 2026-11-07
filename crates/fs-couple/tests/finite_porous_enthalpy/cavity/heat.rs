@@ -1,4 +1,7 @@
 //! Physical heat exchange on retained finite compression histories.
+#[path = "heat/real_gas.rs"]
+mod real_gas;
+
 use super::*;
 use fs_couple::solid_enthalpy::finite_plastic::porous::cavity::heat::{
     CavityHeatError, CavityHeatObserverError, CavityHeatSolve, CavityWallHeatLink,

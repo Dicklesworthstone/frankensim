@@ -14,8 +14,13 @@
 //! Supplied total conductances [W/K] are explicit fixed links. They do not infer
 //! conductivity, exposed area, moving geometry, convection or pore-fluid flow.
 //! Native solid transport and all original observer hooks remain active.
+//! Original ideal or homogeneous Peng--Robinson parcels supply rigid heating,
+//! direct caloric work, phase-domain admission and true acoustic stiffness.
 
+mod gas;
 mod observer;
+
+pub use gas::ThermalCavityGas;
 
 use super::{
     FiniteThermalPorousCavitiesEnergy, FiniteThermalPorousCavityEquilibrium,
@@ -50,11 +55,11 @@ use std::sync::Arc;
 
 use observer::WallObserver;
 
-/// One original well-mixed ideal-gas inventory and its exact prepared chamber.
+/// One original ideal or Peng--Robinson inventory and its exact prepared chamber.
 #[derive(Clone, Debug)]
-pub struct ThermalPorousGasCavity {
+pub struct ThermalPorousGasCavity<G = ClosedGasParcel> {
     pub cavity: Arc<ClosedTetCavity>,
-    pub gas: ClosedGasParcel,
+    pub gas: G,
     pub exterior_pressure_pa: f64,
     pub entropy: GasEntropySolve,
 }
@@ -156,9 +161,9 @@ pub struct CavityGasHeatBalance {
 }
 
 /// Original native work/heat receipts and independently checked internal exchange.
-pub struct CavityHeatBalance {
+pub struct CavityHeatBalance<G = ClosedGasParcel> {
     pub native: FiniteThermoplasticReport<
-        FiniteThermalPorousCavityEquilibrium<CavityGasEpoch>,
+        FiniteThermalPorousCavityEquilibrium<CavityGasEpoch<G>>,
         FiniteThermalPorousCavitiesEnergy,
     >,
     pub gases: Vec<CavityGasHeatBalance>,
@@ -177,31 +182,31 @@ pub struct CavityHeatBalance {
 }
 
 /// Retained physical gas inventories, compaction history and explicit heat links.
-pub struct ThermalPorousGasSystem<'a> {
+pub struct ThermalPorousGasSystem<'a, G = ClosedGasParcel> {
     solid: FiniteThermalPorousSolid<'a>,
-    cavities: Vec<ThermalPorousGasCavity>,
+    cavities: Vec<ThermalPorousGasCavity<G>>,
     links: Vec<CavityWallHeatLink>,
 }
 
 /// Commit thermal, solid, gas and original observer histories together.
-pub struct CavityHeatCandidate<'a, 't, O> {
+pub struct CavityHeatCandidate<'a, 't, O, G = ClosedGasParcel> {
     pub thermal: DepositionSimulation<'t>,
-    pub system: ThermalPorousGasSystem<'a>,
+    pub system: ThermalPorousGasSystem<'a, G>,
     pub observer: O,
-    pub balance: CavityHeatBalance,
+    pub balance: CavityHeatBalance<G>,
     pub nonlinear: NewtonReport,
     pub trials: usize,
 }
 
-struct Trial<'a, 't, O> {
+struct Trial<'a, 't, O, G> {
     thermal: DepositionSimulation<'t>,
     solid: FiniteThermalPorousSolid<'a>,
     observer: O,
-    gases: Vec<ClosedGasParcel>,
-    balance: CavityHeatBalance,
+    gases: Vec<G>,
+    balance: CavityHeatBalance<G>,
 }
 
-impl<'a> ThermalPorousGasSystem<'a> {
+impl<'a, G: ThermalCavityGas> ThermalPorousGasSystem<'a, G> {
     /// Bind 1..=64 independent cavities and at most 16,384 explicit heat links.
     ///
     /// Gas volumes must equal actual accepted geometric volumes. Cavity faces
@@ -211,7 +216,7 @@ impl<'a> ThermalPorousGasSystem<'a> {
     pub fn try_new(
         solid: FiniteThermalPorousSolid<'a>,
         thermal: &DepositionSimulation<'_>,
-        cavities: Vec<ThermalPorousGasCavity>,
+        cavities: Vec<ThermalPorousGasCavity<G>>,
         mut links: Vec<CavityWallHeatLink>,
         cx: &Cx<'_>,
     ) -> Result<Self, CavityHeatError> {
@@ -270,7 +275,7 @@ impl<'a> ThermalPorousGasSystem<'a> {
     }
 
     pub fn solid(&self) -> &FiniteThermalPorousSolid<'a> { &self.solid }
-    pub fn cavities(&self) -> &[ThermalPorousGasCavity] { &self.cavities }
+    pub fn cavities(&self) -> &[ThermalPorousGasCavity<G>] { &self.cavities }
     pub fn links(&self) -> &[CavityWallHeatLink] { &self.links }
     pub fn time_s(&self) -> f64 { self.solid.time_s() }
 
@@ -303,7 +308,7 @@ impl<'a> ThermalPorousGasSystem<'a> {
         initial_heat_j: &[f64],
         controls: CavityHeatSolve,
         cx: &Cx<'_>,
-    ) -> Result<CavityHeatCandidate<'a, 't, O>, CavityHeatError<O::Error>> {
+    ) -> Result<CavityHeatCandidate<'a, 't, O, G>, CavityHeatError<O::Error>> {
         poll(cx)?;
         let count = self.cavities.len();
         let tolerance = controls.energy_tolerance_j;
@@ -356,7 +361,7 @@ impl<'a> ThermalPorousGasSystem<'a> {
                 let heating = gas.add_heat(
                     q, controls.gas, || cx.checkpoint().is_err(),
                 ).map_err(CavityHeatError::Gas)?;
-                temperatures.push(gas.state().state().temperature);
+                temperatures.push(gas.temperature_k());
                 rigid_energy.push(heating.stored_energy_change_j);
                 epochs.push(anchor.with_gas_at_anchor(gas, cx)
                     .map_err(CavityHeatError::Geometry)?);
