@@ -12052,3 +12052,35 @@ isentropic. It does not add gas-wall heat exchange, gas momentum/acoustic
 propagation, pore-fluid transport, contact or evolving conductance. Existing
 P1 locking, thermal-law domain, associated compaction and homogeneous gas-phase
 admission limits remain explicit.
+
+## Current-area pressure in finite thermal plastic shaping
+
+`hyper3::plastic::thermal::FiniteThermoplasticTetSolid::advance_with_pressure`
+uses the original closed tetrahedral pressure surface in every nonlinear trial.
+Its follower force and tangent act on the current deformed area while the native
+thermal J2/Voce/tabulated, creep or overstress material retains its complete
+finite plastic history. The same prepared reference geometry and optional
+consistent reference inertia remain the mechanical owners; a foreign pressure
+surface is refused before solving.
+
+The returned pressure account retains original path work, endpoint work and
+their signed geometric correction. Uniform held pressure uses exact
+`-p delta(V)`; other pressure fields retain their original potential or
+declared displacement-path convention. Combined balance includes actual pressure
+work and its correction once. The sum of absolute material and pressure
+integration defects must fit the caller's work budget, so opposing defects
+cannot hide each other. Physical plastic/creep and reversible thermal heat are
+unchanged; neither pressure quadrature correction nor numerical inertia heats
+the material. The existing unpressured entry point preserves its solve and
+arithmetic path.
+
+Two G1/G3 regression definitions use independent finite coaxial equations for
+pressure-driven loading, heating and release with retained shape, pressure
+volume work and reciprocal heat, and for motion with an independent P1 kinetic
+integral, original mass and transactional refusal/retry. Independent fixture
+arithmetic was checked in JavaScript. The execution host became unavailable;
+Rust formatting, compilation and native regression execution were not performed.
+This remains the native bounded P1 finite-strain model with held interval
+pressure, explicit reference transport geometry and its original locking and
+constitutive limits; contact tooling, mesh adaptation and experimental forming
+validation are separate capabilities.

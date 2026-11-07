@@ -3,6 +3,9 @@
 #[path = "hyper_plastic_thermal/nodal_density.rs"]
 mod nodal_density;
 
+#[path = "hyper_plastic_thermal/pressure.rs"]
+mod pressure;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::plastic::finite::thermal::{

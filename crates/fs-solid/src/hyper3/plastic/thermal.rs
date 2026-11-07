@@ -19,7 +19,8 @@
 //! original momentum solve as fixed-temperature finite plasticity. This module
 //! does not infer density from a source or update mass with thermal expansion.
 //! It retains the parent P1 locking limitations, and supplies no evolving
-//! conductance, follower loads, phase change, contact or new thermal solver.
+//! conductance, phase change, contact or new thermal solver. Held follower
+//! pressure reuses the original current-area load, tangent and path-work owner.
 
 use std::sync::Arc;
 
@@ -31,6 +32,7 @@ use fs_material::plastic::finite::thermal::{
     AffineThermalFiniteJ2, FiniteJ2ThermalError, FiniteJ2ThermalIncrement, FiniteThermalJ2Material,
     FrozenThermalFiniteJ2,
 };
+use fs_math::dd::Dd;
 
 use super::super::{
     HyperTetError, HyperTetProblem, HyperTetSettings, HyperTetSolution, HyperelasticLawField,
@@ -40,6 +42,7 @@ use super::{
     FinitePlasticTetError, FinitePlasticTetState, IDENTITY, checkpoint, energy_gate, invalid,
     reference_size, validate_controls,
 };
+use crate::hyper3::pressure::{ClosedTetPressureSurface, TetPressure};
 use crate::inertia::{BackwardEulerInertia, P1ReferenceMass};
 use crate::linear3::TetAssemblyBudget;
 
@@ -47,6 +50,8 @@ use crate::linear3::TetAssemblyBudget;
 pub use super::dynamics::FinitePlasticMotionControls as FiniteThermoplasticControls;
 /// Shared kinetic account; numerical loss is never caloric deposition.
 pub use crate::inertia::InertialEnergy;
+/// Shared held-pressure work account; no constitutive or caloric state.
+pub use super::porous::FinitePorousPressureEnergy as FiniteThermoplasticPressureWork;
 
 /// Zero-duration momentum transfer with complete thermal and plastic memory.
 pub mod impulse;
@@ -174,6 +179,9 @@ pub struct FiniteThermoplasticTetStep<'a, L: FiniteThermalJ2Material = AffineThe
     pub element_energy: Vec<FiniteThermoplasticElementEnergy>,
     pub energy: FiniteThermoplasticTetEnergy,
     pub inertia: Option<InertialEnergy>,
+    /// Current-area pressure path work and its signed endpoint correction.
+    /// The material endpoint defect and physical caloric heat stay separate.
+    pub pressure: Option<FiniteThermoplasticPressureWork>,
 }
 
 /// Preserve the original spatial and thermal material owners' diagnoses.
@@ -517,7 +525,7 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
     ///
     /// # Errors
     /// Temperature/domain, native solve, work/yield/kinetic gate or cancellation.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     pub fn advance(
         &self,
         new_temperatures_k: &[f64],
@@ -529,8 +537,81 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
         controls: FiniteThermoplasticControls,
         cx: &Cx<'_>,
     ) -> Result<FiniteThermoplasticTetStep<'a, L>, FiniteThermoplasticTetError> {
+        self.advance_loaded(
+            new_temperatures_k,
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            dt_s,
+            settings,
+            controls,
+            None,
+            cx,
+        )
+    }
+
+    /// Advance the original thermal plastic history under a held current-area
+    /// pressure field. Native pressure forces and follower tangents participate
+    /// in every Newton trial; original material and motion histories stay frozen.
+    ///
+    /// Uniform pressure uses exact -p delta(V) work. Other pressure variants
+    /// retain their original conservative or declared-path work conventions.
+    /// The sum of absolute constitutive and pressure integration defects must
+    /// fit the material work budget. Neither correction becomes physical heat.
+    ///
+    /// # Errors
+    /// Foreign reference surface, invalid pressure, or any original thermal,
+    /// mechanical, inertia, energy-budget or cancellation refusal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_pressure<'p>(
+        &self,
+        new_temperatures_k: &[f64],
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        dt_s: f64,
+        surface: &ClosedTetPressureSurface,
+        pressure: impl Into<TetPressure<'p>>,
+        settings: HyperTetSettings,
+        controls: FiniteThermoplasticControls,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteThermoplasticTetStep<'a, L>, FiniteThermoplasticTetError> {
+        self.advance_loaded(
+            new_temperatures_k,
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            dt_s,
+            settings,
+            controls,
+            Some((surface, pressure.into())),
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn advance_loaded(
+        &self,
+        new_temperatures_k: &[f64],
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        dt_s: f64,
+        settings: HyperTetSettings,
+        controls: FiniteThermoplasticControls,
+        pressure: Option<(&ClosedTetPressureSurface, TetPressure<'_>)>,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteThermoplasticTetStep<'a, L>, FiniteThermoplasticTetError> {
         checkpoint(cx)?;
         validate_controls(settings, controls.material)?;
+        if let Some((surface, field)) = pressure {
+            if !surface.matches_reference(self.state.nodes_m, self.state.tetrahedra) {
+                return Err(
+                    invalid("thermal plastic pressure surface must bind the original mesh").into(),
+                );
+            }
+            surface.validate_pressure(field, cx)?;
+        }
         if !dt_s.is_finite()
             || dt_s <= 0.0
             || !controls.maximum_numerical_kinetic_loss_j.is_finite()
@@ -580,15 +661,37 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
             })
             .transpose()
             .map_err(inertia_error)?;
-        let (equilibrium, force) = self.state.solve_endpoint(
-            HyperelasticLawField::PerElement(&frozen),
-            prescribed_m,
-            nodal_forces_n,
-            body_force_n_m3,
-            settings,
-            inertia.as_ref(),
-            cx,
-        )?;
+        let (equilibrium, force) = if pressure.is_some() {
+            let problem = HyperTetProblem {
+                nodes_m: self.state.nodes_m,
+                tetrahedra: self.state.tetrahedra,
+                material: HyperelasticLawField::PerElement(&frozen),
+                prescribed_m,
+                nodal_forces_n,
+                body_force_n_m3,
+                budget: self.state.budget,
+                settings,
+            };
+            let equilibrium = problem.solve_loaded_from(
+                Some(self.state.displacement_m.as_flattened()),
+                Some(&self.state.elements),
+                pressure,
+                None,
+                inertia.as_ref(),
+                cx,
+            )?;
+            (equilibrium, problem.external(&self.state.elements, 1.0))
+        } else {
+            self.state.solve_endpoint(
+                HyperelasticLawField::PerElement(&frozen),
+                prescribed_m,
+                nodal_forces_n,
+                body_force_n_m3,
+                settings,
+                inertia.as_ref(),
+                cx,
+            )?
+        };
         let new_u = equilibrium.displacement_m.as_flattened();
         let motion = inertia
             .as_ref()
@@ -695,10 +798,51 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
         energy.dead_load_endpoint_work_j = work.dead_load_j;
         energy.support_endpoint_work_j = work.support_j;
         energy.equilibrium_work_residual_j = work.residual_j;
+        let pressure = pressure
+            .map(|(surface, field)| -> Result<_, FiniteThermoplasticTetError> {
+                let old_u = self.state.displacement_m.as_flattened();
+                let force = surface.force_n(new_u, field, cx)?;
+                let mut endpoint_work = Dd::ZERO;
+                for (dof, (&value, (&after, &before))) in
+                    force.iter().zip(new_u.iter().zip(old_u)).enumerate()
+                {
+                    if dof % 256 == 0 {
+                        checkpoint(cx)?;
+                    }
+                    endpoint_work = endpoint_work
+                        + Dd::from_f64(value) * (Dd::from_f64(after) - Dd::from_f64(before));
+                }
+                let endpoint_work_j = endpoint_work.to_f64();
+                let work_j = surface.work_j(old_u, new_u, field, cx)?;
+                let correction = work_j - endpoint_work_j;
+                energy.equilibrium_work_residual_j += endpoint_work_j;
+                energy_gate(
+                    "thermal plastic pressure/constitutive endpoint integration defect",
+                    energy.endpoint_work_defect_j.abs() + correction.abs(),
+                    controls.material.maximum_endpoint_work_defect_j,
+                )?;
+                Ok(FiniteThermoplasticPressureWork {
+                    endpoint_work_j,
+                    work_j,
+                    endpoint_work_correction_j: correction,
+                    external_work_defect_j: energy.endpoint_work_defect_j + correction,
+                })
+            })
+            .transpose()?;
         energy.balance_error_j = work.dead_load_j + work.support_j
             - energy.internal_energy_change_j
             - energy.caloric_heat_j
             - energy.endpoint_work_defect_j;
+        if let Some(pressure) = pressure {
+            energy.balance_error_j = (Dd::from_f64(work.dead_load_j)
+                + Dd::from_f64(work.support_j)
+                + Dd::from_f64(pressure.work_j)
+                - Dd::from_f64(energy.internal_energy_change_j)
+                - Dd::from_f64(energy.caloric_heat_j)
+                - Dd::from_f64(energy.endpoint_work_defect_j)
+                - Dd::from_f64(pressure.endpoint_work_correction_j))
+            .to_f64();
+        }
         if let Some((_, value)) = &motion {
             energy_gate(
                 "backward-Euler numerical kinetic loss",
@@ -819,6 +963,7 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
             element_energy,
             energy,
             inertia,
+            pressure,
         })
     }
 }
