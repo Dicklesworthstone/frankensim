@@ -545,7 +545,8 @@ fn partial_voice_failure_permanently_refuses_render_and_control_updates() {
             fs_couple::modal_acoustic_time::ModalAcousticTimeError::BudgetExceeded { .. }
         ))
     ));
-    assert!(partial.iter().any(|p| p.abs() > 1e-6));
+    // Incomplete blocks have no output guarantee; only a complete coherent
+    // pressure sum is published to the caller.
     assert_eq!(context.blocks_rendered(), 0);
 
     // The first voice has advanced while the second refused. Even removing
@@ -765,4 +766,115 @@ fn shared_voice_clock_preserves_native_pressure_and_partition_invariance() {
     let mut output = [123.0; 8];
     silence.block(&mut output).unwrap();
     assert_eq!(output, [0.0; 8]);
+}
+
+fn modal_voice_with_pressure_transfer(transfer: f64) -> ModalStringVoice {
+    let mut model = ModalAcousticTimeModel::try_new(
+        RATE,
+        vec![ModalAcousticMode {
+            angular_frequency_rad_s: 2.0 * core::f64::consts::PI * 220.0,
+            damping_ratio: 1e-3,
+            pressure_per_modal_velocity: fs_math::c64::C64::new(transfer, 0.0),
+        }],
+        ModalAcousticTimeBudget {
+            // The overflow regression admits individually representable
+            // pressures to exercise the ensemble's own numerical boundary.
+            maximum_abs_pressure_pa: f64::MAX,
+            ..ModalAcousticTimeBudget::audible_reference()
+        },
+    )
+    .unwrap();
+    model
+        .restore_states(&[ModalAcousticState {
+            displacement_m_sqrt_kg: 0.0,
+            velocity_m_sqrt_kg_per_s: 1.0,
+        }])
+        .unwrap();
+    ModalStringVoice::new(model, vec![0.0]).unwrap()
+}
+
+#[test]
+fn coherent_pressure_mix_retains_quiet_source_across_callback_partitions() {
+    let quiet_transfer = 2.0_f64.powi(-54);
+    let mut quiet = [0.0; 256];
+    modal_voice_with_pressure_transfer(quiet_transfer)
+        .step_block(&mut quiet)
+        .unwrap();
+    assert!(quiet.iter().all(|pressure| pressure.abs() > 0.0));
+
+    // These permutations have an exact opposing pair, so their physical sum
+    // is the quiet source. This is not a claim of general order independence.
+    for transfers in [
+        [1.0, quiet_transfer, -1.0],
+        [-1.0, quiet_transfer, 1.0],
+        [quiet_transfer, 1.0, -1.0],
+        [1.0, -1.0, quiet_transfer],
+    ] {
+        for block_len in [1, 37, 256] {
+            let voices = transfers
+                .into_iter()
+                .map(|transfer| {
+                    RenderVoice::ModalString(modal_voice_with_pressure_transfer(transfer))
+                })
+                .collect();
+            let mut context = RenderContext::new(voices, 256);
+            let mut actual = [0.0; 256];
+            for block in actual.chunks_mut(block_len) {
+                context.block(block).unwrap();
+            }
+            assert_eq!(
+                actual.map(f64::to_bits),
+                quiet.map(f64::to_bits),
+                "transfers {transfers:?}, callback length {block_len}"
+            );
+            assert_eq!(context.samples_rendered(), 256);
+        }
+    }
+}
+
+#[test]
+fn unrepresentable_pressure_mix_poisoning_prevents_false_success_or_resume() {
+    let mut individual = [0.0; 8];
+    modal_voice_with_pressure_transfer(1e308)
+        .step_block(&mut individual)
+        .unwrap();
+    assert!(individual
+        .iter()
+        .all(|pressure| pressure.is_finite() && *pressure > f64::MAX / 2.0));
+
+    // A later cancelling voice cannot rescue an unrepresentable intermediate
+    // pressure: the bounded accumulator refuses instead of publishing NaN.
+    for transfers in [vec![1e308, 1e308], vec![1e308, 1e308, -1e308]] {
+        let voices = transfers
+            .into_iter()
+            .map(|transfer| {
+                RenderVoice::ModalString(modal_voice_with_pressure_transfer(transfer))
+            })
+            .collect();
+        let mut context = RenderContext::new(voices, 8);
+        let mut partial = [0.0; 8];
+        assert!(matches!(
+            context.block(&mut partial),
+            Err(RenderError::NonFinitePressure { sample: 0 })
+        ));
+        assert!(partial.iter().all(|pressure| pressure.is_finite()));
+        assert_eq!(context.blocks_rendered(), 0);
+        assert_eq!(context.samples_rendered(), 0);
+
+        let mut untouched = [123.0; 8];
+        assert!(matches!(
+            context.block(&mut untouched),
+            Err(RenderError::Poisoned)
+        ));
+        assert_eq!(untouched.map(f64::to_bits), [123.0_f64.to_bits(); 8]);
+        assert!(matches!(
+            context.apply_controls(&[ControlDelta::SetModalForce {
+                voice: 0,
+                mode: 0,
+                force_n_per_sqrt_kg: 0.0,
+            }]),
+            Err(RenderError::Poisoned)
+        ));
+        assert!(context.control_log().is_empty());
+    }
 }

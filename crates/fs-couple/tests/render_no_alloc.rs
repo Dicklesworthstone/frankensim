@@ -3,10 +3,10 @@
 //!
 //! A counting global allocator wraps `System`; after construction and one
 //! warm-up block, rendering through the ADMITTED no-alloc assembly (the
-//! massless-reed voice with an empty plate bank — scalar reed math plus
-//! the exact-FIR ring buffer) must perform ZERO heap allocations per
-//! block. This lives in its own test binary because a `#[global_allocator]`
-//! is process-wide.
+//! massless-reed voices with empty plate banks — scalar reed math plus
+//! the exact-FIR ring buffer, including coherent ensemble mixing) must perform
+//! ZERO heap allocations per block. This lives in its own test binary because
+//! a `#[global_allocator]` is process-wide.
 //!
 //! Disclosed allocating voices (NOT gated here, by design): the
 //! massive-reed lay path (`dissipative_modal_forces` returns a `Vec` per
@@ -76,43 +76,53 @@ fn admitted_no_alloc_assembly_allocates_nothing_per_block() {
         stiffness_n_m: 0.0,
         damping_ratio: 0.35,
     };
-    let voice = ReedBoreVoice::new(
-        &duct,
-        &air,
-        reed,
-        Termination::UnflangedOpen,
-        PlateBank::default(),
-        1.0,
-        48_000,
-        4_800,
-        None,
-    )
-    .expect("voice admits");
-    let mut context = RenderContext::new(vec![RenderVoice::ReedBore(voice)], 512);
     let mut block = vec![0.0; 512];
-    // Warm-up: any lazy one-time allocation happens here, outside the gate.
-    context.block(&mut block).expect("warm-up block");
+    // Exercise both the solo fast path and the compensated ensemble sum in
+    // this one allocator-counting test; separate parallel tests would race.
+    for voice_count in [1, 3] {
+        let voices = (0..voice_count)
+            .map(|_| {
+                RenderVoice::ReedBore(
+                    ReedBoreVoice::new(
+                        &duct,
+                        &air,
+                        reed,
+                        Termination::UnflangedOpen,
+                        PlateBank::default(),
+                        1.0,
+                        48_000,
+                        4_800,
+                        None,
+                    )
+                    .expect("voice admits"),
+                )
+            })
+            .collect();
+        let mut context = RenderContext::new(voices, 512);
+        // Warm-up: any lazy one-time allocation happens here, outside the gate.
+        context.block(&mut block).expect("warm-up block");
 
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
-    for _ in 0..32 {
-        context.block(&mut block).expect("gated block");
+        let before = ALLOCATIONS.load(Ordering::Relaxed);
+        for _ in 0..32 {
+            context.block(&mut block).expect("gated block");
+        }
+        let after = ALLOCATIONS.load(Ordering::Relaxed);
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"render-no-alloc\",\"voices\":{voice_count},\"blocks\":32,\
+             \"allocations\":{}}}",
+            after - before
+        );
+        assert_eq!(
+            after - before,
+            0,
+            "the admitted {voice_count}-voice assembly allocated {} times across 32 blocks; find the \
+             allocation and either remove it or demote the voice to the disclosed-allocating set",
+            after - before
+        );
+        // The gate must not be vacuous: the stream is real sound.
+        let rms = (block.iter().map(|p| p * p).sum::<f64>() / block.len() as f64).sqrt();
+        assert!(rms > 1.0, "non-vacuous stream (rms {rms})");
     }
-    let after = ALLOCATIONS.load(Ordering::Relaxed);
-    println!(
-        "{{\"suite\":\"fs-couple\",\"case\":\"render-no-alloc\",\"blocks\":32,\
-         \"allocations\":{}}}",
-        after - before
-    );
-    assert_eq!(
-        after - before,
-        0,
-        "the admitted no-alloc assembly allocated {} times across 32 blocks; find the \
-         allocation and either remove it or demote the voice to the disclosed-allocating set",
-        after - before
-    );
-    // The gate must not be vacuous: the stream is real sound.
-    let rms = (block.iter().map(|p| p * p).sum::<f64>() / block.len() as f64).sqrt();
-    assert!(rms > 1.0, "non-vacuous stream (rms {rms})");
 
     // The same callback gate also covers explicitly prepared atmospheric
     // convolution; spectral planning and dispatch warm-up happen before it.

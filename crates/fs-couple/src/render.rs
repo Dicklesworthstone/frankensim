@@ -56,6 +56,7 @@ use fs_duct::{Duct, MouthLoad, Termination};
 use fs_exec::CancelGate;
 use fs_material::fluid_acoustics::FluidAcoustics;
 use fs_material::gas::GasState;
+use fs_math::dd::Dd;
 use fs_scenario::BeatingReed;
 
 #[cfg(test)]
@@ -1294,8 +1295,14 @@ pub enum RenderError {
     Acoustic(fs_aeroac::AeroacError),
     /// The implicit friction/network owner refused its physical sample.
     Friction(ModalFrictionError),
-    /// A previous voice refusal left partial state; construct a new context.
+    /// A previous render refusal left partial state; construct a new context.
     Poisoned,
+    /// A voice pressure or an intermediate coherent sum was not representable.
+    /// Voices have already advanced, so the context is poisoned.
+    NonFinitePressure {
+        /// Zero-based sample index within the refused callback.
+        sample: usize,
+    },
     /// A voice refused mid-block; the context is poisoned.
     Voice(AcousticRealizeError),
     /// The modal voice refused mid-block; the context is poisoned.
@@ -1333,8 +1340,14 @@ impl core::fmt::Display for RenderError {
             Self::Friction(e) => write!(f, "friction voice refusal: {e}"),
             Self::Poisoned => write!(
                 f,
-                "render context has partial state after a voice refusal; construct a new context"
+                "render context has partial state after a render refusal; construct a new context"
             ),
+            Self::NonFinitePressure { sample } => {
+                write!(
+                    f,
+                    "render pressure is not representable at callback sample {sample}"
+                )
+            }
             Self::Voice(e) => write!(f, "voice refusal: {e:?}"),
             Self::Modal(e) => write!(f, "modal voice refusal: {e:?}"),
             Self::Bowed(e) => write!(f, "bowed voice refusal: {e}"),
@@ -1400,6 +1413,9 @@ pub struct RenderContext {
     /// Scratch buffer reused across blocks so summation allocates nothing
     /// after construction.
     scratch: Vec<f64>,
+    /// Retain signed pressure residuals until every voice has contributed.
+    /// Solo and empty contexts need no extended-precision mix storage.
+    pressure_sum: Vec<Dd>,
     blocks_rendered: u64,
     samples_rendered: u64,
     controls_applied: Vec<ControlRecord>,
@@ -1413,9 +1429,15 @@ impl RenderContext {
     /// before any voice advances. No source is retuned or implicitly resampled.
     #[must_use]
     pub fn new(voices: Vec<RenderVoice>, max_block: usize) -> Self {
+        let pressure_sum = if voices.len() > 1 {
+            vec![Dd::ZERO; max_block]
+        } else {
+            Vec::new()
+        };
         Self {
             voices,
             scratch: vec![0.0; max_block],
+            pressure_sum,
             blocks_rendered: 0,
             samples_rendered: 0,
             controls_applied: Vec::new(),
@@ -1705,18 +1727,27 @@ impl RenderContext {
         Ok(())
     }
 
-    /// Render exactly one block: zero the output, advance every voice
-    /// `out.len()` samples, sum. No allocation occurs for blocks within
+    /// Render exactly one block: advance every voice `out.len()` samples and
+    /// sum their physical pressure into the output. No allocation occurs within
     /// the pre-sized maximum and no-alloc voices; larger blocks refuse.
+    /// Ensembles accumulate signed physical pressure with double-double
+    /// residuals, preserving quiet sources when louder coherent sources cancel.
+    /// The rounded output never feeds back into that sum. Solo voices retain
+    /// their original binary64 path; no pressure normalization is applied.
     ///
     /// # Errors
-    /// Voice refusals poison the context (mid-sample state is not
-    /// rewound); discard that block's partial output. Later calls refuse
-    /// without touching output or state. An oversized or empty block
+    /// Voice refusals and nonfinite intermediate pressure sums poison the
+    /// context (mid-sample state is not rewound); discard that block's partial
+    /// output. Later calls refuse without touching output or state. An oversized or empty block
     /// refuses before any state moves and does not poison a healthy context.
     pub fn block(&mut self, out: &mut [f64]) -> Result<(), RenderError> {
         self.validate_block_len(out.len())?;
-        out.fill(0.0);
+        let mixed = self.voices.len() > 1;
+        if mixed {
+            self.pressure_sum[..out.len()].fill(Dd::ZERO);
+        } else {
+            out.fill(0.0);
+        }
         for voice in &mut self.voices {
             let scratch = &mut self.scratch[..out.len()];
             let result = match voice {
@@ -1737,8 +1768,32 @@ impl RenderContext {
                 self.poisoned = true;
                 return Err(error);
             }
-            for (accumulator, sample) in out.iter_mut().zip(scratch.iter()) {
-                *accumulator += *sample;
+            if mixed {
+                for (sample, (accumulator, pressure)) in self
+                    .pressure_sum
+                    .iter_mut()
+                    .zip(scratch.iter())
+                    .enumerate()
+                {
+                    *accumulator = *accumulator + Dd::from_f64(*pressure);
+                    if !(accumulator.hi.is_finite() && accumulator.lo.is_finite()) {
+                        self.poisoned = true;
+                        return Err(RenderError::NonFinitePressure { sample });
+                    }
+                }
+            } else {
+                for (sample, (output, pressure)) in out.iter_mut().zip(scratch.iter()).enumerate() {
+                    if !pressure.is_finite() {
+                        self.poisoned = true;
+                        return Err(RenderError::NonFinitePressure { sample });
+                    }
+                    *output += *pressure;
+                }
+            }
+        }
+        if mixed {
+            for (output, accumulator) in out.iter_mut().zip(self.pressure_sum.iter()) {
+                *output = accumulator.to_f64();
             }
         }
         self.blocks_rendered += 1;
