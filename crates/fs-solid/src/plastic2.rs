@@ -50,6 +50,9 @@ use fs_material::plastic::reduction::{
 use fs_material::{SmallStrainLaw, Voigt};
 use fs_sparse::{Coo, Csr};
 
+/// Source-bound fatigue from accepted P1/Q1 plane material-point histories.
+pub mod fatigue;
+
 /// Caller-owned allocation and geometry bounds, checked before preparation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlaneAssemblyBudget {
@@ -695,6 +698,17 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
         cx: &Cx<'_>,
     ) -> Result<SmallStrainPlaneSolution<L::State>, SmallStrainPlaneError> {
         let elements = self.prepare(cx)?;
+        self.solve_prepared(&elements, initial, cx)
+    }
+
+    // Fatigue continuation borrows one frozen problem and reuses its original
+    // quadrature geometry. Endpoint loads change, never topology or material.
+    fn solve_prepared(
+        &self,
+        elements: &[Element],
+        initial: Option<(&[f64], &[ReducedState<L::State>])>,
+        cx: &Cx<'_>,
+    ) -> Result<SmallStrainPlaneSolution<L::State>, SmallStrainPlaneError> {
         let symmetric = (0..elements.len()).all(|e| self.law(e).admissibility().tangent_symmetric);
         let n = 2 * self.mesh.nodes.len();
         let mut fixed = vec![false; n];
@@ -707,11 +721,11 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
             row_of[d] = row;
         }
         let mut offsets = vec![0];
-        for element in &elements {
+        for element in elements {
             offsets.push(offsets.last().unwrap() + element.points.len());
         }
         let (mut u, mut states) = if let Some((u, states)) = initial {
-            self.check(&elements, u, states)?;
+            self.check(elements, u, states)?;
             (u.to_vec(), states.to_vec())
         } else {
             (
@@ -751,7 +765,7 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
                     "load factor produces nonfinite forces or displacements",
                 ));
             }
-            let mut trial = self.evaluate(&elements, &u, &states, &fixed, &mut workspace, cx)?;
+            let mut trial = self.evaluate(elements, &u, &states, &fixed, &mut workspace, cx)?;
             let mut scale = norm(free.iter().map(|&d| external[d]))
                 .max(norm(free.iter().map(|&d| trial.force[d])))
                 .max(f64::MIN_POSITIVE);
@@ -781,7 +795,7 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
                 let mut connected_scale = 0.0_f64;
                 // A fully prescribed body needs only a checked material update.
                 if !free.is_empty() {
-                    let full = self.assemble(&elements, &trial, cx)?;
+                    let full = self.assemble(elements, &trial, cx)?;
                     for (row, &d) in free.iter().enumerate() {
                         let (cols, values) = full.row(d);
                         let mut deformation = [0.0_f64; 2];
@@ -855,7 +869,7 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
                             alpha.mul_add(dp[d], u[d])
                         };
                     }
-                    match self.evaluate(&elements, &candidate, &states, &fixed, &mut workspace, cx)
+                    match self.evaluate(elements, &candidate, &states, &fixed, &mut workspace, cx)
                     {
                         Ok(next) => {
                             let after = norm(free.iter().map(|&d| next.force[d] - external[d]));

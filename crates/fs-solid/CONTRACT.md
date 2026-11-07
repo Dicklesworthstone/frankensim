@@ -10907,3 +10907,37 @@ springback, force-based beam/frame release and atomic fiber refusal.
 compression/release checks with solved free sides and thickness. These numerical
 checks do not establish metal-specific calibration or finite shell forming,
 contact geometry, necking or fracture limits.
+
+## Native plane-continuum fatigue
+
+`plastic2::fatigue::PlaneFatiguePath` carries shared finite-plane strain-life
+fatigue through the original P1/Q1 nonlinear load path. It observes each accepted
+integration point's complete signed three-dimensional constitutive strain and
+physical stress: solved thickness contraction under plane stress, constrained
+transverse stress under plane strain, and the actual assumed strain under B-bar.
+J2, Voce and Chaboche retain their native histories and original return map.
+Geometry is prepared once and shared by restart clones; only the latest accepted
+solution, material samples and bounded rainflow residues are retained.
+
+Each gauge binds its original material-state identity, chemistry, process,
+absolute temperature and elastic modulus to the original strain-life calibration.
+Source-backed curves additionally retain card, state and fixed query-coordinate
+identity. The existing finite-plane CMB, Morrow and Smith-Watson-Topper laws own
+cycle counting and life inversion; unsigned equivalent or instantaneous principal
+stress does not replace the material-point tensor history. Caller-declared
+normals are a finite sampling of candidate planes, not a continuous orientation
+maximum.
+
+The initial zero-load equilibrium is a real sample. Chronological blocks retain
+every accepted intermediate endpoint, and a late mechanics, gauge, budget or
+cancellation refusal rolls back the complete requested block. Prefix previews
+include endpoint half cycles without closing the live history; finalization
+requires the full declared path and commits every gauge atomically. Aggregate
+plane/residue/projection-work admission bounds memory and work before a solve.
+
+`tests/plastic_plane_fatigue.rs` supplies native P1/Q1 Prager cycle oracles,
+plane-strain transverse-stress/SWT and B-bar checks, restart/chunk equivalence,
+and source, budget, cancellation and late-refusal regressions. These synthetic
+implementation checks do not establish transferable component service life.
+The observer changes neither stiffness nor heat and adds no thermal/rate law,
+crack growth, remeshing or second constitutive owner.
