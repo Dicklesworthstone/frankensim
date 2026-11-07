@@ -58,6 +58,7 @@ fn airlight_reference(phase: &PhaseFunction, absorption: f64, scattering: f64) -
                     }
                     PhaseFunction::Rayleigh => 3.0 * (1.0 + cosine * cosine) / (16.0 * PI),
                     PhaseFunction::Tabulated(_)
+                    | PhaseFunction::SphericalTable(_)
                     | PhaseFunction::RayleighDepolarized { .. }
                     | PhaseFunction::SpectralTable(_)
                     | PhaseFunction::SpectralMixture(_) => {

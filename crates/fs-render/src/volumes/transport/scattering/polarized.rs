@@ -1,4 +1,4 @@
-//! Molecular Stokes transport on the original scalar phase and cell-flight owners.
+//! Molecular and spherical-particle Stokes transport on the original flights.
 //!
 //! The Hansen--Travis Rayleigh matrix (doi:10.1007/BF00168069) uses the same
 //! unpolarized 90-degree depolarization ratio and normalization as `PhaseFunction`.
@@ -74,15 +74,11 @@ impl PhaseFunction {
         beam: PolarizedBeam,
         samples: [f64; 2],
     ) -> Result<PolarizedPhaseSample, PolarizedScatteringError> {
-        depolarization(self)?;
+        self.admit_polarized()?;
         let incoming = beam.frame().direction();
-        let sample = self.sample(incoming, samples[0], samples[1])?;
-        let mut matrix = self.rayleigh_mueller(incoming.dot(sample.direction))?;
+        let sample = self.sample_packet(&[beam.wavelength_nm()], incoming, samples[0], samples[1])?;
         if !sample.pdf.is_finite() || sample.pdf <= 0.0 {
             return Err(VolumeTransportError::Unrepresentable.into());
-        }
-        for row in &mut matrix.0 {
-            for entry in row { *entry /= sample.pdf; }
         }
         let transverse = cross(incoming, sample.direction);
         let axis = if transverse.x == 0.0 && transverse.y == 0.0 && transverse.z == 0.0 {
@@ -91,7 +87,22 @@ impl PhaseFunction {
             beam.frame().horizontal()
         } else { unit(transverse)? };
         let incident = beam.with_reference_axis(axis)?;
-        let power = transform(matrix, incident.power())?;
+        let power = if matches!(self, Self::Rayleigh | Self::RayleighDepolarized { .. }) {
+            // Retain the admitted molecular sampler's original arithmetic.
+            let mut matrix=self.rayleigh_mueller(incoming.dot(sample.direction))?;
+            for row in &mut matrix.0 { for entry in row { *entry/=sample.pdf; } }
+            let out=transform(matrix,incident.power())?;
+            if out.i==0.0 && incident.power().i>0.0 {
+                // A rounded M00-M01 can erase a representable near-dipole-null
+                // channel. Use the factored physical response only in that
+                // case; ordinary molecular samples retain their original bits.
+                sampled_response(self,beam.wavelength_nm(),incoming.dot(sample.direction),incident.power(),sample.pdf)?
+            } else { out }
+        } else if incident.power().i==0.0 {
+            Stokes::unpolarized(0.0)
+        } else {
+            sampled_response(self,beam.wavelength_nm(),incoming.dot(sample.direction),incident.power(),sample.pdf)?
+        };
         let frame = PolarizationFrame::try_new(sample.direction, axis)?;
         let beam = PolarizedBeam::try_new(
             beam.ray().origin, frame, beam.wavelength_nm(), beam.medium(), power,
@@ -107,7 +118,7 @@ pub struct PolarizedPhaseSample {
     pub pdf: f64,
 }
 
-/// Borrowed, pre-admitted molecular transport. Keeps original cell identities,
+/// Borrowed, pre-admitted polarized transport. Keeps original cell identities,
 /// spectra, density, source bounds, and native traversal/work limits. Preparation
 /// scans the optical palette once; path samples allocate and clone nothing.
 #[derive(Clone, Copy)]
@@ -118,7 +129,8 @@ pub struct RayleighGrid<'grid, 'data> {
 impl<'grid, 'data> RayleighGrid<'grid, 'data> {
     /// Admit all active optical models before a path starts. Pure absorption
     /// requires no polarization law. An indexed cell retains its own molecular
-    /// depolarization, including any mixture already resolved by its material.
+    /// depolarization or spherical response, including the original spectral
+    /// scattering weights of independent material mixtures.
     pub fn try_new(
         cx: &Cx<'_>, grid: &'grid ScatteringGrid<'data>,
     ) -> Result<Self, PolarizedScatteringError> {
@@ -127,10 +139,10 @@ impl<'grid, 'data> RayleighGrid<'grid, 'data> {
             if let Some(palette) = grid.scattering_palette() {
                 for optical in palette.values() {
                     checkpoint(cx)?;
-                    if !optical.scattering.is_zero() { depolarization(&optical.phase)?; }
+                    if !optical.scattering.is_zero() { optical.phase.admit_polarized()?; }
                 }
             } else {
-                depolarization(grid.phase_ref().ok_or(PolarizedScatteringError::UnsupportedPhase)?)?;
+                grid.phase_ref().ok_or(PolarizedScatteringError::UnsupportedPhase)?.admit_polarized()?;
             }
         }
         checkpoint(cx)?;
@@ -242,10 +254,17 @@ fn unit(v: Vec3) -> Result<Vec3, BeamError> {
 fn scale_power(input: Stokes, weight: f64) -> Result<Stokes, BeamError> {
     if !weight.is_finite() || weight < 0.0 { return Err(BeamError::NumericalRange); }
     let out = Stokes { i:input.i*weight, q:input.q*weight, u:input.u*weight, v:input.v*weight };
-    if ![out.i,out.q,out.u,out.v].into_iter().all(f64::is_finite) {
+    if ![out.i,out.q,out.u,out.v].into_iter().all(f64::is_finite)
+        || (input.i>0.0 && weight>0.0 && out.i==0.0) {
         return Err(BeamError::NumericalRange);
     }
     Ok(out)
+}
+
+fn sampled_response(phase:&PhaseFunction,wavelength_nm:f64,cosine:f64,input:Stokes,pdf:f64) -> Result<Stokes,PolarizedScatteringError> {
+    let response=phase.apply_polarized_at(wavelength_nm,cosine,
+        Stokes { i:1.0,q:input.q/input.i,u:input.u/input.i,v:input.v/input.i })?;
+    Ok(scale_power(Stokes { i:response.i/pdf,q:response.q/pdf,u:response.u/pdf,v:response.v/pdf },input.i)?)
 }
 fn transform(matrix: Mueller, input: Stokes) -> Result<Stokes, BeamError> {
     if input.i == 0.0 { return Ok(Stokes::unpolarized(0.0)); }
@@ -268,3 +287,6 @@ fn transform(matrix: Mueller, input: Stokes) -> Result<Stokes, BeamError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod particles;

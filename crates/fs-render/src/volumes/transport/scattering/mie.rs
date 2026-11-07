@@ -17,22 +17,24 @@
 //! The explicit domain is `1e-4 <= x <= 128`, `|m x| <= 512`. A finite series
 //! and a sampled angular-table discrepancy are numerical estimates, not
 //! certified error bounds. Nonspherical particles, dependent scattering,
-//! absorbing hosts, coherent interference between particles and polarization
-//! transport are outside this model.
+//! absorbing hosts and coherent interference between particles are outside this
+//! model. Full-Stokes angular preparation retains the original complex series;
+//! independent populations mix coherency, never complex particle amplitudes.
 
-use super::{MAX_PHASE_KNOTS, TabulatedPhase, VolumeTransportError, checkpoint};
+use super::{MAX_PHASE_KNOTS, TabulatedPhase, SphericalPhaseTable, SphericalPhaseValue, VolumeTransportError, checkpoint};
 use fs_exec::Cx;
 use fs_math::{c64::C64, det};
 
 mod distribution;
 mod population;
 mod spectrum;
+mod polarized;
 pub use distribution::{LognormalRadiusReport, ParticleSizeDistribution};
 pub use population::{
     MAX_MIE_POPULATION_BINS, MiePopulation, MiePopulationBudget, MiePopulationSolution,
 };
 pub use spectrum::MieOpticalSpectrum;
-pub(crate) use spectrum::{prepare_spectrum, prepare_visible_spectrum};
+pub(crate) use spectrum::{prepare_polarized_spectrum, prepare_spectrum, prepare_visible_spectrum};
 
 /// Maximum admitted size parameter `2 pi n_host r / lambda_vacuum`.
 pub const MAX_MIE_SIZE_PARAMETER: f64 = 128.0;
@@ -378,14 +380,13 @@ impl MieSolution {
         self.cross_sections
     }
 
-    /// Normalized unpolarized Mie phase density, sr⁻¹, evaluated directly from
-    /// the retained series at the propagation-direction cosine.
-    pub fn eval_cos(&self, cosine: f64) -> Result<f64, MieError> {
+    /// Original dimensionless `[S1, S2]` complex amplitudes, perpendicular and
+    /// parallel to the scattering plane. Both s/p/travel frames are right-handed
+    /// and use exp(-i omega t). No intensity normalization or phase fit occurs.
+    /// Exact index matching returns two exact zeros.
+    pub fn amplitudes(&self, cosine: f64) -> Result<[C64; 2], MieError> {
         if !cosine.is_finite() || cosine.abs() > 1.0 + 2e-10 {
             return Err(MieError::Parameters);
-        }
-        if self.scattering_sum == 0.0 {
-            return Err(MieError::NoScattering);
         }
         let mu = cosine.clamp(-1.0, 1.0);
         let (mut pi_previous, mut pi) = (0.0, 1.0);
@@ -399,6 +400,15 @@ impl MieSolution {
             let next = ((2.0 * n + 1.0) * mu * pi - (n + 1.0) * pi_previous) / n;
             (pi_previous, pi) = (pi, next);
         }
+        if !finite(s1) || !finite(s2) { return Err(MieError::Numerical); }
+        Ok([s1, s2])
+    }
+
+    /// Normalized unpolarized Mie phase density, sr⁻¹, evaluated directly from
+    /// the retained series at the propagation-direction cosine.
+    pub fn eval_cos(&self, cosine: f64) -> Result<f64, MieError> {
+        let [s1, s2] = self.amplitudes(cosine)?;
+        if self.scattering_sum == 0.0 { return Err(MieError::NoScattering); }
         let density =
             (s1.norm_sq() + s2.norm_sq()) / (4.0 * core::f64::consts::PI * self.scattering_sum);
         if density.is_finite() && density >= 0.0 {
@@ -425,6 +435,24 @@ impl MieSolution {
     ) -> Result<MiePhaseTable, MieError> {
         prepare_phase_table(self, cx, tolerance, max_knots)
     }
+
+    /// Normalized full-Stokes response from the same electric/magnetic series.
+    /// The positive s/p powers remain available before rounded I/Q conversion.
+    pub fn polarized_value(&self, cosine: f64) -> Result<SphericalPhaseValue, MieError> {
+        let [s1, s2] = self.amplitudes(cosine)?;
+        if self.scattering_sum == 0.0 { return Err(MieError::NoScattering); }
+        let scale = 1.0 / (core::f64::consts::TAU * self.scattering_sum);
+        SphericalPhaseValue::try_new(
+            [s1.norm_sq() * scale, s2.norm_sq() * scale],
+            (s1 * s2.conj()).scale(scale),
+        ).map_err(|_| MieError::Numerical)
+    }
+
+    /// Refine all four real coherency components, including U/V retardance,
+    /// and prepare an allocation-free angular sampler for polarized transport.
+    pub fn polarized_phase_table(&self, cx: &Cx<'_>, tolerance: f64, max_knots: usize) -> Result<MiePhaseTable, MieError> {
+        polarized::prepare(self, cx, tolerance, max_knots)
+    }
 }
 
 /// Shared preparation seam for single spheres, populations, and material
@@ -434,6 +462,7 @@ pub(crate) trait MieAngularSolution {
     fn cross_sections(&self) -> MieCrossSections;
     fn multipoles(&self) -> usize;
     fn eval_cos(&self, cosine: f64) -> Result<f64, MieError>;
+    fn polarized_value(&self, cosine: f64) -> Result<SphericalPhaseValue, MieError>;
 
     fn phase_table(
         &self,
@@ -454,6 +483,9 @@ impl MieAngularSolution for MieSolution {
     }
     fn eval_cos(&self, cosine: f64) -> Result<f64, MieError> {
         self.eval_cos(cosine)
+    }
+    fn polarized_value(&self, cosine: f64) -> Result<SphericalPhaseValue, MieError> {
+        self.polarized_value(cosine)
     }
 }
 
@@ -537,6 +569,7 @@ fn prepare_phase_table<S: MieAngularSolution + ?Sized>(
             poll(cx)?;
             return Ok(MiePhaseTable {
                 phase,
+                polarization: None,
                 normalization_error,
                 mean_cosine_error,
                 max_sampled_relative_error: normalized_error,
@@ -567,12 +600,25 @@ fn prepare_phase_table<S: MieAngularSolution + ?Sized>(
 pub struct MiePhaseTable {
     /// Native normalized phase table; no HG approximation is involved.
     pub phase: TabulatedPhase,
+    /// Full positive coherency on the same cosine grid, when explicitly
+    /// prepared. Scalar-only reports never infer a polarization law.
+    pub polarization: Option<SphericalPhaseTable>,
     /// Absolute deviation of the raw angular integral from unity.
     pub normalization_error: f64,
     /// Absolute error in the normalized interpolant's mean cosine.
     pub mean_cosine_error: f64,
     /// Maximum sampled relative interpolation error, including normalization.
     pub max_sampled_relative_error: f64,
+}
+
+impl MiePhaseTable {
+    /// Retain the complete prepared response in the original phase dispatcher.
+    pub fn phase_function(&self) -> super::PhaseFunction {
+        match &self.polarization {
+            Some(table) => super::PhaseFunction::SphericalTable(table.clone()),
+            None => super::PhaseFunction::Tabulated(self.phase.clone()),
+        }
+    }
 }
 
 fn logarithmic_derivatives(

@@ -35,8 +35,9 @@ pub struct MieOpticalSpectrum {
     /// Zero if both are zero; not a continuous spectral error bound.
     pub max_relative_spectral_midpoint_error: f64,
     /// Maximum phase discrepancy at spectral midpoints on a separate cosine
-    /// grid, scaled by the larger density or `1/(4 pi)`. Unprobed resonances
-    /// are not bounded by this observation.
+    /// grid, scaled by the larger density or `1/(4 pi)`. Polarized preparation
+    /// checks all four independent coherency components as well as intensity.
+    /// Unprobed resonances are not bounded by this observation.
     pub max_sampled_phase_midpoint_error: f64,
 }
 
@@ -64,11 +65,36 @@ impl MieOpticalSpectrum {
         budget: MiePopulationBudget,
         angular_tolerance: f64,
         max_phase_knots: usize,
-        mut population_at: impl FnMut(f64) -> Result<MiePopulation, E>,
+        population_at: impl FnMut(f64) -> Result<MiePopulation, E>,
     ) -> Result<Self, E>
     where
         E: From<MieError>,
     {
+        Self::from_population_source_mode(cx,wavelengths_nm,source_identity,budget,
+            angular_tolerance,max_phase_knots,false,population_at)
+    }
+
+    /// Prepare physical spherical-particle polarization from the same original
+    /// dispersive population source. Angular refinement and spectral midpoint
+    /// diagnostics include both powers and the complex cross term. Every
+    /// declared knot must have nonzero scattering; an absent normalized phase
+    /// is not replaced by an invented isotropic Mueller matrix.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_population_source_polarized<E>(
+        cx:&Cx<'_>, wavelengths_nm:&[f64], source_identity:ContentHash,
+        budget:MiePopulationBudget, angular_tolerance:f64, max_phase_knots:usize,
+        population_at:impl FnMut(f64)->Result<MiePopulation,E>,
+    )->Result<Self,E> where E:From<MieError> {
+        Self::from_population_source_mode(cx,wavelengths_nm,source_identity,budget,
+            angular_tolerance,max_phase_knots,true,population_at)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_population_source_mode<E>(
+        cx:&Cx<'_>, wavelengths_nm:&[f64], source_identity:ContentHash,
+        budget:MiePopulationBudget, angular_tolerance:f64, max_phase_knots:usize,
+        polarized:bool, mut population_at:impl FnMut(f64)->Result<MiePopulation,E>,
+    )->Result<Self,E> where E:From<MieError> {
         poll(cx)?;
         validate_preparation(
             wavelengths_nm,
@@ -87,13 +113,14 @@ impl MieOpticalSpectrum {
             .map(|(sphere, fraction)| (sphere.radius_m, sphere.particle_density_kg_m3, *fraction))
             .collect();
         let mut first = Some(first);
-        prepare_spectrum(
+        prepare_spectrum_mode(
             cx,
             host,
             wavelengths_nm,
             Some(source_identity),
             angular_tolerance,
             max_phase_knots,
+            polarized,
             |wavelength| {
                 poll(cx)?;
                 let population = match first.take() {
@@ -271,12 +298,32 @@ pub(crate) fn prepare_spectrum<S, E>(
     source_identity: Option<ContentHash>,
     angular_tolerance: f64,
     max_phase_knots: usize,
-    mut solve: impl FnMut(f64) -> Result<S, E>,
+    solve: impl FnMut(f64) -> Result<S, E>,
 ) -> Result<MieOpticalSpectrum, E>
 where
     S: MieAngularSolution,
     E: From<MieError>,
 {
+    prepare_spectrum_mode(cx,host_index_n,wavelengths_nm,source_identity,
+        angular_tolerance,max_phase_knots,false,solve)
+}
+
+/// Original source-bound material solves, retaining their complete coherency.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_polarized_spectrum<S,E>(
+    cx:&Cx<'_>,host_index_n:f64,wavelengths_nm:&[f64],source_identity:ContentHash,
+    angular_tolerance:f64,max_phase_knots:usize,solve:impl FnMut(f64)->Result<S,E>,
+)->Result<MieOpticalSpectrum,E> where S:MieAngularSolution,E:From<MieError> {
+    prepare_spectrum_mode(cx,host_index_n,wavelengths_nm,Some(source_identity),
+        angular_tolerance,max_phase_knots,true,solve)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_spectrum_mode<S,E>(
+    cx:&Cx<'_>,host_index_n:f64,wavelengths_nm:&[f64],source_identity:Option<ContentHash>,
+    angular_tolerance:f64,max_phase_knots:usize,polarized:bool,
+    mut solve:impl FnMut(f64)->Result<S,E>,
+)->Result<MieOpticalSpectrum,E> where S:MieAngularSolution,E:From<MieError> {
     poll(cx)?;
     if !host_index_n.is_finite() || host_index_n <= 0.0 {
         return Err(MieError::Parameters.into());
@@ -297,10 +344,13 @@ where
         absorption.push((wavelength, sections.mass_absorption_m2_kg));
         scattering.push((wavelength, sections.mass_scattering_m2_kg));
         let phase = if sections.scattering_m2 == 0.0 {
+            if polarized { return Err(MieError::NoScattering.into()); }
             PhaseFunction::Isotropic
         } else {
-            let report = solution.phase_table(cx, angular_tolerance, max_phase_knots)?;
-            let phase = PhaseFunction::Tabulated(report.phase.clone());
+            let report = if polarized {
+                super::polarized::prepare(&solution,cx,angular_tolerance,max_phase_knots)?
+            } else { solution.phase_table(cx, angular_tolerance, max_phase_knots)? };
+            let phase = report.phase_function();
             angular_reports.push(report);
             phase
         };
@@ -360,6 +410,12 @@ where
                     .max(1.0 / (4.0 * core::f64::consts::PI));
                 max_sampled_phase_midpoint_error =
                     max_sampled_phase_midpoint_error.max((direct - retained).abs() / scale);
+                if polarized {
+                    let direct=solution.polarized_value(cosine)?;
+                    let retained=phase.spherical_value_at(wavelength,cosine).map_err(|_|MieError::Numerical)?;
+                    max_sampled_phase_midpoint_error=max_sampled_phase_midpoint_error
+                        .max(super::polarized::discrepancy(direct,retained));
+                }
             }
         }
     }

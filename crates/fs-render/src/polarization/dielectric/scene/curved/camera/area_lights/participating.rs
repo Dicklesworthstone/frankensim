@@ -426,9 +426,9 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
                 Receiver::Molecular { phase } => {
                     let frame = PolarizationFrame::try_new(endpoint.ray.dir, endpoint.transverse_axis)
                         .map_err(|error| AreaLightCameraError::MolecularPhase { binding: index, error: error.into() })?;
-                    let angular = phase.rayleigh_connection_factor(beam, frame, bundle.interface_state())
+                    let angular = phase.polarized_connection_factor(beam, frame, bundle.interface_state())
                         .map_err(|error| AreaLightCameraError::MolecularPhase { binding: index, error })?;
-                    let pdf = phase.eval_cos(beam.ray().dir.dot(endpoint.ray.dir.scale(-1.0)))
+                    let pdf = phase.eval_at(beam.wavelength_nm(),beam.ray().dir.dot(endpoint.ray.dir.scale(-1.0)))
                         .map_err(|error| AreaLightCameraError::MolecularPhase { binding: index, error: error.into() })?;
                     (endpoint.ray.dir.scale(-1.0), angular,
                         binding.source.volume_mis_weights(sample, connection, target,
@@ -461,7 +461,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
                             let endpoint = bundle.propagation().propagation();
                             let frame = PolarizationFrame::try_new(endpoint.ray.dir, endpoint.transverse_axis)
                                 .map_err(|error| AreaLightCameraError::MolecularPhase { binding: index, error: error.into() })?;
-                            let angular = phase.rayleigh_connection_factor(beam, frame, bundle.interface_state())
+                            let angular = phase.polarized_connection_factor(beam, frame, bundle.interface_state())
                                 .map_err(|error| AreaLightCameraError::MolecularPhase { binding: index, error })?;
                             (endpoint.ray.dir.scale(-1.0), angular)
                         }
@@ -510,7 +510,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
         &self, cx: &Cx<'_>, path: &CurvedPathResult, settings: AreaLightCameraSettings,
         work: &mut Work, workspace: &mut AreaLightCameraWorkspace, state: &PathState,
     ) -> Result<f64, AreaLightCameraError> {
-        let Some(ContinuationAnchor::Molecular(anchor)) = state.anchor else {
+        let Some(ContinuationAnchor::Molecular(anchor)) = state.anchor.as_ref() else {
             return self.area_lights.emitter_weight(cx, path, settings, work, workspace, state);
         };
         let contact = *path.last_contact().ok_or(AreaLightCameraError::NumericalRange)?;

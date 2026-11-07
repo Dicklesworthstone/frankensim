@@ -1,4 +1,4 @@
-//! Reciprocal molecular connections for an intensity-measuring camera.
+//! Reciprocal molecular/particle connections for an intensity-measuring camera.
 //!
 //! In opposite travel frames sharing the same horizontal axis, reciprocity is
 //! `M_reverse = A M_forward^T A`, `A = diag(1,1,-1,1)` (Germer 2017,
@@ -18,7 +18,16 @@ use crate::polarization::dielectric::transport::{BeamError, PolarizationFrame, P
 use fs_math::det;
 
 impl PhaseFunction {
-    /// Molecular source-to-camera angular response, in inverse steradians.
+    /// Molecular-only admission of the shared reciprocal connection owner.
+    pub fn rayleigh_connection_factor(
+        &self, camera_prefix: PolarizedBeam, source_frame: PolarizationFrame,
+        normalized_source: Stokes,
+    ) -> Result<f64, PolarizedScatteringError> {
+        depolarization(self)?;
+        self.polarized_connection_factor(camera_prefix,source_frame,normalized_source)
+    }
+
+    /// Molecular or spherical-particle source-to-camera response, in inverse steradians.
     ///
     /// `camera_prefix` is the pre-collision beam of the original reciprocal
     /// camera walk, travelling FROM the camera TO this vertex. `source_frame`
@@ -38,13 +47,13 @@ impl PhaseFunction {
     /// Frames are rotated before contraction; Q/U/V are not discarded. Exact
     /// polarization extinction is a valid zero. A zero-intensity prefix cannot
     /// define a normalized response and refuses instead of hiding underflow.
-    pub fn rayleigh_connection_factor(
+    pub fn polarized_connection_factor(
         &self,
         camera_prefix: PolarizedBeam,
         source_frame: PolarizationFrame,
         normalized_source: Stokes,
     ) -> Result<f64, PolarizedScatteringError> {
-        let delta = depolarization(self)?;
+        self.admit_polarized()?;
         if normalized_source.i != 1.0 || camera_prefix.power().i <= 0.0 {
             return Err(BeamError::InvalidStokes.into());
         }
@@ -62,22 +71,8 @@ impl PhaseFunction {
         let prefix = normalized(camera_prefix.power())?;
         let camera = normalized(camera_prefix.frame().express_in(prefix, camera_plane))?;
         let cosine = incoming.dot(outgoing).clamp(-1.0, 1.0);
-        let scale = 3.0 / (8.0 * core::f64::consts::PI * (2.0 + delta));
-        let perpendicular_power = 1.0 + incident.q;
-        let parallel_power = (1.0 - incident.q) * cosine * cosine;
-        // This is the existing Hansen--Travis Mueller response, factored to
-        // preserve tiny p-polarized power near a dipole's 90-degree null.
-        // Subtracting M00 and M01 would round that positive power to zero.
-        let mut scattered = Stokes {
-            i: scale * ((1.0 - delta) * (perpendicular_power + parallel_power) + 2.0 * delta),
-            q: scale * (1.0 - delta) * (perpendicular_power - parallel_power),
-            u: scale * 2.0 * (1.0 - delta) * cosine * incident.u,
-            v: scale * 2.0 * (1.0 - 2.0 * delta) * cosine * incident.v,
-        };
+        let mut scattered = self.apply_polarized_at(camera_prefix.wavelength_nm(),cosine,incident)?;
         if scattered.i == 0.0 {
-            if perpendicular_power != 0.0 || cosine != 0.0 || delta != 0.0 {
-                return Err(BeamError::NumericalRange.into());
-            }
             return Ok(0.0);
         }
         let intensity = scattered.i;

@@ -136,6 +136,9 @@ fn gray(phase: &PhaseFunction, mu: Interval, cx: &Cx<'_>) -> Result<Interval, Vo
             }
             range.ok_or(VolumeTransportError::Unrepresentable)?
         }
+        PhaseFunction::SphericalTable(table) => {
+            return gray(&PhaseFunction::Tabulated(table.scalar_phase().clone()),mu,cx);
+        }
         PhaseFunction::SpectralTable(_) | PhaseFunction::SpectralMixture(_) => return Err(VolumeTransportError::Wavelength),
     };
     if !finite(result) { return Err(VolumeTransportError::Unrepresentable); }

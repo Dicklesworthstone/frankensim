@@ -7,6 +7,10 @@ use fs_math::det;
 
 mod table;
 pub use table::{MAX_PHASE_KNOTS, TabulatedPhase};
+mod spherical;
+pub use spherical::{SphericalPhaseTable, SphericalPhaseValue};
+#[cfg(feature = "tracer")]
+mod polarized;
 mod spectral;
 pub use spectral::{
     MAX_PHASE_WAVELENGTHS, PhasePacketEvaluation, PhasePacketSample, SpectralPhaseTable,
@@ -38,6 +42,9 @@ pub enum PhaseFunction {
     },
     /// Reciprocal, azimuthally symmetric tabulated law with a matched sampler.
     Tabulated(TabulatedPhase),
+    /// Physical spherical-scatterer coherency, with a matched scalar proposal.
+    /// Retains independent s/p powers and their complex cross term.
+    SphericalTable(SphericalPhaseTable),
     /// Convex interpolation of normalized angular laws at vacuum wavelengths.
     /// Use the wavelength/packet methods; gray evaluation refuses this law.
     SpectralTable(SpectralPhaseTable),
@@ -120,6 +127,10 @@ impl PhaseFunction {
                 hash.update(&[6]);
                 mixture.hash_into(hash);
             }
+            Self::SphericalTable(table) => {
+                hash.update(&[7]);
+                table.hash_into(hash);
+            }
         }
     }
 
@@ -149,6 +160,7 @@ impl PhaseFunction {
                 1.5 * INV_FOUR_PI * ((1.0 + d) + (1.0 - d) * c * c) / (2.0 + d)
             }
             Self::Tabulated(table) => table.eval_clamped(c),
+            Self::SphericalTable(table) => table.scalar_phase().eval_clamped(c),
             Self::SpectralTable(_) | Self::SpectralMixture(_) => {
                 return Err(VolumeTransportError::Wavelength);
             }
@@ -196,6 +208,7 @@ impl PhaseFunction {
                 }
             }
             Self::Tabulated(table) => table.sample_cosine(u_cos)?,
+            Self::SphericalTable(table) => table.scalar_phase().sample_cosine(u_cos)?,
             Self::SpectralTable(_) | Self::SpectralMixture(_) => {
                 return Err(VolumeTransportError::Wavelength);
             }
@@ -218,7 +231,12 @@ impl PhaseFunction {
         );
         let direction = raw.scale(1.0 / det::sqrt(raw.dot(raw)));
         let pdf = self.eval_cos(w.dot(direction))?;
-        if let Self::Tabulated(table) = self
+        let table = match self {
+            Self::Tabulated(table) => Some(table),
+            Self::SphericalTable(table) => Some(table.scalar_phase()),
+            _ => None,
+        };
+        if let Some(table) = table
             && pdf == 0.0
         {
             // A zero-density CDF boundary has measure zero. A frame rotation

@@ -26,7 +26,8 @@ use crate::volumes::VolumeGrid;
 use crate::volumes::transport::scattering::ScatteringGrid;
 use crate::volumes::transport::scattering::mie::{
     MieError, MieOpticalSpectrum, MiePopulation, MiePopulationBudget, MiePopulationSolution,
-    MieSphere, ParticleSizeDistribution, prepare_spectrum, prepare_visible_spectrum,
+    MieSphere, ParticleSizeDistribution, prepare_polarized_spectrum, prepare_spectrum,
+    prepare_visible_spectrum,
 };
 use crate::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget, VolumeTransportError};
 
@@ -266,6 +267,34 @@ impl MaterialParticleScattering {
             Some(self.identity),
             angular_tolerance,
             max_phase_knots,
+            |wavelength| self.at_wavelength(cx, wavelength, budget),
+        )?;
+        Ok(MaterialParticleSpectrum {
+            binding_identity: self.identity,
+            density_kg_m3: self.density_kg_m3,
+            temperature_k: self.temperature_k,
+            spectrum,
+        })
+    }
+
+    /// Prepare full-Stokes particle transport from this original material and
+    /// radius distribution. Absorption and scattering retain the same source,
+    /// state, host and density as `source_spectrum`; angular interpolation
+    /// retains positive coherency and complex s/p phase. Spectral diagnostics
+    /// inspect all four independent response components at fresh midpoints.
+    /// Every declared knot must have positive scattering. Source support,
+    /// cancellation and all existing Mie/population limits remain enforced.
+    pub fn source_spectrum_polarized(
+        &self,
+        cx: &Cx<'_>,
+        wavelengths_nm: &[f64],
+        budget: MiePopulationBudget,
+        angular_tolerance: f64,
+        max_phase_knots: usize,
+    ) -> Result<MaterialParticleSpectrum, ParticleScatteringError> {
+        let spectrum = prepare_polarized_spectrum(
+            cx, self.host_index_n, wavelengths_nm, self.identity,
+            angular_tolerance, max_phase_knots,
             |wavelength| self.at_wavelength(cx, wavelength, budget),
         )?;
         Ok(MaterialParticleSpectrum {

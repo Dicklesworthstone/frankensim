@@ -178,7 +178,7 @@ impl FixtureContributions<'_, '_, '_, '_, '_> {
                     },
                 )?;
             let angular = phase
-                .rayleigh_connection_factor(beam, source_frame, bundle.interface_state())
+                .polarized_connection_factor(beam, source_frame, bundle.interface_state())
                 .map_err(|error| PointLightCameraError::MolecularPhase {
                     binding: index,
                     error,

@@ -34,7 +34,7 @@ pub use indexed::ScatteringOptics;
 pub use phase::{
     MAX_PHASE_KNOTS, MAX_PHASE_WAVELENGTHS, PhaseFunction, PhasePacketEvaluation,
     PhasePacketSample, PhaseSample, ScatteringMixtureComponent, SpectralPhaseMixture,
-    SpectralPhaseTable, TabulatedPhase,
+    SpectralPhaseTable, TabulatedPhase, SphericalPhaseTable, SphericalPhaseValue,
 };
 /// Incident power absorbed after any number of native scattering events.
 pub mod deposition;

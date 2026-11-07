@@ -1,5 +1,37 @@
 //! Original broadband material claims reach native transport and emission.
 
+#[cfg(feature = "tracer")]
+#[test]
+fn g1_original_material_prepares_polarized_infrared_particles_without_changing_extinction() {
+    use crate::polarization::Stokes;
+    with_cx(|cx,_| {
+        let card=infrared_card(true);
+        for temperature in [300.0,400.0] {
+            let source=infrared_source(&card,temperature);
+            let binding=infrared_binding(&source);
+            let scalar=infrared_spectrum(cx,&source);
+            let polarized=binding.source_spectrum_polarized(
+                cx,&WAVELENGTHS,MiePopulationBudget::default(),0.003,2048,
+            ).unwrap();
+            assert_eq!(polarized.binding_identity(),binding.content_identity());
+            assert_eq!(polarized.particle_density_kg_m3(),scalar.particle_density_kg_m3());
+            assert_eq!(polarized.accepted_temperature_k(),Some(temperature));
+            let spectrum=polarized.spectrum();
+            spectrum.phase.admit_polarized().unwrap();
+            assert!(scalar.spectrum().phase.admit_polarized().is_err());
+            assert!(spectrum.angular_reports.iter().all(|r| r.polarization.is_some()));
+            for wavelength in [8000.0,9000.0,10_000.0,12_000.0] {
+                assert_eq!(spectrum.absorption.at(wavelength).unwrap(),scalar.spectrum().absorption.at(wavelength).unwrap());
+                assert_eq!(spectrum.scattering.at(wavelength).unwrap(),scalar.spectrum().scattering.at(wavelength).unwrap());
+                let response=spectrum.phase.apply_polarized_at(wavelength,0.0,Stokes::unpolarized(1.0)).unwrap();
+                assert!(response.i>0.0 && response.q/response.i>0.999);
+                assert!(Stokes::try_new(response.i,response.q,response.u,response.v).is_some());
+            }
+            assert!(spectrum.phase.mueller_at(7999.0,0.0).is_err());
+        }
+    });
+}
+
 use super::*;
 use crate::material_state::optical_mixture::deposition::ConstituentDepositionBudget;
 use crate::material_state::optical_mixture::{

@@ -110,7 +110,7 @@ impl SpectralPhaseTable {
         self.source_identity
     }
 
-    fn interval(&self, wavelength: f64) -> (&PhaseFunction, &PhaseFunction, f64) {
+    pub(in crate::volumes::transport::scattering) fn interval(&self, wavelength: f64) -> (&PhaseFunction, &PhaseFunction, f64) {
         let upper = self
             .knots
             .partition_point(|(lambda, _)| *lambda < wavelength)

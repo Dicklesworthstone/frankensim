@@ -5186,9 +5186,10 @@ phase owners and compares the retained wavelength interpolation with fresh
 midpoint solves. These diagnostics are sampled numerical evidence, not continuous
 error bounds; insufficient angular resolution refuses. Grid density means
 dispersed particle mass per mixture volume. A nonunit host requires independently
-matching dielectric-interior ray ownership. The model does not claim polarized
-transport, particle interactions, nonspherical particles, measured material
-dispersion, or an inferred aerosol distribution. A constant-index visible spectrum
+matching dielectric-interior ray ownership. The scalar preparation APIs retain intensity-only phases; full-Stokes source
+preparation is specified below. The model does not claim particle interactions,
+nonspherical particles, inferred material dispersion, or an inferred aerosol
+distribution. A constant-index visible spectrum
 does not acquire material dispersion from wavelength sampling alone.
 
 `MieSphere::source_spectrum` and `MiePopulation::source_spectrum` prepare the
@@ -9424,3 +9425,69 @@ circular polarization, native blockers, unresolved distance limits and delta
 chains. The actual source sampler, source-frame and MIS/range arithmetic passed
 a bounded numerical execution; the full native scene regressions were authored
 but not executed in the constrained shared build environment.
+
+## Source-bound full-Stokes Mie scattering and particle transport
+
+`MieSolution::amplitudes` retains the original complex S1/S2 series in the
+documented exp(-i omega t), right-handed s/p/travel convention. Its differential
+response stores both nonnegative diagonal Jones powers and the complex cross
+product before conversion to I/Q. `SphericalPhaseValue` and
+`SphericalPhaseTable` admit positive semidefinite coherency; convex angular
+and spectral interpolation and independent populations mix coherency, never
+complex particle amplitudes. Population weights use the same original
+scattering cross sections and number distribution as the scalar owner.
+
+`polarized_phase_table` refines all four independent real response components
+against the same direct multipoles, using bounded angular knots, cancellation,
+normalization and first-moment checks. Its scalar CDF and M00 share the exact
+same admitted table. The reported discrepancy is sampled numerical evidence;
+it does not certify unprobed angular or spectral resonances. Existing scalar
+preparation remains intensity-only and preserves its numerical arithmetic.
+
+`MieOpticalSpectrum::from_population_source_polarized` prepares the original
+dispersive population at each declared knot and diagnostic midpoint.
+`MaterialParticleScattering::source_spectrum_polarized` uses the SAME native
+material query and sphere solver, retaining accepted state, original n/k laws,
+temperature, particle density, host and radius/number distribution. Absorption
+and total scattering remain the original scalar coefficients. Every declared
+polarized knot requires positive scattering; source support is never
+extrapolated or replaced by an invented isotropic Mueller matrix.
+
+The original `PhaseFunction` dispatcher retains this full response, including
+spectral tables and independent species mixed with their original
+mass-loading-times-scattering weights. Scalar evaluation, CDF sampling,
+contraction and enclosure consumers retain the original M00 law. Full-Stokes
+collision sampling uses the actual wavelength and M/PDF response in the
+physical scattering frame; Rayleigh/depolarized ordinary arithmetic is
+preserved. Positive s/p channels and a bounded binary-exponent fallback retain
+weak responses that rounded M00-M01 or an intermediate quotient could erase.
+Exact optical extinction stays zero; unresolved positive range failures refuse.
+
+The borrowed `RayleighGrid` adapter and density-bound curved scattering media
+admit these retained particle laws without changing native free-flight,
+absorption, density/majorant or geometry ownership. Camera point and area-light
+connections use the common reciprocal full-Stokes contraction, including
+complex phase and circular polarization. Area-light continuation anchors
+borrow cheap shared phase tables and evaluate the original wavelength-specific
+PDF. Sharp particle lobes replay the original sampled direction for the PDF
+consistency guard; independent geometric checks and each image's actual-arrival
+MIS density remain separate. No Mie recurrence, radius-bin solve or material
+query runs at a transport vertex.
+
+Scalar-only HG/isotropic/intensity tables cannot determine polarization and
+refuse full-Stokes transport. The original independent nonmagnetic homogeneous
+sphere domain and real nonabsorbing host restrictions remain. Nonspherical or
+aligned nonspherical particles, dependent scattering, coherent interference
+between distinct particles and nonreciprocal magneto-optics are not supplied.
+Active-scattering environment NEE still requires an original infinite-tail or
+finite-support law; this extension does not infer one.
+
+Executed focused checks cover direct Jones/Mueller agreement, the Rayleigh
+limit, incoherent population weights, all-component angular refinement,
+original dispersive spectral preparation, every input polarization's sampled
+power, frame covariance, reciprocal connections, mixed-species wavelength
+PDFs, exact zeros and representable weak channels. The narrow-peak camera
+anchor arithmetic was executed separately with actual native phase owners.
+Native material-state and complete camera/grid scene integration are not
+claimed by those bounded executions; the infrared material regression is
+authored for the full native build.

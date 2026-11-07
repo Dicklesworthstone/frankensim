@@ -272,6 +272,36 @@ impl MiePopulationSolution {
     ) -> Result<MiePhaseTable, MieError> {
         prepare_phase_table(self, cx, tolerance, max_knots)
     }
+
+    /// Scattering-cross-section weighted coherency of independent particles.
+    /// Summing Jones amplitudes here would invent interparticle interference.
+    pub fn polarized_value(&self, cosine: f64) -> Result<super::SphericalPhaseValue, MieError> {
+        if !cosine.is_finite() || cosine.abs() > 1.0 + 2e-10 { return Err(MieError::Parameters); }
+        if self.sections.scattering_m2 == 0.0 { return Err(MieError::NoScattering); }
+        let mut sums: [Compensated; 4] = core::array::from_fn(|_| Compensated::default());
+        for (solution, weight) in &self.members {
+            if *weight == 0.0 { continue; }
+            let value = solution.polarized_value(cosine)?;
+            let p = value.powers_per_sr();
+            let z = value.cross_per_sr();
+            for (sum, entry) in sums.iter_mut().zip([p[0], p[1], z.re, z.im]) {
+                let contribution = *weight * entry;
+                if !contribution.is_finite() || (entry != 0.0 && contribution == 0.0) { return Err(MieError::Numerical); }
+                sum.add(contribution);
+            }
+        }
+        let sums = sums.map(Compensated::total);
+        super::SphericalPhaseValue::try_new(
+            [sums[0], sums[1]],
+            super::C64::new(sums[2], sums[3]),
+        ).map_err(|_| MieError::Numerical)
+    }
+
+    /// Prepare the full incoherent population response, resolving every
+    /// retained polarization component with the original Mie work limits.
+    pub fn polarized_phase_table(&self, cx: &Cx<'_>, tolerance: f64, max_knots: usize) -> Result<MiePhaseTable, MieError> {
+        super::polarized::prepare(self, cx, tolerance, max_knots)
+    }
 }
 
 impl MieAngularSolution for MiePopulationSolution {
@@ -283,6 +313,9 @@ impl MieAngularSolution for MiePopulationSolution {
     }
     fn eval_cos(&self, cosine: f64) -> Result<f64, MieError> {
         self.eval_cos(cosine)
+    }
+    fn polarized_value(&self, cosine: f64) -> Result<super::SphericalPhaseValue, MieError> {
+        self.polarized_value(cosine)
     }
 }
 

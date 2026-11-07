@@ -215,6 +215,10 @@ fn phase_integral_upper(
             return tabulated_phase_integral_upper(table.knots_per_sr(), cx)
                 .map(|upper| upper.map(|value| value.max(1.0)));
         }
+        PhaseFunction::SphericalTable(table) => {
+            return tabulated_phase_integral_upper(table.scalar_phase().knots_per_sr(),cx)
+                .map(|upper| upper.map(|value| value.max(1.0)));
+        }
         PhaseFunction::SpectralTable(table) => {
             // Convex spectral interpolation cannot exceed the largest
             // endpoint phase integral. No wavelength sampling is used here.

@@ -145,7 +145,7 @@ impl HomogeneousMedium {
             // the azimuthal 1/(2π) to obtain the solid-angle phase density.
             PhaseFunction::HenyeyGreenstein { g } => volumes::hg_pdf_cos(*g, cosine) / (2.0 * PI),
             PhaseFunction::Rayleigh => 3.0 * (1.0 + cosine * cosine) / (16.0 * PI),
-            PhaseFunction::Tabulated(_) | PhaseFunction::RayleighDepolarized { .. } => self
+            PhaseFunction::Tabulated(_) | PhaseFunction::SphericalTable(_) | PhaseFunction::RayleighDepolarized { .. } => self
                 .phase
                 .eval_cos(cosine)
                 .map_err(|_| MediumError::ScatteringCosine)?,

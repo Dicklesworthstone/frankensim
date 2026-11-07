@@ -1,11 +1,11 @@
-//! Molecular multiple scattering along actual curved physical paths.
+//! Molecular and spherical-particle scattering along curved physical paths.
 //!
 //! Each declared medium supplies either a mass-scattering spectrum with density
 //! or an explicitly bounded local spectral molecular law. Its original phase-
 //! index field continues to own absorption and group delay. A scattering-only
 //! flight is measured in arc length, not endpoint separation or a tangent ray.
 //! Native geometry decides whether a surface interrupts that flight. At a
-//! collision the original Rayleigh Mueller/PDF sampler acts on the locally
+//! collision the retained full-Stokes response and native PDF act on the locally
 //! transported polarization frame and current physical refractive index.
 //!
 //! Sampling scattering separately from continuous Beer absorption is the
@@ -17,9 +17,9 @@
 //!
 //! Heterogeneous laws use majorant thinning on that same curved arc, never grid
 //! chords. A local spectral law can vary both scattering rate and molecular
-//! depolarization with composition and wavelength. Only molecular Rayleigh/
-//! depolarized-Rayleigh laws have the requisite native Stokes response; scalar
-//! particle laws refuse. All source snapshots and majorants remain immutable
+//! depolarization with composition and wavelength. Density-bound media also
+//! admit physical spherical-particle coherency and its spectral mixtures;
+//! scalar-only particle laws still refuse. All snapshots and majorants remain immutable
 //! for the complete path; local vacuum cannot prove escape from a positive
 //! global majorant.
 
@@ -226,7 +226,10 @@ impl<'a> CurvedRayleighMedium<'a> {
         if !density_kg_m3.is_finite() || density_kg_m3 < 0.0 {
             return Err(volume_error(VolumeTransportError::Density { index: 0 }));
         }
-        phase.rayleigh_mueller(0.0).map_err(scattering_error)?;
+        phase.admit_polarized().map_err(scattering_error)?;
+        let (low,high)=scattering.wavelength_bounds_nm();
+        phase.eval_at(low,0.0).map_err(volume_error)?;
+        phase.eval_at(high,0.0).map_err(volume_error)?;
         Ok(Self {
             scattering,
             density: CurvedDensityProfile::Uniform(density_kg_m3),
@@ -302,7 +305,10 @@ impl<'a> CurvedRayleighMedium<'a> {
         {
             return Err(volume_error(VolumeTransportError::Density { index: 0 }));
         }
-        phase.rayleigh_mueller(0.0).map_err(scattering_error)?;
+        phase.admit_polarized().map_err(scattering_error)?;
+        let (low,high)=scattering.wavelength_bounds_nm();
+        phase.eval_at(low,0.0).map_err(volume_error)?;
+        phase.eval_at(high,0.0).map_err(volume_error)?;
         Ok(Self {
             scattering,
             density: CurvedDensityProfile::Field {

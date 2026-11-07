@@ -588,7 +588,7 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
         workspace: &mut AreaLightCameraWorkspace,
         state: &PathState,
     ) -> Result<f64, AreaLightCameraError> {
-        let receiver_id = match state.anchor {
+        let receiver_id = match state.anchor.as_ref() {
             Some(ContinuationAnchor::Diffuse(anchor)) => anchor.contact.object_id,
             Some(ContinuationAnchor::Rough(anchor)) => anchor.receiver.contact.object_id,
             _ => return Ok(1.0),
@@ -681,7 +681,7 @@ pub(super) fn emitter_weight_for_source(
     binding: SourceBinding<'_, '_, '_>,
     sample: AreaEmitterSample<'_>,
 ) -> Result<f64, AreaLightCameraError> {
-        let Some(anchor) = state.anchor else { return Ok(1.0); };
+        let Some(anchor) = state.anchor.as_ref() else { return Ok(1.0); };
         let contact = *path.last_contact().ok_or(AreaLightCameraError::NumericalRange)?;
         let source_direction = path.beam().ray().dir.scale(-1.0);
         let cosine = contact.witness.normal.dot(source_direction);
@@ -795,7 +795,17 @@ pub(super) fn emitter_weight_for_source(
                 // resolution. A GGX peak can exceed any cosine-law slope.
                 (pdf, 1e-7 * pdf.abs().max(rough.pdf.abs()) + 64.0 * f64::EPSILON)
             }
-            _ => (anchor.continuation_pdf(arrival, index)?,
+            #[cfg(feature = "volumes")]
+            ContinuationAnchor::Molecular(molecular)
+                if matches!(&molecular.phase, MolecularPhase::Retained(_)) => {
+                // Particle/spectral peaks need not obey the molecular angular
+                // slope bound. Re-evaluate the original sample, independently
+                // of the geometric arrival check below. Actual image MIS still
+                // evaluates each image's own arrival direction.
+                let pdf = anchor.continuation_pdf(molecular.outgoing.scale(-1.0), wavelength, index)?;
+                (pdf, 1e-7 * pdf.abs().max(molecular.pdf.abs()) + 64.0 * f64::EPSILON)
+            }
+            _ => (anchor.continuation_pdf(arrival, wavelength, index)?,
                 angular_allowance / core::f64::consts::PI + 64.0 * f64::EPSILON),
         };
         if angular_distance(arrival, anchor.outgoing().scale(-1.0)) > angular_allowance
@@ -838,7 +848,7 @@ pub(super) fn emitter_weight_for_source(
                         ContinuationAnchor::Molecular(_) => binding.source.volume_mis_weights(
                             sample, image.connection(), target, settings.connection.projection,
                             anchor.continuation_pdf(image.connection().path().bundle()
-                                .propagation().propagation().ray.dir, index)?),
+                                .propagation().propagation().ray.dir, wavelength, index)?),
                     };
                     weight = Some(weights
                         .map_err(|error| AreaLightCameraError::Source { binding: index, error })?
@@ -869,7 +879,7 @@ pub(super) struct RoughAnchor {
     pdf: f64,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum ContinuationAnchor {
     Diffuse(DiffuseAnchor),
     Rough(RoughAnchor),
@@ -877,13 +887,14 @@ pub(super) enum ContinuationAnchor {
     Molecular(MolecularAnchor),
 }
 
-/// Only the two native molecular laws are retained; unlike cloning a general
-/// PhaseFunction, this tag can never copy a heap-backed tabulated phase.
+/// Retain scalar molecular tags or shared immutable particle/spectral tables.
+/// Arc-backed tables are cloned once at a continuous departure, never rebuilt.
 #[cfg(feature = "volumes")]
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum MolecularPhase {
     Rayleigh,
     Depolarized(f64),
+    Retained(crate::volumes::transport::scattering::PhaseFunction),
 }
 
 #[cfg(feature = "volumes")]
@@ -896,23 +907,25 @@ impl MolecularPhase {
         match phase {
             PhaseFunction::Rayleigh => Ok(Self::Rayleigh),
             PhaseFunction::RayleighDepolarized { depolarization } => Ok(Self::Depolarized(*depolarization)),
-            _ => Err(AreaLightCameraError::MolecularPhase {
-                binding, error: crate::volumes::transport::VolumeTransportError::Phase.into(),
-            }),
+            _ => {
+                phase.admit_polarized().map_err(|error| AreaLightCameraError::MolecularPhase { binding,error })?;
+                Ok(Self::Retained(phase.clone()))
+            }
         }
     }
 
-    fn native(self) -> crate::volumes::transport::scattering::PhaseFunction {
+    fn evaluate(&self,wavelength_nm:f64,cosine:f64) -> Result<f64,crate::volumes::transport::VolumeTransportError> {
         use crate::volumes::transport::scattering::PhaseFunction;
         match self {
-            Self::Rayleigh => PhaseFunction::Rayleigh,
-            Self::Depolarized(depolarization) => PhaseFunction::RayleighDepolarized { depolarization },
+            Self::Rayleigh => PhaseFunction::Rayleigh.eval_cos(cosine),
+            Self::Depolarized(depolarization) => PhaseFunction::RayleighDepolarized { depolarization: *depolarization }.eval_cos(cosine),
+            Self::Retained(phase) => phase.eval_at(wavelength_nm,cosine),
         }
     }
 }
 
 #[cfg(feature = "volumes")]
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct MolecularAnchor {
     pub(super) position: Point3,
     pub(super) medium: usize,
@@ -923,7 +936,7 @@ pub(super) struct MolecularAnchor {
 }
 
 impl ContinuationAnchor {
-    fn target(self, _source: Point3, tolerance: f64) -> Result<BundleConnectionTarget, BundleConnectionError> {
+    fn target(&self, _source: Point3, tolerance: f64) -> Result<BundleConnectionTarget, BundleConnectionError> {
         match self {
             Self::Diffuse(anchor) => BundleConnectionTarget::try_diffuse_receiver(
                 anchor.contact.object_id, anchor.contact.witness.surface_point, anchor.normal, tolerance),
@@ -934,7 +947,7 @@ impl ContinuationAnchor {
         }
     }
 
-    fn outgoing(self) -> Vec3 {
+    fn outgoing(&self) -> Vec3 {
         match self {
             Self::Diffuse(anchor) => anchor.outgoing,
             Self::Rough(anchor) => anchor.outgoing,
@@ -943,7 +956,7 @@ impl ContinuationAnchor {
         }
     }
 
-    fn pdf(self) -> f64 {
+    fn pdf(&self) -> f64 {
         match self {
             Self::Diffuse(anchor) => anchor.pdf,
             Self::Rough(anchor) => anchor.pdf,
@@ -952,7 +965,7 @@ impl ContinuationAnchor {
         }
     }
 
-    fn resolution_m(self) -> f64 {
+    fn resolution_m(&self) -> f64 {
         match self {
             Self::Diffuse(anchor) => anchor.contact.resolution_m,
             Self::Rough(anchor) => anchor.receiver.contact.resolution_m,
@@ -963,15 +976,14 @@ impl ContinuationAnchor {
         }
     }
 
-    fn continuation_pdf(self, arrival: Vec3, _binding: usize) -> Result<f64, AreaLightCameraError> {
+    fn continuation_pdf(&self, arrival: Vec3, wavelength_nm: f64, _binding: usize) -> Result<f64, AreaLightCameraError> {
         match self {
             Self::Diffuse(anchor) => Ok((-anchor.normal.dot(arrival)).max(0.0) / core::f64::consts::PI),
             // Rough proposals require the original incident polarization and
             // both native adjacent media; they are evaluated by the receiver.
             Self::Rough(_) => Err(AreaLightCameraError::NumericalRange),
             #[cfg(feature = "volumes")]
-            Self::Molecular(anchor) => anchor.phase.native()
-                .eval_cos(anchor.incoming.dot(arrival.scale(-1.0)))
+            Self::Molecular(anchor) => anchor.phase.evaluate(wavelength_nm,anchor.incoming.dot(arrival.scale(-1.0)))
                 .map_err(|error| AreaLightCameraError::MolecularPhase { binding: _binding, error: error.into() }),
         }
     }

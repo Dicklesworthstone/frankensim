@@ -193,7 +193,7 @@ impl SpectralPhaseMixture {
         )
     }
 
-    fn weights_at(&self, wavelength_nm: f64) -> Result<ScatteringWeights, VolumeTransportError> {
+    pub(super) fn weights_at(&self, wavelength_nm: f64) -> Result<ScatteringWeights, VolumeTransportError> {
         let mut weights = ScatteringWeights {
             probability: [0.0; MAX_OPTICAL_MIXTURE_COMPONENTS],
             active: 0,
@@ -262,10 +262,10 @@ impl PhaseFunction {
     }
 }
 
-struct ScatteringWeights {
-    probability: [f64; MAX_OPTICAL_MIXTURE_COMPONENTS],
-    active: usize,
-    last: usize,
+pub(super) struct ScatteringWeights {
+    pub(super) probability: [f64; MAX_OPTICAL_MIXTURE_COMPONENTS],
+    pub(super) active: usize,
+    pub(super) last: usize,
 }
 
 fn add(sum: &mut f64, correction: &mut f64, value: f64) {
