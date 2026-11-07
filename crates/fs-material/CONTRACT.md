@@ -1,5 +1,32 @@
 # fs-material — CONTRACT
 
+## Finite-strain thermodynamics with retained viscous memory
+
+`ViscoHyperelastic::frozen_thermoelastic_state` derives mechanical Helmholtz
+energy, entropy, internal energy, fixed-deformation capacity and thermal Piola
+stress from the original zero-time physical potential at fixed accepted viscous
+metrics. The shared natural-map chain rule retains noncommuting reference
+derivatives and the existing elastic-source coefficient derivatives. Current
+law/reference/history admission remains native. Positive-duration incremental
+potentials and relaxation loss are not interpreted as reversible storage.
+
+`FiniteThermoelasticPlaneStressState` uses the original full-compliance
+transverse solver and its stable Schur block. Eliminating all transverse
+tractions changes thermal stress and adds the required positive Schur correction
+to the mechanical heat capacity. Elastic, source-derived and fixed-history
+viscoelastic snapshots share this reduction without a second transverse solve.
+Every density remains per original volume; no relaxed thickness becomes mass.
+
+The complete caloric capacity must be admitted separately. Exact-volume pressure
+thermodynamics and thermal/history evolution are outside these local snapshots.
+Native stable finite energy increments remain available for elastic snapshots;
+fixed-visco endpoints explicitly refuse that separate increment operation until
+its complete history-dependent owner exists.
+
+`hyper_thermoelastic_plane_stress` and `visco_thermoelastic` specify independent
+thermal derivatives, Maxwell reciprocity, objectivity, nonproportional retained
+history, relaxation-time independence, native plane reduction and refusals.
+
 ## Adaptive supported deposition with finite gas
 
 `sublimation::gas::timeline::coating::adaptive::advance_coatings_adaptive_with_gas`

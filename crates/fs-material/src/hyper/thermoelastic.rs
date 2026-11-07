@@ -14,9 +14,10 @@
 //! For beta=dP/dT and positive total reference-volume capacity c_F, eliminating
 //! temperature from ds=(c_F/T)dT-beta:dF at ds=0 gives
 //! A_S=A_T+(T/c_F) beta (x) beta. This is a full compressible 3-D local
-//! tangent. Incompressible/mixed pressure, plane stress and irreversible
-//! histories require their own constrained thermodynamic owners. Source
-//! smoothness and the actual meaning of the caloric capacity remain explicit.
+//! tangent. The viscoelastic child uses the same chain rule with accepted
+//! viscous metrics held fixed. Constrained pressure and history evolution
+//! require their own thermodynamic owners. Source smoothness and the actual
+//! meaning of the caloric capacity remain explicit.
 
 use super::acoustic::HyperelasticAcousticState;
 use super::reference::ReferenceDeformation;
@@ -24,6 +25,8 @@ use super::{Hyperelastic, det3};
 use crate::MaterialError;
 use fs_math::dd::Dd;
 
+/// Finite-compliance transverse relaxation of the same thermal potential.
+pub mod plane_stress;
 /// Original elastic-source derivatives for the admitted Neo-Hookean model.
 pub mod source;
 
@@ -60,6 +63,15 @@ struct ElasticTemperatureDerivatives {
     energy_j_m3_k: f64,
     energy_j_m3_k2: f64,
     piola_pa_k: [f64; 9],
+}
+
+// An original-volume physical potential at fixed natural reference/history.
+// The originating constitutive owner, rather than this chain-rule kernel,
+// admits its parameters and supplies its exact gradient and Hessian.
+pub(crate) struct ReferencePotentialDerivatives {
+    pub(crate) free_energy_j_m3: f64,
+    pub(crate) first_piola_pa: [f64; 9],
+    pub(crate) isothermal_tangent_pa: [[f64; 9]; 9],
 }
 
 /// A local natural deformation and its first two temperature derivatives.
@@ -107,12 +119,17 @@ impl ThermalReferenceJet {
 }
 
 /// Immutable original-volume mechanical thermodynamics at one total F and T.
+/// Internal variables, when supplied by the native viscoelastic owner, remain
+/// frozen throughout these reversible derivatives; no relaxation heat or
+/// history update is represented by this snapshot.
 /// Preparation admits the elastic domain, including the original native
 /// constitutive switching conventions. It does not certify a two-sided
 /// tangent at a fibre activation surface or an arbitrary source kink.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FiniteThermoelasticState {
-    law: Hyperelastic,
+    // Only elastic endpoints retain the direct stable increment owner. A
+    // fixed-Cv potential must not fall back to its equilibrium branch alone.
+    law: Option<Hyperelastic>,
     deformation_gradient: [f64; 9],
     elastic_deformation_gradient: [f64; 9],
     temperature_k: f64,
@@ -146,7 +163,6 @@ impl FiniteThermoelasticState {
         )
     }
 
-    #[allow(clippy::too_many_lines)]
     fn with_elastic_temperature_derivatives(
         law: &Hyperelastic,
         total_deformation_gradient: &[f64; 9],
@@ -185,31 +201,93 @@ impl FiniteThermoelasticState {
         {
             return Err(unrepresentable());
         }
-        let jg = reference.volume_ratio();
-        let free_energy_j_m3 = jg * elastic_energy;
-        let first_piola_pa = reference.pullback_piola(&elastic_piola);
-        let isothermal_tangent_pa = reference.pullback_tangent(&elastic_tangent);
+        let mut state = Self::with_reference_potential(
+            total_deformation_gradient,
+            temperature_k,
+            reference_jet,
+            ReferencePotentialDerivatives {
+                free_energy_j_m3: reference.volume_ratio() * elastic_energy,
+                first_piola_pa: reference.pullback_piola(&elastic_piola),
+                isothermal_tangent_pa: reference.pullback_tangent(&elastic_tangent),
+            },
+            partial,
+        )?;
+        state.law = Some(law);
+        Ok(state)
+    }
 
-        // Reuse the prepared inverse through its existing kinematic owner.
-        // B=G_T H, C=G_TT H; Fe_T=-Fe B and Fe_TT=Fe(2B²-C).
-        // Cyclic trace invariance gives Jg_T/Jg=tr(B).
+    /// Shared chain rule for a native physical potential whose coefficients
+    /// and internal variables are fixed. Not an admission seam for a finite-
+    /// interval incremental potential, which is not physical storage.
+    pub(crate) fn from_reference_potential(
+        total_deformation_gradient: &[f64; 9],
+        temperature_k: f64,
+        reference_jet: ThermalReferenceJet,
+        potential: ReferencePotentialDerivatives,
+    ) -> Result<Self, MaterialError> {
+        Self::with_reference_potential(
+            total_deformation_gradient,
+            temperature_k,
+            reference_jet,
+            potential,
+            ElasticTemperatureDerivatives::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn with_reference_potential(
+        total_deformation_gradient: &[f64; 9],
+        temperature_k: f64,
+        reference_jet: ThermalReferenceJet,
+        potential: ReferencePotentialDerivatives,
+        partial: ElasticTemperatureDerivatives,
+    ) -> Result<Self, MaterialError> {
+        if !temperature_k.is_finite() || temperature_k <= 0.0 {
+            return Err(invalid("positive finite absolute temperature required"));
+        }
+        let jacobian = det3(total_deformation_gradient);
+        if total_deformation_gradient
+            .iter()
+            .any(|value| !value.is_finite())
+            || !jacobian.is_finite()
+            || jacobian <= 0.0
+        {
+            return Err(invalid(
+                "finite orientation-preserving total deformation required",
+            ));
+        }
+        let ReferencePotentialDerivatives {
+            free_energy_j_m3,
+            first_piola_pa,
+            isothermal_tangent_pa,
+        } = potential;
+        let reference = reference_jet.reference;
+        let elastic_deformation_gradient =
+            reference.elastic_deformation(total_deformation_gradient);
+        let jg = reference.volume_ratio();
+
+        // Express the natural-map path as an equivalent deformation path at
+        // the CURRENT fixed G, so original Psi, P and A can be used directly.
+        // D=H G_T, C=H G_TT; v=-F D, w=F(2D²-C), Jg_T/Jg=tr(D).
+        // This never changes the native history binding or pushes it to a
+        // different frame. In particular, H and G_T need not commute.
         let h = reference.elastic_deformation(&IDENTITY);
-        let b = product(&reference_jet.first_derivative_per_k, &h);
-        let c = product(&reference_jet.second_derivative_per_k2, &h);
-        let b_squared = product(&b, &b);
-        let trace_b = trace(&b);
-        let jg_t = jg * trace_b;
-        let jg_tt = jg * (trace_b * trace_b - trace(&b_squared) + trace(&c));
-        let elastic_t = product(&elastic_deformation_gradient, &b).map(|value| -value);
-        let curvature = core::array::from_fn(|ij| 2.0 * b_squared[ij] - c[ij]);
-        let elastic_tt = product(&elastic_deformation_gradient, &curvature);
-        let elastic_piola_t: [f64; 9] =
-            core::array::from_fn(|row| dot(&elastic_tangent[row], &elastic_t));
-        let elastic_work_t = dot(&elastic_piola, &elastic_t);
-        let mut psi_t = jg_t * elastic_energy + jg * elastic_work_t;
-        let mut psi_tt = jg_tt * elastic_energy
-            + 2.0 * jg_t * elastic_work_t
-            + jg * (dot(&elastic_t, &elastic_piola_t) + dot(&elastic_piola, &elastic_tt));
+        let d = product(&h, &reference_jet.first_derivative_per_k);
+        let c = product(&h, &reference_jet.second_derivative_per_k2);
+        let d_squared = product(&d, &d);
+        let trace_d = trace(&d);
+        let relative_volume_tt = trace_d * trace_d - trace(&d_squared) + trace(&c);
+        let equivalent_t = product(total_deformation_gradient, &d).map(|value| -value);
+        let curvature = core::array::from_fn(|ij| 2.0 * d_squared[ij] - c[ij]);
+        let equivalent_tt = product(total_deformation_gradient, &curvature);
+        let piola_t: [f64; 9] =
+            core::array::from_fn(|row| dot(&isothermal_tangent_pa[row], &equivalent_t));
+        let work_t = dot(&first_piola_pa, &equivalent_t);
+        let mut psi_t = trace_d * free_energy_j_m3 + work_t;
+        let mut psi_tt = relative_volume_tt * free_energy_j_m3
+            + 2.0 * trace_d * work_t
+            + dot(&equivalent_t, &piola_t)
+            + dot(&first_piola_pa, &equivalent_tt);
         let variable_coefficients = partial.energy_j_m3_k != 0.0
             || partial.energy_j_m3_k2 != 0.0
             || partial.piola_pa_k.iter().any(|value| *value != 0.0);
@@ -217,24 +295,27 @@ impl FiniteThermoelasticState {
             // Psi=Jg W(Fe,T): include the partial thermal response and both
             // mixed reference/coefficient terms, without re-differencing G.
             psi_t += jg * partial.energy_j_m3_k;
-            psi_tt += 2.0 * jg_t * partial.energy_j_m3_k
-                + jg * (2.0 * dot(&partial.piola_pa_k, &elastic_t) + partial.energy_j_m3_k2);
+            psi_tt += 2.0 * trace_d * jg * partial.energy_j_m3_k
+                + 2.0
+                    * dot(
+                        &reference.pullback_piola(&partial.piola_pa_k),
+                        &equivalent_t,
+                    )
+                + jg * partial.energy_j_m3_k2;
         }
         let entropy_j_m3_k = -psi_t;
         let internal_energy_j_m3 = temperature_k.mul_add(entropy_j_m3_k, free_energy_j_m3);
         let mechanical_heat_capacity_j_m3_k = -temperature_k * psi_tt;
 
-        // d(Jg Pe H^T)/dT = tr(B) P + Jg (Pe_T - Pe B^T) H^T.
-        // The same native pullback carries every shear/cross component.
-        let pulled_rate = reference.pullback_piola(&core::array::from_fn(|ij| {
+        // d(Jg Pe H^T)/dT = tr(D) P + A:v - P D^T.
+        // The complete original tangent carries every shear/cross component.
+        let mut stress_temperature_derivative_pa_k = core::array::from_fn(|ij| {
             let (i, j) = (ij / 3, ij % 3);
             let inverse_work = (0..3).fold(0.0, |sum, k| {
-                elastic_piola[3 * i + k].mul_add(b[3 * j + k], sum)
+                first_piola_pa[3 * i + k].mul_add(d[3 * j + k], sum)
             });
-            elastic_piola_t[ij] - inverse_work
-        }));
-        let mut stress_temperature_derivative_pa_k =
-            core::array::from_fn(|ij| trace_b.mul_add(first_piola_pa[ij], pulled_rate[ij]));
+            trace_d.mul_add(first_piola_pa[ij], piola_t[ij] - inverse_work)
+        });
         if variable_coefficients {
             let coefficient_rate = reference.pullback_piola(&partial.piola_pa_k);
             for (derivative, increment) in stress_temperature_derivative_pa_k
@@ -245,9 +326,8 @@ impl FiniteThermoelasticState {
             }
         }
         if [
-            elastic_energy,
-            jg_t,
-            jg_tt,
+            trace_d,
+            relative_volume_tt,
             free_energy_j_m3,
             entropy_j_m3_k,
             internal_energy_j_m3,
@@ -262,7 +342,7 @@ impl FiniteThermoelasticState {
             return Err(unrepresentable());
         }
         Ok(Self {
-            law,
+            law: None,
             deformation_gradient: *total_deformation_gradient,
             elastic_deformation_gradient,
             temperature_k,
@@ -306,14 +386,23 @@ impl FiniteThermoelasticState {
     /// natural volume, are retained independently of large absolute storage.
     /// The caller owns the physical source/trajectory relationship of the two
     /// states; this operation does not label their difference as work or heat.
+    ///
+    /// Both endpoints must retain the native elastic increment owner. Fixed-
+    /// history viscoelastic snapshots explicitly refuse: their separate stable
+    /// Cv/reference increment owner is not supplied by this thermal snapshot.
     pub fn free_energy_increment_to(&self, after: &Self) -> Result<f64, MaterialError> {
+        let (Some(before_law), Some(after_law)) = (&self.law, &after.law) else {
+            return Err(invalid(
+                "stable thermal energy increments require native elastic endpoints; fixed-history viscoelastic increments are unsupported",
+            ));
+        };
         let before_f = &self.elastic_deformation_gradient;
         let after_f = &after.elastic_deformation_gradient;
         let increment = self.reference_jet.reference.original_density_increment_to(
             &after.reference_jet.reference,
-            self.law.energy(before_f),
-            after.law.energy(after_f),
-            self.law.energy_increment_to(before_f, &after.law, after_f),
+            before_law.energy(before_f),
+            after_law.energy(after_f),
+            before_law.energy_increment_to(before_f, after_law, after_f),
         );
         if increment.is_finite() {
             Ok(increment)
@@ -325,6 +414,8 @@ impl FiniteThermoelasticState {
     /// The symmetric product identity avoids subtracting two large rounded
     /// internal energies. Entropy values retain their original source-derived
     /// numerical precision; this is not a new constitutive derivative model.
+    /// As for `free_energy_increment_to`, fixed-history viscoelastic endpoints
+    /// refuse until their own direct stable energy increment is supplied.
     pub fn internal_energy_increment_to(&self, after: &Self) -> Result<f64, MaterialError> {
         let before_t = Dd::from_f64(self.temperature_k);
         let after_t = Dd::from_f64(after.temperature_k);

@@ -50,6 +50,9 @@ pub use plane_stress::{
 /// Objective Green-strain membranes with the original finite-viscoelastic history.
 pub mod membrane;
 
+/// Native reversible thermal derivatives with accepted viscous memory fixed.
+pub mod thermoelastic;
+
 use crate::hyper::reference::ReferenceDeformation;
 use crate::hyper::{Hyperelastic, MAX_OGDEN_TERMS, OgdenTerm};
 use crate::{MaterialAdmissibility, MaterialError};
