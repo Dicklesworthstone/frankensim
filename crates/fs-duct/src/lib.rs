@@ -1204,17 +1204,27 @@ pub(crate) fn collect_open_hole_sites(duct: &Duct) -> Vec<OpenHoleSite> {
     sites
 }
 
-/// Sharp-edged vena-contracta contraction coefficient
-/// $C_{\text{vc}} = \pi / (\pi + 2) \approx 0.61$ (Kirchhoff/Helmholtz
-/// free-streamline bound for $r_c / b \to 0$; `Dalmont et al. 2002`,
-/// *Acta Acust. united Ac.* 88:567–575, Sec. 4.1; `Atig et al. 2004`,
-/// *J. Sound Vib.* 269:1119–1130).
+/// Steady thin-plate vena-contracta coefficient
+/// $C_{\text{vc}} = \pi / (\pi + 2) \approx 0.61$ (Kirchhoff free-streamline
+/// contraction of a plane jet): a textbook value, not a tone-hole measurement.
+/// Neither printed law below carries it: see [`open_hole_orifice_quadratic_coeff`].
 pub const SHARP_EDGE_VENA_CONTRACTA: f64 = 0.61;
 
 /// Quasi-steady orifice separation quadratic loss coefficient
 /// $K = \rho / (2 C_{\text{vc}}^2 A_h^2)$ [$\text{Pa}\cdot\text{s}^2/\text{m}^6$]
-/// for an open or vented hole of effective radius $b_{\text{eff}} = b\sqrt{\sigma}$
-/// (`Dalmont et al. 2002` Eq. 18; `Atig et al. 2004` Eq. 3).
+/// for an open or vented hole of effective radius $b_{\text{eff}} = b\sqrt{\sigma}$.
+///
+/// Printed anchors, in this form (first harmonic of $K|U|U$, so the resistance
+/// is $(4 c_d / 3\pi)\,\rho\hat v / A$ with $c_d = 1 / C_{\text{vc}}^2$):
+/// Atig, Dalmont and Gilbert 2004 (*C. R. Mécanique* 332:299-304) Eq. 3,
+/// $Z_{nl}/Z_c = (2 c_d / 3\pi) M$ with their $c_d = 2$ (thin-walled unflanged
+/// open end of a tube) or $13/9$ (flanged), is $C_{\text{vc}} = 1$ or $1.18$;
+/// the hole-branch term $K_h Z_{ch} v_{\text{RMS}} / c_0$, $K_h = 0.5$, of the
+/// sharp-edged side hole of Dalmont et al. 2002 (*Acta Acust. united Ac.*
+/// 88:567-575) as quoted by Szwarcberg et al. 2024 (*JASA*, Sec. III.2.1) is
+/// $C_{\text{vc}} = 1.096$ (its series term and the $K_a Z_c / 4$ shunt term have
+/// no port here). The 0.61 above is the steady plate value and gives a $K$ 2.7
+/// times Atig's $c_d = 2$ reading and 3.2 times the side-hole $K_h$ reading.
 ///
 /// Returns `0.0` when `loss == LossModel::Lossless` so lossless ducts stay
 /// strictly conservative.
