@@ -7151,6 +7151,18 @@ access and `apply` include both terms; `apply_into` uses caller-owned output
 and scratch without heap allocation, and leaves output unchanged on refusal.
 The sparse `geometric_part` alone is not the complete gas stiffness.
 
+The static acoustic operator retains independent factors as
+`K_acoustic = sum_c w_c w_c^T`; merging factors would introduce unphysical
+cross-chamber terms. Empty and single-factor actions keep the original
+arithmetic. Multiple factors store ordered nonzero free-coordinate entries,
+so Krylov application uses work and storage proportional to the active boundary
+entries and allocates no temporary vectors. The Jacobi fallback includes the
+full signed geometric-plus-acoustic diagonal before taking its absolute value.
+Multiple-source force normalization adds each cavity's translation-invariant
+bound on each free row before taking the norm. Focused operator regressions
+check independent and opposing factors, action and transpose, diagonal,
+source/free-chart refusal and the empty/single reductions.
+
 `ClosedTetCavity::volume_change_m3` and held-pressure work use compensated
 polarized boundary-cone determinants before subtracting any rounded volume
 totals. Both original solid configurations and positive gas volumes remain

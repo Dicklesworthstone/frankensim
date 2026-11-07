@@ -1711,16 +1711,18 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                     }
                 }
                 let kff = coo.assemble();
-                let acoustic = if let Some(current) = &current_cavity {
+                if let Some(current) = &current_cavity {
                     let weights = current.force_tangent.acoustic_rank_one_vector();
                     let prescribed_projection = weights.iter().zip(&dp_full)
                         .fold(0.0, |sum, (&w, &dp)| w.mul_add(dp, sum));
-                    let amplitude = fs_math::det::sqrt(load);
                     for (row, &dof) in free.iter().enumerate() {
                         rhs[row] = (-load * weights[dof]).mul_add(prescribed_projection, rhs[row]);
                     }
-                    free.iter().map(|&dof| amplitude * weights[dof]).collect::<Vec<_>>()
-                } else { Vec::new() };
+                }
+                let acoustic = pressure::cavity::equilibrium::AcousticFactors::from_full_vectors(
+                    current_cavity.iter().map(|current| current.force_tangent.acoustic_rank_one_vector()),
+                    &free, load, cx,
+                )?;
                 let (direction, iterations, fallback) = if current_cavity.is_some() {
                     let (direction, iterations) =
                         self.general_linear_solve_with_acoustic(&kff, &acoustic, &rhs, load, cx)?;
@@ -2022,11 +2024,14 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         load: f64,
         cx: &Cx<'_>,
     ) -> Result<(Vec<f64>, usize), HyperTetError> {
-        self.general_linear_solve_with_acoustic(kff, &[], rhs, load, cx)
+        self.general_linear_solve_with_acoustic(
+            kff, &pressure::cavity::equilibrium::AcousticFactors::empty(), rhs, load, cx,
+        )
     }
 
     fn general_linear_solve_with_acoustic(
-        &self, kff: &Csr, acoustic: &[f64], rhs: &[f64], load: f64, cx: &Cx<'_>,
+        &self, kff: &Csr, acoustic: &pressure::cavity::equilibrium::AcousticFactors,
+        rhs: &[f64], load: f64, cx: &Cx<'_>,
     ) -> Result<(Vec<f64>, usize), HyperTetError> {
         checkpoint(cx)?;
         if norm(rhs) == 0.0 {
@@ -2040,17 +2045,19 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         }
         let preconditioner = match ilu0(kff) {
             Ok(ilu) => GeneralPreconditioner::Ilu(ilu),
-            Err(_) => GeneralPreconditioner::Jacobi(AbsJacobi {
-                inv: (0..kff.nrows())
-                    .map(|i| {
-                        let diagonal = kff.get(i, i).abs();
-                        if diagonal > 0.0 { 1.0 / diagonal } else { 1.0 }
-                    })
-                    .collect(),
-            }),
+            Err(_) => {
+                let mut diagonal: Vec<_> = (0..kff.nrows()).map(|i| kff.get(i, i)).collect();
+                acoustic.add_diagonal(&mut diagonal, cx)?;
+                GeneralPreconditioner::Jacobi(AbsJacobi {
+                    inv: diagonal.into_iter().map(|value| {
+                        let magnitude = value.abs();
+                        if magnitude > 0.0 { 1.0 / magnitude } else { 1.0 }
+                    }).collect(),
+                })
+            }
         };
         let op = pressure::cavity::equilibrium::AcousticTangent {
-            sparse: CsrOp::general(kff.clone()), factor: acoustic,
+            sparse: CsrOp::general(kff.clone()), factors: acoustic,
         };
         let restart = rhs.len().min(32).min(self.settings.max_linear_iterations);
         let mut state = FgmresState::new(rhs, restart);
