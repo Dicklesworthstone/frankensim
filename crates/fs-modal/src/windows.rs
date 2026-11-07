@@ -264,18 +264,14 @@ pub fn slice_windows(
         for mode in &report.modes {
             let relative = mode.residual / mode.lambda.abs().max(f64::MIN_POSITIVE);
             max_width = max_width.max(relative);
+            // Every window converged its certified count; an over-wide certificate is its own
+            // refusal, so `WindowUnresolved` keeps meaning the iteration budget.
             if !relative.is_finite() || relative > plan.maximum_relative_halfwidth {
-                return Err(ModalError::WindowUnresolved {
-                    expected: report.expected,
-                    converged: report
-                        .modes
-                        .iter()
-                        .filter(|m| {
-                            m.residual / m.lambda.abs().max(f64::MIN_POSITIVE)
-                                <= plan.maximum_relative_halfwidth
-                        })
-                        .count(),
+                return Err(ModalError::HalfwidthExceeded {
                     window: report.window,
+                    lambda: mode.lambda,
+                    relative,
+                    cap: plan.maximum_relative_halfwidth,
                 });
             }
         }

@@ -4,7 +4,7 @@
 use crate::card::Card;
 use fs_exec::Cx;
 use fs_material::OrthotropicElastic;
-use fs_modal::{ModePair, SliceOptions, WindowPlan, slice_windows};
+use fs_modal::{ModalError, ModePair, SliceOptions, WindowPlan, slice_windows};
 use fs_solid::linear3::tet10::{
     BoundaryProjection, QuadraticTetProblem, TetQuadrature, promote_p1_to_p2,
 };
@@ -180,20 +180,74 @@ const MAX_WINDOWS_AT_WORK: usize = 13;
 /// A window edge that falls within the certificate's half-width of an eigenvalue leaves that window
 /// unresolved (`WindowUnresolved`, seen on the A5 check cards). A different window count moves every edge,
 /// so the card's count is tried first and then the next three. Each attempt is a complete certified window
-/// plan, so a success is as good as any other; if all four refuse, the last refusal is returned.
+/// plan, so a success is as good as any other. A refused attempt keeps its reason (`refusal`): it goes to
+/// stderr as it happens, so a later count's success does not lose it, and if all four refuse the error
+/// carries all four.
 pub fn band_modes(
     card: &Card,
     a: &TetElasticAssembly,
     cx: &Cx<'_>,
 ) -> Result<Vec<ModePair>, String> {
-    let mut last = String::new();
+    let mut refused = Vec::with_capacity(4);
     for n in card.windows..card.windows + 4 {
         match band_modes_in(card, a, cx, n) {
             Ok(modes) => return Ok(modes),
-            Err(e) => last = e,
+            Err(e) => {
+                let reason = refusal(card, n, &e);
+                eprintln!("bar_strike {}: window plan refused: {reason}", card.name);
+                refused.push(reason);
+            }
         }
     }
-    Err(last)
+    Err(format!(
+        "certified band windows refused at all four counts: {}",
+        refused.join("; ")
+    ))
+}
+
+/// Why `n` windows refused: the count, where (window k of n with its span in Hz, and the mode over the
+/// certificate cap or the shift of the factor that refused, in Hz), and the owner's refusal with its
+/// `FS-MODAL-*` code, which names the limit: `WINDOW-UNRESOLVED` the Krylov budget (`slice_options`),
+/// `HALFWIDTH-EXCEEDED` the card's `maximum_relative_halfwidth`, `FACTOR` the factor cap or a pivot.
+pub(crate) fn refusal(card: &Card, n: usize, e: &ModalError) -> String {
+    let plan = window_plan(card, n);
+    let f_hz = |lambda: f64| lambda.max(0.0).sqrt() / TAU;
+    let window = |k: usize| {
+        let (lo, hi) = plan.windows[k];
+        format!(
+            "window {} of {n} ({:.1} to {:.1} Hz)",
+            k + 1,
+            f_hz(lo),
+            f_hz(hi)
+        )
+    };
+    let at = match e {
+        ModalError::WindowUnresolved { window: w, .. } => {
+            plan.windows.iter().position(|p| p == w).map(window)
+        }
+        ModalError::HalfwidthExceeded {
+            window: w, lambda, ..
+        } => plan
+            .windows
+            .iter()
+            .position(|p| p == w)
+            .map(|k| format!("{}, the mode at {:.3} Hz", window(k), f_hz(*lambda))),
+        ModalError::Factor { shift, .. } if shift.is_finite() => Some(
+            match plan
+                .windows
+                .iter()
+                .position(|&(lo, hi)| lo < *shift && *shift < hi)
+            {
+                Some(k) => format!("{}, its factor at {:.1} Hz", window(k), f_hz(*shift)),
+                None => format!("the count at the edge {:.1} Hz", f_hz(*shift)),
+            },
+        ),
+        _ => None,
+    };
+    match at {
+        Some(at) => format!("{n} windows, {at}: {e}"),
+        None => format!("{n} windows, the whole plan: {e}"),
+    }
 }
 
 /// `n` equal windows from 20 Hz to the card's band. Each window at work may hold its factor cap against the
@@ -222,10 +276,9 @@ fn band_modes_in(
     a: &TetElasticAssembly,
     cx: &Cx<'_>,
     n: usize,
-) -> Result<Vec<ModePair>, String> {
+) -> Result<Vec<ModePair>, ModalError> {
     let plan = window_plan(card, n);
-    let report = slice_windows(&a.stiffness, &a.mass, &plan, &slice_options(card), cx)
-        .map_err(|e| format!("certified band windows: {e:?}"))?;
+    let report = slice_windows(&a.stiffness, &a.mass, &plan, &slice_options(card), cx)?;
     let mut modes: Vec<ModePair> = report.reports.into_iter().flat_map(|w| w.modes).collect();
     canonical_phase(&mut modes);
     Ok(modes)

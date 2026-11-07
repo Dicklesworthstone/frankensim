@@ -352,6 +352,53 @@ fn arc_profile_is_flat_in_the_middle_and_full_thickness_outside_the_cut() {
     assert!((p.thickness(l, t, x) - expected).abs() < 1e-15);
 }
 
+/// A refused window plan keeps its reason. With the certificate cap below any residual every count tried
+/// refuses, and the error names all four: the count, the window over the cap (k of n with its span in Hz,
+/// the one holding the passing plan's lowest mode) and the owner's code for that limit.
+#[test]
+fn every_refused_window_count_keeps_its_reason() {
+    let card = coarse(3500.0);
+    let s = structure(&card, 1, card.density_kg_m3).expect("the 1e-8 plan passes");
+    let lowest = s
+        .modes
+        .iter()
+        .map(|m| m.lambda)
+        .fold(f64::INFINITY, f64::min);
+    let mut tight = card.clone();
+    tight.maximum_relative_halfwidth = f64::MIN_POSITIVE;
+    let err = match structure(&tight, 1, tight.density_kg_m3) {
+        Ok(_) => panic!("no count passes a cap below any residual"),
+        Err(e) => e,
+    };
+    assert!(
+        err.starts_with("certified band windows refused at all four counts: "),
+        "{err}"
+    );
+    let f_hz = |lambda: f64| lambda.max(0.0).sqrt() / bar::TAU;
+    for n in card.windows..card.windows + 4 {
+        let plan = bar::window_plan(&card, n);
+        let k = plan
+            .windows
+            .iter()
+            .position(|&(lo, hi)| lo < lowest && lowest <= hi)
+            .expect("the lowest mode lies in the band");
+        let (lo, hi) = plan.windows[k];
+        let named = format!(
+            "{n} windows, window {} of {n} ({:.1} to {:.1} Hz), the mode at ",
+            k + 1,
+            f_hz(lo),
+            f_hz(hi)
+        );
+        assert!(err.contains(&named), "{named} in {err}");
+    }
+    assert_eq!(
+        err.matches("FS-MODAL-HALFWIDTH-EXCEEDED").count(),
+        4,
+        "{err}"
+    );
+    assert!(!err.contains("FS-MODAL-WINDOW-UNRESOLVED"), "{err}");
+}
+
 /// The whole route at the coarsest rung: modes, Burton-Miller transfers, cited mallet, render. The output is
 /// finite, non-trivial, and replays bit for bit.
 #[test]

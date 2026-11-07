@@ -123,6 +123,20 @@ pub enum ModalError {
         /// The window.
         window: (f64, f64),
     },
+    /// Every window of a plan converged its certified count, but a mode's certificate is wider than the
+    /// plan allows: its residual relative to `|λ̂|` exceeds `WindowPlan::maximum_relative_halfwidth`, or is
+    /// not finite. Raised only by [`slice_windows`]' check of the returned modes, so
+    /// [`ModalError::WindowUnresolved`] stays the iteration budget's refusal.
+    HalfwidthExceeded {
+        /// The window holding the mode.
+        window: (f64, f64),
+        /// The mode's Ritz value λ̂, in the pencil's units.
+        lambda: f64,
+        /// Its residual relative to `|λ̂|`.
+        relative: f64,
+        /// The plan's `maximum_relative_halfwidth`.
+        cap: f64,
+    },
     /// The dense complex eigensolver failed on the linearized quadratic
     /// pencil.
     QuadraticEig {
@@ -219,6 +233,17 @@ impl core::fmt::Display for ModalError {
                 f,
                 "FS-MODAL-WINDOW-UNRESOLVED: inertia certifies {expected} mode(s) in \
                  ({}, {}] but only {converged} converged within budget",
+                window.0, window.1
+            ),
+            ModalError::HalfwidthExceeded {
+                window,
+                lambda,
+                relative,
+                cap,
+            } => write!(
+                f,
+                "FS-MODAL-HALFWIDTH-EXCEEDED: the mode at {lambda} in ({}, {}] carries a relative \
+                 half-width {relative:e}, above the plan's {cap:e}",
                 window.0, window.1
             ),
             ModalError::QuadraticEig { detail } => {

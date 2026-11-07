@@ -135,8 +135,9 @@ mass-normalized damped modes (`time`, moved from fs-couple under owner decision 
 - `ModalError` — typed refusals with stable `FS-MODAL-*` display codes:
   dimension mismatch, mass-not-SPD, factorization refusal (wrapping the
   fs-sparse `FS-SPARSE-DIRECT-*` code and the shift), invalid window,
-  window-unresolved (the count-certificate mutation gate), unrepresentable
-  mass-coordinate equilibration, quadratic-eig failure.
+  window-unresolved (the count-certificate mutation gate), half-width
+  exceeded (a parallel plan's converged mode over its certificate cap),
+  unrepresentable mass-coordinate equilibration, quadratic-eig failure.
 
 ### `harmonic::resonance`: actual driven peaks, notches and linewidths
 
@@ -845,7 +846,12 @@ Wasm executes windows sequentially through the same body without spawning.
 
 `MultiSliceReport` returns all slices, symbolic nnz(L), and timing/work/memory
 accounting. `maximum_relative_halfwidth` is enforced against every explicit
-residual; an unresolved or over-wide mode refuses the whole call. The memory
+residual; an unresolved or over-wide mode refuses the whole call. A window whose
+iteration budget ends short of its certified count refuses as
+`WindowUnresolved`; a converged mode whose residual / |lambda| exceeds the cap
+(or is not finite) refuses as `HalfwidthExceeded`, carrying its window, Ritz
+value, relative half-width and the cap, so the two causes never share a code
+(`tests/parallel_windows.rs` gives both on one pencil). The memory
 cap admits retained CSR/symbolic/mass payload, concurrent numeric factor caps,
 Krylov scratch, scales and output vectors. It excludes allocator overhead,
 thread stacks and transient symbolic-construction storage; reported peak is

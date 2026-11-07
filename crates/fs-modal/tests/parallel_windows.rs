@@ -236,6 +236,63 @@ fn g0_window_count_cap_and_cap_plus_one() {
         "parallel work needs an explicit factor cap"
     );
 }
+/// The plan's two refusals keep their causes apart. A converged mode over the
+/// certificate cap refuses as `HalfwidthExceeded`, naming its window, Ritz value,
+/// relative half-width and the cap, to the bit of the passing run; a starved
+/// iteration budget still refuses as `WindowUnresolved` under the same cap.
+#[test]
+fn g0_halfwidth_and_budget_refusals_name_their_own_causes() {
+    let n = 80;
+    let k = chain(n);
+    let m = Csr::identity(n);
+    let gate = CancelGate::new_clock_free();
+    let relative =
+        |mode: &fs_modal::ModePair| mode.residual / mode.lambda.abs().max(f64::MIN_POSITIVE);
+    let good = with_cx(&gate, |cx| {
+        slice_windows(&k, &m, &plan(n, 2), &options(), cx)
+    })
+    .expect("the 1e-8 plan passes");
+    let cap = f64::MIN_POSITIVE;
+    let (window, first) = good
+        .reports
+        .iter()
+        .find_map(|r| {
+            r.modes
+                .iter()
+                .find(|m| relative(m) > cap)
+                .map(|m| (r.window, m))
+        })
+        .expect("some returned mode carries a nonzero residual");
+    let tight = WindowPlan {
+        maximum_relative_halfwidth: cap,
+        ..plan(n, 2)
+    };
+    match with_cx(&gate, |cx| slice_windows(&k, &m, &tight, &options(), cx)) {
+        Err(e @ ModalError::HalfwidthExceeded { .. }) => {
+            assert_eq!(
+                e,
+                ModalError::HalfwidthExceeded {
+                    window,
+                    lambda: first.lambda,
+                    relative: relative(first),
+                    cap,
+                }
+            );
+            let text = e.to_string();
+            assert!(text.starts_with("FS-MODAL-HALFWIDTH-EXCEEDED"), "{text}");
+        }
+        other => panic!("expected HalfwidthExceeded, got {other:?}"),
+    }
+    let starved = SliceOptions {
+        max_lanczos: 2,
+        max_restarts: 1,
+        ..options()
+    };
+    assert!(matches!(
+        with_cx(&gate, |cx| slice_windows(&k, &m, &tight, &starved, cx)),
+        Err(ModalError::WindowUnresolved { expected, converged, .. }) if converged < expected
+    ));
+}
 #[test]
 fn g4_cancellation_drains_and_returns_cancelled() {
     let n = 1000;
