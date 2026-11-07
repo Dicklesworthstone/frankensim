@@ -306,6 +306,40 @@ Focused G0/G3/G4 tests compare live rebinding with two original physical
 intervals, exercise changed gas inventory and mass-owned area, and cover stale
 outputs, original source errors, identity refusal and cancellation.
 
+### Closed support/coating/gas phase-equilibrium endpoints
+
+The resistive chamber's equilibrium module supplies an isolated thermodynamic
+endpoint for one nonvolatile support, one volatile coating and the original
+finite multicomponent gas. Positive exposed area, scalar support/coating
+conductance and molecular accommodation are required exchange permissions.
+The endpoint imposes a common temperature and partitions the conserved
+volatile mass by the original saturation law: positive deposit coexists with
+saturated vapor; insufficient volatile inventory leaves an exactly bare,
+undersaturated support. No mass tolerance deletes a meaningful residual film.
+
+A caller-declared support-specific-enthalpy bracket selects one increasing
+branch. Every nonstationary trial uses the original phase source and gas
+partial enthalpy, derives coating enthalpy with the fixed datum conversion,
+and verifies that value through the original coating inverse. The residual
+uses original species enthalpy increments so formation constants cancel before
+energy admission. Stored caloric encoding has its own energy gate. Both body
+datums remain independent. An exact stationary endpoint is preserved without
+probing unused root endpoints.
+
+The original gas inventory/known-temperature owner reconstructs the accepted
+composition, pressure, transport and acoustic state at most once. Actual species
+inventories, total mass, source-relative energy, common temperature and phase
+complementarity are admitted before publishing the candidate. Exact depletion
+of one gas species retains its source catalog; complete gas vacuum refuses.
+Explicit evaluation limits and the existing caller cancellation gate bound work.
+
+The fixed accessible gas volume excludes supports. Actual initial and trial
+deposit volumes must remain below the explicit fraction ceiling in (0, 0.01].
+This bounds omitted displacement, not pressure-work error. The endpoint is not
+a transient molecular step, a nucleation/extinction clock, a global free-energy
+minimizer or a morphology update. It adds no external heat, pore model or
+kinetic equilibration time.
+
 ## Source-bound finite membrane entropy and thermal stress
 
 `HyperelasticMembrane::thermoelastic_state` prepares the original expansion
