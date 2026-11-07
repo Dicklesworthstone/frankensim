@@ -5475,6 +5475,26 @@ The fractional value and AD tangents share that arithmetic. These numerical
 improvements do not extend any source applicability band or replace the light-loss
 assumption behind modal `eta/2`.
 
+`PronyRampSensitivity` prepares opt-in exact transient derivatives of the original
+Maxwell ramp. `PronyRampLinearization` retains the original primal tuple and the
+Jacobian of endpoint branch strain, interval mean and independently integrated
+physical heat with respect to initial branch strain, imposed strain increment and
+log relaxation time at fixed duration. Reusable preparation and tangent/pullback
+application allocate nothing; forward-only consumers retain their original cost.
+Cancellation-free coefficient derivatives preserve weak physical loss. Elastic
+zero-duration and fully relaxed limits are explicit. Heat derivatives follow the
+original positive integral, never subtraction of nearly equal work and storage.
+
+The initial history is held fixed in each local parameter derivative. A complete
+experiment must propagate it through the accepted steps; the API supplies both
+push-forward and transpose pullback for that purpose. Focused tests independently
+integrate the sensitivity equations, differentiate the energy identity, reverse
+multibranch loading/reversal histories, and recover an authored relaxation time
+from synthetic transient stresses. This is a derivative of the prescribed-strain
+constitutive law, not an automatic derivative of a coupled dynamics solve, a
+stress-control eigenbasis, a source selection or fractional-to-Prony fit, and it
+does not establish measured-material identifiability or a new applicability band.
+
 `visco::slab_ted` evaluates the complete insulated-slab thermal diffusion
 spectrum in constant work, using a positive low-frequency series and scaled
 closed form. `slab_loss_factor` is the uniaxial bending loss;

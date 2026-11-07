@@ -39,6 +39,8 @@ use fs_ad::dual::gradient;
 use fs_math::det;
 
 mod prony_spectrum;
+mod prony_sensitivity;
+pub use prony_sensitivity::{PronyRampLinearization, PronyRampSensitivity};
 
 /// Zener thermoelastic damping of solid circular sections (exact thermal-mode series).
 pub mod circular_ted;
@@ -649,6 +651,8 @@ pub fn prony_ramp(q0: f64, delta: f64, r: f64) -> (f64, f64, f64) {
 /// strain coordinate. Exponentials and cancellation-free small-rate series
 /// are evaluated only at preparation; [`Self::apply`] uses scalar arithmetic.
 /// The physical meaning and caller-admission requirements are [`prony_ramp`]'s.
+/// [`PronyRampSensitivity`] adds opt-in exact history and relaxation-time
+/// derivatives, including the independently integrated physical heat.
 #[derive(Debug, Clone, Copy)]
 pub struct PronyRamp {
     instantaneous: bool,
