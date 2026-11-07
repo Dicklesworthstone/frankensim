@@ -5639,6 +5639,15 @@ photoionization plus escaping recombination photons closes the original absorbed
 photon account. This composes the existing owners for successive prescribed
 intervals; it does not claim simultaneous radiation/field/chemistry integration.
 
+The spectral-ionization feedback regression uses two bands of the original
+Verner H I source, checks their distinct transmitted fractions and chemical
+plus electron-sensible energy, and passes the same accepted populations and
+temperatures into the existing collision-derived material. It specifies the
+resulting harmonic current/heat/storage and planar current/Joule-heat balances
+without assigning an illumination-dependent conductivity or resetting to Saha
+equilibrium. The electrical field is evaluated after the spectral exposure;
+the test does not claim a continuously coupled radiation/electrical transient.
+
 ## Oriented magnetic permeability in current-free three-dimensional fields
 
 `SpatialMagnetostatics::with_magnetic_laws` retains an explicit scalar or

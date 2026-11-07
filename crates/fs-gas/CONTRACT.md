@@ -6840,6 +6840,38 @@ Regressions cover variable Cp/nonzero species entropy references, independently
 reconstructed complete boundary supply, both-half and discarded-attempt work
 limits, closed compatibility, moving-bath refusal and atomic cancellation.
 
+## Frequency-resolved photoionization with evolving opacity
+
+`chemistry::photoionization::spectrum::advance_spectral_photoionization`
+evolves constant, bandwidth-integrated photon groups through one fixed-area,
+uniformly mixed cell. Every band retains its original cross section and its
+own incoming, absorbed and transmitted photon and energy accounts. Changing
+neutral abundance changes each band's absorption; an average photon energy
+or average opacity is not substituted for the spectrum.
+
+Exact monochromatic subflows compose symmetrically. Adaptive full/two-half
+comparison controls estimated second-order local errors in population,
+electron temperature and individual band accounts. Cross sections prepare
+once; trials reuse bounded buffers without allocating or solving a nonlinear
+system. Positive subflows retain finite neutral tails and photon budgets.
+Explicit source-temperature, group-count, step-count, charge, photon and
+energy allowances gate publication, with cancellation during group work.
+
+Each absorbed photon creates one ion and electron. The original chemical gap
+is stored once, and the band's excess energy enters the changing electron
+population's sensible energy. Initially absent electrons need no artificial
+seed. The accepted endpoint retains the original thermodynamic bank for
+electrical, collision and optical consumers without an LTE projection.
+Seven focused regressions cover the exact monochromatic limit, independently
+integrated two-band heating, temporal and band-order refinement, neutral
+tails, empty/dark/subthreshold inputs, initially unseeded mixed spectra,
+conserved reference shifts and transactional budget/cancellation refusal.
+
+The scope is discrete beams through a fixed mixed cell, with quasi-static
+propagation and immediate photoelectron thermalization. It does not infer
+spectral quadrature accuracy, spatial multigroup fronts, secondary ionization,
+recombination during the exposure, or empirical/global error bounds.
+
 ## Radiative capture with escaping photon energy
 
 `chemistry::radiative_recombination::advance_radiative_recombination`

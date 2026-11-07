@@ -13,6 +13,7 @@ use fs_thermochem::kinetics::atomic_ionization::photoionization::{
 const SIGMA: f64 = 1e-22;
 
 mod column;
+mod spectrum;
 
 fn photon_source(channel: AtomicIonizationV1) -> AtomicPhotoionizationV1 {
     photon_source_with_cross_section(channel, SIGMA)

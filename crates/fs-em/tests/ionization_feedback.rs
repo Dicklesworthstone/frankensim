@@ -47,6 +47,159 @@ fn field_controls() -> ConductionControls {
 }
 
 #[test]
+fn g1_spectral_ionization_preserves_band_energy_through_current_and_heating() {
+    use fs_gas::chemistry::photoionization::spectrum::{
+        SpectralPhotoionizationSolve, advance_spectral_photoionization,
+    };
+    use fs_math::c64::C64;
+    use fs_qty::{Area, Energy};
+    use fs_thermochem::kinetics::atomic_ionization::photoionization::{
+        AtomicPhotoionizationV1, PhotonNumberFluxV1,
+    };
+
+    // Different photon energies see different original H I opacities. The
+    // deliberately broad beam keeps both transmitted bands measurable.
+    let initial = fixture::frozen_state(0.0, 6000.0, 16000.0, 0.2);
+    let channel = AtomicIonizationV1::new(
+        initial.thermodynamics().clone(),
+        ReactionId::new("spectral-hydrogen-electrical-feedback").unwrap(),
+        fixture::id("H+"),
+        ElectronImpactRateV1::new(
+            fixture::id("e-"),
+            nist::hydrogen(fixture::id("H")),
+            MaxwellianRateControlsV1 {
+                relative_tolerance: 1e-10,
+                maximum_subdivisions: 4096,
+            },
+            0.1,
+        )
+        .unwrap(),
+        AtomicStatisticalWeightsV1 { neutral: 2, ion: 1 },
+        1e-12,
+    )
+    .unwrap();
+    let source = AtomicPhotoionizationV1::verner_hydrogen(channel.clone()).unwrap();
+    let area = 1000.0;
+    let duration = 1e-7;
+    let groups = [
+        PhotonNumberFluxV1 {
+            photon_energy: Energy::new(14.0 * fixture::E),
+            number_flux_per_m2_s: 3e-3 * fixture::NA / (area * duration),
+        },
+        PhotonNumberFluxV1 {
+            photon_energy: Energy::new(17.0 * fixture::E),
+            number_flux_per_m2_s: 4e-3 * fixture::NA / (area * duration),
+        },
+    ];
+    let mut controls =
+        SpectralPhotoionizationSolve::new(Temperature::new(2000.0), Temperature::new(20000.0));
+    controls.relative_tolerance = 1e-8;
+    controls.initial_step_s = duration;
+    controls.maximum_step_s = duration;
+    let photo = advance_spectral_photoionization(
+        &initial,
+        &source,
+        &groups,
+        Area::new(area),
+        Time::new(duration),
+        controls,
+        || false,
+    )
+    .unwrap();
+    let state = photo.state();
+    assert_eq!(state.thermodynamics(), initial.thermodynamics());
+    assert_eq!(state.heavy_temperature(), initial.heavy_temperature());
+    assert_eq!(state.amounts()[1], state.amounts()[2]);
+    fixture::relative(
+        state.amounts()[2].value(),
+        photo.reaction_extent().value(),
+        1e-13,
+    );
+    fixture::relative(
+        state.amounts()[0].value() + state.amounts()[1].value(),
+        1.0,
+        1e-13,
+    );
+
+    let band = photo.group_balances();
+    assert!(band[0].transmitted_photons > 0.0 && band[1].transmitted_photons > 0.0);
+    assert!(
+        band[1].transmitted_photons / band[1].incident_photons
+            > band[0].transmitted_photons / band[0].incident_photons
+    );
+    let absorbed = band
+        .iter()
+        .zip(groups)
+        .map(|(b, g)| {
+            fixture::relative(
+                b.absorbed_photons + b.transmitted_photons,
+                b.incident_photons,
+                1e-12,
+            );
+            b.absorbed_photons * g.photon_energy.value()
+        })
+        .sum::<f64>();
+    // Independently reconstruct the original chemical and electron sensible
+    // stores. No average incident photon energy or second ionization debit.
+    let electrons = state.amounts()[2].value();
+    let chemical = electrons * channel.ionization_energy_j_mol();
+    let sensible = 1.5 * R * electrons * state.electron_temperature().value();
+    assert!((chemical + sensible - absorbed).abs() < controls.energy_tolerance_j);
+    assert!(
+        (state.internal_energy().value() - initial.internal_energy().value() - absorbed).abs()
+            < 2e-7
+    );
+
+    let conductor = material(state);
+    assert_eq!(conductor.state(), state);
+    assert!(conductor.equilibrium().is_none());
+    let electron = conductor
+        .carriers()
+        .iter()
+        .find(|c| c.is_electron())
+        .unwrap();
+    fixture::relative(
+        electron.number_density_per_m3(),
+        electrons * fixture::NA / 0.2,
+        1e-13,
+    );
+    let sigma = conductor.conductivity_s_m();
+    assert!(sigma > 0.0);
+    let harmonic = conductor.prepare_harmonic(|| false).unwrap();
+    let response = harmonic
+        .response(1e12, [C64::from_re(0.001), C64::ZERO, C64::ZERO], || false)
+        .unwrap();
+    fixture::relative(
+        response.mean_electrical_power_w_m3,
+        response.mean_heating_w_m3.total_power_density_w_m3(),
+        1e-12,
+    );
+    assert!(response.mean_drift_kinetic_energy_j_m3 > 0.0);
+
+    let operator = PlanarConduction::new(
+        layered(0.5, 1.0, 0.2),
+        vec![conductor; 4],
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
+    let field = operator
+        .solve(&ends(2.0), field_controls(), &mut || false)
+        .unwrap();
+    fixture::relative(field.current_density_a_m2()[0][0], -2.0 * sigma, 1e-12);
+    fixture::relative(field.power_w(), 0.8 * sigma, 1e-12);
+    let mut supplied_heat = 0.0;
+    for (cell, electric) in field.electric_field_v_m().iter().enumerate() {
+        let heat = operator.conductors()[cell]
+            .joule_heating_w_m3(*electric)
+            .unwrap();
+        supplied_heat += operator.mesh().face_measure(cell).unwrap()
+            * (heat.electron_power_density_w_m3() + heat.heavy_power_density_w_m3());
+    }
+    fixture::relative(supplied_heat, field.power_w(), 1e-12);
+}
+
+#[test]
 fn g1_two_temperature_atomic_ionization_changes_current_and_closes_electrical_work() {
     let initial = fixture::frozen_state(1e-4, 6000.0, 16000.0, 0.2);
     let forward = ElectronImpactRateV1::new(

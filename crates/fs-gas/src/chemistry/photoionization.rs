@@ -27,6 +27,7 @@
 //! cell remains uniformly mixed; different cells need not share a gas state.
 
 pub mod column;
+pub mod spectrum;
 
 use fs_math::det::{exp, expm1, ln};
 use fs_qty::{Amount, Area, Energy, Temperature, Time};
