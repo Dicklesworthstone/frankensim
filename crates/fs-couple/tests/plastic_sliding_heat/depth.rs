@@ -3,6 +3,9 @@
 #[path = "depth/removal.rs"]
 mod removal;
 
+#[path = "depth/resistance.rs"]
+mod resistance;
+
 use super::*;
 use fs_contact::normal_patch::FiniteGapPlasticLinearSolver;
 use fs_contact::normal_patch::plastic_source::depth_wear::SourceDepthHardnessWear;
@@ -64,10 +67,21 @@ fn depth_material(side: usize, maximum_temperature_k: f64) -> (MaterialCard, Pro
             provenance: provenance(),
         })
         .unwrap();
-    (MaterialCard::assemble(base.id().clone(), claims, vec![]).unwrap(), key)
+    (
+        MaterialCard::assemble(base.id().clone(), claims, vec![]).unwrap(),
+        key,
+    )
 }
 
 fn depth_fixture(maximum_temperature_k: f64, cx: &Cx<'_>) -> DepthFixture {
+    depth_fixture_with_extra_claim(maximum_temperature_k, cx, None)
+}
+
+fn depth_fixture_with_extra_claim(
+    maximum_temperature_k: f64,
+    cx: &Cx<'_>,
+    extra: Option<PropertyClaim>,
+) -> DepthFixture {
     let [(a, ha), (b, hb)] = [0, 1].map(|side| depth_material(side, maximum_temperature_k));
     let cards = [a, b];
     let keys = [ha, hb];
@@ -75,7 +89,10 @@ fn depth_fixture(maximum_temperature_k: f64, cx: &Cx<'_>) -> DepthFixture {
         ResolvedHeatCapacityCurve::try_new_exact(
             card,
             HeatCapacitySourceQuery {
-                heat_capacity: &PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS),
+                heat_capacity: &PropertyKey::new(
+                    "specific_heat_capacity",
+                    SPECIFIC_HEAT_CAPACITY_DIMS,
+                ),
                 density: &PropertyKey::new("density", Density::DIMS),
                 temperature_axis: "T",
                 lower: &point(280.0),
@@ -92,43 +109,85 @@ fn depth_fixture(maximum_temperature_k: f64, cx: &Cx<'_>) -> DepthFixture {
     let mut claims = original.claims().clone();
     let wear_keys = ["depth_k_a", "depth_k_b"].map(|name| PropertyKey::new(name, Dims::NONE));
     for side in 0..2 {
-        claims.insert_claim(claim(
-            wear_keys[side].clone(),
-            [280.0, 320.0].map(|t| WEAR_K[side] * (1.0 + 0.02 * (t - T0))),
-        )).unwrap();
+        claims
+            .insert_claim(claim(
+                wear_keys[side].clone(),
+                [280.0, 320.0].map(|t| WEAR_K[side] * (1.0 + 0.02 * (t - T0))),
+            ))
+            .unwrap();
     }
     for (key, values) in [
         (PropertyKey::new("mu_static", Dims::NONE), [0.9; 2]),
-        (PropertyKey::new("mu_kinetic", Dims::NONE), [280.0, 320.0].map(|t| 0.4 + 0.01 * (t - T0))),
+        (
+            PropertyKey::new("mu_kinetic", Dims::NONE),
+            [280.0, 320.0].map(|t| 0.4 + 0.01 * (t - T0)),
+        ),
     ] {
         claims.insert_claim(claim(key, values)).unwrap();
     }
+    if let Some(extra) = extra {
+        claims.insert_claim(extra).unwrap();
+    }
     let interface = InterfaceSystemCard::assemble(
-        original.surface_a().clone(), original.surface_b().clone(),
-        original.context().clone(), claims, original.models().to_vec(),
-    ).unwrap();
+        original.surface_a().clone(),
+        original.surface_b().clone(),
+        original.context().clone(),
+        claims,
+        original.models().to_vec(),
+    )
+    .unwrap();
     let query = point(T0);
     let select = MaterialPropertySelection::SingleClaimOnly;
-    let solids = cards.each_ref().map(|card| {
-        resolve_isotropic_solid_state_point(card, &query, select.clone()).unwrap()
-    });
+    let solids = cards
+        .each_ref()
+        .map(|card| resolve_isotropic_solid_state_point(card, &query, select.clone()).unwrap());
     let dry = bind_dry_interface_system_card(&interface, InputAuthority::SyntheticFixture).unwrap();
     let elastic = bind_isotropic_elastic_interface(&dry, &solids[0], &solids[1]).unwrap();
-    let adhesion = resolve_interface_state_point(&interface, &query, &[
-        ScalarPropertyRequirement::try_new(ADHESION_ENERGY_PROPERTY, ADHESION_ENERGY_DIMS, ScalarAdmissibility::NonNegative).unwrap()
-    ], select.clone()).unwrap();
+    let adhesion = resolve_interface_state_point(
+        &interface,
+        &query,
+        &[ScalarPropertyRequirement::try_new(
+            ADHESION_ENERGY_PROPERTY,
+            ADHESION_ENERGY_DIMS,
+            ScalarAdmissibility::NonNegative,
+        )
+        .unwrap()],
+        select.clone(),
+    )
+    .unwrap();
     let normal = bind_normal_interface_state(&elastic, &adhesion).unwrap();
-    let profiles = [0, 1].map(|side| ResolvedDepthHardness::new(
-        &cards[side], &query, keys[side].clone(), select.clone(), MAX_DEPTH,
-    ).unwrap());
-    let coefficients = resolve_interface_state_point(&interface, &query, &wear_keys.each_ref().map(|key| {
-        ScalarPropertyRequirement::try_with_key(key, ScalarAdmissibility::NonNegative).unwrap()
-    }), select.clone()).unwrap();
+    let profiles = [0, 1].map(|side| {
+        ResolvedDepthHardness::new(
+            &cards[side],
+            &query,
+            keys[side].clone(),
+            select.clone(),
+            MAX_DEPTH,
+        )
+        .unwrap()
+    });
+    let coefficients = resolve_interface_state_point(
+        &interface,
+        &query,
+        &wear_keys.each_ref().map(|key| {
+            ScalarPropertyRequirement::try_with_key(key, ScalarAdmissibility::NonNegative).unwrap()
+        }),
+        select.clone(),
+    )
+    .unwrap();
     let mut gap = vec![1e-3; 25];
     gap[12] = 0.0;
     let wear = SourceDepthHardnessWear::new(
-        normal, coefficients, wear_keys, profiles,
-        FiniteGapGrid { cells_x: 5, cells_y: 5, cell_width_m: SIDE, cell_depth_m: SIDE },
+        normal,
+        coefficients,
+        wear_keys,
+        profiles,
+        FiniteGapGrid {
+            cells_x: 5,
+            cells_y: 5,
+            cell_width_m: SIDE,
+            cell_depth_m: SIDE,
+        },
         gap,
         PlasticContactControls {
             maximum_active_set_iterations: 128,
@@ -141,18 +200,39 @@ fn depth_fixture(maximum_temperature_k: f64, cx: &Cx<'_>) -> DepthFixture {
             half_space_depth_m: [LENGTH; 2],
             maximum_patch_to_depth: [0.1; 2],
         },
-        [MAX_DEPTH; 2], FiniteGapPlasticLinearSolver::Dense, cx,
-    ).unwrap();
-    let requirement = |name| ScalarPropertyRequirement::try_new(name, Dims::NONE, ScalarAdmissibility::NonNegative).unwrap();
+        [MAX_DEPTH; 2],
+        FiniteGapPlasticLinearSolver::Dense,
+        cx,
+    )
+    .unwrap();
+    let requirement = |name| {
+        ScalarPropertyRequirement::try_new(name, Dims::NONE, ScalarAdmissibility::NonNegative)
+            .unwrap()
+    };
     let friction = SourceThermalCoulomb::resolve(
-        dry, query, requirement("mu_static"), requirement("mu_kinetic"), select,
-        ThermalFrictionAxes { temperature: "T".into(), nominal_pressure: None },
-    ).unwrap();
-    DepthFixture { cards, caloric, source: SourceDepthSlidingWear::new(wear, friction).unwrap() }
+        dry,
+        query,
+        requirement("mu_static"),
+        requirement("mu_kinetic"),
+        select,
+        ThermalFrictionAxes {
+            temperature: "T".into(),
+            nominal_pressure: None,
+        },
+    )
+    .unwrap();
+    DepthFixture {
+        cards,
+        caloric,
+        source: SourceDepthSlidingWear::new(wear, friction).unwrap(),
+    }
 }
 
 fn depth_loaded(data: &DepthFixture, cx: &Cx<'_>) -> SourceDepthSlidingWear {
-    data.source.advance_normal(HardnessSlidingControl::Approach(5e-5), cx).unwrap().candidate
+    data.source
+        .advance_normal(HardnessSlidingControl::Approach(5e-5), cx)
+        .unwrap()
+        .candidate
 }
 
 fn bind_depth<'a>(
@@ -164,9 +244,15 @@ fn bind_depth<'a>(
     cx: &Cx<'_>,
 ) -> DepthSlidingHeatContact<'a> {
     DepthSlidingHeatContact::new(
-        thermal, source, [&data.cards[0], &data.cards[1]],
-        [&data.caloric[0], &data.caloric[1]], route, limits, cx,
-    ).unwrap()
+        thermal,
+        source,
+        [&data.cards[0], &data.cards[1]],
+        [&data.caloric[0], &data.caloric[1]],
+        route,
+        limits,
+        cx,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -174,20 +260,35 @@ fn g1_live_depth_hardness_heat_matches_independent_quadratic_and_three_work_acco
     with_cx(|cx, _| {
         let data = depth_fixture(320.0, cx);
         // A preconditioned, cooled specimen starts with actual removed depth.
-        let preworn = depth_loaded(&data, cx).advance(
-            &motion(0.005), 0.1, controls().friction,
-            HardnessSlidingControl::Approach(5e-5), cx,
-        ).unwrap().candidate;
+        let preworn = depth_loaded(&data, cx)
+            .advance(
+                &motion(0.005),
+                0.1,
+                controls().friction,
+                HardnessSlidingControl::Approach(5e-5),
+                cx,
+            )
+            .unwrap()
+            .candidate;
         let saved_source = preworn.clone();
         let thermal = network(&data.caloric, T0);
         let saved_cells = thermal.cells().clone();
         let route = FrictionHeatRoute::from_link(&thermal, LINK, [CONDUCTIVITY; 2]).unwrap();
         let contact = bind_depth(&data, &thermal, &route, preworn, limits(), cx);
         let distance = 0.01;
-        let step = contact.step_candidate(
-            &thermal, 0.1, &motion(distance), PlasticSlidingHeatBoundary::HeldApproach,
-            controls(), &[0.0; 2], T0, transport, cx,
-        ).unwrap();
+        let step = contact
+            .step_candidate(
+                &thermal,
+                0.1,
+                &motion(distance),
+                PlasticSlidingHeatBoundary::HeldApproach,
+                controls(),
+                &[0.0; 2],
+                T0,
+                transport,
+                cx,
+            )
+            .unwrap();
         let report = step.report();
         let capacity = RHO * AREA * LENGTH * CP;
         let half_g = CONDUCTIVITY * AREA / (0.5 * LENGTH);
@@ -205,7 +306,18 @@ fn g1_live_depth_hardness_heat_matches_independent_quadratic_and_three_work_acco
         let friction_work = measure * pressure * (0.4 + 0.01 * theta);
         close(report.heat.interface_temperature_k, T0 + theta, 0.0, 2e-6);
         close(report.frictional_work_j, friction_work, 2e-6, 1e-13);
-        close(report.mechanics.temperature.candidate.wear_state().contact_state().pressure_pa()[12], pressure, 2e-6, 1e-3);
+        close(
+            report
+                .mechanics
+                .temperature
+                .candidate
+                .wear_state()
+                .contact_state()
+                .pressure_pa()[12],
+            pressure,
+            2e-6,
+            1e-3,
+        );
         let mut stored = 0.0;
         for (side, id) in CELLS.into_iter().enumerate() {
             close(step.thermal().temperature_k(id).unwrap(), body_k, 0.0, 2e-6);
@@ -214,16 +326,40 @@ fn g1_live_depth_hardness_heat_matches_independent_quadratic_and_three_work_acco
             let new = &step.thermal().cells()[&id];
             stored += old.mass_kg * (new.specific_h_j_kg - old.specific_h_j_kg);
             let z = saved_source.wear_state().recession_m()[side][12];
-            let h = if side == 0 { pressure } else { 2e6 + GRADIENT[side] * z };
+            let h = if side == 0 {
+                pressure
+            } else {
+                2e6 + GRADIENT[side] * z
+            };
             let k = WEAR_K[side] * (1.0 + 0.02 * theta);
             let q = k * pressure * distance;
             let increment = 2.0 * q / (h + (h * h + 2.0 * GRADIENT[side] * q).sqrt());
-            close(report.mechanics.sliding.recession_increment_m[side][12], increment, 3e-6, 1e-15);
-            close(report.mechanics.sliding.wear[side].increment_m3, AREA * increment, 3e-6, 1e-23);
-            close(report.removed_volume_m3[side], saved_source.wear_state().volumes_m3()[side] + AREA * increment, 3e-6, 1e-23);
+            close(
+                report.mechanics.sliding.recession_increment_m[side][12],
+                increment,
+                3e-6,
+                1e-15,
+            );
+            close(
+                report.mechanics.sliding.wear[side].increment_m3,
+                AREA * increment,
+                3e-6,
+                1e-23,
+            );
+            close(
+                report.removed_volume_m3[side],
+                saved_source.wear_state().volumes_m3()[side] + AREA * increment,
+                3e-6,
+                1e-23,
+            );
         }
         close(stored, friction_work, 2e-6, 3e-11);
-        close(report.heat.body_heat_j.iter().sum(), friction_work, 2e-6, 3e-11);
+        close(
+            report.heat.body_heat_j.iter().sum(),
+            friction_work,
+            2e-6,
+            3e-11,
+        );
         assert_eq!(report.mechanics.wear_normals().len(), 2);
         let normals = std::iter::once(report.mechanics.temperature_normal())
             .chain(report.mechanics.wear_normals().iter().map(|r| &r.normal));
@@ -235,8 +371,19 @@ fn g1_live_depth_hardness_heat_matches_independent_quadratic_and_three_work_acco
         }
         close(report.normal_work_j, normal_work, 1e-12, 1e-20);
         close(report.normal_plastic_work_j, plastic_work, 1e-12, 1e-20);
-        close(report.temperature_parameter_work_j + report.wear_parameter_work_j, parameter_work, 1e-12, 1e-20);
-        assert!(report.mechanics.wear_normals()[1].normal.response.plastic_work_j > 0.0);
+        close(
+            report.temperature_parameter_work_j + report.wear_parameter_work_j,
+            parameter_work,
+            1e-12,
+            1e-20,
+        );
+        assert!(
+            report.mechanics.wear_normals()[1]
+                .normal
+                .response
+                .plastic_work_j
+                > 0.0
+        );
         assert_eq!(report.normal_plastic_heat_j, [0.0; 2]);
         close(report.nonthermal_plastic_work_j, plastic_work, 1e-12, 1e-20);
         assert!(report.heat.total_energy_residual_j.abs() <= controls().heat.total_j);
@@ -252,14 +399,28 @@ fn g1_depth_heat_force_spring_and_reversal_preserve_actual_history_and_thermal_f
     with_cx(|cx, _| {
         let data = depth_fixture(320.0, cx);
         let force = 0.004;
-        let source = data.source.advance_normal(HardnessSlidingControl::Load {
-            force_n: force, controls: normal_controls(),
-        }, cx).unwrap().candidate;
+        let source = data
+            .source
+            .advance_normal(
+                HardnessSlidingControl::Load {
+                    force_n: force,
+                    controls: normal_controls(),
+                },
+                cx,
+            )
+            .unwrap()
+            .candidate;
         let approach = source.wear_state().contact_state().approach_m();
         for boundary in [
-            PlasticSlidingHeatBoundary::MaintainedLoad { force_n: force, controls: normal_controls() },
+            PlasticSlidingHeatBoundary::MaintainedLoad {
+                force_n: force,
+                controls: normal_controls(),
+            },
             PlasticSlidingHeatBoundary::FixedDrive {
-                drive: FiniteGapPlasticDrive { stiffness_n_per_m: 1000.0, position_m: approach + force / 1000.0 },
+                drive: FiniteGapPlasticDrive {
+                    stiffness_n_per_m: 1000.0,
+                    position_m: approach + force / 1000.0,
+                },
                 controls: normal_controls(),
             },
         ] {
@@ -267,26 +428,81 @@ fn g1_depth_heat_force_spring_and_reversal_preserve_actual_history_and_thermal_f
             let route = FrictionHeatRoute::from_link(&thermal, LINK, [CONDUCTIVITY; 2]).unwrap();
             let contact = bind_depth(&data, &thermal, &route, source.clone(), limits(), cx);
             let distance = 0.01;
-            let forward = contact.step_candidate(&thermal, 0.1, &motion(distance), boundary,
-                controls(), &[0.0; 2], T0, transport, cx).unwrap();
+            let forward = contact
+                .step_candidate(
+                    &thermal,
+                    0.1,
+                    &motion(distance),
+                    boundary,
+                    controls(),
+                    &[0.0; 2],
+                    T0,
+                    transport,
+                    cx,
+                )
+                .unwrap();
             let capacity = RHO * AREA * LENGTH * CP;
             let g = CONDUCTIVITY * AREA / (0.5 * LENGTH);
             let b = 0.1 * g / (capacity + 0.1 * g);
             let theta = force * distance * 0.4 / (2.0 * capacity * b - force * distance * 0.01);
-            close(forward.report().heat.interface_temperature_k, T0 + theta, 0.0, 2e-6);
-            close(forward.report().frictional_work_j, force * distance * (0.4 + 0.01 * theta), 2e-6, 1e-13);
-            let reverse = forward.contact().step_candidate(forward.thermal(), 0.2, &motion(-distance), boundary,
-                controls(), &[0.0; 2], forward.report().heat.interface_temperature_k, transport, cx).unwrap();
-            assert_eq!(reverse.contact().source().tangential_states()[12].slip_m(), [0.0; 2]);
+            close(
+                forward.report().heat.interface_temperature_k,
+                T0 + theta,
+                0.0,
+                2e-6,
+            );
+            close(
+                forward.report().frictional_work_j,
+                force * distance * (0.4 + 0.01 * theta),
+                2e-6,
+                1e-13,
+            );
+            let reverse = forward
+                .contact()
+                .step_candidate(
+                    forward.thermal(),
+                    0.2,
+                    &motion(-distance),
+                    boundary,
+                    controls(),
+                    &[0.0; 2],
+                    forward.report().heat.interface_temperature_k,
+                    transport,
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(
+                reverse.contact().source().tangential_states()[12].slip_m(),
+                [0.0; 2]
+            );
             assert!(reverse.report().frictional_work_j > 0.0);
-            assert!(reverse.thermal().temperature_k(CELLS[0]).unwrap() > forward.thermal().temperature_k(CELLS[0]).unwrap());
+            assert!(
+                reverse.thermal().temperature_k(CELLS[0]).unwrap()
+                    > forward.thermal().temperature_k(CELLS[0]).unwrap()
+            );
             for side in 0..2 {
-                assert!(reverse.report().removed_volume_m3[side] > forward.report().removed_volume_m3[side]);
+                assert!(
+                    reverse.report().removed_volume_m3[side]
+                        > forward.report().removed_volume_m3[side]
+                );
             }
             if matches!(boundary, PlasticSlidingHeatBoundary::MaintainedLoad { .. }) {
-                close(reverse.contact().source().wear_state().contact_state().pressure_pa()[12] * AREA, force, 1e-10, 1e-13);
+                close(
+                    reverse
+                        .contact()
+                        .source()
+                        .wear_state()
+                        .contact_state()
+                        .pressure_pa()[12]
+                        * AREA,
+                    force,
+                    1e-10,
+                    1e-13,
+                );
             }
-            assert!(reverse.report().contact_work_residual_j <= controls().contact_work_tolerance_j);
+            assert!(
+                reverse.report().contact_work_residual_j <= controls().contact_work_tolerance_j
+            );
             assert_eq!(reverse.thermal().time_s(), 0.2);
             assert_eq!(thermal.time_s(), 0.0);
         }
@@ -308,8 +524,21 @@ fn g4_depth_heat_source_inventory_budget_and_cancellation_refuse_without_partial
                 bound.maximum_removed_volume_fraction = [1e-8; 2];
             }
             let contact = bind_depth(&data, &thermal, &route, source, bound, cx);
-            assert!(contact.step_candidate(&thermal, 0.1, &motion(0.01), PlasticSlidingHeatBoundary::HeldApproach,
-                controls(), &[0.0; 2], T0, transport, cx).is_err());
+            assert!(
+                contact
+                    .step_candidate(
+                        &thermal,
+                        0.1,
+                        &motion(0.01),
+                        PlasticSlidingHeatBoundary::HeldApproach,
+                        controls(),
+                        &[0.0; 2],
+                        T0,
+                        transport,
+                        cx
+                    )
+                    .is_err()
+            );
             assert_eq!(contact.source(), &saved_source);
             assert_eq!(thermal.cells(), &saved_cells);
             assert_eq!(thermal.time_s(), 0.0);
@@ -323,11 +552,37 @@ fn g4_depth_heat_source_inventory_budget_and_cancellation_refuse_without_partial
         let contact = bind_depth(&data, &thermal, &route, source, limits(), cx);
         let mut limited = controls();
         limited.maximum_trials = 1;
-        assert!(contact.step_candidate(&thermal, 0.1, &motion(0.01), PlasticSlidingHeatBoundary::HeldApproach,
-            limited, &[0.0; 2], T0, transport, cx).is_err());
+        assert!(
+            contact
+                .step_candidate(
+                    &thermal,
+                    0.1,
+                    &motion(0.01),
+                    PlasticSlidingHeatBoundary::HeldApproach,
+                    limited,
+                    &[0.0; 2],
+                    T0,
+                    transport,
+                    cx
+                )
+                .is_err()
+        );
         gate.request();
-        assert!(contact.step_candidate(&thermal, 0.1, &motion(0.01), PlasticSlidingHeatBoundary::HeldApproach,
-            controls(), &[0.0; 2], T0, transport, cx).is_err());
+        assert!(
+            contact
+                .step_candidate(
+                    &thermal,
+                    0.1,
+                    &motion(0.01),
+                    PlasticSlidingHeatBoundary::HeldApproach,
+                    controls(),
+                    &[0.0; 2],
+                    T0,
+                    transport,
+                    cx
+                )
+                .is_err()
+        );
         assert_eq!(contact.source(), &saved_source);
         assert_eq!(thermal.cells(), &saved_cells);
     });

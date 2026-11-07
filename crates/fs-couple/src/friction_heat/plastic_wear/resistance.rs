@@ -8,6 +8,7 @@
 //! A source calibrated to another pressure/temperature convention is unsuitable.
 //! This does not resolve lateral constriction or a finite third-body heat store.
 
+use fs_matdb::InterfaceSystemCard;
 use fs_material::state_point::{MaterialStatePointError, ResolvedInterfaceStatePoint};
 use fs_material::thermal::interface::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
@@ -53,6 +54,60 @@ impl PlasticThermalResistance {
         self.fraction_to_first
     }
 
+    pub(super) fn bind<E>(
+        source: ResolvedInterfaceStatePoint,
+        pressure_axis: String,
+        fraction_to_first: f64,
+        fixed: &ResolvedInterfaceStatePoint,
+        temperature_axis: String,
+        interface_temperature_k: f64,
+    ) -> Result<Self, PlasticSlidingHeatError<E>> {
+        let pressure_quantity =
+            QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static));
+        if !fraction_to_first.is_finite()
+            || !(0.0..=1.0).contains(&fraction_to_first)
+            || pressure_axis.is_empty()
+            || fixed.state_coordinate(&pressure_axis).is_some()
+            || source.axis_quantities().get(&pressure_axis) != Some(&pressure_quantity)
+            || source.card_identity() != fixed.card_identity()
+            || source.surface_materials() != fixed.surface_materials()
+            || !source
+                .query_point()
+                .iter()
+                .filter(|(axis, _)| axis != &pressure_axis)
+                .eq(fixed.query_point().iter())
+            || !source
+                .axis_quantities()
+                .iter()
+                .filter(|(axis, _)| *axis != &pressure_axis)
+                .eq(fixed.axis_quantities().iter())
+            || source.state_coordinate(&temperature_axis) != Some(interface_temperature_k)
+        {
+            return Err(PlasticSlidingHeatError::Invalid(
+                "resistance requires the original ordered interface/fixed conditions, owned temperature/pressure, and an explicit plane split",
+            ));
+        }
+        let mut owned = vec![(pressure_axis.as_str(), pressure_quantity)];
+        if let Some(&quantity) = source.axis_quantities().get(&temperature_axis) {
+            owned.push((temperature_axis.as_str(), quantity));
+        }
+        if source.properties().len() != 1
+            || source.property_by_key(&resistance_key()).is_none()
+            || !source.properties()[0]
+                .has_only_owned_coordinates_and_fixed_external_conditions(&owned)
+        {
+            return Err(PlasticSlidingHeatError::Invalid(
+                "one original canonical thermal resistance claim with only owned or fixed external coordinates required",
+            ));
+        }
+        Ok(Self {
+            source,
+            pressure_axis,
+            temperature_axis,
+            fraction_to_first,
+        })
+    }
+
     pub(super) fn sample<E>(
         &self,
         contact: &SourcePlasticSlidingWear,
@@ -60,12 +115,34 @@ impl PlasticThermalResistance {
         interface_temperature_k: f64,
         cx: &Cx<'_>,
     ) -> Result<PlasticThermalResistanceSample, PlasticSlidingHeatError<E>> {
+        self.sample_native_pressure(
+            contact
+                .wear_source()
+                .contact()
+                .normal_source()
+                .elastic()
+                .interface()
+                .card(),
+            state
+                .wear_state()
+                .contact_state()
+                .contact_state()
+                .pressure_pa(),
+            interface_temperature_k,
+            cx,
+        )
+    }
+
+    // Both owners supply their actual accepted/trial endpoint on an equal-area
+    // native grid. Source binding and pressure/temperature sampling stay shared.
+    pub(super) fn sample_native_pressure<E>(
+        &self,
+        interface: &InterfaceSystemCard,
+        pressure: &[f64],
+        interface_temperature_k: f64,
+        cx: &Cx<'_>,
+    ) -> Result<PlasticThermalResistanceSample, PlasticSlidingHeatError<E>> {
         checkpoint(cx)?;
-        let pressure = state
-            .wear_state()
-            .contact_state()
-            .contact_state()
-            .pressure_pa();
         let count = pressure.iter().filter(|p| **p > 0.0).count();
         if count == 0 || !interface_temperature_k.is_finite() || interface_temperature_k <= 0.0 {
             return Err(PlasticSlidingHeatError::Invalid(
@@ -100,16 +177,7 @@ impl PlasticThermalResistance {
             .map_err(|_| {
                 PlasticSlidingHeatError::Invalid("finite original resistance coordinates required")
             })?;
-        let source = self.source.at_query_point(
-            contact
-                .wear_source()
-                .contact()
-                .normal_source()
-                .elastic()
-                .interface()
-                .card(),
-            &query,
-        )?;
+        let source = self.source.at_query_point(interface, &query)?;
         let resistance = source
             .property_by_key(&resistance_key())
             .ok_or(PlasticSlidingHeatError::Invalid(
@@ -136,6 +204,24 @@ impl PlasticThermalResistance {
             mean_loaded_pressure_pa,
             area_resistance_m2_k_w,
         })
+    }
+}
+
+impl PlasticThermalResistanceSample {
+    pub(super) fn admit_route<E>(
+        &self,
+        route: &FrictionHeatRoute,
+    ) -> Result<(), PlasticSlidingHeatError<E>> {
+        let accepted = route.area_resistance_m2_k_w();
+        if (0..2).any(|i| {
+            (accepted[i] - self.area_resistance_m2_k_w[i]).abs()
+                > 64.0 * f64::EPSILON * accepted[i].max(self.area_resistance_m2_k_w[i])
+        }) {
+            return Err(PlasticSlidingHeatError::Invalid(
+                "accepted heat route must retain the original source-resolved resistance split",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -168,68 +254,21 @@ impl PlasticSlidingHeatContact<'_> {
     ) -> Result<Self, PlasticSlidingHeatError> {
         checkpoint(cx)?;
         let normal = self.source.wear_source().contact().normal_source();
-        let fixed = normal.interface_state();
-        let temperature_axis = self.source.friction_source().axes().temperature.clone();
-        let pressure_quantity =
-            QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static));
-        if !fraction_to_first.is_finite()
-            || !(0.0..=1.0).contains(&fraction_to_first)
-            || pressure_axis.is_empty()
-            || fixed.state_coordinate(&pressure_axis).is_some()
-            || source.axis_quantities().get(&pressure_axis) != Some(&pressure_quantity)
-            || source.card_identity() != fixed.card_identity()
-            || source.surface_materials() != fixed.surface_materials()
-            || !source
-                .query_point()
-                .iter()
-                .filter(|(axis, _)| axis != &pressure_axis)
-                .eq(fixed.query_point().iter())
-            || !source
-                .axis_quantities()
-                .iter()
-                .filter(|(axis, _)| *axis != &pressure_axis)
-                .eq(fixed.axis_quantities().iter())
-            || source.state_coordinate(&temperature_axis)
-                != Some(self.source.interface_temperature_k())
-        {
-            return Err(PlasticSlidingHeatError::Invalid(
-                "resistance requires the original ordered interface/fixed conditions, owned temperature/pressure, and an explicit plane split",
-            ));
-        }
-        let mut owned = vec![(pressure_axis.as_str(), pressure_quantity)];
-        if let Some(&quantity) = source.axis_quantities().get(&temperature_axis) {
-            owned.push((temperature_axis.as_str(), quantity));
-        }
-        if source.properties().len() != 1
-            || source.property_by_key(&resistance_key()).is_none()
-            || !source.properties()[0]
-                .has_only_owned_coordinates_and_fixed_external_conditions(&owned)
-        {
-            return Err(PlasticSlidingHeatError::Invalid(
-                "one original canonical thermal resistance claim with only owned or fixed external coordinates required",
-            ));
-        }
-        let resistance = PlasticThermalResistance {
+        let resistance = PlasticThermalResistance::bind(
             source,
             pressure_axis,
-            temperature_axis,
             fraction_to_first,
-        };
+            normal.interface_state(),
+            self.source.friction_source().axes().temperature.clone(),
+            self.source.interface_temperature_k(),
+        )?;
         let sample = resistance.sample(
             &self.source,
             &self.state,
             self.source.interface_temperature_k(),
             cx,
         )?;
-        let accepted = self.route.area_resistance_m2_k_w();
-        if (0..2).any(|i| {
-            (accepted[i] - sample.area_resistance_m2_k_w[i]).abs()
-                > 64.0 * f64::EPSILON * accepted[i].max(sample.area_resistance_m2_k_w[i])
-        }) {
-            return Err(PlasticSlidingHeatError::Invalid(
-                "accepted heat route must retain the original source-resolved resistance split",
-            ));
-        }
+        sample.admit_route(&self.route)?;
         self.resistance = Some(resistance);
         Ok(self)
     }

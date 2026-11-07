@@ -12,19 +12,23 @@
 //! partition. Signed parameter work never supplies friction heat.
 //!
 //! This retains the native beginning-pressure wear split, uniform body thermal
-//! receivers and explicit fixed contact resistance. It does not resolve lateral
-//! thermal fields or certify a reciprocal thermoelastic free-energy model.
+//! receivers and either explicit fixed or original source-resolved contact
+//! resistance. It does not resolve lateral thermal fields or certify a
+//! reciprocal thermoelastic free-energy model.
 //! Geometry and thermal mass stay fixed during an interval; cumulative removal
 //! is constrained against the original receiving volumes.
 
 /// Conservative export of newly worn mass and its current signed enthalpy.
 pub mod removal;
 
+/// Original resistance at actual final depth-contact pressure and temperature.
+pub mod resistance;
+
+use fs_contact::normal_patch::plastic_source::wear::sliding::hardness::temperature::DepthSlidingThermalRefresh;
 use fs_contact::normal_patch::plastic_source::wear::sliding::hardness::{
     HardnessSlidingAdvance, HardnessSlidingContinuation, HardnessSlidingControl,
     SourceDepthSlidingWear,
 };
-use fs_contact::normal_patch::plastic_source::wear::sliding::hardness::temperature::DepthSlidingThermalRefresh;
 
 use super::*;
 
@@ -72,6 +76,7 @@ pub struct DepthSlidingHeatContact<'a> {
     footprint: PlasticSlidingHeatFootprint,
     limits: PlasticSlidingHeatLimits,
     plastic_work_heat: PlasticWorkHeatPartition,
+    resistance: Option<PlasticThermalResistance>,
     time_s: f64,
 }
 
@@ -116,8 +121,14 @@ impl<'a> DepthSlidingHeatContact<'a> {
         cx: &Cx<'_>,
     ) -> Result<Self, PlasticSlidingHeatError> {
         Self::new_with_footprint(
-            thermal, source, material_cards, caloric, route, limits,
-            PlasticSlidingHeatFootprint::FixedActiveCells, cx,
+            thermal,
+            source,
+            material_cards,
+            caloric,
+            route,
+            limits,
+            PlasticSlidingHeatFootprint::FixedActiveCells,
+            cx,
         )
     }
 
@@ -135,8 +146,14 @@ impl<'a> DepthSlidingHeatContact<'a> {
         cx: &Cx<'_>,
     ) -> Result<Self, PlasticSlidingHeatError> {
         Self::new_with_footprint(
-            thermal, source, material_cards, caloric, route, limits,
-            PlasticSlidingHeatFootprint::EvolvingActiveCells, cx,
+            thermal,
+            source,
+            material_cards,
+            caloric,
+            route,
+            limits,
+            PlasticSlidingHeatFootprint::EvolvingActiveCells,
+            cx,
         )
     }
 
@@ -152,7 +169,9 @@ impl<'a> DepthSlidingHeatContact<'a> {
         cx: &Cx<'_>,
     ) -> Result<Self, PlasticSlidingHeatError> {
         checkpoint(cx)?;
-        if limits.maximum_removed_volume_fraction.iter()
+        if limits
+            .maximum_removed_volume_fraction
+            .iter()
             .any(|v| !v.is_finite() || *v < 0.0 || *v >= 1.0)
             || !limits.maximum_absolute_parameter_work_j.is_finite()
             || limits.maximum_absolute_parameter_work_j < 0.0
@@ -171,7 +190,10 @@ impl<'a> DepthSlidingHeatContact<'a> {
         let normal = source.wear_state().normal_source();
         binding::admit_caloric_sources(normal, material_cards, caloric, cx)?;
         let temperature = temperatures(thermal, caloric, route)?;
-        let bulk = [normal.elastic().surface_a_state(), normal.elastic().surface_b_state()];
+        let bulk = [
+            normal.elastic().surface_a_state(),
+            normal.elastic().surface_b_state(),
+        ];
         if (0..2).any(|i| bulk[i].resolved().state_coordinate("T") != Some(temperature[i])) {
             return Err(PlasticSlidingHeatError::Invalid(
                 "accepted bulk source temperatures must equal the original thermal checkpoint",
@@ -203,18 +225,26 @@ impl<'a> DepthSlidingHeatContact<'a> {
         let grid = source.wear_state().model().config().grid;
         let area = finite(count as f64 * (grid.cell_width_m * grid.cell_depth_m))?;
         let thermal_area = route.contact_area_m2();
-        if count == 0 || (area - thermal_area).abs() > 64.0 * f64::EPSILON * area.max(thermal_area) {
+        if count == 0 || (area - thermal_area).abs() > 64.0 * f64::EPSILON * area.max(thermal_area)
+        {
             return Err(PlasticSlidingHeatError::Invalid(
                 "actual loaded grid cells must exactly cover the original thermal face area",
             ));
         }
         let thermal_wear_checkpoint_m3 = source.wear_state().volumes_m3();
         let bound = Self {
-            source, material_cards, caloric, route: route.clone(),
+            source,
+            material_cards,
+            caloric,
+            route: route.clone(),
             original_body_ids: cells.map(|id| thermal.cells()[&id].body_id),
             original_volume_m3: cells.map(|id| thermal.cells()[&id].geometry.volume_m3),
-            thermal_wear_checkpoint_m3, active_cells, footprint, limits,
+            thermal_wear_checkpoint_m3,
+            active_cells,
+            footprint,
+            limits,
             plastic_work_heat: PlasticWorkHeatPartition::default(),
+            resistance: None,
             time_s: thermal.time_s(),
         };
         bound.admit_footprint_support()?;
@@ -223,11 +253,21 @@ impl<'a> DepthSlidingHeatContact<'a> {
         Ok(bound)
     }
 
-    pub const fn source(&self) -> &SourceDepthSlidingWear { &self.source }
-    pub const fn time_s(&self) -> f64 { self.time_s }
-    pub const fn route(&self) -> &FrictionHeatRoute { &self.route }
-    pub const fn limits(&self) -> PlasticSlidingHeatLimits { self.limits }
-    pub const fn footprint(&self) -> PlasticSlidingHeatFootprint { self.footprint }
+    pub const fn source(&self) -> &SourceDepthSlidingWear {
+        &self.source
+    }
+    pub const fn time_s(&self) -> f64 {
+        self.time_s
+    }
+    pub const fn route(&self) -> &FrictionHeatRoute {
+        &self.route
+    }
+    pub const fn limits(&self) -> PlasticSlidingHeatLimits {
+        self.limits
+    }
+    pub const fn footprint(&self) -> PlasticSlidingHeatFootprint {
+        self.footprint
+    }
 
     /// Declare conversion of future incremental native plastic work only.
     #[must_use]
@@ -235,7 +275,9 @@ impl<'a> DepthSlidingHeatContact<'a> {
         self.plastic_work_heat = partition;
         self
     }
-    pub const fn plastic_work_heat(&self) -> PlasticWorkHeatPartition { self.plastic_work_heat }
+    pub const fn plastic_work_heat(&self) -> PlasticWorkHeatPartition {
+        self.plastic_work_heat
+    }
 
     /// Solve finite caloric feedback from the same accepted histories on every
     /// trial. Original full-depth support and actual loaded friction queries
@@ -261,19 +303,31 @@ impl<'a> DepthSlidingHeatContact<'a> {
             PlasticSlidingHeatBoundary::HeldApproach => HardnessSlidingControl::Approach(
                 self.source.wear_state().contact_state().approach_m(),
             ),
-            PlasticSlidingHeatBoundary::MaintainedLoad { force_n, controls } =>
-                HardnessSlidingControl::Load { force_n, controls },
-            PlasticSlidingHeatBoundary::FixedDrive { drive, controls } =>
-                HardnessSlidingControl::Drive { drive, controls },
+            PlasticSlidingHeatBoundary::MaintainedLoad { force_n, controls } => {
+                HardnessSlidingControl::Load { force_n, controls }
+            }
+            PlasticSlidingHeatBoundary::FixedDrive { drive, controls } => {
+                HardnessSlidingControl::Drive { drive, controls }
+            }
         };
         let solved = engine::solve(
-            thermal, target_s, &self.route, previous_area,
-            self.footprint == PlasticSlidingHeatFootprint::EvolvingActiveCells,
-            controls, energy_guess_j, interface_temperature_guess_k,
+            thermal,
+            target_s,
+            &self.route,
+            previous_area,
+            self.footprint == PlasticSlidingHeatFootprint::EvolvingActiveCells
+                || self.resistance.is_some(),
+            controls,
+            energy_guess_j,
+            interface_temperature_guess_k,
             |endpoint, interface_temperature, duration_s| {
                 let body_temperatures = temperatures(endpoint, self.caloric, &self.route)?;
                 let temperature = self.source.refresh_at_temperatures(
-                    self.material_cards, body_temperatures, interface_temperature, control, cx,
+                    self.material_cards,
+                    body_temperatures,
+                    interface_temperature,
+                    control,
+                    cx,
                 )?;
                 let refreshed_contact_area_m2 = self.admit_footprint(&temperature.candidate, cx)?;
                 let mut supplied = temperature.normal.normal.parameter_work_j.abs();
@@ -283,7 +337,11 @@ impl<'a> DepthSlidingHeatContact<'a> {
                     ));
                 }
                 let sliding = temperature.candidate.advance(
-                    motion, duration_s, controls.friction, control, cx,
+                    motion,
+                    duration_s,
+                    controls.friction,
+                    control,
+                    cx,
                 )?;
                 if sliding.normal.len() != 2 {
                     return Err(PlasticSlidingHeatError::Invalid(
@@ -301,29 +359,68 @@ impl<'a> DepthSlidingHeatContact<'a> {
                 let endpoint_contact_area_m2 = self.admit_footprint(&sliding.candidate, cx)?;
                 let removed_volume_fraction = self.admit_removal(&sliding.candidate)?;
                 let removed_volume_m3 = sliding.candidate.wear_state().volumes_m3();
-                let mechanics = DepthSlidingHeatMechanics { temperature, sliding };
+                let mechanics = DepthSlidingHeatMechanics {
+                    temperature,
+                    sliding,
+                };
                 let work = engine::mechanical_work(
                     mechanics.temperature_normal(),
-                    &[&mechanics.wear_normals()[0].normal, &mechanics.wear_normals()[1].normal],
-                    mechanics.cells(), mechanics.frictional_work_j(),
-                    controls.contact_work_tolerance_j, cx,
+                    &[
+                        &mechanics.wear_normals()[0].normal,
+                        &mechanics.wear_normals()[1].normal,
+                    ],
+                    mechanics.cells(),
+                    mechanics.frictional_work_j(),
+                    controls.contact_work_tolerance_j,
+                    cx,
                 )?;
                 let (normal_plastic_heat_j, nonthermal_plastic_work_j) =
                     self.plastic_work_heat.split(work.normal_plastic_work_j)?;
                 Ok(engine::PreparedMechanics {
-                    source: (), mechanics, work, removed_volume_m3, removed_volume_fraction,
-                    refreshed_contact_area_m2, endpoint_contact_area_m2,
-                    normal_plastic_heat_j, nonthermal_plastic_work_j,
+                    source: (),
+                    mechanics,
+                    work,
+                    removed_volume_m3,
+                    removed_volume_fraction,
+                    refreshed_contact_area_m2,
+                    endpoint_contact_area_m2,
+                    normal_plastic_heat_j,
+                    nonthermal_plastic_work_j,
                 })
             },
-            |_, _| Ok(None),
-            resolve, cx,
+            |prepared, interface_temperature| {
+                self.resistance
+                    .as_ref()
+                    .map(|resistance| {
+                        resistance.sample_depth(
+                            prepared.mechanics.candidate(),
+                            interface_temperature,
+                            cx,
+                        )
+                    })
+                    .transpose()
+            },
+            resolve,
+            cx,
         )?;
-        let engine::Solved { thermal, successor_route, report, .. } = solved;
+        let engine::Solved {
+            thermal,
+            successor_route,
+            report,
+            ..
+        } = solved;
         let source = report.mechanics.candidate().clone();
         let mut active_cells = Vec::with_capacity(self.active_cells.len());
-        for (i, p) in source.wear_state().contact_state().pressure_pa().iter().enumerate() {
-            if i % 64 == 0 { checkpoint(cx)?; }
+        for (i, p) in source
+            .wear_state()
+            .contact_state()
+            .pressure_pa()
+            .iter()
+            .enumerate()
+        {
+            if i % 64 == 0 {
+                checkpoint(cx)?;
+            }
             active_cells.push(*p > 0.0);
         }
         let contact = Self {
@@ -338,14 +435,21 @@ impl<'a> DepthSlidingHeatContact<'a> {
             footprint: self.footprint,
             limits: self.limits,
             plastic_work_heat: self.plastic_work_heat,
+            resistance: self.resistance.clone(),
             time_s: target_s,
         };
         checkpoint(cx)?;
-        Ok(DepthSlidingHeatCandidate { contact, thermal, report })
+        Ok(DepthSlidingHeatCandidate {
+            contact,
+            thermal,
+            report,
+        })
     }
 
-    fn admit_thermal<E>(&self, thermal: &DepositionSimulation<'_>)
-        -> Result<[f64; 2], PlasticSlidingHeatError<E>> {
+    fn admit_thermal<E>(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+    ) -> Result<[f64; 2], PlasticSlidingHeatError<E>> {
         self.route.validate(thermal)?;
         self.admit_footprint_support()?;
         if self.time_s != thermal.time_s()
@@ -357,7 +461,10 @@ impl<'a> DepthSlidingHeatContact<'a> {
         }
         let temperature = temperatures(thermal, self.caloric, &self.route)?;
         let normal = self.source.wear_state().normal_source().elastic();
-        let bulk = [normal.surface_a_state().resolved(), normal.surface_b_state().resolved()];
+        let bulk = [
+            normal.surface_a_state().resolved(),
+            normal.surface_b_state().resolved(),
+        ];
         if (0..2).any(|i| bulk[i].state_coordinate("T") != Some(temperature[i])) {
             return Err(PlasticSlidingHeatError::Invalid(
                 "accepted bulk source temperatures differ from the thermal checkpoint",
@@ -367,25 +474,39 @@ impl<'a> DepthSlidingHeatContact<'a> {
         Ok(temperature)
     }
 
-    fn admit_footprint<E>(&self, source: &SourceDepthSlidingWear, cx: &Cx<'_>)
-        -> Result<f64, PlasticSlidingHeatError<E>> {
+    fn admit_footprint<E>(
+        &self,
+        source: &SourceDepthSlidingWear,
+        cx: &Cx<'_>,
+    ) -> Result<f64, PlasticSlidingHeatError<E>> {
         let grid = source.wear_state().model().config().grid;
         native_footprint(
-            source.wear_state().contact_state().pressure_pa(), &self.active_cells, self.footprint,
-            grid.cell_width_m * grid.cell_depth_m, cx,
+            source.wear_state().contact_state().pressure_pa(),
+            &self.active_cells,
+            self.footprint,
+            grid.cell_width_m * grid.cell_depth_m,
+            cx,
         )
     }
 
     fn admit_footprint_support<E>(&self) -> Result<(), PlasticSlidingHeatError<E>> {
         let grid = self.source.wear_state().model().config().grid;
         footprint_support(
-            &self.route, self.footprint, self.active_cells.len(),
+            &self.route,
+            self.footprint,
+            self.active_cells.len(),
             grid.cell_width_m * grid.cell_depth_m,
         )
     }
 
-    fn admit_removal<E>(&self, source: &SourceDepthSlidingWear)
-        -> Result<[f64; 2], PlasticSlidingHeatError<E>> {
-        removal_fractions(source.wear_state().volumes_m3(), self.original_volume_m3, self.limits)
+    fn admit_removal<E>(
+        &self,
+        source: &SourceDepthSlidingWear,
+    ) -> Result<[f64; 2], PlasticSlidingHeatError<E>> {
+        removal_fractions(
+            source.wear_state().volumes_m3(),
+            self.original_volume_m3,
+            self.limits,
+        )
     }
 }

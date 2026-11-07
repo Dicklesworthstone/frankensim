@@ -12,7 +12,7 @@ fn export_tolerances() -> MaterialRemovalTolerances {
 
 // Declared uniform prismatic receiver approximation for the one loaded cell.
 // Original spatial recession and permanent indentation stay in native contact.
-fn export_geometry(
+pub(super) fn export_geometry(
     pending_m3: [f64; 2],
     thermal: &DepositionSimulation<'_>,
 ) -> ([CellGeometry; 2], [ContactPatchUpdate; 1]) {

@@ -1191,14 +1191,37 @@ The ordinary and depth owners share the existing Newton/caloric engine and
 source/footprint/inventory admission, with no second contact or thermal law.
 
 Fixed and evolving active footprints retain their original geometry limits.
-Contact resistance is the explicitly supplied fixed route resistance. This
-owner does not add adaptive depth marching, lateral temperature fields or a
-reciprocal thermoelastic free-energy model. Thermal mass and geometry remain
-fixed within each interval, and cumulative removal uses the original receiving
+Contact resistance is either explicitly fixed or resolved from the original
+interface source as described below. This owner does not add adaptive depth
+marching, lateral temperature fields or a reciprocal thermoelastic free-energy
+model. Thermal mass and geometry remain fixed within each interval, and
+cumulative removal uses the original receiving
 volumes. The regression definitions cover an independent coupled quadratic,
 actual reversal under force and spring control, all three work accounts and
 transactional source, removal, iteration and cancellation refusal. Native Rust
 compilation and test execution were unavailable during this implementation.
+
+### Original thermal resistance on depth-hardness contact
+
+`DepthSlidingHeatContact::with_sourced_contact_resistance` binds the same
+canonical resistance source as ordinary plastic sliding, with its original
+ordered interface, typed pressure axis, temperature role and fixed conditions.
+Each thermal trial queries the source at the final pressure after both native
+recession and exposed-hardness continuation. Mean pressure uses the actual
+positive-pressure cells on the equal-area grid. The source's original claim and
+support remain authoritative; unsupported final pressure or temperature refuses
+the complete contact/thermal candidate.
+
+Even with a fixed active footprint, the native heat engine updates both
+resistance legs and the successor series conductance. The explicit resistance
+split locates the massless generation plane; finite-body temperatures and
+conductances determine the heat partition. Accepted steps and material export
+retain the same source and split. Ordinary and depth owners share source
+admission, pressure sampling and route admission; no second heat law is added.
+Four regression definitions cover an independent asymmetric heat quadratic,
+actual R(T,p) sampling through wear/export/reversal, zero-resistance replay and
+transactional source/support refusal. This remains a uniform-face model without
+resolved lateral constriction or third-body caloric storage.
 
 ### Conservative export after depth-hardness sliding
 
