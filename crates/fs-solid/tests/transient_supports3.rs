@@ -591,3 +591,192 @@ fn g4_invalid_supports_cancel_and_incompatible_operations_preserve_the_checkpoin
         }
     });
 }
+
+
+fn eigenstrain(m: &TetElasticMaterial, strain: f64) -> TetThermalStrainState {
+    TetThermalStrainState::try_new(300.0 + 1000.0 * strain, 300.0,
+        [strain, 0.0, 0.0, 0.0, 0.0, 0.0], m.material_state_identity, FRAME, 0.1).unwrap()
+}
+
+#[test]
+fn g1_g3_changing_eigenstrain_and_supports_share_full_damped_equations_and_work() {
+    with_cx(false, |cx| {
+        let m = material();
+        let refreshed = TetElasticMaterial::try_new(6.0, 60.0, 0.0, [80; 32]).unwrap();
+        let fixed: Vec<_> = (0..12).filter(|d| *d != 3).collect();
+        let p = problem(&m, &fixed);
+        let next_problem = problem(&refreshed, &fixed);
+        let g = geometry(cx);
+        let load = g.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        let (mut qc, mut qf, mut vc, mut vf, mut ac, mut e) =
+            (0.0005, 0.0003, 0.002, -0.001, 0.004, 0.0002);
+        // Full consistent mass and Rayleigh cross terms, independently reduced:
+        // M_ff=.1, M_fc=.05, K_ff=10, K_fc=-10, C_ff=.1, C_fc=-.04.
+        let mut af = (10.0 * e - 10.0 * qf + 10.0 * qc - 0.1 * vf
+            + 0.04 * vc - 0.05 * ac) / 0.1;
+        let mut u = ZERO; u[0][0] = qc; u[1][0] = qf;
+        let mut v = ZERO; v[0][0] = vc; v[1][0] = vf;
+        let mut a = ZERO; a[0][0] = ac;
+        let thermal = eigenstrain(&m, e);
+        let config = TransientConfig3 { mass_damping_per_s: 0.4,
+            stiffness_damping_s: 0.006, ..Default::default() };
+        let mut run = load.begin_transient_with_supports(&p,
+            Some(TetThermalStrainField::Uniform(&thermal)), 0.0, &u, &v, &a, config, cx).unwrap();
+        close(run.state().acceleration[0], af);
+        for (next_e, next_ac) in [(0.0007, 0.01), (-0.0001, -0.02), (0.0004, 0.0)] {
+            let h = 0.01; let b = 0.25 * h * h;
+            let next_vc = vc + 0.5 * h * (ac + next_ac);
+            let next_qc = qc + 0.5 * h * (vc + next_vc);
+            let qp = qf + h * vf + b * af;
+            let vp = vf + 0.5 * h * af;
+            let next_af = (10.0 * next_e + 10.0 * next_qc + 0.04 * next_vc
+                - 0.05 * next_ac - 10.0 * qp - 0.1 * vp)
+                / (0.1 + 0.05 * h + 10.0 * b);
+            let next_qf = qp + b * next_af;
+            let next_vf = vp + 0.5 * h * next_af;
+            let reaction = |q_c: f64, q_f: f64, v_c: f64, v_f: f64,
+                a_c: f64, a_f: f64, strain: f64| {
+                0.1 * a_c + 0.05 * a_f + 0.16 * v_c - 0.04 * v_f
+                    + 20.0 * q_c - 10.0 * q_f + 10.0 * strain
+            };
+            let old_reaction = reaction(qc, qf, vc, vf, ac, af, e);
+            let next_reaction = reaction(next_qc, next_qf, next_vc, next_vf,
+                next_ac, next_af, next_e);
+            let target = eigenstrain(&refreshed, next_e);
+            let field = TetThermalStrainField::Uniform(&target);
+            let checkpoint = run.clone();
+            let (next, report) = run.advance_thermal_with_support_accelerations_candidate(
+                &next_problem, field, &load, &[(0, next_ac)], h, FRAME, 0.1, cx).unwrap();
+            let (replayed, replay_report) = checkpoint.advance_thermal_with_support_accelerations_candidate(
+                &next_problem, field, &load, &[(0, next_ac)], h, FRAME, 0.1, cx).unwrap();
+            assert_eq!(report, replay_report);
+            assert_eq!(next.nodal_motion(cx).unwrap(), replayed.nodal_motion(cx).unwrap());
+            assert_eq!(run.state(), checkpoint.state());
+            let motion = next.nodal_motion(cx).unwrap();
+            for (actual, expected) in [
+                (motion[0][0][0], next_qc), (motion[1][0][0], next_vc),
+                (motion[2][0][0], next_ac), (motion[0][1][0], next_qf),
+                (motion[1][1][0], next_vf), (motion[2][1][0], next_af),
+            ] { close(actual, expected); }
+            let response = next.recover_response(FRAME, 0.1, cx).unwrap();
+            close(response.support_reactions_n[0][0], next_reaction);
+            close(response.stress.elements()[0].stress_mandel_pa()[0],
+                60.0 * (next_qf - next_qc - next_e));
+            assert!(response.free_force_residual_n < 1e-11);
+            close(report.native.thermal_equivalent_work_j,
+                5.0 * (e + next_e) * ((next_qf - qf) - (next_qc - qc)));
+            close(report.native.support_work_j,
+                0.5 * (old_reaction + next_reaction) * (next_qc - qc));
+            assert!(report.native.damping_loss_j > 0.0);
+            assert!(report.native.balance_error_j.abs() < 1e-12);
+            assert!(report.physical_balance_error_j.abs() < 1e-12);
+            let (position_driven, position_report) = run.advance_thermal_with_supports_candidate(
+                &next_problem, field, &load, &[(0, next_qc)], h, FRAME, 0.1, cx).unwrap();
+            let positional = position_driven.nodal_motion(cx).unwrap();
+            for component in 0..3 { for node in [0, 1] {
+                close(positional[component][node][0], motion[component][node][0]);
+            }}
+            assert!(position_report.physical_balance_error_j.abs() < 1e-12);
+            run = next;
+            (qc, qf, vc, vf, ac, af, e) =
+                (next_qc, next_qf, next_vc, next_vf, next_ac, next_af, next_e);
+        }
+    });
+}
+
+#[test]
+fn g1_fully_prescribed_heating_averages_thermal_forces_and_retains_the_new_reactions() {
+    with_cx(false, |cx| {
+        let m = material();
+        let fixed: Vec<_> = (0..12).collect();
+        let p = problem(&m, &fixed);
+        let g = geometry(cx);
+        let load = g.assemble(&[], VolumeLoad3::None, &[(3, 0.2)], cx).unwrap();
+        let speed = 1.0 / 128.0; let h = 1.0 / 32.0; let q = speed * h;
+        let mut v = ZERO; v[1][0] = speed;
+        let run = load.begin_transient_with_supports(&p, None, 0.0,
+            &ZERO, &v, &ZERO, Default::default(), cx).unwrap();
+        let target = eigenstrain(&m, 0.001);
+        let (mut next, report) = run.advance_thermal_with_supports_candidate(&p,
+            TetThermalStrainField::Uniform(&target), &load, &[(3, q)], h, FRAME, 0.1, cx).unwrap();
+        assert!(next.free_dofs().is_empty());
+        assert_eq!(report.native.iterations, 0);
+        close(report.native.thermal_equivalent_work_j, 5.0 * 0.001 * q);
+        close(report.native.mechanical_work_j, 0.2 * q);
+        close(report.native.support_work_j, (5.0 * (q - 0.001) - 0.2) * q);
+        close(report.thermal_material_work_j, -5.0 * (q - 0.001) * 0.001);
+        close(report.elastic_energy_change_j, 5.0 * (q - 0.001).powi(2));
+        assert!(report.native.balance_error_j.abs() < 1e-12);
+        assert!(report.physical_balance_error_j.abs() < 1e-12);
+        let response = next.recover_response(FRAME, 0.1, cx).unwrap();
+        close(response.support_reactions_n[1][0], 10.0 * (q - 0.001) - 0.2);
+        // Ordinary support advancement consumes the refreshed full thermal load.
+        let frozen = next.advance_with_support_accelerations(&load, &[], h, cx).unwrap();
+        close(frozen.thermal_equivalent_work_j, 10.0 * 0.001 * q);
+        close(frozen.support_work_j, (15.0 * q - 10.0 * 0.001 - 0.2) * q);
+        assert!(frozen.balance_error_j.abs() < 1e-12);
+        close(next.nodal_motion(cx).unwrap()[0][1][0], 2.0 * q);
+        close(next.recover_response(FRAME, 0.1, cx).unwrap().support_reactions_n[1][0],
+            10.0 * (2.0 * q - 0.001) - 0.2);
+        assert_eq!(run.state().step, 0);
+        assert_eq!(run.nodal_motion(cx).unwrap()[0], ZERO);
+    });
+}
+
+#[test]
+fn g4_thermal_support_refusals_leave_the_accepted_checkpoint_usable() {
+    with_cx(false, |cx| {
+        let m = material();
+        let fixed: Vec<_> = (0..12).filter(|d| *d != 3).collect();
+        let p = problem(&m, &fixed);
+        let g = geometry(cx);
+        let load = g.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        let run = load.begin_transient_with_supports(&p, None, 0.0,
+            &ZERO, &ZERO, &ZERO, TransientConfig3 { maximum_steps: 1,
+                ..Default::default() }, cx).unwrap();
+        let before = run.state().clone();
+        let motion = run.nodal_motion(cx).unwrap();
+        let response = run.recover_response(FRAME, 0.1, cx).unwrap();
+        let target = eigenstrain(&m, 0.001);
+        let field = TetThermalStrainField::Uniform(&target);
+        for supports in [&[(3, 0.0)][..], &[(0, 0.0), (0, 0.0)], &[(0, f64::NAN)]] {
+            assert!(run.advance_thermal_with_support_accelerations_candidate(
+                &p, field, &load, supports, 0.01, FRAME, 0.1, cx).is_err());
+        }
+        for changed in [
+            TetElasticMaterial::try_new(6.0, 61.0, 0.0, [81; 32]).unwrap(),
+            TetElasticMaterial::try_new(7.0, 60.0, 0.0, [82; 32]).unwrap(),
+        ] {
+            let changed_problem = problem(&changed, &fixed);
+            let changed_thermal = eigenstrain(&changed, 0.001);
+            assert!(matches!(run.advance_thermal_with_supports_candidate(
+                &changed_problem, TetThermalStrainField::Uniform(&changed_thermal),
+                &load, &[(0, 0.00001)], 0.01, FRAME, 0.1, cx),
+                Err(TransientError3::Invalid(_))));
+        }
+        // Late physical strain refusal must discard an otherwise solved candidate.
+        assert!(run.advance_thermal_with_supports_candidate(&p, field, &load,
+            &[(0, 0.00001)], 0.01, FRAME, 1e-8, cx).is_err());
+        assert!(run.advance_thermal_candidate(&p, field, &load, 0.01, FRAME, 0.1, cx).is_err());
+        with_cx(true, |cancelled| {
+            assert!(matches!(run.advance_thermal_with_support_accelerations_candidate(
+                &p, field, &load, &[(0, 0.01)], 0.01, FRAME, 0.1, cancelled),
+                Err(TransientError3::Cancelled)));
+        });
+        assert_eq!(run.state(), &before);
+        assert_eq!(run.nodal_motion(cx).unwrap(), motion);
+        assert_eq!(run.recover_response(FRAME, 0.1, cx).unwrap(), response);
+        assert!(run.thermal_strain_field().is_none());
+        let (next, report) = run.advance_thermal_with_support_accelerations_candidate(
+            &p, field, &load, &[(0, 0.01)], 0.01, FRAME, 0.1, cx).unwrap();
+        assert!(report.physical_balance_error_j.abs() < 1e-12);
+        assert!(matches!(next.advance_thermal_with_support_accelerations_candidate(
+            &p, field, &load, &[(0, 0.01)], 0.01, FRAME, 0.1, cx),
+            Err(TransientError3::Budget)));
+        let stationary = load.begin_transient(&p, None, 0.0,
+            &ZERO, &ZERO, Default::default(), cx).unwrap();
+        assert!(matches!(stationary.advance_thermal_with_supports_candidate(
+            &p, field, &load, &[(0, 0.0)], 0.01, FRAME, 0.1, cx),
+            Err(TransientError3::Invalid(_))));
+    });
+}

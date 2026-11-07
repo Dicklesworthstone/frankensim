@@ -1,5 +1,28 @@
 # fs-solid CONTRACT
 
+## Source-refreshed thermal strain with prescribed support dynamics
+
+`TetTransientRun3::advance_thermal_with_supports_candidate` and
+`advance_thermal_with_support_accelerations_candidate` join changing thermal
+eigenstrain to the existing full consistent-mass support/Newmark equations.
+They retain the same fixed components, complete stiffness and reference inertia;
+refreshed source identities and thermal fields remain bound to the returned run.
+Changed stiffness with prescribed supports explicitly refuses.
+
+The full endpoint thermal load enters reactions and the free equation.
+Numerical work pairs the mean of accepted and candidate thermal forces with the
+same full displacement as external and support work. Physical shifted elastic
+storage separately balances signed thermal material work, external work,
+support work and declared Rayleigh loss. No reciprocal heat debit is inferred.
+Ordinary later support steps consume the newly accepted field and reactions.
+
+Both endpoint conventions share native support admission and predictors.
+Cancellation, source, strain, displacement, energy and resource refusals leave
+the input checkpoint intact. Focused regressions in `transient_supports3`
+cover an independent damped free-component equation, heating and cooling,
+deterministic replay, fully prescribed motion, retained thermal reaction/work
+and refused candidates.
+
 ## Thermal strain rates in native viscous tensile fracture
 
 `ThermalBrittleTetMotion` advances total deformation and source-integrated free

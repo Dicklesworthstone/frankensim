@@ -13,7 +13,7 @@ use super::*;
 pub(super) struct PrescribedMotion3 {
     /// Full node-major fields, zero on free components.
     pub(super) motion: [Vec<f64>; 3],
-    thermal: Arc<[f64]>,
+    pub(super) thermal: Arc<[f64]>,
     /// Support force ON the solid at the accepted endpoint; zero on free DOFs.
     reactions: Vec<f64>,
 }
@@ -79,8 +79,10 @@ impl<'g, 'm> TetLoadCase3<'g, 'm> {
     /// from the complete partitioned equation, including M_fc, C_fc and K_fc.
     ///
     /// Every later endpoint must use `advance_with_supports`,
-    /// `advance_with_support_accelerations`, or a corresponding history adapter.
-    /// The constraint set and material/thermal state remain frozen.
+    /// `advance_with_support_accelerations`, a thermal/support candidate, or a
+    /// corresponding history adapter.
+    /// The constraint set stays fixed. The thermal candidate APIs additionally
+    /// admit changing eigenstrain while the complete stiffness stays fixed.
     /// Prescribed motion is absolute in the reference world's Cartesian axes;
     /// no accelerating-frame or velocity-integration convention is inferred.
     /// Existing displacement, element, solve and cancellation bounds apply.
@@ -119,7 +121,7 @@ struct Endpoint {
 }
 
 #[derive(Clone, Copy)]
-enum SupportEndpoint {
+pub(super) enum SupportEndpoint {
     Displacement,
     Acceleration,
 }
@@ -201,6 +203,19 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         h_s: f64,
         cx: &Cx<'_>,
     ) -> Result<TransientStep3, TransientError3> {
+        let candidate = self.support_endpoint_candidate(prescribed_dofs, kind, h_s, cx)?;
+        self.advance_impl(load_next, Some(candidate), h_s, cx)
+    }
+
+    // Thermal and ordinary motion use the same endpoint admission, omitted-DOF
+    // conventions and Newmark support predictors.
+    pub(super) fn support_endpoint_candidate(
+        &self,
+        prescribed_dofs: &[(usize, f64)],
+        kind: SupportEndpoint,
+        h_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<PrescribedMotion3, TransientError3> {
         check(cx)?;
         let Some(previous) = &self.prescribed else {
             return Err(TransientError3::Invalid(
@@ -246,7 +261,8 @@ impl TetTransientRun3<'_, '_, '_, '_> {
                 )?;
             }
         }
-        self.advance_impl(load_next, Some(candidate), h_s, cx)
+        check(cx)?;
+        Ok(candidate)
     }
 
     pub(super) fn support_acceleration_candidate(
@@ -501,7 +517,16 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         let mut thermal = Dd::default();
         for d in 0..full {
             if d % 256 == 0 { check(cx)?; }
-            thermal = thermal + Dd::from_f64(next.thermal[d]) * displacement(d);
+            // The full thermal load participates in both the free equation and
+            // the prescribed reactions. Pair its endpoint mean with the SAME
+            // displacement used by mechanical and support work.
+            let mean = if previous.thermal[d].to_bits() == next.thermal[d].to_bits() {
+                Dd::from_f64(next.thermal[d])
+            } else {
+                Dd::from_f64(0.5 * previous.thermal[d])
+                    + Dd::from_f64(0.5 * next.thermal[d])
+            };
+            thermal = thermal + mean * displacement(d);
         }
         let mut support = Dd::default();
         for &d in self.problem.fixed_dofs {

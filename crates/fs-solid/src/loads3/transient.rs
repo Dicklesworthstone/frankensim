@@ -455,9 +455,11 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         mut next_supports: Option<motion::PrescribedMotion3>, thermal_next: Option<&[f64]>,
         stiffness_before: Option<&Csr>, h_s: f64, cx: &Cx<'_>) -> Result<TransientStep3, TransientError3> {
         check(cx)?;
-        if thermal_next.is_some_and(|field| field.len() != self.thermal.len())
-            || (thermal_next.is_some() && next_supports.is_some()) {
-            return Err(TransientError3::Invalid("thermal endpoint requires matching fields and stationary zero supports"));
+        if thermal_next.is_some_and(|field| field.len() != self.thermal.len()) {
+            return Err(TransientError3::Invalid("thermal endpoint requires matching fields"));
+        }
+        if self.prescribed.is_some() != next_supports.is_some() {
+            return Err(TransientError3::Invalid("prescribed motion requires an explicit matching support endpoint"));
         }
         if stiffness_before.is_some_and(|matrix| matrix.nrows() != self.free_dofs().len())
             || (stiffness_before.is_some() && next_supports.is_some()) {
