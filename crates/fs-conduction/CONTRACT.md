@@ -2208,10 +2208,15 @@ Successive additions intentionally accumulate further layer storage.
 `transient::MaterialHeatCapacity` resolves constant density and specific heat
 from one immutable material card at an explicit reference state, then pins both
 selected sources at the endpoints of a declared positive temperature interval.
-Only validity-wide scalar static laws are admitted: temperature-varying
-density/Cp is not silently frozen. Those laws belong to the existing
-reference-mass enthalpy path. The `isotropic_conductivity` pairing method uses
-the same card, external conditions and interval with the original conductivity
+Validity-wide scalar static laws and curves/surfaces depending only on typed
+held external conditions, including pressure, moisture and composition, are
+admitted. Every source coordinate and quantity meaning remains in the reference
+and endpoint receipts. Any
+temperature dependence still belongs to the existing reference-mass enthalpy
+path, even when sampled endpoint values agree. Held conditions set an initial
+inventory on the fixed reference volume; stepping does not evolve density,
+mass, composition or pressure-volume work. The `isotropic_conductivity` pairing
+method uses the same card, external conditions and interval with the original conductivity
 table owner; an unrelated card refuses. Legacy hand-composed conductivity
 models remain independent because they carry claim receipts rather than card
 identity.

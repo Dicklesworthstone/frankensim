@@ -21,7 +21,8 @@ use fs_material::state_point::{
     DENSITY_PROPERTY, MaterialPropertySelection, SPECIFIC_HEAT_CAPACITY_DIMS,
     SPECIFIC_HEAT_CAPACITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY,
 };
-use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::semantic::{CompositionBasis, FrequencyConvention, MoistureBasis, QuantityKind,
+    SemanticType, ValueForm};
 use fs_qty::{Density, Dims, QuantitySpec, Temperature};
 use fs_rep_mesh::TetComplex;
 use fs_scenario::scenario::Environment;
@@ -90,6 +91,82 @@ fn capacity(card: &MaterialCard, high: f64) -> MaterialHeatCapacity {
         MaterialPropertySelection::SingleClaimOnly,
     )
     .unwrap()
+}
+
+const HELD_AXES: [&str; 3] = ["pressure", "water_content", "alloy_fraction"];
+
+fn held_quantities() -> [Option<QuantitySpec>; 3] {
+    [QuantityKind::Pressure, QuantityKind::Moisture(MoistureBasis::DryMass),
+        QuantityKind::Composition(CompositionBasis::MassFraction)]
+        .map(|kind| Some(QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))))
+}
+
+fn held_point(quantities: [Option<QuantitySpec>; 3], values: [f64; 3]) -> QueryPoint {
+    let mut point = QueryPoint::new().with("T", 300.0).unwrap();
+    for ((axis, quantity), value) in HELD_AXES.into_iter().zip(quantities).zip(values) {
+        point = match quantity {
+            Some(quantity) => point.with_quantity(axis, quantity, value),
+            None => point.with(axis, value),
+        }.unwrap();
+    }
+    point
+}
+
+fn held_card(
+    quantities: [Option<QuantitySpec>; 3],
+    heat_capacity_interpolation: InterpolationPolicy,
+) -> MaterialCard {
+    let mut claims = ClaimSet::new();
+    let validity = |axes: &[usize]| {
+        let mut validity = ValidityDomain::unconstrained().with("T", 280.0, 360.0);
+        let ranges = [[1e5, 2e5], [0.0, 0.2], [0.0, 1.0]];
+        for &index in axes {
+            let [low, high] = ranges[index];
+            validity = match quantities[index] {
+                Some(quantity) => validity.with_quantity(HELD_AXES[index], quantity, low, high),
+                None => validity.with(HELD_AXES[index], low, high),
+            };
+        }
+        validity
+    };
+    let provenance = Provenance {
+        source: "manufactured held-environment caloric and conduction laws".into(),
+        license: "test-only; not measured material data".into(),
+        artifact: None,
+    };
+    for (name, dims, values) in [
+        (DENSITY_PROPERTY, Density::DIMS, [2.0, 3.0]),
+        (THERMAL_CONDUCTIVITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS, [2.0, 4.0]),
+    ] {
+        claims.insert_claim(PropertyClaim {
+            key: PropertyKey::new(name, dims),
+            value: PropertyValue::Curve {
+                abscissa: HELD_AXES[0].into(),
+                abscissa_dims: quantities[0].map_or(fs_qty::Pressure::DIMS, |q| q.dims()),
+                knots: vec![(1e5, values[0]), (2e5, values[1])], dims,
+            },
+            validity: validity(&[0]), interpolation: InterpolationPolicy::LinearInside,
+            uncertainty: UncertaintyModel::Unstated, observations: vec![],
+            provenance: provenance.clone(),
+        }).unwrap();
+    }
+    claims.insert_claim(PropertyClaim {
+        key: PropertyKey::new(SPECIFIC_HEAT_CAPACITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS),
+        value: PropertyValue::Surface2D {
+            axes: [HELD_AXES[1].into(), HELD_AXES[2].into()],
+            axis_dims: [quantities[1].map_or(Dims::NONE, |q| q.dims()),
+                quantities[2].map_or(Dims::NONE, |q| q.dims())],
+            samples: vec![([0.0, 0.0], 10.0), ([0.2, 0.0], 15.0),
+                ([0.0, 1.0], 15.0), ([0.2, 1.0], 20.0)],
+            triangles: vec![[0, 1, 2], [1, 3, 2]], dims: SPECIFIC_HEAT_CAPACITY_DIMS,
+        },
+        validity: validity(&[1, 2]), interpolation: heat_capacity_interpolation,
+        uncertainty: UncertaintyModel::Unstated, observations: vec![], provenance,
+    }).unwrap();
+    MaterialCard::assemble(MaterialStateId {
+        chemistry: "synthetic conditioned material".into(), phase: "solid".into(),
+        process: "independently initialized fixed reference volume".into(), revision: 0,
+    }, claims, vec![]).unwrap()
 }
 
 fn mesh(two: bool) -> ConductionMesh {
@@ -404,6 +481,114 @@ fn g0_catalog_source_admission_preserves_temperature_and_selector_limits() {
     );
     let point = point.with_quantity("stress", stress, 1.0).unwrap();
     assert!(resolve(&stressed, source, &point, [297.15, 298.15]).is_err());
+}
+
+#[test]
+fn g1_held_material_environment_reaches_original_transient_storage_and_diffusion() {
+    use fs_conduction::transient::{
+        FinalStateFunctional, HeatCapacity, TransientConfig,
+        march_with_capacity_and_source_scale_gradient,
+    };
+    let quantities = held_quantities();
+    let material = held_card(quantities, InterpolationPolicy::LinearInside);
+    let mesh = mesh(false);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .adiabatic_remainder().finish().unwrap();
+    let functional = FinalStateFunctional::probe(4, 1).unwrap();
+    let heat = ScalarField::Uniform(30.0);
+    for (environment, [rho, cp, conductivity]) in [
+        ([1e5, 0.0, 0.0], [2.0, 10.0, 2.0]),
+        ([2e5, 0.0, 0.0], [3.0, 10.0, 4.0]),
+        ([1e5, 0.2, 0.0], [2.0, 15.0, 2.0]),
+        ([1e5, 0.0, 1.0], [2.0, 15.0, 2.0]),
+        ([1.5e5, 0.1, 0.5], [2.5, 15.0, 3.0]),
+        ([2e5, 0.2, 1.0], [3.0, 20.0, 4.0]),
+    ] {
+        // One unchanged card and mesh. Held coordinates set the initial
+        // reference inventory; they do not evolve during thermal marching.
+        let point = held_point(quantities, environment);
+        let storage = MaterialHeatCapacity::from_card(
+            &material, &point, 280.0, 360.0, MaterialPropertySelection::SingleClaimOnly,
+        ).unwrap();
+        assert_eq!(storage.reference().query(), point);
+        let value = rho * cp;
+        assert!((storage.value_j_per_m3_k() - value).abs() < 1e-12);
+        for state in [storage.reference(), &storage.endpoints()[0], &storage.endpoints()[1]] {
+            assert_eq!(state.card_identity(), material.content_hash());
+            assert_eq!(state.axis_quantities(), point.axis_quantities());
+            for (axis, condition) in HELD_AXES.into_iter().zip(environment) {
+                assert_eq!(state.query().axes()[axis], condition);
+            }
+            for (name, expected) in [(DENSITY_PROPERTY, rho), (SPECIFIC_HEAT_CAPACITY_PROPERTY, cp)] {
+                let property = state.property(name).unwrap();
+                assert!((property.value_si() - expected).abs() < 1e-12);
+                assert_eq!(property.answer().receipt.selected,
+                    storage.reference().property(name).unwrap().answer().receipt.selected);
+                material.claims().verify_receipt(&property.answer().receipt).unwrap();
+            }
+            assert_eq!(state.property(SPECIFIC_HEAT_CAPACITY_PROPERTY).unwrap().source_axes().len(), 2);
+        }
+        let k = storage.isotropic_conductivity(&material, SelectionPolicy::SingleClaimOnly).unwrap();
+        assert!((k.tensor_at(300.0).unwrap()[0][0] - conductivity).abs() < 1e-12);
+        for receipt in k.receipts() {
+            material.claims().verify_receipt(receipt).unwrap();
+            assert_eq!(receipt.axis_quantities, *point.axis_quantities());
+        }
+        for theta in [0.5, 1.0] {
+            let config = TransientConfig::new(theta, 0.2, controls().linear).unwrap();
+            with_cx(|cx| {
+                let (solved, gradient) = march_with_capacity_and_source_scale_gradient(
+                    cx, ConductionProblem {
+                        mesh: &mesh, boundary: &boundary, material: &k,
+                        source: &heat, element_materials: None,
+                    }, HeatCapacity::MaterialUniform(&storage), &config,
+                    &[300.0, 310.0, 290.0, 300.0], &functional, 3,
+                ).unwrap();
+                // Independent P1 diffusion eigenmode and total caloric balance.
+                let z = 4.0 * conductivity * 0.2 / value;
+                let ratio = (1.0 - (1.0 - theta) * z) / (1.0 + theta * z);
+                let amplitude = 10.0 * ratio.powi(3);
+                let rise = 30.0 * 0.6 / value;
+                for (actual, mode) in solved.temperature.iter().zip([0.0, amplitude, -amplitude, 0.0]) {
+                    assert!((actual - 300.0 - rise - mode).abs() < 1e-8);
+                }
+                assert!((gradient - rise).abs() < 1e-9);
+            });
+        }
+    }
+}
+
+#[test]
+fn g0_held_caloric_sources_keep_their_quantity_roles_and_exact_support() {
+    let original = held_quantities();
+    let create = |material: &MaterialCard, point: &QueryPoint| {
+        MaterialHeatCapacity::from_card(material, point, 280.0, 360.0,
+            MaterialPropertySelection::SingleClaimOnly)
+    };
+    // Holding a coordinate does not turn stress, frequency or an untyped Pa
+    // value into an admissible external pressure condition.
+    for quantity in [None,
+        Some(QuantitySpec::semantic(SemanticType::new(QuantityKind::Stress, ValueForm::Static))),
+        Some(QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Frequency(FrequencyConvention::Cyclic), ValueForm::Static))),
+    ] {
+        let mut quantities = original;
+        quantities[0] = quantity;
+        let material = held_card(quantities, InterpolationPolicy::LinearInside);
+        assert!(create(&material, &held_point(quantities, [1.5e5, 0.1, 0.5])).is_err());
+    }
+    let material = held_card(original, InterpolationPolicy::LinearInside);
+    let mut wrong_basis = original;
+    wrong_basis[1] = Some(QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::Moisture(MoistureBasis::WetMass), ValueForm::Static)));
+    assert!(create(&material, &held_point(wrong_basis, [1.5e5, 0.1, 0.5])).is_err());
+    assert!(create(&material, &QueryPoint::new().with("T", 300.0).unwrap()).is_err());
+    assert!(create(&material, &held_point(original, [1.5e5, 0.21, 0.5])).is_err());
+    // Exact-only environmental data support the SAME held sample throughout
+    // T's explicit validity, but never authorize interpolation to another mix.
+    let exact = held_card(original, InterpolationPolicy::TabulatedOnly);
+    assert!(create(&exact, &held_point(original, [1e5, 0.0, 0.0])).is_ok());
+    assert!(create(&exact, &held_point(original, [1e5, 0.1, 0.5])).is_err());
 }
 
 #[test]

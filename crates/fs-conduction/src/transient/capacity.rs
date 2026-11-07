@@ -1,8 +1,11 @@
 //! Source-bound constant heat storage for the existing temperature steppers.
 //!
-//! This reduction is admitted only when BOTH density and specific heat are
-//! validity-wide scalar laws. Temperature-varying data belong to the existing
-//! reference-mass enthalpy owner; they are never silently frozen here.
+//! BOTH density and specific heat must remain constant throughout the owned
+//! temperature interval. Source laws may depend on explicitly typed, held
+//! pressure, moisture or composition. Temperature-varying data belong to the
+//! existing reference-mass enthalpy owner; they are never frozen here.
+//! Held conditions set the initial inventory on a fixed reference volume;
+//! stepping does not evolve density, composition, mass or pressure-volume work.
 
 pub(super) mod mixture;
 pub use mixture::MaterialHeatCapacityVolumeFraction;
@@ -62,11 +65,12 @@ impl MaterialHeatCapacity {
     /// and pin those exact claims over `[low_k, high_k]`. The source coordinate
     /// `T` must denote absolute temperature; all other conditions stay fixed.
     ///
-    /// Only scalar, static source laws are admitted. A curve is not made
-    /// constant by sampling it once, even if its endpoint values happen to agree.
-    /// Nonconstant caloric data require `EnthalpyBackwardEuler` and its original
-    /// `ResolvedHeatCapacityCurve`. No phase boundary is inferred from a card's
-    /// name: the caller must select a single-phase source validity interval.
+    /// Scalar static laws and laws depending only on typed held external
+    /// conditions are admitted. Any temperature dependence still requires
+    /// `EnthalpyBackwardEuler` and its original `ResolvedHeatCapacityCurve`,
+    /// even if endpoint values agree. Pressure, moisture and composition do not
+    /// evolve in this owner. The caller selects a single-phase source interval;
+    /// no phase boundary or changing mass is inferred from a material name.
     pub fn from_card(
         card: &MaterialCard,
         point: &QueryPoint,
@@ -96,10 +100,11 @@ impl MaterialHeatCapacity {
     /// retains every typed external condition; only `temperature_axis` changes
     /// when the pinned claims are checked at the two interval endpoints.
     ///
-    /// Density and specific heat must be positive, static scalar laws with
-    /// their respective SI dimensions. This does not freeze curves, reinterpret
-    /// an unknown test temperature as support, or select an alternative source
-    /// if the requested keys or conditions are missing.
+    /// Density and specific heat must be positive and constant with respect to
+    /// temperature, with their respective SI dimensions. A curve or surface
+    /// may respond to typed held external conditions; its complete original
+    /// source and query survive. Unknown temperature support, temperature
+    /// dependence and missing source conditions still refuse.
     pub fn from_card_at_query_points(
         card: &MaterialCard,
         source: MaterialHeatCapacitySource<'_>,
@@ -176,13 +181,19 @@ impl MaterialHeatCapacity {
         let reference = resolve_material_state_point(card, point, &requirements, selection)
             .map_err(|error| invalid(&error.to_string()))?;
         for property in reference.properties() {
-            if !property.source_axes().is_empty()
-                || property.answer().receipt.decision != EvaluationDecision::ConstantWithinValidity
+            if (property.source_axes().is_empty()
+                && property.answer().receipt.decision != EvaluationDecision::ConstantWithinValidity)
+                || property.source_axes().iter().any(|(axis, dims)| {
+                    axis == temperature_axis || *dims == Temperature::DIMS
+                })
             {
                 return Err(invalid(
-                    "constant storage requires static scalar density and specific heat; use source-bound enthalpy for varying laws",
+                    "constant storage requires temperature-independent density and specific heat; use source-bound enthalpy for temperature-varying laws",
                 ));
             }
+            // The existing common source-context policy admits only typed held
+            // external response axes. Since none is a temperature coordinate,
+            // changing T cannot cross source knots or cells or change rho/Cp.
             admit_thermal_source_context(
                 property,
                 temperature_axis,
