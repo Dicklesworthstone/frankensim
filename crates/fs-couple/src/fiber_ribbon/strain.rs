@@ -225,14 +225,23 @@ impl FiberStrain {
             .model
             .strain_bounds(&slopes, &q[..self.model.axial_modes().len()])
             .map_err(|_| invalid())?;
+        self.validate_kinematic_bounds(slope_bound, mean, variation)?;
+        Ok((mean, variation))
+    }
+
+    fn validate_kinematic_bounds(&self, slope_bound: f64, mean: f64, variation: f64)
+        -> Result<(), ModalCouplingError>
+    {
         if !slope_bound.is_finite()
+            || !mean.is_finite()
+            || !variation.is_finite()
             || slope_bound > self.limits.maximum_slope
             || mean.abs() + variation > self.limits.maximum_strain
             || self.tension_n + self.axial_rigidity_n * (mean - variation) <= 0.0
         {
             return Err(invalid());
         }
-        Ok((mean, variation))
+        Ok(())
     }
 
     /// Original continuous-span motion bounds.
@@ -319,6 +328,9 @@ impl ModalPotential for FiberStrain {
     fn validate_coordinates(&self, q: &[f64]) -> Result<(), ModalCouplingError> {
         let (mean, variation) = self.validate_kinematics(q)?;
         if let Some(guard) = &self.tensile {
+            // Rate stress can oppose elastic stress. The native endpoint gate
+            // owns that combined decision; storage/loss quadrature sees only q.
+            if guard.has_viscosity() { return Ok(()); }
             let axial_strain = self.tension_n / self.axial_rigidity_n + mean + variation;
             if guard
                 .assess(&q[self.model.axial_modes().len()..], axial_strain)?
@@ -328,6 +340,19 @@ impl ModalPotential for FiberStrain {
                     what: "fiber tensile envelope exceeds its original material limit",
                 });
             }
+        }
+        Ok(())
+    }
+
+    fn requires_velocity_validation(&self) -> bool {
+        self.tensile.as_ref().is_some_and(|guard| guard.has_viscosity())
+    }
+
+    fn validate_state(&self, q: &[f64], velocity: &[f64]) -> Result<(), ModalCouplingError> {
+        if self.tensile_state_assessment(q, velocity)?.is_some_and(|assessment| assessment.exceeds_limit()) {
+            return Err(ModalCouplingError::Invalid {
+                what: "fiber tensile envelope exceeds its original material limit",
+            });
         }
         Ok(())
     }

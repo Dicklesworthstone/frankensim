@@ -5,6 +5,9 @@ use fs_couple::render::schedule::force::coupled::contact::friction::nonlinear::M
 use fs_material::section::relaxation::LayerRelaxationProperties;
 use fs_phs::Storage;
 
+#[path = "tensile/viscous.rs"]
+mod viscous;
+
 const LIMIT: &str = "fiber_tensile_limit";
 const RADIUS: f64 = 40e-6;
 const YOUNG: f64 = 3e9;
@@ -28,6 +31,16 @@ fn ribbon_with_viscosities(
         }],
     )
     .unwrap();
+    ribbon_with_section(cells, section, 1, 1, gate)
+}
+
+fn ribbon_with_section(
+    cells: usize,
+    section: ConcentricElasticSection,
+    axial_modes: usize,
+    transverse_modes: usize,
+    gate: &CancelGate,
+) -> TensionedFiberRibbon {
     TensionedFiberRibbon::try_new(
         FiberRibbonGeometry {
             length_m: 0.6,
@@ -37,8 +50,8 @@ fn ribbon_with_viscosities(
         },
         FiberRibbonResolution {
             cells,
-            axial_modes: 1,
-            transverse_modes: 1,
+            axial_modes,
+            transverse_modes,
         },
         section
             .clone()
@@ -153,10 +166,10 @@ fn tensile_fiber_preload_sources_and_memory_combinations_refuse_explicitly() {
 }
 
 #[test]
-fn tensile_fiber_viscous_materials_require_a_velocity_aware_stress_owner() {
+fn tensile_fiber_viscous_sources_activate_native_endpoint_validation() {
     let gate = CancelGate::new_clock_free();
-    // Neither direction may hide positive material stress behind an elastic
-    // coordinate-only bound. Even tiny sourced coefficients require rates.
+    // Either source direction needs actual endpoint rates, even when its
+    // coefficient is tiny or loss is owned by the original linear propagator.
     for eta in [50.0, 1e-12] {
         for (axial_eta, bending_eta) in [(eta, 0.0), (0.0, eta)] {
             let original = ribbon_with_viscosities(3, 100e6, axial_eta, bending_eta, &gate);
@@ -168,15 +181,15 @@ fn tensile_fiber_viscous_materials_require_a_velocity_aware_stress_owner() {
                 original.bending_material().viscous_stiffness_n_m2_s() > 0.0,
                 bending_eta > 0.0
             );
-            let error = original.with_tensile_limit(LIMIT).unwrap_err();
-            assert!(
-                format!("{error}").contains("Kelvin-Voigt strain-rate stresses"),
-                "{error}"
-            );
+            let guarded = original.with_tensile_limit(LIMIT).unwrap();
+            let strain = guarded.strain().unwrap();
+            assert!(strain.requires_velocity_validation());
+            strain.validate_state(&[0.0; 2], &[0.0; 2]).unwrap();
         }
     }
-    // Explicitly lossless source laws retain the elastic admission route.
-    ribbon(3, 100e6, &gate).with_tensile_limit(LIMIT).unwrap();
+    // Explicitly lossless laws retain their original coordinate-only path.
+    let elastic = ribbon(3, 100e6, &gate).with_tensile_limit(LIMIT).unwrap();
+    assert!(!elastic.strain().unwrap().requires_velocity_validation());
 }
 
 #[test]

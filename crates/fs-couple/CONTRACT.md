@@ -2099,25 +2099,41 @@ obligation.
 named static strength to the existing nonlinear `FiberStrain` owner. Its
 retained longitudinal strain supplies the axial upper bound, including the
 maintained preload and geometric mean. Original mass-normalized transverse
-coordinates supply a continuous-span curvature envelope. Each layer uses
-`E_i (epsilon_max + r_outer_i K)` with its own physical fiber radius: refining
-the ribbon width changes neither stress nor utilization. `FiberTensileAssessment`
-reports force per original fiber, retaining the section and strength receipts.
+coordinates supply a continuous-span curvature envelope. Elastic layers use
+`E_i (epsilon_max + r_outer_i K)` with their own physical fiber radii: refining
+the ribbon width changes neither stress nor utilization.
+
+Sourced Kelvin--Voigt layers retain independent original axial and bending
+viscosities through `KelvinVoigtTensileCapacity`. The original longitudinal
+owner supplies the complete strain rate, including `y_x*y_xt` and its mean.
+For each layer, signed `E_i*epsilon_j + eta_ai*epsilon_dot_j` axial harmonics
+and `E_i*kappa_n + eta_bi*kappa_dot_n` bending modes combine before their
+span magnitudes are summed. Unloading can therefore cancel tensile stress;
+no section-average viscosity redistributes it between layers. The maintained
+preload has zero rate. `tensile_state_assessment` reports total stress, while
+`tensile_assessment` explicitly reports the elastic contribution alone.
+Both retain the original section/strength receipts and force per physical fiber.
 
 Preload and the original coupled candidate gate refuse a crossed envelope;
 state, histories, work accounts and time remain transactional. Forces and energy
-are unchanged. The additional per-layer comparison allocates no scratch; it
-reuses the native strain evaluation and stores immutable strength data once.
-This explicitly selected elastic normal-stress envelope has the same model
-limits as the string criterion above. Sourced axial and bending Kelvin--Voigt
-viscosities must both be exactly zero: this coordinate-only candidate gate
-cannot bound total strain-rate stress without a velocity-aware owner. It checks
-the original material coefficients, not numerical or modal damping. Hereditary
-combinations refuse in either builder order until actual layer memories can
-participate. Tests in
-`tests/material_multi_bow/fiber_ribbon/tensile.rs` cover analytical demand,
-width refinement, source/preload and viscous-material refusal, and native
-contact-bank rollback.
+are unchanged. Velocity-dependent limits use the actual original modal velocities
+at cold binding, component-state restoration, accepted states, converged dynamic
+candidates, and final staged static equilibria, before publication. Cold restores
+also admit all displacement-only constitutive domains and retain their accepted
+material histories. The held-force displacement increment
+divided by dt is not substituted for an endpoint velocity. Mapped admission
+buffers are prepared once and reused; displacement-only laws gather no extra
+velocity data. The fiber assessment uses bounded stack workspaces and cached
+per-layer coefficients without new heap allocation or runtime source lookup.
+
+This remains a fixed-state normal-stress envelope at temporal endpoints, with
+no guarantee between samples, rate-dependent strength, yielding, fatigue or
+rupture topology. Hereditary combinations refuse in either builder order until
+actual layer memories can participate. Tests in
+`tests/material_multi_bow/fiber_ribbon/tensile.rs` and its `tensile/viscous.rs`
+child cover analytical demand, width refinement, distinct layer viscosities,
+signed cancellation, source/preload refusal, unchanged admitted mechanics,
+and native cold/restore/static/dynamic admission and rollback.
 
 
 ## Actual worn material leaving hardness-coupled thermal receivers

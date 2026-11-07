@@ -30,6 +30,22 @@ pub trait ModalPotential: Storage + Send + Sync {
     fn coordinate_count(&self) -> usize;
     /// Reject nonfinite coordinates or motion outside the constitutive domain.
     fn validate_coordinates(&self, q: &[f64]) -> Result<(), ModalCouplingError>;
+    /// Whether endpoint admission additionally needs actual modal velocities.
+    /// This immutable selection prepares reusable mapped state buffers once;
+    /// displacement-only laws incur no velocity gathers. Wrappers must forward
+    /// this selection together with `validate_state`.
+    fn requires_velocity_validation(&self) -> bool { false }
+    /// Admit a complete native endpoint without changing storage or history.
+    /// Override together with `requires_velocity_validation` for rate-dependent
+    /// validity. The host supplies the original accepted or staged velocities,
+    /// never displacement increment / dt from its held-force loss quadrature.
+    /// Admission runs at cold binding and before dynamic/static publication.
+    fn validate_state(&self, q: &[f64], velocity: &[f64]) -> Result<(), ModalCouplingError> {
+        if velocity.len() != self.coordinate_count() || velocity.iter().any(|v| !v.is_finite()) {
+            return Err(invalid("constitutive admission needs complete finite modal velocities"));
+        }
+        self.validate_coordinates(q)
+    }
     /// Whether the constitutive reaction below can be nonzero. Elastic laws
     /// keep the original solve path without additional per-trial loss work.
     fn has_constitutive_loss(&self) -> bool { false }
@@ -258,7 +274,15 @@ struct BoundPotential {
     coordinates: Vec<usize>,
     contiguous: Option<std::ops::Range<usize>>,
     replaced_stiffness: Vec<f64>,
+    state_validation: Option<PotentialStateValidation>,
     potential: Box<dyn ModalPotential>,
+}
+// Original component/mode addresses survive cold extensions of the network.
+// Both mapped buffers are allocated once, including noncontiguous bindings.
+struct PotentialStateValidation {
+    coordinates: Vec<ModalCoordinate>,
+    q: Vec<f64>,
+    velocity: Vec<f64>,
 }
 impl BoundPotential {
     fn select<'a>(&self, q: &'a [f64]) -> Cow<'a, [f64]> {
@@ -368,14 +392,22 @@ impl FrictionModalSystem {
             }
             let contiguous = coordinates.windows(2).all(|pair| pair[1] == pair[0] + 1)
                 .then(|| coordinates[0]..coordinates[0] + count);
+            let state_validation = binding.potential.requires_velocity_validation().then(|| {
+                PotentialStateValidation {
+                    coordinates: binding.coordinates,
+                    q: vec![0.0; count],
+                    velocity: vec![0.0; count],
+                }
+            });
             potentials.push(BoundPotential {
                 coordinates,
                 contiguous,
                 replaced_stiffness,
+                state_validation,
                 potential: binding.potential,
             });
         }
-        let state = NonlinearFrictionState {
+        let mut state = NonlinearFrictionState {
             potentials,
             histories,
             staged_history_sample: None,
@@ -383,6 +415,7 @@ impl FrictionModalSystem {
             last: None,
             preload: None,
         };
+        state.validate_states(self.components())?;
         let q = coordinates(self.components());
         let total = finite(self.network.total_energy_j()? + state.potential_energy(&q)? + state.history_energy(&q)?)?;
         limit(
@@ -514,7 +547,7 @@ impl FrictionModalSystem {
     }
 }
 impl NonlinearFrictionState {
-    pub(super) fn initialize_equilibrium(&self, network: &mut CoupledModalSystem,
+    pub(super) fn initialize_equilibrium(&mut self, network: &mut CoupledModalSystem,
         external: &[f64], obstacles: Option<&super::multiple::obstacles::ObstacleSet>,
         gate: &CancelGate) -> Result<NonlinearPreloadDiagnostics, ModalFrictionError>
     {
@@ -522,6 +555,29 @@ impl NonlinearFrictionState {
             return Err(invalid("initialize static equilibrium before binding hereditary material history").into());
         }
         equilibrium::initialize(self, network, external, obstacles, gate)
+    }
+    fn validate_states(&mut self, models: &[ModalAcousticTimeModel]) -> Result<(), ModalCouplingError> {
+        for binding in &mut self.potentials {
+            let Some(validation) = &mut binding.state_validation else { continue; };
+            for (index, address) in validation.coordinates.iter().enumerate() {
+                let state = models.get(address.component)
+                    .and_then(|model| model.states().get(address.mode))
+                    .ok_or_else(|| invalid("constitutive admission lost its original modal state"))?;
+                validation.q[index] = state.displacement_m_sqrt_kg;
+                validation.velocity[index] = state.velocity_m_sqrt_kg_per_s;
+            }
+            binding.potential.validate_state(&validation.q, &validation.velocity)?;
+        }
+        Ok(())
+    }
+    /// Cold restoration must admit displacement-only laws as well as actual
+    /// velocity-dependent limits, while retaining every accepted history.
+    pub(super) fn validate_restored_states(&mut self, models: &[ModalAcousticTimeModel])
+        -> Result<(), ModalCouplingError>
+    {
+        let q = coordinates(models);
+        finite(self.potential_energy(&q)? + self.history_energy(&q)?)?;
+        self.validate_states(models)
     }
     fn potential_energy(&self, q: &[f64]) -> Result<f64, ModalCouplingError> {
         let mut energy = 0.0;
@@ -621,6 +677,7 @@ impl NonlinearFrictionState {
                 invalid("external force must retain every nonlinear bank coordinate").into(),
             );
         }
+        self.validate_states(inner.components())?;
         let before_q = coordinates(inner.components());
         let dt = inner.sample_period_s();
         let has_loss = self.potentials.iter().any(|p| p.potential.has_constitutive_loss());
@@ -756,6 +813,9 @@ impl NonlinearFrictionState {
             )?;
             last_energy = (balance, energy_tolerance);
             if residual <= tolerance && balance.abs() <= energy_tolerance {
+                // The constitutive limit sees the actual converged endpoint,
+                // independently of acceleration observation and loss quadrature.
+                self.validate_states(&inner.network.candidates)?;
                 limit(
                     "total linear, nonlinear and contact energy",
                     total_after,

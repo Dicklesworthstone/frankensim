@@ -510,10 +510,12 @@ impl MultiFrictionModalSystem {
     /// budgets; `prepare_prediction` re-derives the network's cached positions
     /// from the models on the next step, so no other cache needs touching. The
     /// shared clock is unchanged and any later contact history starts fresh.
+    /// Bound material and nonlinear domains admit the complete staged state,
+    /// including actual velocities, before the replacement becomes accepted.
     ///
     /// # Errors
     /// A sample already rendered, an unknown component, or a state that the
-    /// modal basis or budgets reject.
+    /// modal basis, budgets or bound constitutive domains reject.
     pub fn restore_component_states(&mut self, component: usize, states: &[ModalAcousticState])
         -> Result<(), ModalFrictionError>
     {
@@ -521,10 +523,11 @@ impl MultiFrictionModalSystem {
             return Err(invalid("restore component states before any sample is rendered").into());
         }
         let network = &mut self.core.network;
+        let nonlinear = &mut self.core.nonlinear;
         if component >= network.models.len() {
             return Err(invalid("restore names a component outside the coupled network").into());
         }
-        if !network.plane_stress_material_points.is_empty() {
+        if !network.plane_stress_material_points.is_empty() || nonlinear.is_some() {
             // A cold restart is still a physical source-domain change. Stage
             // the complete accepted prefix before exposing this replacement.
             network.candidates.clone_from(&network.models);
@@ -532,6 +535,13 @@ impl MultiFrictionModalSystem {
             network.candidates[component].restore_states(states)
                 .map_err(|source|ModalCouplingError::Component {component,source})?;
             network.validate_staged_material_points(None)?;
+            if let Some(state) = nonlinear {
+                state.validate_restored_states(&network.candidates)?;
+            }
+            // Publication copies the already admitted model, with no fallible
+            // restart or constitutive query after accepted state changes.
+            network.models[component].clone_from(&network.candidates[component]);
+            return Ok(());
         }
         network.models[component].restore_states(states)
             .map_err(|source| ModalCouplingError::Component { component, source })?;

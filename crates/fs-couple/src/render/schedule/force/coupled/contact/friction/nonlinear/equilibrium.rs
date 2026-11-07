@@ -197,7 +197,7 @@ fn residual(
 }
 
 pub(super) fn initialize(
-    state: &NonlinearFrictionState,
+    state: &mut NonlinearFrictionState,
     network: &mut CoupledModalSystem,
     external: &[f64],
     obstacles: Option<&ObstacleSet>,
@@ -252,6 +252,7 @@ pub(super) fn initialize(
                 energy,
                 network.config.maximum_total_energy_j,
             )?;
+            state.validate_states(&network.candidates)?;
             poll(Some(gate))?;
             std::mem::swap(&mut network.models, &mut network.candidates);
             std::mem::swap(
