@@ -2,6 +2,9 @@
 #[path = "heat/real_gas.rs"]
 mod real_gas;
 
+#[path = "heat/source.rs"]
+mod source;
+
 use super::*;
 use fs_couple::solid_enthalpy::finite_plastic::porous::cavity::heat::{
     CavityHeatError, CavityHeatObserverError, CavityHeatSolve, CavityWallHeatLink,

@@ -139,6 +139,17 @@ impl<'c, 'm> PreparedContact<'c, 'm> {
         source: &StructuralSource<'m>,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Option<Arc<ResolvedConductionLayer<'m>>>, SolidGasError> {
+        self.prepare_solid_profile_at(source.curve, source.point, checkpoint)
+    }
+
+    // The retained chart borrows only its original caloric curve. A moving
+    // owner may own its query context without retaining a self-reference.
+    pub(crate) fn prepare_solid_profile_at(
+        &self,
+        caloric: &'m EquilibriumEnthalpyPhaseCurve,
+        point: ThermalMaterialPoint<'_>,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<Arc<ResolvedConductionLayer<'m>>>, SolidGasError> {
         let Some(film) = self.contact.convection else { return Ok(None) };
         let SolidGasConductivityProfile::IntegratedPurePhase { phase, temperature_range_k } =
             film.solid_profile else { return Ok(None) };
@@ -150,7 +161,7 @@ impl<'c, 'm> PreparedContact<'c, 'm> {
             return Err(SolidGasError::Invalid("integrated solid profile has an incompatible conductivity pin"));
         }
         let layer = ResolvedConductionLayer::new(
-            source.curve, source.point, &self.contact.conductivity,
+            caloric, point, &self.contact.conductivity,
             ClaimSelection::Pinned(pins[0].1), phase, temperature_range_k, checkpoint,
         )?;
         Ok(Some(Arc::new(layer)))

@@ -11,16 +11,19 @@
 //! by their native solvers. Every nonlinear probe starts from the same accepted
 //! gas, wall, thermal clock and independently cloned observer history.
 //!
-//! Supplied total conductances [W/K] are explicit fixed links. They do not infer
-//! conductivity, exposed area, moving geometry, convection or pore-fluid flow.
+//! Supplied total conductances [W/K] are explicit fixed links. Optional source
+//! contacts reuse original material conduction/convection at held patch geometry.
+//! Neither path infers moving area or pore-fluid flow.
 //! Native solid transport and all original observer hooks remain active.
 //! Original ideal or homogeneous Peng--Robinson parcels supply rigid heating,
 //! direct caloric work, phase-domain admission and true acoustic stiffness.
 
 mod gas;
 mod observer;
+pub mod source;
 
 pub use gas::ThermalCavityGas;
+pub use source::{CavityWallSourceContact, CavityWallSourceReceipt};
 
 use super::{
     FiniteThermalPorousCavitiesEnergy, FiniteThermalPorousCavityEquilibrium,
@@ -92,6 +95,7 @@ pub struct CavityHeatSolve {
 pub enum CavityHeatObserverError<E> {
     Invalid(&'static str),
     Thermal(DepositionError),
+    Source(crate::solid_enthalpy::gas::SolidGasError),
     Observer(E),
 }
 impl<E> From<DepositionError> for CavityHeatObserverError<E> {
@@ -105,6 +109,7 @@ pub enum CavityHeatError<E = Infallible> {
     Binding(FiniteThermoplasticError),
     Geometry(HyperTetError),
     Gas(GasEnergyError),
+    Source(crate::solid_enthalpy::gas::SolidGasError),
     Feedback(FiniteThermoplasticError<CavityHeatObserverError<E>>),
     Newton(NewtonError),
     Interrupted(SolverRunProgress),
@@ -168,6 +173,8 @@ pub struct CavityHeatBalance<G = ClosedGasParcel> {
     >,
     pub gases: Vec<CavityGasHeatBalance>,
     pub links: Vec<CavityWallHeatReceipt>,
+    /// Source-owned patches on the same accepted native thermal substeps.
+    pub source_contacts: Vec<CavityWallSourceReceipt>,
     pub total_gas_energy_change_j: f64,
     /// ACTUAL integrated source added to the native wall cells [J].
     pub gas_to_solid_heat_j: f64,
@@ -186,6 +193,7 @@ pub struct ThermalPorousGasSystem<'a, G = ClosedGasParcel> {
     solid: FiniteThermalPorousSolid<'a>,
     cavities: Vec<ThermalPorousGasCavity<G>>,
     links: Vec<CavityWallHeatLink>,
+    source_contacts: Option<Arc<source::PreparedContacts<'a, G>>>,
 }
 
 /// Commit thermal, solid, gas and original observer histories together.
@@ -271,7 +279,7 @@ impl<'a, G: ThermalCavityGas> ThermalPorousGasSystem<'a, G> {
             }
         }
         poll(cx)?;
-        Ok(Self { solid, cavities, links })
+        Ok(Self { solid, cavities, links, source_contacts: None })
     }
 
     pub fn solid(&self) -> &FiniteThermalPorousSolid<'a> { &self.solid }
@@ -373,7 +381,12 @@ impl<'a, G: ThermalCavityGas> ThermalPorousGasSystem<'a, G> {
                     controls: entry.entropy,
                 }
             }).collect();
-            let wall = WallObserver::new(&self.links, &temperatures, observer.clone());
+            let source = self.source_contacts.as_ref()
+                .map(|prepared| prepared.flux(&epochs,
+                    &mut || cx.checkpoint().map_err(|_| DepositionError::Cancelled),
+                )).transpose()
+                .map_err(CavityHeatError::Source)?;
+            let wall = WallObserver::new(&self.links, &temperatures, source, observer.clone());
             let next = self.solid.advance_with_cavities_and_coupling(
                 thermal, &wall, target_s, prescribed_m, nodal_forces_n, body_force_n_m3,
                 &sources, pressure, settings, mechanical_controls, thermal_config,
@@ -411,6 +424,7 @@ impl<'a, G: ThermalCavityGas> ThermalPorousGasSystem<'a, G> {
                 + total_rigid + wall.applied_heat_j - total_external).to_f64())?;
             let balance = CavityHeatBalance {
                 native, gases: balances, links: wall.receipts()?,
+                source_contacts: wall.source_receipts()?,
                 total_gas_energy_change_j: number(total_gas.to_f64())?,
                 gas_to_solid_heat_j: film, external_solid_heat_j: external_solid,
                 interface_heat_defect_j: number(wall.interface_defect_j.to_f64())?,
@@ -453,7 +467,10 @@ impl<'a, G: ThermalCavityGas> ThermalPorousGasSystem<'a, G> {
         poll(cx)?;
         Ok(CavityHeatCandidate {
             thermal: trial.thermal,
-            system: Self { solid: trial.solid, cavities, links: self.links.clone() },
+            system: Self {
+                solid: trial.solid, cavities, links: self.links.clone(),
+                source_contacts: self.source_contacts.clone(),
+            },
             observer: trial.observer, balance: trial.balance,
             nonlinear: result.report, trials: trials.get(),
         })

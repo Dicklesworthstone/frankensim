@@ -5328,3 +5328,45 @@ cancellation and deterministic-replay boundaries. These tests are authored but
 not claimed executed while the full `fs-couple` dependency closure is unavailable.
 Formatting and the bounded native-API/physics review are separate from numerical
 execution; no complete workspace or experimental-validation claim is made.
+
+### Original conductivity and convection on retained porous gas walls
+
+`ThermalPorousGasSystem<ClosedGasParcel>::with_source_contacts` adds original
+`SolidGasContact` patches to the existing finite-gas, porous-compaction and
+thermal-feedback owner. It reuses `PreparedContact` for two-layer conduction,
+source k(T), forced/natural convection, and the actual solid-surface heat
+balance. Original correlation domains and evidence remain authoritative.
+
+The original material card, exact caloric curve and complete fixed query
+context come from each retained mechanical family. Conductivity is selected
+at its original stress-free reference and remains pinned. Integrated pure-phase
+conductivity profiles are prepared once and shared across thermal probes and
+accepted compression epochs. Each heated gas endpoint supplies one original
+isobaric property law; native thermal substeps resolve the actual cell state.
+No gas conductivity, heat capacity, density, pressure or material source is
+replaced with a constant surrogate.
+
+Source patches and fixed W/K links share one 16,384-entry cap and unique ID
+space. Patch areas must fit the original exposed cell area, and source-contact
+cells cannot also apply native ambient convection. Explicitly declared area,
+layer distances and correlation geometry remain held reference-network data;
+this does not infer a moving boundary layer or deformed Fourier operator.
+The initial source-contact entry admits ideal parcels because that is the
+original film-property owner's supported gas law. Existing Peng--Robinson
+fixed-link heat and native dense-fluid pressure/caloric behavior remain intact.
+
+All transfers enter the same compensated per-gas, per-cell and complete energy
+accounts as fixed links. Source convection contributes its actual transferred
+power divided by the gas/cell contrast to the native explicit decay budget;
+its series diagnostic is not silently used as a nonlinear tangent. Reports
+retain actual source queries, surface temperatures, source profiles and signed
+heat integrals. Late source-domain failures, native solve refusal and
+cancellation publish no gas, thermal, mechanical or observer history.
+
+Four focused regression definitions compare an independent finite-capacity
+series-conduction balance, integrated affine k(T) and the original sphere
+Nu=2 limit across two heated compaction epochs, retained profile identity,
+late conductivity-domain rollback/retry, and patch coverage/identity admission.
+They retain the existing first-order heat-before-motion and thermal-substep
+accuracy boundaries; energy closure is not a time-accuracy or calibration
+claim. Validation status is reported with the implementation commit.

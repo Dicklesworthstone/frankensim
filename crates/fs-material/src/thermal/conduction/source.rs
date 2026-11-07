@@ -48,7 +48,7 @@ impl<'a> ResolvedConductionLayer<'a> {
     /// and every 256 copied knots. Preparation never changes thermal history.
     #[allow(clippy::too_many_arguments)]
     pub fn new(caloric: &'a EquilibriumEnthalpyPhaseCurve,
-        point: ThermalMaterialPoint<'a>, key: &PropertyKey, selection: ClaimSelection,
+        point: ThermalMaterialPoint<'_>, key: &PropertyKey, selection: ClaimSelection,
         phase: SolidLiquidPhase, temperature_range_k: [f64; 2],
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>) -> Result<Self, LayerSourceError> {
         checkpoint()?;

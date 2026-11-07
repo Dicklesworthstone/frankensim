@@ -1,8 +1,9 @@
 //! Explicit gas-wall links on the original observer/thermal timeline.
 use super::{
     CavityHeatError, CavityHeatObserverError, CavityWallHeatLink,
-    CavityWallHeatReceipt, number,
+    CavityWallHeatReceipt, CavityWallSourceReceipt, ThermalCavityGas, number,
 };
+use super::source::{SourceFlux, SourceSample, observer_error};
 use fs_math::dd::Dd;
 use fs_thermal::enthalpy::{
     CellId, DepositionError, DepositionObserver, DepositionSimulation, Event, HeatTransfer,
@@ -31,11 +32,14 @@ struct LinkSample {
 }
 
 #[derive(Clone)]
-pub(super) struct WallObserver<'s, O> {
+pub(super) struct WallObserver<'s, 'm, O, G> {
     links: &'s [CavityWallHeatLink],
     gas_temperatures: &'s [f64],
+    source: Option<SourceFlux<'s, 'm, G>>,
     pub(super) inner: O,
     samples: Vec<LinkSample>,
+    source_samples: Vec<SourceSample>,
+    source_heat_j: Vec<Dd>,
     applied_w: BTreeMap<CellId, f64>,
     conductances_w_k: BTreeMap<CellId, f64>,
     representation_defect_w: Dd,
@@ -44,12 +48,15 @@ pub(super) struct WallObserver<'s, O> {
     pub(super) interface_defect_j: Dd,
 }
 
-impl<'s, O> WallObserver<'s, O> {
+impl<'s, 'm, O, G> WallObserver<'s, 'm, O, G> {
     pub(super) fn new(
-        links: &'s [CavityWallHeatLink], gas_temperatures: &'s [f64], inner: O,
+        links: &'s [CavityWallHeatLink], gas_temperatures: &'s [f64],
+        source: Option<SourceFlux<'s, 'm, G>>, inner: O,
     ) -> Self {
+        let source_heat_j = vec![Dd::ZERO; source.as_ref().map_or(0, SourceFlux::len)];
         Self {
             links, gas_temperatures, inner,
+            source, source_samples: Vec::new(), source_heat_j,
             samples: links.iter().map(|_| LinkSample {
                 heat_j: Dd::ZERO, temperature_k: 0.0, power_w: 0.0,
             }).collect(),
@@ -70,9 +77,17 @@ impl<'s, O> WallObserver<'s, O> {
             })
         }).collect()
     }
+
+    pub(super) fn source_receipts<E>(&self) -> Result<Vec<CavityWallSourceReceipt>, CavityHeatError<E>> {
+        self.source_samples.iter().zip(&self.source_heat_j).map(|(sample, heat)| {
+            let mut receipt = sample.receipt.clone();
+            receipt.heat_into_solid_j = number(heat.to_f64())?;
+            Ok(receipt)
+        }).collect()
+    }
 }
 
-impl<O: DepositionObserver> DepositionObserver for WallObserver<'_, O> {
+impl<O: DepositionObserver, G: ThermalCavityGas> DepositionObserver for WallObserver<'_, '_, O, G> {
     type Error = CavityHeatObserverError<O::Error>;
 
     fn begin(&mut self) -> Result<(), Self::Error> {
@@ -82,6 +97,8 @@ impl<O: DepositionObserver> DepositionObserver for WallObserver<'_, O> {
             sample.power_w = 0.0;
         }
         self.applied_w.clear();
+        self.source_samples.clear();
+        self.source_heat_j.fill(Dd::ZERO);
         self.conductances_w_k.clear();
         self.gas_heat_j.fill(Dd::ZERO);
         self.applied_heat_j = Dd::ZERO;
@@ -112,6 +129,18 @@ impl<O: DepositionObserver> DepositionObserver for WallObserver<'_, O> {
             *decay = *decay + Dd::from_f64(link.conductance_w_k);
             sample.temperature_k = temperature;
             sample.power_w = power;
+        }
+        if let Some(source) = &self.source {
+            let samples = source.samples(thermal, &mut || checkpoint()).map_err(observer_error)?;
+            for sample in &samples {
+                checkpoint()?;
+                let row = &sample.receipt;
+                let total = powers.entry(row.cell).or_insert(Dd::ZERO);
+                *total = *total + Dd::from_f64(row.last_power_into_solid_w);
+                let decay = conductances.entry(row.cell).or_insert(Dd::ZERO);
+                *decay = *decay + Dd::from_f64(row.last_explicit_decay_conductance_w_k);
+            }
+            self.source_samples = samples;
         }
         let mut applied = BTreeMap::new();
         let mut defect = Dd::ZERO;
@@ -218,6 +247,15 @@ impl<O: DepositionObserver> DepositionObserver for WallObserver<'_, O> {
             self.gas_heat_j[link.cavity] = self.gas_heat_j[link.cavity] + heat;
             finite(sample.heat_j.to_f64())?;
             finite(self.gas_heat_j[link.cavity].to_f64())?;
+        }
+        for (sample, accumulated) in self.source_samples.iter().zip(&mut self.source_heat_j) {
+            checkpoint()?;
+            let row = &sample.receipt;
+            let heat = integral(row.last_power_into_solid_w, dt)?;
+            *accumulated = *accumulated + heat;
+            self.gas_heat_j[row.cavity] = self.gas_heat_j[row.cavity] + heat;
+            finite(accumulated.to_f64())?;
+            finite(self.gas_heat_j[row.cavity].to_f64())?;
         }
         self.interface_defect_j = self.interface_defect_j
             + self.representation_defect_w * Dd::from_f64(dt);
