@@ -2865,6 +2865,36 @@ slab solution, density/depth scaling, numerical/resource refusal and
 cancellation. Manufactured kernels establish these equations, not accuracy for
 an evaluated shielding material.
 
+### Composition-dependent photon opacity
+
+`PhotonMassMaterial::from_mass_fractions` prepares a homogeneous mixture from
+original constituent tables and explicit mass fractions. Total extinction,
+local heat and every outgoing photon-energy coefficient are combined by
+compensated mass-weighted summation. The result retains the target material ID,
+each original source table, authored fractions and an explicit
+`kernel_applicability` statement. Fractions must sum to one within the original
+16-epsilon closure allowance; no fraction or energy coefficient is normalized.
+All sources must share the photon kind and exact energy grid. Storage/work
+admission precedes expansion, positive product underflow/overflow refuses, and
+bounded checkpoints retain cancellation. Repeated transport uses the prepared
+table without constituent loops. `macroscopic_cell` applies the actual mixture
+density, so existing shielding and nuclear heating adapters consume the result.
+
+NIST's [mass attenuation additivity](https://physics.nist.gov/PhysRefData/XrayMassCoef/chap2.html)
+does not establish additivity of
+[mass energy-absorption coefficients](https://physics.nist.gov/PhysRefData/XrayMassCoef/chap3.html).
+The caller must justify independent interactions, common within-group spectral
+weighting, and each supplied local-deposition/redistribution kernel IN the
+mixture. This constructor does not derive those kernels from attenuation,
+model secondary-electron transport, infer compound absorption-edge changes, or
+qualify measured data. Resolved stratified materials remain distinct slab cells.
+
+Focused G1/G3/G4 tests cover analytic mass-weighted multigroup coefficients,
+thin/thick oblique Beer–Lambert calorimetry, an independent infinite
+scattering/reabsorption series, partial-density and regrouping equivalence,
+retained source identity, numerical range, incompatible inputs, budgets and
+cancellation. Their sources are manufactured laws, not empirical validation.
+
 ## External collimated and diffuse photon absorption
 
 `radiation::transport::prepare_slab_response_with_sources` admits explicit

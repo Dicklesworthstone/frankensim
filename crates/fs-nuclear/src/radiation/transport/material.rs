@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use super::{PhotonCollision, PhotonSlabCell, PhotonSlabLimits, validate_coefficients};
 use crate::endf::decay::spectra::DecayRadiation;
-use crate::radiation::{RadiationError, nonnegative, product};
+use crate::radiation::{ROW_CLOSURE_TOLERANCE, RadiationError, Sum, finite, nonnegative, product};
 
 /// Source-bound temperature interpolation of the complete photon energy kernel.
 pub mod temperature;
@@ -34,6 +34,25 @@ pub struct PhotonMassCollision {
 #[derive(Clone, Debug)]
 pub struct PhotonMassMaterial(Arc<MaterialData>);
 
+/// One original constituent and its fraction of the mixture's total MASS.
+/// These are neither volume fractions nor normalized photon-interaction weights.
+#[derive(Clone, Debug)]
+pub struct PhotonMassConstituent {
+    pub mass_fraction: f64,
+    pub material: PhotonMassMaterial,
+}
+
+/// Retained physical assumptions and source tables of a homogeneous mixture.
+#[derive(Clone, Debug)]
+pub struct PhotonMassMixture {
+    /// Caller-supplied basis for independent photon interactions, compatible
+    /// group collapsing and the applicability of every constituent's complete
+    /// outgoing-photon/local-deposition kernel IN this target mixture.
+    pub kernel_applicability: String,
+    /// Original authored order, fractions and immutable source material tables.
+    pub constituents: Vec<PhotonMassConstituent>,
+}
+
 #[derive(Debug)]
 struct MaterialData {
     data_id: String,
@@ -41,6 +60,7 @@ struct MaterialData {
     radiation: DecayRadiation,
     edges_j: Vec<f64>,
     groups: Vec<PhotonMassCollision>,
+    mixture: Option<PhotonMassMixture>,
 }
 
 impl PhotonMassMaterial {
@@ -105,7 +125,134 @@ impl PhotonMassMaterial {
             radiation,
             edges_j: group_edges_j,
             groups,
+            mixture: None,
         })))
+    }
+
+    /// Prepare the complete mass kernel of an explicitly homogeneous mixture.
+    ///
+    /// Each coefficient is `sum_i(w_i * coefficient_i)`, using compensated
+    /// summation; positive product underflow refuses. Fractions must close one
+    /// within [`ROW_CLOSURE_TOLERANCE`]; neither composition nor kernels are normalized.
+    /// All constituents, including zero-weight sources, must have the same
+    /// photon kind and exact energy grid. The result uses the target material
+    /// identity; its later density must be the actual MIXTURE density.
+    ///
+    /// Mass attenuation additivity follows NIST section 2, equation (6):
+    /// <https://physics.nist.gov/PhysRefData/XrayMassCoef/chap2.html>.
+    /// This does NOT establish additivity of mass energy-absorption coefficients
+    /// (NIST section 3). `kernel_applicability` must justify each supplied
+    /// constituent heat/redistribution kernel in the target mixture, including
+    /// secondary-particle deposition and common within-group spectral weighting.
+    /// Matching grids alone cannot establish those physical assumptions. No
+    /// chemical absorption-edge structure or electron stopping law is inferred.
+    /// Resolved layers must use slab geometry instead of this homogenization.
+    ///
+    /// Preparation bounds cover immediate source kernels, result, fractions and
+    /// coefficient visits before allocation. Original source objects are shared;
+    /// repeated transport/heating uses the prepared table without mixture work.
+    pub fn from_mass_fractions(
+        data_id: String,
+        material_id: u64,
+        constituents: Vec<PhotonMassConstituent>,
+        kernel_applicability: String,
+        limits: PhotonSlabLimits,
+        mut checkpoint: impl FnMut() -> Result<(), RadiationError>,
+    ) -> Result<Self, RadiationError> {
+        checkpoint()?;
+        if data_id.trim().is_empty()
+            || kernel_applicability.trim().is_empty()
+            || constituents.is_empty()
+        {
+            return Err(RadiationError::InvalidInput(
+                "identified photon mixture, constituent mass fractions and kernel applicability required",
+            ));
+        }
+        let first = &constituents[0].material;
+        let count = first.groups().len();
+        let values = count
+            .checked_add(2)
+            .and_then(|width| count.checked_mul(width))
+            .and_then(|rows| rows.checked_add(first.group_edges_j().len()))
+            .and_then(|kernel| {
+                constituents
+                    .len()
+                    .checked_add(1)
+                    .and_then(|tables| kernel.checked_mul(tables))
+            })
+            .and_then(|tables| tables.checked_add(constituents.len()))
+            .and_then(|tables| tables.checked_add(2))
+            .ok_or(RadiationError::Budget("photon mixture storage/work"))?;
+        if count > limits.max_groups || values > limits.max_values || values > limits.max_work {
+            return Err(RadiationError::Budget("photon mixture storage/work"));
+        }
+        let mut fractions = Sum::default();
+        for constituent in &constituents {
+            checkpoint()?;
+            if !nonnegative(constituent.mass_fraction)
+                || constituent.mass_fraction > 1.0
+                || constituent.material.radiation() != first.radiation()
+                || constituent.material.group_edges_j() != first.group_edges_j()
+            {
+                return Err(RadiationError::InvalidInput(
+                    "photon mixture needs fractions in [0,1] and one photon kind/group grid",
+                ));
+            }
+            fractions.add(constituent.mass_fraction)?;
+        }
+        fractions.add(-1.0)?;
+        if fractions.hi.abs() + fractions.lo.abs() > ROW_CLOSURE_TOLERANCE {
+            return Err(RadiationError::InvalidInput(
+                "photon constituent mass fractions must close one without normalization",
+            ));
+        }
+        let mut groups = Vec::with_capacity(count);
+        for incident in 0..count {
+            checkpoint()?;
+            let total_m2_kg = weighted_coefficient(
+                &constituents,
+                incident,
+                |row| row.total_m2_kg,
+                &mut checkpoint,
+            )?;
+            let heat_m2_kg = weighted_coefficient(
+                &constituents,
+                incident,
+                |row| row.heat_m2_kg,
+                &mut checkpoint,
+            )?;
+            let mut redistribution_m2_kg = Vec::with_capacity(count);
+            for outgoing in 0..count {
+                redistribution_m2_kg.push(weighted_coefficient(
+                    &constituents,
+                    incident,
+                    |row| row.redistribution_m2_kg[outgoing],
+                    &mut checkpoint,
+                )?);
+            }
+            groups.push(PhotonMassCollision {
+                total_m2_kg,
+                heat_m2_kg,
+                redistribution_m2_kg,
+            });
+        }
+        // Reuse the original table's energy closure and downscatter admission.
+        let mut result = Self::new(
+            data_id,
+            material_id,
+            first.radiation(),
+            first.group_edges_j().to_vec(),
+            groups,
+            limits,
+            &mut checkpoint,
+        )?;
+        Arc::get_mut(&mut result.0)
+            .expect("newly admitted unshared photon mixture")
+            .mixture = Some(PhotonMassMixture {
+            kernel_applicability,
+            constituents,
+        });
+        Ok(result)
     }
 
     pub fn data_id(&self) -> &str {
@@ -127,6 +274,12 @@ impl PhotonMassMaterial {
 
     pub fn groups(&self) -> &[PhotonMassCollision] {
         &self.0.groups
+    }
+
+    /// Original composition and its physical applicability, when prepared by
+    /// [`Self::from_mass_fractions`]. Directly supplied tables have no mixture.
+    pub fn mixture(&self) -> Option<&PhotonMassMixture> {
+        self.0.mixture.as_ref()
     }
 
     /// Scale by the explicitly supplied original reference density [kg/m³].
@@ -172,6 +325,23 @@ impl PhotonMassMaterial {
             groups,
         })
     }
+}
+
+fn weighted_coefficient(
+    constituents: &[PhotonMassConstituent],
+    incident: usize,
+    select: impl Fn(&PhotonMassCollision) -> f64,
+    checkpoint: &mut impl FnMut() -> Result<(), RadiationError>,
+) -> Result<f64, RadiationError> {
+    let mut sum = Sum::default();
+    for (index, constituent) in constituents.iter().enumerate() {
+        if index % 64 == 0 {
+            checkpoint()?;
+        }
+        let value = select(&constituent.material.groups()[incident]);
+        sum.add(product(constituent.mass_fraction, value)?.0)?;
+    }
+    finite(sum.hi + sum.lo)
 }
 
 #[cfg(test)]
