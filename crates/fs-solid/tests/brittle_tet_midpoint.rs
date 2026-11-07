@@ -75,7 +75,7 @@ fn controls() -> BrittleTetMidpointControls {
         difference_step_strain: Some(1e-7),
     }
 }
-fn source(geometry: &TetLoadGeometry3<'_>) -> ResolvedBrittleCrackBand {
+fn material_card() -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, dims, value) in [
         (YOUNG_MODULUS_PROPERTY, Pressure::DIMS, YOUNG),
@@ -111,7 +111,7 @@ fn source(geometry: &TetLoadGeometry3<'_>) -> ResolvedBrittleCrackBand {
             })
             .unwrap();
     }
-    let card = MaterialCard::assemble(
+    MaterialCard::assemble(
         MaterialStateId {
             chemistry: "manufactured brittle solid".into(),
             phase: "solid".into(),
@@ -121,7 +121,11 @@ fn source(geometry: &TetLoadGeometry3<'_>) -> ResolvedBrittleCrackBand {
         claims,
         vec![],
     )
-    .unwrap();
+    .unwrap()
+}
+
+fn source(geometry: &TetLoadGeometry3<'_>) -> ResolvedBrittleCrackBand {
+    let card = material_card();
     let band = TetCrackBandGeometry::from_element(geometry, 0, [1., 0., 0.]).unwrap();
     resolve_brittle_dynamic_material(
         &card,
@@ -431,3 +435,6 @@ fn cancellation_and_failed_newton_candidates_leave_motion_and_step_budget_retrya
 
 #[path = "brittle_tet_midpoint/time.rs"]
 mod time;
+
+#[path = "brittle_tet_midpoint/rate.rs"]
+mod rate;

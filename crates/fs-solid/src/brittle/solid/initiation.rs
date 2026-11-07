@@ -154,6 +154,14 @@ impl<'a> TensileElasticTetSolid<'a> {
                 "nonempty original geometry must fit the native assembly budget",
             ));
         }
+        for source in materials {
+            checkpoint(cx)?;
+            if source.law().viscosity().is_some() {
+                return Err(TensileTetInitiationError::Invalid(
+                    "elastic-only tensile prehistory cannot omit physical bond viscosity",
+                ));
+            }
+        }
         let solution = SmallStrainTetSolution {
             displacement_m: vec![[0.0; 3]; geometry.nodes_m().len()],
             element_strain: vec![[0.0; 6]; materials.len()],

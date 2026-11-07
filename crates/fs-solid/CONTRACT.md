@@ -1,5 +1,27 @@
 # fs-solid CONTRACT
 
+## Physical fracture viscosity in native tetrahedral dynamics
+
+`BrittleTetMotion` endpoint and midpoint advances use the original duration-bound
+crack-band/cohesive law when explicit fracture-plane viscosity is selected.
+Total material work includes the exact surviving-bond viscous integral, while
+`viscous_dissipation_j`, intrinsic fracture history, contact loss and numerical
+kinetic/endpoint defects remain separate. Adaptive, sustained-contact and
+coefficient-temperature work accounts carry the same physical viscous loss.
+
+The native P1 operator projects accepted nodal velocity to instantaneous stress
+after initialization, centered steps and contact impulses. A secant-rate path
+traction is not published as a midpoint endpoint-velocity observation. Source,
+rate, energy, budget and cancellation refusals publish no partial motion.
+Complete failure removes bond viscosity and retains native compression and
+topology/momentum transfer. Elastic-only tensile predecessors and the untimed
+thermal-eigenstrain owner cannot silently omit selected viscosity.
+
+Coefficients remain explicit Pa s/m inputs without inferred bulk calibration
+or arbitrary-width objectivity. Focused native regressions use independent
+normal/shear oscillator and surviving-bond work oracles, checking actual
+endpoint stresses, distinct losses, rupture, reclosure and refusal atomicity.
+
 ## Regional source temperatures in retained finite-strain membrane motion
 
 `OwnedFiniteViscoMembraneMotion::with_temperatures` evaluates one original

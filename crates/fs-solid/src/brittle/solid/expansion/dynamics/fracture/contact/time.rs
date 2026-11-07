@@ -128,6 +128,8 @@ impl<'a> ReleasedFaceTimeMotion for ThermalBrittleTetMotion<'a> {
             eigenstrain_work_j: energy.eigenstrain_work_j,
             // Native total fracture already includes parameter-induced loss.
             fracture_dissipation_j: energy.fracture_dissipation_j,
+            // The thermal-eigenstrain source owner refuses bond viscosity.
+            viscous_dissipation_j: 0.0,
             dead_load_mean_work_j: energy.dead_load_mean_work_j,
             support_mean_work_j: energy.support_mean_work_j,
             kinetic_change_j: energy.inertia.kinetic_change_j,

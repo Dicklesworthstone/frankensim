@@ -96,6 +96,8 @@ pub struct BrittleFaceTimeEnergy {
     /// Minus mean stress contracted with the thermal free-strain change.
     pub eigenstrain_work_j: f64,
     pub fracture_dissipation_j: f64,
+    /// Surviving-bond physical loss, kept separate from fracture and contact.
+    pub viscous_dissipation_j: f64,
     /// Mechanical loss from the contact owner; no thermal allocation is inferred.
     pub contact_dissipation_j: f64,
     /// Bounded numerical work at sustained normal constraints, never a loss
@@ -113,7 +115,7 @@ pub struct BrittleFaceTimeEnergy {
     pub mean_work_error_j: f64,
     pub absolute_mean_work_error_j: f64,
     /// External plus parameter/eigenstrain work minus elastic/kinetic changes
-    /// and the separate fracture/contact losses.
+    /// and the separate fracture/viscous/contact losses.
     pub total_balance_error_j: f64,
     /// Prevents opposite local numerical defects from hiding in the total.
     pub absolute_local_balance_error_j: f64,
@@ -330,6 +332,7 @@ impl<'a> ReleasedFaceTimeMotion for BrittleTetMotion<'a> {
             parameter_work_j: 0.0,
             eigenstrain_work_j: 0.0,
             fracture_dissipation_j: energy.fracture_dissipation_j,
+            viscous_dissipation_j: energy.viscous_dissipation_j,
             dead_load_mean_work_j: energy.dead_load_mean_work_j,
             support_mean_work_j: energy.support_mean_work_j,
             kinetic_change_j: energy.inertia.kinetic_change_j,
@@ -448,6 +451,7 @@ pub(crate) struct FaceTimeWork {
     pub parameter_work_j: f64,
     pub eigenstrain_work_j: f64,
     pub fracture_dissipation_j: f64,
+    pub viscous_dissipation_j: f64,
     pub dead_load_mean_work_j: f64,
     pub support_mean_work_j: f64,
     pub kinetic_change_j: f64,
@@ -877,7 +881,7 @@ fn run_time<M: ReleasedFaceTimeMotion, P: ReleasedFaceTimePolicy<M>>(
     } else {
         0
     })?;
-    let mut sums = [Sum::default(); 12];
+    let mut sums = [Sum::default(); 13];
     let mut normal_work = Sum::default();
     let mut absolute_normal_work = Sum::default();
     let mut tangential_work = Sum::default();
@@ -1043,6 +1047,7 @@ fn run_time<M: ReleasedFaceTimeMotion, P: ReleasedFaceTimePolicy<M>>(
                     work.mean_internal_work_j,
                     work.parameter_work_j,
                     work.eigenstrain_work_j,
+                    work.viscous_dissipation_j,
                 ],
             )?;
             push(
@@ -1109,6 +1114,7 @@ fn run_time<M: ReleasedFaceTimeMotion, P: ReleasedFaceTimePolicy<M>>(
                     0.0,
                     0.0,
                     0.0,
+                    0.0,
                 ],
             )?;
             push(&mut impacts, hit)?;
@@ -1130,6 +1136,7 @@ fn run_time<M: ReleasedFaceTimeMotion, P: ReleasedFaceTimePolicy<M>>(
         internal,
         parameter,
         eigenstrain,
+        viscous,
     ] = sums.map(Sum::value);
     let final_inventory = motion.time_inventory();
     let storage_change = final_inventory.stored_energy_j - initial_inventory.stored_energy_j;
@@ -1143,6 +1150,7 @@ fn run_time<M: ReleasedFaceTimeMotion, P: ReleasedFaceTimePolicy<M>>(
         parameter_work_j: parameter,
         eigenstrain_work_j: eigenstrain,
         fracture_dissipation_j: fracture,
+        viscous_dissipation_j: viscous,
         contact_dissipation_j: contact,
         normal_contact_work_j: normal_work.value(),
         absolute_normal_contact_work_j: absolute_normal_work.value(),
@@ -1151,14 +1159,16 @@ fn run_time<M: ReleasedFaceTimeMotion, P: ReleasedFaceTimePolicy<M>>(
         dead_load_mean_work_j: dead,
         support_mean_work_j: support,
         support_impulse_work_j: impulse_support,
-        material_balance_error_j: (((material + parameter) + eigenstrain) - storage_change)
-            - fracture,
+        material_balance_error_j: ((((material + parameter) + eigenstrain) - storage_change)
+            - fracture)
+            - viscous,
         mean_work_error_j: internal - material,
         absolute_mean_work_error_j: absolute_mean,
-        total_balance_error_j: (((((((dead + support) + impulse_support) + parameter)
+        total_balance_error_j: ((((((((dead + support) + impulse_support) + parameter)
             + eigenstrain)
             - storage_change)
             - fracture)
+            - viscous)
             - contact)
             - kinetic,
         absolute_local_balance_error_j: absolute_balance,
@@ -1299,7 +1309,7 @@ fn push<T>(values: &mut Vec<T>, value: T) -> Result<(), BrittleFaceTimeError> {
     values.push(value);
     Ok(())
 }
-fn accumulate(sums: &mut [Sum; 12], values: [f64; 12]) -> Result<(), BrittleFaceTimeError> {
+fn accumulate(sums: &mut [Sum; 13], values: [f64; 13]) -> Result<(), BrittleFaceTimeError> {
     for (sum, value) in sums.iter_mut().zip(values) {
         sum.add(value);
         if !value.is_finite() || !sum.value().is_finite() {

@@ -300,6 +300,7 @@ impl<'a> TensileElasticTetMotion<'a> {
             stored_after_j,
             material_work_j,
             fracture_dissipation_j: 0.0,
+            viscous_dissipation_j: 0.0,
             material_balance_error_j: material_work_j - storage_change,
             mean_internal_work_j,
             mean_work_error_j: mean_internal_work_j - material_work_j,

@@ -213,6 +213,7 @@ pub(crate) struct SustainedWork {
     pub inertial_work_j: f64,
     pub storage_change_j: f64,
     pub fracture_dissipation_j: f64,
+    pub viscous_dissipation_j: f64,
     pub kinetic_change_j: f64,
     pub parameter_work_j: f64,
     pub eigenstrain_work_j: f64,
@@ -252,6 +253,7 @@ impl<'a> NativeFaceSustainedTrial for BrittleTetMidpointStep<'a> {
             inertial_work_j: energy.inertia.inertial_work_j,
             storage_change_j: energy.stored_after_j - energy.stored_before_j,
             fracture_dissipation_j: energy.fracture_dissipation_j,
+            viscous_dissipation_j: energy.viscous_dissipation_j,
             kinetic_change_j: energy.inertia.kinetic_change_j,
             parameter_work_j: 0.0,
             eigenstrain_work_j: 0.0,
@@ -458,9 +460,11 @@ pub(crate) fn admit_released_face_sustained_work<Step: NativeFaceSustainedTrial>
         (work.dead_load_mean_work_j - external_work.value()) - contact.contact_work_j;
     let external = external_work.value() + work.support_mean_work_j;
     let equilibrium_work_residual_j = (external - work.mean_internal_work_j) - work.inertial_work_j;
-    let total_balance_error_j = ((((external + work.parameter_work_j) + work.eigenstrain_work_j)
+    let total_balance_error_j = (((((external + work.parameter_work_j)
+        + work.eigenstrain_work_j)
         - work.storage_change_j)
         - work.fracture_dissipation_j)
+        - work.viscous_dissipation_j)
         - work.kinetic_change_j;
     let energy = Step::external_energy(
         native_energy,

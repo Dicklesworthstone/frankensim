@@ -231,12 +231,15 @@ impl<'a> BrittleTetSolid<'a> {
                     material_m: supplied,
                 });
             }
-            let virgin = law
-                .trial(&[0.0; 6], &law.initial_state())
+            let virgin = law.initial_state();
+            // Virgin preparation has no elapsed time or imposed strain rate.
+            // Timed laws observe the quiescent state without a fictitious step.
+            let stress = law
+                .stress_at_rate(&virgin, &[0.0; 6])
                 .map_err(|source| BrittleTetError::Material { element, source })?;
             bands.push(band);
-            states.push(virgin.state);
-            stresses.push(virgin.stress_pa);
+            states.push(virgin);
+            stresses.push(stress);
         }
         let solution = SmallStrainTetSolution {
             displacement_m: vec![[0.0; 3]; geometry.nodes_m().len()],

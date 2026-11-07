@@ -191,20 +191,26 @@ impl<'a> BrittleTetSolid<'a> {
                     next_source.law().settings().energy_tolerance_j_m3,
                 )
                 .map_err(|source| BrittleTetTemperatureError::Source { element, source })?;
-            let held = next_source
-                .law()
-                .trial(step.state.strain(), &step.state)
-                .map_err(|source| BrittleTetTemperatureError::Source {
-                    element,
-                    source: source.into(),
-                })?;
-            if held.state != step.state || held.energy.work != 0.0 || held.energy.dissipated != 0.0
-            {
-                return Err(BrittleTetError::Invalid(
-                    "transferred native state is not stationary at its held strain",
-                )
-                .into());
-            }
+            let stress = if next_source.law().viscosity().is_some() {
+                // Coefficient transfer itself has no jump motion. This private
+                // prepared state must still pass its subsequent timed solve;
+                // that owner recovers stress at the accepted physical velocity.
+                next_source.law().stress_at_rate(&step.state, &[0.0; 6])
+                    .map_err(|source| BrittleTetTemperatureError::Source {
+                        element, source: source.into(),
+                    })?
+            } else {
+                let held = next_source.law().trial(step.state.strain(), &step.state)
+                    .map_err(|source| BrittleTetTemperatureError::Source {
+                        element, source: source.into(),
+                    })?;
+                if held.state != step.state || held.energy.work != 0.0 || held.energy.dissipated != 0.0 {
+                    return Err(BrittleTetError::Invalid(
+                        "transferred native state is not stationary at its held strain",
+                    ).into());
+                }
+                held.stress_pa
+            };
             if !step.state.is_valid()
                 || step.state.strain() != old_state.strain()
                 || step.state.damage() < old_state.damage()
@@ -231,7 +237,7 @@ impl<'a> BrittleTetSolid<'a> {
                 defect_j_m3: step.defect_j_m3,
             });
             states.push(step.state);
-            stresses.push(held.stress_pa);
+            stresses.push(stress);
         }
         transfer.balance_error_j = (transfer.parameter_work_j
             - (transfer.stored_after_j - transfer.stored_before_j))

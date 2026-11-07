@@ -232,7 +232,7 @@ impl<'a> BrittleTetMotion<'a> {
         kinetic_after_j: f64,
         cx: &Cx<'_>,
     ) -> Result<Self, BrittleFaceFrictionError> {
-        let solid = BrittleTetSolid {
+        let mut solid = BrittleTetSolid {
             geometry: self.solid.geometry,
             materials: self.solid.materials,
             bands: Arc::clone(&self.solid.bands),
@@ -242,6 +242,7 @@ impl<'a> BrittleTetMotion<'a> {
             stored_energy_j: self.solid.stored_energy_j,
             fracture_dissipation_j: self.solid.fracture_dissipation_j,
         };
+        solid.refresh_rate_stresses(&velocity_mps, cx)?;
         checkpoint(cx)?;
         Ok(Self {
             solid,

@@ -129,10 +129,11 @@ impl<'a> BrittleTetMotion<'a> {
             mechanical.motion.solid().stored_energy_j() - prepared.transfer.stored_before_j;
         // The native increment preserves a small kinetic change on top of
         // large translational storage; do not subtract the absolute stores.
-        let total_balance_error_j = (((prepared.transfer.parameter_work_j
+        let total_balance_error_j = ((((prepared.transfer.parameter_work_j
             + mechanical.energy.external_mean_work_j())
             - storage_change)
             - fracture)
+            - mechanical.energy.viscous_dissipation_j)
             - mechanical.energy.inertia.kinetic_change_j;
         energy_gate(
             "combined temperature/midpoint work",

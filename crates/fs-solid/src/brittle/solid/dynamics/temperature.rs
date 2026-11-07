@@ -278,9 +278,10 @@ impl<'a> BrittleTetMotion<'a> {
         let storage_change = next.solid().stored_energy_j() - transfer.stored_before_j;
         // Keep native stable kinetic increments (summed for an adaptive path).
         // Large absolute kinetic stores can lose a small physical change.
-        let defect = (((((transfer.parameter_work_j + mechanical.external_endpoint_work_j())
+        let defect = ((((((transfer.parameter_work_j + mechanical.external_endpoint_work_j())
             - storage_change)
             - fracture)
+            - mechanical.viscous_dissipation_j)
             - mechanical.inertia.kinetic_change_j)
             - mechanical.inertia.numerical_loss_j)
             - mechanical.constitutive_endpoint_defect_j;

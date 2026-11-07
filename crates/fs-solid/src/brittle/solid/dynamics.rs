@@ -7,7 +7,7 @@
 //! damage. A supported static limit is not imposed on an inertial trajectory.
 //!
 //! External and support work are balanced against elastic storage, physical
-//! fracture loss, kinetic change, constitutive endpoint quadrature error and
+//! fracture loss, physical bond-viscous loss, kinetic change, endpoint quadrature error and
 //! backward-Euler numerical kinetic loss as SEPARATE accounts. Numerical
 //! damping is not fracture dissipation or heat. First-order time and fixed-plane
 //! small-strain limitations remain. The [`time`] path refines native timesteps
@@ -37,7 +37,9 @@ use fs_exec::Cx;
 use fs_material::brittle::BrittleEnergy;
 use fs_material::brittle::source::BrittleSourceError;
 
-use super::{BrittleTetControls, BrittleTetError, BrittleTetSolid, checkpoint, energy_gate};
+use super::{
+    BrittleTetControls, BrittleTetEnergy, BrittleTetError, BrittleTetSolid, checkpoint, energy_gate,
+};
 use crate::inertia::P1ReferenceMass;
 use crate::plastic3::dynamics::InertialEnergy;
 use crate::plastic3::{
@@ -67,6 +69,9 @@ pub struct BrittleTetDynamicEnergy {
     pub stored_after_j: f64,
     pub material_work_j: f64,
     pub fracture_dissipation_j: f64,
+    /// Physical surviving-bond loss, separate from intrinsic fracture energy
+    /// and backward-Euler numerical dissipation.
+    pub viscous_dissipation_j: f64,
     pub material_balance_error_j: f64,
     pub internal_endpoint_work_j: f64,
     pub dead_load_endpoint_work_j: f64,
@@ -76,7 +81,7 @@ pub struct BrittleTetDynamicEnergy {
     pub equilibrium_work_residual_j: f64,
     /// Internal endpoint work minus exact native constitutive path work.
     pub constitutive_endpoint_defect_j: f64,
-    /// External work minus elastic change, fracture, kinetic change and the
+    /// External work minus elastic change, fracture/viscous loss, kinetic change and the
     /// two separately reported numerical accounts.
     pub total_balance_error_j: f64,
 }
@@ -105,6 +110,8 @@ pub struct BrittleTetMotion<'a> {
 #[derive(Debug)]
 pub struct BrittleTetMotionStep<'a> {
     pub motion: BrittleTetMotion<'a>,
+    /// Original intrinsic work/storage/fracture per element, excluding physical
+    /// viscosity; the complete work and separate viscous loss are in `energy`.
     pub element_energy: Vec<BrittleEnergy>,
     pub energy: BrittleTetDynamicEnergy,
 }
@@ -146,7 +153,7 @@ impl<'a> BrittleTetMotion<'a> {
     /// this internal transfer preserves the original inertia and clock verbatim.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::brittle::solid) fn from_tensile_handoff(
-        solid: BrittleTetSolid<'a>,
+        mut solid: BrittleTetSolid<'a>,
         velocity_mps: Vec<[f64; 3]>,
         reference_density_kg_m3: Arc<[f64]>,
         mass: Arc<P1ReferenceMass>,
@@ -167,6 +174,7 @@ impl<'a> BrittleTetMotion<'a> {
                 "tensile handoff must preserve original motion and inventory dimensions",
             ));
         }
+        solid.refresh_rate_stresses(&velocity_mps, cx)?;
         Ok(Self {
             solid,
             velocity_mps,
@@ -251,7 +259,7 @@ impl<'a> BrittleTetMotion<'a> {
                 "initial consistent kinetic storage must be finite and nonnegative",
             ));
         }
-        let retained = BrittleTetSolid {
+        let mut retained = BrittleTetSolid {
             geometry: solid.geometry,
             materials: solid.materials,
             bands: Arc::clone(&solid.bands),
@@ -261,6 +269,7 @@ impl<'a> BrittleTetMotion<'a> {
             stored_energy_j: solid.stored_energy_j,
             fracture_dissipation_j: solid.fracture_dissipation_j,
         };
+        retained.refresh_rate_stresses(initial_velocity_mps, cx)?;
         checkpoint(cx)?;
         Ok(Self {
             solid: retained,
@@ -356,9 +365,14 @@ impl<'a> BrittleTetMotion<'a> {
             ));
         }
         let mut laws = Vec::with_capacity(self.solid.materials.len());
-        for material in self.solid.materials {
+        for (element, material) in self.solid.materials.iter().enumerate() {
             checkpoint(cx)?;
-            laws.push(material.small_strain_law());
+            laws.push(
+                material
+                    .law()
+                    .small_strain_law_over_time(dt_s)
+                    .map_err(|source| BrittleTetError::Material { element, source })?,
+            );
         }
         let problem = SmallStrainTetProblem {
             nodes_m: self.solid.geometry.nodes_m(),
@@ -378,8 +392,55 @@ impl<'a> BrittleTetMotion<'a> {
             dt_s,
             cx,
         )?;
-        let (material, element_energy, cumulative_loss) =
-            self.solid.material_energy(&step.solution, cx)?;
+        let mut material = BrittleTetEnergy {
+            stored_before_j: self.solid.stored_energy_j,
+            ..BrittleTetEnergy::default()
+        };
+        let mut element_energy = Vec::with_capacity(self.solid.materials.len());
+        let mut cumulative_loss = 0.0;
+        let mut viscous_loss = 0.0;
+        for (element, source) in self.solid.materials.iter().enumerate() {
+            checkpoint(cx)?;
+            let old = &self.solid.solution.element_states[element];
+            let strain = &step.solution.element_strain[element];
+            let timed = source
+                .law()
+                .trial_over_time(strain, old, dt_s)
+                .map_err(|source| BrittleTetError::Material { element, source })?;
+            let intrinsic = &timed.equilibrium;
+            if intrinsic.state != step.solution.element_states[element]
+                || timed.stress_pa != step.solution.element_stress[element]
+                || intrinsic.state.damage() < old.damage()
+                || intrinsic.state.dissipated_j_m3() < old.dissipated_j_m3()
+                || intrinsic.energy.dissipated < 0.0
+                || !timed.viscous_dissipated_j_m3.is_finite()
+                || timed.viscous_dissipated_j_m3 < 0.0
+            {
+                return Err(BrittleTetDynamicError::Invalid(
+                    "timed native history/stress, viscosity or irreversibility mismatch",
+                ));
+            }
+            let volume = self.solid.bands[element].reference_volume_m3();
+            material.stored_after_j = volume.mul_add(
+                intrinsic.state.stored_energy_j_m3(),
+                material.stored_after_j,
+            );
+            material.material_work_j =
+                volume.mul_add(timed.total_work_j_m3(), material.material_work_j);
+            material.fracture_dissipation_j =
+                volume.mul_add(intrinsic.energy.dissipated, material.fracture_dissipation_j);
+            cumulative_loss = volume.mul_add(intrinsic.state.dissipated_j_m3(), cumulative_loss);
+            viscous_loss = volume.mul_add(timed.viscous_dissipated_j_m3, viscous_loss);
+            let mut endpoint_density = 0.0;
+            for component in 0..6 {
+                let weight = if component < 3 { 1.0 } else { 2.0 };
+                let change = weight * (strain[component] - old.strain()[component]);
+                endpoint_density = timed.stress_pa[component].mul_add(change, endpoint_density);
+            }
+            material.internal_endpoint_work_j =
+                volume.mul_add(endpoint_density, material.internal_endpoint_work_j);
+            element_energy.push(intrinsic.energy);
+        }
         let new_u = step.solution.displacement_m.as_flattened();
         let mut dead_work = 0.0;
         for &(dof, force) in nodal_forces_n {
@@ -399,7 +460,8 @@ impl<'a> BrittleTetMotion<'a> {
         let constitutive_defect = material.internal_endpoint_work_j - material.material_work_j;
         let equilibrium_defect =
             (external - material.internal_endpoint_work_j) - step.energy.inertial_work_j;
-        let total_defect = ((((external - storage_change) - material.fracture_dissipation_j)
+        let total_defect = (((((external - storage_change) - material.fracture_dissipation_j)
+            - viscous_loss)
             - step.energy.kinetic_change_j)
             - step.energy.numerical_loss_j)
             - constitutive_defect;
@@ -409,8 +471,10 @@ impl<'a> BrittleTetMotion<'a> {
             stored_after_j: material.stored_after_j,
             material_work_j: material.material_work_j,
             fracture_dissipation_j: material.fracture_dissipation_j,
-            material_balance_error_j: (material.material_work_j - storage_change)
-                - material.fracture_dissipation_j,
+            viscous_dissipation_j: viscous_loss,
+            material_balance_error_j: ((material.material_work_j - storage_change)
+                - material.fracture_dissipation_j)
+                - viscous_loss,
             internal_endpoint_work_j: material.internal_endpoint_work_j,
             dead_load_endpoint_work_j: dead_work,
             support_endpoint_work_j: support_work,
@@ -467,6 +531,7 @@ impl<'a> BrittleTetMotion<'a> {
             material.stored_after_j,
             material.fracture_dissipation_j,
             cumulative_loss,
+            viscous_loss,
         ]
         .iter()
         .any(|v| !v.is_finite() || *v < 0.0)
@@ -477,7 +542,7 @@ impl<'a> BrittleTetMotion<'a> {
         }
         self.solid
             .require_released_faces(&step.solution.displacement_m, cx)?;
-        let solid = BrittleTetSolid {
+        let mut solid = BrittleTetSolid {
             geometry: self.solid.geometry,
             materials: self.solid.materials,
             bands: Arc::clone(&self.solid.bands),
@@ -487,6 +552,7 @@ impl<'a> BrittleTetMotion<'a> {
             stored_energy_j: material.stored_after_j,
             fracture_dissipation_j: cumulative_loss,
         };
+        solid.refresh_rate_stresses(&step.velocity_mps, cx)?;
         checkpoint(cx)?;
         Ok(BrittleTetMotionStep {
             motion: Self {
@@ -502,5 +568,81 @@ impl<'a> BrittleTetMotion<'a> {
             element_energy,
             energy,
         })
+    }
+}
+
+impl BrittleTetSolid<'_> {
+    /// Publish stresses at the actual accepted velocity, without advancing
+    /// damage. Used after centered steps, initialization and contact impulses;
+    /// a midpoint path's secant strain rate is generally not its endpoint rate.
+    /// The original P1 strain operator also owns this rate projection.
+    pub(in crate::brittle::solid) fn refresh_rate_stresses(
+        &mut self,
+        velocity_mps: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<(), BrittleTetError> {
+        checkpoint(cx)?;
+        // Fully failed bonds have no dashpots. Do not allocate or project an
+        // irrelevant velocity field after their complete disappearance.
+        if !self
+            .materials
+            .iter()
+            .zip(&self.solution.element_states)
+            .any(|(source, state)| source.law().viscosity().is_some() && !state.failed())
+        {
+            return Ok(());
+        }
+        if velocity_mps.len() != self.geometry.nodes_m().len()
+            || velocity_mps
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite())
+        {
+            return Err(BrittleTetError::Invalid(
+                "finite complete endpoint velocity required",
+            ));
+        }
+        // These borrowed laws supply geometry/type admission only. No untimed
+        // constitutive trial is evaluated by the native strain-field query.
+        let laws: Vec<_> = self
+            .materials
+            .iter()
+            .map(|source| source.small_strain_law())
+            .collect();
+        // Every velocity is known here: no free unknown is introduced into the
+        // caller's solver budget by this purely kinematic observation.
+        let prescribed: Vec<_> = velocity_mps
+            .as_flattened()
+            .iter()
+            .copied()
+            .enumerate()
+            .collect();
+        let problem = SmallStrainTetProblem {
+            nodes_m: self.geometry.nodes_m(),
+            tetrahedra: self.geometry.tetrahedra(),
+            laws: SmallStrainLawField::PerElement(&laws),
+            prescribed_m: &prescribed,
+            nodal_forces_n: &[],
+            load_path: &[1.0],
+            budget: self.budget,
+            settings: IncrementSettings::default(),
+        };
+        let strain_rates = problem.strain_field(velocity_mps.as_flattened(), cx)?;
+        let mut stresses = Vec::with_capacity(self.materials.len());
+        for (element, source) in self.materials.iter().enumerate() {
+            checkpoint(cx)?;
+            stresses.push(
+                source
+                    .law()
+                    .stress_at_rate(
+                        &self.solution.element_states[element],
+                        &strain_rates[element],
+                    )
+                    .map_err(|source| BrittleTetError::Material { element, source })?,
+            );
+        }
+        checkpoint(cx)?;
+        self.solution.element_stress = stresses;
+        Ok(())
     }
 }

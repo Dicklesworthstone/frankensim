@@ -3,11 +3,12 @@
 //! The force response is the material's analytic mean stress over the complete
 //! straight strain path, including rupture within a step. Native midpoint
 //! inertia supplies `v_next = 2*(u_next-u_old)/dt-v_old`. Their work is checked
-//! against the actual kinetic/storage changes and irreversible fracture loss,
+//! against kinetic/storage changes, irreversible fracture and physical bond-viscous loss,
 //! without an endpoint quadrature correction or numerical kinetic dissipation.
 //!
 //! Mean response stresses are distinct from the accepted physical endpoint
-//! stresses. Every endpoint is replayed through the original constitutive owner
+//! stresses, whose viscous part uses the actual accepted nodal velocity rather
+//! than the generally different interval secant rate. Every endpoint is replayed through the original constitutive owner
 //! before publication; the returned solid retains its real endpoint history.
 //! Nonsmooth paths may lack a classical derivative. An explicit solver control
 //! admits the existing bounded numerical derivative of the same mean response;
@@ -65,6 +66,9 @@ pub struct BrittleTetMidpointEnergy {
     pub stored_after_j: f64,
     pub material_work_j: f64,
     pub fracture_dissipation_j: f64,
+    /// Exact path integral of physical surviving-bond viscosity, excluding
+    /// intrinsic fracture work and numerical dissipation.
+    pub viscous_dissipation_j: f64,
     pub material_balance_error_j: f64,
     /// Volume integral of mean stress double-contracted with actual strain change.
     pub mean_internal_work_j: f64,
@@ -74,7 +78,7 @@ pub struct BrittleTetMidpointEnergy {
     /// Complete native mean reactions, including acceleration of constrained DOFs.
     pub support_mean_work_j: f64,
     pub equilibrium_work_residual_j: f64,
-    /// External work minus elastic change, fracture loss and kinetic change.
+    /// External work minus elastic change, fracture/viscous loss and kinetic change.
     pub total_balance_error_j: f64,
 }
 
@@ -89,7 +93,8 @@ impl BrittleTetMidpointEnergy {
 #[derive(Debug)]
 pub struct BrittleTetMidpointStep<'a> {
     pub motion: BrittleTetMotion<'a>,
-    /// Original per-element work, storage change and fracture loss in J/m³.
+    /// Original intrinsic work, storage change and fracture loss in J/m³;
+    /// total work and separate physical viscous loss are retained in `energy`.
     pub element_energy: Vec<BrittleEnergy>,
     /// Work-conjugate response used by Newton, distinct from endpoint stresses
     /// available through `motion.solid().solution().element_stress`.
@@ -182,9 +187,14 @@ impl<'a> BrittleTetMotion<'a> {
             ));
         }
         let mut laws = Vec::with_capacity(self.solid.materials.len());
-        for material in self.solid.materials {
+        for (element, material) in self.solid.materials.iter().enumerate() {
             checkpoint(cx)?;
-            laws.push(material.law().mean_small_strain_law());
+            laws.push(
+                material
+                    .law()
+                    .mean_small_strain_law_over_time(dt_s)
+                    .map_err(|source| BrittleTetError::Material { element, source })?,
+            );
         }
         let problem = SmallStrainTetProblem {
             nodes_m: self.solid.geometry.nodes_m(),
@@ -212,6 +222,7 @@ impl<'a> BrittleTetMotion<'a> {
         let mut stored_after = 0.0;
         let mut material_work = 0.0;
         let mut fracture_loss = 0.0;
+        let mut viscous_loss = 0.0;
         let mut cumulative_loss = 0.0;
         let mut mean_work = 0.0;
         for (element, material) in self.solid.materials.iter().enumerate() {
@@ -219,14 +230,16 @@ impl<'a> BrittleTetMotion<'a> {
             let old = &self.solid.solution.element_states[element];
             let path = material
                 .law()
-                .trial_with_mean_stress(&solution.element_strain[element], old)
+                .trial_over_time_with_mean_stress(&solution.element_strain[element], old, dt_s)
                 .map_err(|source| BrittleTetError::Material { element, source })?;
-            let endpoint = path.endpoint;
+            let endpoint = &path.endpoint.equilibrium;
             if path.mean_stress_pa != mean_element_stress_pa[element]
                 || endpoint.state != solution.element_states[element]
                 || endpoint.state.damage() < old.damage()
                 || endpoint.state.dissipated_j_m3() < old.dissipated_j_m3()
                 || endpoint.energy.dissipated < 0.0
+                || !path.endpoint.viscous_dissipated_j_m3.is_finite()
+                || path.endpoint.viscous_dissipated_j_m3 < 0.0
             {
                 return Err(BrittleTetDynamicError::Invalid(
                     "midpoint response, endpoint history or irreversibility mismatch",
@@ -234,8 +247,9 @@ impl<'a> BrittleTetMotion<'a> {
             }
             let volume = self.solid.bands[element].reference_volume_m3();
             stored_after = volume.mul_add(endpoint.state.stored_energy_j_m3(), stored_after);
-            material_work = volume.mul_add(endpoint.energy.work, material_work);
+            material_work = volume.mul_add(path.endpoint.total_work_j_m3(), material_work);
             fracture_loss = volume.mul_add(endpoint.energy.dissipated, fracture_loss);
+            viscous_loss = volume.mul_add(path.endpoint.viscous_dissipated_j_m3, viscous_loss);
             cumulative_loss = volume.mul_add(endpoint.state.dissipated_j_m3(), cumulative_loss);
             mean_work = volume.mul_add(path.path_work_j_m3, mean_work);
             solution.element_stress.push(endpoint.stress_pa);
@@ -260,13 +274,15 @@ impl<'a> BrittleTetMotion<'a> {
             stored_after_j: stored_after,
             material_work_j: material_work,
             fracture_dissipation_j: fracture_loss,
-            material_balance_error_j: (material_work - storage_change) - fracture_loss,
+            viscous_dissipation_j: viscous_loss,
+            material_balance_error_j: ((material_work - storage_change) - fracture_loss)
+                - viscous_loss,
             mean_internal_work_j: mean_work,
             mean_work_error_j: mean_work - material_work,
             dead_load_mean_work_j: dead_work,
             support_mean_work_j: support_work,
             equilibrium_work_residual_j: (external - mean_work) - step.energy.inertial_work_j,
-            total_balance_error_j: ((external - storage_change) - fracture_loss)
+            total_balance_error_j: (((external - storage_change) - fracture_loss) - viscous_loss)
                 - step.energy.kinetic_change_j,
         };
         for (account, defect, tolerance) in [
@@ -309,7 +325,7 @@ impl<'a> BrittleTetMotion<'a> {
             energy_gate(account, defect, tolerance)?;
         }
         if step.energy.numerical_loss_j != 0.0
-            || [stored_after, fracture_loss, cumulative_loss]
+            || [stored_after, fracture_loss, cumulative_loss, viscous_loss]
                 .iter()
                 .any(|value| !value.is_finite() || *value < 0.0)
         {
@@ -317,7 +333,7 @@ impl<'a> BrittleTetMotion<'a> {
                 "midpoint must retain physical nonnegative energy without numerical kinetic loss",
             ));
         }
-        let solid = BrittleTetSolid {
+        let mut solid = BrittleTetSolid {
             geometry: self.solid.geometry,
             materials: self.solid.materials,
             bands: Arc::clone(&self.solid.bands),
@@ -327,6 +343,7 @@ impl<'a> BrittleTetMotion<'a> {
             stored_energy_j: stored_after,
             fracture_dissipation_j: cumulative_loss,
         };
+        solid.refresh_rate_stresses(&step.velocity_mps, cx)?;
         checkpoint(cx)?;
         Ok(BrittleTetMidpointStep {
             motion: Self {

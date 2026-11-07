@@ -175,6 +175,7 @@ impl<'a> BrittleTetMotion<'a> {
             kinetic,
             numerical,
             inertial,
+            viscous,
         ] = result.values;
         let storage_change = motion.solid.stored_energy_j - self.solid.stored_energy_j;
         let inertia = InertialEnergy {
@@ -193,13 +194,15 @@ impl<'a> BrittleTetMotion<'a> {
             stored_after_j: motion.solid.stored_energy_j,
             material_work_j: material,
             fracture_dissipation_j: fracture,
-            material_balance_error_j: (material - storage_change) - fracture,
+            viscous_dissipation_j: viscous,
+            material_balance_error_j: ((material - storage_change) - fracture) - viscous,
             internal_endpoint_work_j: internal,
             dead_load_endpoint_work_j: dead,
             support_endpoint_work_j: support,
             equilibrium_work_residual_j: ((dead + support) - internal) - inertial,
             constitutive_endpoint_defect_j: constitutive,
-            total_balance_error_j: (((((dead + support) - storage_change) - fracture) - kinetic)
+            total_balance_error_j: ((((((dead + support) - storage_change) - fracture) - viscous)
+                - kinetic)
                 - numerical)
                 - constitutive,
         };
@@ -283,9 +286,10 @@ pub(super) trait Scheme {
         cx: &Cx<'_>,
     ) -> Result<TimeTrial<'a, Self::Energy>, BrittleTetDynamicError>;
     /// Material, fracture, internal, applied, support, signed work defect,
-    /// absolute work defect, kinetic change, numerical loss, inertial work.
+    /// absolute work defect, kinetic change, numerical loss, inertial work,
+    /// and surviving-bond physical viscous loss.
     /// The concrete public result retains endpoint-vs-mean semantics.
-    fn values(&self, energy: Self::Energy) -> [f64; 10];
+    fn values(&self, energy: Self::Energy) -> [f64; 11];
     fn work_growth(&self, work: Self::Work, part: f64, energy: [Self::Energy; 2]) -> f64;
     fn retryable(&self, error: &BrittleTetDynamicError) -> bool;
 }
@@ -295,7 +299,7 @@ pub(super) struct TimeTrajectory<'a, E> {
     pub(super) records: Vec<BrittleTetTimeRecord<E>>,
     pub(super) trials: usize,
     pub(super) rejected_intervals: usize,
-    pub(super) values: [f64; 10],
+    pub(super) values: [f64; 11],
     /// Tangent evaluations from completed native solves, including discarded
     /// coarse/rejected candidates.
     /// A failed native solve does not expose its partial tangent telemetry.
@@ -355,7 +359,7 @@ impl Scheme for BackwardEuler {
         })
     }
 
-    fn values(&self, e: Self::Energy) -> [f64; 10] {
+    fn values(&self, e: Self::Energy) -> [f64; 11] {
         [
             e.material_work_j,
             e.fracture_dissipation_j,
@@ -367,6 +371,7 @@ impl Scheme for BackwardEuler {
             e.inertia.kinetic_change_j,
             e.inertia.numerical_loss_j,
             e.inertia.inertial_work_j,
+            e.viscous_dissipation_j,
         ]
     }
 
@@ -426,7 +431,7 @@ pub(super) fn drive<'a, S: Scheme>(
     let duration = target_time - original.time_s;
     let mut current: Option<BrittleTetMotion<'a>> = None;
     let mut records = buffer(controls.maximum_intervals.min(64))?;
-    let mut sums = [Sum::default(); 10];
+    let mut sums = [Sum::default(); 11];
     let mut interval = controls.initial_interval_s;
     let mut trials = 0;
     let mut rejected = 0;
