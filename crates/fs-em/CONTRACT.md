@@ -6802,3 +6802,54 @@ thermal tests cover the joint loss and source-validity path in fs-couple. These
 full-field tests remain unexecuted while the complete workspace dependency
 closure is unavailable; formatting and focused source/API review are the
 executed checks for this adapter extension.
+
+### Source-bound anisotropic absorption and local optical heating
+
+`OrientedUniaxialInterface::prepare_absorbing_field` and its signed tangential-
+index counterpart admit the original ordered complex principal indices of the
+same `UniaxialOpticalResponse`. Both source spectra, complete material snapshot,
+original wavelength support, interpolation-gap limit and same-state real scalar
+permeability remain authoritative. The source now exposes ordered complex
+principal indices and SI permittivities without resampling or discarding loss.
+Existing transparent queries retain their original extinction refusals.
+
+The native uniaxial Maxwell eigensystem supplies complex ordinary and
+extraordinary waves for the original fixed arbitrary optic axis. Existing
+incident-coordinate admission and Maxwell eigenvectors are shared with the
+transparent owner. The extraordinary quadratic retains its stable paired roots
+until decay or normal-flux admission selects the outgoing branch. Complex
+Maxwell residuals, tangential continuity and independent entrance R/T balance
+must pass. The existing row-scaled fixed boundary solve and compensated
+face-anchored field propagator supply the solved amplitudes and spatial fields.
+Exactly zero source extinction delegates to the original transparent solve.
+
+Prepared results retain full complex reflected fields and both transmitted
+modes. Point queries return coherent Cartesian E/H, signed cycle-mean Poynting
+flux and local dielectric heat `omega/2 E*[-Im(epsilon)]E` in W/m³. The two
+eigenmodes interfere before either power contraction; adding their separate
+heats or powers is generally incorrect. Positive weighted parallel/perpendicular
+squares preserve anisotropic dissipation without subtracting nearly equal
+intensities. Pure evanescence in a lossless eigenaxis supplies no heat.
+Transmitted interface power means power entering the crystal at z=0, before
+bulk absorption. Preparation and each point query have fixed two-mode work and
+allocate nothing; point queries neither resolve material sources nor repeat
+boundary solves.
+
+This is a monochromatic passive reciprocal uniaxial half-space with a lossless
+isotropic incident port. It does not advance temperature, infer magnetic loss,
+support an absorbing incident port or finite lossy stack, introduce a biaxial
+or gain model, or claim a causal transient reservoir. Unresolved/coalesced
+complex modes, ambiguous outgoing branches and unrepresentable source loss or
+fields refuse explicitly; the original transparent critical support remains.
+
+Focused actual-source rustc validation passed 49 tests: six new absorption
+groups and 43 existing principal/arbitrary-axis/propagation cases. The new
+groups cover independent complex Fresnel limits with magnetic/metallic
+contrast, analytic dichroism/phase, full complex Maxwell curls and continuity,
+rotated coupling and coherent cross terms, differential and integrated
+Poynting/heating balance, transparent reduction, evanescence and admission.
+This probe uses real fs-math, complete production numerical leaves and four
+exact native slab helper bodies in a minimal module wrapper; it excludes
+material resolution. An additional native original-source integration test
+covers retained source identities, spectral support/gaps and depth-dependent
+heat and flux; its native Cargo execution is tracked separately.

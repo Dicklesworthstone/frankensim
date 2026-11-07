@@ -9,8 +9,10 @@
 //! [`PreparedOrientedCrystalField`] propagates the solved fields coherently
 //! through their actual half-spaces, retaining both modal phase and decay.
 //!
-//! This is one planar, lossless, homogeneous half-space. It does not supply
-//! absorbing/biaxial crystals, multilayers, transient fields or ray traversal.
+//! The original queries describe a transparent homogeneous half-space.
+//! [`absorbing`] admits the same original complex spectral axes and supplies
+//! coherent attenuating fields and anisotropic dielectric heating.
+//! Neither path supplies biaxial crystals, transient fields or ray traversal.
 //! [`spectrum`] prepares coherent incident directions against this same owner
 //! and propagates both eigenmodes to physical points in either half-space.
 //! Maxwell's anisotropic dispersion and eigenvectors: MIT 6.974 §2.8,
@@ -35,6 +37,9 @@ pub mod slab;
 
 /// Coherent stacks of finite crystals with independent original global axes.
 pub mod stack;
+
+/// Source-bound absorbing half-space fields and local dielectric heating.
+pub mod absorbing;
 
 const C0: f64 = 299_792_458.0;
 type Result<T> = core::result::Result<T, ReflectionError>;

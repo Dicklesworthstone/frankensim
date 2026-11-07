@@ -86,7 +86,7 @@ pub(super) fn unit(v: [f64; 3]) -> Result<[f64; 3]> {
     let length = det::hypot(det::hypot(v[0], v[1]), v[2]);
     Ok(v.map(|x| if x == 0.0 { 0.0 } else { x / length }))
 }
-fn cross(a: Vector, b: Vector) -> Vector {
+pub(super) fn cross(a: Vector, b: Vector) -> Vector {
     [
         a[1] * b[2] - a[2] * b[1],
         a[2] * b[0] - a[0] * b[2],
@@ -121,32 +121,7 @@ pub(super) fn eigenbasis(data: Input) -> Result<Eigenbasis> {
     let ed = Dd::from_f64(e);
     let o2 = od * od;
     let e2 = ed * ed;
-    let id = Dd::from_f64(i);
-    let (p, p2, qi) = match data.incidence {
-        Incidence::Cosine(c) => {
-            positive(c)?;
-            if c > 1.0 {
-                return Err(invalid("crystal incidence cosine must lie in (0,1]"));
-            }
-            let cd = Dd::from_f64(c);
-            let s2 = (Dd::ONE - cd) * (Dd::ONE + cd);
-            (i * det::sqrt(s2.to_f64()), id * id * s2, positive(i * c)?)
-        }
-        Incidence::TangentialIndex(value) => {
-            if !value.is_finite() || value.abs() >= data.ni {
-                return Err(invalid(
-                    "tangential index needs a propagating incident port",
-                ));
-            }
-            let p = value / scale;
-            if value != 0.0 && p == 0.0 {
-                return Err(invalid("crystal tangential index is unrepresentable"));
-            }
-            let pd = Dd::from_f64(p);
-            let p2 = pd * pd;
-            (p, p2, positive((id * id - p2).sqrt().to_f64())?)
-        }
-    };
+    let (p, p2, qi) = incident_coordinates(data.ni, scale, i, data.incidence)?;
     let (zo, ko) = if data.ni == data.no {
         (C64::from_re(qi), UniaxialWaveKind::Propagating)
     } else {
@@ -178,10 +153,6 @@ pub(super) fn eigenbasis(data: Input) -> Result<Eigenbasis> {
         };
         (C64::new(real, s.im / f.to_f64()), k)
     };
-    let qs = [
-        [C64::from_re(p), C64::ZERO, zo],
-        [C64::from_re(p), C64::ZERO, ze],
-    ];
     let mut modes = [
         Mode {
             z: zo,
@@ -196,35 +167,14 @@ pub(super) fn eigenbasis(data: Input) -> Result<Eigenbasis> {
             h: [C64::ZERO; 3],
         },
     ];
-    let a = axis.map(C64::from_re);
-    for m in 0..2 {
-        let q = qs[m];
-        if data.no == data.ne || axis[1] == 0.0 {
-            // The principal section is exactly decoupled, including the
-            // optic-axis degeneracy where q cross a is the zero vector.
-            if m == 0 {
-                modes[m].e = [C64::ZERO, C64::ONE, C64::ZERO];
-                modes[m].h = cross(q, modes[m].e);
-            } else {
-                modes[m].h = [C64::ZERO, C64::ONE, C64::ZERO];
-                modes[m].e = inverse_tensor(cross(q, modes[m].h).map(|z| -z), axis, o * o, e * e);
-            }
-        } else if m == 0 {
-            modes[m].e = cross(q, a);
-            modes[m].h = cross(q, modes[m].e);
-        } else {
-            modes[m].h = cross(q, a);
-            modes[m].e = inverse_tensor(cross(q, modes[m].h).map(|z| -z), axis, o * o, e * e);
-        }
-        let basis_scale = positive(
-            modes[m]
-                .e
-                .iter()
-                .chain(&modes[m].h)
-                .fold(0.0_f64, |v, z| v.max(z.abs())),
+    for (m, mode) in modes.iter_mut().enumerate() {
+        (mode.e, mode.h) = eigenvectors(
+            axis,
+            [C64::from_re(p), C64::ZERO, mode.z],
+            m == 0,
+            data.no == data.ne,
+            |v| inverse_tensor(v, axis, o * o, e * e),
         )?;
-        modes[m].e = modes[m].e.map(|z| z.scale(1.0 / basis_scale));
-        modes[m].h = modes[m].h.map(|z| z.scale(1.0 / basis_scale));
     }
     Ok(Eigenbasis {
         i,
@@ -234,6 +184,75 @@ pub(super) fn eigenbasis(data: Input) -> Result<Eigenbasis> {
         ratio_mu,
         modes,
     })
+}
+
+/// Preserve authored grazing cosines and signed tangential indices. Shared
+/// by the real and complex constitutive branches before their dispersion.
+pub(super) fn incident_coordinates(
+    incident_index: f64,
+    scale: f64,
+    i: f64,
+    incidence: Incidence,
+) -> Result<(f64, Dd, f64)> {
+    let id = Dd::from_f64(i);
+    Ok(match incidence {
+        Incidence::Cosine(c) => {
+            positive(c)?;
+            if c > 1.0 {
+                return Err(invalid("crystal incidence cosine must lie in (0,1]"));
+            }
+            let cd = Dd::from_f64(c);
+            let s2 = (Dd::ONE - cd) * (Dd::ONE + cd);
+            (i * det::sqrt(s2.to_f64()), id * id * s2, positive(i * c)?)
+        }
+        Incidence::TangentialIndex(value) => {
+            if !value.is_finite() || value.abs() >= incident_index {
+                return Err(invalid(
+                    "tangential index needs a propagating incident port",
+                ));
+            }
+            let p = value / scale;
+            if value != 0.0 && p == 0.0 {
+                return Err(invalid("crystal tangential index is unrepresentable"));
+            }
+            let pd = Dd::from_f64(p);
+            let p2 = pd * pd;
+            (p, p2, positive((id * id - p2).sqrt().to_f64())?)
+        }
+    })
+}
+
+/// Native Maxwell eigenvectors, shared across transparent and passive
+/// complex principal tensors. The caller owns only the inverse constitutive
+/// tensor; exact principal-section/isotropic degeneracies use TE then TM.
+pub(super) fn eigenvectors(
+    axis: [f64; 3],
+    q: Vector,
+    ordinary: bool,
+    isotropic: bool,
+    inverse: impl Fn(Vector) -> Vector,
+) -> Result<(Vector, Vector)> {
+    let a = axis.map(C64::from_re);
+    let (e, h) = if isotropic || axis[1] == 0.0 {
+        if ordinary {
+            let e = [C64::ZERO, C64::ONE, C64::ZERO];
+            (e, cross(q, e))
+        } else {
+            let h = [C64::ZERO, C64::ONE, C64::ZERO];
+            (inverse(cross(q, h).map(|z| -z)), h)
+        }
+    } else if ordinary {
+        let e = cross(q, a);
+        (e, cross(q, e))
+    } else {
+        let h = cross(q, a);
+        (inverse(cross(q, h).map(|z| -z)), h)
+    };
+    let basis_scale = positive(e.iter().chain(&h).fold(0.0_f64, |v, z| v.max(z.abs())))?;
+    Ok((
+        e.map(|z| z.scale(1.0 / basis_scale)),
+        h.map(|z| z.scale(1.0 / basis_scale)),
+    ))
 }
 
 pub(super) fn solve(data: Input) -> Result<OrientedCrystalResponse> {

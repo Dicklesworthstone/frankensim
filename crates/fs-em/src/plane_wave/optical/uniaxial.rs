@@ -1,4 +1,4 @@
-//! Two original spectral index axes of a transparent uniaxial crystal.
+//! Two original spectral index axes of a passive uniaxial crystal.
 //!
 //! Each eigenaxis retains its explicitly bound wavelength/property roles from
 //! SpectralComplexIndexStatePoint. Both MUST refer to the same complete
@@ -13,6 +13,7 @@
 
 use super::{ReflectionError, SpectralOpticalResponse, SpectralOpticalSource, positive};
 use fs_material::state_point::{ResolvedMaterialStatePoint, SpectralComplexIndexStatePoint};
+use fs_math::c64::C64;
 
 /// Borrowed original ordinary/extraordinary spectra with same-state SI mu.
 /// Source support, interpolation gaps and optical coordinate admission reuse
@@ -100,14 +101,38 @@ impl<'a> UniaxialOpticalResponse<'a> {
     /// Both owners admit frequency before any endpoint roundoff correction;
     /// positive loss in either axis refuses the transparent-crystal model.
     pub fn phase_indices(self, omega_rad_s: f64) -> Result<[f64; 2], ReflectionError> {
-        let ordinary = self.ordinary_response.complex_index(omega_rad_s)?;
-        let extraordinary = self.extraordinary_response.complex_index(omega_rad_s)?;
+        let [ordinary, extraordinary] = self.complex_principal_indices(omega_rad_s)?;
         if ordinary.im != 0.0 || extraordinary.im != 0.0 {
             return Err(ReflectionError::Invalid(
                 "transparent uniaxial refraction cannot discard source extinction in either axis",
             ));
         }
         Ok([positive(ordinary.re)?, positive(extraordinary.re)?])
+    }
+
+    /// Original ordered [ordinary, extraordinary] principal indices n-i*k.
+    /// Both original wavelength supports, knot-gap limits and state bindings
+    /// remain authoritative. A consumer admitting loss must retain both
+    /// complex values in Maxwell's tensor; taking only their real parts is
+    /// not an absorbing-crystal model.
+    pub fn complex_principal_indices(self, omega_rad_s: f64) -> Result<[C64; 2], ReflectionError> {
+        Ok([
+            self.ordinary_response.complex_index(omega_rad_s)?,
+            self.extraordinary_response.complex_index(omega_rad_s)?,
+        ])
+    }
+
+    /// Original principal SI permittivities N²/(mu*c0²) [F/m]. The shared
+    /// scalar mu belongs to the same complete source snapshot. Negative real
+    /// epsilon is admitted; positive extinction may never round to zero loss.
+    pub fn principal_permittivities_f_m(
+        self,
+        omega_rad_s: f64,
+    ) -> Result<[C64; 2], ReflectionError> {
+        Ok([
+            self.ordinary_response.permittivity_f_m(omega_rad_s)?,
+            self.extraordinary_response.permittivity_f_m(omega_rad_s)?,
+        ])
     }
 }
 
