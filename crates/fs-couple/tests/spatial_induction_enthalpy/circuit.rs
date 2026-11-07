@@ -1,4 +1,9 @@
 //! G1/G3/G4: actual electrode circuits, magnetic entropy and finite heat.
+#[path = "circuit/heat.rs"]
+mod heat;
+#[path = "circuit/material.rs"]
+mod material;
+
 use super::*;
 use fs_couple::circuit_enthalpy::ResistorCell;
 use fs_em::spatial::vector_potential::induction::terminals::{
@@ -165,7 +170,7 @@ fn circuit_driven_sigma_and_mu_feedback_matches_independent_whitney_thermal_elim
     // Unit-cube integration: int W_x=1/6, int W²=1/5, K(T)=4/mu(T).
     // The resistor is an independently heated second body. The magnetic
     // entropy is S=2*mu_T*a²/mu², so Qrev=-P-delta(T*S).
-    let (rho, alpha, mu0, resistance, dt): (f64, f64, f64, f64, f64) = (0.2, 0.01, 1.0, 0.4, 0.1);
+    let (rho, alpha, mu0, resistance, dt): (f64, f64, f64, f64, f64) = (0.2, 0.005, 1.0, 0.4, 0.1);
     for basis in [
         ElectricalPropertyBasis::Resistivity,
         ElectricalPropertyBasis::Conductivity,
@@ -283,7 +288,7 @@ fn circuit_driven_sigma_and_mu_feedback_matches_independent_whitney_thermal_elim
 #[test]
 fn charged_capacitor_preserves_native_charge_while_heating_changes_field_current() {
     let basis = ElectricalPropertyBasis::Resistivity;
-    let card = source::absolute_affine_magnetic_card(0.2, 0.03, 2.0, 0.0, basis);
+    let card = source::absolute_affine_magnetic_card(0.2, 0.008, 2.0, 0.0, basis);
     let curve = curve(&card);
     let problem = problem(&card, basis);
     let capacitance = 0.4;
@@ -321,7 +326,7 @@ fn charged_capacitor_preserves_native_charge_while_heating_changes_field_current
     let dt = 0.05;
     for index in 0..8 {
         let at = |t: f64| {
-            let s = sigma(t, 0.2, 0.03, basis);
+            let s = sigma(t, 0.2, 0.008, basis);
             let f = s / 6.0;
             let d = s / 5.0 + dt;
             let y = s - f * f / d;
@@ -393,7 +398,7 @@ fn charged_capacitor_preserves_native_charge_while_heating_changes_field_current
 #[test]
 fn missing_heat_receivers_source_changes_and_exhausted_trials_preserve_all_histories() {
     let basis = ElectricalPropertyBasis::Resistivity;
-    let card = source::absolute_affine_magnetic_card(0.2, 0.01, 1.0, 0.0, basis);
+    let card = source::absolute_affine_magnetic_card(0.2, 0.005, 1.0, 0.0, basis);
     let curve = curve(&card);
     let problem = problem(&card, basis);
     let circuit = connect(
@@ -492,7 +497,7 @@ fn missing_heat_receivers_source_changes_and_exhausted_trials_preserve_all_histo
         ),
         Err(CircuitEnthalpyError::Cancelled)
     ));
-    let other_card = source::absolute_affine_magnetic_card(0.3, 0.01, 1.0, 0.0, basis);
+    let other_card = source::absolute_affine_magnetic_card(0.3, 0.005, 1.0, 0.0, basis);
     let other_cells = bindings(&other_card, &curve, &context, true);
     let changed = SpatialMagneticThermalNetwork {
         cells: &other_cells,

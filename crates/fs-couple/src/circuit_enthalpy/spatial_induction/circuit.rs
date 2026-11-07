@@ -6,16 +6,27 @@
 //! receivers once. Magnetic entropy/parameter work stays with the existing
 //! caloric owner; numerical reference resistors never become physical heat.
 //!
-//! The native circuit graph, its R/L/C coefficients, and geometry remain fixed.
+//! The native circuit graph, reactive coefficients, and geometry remain fixed.
+//! Authored resistor coefficients stay fixed unless their original material
+//! bindings explicitly resolve resistance at the same proposed temperature.
 //! Endpoint field coefficients and backward-Euler enthalpy give first-order
 //! coupled accuracy in general. Prescribed motion transfers external mechanical
 //! work; it does not move the material interface or advance a mechanical body.
 
+mod heat;
+mod material;
+pub use heat::heat_assembly_candidate;
+
+pub use super::terminals::circuit::{
+    SpatialTerminalCircuitThermalCandidate, SpatialTerminalCircuitThermalError,
+    SpatialTerminalCircuitThermalNetwork,
+};
 use super::terminals::circuit::{
-    SpatialTerminalCircuitThermalCandidate, SpatialTerminalCircuitThermalNetwork,
+    TerminalError, admit_initial_graph_sources, deposit_graph_heat, electrical,
+    pinned_graph_sources,
 };
 use super::*;
-use crate::circuit_enthalpy::ResistorCell;
+use crate::circuit_enthalpy::{ResistorCell, material::CellResistor};
 use fs_em::spatial::vector_potential::induction::terminals::circuit::{
     SpatialTerminalCircuit, SpatialTerminalCircuitCandidate, SpatialTerminalCircuitControls,
     SpatialTerminalCircuitError, SpatialTerminalCircuitStep,
@@ -95,13 +106,6 @@ impl<C: SpatialConductorMaterial> LinearInductionThermalDriver
     }
 }
 
-fn circuit_error(error: SpatialTerminalCircuitError) -> Error {
-    match error {
-        SpatialTerminalCircuitError::Cancelled => CircuitEnthalpyError::Cancelled,
-        other => CircuitEnthalpyError::Source(MagneticThermalError::SpatialTerminalCircuit(other)),
-    }
-}
-
 impl SpatialMagneticThermalNetwork<'_> {
     /// Solve original field, circuit and finite-temperature feedback together.
     ///
@@ -145,7 +149,6 @@ impl SpatialMagneticThermalNetwork<'_> {
             },
             graph_resistors: resistor_destinations,
         };
-        let destinations = receiving.routes(thermal, circuit.time_s(), circuit.graph(), &cancel)?;
         let material_network = MaterialNetwork {
             cells: self.cells,
             resistors: &[],
@@ -154,23 +157,126 @@ impl SpatialMagneticThermalNetwork<'_> {
         let prepared = material_network
             .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
             .map_err(material)?;
-        let (thermal, circuit, report) = self.step_linear_driver_candidate(
+        let proposal: Result<SpatialCircuitThermalCandidate<'t, 'm, C>, TerminalError> = receiving
+            .step_linear_resolved_candidate(
+                thermal,
+                target_s,
+                circuit,
+                external_inputs,
+                endpoint_impressed_current_a_m2,
+                velocity_m_s,
+                None,
+                bindings,
+                controls,
+                circuit_controls,
+                assembly,
+                initial_energy_increments_j,
+                |trial| {
+                    prepared
+                        .resolve(trial, || (*cancel.borrow_mut())())
+                        .map_err(material)
+                        .map_err(native_error)
+                },
+                |sample| sample,
+                &cancel,
+            );
+        proposal.map_err(|error| {
+            error.map_source(|source| match source {
+                SpatialTerminalCircuitThermalError::Native(error) => error,
+                SpatialTerminalCircuitThermalError::Circuit(error) => {
+                    MagneticThermalError::SpatialTerminalCircuit(error)
+                }
+                SpatialTerminalCircuitThermalError::Heat(error) => {
+                    MagneticThermalError::Heat(error)
+                }
+            })
+        })
+    }
+}
+
+impl SpatialTerminalCircuitThermalNetwork<'_> {
+    // Direct material bindings and complete thermal assemblies both evaluate
+    // this original field/circuit driver. Their only difference is the source
+    // resolver and the accepted source payload, never the thermal residual.
+    #[allow(clippy::too_many_arguments)]
+    fn step_linear_resolved_candidate<'t, 'm, S, E, C: SpatialConductorMaterial>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        circuit: &SpatialTerminalCircuit<'m, C>,
+        external_inputs: &[f64],
+        endpoint_impressed_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        graph_material: Option<&[CellResistor]>,
+        magnetic_laws: &[SpatialMagneticThermalLaw],
+        controls: CircuitEnthalpySolve,
+        circuit_controls: SpatialTerminalCircuitControls,
+        assembly: WeightedAssemblyLimits,
+        initial_energy_increments_j: &[f64],
+        resolve: impl Fn(
+            &DepositionSimulation<'_>,
+        ) -> Result<CircuitThermalCoefficients<S>, TerminalError<E>>,
+        sample: impl Fn(&S) -> &MaterialNetworkSample,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<SpatialCircuitThermalCandidate<'t, 'm, C, S>, TerminalError<E>> {
+        check(cancel).map_err(native_error)?;
+        crate::circuit_enthalpy::admit_driver_unknowns(
+            thermal,
+            controls,
+            initial_energy_increments_j,
+        )?;
+        let routes = self
+            .routes(thermal, circuit.time_s(), circuit.graph(), cancel)
+            .map_err(native_error)?;
+        self.admit_graph_material_bindings(
+            circuit.graph_resistor_materials(),
+            graph_material,
+            &routes,
+            cancel,
+        )
+        .map_err(native_error)?;
+        let initial = resolve(thermal)?;
+        admit_initial_graph_sources(
+            circuit.graph(),
+            circuit.graph_resistor_materials(),
+            graph_material.map_or(0, |bindings| bindings.len()),
+            &initial.resistors,
+            cancel,
+        )
+        .map_err(native_error)?;
+        let (thermal, circuit, report) = self.magnetic.step_linear_driver_candidate(
             thermal,
             target_s,
             circuit,
-            bindings,
+            magnetic_laws,
             controls,
             initial_energy_increments_j,
-            |trial| {
-                prepared
-                    .resolve(trial, || (*cancel.borrow_mut())())
-                    .map_err(material)
-            },
-            |sample| sample,
-            |_, _, materials, conductors, remaining| {
+            resolve,
+            sample,
+            |_, coefficients, materials, conductors, remaining| {
                 let mut limited = circuit_controls;
                 limited.maximum_field_trials = limited.maximum_field_trials.min(remaining);
-                circuit
+                if limited.maximum_field_trials == 0 {
+                    return Err(CircuitEnthalpyError::CircuitBudget);
+                }
+                let refreshed_graph;
+                let driven = if graph_material.is_some() {
+                    let sources =
+                        pinned_graph_sources(&initial.resistors, &coefficients.resistors, cancel)
+                            .map_err(native_error)?;
+                    refreshed_graph = circuit
+                        .with_graph_resistors(sources, &mut || (*cancel.borrow_mut())())
+                        .map_err(electrical)?;
+                    &refreshed_graph
+                } else {
+                    if !coefficients.resistors.is_empty() {
+                        return Err(native_error(invalid(
+                            "unowned graph resistor source appeared in an electrode thermal trial",
+                        )));
+                    }
+                    circuit
+                };
+                driven
                     .step_with_materials_candidate(
                         external_inputs,
                         endpoint_impressed_current_a_m2,
@@ -188,36 +294,21 @@ impl SpatialMagneticThermalNetwork<'_> {
                         {
                             CircuitEnthalpyError::CircuitBudget
                         } else {
-                            circuit_error(error)
+                            electrical(error)
                         }
                     })
             },
             |proposal, powers, dt, checkpoint| {
-                for (&branch, &cell) in &destinations {
-                    checkpoint()?;
-                    let loss = proposal
-                        .step()
-                        .branches
-                        .get(branch)
-                        .filter(|loss| loss.branch == branch)
-                        .ok_or_else(|| invalid("native circuit omitted an original resistor"))?;
-                    let heat = loss.absorbed_work_j;
-                    let power = finite(heat / dt)?;
-                    if heat < 0.0 || heat != 0.0 && power == 0.0 {
-                        return Err(invalid(
-                            "circuit heat is negative or lost in power conversion",
-                        ));
-                    }
-                    let previous = *powers.get(&cell).unwrap_or(&0.0);
-                    let next = finite(previous + power)?;
-                    if power != 0.0 && next == previous {
-                        return Err(invalid("circuit heat disappeared in its thermal receiver"));
-                    }
-                    powers.insert(cell, next);
-                }
-                Ok(())
+                deposit_graph_heat(
+                    &proposal.step().graph_resistors,
+                    &routes,
+                    powers,
+                    dt,
+                    checkpoint,
+                )
+                .map_err(native_error)
             },
-            &cancel,
+            cancel,
         )?;
         Ok(SpatialCircuitThermalCandidate {
             thermal,

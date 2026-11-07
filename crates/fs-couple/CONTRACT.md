@@ -154,13 +154,64 @@ clocks, volume correspondences, thermal laws, material and solve budgets remain
 admitted before joint publication. Refused heat routing, source changes,
 cancellation and failed field or enthalpy trials preserve all three histories.
 
-The graph R/L/C coefficients, geometry and conducting occupancy remain fixed;
-prescribed motion represents external mechanical work. This is a linear
+The legacy fixed-resistance entry retains authored R/L/C coefficients,
+geometry and conducting occupancy; prescribed motion represents external mechanical work. This is a linear
 magnetic, fully solid MQS coupling with endpoint material/enthalpy feedback,
 generally first order in the coupled temperature update. Independent Whitney
 element elimination tests exercise both electrical property bases, signed
 permeability slopes, separate resistor heating and retained capacitor charge.
 
+## Complete heat transport and material resistor feedback for solid electrodes
+
+`spatial_induction::circuit::heat_assembly_candidate` continues the same native
+linear A–phi electrode circuit through any original `HeatAssembly`. Every
+proposed caloric state resolves contact resistance, integrated conduction
+layers, gray-diffuse enclosure radiation and provider-owned finite thermal
+links or coolant together with conductor conductivity and magnetic entropy.
+The original backward-Euler residual advances every finite receiver once;
+there is no independent cooling step or extra temperature history. The full
+associated source sample and provider error type remain in the accepted
+candidate or typed refusal.
+
+`SpatialTerminalCircuitThermalNetwork::step_linear_material_candidate`
+also binds every authored graph resistor to its original electrical material,
+basis and whole-volume finite body. The complete heat adapter consumes those
+same bindings from its prepared electrical/material network. Accepted graph
+resistance and retained source state must agree before stepping. Every trial
+pins original claim selection, full fixed conditions, geometry and receiver,
+then rebinds the original R(T) without resetting native charge, flux, time or
+magnetic potential. A changed resistance invalidates the native response cache.
+Source-backed graph resistors occupy distinct caloric bodies outside the field
+receivers; their length times area must equal the corresponding original volume.
+The earlier fixed-resistance entry retains its original API and numerical
+resistances; it refuses to discard an already retained material binding.
+
+Both entry points share the same linear field/circuit driver, graph-source
+admission and authored-loss deposit owner used by the original coupled paths.
+Conductor-frame Joule loss and actual graph resistor loss enter their explicit
+finite receivers once. Artificial interface-reference dissipation is canceled
+inside the native circuit and never becomes physical heat. Magnetic parameter
+work, entropy and reversible heat retain their original separate accounts.
+Finite-link exchange and closed-enclosure radiation are internal; both the
+native and physical energy checks exclude the enclosure's numerical net from
+external heat. The joint account remains
+`delta U_field + delta W_circuit + delta H_caloric + W_mechanical
+= W_impressed + W_external + Q_external`.
+
+Fixed geometry, fully solid field receivers, linear magnetic source domains,
+reactive coefficients and first-order thermal feedback remain the admitted
+scope. Prescribed motion exchanges external work without advancing mechanics.
+Thermal boundaries requiring an unowned E/J/B/H coordinate and electrical
+interface contacts without their native work owner refuse. Cancellation,
+changed source identity or geometry, invalid routing and exhausted budgets
+return no partially advanced field, circuit or thermal history.
+
+Focused regressions use independent Whitney-element elimination and two-body
+caloric balances for both electrical source bases, continued drive reversal,
+R(T), sigma(T), mu(T) and magnetic entropy. Complete-assembly cases exercise
+source-controlled contact and emissivity changes, integrated layers, accepted
+provider payloads, refreshed finite links, typed source refusal, cancellation
+and unowned field-conditioned radiation.
 
 ## Physical nonlinear and hysteretic electrodes with finite heat
 

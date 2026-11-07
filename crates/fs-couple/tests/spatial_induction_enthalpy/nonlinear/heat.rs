@@ -75,7 +75,7 @@ fn with_heat<R>(
     )
 }
 
-pub(super) fn with_heat_material<R>(
+pub(crate) fn with_heat_material<R>(
     nonlinear: bool,
     epsilon: f64,
     resistance: f64,
