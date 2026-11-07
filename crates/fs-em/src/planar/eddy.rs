@@ -51,7 +51,6 @@ use fs_rep_mesh::TriComplex2;
 use fs_solver::{
     CheckedCgConfig, CheckedCgError, LinearOp, ResidualClaim, SolveReport, checked_cg,
 };
-use fs_sparse::precond::IdentityPrecond;
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
@@ -262,24 +261,33 @@ impl EddySection for PlanarMagnetostatics {
 }
 
 // An operator adapter only; the existing checked CG owns every recurrence.
+struct IncrementScratch {
+    full: Vec<f64>,
+    conduction: Vec<f64>,
+}
 struct Increment<'a> {
     problem: &'a PlanarMagnetostatics,
     free: &'a [usize],
     conduction: &'a Conduction,
     dt: f64,
     interrupted: &'a dyn Fn() -> bool,
+    scratch: RefCell<IncrementScratch>,
 }
 impl LinearOp for Increment<'_> {
     fn n(&self) -> usize {
         self.free.len()
     }
     fn apply(&self, x: &[f64], y: &mut [f64]) {
-        let mut full = vec![0.0; self.problem.mesh.vertices().len()];
+        // Retain both full-mesh work vectors throughout CG and its true-residual
+        // checks. Only the original sparse stiffness and regional mass act here.
+        let mut scratch = self.scratch.borrow_mut();
+        let IncrementScratch { full, conduction } = &mut *scratch;
+        // Every free value is replaced; constrained entries retain their initial
+        // zero because the magnetic and conduction operators only read `full`.
         for (&v, &value) in self.free.iter().zip(x) {
             full[v] = value;
         }
-        let mut c = vec![0.0; full.len()];
-        if !self.conduction.apply(&full, &mut c, self.interrupted) {
+        if !self.conduction.apply(full, conduction, self.interrupted) {
             y.fill(f64::NAN);
             return;
         }
@@ -294,7 +302,7 @@ impl LinearOp for Increment<'_> {
                 .zip(vals)
                 .map(|(&w, &value)| value * full[w])
                 .sum::<f64>();
-            y[row] = 0.5 * k + c[v] / self.dt;
+            y[row] = 0.5 * k + conduction[v] / self.dt;
         }
     }
 }
@@ -995,6 +1003,14 @@ impl<'m> PlanarEddy<'m> {
         let report = if self.free.is_empty() {
             None
         } else {
+            let preconditioner = moving::MovingJacobi::new(
+                &next_problem.stiffness,
+                &self.free,
+                &conduction,
+                dt,
+                0.5,
+                cancelled,
+            )?;
             let cancel = RefCell::new(&mut *cancelled);
             let interrupted = Cell::new(false);
             let check = || {
@@ -1011,8 +1027,12 @@ impl<'m> PlanarEddy<'m> {
                 conduction: &conduction,
                 dt,
                 interrupted: &check,
+                scratch: RefCell::new(IncrementScratch {
+                    full: vec![0.0; next_problem.mesh.vertices().len()],
+                    conduction: vec![0.0; next_problem.mesh.vertices().len()],
+                }),
             };
-            let result = checked_cg(&op, &IdentityPrecond, &rhs, limits.linear, |_| {
+            let result = checked_cg(&op, &preconditioner, &rhs, limits.linear, |_| {
                 if check() {
                     Err(EddyError::Cancelled)
                 } else {

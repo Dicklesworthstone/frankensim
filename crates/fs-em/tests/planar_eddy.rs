@@ -505,3 +505,198 @@ fn field_and_material_history_survive_source_budget_cancel_and_topology_refusals
     near(a.step().heat_j, b.step().heat_j);
 }
 
+#[test]
+fn conductivity_contrast_uses_fewer_iterations_without_changing_field_or_heat() {
+    use fs_solver::{LinearOp, checked_cg};
+    use fs_sparse::precond::IdentityPrecond;
+
+    struct Reference(Vec<Vec<f64>>);
+    impl LinearOp for Reference {
+        fn n(&self) -> usize {
+            self.0.len()
+        }
+        fn apply(&self, x: &[f64], y: &mut [f64]) {
+            for (row, value) in self.0.iter().zip(y) {
+                *value = row.iter().zip(x).map(|(a, b)| a * b).sum();
+            }
+        }
+    }
+
+    // A connected conductor with five decades of source-resolved conductivity
+    // contrast. These are manufactured coefficients, not measured metal data.
+    // The reference assembles elementary P1 integrals independently of the
+    // production FEEC Hodge, projected-mass operator and Jacobi preconditioner.
+    let n = 12;
+    let depth = 0.3;
+    let mu = 1e-6;
+    let dt = 1e-5;
+    let basis = ElectricalPropertyBasis::Conductivity;
+    let mut vertices = Vec::new();
+    let mut boundary = Vec::new();
+    let mut free = Vec::new();
+    for y in 0..=n {
+        for x in 0..=n {
+            let v = vertices.len();
+            if x == 0 || y == 0 || x == n || y == n {
+                boundary.push((v, 0.0));
+            } else {
+                free.push(v);
+            }
+            vertices.push([x as f64 / n as f64, y as f64 / n as f64]);
+        }
+    }
+    let sources: Vec<_> = (0..n)
+        .map(|x| {
+            let sigma = 100.0 * 3.0_f64.powi(x as i32);
+            bundle(&card(sigma.recip(), 0.0, mu, basis), 300.0, basis)
+        })
+        .collect();
+    let mut faces = Vec::new();
+    let mut materials = Vec::new();
+    let mut sigma = Vec::new();
+    let mut current = Vec::new();
+    for y in 0..n {
+        for (x, source) in sources.iter().enumerate() {
+            let a = (y * (n + 1) + x) as u32;
+            let d = a + (n + 1) as u32;
+            faces.extend([[a, a + 1, d + 1], [a, d + 1, d]]);
+            materials.extend([source.clone(), source.clone()]);
+            sigma.extend([100.0 * 3.0_f64.powi(x as i32); 2]);
+            current.extend([if y < n / 2 { 1e4 } else { -1e4 }; 2]);
+        }
+    }
+    let mesh = TriComplex2::from_indexed_triangles(
+        "induction-conductivity-contrast",
+        vertices,
+        faces,
+        Metric2::planar(depth).unwrap(),
+    )
+    .unwrap();
+    let problem = PlanarMagnetostatics::new(mesh, materials, limits(), &mut || false).unwrap();
+    let count = problem.mesh().vertices().len();
+    let mut stiffness = vec![vec![0.0; count]; count];
+    let mut mass = stiffness.clone();
+    let mut moments = vec![0.0; count];
+    let mut load = vec![0.0; count];
+    let mut weight = 0.0;
+    let mut geometry = Vec::new();
+    for (cell, face) in problem.mesh().faces().iter().enumerate() {
+        let f = face.map(|v| v as usize);
+        let p = f.map(|v| problem.mesh().vertices()[v]);
+        let det =
+            (p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]);
+        let volume = det.abs() * depth / 2.0;
+        let g: [[f64; 2]; 3] = std::array::from_fn(|i| {
+            let j = (i + 1) % 3;
+            let k = (i + 2) % 3;
+            [(p[j][1] - p[k][1]) / det, (p[k][0] - p[j][0]) / det]
+        });
+        geometry.push((volume, g));
+        weight += sigma[cell] * volume;
+        for i in 0..3 {
+            moments[f[i]] += sigma[cell] * volume / 3.0;
+            load[f[i]] += 0.5 * current[cell] * volume / 3.0;
+            for j in 0..3 {
+                stiffness[f[i]][f[j]] += volume / mu * (g[i][0] * g[j][0] + g[i][1] * g[j][1]);
+                mass[f[i]][f[j]] += sigma[cell] * volume / 12.0 * if i == j { 2.0 } else { 1.0 };
+            }
+        }
+    }
+    let reference = Reference(
+        free.iter()
+            .map(|&i| {
+                free.iter()
+                    .map(|&j| {
+                        0.5 * stiffness[i][j] + (mass[i][j] - moments[i] * moments[j] / weight) / dt
+                    })
+                    .collect()
+            })
+            .collect(),
+    );
+    let rhs: Vec<_> = free.iter().map(|&v| load[v]).collect();
+    let unpreconditioned = checked_cg(&reference, &IdentityPrecond, &rhs, linear(), |_| {
+        Ok::<(), ()>(())
+    })
+    .unwrap();
+    assert!(unpreconditioned.report.converged_euclidean());
+    let mut expected = vec![0.0; count];
+    for (&v, &value) in free.iter().zip(&unpreconditioned.x) {
+        expected[v] = value;
+    }
+
+    let zero = vec![0.0; current.len()];
+    let initial = problem
+        .solve(&zero, &boundary, linear(), &mut || false)
+        .unwrap();
+    let control = EddyControls {
+        current_balance_tolerance_a: 1e-7,
+        ..controls()
+    };
+    let state = PlanarEddy::new(
+        &initial,
+        conductors(&problem, basis),
+        &[],
+        &boundary,
+        0.0,
+        control,
+        &mut || false,
+    )
+    .unwrap();
+    let next = state
+        .step_to_candidate(
+            dt,
+            state.conductors().to_vec(),
+            &current,
+            control,
+            &mut || false,
+        )
+        .unwrap();
+    let report = next.step().report.as_ref().unwrap();
+    assert!(report.converged_euclidean());
+    eprintln!(
+        "conductivity contrast: Jacobi {} vs identity {} CG iterations",
+        report.iters, unpreconditioned.report.iters,
+    );
+    assert!(
+        3 * report.iters < unpreconditioned.report.iters,
+        "Jacobi {} vs identity {} iterations",
+        report.iters,
+        unpreconditioned.report.iters,
+    );
+    let field_scale = expected.iter().map(|v| v.abs()).fold(0.0, f64::max);
+    for (&actual, &expected) in next.state().potential_wb_m().iter().zip(&expected) {
+        assert!((actual - expected).abs() < 2e-8 * field_scale);
+    }
+
+    let mean = moments
+        .iter()
+        .zip(&expected)
+        .map(|(m, a)| m * a)
+        .sum::<f64>()
+        / weight;
+    let field = next.state().field(&mut || false).unwrap();
+    let mut heat = 0.0;
+    let mut stored = 0.0;
+    for (cell, face) in problem.mesh().faces().iter().enumerate() {
+        let f = face.map(|v| v as usize);
+        let (volume, g) = geometry[cell];
+        let grad: [f64; 2] =
+            std::array::from_fn(|axis| (0..3).map(|i| expected[f[i]] * g[i][axis]).sum());
+        let b = [grad[1], -grad[0]];
+        for (&actual, expected) in field.magnetic_flux_density_t()[cell].iter().zip(b) {
+            assert!((actual - expected).abs() < 2e-7 * field_scale);
+        }
+        let electric = f.map(|v| (mean - expected[v]) / dt);
+        let q = dt * sigma[cell] * volume / 12.0
+            * (electric.iter().sum::<f64>().powi(2) + electric.iter().map(|e| e * e).sum::<f64>());
+        heat += q;
+        stored += volume / (2.0 * mu) * (b[0] * b[0] + b[1] * b[1]);
+    }
+    let work = load.iter().zip(&expected).map(|(f, a)| f * a).sum::<f64>();
+    assert!((next.step().heat_j - heat).abs() < 2e-8 * heat);
+    assert!((next.step().stored_after_j - stored).abs() < 2e-8 * stored);
+    assert!((next.step().supplied_work_j - work).abs() < 2e-8 * work);
+    assert!((stored + heat - work).abs() < 1e-9 * work);
+    near(next.step().energy_residual_j, 0.0);
+    near(next.step().region_currents_a[0].1, 0.0);
+}

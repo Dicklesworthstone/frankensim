@@ -257,7 +257,8 @@ pub(super) struct MovingIncrement<'a> {
 
 // Positive diffusion/storage diagonal, leaving the nonsymmetric velocity term
 // to FGMRES. Regional subtraction is the exact floating-mass diagonal; omitting
-// it would precondition the wrong electrical constraint.
+// it would precondition the wrong electrical constraint. The same positive
+// diagonal also preconditions stationary induction's SPD checked-CG solve.
 pub(super) struct MovingJacobi(Vec<f64>);
 impl MovingJacobi {
     pub(super) fn new(
@@ -292,7 +293,7 @@ impl MovingJacobi {
             let value = stage_factor * stiffness + diagonal[v] / dt;
             if !positive(value) || !positive(value.recip()) {
                 return Err(EddyError::Invalid(
-                    "moving-induction diffusion/storage diagonal is not representably positive",
+                    "induction diffusion/storage diagonal is not representably positive",
                 ));
             }
             inverse.push(value.recip());
@@ -305,6 +306,11 @@ impl FlexiblePreconditioner for MovingJacobi {
         for ((out, &value), &scale) in output.iter_mut().zip(residual).zip(&self.0) {
             *out = value * scale;
         }
+    }
+}
+impl fs_sparse::precond::Precond for MovingJacobi {
+    fn apply(&self, residual: &[f64], output: &mut [f64]) {
+        FlexiblePreconditioner::apply(self, 0, residual, output);
     }
 }
 
