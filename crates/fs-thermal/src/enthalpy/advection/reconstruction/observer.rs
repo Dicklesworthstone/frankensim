@@ -1,6 +1,7 @@
 //! Limited face transport on the original explicit thermal timeline.
 
 use super::{Advected, LimitedEnthalpyReconstruction, Sum, entropy, finite, invalid};
+use crate::enthalpy::advection::schedule::{AdvectionSchedule, ExplicitAdvectionSchedule};
 use crate::enthalpy::advection::{AdvectionAudit, MassBoundary, MassFlow};
 use crate::enthalpy::{
     CellId, DepositionError, DepositionObserver, DepositionSimulation, Event, HeatTransfer,
@@ -31,6 +32,7 @@ use std::sync::Arc;
 pub struct ReconstructedAdvected<O> {
     advection: Advected<O>,
     reconstruction: Option<Arc<LimitedEnthalpyReconstruction>>,
+    schedule: Option<ExplicitAdvectionSchedule>,
 }
 
 impl<O> Advected<O> {
@@ -58,11 +60,55 @@ impl<O> Advected<O> {
         Ok(ReconstructedAdvected {
             advection: self,
             reconstruction,
+            schedule: None,
         })
+    }
+
+    /// Sample a prescribed pump/inlet history on the original explicit steps.
+    /// For limited faces, attach reconstruction first and then the schedule.
+    pub fn with_schedule(
+        self,
+        schedule: impl Into<Arc<AdvectionSchedule>>,
+    ) -> Result<ReconstructedAdvected<O>, DepositionError> {
+        self.with_optional_reconstruction(None)?
+            .with_schedule(schedule)
     }
 }
 
 impl<O> ReconstructedAdvected<O> {
+    /// Attach a common pump multiplier and original-law inlet enthalpy history.
+    ///
+    /// Rates and inlet h are sampled at each accepted substep START, preserving
+    /// the native explicit Euler time order. Schedule knots compose with inner
+    /// source transitions and authored events; clipping still occurs after the
+    /// combined CFL. Choose/refine max_dt_s for pump and inlet time variation,
+    /// including startup from zero flow; this is not an interval-average flux.
+    ///
+    /// Immutable baseline connections and the schedule are shared by clones.
+    /// Native source, mass, liquid-support, entropy and energy admission use the
+    /// actual sampled streams. Common nonnegative scaling preserves the original
+    /// directions and stationary species; it supplies no momentum or density law.
+    pub fn with_schedule(
+        mut self,
+        schedule: impl Into<Arc<AdvectionSchedule>>,
+    ) -> Result<Self, DepositionError> {
+        if self.schedule.is_some() {
+            return Err(invalid("explicit advection already has a schedule"));
+        }
+        self.schedule = Some(ExplicitAdvectionSchedule::new(
+            &self.advection,
+            schedule.into(),
+        )?);
+        Ok(self)
+    }
+
+    /// Selected pump/inlet history, absent for the original frozen-flow path.
+    pub fn schedule(&self) -> Option<&AdvectionSchedule> {
+        self.schedule
+            .as_ref()
+            .map(|binding| binding.schedule.as_ref())
+    }
+
     /// Original wrapped physical observer and its accepted history.
     pub fn inner(&self) -> &O {
         self.advection.inner()
@@ -75,11 +121,11 @@ impl<O> ReconstructedAdvected<O> {
     pub fn audit(&self) -> AdvectionAudit {
         self.advection.audit()
     }
-    /// Original signed mass-flow connections.
+    /// Signed connections; with a schedule, the latest prepared start sample.
     pub fn flows(&self) -> &[MassFlow] {
         self.advection.flows()
     }
-    /// Original external mass and enthalpy streams.
+    /// External streams; with a schedule, the latest prepared start sample.
     pub fn boundaries(&self) -> &[MassBoundary] {
         self.advection.boundaries()
     }
@@ -87,7 +133,8 @@ impl<O> ReconstructedAdvected<O> {
     pub fn advection(&self) -> &Advected<O> {
         &self.advection
     }
-    /// Recover the original donor-cell owner without reconstruction.
+    /// Recover the donor-cell owner without reconstruction or schedule. The
+    /// latest prepared start-sample rates/streams are retained as fixed values.
     pub fn into_advection(self) -> Advected<O> {
         self.advection
     }
@@ -101,7 +148,11 @@ impl<O: DepositionObserver> DepositionObserver for ReconstructedAdvected<O> {
     type Error = O::Error;
 
     fn begin(&mut self) -> Result<(), Self::Error> {
-        self.advection.begin()
+        self.advection.begin()?;
+        if let Some(schedule) = &mut self.schedule {
+            schedule.reset();
+        }
+        Ok(())
     }
 
     fn next_transition_time_s(
@@ -109,7 +160,19 @@ impl<O: DepositionObserver> DepositionObserver for ReconstructedAdvected<O> {
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<Option<f64>, Self::Error> {
-        self.advection.next_transition_time_s(thermal, check)
+        let inner = self.advection.next_transition_time_s(thermal, check)?;
+        let Some(schedule) = &self.schedule else {
+            return Ok(inner);
+        };
+        // A valid schedule knot must not hide an invalid inner transition.
+        if inner.is_some_and(|time| !time.is_finite() || time <= thermal.time_s()) {
+            return Err(invalid("observer transition must be finite and strictly future").into());
+        }
+        let scheduled = schedule.schedule.next_transition_time_s(thermal.time_s());
+        Ok(match (inner, scheduled) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            _ => inner.or(scheduled),
+        })
     }
 
     fn sources(
@@ -119,6 +182,9 @@ impl<O: DepositionObserver> DepositionObserver for ReconstructedAdvected<O> {
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
         if let Some(plan) = &self.reconstruction {
             plan.admit_cells(thermal, check)?;
+        }
+        if let Some(schedule) = &mut self.schedule {
+            schedule.prepare(&mut self.advection, thermal, check)?;
         }
         self.advection.sources(thermal, check)
     }

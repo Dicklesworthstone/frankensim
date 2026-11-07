@@ -3847,6 +3847,41 @@ stepper and backward Euler remain first order in time. Spatial/time refinement, 
 remains necessary; no measured throughput or unconditional nonlinear convergence
 is claimed.
 
+### Prescribed pump and inlet histories on graph thermal transport
+
+`GraphEnthalpyTransport::with_schedule` binds the original thermal
+`AdvectionSchedule` to the admitted signed graph and fixed fluid inventory.
+The shared history scales every original internal and external mass rate by
+one nonnegative multiplier and samples inlet enthalpy in its original caloric
+law. Baseline rates remain immutable, so stopping the pump does not erase the
+flow used on restart. Source, material, inlet identity and storage admission
+remain with the existing native owners.
+
+`wrap_observer` and `advance_to` carry that history into the original explicit
+timeline, with or without limited axial reconstruction. Each accepted substep
+uses its start-time sample, the actual sampled CFL restriction, and the earliest
+native source, schedule or authored-event transition. Existing dense, sparse
+and nonlinear implicit graph entries instead freeze one endpoint sample before
+their native backward-Euler solve. Newton/Krylov trials reuse that one flow;
+they do not repeatedly sample or integrate the schedule. An implicit interval
+containing an interior schedule knot refuses before advancing either owner;
+callers split at the knot. An interval ending exactly at the knot is admitted.
+
+Native reciprocal transfers, external stream enthalpy and nonadvective heat
+retain their original single owners, conservation checks and rollback.
+Unscheduled bindings preserve their existing execution paths. Regression
+sources cover a stopped/ramped two-tank analytic response and refinement,
+agreement of all three implicit entries with a common endpoint balance,
+datum shifts, invalid inlet identities, interior-knot refusal, and both flow
+signs in a reconstructed distributed pipe.
+
+The schedule prescribes flow; it does not solve pump momentum, infer mechanical
+work, reverse branches independently, change stored mass or evolve composition.
+Explicit start sampling and backward-Euler endpoint sampling retain their
+original first-order time accuracy. Callers still choose and refine intervals
+that resolve pump startup and inlet variation. No measured throughput or global
+temporal-error bound is implied.
+
 ## Actual liquid graph dissipation as local fluid heat
 
 `LiquidGraphSources::dissipative_heating` binds an opt-in heat owner to the

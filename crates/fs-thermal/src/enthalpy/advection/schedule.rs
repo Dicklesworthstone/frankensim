@@ -1,5 +1,6 @@
 //! Prescribed pump and inlet histories on the original fixed-mass flow graph.
 use super::*;
+use std::sync::Arc;
 
 /// One continuous piecewise-linear pump/inlet sample.
 ///
@@ -24,6 +25,60 @@ pub struct AdvectionScheduleKnot {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AdvectionSchedule {
     knots: Vec<AdvectionScheduleKnot>,
+}
+
+struct ScheduleSample<'a> {
+    from: &'a AdvectionScheduleKnot,
+    to: &'a AdvectionScheduleKnot,
+    fraction: f64,
+    multiplier: f64,
+}
+
+/// Original prescribed data, shared across cloned explicit candidates. Only
+/// the current native flow buffers are resampled; physical observers and their
+/// histories are never cloned or rebuilt by a source-epoch preparation.
+#[derive(Clone)]
+pub(super) struct ExplicitAdvectionSchedule {
+    pub(super) schedule: Arc<AdvectionSchedule>,
+    flows: Arc<[MassFlow]>,
+    boundaries: Arc<[MassBoundary]>,
+    admitted: bool,
+}
+
+impl ExplicitAdvectionSchedule {
+    pub(super) fn new<O>(
+        flow: &Advected<O>,
+        schedule: Arc<AdvectionSchedule>,
+    ) -> Result<Self, DepositionError> {
+        schedule.inlets(&flow.boundaries, &mut || Ok(()))?;
+        Ok(Self {
+            schedule,
+            flows: flow.flows.clone().into(),
+            boundaries: flow.boundaries.clone().into(),
+            admitted: false,
+        })
+    }
+
+    pub(super) fn reset(&mut self) {
+        self.admitted = false;
+    }
+
+    pub(super) fn prepare<O>(
+        &mut self,
+        flow: &mut Advected<O>,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), DepositionError> {
+        if !self.admitted {
+            // Validate original inlet laws even during a stopped interval.
+            // begin() renews this admission against each actual input history.
+            self.schedule
+                .admit_sources(flow, &self.boundaries, thermal, checkpoint)?;
+            self.admitted = true;
+        }
+        let sample = self.schedule.sample(thermal.time_s(), checkpoint)?;
+        sample.apply(&self.flows, &self.boundaries, flow, checkpoint)
+    }
 }
 
 impl AdvectionSchedule {
@@ -53,14 +108,19 @@ impl AdvectionSchedule {
                     "advection schedule needs ordered times, nonnegative flow and identical inlet IDs",
                 ));
             }
-            for (j, ((id, h), expected_id)) in knot.inlet_enthalpies_j_kg.iter()
-                .zip(knots[0].inlet_enthalpies_j_kg.keys()).enumerate()
+            for (j, ((id, h), expected_id)) in knot
+                .inlet_enthalpies_j_kg
+                .iter()
+                .zip(knots[0].inlet_enthalpies_j_kg.keys())
+                .enumerate()
             {
                 if j % 256 == 0 {
                     checkpoint()?;
                 }
                 if id != expected_id || !h.is_finite() {
-                    return Err(invalid("scheduled inlets need identical IDs and finite enthalpies"));
+                    return Err(invalid(
+                        "scheduled inlets need identical IDs and finite enthalpies",
+                    ));
                 }
             }
         }
@@ -79,6 +139,26 @@ impl AdvectionSchedule {
             .map(|knot| knot.time_s)
     }
 
+    /// Freeze the prescribed rates and inlet h at one physical time.
+    ///
+    /// Original schedule, inlet-law, stationary-composition and carrier data
+    /// are admitted against `thermal`, then the SAME sampler used by native
+    /// implicit stages supplies the snapshot. This advances no physical state
+    /// or audit. The receiving native solve still owns continuity, actual cell
+    /// calorics/liquid support, transport and acceptance. Explicit upwind
+    /// entropy histories are not implicit endpoint snapshots.
+    pub fn flow_at_time(
+        &self,
+        flow: &Advected<()>,
+        thermal: &DepositionSimulation<'_>,
+        time_s: f64,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Advected<()>, DepositionError> {
+        self.admit(flow, thermal, &mut checkpoint)?;
+        self.flow_at(flow, time_s, &mut checkpoint)
+            .map(|(flow, _)| flow)
+    }
+
     pub(in crate::enthalpy) fn admit(
         &self,
         flow: &Advected<()>,
@@ -87,13 +167,17 @@ impl AdvectionSchedule {
     ) -> Result<(), DepositionError> {
         checkpoint()?;
         flow.admit_implicit_transport()?;
+        self.admit_sources(flow, &flow.boundaries, thermal, checkpoint)
+    }
+
+    fn inlets<'a>(
+        &self,
+        boundaries: &'a [MassBoundary],
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<u64, &'a MassBoundary>, DepositionError> {
         let mut inlets = BTreeMap::new();
-        for boundary in &flow.boundaries {
+        for boundary in boundaries {
             checkpoint()?;
-            let (_, cell, _) = boundary.identity();
-            if !thermal.cells().contains_key(&cell) {
-                return Err(invalid("inactive scheduled mass-flow boundary cell"));
-            }
             if let MassBoundary::Inlet { id, .. } = *boundary {
                 inlets.insert(id, boundary);
             }
@@ -106,12 +190,33 @@ impl AdvectionSchedule {
                 ));
             }
         }
+        Ok(inlets)
+    }
+
+    fn admit_sources<O>(
+        &self,
+        flow: &Advected<O>,
+        boundaries: &[MassBoundary],
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), DepositionError> {
+        for boundary in boundaries {
+            checkpoint()?;
+            if !thermal.cells().contains_key(&boundary.identity().1) {
+                return Err(invalid("inactive scheduled mass-flow boundary cell"));
+            }
+        }
+        let inlets = self.inlets(boundaries, checkpoint)?;
         // Keep the original composition/common-reference owner, including
         // during pump-off intervals. Never solve an underdetermined zero-flow
         // species graph or reinterpret inlet h in a receiving mixture's law.
         if let Some(species) = &flow.stationary_species {
-            species.validate_laws(thermal, &flow.boundaries, &flow.selective_outlets,
-                &flow.selective_outlet_laws)?;
+            species.validate_laws(
+                thermal,
+                boundaries,
+                &flow.selective_outlets,
+                &flow.selective_outlet_laws,
+            )?;
         }
         for knot in &self.knots {
             checkpoint()?;
@@ -173,6 +278,17 @@ impl AdvectionSchedule {
         time_s: f64,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(Advected<()>, f64), DepositionError> {
+        let sample = self.sample(time_s, checkpoint)?;
+        let mut result = flow.clone();
+        sample.apply(&flow.flows, &flow.boundaries, &mut result, checkpoint)?;
+        Ok((result, sample.multiplier))
+    }
+
+    fn sample(
+        &self,
+        time_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ScheduleSample<'_>, DepositionError> {
         checkpoint()?;
         if !time_s.is_finite() || time_s < 0.0 {
             return Err(invalid(
@@ -190,39 +306,62 @@ impl AdvectionSchedule {
             (a, b, finite((time_s - a.time_s) / (b.time_s - a.time_s))?)
         };
         let multiplier = interpolate(a.flow_multiplier, b.flow_multiplier, fraction)?;
-        let mut result = flow.clone();
-        for edge in &mut result.flows {
-            checkpoint()?;
-            edge.kg_s = scale_rate(edge.kg_s, multiplier)?;
+        Ok(ScheduleSample {
+            from: a,
+            to: b,
+            fraction,
+            multiplier,
+        })
+    }
+}
+
+impl ScheduleSample<'_> {
+    fn apply<O>(
+        &self,
+        original_flows: &[MassFlow],
+        original_boundaries: &[MassBoundary],
+        result: &mut Advected<O>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), DepositionError> {
+        if result.flows.len() != original_flows.len() {
+            return Err(invalid("scheduled flow topology changed"));
         }
-        for boundary in &mut result.boundaries {
+        for (edge, original) in result.flows.iter_mut().zip(original_flows) {
             checkpoint()?;
-            match boundary {
+            edge.kg_s = scale_rate(original.kg_s, self.multiplier)?;
+        }
+        // Retain capacity while stopped. A later sample rebuilds these same
+        // original streams, rather than scaling the last sample cumulatively.
+        result.boundaries.clear();
+        for &original in original_boundaries {
+            checkpoint()?;
+            let mut boundary = original;
+            match &mut boundary {
                 MassBoundary::Inlet {
                     id,
                     kg_s,
                     specific_h_j_kg,
                     ..
                 } => {
-                    *kg_s = scale_rate(*kg_s, multiplier)?;
-                    if let Some(&ha) = a.inlet_enthalpies_j_kg.get(&*id) {
-                        *specific_h_j_kg = interpolate(ha, b.inlet_enthalpies_j_kg[&*id], fraction)?;
+                    *kg_s = scale_rate(*kg_s, self.multiplier)?;
+                    if let Some(&ha) = self.from.inlet_enthalpies_j_kg.get(&*id) {
+                        *specific_h_j_kg =
+                            interpolate(ha, self.to.inlet_enthalpies_j_kg[&*id], self.fraction)?;
                     }
                 }
                 MassBoundary::Outlet { kg_s, .. } => {
-                    *kg_s = scale_rate(*kg_s, multiplier)?;
+                    *kg_s = scale_rate(*kg_s, self.multiplier)?;
                 }
             }
+            if self.multiplier != 0.0 {
+                result.boundaries.push(boundary);
+            }
         }
-        if multiplier == 0.0 {
-            // No boundary is actually carrying mass. Retain original frozen
-            // composition, reference cells and carrier identity. Zero interior
-            // faces still pass the native active-cell check but do not require
-            // liquid support. A later nonzero stage rechecks the original law.
-            result.boundaries.clear();
-        }
+        // A stopped sample carries no external mass. Original composition,
+        // component references and carrier identity remain bound; nonzero
+        // samples recheck native mobility and per-cell mass balance.
         checkpoint()?;
-        Ok((result, multiplier))
+        Ok(())
     }
 }
 

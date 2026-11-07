@@ -3,6 +3,9 @@ use super::*;
 use crate::enthalpy::{DepositionObserver, HeatTransfer};
 use std::sync::Arc;
 
+#[path = "schedule_tests.rs"]
+mod schedule;
+
 fn config(max_dt_s: f64) -> StepConfig {
     StepConfig {
         max_dt_s,

@@ -21,6 +21,7 @@ use std::sync::Arc;
 use fs_exec::Cx;
 use fs_qty::Density;
 use fs_thermal::enthalpy::advection::reconstruction::LimitedEnthalpyReconstruction;
+use fs_thermal::enthalpy::advection::schedule::AdvectionSchedule;
 use fs_thermal::enthalpy::advection::{
     Advected, AdvectionAudit, MassBoundary, MassFlow, ReconstructedAdvected,
 };
@@ -70,6 +71,7 @@ pub struct GraphEnthalpyTransport {
     advection: Advected<()>,
     max_connections: usize,
     reconstruction: Option<Arc<LimitedEnthalpyReconstruction>>,
+    schedule: Option<Arc<AdvectionSchedule>>,
 }
 
 #[derive(Clone)]
@@ -267,6 +269,7 @@ impl GraphEnthalpyTransport {
             advection,
             max_connections,
             reconstruction: None,
+            schedule: None,
         })
     }
 
@@ -301,9 +304,13 @@ impl GraphEnthalpyTransport {
     /// bindings; unstencilled junctions retain donor-cell transport. The native
     /// explicit time integration remains first order.
     pub fn wrap_observer<O>(&self, inner: O) -> Result<ReconstructedAdvected<O>, DepositionError> {
-        Advected::new(inner, self.advection.flows().to_vec(), self.max_connections)?
+        let observer = Advected::new(inner, self.advection.flows().to_vec(), self.max_connections)?
             .with_boundaries(self.advection.boundaries().to_vec(), self.max_connections)?
-            .with_optional_reconstruction(self.reconstruction.clone())
+            .with_optional_reconstruction(self.reconstruction.clone())?;
+        match &self.schedule {
+            Some(schedule) => observer.with_schedule(schedule.clone()),
+            None => Ok(observer),
+        }
     }
 
     /// Advance the original thermal state using its existing conservative
@@ -336,15 +343,24 @@ impl GraphEnthalpyTransport {
         thermal: &DepositionSimulation<'_>,
     ) -> Result<TransportStepCoefficients<()>, TransientTransportError> {
         self.validate_storage(cx, thermal)?;
+        let scheduled = self
+            .schedule
+            .as_ref()
+            .map(|schedule| {
+                schedule.flow_at_time(&self.advection, thermal, thermal.time_s(), || {
+                    thermal_checkpoint(cx)
+                })
+            })
+            .transpose()?;
+        let advection = scheduled.as_ref().unwrap_or(&self.advection);
         Ok(match &self.reconstruction {
             Some(plan) => {
-                self.advection
+                advection
                     .endpoint_transport_with_reconstruction(thermal, plan, || {
                         thermal_checkpoint(cx)
                     })?
             }
-            None => self
-                .advection
+            None => advection
                 .endpoint_transport(thermal, || thermal_checkpoint(cx))?,
         })
     }
@@ -367,6 +383,15 @@ impl GraphEnthalpyTransport {
         cell_tolerance_j: f64,
         total_tolerance_j: f64,
     ) -> Result<(DepositionSimulation<'m>, EnergyAudit), TransientTransportError> {
+        if let Some(frozen) = self.freeze_scheduled_interval(cx, thermal, target_s)? {
+            return frozen.advance_advection_implicit(
+                cx,
+                thermal,
+                target_s,
+                cell_tolerance_j,
+                total_tolerance_j,
+            );
+        }
         self.require_upwind()?;
         self.validate_storage(cx, thermal)?;
         let n = thermal.cells().len();
@@ -514,6 +539,7 @@ pub mod implicit;
 pub mod inertial;
 pub mod material;
 pub mod nonlinear;
+mod schedule;
 
 #[cfg(test)]
 mod tests;

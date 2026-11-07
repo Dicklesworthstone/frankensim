@@ -103,6 +103,9 @@ impl GraphEnthalpyTransport {
         target_s: f64,
         controls: SparseAdvectionControls,
     ) -> Result<(DepositionSimulation<'m>, SparseAdvectionReport), SparseAdvectionError> {
+        if let Some(frozen) = self.freeze_scheduled_interval(cx, thermal, target_s)? {
+            return frozen.advance_advection_sparse_implicit(cx, thermal, target_s, controls);
+        }
         self.require_upwind()?;
         self.validate_storage(cx, thermal)?;
         let n = thermal.cells().len();

@@ -1,6 +1,76 @@
 //! Authored nonuniform pipe geometry reaches the native explicit heat timeline.
 
 use super::*;
+use fs_thermal::enthalpy::advection::schedule::{AdvectionSchedule, AdvectionScheduleKnot};
+
+#[test]
+fn scheduled_reconstructed_pipe_matches_the_same_native_prescribed_flow() {
+    with_cx(|cx| {
+        let law = law(1e6);
+        let (initial, path) = wave(&law, 6);
+        let graph = graph(cx, 1.0);
+        let inventory = DistributedGraphInventory::new(
+            cx,
+            &graph,
+            Density::new(gas().density),
+            &NODES,
+            &[path],
+            &initial,
+            32,
+        )
+        .unwrap()
+        .with_limited_reconstruction(cx, &graph, &initial, 4)
+        .unwrap();
+        for q in [-0.2, 0.2] {
+            let (inlet, outlet) = if q > 0.0 {
+                (NODES[0], NODES[1])
+            } else {
+                (NODES[1], NODES[0])
+            };
+            let base = inventory
+                .bind(
+                    cx,
+                    &graph,
+                    &[q],
+                    &initial,
+                    streams(&law, q, inlet, outlet, 30.0),
+                    32,
+                )
+                .unwrap();
+            let schedule = AdvectionSchedule::new(
+                vec![AdvectionScheduleKnot {
+                    time_s: 0.0,
+                    flow_multiplier: 2.0,
+                    inlet_enthalpies_j_kg: BTreeMap::new(),
+                }],
+                1,
+                0,
+                || Ok(()),
+            )
+            .unwrap();
+            let scheduled = base.with_schedule(cx, &initial, schedule).unwrap();
+            let fixed = inventory
+                .bind(
+                    cx,
+                    &graph,
+                    &[2.0 * q],
+                    &initial,
+                    streams(&law, 2.0 * q, inlet, outlet, 30.0),
+                    32,
+                )
+                .unwrap();
+            let config = StepConfig {
+                max_dt_s: 1.0,
+                energy_tolerance_j: 1e-6,
+            };
+            let (a, ea, aa) = scheduled.advance_to(cx, &initial, 0.01, config).unwrap();
+            let (b, eb, ab) = fixed.advance_to(cx, &initial, 0.01, config).unwrap();
+            assert_eq!(a.cells(), b.cells());
+            assert_eq!(ea, eb);
+            assert_eq!(aa, ab);
+        }
+    });
+}
 
 #[test]
 fn reconstructed_graph_moves_affine_heat_with_native_sources_in_both_directions() {

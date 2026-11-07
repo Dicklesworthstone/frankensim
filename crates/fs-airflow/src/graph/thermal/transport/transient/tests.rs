@@ -1,4 +1,6 @@
 //! Native hydraulic -> original thermal inventory -> independently checked heat.
+mod scheduled;
+
 use super::*;
 use crate::graph::{GraphSolution, LossGraph};
 use crate::graph::tests::{boundary, config, edge, with_cx};

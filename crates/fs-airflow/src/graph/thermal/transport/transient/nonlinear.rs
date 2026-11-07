@@ -99,6 +99,11 @@ impl GraphEnthalpyTransport {
         resolve: impl Fn(&Cx<'_>, &DepositionSimulation<'m>) -> Result<BoundaryStepCoefficients<T>, E>,
     ) -> Result<(DepositionSimulation<'m>, ImplicitTransportReport<T>), ImplicitTransportError<E>>
     {
+        if let Some(frozen) = self.freeze_scheduled_interval(cx, thermal, target_s)? {
+            return frozen.advance_implicit_with_heat(
+                cx, thermal, target_s, controls, energy_guess_j, resolve,
+            );
+        }
         thermal_checkpoint(cx)?;
         controls
             .solver

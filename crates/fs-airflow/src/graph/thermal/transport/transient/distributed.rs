@@ -264,8 +264,9 @@ impl DistributedGraphInventory {
     /// transport. No junction gradient or hidden control volume is inferred.
     ///
     /// The shared plan is used by native inertial and quasi-steady endpoint
-    /// residuals, including reversal. Explicit observers and linear frozen-
-    /// flow shortcuts refuse this mode; use the nonlinear implicit entry.
+    /// residuals, including reversal, and by the original explicit timeline.
+    /// Linear frozen-flow shortcuts require upwind transport; reconstructed
+    /// implicit intervals use the nonlinear endpoint entry.
     pub fn with_limited_reconstruction(
         mut self,
         cx: &Cx<'_>,

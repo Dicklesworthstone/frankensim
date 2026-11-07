@@ -3124,6 +3124,52 @@ first/second temporal refinement, stopped-liquid heating and restart refusal,
 the limited-face exact Jacobian, frozen stationary mixtures with distinct inlet
 laws, malformed histories, shared work ceilings and late cancellation.
 
+### Prescribed histories on the original explicit convection timeline
+
+`Advected::with_schedule` and `ReconstructedAdvected::with_schedule` attach that
+same `AdvectionSchedule` to the original explicit observer. The immutable
+schedule and baseline connections are shared across candidate clones. Each
+source epoch samples rates and inlet enthalpy at its actual START time, using
+the same sampler as native implicit stages. Rates always scale the original
+connections, so a zero-flow interval cannot erase later pump restart. Stopped
+boundary streams are absent; baseline material, stationary composition,
+component references and liquid-carrier bindings remain intact.
+
+The schedule's next knot is composed with the inner observer's next transition;
+invalid inner transitions still refuse. Original CFL restrictions and final
+event/transition clipping choose the accepted interval. Source owners, interval
+heat, inner paired transfers, authored events and accepted histories remain on
+that one native timeline. Actual sampled mass rates determine the combined
+conduction/advection limit and reported Courant number. Limited reconstruction
+uses those same signed rates, without cloning the plan or inner observer at
+each substep. Upwind entropy histories describe the actual sampled inlet laws
+and fluxes; the existing nonempty-reconstruction exclusions remain unchanged.
+
+Construction checks original inlet identities. Each native advance renews
+complete inlet-knot caloric admission against its actual starting history;
+native source queries still check every interpolated inlet and actual flowing
+cell. Supported knots therefore do not authorize a calorically unsupported
+interior sample. A failure after locally accepted work discards both the thermal
+candidate and sampled observer, including its source and transport accounts.
+Without a schedule, the prior arithmetic and native hooks are unchanged.
+
+This retains first-order explicit time sampling, rather than integrating the
+within-step pump or inlet history. `max_dt_s` must resolve their variation,
+especially startup from zero flow; knot clipping alone is not a time-accuracy
+certificate. Common nonnegative scaling does not infer momentum, flow reversal,
+independent branch changes, evolving composition or changing stored mass.
+`AdvectionSchedule::flow_at_time` supplies the same admitted frozen snapshot to
+other native consumers without advancing state or accepted audits. Those
+consumers retain continuity, actual caloric/liquid support and physical-step
+acceptance; the snapshot itself is no temporal quadrature rule.
+
+Focused regressions use independent non-autonomous calorimetry and explicit
+chain balances, a datum shift, pump stop/restart through source transitions and
+events, interval heating, signed reconstructed circulation, actual upwind
+entropy, stopped-solid heating into mobile coexistence, and late source-domain
+or cancellation refusal. These are authored native numerical checks, not
+experimental validation or a coupled temporal-order upgrade.
+
 ## Finite-lifetime luminescent excitation
 
 `luminescence::ExcitationDecay` advances an authored emitting-state energy store

@@ -93,6 +93,37 @@ fn explicit_liquid_reconstruction_keeps_stationary_latent_inventory_and_bulk_lim
 }
 
 #[test]
+fn scheduled_explicit_liquid_pump_heats_solid_then_restarts_without_latent_advection() {
+    use crate::enthalpy::advection::schedule::{AdvectionSchedule, AdvectionScheduleKnot};
+    let law = PhaseLaw { datum: 0.0, identity: 7, melting_range_k: 0.0 };
+    let mut initial = prepare(&law, &[-20.0; 3], 2.0);
+    for cell in initial.cells.values_mut() { cell.boundary.source_w = 30.0; }
+    let schedule = AdvectionSchedule::new(
+        [(0.0, 0.0), (1.0, 0.0), (2.0, 1.0)].into_iter()
+            .map(|(time_s, flow_multiplier)| AdvectionScheduleKnot {
+                time_s, flow_multiplier, inlet_enthalpies_j_kg: Default::default(),
+            }).collect(), 3, 0, || Ok(()),
+    ).unwrap();
+    let flow = liquid_flow(&law, 0.2).with_reconstruction(plan(&initial)).unwrap()
+        .with_schedule(schedule).unwrap();
+    let (heated, stopped, first) = initial.advance_observed(
+        &flow, 1.0, config(0.25), || Ok(()),
+    ).unwrap();
+    for cell in heated.cells().values() { close(cell.specific_h_j_kg, 10.0, 1e-11); }
+    assert_eq!(stopped.audit().transported_mass_kg, 0.0);
+    close(first.external_heat_j, 90.0, 1e-11);
+    let (next, running, second) = heated.advance_observed(
+        &stopped, 2.0, config(0.25), || Ok(()),
+    ).unwrap();
+    for cell in next.cells().values() { close(cell.specific_h_j_kg, 40.0, 1e-11); }
+    assert!(running.audit().transported_mass_kg > 0.0);
+    close(second.external_heat_j, 90.0, 1e-11);
+    assert_eq!(running.audit().external_enthalpy_j, 0.0);
+    assert_eq!(initial.time_s(), 0.0);
+    assert_eq!(flow.audit(), Default::default());
+}
+
+#[test]
 fn liquid_reconstruction_recovers_affine_bulk_traces_on_unequal_cells_and_reversal() {
     for datum in [0.0, 1_099_511_627_776.0] {
         let law = PhaseLaw { datum, identity: 7, melting_range_k: 0.0 };
