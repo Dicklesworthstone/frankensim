@@ -745,7 +745,10 @@ impl SpatialSolidState<'_> {
         self.time_s
             .is_some_and(|time| time.to_bits() == run.state().time_s.to_bits())
             && self.matches_problem(run.material_problem())
-            && self.nodal_reference_density_kg_m3 == run.nodal_reference_density_kg_m3()
+            && match self.nodal_reference_density_kg_m3 {
+                Some(density) => run.nodal_reference_density_kg_m3() == Some(density),
+                None => super::reference_inventory_matches(run, run.material_problem()),
+            }
             && thermal_matches
     }
 

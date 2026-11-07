@@ -116,6 +116,31 @@ impl From<TransientError3> for SolidEnthalpyError {
 fn poll(cx: &Cx<'_>) -> Result<(), SolidEnthalpyError> {
     cx.checkpoint().map_err(|_| SolidEnthalpyError::Cancelled)
 }
+
+// For a cellwise caloric inventory, an explicit native P1 density field must
+// reproduce each element's reference density. That field overrides material
+// density in every inertial operator, so equal total mass is insufficient.
+// Spatial heat with its own P1 density instead compares those exact profiles.
+fn reference_inventory_matches(
+    run: &TetTransientRun3<'_, '_, '_, '_>,
+    problem: &TetLinearElasticProblem<'_>,
+) -> bool {
+    run.nodal_reference_density_kg_m3().is_none_or(|density| {
+        problem.tetrahedra.iter().enumerate().all(|(element, tet)| {
+            let material = match problem.materials {
+                TetMaterialField::Uniform(material) => Some(material),
+                TetMaterialField::PerElement(materials) => materials.get(element),
+            };
+            material.is_some_and(|material| {
+                tet.iter().all(|&vertex| {
+                    density.get(vertex).is_some_and(|rho| {
+                        rho.to_bits() == material.density_kg_m3.to_bits()
+                    })
+                })
+            })
+        })
+    })
+}
 // Preserve the original public error surface when no physical observer is supplied.
 fn unobserved_error(
     error: ObserverCouplingError<SolidEnthalpyError, DepositionError>,
@@ -520,6 +545,7 @@ impl SolidEnthalpyState<'_> {
         };
         run.state().time_s.to_bits() == self.time_s.to_bits()
             && self.matches_problem(run.material_problem()) && thermal_matches
+            && reference_inventory_matches(run, run.material_problem())
     }
 
     /// Replace a running specimen with this source-resolved material state at
@@ -549,6 +575,7 @@ impl SolidEnthalpyState<'_> {
     ) -> Result<(TetTransientRun3<'g, 'm, 'p, 's>, SolidMaterialRebind), SolidEnthalpyError> {
         poll(cx)?;
         if !previous.matches_transient(run) || !self.matches_problem(problem)
+            || !reference_inventory_matches(run, problem)
             || self.time_s.to_bits() != previous.time_s.to_bits()
             || self.mesh_frame != previous.mesh_frame
             || self.nodes_m != previous.nodes_m || self.tetrahedra != previous.tetrahedra

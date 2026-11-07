@@ -45,6 +45,8 @@ mod conductivity;
 mod motion;
 #[path = "spatial_solid_enthalpy/radiation.rs"]
 mod radiation;
+#[path = "spatial_solid_enthalpy/reference_inventory.rs"]
+mod reference_inventory;
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();
