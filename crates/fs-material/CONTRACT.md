@@ -20465,3 +20465,28 @@ history, an elastic modulus shift, a caloric balance or independent authority
 for time-temperature superposition. Focused tests use genuine resolved scalar
 sources to check stress/heat, weak passive channels, held moisture, source-axis
 refusals, immutable reference data and support/representability bounds.
+
+## Passive Mandel tensor work factors
+
+Full three-dimensional `TensorProny` branches and optional Kelvin--Voigt
+viscosity use `plane_stress_viscosity::factor_passive_work_matrix` for their
+passive Mandel work factors. Admission uses the original dimensional
+coefficients and the shared compensated Schur arithmetic; it does not square a
+global Frobenius norm, discard positive loss relative to the strongest axis, or
+introduce a damping floor. Resolved rank-deficient null directions remain
+undamped. Nonfinite, asymmetric, active, or unrepresentable data are refused
+under the shared factor's local admission and reconstruction bounds.
+
+The original constitutive tensors, relaxation times, branch order, and
+physical Mandel internal strains remain unchanged. Exact affine-ramp stress
+and mean stress still use the source tensors; branch storage and independently
+integrated nonnegative heat use their admitted work factors. The equilibrium
+positive-definite factor and elastic admission path are unchanged.
+
+Five native regressions compiled and demonstrated the original defects,
+including threefold Kelvin heat, phantom null-direction work, passive scale
+overflow/underflow and hidden active cross terms. Their independent oracle
+contracts original tensors and integrates physical heat by quadrature. The
+shared replacement factor has passing source and shell coverage; execution
+became unavailable before this final delegation could be rerun, so a corrected
+pass of these five full-tensor tests is not yet claimed.

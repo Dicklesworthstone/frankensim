@@ -6,8 +6,8 @@
 //! - Optional instantaneous Kelvin–Voigt viscosity `C_kv ⪰ 0` [Pa·s].
 //! - Relaxation branches `(C_j, τ_j)` (`j = 1..=N`, `N ≤ 64`) with `C_j ⪰ 0`
 //!   (symmetric positive semidefinite, no eigenvalue clipping) and `τ_j > 0`.
-//! - Each branch is factored once at admission as `C_j = L_j L_jᵀ` via deterministic
-//!   cyclic Jacobi eigendecomposition (`fs_la::eigen::jacobi_eigh`).
+//! - Each branch is factored once at admission as `C_j = L_j L_jᵀ` using
+//!   the shared original-unit compensated passive work factor.
 //! - Helmholtz free energy density:
 //!   `ψ(ε, q) = ½ εᵀ C_eq ε + Σ_j ½ q_jᵀ C_j q_j = ½ εᵀ C_eq ε + Σ_j ½ ‖L_jᵀ q_j‖²`.
 //! - Under a piecewise-linear strain ramp over `dt`, each branch strain `q_j ∈ ℝ⁶`
@@ -255,40 +255,14 @@ pub(crate) fn pd_factor(c: &Mandel6) -> Result<Mandel6, ViscoError> {
     Ok(factor)
 }
 
-/// Verify `c ⪰ 0` via Jacobi eigendecomposition without clipping negative eigenvalues,
-/// returning `L` such that `c = L Lᵀ`.
+/// Verify `c ⪰ 0` with the shared original-unit passive work factor.
+/// Returns `L` such that `c = L Lᵀ`, preserving resolved weak and null directions.
 pub(crate) fn psd_factor(c: &Mandel6) -> Result<Mandel6, ViscoError> {
-    let norm = check_symmetric_finite(c)?;
-    for i in 0..6 {
-        if c[i][i] < 0.0 {
-            return Err(ViscoError::Parameters {
-                what: "PSD Mandel tensor cannot have negative diagonal entries",
-            });
+    crate::plane_stress_viscosity::factor_passive_work_matrix(c).map_err(|_| {
+        ViscoError::Parameters {
+            what: "Prony branch or Kelvin-Voigt Mandel tensor is not finite, symmetric, representable and passive",
         }
-    }
-    if norm == 0.0 {
-        return Ok([[0.0; 6]; 6]);
-    }
-    let flat: Vec<f64> = c.iter().flatten().copied().collect();
-    let (evals, evecs) = jacobi_eigh(&flat, 6);
-    // Allow only floating-point roundoff on zero eigenvalues of rank-deficient
-    // matrices (≤ 64 * EPSILON * ||C||_F ≈ 1.4e-14 * ||C||_F); any physical or
-    // test-injected negative eigenvalue (such as -1e-12 * ||C||_F) is refused.
-    let zero_tol = 64.0 * f64::EPSILON * norm;
-    let mut factor = [[0.0f64; 6]; 6];
-    for k in 0..6 {
-        let lam = evals[k];
-        if !lam.is_finite() || lam < -zero_tol {
-            return Err(ViscoError::Parameters {
-                what: "Prony branch or Kelvin-Voigt Mandel tensor is not positive semidefinite",
-            });
-        }
-        let s = if lam > 0.0 { det::sqrt(lam) } else { 0.0 };
-        for i in 0..6 {
-            factor[i][k] = evecs[i * 6 + k] * s;
-        }
-    }
-    Ok(factor)
+    })
 }
 
 fn dot6(a: &[f64; 6], b: &[f64; 6]) -> f64 {
