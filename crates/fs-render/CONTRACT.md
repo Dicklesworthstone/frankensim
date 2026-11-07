@@ -4145,6 +4145,18 @@ the rear-cap geometric factor; callers apply that factor exactly once during
 pixel integration. Retained scene paths start at the lens exit. Lens-aware
 transient flight timing remains a separate integration.
 
+`CurvedCameraRaster::sample_pixel_sequential` and
+`sample_pixel_sensor_sequential` integrate the same full optical seeds into
+visible XYZ or original-band QE and photon responses, including infrared.
+Their analyzed variants place the original passive analyzer at the sensor.
+The shared raster, pupil and spectral proposal owner retains the original
+counter streams. Each new result stores optional rays and native paths:
+physically clipped lanes have neither, contribute zero and retain their full
+one-quarter wavelength measure. No ray is fabricated, retried or normalized
+by the number of surviving colors. Only the separate geometric weight is
+applied after scene transport. Existing mandatory-ray pixel APIs preserve
+their original behavior and refuse sequential lenses explicitly.
+
 The motion path reconstructs only the supplied interpolation model. It does not
 invent mechanical bandwidth, unwrap rotations absent from keyframes, smooth a
 declared contact/terminal discontinuity, validate the source dynamics, or claim

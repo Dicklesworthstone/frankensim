@@ -19,6 +19,9 @@ use crate::polarization::dielectric::scene::curved::participating::CurvedRayleig
 use crate::spectral::detector::{DetectorWavelength, QuantumEfficiencySensor};
 use fs_math::dd::Dd;
 
+mod sequential;
+pub use sequential::CurvedSequentialSensorPixelSample;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CurvedSensorPixelSample<const CHANNELS: usize> {
     qe_weighted_radiance_w_m2_sr: [f64; CHANNELS],
@@ -209,12 +212,7 @@ impl CurvedCameraRaster<'_> {
             pixel,
             sample,
             |u| {
-                let weights = [
-                    sensor.sample_wavelength(u)?,
-                    sensor.sample_wavelength((u + 0.25).fract())?,
-                    sensor.sample_wavelength((u + 0.5).fract())?,
-                    sensor.sample_wavelength((u + 0.75).fract())?,
-                ];
+                let weights = detector_packet(sensor, u)?;
                 let wavelengths = weights.map(|draw| draw.wavelength_nm());
                 draws = Some(weights);
                 Ok(wavelengths)
@@ -254,6 +252,18 @@ impl CurvedCameraRaster<'_> {
             diffraction_weights,
         })
     }
+}
+
+fn detector_packet<const C: usize>(
+    sensor: &QuantumEfficiencySensor<C>,
+    u: f64,
+) -> Result<[DetectorWavelength<C>; CAMERA_WAVELENGTHS], CurvedRasterError> {
+    Ok([
+        sensor.sample_wavelength(u)?,
+        sensor.sample_wavelength((u + 0.25).fract())?,
+        sensor.sample_wavelength((u + 0.5).fract())?,
+        sensor.sample_wavelength((u + 0.75).fract())?,
+    ])
 }
 
 // Divide the larger factor first, preserving tiny radiances multiplied by

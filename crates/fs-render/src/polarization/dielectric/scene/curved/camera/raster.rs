@@ -15,9 +15,13 @@
 //! [`wave::CurvedWaveCameraRaster`]; the generic geometric raster rejects it.
 //! An explicit geometric dispersive lens retains its native pupil and phase
 //! index laws, generating a separate camera ray for every sampled wavelength.
+//! Resolved sequential lenses use [`CurvedCameraRaster::sample_pixel_sequential`]
+//! and its detector variants: each live lane carries the full reciprocal lens
+//! polarization into the scene. Aperture/TIR misses have no ray and retain
+//! the original zero-contribution wavelength draw.
 
-use super::{CameraRadianceError, CameraRadianceSample, CurvedCameraScene};
-use crate::camera::{CameraError, LensSample, PhysicalCamera};
+use super::{CameraAnalyzer, CameraRadianceError, CameraRadianceSample, CurvedCameraScene};
+use crate::camera::{CameraError, LensSample, PhysicalCamera, SequentialCameraBeam};
 use crate::charts::Ray;
 use crate::hero_wavelength_packet;
 use crate::polarization::dielectric::scene::curved::CurvedTraceSettings;
@@ -41,6 +45,8 @@ pub mod area_lights;
 
 /// Source-bounded multichannel detector signals, including infrared bands.
 pub mod sensor;
+mod sequential;
+pub use sequential::CurvedSequentialPixelSample;
 /// Native finite-source histories at the original observation clock.
 pub mod transient;
 
@@ -127,6 +133,31 @@ impl CurvedPixelSample {
     /// these weights. Geometric cameras retain exact unit weights.
     pub const fn diffraction_weights(&self) -> &[f64; CAMERA_WAVELENGTHS] {
         &self.diffraction_weights
+    }
+}
+
+// A clipped wavelength has neither an outgoing ray nor a fabricated path.
+// The original mandatory-ray API is adapted only from complete packets.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct OptionalCameraPacket {
+    rays: [Option<Ray>; CAMERA_WAVELENGTHS],
+    wavelengths_nm: [f64; CAMERA_WAVELENGTHS],
+    spectral: [Option<CameraRadianceSample>; CAMERA_WAVELENGTHS],
+    optical_weights: [f64; CAMERA_WAVELENGTHS],
+}
+
+#[derive(Clone, Copy)]
+enum CameraLaunch {
+    Geometric(Ray),
+    Sequential(SequentialCameraBeam),
+}
+
+impl CameraLaunch {
+    fn ray(self) -> Ray {
+        match self {
+            Self::Geometric(ray) => ray,
+            Self::Sequential(beam) => beam.ray(),
+        }
     }
 }
 
@@ -294,6 +325,53 @@ impl<'a> CurvedCameraRaster<'a> {
         ),
         CurvedRasterError,
     > {
+        if self.camera.sequential_lens().is_some() {
+            cx.checkpoint().map_err(CameraError::from)?;
+            if pixel >= self.pixels {
+                return Err(CurvedRasterError::InvalidRaster);
+            }
+            return Err(CameraError::SequentialLensRequiresWeightedRays.into());
+        }
+        let packet = self.sample_optional_packet_with_transport(
+            cx,
+            seed,
+            pixel,
+            sample,
+            None,
+            wavelengths,
+            |cx, launch, wavelength, lane| match launch {
+                CameraLaunch::Geometric(ray) => Ok(trace(cx, ray, wavelength, lane)?),
+                CameraLaunch::Sequential(_) => {
+                    Err(CameraError::SequentialLensRequiresWeightedRays.into())
+                }
+            },
+        )?;
+        Ok((
+            complete_lanes(packet.rays)?,
+            packet.wavelengths_nm,
+            complete_lanes(packet.spectral)?,
+            packet.optical_weights,
+        ))
+    }
+
+    // All camera models retain the same original raster/pupil/proposal draws
+    // and transport callback. Only physically absent lanes skip that callback.
+    #[allow(clippy::too_many_arguments)]
+    fn sample_optional_packet_with_transport(
+        &self,
+        cx: &Cx<'_>,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+        analyzer: Option<CameraAnalyzer>,
+        wavelengths: impl FnOnce(f64) -> Result<[f64; CAMERA_WAVELENGTHS], CurvedRasterError>,
+        mut trace: impl FnMut(
+            &Cx<'_>,
+            CameraLaunch,
+            f64,
+            usize,
+        ) -> Result<CameraRadianceSample, CurvedRasterError>,
+    ) -> Result<OptionalCameraPacket, CurvedRasterError> {
         cx.checkpoint().map_err(CameraError::from)?;
         if pixel >= self.pixels {
             return Err(CurvedRasterError::InvalidRaster);
@@ -328,8 +406,37 @@ impl<'a> CurvedCameraRaster<'a> {
         } else {
             None
         };
-        let (rays, mut diffraction_weights) = if let Some(token) = &layered {
-            ([token.ray(); CAMERA_WAVELENGTHS], [0.0; CAMERA_WAVELENGTHS])
+        let (launches, mut diffraction_weights) = if self.camera.sequential_lens().is_some() {
+            let beams = if let Some(analyzer) = analyzer {
+                self.camera
+                    .generate_sequential_spectral_beams_analyzed_from_tangent_offsets(
+                        &render_cx,
+                        x_tan,
+                        y_tan,
+                        lens_sample,
+                        &wavelengths_nm,
+                        analyzer.reference_axis(),
+                        analyzer.row(),
+                    )?
+            } else {
+                self.camera
+                    .generate_sequential_spectral_beams_from_tangent_offsets(
+                        &render_cx,
+                        x_tan,
+                        y_tan,
+                        lens_sample,
+                        &wavelengths_nm,
+                    )?
+            };
+            (
+                beams.map(|beam| beam.map(CameraLaunch::Sequential)),
+                beams.map(|beam| beam.map_or(0.0, |beam| beam.geometry_weight())),
+            )
+        } else if let Some(token) = &layered {
+            (
+                [Some(CameraLaunch::Geometric(token.ray())); CAMERA_WAVELENGTHS],
+                [0.0; CAMERA_WAVELENGTHS],
+            )
         } else if self.camera.has_diffraction() {
             let optical = self.camera.generate_spectral_ray_from_tangent_offsets(
                 &render_cx,
@@ -339,7 +446,10 @@ impl<'a> CurvedCameraRaster<'a> {
                 diffraction_sample,
                 &wavelengths_nm,
             )?;
-            ([optical.ray; CAMERA_WAVELENGTHS], optical.weights)
+            (
+                [Some(CameraLaunch::Geometric(optical.ray)); CAMERA_WAVELENGTHS],
+                optical.weights,
+            )
         } else {
             (
                 self.camera
@@ -349,17 +459,25 @@ impl<'a> CurvedCameraRaster<'a> {
                         y_tan,
                         lens_sample,
                         &wavelengths_nm,
-                    )?,
+                    )?
+                    .map(|ray| Some(CameraLaunch::Geometric(ray))),
                 [1.0; CAMERA_WAVELENGTHS],
             )
         };
-        let mut trace_lane = |lane: usize| -> Result<CameraRadianceSample, CurvedRasterError> {
-            let result = trace(&render_cx, rays[lane], wavelengths_nm[lane], lane)?;
-            if let Some(lens) = self.camera.dispersive_lens() {
-                lens.admit_exterior_phase_index(wavelengths_nm[lane], result.launch_phase_index())?;
-            }
-            Ok(result)
-        };
+        let mut trace_lane =
+            |lane: usize| -> Result<Option<CameraRadianceSample>, CurvedRasterError> {
+                let Some(launch) = launches[lane] else {
+                    return Ok(None);
+                };
+                let result = trace(&render_cx, launch, wavelengths_nm[lane], lane)?;
+                if let Some(lens) = self.camera.dispersive_lens() {
+                    lens.admit_exterior_phase_index(
+                        wavelengths_nm[lane],
+                        result.launch_phase_index(),
+                    )?;
+                }
+                Ok(Some(result))
+            };
         // Fixed storage and explicit propagation of the first failed lane.
         let spectral = [
             trace_lane(0)?,
@@ -368,11 +486,12 @@ impl<'a> CurvedCameraRaster<'a> {
             trace_lane(3)?,
         ];
         if self.camera.has_diffraction() {
+            let resolved = complete_lanes(spectral)?;
             let points = [
-                wave::source_point(&spectral[0])?,
-                wave::source_point(&spectral[1])?,
-                wave::source_point(&spectral[2])?,
-                wave::source_point(&spectral[3])?,
+                wave::source_point(&resolved[0])?,
+                wave::source_point(&resolved[1])?,
+                wave::source_point(&resolved[2])?,
+                wave::source_point(&resolved[3])?,
             ];
             if let Some(token) = layered {
                 diffraction_weights = token.resolve_spectral_sources(&render_cx, points)?.weights;
@@ -391,8 +510,24 @@ impl<'a> CurvedCameraRaster<'a> {
                 }
             }
         }
-        Ok((rays, wavelengths_nm, spectral, diffraction_weights))
+        Ok(OptionalCameraPacket {
+            rays: launches.map(|launch| launch.map(CameraLaunch::ray)),
+            wavelengths_nm,
+            spectral,
+            optical_weights: diffraction_weights,
+        })
     }
+}
+
+fn complete_lanes<T>(
+    [a, b, c, d]: [Option<T>; CAMERA_WAVELENGTHS],
+) -> Result<[T; CAMERA_WAVELENGTHS], CurvedRasterError> {
+    Ok([
+        a.ok_or(CurvedRasterError::NumericalRange)?,
+        b.ok_or(CurvedRasterError::NumericalRange)?,
+        c.ok_or(CurvedRasterError::NumericalRange)?,
+        d.ok_or(CurvedRasterError::NumericalRange)?,
+    ])
 }
 
 fn unit(word: u32) -> f64 {
