@@ -1,4 +1,4 @@
-//! Adaptive backward Euler without replacing the physical enthalpy equation.
+//! Adaptive backward Euler and SDIRK2 on the original physical enthalpy equation.
 //!
 //! Each trial compares one full step with two half steps from the SAME accepted
 //! history. The fine endpoint is accepted without Richardson extrapolation:
@@ -10,6 +10,8 @@
 //! Thus an enthalpy reference offset cannot loosen the requested accuracy. These
 //! are local time-error estimates, not bounds on accumulated or spatial error.
 //! Only the two accepted half steps contribute heat to the running balance.
+//! SDIRK2 retains its two native stages and integrates their physical heat;
+//! instantaneous endpoint power never substitutes for that tableau quadrature.
 //!
 //! `advance_to` lands exactly on a requested event time. Source, boundary and
 //! contact laws are fixed during that call; change them only between event calls.
@@ -20,9 +22,11 @@
 
 pub mod contact;
 pub mod material;
+mod sdirk;
+pub use sdirk::EnthalpySdirk2AcceptedTrial;
 mod entropy;
-pub use entropy::{AdaptiveEnthalpyEntropyReport, AdaptiveEnthalpyEntropyState};
 pub(crate) use entropy::combine_entropy;
+pub use entropy::{AdaptiveEnthalpyEntropyReport, AdaptiveEnthalpyEntropyState};
 
 use std::ops::ControlFlow;
 
@@ -64,7 +68,9 @@ pub struct EnthalpyTimeError {
     pub maximum_enthalpy_difference_j_kg: f64,
     pub maximum_temperature_difference_k: f64,
     pub maximum_liquid_fraction_difference: f64,
-    /// Maximum componentwise difference divided by its declared allowance.
+    /// Maximum estimated fine-step error divided by its declared allowance.
+    /// Backward Euler uses the full difference; smooth SDIRK2 uses one third
+    /// for equal half steps. The raw differences above remain unscaled.
     /// Acceptance requires this value to be at most one.
     pub normalized: f64,
 }
@@ -105,10 +111,12 @@ pub enum AdaptiveEnthalpyStatus {
 pub struct AdaptiveEnthalpyReport {
     pub status: AdaptiveEnthalpyStatus,
     pub time_s: f64,
-    /// Accepted full trials; each contains two physical backward-Euler steps.
+    /// Accepted full trials; each contains two physical integration steps.
     pub accepted: usize,
     pub rejected: usize,
-    /// Actual attempted endpoint solves, including rejected comparison work.
+    /// Attempted integration steps, including rejected comparison work.
+    /// A backward-Euler attempt has one implicit stage; an SDIRK2 attempt
+    /// has at most two, each under the original bounded nonlinear controls.
     pub endpoint_solves: usize,
     pub last_error: Option<EnthalpyTimeError>,
     /// A recoverable nonlinear, physical residual or energy refusal on the
@@ -133,7 +141,7 @@ pub struct AdaptiveEnthalpyState<'s, 'm, 'c> {
     initial_h: Vec<f64>,
     initial_temperature: Vec<f64>,
     initial_liquid: Vec<f64>,
-    endpoint: Option<EnthalpyStepSolution>,
+    endpoint: Option<AdaptiveStep>,
     time_s: f64,
     next_step_s: f64,
     accepted: usize,
@@ -144,6 +152,94 @@ pub struct AdaptiveEnthalpyState<'s, 'm, 'c> {
     stored_energy_change_j: f64,
     last_error: Option<EnthalpyTimeError>,
     last_endpoint_refusal: Option<EnthalpyError>,
+}
+
+// Keep authentic native reports without copying nodal fields or replacing
+// stage-integrated heat by averaged endpoint fields. Only the controller's
+// field access and accepted external-heat accounting are shared. Inline reports
+// avoid another allocation on every trial; their nodal fields already use Vec.
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
+enum AdaptiveStep {
+    BackwardEuler(EnthalpyStepSolution),
+    Sdirk2(super::sdirk::EnthalpySdirk2Step),
+}
+
+impl AdaptiveStep {
+    fn enthalpy(&self) -> &[f64] {
+        match self {
+            Self::BackwardEuler(step) => &step.specific_enthalpy_j_kg,
+            Self::Sdirk2(step) => &step.second_stage.specific_enthalpy_j_kg,
+        }
+    }
+
+    fn temperature(&self) -> &[f64] {
+        match self {
+            Self::BackwardEuler(step) => &step.temperature,
+            Self::Sdirk2(step) => &step.second_stage.temperature,
+        }
+    }
+
+    fn liquid_fraction(&self) -> &[f64] {
+        match self {
+            Self::BackwardEuler(step) => &step.liquid_mass_fraction,
+            Self::Sdirk2(step) => &step.second_stage.liquid_mass_fraction,
+        }
+    }
+
+    fn external_heat_j(&self, dt_s: f64) -> Result<f64, EnthalpyError> {
+        match self {
+            Self::BackwardEuler(step) => finite(dt_s * external_heat_w(step)?),
+            Self::Sdirk2(step) => {
+                use fs_math::dd::Dd;
+                let net = Dd::from_f64(step.source_j) + Dd::from_f64(step.dirichlet_in_j)
+                    - Dd::from_f64(step.neumann_out_j)
+                    - Dd::from_f64(step.robin_out_j)
+                    - Dd::from_f64(step.radiation_out_j);
+                finite(net.hi)?;
+                finite(net.lo)?;
+                finite(net.to_f64())
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AdaptiveOrder {
+    BackwardEuler,
+    Sdirk2,
+}
+
+impl AdaptiveOrder {
+    fn error_root(self, error: f64) -> f64 {
+        match self {
+            Self::BackwardEuler => error.sqrt(),
+            Self::Sdirk2 => error.cbrt(),
+        }
+    }
+
+    fn fine_error_scale(self, first_dt: f64, dt: f64) -> f64 {
+        match self {
+            Self::BackwardEuler => 1.0,
+            Self::Sdirk2 => {
+                // Fine LTE / (coarse LTE - fine LTE). Equal halves give 1/3;
+                // actual rounded clock intervals need their own cubic weights.
+                let fraction = first_dt / dt;
+                let difference = 3.0 * fraction * (1.0 - fraction);
+                (1.0 - difference) / difference
+            }
+        }
+    }
+}
+
+struct NativeAcceptedTrial<'a> {
+    accepted_trial: usize,
+    start_time_s: f64,
+    midpoint_time_s: f64,
+    end_time_s: f64,
+    first_half: &'a AdaptiveStep,
+    second_half: &'a AdaptiveStep,
+    error: EnthalpyTimeError,
 }
 
 impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
@@ -253,25 +349,30 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
     pub fn specific_enthalpy_j_kg(&self) -> &[f64] {
         self.endpoint
             .as_ref()
-            .map_or(&self.initial_h, |s| &s.specific_enthalpy_j_kg)
+            .map_or(&self.initial_h, AdaptiveStep::enthalpy)
     }
     #[must_use]
     pub fn temperature(&self) -> &[f64] {
         self.endpoint
             .as_ref()
-            .map_or(&self.initial_temperature, |s| &s.temperature)
+            .map_or(&self.initial_temperature, AdaptiveStep::temperature)
     }
     #[must_use]
     pub fn liquid_mass_fraction(&self) -> &[f64] {
         self.endpoint
             .as_ref()
-            .map_or(&self.initial_liquid, |s| &s.liquid_mass_fraction)
+            .map_or(&self.initial_liquid, AdaptiveStep::liquid_fraction)
     }
-    /// Last accepted HALF-step response. Its storage and energy fields cover
-    /// only that half step; use the returned report for the whole trajectory.
+    /// Last accepted backward-Euler HALF-step response. Its storage and energy
+    /// cover only that half step; use the report for the whole trajectory.
+    /// Returns `None` before any step or when the latest step used SDIRK2;
+    /// [`Self::last_sdirk2_step`] retains that method's authentic stage reports.
     #[must_use]
     pub fn last_endpoint(&self) -> Option<&EnthalpyStepSolution> {
-        self.endpoint.as_ref()
+        match self.endpoint.as_ref()? {
+            AdaptiveStep::BackwardEuler(step) => Some(step),
+            AdaptiveStep::Sdirk2(_) => None,
+        }
     }
 
     /// Advance under fixed source/boundary/contact laws to a declared event.
@@ -329,7 +430,12 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
         max_trials: usize,
     ) -> Result<AdaptiveEnthalpyReport, EnthalpyError> {
         self.advance_to_with_pointwise_ambient_radiation_observed(
-            cx, problem, interfaces, radiation, end_time_s, max_trials,
+            cx,
+            problem,
+            interfaces,
+            radiation,
+            end_time_s,
+            max_trials,
             |_| ControlFlow::Continue(()),
         )
     }
@@ -353,9 +459,11 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
             cx,
             end_time_s,
             max_trials,
-            |h, dt| storage.advance_with_pointwise_ambient_radiation(
-                cx, problem, interfaces, h, dt, config, radiation,
-            ),
+            |h, dt| {
+                storage.advance_with_pointwise_ambient_radiation(
+                    cx, problem, interfaces, h, dt, config, radiation,
+                )
+            },
             observe,
         )
     }
@@ -372,7 +480,12 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
         max_trials: usize,
     ) -> Result<AdaptiveEnthalpyReport, EnthalpyError> {
         self.advance_to_with_pointwise_enclosure_radiation_observed(
-            cx, problem, interfaces, radiation, end_time_s, max_trials,
+            cx,
+            problem,
+            interfaces,
+            radiation,
+            end_time_s,
+            max_trials,
             |_| ControlFlow::Continue(()),
         )
     }
@@ -396,9 +509,11 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
             cx,
             end_time_s,
             max_trials,
-            |h, dt| storage.advance_with_pointwise_enclosure_radiation(
-                cx, problem, interfaces, h, dt, config, radiation,
-            ),
+            |h, dt| {
+                storage.advance_with_pointwise_enclosure_radiation(
+                    cx, problem, interfaces, h, dt, config, radiation,
+                )
+            },
             observe,
         )
     }
@@ -412,13 +527,20 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
         observe: impl FnMut(EnthalpyAcceptedTrial<'_>) -> ControlFlow<()>,
     ) -> Result<AdaptiveEnthalpyReport, EnthalpyError> {
         self.advance_with_account(
-            cx, end, max_trials,
-            |h, dt, _| Ok((advance(h, dt)?, None)), None, observe,
-        ).map_err(|error| match error {
+            cx,
+            end,
+            max_trials,
+            |h, dt, _| Ok((advance(h, dt)?, None)),
+            None,
+            observe,
+        )
+        .map_err(|error| match error {
             super::entropy::EnthalpyEntropyError::Physical(error) => error,
             // This path supplies neither entropy metadata nor an account, so
             // it cannot run an entropy gate.
-            _ => EnthalpyError::InvalidInput("unexpected entropy gate on a physical-only trajectory"),
+            _ => {
+                EnthalpyError::InvalidInput("unexpected entropy gate on a physical-only trajectory")
+            }
         })
     }
 
@@ -428,18 +550,75 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
         cx: &Cx<'_>,
         end: f64,
         max_trials: usize,
-        mut advance: impl FnMut(&[f64], f64, bool) -> Result<
-            (EnthalpyStepSolution, Option<super::entropy::EnthalpyEntropyBalance>),
+        mut advance: impl FnMut(
+            &[f64],
+            f64,
+            bool,
+        ) -> Result<
+            (
+                EnthalpyStepSolution,
+                Option<super::entropy::EnthalpyEntropyBalance>,
+            ),
+            super::entropy::EnthalpyEntropyError,
+        >,
+        entropy: Option<&mut entropy::EntropyAccount>,
+        mut observe: impl FnMut(EnthalpyAcceptedTrial<'_>) -> ControlFlow<()>,
+    ) -> Result<AdaptiveEnthalpyReport, super::entropy::EnthalpyEntropyError> {
+        self.advance_native_with_account(
+            cx,
+            end,
+            max_trials,
+            AdaptiveOrder::BackwardEuler,
+            |h, dt, account| {
+                advance(h, dt, account)
+                    .map(|(step, entropy)| (AdaptiveStep::BackwardEuler(step), entropy))
+            },
+            entropy,
+            |trial| {
+                let (
+                    AdaptiveStep::BackwardEuler(first_half),
+                    AdaptiveStep::BackwardEuler(second_half),
+                ) = (trial.first_half, trial.second_half)
+                else {
+                    unreachable!("backward-Euler advancement retains backward-Euler reports")
+                };
+                observe(EnthalpyAcceptedTrial {
+                    accepted_trial: trial.accepted_trial,
+                    start_time_s: trial.start_time_s,
+                    midpoint_time_s: trial.midpoint_time_s,
+                    end_time_s: trial.end_time_s,
+                    first_half,
+                    second_half,
+                    error: trial.error,
+                })
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn advance_native_with_account(
+        &mut self,
+        cx: &Cx<'_>,
+        end: f64,
+        max_trials: usize,
+        order: AdaptiveOrder,
+        mut advance: impl FnMut(
+            &[f64],
+            f64,
+            bool,
+        ) -> Result<
+            (AdaptiveStep, Option<super::entropy::EnthalpyEntropyBalance>),
             super::entropy::EnthalpyEntropyError,
         >,
         mut entropy: Option<&mut entropy::EntropyAccount>,
-        mut observe: impl FnMut(EnthalpyAcceptedTrial<'_>) -> ControlFlow<()>,
+        mut observe: impl FnMut(NativeAcceptedTrial<'_>) -> ControlFlow<()>,
     ) -> Result<AdaptiveEnthalpyReport, super::entropy::EnthalpyEntropyError> {
         poll(cx, 0)?;
         if !end.is_finite() || end < self.time_s || !(end - self.time_s).is_finite() {
             return Err(EnthalpyError::InvalidInput(
                 "adaptive end time must be finite and not precede history",
-            ).into());
+            )
+            .into());
         }
         let before = (self.accepted, self.rejected, self.endpoint_solves);
         self.accepted
@@ -498,42 +677,56 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
                 let (coarse, _) = advance(self.specific_enthalpy_j_kg(), dt, false)?;
                 poll(cx, trial)?;
                 self.endpoint_solves += 1;
-                let (first, first_entropy) = advance(self.specific_enthalpy_j_kg(), first_dt, true)?;
+                let (first, first_entropy) =
+                    advance(self.specific_enthalpy_j_kg(), first_dt, true)?;
                 poll(cx, trial)?;
                 self.endpoint_solves += 1;
-                let (fine, second_entropy) = advance(&first.specific_enthalpy_j_kg, second_dt, true)?;
-                let input_first = finite(first_dt * external_heat_w(&first)?)?;
-                let input_second = finite(second_dt * external_heat_w(&fine)?)?;
-                let error = estimate(cx, self, &coarse, &fine)?;
+                let (fine, second_entropy) = advance(first.enthalpy(), second_dt, true)?;
+                let input_first = first.external_heat_j(first_dt)?;
+                let input_second = fine.external_heat_j(second_dt)?;
+                let error = estimate(
+                    cx,
+                    self,
+                    &coarse,
+                    &fine,
+                    order.fine_error_scale(first_dt, dt),
+                )?;
                 Ok::<_, super::entropy::EnthalpyEntropyError>((
-                    first, fine, input_first, input_second, error, first_entropy, second_entropy,
+                    first,
+                    fine,
+                    input_first,
+                    input_second,
+                    error,
+                    first_entropy,
+                    second_entropy,
                 ))
             })();
-            let (first, fine, input_first, input_second, error, first_entropy, second_entropy) = match candidate {
-                Ok(candidate) => candidate,
-                Err(super::entropy::EnthalpyEntropyError::Physical(
-                    error @ (EnthalpyError::NotConverged(_)
+            let (first, fine, input_first, input_second, error, first_entropy, second_entropy) =
+                match candidate {
+                    Ok(candidate) => candidate,
+                    Err(super::entropy::EnthalpyEntropyError::Physical(
+                        error @ (EnthalpyError::NotConverged(_)
                         | EnthalpyError::EndpointResidual { .. }
                         | EnthalpyError::EnergyBalance { .. }),
-                )) => {
-                    poll(cx, trial)?;
-                    self.rejected += 1;
-                    self.last_error = None;
-                    self.last_endpoint_refusal = Some(error);
-                    if !self.reduce_step(requested_step, 0.5) {
-                        status = AdaptiveEnthalpyStatus::MinimumStep;
-                        break;
+                    )) => {
+                        poll(cx, trial)?;
+                        self.rejected += 1;
+                        self.last_error = None;
+                        self.last_endpoint_refusal = Some(error);
+                        if !self.reduce_step(requested_step, 0.5) {
+                            status = AdaptiveEnthalpyStatus::MinimumStep;
+                            break;
+                        }
+                        continue;
                     }
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
+                    Err(error) => return Err(error),
+                };
             poll(cx, trial)?;
             if error.normalized > 1.0 {
                 self.rejected += 1;
                 self.last_error = Some(error);
                 self.last_endpoint_refusal = None;
-                let factor = (0.9 / error.normalized.sqrt()).clamp(0.1, 0.5);
+                let factor = (0.9 / order.error_root(error.normalized)).clamp(0.1, 0.5);
                 if !self.reduce_step(requested_step, factor) {
                     status = AdaptiveEnthalpyStatus::MinimumStep;
                     break;
@@ -547,11 +740,7 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
             let (sum, correction) = compensated_add(sum, correction, input_second)?;
             let mut stored = 0.0;
             let mut stored_correction = 0.0;
-            for (vertex, (&h, &initial)) in fine
-                .specific_enthalpy_j_kg
-                .iter()
-                .zip(&self.initial_h)
-                .enumerate()
+            for (vertex, (&h, &initial)) in fine.enthalpy().iter().zip(&self.initial_h).enumerate()
             {
                 if vertex % ASSEMBLY_TILE == 0 {
                     poll(cx, vertex)?;
@@ -559,14 +748,23 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
                 (stored, stored_correction) = compensated_add(
                     stored,
                     stored_correction,
-                    self.storage.storage_change_j(vertex, h, initial, fine.temperature[vertex])?,
+                    self.storage.storage_change_j(
+                        vertex,
+                        h,
+                        initial,
+                        fine.temperature()[vertex],
+                    )?,
                 )?;
             }
             finite(stored - sum)?;
             let entropy_candidate = if let Some(account) = entropy.as_deref() {
                 Some(account.extended(
-                    self.storage, cx, &self.initial_h, &fine.specific_enthalpy_j_kg,
-                    first_entropy, second_entropy,
+                    self.storage,
+                    cx,
+                    &self.initial_h,
+                    fine.enthalpy(),
+                    first_entropy,
+                    second_entropy,
                 )?)
             } else {
                 None
@@ -574,7 +772,7 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
             let factor = if error.normalized == 0.0 {
                 2.0
             } else {
-                (0.9 / error.normalized.sqrt()).clamp(0.5, 2.0)
+                (0.9 / order.error_root(error.normalized)).clamp(0.5, 2.0)
             };
             let next = (dt * factor)
                 .min(self.config.maximum_step_s)
@@ -595,7 +793,7 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
             // Publish an atomic borrowed pair only after accepting ALL physical
             // state and accounting. The first half was already computed for the
             // comparison; keeping it alive through this callback adds no clone.
-            let stop = observe(EnthalpyAcceptedTrial {
+            let stop = observe(NativeAcceptedTrial {
                 accepted_trial: self.accepted,
                 start_time_s: trial_start,
                 midpoint_time_s: middle,
@@ -644,8 +842,9 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
 fn estimate(
     cx: &Cx<'_>,
     state: &AdaptiveEnthalpyState<'_, '_, '_>,
-    coarse: &EnthalpyStepSolution,
-    fine: &EnthalpyStepSolution,
+    coarse: &AdaptiveStep,
+    fine: &AdaptiveStep,
+    fine_error_scale: f64,
 ) -> Result<EnthalpyTimeError, EnthalpyError> {
     let mut error = EnthalpyTimeError {
         maximum_enthalpy_difference_j_kg: 0.0,
@@ -655,20 +854,20 @@ fn estimate(
     };
     let fields = [
         (
-            &coarse.specific_enthalpy_j_kg,
-            &fine.specific_enthalpy_j_kg,
+            coarse.enthalpy(),
+            fine.enthalpy(),
             state.specific_enthalpy_j_kg(),
             state.config.enthalpy_absolute_tolerance_j_kg,
         ),
         (
-            &coarse.temperature,
-            &fine.temperature,
+            coarse.temperature(),
+            fine.temperature(),
             state.temperature(),
             state.config.temperature_absolute_tolerance_k,
         ),
         (
-            &coarse.liquid_mass_fraction,
-            &fine.liquid_mass_fraction,
+            coarse.liquid_fraction(),
+            fine.liquid_fraction(),
             state.liquid_mass_fraction(),
             state.config.liquid_fraction_absolute_tolerance,
         ),
@@ -682,7 +881,9 @@ fn estimate(
             let difference = finite(half - full)?.abs();
             let change = finite(full - old)?.abs().max(finite(half - old)?.abs());
             let allowance = finite(atol + finite(state.config.relative_tolerance * change)?)?;
-            let ratio = difference / allowance;
+            // Divide first so a tiny representable discrepancy is not rounded
+            // to zero before comparison with an equally small allowance.
+            let ratio = (difference / allowance) * fine_error_scale;
             // An infinite ratio means rejection, not a fabricated finite error.
             if ratio.is_nan() {
                 return Err(EnthalpyError::NonFiniteArithmetic);
@@ -716,4 +917,3 @@ fn compensated_add(sum: f64, correction: f64, value: f64) -> Result<(f64, f64), 
     let next = finite(sum + increment)?;
     Ok((next, finite((next - sum) - increment)?))
 }
-

@@ -4,6 +4,8 @@
 mod support;
 #[path = "adaptive_enthalpy/entropy.rs"]
 mod entropy;
+#[path = "adaptive_enthalpy/sdirk.rs"]
+mod sdirk;
 
 use std::ops::ControlFlow;
 

@@ -39,7 +39,7 @@ pub struct EnthalpySdirk2Input<'a> {
 /// Its power fields are instantaneous physical watts, never weighted averages.
 /// The second stage is the accepted endpoint; the first is not an accepted
 /// subinterval and must not be published or charged as one.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EnthalpySdirk2Stage {
     pub specific_enthalpy_j_kg: Vec<f64>,
     pub temperature: Vec<f64>,
@@ -68,7 +68,7 @@ pub struct EnthalpySdirk2Stage {
 
 /// One accepted interval with both authentic stages and integrated heat.
 /// No stage carry is included in these external physical joule accounts.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EnthalpySdirk2Step {
     pub duration_s: f64,
     pub first_stage: EnthalpySdirk2Stage,
