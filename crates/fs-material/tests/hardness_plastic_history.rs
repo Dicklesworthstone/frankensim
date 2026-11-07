@@ -182,6 +182,15 @@ fn g1_native_plastic_work_and_independent_hardness_share_one_accepted_history() 
         assert_eq!(step.stress_pa, original.stress_pa);
         assert_eq!(step.state.plastic(), &original.state);
         assert_eq!(step.energy, original.energy);
+        let observed = model
+            .observe_accepted(
+                model.plastic(),
+                &original.strain,
+                &original.state,
+                GATES.yield_pa,
+            )
+            .unwrap();
+        assert_eq!(observed, step.state);
         let exported = model.resolve_hardness_state(&card, &step.state).unwrap();
         near(step.state.hardness_pa(), exported.hardness_pa());
         assert_eq!(exported.key(), &key);
@@ -205,6 +214,61 @@ fn g1_native_plastic_work_and_independent_hardness_share_one_accepted_history() 
     near(model.hardness_pa_at(0.0).unwrap(), 100.0);
     near(model.hardness_pa_at(0.025).unwrap(), 225.0);
     assert!(model.hardness_pa_at(0.04).unwrap() < model.hardness_pa_at(0.01).unwrap());
+}
+
+#[test]
+fn g0_accepted_observation_refuses_changed_sources_unsupported_history_and_invalid_states() {
+    let (card, key) = fixture(curve(1.0), InterpolationPolicy::LinearInside, 100.0);
+    let model = prepare(&card, &key, 300.0, 0.04);
+    let strain = [0.006, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let native = model
+        .plastic()
+        .law()
+        .advance_with_energy(&[0.0; 6], model.initial_state().plastic(), &strain, GATES)
+        .unwrap();
+    let before = native.clone();
+    let changed_context = plastic(&card, 301.0);
+    assert!(
+        model
+            .observe_accepted(&changed_context, &strain, &native.state, GATES.yield_pa)
+            .is_err()
+    );
+    let changed_bound = ResolvedJ2Plasticity::try_from_material(
+        model.plastic().material().clone(),
+        model.plastic().hardening_basis(),
+        0.04,
+    )
+    .unwrap();
+    assert!(
+        model
+            .observe_accepted(&changed_bound, &strain, &native.state, GATES.yield_pa)
+            .is_err()
+    );
+    let limited = prepare(&card, &key, 300.0, native.state.alpha / 2.0);
+    assert!(
+        limited
+            .observe_accepted(model.plastic(), &strain, &native.state, GATES.yield_pa)
+            .is_err()
+    );
+    let mut invalid = native.state.clone();
+    invalid.alpha = 0.0;
+    assert!(
+        model
+            .observe_accepted(model.plastic(), &strain, &invalid, GATES.yield_pa)
+            .is_err()
+    );
+    assert!(
+        model
+            .observe_accepted(model.plastic(), &strain, &native.state, f64::NAN)
+            .is_err()
+    );
+    assert_eq!(native, before);
+    near(
+        model
+            .hardness_pa_at_accepted(model.plastic(), &strain, &native.state, GATES.yield_pa)
+            .unwrap(),
+        model.hardness_pa_at(native.state.alpha).unwrap(),
+    );
 }
 
 #[test]

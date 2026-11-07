@@ -534,6 +534,16 @@ material qualification.
 
 ## Source indentation hardness for contact and wear
 
+`hardness::plastic_history::ResolvedJ2Hardness::hardness_pa_at_accepted` observes
+an accepted native J2 point without a second return map. Original mechanical
+source identity, fixed conditions, hardening convention and law must match;
+native small-strain/history/yield admission and prepared hardness support remain
+binding. Scalar observation allocates nothing. `observe_accepted` retains a
+small numeric endpoint for the existing typed-source export; it copies no source
+receipts and adds no work, storage or heat. The spatial solid observer composes
+this same route for each original element. Numerical admission is not evidence
+that an arbitrary supplied tensor came from a converged physical trajectory.
+
 `hardness::thermal_history::ThermoplasticHardnessSource` observes an independent
 original H(T, accumulated-equivalent-plastic-strain) test at accepted native
 `CaloricPoint` states. J2, Voce/viscous and complete N-branch Chaboche histories

@@ -281,6 +281,55 @@ impl ResolvedJ2Hardness {
         Ok(value)
     }
 
+    /// Observe an already accepted native J2 point without another return map.
+    ///
+    /// Spatial solvers retain their original strains and histories. The exact
+    /// mechanical source, hardening convention and law must match this prepared
+    /// hardness path, and the native owner admits the committed history with the
+    /// caller's absolute yield allowance. No temperature, plastic strain, stress,
+    /// work or heat is advanced. This scalar path allocates no source or state.
+    pub fn hardness_pa_at_accepted(
+        &self,
+        plastic: &ResolvedJ2Plasticity,
+        strain: &Voigt,
+        state: &J2State,
+        yield_tolerance_pa: f64,
+    ) -> Result<f64, J2HardnessError> {
+        require(
+            plastic.material().identity() == self.plastic.material().identity()
+                && plastic.hardening_basis() == self.plastic.hardening_basis()
+                && plastic.law() == self.plastic.law(),
+            "accepted history must retain the original native J2 source, law and conditions",
+        )?;
+        plastic
+            .law()
+            .validate_committed_history(strain, state, yield_tolerance_pa)?;
+        self.hardness_pa_at(state.alpha)
+    }
+
+    /// Retain one accepted native endpoint for typed source export or subsequent
+    /// checked point stepping. This copies only its small numeric history; the
+    /// original source receipts stay with this prepared owner.
+    ///
+    /// The caller supplies a converged native point. Admission checks source and
+    /// endpoint consistency, not the provenance of an arbitrary supplied tensor.
+    pub fn observe_accepted(
+        &self,
+        plastic: &ResolvedJ2Plasticity,
+        strain: &Voigt,
+        state: &J2State,
+        yield_tolerance_pa: f64,
+    ) -> Result<J2HardnessState, J2HardnessError> {
+        let hardness_pa =
+            self.hardness_pa_at_accepted(plastic, strain, state, yield_tolerance_pa)?;
+        Ok(J2HardnessState {
+            owner: self.identity,
+            strain: *strain,
+            plastic: state.clone(),
+            hardness_pa,
+        })
+    }
+
     /// Propose one physical loading/unloading/reversal step through the native
     /// J2 return map and its existing energy/yield gates. Native accumulated
     /// strain alone drives hardness; absolute total strain is never substituted.
