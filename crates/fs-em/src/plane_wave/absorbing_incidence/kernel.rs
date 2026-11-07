@@ -75,17 +75,41 @@ fn exponent(value: f64) -> i32 {
     (((value.to_bits() >> 52) & 0x7ff) as i32 - 1023).max(-1022)
 }
 
+// Real, exact binary reference coordinates, not a substitute material law.
+// The product and ratio of these constitutive scales have exact square roots.
+pub(in crate::plane_wave) fn reference_scales(
+    omega: f64,
+    epsilon: C64,
+    mu: f64,
+) -> Result<[f64; 4]> {
+    let mut e = exponent(magnitude(epsilon));
+    let mut m = exponent(mu);
+    if (e + m) & 1 != 0 {
+        if e > -1022 {
+            e -= 1;
+        } else {
+            m -= 1;
+        }
+    }
+    Ok([
+        positive(power_of_two(e))?,
+        positive(power_of_two(m))?,
+        positive(omega * power_of_two((e + m) / 2))?,
+        positive(power_of_two((e - m) / 2))?,
+    ])
+}
+
 #[derive(Clone, Copy)]
-struct Medium {
-    normal: C64,
-    omega_epsilon: C64,
-    omega_mu: f64,
-    te_admittance: C64,
+pub(in crate::plane_wave) struct Medium {
+    pub(in crate::plane_wave) normal: C64,
+    pub(in crate::plane_wave) omega_epsilon: C64,
+    pub(in crate::plane_wave) omega_mu: f64,
+    pub(in crate::plane_wave) te_admittance: C64,
     // Unlike TM admittance, this remains finite at a critical exit.
-    tm_impedance: C64,
+    pub(in crate::plane_wave) tm_impedance: C64,
 }
 impl Medium {
-    fn new(omega: f64, kx: f64, epsilon: C64, mu: f64) -> Result<Self> {
+    pub(in crate::plane_wave) fn new(omega: f64, kx: f64, epsilon: C64, mu: f64) -> Result<Self> {
         positive(mu)?;
         if !finite(epsilon) || epsilon == C64::ZERO || epsilon.im > 0.0 {
             return Err(invalid(
@@ -95,22 +119,13 @@ impl Medium {
         // Binary constitutive references make their geometric mean exact.
         // No rounded refractive index/angle precedes the k_z discriminant;
         // omega² and the unscaled epsilon*mu product are never formed.
-        let mut e = exponent(magnitude(epsilon));
-        let mut m = exponent(mu);
-        if (e + m) & 1 != 0 {
-            if e > -1022 {
-                e -= 1;
-            } else {
-                m -= 1;
-            }
-        }
-        let medium = WaveMedium::new(epsilon, mu, power_of_two(e), power_of_two(m))?;
+        let [epsilon_ref, mu_ref, wave_scale, _] = reference_scales(omega, epsilon, mu)?;
+        let medium = WaveMedium::new(epsilon, mu, epsilon_ref, mu_ref)?;
         if (epsilon.re != 0.0 && medium.index_squared_ratio.re == 0.0)
             || (epsilon.im != 0.0 && medium.index_squared_ratio.im == 0.0)
         {
             return Err(invalid("interface constitutive contrast underflows"));
         }
-        let wave_scale = positive(omega * power_of_two((e + m) / 2))?;
         let transverse = Dd::from_f64(kx) / Dd::from_f64(wave_scale);
         let square = Dd::from_pair(
             medium.index_squared_ratio.re,
@@ -151,7 +166,12 @@ impl Medium {
         })
     }
 
-    fn field(self, kx: f64, e: [C64; 2], h: [C64; 2]) -> Result<InterfaceBoundaryField> {
+    pub(in crate::plane_wave) fn field(
+        self,
+        kx: f64,
+        e: [C64; 2],
+        h: [C64; 2],
+    ) -> Result<InterfaceBoundaryField> {
         // h=[Hy,-Hx] is power-conjugate to e=[Ex,Ey]. Maxwell-Ampere
         // determines Ez without dividing by a vanishing transmitted k_z.
         let field = InterfaceBoundaryField {
@@ -186,10 +206,42 @@ fn gains(a: C64, b: C64) -> Result<[C64; 3]> {
 // Apply the weight before squaring an amplitude. This avoids needlessly
 // overflowing |E|² when its physical power is representable, and keeps a
 // weak interference term independent of subtraction of the larger powers.
-fn quadratic(weight: Dd, amplitude: C64) -> Dd {
+pub(in crate::plane_wave) fn quadratic(weight: Dd, amplitude: C64) -> Dd {
     let re = Dd::from_f64(amplitude.re);
     let im = Dd::from_f64(amplitude.im);
     (weight * re) * re + (weight * im) * im
+}
+
+pub(in crate::plane_wave) fn entrance_power(
+    yi: [C64; 2],
+    reflected_gain: [C64; 2],
+    incident: [C64; 2],
+    reflected: [C64; 2],
+) -> [Dd; 3] {
+    let mut pi = Dd::ZERO;
+    let mut pr = Dd::ZERO;
+    let mut interference = Dd::ZERO;
+    for c in 0..2 {
+        let weight = Dd::from_f64(yi[c].re) * Dd::from_f64(0.5);
+        pi = pi + quadratic(weight, incident[c]);
+        pr = pr - quadratic(weight, reflected[c]);
+        interference = interference
+            + quadratic(
+                Dd::from_f64(yi[c].im) * Dd::from_f64(reflected_gain[c].im),
+                incident[c],
+            );
+    }
+    [pi, pr, interference]
+}
+
+pub(in crate::plane_wave) fn exit_power(medium: Medium, e: [C64; 2], h: [C64; 2]) -> Dd {
+    quadratic(
+        Dd::from_f64(medium.te_admittance.re) * Dd::from_f64(0.5),
+        e[1],
+    ) + quadratic(
+        Dd::from_f64(medium.tm_impedance.re) * Dd::from_f64(0.5),
+        h[0],
+    )
 }
 
 pub(super) fn solve(data: Input) -> Result<AbsorbingInterfaceReflection> {
@@ -242,23 +294,8 @@ pub(super) fn solve(data: Input) -> Result<AbsorbingInterfaceReflection> {
     let incident_field = incident.field(data.kx, ei, hi)?;
     let reflected_field = incident.field(data.kx, er, hr)?;
     let transmitted_field = transmitted.field(data.kx, et, ht)?;
-    let mut pi = Dd::ZERO;
-    let mut pr = Dd::ZERO;
-    let mut interference = Dd::ZERO;
-    for c in 0..2 {
-        let weight = Dd::from_f64(yi[c].re) * Dd::from_f64(0.5);
-        pi = pi + quadratic(weight, ei[c]);
-        pr = pr - quadratic(weight, er[c]);
-        interference =
-            interference + quadratic(Dd::from_f64(yi[c].im) * Dd::from_f64(r[c].im), ei[c]);
-    }
-    let pt = quadratic(
-        Dd::from_f64(transmitted.te_admittance.re) * Dd::from_f64(0.5),
-        et[1],
-    ) + quadratic(
-        Dd::from_f64(transmitted.tm_impedance.re) * Dd::from_f64(0.5),
-        ht[0],
-    );
+    let [pi, pr, interference] = entrance_power(yi, r, ei, er);
+    let pt = exit_power(transmitted, et, ht);
     let powers = [pi, pr, interference, pt].map(Dd::to_f64);
     if powers.iter().any(|p| !p.is_finite())
         || powers[0] < 0.0

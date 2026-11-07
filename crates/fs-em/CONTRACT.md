@@ -3658,6 +3658,49 @@ this resource-limited session. The power convention follows the Poynting
 derivation in [Byrnes, sections 4.3–4.4.1 and Appendix B](https://arxiv.org/pdf/1603.02720),
 with this owner's conjugate time convention and explicitly sourced permeability.
 
+### Coherent films illuminated from an absorbing medium
+
+`plane_wave::layers::absorbing_incidence::PlanarAbsorbingDielectricLayers`
+extends the explicit-real-kx owner to up to 64 coherent finite films. It retains
+all original incident, film and exit laws and thicknesses; resolves their actual
+permittivities and sourced permeabilities once at the requested frequency; and
+prepares both TM/TE fields together. `illuminate([Ex,Ey])` binds actual complex
+peak fields at the first face. Repeated illumination and `layer_field` depth
+queries allocate nothing and do not rebuild the stack or reevaluate a material.
+Empty stacks reduce to the absorbing single interface; zero-thickness films
+remain identities after their original sources are admitted.
+
+The shared bounded E/H slab recursion runs in a real numerical reference port,
+then matches its entrance against the original complex incident admittance.
+That reference is only a coordinate scale, never a replacement constitutive
+law. Decaying propagation, compensated absolute-q phase, exact-critical entire
+fields, and opaque limits reuse the existing slab and depth-field owners.
+Positive even/odd dissipative modes give each film's heat independently of
+exterior subtraction, including weak loss and coherent standing waves. Full
+Cartesian E/H and local `-omega Im(epsilon) |E|²/2` heating include longitudinal
+TM electric fields. The result satisfies
+`P_incident + P_reflected + P_interference = P_exit + sum(P_film_heat)`.
+Entrance interference remains signed and is never assigned to film heat;
+exit flux excludes subsequent half-space absorption. Film heat is W/m² and
+local heat is W/m³. The consuming thermal model owns area and time conversion.
+
+Native G1/G3 regressions compare against independent dimensional transfer
+matrices and six-component fields, continuity of tangential E/H and normal
+D/B, independently integrated volume loss, empty-stack interference, film
+subdivision, exact-critical fields, opaque loss and weak positive heat.
+Existing single-interface and depth-field regressions also pass with the shared
+helpers. The public adapter was compiled and exercised with source-resolution
+plumbing stubbed; a source-card Debye/Ohmic integration regression is present,
+but its Cargo execution remains pending under this session's resource limits.
+
+This owner covers one-sided monochromatic stationary isotropic planar films.
+It supplies no finite-coherence, roughness, anisotropic, magnetic-loss,
+transient, absorbing angular-spectrum, two-sided absorbing-port or upstream
+launch model. Pure evanescent/grazing incidence, active media, unrepresentable
+contrasts/fields/powers and plasma without original whole-field drift admission
+refuse. The older angle, beam and simultaneous-illumination owners retain their
+lossless incident-port admission.
+
 ### Coherent finite dielectric films
 
 `plane_wave::layers::PlanarDielectricLayers` prepares up to 64 ordered finite

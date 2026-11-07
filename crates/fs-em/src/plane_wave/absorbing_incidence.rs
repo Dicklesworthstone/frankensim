@@ -21,7 +21,7 @@
 use super::{DielectricResponse, PlanarDielectricInterface, ReflectionError, positive};
 use fs_math::c64::C64;
 
-mod kernel;
+pub(super) mod kernel;
 pub use kernel::{AbsorbingInterfaceReflection, InterfaceBoundaryField};
 
 impl PlanarDielectricInterface<'_> {

@@ -24,7 +24,7 @@
 
 use super::{
     DielectricResponse, Polarization, ReflectionError, WaveMedium, finite, interface_response,
-    positive,
+    interface_response_from_normal, positive,
 };
 use fs_material::{
     field_storage::linear_magnetic_permeability, state_point::ResolvedMaterialStatePoint,
@@ -44,6 +44,9 @@ pub use fields::{
     IonizedGasLayerExcitation, IonizedGasLayerHeating, IonizedGasLayerPoint, LayerTangentialField,
     PreparedIonizedGasLayerIllumination, PreparedLayerField,
 };
+
+/// Coherent films with explicit real transverse wave number and absorbing incidence.
+pub mod absorbing_incidence;
 
 /// Preparation storage and allocation-free angle work are bounded by this cap.
 pub const MAX_LAYERS: usize = 64;
@@ -517,12 +520,30 @@ fn admittance_state(
     polarization: Polarization,
 ) -> Result<[C64; 2], ReflectionError> {
     let normal = medium.normal(cosine)?;
+    admittance_state_from_normal(medium, cosine, polarization, normal)
+}
+
+fn admittance_state_from_normal(
+    medium: WaveMedium,
+    cosine: f64,
+    polarization: Polarization,
+    normal: C64,
+) -> Result<[C64; 2], ReflectionError> {
     let (a, b) = match polarization {
         Polarization::Te => (C64::from_re(medium.mu_ratio * cosine), normal),
         Polarization::Tm => (normal, medium.epsilon_ratio.scale(cosine)),
     };
     let scale = positive(maximum(a).max(maximum(b)))?;
     Ok([divided(a, scale), divided(b, scale)])
+}
+
+#[derive(Clone, Copy)]
+struct SlabWave {
+    normal: C64,
+    phase: f64,
+    phase_parts: Dd,
+    decay: f64,
+    tangential_squared: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -576,7 +597,72 @@ impl Slab {
         }
         let q = medium.normal(cosine)?;
         let depth = positive(wave_number * thickness)?;
-        let decay = q.im * depth;
+        Self::from_resolved(
+            medium,
+            wave_number,
+            cosine,
+            polarization,
+            thickness,
+            SlabWave {
+                normal: q,
+                phase: q.re * depth,
+                phase_parts: Dd::from_f64(q.re) * (Dd::from_f64(wave_number) * phase_thickness),
+                decay: q.im * depth,
+                tangential_squared: (1.0 - cosine) * (1.0 + cosine),
+            },
+        )
+    }
+
+    // The same bounded slab operator, now in a real numerical reference port
+    // at explicit kx. Absolute q keeps phase identical to the depth-field owner.
+    fn new_at_transverse(
+        medium: WaveMedium,
+        reference_wave_number: f64,
+        kx: f64,
+        normal_wavenumber: C64,
+        polarization: Polarization,
+        thickness: f64,
+    ) -> Result<Self, ReflectionError> {
+        if thickness == 0.0 {
+            return Ok(Self::IDENTITY);
+        }
+        let normal = divided(normal_wavenumber, reference_wave_number);
+        let transverse = Dd::from_f64(kx) / Dd::from_f64(reference_wave_number);
+        let tangential_squared = (transverse * transverse).to_f64();
+        if !finite(normal)
+            || !tangential_squared.is_finite()
+            || (normal_wavenumber.re != 0.0 && normal.re == 0.0)
+            || (normal_wavenumber.im != 0.0 && normal.im == 0.0)
+        {
+            return Err(bad("explicit film wave number is unrepresentable"));
+        }
+        Self::from_resolved(
+            medium,
+            reference_wave_number,
+            1.0,
+            polarization,
+            thickness,
+            SlabWave {
+                normal,
+                phase: normal_wavenumber.re * thickness,
+                phase_parts: Dd::from_f64(normal_wavenumber.re) * Dd::from_f64(thickness),
+                decay: normal_wavenumber.im * thickness,
+                tangential_squared,
+            },
+        )
+    }
+
+    fn from_resolved(
+        medium: WaveMedium,
+        wave_number: f64,
+        cosine: f64,
+        polarization: Polarization,
+        thickness: f64,
+        wave: SlabWave,
+    ) -> Result<Self, ReflectionError> {
+        let q = wave.normal;
+        let depth = positive(wave_number * thickness)?;
+        let decay = wave.decay;
         let attenuation = if decay == f64::NEG_INFINITY {
             0.0
         } else {
@@ -585,8 +671,9 @@ impl Slab {
         if attenuation == 0.0 {
             // An opaque slab is its front interface plus absorption: it
             // needs neither a growing reciprocal exponential nor its phase.
-            let interface = interface_response(medium, wave_number, cosine, polarization)?;
-            let state = admittance_state(medium, cosine, polarization)?;
+            let interface =
+                interface_response_from_normal(medium, wave_number, cosine, polarization, q)?;
+            let state = admittance_state_from_normal(medium, cosine, polarization, q)?;
             return Ok(Self {
                 matrix: [[state[0], C64::ZERO], [state[1], C64::ZERO]],
                 scale: C64::ZERO,
@@ -594,14 +681,14 @@ impl Slab {
                 odd_loss: interface.transmitted_power_fraction,
             });
         }
-        let phase = q.re * depth;
+        let phase = wave.phase;
         if !phase.is_finite() {
             return Err(bad("film propagation phase is unrepresentable"));
         }
         // Preserve both products of the authored q, k and thickness. The
         // original rounded depth still owns attenuation and admission; phase
         // reduction alone uses DD. This does not refine the material law or q.
-        let phase_parts = Dd::from_f64(q.re) * (Dd::from_f64(wave_number) * phase_thickness);
+        let phase_parts = wave.phase_parts;
         let (sine, cos_phase) = det::sin_cos_dd(phase_parts);
         let (sine, cos_phase) = (sine.to_f64(), cos_phase.to_f64());
         let p = C64::new(attenuation * cos_phase, -attenuation * sine);
@@ -702,7 +789,7 @@ impl Slab {
                         let factor =
                             attenuation * ((-medium.epsilon_ratio.im * cosine) / scale) * depth;
                         let normal_weight = q.re * normal.re + q.im * normal.im;
-                        let lateral_weight = (1.0 - cosine) * (1.0 + cosine) / scale;
+                        let lateral_weight = wave.tangential_squared / scale;
                         (
                             factor * (normal_weight * plus + lateral_weight * minus),
                             factor * (normal_weight * minus + lateral_weight * plus),

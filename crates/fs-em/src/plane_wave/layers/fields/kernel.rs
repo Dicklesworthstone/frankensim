@@ -15,7 +15,7 @@ enum Interior {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct LayerFieldKernel {
+pub(in crate::plane_wave::layers) struct LayerFieldKernel {
     thickness: f64,
     kz: C64,
     // Retained real q*k for phase; kz still owns admittance and attenuation.
@@ -30,7 +30,7 @@ fn finite(z: C64) -> bool {
 }
 
 impl LayerFieldKernel {
-    pub(super) fn new(
+    pub(in crate::plane_wave::layers) fn new(
         thickness: f64,
         kz: C64,
         phase_wavenumber: Dd,
@@ -168,7 +168,7 @@ impl LayerFieldKernel {
             .then_some(values)
     }
 
-    pub(super) fn field(self, depth: f64) -> Option<[C64; 2]> {
+    pub(in crate::plane_wave::layers) fn field(self, depth: f64) -> Option<[C64; 2]> {
         if !depth.is_finite() || depth < 0.0 || depth > self.thickness {
             return None;
         }

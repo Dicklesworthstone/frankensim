@@ -152,3 +152,129 @@ fn public_query_refuses_nonfinite_wave_data_and_retains_zero_illumination() {
     assert_eq!(zero.interference_normal_power_w_m2, 0.0);
     assert_eq!(zero.transmitted_normal_power_w_m2, 0.0);
 }
+
+#[test]
+fn original_absorbing_sources_prepare_coherent_films_and_positive_depth_heating() {
+    use fs_em::plane_wave::layers::{
+        DielectricLayer, PlanarDielectricLayers,
+        absorbing_incidence::PlanarAbsorbingDielectricLayers,
+    };
+    let incident = finite_layers::debye(2.0 * E, 3.0 * E, 0.7, 0.002);
+    let outside = material(4.0 * E, 1.2 * M);
+    let conductor = ResolvedConductorState::try_from_material_with_basis(
+        source(
+            &[
+                (EPS_NAME, EPS, 3.0 * E),
+                (MU_NAME, MU, 1.4 * M),
+                (
+                    ElectricalPropertyBasis::Conductivity.property_name(),
+                    ElectricalPropertyBasis::Conductivity.dimensions(),
+                    0.02,
+                ),
+            ],
+            ValidityDomain::unconstrained(),
+            QueryPoint::new(),
+        ),
+        ElectricalPropertyBasis::Conductivity,
+    )
+    .unwrap();
+    let layers = [
+        DielectricLayer {
+            response: DielectricResponse::Ohmic(&conductor),
+            thickness_m: 0.02,
+        },
+        DielectricLayer {
+            response: DielectricResponse::Debye(&incident),
+            thickness_m: 0.08,
+        },
+    ];
+    let electric = [C64::new(0.7, 0.2), C64::new(-0.3, 0.5)];
+    for omega in [1e8, 1e9, 1e10] {
+        let kx = 0.4 * omega * (E * M).sqrt();
+        let source = PlanarAbsorbingDielectricLayers::try_new(
+            DielectricResponse::Debye(&incident),
+            DielectricResponse::Lossless(&outside),
+            omega,
+            kx,
+            &layers,
+        )
+        .unwrap();
+        assert!(std::ptr::eq(
+            source.incident_response().material(),
+            incident.material()
+        ));
+        assert!(std::ptr::eq(source.exit_response().material(), &outside));
+        assert!(std::ptr::eq(
+            source.layer(0).unwrap().response.material(),
+            conductor.material()
+        ));
+        assert_eq!(source.layer_count(), 2);
+        assert_eq!(source.angular_frequency_rad_s(), omega);
+        assert_eq!(source.transverse_wavenumber_rad_m(), kx);
+        let x = omega * 1e-9;
+        complex_near(
+            source.incident_permittivity_f_m(),
+            C64::new(
+                2.0 * E + 3.0 * E / (1.0 + x * x),
+                -3.0 * E * x / (1.0 + x * x),
+            ),
+            1e-24,
+        );
+        // The new explicit-kx owner does not weaken old normalized-port gates.
+        assert!(
+            PlanarDielectricLayers::try_new_with_incident_response(
+                DielectricResponse::Debye(&incident),
+                DielectricResponse::Lossless(&outside),
+                omega,
+                &layers,
+            )
+            .is_err()
+        );
+        let actual = source.illuminate(electric).unwrap();
+        assert!(std::ptr::eq(actual.source(), &source));
+        let response = actual.response();
+        assert!(
+            actual
+                .absorbed_power_per_layer_w_m2()
+                .iter()
+                .all(|&p| p > 0.0)
+        );
+        near(
+            actual.absorbed_power_per_layer_w_m2().iter().sum(),
+            response.absorbed_power_w_m2,
+            1e-16,
+        );
+        near(
+            response.incident_normal_power_w_m2
+                + response.reflected_normal_power_w_m2
+                + response.interference_normal_power_w_m2,
+            response.transmitted_normal_power_w_m2 + response.absorbed_power_w_m2,
+            1e-15,
+        );
+        for (i, layer) in layers.iter().enumerate() {
+            let n = 200;
+            let dz = layer.thickness_m / f64::from(n);
+            let mut integral = 0.0;
+            for j in 0..=n {
+                let point = actual
+                    .layer_field(i, layer.thickness_m * f64::from(j) / f64::from(n))
+                    .unwrap();
+                let weight = if j == 0 || j == n {
+                    1.0
+                } else if j % 2 == 0 {
+                    2.0
+                } else {
+                    4.0
+                };
+                integral += weight * point.heating_w_m3;
+            }
+            near(
+                integral * dz / 3.0,
+                actual.absorbed_power_per_layer_w_m2()[i],
+                2e-10 * response.incident_normal_power_w_m2,
+            );
+        }
+        assert!(actual.layer_field(2, 0.0).is_err());
+        assert!(actual.layer_field(0, -0.1).is_err());
+    }
+}

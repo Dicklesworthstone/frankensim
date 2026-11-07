@@ -9,7 +9,7 @@
 
 use super::*;
 
-mod kernel;
+pub(super) mod kernel;
 use kernel::LayerFieldKernel;
 
 mod preparation;

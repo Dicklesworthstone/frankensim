@@ -554,6 +554,18 @@ fn interface_response(
     polarization: Polarization,
 ) -> Result<InterfaceReflection, ReflectionError> {
     let normal = medium.normal(cosine)?;
+    interface_response_from_normal(medium, wave_number, cosine, polarization, normal)
+}
+
+// Also used by a film expressed in a real numerical reference port. Its
+// resolved normal wave number may come from an explicit conserved kx.
+fn interface_response_from_normal(
+    medium: WaveMedium,
+    wave_number: f64,
+    cosine: f64,
+    polarization: Polarization,
+    normal: C64,
+) -> Result<InterfaceReflection, ReflectionError> {
     let incident_normal = positive(wave_number * cosine)?;
     let transmitted_normal = normal.scale(wave_number);
     if !finite(transmitted_normal) {
