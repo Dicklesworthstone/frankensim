@@ -13,7 +13,9 @@ use fs_material::plastic::finite::porous::thermal::{
 };
 
 use super::super::FiniteThermoplasticError;
-use super::super::material::{FiniteThermoplasticQuery, admit_caloric_source};
+use super::super::material::{
+    FiniteThermoplasticQuery, ReferenceCaloricMaterial, ReferenceCaloricQuery,
+};
 
 /// One original material card, thermal porous family and exact caloric chart.
 /// All energetic coefficients and capacities refer to the original volume;
@@ -22,7 +24,7 @@ use super::super::material::{FiniteThermoplasticQuery, admit_caloric_source};
 pub struct FiniteThermalPorousMaterialBinding<'a> {
     query: FiniteThermoplasticQuery<'a>,
     family: ResolvedAffineThermalFinitePorous,
-    reference_density_kg_m3: f64,
+    caloric: ReferenceCaloricMaterial<'a>,
     minimum_total_heat_capacity_j_m3_k: f64,
 }
 
@@ -47,18 +49,32 @@ impl<'a> FiniteThermalPorousMaterialBinding<'a> {
         )
         .map_err(|error| FiniteThermoplasticError::Source(error.to_string()))?;
         let parameters = family.law().parameters();
-        let admitted = admit_caloric_source(
-            &query,
+        let caloric = ReferenceCaloricMaterial::try_new(
+            ReferenceCaloricQuery {
+                card: query.card,
+                caloric: query.caloric,
+                context: query.context.clone(),
+                temperature_axis: query.temperature_axis.clone(),
+                caloric_reference: query.caloric_reference,
+            },
             initial_specific_enthalpy_j_kg,
             parameters.reference_temperature_k,
             parameters.temperature_range_k,
-            family.law().minimum_mechanical_heat_capacity_j_m3_k(),
         )?;
+        let minimum_total_heat_capacity_j_m3_k = caloric.minimum_heat_capacity_j_m3_k()
+            + family.law().minimum_mechanical_heat_capacity_j_m3_k();
+        if !minimum_total_heat_capacity_j_m3_k.is_finite()
+            || minimum_total_heat_capacity_j_m3_k <= 0.0
+        {
+            return Err(FiniteThermoplasticError::Invalid(
+                "caloric plus mechanical heat capacity must remain positive over the full admitted state domain",
+            ));
+        }
         Ok(Self {
             query,
             family,
-            reference_density_kg_m3: admitted.reference_density_kg_m3,
-            minimum_total_heat_capacity_j_m3_k: admitted.minimum_total_heat_capacity_j_m3_k,
+            caloric,
+            minimum_total_heat_capacity_j_m3_k,
         })
     }
 
@@ -72,7 +88,7 @@ impl<'a> FiniteThermalPorousMaterialBinding<'a> {
         self.query.caloric
     }
     pub const fn reference_density_kg_m3(&self) -> f64 {
-        self.reference_density_kg_m3
+        self.caloric.reference_density_kg_m3()
     }
     /// Conservative lower bound including the exact caloric chart's chords.
     pub const fn minimum_total_heat_capacity_j_m3_k(&self) -> f64 {

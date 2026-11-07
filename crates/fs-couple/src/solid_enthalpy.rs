@@ -25,6 +25,8 @@ pub mod creep;
 pub mod plastic;
 /// Finite-deformation plastic history with reciprocal caloric feedback.
 pub mod finite_plastic;
+/// Finite ductile softening and retained motion with reciprocal physical heat.
+pub mod finite_ductile;
 /// Reciprocal source thermodynamics on the native elastic equilibrium/heat history.
 pub mod thermoelastic;
 /// One finite source gas exchanges heat with distinct spatial solid cells.

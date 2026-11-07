@@ -17,15 +17,17 @@ use fs_thermal::enthalpy::{
     HeatTransfer, StepConfig, ThermalLaw,
 };
 
+use super::material::ReferenceCaloricMaterial;
 use super::{
     FiniteThermoplasticConfig, FiniteThermoplasticError, FiniteThermoplasticMaterial,
     FiniteThermoplasticReport, finite, poll, positive,
 };
 
-/// Caloric ownership shared by native finite constitutive families. Mechanical
-/// history remains entirely inside each original solid proposal.
-pub(super) trait CaloricMaterial {
+/// Original caloric storage, independent of the mechanical constitutive family.
+/// Every implementation retains its prepared source and exact chart object.
+pub(in crate::solid_enthalpy) trait CaloricMaterial {
     fn caloric_source(&self) -> &ResolvedHeatCapacityCurve;
+
     fn state_at_specific_enthalpy(&self, h: f64) -> Result<EquilibriumPhaseState, PhaseStateError> {
         self.caloric_source().curve().state_at_specific_enthalpy(h)
     }
@@ -36,17 +38,50 @@ impl CaloricMaterial for FiniteThermoplasticMaterial<'_> {
         FiniteThermoplasticMaterial::caloric_source(self)
     }
 }
-
+impl CaloricMaterial for ReferenceCaloricMaterial<'_> {
+    fn caloric_source(&self) -> &ResolvedHeatCapacityCurve {
+        ReferenceCaloricMaterial::caloric_source(self)
+    }
+}
 impl CaloricMaterial for super::porous::material::FiniteThermalPorousMaterialBinding<'_> {
     fn caloric_source(&self) -> &ResolvedHeatCapacityCurve {
         super::porous::material::FiniteThermalPorousMaterialBinding::caloric_source(self)
     }
 }
 
+/// The original mechanical owner's independently retained whole-solid account.
+/// Nonthermal irreversible energy is explicit; it is neither discarded nor
+/// silently deposited into the separate caloric chart.
+pub(in crate::solid_enthalpy) trait MechanicalEnergy {
+    fn internal_energy_change_j(&self) -> f64;
+    fn endpoint_work_defect_j(&self) -> f64;
+    fn dead_load_endpoint_work_j(&self) -> f64;
+    fn support_endpoint_work_j(&self) -> f64;
+    fn nonthermal_loss_j(&self) -> f64;
+}
+
+impl MechanicalEnergy for FiniteThermoplasticTetEnergy {
+    fn internal_energy_change_j(&self) -> f64 {
+        self.internal_energy_change_j
+    }
+    fn endpoint_work_defect_j(&self) -> f64 {
+        self.endpoint_work_defect_j
+    }
+    fn dead_load_endpoint_work_j(&self) -> f64 {
+        self.dead_load_endpoint_work_j
+    }
+    fn support_endpoint_work_j(&self) -> f64 {
+        self.support_endpoint_work_j
+    }
+    fn nonthermal_loss_j(&self) -> f64 {
+        0.0
+    }
+}
+
 /// Exact original cell/material pairing, independent of mechanical dimension.
-pub(super) struct ThermalBinding<'b, 'm, M> {
-    pub(super) cells: &'b [DepositedCell],
-    pub(super) materials: FinitePlasticLawField<'m, M>,
+pub(in crate::solid_enthalpy) struct ThermalBinding<'b, 'm, M> {
+    pub(in crate::solid_enthalpy) cells: &'b [DepositedCell],
+    pub(in crate::solid_enthalpy) materials: FinitePlasticLawField<'m, M>,
 }
 
 impl<M> Copy for ThermalBinding<'_, '_, M> {}
@@ -75,7 +110,7 @@ impl<M: CaloricMaterial> ThermalBinding<'_, '_, M> {
         }
     }
 
-    pub(super) fn enthalpies<E>(
+    pub(in crate::solid_enthalpy) fn enthalpies<E>(
         &self,
         thermal: &DepositionSimulation<'_>,
         accepted: bool,
@@ -116,7 +151,7 @@ impl<M: CaloricMaterial> ThermalBinding<'_, '_, M> {
         Ok(result)
     }
 
-    pub(super) fn temperatures<E>(
+    pub(in crate::solid_enthalpy) fn temperatures<E>(
         &self,
         enthalpies: &[f64],
     ) -> Result<Vec<f64>, FiniteThermoplasticError<E>> {
@@ -140,21 +175,27 @@ impl<M: CaloricMaterial> ThermalBinding<'_, '_, M> {
 }
 
 /// Original mechanics proposal plus already integrated physical cell heat.
-pub(super) struct MechanicalProposal<S, E> {
-    pub(super) state: S,
-    pub(super) equilibrium: E,
-    pub(super) energy: FiniteThermoplasticTetEnergy,
-    pub(super) inertia: Option<InertialEnergy>,
-    pub(super) heat_j: Vec<f64>,
+pub(in crate::solid_enthalpy) struct MechanicalProposal<S, E, A = FiniteThermoplasticTetEnergy> {
+    pub(in crate::solid_enthalpy) state: S,
+    pub(in crate::solid_enthalpy) equilibrium: E,
+    pub(in crate::solid_enthalpy) energy: A,
+    pub(in crate::solid_enthalpy) inertia: Option<InertialEnergy>,
+    pub(in crate::solid_enthalpy) heat_j: Vec<f64>,
 }
 
 /// Complete accepted thermal/mechanical/observer endpoint.
-pub(super) struct FeedbackCandidate<'t, S, E, O> {
-    pub(super) thermal: DepositionSimulation<'t>,
-    pub(super) state: S,
-    pub(super) observer: O,
-    pub(super) cells: Vec<DepositedCell>,
-    pub(super) report: FiniteThermoplasticReport<E>,
+pub(in crate::solid_enthalpy) struct FeedbackCandidate<
+    't,
+    S,
+    E,
+    O,
+    A = FiniteThermoplasticTetEnergy,
+> {
+    pub(in crate::solid_enthalpy) thermal: DepositionSimulation<'t>,
+    pub(in crate::solid_enthalpy) state: S,
+    pub(in crate::solid_enthalpy) observer: O,
+    pub(in crate::solid_enthalpy) cells: Vec<DepositedCell>,
+    pub(in crate::solid_enthalpy) report: FiniteThermoplasticReport<E, A>,
 }
 
 fn admit_heat<E>(heat_j: &[f64], cells: usize) -> Result<(), FiniteThermoplasticError<E>> {
@@ -167,7 +208,14 @@ fn admit_heat<E>(heat_j: &[f64], cells: usize) -> Result<(), FiniteThermoplastic
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn advance<'t, M: CaloricMaterial, S, E, O: DepositionObserver>(
+pub(in crate::solid_enthalpy) fn advance<
+    't,
+    S,
+    E,
+    O: DepositionObserver,
+    M: CaloricMaterial,
+    A: MechanicalEnergy,
+>(
     binding: ThermalBinding<'_, '_, M>,
     time_s: f64,
     thermal: &DepositionSimulation<'t>,
@@ -179,8 +227,9 @@ pub(super) fn advance<'t, M: CaloricMaterial, S, E, O: DepositionObserver>(
     mechanics: impl FnMut(
         &[f64],
         f64,
-    ) -> Result<MechanicalProposal<S, E>, FiniteThermoplasticError<O::Error>>,
-) -> Result<FeedbackCandidate<'t, S, E, O>, FiniteThermoplasticError<O::Error>> {
+    )
+        -> Result<MechanicalProposal<S, E, A>, FiniteThermoplasticError<O::Error>>,
+) -> Result<FeedbackCandidate<'t, S, E, O, A>, FiniteThermoplasticError<O::Error>> {
     advance_with_coupling(
         binding,
         time_s,
@@ -196,7 +245,14 @@ pub(super) fn advance<'t, M: CaloricMaterial, S, E, O: DepositionObserver>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn advance_with_coupling<'t, M: CaloricMaterial, S, E, O: DepositionObserver>(
+pub(in crate::solid_enthalpy) fn advance_with_coupling<
+    't,
+    S,
+    E,
+    O: DepositionObserver,
+    M: CaloricMaterial,
+    A: MechanicalEnergy,
+>(
     binding: ThermalBinding<'_, '_, M>,
     time_s: f64,
     thermal: &DepositionSimulation<'t>,
@@ -210,8 +266,8 @@ pub(super) fn advance_with_coupling<'t, M: CaloricMaterial, S, E, O: DepositionO
         &[f64],
         f64,
     )
-        -> Result<MechanicalProposal<S, E>, FiniteThermoplasticError<O::Error>>,
-) -> Result<FeedbackCandidate<'t, S, E, O>, FiniteThermoplasticError<O::Error>> {
+        -> Result<MechanicalProposal<S, E, A>, FiniteThermoplasticError<O::Error>>,
+) -> Result<FeedbackCandidate<'t, S, E, O, A>, FiniteThermoplasticError<O::Error>> {
     poll(cx)?;
     let duration_s = target_s - time_s;
     if thermal.time_s() != time_s
@@ -299,15 +355,27 @@ pub(super) fn advance_with_coupling<'t, M: CaloricMaterial, S, E, O: DepositionO
             inertia.kinetic_change_j + inertia.numerical_loss_j
         });
         let combined_residual_j = finite(
-            actual.energy.internal_energy_change_j
+            actual.energy.internal_energy_change_j()
                 + thermal_audit.stored_energy_change_j
-                + actual.energy.endpoint_work_defect_j
+                + actual.energy.endpoint_work_defect_j()
                 + inertia_account
-                - actual.energy.dead_load_endpoint_work_j
-                - actual.energy.support_endpoint_work_j
+                - actual.energy.dead_load_endpoint_work_j()
+                - actual.energy.support_endpoint_work_j()
                 - external_heat_j
                 - thermal_audit.incoming_energy_j,
         )?;
+        let nonthermal_loss_j = finite(actual.energy.nonthermal_loss_j())?;
+        if nonthermal_loss_j < 0.0 {
+            return Err(FiniteThermoplasticError::Invalid(
+                "nonthermal irreversible energy must be finite and nonnegative",
+            ));
+        }
+        // Preserve the original all-thermal account's exact arithmetic path.
+        let combined_residual_j = if nonthermal_loss_j == 0.0 {
+            combined_residual_j
+        } else {
+            finite(combined_residual_j + nonthermal_loss_j)?
+        };
         defects = [
             trial_temperatures
                 .iter()
@@ -389,13 +457,13 @@ pub(super) fn advance_with_coupling<'t, M: CaloricMaterial, S, E, O: DepositionO
     })
 }
 
-struct FiniteHeat<'b, 'm, 'cx, M, O> {
+struct FiniteHeat<'b, 'm, 'cx, O, M> {
     binding: ThermalBinding<'b, 'm, M>,
     inner: O,
     cx: &'b Cx<'cx>,
     watts: BTreeMap<CellId, f64>,
 }
-impl<M, O: Clone> Clone for FiniteHeat<'_, '_, '_, M, O> {
+impl<O: Clone, M> Clone for FiniteHeat<'_, '_, '_, O, M> {
     fn clone(&self) -> Self {
         Self {
             binding: self.binding,
@@ -405,8 +473,8 @@ impl<M, O: Clone> Clone for FiniteHeat<'_, '_, '_, M, O> {
         }
     }
 }
-impl<M: CaloricMaterial, O: DepositionObserver> DepositionObserver
-    for FiniteHeat<'_, '_, '_, M, O>
+impl<O: DepositionObserver, M: CaloricMaterial> DepositionObserver
+    for FiniteHeat<'_, '_, '_, O, M>
 {
     type Error = FiniteThermoplasticError<O::Error>;
     fn begin(&mut self) -> Result<(), Self::Error> {

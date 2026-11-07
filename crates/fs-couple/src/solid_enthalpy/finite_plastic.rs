@@ -25,7 +25,7 @@
 //! P1 finite solid, including its volumetric-locking limitations. Optional
 //! inertia uses the same fixed reference mass and endpoint solve.
 
-mod feedback;
+pub(super) mod feedback;
 pub mod impact;
 pub mod material;
 /// Retained thermal porous compaction on the same conservative heat timeline.
@@ -36,7 +36,10 @@ pub use impact::{
     FiniteThermoplasticEllipticImpactError, FiniteThermoplasticImpactError,
     FiniteThermoplasticSourceImpactError,
 };
-pub use material::{CaloricReference, FiniteThermoplasticMaterial, FiniteThermoplasticQuery};
+pub use material::{
+    CaloricReference, FiniteThermoplasticMaterial, FiniteThermoplasticQuery,
+    ReferenceCaloricMaterial, ReferenceCaloricQuery,
+};
 
 use std::collections::BTreeSet;
 use std::convert::Infallible;
@@ -65,6 +68,7 @@ pub enum FiniteThermoplasticError<E = Infallible> {
     Source(String),
     Caloric(PhaseStateError),
     Solid(FiniteThermoplasticTetError),
+    DuctileSolid(fs_solid::hyper3::plastic::ductile::FiniteDuctileTetError),
     Sheet(FiniteThermoplasticSheetError),
     Porous(fs_solid::hyper3::plastic::porous::thermal::FiniteThermalPorousTetError),
     Thermal(DepositionError),
@@ -370,10 +374,10 @@ impl<'a> FiniteThermoplasticSolid<'a> {
 
 /// Original mechanical and thermal reports plus independently checked coupling.
 #[derive(Debug)]
-pub struct FiniteThermoplasticReport<E = HyperTetSolution> {
+pub struct FiniteThermoplasticReport<E = HyperTetSolution, A = FiniteThermoplasticTetEnergy> {
     pub iterations: usize,
     pub equilibrium: E,
-    pub material_energy: FiniteThermoplasticTetEnergy,
+    pub material_energy: A,
     pub inertia: Option<InertialEnergy>,
     pub thermal_audit: EnergyAudit,
     pub applied_heat_j: f64,

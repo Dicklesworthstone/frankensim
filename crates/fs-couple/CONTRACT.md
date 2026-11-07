@@ -2415,6 +2415,81 @@ receipts and atomic refusal. The shell case includes nonzero sourced expansion.
 These regression definitions have not yet run on a prescribed build runner;
 their independently checked scalar trajectories are not production test results.
 
+## Reciprocal caloric feedback through finite ductile softening
+
+`solid_enthalpy::finite_ductile::FiniteDuctileThermalSolid` binds the original
+finite ductile tetrahedral specimen to its original fully solid caloric cells.
+`ReferenceCaloricMaterial` shares the existing finite thermoplastic source
+admission: immutable same-card caloric object, complete typed fixed context,
+original pinned Cp/density receipts, positive heat capacity and an explicit
+stress-free zero-pressure caloric reference. Original reference volume and
+sourced reference density must reproduce cell inventory. Optional native
+consistent inertia uses that same density once; current temperature, damage
+and deformation never replace the mass inventory.
+
+The native nonpotential finite solve retains its original material, plastic
+metric, initiation/damage history and velocity through every coupled proposal.
+The existing finite thermoplastic Picard/IQN-ILS driver advances the original
+thermal timeline, observer, events and transport. Actual caloric endpoint
+temperatures and the SAME physical interval reach initiation and momentum.
+Each proposal starts from the same complete accepted state. Coupling secants
+belong only to the current interval and cannot advance physical history.
+Source-backed initiation must match the original caloric material reference;
+a calibration fixed at one temperature refuses an unsupported heated endpoint.
+Authored numerical initiation retains its explicit domain without acquiring
+material-card authority from the caloric source.
+
+Compact element receipts come from the existing final constitutive audit, with
+no repeated return mapping or subtraction of large cumulative dissipation.
+Explicit fractions partition ALREADY-ACCOUNTED plastic dissipation and damage
+release between caloric heat and two retained nonthermal irreversible energy
+inventories. These are not Taylor--Quinney fractions of total plastic work;
+native energetic hardening is already mechanical storage. Unheated energy is
+neither discarded nor claimed to be measured fracture-surface energy, and no
+later release law is inferred. Signed material endpoint defects and numerical
+kinetic loss never become heat or nonthermal physical energy.
+
+Independent plastic/damage partition checks precede the shared temperature,
+sum-of-absolute-cell-heat-discrepancy, caloric-balance and combined-work gates.
+The combined account retains mechanical storage, caloric storage, nonthermal
+energy, kinetic change and both numerical accounts without charging physical
+dissipation twice. Only the complete mechanical, thermal, observer and
+nonthermal state publishes. Refusals preserve the original state for retry.
+Initial binding refuses prior plastic/damage loss without its original coupled
+history; subsequent intervals continue from the returned complete owner.
+
+This extension uses the supplied fixed-coefficient finite J2 backbone, with
+temperature-dependent initiation. It adds no thermal expansion, native
+coefficient softening, mechanical entropy, evolving Fourier geometry, phase
+change, crack topology, contact or fragment transfer. Reference-network
+conductances and the heat fractions remain explicit model inputs. Coupling
+convergence and first-law closure do not certify temporal or experimental
+fracture accuracy. The focused definitions in
+`tests/finite_plastic_enthalpy/ductile.rs` exercise independent scalar heated
+initiation, subsequent release of stored energy, retained nonthermal energy,
+held replay, simultaneous free-coordinate motion/heat at two physical rates,
+original-source/domain/retry and cancellation refusals.
+
+The five new coupled ductile regressions pass in the selected native execution
+closure. Six existing thermoplastic regressions also pass; five older selected
+cases fail identically when the original `d624b404` coupling/material/feedback
+bodies are rebuilt against the same native dependencies (four native Newton
+stalls and one caloric-density fixture assertion before coupling). The full
+original finite ductile solid integration target passes all twelve tests.
+These results do not claim a full-workspace Cargo or constellation pass: the
+ordinary Cargo attempt was killed in the pinned upstream execution dependency,
+and the constellation preflight reported pre-existing NumPy/pandas checkout
+mismatches. No native physics, solvers or cancellation owners were substituted.
+
+The shared source/feedback owner also preserves the concurrent finite porous
+thermal adapter. Reconciled native material/solid/coupling production bodies
+compile, and all five ductile thermal tests still pass. Three upstream porous
+regressions pass; the fourth adiabatic-crush Newton stall reproduces with a
+byte-identical residual history using the unmodified `23de8912b` upstream
+feedback/material/porous bodies and identical native dependencies. No observed
+new failure is attributable to this integration; the existing failures remain
+explicitly outside a passing-workspace claim.
+
 ### Simultaneous recovering creep and plasticity in thermal solids
 
 `RecoveringNortonJ2Source` composes with the existing `ExpandingCreepSource`

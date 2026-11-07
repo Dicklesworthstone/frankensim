@@ -8,6 +8,8 @@
 mod combined;
 #[path = "finite_plastic_enthalpy/creep.rs"]
 mod creep;
+#[path = "finite_plastic_enthalpy/ductile.rs"]
+mod ductile;
 #[path = "finite_plastic_enthalpy/rate.rs"]
 mod rate;
 #[path = "finite_plastic_enthalpy/sheet.rs"]
