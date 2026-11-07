@@ -745,8 +745,18 @@ difference to retain the small net force. Local positive heat, translation force
 and spin torque share one quadrature. Spin torque may assist rotation while
 translation supplies that work; total interface power remains dissipative.
 Independent small-disk asymptotics and full-patch integration check these limits.
-Partially intersecting active disks retain the original full-patch rule and its
-explicit resolution/refusal boundary.
+Partially intersecting active disks use their actual circle-intersection domain,
+including an exterior stationary point and a shrinking active crescent. Local-slip
+rays follow the exact Hertz pressure roots, with radial and angular endpoint
+transforms and a split at the two circles' intersection. Rationalized near roots
+retain the rim limit; sorted-side triangle geometry and `atan2` retain narrow
+exterior views whose cosine rounds to one. The same bounded positive quadrature
+produces force, moment and heat without Coulomb subtraction. Independent rim,
+vanishing-crescent and far-stationary-point asymptotics, full-surface integration,
+branch continuity and refinement check these formerly unresolved geometries.
+An unrepresentable positive region still refuses explicitly. Very large opposing
+translation/spin powers can lose their small difference in floating arithmetic;
+directly integrated heat and the separate power residual remain visible.
 
 Other cases use explicit radial/angular composite four-point Gauss resolution.
 The integrand subtracts the exact zero-speed Coulomb response, removing the

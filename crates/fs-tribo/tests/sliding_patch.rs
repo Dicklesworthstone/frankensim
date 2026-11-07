@@ -6,6 +6,9 @@ use fs_tribo::FrictionLaw;
 use fs_tribo::sliding_patch::rate_dependent::{HertzFrictionPatch, HertzFrictionQuadrature};
 use fs_tribo::sliding_patch::{HertzSlidingPatch, HertzSlidingPatchParameters};
 
+#[path = "sliding_patch/clipped.rs"]
+mod clipped;
+
 fn patch(normal: f64, radius: f64, mu: f64) -> HertzSlidingPatch {
     HertzSlidingPatch::new(HertzSlidingPatchParameters {
         normal_force_n: normal,

@@ -11,9 +11,10 @@
 //! point, without introducing a speed regularizer. Deterministic composite
 //! four-point Gauss quadrature has caller-owned radial and angular resolution;
 //! it is a convergent spatial discretization, not an error certificate.
-//! Clipped affine spin and mixed motion with a contained active disk integrate
-//! that disk directly, so a rapidly shrinking frictional region cannot vanish
-//! between full-patch nodes or through subtraction of Coulomb responses.
+//! Clipped affine motion integrates its actual positive-friction region,
+//! including an active disk crossing the Hertz boundary or lying outside it.
+//! A shrinking disk or crescent therefore cannot vanish between full-patch
+//! nodes or through subtraction of Coulomb responses.
 //!
 //! This is instantaneous prescribed gross sliding. It does not choose a static
 //! reaction, solve velocity-weakening branch selection, evolve the contact,
@@ -25,6 +26,8 @@ use fs_math::det;
 
 use super::{HertzSlidingPatch, HertzSlidingPatchParameters, HertzSlidingWrench, finite};
 use crate::{FrictionLaw, TriboError};
+
+mod clipped;
 
 // Four-point Gauss--Legendre rule on [-1, 1].
 const GAUSS: [(f64, f64); 4] = [
@@ -38,10 +41,12 @@ const MAXIMUM_PANELS: usize = 256;
 /// Explicit spatial resolution for the local, non-affine friction response.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HertzFrictionQuadrature {
-    /// Panels in `r = a sin(theta)`, `0 <= theta <= pi/2`; four nodes per panel.
+    /// Panels in the radial transform; four nodes per panel. Full-patch rules
+    /// use `r = a sin(theta)`; clipped rules follow the actual active span.
     pub radial_panels: usize,
-    /// Panels across a reflection-symmetric half disk; four nodes per panel.
-    /// Pure spin uses radial quadrature only.
+    /// Panels per reflection-symmetric angular interval; four nodes per panel.
+    /// An intersecting active disk splits at its circle intersection. Pure spin
+    /// uses radial quadrature only.
     pub angular_panels: usize,
 }
 
@@ -194,6 +199,15 @@ impl HertzFrictionPatch {
                     quadrature,
                 );
             }
+            return clipped::intersecting_disk(
+                parameters,
+                slip_velocity_m_s,
+                spin_rad_s,
+                speed,
+                edge_speed,
+                cutoff_speed,
+                quadrature,
+            );
         }
         finite(speed + edge_speed, "hertz_friction_maximum_speed")?;
         let mut correction = Compensated::default();
