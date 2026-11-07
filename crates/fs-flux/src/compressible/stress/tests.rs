@@ -1,10 +1,11 @@
-use super::{Viscosity, traction};
+use super::{Viscosity, no_slip_traction, traction};
 
 #[derive(Clone, Copy, PartialEq)]
 enum End {
     Periodic,
     Slip,
     Zero,
+    NoSlip,
 }
 
 fn native<const D: usize>(
@@ -39,6 +40,27 @@ fn balance<const D: usize>(
     material: &[Viscosity],
     corrected: bool,
 ) -> (f64, f64, Vec<[f64; D]>) {
+    let (production, dissipation, force, _) = balance_with_walls(
+        shape,
+        spacing,
+        ends,
+        [[[0.0; D]; 2]; D],
+        velocity,
+        material,
+        corrected,
+    );
+    (production, dissipation, force)
+}
+
+fn balance_with_walls<const D: usize>(
+    shape: [usize; D],
+    spacing: [f64; D],
+    ends: [[End; 2]; D],
+    wall_velocity: [[[f64; D]; 2]; D],
+    velocity: &[[f64; D]],
+    material: &[Viscosity],
+    corrected: bool,
+) -> (f64, f64, Vec<[f64; D]>, f64) {
     let n = velocity.len();
     let mut c = vec![[[0.0; D]; D]; n];
     let mut h = c.clone();
@@ -67,6 +89,10 @@ fn balance<const D: usize>(
                     let mut ghost = velocity[i];
                     if ends[axis][side] == End::Slip {
                         ghost[axis] = -ghost[axis];
+                    } else if ends[axis][side] == End::NoSlip {
+                        ghost = std::array::from_fn(|a| {
+                            2.0 * wall_velocity[axis][side][a] - velocity[i][a]
+                        });
                     }
                     ghost
                 };
@@ -80,6 +106,7 @@ fn balance<const D: usize>(
             }
         }
     }
+    let mut wall_power = 0.0;
     for i in 0..n {
         for axis in 0..D {
             let stride: usize = shape[..axis].iter().product();
@@ -117,6 +144,21 @@ fn balance<const D: usize>(
                     let traction =
                         ((4.0 / 3.0) * mu + bulk) * normal + (bulk - (2.0 / 3.0) * mu) * transverse;
                     force[i][axis] -= sign * traction / spacing[axis];
+                } else if outside && ends[axis][side] == End::NoSlip {
+                    let wall = wall_velocity[axis][side];
+                    let stress = no_slip_traction(
+                        axis,
+                        -sign,
+                        0.5 * spacing[axis],
+                        velocity[i],
+                        wall,
+                        material[i],
+                        |a, j| c[i][a][j],
+                    );
+                    for a in 0..D {
+                        force[i][a] -= sign * stress[a] / spacing[axis];
+                        wall_power -= sign * wall[a] * stress[a] / spacing[axis];
+                    }
                 }
             }
         }
@@ -144,7 +186,7 @@ fn balance<const D: usize>(
             + mu * h2
             + (bulk + mu / 3.0) * diagonal_h2;
     }
-    (production, dissipation, force)
+    (production, dissipation, force, wall_power)
 }
 
 fn supported_ends<const D: usize>(shape: [usize; D], spacing: [f64; D]) {
@@ -350,5 +392,167 @@ fn coupled_variable_shear_and_bulk_stress_converges_at_second_order() {
             assert!((3.8..4.1).contains(&ratio), "refinement ratio {ratio}");
         }
         previous = Some(error);
+    }
+}
+
+fn prescribed_wall_balance<const D: usize>(shape: [usize; D], spacing: [f64; D]) {
+    let n = shape.iter().product();
+    let velocity: Vec<[f64; D]> = (0..n)
+        .map(|i| std::array::from_fn(|a| ((11 * i + 5 * a + 1) as f64).sin()))
+        .collect();
+    let material: Vec<_> = (0..n)
+        .map(|i| Viscosity {
+            shear: 10.0_f64.powf(4.0 * ((3 * i + 1) as f64).sin()),
+            bulk: if i % 3 == 0 {
+                0.0
+            } else {
+                10.0_f64.powf(2.0 * ((7 * i + 2) as f64).sin())
+            },
+        })
+        .collect();
+    let choices = [
+        [End::NoSlip; 2],
+        [End::NoSlip, End::Slip],
+        [End::Slip, End::NoSlip],
+        [End::Periodic; 2],
+        [End::Zero; 2],
+    ];
+    for motion in [0.0, 1.0] {
+        let walls = std::array::from_fn(|axis| {
+            std::array::from_fn(|side| {
+                std::array::from_fn(|a| {
+                    if a == axis {
+                        0.0
+                    } else {
+                        motion * ((axis * 11 + side * 7 + a + 1) as f64).cos()
+                    }
+                })
+            })
+        });
+        for mut encoded in 0..5_usize.pow(D as u32) {
+            let ends = std::array::from_fn(|_| {
+                let pair = choices[encoded % 5];
+                encoded /= 5;
+                pair
+            });
+            let (rate, dissipation, _, power) =
+                balance_with_walls(shape, spacing, ends, walls, &velocity, &material, true);
+            assert!(dissipation >= 0.0);
+            let scale = (power.abs() + rate.abs() + dissipation).max(1.0);
+            assert!(
+                (power - rate - dissipation).abs() < 3e-14 * scale,
+                "wall power {power}, kinetic rate {rate}, quadratic dissipation {dissipation}"
+            );
+            if motion == 0.0 {
+                assert_eq!(power, 0.0);
+                assert!(rate <= 0.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn prescribed_walls_close_power_at_corners_and_singleton_axes() {
+    // Every plane orientation, mixed ends, distinct corner velocities and
+    // eight-decade positive viscosity; no corner velocity averaging is needed.
+    prescribed_wall_balance([4, 5], [0.7, 1.3]);
+    prescribed_wall_balance([1, 1], [0.7, 1.3]);
+    prescribed_wall_balance([4, 3, 2], [0.7, 1.3, 0.9]);
+    prescribed_wall_balance([1, 3, 1], [0.7, 1.3, 0.9]);
+    prescribed_wall_balance([1, 1, 1], [0.7, 1.3, 0.9]);
+}
+
+#[test]
+fn moving_wall_can_supply_kinetic_energy_with_positive_viscous_dissipation() {
+    let mut walls = [[[0.0; 2]; 2]; 2];
+    walls[0][1][1] = 1.0;
+    let (rate, dissipation, force, power) = balance_with_walls(
+        [1, 1],
+        [1.0; 2],
+        [[End::NoSlip; 2], [End::Periodic; 2]],
+        walls,
+        &[[0.0, 0.25]],
+        &[Viscosity {
+            shear: 2.0,
+            bulk: 0.0,
+        }],
+        true,
+    );
+    assert_eq!(force, vec![[0.0, 2.0]]);
+    assert_eq!(rate, 0.5);
+    assert_eq!(power, 3.0);
+    assert_eq!(dissipation, 2.5);
+    assert_eq!(power - rate, dissipation);
+}
+
+#[test]
+fn variable_viscosity_wall_driven_couette_converges_to_the_resistance_integral() {
+    // mu(x)=1+x, U(0)=0, U(1)=1: tau=1/ln(2), U(x)=ln(1+x)/ln(2).
+    // Steady cell values and wall load converge quadratically in this example;
+    // inserting the continuum profile in the half-cell wall traction is only
+    // first-order locally. Do not infer a general second-order wall theorem.
+    let exact_traction = 1.0 / 2.0_f64.ln();
+    let mut previous: Option<[f64; 3]> = None;
+    for n in [8, 16, 32, 64] {
+        let h = 1.0 / n as f64;
+        let material: Vec<_> = (0..n)
+            .map(|i| Viscosity {
+                shear: 1.0 + (i as f64 + 0.5) * h,
+                bulk: 0.0,
+            })
+            .collect();
+        let mut resistance = 0.5 * h / material[0].shear + 0.5 * h / material[n - 1].shear;
+        for pair in material.windows(2) {
+            resistance += h / (0.5 * pair[0].shear + 0.5 * pair[1].shear);
+        }
+        let stress = 1.0 / resistance;
+        let mut partial = 0.5 * h / material[0].shear;
+        let mut velocity = Vec::new();
+        let mut profile_error = 0.0_f64;
+        for i in 0..n {
+            let u = stress * partial;
+            velocity.push([0.0, u]);
+            let exact = (1.0 + (i as f64 + 0.5) * h).ln() * exact_traction;
+            profile_error = profile_error.max((u - exact).abs());
+            if i + 1 < n {
+                partial += h / (0.5 * material[i].shear + 0.5 * material[i + 1].shear);
+            }
+        }
+        let mut walls = [[[0.0; 2]; 2]; 2];
+        walls[0][1][1] = 1.0;
+        let (rate, dissipation, force, power) = balance_with_walls(
+            [n, 1],
+            [h, 1.0],
+            [[End::NoSlip; 2], [End::Periodic; 2]],
+            walls,
+            &velocity,
+            &material,
+            true,
+        );
+        assert!(force.iter().flatten().all(|v| v.abs() < 1e-9));
+        assert!((power * h - stress).abs() < 1e-12);
+        assert!((power - rate - dissipation).abs() < 1e-10);
+        let local = no_slip_traction(
+            0,
+            -1.0,
+            0.5 * h,
+            [0.0, (1.0 + 0.5 * h).ln() * exact_traction],
+            [0.0; 2],
+            material[0],
+            |_, _| 0.0,
+        )[1];
+        let errors = [
+            profile_error,
+            (stress - exact_traction).abs(),
+            (local - exact_traction).abs(),
+        ];
+        if let Some(coarse) = previous {
+            let ratios = std::array::from_fn::<_, 3, _>(|i| coarse[i] / errors[i]);
+            assert!((3.5..4.2).contains(&ratios[0]));
+            assert!((3.5..4.2).contains(&ratios[1]));
+            assert!((1.9..2.1).contains(&ratios[2]));
+            eprintln!("Couette n={n}: profile/load/local-wall refinement {ratios:?}");
+        }
+        previous = Some(errors);
     }
 }

@@ -408,42 +408,50 @@ fn g1_no_slip_wall_uses_half_cell_shear_heat_and_prescribed_wall_work() {
 }
 
 #[test]
-fn g1_constant_no_slip_wall_has_no_spurious_transverse_normal_traction() {
-    let grid = CartesianGrid::new(3, 3, 3, 0.25, 0.25, 0.25).unwrap();
-    for axis in 0..3 {
-        let t = tangents(axis)[0];
-        for upper in [false, true] {
-            let flow = field(gas(0.0), grid, channel(axis), |x| {
-                let distance = if upper { 0.75 - x[axis] } else { x[axis] };
-                let mut velocity = [0.0; 3];
-                velocity[t] = 0.05 * x[t] * distance;
-                [1.0, velocity[0], velocity[1], velocity[2], 2.0]
-            });
-            let side = BoundarySide::ALL[2 * axis + usize::from(upper)];
-            let mut op =
-                MolecularTransport3d::new(&flow, law(flow.gas(), 0.02, 0.003, 0.01), || false)
-                    .unwrap()
-                    .with_wall(
-                        side,
-                        MolecularWall3d::NoSlip {
-                            velocity: [0.0; 3],
-                            thermal: WallThermalCondition::Adiabatic,
-                        },
-                    )
-                    .unwrap();
-            prepare(&mut op, &flow);
-            let mut face = [1; 3];
-            face[axis] = if upper { 3 } else { 0 };
-            close(
-                op.work.flux[axis][grid.cell_face(axis, face)].normal_momentum,
-                0.0,
-                2e-14,
-            );
-            face[axis] = if upper { 2 } else { 0 };
-            assert!(
-                op.work.gradient[grid.index(face)][t][t].abs() > 0.001,
-                "the adjacent-cell transverse derivative is deliberately nonzero"
-            );
+fn g1_no_slip_adjoint_normal_traction_tends_to_the_constant_boundary_trace() {
+    for n in [3, 6] {
+        let h = 0.75 / n as f64;
+        let grid = CartesianGrid::new(n, n, n, h, h, h).unwrap();
+        for axis in 0..3 {
+            let t = tangents(axis)[0];
+            for upper in [false, true] {
+                let flow = field(gas(0.0), grid, channel(axis), |x| {
+                    let distance = if upper { 0.75 - x[axis] } else { x[axis] };
+                    let mut velocity = [0.0; 3];
+                    velocity[t] = 0.05 * x[t] * distance;
+                    [1.0, velocity[0], velocity[1], velocity[2], 2.0]
+                });
+                let side = BoundarySide::ALL[2 * axis + usize::from(upper)];
+                let mut op =
+                    MolecularTransport3d::new(&flow, law(flow.gas(), 0.02, 0.003, 0.01), || false)
+                        .unwrap()
+                        .with_wall(
+                            side,
+                            MolecularWall3d::NoSlip {
+                                velocity: [0.0; 3],
+                                thermal: WallThermalCondition::Adiabatic,
+                            },
+                        )
+                        .unwrap();
+                prepare(&mut op, &flow);
+                let mut face = [1; 3];
+                face[axis] = if upper { n } else { 0 };
+                // The adjacent centered transverse strain is required by the
+                // mechanical adjoint identity. For this smooth zero wall trace,
+                // its boundary traction tends to zero linearly with h; this is
+                // not a claim of an exact physical trace on a finite grid.
+                close(
+                    op.work.flux[axis][grid.cell_face(axis, face)].normal_momentum,
+                    -(0.003 - 2.0 * 0.02 / 3.0) * 0.05 * (0.5 * h),
+                    2e-14,
+                );
+                face[axis] = if upper { n - 1 } else { 0 };
+                close(
+                    op.work.gradient[grid.index(face)][t][t],
+                    0.05 * (0.5 * h),
+                    2e-14,
+                );
+            }
         }
     }
 }

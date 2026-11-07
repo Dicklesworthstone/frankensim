@@ -2,8 +2,8 @@
 //!
 //! The original transport law supplies actual temperature, pressure and frozen
 //! composition coefficients. Compatible molecular stress samples cell values
-//! on periodic, zero-flux and free-slip domains; Fourier heat keeps its native
-//! face sampling. Stress work and Fourier heat share one
+//! on periodic, zero-flux, free-slip and prescribed no-slip domains; Fourier
+//! heat keeps its native face sampling. Stress work and Fourier heat share one
 //! conservative total-energy flux; kinetic energy lost to viscosity becomes
 //! internal energy without an additional heat source. These operators do not
 //! resolve a physical shock thickness without an adequate grid and source data.
@@ -81,8 +81,10 @@ struct MolecularWorkspace {
 /// enables heat and stress exchange through complete source-admitted uniform
 /// or face-resolved reservoirs. All workspaces are preallocated.
 /// Compatible cell-weighted molecular stress retains sixteen bytes of
-/// viscosity scratch per cell. Any prescribed no-slip/Navier wall or enabled
-/// molecular bath exchange keeps the original full mechanical discretization.
+/// viscosity scratch per cell, including prescribed no-slip wall motion and
+/// its actual mechanical power. Positive Navier slip, enabled molecular bath
+/// exchange or an authored equilibrium SGS wall keeps the original full
+/// mechanical discretization.
 /// SGS retains its authored face closure and has no new dissipation guarantee.
 pub struct MolecularTransport3d<L> {
     gas: FrozenGas,
@@ -158,11 +160,19 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     /// identity. This describes the molecular contribution; modeled SGS stress
     /// retains its own physical and numerical qualifications.
     pub fn uses_compatible_molecular_stress(&self) -> bool {
+        #[cfg(feature = "experimental-sgs")]
+        if self
+            .sgs
+            .as_ref()
+            .is_some_and(sgs::SubgridTransport::has_equilibrium_wall)
+        {
+            return false;
+        }
         !self.reservoir_exchange
             && self
                 .walls
                 .iter()
-                .all(|wall| matches!(wall, MolecularWall3d::SlipAdiabatic))
+                .all(|wall| wall.supports_compatible_stress())
     }
 
     /// Enable molecular heat and full Newtonian stress at complete reservoirs.
@@ -569,10 +579,13 @@ fn spatial<L: TransportLaw>(
     #[cfg(feature = "experimental-sgs")] mut subgrid: Option<&mut sgs::SubgridTransport>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, MolecularError> {
-    let compatible = reservoirs.is_none()
-        && walls
-            .iter()
-            .all(|wall| matches!(wall, MolecularWall3d::SlipAdiabatic));
+    let compatible =
+        reservoirs.is_none() && walls.iter().all(|wall| wall.supports_compatible_stress());
+    #[cfg(feature = "experimental-sgs")]
+    let compatible = compatible
+        && subgrid
+            .as_ref()
+            .is_none_or(|sgs| !sgs.has_equilibrium_wall());
     let mut minimum_density = f64::INFINITY;
     let mut minimum_cv = f64::INFINITY;
     for (q, p) in states.iter().zip(primitive.iter_mut()) {
@@ -751,6 +764,8 @@ fn spatial<L: TransportLaw>(
                 && !wall
                 && (viscosity[left] != molecular_viscosity
                     || viscosity[right] != molecular_viscosity);
+            let replace_wall =
+                compatible && wall_model.is_some_and(|model| model.no_slip_velocity().is_some());
             let conductivity = coefficients.thermal_conductivity.value();
             if ![mu, bulk, conductivity]
                 .into_iter()
@@ -807,7 +822,7 @@ fn spatial<L: TransportLaw>(
             let (wall_mu, shear_diffusion) = (mu, mu);
             // Cover both tangential cross-derivative stencils, variable face
             // coefficients and doubled half-cell wall or reservoir gradients.
-            let stress_scale = if replace_molecular {
+            let stress_scale = if replace_molecular || replace_wall {
                 let modeled = crate::compressible::stress::Viscosity {
                     shear: modeled_mu,
                     bulk: 0.0,
@@ -865,16 +880,40 @@ fn spatial<L: TransportLaw>(
             let mut normal_stress =
                 longitudinal * normal_derivative + cross * transverse_divergence;
             let (mut shear_stress, mut energy) = if let Some(model) = wall_model {
-                let (shear, energy) = model.shear_and_energy(
-                    axis,
-                    if face == 0 { -1.0 } else { 1.0 },
-                    pl.velocity,
-                    pl.temperature,
-                    0.5 * grid.spacing[axis],
-                    wall_mu,
-                    conductivity,
-                );
-                ([shear[tangential[0]], shear[tangential[1]]], energy)
+                if compatible && let Some(wall_velocity) = model.no_slip_velocity() {
+                    let traction = crate::compressible::stress::no_slip_traction(
+                        axis,
+                        sign,
+                        0.5 * grid.spacing[axis],
+                        pl.velocity,
+                        wall_velocity,
+                        viscosity[left],
+                        |component, derivative| gradient[left][component][derivative],
+                    );
+                    normal_stress = traction[axis];
+                    let shear = tangential.map(|t| traction[t]);
+                    let heat = model.conductive_energy_flux(
+                        sign,
+                        pl.temperature,
+                        0.5 * grid.spacing[axis],
+                        conductivity,
+                    );
+                    let energy = -shear[0] * wall_velocity[tangential[0]]
+                        - shear[1] * wall_velocity[tangential[1]]
+                        + heat;
+                    (shear, energy)
+                } else {
+                    let (shear, energy) = model.shear_and_energy(
+                        axis,
+                        sign,
+                        pl.velocity,
+                        pl.temperature,
+                        0.5 * grid.spacing[axis],
+                        wall_mu,
+                        conductivity,
+                    );
+                    ([shear[tangential[0]], shear[tangential[1]]], energy)
+                }
             } else {
                 let shear: [f64; 2] = std::array::from_fn(|i| {
                     let t = tangential[i];

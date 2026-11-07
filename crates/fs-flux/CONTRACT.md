@@ -7918,30 +7918,33 @@ Every proposal checks whole-field component amounts, per-cell capacity, total en
 
 Frozen-composition planar and spatial molecular owners now sample the original
 transport law at cells and use a shared compatible Newtonian mechanical
-stencil on periodic, zero-diffusive-flux and SlipAdiabatic domains. Normal face
-derivatives use arithmetic cell viscosities; each centered cross derivative
-carries its own cell coefficient before face averaging. For nonnegative shear
-and bulk viscosity, the resulting semidiscrete molecular kinetic-energy loss
-is a sum of squared symmetric/deviatoric centered strains and nonnegative
-normal-derivative residuals. Smooth variable-material manufactured fields
-retain second-order force convergence. This prevents a demonstrated
-positive-viscosity stencil from creating kinetic energy and spurious vorticity
-while conserving total energy.
+stencil on periodic, zero-diffusive-flux, SlipAdiabatic and prescribed no-slip
+domains. Normal face derivatives use arithmetic cell viscosities; each
+centered cross derivative carries its own cell coefficient before face
+averaging. For nonnegative shear and bulk viscosity, prescribed wall power
+minus the semidiscrete molecular kinetic-energy rate is a sum of squared
+symmetric/deviatoric centered strains and nonnegative normal-derivative
+residuals. Smooth periodic variable-material manufactured fields retain
+second-order force convergence. This prevents a demonstrated positive-viscosity
+stencil from creating unforced kinetic energy and spurious vorticity while
+conserving total energy and the actual boundary work.
 
-`uses_compatible_molecular_stress` reports the complete-domain selection. Any
-prescribed no-slip/Navier wall, or enabled molecular bath exchange in 3D,
-retains the entire original mechanical discretization and physical boundary
-law. The new dissipation identity is not claimed for that fallback, arbitrary
-time steps, shocks or the combined SGS model. Original SGS face viscosity,
-ratio/source admission and heat remain authored model contributions. Its
-modeled viscosity is retained separately so replacement of a large molecular
-midpoint sample cannot erase a finite modeled stress.
+`uses_compatible_molecular_stress` reports the complete-domain selection.
+No-slip walls may have constant tangential velocity and their original
+adiabatic or isothermal thermal condition; zero-length Navier slip is the same
+Dirichlet case. Positive finite Navier slip, enabled molecular bath exchange
+in 3D, or an explicitly configured equilibrium SGS wall law retains the entire
+original mechanical discretization. The dissipation identity is not claimed
+for that fallback, arbitrary time steps, shocks or the combined SGS model.
+Ordinary interior SGS face viscosity, ratio/source admission and heat remain
+authored contributions. Modeled viscosity is retained separately so replacing
+a large molecular midpoint sample cannot erase finite modeled stress.
 
 Every SSP/RKL stage and stress-vorticity observation refreshes a preallocated
 16-byte/cell source-viscosity cache. Mechanical parabolic bounds use the actual
 cell coefficients and the global minimum density; heat keeps the native face
-coefficient. Matching constant cell/face coefficients preserve original stress,
-work and step-bound arithmetic. Otherwise traction and total-energy work are
+coefficient. Matching constant cell/face coefficients at interior faces preserve
+original stress, work and step-bound arithmetic. Otherwise traction and total-energy work are
 formed directly, without cancellation against a possibly enormous unused
 midpoint stress. No extra viscous-heating source is introduced; conductive
 heat remains in the same conservative energy flux. Molecular cancellation and
@@ -7971,3 +7974,28 @@ Compatible face traction and its conservative mechanical work are formed directl
 Each owner prepares one shear/bulk coefficient pair per cell, adding 16 bytes per cell to the required and actual base workspace accounting. Stabilized and adaptive workspace requirements inherit the increased base size. Source sampling and all face work remain inside the existing staged commit/cancellation boundary.
 
 Regression coverage adds five planar and three spatial owner test groups for the energy-producing variable-composition vortex, SSP/RKL/adaptive stepping, original species/heat/cross-transport preservation, an extreme nonlinear midpoint-viscosity contrast, actual-cell rate admission, workspace budgets, whole-domain boundary selection, and late cancellation/replay. These owner tests were parsed and reviewed but could not be compiled or executed in the resource-constrained session. The six exact-production shared-stress kernel tests from the preceding frozen-gas correction passed; they establish the shared algebraic identities and convergence evidence, not a full mixture-owner build gate.
+
+### Prescribed-wall vorticity and compatible mechanical power
+
+Frozen planar and spatial molecular owners use the shared
+`stress::no_slip_traction` for supported prescribed walls. It retains the full
+cell-centered cross stress paired with the same odd velocity ghost used by the
+interior gradient. Replacing that cross stress with derivatives of the exact
+constant wall trace would break the discrete mechanical energy identity.
+Each face uses its own prescribed tangential velocity for mechanical work,
+including corners and singleton axes; no velocities from different planes are
+averaged. Total-energy flux is the same traction's wall work plus the original
+source's Fourier heat. Source coefficients at thermal wall states continue to
+own conduction, while cell viscosities own compatible stress and its rate bound.
+
+The existing sixteen-byte/cell viscosity cache, SSP/RKL stage machinery,
+stress-vorticity observation and transactional loads remain shared. No new
+numerical field allocation is introduced. Nine tests of the exact Rust stress
+kernel passed, including six retained tests and three new groups: 850 mixed
+stationary/moving wall configurations, explicit wall-driven kinetic gain with
+the matching power balance, and variable-viscosity Couette refinement. The
+Couette solution and steady wall load approached second order, while traction
+evaluated on the analytic sampled profile approached first order at the wall;
+there is no blanket second-order local wall-stress claim. Full flow-owner
+regressions were source-reviewed and parser-checked but not compiled or run in
+the resource-constrained environment.

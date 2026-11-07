@@ -59,6 +59,26 @@ impl<const D: usize> Default for MolecularWall<D> {
 pub type MolecularWall2d = MolecularWall<2>;
 
 impl<const D: usize> MolecularWall<D> {
+    /// The zero-length Navier limit is the same prescribed velocity trace as
+    /// no slip, independently of its now-inactive friction heat partition.
+    pub(in crate::compressible) fn no_slip_velocity(self) -> Option<[f64; D]> {
+        match self {
+            Self::NoSlip { velocity, .. }
+            | Self::NavierSlip {
+                velocity,
+                slip_length_m: 0.0,
+                ..
+            } => Some(velocity),
+            _ => None,
+        }
+    }
+
+    /// Wall traces admitted by the cell-weighted mechanical energy identity.
+    /// Finite Navier slip retains its original interfacial-friction operator.
+    pub(in crate::compressible) fn supports_compatible_stress(self) -> bool {
+        matches!(self, Self::SlipAdiabatic) || self.no_slip_velocity().is_some()
+    }
+
     /// Geometry owners independently require a physical reflecting side.
     pub(in crate::compressible) fn validate(
         self,
@@ -189,15 +209,15 @@ impl<const D: usize> MolecularWall<D> {
         viscosity: f64,
         conductivity: f64,
     ) -> ([f64; D], f64) {
-        let (velocity, thermal, slip_length, fluid_heat_fraction) = match self {
+        let (velocity, slip_length, fluid_heat_fraction) = match self {
             Self::SlipAdiabatic => return ([0.0; D], 0.0),
-            Self::NoSlip { velocity, thermal } => (velocity, thermal, 0.0, 1.0),
+            Self::NoSlip { velocity, .. } => (velocity, 0.0, 1.0),
             Self::NavierSlip {
                 velocity,
-                thermal,
                 slip_length_m,
                 fluid_heat_fraction,
-            } => (velocity, thermal, slip_length_m, fluid_heat_fraction),
+                ..
+            } => (velocity, slip_length_m, fluid_heat_fraction),
         };
         let shear = core::array::from_fn(|axis| {
             if axis == normal_axis {
@@ -233,12 +253,34 @@ impl<const D: usize> MolecularWall<D> {
             // its dissipated kinetic energy is already internal energy.
             work += outward_sign * (1.0 - fluid_heat_fraction) * dissipation;
         }
-        let heat = match thermal {
-            WallThermalCondition::Adiabatic => 0.0,
-            WallThermalCondition::Isothermal(t) => {
-                -conductivity * outward_sign * (t.value() - cell_temperature) / wall_distance
-            }
-        };
+        let heat = self.conductive_energy_flux(
+            outward_sign,
+            cell_temperature,
+            wall_distance,
+            conductivity,
+        );
         (shear, work + heat)
+    }
+
+    /// Original Fourier heat flux before any mechanical work. Keeping this
+    /// term separate avoids recovering finite heat by subtracting large work.
+    pub(in crate::compressible) fn conductive_energy_flux(
+        self,
+        outward_sign: f64,
+        cell_temperature: f64,
+        wall_distance: f64,
+        conductivity: f64,
+    ) -> f64 {
+        match self {
+            Self::NoSlip {
+                thermal: WallThermalCondition::Isothermal(t),
+                ..
+            }
+            | Self::NavierSlip {
+                thermal: WallThermalCondition::Isothermal(t),
+                ..
+            } => -conductivity * outward_sign * (t.value() - cell_temperature) / wall_distance,
+            _ => 0.0,
+        }
     }
 }

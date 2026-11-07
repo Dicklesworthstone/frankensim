@@ -1,7 +1,7 @@
-//! Compatible molecular mechanics on periodic, zero-flux and free-slip grids.
+//! Compatible molecular mechanics on Cartesian grids and prescribed walls.
 //!
 //! With cell viscosities, centered derivatives C and half-differences H of
-//! neighboring face derivatives, the negative kinetic-energy rate is
+//! neighboring face derivatives, wall mechanical power minus kinetic-energy rate is
 //! `2 mu |dev sym C(u)|^2 + bulk div(Cu)^2 + mu |H(u)|^2
 //!  + (bulk + mu/3) sum_j H_j(u_j)^2`, summed over cells.
 //! In two dimensions the deviatoric trace retains the physical third dimension.
@@ -10,8 +10,15 @@
 //! but each cross derivative must carry its own cell's coefficient BEFORE the
 //! two cell contributions are averaged onto the face.
 //!
-//! Prescribed velocity, finite-slip and bath boundaries need their own discrete
-//! boundary-work derivation. Callers retain their original full operator there.
+//! A prescribed-velocity wall uses the same odd ghost `2 U_wall - u` as the
+//! cell gradient. Its positive-axis traction is `T-q` on the lower side and
+//! `T+q` on the upper side, where `T=mu(C+C^T)+(bulk-2mu/3)tr(C)I` and
+//! `q_aj=mu H_j(u_a)+(bulk+mu/3)delta_aj H_j(u_j)`. Hence its energy flux
+//! uses `-U_wall dot traction`; outward wall power is `U_wall dot traction*n`.
+//! This local identity also covers corners and singleton axes, without averaging
+//! different planes' prescribed velocities. Zero-length Navier slip is the same
+//! Dirichlet case. Positive finite slip, bath and modeled equilibrium wall laws
+//! retain their original complete operator pending their own boundary derivation.
 //! This is a semidiscrete molecular identity, not a time-step or SGS theorem.
 
 /// Source-evaluated cell viscosities [Pa s]; sixteen numerical bytes per cell.
@@ -74,6 +81,46 @@ pub(super) fn traction<const D: usize>(
             mean_mu * normal
                 + 0.5 * cell[0].shear * gradient(0, axis, component)
                 + 0.5 * cell[1].shear * gradient(1, axis, component)
+        }
+    })
+}
+
+/// Complete compatible traction at a prescribed tangential-velocity wall.
+///
+/// `outward_sign` is -1 on a lower plane and +1 on an upper plane;
+/// `wall_distance` is the positive center-to-wall distance (half a grid cell).
+/// Return components are global `tau[a, axis]`, along the POSITIVE coordinate
+/// axis, not outward traction. Inputs use the same cell source viscosities and
+/// cached gradient as the interior operator; `gradient(component, derivative)`
+/// must include the actual wall's odd velocity ghost. Geometry owners admit the
+/// wall velocity's zero normal component before calling this helper.
+///
+/// Both cross terms belong to the discrete adjoint, even for constant viscosity.
+/// Replacing them by derivatives of a constant boundary trace breaks the energy
+/// balance. They approach that physical trace under refinement, but this helper
+/// does not claim second-order wall accuracy. Molecular energy flux is
+/// `-wall_velocity dot traction` plus the original source's thermal flux;
+/// thermal coefficients and any separate SGS contribution keep their own laws.
+#[inline]
+pub(super) fn no_slip_traction<const D: usize>(
+    axis: usize,
+    outward_sign: f64,
+    wall_distance: f64,
+    velocity: [f64; D],
+    wall_velocity: [f64; D],
+    cell: Viscosity,
+    gradient: impl Fn(usize, usize) -> f64,
+) -> [f64; D] {
+    let longitudinal = (4.0 / 3.0) * cell.shear + cell.bulk;
+    let cross = cell.bulk - (2.0 / 3.0) * cell.shear;
+    std::array::from_fn(|component| {
+        let normal =
+            outward_sign * (wall_velocity[component] - velocity[component]) / wall_distance;
+        if component == axis {
+            let divergence: f64 = (0..D).filter(|&t| t != axis).map(|t| gradient(t, t)).sum();
+            longitudinal * normal + cross * divergence
+        } else {
+            cell.shear * (normal + gradient(axis, component))
         }
     })
 }

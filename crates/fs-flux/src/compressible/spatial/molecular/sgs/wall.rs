@@ -183,6 +183,10 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
 }
 
 impl SubgridTransport {
+    pub(in crate::compressible::spatial::molecular) fn has_equilibrium_wall(&self) -> bool {
+        self.wall_models.iter().any(Option::is_some)
+    }
+
     pub(in crate::compressible::spatial::molecular) fn admit_wall(
         &self,
         side: BoundarySide,

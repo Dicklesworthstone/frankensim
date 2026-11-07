@@ -199,9 +199,11 @@ struct MolecularWorkspace {
 /// half-cell distance and admit prescribed tangential motion or temperature.
 /// The same energy flux carries their wall work and Fourier heat; no separate
 /// viscous heat source is added. Transmissive ends have zero molecular flux.
-/// Periodic, zero-flux and free-slip domains use compatible cell-weighted
-/// molecular stress, retaining sixteen bytes of viscosity scratch per cell.
-/// A prescribed no-slip or Navier wall keeps the original full discretization.
+/// Periodic, zero-flux, free-slip and prescribed no-slip domains use compatible
+/// cell-weighted molecular stress, retaining sixteen bytes of viscosity scratch
+/// per cell. No-slip traction includes the centered cross terms paired with
+/// the cell gradients, and its work uses the prescribed wall velocity.
+/// Positive Navier slip keeps the original full mechanical discretization.
 pub struct MolecularTransport2d<L> {
     gas: FrozenGas,
     grid: CartesianGrid,
@@ -259,12 +261,12 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
     }
 
     /// Whether the complete domain admits the compatible molecular stress
-    /// identity. Prescribed velocity and finite-slip walls retain their native
-    /// mechanical discretization, including their original physical wall work.
+    /// identity. Prescribed no-slip motion contributes its actual wall power;
+    /// positive Navier slip retains the original mechanical discretization.
     pub fn uses_compatible_molecular_stress(&self) -> bool {
         self.walls
             .iter()
-            .all(|wall| matches!(wall, MolecularWall2d::SlipAdiabatic))
+            .all(|wall| wall.supports_compatible_stress())
     }
 
     /// Configure a flat impermeable side. Its prescribed tangential velocity
@@ -565,9 +567,7 @@ fn spatial<L: TransportLaw>(
     binary: &mut [f64],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, MolecularError> {
-    let compatible = walls
-        .iter()
-        .all(|wall| matches!(wall, MolecularWall2d::SlipAdiabatic));
+    let compatible = walls.iter().all(|wall| wall.supports_compatible_stress());
     let mut minimum_density = f64::INFINITY;
     let mut minimum_cv = f64::INFINITY;
     for (q, p) in states.iter().zip(primitive.iter_mut()) {
@@ -776,16 +776,40 @@ fn spatial<L: TransportLaw>(
                     };
                 let mut normal_stress = longitudinal * normal_gradient + cross * tangent_transverse;
                 let (mut shear_stress, mut energy) = if let Some(model) = wall_model {
-                    let (shear, energy) = model.shear_and_energy(
-                        axis,
-                        if face == 0 { -1.0 } else { 1.0 },
-                        pl.velocity,
-                        pl.temperature,
-                        0.5 * grid.spacing[axis],
-                        mu,
-                        conductivity,
-                    );
-                    (shear[tangent], energy)
+                    let sign = if face == 0 { -1.0 } else { 1.0 };
+                    if compatible && let Some(wall_velocity) = model.no_slip_velocity() {
+                        let traction = super::stress::no_slip_traction(
+                            axis,
+                            sign,
+                            0.5 * grid.spacing[axis],
+                            pl.velocity,
+                            wall_velocity,
+                            viscosity[left],
+                            |component, derivative| gradient[left][component][derivative],
+                        );
+                        normal_stress = traction[axis];
+                        let heat = model.conductive_energy_flux(
+                            sign,
+                            pl.temperature,
+                            0.5 * grid.spacing[axis],
+                            conductivity,
+                        );
+                        (
+                            traction[tangent],
+                            -traction[tangent] * wall_velocity[tangent] + heat,
+                        )
+                    } else {
+                        let (shear, energy) = model.shear_and_energy(
+                            axis,
+                            sign,
+                            pl.velocity,
+                            pl.temperature,
+                            0.5 * grid.spacing[axis],
+                            mu,
+                            conductivity,
+                        );
+                        (shear[tangent], energy)
+                    }
                 } else {
                     let shear = mu * (transverse_gradient + tangent_normal);
                     let energy = -normal_stress
