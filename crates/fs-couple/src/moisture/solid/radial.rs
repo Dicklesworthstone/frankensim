@@ -12,6 +12,8 @@ use crate::moisture::adaptive::{
 };
 use crate::moisture::radial::{MoistureRadial, RadialMoistureSymmetry};
 
+#[path = "radial/finite.rs"]
+mod finite;
 #[path = "radial/mesh.rs"]
 mod mesh;
 

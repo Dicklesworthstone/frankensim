@@ -30,6 +30,12 @@ use crate::moisture::{
 };
 use fs_exec::Cx;
 
+mod sdirk;
+pub use sdirk::{
+    RadialAtmosphereSdirk2Candidate, RadialAtmosphereSdirk2Step,
+    SharedRadialAtmosphereSdirk2Candidate,
+};
+
 /// One original gas inventory and radial field accepted at a common endpoint.
 pub type RadialAtmosphereMoistureCandidate =
     AtmosphereMoistureCandidate<MoistureRadial, MoistureStepReport>;

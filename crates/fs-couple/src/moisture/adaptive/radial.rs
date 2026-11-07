@@ -3,6 +3,8 @@
 use super::*;
 use crate::moisture::radial::MoistureRadial;
 
+mod finite;
+
 fn snapshot(state: &MoistureRadial) -> Result<Snapshot<'_>, MoistureError> {
     Ok(Snapshot {
         fields: Specimens::One((0, state.field())),
@@ -17,13 +19,13 @@ fn snapshot(state: &MoistureRadial) -> Result<Snapshot<'_>, MoistureError> {
 /// Form local differences before multiplying by dry mass, avoiding subtraction
 /// of large stored totals. Relative tolerance scales the actual transported
 /// water, not the potentially much larger water already bound in the specimen.
-fn water_distance(
+fn water_distance<E>(
     original: &MoistureRadial,
     coarse: &MoistureRadial,
     fine: &MoistureRadial,
     controls: MoistureTimeControls,
     cx: &Cx<'_>,
-) -> Result<f64, MoistureAdvanceError<MoistureError>> {
+) -> Result<f64, MoistureAdvanceError<E>> {
     let mut difference = WaterSum::default();
     let mut coarse_change = WaterSum::default();
     let mut fine_change = WaterSum::default();

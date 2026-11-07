@@ -63,6 +63,13 @@ impl<const FACES: usize> StageLoad<FACES> {
         Ok(())
     }
 
+    /// Source support already admitted by the original field and active
+    /// first-stage reservoirs. A later reservoir probe can change its envelope
+    /// without removing the physical first-stage load from the second stage.
+    pub(super) const fn source_bounds(&self) -> [f64; 2] {
+        self.bounds
+    }
+
     pub(super) fn check_range(
         &self,
         candidate: &[f64],

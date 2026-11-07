@@ -9,6 +9,9 @@ use fs_couple::moisture::atmosphere::{
 };
 use fs_couple::moisture::radial::atmosphere::RadialMoistureParticipant;
 
+#[path = "atmosphere/sdirk.rs"]
+mod sdirk;
+
 fn paired_controls() -> PairedAtmosphereMoistureSolve {
     PairedAtmosphereMoistureSolve {
         atmospheres: [finite_controls(); 2],

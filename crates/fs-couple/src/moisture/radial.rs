@@ -375,11 +375,19 @@ impl MoistureRadial {
                     .filter_map(|b| b.equilibrium),
             )
             .fold(0.0, f64::max);
+        // A finite reservoir can move between RK stages. The actual retained
+        // first-stage load may produce content outside the old/current-probe
+        // envelope, while still inside the physical admitted stage range.
+        // Extend only source support; preserve the algebraic reference shift.
+        let source_bounds = known.map_or([lower, upper], |load| {
+            let [a, b] = load.source_bounds();
+            [lower.min(a), upper.max(b)]
+        });
         let profile = KirchhoffMoistureDiffusivity::from_binding(
             &self.card,
             &self.transport,
             &self.property,
-            [lower, upper],
+            source_bounds,
         )?;
         let start = self.transport_states(&self.moisture, cx)?;
         let mut iterate = self.moisture.clone();

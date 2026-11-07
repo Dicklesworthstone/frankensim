@@ -3260,6 +3260,32 @@ linear modes, a nonlinear dry-front ODE, finite surface resistance and weighted
 water balances define six focused native regressions. A converged stage is not
 a global temporal-error estimate.
 
+### Second-order and adaptive finite-vapor radial transport
+
+`advance_radial_sdirk2` and `advance_shared_radial_sdirk2` on the original
+finite-atmosphere owner solve the actual gas humidity at each implicit stage.
+First-stage face rates supply the explicit RK load; the second stage balances
+the original gas inventory and original solid storage against the full weighted
+water transfer. Diagnostic intermediate gas/solid states are never debited twice.
+The prepared Kirchhoff source interval retains the first stage's admitted range
+for later humidity probes, while the algebraic reference shift and actual
+active-face physical range checks remain unchanged.
+
+`advance_radial_adaptive_to` and `advance_radial_sdirk2_adaptive_to` control
+a complete finite-air duration using the existing temporal driver. Acceptance
+checks every shell's moisture, noncancelling local water error, gas vapor mass
+and RH. Accepted fine-step transfers alone enter the fixed whole-window water,
+carrier and total-mass account. Source/bracket limits remain explicit; a failed
+duration publishes neither inventory. Matching native-solid methods resolve the
+compatible final shape and wet vibration pencil after these gates, with late
+mechanical refusal preserving all inputs. Second-order endpoints also
+support multiple specimens sharing a chamber. Adaptive finite-air durations
+currently couple one specimen and one chamber; paired-chamber exchange retains
+its backward-Euler path. Eight native regressions define
+independent coupled exponential limits, nonlinear curved-film fluxes, stage
+source support, unequal-shell/gas accuracy and whole-call rollback. Their error
+estimates are local, not global continuum or experimental-validation claims.
+
 ### Accuracy-controlled radial durations
 
 `MoistureRadial::advance_adaptive_to` and `advance_sdirk2_adaptive_to` reuse
