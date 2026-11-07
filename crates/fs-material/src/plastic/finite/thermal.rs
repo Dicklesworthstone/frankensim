@@ -22,6 +22,11 @@
 //! pressure-flow conversion, configurational plastic entropy, damage, or
 //! independent Taylor–Quinney coefficient is inferred here.
 //!
+//! Explicit tabulated hardening retains fixed plastic-strain knots and affine
+//! temperature evolution of every Kirchhoff yield ordinate. Its exact signed
+//! storage derivative contributes entropy even at a perfectly plastic thermal
+//! endpoint. Native flow, finite history and caloric transport remain unchanged.
+//!
 //! A finite step retains physical yield dissipation, reversible caloric
 //! exchange and a SIGNED mechanical endpoint-work defect separately. The
 //! defect is never heated. This endpoint rule needs timestep refinement;
@@ -76,6 +81,9 @@ use fs_math::det;
 
 /// Exact model-card binding for the affine Kirchhoff/logarithmic thermal family.
 pub mod source;
+/// Bounded yield curves with affine temperature dependence on fixed strain knots.
+pub mod tabulated;
+pub use tabulated::FiniteJ2ThermalTabulatedHardening;
 
 /// Explicit derivatives of the original-reference-volume constitutive coefficients.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -156,6 +164,7 @@ pub struct AffineThermalFiniteJ2 {
     limits: FiniteJ2Limits,
     minimum_mechanical_heat_capacity_j_m3_k: f64,
     voce_hardening: Option<FiniteJ2ThermalVoceHardening>,
+    tabulated_hardening: Option<FiniteJ2ThermalTabulatedHardening>,
     overstress: Option<FiniteJ2ThermalOverstress>,
     norton_creep: bool,
     maximum_accumulated_creep_strain: Option<f64>,
@@ -192,6 +201,7 @@ pub struct FrozenThermalFiniteJ2 {
     native: FrozenNative,
     slopes: FiniteJ2TemperatureSlopes,
     voce_hardening: Option<FrozenVoceHardening>,
+    tabulated_hardening: Option<FiniteJ2ThermalTabulatedHardening>,
     temperature_k: f64,
     log_thermal_stretch: f64,
     thermal_stretch: f64,
@@ -394,6 +404,7 @@ impl AffineThermalFiniteJ2 {
             limits,
             minimum_mechanical_heat_capacity_j_m3_k: 0.0,
             voce_hardening: None,
+            tabulated_hardening: None,
             overstress: None,
             norton_creep,
             maximum_accumulated_creep_strain: None,
@@ -417,7 +428,8 @@ impl AffineThermalFiniteJ2 {
             .max(high.backbone().parameters().bulk_modulus_pa);
         let max_expansion = low.expansion_per_k.abs().max(high.expansion_per_k.abs());
         let max_log_volume = det::sqrt(3.0) * limits.maximum_elastic_log_strain;
-        // mu''=H''=Q''=0, with constant Voce b when selected. Bound the remaining
+        // mu''=H''=Q''=0. Each selected table ordinate also has zero second
+        // temperature derivative. Voce b and strain knots stay fixed. Bound the
         // volumetric/thermal contribution
         // throughout the full admitted elastic and temperature envelope.
         let capacity_magnitude = finite(
@@ -492,11 +504,12 @@ impl AffineThermalFiniteJ2 {
             saturation_slope_pa_k,
         };
         if self.norton_creep
+            || self.tabulated_hardening.is_some()
             || !saturation_slope_pa_k.is_finite()
             || self.voce_hardening.is_some_and(|old| old != hardening)
         {
             return Err(FiniteJ2ThermalError::Parameters(
-                "finite thermal Voce requires a plastic family, a finite saturation slope and no replacement of selected coefficients",
+                "finite thermal Voce requires a plastic family, a finite saturation slope and no competing table or replacement of selected coefficients",
             ));
         }
         self.voce_hardening = Some(hardening);
@@ -760,6 +773,12 @@ impl AffineThermalFiniteJ2 {
         } else {
             None
         };
+        let tabulated_hardening = if let Some(hardening) = &self.tabulated_hardening {
+            native = native.with_tabulated_hardening(hardening.frozen_table(delta)?)?;
+            Some(hardening.clone())
+        } else {
+            None
+        };
         let expansion_per_k = coefficient(
             p.logarithmic_expansion_per_k,
             p.logarithmic_expansion_slope_per_k2,
@@ -818,6 +837,7 @@ impl AffineThermalFiniteJ2 {
             native,
             slopes: p.slopes,
             voce_hardening,
+            tabulated_hardening,
             temperature_k,
             log_thermal_stretch,
             thermal_stretch,
@@ -925,6 +945,19 @@ impl AffineThermalFiniteJ2 {
             if new.saturation_pa != 0.0 {
                 frozen_old_storage = finite(frozen_old_storage + new.saturation_pa * shape)?;
             }
+        }
+        if let Some(hardening) = &new_law.tabulated_hardening {
+            let slope = hardening.hardening_energy_temperature_derivative_j_m3_k(old_state.alpha)?;
+            coefficient_storage_change_j_m3 = finite(
+                coefficient_storage_change_j_m3
+                    + (new_temperature_k - old_temperature_k) * slope,
+            )?;
+            // The native table owns the exact endpoint-temperature primitive.
+            // Use the direct affine coefficient increment above instead of
+            // subtracting two large accumulated hardening energies.
+            frozen_old_storage = finite(
+                frozen_old_storage + new_law.backbone().hardening_energy(old_state.alpha),
+            )?;
         }
         let delta_f = core::array::from_fn(|i| new_f[i] - old_f[i]);
         let delta_fm = core::array::from_fn(|i| new_fm[i] - old_fm[i]);
@@ -1168,6 +1201,12 @@ impl FrozenThermalFiniteJ2 {
                             ),
                 )?;
             }
+        }
+        if let Some(hardening) = &self.tabulated_hardening {
+            entropy_j_m3_k = finite(
+                entropy_j_m3_k
+                    - hardening.hardening_energy_temperature_derivative_j_m3_k(state.alpha)?,
+            )?;
         }
         let internal_energy_j_m3 =
             finite(self.temperature_k.mul_add(entropy_j_m3_k, free_energy_j_m3))?;
