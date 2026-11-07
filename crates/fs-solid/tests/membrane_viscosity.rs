@@ -3,7 +3,8 @@ use fs_evidence::ValidityDomain;
 use fs_material::plane_stress_viscosity::{
     MaterialPlane, PlaneStressViscosity, PLANE_STRESS_VISCOSITY_PROPERTIES as KEYS,
 };
-use fs_material::sheet::{AREAL_DENSITY, MEMBRANE_DIMS, ResolvedSheet, THICKNESS};
+use fs_material::sheet::{AREAL_DENSITY, MEMBRANE_DIMS, MEMBRANE_PROPERTIES, ResolvedSheet, THICKNESS};
+use fs_material::sheet::tabulated::{COUPLING_PROPERTY, CURVE_PROPERTIES, STRAIN_AXIS};
 use fs_material::state_point::{
     MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
     resolve_material_state_point,
@@ -12,7 +13,7 @@ use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim,
     PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel,
 };
-use fs_qty::{Dims, DynViscosity};
+use fs_qty::{Dims, DynViscosity, QuantitySpec};
 use fs_solid::membrane::vibration::{MembraneModes, VibrationSettings};
 use fs_solid::membrane::viscosity::{MembraneViscosity, MembraneViscosityError};
 use fs_solid::membrane::{MembraneBudget, MembraneDomain, MembraneError, MembranePatch};
@@ -23,26 +24,71 @@ fn patch(
     thickness: f64,
     grain: f64,
 ) -> (MembranePatch, Vec<PlaneStressViscosity>) {
+    patch_with_source_bands(values, thickness, grain, &[], 0.0, false)
+}
+
+fn patch_with_source_bands(
+    values: [f64; 6],
+    thickness: f64,
+    grain: f64,
+    bands: &[(&str, (f64, f64))],
+    query_omega: f64,
+    tabulated: bool,
+) -> (MembranePatch, Vec<PlaneStressViscosity>) {
     let mut properties = vec![
         (AREAL_DENSITY, 6.0, Dims([-2, 1, 0, 0, 0, 0])),
         (THICKNESS, thickness, Dims([1, 0, 0, 0, 0, 0])),
-        ("warp_stiffness", 1200.0, MEMBRANE_DIMS),
-        ("weft_stiffness", 600.0, MEMBRANE_DIMS),
-        ("poisson_warp_weft", 0.0, Dims::NONE),
-        ("shear_stiffness", 250.0, MEMBRANE_DIMS),
     ];
+    if tabulated {
+        properties.extend(CURVE_PROPERTIES.into_iter().zip([1200.0, 600.0, 250.0])
+            .map(|(key, stiffness)| (key, stiffness, MEMBRANE_DIMS)));
+        properties.push((COUPLING_PROPERTY, 0.0, MEMBRANE_DIMS));
+    } else {
+        properties.extend([
+            ("warp_stiffness", 1200.0, MEMBRANE_DIMS),
+            ("weft_stiffness", 600.0, MEMBRANE_DIMS),
+            ("poisson_warp_weft", 0.0, Dims::NONE),
+            ("shear_stiffness", 250.0, MEMBRANE_DIMS),
+        ]);
+    }
     properties.extend(KEYS.into_iter().zip(values).map(|(key, value)| {
         (key, value, DynViscosity::DIMS)
     }));
+    // An explicitly requested extra channel tests preservation of whole bundles
+    // without making unrelated source properties part of membrane mechanics.
+    for &(key, _) in bands {
+        if !properties.iter().any(|(name, _, _)| *name == key) {
+            properties.push((key, 1.0, Dims::NONE));
+        }
+    }
     let mut claims = ClaimSet::new();
     let mut requirements = Vec::new();
     for (key, value, dims) in properties {
+        let (lo, hi) = bands.iter().find(|(name, _)| *name == key)
+            .map_or((0.0, 1000.0), |(_, band)| *band);
+        let curve = tabulated && CURVE_PROPERTIES.contains(&key);
         claims.insert_claim(PropertyClaim {
             key: PropertyKey::new(key, dims),
-            value: PropertyValue::Scalar { value, dims },
-            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            value: if curve {
+                PropertyValue::Curve {
+                    abscissa: STRAIN_AXIS.into(),
+                    abscissa_dims: Dims::NONE,
+                    knots: vec![
+                        (-0.2, -0.2 * value), (0.0, 0.0),
+                        (0.04, 0.04 * value), (0.2, 0.36 * value),
+                    ],
+                    dims,
+                }
+            } else {
+                PropertyValue::Scalar { value, dims }
+            },
+            interpolation: if curve {
+                InterpolationPolicy::LinearInside
+            } else {
+                InterpolationPolicy::ConstantWithinValidity
+            },
             validity: ValidityDomain::unconstrained()
-                .with("T", 290.0, 310.0).with("omega", 0.0, 1000.0),
+                .with("T", 290.0, 310.0).with("omega", lo, hi),
             uncertainty: UncertaintyModel::Unstated,
             observations: vec![],
             provenance: Provenance {
@@ -61,14 +107,20 @@ fn patch(
         process: "damping test".into(),
         revision: 0,
     }, claims, vec![]).unwrap();
+    let mut query = QueryPoint::new().with("T", 300.0).unwrap()
+        .with("omega", query_omega).unwrap();
+    if tabulated {
+        query = query.with_quantity(
+            STRAIN_AXIS, QuantitySpec::dimensional(Dims::NONE), 0.0,
+        ).unwrap();
+    }
     let source = resolve_material_state_point(
-        &card, &QueryPoint::new().with("T", 300.0).unwrap().with("omega", 0.0).unwrap(),
-        &requirements, MaterialPropertySelection::SingleClaimOnly,
+        &card, &query, &requirements, MaterialPropertySelection::SingleClaimOnly,
     ).unwrap();
     let law = PlaneStressViscosity::from_material(
         source.clone(), MaterialPlane::Axes12, KEYS,
     ).unwrap();
-    let sheet = ResolvedSheet::try_from_material(source).unwrap();
+    let sheet = ResolvedSheet::try_from_material_with_card(source, &card).unwrap();
     let patch = MembranePatch::try_new(
         Mesh2 {
             nodes: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
@@ -285,6 +337,106 @@ fn source_axes_band_budget_foreign_geometry_and_cancelled_trials_refuse() {
     }), Err(MembraneViscosityError::Membrane(MembraneError::Cancelled))));
     assert_eq!(basis.linearization_displacement_m(), u.as_slice());
     damping.evaluate(&u, &[[0.0; 3]; 3], || false).unwrap();
+}
+
+
+#[test]
+fn mechanical_source_bands_bound_quadratic_and_tabulated_damping_and_modes() {
+    let values = [4.0, 3.0, 2.0, 1.0, 0.4, 0.2];
+    let u = deformed();
+    for tabulated in [false, true] {
+        let (reference, _) = patch_with_source_bands(
+            values, 0.002, 0.0, &[], 0.0, tabulated,
+        );
+        let reference_modes = modes(&reference, &u, &[5, 8]);
+        let cutoff = 0.5 * reference_modes.modes()[0].lambda.sqrt();
+        assert!(cutoff > 0.0 && cutoff < 1000.0);
+        let mut mechanical = vec![AREAL_DENSITY, THICKNESS];
+        if tabulated {
+            mechanical.extend(CURVE_PROPERTIES);
+            mechanical.push(COUPLING_PROPERTY);
+        } else {
+            mechanical.extend(MEMBRANE_PROPERTIES);
+        }
+        for key in mechanical {
+            // The selected viscosity stays broad; narrow exactly one source
+            // used by inertia, reference-volume loss or the active elastic law.
+            let (p, laws) = patch_with_source_bands(
+                values, 0.002, 0.0, &[(key, (0.0, cutoff))], 0.0, tabulated,
+            );
+            assert_eq!(laws[0].omega_band_rad_s(), (0.0, 1000.0));
+            assert!(MembraneViscosity::new(
+                &p, laws.clone(), (0.0, 1000.0), || false,
+            ).is_err(), "{key} did not constrain the declared material band");
+            let admitted = MembraneViscosity::new(
+                &p, laws, (0.0, cutoff), || false,
+            ).unwrap();
+            assert_eq!(admitted.resolved_band_rad_s(), (0.0, cutoff));
+            assert_eq!(admitted.reference_laws()[0].source(), p.sheets()[0].material());
+            // Numeric coefficients and native modal extraction are unchanged.
+            // The retained actual mode lies outside the narrower source support.
+            let basis = modes(&p, &u, &[5, 8]);
+            close(basis.modes()[0].lambda, reference_modes.modes()[0].lambda);
+            assert!(admitted.project_modes(&basis, 100_000, || false).is_err());
+        }
+    }
+}
+
+#[test]
+fn unrelated_carried_properties_do_not_narrow_selected_membrane_physics() {
+    let values = [4.0, 3.0, 2.0, 1.0, 0.4, 0.2];
+    let u = deformed();
+    for tabulated in [false, true] {
+        let (reference, reference_laws) = patch_with_source_bands(
+            values, 0.002, 0.0, &[], 0.0, tabulated,
+        );
+        let reference_modes = modes(&reference, &u, &[5, 8]);
+        let reference_damping = MembraneViscosity::new(
+            &reference, reference_laws, (0.0, 1000.0), || false,
+        ).unwrap();
+        let expected = reference_damping.project_modes(
+            &reference_modes, 100_000, || false,
+        ).unwrap();
+        let (p, laws) = patch_with_source_bands(
+            values, 0.002, 0.0, &[("unused_source_channel", (0.0, 0.01))], 0.0, tabulated,
+        );
+        assert!(p.sheets()[0].material().property("unused_source_channel").is_some());
+        let damping = MembraneViscosity::new(&p, laws, (0.0, 1000.0), || false).unwrap();
+        let basis = modes(&p, &u, &[5, 8]);
+        let actual = damping.project_modes(&basis, 100_000, || false).unwrap();
+        for (&a, &b) in actual.matrix_per_s().iter().zip(expected.matrix_per_s()) {
+            close(a, b);
+        }
+    }
+}
+
+#[test]
+fn disjoint_regional_mechanical_support_cannot_borrow_a_broad_viscosity_band() {
+    let values = [4.0, 3.0, 2.0, 1.0, 0.4, 0.2];
+    let (left, mut laws) = patch_with_source_bands(
+        values, 0.002, 0.0, &[("warp_stiffness", (0.0, 100.0))], 0.0, false,
+    );
+    let (right, right_laws) = patch_with_source_bands(
+        values, 0.002, 0.0, &[("warp_stiffness", (200.0, 300.0))], 250.0, false,
+    );
+    laws.extend(right_laws);
+    let p = MembranePatch::try_new(
+        Mesh2 {
+            nodes: vec![
+                [0.0, 0.0], [1.0, 0.0], [0.0, 1.0],
+                [2.0, 0.0], [3.0, 0.0], [2.0, 1.0],
+            ],
+            elems: vec![vec![0, 1, 2], vec![3, 4, 5]],
+            patches: vec![],
+        },
+        vec![left.sheets()[0].clone(), right.sheets()[0].clone()], vec![0.0; 2],
+        MembraneDomain { minimum_area_ratio: 0.01, maximum_abs_strain: 0.5 },
+        MembraneBudget { max_nodes: 6, max_triangles: 2 },
+        || false,
+    ).unwrap();
+    for band in [(0.0, 1000.0), (0.0, 100.0), (200.0, 300.0), (100.0, 200.0)] {
+        assert!(MembraneViscosity::new(&p, laws.clone(), band, || false).is_err());
+    }
 }
 
 #[path = "membrane_viscosity/modal.rs"]

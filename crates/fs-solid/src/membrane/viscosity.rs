@@ -20,7 +20,8 @@ use super::{Element, MembraneError, MembranePatch, dot, finite_vectors, poll};
 use fs_material::plane_stress_viscosity::{
     MaterialPlane, PlaneStressViscosity, factor_passive_resultant,
 };
-use fs_material::sheet::MembraneLaw;
+use fs_material::sheet::{AREAL_DENSITY, MEMBRANE_PROPERTIES, MembraneLaw, THICKNESS};
+use fs_material::sheet::tabulated::{COUPLING_PROPERTY, CURVE_PROPERTIES};
 
 /// Original membrane/source refusal or an incompatible material binding.
 #[derive(Debug)]
@@ -211,8 +212,11 @@ impl<'a> MembraneViscosity<'a> {
     /// refreshes only the pinned viscosity claims at the elastic endpoint.
     /// Reference thickness comes from the original sheet, independently of mass.
     ///
-    /// The finite ordered resolved band must lie inside EVERY source band.
-    /// It is a declared applicability interval, not a signal bandwidth proof.
+    /// The finite ordered resolved band must lie inside EVERY participating
+    /// viscosity, areal-density, thickness and active membrane-law source band.
+    /// Unused properties retained in the complete bundle do not constrain it.
+    /// A request outside their intersection refuses; it is never silently clipped.
+    /// This is a declared applicability interval, not a signal bandwidth proof.
     /// Transient consumers must separately admit their forcing and sampling.
     pub fn new(
         patch: &'a MembranePatch,
@@ -245,6 +249,7 @@ impl<'a> MembraneViscosity<'a> {
         let mut volumes_m3 = Vec::with_capacity(laws.len());
         let mut factors = Vec::with_capacity(laws.len());
         let mut natural_references = Vec::with_capacity(laws.len());
+        let mut source_band = (0.0_f64, f64::INFINITY);
         for (index, ((element, sheet), law)) in
             patch.elements.iter().zip(&patch.sheets).zip(&laws).enumerate()
         {
@@ -267,6 +272,36 @@ impl<'a> MembraneViscosity<'a> {
             for omega in [lo, hi] {
                 law.validate_frequency(omega)
                     .map_err(|source| MembraneViscosityError::Material { element: index, source })?;
+            }
+            let (loss_lo, loss_hi) = law.omega_band_rad_s();
+            source_band = (source_band.0.max(loss_lo), source_band.1.min(loss_hi));
+            let mut include_property = |key: &str| -> Result<()> {
+                let property = sheet.material().property(key)
+                    .ok_or_else(|| invalid("missing original membrane mechanical source"))?;
+                if let Some((low, high)) = property.angular_frequency_band_rad_s()
+                    .map_err(|source| MembraneViscosityError::Source { element: index, source })?
+                {
+                    source_band = (source_band.0.max(low), source_band.1.min(high));
+                }
+                Ok(())
+            };
+            include_property(AREAL_DENSITY)?;
+            include_property(THICKNESS)?;
+            match &element.law {
+                MembraneLaw::Quadratic(_) => {
+                    for key in MEMBRANE_PROPERTIES { include_property(key)?; }
+                }
+                MembraneLaw::Tabulated(_) => {
+                    for key in CURVE_PROPERTIES { include_property(key)?; }
+                    include_property(COUPLING_PROPERTY)?;
+                }
+                // The native hyperelastic owner already requires fixed external
+                // model support and refuses frequency applicability. Reference
+                // mass/thickness still belong to the original sheet above.
+                MembraneLaw::Hyperelastic(_) => {}
+            }
+            if source_band.1 < source_band.0 || lo < source_band.0 || hi > source_band.1 {
+                return Err(invalid("declared membrane band exceeds combined mechanical and viscosity source support"));
             }
             let volume = element.area * sheet.thickness_m();
             if !volume.is_finite() || volume <= 0.0 {
@@ -310,7 +345,7 @@ impl<'a> MembraneViscosity<'a> {
         self.reference_laws.as_deref().unwrap_or(&self.laws)
     }
 
-    /// Declared resolved applicability interval [rad/s].
+    /// Declared resolved interval inside all participating mechanical/loss bands [rad/s].
     pub const fn resolved_band_rad_s(&self) -> (f64, f64) {
         self.resolved_band_rad_s
     }
@@ -493,7 +528,7 @@ impl<'a> MembraneViscosity<'a> {
             for lambda in [mode.interval.0, mode.lambda, mode.interval.1] {
                 let omega = lambda.sqrt();
                 if !omega.is_finite() || omega < lo || omega > hi {
-                    return Err(invalid("membrane frequency enclosure exceeds the declared viscosity band"));
+                    return Err(invalid("membrane frequency enclosure exceeds the declared material band"));
                 }
             }
         }
