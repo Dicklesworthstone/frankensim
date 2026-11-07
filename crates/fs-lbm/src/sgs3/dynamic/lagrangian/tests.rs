@@ -94,12 +94,26 @@ fn trilinear_departures_reproduce_affine_history_and_wrap() {
             [x + 2.0 * y - 3.0 * z, 1.0 + x + y + z]
         })
         .collect();
-    let value = sample_history(shape, index(shape, [2, 2, 2]), [0.25, -0.5, 0.75], &values);
+    let value = sample_history(
+        FilterGeometry::Periodic,
+        shape,
+        index(shape, [2, 2, 2]),
+        [0.25, -0.5, 0.75],
+        &values,
+    )
+    .unwrap();
     assert_eq!(
         value,
         [1.75 + 2.0 * 2.5 - 3.0 * 1.25, 1.0 + 1.75 + 2.5 + 1.25]
     );
-    let wrapped = sample_history(shape, index(shape, [0, 0, 0]), [0.5, 0.0, 0.0], &values);
+    let wrapped = sample_history(
+        FilterGeometry::Periodic,
+        shape,
+        index(shape, [0, 0, 0]),
+        [0.5, 0.0, 0.0],
+        &values,
+    )
+    .unwrap();
     assert_eq!(wrapped, [2.0, 3.0]);
 }
 

@@ -14758,11 +14758,11 @@ Six new focused tests and eight existing momentum-history tests compiled and
 passed in a bounded native source probe (14 passed, 0 failed, 0 ignored). That
 probe used the actual dynamic/filter/history modules and required pinned fs-math
 deterministic functions; it is not a Cargo crate build or DSR gate. Rustfmt and
-bounded source review also completed. The model remains first-order pathline
-integration on periodic Cartesian domains, with explicit authored timescales,
-nonnegative emitted transport and signed history. No adaptive-timescale
-calibration, wall/inflow memory, scalar variance, reaction-rate, SGS energy or
-DNS/turbulence-accuracy qualification is supplied.
+bounded source review also completed. The original periodic entry remains
+first-order with explicit authored timescales, nonnegative emitted transport
+and signed history. The resolved-channel extension below adds physical-wall
+histories; adaptive-timescale calibration, inflow memory, scalar variance,
+reaction-rate, SGS energy and DNS/turbulence-accuracy qualification remain absent.
 
 ### Joint Lagrangian stress, heat and component histories
 
@@ -14794,9 +14794,49 @@ weighting, independently reconstructed physical-history relaxation, joint
 rollback/retry, storage/admission and centered-null/uniform-source memory.
 All 68 real-source SGS tests passed with pinned nightly-2026-07-06 and the
 actual compiled fs-math dependency. This bounded probe is not a full crate
-build or DSR gate. Periodic Cartesian domains, first-order pathline integration
-and explicit authored timescales remain; wall/inflow memory, adaptive memory
-calibration, reaction-rate and SGS-energy closure are not supplied.
+build or DSR gate. First-order pathline integration and explicit authored
+timescales remain. The resolved-channel extension below adds physical-wall
+domains; inflow memory, adaptive calibration, reaction-rate and SGS-energy
+closure are not supplied.
+
+### Resolved-channel Lagrangian turbulence histories
+
+The momentum, paired scalar and common-component owners now provide
+`new_channel`, `prepare_with_walls` and `normal_axis`. They reuse the
+original channel Favre filter, Cartesian spacings and physical wall
+derivatives. Current no-slip velocities and scalar Value/ZeroGradient/Interior
+conditions enter normalization and both physical and filtered gradients.
+Common species retain interior-only normal reconstruction; impermeability
+does not invent a mass-fraction wall gradient.
+
+Startup averages signed contractions in a local tangential 3-by-3 stencil.
+It does not reuse instantaneous whole-plane averaging: each history retains
+its local trajectory. Common-component contractions remain raw until the
+chosen instantaneous or Lagrangian averaging owner consumes them.
+
+History interpolation remains periodic only in the two tangential axes.
+Normal backtracking must remain inside the actual half-cell walls. Positive
+trilinear weights interpolate fluid-center histories; within either outer
+half cell, constant extension uses the nearest fluid history. A departure
+through a physical wall refuses the trial instead of wrapping or reflecting
+history across the channel. This is an explicit first-order boundary
+approximation, not a calibrated wall model.
+
+All three histories share the original exclusive publication transaction,
+with independent signed numerator/denominator scales and memory times.
+Cancellation, wall crossing or coefficient refusal preserves every accepted
+bank and sample time. Periodic entry points and their arithmetic remain.
+Numerical payload remains 168/264/376 bytes per cell for momentum, paired
+scalar and common-component owners; channel preparation adds no field
+allocation or species-count-dependent storage.
+
+All 74 real-source SGS tests passed using pinned nightly-2026-07-06 and
+the actual fs-math dependency, including existing periodic and instantaneous
+channel cases. Six added groups cover local tangential initialization,
+all normal orientations, wall values and physical scaling, no opposite-wall
+history, signed decay/translation, storage admission and joint rollback.
+This is a bounded native source probe, not a full crate/DSR gate, turbulent
+channel DNS qualification or adaptive memory calibration.
 
 ## Dense source-resolved shear rheology
 

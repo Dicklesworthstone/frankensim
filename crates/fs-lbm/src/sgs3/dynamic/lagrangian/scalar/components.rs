@@ -9,8 +9,10 @@
 //! All three fits share the current Favre flow and sample time. A trial
 //! publishes all three histories together only after its consumer accepts.
 //! Zero current sources still advect and decay the accepted signed history.
-//! The periodic, authored-timescale and exploratory limits of the parent
-//! scalar and momentum histories remain unchanged.
+//! The periodic or resolved-channel geometry, authored timescales and
+//! exploratory limits of the parent scalar and momentum histories apply.
+//! Channel component gradients use three interior fluid centers at the walls;
+//! impermeability never invents a composition wall value or zero gradient.
 
 use super::super::super::scalar::components::PeriodicDynamicComponents;
 use super::*;
@@ -145,7 +147,49 @@ impl LagrangianDynamicComponents {
         component_count: usize,
         maximum_bytes: usize,
     ) -> Result<Self, DynamicSgsError> {
-        FilterGeometry::Periodic.validate_shape(shape)?;
+        Self::new_geometry(
+            shape,
+            spacing,
+            FilterGeometry::Periodic,
+            component_count,
+            maximum_bytes,
+        )
+    }
+
+    /// Joint momentum, heat and component history in a resolved plane channel.
+    /// Each dimension needs at least three fluid cells. Numerical storage is
+    /// unchanged and remains independent of the number of components.
+    pub fn new_channel(
+        shape: [usize; 3],
+        spacing: [f64; 3],
+        normal_axis: usize,
+        component_count: usize,
+        maximum_bytes: usize,
+    ) -> Result<Self, DynamicSgsError> {
+        Self::new_geometry(
+            shape,
+            spacing,
+            FilterGeometry::Channel(normal_axis),
+            component_count,
+            maximum_bytes,
+        )
+    }
+
+    fn new_geometry(
+        shape: [usize; 3],
+        spacing: [f64; 3],
+        geometry: FilterGeometry,
+        component_count: usize,
+        maximum_bytes: usize,
+    ) -> Result<Self, DynamicSgsError> {
+        geometry.validate_shape(shape)?;
+        if let FilterGeometry::Channel(normal) = geometry {
+            if shape[normal] < 3 {
+                return Err(DynamicSgsError::Invalid(
+                    "component wall derivatives require three normal fluid cells",
+                ));
+            }
+        }
         if component_count == 0 {
             return Err(DynamicSgsError::Invalid("at least one component required"));
         }
@@ -168,9 +212,14 @@ impl LagrangianDynamicComponents {
             });
         }
         let result = Self {
-            flow: LagrangianDynamicScalar::new(shape, spacing, maximum_bytes)?,
+            flow: LagrangianDynamicScalar::new_geometry(shape, spacing, geometry, maximum_bytes)?,
             components: ComponentMemory {
-                workspace: PeriodicDynamicComponents::new(shape, component_count, maximum_bytes)?,
+                workspace: PeriodicDynamicComponents::new_geometry(
+                    shape,
+                    geometry,
+                    component_count,
+                    maximum_bytes,
+                )?,
                 history: allocated(cells, [0.0; 2])?,
                 candidate: allocated(cells, [0.0; 2])?,
                 history_log_scale: None,
@@ -205,6 +254,10 @@ impl LagrangianDynamicComponents {
         self.components.workspace.component_count()
     }
 
+    pub const fn normal_axis(&self) -> Option<usize> {
+        self.flow.normal_axis()
+    }
+
     pub const fn accepted_time(&self) -> Option<f64> {
         self.flow.accepted_time()
     }
@@ -226,6 +279,61 @@ impl LagrangianDynamicComponents {
         velocity: &[[f64; 3]],
         scalar: &[f64],
         components: impl Fn(usize, usize) -> f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<LagrangianComponentsTrial<'_>, DynamicSgsError> {
+        self.prepare_impl(
+            momentum, heat, config, time, density, velocity, None, scalar, None, components,
+            cancelled,
+        )
+    }
+
+    /// Prepare all three channel fits from one physical sample. Wall velocities
+    /// and heat laws are lower then upper; composition wall derivatives are
+    /// reconstructed from the original fluid values without a prescribed datum.
+    /// A refusal or dropped trial leaves every accepted bank and clock unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_with_walls(
+        &mut self,
+        momentum: LagrangianSgsConfig,
+        heat: LagrangianScalarConfig,
+        config: LagrangianComponentsConfig,
+        time: f64,
+        density: &[f64],
+        velocity: &[[f64; 3]],
+        wall_velocity: [[f64; 3]; 2],
+        scalar: &[f64],
+        scalar_walls: [ScalarWall; 2],
+        components: impl Fn(usize, usize) -> f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<LagrangianComponentsTrial<'_>, DynamicSgsError> {
+        self.prepare_impl(
+            momentum,
+            heat,
+            config,
+            time,
+            density,
+            velocity,
+            Some(wall_velocity),
+            scalar,
+            Some(scalar_walls),
+            components,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_impl(
+        &mut self,
+        momentum: LagrangianSgsConfig,
+        heat: LagrangianScalarConfig,
+        config: LagrangianComponentsConfig,
+        time: f64,
+        density: &[f64],
+        velocity: &[[f64; 3]],
+        wall_velocity: Option<[[f64; 3]; 2]>,
+        scalar: &[f64],
+        scalar_walls: Option<[ScalarWall; 2]>,
+        components: impl Fn(usize, usize) -> f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<LagrangianComponentsTrial<'_>, DynamicSgsError> {
         poll(&mut cancelled, 0)?;
@@ -236,13 +344,15 @@ impl LagrangianDynamicComponents {
             .measure_scale(&components, &mut cancelled)?;
         let previous = self.flow.accepted_time();
         let elapsed = previous.map_or(0.0, |accepted| time - accepted);
-        let (joint, scales) = self.flow.prepare_scaled(
+        let (joint, scales) = self.flow.prepare_scaled_with_walls(
             momentum,
             heat,
             time,
             density,
             velocity,
+            wall_velocity,
             scalar,
+            scalar_walls,
             &mut cancelled,
         )?;
         let flow = &joint.momentum.owner.flow;
@@ -291,3 +401,7 @@ impl LagrangianDynamicComponents {
 #[cfg(test)]
 #[path = "components/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "components/channel_tests.rs"]
+mod channel_tests;

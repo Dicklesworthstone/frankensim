@@ -217,6 +217,10 @@ impl PeriodicDynamicComponents {
         }
         let domain =
             self.prepare_contractions(flow, density, scales, common_scale, values, cancelled)?;
+        // Instantaneous channel fits average each plane once after summing
+        // component contractions. Pathline history consumes the raw sources.
+        flow.geometry
+            .average_planes(self.scalar.shape, &mut self.scalar.contraction, cancelled)?;
         self.scalar
             .fit_from(flow, config.fit_config(), scales, domain, cancelled)
     }
@@ -305,11 +309,6 @@ impl PeriodicDynamicComponents {
             numerator.add(pair[0]);
             denominator.add(pair[1]);
         }
-        // Sum raw component contractions first, then average each plane once.
-        // Averaging every component separately adds sweeps and can discard a
-        // small component's weight before the common objective is formed.
-        flow.geometry
-            .average_planes(self.scalar.shape, &mut self.scalar.contraction, cancelled)?;
         Ok([numerator.value, denominator.value])
     }
 }

@@ -13,10 +13,18 @@
 //! This follows the pathline-averaging construction of Meneveau, Lund & Cabot
 //! (1996), doi:10.1017/S0022112096007379. Here the positive memory time is
 //! caller-declared: the paper's adaptive timescale and calibration are NOT
-//! implemented. Initial history uses the existing local 27-cell average.
-//! The grid/test filters remain one/three cells on a uniform periodic box.
-//! No wall, inflow, backscatter-energy or DNS claim is added. Independent
-//! scalar-flux histories are available through the opt-in [`scalar`] owner.
+//! implemented. Periodic history starts from the local 27-cell average.
+//! A resolved plane channel instead uses the existing tangential test filter
+//! and a local nine-cell initial average, not homogeneous-plane averaging.
+//! Its actual no-slip wall velocities enter the original Favre contractions.
+//!
+//! Channel backtracking wraps only the two tangential axes. Normal departures
+//! must remain between the physical walls, half a cell beyond the outer
+//! centers. Positive interpolation extends the nearest center through each
+//! outer half cell; this declared first-order boundary extrapolation never
+//! joins opposite walls or invents inflow history. A departure beyond a wall
+//! refuses the trial. No wall law, inflow, backscatter-energy or DNS claim is
+//! added. Independent scalar-flux histories use the opt-in [`scalar`] owner.
 //!
 //! A prepared trial borrows its owner. Dropping it rejects the history;
 //! committing it after the consuming flow step succeeds publishes history
@@ -139,7 +147,33 @@ impl LagrangianDynamicSgs {
         spacing: [f64; 3],
         maximum_bytes: usize,
     ) -> Result<Self, DynamicSgsError> {
-        FilterGeometry::Periodic.validate_shape(shape)?;
+        Self::new_geometry(shape, spacing, FilterGeometry::Periodic, maximum_bytes)
+    }
+
+    /// Resolved no-slip channel with two periodic axes and one fixed wall normal.
+    /// Wall velocities are supplied to each `prepare_with_walls` call. Storage
+    /// and allocation bounds are identical to the periodic owner.
+    pub fn new_channel(
+        shape: [usize; 3],
+        spacing: [f64; 3],
+        normal_axis: usize,
+        maximum_bytes: usize,
+    ) -> Result<Self, DynamicSgsError> {
+        Self::new_geometry(
+            shape,
+            spacing,
+            FilterGeometry::Channel(normal_axis),
+            maximum_bytes,
+        )
+    }
+
+    fn new_geometry(
+        shape: [usize; 3],
+        spacing: [f64; 3],
+        geometry: FilterGeometry,
+        maximum_bytes: usize,
+    ) -> Result<Self, DynamicSgsError> {
+        geometry.validate_shape(shape)?;
         let cells = shape
             .into_iter()
             .try_fold(1usize, |n, d| n.checked_mul(d))
@@ -152,7 +186,12 @@ impl LagrangianDynamicSgs {
             });
         }
         let result = Self {
-            flow: PeriodicDynamicSgs::new_cartesian(shape, spacing, maximum_bytes)?,
+            flow: PeriodicDynamicSgs::new_cartesian_geometry(
+                shape,
+                spacing,
+                geometry,
+                maximum_bytes,
+            )?,
             history: allocated(cells, [0.0; 2])?,
             candidate: allocated(cells, [0.0; 2])?,
             accepted_time: None,
@@ -176,6 +215,14 @@ impl LagrangianDynamicSgs {
 
     pub const fn shape(&self) -> [usize; 3] {
         self.flow.shape()
+    }
+
+    /// Fixed impermeable wall normal, or None for the periodic owner.
+    pub const fn normal_axis(&self) -> Option<usize> {
+        match self.flow.geometry {
+            FilterGeometry::Periodic => None,
+            FilterGeometry::Channel(axis) => Some(axis),
+        }
     }
 
     /// Physical grid-filter width used by the Germano model.
@@ -204,6 +251,31 @@ impl LagrangianDynamicSgs {
             .map(|(trial, _)| trial)
     }
 
+    /// Prepare channel history from current physical fields and both no-slip
+    /// wall velocities (lower, upper). Normal wall speeds must be zero.
+    /// This entry requires a channel owner; periodic preparation requires `prepare`.
+    /// The geometry and accepted history remain fixed while wall speeds may change.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_with_walls(
+        &mut self,
+        config: LagrangianSgsConfig,
+        time: f64,
+        density: &[f64],
+        velocity: &[[f64; 3]],
+        wall_velocity: [[f64; 3]; 2],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<LagrangianSgsTrial<'_>, DynamicSgsError> {
+        self.prepare_scaled_with_walls(
+            config,
+            time,
+            density,
+            velocity,
+            Some(wall_velocity),
+            cancelled,
+        )
+        .map(|(trial, _)| trial)
+    }
+
     // Joint scalar preparation reuses these exact current Favre fields and
     // scales. The standalone momentum path retains its original arithmetic.
     fn prepare_scaled(
@@ -212,6 +284,19 @@ impl LagrangianDynamicSgs {
         time: f64,
         density: &[f64],
         velocity: &[[f64; 3]],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(LagrangianSgsTrial<'_>, InputScales), DynamicSgsError> {
+        self.prepare_scaled_with_walls(config, time, density, velocity, None, cancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_scaled_with_walls(
+        &mut self,
+        config: LagrangianSgsConfig,
+        time: f64,
+        density: &[f64],
+        velocity: &[[f64; 3]],
+        walls: Option<[[f64; 3]; 2]>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(LagrangianSgsTrial<'_>, InputScales), DynamicSgsError> {
         poll(&mut cancelled, 0)?;
@@ -224,10 +309,19 @@ impl LagrangianDynamicSgs {
                 "finite increasing Lagrangian sample times required",
             ));
         }
+        let walls = match (self.normal_axis(), walls) {
+            (None, None) => [[0.0; 3]; 2],
+            (Some(_), Some(walls)) => walls,
+            _ => {
+                return Err(DynamicSgsError::Invalid(
+                    "Lagrangian wall data must match workspace geometry",
+                ));
+            }
+        };
         let elapsed = self.accepted_time.map_or(0.0, |previous| time - previous);
         let (scales, _) =
             self.flow
-                .prepare_contractions(density, velocity, [[0.0; 3]; 2], &mut cancelled)?;
+                .prepare_contractions(density, velocity, walls, &mut cancelled)?;
         let current_log = (scales.velocity > 0.0)
             .then(|| 2.0 * det::ln(scales.density) + 4.0 * det::ln(scales.velocity));
         let update = HistoryUpdate::new(
@@ -306,6 +400,7 @@ impl LagrangianDynamicSgs {
 // logarithmic history arithmetic. Only their physical normalization differs.
 struct HistoryUpdate {
     shape: [usize; 3],
+    geometry: FilterGeometry,
     spacing: [f64; 3],
     initialized: bool,
     elapsed: f64,
@@ -346,6 +441,7 @@ impl HistoryUpdate {
         }
         Ok(Self {
             shape: flow.shape,
+            geometry: flow.geometry,
             spacing: flow.spacing,
             initialized,
             elapsed,
@@ -368,10 +464,11 @@ impl HistoryUpdate {
         let pair = if !self.initialized {
             let mut pair = [0.0; 2];
             let mut determined = false;
-            each_box(self.shape, cell, |j| {
+            let samples = self.geometry.samples();
+            self.geometry.each_box(self.shape, cell, |j| {
                 determined |= contraction[j][1] != 0.0;
                 for k in 0..2 {
-                    pair[k] += contraction[j][k] / 27.0;
+                    pair[k] += contraction[j][k] / samples;
                 }
             });
             if determined && pair[1] == 0.0 {
@@ -393,7 +490,7 @@ impl HistoryUpdate {
                     reason: "Lagrangian departure exceeds declared cell limit",
                 });
             }
-            let advected = sample_history(self.shape, cell, departure, history);
+            let advected = sample_history(self.geometry, self.shape, cell, departure, history)?;
             let current = contraction[cell];
             if (self.old_weight > 0.0 && self.old_scale == 0.0 && advected[1] != 0.0)
                 || (self.fresh > 0.0 && self.new_scale == 0.0 && current[1] != 0.0)
@@ -452,23 +549,52 @@ impl HistoryUpdate {
 // physical velocity, including uniform advection, defines the departure;
 // subtracting the covariance's reference velocity here would pin eddies.
 fn sample_history(
+    geometry: FilterGeometry,
     shape: [usize; 3],
     cell: usize,
     departure: [f64; 3],
     history: &[[f64; 2]],
-) -> [f64; 2] {
+) -> Result<[f64; 2], DynamicSgsError> {
     let p = coordinates(shape, cell);
+    let normal = match geometry {
+        FilterGeometry::Periodic => None,
+        FilterGeometry::Channel(axis) => {
+            let at = p[axis] as f64 - departure[axis];
+            if !at.is_finite() || at < -0.5 || at > shape[axis] as f64 - 0.5 {
+                return Err(DynamicSgsError::Cell {
+                    cell,
+                    reason: "Lagrangian departure crosses impermeable channel wall",
+                });
+            }
+            Some(axis)
+        }
+    };
     let coordinate = core::array::from_fn::<_, 3, _>(|a| {
-        (p[a] as f64 - departure[a]).rem_euclid(shape[a] as f64)
+        let at = p[a] as f64 - departure[a];
+        if normal == Some(a) {
+            at.clamp(0.0, (shape[a] - 1) as f64)
+        } else {
+            at.rem_euclid(shape[a] as f64)
+        }
     });
     let lower = coordinate.map(|v| v.floor() as usize);
+    let upper = core::array::from_fn::<_, 3, _>(|a| {
+        if normal == Some(a) {
+            (lower[a] + 1).min(shape[a] - 1)
+        } else {
+            (lower[a] + 1) % shape[a]
+        }
+    });
     let fraction = core::array::from_fn::<_, 3, _>(|a| coordinate[a] - lower[a] as f64);
+    // rem_euclid can round a tiny negative periodic coordinate to the extent.
+    // Retain the original wrapped index even in that endpoint case.
+    let lower = core::array::from_fn::<_, 3, _>(|a| lower[a] % shape[a]);
     let mut result = [0.0; 2];
     for z in 0..2 {
         for y in 0..2 {
             for x in 0..2 {
                 let offset = [x, y, z];
-                let q = core::array::from_fn(|a| (lower[a] + offset[a]) % shape[a]);
+                let q = core::array::from_fn(|a| if offset[a] == 0 { lower[a] } else { upper[a] });
                 let weight = (0..3)
                     .map(|a| {
                         if offset[a] == 0 {
@@ -484,7 +610,7 @@ fn sample_history(
             }
         }
     }
-    result
+    Ok(result)
 }
 
 #[cfg(test)]

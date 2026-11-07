@@ -19,10 +19,14 @@
 //! with the parent first-order pathline averaging (Meneveau, Lund & Cabot,
 //! 1996, doi:10.1017/S0022112096007379). It is a declared discretization with
 //! authored memory times, not the papers' adaptive/calibrated timescale.
-//! Only periodic Cartesian domains are admitted. Backscatter is excluded
-//! from emitted diffusion while signed history is retained. There is no wall,
-//! reaction-rate, scalar-variance, isotropic SGS-energy or DNS qualification.
+//! Periodic Cartesian domains and resolved plane channels are admitted.
+//! Channel walls use the original scalar derivative policy at both filter
+//! scales, and the parent's positive, wall-bounded history interpolation.
+//! Backscatter is excluded from emitted diffusion while signed history is
+//! retained. There is no thermal wall-function, reaction-rate, scalar-variance,
+//! isotropic SGS-energy or DNS qualification.
 
+use super::super::channel::ScalarWall;
 use super::super::scalar::{DynamicScalarConfig, DynamicScalarReport, PeriodicDynamicScalar};
 use super::*;
 
@@ -161,7 +165,32 @@ impl LagrangianDynamicScalar {
         spacing: [f64; 3],
         maximum_bytes: usize,
     ) -> Result<Self, DynamicSgsError> {
-        FilterGeometry::Periodic.validate_shape(shape)?;
+        Self::new_geometry(shape, spacing, FilterGeometry::Periodic, maximum_bytes)
+    }
+
+    /// Joint history on a resolved plane channel, with the same byte budget
+    /// as the periodic owner. Supply both physical wall laws at each sample.
+    pub fn new_channel(
+        shape: [usize; 3],
+        spacing: [f64; 3],
+        normal_axis: usize,
+        maximum_bytes: usize,
+    ) -> Result<Self, DynamicSgsError> {
+        Self::new_geometry(
+            shape,
+            spacing,
+            FilterGeometry::Channel(normal_axis),
+            maximum_bytes,
+        )
+    }
+
+    fn new_geometry(
+        shape: [usize; 3],
+        spacing: [f64; 3],
+        geometry: FilterGeometry,
+        maximum_bytes: usize,
+    ) -> Result<Self, DynamicSgsError> {
+        geometry.validate_shape(shape)?;
         let cells = shape
             .into_iter()
             .try_fold(1usize, |n, d| n.checked_mul(d))
@@ -176,9 +205,9 @@ impl LagrangianDynamicScalar {
             });
         }
         let result = Self {
-            flow: LagrangianDynamicSgs::new(shape, spacing, maximum_bytes)?,
+            flow: LagrangianDynamicSgs::new_geometry(shape, spacing, geometry, maximum_bytes)?,
             scalar: ScalarMemory {
-                workspace: PeriodicDynamicScalar::new(shape, maximum_bytes)?,
+                workspace: PeriodicDynamicScalar::new_geometry(shape, geometry, maximum_bytes)?,
                 history: allocated(cells, [0.0; 2])?,
                 candidate: allocated(cells, [0.0; 2])?,
                 history_log_scale: None,
@@ -210,6 +239,10 @@ impl LagrangianDynamicScalar {
         self.flow.filter_width()
     }
 
+    pub const fn normal_axis(&self) -> Option<usize> {
+        self.flow.normal_axis()
+    }
+
     /// Common last committed sample time, not the consuming flow's endpoint.
     pub const fn accepted_time(&self) -> Option<f64> {
         self.flow.accepted_time()
@@ -237,6 +270,37 @@ impl LagrangianDynamicScalar {
             .map(|(trial, _)| trial)
     }
 
+    /// Prepare both channel fits with the current lower/upper physical walls.
+    /// Fixed scalar values include their wall-to-fluid variation in the common
+    /// normalization. ZeroGradient and Interior policies require three normal
+    /// fluid cells even if the current scalar field is uniform.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_with_walls(
+        &mut self,
+        momentum: LagrangianSgsConfig,
+        config: LagrangianScalarConfig,
+        time: f64,
+        density: &[f64],
+        velocity: &[[f64; 3]],
+        wall_velocity: [[f64; 3]; 2],
+        scalar: &[f64],
+        scalar_walls: [ScalarWall; 2],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<LagrangianScalarTrial<'_>, DynamicSgsError> {
+        self.prepare_scaled_with_walls(
+            momentum,
+            config,
+            time,
+            density,
+            velocity,
+            Some(wall_velocity),
+            scalar,
+            Some(scalar_walls),
+            cancelled,
+        )
+        .map(|(trial, _)| trial)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn prepare_scaled(
         &mut self,
@@ -246,6 +310,24 @@ impl LagrangianDynamicScalar {
         density: &[f64],
         velocity: &[[f64; 3]],
         scalar: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(LagrangianScalarTrial<'_>, InputScales), DynamicSgsError> {
+        self.prepare_scaled_with_walls(
+            momentum, config, time, density, velocity, None, scalar, None, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_scaled_with_walls(
+        &mut self,
+        momentum: LagrangianSgsConfig,
+        config: LagrangianScalarConfig,
+        time: f64,
+        density: &[f64],
+        velocity: &[[f64; 3]],
+        wall_velocity: Option<[[f64; 3]; 2]>,
+        scalar: &[f64],
+        scalar_walls: Option<[ScalarWall; 2]>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(LagrangianScalarTrial<'_>, InputScales), DynamicSgsError> {
         poll(&mut cancelled, 0)?;
@@ -255,12 +337,39 @@ impl LagrangianDynamicScalar {
                 "scalar field and Lagrangian workspace lengths differ",
             ));
         }
-        let scalar_scale = self.scalar.workspace.normalize(scalar, &mut cancelled)?;
+        match (self.normal_axis(), scalar_walls) {
+            (Some(normal), Some(walls)) => {
+                if self.shape()[normal] < 3
+                    && walls
+                        .iter()
+                        .any(|wall| matches!(wall, ScalarWall::ZeroGradient | ScalarWall::Interior))
+                {
+                    return Err(DynamicSgsError::Invalid(
+                        "scalar wall reconstruction requires three normal fluid cells",
+                    ));
+                }
+            }
+            (None, None) => {}
+            _ => {
+                return Err(DynamicSgsError::Invalid(
+                    "Lagrangian scalar wall data must match workspace geometry",
+                ));
+            }
+        }
+        let scalar_scale =
+            self.scalar
+                .workspace
+                .normalize_with_walls(scalar, scalar_walls, &mut cancelled)?;
         let previous = self.flow.accepted_time();
         let elapsed = previous.map_or(0.0, |t| time - t);
-        let (momentum, scales) =
-            self.flow
-                .prepare_scaled(momentum, time, density, velocity, &mut cancelled)?;
+        let (momentum, scales) = self.flow.prepare_scaled_with_walls(
+            momentum,
+            time,
+            density,
+            velocity,
+            wall_velocity,
+            &mut cancelled,
+        )?;
         let flow = &momentum.owner.flow;
         if scales.velocity == 0.0 || scalar_scale == 0.0 {
             // The current source is zero, but old pathline history must still
