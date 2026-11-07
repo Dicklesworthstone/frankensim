@@ -13,7 +13,7 @@ usage: python3 -I gen_violin_maple_pack.py REPO_ROOT OUT_ROOT [shear=ultrasonic|
 Reads REPO_ROOT/data/matdb/seed-v1/{maple-sycamore-sonderegger2013,maple-sycamore-loss-lammlein2020,maple-sycamore-lammlein2020-plates}/properties.tsv and writes
 OUT_ROOT/violin-maple-sycamore-sonderegger2013-shell/{manifest.tsv,properties.tsv}.
 shear=ultrasonic writes the earlier pack (G_LR ultrasonic as well, the scalars of 4f9abefe1) under the name ...-shell-ultrasonicshear.
-inplane=laemmlein (a declared ALTERNATIVE, not the registered model) takes the density, E_L, E_R and G_LR all from Laemmlein's plates (audio band, one consistent source) with G_LT, G_RT and
+inplane=laemmlein (the audio-band pack, registered as violin-maple-sycamore-sonderegger2013-shell-laemmlein; the violin, viola and cello maple parts use it) takes the density, E_L, E_R and G_LR all from Laemmlein's plates (audio band, one consistent source) with G_LT, G_RT and
 nu_LR as above; the pack is then named ...-shell-laemmlein.
 With shear=fpl (a declared SENSITIVITY, not the registered model) G_LR and G_LT are the Wood Handbook sugar maple ratios times the same E_L (glr_over_el 0.111, glt_over_el 0.063 of the committed pack
 maple-sugar-fpl-gtr282) instead of the ultrasonic values; G_RT stays ultrasonic (the Wood Handbook set has no G_RT ratio); the pack is then named ...-fplshear-shell.

@@ -83,7 +83,8 @@ Tools next to this file (Python; run with `uv run --python 3.12 --with triangle 
   in the audio band (Laemmlein's violin-back plates), G_LT and G_RT ultrasonic (no audio-band source found).
   - `shear=ultrasonic` writes the earlier pack, with G_LR ultrasonic too.
   - `shear=fpl` writes the Wood Handbook shear sensitivity.
-  - `inplane=laemmlein` writes the alternative with density, E_L, E_R and G_LR all from Laemmlein's plates.
+  - `inplane=laemmlein` writes the audio-band pack, with density, E_L, E_R and G_LR all from Laemmlein's plates; it is
+    registered as `violin-maple-sycamore-sonderegger2013-shell-laemmlein`, and the violin, viola and cello maple parts use it.
 - `gen_violin_spruce_pack.py REPO_ROOT OUT_ROOT` writes the shell-ready Norway spruce pack from the committed Viala 2020
   violin-quarter pack, with the Sitka nu_LR of the Wood Handbook pack as a declared surrogate.
 
