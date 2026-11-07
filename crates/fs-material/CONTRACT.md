@@ -20895,3 +20895,24 @@ role retention, independent zero/finite-conductivity and zero/finite-pole-loss
 limits, unchanged original polarization/current recovery, and source refusals.
 Formatting and a focused source review pass. These integration tests are not
 claimed executed without the complete material dependency closure.
+
+
+### Timed static recovery of cyclic backstress
+
+`ChabocheStaticRecoveryJ2<N>` explicitly adds `dX_i/dt = -r_i X_i`
+with independent rates in s^-1 and the actual positive physical interval,
+alone or with the original linear/power-law Perzyna kinetics. Fixed preparation
+divides C, gamma and incoming X by `1+r*dt`, then reuses the original scalar
+consistency, direction drift and exact tensor/axial tangents for simultaneous
+recovery and plastic flow. Original C remains authoritative for stored energy;
+the original work account separates physical dynamic/static recovery from
+backward-Euler numerical loss. No response performs a new source query.
+
+Incoming history and accepted candidates retain original bounds. Rate/duration
+overflow and unresolved active coefficients refuse. Branches remain independent
+and proposals never mutate accepted history. Three authored G0/G1 regressions
+cover independent dwell recurrence and continuous-time refinement, simultaneous
+nonproportional flow/tangent/energy, zero-rate and absent-branch reductions, and
+refusal. Rust parsing/formatting passed; native compilation and tests remain
+unverified. This is linear static recovery, not nonlinear recovery, isotropic
+annealing, recrystallization, finite kinematic plasticity or empirical calibration.

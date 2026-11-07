@@ -32,6 +32,8 @@ use fs_math::det;
 pub mod axial;
 /// Joint linear/power-law kinetics with the native multi-branch history owner.
 pub mod rate;
+/// Explicit-time linear static recovery on the same implicit branch return.
+pub mod recovery;
 /// Fixed-condition source binding with independently selected branch coefficients.
 pub mod source;
 
@@ -119,7 +121,8 @@ pub struct ChabocheEnergyIncrement<const N: usize = 1> {
     pub state: ChabocheState<N>,
     /// Work and storage; physical dissipation ALREADY includes recovery below.
     pub energy: IncrementEnergy,
-    /// Dynamic-recovery contribution to physical dissipation [J/m3], not extra heat.
+    /// Dynamic plus explicitly selected static recovery [J/m3], already in
+    /// physical dissipation; this is not an additional heat source.
     pub recovery_dissipation_j_m3: f64,
 }
 
@@ -660,8 +663,40 @@ impl<const N: usize> ChabocheJ2<N> {
             ));
         }
         let next = self.response_with_rate(strain, old_state, false, kinetics)?;
+        self.audit_increment(
+            old_strain, old_state, strain, next, tolerances, kinetics, &[0.0; N],
+        )
+    }
+
+    // The timed recovery owner supplies a candidate from this same scalar
+    // elimination, but storage always uses the ORIGINAL branch moduli here.
+    #[allow(clippy::too_many_arguments)]
+    fn audit_increment(
+        &self,
+        old_strain: &Voigt,
+        old_state: &ChabocheState<N>,
+        strain: &Voigt,
+        next: ChabocheResponse<N>,
+        tolerances: EnergyTolerances,
+        kinetics: Option<&super::rate::VoceOverstressJ2>,
+        static_recovery_increments: &[f64; N],
+    ) -> Result<ChabocheEnergyIncrement<N>, ChabocheError> {
+        self.validate_history(old_strain, old_state)?;
+        if !tolerances.energy_j_m3.is_finite()
+            || tolerances.energy_j_m3 <= 0.0
+            || !tolerances.yield_pa.is_finite()
+            || tolerances.yield_pa <= 0.0
+        {
+            return Err(ChabocheError::Invalid(
+                "energy and yield allowances must be finite and positive",
+            ));
+        }
         let delta = next.state.plastic.alpha - old_state.plastic.alpha;
-        if delta < 0.0 || delta == 0.0 && next.state != *old_state {
+        if delta < 0.0
+            || delta == 0.0
+                && next.state != *old_state
+                && static_recovery_increments.iter().all(|value| *value == 0.0)
+        {
             return Err(ChabocheError::Invalid(
                 "nonrepresentable accumulated history increment",
             ));
@@ -696,11 +731,12 @@ impl<const N: usize> ChabocheJ2<N> {
                 .backbone
                 .saturation_numerical_loss(old_state.plastic.alpha, delta);
         let mut recovery_dissipation = 0.0;
-        for ((branch, a0), a1) in self
+        for (index, ((branch, a0), a1)) in self
             .branches
             .iter()
             .zip(&old_state.backstress_pa)
             .zip(&next.state.backstress_pa)
+            .enumerate()
         {
             if branch.modulus_pa == 0.0 {
                 continue;
@@ -709,6 +745,9 @@ impl<const N: usize> ChabocheJ2<N> {
             let da = subtract(a1, a0);
             numerical_dissipation += 0.75 * (contract(&da, &da) / branch.modulus_pa);
             recovery_dissipation += 2.0 * branch.recovery_per_strain * delta * final_branch;
+            if static_recovery_increments[index] != 0.0 {
+                recovery_dissipation += 2.0 * static_recovery_increments[index] * final_branch;
+            }
         }
         let mut energy = IncrementEnergy {
             initial,

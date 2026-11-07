@@ -102,7 +102,7 @@ impl<const N: usize> UniaxialChaboche<N> {
         self.response_with_kinetics(strain, state, None)
     }
 
-    fn response_with_kinetics(
+    pub(super) fn response_with_kinetics(
         &self,
         strain: f64,
         state: &UniaxialChabocheState<N>,
@@ -116,10 +116,13 @@ impl<const N: usize> UniaxialChaboche<N> {
         // shared owner, including their dependence on the plastic increment.
         let effective = [2.0 * trial / 3.0, -trial / 3.0, -trial / 3.0, 0.0, 0.0, 0.0];
         let returned = match kinetics {
-            Some(rate) => self
+            Some(rate) => {
+                self.backbone
+                    .solve_rate_increment(&effective, &state.history, e, rate)?
+            }
+            None => self
                 .backbone
-                .solve_rate_increment(&effective, &state.history, e, rate)?,
-            None => self.backbone.solve_increment(&effective, &state.history, e)?,
+                .solve_increment(&effective, &state.history, e)?,
         };
         let next = self.backbone.returned_state(&state.history, &returned);
         let tensor = self.compatible_strain(strain, next.plastic.plastic_strain[0]);
@@ -213,7 +216,10 @@ impl<const N: usize> UniaxialChabocheOverstress<N> {
         let linear = axial.backbone().backbone().backbone();
         let mut modulus = linear.elastic.youngs
             + linear.kinematic_hardening
-            + axial.backbone().backbone().isotropic_hardening_derivative_pa(0.0);
+            + axial
+                .backbone()
+                .backbone()
+                .isotropic_hardening_derivative_pa(0.0);
         for branch in axial.backbone().branches() {
             modulus += branch.modulus_pa();
         }
@@ -247,7 +253,9 @@ impl<const N: usize> UniaxialChabocheOverstress<N> {
         strain: f64,
         tolerances: EnergyTolerances,
     ) -> Result<ChabocheEnergyIncrement<N>, ChabocheError> {
-        let old_tensor = self.axial.compatible_strain(old_strain, old.plastic_strain());
+        let old_tensor = self
+            .axial
+            .compatible_strain(old_strain, old.plastic_strain());
         let next = self.response(strain, old)?;
         self.law
             .advance_with_energy(&old_tensor, &old.history, &next.strain, tolerances)
@@ -261,10 +269,12 @@ impl<const N: usize> Uniaxial for UniaxialChabocheOverstress<N> {
         self.axial.initial_state()
     }
     fn stress(&self, strain: f64, state: &Self::State) -> f64 {
-        self.response(strain, state).map_or(f64::NAN, |r| r.stress_pa)
+        self.response(strain, state)
+            .map_or(f64::NAN, |r| r.stress_pa)
     }
     fn tangent(&self, strain: f64, state: &Self::State) -> f64 {
-        self.response(strain, state).map_or(f64::NAN, |r| r.tangent_pa)
+        self.response(strain, state)
+            .map_or(f64::NAN, |r| r.tangent_pa)
     }
     fn update_state(&self, strain: f64, state: &Self::State) -> Self::State {
         self.response(strain, state).map_or_else(

@@ -8,6 +8,9 @@ use fs_material::plastic::voce::VoceJ2;
 use fs_material::tensor::{contract, trace};
 use fs_material::{SmallStrainLaw, Voigt};
 
+#[path = "plastic_chaboche/recovery.rs"]
+mod recovery;
+
 const TOL: EnergyTolerances = EnergyTolerances {
     energy_j_m3: 1e-10,
     yield_pa: 1e-9,
