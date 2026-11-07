@@ -590,6 +590,21 @@ material qualification.
 
 ## Source indentation hardness for contact and wear
 
+`ResolvedDepthHardness::hardness_integral_between` integrates the original
+piecewise-affine profile over exposed material depth in Pa m.
+`advance_by_integral` inverts that monotone integral for a prescribed Archard
+measure `k * p * ds`, crossing original source knots without freezing hardness.
+It returns the retained depth increment and the original profile's interval
+mean for the existing wear-volume owner. The mean is a quadrature value, not a
+new material claim. Local coordinates and compensated accumulation preserve
+small increments late in a wear history; the inverse scales hardness before
+solving its quadratic. Runtime work allocates nothing and visits only crossed
+source segments after binary search. Unsupported removal and lost arithmetic
+or depth resolution refuse; source limits never extrapolate. Pressure feedback
+and mechanical work remain with contact. Synthetic affine, cross-knot,
+partition, extreme-scale and late-small-increment references exercise this
+bounded integration; material calibration remains separate.
+
 `hardness::plastic_history::ResolvedJ2Hardness::hardness_pa_at_accepted` observes
 an accepted native J2 point without a second return map. Original mechanical
 source identity, fixed conditions, hardening convention and law must match;

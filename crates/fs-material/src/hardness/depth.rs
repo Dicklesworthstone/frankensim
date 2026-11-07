@@ -7,6 +7,9 @@
 //! checked once, including interior breakpoints and holes, with no extrapolation.
 //! Runtime evaluation is a binary search without source allocation or querying.
 
+mod integral;
+pub use integral::DepthHardnessAdvance;
+
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{
     ClaimSelection, MatDbError, MaterialCard, PropertyKey, PropertyLineSlice, PropertySupportError,
