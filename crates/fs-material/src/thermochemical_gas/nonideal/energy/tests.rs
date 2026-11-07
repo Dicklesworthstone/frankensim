@@ -138,6 +138,64 @@ fn g1_general_energy_increment_keeps_both_density_endpoints_and_heat_direction()
 }
 
 #[test]
+fn paired_energy_increment_retains_original_endpoint_cv_and_formation_invariance() {
+    let model = bound();
+    for ((rho0, t0), (rho1, t1)) in [
+        ((40.0, 300.0), (60.0, 350.0)),
+        ((60.0, 350.0), (40.0, 300.0)),
+        ((40.0, 300.0), (60.0, 300.0)),
+        ((40.0, 300.0), (40.0, 300.0)),
+        ((47.889_003_167_633_395, 300.0), (47.889_003_172_422_3, 300.000_000_01)),
+    ] {
+        let paired = model.specific_internal_energy_change_and_cv_between_densities(
+            rho0, t0, rho1, t1,
+        ).unwrap();
+        let full = model.evaluate_density_temperature(&point(t1, 5e6), rho1).unwrap();
+        let cv = paired.final_cv_j_kg_k();
+        assert!(cv > 0.0);
+        assert!((cv / full.specific_heat_cv_j_kg_k() - 1.0).abs() < 128.0 * f64::EPSILON);
+        let dt = 0.001;
+        let plus = model.specific_internal_energy_change_between_densities(
+            rho0, t0, rho1, t1 + dt,
+        ).unwrap();
+        let minus = model.specific_internal_energy_change_between_densities(
+            rho0, t0, rho1, t1 - dt,
+        ).unwrap();
+        assert!(((plus - minus) / (2.0 * dt) / cv - 1.0).abs() < 1e-9);
+        assert_eq!(model.specific_internal_energy_change_between_densities(
+            rho1, t1, rho0, t0,
+        ).unwrap(), -paired.internal_energy_change_j_kg());
+        for datum in [-1e24, 1e24] {
+            let shifted = bound_with_reference(datum);
+            assert_eq!(shifted.specific_internal_energy_change_and_cv_between_densities(
+                rho0, t0, rho1, t1,
+            ).unwrap(), paired);
+        }
+    }
+}
+
+#[test]
+fn paired_energy_increment_keeps_both_endpoint_domains() {
+    let model = bound();
+    for density in [0.0, -1.0, 1e9, f64::NAN, f64::INFINITY] {
+        assert!(model.specific_internal_energy_change_and_cv_between_densities(
+            density, 300.0, 40.0, 350.0,
+        ).is_err());
+        assert!(model.specific_internal_energy_change_and_cv_between_densities(
+            40.0, 300.0, density, 350.0,
+        ).is_err());
+    }
+    for temperature in [199.0, 2001.0, f64::NAN, f64::INFINITY] {
+        assert!(model.specific_internal_energy_change_and_cv_between_densities(
+            40.0, temperature, 60.0, 350.0,
+        ).is_err());
+        assert!(model.specific_internal_energy_change_and_cv_between_densities(
+            40.0, 300.0, 60.0, temperature,
+        ).is_err());
+    }
+}
+
+#[test]
 fn original_law_enthalpy_closes_energy_and_flow_work_and_reverses() {
     let model = bound();
     let rho = 47.889_003_167_633_395;

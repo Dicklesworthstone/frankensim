@@ -7,7 +7,6 @@ use crate::multicomponent::wall_exchange::{
     WallGasCaloric, WallGasState, WallThermal, exchange_caloric,
     exchange_caloric_with_heat_storage,
 };
-use fs_material::MaterialError;
 use fs_qty::Time;
 
 /// One cell's contact and optional original finite-wall caloric law.
@@ -265,34 +264,24 @@ impl WallGasCaloric for RealGasCaloric<'_> {
                 RealGasFlowError::Invalid("wall trial outside original real-gas domain").into(),
             );
         }
-        let point = self
-            .gas
-            .context()
-            .clone()
-            .with("temperature", temperature)
-            .map_err(|error| {
-                RealGasFlowError::Material(MaterialError::State {
-                    what: format!("real-gas wall temperature coordinate: {error}"),
-                })
-            })?;
-        let source = self
-            .gas
-            .model()
-            .evaluate_density_temperature(&point, self.density)
-            .map_err(RealGasFlowError::from)?;
         let reference = self.gas.reference_state();
-        let internal = self
+        // One original finite energy increment already resolves the endpoint
+        // Cv and checks both EOS/caloric states. Speculative heat trials need
+        // neither a PT cubic inventory nor dilute-gas transport. prepare()
+        // still decodes every accepted candidate before publishing any state,
+        // admitting its complete source axes, transport and density branch.
+        let caloric = self
             .gas
             .model()
-            .specific_internal_energy_change_between_densities(
+            .specific_internal_energy_change_and_cv_between_densities(
                 reference.density_kg_m3(),
                 reference.temperature_k(),
                 self.density,
                 temperature,
             )
             .map_err(RealGasFlowError::from)?;
-        let energy = self.density * internal;
-        let capacity = self.density * source.specific_heat_cv_j_kg_k();
+        let energy = self.density * caloric.internal_energy_change_j_kg();
+        let capacity = self.density * caloric.final_cv_j_kg_k();
         if !energy.is_finite() || !positive(capacity) {
             return Err(
                 RealGasFlowError::Invalid("unrepresentable original real-gas calorics").into(),

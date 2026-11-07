@@ -44,6 +44,26 @@ impl RealGasEnergySolution {
     pub const fn iterations(&self) -> usize { self.iterations }
 }
 
+/// Original relative internal energy and its final fixed-density tangent.
+///
+/// This is a homogeneous caloric query, not an accepted transport/material
+/// state. It checks the original EOS and caloric support at both endpoints;
+/// consumers must resolve their complete accepted material state separately.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RealGasCaloricIncrement {
+    internal_energy_change_j_kg: f64,
+    final_cv_j_kg_k: f64,
+}
+impl RealGasCaloricIncrement {
+    /// Signed original NASA/PR Delta u [J/kg], including density departure.
+    pub const fn internal_energy_change_j_kg(self) -> f64 {
+        self.internal_energy_change_j_kg
+    }
+    /// Complete final Cv [J/(kg K)], not ideal-gas Cp-R or a frozen secant.
+    /// This is d(Delta u)/dT_final while both endpoint densities remain fixed.
+    pub const fn final_cv_j_kg_k(self) -> f64 { self.final_cv_j_kg_k }
+}
+
 struct CaloricSample {
     internal_energy_j_kg: f64,
     residual_energy_j_kg: f64,
@@ -152,14 +172,39 @@ impl ThermochemicalPengRobinsonModel {
         &self, initial_density_kg_m3: f64, initial_temperature_k: f64,
         final_density_kg_m3: f64, final_temperature_k: f64,
     ) -> Result<f64, GasEnergyError> {
+        self.specific_internal_energy_change_and_cv_between_densities(
+            initial_density_kg_m3, initial_temperature_k,
+            final_density_kg_m3, final_temperature_k,
+        ).map(RealGasCaloricIncrement::internal_energy_change_j_kg)
+    }
+
+    /// Original Delta u and final Cv from the same direct density-caloric query.
+    /// The original finite NASA/PR energy increment remains independent of
+    /// formation datums, including changes of density and very small heating.
+    ///
+    /// Both endpoints retain positive pressure, mechanical stability and
+    /// positive complete Cv on the original caloric source. The caller declares
+    /// a continuous homogeneous branch. No PT cubic inventory, component
+    /// fugacity or transport/card resolution is performed: this supplies a
+    /// nonlinear caloric trial, not a complete accepted material state.
+    pub fn specific_internal_energy_change_and_cv_between_densities(
+        &self, initial_density_kg_m3: f64, initial_temperature_k: f64,
+        final_density_kg_m3: f64, final_temperature_k: f64,
+    ) -> Result<RealGasCaloricIncrement, GasEnergyError> {
         let reference = self.caloric_reference(initial_density_kg_m3,
             initial_temperature_k, final_density_kg_m3)?;
         self.caloric_from_eos(reference.initial_state())?;
         let change = reference.evaluate(Temperature::new(final_temperature_k))
             .map_err(|error| failure("real-gas caloric increment", error))?;
-        self.caloric_from_eos(change.state())?;
-        self.caloric_increment(initial_temperature_k, final_temperature_k,
-            change.residual_internal_energy_change_j_mol())
+        let final_state = self.caloric_from_eos(change.state())?;
+        let internal_energy_change_j_kg = self.caloric_increment(
+            initial_temperature_k, final_temperature_k,
+            change.residual_internal_energy_change_j_mol(),
+        )?;
+        Ok(RealGasCaloricIncrement {
+            internal_energy_change_j_kg,
+            final_cv_j_kg_k: final_state.cv_j_kg_k,
+        })
     }
 
     /// Original-law Delta h [J/kg] between explicit density/temperature states.

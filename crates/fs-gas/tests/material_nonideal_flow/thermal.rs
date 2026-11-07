@@ -155,6 +155,57 @@ fn dense_reservoir_heating_and_cooling_use_original_variable_cv_and_accepted_dur
     }
 }
 
+#[test]
+fn caloric_wall_trials_cross_transport_limits_but_accepted_gas_must_remain_supported() {
+    let mut wider = domain();
+    wider.energy.minimum_temperature_k = 250.0;
+    let gas = bind(common::model([0.0; 2], [0.0; 2], [200.0, 2000.0]), wider);
+    // The original caloric branch admits the cold reservoir. Its dilute-gas
+    // transport cards start at 300 K, but no gas endpoint need reach 250 K.
+    assert!(gas.model().evaluate_density_temperature(&point(250.0), 20.0).is_err());
+    assert!(gas.model().specific_internal_energy_change_and_cv_between_densities(
+        20.0, 350.0, 20.0, 250.0,
+    ).is_ok());
+    let mut flow = uniform(gas, 350.0, 0.0);
+    let conductance = 1e6;
+    let make_wall = |conductance| contact(WallThermal::Reservoir {
+        temperature_k: 250.0, conductance_w_per_k: conductance,
+    });
+    let mut walls = RealGasWallOperator::new(
+        &flow, vec![make_wall(conductance); 3], || false,
+    ).unwrap();
+    let mut no_retry = controls();
+    no_retry.maximum_halvings = 0;
+    let report = flow.step_with_walls(
+        Time::new(1e-6), no_retry, &mut walls, wall_controls(), || false,
+    ).unwrap();
+    assert_eq!(report.elapsed, Time::new(1e-6));
+    let mass = 20.0 * flow.mesh().volumes()[0];
+    let expected = root(250.0, 350.0, |t| {
+        mass * (internal_energy(20.0, t) - internal_energy(20.0, 350.0))
+            - conductance * report.elapsed.value() * (250.0 - t)
+    });
+    assert!(expected > 300.0 && expected < 350.0);
+    for primitive in flow.primitives() {
+        near(primitive.temperature, expected, 3e-8);
+    }
+    check_wall_balance(&flow, &walls, report);
+
+    // Stronger heat exchange would finish below the transport domain. The
+    // final full decode must still refuse, without publishing any owner.
+    let mut outside = RealGasWallOperator::new(
+        &flow, vec![make_wall(1e12); 3], || false,
+    ).unwrap();
+    let snapshot = (flow.states().to_vec(), flow.primitives().to_vec(), flow.time(),
+        outside.contacts().to_vec());
+    assert!(matches!(flow.step_with_walls(
+        Time::new(1e-6), no_retry, &mut outside, wall_controls(), || false,
+    ), Err(RealGasFlowError::StepRetries { .. })));
+    assert_eq!((flow.states().to_vec(), flow.primitives().to_vec(), flow.time(),
+        outside.contacts().to_vec()), snapshot);
+    assert_eq!(outside.last_report(), None);
+}
+
 // Original enthalpy chart with Cp(T)=T. This is deliberately nonlinear even
 // though its T(h) remains elementary; a cached capacity times delta T is wrong.
 struct QuadraticEnthalpy;
