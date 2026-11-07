@@ -3722,6 +3722,16 @@ masked load multiplier supplies the timestep convention once; positive outward
 flux contributes with a negative load sign. Radiation remains separate from the
 original prescribed flux even when both act on the same physical trace.
 
+Driver 136 joins declared surface heating to that same boundary-load pullback
+for both storage coordinates. `surface_power.sources` retains each original
+power-row index, surface name, watts, duty and physical area, with independent
+derivatives for delivered watts, declared watts and duty. Multiple rows on one
+surface share the original trace while remaining independent controls. The
+inward flux normalization uses the same native face measures as the forward
+solve, and neither watts nor duty is used as a divisor. The selected complete
+dual already includes feedback and timestep scaling; fixed equations and an
+initial sampled peak have zero future surface-heating sensitivity.
+
 Workspace allowances are charged before forward execution. These controls
 leave the accepted temperature and energy history unchanged, differentiate
 the selected discrete objective only, and supply no physical-validation or

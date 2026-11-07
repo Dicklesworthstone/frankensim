@@ -900,6 +900,7 @@ pub(in crate::solve::transient) fn finish(
     let prescribed_fragment = prescribed_controls.fragment(selected.state)?;
     let robin_fragment = robin_controls.fragment(selected.state)?;
     let flux_fragment = flux_controls.fragment(selected.state)?;
+    let surface_power_fragment = flux_controls.surface_power_fragment(selected.state)?;
     let controls_fragment = convection_controls.as_ref()
         .map(|controls| controls.fragment(selected.state)).transpose()?.unwrap_or_default();
     let convection_fragment = if convection_ports == 0 { String::new() } else { format!(
@@ -909,10 +910,10 @@ pub(in crate::solve::transient) fn finish(
     let pointwise_scope = pointwise.map(|lowering| pointwise::history_scope(
         SCOPE, lowering.is_material(), lowering.is_material_enclosure(),
     ));
-    let flux_scope = (!flux_fragment.is_empty()).then(||
+    let flux_scope = (!flux_fragment.is_empty() || !surface_power_fragment.is_empty()).then(||
         pointwise_scope.as_deref().unwrap_or(SCOPE).replace(
             "Prescribed Neumann data, phase-law parameters and the time grid are fixed.",
-            "Independent original outward heat-flux densities use the same complete physical dual and exact named P1 traces throughout the selected prefix. Phase-law parameters and the time grid are fixed.",
+            "Original Neumann controls use the same complete physical dual and exact named P1 traces throughout the selected prefix. Declared surface watts and duties retain the physical-area normalization and separate source identities; prescribed fluxes retain their outward-density coordinate. Phase-law parameters and the time grid are fixed.",
         ));
     let original_scope = flux_scope.as_deref().or(pointwise_scope.as_deref()).unwrap_or(SCOPE);
     let contact_fragment = if temperature_contacts.is_some() { format!(
@@ -933,7 +934,7 @@ pub(in crate::solve::transient) fn finish(
     ));
     poll(cx, deadline)?;
     Ok(format!(
-        "{{\"schema\":\"fs-cli-native-enthalpy-adjoint-v1\",\"output\":{},\"method\":\"discrete-total-enthalpy-backward-euler-reverse\",\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"active_ties\":{},\"unique_sampled_maximum\":{},\"dtemperature_duniform_initial_specific_enthalpy_k_kg_per_j\":{},\"dtemperature_dinitial_specific_enthalpy_k_kg_per_j\":[{}],\"dtemperature_dreference_density_multiplier_k\":{},\"regional_storage\":[{}],\"regional_power\":[{}],\"intervals\":[{}],\"revalidated_solid_endpoints\":{},\"adjoint_krylov_iterations\":{},\"maximum_dual_relative_residual\":{},\"max_reverse_steps\":{},\"max_krylov_iterations_per_linear_solve\":{},\"max_restart_columns_per_linear_solve\":{},\"max_adjoint_krylov_iterations\":{},\"additional_storage_estimate_bytes\":{}{radiation_fragment}{convection_fragment}{material_fragment}{prescribed_fragment}{robin_fragment}{flux_fragment}{contact_fragment},\"authority\":\"Estimated\",\"scope\":{}}}",
+        "{{\"schema\":\"fs-cli-native-enthalpy-adjoint-v1\",\"output\":{},\"method\":\"discrete-total-enthalpy-backward-euler-reverse\",\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"active_ties\":{},\"unique_sampled_maximum\":{},\"dtemperature_duniform_initial_specific_enthalpy_k_kg_per_j\":{},\"dtemperature_dinitial_specific_enthalpy_k_kg_per_j\":[{}],\"dtemperature_dreference_density_multiplier_k\":{},\"regional_storage\":[{}],\"regional_power\":[{}],\"intervals\":[{}],\"revalidated_solid_endpoints\":{},\"adjoint_krylov_iterations\":{},\"maximum_dual_relative_residual\":{},\"max_reverse_steps\":{},\"max_krylov_iterations_per_linear_solve\":{},\"max_restart_columns_per_linear_solve\":{},\"max_adjoint_krylov_iterations\":{},\"additional_storage_estimate_bytes\":{}{radiation_fragment}{convection_fragment}{material_fragment}{prescribed_fragment}{robin_fragment}{flux_fragment}{surface_power_fragment}{contact_fragment},\"authority\":\"Estimated\",\"scope\":{}}}",
         json_string(objective.name()), number(selected.value)?, number(selected_time)?,
         selected.state, selected.vertex, selected.ties, selected.ties == 1,
         number(initial_uniform)?, initial_rows.join(","), number(density_multiplier)?,

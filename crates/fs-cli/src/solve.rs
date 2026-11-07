@@ -341,7 +341,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// measures, retained fields and adjoints when propagating geometry offsets.
 /// Version 135 includes declared thin-coating heat storage in both native
 /// temperature grids and every coupled capacity response and energy audit.
-pub const SOLVE_DRIVER_VERSION: u32 = 135;
+/// Version 136 differentiates declared surface watts and duties through the
+/// complete native capacity and total-enthalpy trajectories on physical traces.
+pub const SOLVE_DRIVER_VERSION: u32 = 136;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

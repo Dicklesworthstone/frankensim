@@ -139,6 +139,7 @@ struct Derivatives {
     material_controls: String,
     prescribed_temperature: String,
     prescribed_heat_flux: String,
+    surface_power: String,
 }
 
 fn dot(cx: &Cx<'_>, a: &[f64], b: &[f64], deadline: Option<(Instant, f64)>)
@@ -677,6 +678,7 @@ pub(in crate::solve::transient) fn finish(
         .map(|controls| controls.fragment(selected.state)).transpose()?.unwrap_or_default();
     let prescribed_temperature = prescribed_controls.fragment_for_capacity(selected.state)?;
     let prescribed_heat_flux = flux_controls.fragment(selected.state)?;
+    let surface_power = flux_controls.surface_power_fragment(selected.state)?;
     let contact = if temperature_contacts.is_some() {
         contact::fragment(selected.state, max_contact_pairs, contact_workspace)
     } else {
@@ -691,7 +693,7 @@ pub(in crate::solve::transient) fn finish(
         boundary_histories: boundary_history.is_some(),
         primal_iterations, dual_iterations, max_dual_solves_per_step, worst_dual,
         reconstructed_steps, revalidated_steps, additional_storage_bytes, radiation, convection,
-        contact, material_controls, prescribed_temperature, prescribed_heat_flux,
+        contact, material_controls, prescribed_temperature, prescribed_heat_flux, surface_power,
     };
     report::render(cx, &result, ends_s, objective, config, deadline)
 }

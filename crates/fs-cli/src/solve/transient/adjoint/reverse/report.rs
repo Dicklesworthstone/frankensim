@@ -84,11 +84,16 @@ pub(super) fn render(
     if !heat_flux.is_empty() {
         scope.push_str(" Independent original outward heat-flux densities are differentiated on their unchanged named P1 traces throughout the selected prefix. Their negative load contractions use the same complete physical dual, including all admitted feedback, with no extra timestep factor or solve.");
     }
+    let surface_power = &result.surface_power;
+    if !surface_power.is_empty() {
+        scope = scope.replace("Surface-power, ", "");
+        scope.push_str(" Every declared surface-power row retains independent watts and duty controls through its exact physical-area normalized inward P1 load. Multiple sources on one trace remain separate controls. The same complete dual includes all admitted feedback, with zero future heating sensitivity at an initial sampled peak.");
+    }
     if result.boundary_histories {
         scope.push_str(" Declared thermal histories are held fixed and sampled at the same interval starts as the forward trajectory, before every endpoint reconstruction and coupled tangent. A replaced static Robin reference has zero derivative and is marked reference_history_held_fixed; its coefficient remains a control. Scheduled static heat-flux controls are omitted and scheduled prescribed-temperature coordinates remain fixed. These are not derivatives of history values or switching times.");
     }
     poll(cx, deadline)?;
-    Ok(format!("{{\"schema\":\"fs-cli-native-transient-adjoint-v1\",\"output\":{},\"method\":\"discrete-backward-euler-reverse\",\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"active_ties\":{},\"unique_sampled_maximum\":{},\"dtemperature_duniform_initial_k_per_k\":{},\"dtemperature_dinitial_temperatures\":[{}],\"dtemperature_dcapacity_multiplier_k\":{},\"regional_power\":[{}],\"robin\":[{}],\"intervals\":[{}],\"reconstructed_solid_endpoints\":{},\"revalidated_solid_endpoints\":{},\"reconstruction_krylov_iterations\":{},\"adjoint_krylov_iterations\":{},\"maximum_dual_relative_residual\":{},\"max_reverse_steps\":{},\"max_krylov_iterations_per_linear_solve\":{},\"max_reconstruction_krylov_iterations\":{},\"max_adjoint_krylov_iterations\":{},\"additional_storage_estimate_bytes\":{},\"authority\":\"Estimated\",\"scope\":{}{}{}{}{}{contact}{heat_flux}}}",
+    Ok(format!("{{\"schema\":\"fs-cli-native-transient-adjoint-v1\",\"output\":{},\"method\":\"discrete-backward-euler-reverse\",\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"active_ties\":{},\"unique_sampled_maximum\":{},\"dtemperature_duniform_initial_k_per_k\":{},\"dtemperature_dinitial_temperatures\":[{}],\"dtemperature_dcapacity_multiplier_k\":{},\"regional_power\":[{}],\"robin\":[{}],\"intervals\":[{}],\"reconstructed_solid_endpoints\":{},\"revalidated_solid_endpoints\":{},\"reconstruction_krylov_iterations\":{},\"adjoint_krylov_iterations\":{},\"maximum_dual_relative_residual\":{},\"max_reverse_steps\":{},\"max_krylov_iterations_per_linear_solve\":{},\"max_reconstruction_krylov_iterations\":{},\"max_adjoint_krylov_iterations\":{},\"additional_storage_estimate_bytes\":{},\"authority\":\"Estimated\",\"scope\":{}{}{}{}{}{contact}{heat_flux}{surface_power}}}",
         json_string(objective.name()), number(selected.value)?, number(time)?, selected.state,
         selected.vertex, selected.ties, selected.ties == 1, number(initial_uniform)?, initial.join(","),
         number(result.capacity)?, regional.join(","), robin.join(","), intervals.join(","), result.reconstructed_steps, result.revalidated_steps,
