@@ -3800,8 +3800,9 @@ patch law uses the current texture, while the candidate history keeps its own
 original source/frame identity.
 
 For pure translation, declared speed axes use the actual slip norm and accepted
-path coordinates remain fixed. A speed-dependent source with nonzero spin
-refuses because one centre speed cannot represent the distributed local slip.
+path coordinates remain fixed. This uniform-source entry refuses a speed-dependent
+source with nonzero spin because one centre speed cannot represent distributed
+local slip; the resolved entry below handles that physical field explicitly.
 Speed-independent sources retain the native joint translation/spin integral,
 analytic radial reduction and bounded cancellable angular quadrature. Zero
 indentation returns no footprint and exactly zero wrench; it does not assign a
@@ -3822,6 +3823,48 @@ texture/footprint covariance, unloaded admission, and transactional source,
 geometry, schema and late-cancellation refusals. Existing numerical/source
 owners are compiled directly in the focused harness; this is not full-workspace
 or measured-material qualification.
+
+### Local-speed source queries across spinning Hertz contact
+
+`SourceThermalEllipticCoulomb::evaluate_hertz_patch_resolved` composes the same
+normal and ordered material/source admissions with
+`ResolvedEllipticHertzPatch`. Every original principal claim is queried at the
+actual local speed `|u + omega J r|`; the native original associated ellipse
+then supplies local traction. Each canonical pressure node retains its location,
+velocity, pressure weight, actual law and both original usage-receipt bundles.
+No centre or RMS coefficient stands in for the spinning patch. The actual
+transported texture remains independent of the normal footprint direction.
+
+Before integration, two source probes admit a conservative entire-footprint
+speed interval using the maximum semiaxis. This can conservatively refuse a
+narrow ellipse rather than let quadrature miss an out-of-domain edge. Those
+probes are identified separately from physical pressure nodes. Every declared
+speed axis is replaced by actual local speed; accepted path coordinates,
+separate A/B bulk temperatures, interface temperature, nominal source pressure,
+selected claims and authority retain their original meanings. Hertz pressure
+weights never replace a nominal source-pressure coordinate. A spin variation
+that cannot be represented at the current translational speed refuses.
+
+The report contains the normal response, native force/torque/physical-power
+integral, load and power residuals, envelope probes and bounded local receipts.
+No node is promoted to a global source checkpoint: accepted native slip,
+temperature history and cumulative path do not advance. Zero indentation keeps
+no footprint and no quadrature nodes, while still admitting original sources.
+Local law work is capped by the supplied native evaluation budget, plus two
+envelope probes; cancellation polls extend through each original source refresh.
+Normal, source, budget, allocation and cancellation failures return no partial
+response. This remains instantaneous gross sliding with uniform external
+conditions, no distributed memory, static capture, heat allocation or local
+thermal solve. Neither envelope probes nor small work/load residuals certify
+spatial convergence; the original cheaper uniform-law path remains available.
+
+Three new G1/G3/G4 source integration groups independently reconstruct the
+linear-speed Hertz force and second-moment spin torque, check every local speed
+and source receipt with unequal bulk temperatures, transport anisotropic texture
+through an arbitrary frame rotation, and exercise entire-footprint source
+refusal, unrepresentable spin, budget failure, late cancellation, exact retry,
+foreign identity and unloaded admission. All nine Hertz source integration
+tests pass through the original source owners in the focused native build.
 
 ## Low-Tabor adhesion with evolving-area elastic microslip
 

@@ -10,9 +10,13 @@
 //! temperature coordinates read the original ordered bulk temperatures. Local
 //! slip speed is uniform only for pure translation: a speed-dependent source
 //! refuses nonzero spin rather than sampling every point at the centre speed.
-//! Spatially varying temperature, speed-dependent spinning traction, distributed
-//! path memory, static reactions and physical-time advancement require separate
-//! resolved owners. The returned checkpoint is only a source-refresh candidate.
+//! `resolved` evaluates speed-dependent spinning traction at actual local slip.
+//! Spatially varying temperature, distributed path memory, static reactions and
+//! physical-time advancement require separate owners. A uniform response's
+//! returned checkpoint is only a source-refresh candidate.
+
+/// Distributed local-speed source queries on the actual Hertz pressure field.
+pub mod resolved;
 
 use super::impulse::{SourceImpulseCoefficientRole, SourceImpulseError};
 use super::*;
@@ -134,34 +138,10 @@ impl SourceThermalEllipticCoulomb {
         quadrature: EllipticHertzQuadrature,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SourceEllipticHertzReport, SourceEllipticHertzError> {
-        poll(cancelled)?;
-        self.check(state)?;
-        let elastic = normal.model().normal_state().elastic();
-        if elastic.interface() != self.principal[0].interface()
-            || conditions.contact_temperature_k != elastic.state_coordinate("T")
-        {
+        let actual = self.hertz_conditions(state, normal, input, conditions, cancelled)?;
+        if !(1..=256).contains(&quadrature.angular_panels) {
             return Err(SourceEllipticHertzError::Invalid(
-                "normal and friction require the same ordered interface, authority and interface temperature",
-            ));
-        }
-        let accepted = state.sources[0].query();
-        if conditions.query.axis_quantities() != accepted.axis_quantities()
-            || conditions.query.axes().keys().ne(accepted.axes().keys())
-        {
-            return Err(SourceEllipticHertzError::Invalid(
-                "original complete query schema required before replacing temperature placeholders",
-            ));
-        }
-        let footprint_norm = fs_math::det::hypot(input.footprint_axis[0], input.footprint_axis[1]);
-        if !input.spin_rad_s.is_finite()
-            || input.slip_velocity_m_s.iter().any(|x| !x.is_finite())
-            || input.footprint_axis.iter().any(|x| !x.is_finite())
-            || !footprint_norm.is_finite()
-            || footprint_norm == 0.0
-            || !(1..=256).contains(&quadrature.angular_panels)
-        {
-            return Err(SourceEllipticHertzError::Invalid(
-                "finite rigid patch motion, nonzero footprint direction and bounded quadrature required",
+                "bounded angular quadrature required",
             ));
         }
         let axes = self.principal[0].query_axes();
@@ -172,37 +152,6 @@ impl SourceThermalEllipticCoulomb {
         {
             return Err(SourceEllipticHertzError::Invalid(
                 "spinning speed-dependent friction requires resolved local speed queries",
-            ));
-        }
-        let mut actual = conditions.clone();
-        let bulk = [elastic.surface_a_state(), elastic.surface_b_state()];
-        for (side, axis) in input.surface_temperature_axes.into_iter().enumerate() {
-            let Some(axis) = axis else { continue };
-            if !axes
-                .iter()
-                .any(|owned| owned.name == axis && owned.kind == FrictionQueryAxisKind::Temperature)
-                || input.surface_temperature_axes[..side].contains(&Some(axis))
-            {
-                return Err(SourceEllipticHertzError::Invalid(
-                    "each bulk temperature requires a distinct original owned temperature axis",
-                ));
-            }
-            let temperature = bulk[side].resolved().state_coordinate("T").ok_or(
-                SourceEllipticHertzError::Invalid("original bulk absolute temperature required"),
-            )?;
-            actual.query = actual
-                .query
-                .with(axis, temperature)
-                .map_err(SourceThermalCoulombError::from)?;
-        }
-        if axes.iter().any(|axis| {
-            axis.kind == FrictionQueryAxisKind::Temperature
-                && !input
-                    .surface_temperature_axes
-                    .contains(&Some(axis.name.as_str()))
-        }) {
-            return Err(SourceEllipticHertzError::Invalid(
-                "all additional temperature axes need an original ordered bulk owner",
             ));
         }
         poll(cancelled)?;
@@ -267,6 +216,78 @@ impl SourceThermalEllipticCoulomb {
             patch,
             wrench,
         })
+    }
+
+    fn hertz_conditions(
+        &self,
+        state: &SourceThermalEllipticState,
+        normal: &SourcePointContact,
+        input: SourceEllipticHertzInput<'_>,
+        conditions: &SourceFrictionConditions,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SourceFrictionConditions, SourceEllipticHertzError> {
+        poll(cancelled)?;
+        self.check(state)?;
+        let elastic = normal.model().normal_state().elastic();
+        if elastic.interface() != self.principal[0].interface()
+            || conditions.contact_temperature_k != elastic.state_coordinate("T")
+        {
+            return Err(SourceEllipticHertzError::Invalid(
+                "normal and friction require the same ordered interface, authority and interface temperature",
+            ));
+        }
+        let accepted = state.sources[0].query();
+        if conditions.query.axis_quantities() != accepted.axis_quantities()
+            || conditions.query.axes().keys().ne(accepted.axes().keys())
+        {
+            return Err(SourceEllipticHertzError::Invalid(
+                "original complete query schema required before replacing temperature placeholders",
+            ));
+        }
+        let footprint_norm = fs_math::det::hypot(input.footprint_axis[0], input.footprint_axis[1]);
+        if !input.spin_rad_s.is_finite()
+            || input.slip_velocity_m_s.iter().any(|x| !x.is_finite())
+            || input.footprint_axis.iter().any(|x| !x.is_finite())
+            || !footprint_norm.is_finite()
+            || footprint_norm == 0.0
+        {
+            return Err(SourceEllipticHertzError::Invalid(
+                "finite rigid patch motion and nonzero footprint direction required",
+            ));
+        }
+        let axes = self.principal[0].query_axes();
+        let mut actual = conditions.clone();
+        let bulk = [elastic.surface_a_state(), elastic.surface_b_state()];
+        for (side, axis) in input.surface_temperature_axes.into_iter().enumerate() {
+            let Some(axis) = axis else { continue };
+            if !axes
+                .iter()
+                .any(|owned| owned.name == axis && owned.kind == FrictionQueryAxisKind::Temperature)
+                || input.surface_temperature_axes[..side].contains(&Some(axis))
+            {
+                return Err(SourceEllipticHertzError::Invalid(
+                    "each bulk temperature requires a distinct original owned temperature axis",
+                ));
+            }
+            let temperature = bulk[side].resolved().state_coordinate("T").ok_or(
+                SourceEllipticHertzError::Invalid("original bulk absolute temperature required"),
+            )?;
+            actual.query = actual
+                .query
+                .with(axis, temperature)
+                .map_err(SourceThermalCoulombError::from)?;
+        }
+        if axes.iter().any(|axis| {
+            axis.kind == FrictionQueryAxisKind::Temperature
+                && !input
+                    .surface_temperature_axes
+                    .contains(&Some(axis.name.as_str()))
+        }) {
+            return Err(SourceEllipticHertzError::Invalid(
+                "all additional temperature axes need an original ordered bulk owner",
+            ));
+        }
+        Ok(actual)
     }
 }
 

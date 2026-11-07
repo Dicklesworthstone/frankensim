@@ -17,11 +17,24 @@ use fs_tribo::tangential::transport::{ObjectiveTangentialLaw, TangentialHistoryR
 #[path = "../../source_point/common.rs"]
 mod normal_fixture;
 
+#[path = "hertz/resolved.rs"]
+mod resolved;
+
 fn fixture(
     bulk_temperatures: [f64; 2],
     texture: [f64; 2],
     speed_dependent: bool,
     rank_one: bool,
+) -> (SourceThermalEllipticCoulomb, SourcePointContact) {
+    fixture_with_rate_pair(bulk_temperatures, texture, speed_dependent, rank_one, None)
+}
+
+fn fixture_with_rate_pair(
+    bulk_temperatures: [f64; 2],
+    texture: [f64; 2],
+    speed_dependent: bool,
+    rank_one: bool,
+    rate_pair: Option<[f64; 2]>,
 ) -> (SourceThermalEllipticCoulomb, SourcePointContact) {
     let a = normal_fixture::solid("A", 1000.0, 1e7);
     let b = normal_fixture::solid("B", 2000.0, 2e7);
@@ -42,6 +55,11 @@ fn fixture(
             if rank_one { [0.0; 2] } else { [0.1, 0.5] },
         ),
     ] {
+        let (axis, values) = match (name, rate_pair) {
+            (KINETIC, Some(slopes)) => ("speed", [0.0, 2.0 * slopes[0]]),
+            (KINETIC_Y, Some(slopes)) => ("speed", [0.0, 2.0 * slopes[1]]),
+            _ => (axis, values),
+        };
         let mut property = curve(name, values);
         let (dims, abscissas) = if axis == "speed" {
             (Dims([1, 0, -1, 0, 0, 0]), [0.0, 2.0])
