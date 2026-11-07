@@ -197,3 +197,81 @@ fn graded_density_rejects_bad_counts_values_and_overflow() {
     }
     assert!(round_element_with_reference_density(4.,[1.;2],1.,[f64::MAX/2.,f64::MAX]).is_err());
 }
+
+#[test]
+fn graded_elasticity_matches_independent_polynomial_work_without_changing_inertia() {
+    fn product(a:&[f64],b:&[f64])->Vec<f64> {
+        let mut c=vec![0.;a.len()+b.len()-1];
+        for (i,a) in a.iter().enumerate() {for (j,b) in b.iter().enumerate() {c[i+j]+=a*b;}}
+        c
+    }
+    fn integral(a:&[f64])->f64 {a.iter().enumerate().map(|(i,a)|a/(i+1) as f64).sum()}
+    let l=0.7;let radii=[0.003,0.009];let modulus=[5e9,21e9];let density=[430.,1800.];
+    let (k,m)=round_element_with_reference_material(l,radii,modulus,density).unwrap();
+    assert_eq!(m,round_element_with_reference_density(l,radii,12e9,density).unwrap().1);
+    let r=[radii[0],radii[1]-radii[0]];let r2=product(&r,&r);
+    let ei=product(&[modulus[0],modulus[1]-modulus[0]],&product(&r2,&r2));
+    let dd=[[-6./(l*l),12./(l*l)],[-4./l,6./l],[6./(l*l),-12./(l*l)],[-2./l,6./l]];
+    for i in 0..4 {for j in 0..4 {
+        let expected=std::f64::consts::PI*l*0.25*integral(&product(&ei,&product(&dd[i],&dd[j])));
+        assert!((k[4*i+j]-expected).abs()<2e-12*expected.abs().max(1e-8),
+            "K[{i},{j}]: {} != {expected}",k[4*i+j]);
+    }}
+    assert!(quad(&k,[0.,1.,l,1.]).abs()<1e-10);
+    assert!(quad(&k,[1.,0.,1.,0.]).abs()<1e-10);
+    assert_eq!(round_element_with_reference_material(l,radii,[12e9;2],density).unwrap(),
+        round_element_with_reference_density(l,radii,12e9,density).unwrap());
+}
+
+#[test]
+fn elastic_material_distribution_changes_native_spectrum_and_preserves_mass_ports() {
+    let mut s=spec();s.pivot_m=0.;
+    let uniform=RoundBeamModes::new(&shaft(),s).unwrap();
+    let explicit=RoundBeamModes::with_reference_material(&shaft(),s,&[[s.young_pa;2]],
+        &[[s.density_kg_m3;2]],&[]).unwrap();
+    assert_eq!(uniform.omega,explicit.omega);assert_eq!(uniform.shapes,explicit.shapes);
+    // Same average E and exactly the same mass: retain the actual stiffness
+    // distribution instead of multiplying uniform-beam frequencies afterward.
+    let soft_root=RoundBeamModes::with_reference_material(&shaft(),s,&[[4e9,20e9]],&[[800.;2]],&[]).unwrap();
+    let soft_tip=RoundBeamModes::with_reference_material(&shaft(),s,&[[20e9,4e9]],&[[800.;2]],&[]).unwrap();
+    assert_eq!(soft_root.pivot_inertia_kg_m2,soft_tip.pivot_inertia_kg_m2);
+    assert_eq!(soft_root.tip[0],soft_tip.tip[0]);assert_eq!(soft_root.hand[0],soft_tip.hand[0]);
+    assert!((soft_root.omega[1]/soft_tip.omega[1]-1.).abs()>0.01);
+    let mut scaled=s;scaled.maximum_hz*=2.;
+    // The profiles own their values, so unused homogeneous placeholders must
+    // not enter the result or block admission.
+    scaled.young_pa=f64::NAN;scaled.density_kg_m3=f64::NAN;
+    let stiffer=RoundBeamModes::with_reference_material(&shaft(),scaled,&[[16e9,80e9]],&[[800.;2]],&[]).unwrap();
+    assert_eq!(soft_root.omega.len(),stiffer.omega.len());
+    for (a,b) in soft_root.omega.iter().zip(&stiffer.omega).skip(1) {assert!((b/(2.*a)-1.).abs()<2e-7);}
+    assert_eq!(soft_root.pivot_inertia_kg_m2,stiffer.pivot_inertia_kg_m2);
+}
+
+#[test]
+fn elastic_interfaces_survive_subdivision_and_pivot_insertion() {
+    let stations=[RoundStation{x_m:0.,radius_m:0.005},RoundStation{x_m:0.17,radius_m:0.004},
+        RoundStation{x_m:0.4,radius_m:0.006}];
+    let modulus=[[4e9,8e9],[24e9,12e9]];let density=[[800.;2];2];
+    let mut frequencies=Vec::new();let mut inertia=Vec::new();
+    for subdivisions in [4,8,16] {
+        let mut s=spec();s.subdivisions=subdivisions;
+        let modes=RoundBeamModes::with_reference_material(&stations,s,&modulus,&density,&[]).unwrap();
+        frequencies.push(modes.omega[1]);inertia.push(modes.pivot_inertia_kg_m2);
+    }
+    // Conforming Hermite refinement resolves curvature at the actual elastic
+    // jump. The non-station pivot is inserted in every mesh.
+    assert!((frequencies[2]-frequencies[1]).abs()<0.4*(frequencies[1]-frequencies[0]).abs());
+    assert!((inertia[0]/inertia[2]-1.).abs()<1e-12);
+}
+
+#[test]
+fn graded_elasticity_refuses_missing_or_nonphysical_moduli() {
+    for modulus in [vec![],vec![[12e9;2];2],vec![[0.,12e9]],vec![[-1.,12e9]],
+        vec![[12e9,f64::NAN]],vec![[f64::INFINITY,12e9]]] {
+        assert!(RoundBeamModes::with_reference_material(&shaft(),spec(),&modulus,&[[800.;2]],&[]).is_err());
+    }
+    for modulus in [[0.,12e9],[-1.,12e9],[12e9,f64::NAN],[f64::INFINITY,12e9]] {
+        assert!(round_element_with_reference_material(0.4,[0.005;2],modulus,[800.;2]).is_err());
+    }
+    assert!(round_element_with_reference_material(0.4,[1.;2],[f64::MAX/2.,f64::MAX],[1.;2]).is_err());
+}

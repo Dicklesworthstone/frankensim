@@ -63,7 +63,21 @@ pub fn round_element(l: f64, radii: [f64;2], e: f64, rho: f64)
 /// radii, or overflowing matrix entries.
 pub fn round_element_with_reference_density(l: f64, radii: [f64;2], e: f64,
     reference_density_kg_m3: [f64;2]) -> Result<([f64;16], [f64;16]), PlateError> {
-    if [l,e].iter().chain(&reference_density_kg_m3).any(|v| !v.is_finite() || *v<=0.)
+    round_element_with_reference_material(l, radii, [e; 2], reference_density_kg_m3)
+}
+
+/// Original tapered Rayleigh element with independent linear Young's modulus
+/// [Pa] and reference-density [kg/m³] fields. Elastic work uses the local
+/// `E(x) I(x)`, not a mean modulus; inertia uses the local density only.
+/// Five Gauss points integrate the stiffness polynomial through degree seven
+/// and the kinetic polynomial through degree nine, exactly up to rounding.
+/// Constant profiles preserve the homogeneous kernel's arithmetic.
+/// # Errors
+/// Nonpositive/nonfinite modulus, density or length, invalid radii, or overflow.
+pub fn round_element_with_reference_material(l: f64, radii: [f64;2],
+    young_pa: [f64;2], reference_density_kg_m3: [f64;2])
+    -> Result<([f64;16], [f64;16]), PlateError> {
+    if [l].iter().chain(&young_pa).chain(&reference_density_kg_m3).any(|v| !v.is_finite() || *v<=0.)
         || radii.iter().any(|v| !v.is_finite() || *v<0.) || radii==[0.,0.] {
         return Err(bad("round beam element needs positive length/E/rho and a nonempty radius profile"));
     }
@@ -73,6 +87,8 @@ pub fn round_element_with_reference_density(l: f64, radii: [f64;2], e: f64,
         (0.5384693101056831,0.4786286704993665),(0.906179845938664,0.2369268850561891)] {
         let t=0.5*(1.+t); let w=0.5*l*w;
         let radius=(1.-t)*radii[0]+t*radii[1];
+        let e=if young_pa[0]==young_pa[1] {young_pa[0]}
+            else {(1.-t)*young_pa[0]+t*young_pa[1]};
         let rho=if reference_density_kg_m3[0]==reference_density_kg_m3[1] {
             reference_density_kg_m3[0]
         } else {(1.-t)*reference_density_kg_m3[0]+t*reference_density_kg_m3[1]};
@@ -100,7 +116,7 @@ impl RoundBeamModes {
     /// the same loaded mass metric. Empty input preserves `new` exactly.
     pub fn with_inertias(stations: &[RoundStation], spec: RoundBeamSpec,
         attached: &[RoundInertia]) -> Result<Self, PlateError> {
-        Self::assemble(stations, spec, attached, None)
+        Self::assemble(stations, spec, attached, None, None)
     }
 
     /// Build the original shaft pencil with one pair of positive reference
@@ -116,16 +132,34 @@ impl RoundBeamModes {
     pub fn with_reference_density(stations: &[RoundStation], spec: RoundBeamSpec,
         reference_density_kg_m3: &[[f64;2]], attached: &[RoundInertia])
         -> Result<Self, PlateError> {
-        Self::assemble(stations, spec, attached, Some(reference_density_kg_m3))
+        Self::assemble(stations, spec, attached, None, Some(reference_density_kg_m3))
+    }
+
+    /// Build the original elastic pencil with one pair of Young's moduli [Pa]
+    /// and reference densities [kg/m³] per original geometry interval. Both
+    /// fields are linear within each interval and may jump at shared stations.
+    /// Subdivision and pivot insertion preserve the authored material field;
+    /// no averaging across elastic interfaces or frequency rescaling occurs.
+    /// Profiles replace `spec.young_pa` and `spec.density_kg_m3`. Attached
+    /// masses, mass normalization and reciprocal force ports remain native.
+    /// This is cold linear elasticity, not a thermal evolution or damping law.
+    /// # Errors
+    /// Invalid field counts/values, or the original bounded spectral refusals.
+    pub fn with_reference_material(stations: &[RoundStation], spec: RoundBeamSpec,
+        young_pa: &[[f64;2]], reference_density_kg_m3: &[[f64;2]],
+        attached: &[RoundInertia]) -> Result<Self, PlateError> {
+        Self::assemble(stations, spec, attached, Some(young_pa), Some(reference_density_kg_m3))
     }
 
     fn assemble(stations: &[RoundStation], spec: RoundBeamSpec,
-        attached: &[RoundInertia], reference_density_kg_m3: Option<&[[f64;2]]>)
+        attached: &[RoundInertia], young_pa: Option<&[[f64;2]]>,
+        reference_density_kg_m3: Option<&[[f64;2]]>)
         -> Result<Self, PlateError> {
         let s=spec;
         if stations.len()<2 || stations.len()>33 || s.subdivisions==0 || s.subdivisions>16
             || !(2..=17).contains(&s.maximum_modes)
-            || [s.young_pa,s.maximum_hz].iter().any(|x| !x.is_finite() || *x<=0.)
+            || !s.maximum_hz.is_finite() || s.maximum_hz<=0.
+            || (young_pa.is_none() && (!s.young_pa.is_finite() || s.young_pa<=0.))
             || (reference_density_kg_m3.is_none() && (!s.density_kg_m3.is_finite() || s.density_kg_m3<=0.))
             || [s.pivot_m,s.contact_m,s.hand_m].iter().any(|x| !x.is_finite())
             || stations.iter().any(|v| !v.x_m.is_finite() || !v.radius_m.is_finite() || v.radius_m<0.)
@@ -135,6 +169,11 @@ impl RoundBeamModes {
         if let Some(density)=reference_density_kg_m3 {
             if density.len()!=stations.len()-1 || density.iter().flatten().any(|v|!v.is_finite() || *v<=0.) {
                 return Err(bad("round beam reference density needs one positive endpoint pair per geometry interval"));
+            }
+        }
+        if let Some(modulus)=young_pa {
+            if modulus.len()!=stations.len()-1 || modulus.iter().flatten().any(|v|!v.is_finite() || *v<=0.) {
+                return Err(bad("round beam Young's modulus needs one positive endpoint pair per geometry interval"));
             }
         }
         let start=stations[0].x_m; let end=stations[stations.len()-1].x_m; let length=end-start;
@@ -180,7 +219,17 @@ impl RoundBeamModes {
                     })
                 }
             } else {[s.density_kg_m3;2]};
-            let (ke,me)=round_element_with_reference_density(x[1]-x[0],[radius(x[0]),radius(x[1])],s.young_pa,density)?;
+            let modulus=if let Some(profile)=young_pa {
+                let i=stations.partition_point(|p|p.x_m<=x[0]).saturating_sub(1).min(stations.len()-2);
+                let e=profile[i];
+                if e[0]==e[1] {e} else {
+                    [x[0],x[1]].map(|coordinate| {
+                        let t=(coordinate-stations[i].x_m)/(stations[i+1].x_m-stations[i].x_m);
+                        (1.-t)*e[0]+t*e[1]
+                    })
+                }
+            } else {[s.young_pa;2]};
+            let (ke,me)=round_element_with_reference_material(x[1]-x[0],[radius(x[0]),radius(x[1])],modulus,density)?;
             // Scale slopes by total length to avoid mixing metre and radian
             // magnitudes in the generalized eigensolver. Ports undo this scale.
             for i in 0..4 { for j in 0..4 {
