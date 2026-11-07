@@ -4358,6 +4358,11 @@ outside this analytic boundary model.
 
 ## Source-backed nonlinear electrostatics and differential capacitance
 
+Source-driven Gauss fields may have a single grounded physical conductor;
+every electrical component still needs its own voltage reference. General
+electrode admission shares the original complete-edge and positive-area checks,
+while capacitance/network extraction retains its two-terminal requirement.
+
 Both planar and axisymmetric nonlinear electrodes accept prescribed volume
 charge, internal free-charge sheets, outward displacement traces and independent
 impressed polarization through `solve_with_sources`. The original linear source

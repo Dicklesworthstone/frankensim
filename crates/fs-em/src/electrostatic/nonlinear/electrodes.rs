@@ -115,9 +115,9 @@ impl PlanarNonlinearElectrostatics {
     ) -> Result<NonlinearElectrodes<'m>, Error> {
         poll(cancelled)?;
         if matches!(self.mesh.metric(), Metric2::Axisymmetric { .. }) {
-            super::super::axisymmetric::admit_terminal_traces(&self.mesh, terminals, cancelled)?;
+            super::super::axisymmetric::admit_electrode_traces(&self.mesh, terminals, cancelled)?;
         } else {
-            scalar_potential::terminal_boundary(
+            scalar_potential::electrode_boundary(
                 &self.mesh,
                 terminals,
                 &vec![0.0; terminals.len()],

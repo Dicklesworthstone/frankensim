@@ -250,22 +250,39 @@ pub(crate) fn solve_relative(
     })
 }
 
-/// Electrode labels must refer to disjoint unions of complete exterior edges,
-/// not point contacts. The field owner subsequently admits component anchoring.
+/// Network extraction needs at least two terminals. General source-driven
+/// Gauss problems use `electrode_boundary` and their component references.
 pub(crate) fn terminal_boundary(
     mesh: &TriComplex2,
     terminals: &[&[usize]],
     voltages_v: &[f64],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Vec<(usize, f64)>, PotentialError> {
+    if terminals.len() < 2 {
+        return Err(PotentialError::Invalid(
+            "complete finite electrode voltages and at least two terminals required",
+        ));
+    }
+    electrode_boundary(mesh, terminals, voltages_v, cancelled)
+}
+
+/// One or more disjoint unions of complete exterior edges, not point contacts.
+/// A source-driven field may have one grounded conductor; its field owner must
+/// still admit a voltage reference on every connected electrical component.
+pub(crate) fn electrode_boundary(
+    mesh: &TriComplex2,
+    terminals: &[&[usize]],
+    voltages_v: &[f64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<(usize, f64)>, PotentialError> {
     let n = mesh.vertices().len();
-    if terminals.len() < 2
+    if terminals.is_empty()
         || terminals.len() > n
         || voltages_v.len() != terminals.len()
         || voltages_v.iter().any(|v| !v.is_finite())
     {
         return Err(PotentialError::Invalid(
-            "complete finite electrode voltages and at least two terminals required",
+            "complete finite electrode voltages and at least one physical terminal required",
         ));
     }
     let trace = mesh

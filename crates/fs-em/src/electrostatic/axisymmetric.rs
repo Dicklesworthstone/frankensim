@@ -220,13 +220,24 @@ pub(super) fn admit_terminal_traces(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), ElectrostaticError> {
     poll(cancelled)?;
-    let n = mesh.vertices().len();
-    if terminals.len() < 2 || terminals.len() > n {
+    if terminals.len() < 2 {
         return Err(ElectrostaticError::Invalid(
             "at least two bounded axisymmetric electrode traces required",
         ));
     }
-    crate::scalar_potential::terminal_boundary(
+    admit_electrode_traces(mesh, terminals, cancelled)
+}
+
+/// General radial Gauss fields may have one grounded physical conductor.
+/// Capacitance/network callers retain their separate two-terminal admission.
+pub(super) fn admit_electrode_traces(
+    mesh: &TriComplex2,
+    terminals: &[&[usize]],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), ElectrostaticError> {
+    poll(cancelled)?;
+    let n = mesh.vertices().len();
+    crate::scalar_potential::electrode_boundary(
         mesh,
         terminals,
         &vec![0.0; terminals.len()],
