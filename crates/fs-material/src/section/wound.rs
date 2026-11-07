@@ -88,7 +88,11 @@ pub fn close_wound_pitch_m(under_diameter_m: f64, wire_diameter_m: f64)
 
 impl HelicalWrapping {
     /// Wind `wraps` (innermost first) over the outer surface of `core`.
-    /// Every wrap must resolve at the core's physical query coordinates.
+    /// Every wrap must resolve at the core's complete physical query coordinates,
+    /// including their quantity conventions. Density may follow sourced curves or
+    /// surfaces in held temperature, pressure, composition, moisture or concentration.
+    /// This mass-only owner has no frequency-domain admission or evolving state:
+    /// spectral, field, stress, strain and rate restrictions therefore refuse.
     ///
     /// # Errors
     /// An empty or oversized wrap list, nonpositive or interpenetrating
@@ -122,8 +126,8 @@ impl HelicalWrapping {
             if density.requirement().quantity() != QuantitySpec::dimensional(Density::DIMS) {
                 return Err(invalid("wrap density must be dimension-only kg/m3"));
             }
-            if !density.is_constant_at_fixed_temperature() {
-                return Err(invalid("wrap density must be a constant or T-only curve at fixed positive absolute T"));
+            if !density.is_static_at_fixed_external_conditions() {
+                return Err(invalid("wrap density requires a held, explicitly typed environment without frequency or unowned state dependence"));
             }
             let rho = positive(density.value_si(), "positive finite wrap density")?;
             let wire_per_axial_length = positive((TAU * radius).hypot(pitch) / pitch, "helix length ratio")?;

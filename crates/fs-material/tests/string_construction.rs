@@ -8,12 +8,17 @@ use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer};
 use fs_material::state_point::{MaterialPropertySelection, ResolvedMaterialStatePoint,
     ResolvedScalarProperty, ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point};
 use fs_qty::{Density, Dims, Length, Pressure, QuantitySpec};
+use fs_qty::semantic::{FrequencyConvention, MoistureBasis, QuantityKind, SemanticType,
+    StrainBasis, StrainComponent, ValueForm};
 use std::f64::consts::PI;
 
 const LIMIT: &str = "tensile_limit";
 
 fn material(values: &[(&str, Dims, f64)]) -> ResolvedMaterialStatePoint { material_at(values, 293.15) }
 fn material_at(values: &[(&str, Dims, f64)], temperature: f64) -> ResolvedMaterialStatePoint {
+    material_at_point(values, &QueryPoint::new().with("T", temperature).unwrap())
+}
+fn material_at_point(values: &[(&str, Dims, f64)], point: &QueryPoint) -> ResolvedMaterialStatePoint {
     let mut claims = ClaimSet::new();
     let mut requirements = Vec::new();
     for &(name, dims, value) in values {
@@ -28,7 +33,7 @@ fn material_at(values: &[(&str, Dims, f64)], temperature: f64) -> ResolvedMateri
     }
     let card = MaterialCard::assemble(MaterialStateId { chemistry: "test".into(), phase: "solid".into(),
         process: "synthetic".into(), revision: 0 }, claims, vec![]).unwrap();
-    resolve_material_state_point(&card, &QueryPoint::new().with("T", temperature).unwrap(),
+    resolve_material_state_point(&card, point,
         &requirements, MaterialPropertySelection::SingleClaimOnly).unwrap()
 }
 fn solid(rho: f64, young: f64, limit: f64) -> ResolvedMaterialStatePoint {
@@ -285,6 +290,178 @@ fn g0_empty_oversized_mismatched_or_unsourced_wraps_refuse() {
     let warm = HelicalWrap { wire_diameter_m: 0.001, pitch_m: 0.002,
         material: material_at(&[("density", Density::DIMS, 8960.0)], 300.0) };
     assert!(HelicalWrapping::try_new(&core, vec![warm]).is_err());
+}
+
+// These are separately constructed strings at held environments. Refreshing
+// source data does not evolve water uptake, geometry, tension or stored energy.
+fn static_quantity(kind: QuantityKind) -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
+}
+fn wrapping_density_card(value: PropertyValue, validity: ValidityDomain) -> MaterialCard {
+    let interpolation = if matches!(&value, PropertyValue::Scalar { .. }) {
+        InterpolationPolicy::ConstantWithinValidity
+    } else {
+        InterpolationPolicy::LinearInside
+    };
+    let mut claims = ClaimSet::new();
+    claims.insert_claim(PropertyClaim {
+        key: PropertyKey::new("density", Density::DIMS), value, validity,
+        uncertainty: UncertaintyModel::Unstated, interpolation, observations: vec![],
+        provenance: Provenance { source: "synthetic held-environment wrap density".into(),
+            license: "CC0-1.0".into(), artifact: None },
+    }).unwrap();
+    MaterialCard::assemble(MaterialStateId { chemistry: "synthetic wrap".into(),
+        phase: "solid".into(), process: "held environment".into(), revision: 0 },
+        claims, vec![]).unwrap()
+}
+fn wrapping_density_at(card: &MaterialCard, point: &QueryPoint) -> ResolvedMaterialStatePoint {
+    let requirement = ScalarPropertyRequirement::try_new("density", Density::DIMS,
+        ScalarAdmissibility::StrictlyPositive).unwrap();
+    resolve_material_state_point(card, point, &[requirement],
+        MaterialPropertySelection::SingleClaimOnly).unwrap()
+}
+fn wrapping_core_at(point: &QueryPoint) -> ConcentricElasticSection {
+    rod(&[(0.0006, material_at_point(&[
+        ("density", Density::DIMS, 7850.0), ("young_modulus", Pressure::DIMS, 2e11),
+    ], point))])
+}
+fn sourced_wrap(material: ResolvedMaterialStatePoint) -> HelicalWrap {
+    HelicalWrap { wire_diameter_m: 0.001, pitch_m: 0.002, material }
+}
+
+#[test]
+fn g1_wrap_density_curves_and_surfaces_reach_helix_mass_with_original_sources() {
+    let pressure = static_quantity(QuantityKind::Pressure);
+    let moisture = static_quantity(QuantityKind::Moisture(MoistureBasis::DryMass));
+    let validity = ValidityDomain::unconstrained().with("T", 280.0, 320.0)
+        .with_quantity("ambient_pressure", pressure, 1e5, 2e5)
+        .with_quantity("water_content", moisture, 0.0, 0.2);
+    let point = |p, m| QueryPoint::new().with("T", 293.15).unwrap()
+        .with_quantity("ambient_pressure", pressure, p).unwrap()
+        .with_quantity("water_content", moisture, m).unwrap()
+        // A complete operating point may also query another law's frequency;
+        // density itself has no spectral applicability or response.
+        .with_quantity("frequency", static_quantity(QuantityKind::Frequency(
+            FrequencyConvention::Cyclic)), 1000.0).unwrap();
+    let points = [point(1.25e5, 0.05), point(1.75e5, 0.15)];
+    for (value, expected) in [
+        (PropertyValue::Curve {
+            abscissa: "water_content".into(), abscissa_dims: Dims::NONE,
+            knots: vec![(0.0, 8000.0), (0.2, 12000.0)], dims: Density::DIMS,
+        }, [9000.0, 11000.0]),
+        (PropertyValue::Surface2D {
+            axes: ["ambient_pressure".into(), "water_content".into()],
+            axis_dims: [Pressure::DIMS, Dims::NONE],
+            samples: vec![([1e5, 0.0], 8000.0), ([2e5, 0.0], 10000.0),
+                ([1e5, 0.2], 12000.0), ([2e5, 0.2], 14000.0)],
+            triangles: vec![[0, 1, 2], [1, 3, 2]], dims: Density::DIMS,
+        }, [9500.0, 12500.0]),
+    ] {
+        let card = wrapping_density_card(value, validity.clone());
+        let first = wrapping_density_at(&card, &points[0]);
+        let next = first.at_query_point(&card, &points[1]).unwrap();
+        assert_eq!(first.card_identity(), next.card_identity());
+        assert_ne!(first.identity(), next.identity());
+        let selected = first.property("density").unwrap().answer().receipt.selected;
+        assert_eq!(selected, next.property("density").unwrap().answer().receipt.selected);
+        let sources = [first, next];
+        let mut masses = Vec::new();
+        for index in 0..2 {
+            let source = &sources[index];
+            near(source.property("density").unwrap().value_si(), expected[index], 1e-14);
+            let core = wrapping_core_at(&points[index]);
+            let wrapping = HelicalWrapping::try_new(&core,
+                vec![sourced_wrap(source.clone())]).unwrap();
+            let (d, pitch) = (0.001_f64, 0.002_f64);
+            let turn_length = ((PI * (2.0 * 0.0006 + d)).powi(2) + pitch.powi(2)).sqrt();
+            let expected_mass = expected[index] * PI * d.powi(2) / 4.0 * turn_length / pitch;
+            near(wrapping.line_density_kg_m(), expected_mass, 1e-14);
+            assert_eq!(wrapping.wrap_line_density_kg_m(), &[wrapping.line_density_kg_m()]);
+            assert_eq!(&wrapping.wraps()[0].material, source);
+            near(wrapping.outer_radius_m(), 0.0016, 1e-14);
+            masses.push(wrapping.line_density_kg_m());
+        }
+        near(masses[1] / masses[0], expected[1] / expected[0], 1e-14);
+        assert!(sources[0].at_query_point(&card, &point(2.1e5, 0.05)).is_err());
+
+        // A different density card at identical geometry and conditions changes
+        // wire mass without a material-name switch or a new constitutive formula.
+        let replacement = wrapping_density_card(PropertyValue::Scalar {
+            value: 19000.0, dims: Density::DIMS,
+        }, validity.clone());
+        let substitute = wrapping_density_at(&replacement, &points[0]);
+        assert_ne!(substitute.card_identity(), sources[0].card_identity());
+        let core = wrapping_core_at(&points[0]);
+        let before = core.clone();
+        let changed = HelicalWrapping::try_new(&core,
+            vec![sourced_wrap(substitute.clone())]).unwrap();
+        near(changed.line_density_kg_m() / masses[0], 19000.0 / expected[0], 1e-14);
+        assert_eq!(&changed.wraps()[0].material, &substitute);
+        assert_eq!(core, before, "wrapping cannot change the core's EA, EI or mass");
+    }
+}
+
+#[test]
+fn g0_wrap_density_refuses_unowned_response_and_applicability_axes() {
+    let strain = static_quantity(QuantityKind::Strain {
+        basis: StrainBasis::Engineering, component: StrainComponent::Normal,
+    });
+    for (axis, quantity, dims, bounds) in [
+        ("ambient_pressure", None, Pressure::DIMS, [1e5, 2e5]),
+        ("strain", Some(strain), Dims::NONE, [0.0, 0.1]),
+        ("stress", Some(static_quantity(QuantityKind::Stress)), Pressure::DIMS, [0.0, 1e6]),
+        ("strain_rate", Some(QuantitySpec::dimensional(fs_qty::Frequency::DIMS)),
+            fs_qty::Frequency::DIMS, [0.0, 1.0]),
+        ("magnetic_field", Some(QuantitySpec::dimensional(Dims([0, 1, -2, 0, -1, 0]))),
+            Dims([0, 1, -2, 0, -1, 0]), [0.0, 1.0]),
+        ("frequency", Some(static_quantity(QuantityKind::Frequency(FrequencyConvention::Cyclic))),
+            fs_qty::Frequency::DIMS, [0.0, 100.0]),
+        ("omega", None, fs_qty::Frequency::DIMS, [0.0, 100.0]),
+    ] {
+        let middle = 0.5 * (bounds[0] + bounds[1]);
+        let validity = ValidityDomain::unconstrained().with("T", 280.0, 320.0);
+        let point = QueryPoint::new().with("T", 293.15).unwrap();
+        let (validity, point) = match quantity {
+            Some(quantity) => (validity.with_quantity(axis, quantity, bounds[0], bounds[1]),
+                point.with_quantity(axis, quantity, middle).unwrap()),
+            None => (validity.with(axis, bounds[0], bounds[1]), point.with(axis, middle).unwrap()),
+        };
+        for varying in [false, true] {
+            let value = if varying {
+                PropertyValue::Curve { abscissa: axis.into(), abscissa_dims: dims,
+                    knots: vec![(bounds[0], 8000.0), (bounds[1], 9000.0)], dims: Density::DIMS }
+            } else {
+                PropertyValue::Scalar { value: 8500.0, dims: Density::DIMS }
+            };
+            let card = wrapping_density_card(value, validity.clone());
+            // Both source forms resolve. A scalar's applicability bound still
+            // cannot become broadband mass or an unowned evolution law.
+            let source = wrapping_density_at(&card, &point);
+            let core = wrapping_core_at(&point);
+            assert!(HelicalWrapping::try_new(&core, vec![sourced_wrap(source)]).is_err(),
+                "axis {axis}, varying {varying}");
+        }
+    }
+}
+
+#[test]
+fn g0_wraps_require_the_same_complete_environment_and_quantity_conventions() {
+    let pressure = static_quantity(QuantityKind::Pressure);
+    let point = |quantity, value| QueryPoint::new().with("T", 293.15).unwrap()
+        .with_quantity("ambient_pressure", quantity, value).unwrap();
+    let original = point(pressure, 1.5e5);
+    let core = wrapping_core_at(&original);
+    let source_at = |point: &QueryPoint| material_at_point(&[
+        ("density", Density::DIMS, 8960.0),
+    ], point);
+    assert!(HelicalWrapping::try_new(&core, vec![sourced_wrap(source_at(&original))]).is_ok());
+    for other in [
+        point(pressure, 1.6e5),
+        point(static_quantity(QuantityKind::Stress), 1.5e5),
+        QueryPoint::new().with("T", 293.15).unwrap(),
+    ] {
+        assert!(HelicalWrapping::try_new(&core, vec![sourced_wrap(source_at(&other))]).is_err());
+    }
 }
 
 // ---- Loss-angle (hysteretic) bending loss ----
