@@ -1,7 +1,9 @@
 //! G1 analytic spectra/populations and G3 interval/group/owner agreement.
 //! Except for the pinned Co60/Ni60 records, all coefficients are manufactured.
 
-use super::super::{DecayEnergyFractions, DecayEnergyRouting, DecayModelEntry};
+use super::super::{
+    DecayEnergyFractions, DecayEnergyRouting, DecayModelEntry, DecayProductRetention,
+};
 use super::*;
 use crate::burnup::transport::{
     BurnupTransportBudget, BurnupTransportLimits, BurnupTransportState, NuclideTransfer,
@@ -511,6 +513,101 @@ fn decay_reordered_burnup_competition_and_compartment_sources_agree() {
         decay.emitted_energy_j[0],
         1e-21,
     );
+}
+
+#[test]
+fn retained_alpha_binding_checks_exact_products_and_counts_emission_energy_once() {
+    let mut spectrum = gamma(2.0 * U);
+    spectrum.discrete = vec![DiscreteDecayEmission {
+        decay_mode: 4.0,
+        ..line(2.0 * U, 1.0)
+    }]
+    .into();
+    let template = chain(vec![vec![spectrum], vec![]], false);
+    let mut parent = (*template.evaluations()[0]).clone();
+    parent.metadata.nuclide = NuclideId::new(4, 8, 0).unwrap();
+    parent.metadata.atomic_weight_ratio = 8.0;
+    parent.modes = vec![DecayMode {
+        rtyp: 4.0,
+        q_j: 12.0 * U,
+        ..parent.modes()[0].clone()
+    }]
+    .into();
+    parent.average_energies = [0.0, 2.0 * U, 5.0 * U]
+        .map(|energy| DecayEnergy {
+            value_j: Some(energy),
+            uncertainty_j: 0.0,
+        })
+        .into();
+    let mut helium = (*template.evaluations()[1]).clone();
+    helium.metadata.nuclide = NuclideId::new(2, 4, 0).unwrap();
+    helium.metadata.atomic_weight_ratio = 4.0;
+    let original = assemble(vec![
+        DecayModelEntry {
+            evaluation: Arc::new(parent),
+            routing: routing(),
+        },
+        DecayModelEntry {
+            evaluation: Arc::new(helium),
+            routing: routing(),
+        },
+    ]);
+    let assembly = Arc::new(
+        (*original)
+            .clone()
+            .with_burnup_product_retention(
+                DecayProductRetention {
+                    alpha_particles: true,
+                    protons: false,
+                },
+                || Ok(()),
+            )
+            .unwrap(),
+    );
+    let source = prepare(
+        Arc::clone(&assembly),
+        DecayRadiation::Gamma,
+        vec![0.0, 4.0 * U],
+    );
+    let data = assembly
+        .burnup_data(group_grid(), 200.0, 1000.0, || Ok(()))
+        .unwrap();
+    assert_eq!(data.reactions[0].products.len(), 1);
+    assert_eq!(data.reactions[0].products[0].yield_per_event, 2.0);
+    for change in 0..4 {
+        let mut altered = data.clone();
+        match change {
+            0 => altered.reactions[0].products[0].yield_per_event = 1.0,
+            1 => altered.reactions[0].products.clear(),
+            2 => altered.reactions[0].products[0].nuclide = 0,
+            _ => altered.reactions[0].energy_per_event.escaped_j *= 2.0,
+        }
+        let wrong = Arc::new(BurnupModel::new(altered, BurnupLimits::default()).unwrap());
+        assert!(source.bind_burnup(wrong, || Ok(())).is_err());
+    }
+    let model = Arc::new(BurnupModel::new(data, BurnupLimits::default()).unwrap());
+    let residual_only = prepare(original, DecayRadiation::Gamma, vec![0.0, 4.0 * U]);
+    assert!(
+        residual_only
+            .bind_burnup(Arc::clone(&model), || Ok(()))
+            .is_err()
+    );
+    let bound = source.bind_burnup(Arc::clone(&model), || Ok(())).unwrap();
+    let flux = GroupFlux::new(Arc::clone(model.groups()), vec![0.0]).unwrap();
+    let state = BurnupInventory::new(Arc::clone(&model), vec![1000.0, 0.0]).unwrap();
+    let (after, step) = state
+        .trial(1.0, &flux, 300.0, burnup_budget(), || Ok(()))
+        .unwrap();
+    let photons = bound.from_burnup_step(&model, &step, || Ok(())).unwrap();
+    near(after.populations()[0], 500.0, 1e-8);
+    near(after.populations()[1], 1000.0, 1e-8);
+    near(step.decays, 500.0, 1e-8);
+    near(photons.emitted_particles[0], 500.0, 1e-8);
+    near(photons.emitted_energy_j[0], 500.0 * 2.0 * U, 1e-21);
+    near(step.released.radiation_j, 500.0 * 2.0 * U, 1e-21);
+    near(step.released.escaped_j, 500.0 * 5.0 * U, 1e-21);
+    near(step.generated_energy_j, 500.0 * 7.0 * U, 1e-21);
+    assert_eq!(step.released.deposited_j, 0.0);
 }
 
 #[test]

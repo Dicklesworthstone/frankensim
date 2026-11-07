@@ -3,7 +3,11 @@
 //! manufactured and make no empirical isotope or cross-section accuracy claim.
 
 use super::*;
-use crate::burnup::{BurnupBudget, BurnupInventory, BurnupLimits, BurnupModel};
+use crate::burnup::transport::{
+    BurnupTransportBudget, BurnupTransportLimits, BurnupTransportState, NuclideOutflow,
+    NuclideTransfer, NuclideTransport,
+};
+use crate::burnup::{BurnupBudget, BurnupInventory, BurnupLimits, BurnupModel, BurnupProduct};
 use crate::decay::{DecayBudget, DecayInventory};
 use crate::endf::decay::{EndfDecayReadLimits, EndfDecaySelection};
 use crate::irradiation::GroupFlux;
@@ -285,7 +289,10 @@ fn decay_mode_sequences_resolve_alpha_isomers_and_delayed_particles() {
         (identity(16, 31, 0), 7.0, 0, identity(15, 30, 0)),
         (identity(10, 22, 0), 5.0, 0, identity(10, 21, 0)),
     ] {
-        assert_eq!(daughter(parent, rtyp, state).unwrap(), expected);
+        assert_eq!(
+            resolve_mode(parent, rtyp, state).unwrap().residual,
+            expected
+        );
     }
     let parent = identity(95, 242, 2);
     let record = evaluation(
@@ -298,7 +305,7 @@ fn decay_mode_sequences_resolve_alpha_isomers_and_delayed_particles() {
     assert_eq!(assembled.model().branches()[0].daughter, 1);
     for mode in [6.0, 1.6, 10.0, 1.05] {
         assert!(matches!(
-            daughter(parent, mode, 0),
+            resolve_mode(parent, mode, 0),
             Err(DecayAssemblyError::UnsupportedDecayMode { .. })
         ));
     }
@@ -497,4 +504,271 @@ fn imported_decay_and_capture_share_original_cyclic_burnup_and_calorimetry() {
         1e-23,
     );
     assert_eq!(initial.populations(), &[0.0, 1000.0]);
+}
+
+#[test]
+fn retained_alpha_inventory_uses_the_original_half_life_and_explicit_stable_product() {
+    let parent = evaluation(
+        identity(84, 210, 0),
+        Some(2.0),
+        &[Some(0.0), Some(0.0), Some(5e6)],
+        &[(4.0, 0, 1.0, 6e6)],
+    );
+    let helium = identity(2, 4, 0);
+    let lead = identity(82, 206, 0);
+    let policy = DecayProductRetention {
+        alpha_particles: true,
+        protons: false,
+    };
+    let missing = assembly(vec![entry(Arc::clone(&parent)), entry(stable(lead))]);
+    assert_eq!(
+        missing
+            .with_burnup_product_retention(policy, || Ok(()))
+            .unwrap_err(),
+        DecayAssemblyError::MissingRetainedProduct(helium)
+    );
+    let original = assembly(vec![
+        entry(stable(helium)),
+        entry(parent),
+        entry(stable(lead)),
+    ]);
+    let groups = Arc::new(NeutronGroups::new("alpha-inventory".into(), vec![0.0, 1.0]).unwrap());
+    let residual_only = original
+        .burnup_data(Arc::clone(&groups), 200.0, 1000.0, || Ok(()))
+        .unwrap();
+    assert_eq!(
+        original.burnup_product_retention(),
+        DecayProductRetention::default()
+    );
+    assert_eq!(
+        residual_only.reactions[0].products,
+        vec![BurnupProduct {
+            nuclide: 2,
+            yield_per_event: 1.0,
+        }]
+    );
+    let retained = original
+        .clone()
+        .with_burnup_product_retention(policy, || Ok(()))
+        .unwrap();
+    assert_eq!(retained.burnup_product_retention(), policy);
+    assert!(Arc::ptr_eq(original.model(), retained.model()));
+    let data = retained
+        .burnup_data(Arc::clone(&groups), 200.0, 1000.0, || Ok(()))
+        .unwrap();
+    assert_eq!(
+        data.reactions[0].energy_per_event,
+        residual_only.reactions[0].energy_per_event
+    );
+    let model = Arc::new(BurnupModel::new(data, BurnupLimits::default()).unwrap());
+    let state = BurnupInventory::new(model, vec![0.0, 1000.0, 0.0]).unwrap();
+    let flux = GroupFlux::new(groups, vec![0.0]).unwrap();
+    let (after, step) = state
+        .trial(
+            2.0,
+            &flux,
+            300.0,
+            BurnupBudget {
+                limits: BurnupLimits::default(),
+                nuclei_tolerance: 1e-7,
+                energy_tolerance_j: 1e-20,
+            },
+            || Ok(()),
+        )
+        .unwrap();
+    for &population in after.populations() {
+        close(population, 500.0, 1e-8);
+    }
+    close(step.decays, 500.0, 1e-8);
+    close(step.released.escaped_j, 500.0 * 5e6 * EV_J, 1e-21);
+    assert_eq!(step.released.deposited_j, 0.0);
+    close(
+        4.0 * after.populations()[0]
+            + 210.0 * after.populations()[1]
+            + 206.0 * after.populations()[2],
+        210_000.0,
+        1e-6,
+    );
+    assert_eq!(state.populations(), &[0.0, 1000.0, 0.0]);
+    assert_eq!(
+        original
+            .with_burnup_product_retention(policy, || Err(FissionError::Cancelled))
+            .unwrap_err(),
+        DecayAssemblyError::Physics(FissionError::Cancelled)
+    );
+    // Manufactured wrong lifetime: even an explicitly supplied He4 identity
+    // cannot stand in for the required stable charged-product evaluation.
+    let wrong_helium = evaluation(helium, Some(1.0), &[Some(0.0); 3], &[(1.0, 0, 1.0, 0.0)]);
+    let wrong = assembly(vec![entry(wrong_helium), entry(stable(identity(3, 4, 0)))]);
+    assert_eq!(
+        wrong
+            .with_burnup_product_retention(policy, || Ok(()))
+            .unwrap_err(),
+        DecayAssemblyError::UnstableRetainedProduct(helium)
+    );
+}
+
+#[test]
+fn retained_coincident_alpha_and_proton_products_merge_exact_rtyp_multiplicities() {
+    let helium = identity(2, 4, 0);
+    let hydrogen = identity(1, 1, 0);
+    // Manufactured coefficients, including Be8 -> 2 He4 and repeated RTYP
+    // digits. Expected counts include the residual when its identity coincides.
+    for (parent, rtyp, residual, helium_yield, proton_yield) in [
+        (identity(4, 8, 0), 4.0, helium, 2.0, 0.0),
+        (identity(5, 12, 0), 1.44, helium, 3.0, 0.0),
+        (identity(2, 2, 0), 7.0, hydrogen, 0.0, 2.0),
+        (identity(10, 18, 0), 2.77, identity(7, 16, 0), 0.0, 2.0),
+        (identity(10, 24, 0), 1.47, identity(8, 19, 0), 1.0, 1.0),
+    ] {
+        let mut entries = vec![
+            entry(evaluation(
+                parent,
+                Some(1.0),
+                &[Some(0.0); 3],
+                &[(rtyp, 0, 1.0, 0.0)],
+            )),
+            entry(stable(residual)),
+        ];
+        for product in [helium, hydrogen] {
+            if product != residual {
+                entries.push(entry(stable(product)));
+            }
+        }
+        let assembled = assembly(entries)
+            .with_burnup_product_retention(
+                DecayProductRetention {
+                    alpha_particles: true,
+                    protons: true,
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        let groups =
+            Arc::new(NeutronGroups::new("coincident-products".into(), vec![0.0, 1.0]).unwrap());
+        let data = assembled
+            .burnup_data(Arc::clone(&groups), 200.0, 1000.0, || Ok(()))
+            .unwrap();
+        assert!(data.reactions[0].products.len() <= 3);
+        let model = Arc::new(BurnupModel::new(data, BurnupLimits::default()).unwrap());
+        let mut populations = vec![0.0; assembled.nuclides().len()];
+        populations[0] = 1000.0;
+        let state = BurnupInventory::new(model, populations).unwrap();
+        let flux = GroupFlux::new(groups, vec![0.0]).unwrap();
+        let (after, step) = state
+            .trial(
+                1.0,
+                &flux,
+                300.0,
+                BurnupBudget {
+                    limits: BurnupLimits::default(),
+                    nuclei_tolerance: 1e-7,
+                    energy_tolerance_j: 1e-20,
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        close(after.populations()[0], 500.0, 1e-8);
+        close(
+            after.populations()[assembled.index(helium).unwrap()],
+            500.0 * helium_yield,
+            1e-8,
+        );
+        close(
+            after.populations()[assembled.index(hydrogen).unwrap()],
+            500.0 * proton_yield,
+            1e-8,
+        );
+        close(step.decays, 500.0, 1e-8);
+        let nucleons: f64 = after
+            .populations()
+            .iter()
+            .zip(assembled.nuclides())
+            .map(|(&count, id)| count * f64::from(id.mass_number()))
+            .sum();
+        close(nucleons, 1000.0 * f64::from(parent.mass_number()), 1e-6);
+    }
+}
+
+#[test]
+fn generated_helium_moves_and_is_extracted_during_the_same_decay_interval() {
+    let assembled = assembly(vec![
+        entry(evaluation(
+            identity(84, 210, 0),
+            Some(1.0),
+            &[Some(0.0), Some(0.0), Some(5e6)],
+            &[(4.0, 0, 1.0, 6e6)],
+        )),
+        entry(stable(identity(82, 206, 0))),
+        entry(stable(identity(2, 4, 0))),
+    ])
+    .with_burnup_product_retention(
+        DecayProductRetention {
+            alpha_particles: true,
+            protons: false,
+        },
+        || Ok(()),
+    )
+    .unwrap();
+    let groups = Arc::new(NeutronGroups::new("helium-extraction".into(), vec![0.0, 1.0]).unwrap());
+    let data = assembled
+        .burnup_data(Arc::clone(&groups), 200.0, 1000.0, || Ok(()))
+        .unwrap();
+    let model = Arc::new(BurnupModel::new(data, BurnupLimits::default()).unwrap());
+    let lambda = std::f64::consts::LN_2;
+    let limits = BurnupTransportLimits::default();
+    let initial = BurnupTransportState::new(
+        vec![
+            BurnupInventory::new(Arc::clone(&model), vec![1000.0, 0.0, 0.0]).unwrap(),
+            BurnupInventory::new(model, vec![0.0; 3]).unwrap(),
+        ],
+        vec![1.0, 1.0],
+        NuclideTransport {
+            transfers: vec![NuclideTransfer {
+                from_compartment: 0,
+                to_compartment: 1,
+                rates_per_s: vec![0.0, 0.0, lambda],
+            }],
+            outflows: vec![NuclideOutflow {
+                compartment: 1,
+                rates_per_s: vec![0.0, 0.0, lambda],
+            }],
+        },
+        limits,
+        || Ok(()),
+    )
+    .unwrap();
+    let flux = GroupFlux::new(groups, vec![0.0]).unwrap();
+    let (after, step) = initial
+        .trial(
+            1.0,
+            &[flux.clone(), flux],
+            &[300.0; 2],
+            BurnupTransportBudget {
+                limits,
+                nuclei_tolerance: 1e-7,
+                energy_tolerance_j: 1e-20,
+            },
+            || Ok(()),
+        )
+        .unwrap();
+    // Independent equal-rate chain: parent -> He_A -> He_B -> exterior.
+    let donor_helium = 500.0 * lambda;
+    let receiver_helium = 250.0 * lambda * lambda;
+    let extracted = 500.0 - donor_helium - receiver_helium;
+    close(after.inventories()[0].populations()[0], 500.0, 1e-8);
+    close(after.inventories()[0].populations()[1], 500.0, 1e-8);
+    close(after.inventories()[0].populations()[2], donor_helium, 1e-8);
+    close(
+        after.inventories()[1].populations()[2],
+        receiver_helium,
+        1e-8,
+    );
+    close(step.transfer_counts[0][2], 500.0 - donor_helium, 1e-8);
+    close(step.outflow_counts[0][2], extracted, 1e-8);
+    assert_eq!(after.inventories()[1].populations()[..2], [0.0; 2]);
+    close(step.burnup[0].decays, 500.0, 1e-8);
+    close(step.burnup[0].released.escaped_j, 500.0 * 5e6 * EV_J, 1e-21);
+    assert_eq!(step.burnup[1].released, EnergyChannels::default());
+    assert_eq!(step.burnup[1].decays, 0.0);
 }

@@ -1807,6 +1807,19 @@ origin codes and spontaneous fission without resolved product yields refuse.
 Branch closure, topology and model work limits are admitted by the original
 `DecayModel`, without branch normalization.
 
+`with_burnup_product_retention(DecayProductRetention { alpha_particles, protons }, ...)`
+optionally retains emitted He4/H1 in that same burnup inventory. Both switches
+default to false. Enabled species require explicitly supplied stable ground-state
+evaluations; absent products or nonstable laws refuse. The original RTYP pass
+caches charged-particle multiplicities once. Lowering merges coincident identities,
+so Be8 alpha decay yields two He4 nuclei, and repeated emission codes retain each
+charged nucleus. The residual-lineage `DecayModel` and parent half-lives stay
+unchanged. Generated helium/hydrogen can use the existing selective compartment
+transport and extraction; their birth times and subsequent residence are resolved
+within the same positive reaction solve. Spectral binding compares the exact same
+retained products and multiplicities. Retaining more nuclei never multiplies a
+parent event's heat or photon spectrum.
+
 Callers explicitly route each of the ELP, EEM and EHP aggregate emitted-energy
 categories among deposited, radiation and escaped destinations. Fractions are
 admitted as supplied and applied once. Unknown aggregate energies refuse model
@@ -1818,8 +1831,10 @@ correlations. The heavy-particle aggregate includes neutrons and recoil, so its
 shared routing fraction is an explicit transport approximation.
 
 Source uncertainties remain observable data; they are not propagated into
-solver tolerances or treated as validation evidence. No emitted-particle
-inventory, material-mass adjustment or nuclear mass/charge ledger is inferred.
+solver tolerances or treated as validation evidence. Charged-product retention
+does not infer kinetic stopping, electron capture, material composition or mass,
+neutron inventory, or a complete nuclear mass/charge ledger. Energy routing
+remains an independently supplied assumption.
 Assembly is bounded by the original node/edge limits and cancellable; burnup
 data construction preserves deterministic ordering and source mode labels.
 
@@ -1833,6 +1848,14 @@ all 150 tests. The `evaluated_decay` example also compiled and ran: at the
 imported half-life it retained half the original tritium, produced the other
 half as helium-3, and deposited the explicitly routed 5690 eV mean electron
 energy per transformation rather than the 18590 eV Q value.
+
+Four further regressions cover retained alpha inventories after one half-life,
+coincident and repeated He4/H1 yields, selective helium movement/extraction during
+its production interval, and exact spectral binding with one energy credit per
+decay. The focused original-source native gate passed all 24 assembly/emission
+tests. This gate compiled the full default-feature nuclear production source and
+used the original selected numerical dependencies; it is not a workspace Cargo
+or constellation integration result.
 
 ## Continuous spatial sources and moving delayed-neutron precursors
 

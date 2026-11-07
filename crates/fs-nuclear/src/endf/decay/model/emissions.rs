@@ -254,12 +254,13 @@ impl PreparedDecayEmission {
         }
         let mut work = 0;
         let mut expected = BTreeMap::new();
-        for (branch, &(record, mode)) in self
+        for (branch_index, (branch, &(record, mode))) in self
             .assembly
             .model()
             .branches()
             .iter()
             .zip(&self.assembly.mode_sources)
+            .enumerate()
         {
             visit(&mut work, self.limits, &mut checkpoint)?;
             let source = &self.assembly.evaluations()[record];
@@ -270,7 +271,10 @@ impl PreparedDecayEmission {
                 source.metadata().material_number,
                 mode
             );
-            if expected.insert((branch.parent, label), branch).is_some() {
+            if expected
+                .insert((branch.parent, label), (branch_index, branch))
+                .is_some()
+            {
                 return Err(invalid("ambiguous evaluated decay channel identity"));
             }
         }
@@ -278,16 +282,17 @@ impl PreparedDecayEmission {
         for (index, reaction) in model.reactions().iter().enumerate() {
             visit(&mut work, self.limits, &mut checkpoint)?;
             if let BurnupRate::Decay { branch_fraction } = reaction.rate {
-                let branch = expected
+                let (branch_index, branch) = expected
                     .remove(&(reaction.parent, reaction.data_id.clone()))
                     .ok_or_else(|| {
                         invalid("burnup contains an unbound or duplicate decay channel")
                     })?;
                 if branch_fraction != branch.probability
                     || reaction.energy_per_event != branch.energy_per_decay
-                    || reaction.products.len() != 1
-                    || reaction.products[0].nuclide != branch.daughter
-                    || reaction.products[0].yield_per_event != 1.0
+                    || !self
+                        .assembly
+                        .burnup_products(branch_index)
+                        .matches(&reaction.products)
                 {
                     return Err(invalid(
                         "burnup decay branch differs from its evaluated source",

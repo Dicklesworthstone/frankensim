@@ -11,8 +11,9 @@
 //! transformation followed by immediate particle emissions, and RFS selects the
 //! final isomer. Only modes with one represented residual nucleus are lowered.
 //! Spontaneous fission needs separately authored product yields. Unrepresented
-//! daughters are refused; no missing evaluation is assumed stable. Emitted
-//! particles are not additional inventory nodes or a nuclear mass/charge ledger.
+//! daughters are refused; no missing evaluation is assumed stable. Burnup may
+//! explicitly retain emitted alpha particles and protons as supplied He4/H1
+//! inventories. This does not infer stopping, heat, or a nuclear mass/charge ledger.
 //!
 //! This is an import-time assembly adapter, not a second inventory or solver.
 //! Decay admission/evolution and irradiation retain their existing owners.
@@ -22,13 +23,17 @@ use std::{collections::BTreeMap, sync::Arc};
 use fs_la::decay::{DecayLimits, MAX_DECAY_EDGES, MAX_DECAY_NODES};
 
 use super::DecayEvaluation;
-use crate::burnup::{BurnupData, BurnupNuclide, BurnupProduct, BurnupRate, BurnupReaction};
+use crate::burnup::{BurnupData, BurnupNuclide, BurnupRate, BurnupReaction};
 use crate::decay::{DecayBranch, DecayError, DecayModel, DecayNuclide};
 use crate::irradiation::{NeutronGroups, NuclideId};
 use crate::{Accumulator, EnergyChannels, FissionError, nonnegative, positive, sum};
 
 /// Energy-resolved emissions driven by the original integrated decay events.
 pub mod emissions;
+
+mod products;
+pub use products::DecayProductRetention;
+use products::{ChargedMultiplicity, RetentionBinding, resolve_mode};
 
 /// Explicit fractions of one category's emitted energy sent to each destination.
 /// Fractions must be finite, nonnegative, and sum to one within rounding; they
@@ -100,6 +105,10 @@ pub enum DecayAssemblyError {
         parent: NuclideId,
         daughter: NuclideId,
     },
+    /// Retaining a charged coproduct requires its explicitly supplied evaluation.
+    MissingRetainedProduct(NuclideId),
+    /// Ground-state He4/H1 must have an explicitly stable evaluated law.
+    UnstableRetainedProduct(NuclideId),
     /// Component names are ENDF ELP, EEM, EHP and neutrino energy.
     UnknownEnergy {
         nuclide: NuclideId,
@@ -150,6 +159,8 @@ pub struct EvaluatedDecayAssembly {
     indices: BTreeMap<NuclideId, usize>,
     // For each admitted physical branch, retain its original record/mode index.
     mode_sources: Vec<(usize, usize)>,
+    charged_multiplicities: Vec<ChargedMultiplicity>,
+    product_retention: RetentionBinding,
 }
 
 impl EvaluatedDecayAssembly {
@@ -194,6 +205,7 @@ impl EvaluatedDecayAssembly {
         let mut nodes = Vec::with_capacity(entries.len());
         let mut branches = Vec::with_capacity(mode_count);
         let mut mode_sources = Vec::with_capacity(mode_count);
+        let mut charged_multiplicities = Vec::with_capacity(mode_count);
         for (parent, entry) in entries.iter().enumerate() {
             checkpoint()?;
             let evaluation = &entry.evaluation;
@@ -214,7 +226,8 @@ impl EvaluatedDecayAssembly {
                 if mode.probability == 0.0 {
                     continue;
                 }
-                let daughter_id = daughter(id, mode.rtyp, mode.daughter_isomer)?;
+                let resolved = resolve_mode(id, mode.rtyp, mode.daughter_isomer)?;
+                let daughter_id = resolved.residual;
                 let &daughter =
                     indices
                         .get(&daughter_id)
@@ -229,6 +242,7 @@ impl EvaluatedDecayAssembly {
                     energy_per_decay: energy,
                 });
                 mode_sources.push((parent, mode_index));
+                charged_multiplicities.push(resolved.charged);
             }
         }
         checkpoint()?;
@@ -245,6 +259,8 @@ impl EvaluatedDecayAssembly {
             nuclides,
             indices,
             mode_sources,
+            charged_multiplicities,
+            product_retention: RetentionBinding::default(),
         })
     }
 
@@ -274,7 +290,8 @@ impl EvaluatedDecayAssembly {
     }
 
     /// Produce ordinary burnup data with the same order, half-lives and decay
-    /// channels. Append independently supplied capture/fission reactions using
+    /// channels and the explicitly selected charged-coproduct retention policy.
+    /// Append independently supplied capture/fission reactions using
     /// index(), then admit through BurnupModel::new with its original work limits.
     /// No cross sections, fission yields or material-temperature range are inferred.
     pub fn burnup_data(
@@ -299,7 +316,13 @@ impl EvaluatedDecayAssembly {
             nuclides.push(BurnupNuclide { id, law: node.law });
         }
         let mut reactions = Vec::with_capacity(self.mode_sources.len());
-        for (branch, &(record, mode)) in self.model.branches().iter().zip(&self.mode_sources) {
+        for (index, (branch, &(record, mode))) in self
+            .model
+            .branches()
+            .iter()
+            .zip(&self.mode_sources)
+            .enumerate()
+        {
             checkpoint()?;
             let source = &self.evaluations[record];
             reactions.push(BurnupReaction {
@@ -314,10 +337,7 @@ impl EvaluatedDecayAssembly {
                 rate: BurnupRate::Decay {
                     branch_fraction: branch.probability,
                 },
-                products: vec![BurnupProduct {
-                    nuclide: branch.daughter,
-                    yield_per_event: 1.0,
-                }],
+                products: self.burnup_products(index).as_slice().to_vec(),
                 energy_per_event: branch.energy_per_decay,
             });
         }
@@ -380,48 +400,6 @@ fn average_energy(
             nuclide: evaluation.metadata().nuclide,
             component,
         })
-}
-
-fn daughter(parent: NuclideId, rtyp: f64, isomer: u16) -> Result<NuclideId, DecayAssemblyError> {
-    let unsupported = || DecayAssemblyError::UnsupportedDecayMode { parent, rtyp };
-    let invalid = || DecayAssemblyError::InvalidDaughter { parent, rtyp };
-    if !rtyp.is_finite() || !(1.0..8.0).contains(&rtyp) {
-        return Err(unsupported());
-    }
-    // The shortest decimal rendering recovers the ENDF particle-code sequence
-    // without truncating binary roundoff in e.g. (1.44 - 1) * 100. The source's
-    // eleven-column numeric field bounds the available significant digits.
-    let code = rtyp.to_string();
-    let mut z = i32::from(parent.atomic_number());
-    let mut a = i32::from(parent.mass_number());
-    for mode in code.bytes().filter(|&byte| byte != b'.') {
-        match mode {
-            b'1' => z += 1,
-            b'2' => z -= 1,
-            b'3' => (),
-            b'4' => {
-                z -= 2;
-                a -= 4;
-            }
-            b'5' => a -= 1,
-            b'7' => {
-                z -= 1;
-                a -= 1;
-            }
-            // SF (6) has multiple residuals; zero and unknown codes are not
-            // silently treated as no-op isomeric transitions.
-            _ => return Err(unsupported()),
-        }
-        if z <= 0 || a < z || a > i32::from(u16::MAX) {
-            return Err(invalid());
-        }
-    }
-    NuclideId::new(
-        u16::try_from(z).map_err(|_| invalid())?,
-        u16::try_from(a).map_err(|_| invalid())?,
-        isomer,
-    )
-    .map_err(|_| invalid())
 }
 
 #[cfg(test)]
