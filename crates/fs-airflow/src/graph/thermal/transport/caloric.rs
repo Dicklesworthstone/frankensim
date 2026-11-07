@@ -9,9 +9,9 @@
 //! Density, hydraulic flow and film coefficients are prescribed. The source
 //! pressure is the common thermodynamic approximation, not a reinterpretation
 //! of the graph's hydraulic pressure drops. No pressure work, phase change,
-//! composition mixing or density/flow feedback is inferred. Native return-air
-//! and closed-circulation solvers assume affine temperature response and are
-//! unavailable on this distinct source-caloric type, as are their adjoints.
+//! composition mixing or density/flow feedback is inferred. Imposed return-air
+//! links close a bounded nonlinear enthalpy balance using the original source
+//! response. Closed native circulations and return-loop adjoints are not supplied.
 
 use std::sync::Arc;
 
@@ -25,6 +25,9 @@ use super::*;
 use crate::conjugate::caloric::CaloricAirPath;
 use crate::conjugate::{ConjugateConfig, IqnIlsConfig, RegionBalance, SolidRegionState};
 
+mod recirculation;
+pub use recirculation::CaloricRecirculationConfig;
+
 /// Source-caloric specialization of the existing admitted once-through network.
 /// The source is shared, never selected independently at a junction or branch.
 #[derive(Debug)]
@@ -34,6 +37,7 @@ pub struct CaloricTransportNetwork<'a> {
     reference_temperature: Temperature,
     external_mass: Vec<f64>,
     mass_residual: Vec<f64>,
+    feedback: Option<recirculation::CaloricFeedback>,
 }
 
 impl<'a> CaloricTransportNetwork<'a> {
@@ -123,6 +127,7 @@ impl<'a> CaloricTransportNetwork<'a> {
             reference_temperature,
             external_mass,
             mass_residual,
+            feedback: None,
         })
     }
 
@@ -181,12 +186,16 @@ impl<'a> CaloricTransportNetwork<'a> {
         cx: &Cx<'_>,
         walls: Option<&[f64]>,
     ) -> Result<TransportMarch, TransportError> {
+        if let Some(feedback) = &self.feedback {
+            return feedback.march(self, cx, walls);
+        }
         self.topology.march_once_with_source(
             cx,
             walls,
             &self.topology.inlet_temperatures,
             None,
             Some(self.context()),
+            None,
         )
     }
 
@@ -195,6 +204,8 @@ impl<'a> CaloricTransportNetwork<'a> {
             law: &self.caloric,
             external_mass: &self.external_mass,
             mass_residual: &self.mass_residual,
+            reference_k: None,
+            inlet_enthalpies: None,
         }
     }
 
@@ -281,9 +292,27 @@ pub(super) struct CaloricContext<'a> {
     law: &'a Arc<IsobaricHeatCapacityLaw>,
     pub(super) external_mass: &'a [f64],
     pub(super) mass_residual: &'a [f64],
+    // Only the nonlinear return owner supplies primary energy coordinates.
+    // Ordinary source marches retain the original allocation-free context.
+    pub(super) reference_k: Option<f64>,
+    pub(super) inlet_enthalpies: Option<&'a [Option<f64>]>,
 }
 
 impl CaloricContext<'_> {
+    pub(super) fn inlet_enthalpy(
+        self,
+        node: usize,
+        reference_k: f64,
+        temperature: f64,
+    ) -> Result<f64, TransportError> {
+        match self.inlet_enthalpies {
+            Some(values) => values[node].ok_or(TransportError::InvalidInput(
+                "source supply is missing its retained enthalpy",
+            )),
+            None => self.enthalpy(reference_k, temperature),
+        }
+    }
+
     pub(super) fn enthalpy(
         self,
         reference_k: f64,

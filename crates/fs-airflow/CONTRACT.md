@@ -21,13 +21,35 @@ shared-solid driver and source-aware branch balance probes. Fixed/Aitken/IQN
 acceleration, temperature convergence and per-region watt gates retain their
 native owner. Source/domain or balance refusal returns no partial field.
 
+`with_recirculation` admits the native bounded, prescribed return-link topology
+with receiving-supply mass fractions and strictly positive fresh makeup.
+It solves the nonlinear mixer equations in relative specific enthalpy, using
+the original channel inlet response and native mass-weighted DAG elimination.
+The reduced Newton solve has explicit iteration and damped-trial limits;
+every trial remains inside the original source support. The original shared
+solid driver consumes the resulting references without a second coupling loop.
+
+Supply enthalpies are primary unknowns. The shared graph walk retains inlet
+and node enthalpy coordinates, so returning exhaust is never reconstructed from
+rounded temperatures. Mixer watt residuals and the source-minimum-Cp bound on
+temperature residual must both pass. A separate fresh/undrawn-exhaust ledger
+then closes the outer heat balance. Reports retain actual mass rates and mark
+the physical reference temperature of diagnostic Cp capacity rates; those
+rates do not enter the nonlinear heat balance.
+
 Hydraulic flow, density and film coefficients remain prescribed. This path is
-steady, single-phase, once-through and acyclic. Recirculation, closed-loop
-affine-temperature solvers, composition mixing, pressure work, density/flow
-feedback and their adjoints are not added by this source-caloric specialization.
+steady and single-phase; its internal hydraulic graph remains acyclic.
+Native closed circulation, composition mixing, return-path fan/pressure work,
+density/flow feedback and their adjoints are not supplied by this specialization.
+
 Focused regressions exercise real hydraulic split/merge and reverse-flow
 solutions, nonlinear mixing, source/datum invariance, weak heat, shared-solid
 power balance, hydraulic defects, cancellation and source refusals.
+Return regressions include an independent affine-Cp analytical balance,
+heating/cooling, 99.99% recirculation, multi-supply mixing, source-only Cp
+changes, datum/order invariance, bounded refusal, a coupled solid and retained
+weak heat at a 1e-14 W balance tolerance. These are numerical model checks,
+not experimental validation or a global nonlinear-convergence guarantee.
 
 ## Source-specific heat in steady conjugate channels
 
@@ -52,6 +74,16 @@ temperature tolerance and independent per-region watt gates. Original
 constant-Cp goal and refinement formulas cannot silently consume this distinct
 path type. Per-segment NTU is the inlet-Cp diagnostic; effectiveness comes from
 the integrated temperature change, not an assumed constant-Cp exponential.
+
+`march_with_inlet_response` returns the analytic fixed-wall inlet response of
+that same march. The original material exchange retains `dh_out/dh_in` before
+rounding absolute temperatures, including the exponential equilibrium limit
+and saturated outlets. Channel composition multiplies these passive enthalpy
+gains; temperature response additionally uses the original inlet/outlet Cp
+ratio. This is a derivative at fixed mass flow, conductance and wall states,
+not a coupled design adjoint. Analytical constant/affine-Cp tests, central
+differences, heating/cooling, source knots and datum/refinement checks cover
+the response.
 
 The model remains steady, single-phase, one-dimensional and isobaric, at fixed
 composition, mass flow and heat-transfer coefficient. It adds no hydraulic

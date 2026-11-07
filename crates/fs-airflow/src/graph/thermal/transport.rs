@@ -133,6 +133,12 @@ pub enum TransportError {
     HeatImbalance { residual_w: f64, tolerance_w: f64, hydraulic_defect_w: f64 },
     /// Sum of absolute recomputed node heat residuals in a native circulation.
     CirculationResidual { residual_w: f64, tolerance_w: f64 },
+    /// The bounded source-caloric return solve did not close its mixer budgets.
+    CaloricRecirculationNotConverged {
+        iterations: usize,
+        max_mixing_residual_k: f64,
+        mixing_heat_residual_w: f64,
+    },
     /// A bounded work checkpoint refused more work.
     Interrupted,
     /// Existing channel or conjugate solver refusal, preserved without promotion.
@@ -467,7 +473,7 @@ impl<'a> TransportNetwork<'a> {
     fn march_once_with_nodes(&self, cx: &Cx<'_>, walls: Option<&[f64]>,
         inlets: &[Option<f64>], solved_nodes: Option<&[f64]>)
         -> Result<TransportMarch, TransportError> {
-        self.march_once_with_source(cx, walls, inlets, solved_nodes, None)
+        self.march_once_with_source(cx, walls, inlets, solved_nodes, None, None)
     }
 
     // Topology, branch orientation, region ownership and the watt ledger have
@@ -475,21 +481,27 @@ impl<'a> TransportNetwork<'a> {
     // enthalpy and supplies its own original channel law and inverse.
     fn march_once_with_source(&self, cx: &Cx<'_>, walls: Option<&[f64]>,
         inlets: &[Option<f64>], solved_nodes: Option<&[f64]>,
-        source: Option<caloric::CaloricContext<'_>>)
+        source: Option<caloric::CaloricContext<'_>>,
+        mut retained_enthalpies: Option<&mut [Option<f64>]>)
         -> Result<TransportMarch, TransportError> {
         poll(cx)?;
         if source.is_some() && (solved_nodes.is_some() || self.feedback.is_some() || self.circulation.is_some()) {
             return Err(TransportError::InvalidInput("source-caloric transport requires the native once-through DAG"));
         }
-        let reference_k = inlets.iter().flatten().next().copied().unwrap_or(self.reference_k);
+        let reference_k = source.and_then(|source| source.reference_k).unwrap_or_else(||
+            inlets.iter().flatten().next().copied().unwrap_or(self.reference_k));
         let n = self.order.len();
+        if retained_enthalpies.as_ref().is_some_and(|values| values.len() != n)
+            || source.and_then(|source| source.inlet_enthalpies).is_some_and(|values| values.len() != n) {
+            return Err(TransportError::InvalidInput("source enthalpy coordinate shape"));
+        }
         let mut mixers = vec![Mixer::default(); n];
         for (node, &temperature) in inlets.iter().enumerate() {
             poll(cx)?;
             if let Some(temperature) = temperature {
                 if let Some(source) = source {
                     mixers[node].add_coordinate(source.external_mass[node],
-                        source.enthalpy(reference_k, temperature)?)?;
+                        source.inlet_enthalpy(node, reference_k, temperature)?)?;
                 } else {
                     mixers[node].add(self.external_capacity[node], temperature)?;
                 }
@@ -520,12 +532,15 @@ impl<'a> TransportNetwork<'a> {
                 Some(source) => source.temperature(reference_k, coordinate)?,
                 None => coordinate,
             };
+            if let Some(values) = &mut retained_enthalpies {
+                values[node] = Some(coordinate);
+            }
             result.node_temperatures_k[node] = Some(temperature);
             let entering_temperature = inlets[node].unwrap_or(temperature);
             let (external_heat, hydraulic_defect) = if let Some(source) = source {
                 let external = source.external_mass[node];
                 let specific_h = if external > 0.0 {
-                    source.enthalpy(reference_k, entering_temperature)?
+                    source.inlet_enthalpy(node, reference_k, entering_temperature)?
                 } else { coordinate };
                 (finite(-external * specific_h, "external source enthalpy")?,
                     finite(source.mass_residual[node] * coordinate, "hydraulic source energy defect")?)

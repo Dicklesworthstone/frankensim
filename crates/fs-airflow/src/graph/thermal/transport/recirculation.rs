@@ -31,7 +31,8 @@ pub struct RecirculationLink {
     pub fraction: f64,
 }
 
-/// One accepted fresh/return mixture. Capacities are mass flow times cp.
+/// One accepted fresh/return mixture. Capacities are mass flow times cp;
+/// source-caloric reports label the reference temperature used for that diagnostic.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecirculatedSupply {
     /// External supply node.
@@ -40,6 +41,10 @@ pub struct RecirculatedSupply {
     pub fresh_temperature_k: f64,
     /// Actually marched mixture of fresh and returned air, K.
     pub mixed_temperature_k: f64,
+    /// Fresh makeup mass flow, kg/s.
+    pub fresh_mass_flow_kg_per_s: f64,
+    /// Returned mass flow entering this supply, kg/s.
+    pub return_mass_flow_kg_per_s: f64,
     /// Fresh makeup capacity rate, W/K.
     pub fresh_capacity_w_per_k: f64,
     /// Returned capacity rate entering this supply, W/K.
@@ -55,6 +60,8 @@ pub struct RecirculatedStream {
     pub return_node: usize,
     /// Declared receiving-supply fraction.
     pub fraction: f64,
+    /// Mass flow removed from this exhaust, kg/s.
+    pub mass_flow_kg_per_s: f64,
     /// Capacity flow removed from this exhaust, W/K.
     pub capacity_w_per_k: f64,
     /// Temperature at the actual solved return node, K.
@@ -64,6 +71,11 @@ pub struct RecirculatedStream {
 /// Independently accumulated outer heat balance after removing return streams.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecirculationReport {
+    /// For source-caloric transport, capacity rates use Cp at this physical
+    /// reference temperature as diagnostics only. Mixing and the watt ledger
+    /// use the original enthalpy integrals and mass rates. `None` denotes the
+    /// native constant-Cp model.
+    pub caloric_reference_temperature_k: Option<f64>,
     /// Affected supplies, sorted by node.
     pub supplies: Vec<RecirculatedSupply>,
     /// Positive return draws, sorted by (supply, return).
@@ -74,6 +86,8 @@ pub struct RecirculationReport {
     /// Outer gain minus heat actually received from the walls, W.
     pub heat_imbalance_w: f64,
     /// Largest independently recomputed mixture-temperature residual, K.
+    /// Source-caloric reports bound it by the enthalpy residual divided by
+    /// the minimum original source Cp over its admitted support.
     pub max_mixing_residual_k: f64,
 }
 
@@ -201,7 +215,8 @@ impl Feedback {
     fn audit(&self, network: &TransportNetwork<'_>, cx: &Cx<'_>, inlets: &[Option<f64>],
         march: &TransportMarch) -> Result<RecirculationReport, TransportError> {
         let reference = march.enthalpy_reference_k;
-        let mut report = RecirculationReport { supplies: Vec::new(), streams: Vec::new(),
+        let mut report = RecirculationReport { caloric_reference_temperature_k: None,
+            supplies: Vec::new(), streams: Vec::new(),
             external_heat_gain_w: 0.0, heat_imbalance_w: 0.0, max_mixing_residual_k: 0.0 };
         let mut proposed = Vec::with_capacity(self.sources.len());
         for (i, &node) in self.sources.iter().enumerate() {
@@ -216,6 +231,8 @@ impl Feedback {
             proposed[i] = finite(proposed[i] + link.fraction * (temperature - reference), "recomputed mixture")?;
             report.streams.push(RecirculatedStream { supply_node: link.supply_node,
                 return_node: link.return_node, fraction: link.fraction,
+                mass_flow_kg_per_s: link.fraction * network.external_capacity[link.supply_node]
+                    / network.air.specific_heat_j_kg_k,
                 capacity_w_per_k: link.fraction * network.external_capacity[link.supply_node],
                 temperature_k: temperature });
         }
@@ -229,6 +246,10 @@ impl Feedback {
             report.supplies.push(RecirculatedSupply { node,
                 fresh_temperature_k: network.inlet_temperatures[node].expect("fresh source"),
                 mixed_temperature_k: mixed,
+                fresh_mass_flow_kg_per_s: (1.0 - self.fractions[i]) * network.external_capacity[node]
+                    / network.air.specific_heat_j_kg_k,
+                return_mass_flow_kg_per_s: self.fractions[i] * network.external_capacity[node]
+                    / network.air.specific_heat_j_kg_k,
                 fresh_capacity_w_per_k: (1.0 - self.fractions[i]) * network.external_capacity[node],
                 return_capacity_w_per_k: self.fractions[i] * network.external_capacity[node] });
         }
