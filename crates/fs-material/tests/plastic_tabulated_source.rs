@@ -2,6 +2,9 @@
 //! Synthetic coefficients verify implementation, not alloy calibration.
 #![deny(unsafe_code)]
 
+#[path = "plastic_tabulated_source/rate.rs"]
+mod rate;
+
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimId, ClaimSelection, ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId,

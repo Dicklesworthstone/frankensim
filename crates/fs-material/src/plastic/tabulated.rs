@@ -24,6 +24,7 @@ use super::{J2Plasticity, J2State, Update};
 use crate::{MaterialAdmissibility, MaterialError, SmallStrainLaw, Tangent6, Voigt};
 use core::fmt;
 use fs_evidence::{Ambition, ModelCard};
+use std::sync::Arc;
 
 /// One absolute flow-stress datum in the consumer's declared stress convention.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -35,12 +36,13 @@ pub struct HardeningPoint {
 }
 
 /// Fixed material calibration with slopes and exact primitive prepared once.
-/// Point queries and consistency returns allocate no memory.
+/// Point queries and consistency returns allocate no memory. Immutable arrays
+/// are shared so preparing another physical step never copies a measured curve.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabulatedHardening {
-    points: Vec<HardeningPoint>,
-    slopes: Vec<f64>,
-    stored: Vec<f64>,
+    points: Arc<[HardeningPoint]>,
+    slopes: Arc<[f64]>,
+    stored: Arc<[f64]>,
 }
 
 /// Invalid data, a measured-domain exit, or unrepresentable arithmetic.
@@ -129,9 +131,9 @@ impl TabulatedHardening {
             stored.push(cumulative);
         }
         Ok(Self {
-            points,
-            slopes,
-            stored,
+            points: points.into(),
+            slopes: slopes.into(),
+            stored: stored.into(),
         })
     }
 

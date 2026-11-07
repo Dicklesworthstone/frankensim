@@ -27,6 +27,9 @@ use crate::{MaterialAdmissibility, MaterialError, SmallStrainLaw, Tangent6, Voig
 use fs_evidence::{Ambition, ModelCard};
 use fs_math::det;
 
+/// Same-card measured hardening and independently selected flow kinetics.
+pub mod source;
+
 /// One immutable table and one explicitly selected physical flow interval.
 /// Preparing a later interval does not reset the original native J2 history.
 #[derive(Clone, Debug, PartialEq)]
