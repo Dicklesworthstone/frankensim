@@ -764,7 +764,10 @@ pub(super) fn material_modal_dg_provenance(
             "original three-dimensional regional material solid with all selected modes, signed pressure/force maps and full coupled viscosity in the shared DG aperture solve; frozen-frequency material image with sampled dispersion checks, not hereditary solid dynamics; mesh, mode, time and DG refinement remain separate; no measured-instrument qualification")
         }
     } else if let Some(reed) = p.reed_record() {
-        (format!(",\"typed_reed\":{{\"source\":{},\"rest_opening_m\":{:e},\"width_m\":{:e},\"closing_pressure_pa\":{:e},\"mass_kg\":{:e},\"stiffness_n_m\":{:e},\"damping_ratio\":{:e},\"pressure_area_m2\":{:e},\"damping_n_s_m\":{:e}}}",
+        let contraction = reed.contraction().map_or_else(String::new, |c| format!(",\"jet_contraction\":{c:e}"));
+        let noise = p.constriction_noise().map_or_else(String::new, |card| format!(
+            ",\"constriction_noise\":{{\"seed\":{},\"duct_radius_m\":{:e}}}", card.seed, card.duct_radius_m));
+        (format!(",\"typed_reed\":{{\"source\":{},\"rest_opening_m\":{:e},\"width_m\":{:e},\"closing_pressure_pa\":{:e},\"mass_kg\":{:e},\"stiffness_n_m\":{:e},\"damping_ratio\":{:e},\"pressure_area_m2\":{:e},\"damping_n_s_m\":{:e}{contraction}{noise}}}",
             json_string(reed.source()), reed.rest_opening_m(), reed.width_m(), reed.closing_pressure_pa(),
             reed.mass_kg(), reed.stiffness_n_m(), reed.damping_ratio(), reed.pressure_area_m2(), reed.damping_n_s_m()),
             "one typed lumped reed (a single modal mode: gap, pressure area k H / P_c, damping 2 zeta sqrt(k m)) in the shared exact pressure/contact/DG owner; its six numbers are the named description rows with the basis words printed there, not a measured instrument or a plate; DG spatial and nonlinear time convergence require separate refinement")

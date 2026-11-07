@@ -20,6 +20,7 @@ use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationReport};
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
 use crate::render::schedule::{GestureCompileError, ScheduledControl};
+use crate::turbulence_noise::{ConstrictionNoise, ConstrictionNoiseCard};
 use fs_scenario::gesture::GestureSchedule;
 
 mod controls;
@@ -49,6 +50,8 @@ pub struct LoadedDgPerformance {
     plate_forces: [Option<ForceSchedule>; 2],
     spatial_pressures: [Option<PressureSchedule>; 2],
     finite_gas: Option<FiniteGasPlayback>,
+    // The opt-in duct-constriction noise: a seeded series pressure on the mouth side (`with_constriction_noise`).
+    constriction_noise: Option<ConstrictionNoise>,
     last: Option<DgApertureFrame>,
     poisoned: bool,
 }
@@ -90,8 +93,28 @@ impl LoadedDgPerformance {
         Ok(Self {
             system, observation, receiver, observer_gas: None, terminal_flows, config, schedule, controls, next: 0,
             held_pressure_pa: 0.0, plate_forces: [None, None],
-            spatial_pressures: [None, None], finite_gas: None, last: None, poisoned: false,
+            spatial_pressures: [None, None], finite_gas: None, constriction_noise: None,
+            last: None, poisoned: false,
         })
+    }
+
+    /// Add the opt-in duct-constriction noise ([`ConstrictionNoise`], the reed-bore voice's `constriction_noise`
+    /// row): Oldham and Ukpoho's printed law as a third-octave series source of rms K(St) times the held blowing
+    /// pressure, silent while the last accepted sample's bore flow was not forward. It adds to the mouth-side pressure
+    /// the mechanical solve sees, never to the gesture's held pressure, and is drawn from the card's seed on the
+    /// mechanical clock, one white sample per physical sample, so the callback partition cannot change it. The law is an
+    /// extrapolation in size, speed and shape (see `ConstrictionNoise`). Without this call a performance is
+    /// bit-identical to one written before it existed. One cold attachment.
+    ///
+    /// # Errors
+    /// An advanced or poisoned performance, a second attachment, or the card's own refusal.
+    pub fn with_constriction_noise(mut self, card: ConstrictionNoiseCard) -> Result<Self, GestureCompileError> {
+        if self.poisoned || self.system.aperture().accepted_steps() != 0 || self.constriction_noise.is_some() {
+            return Err(invalid("constriction noise requires one cold attachment"));
+        }
+        let dt = 1.0 / f64::from(self.config.sample_rate_hz);
+        self.constriction_noise = Some(ConstrictionNoise::new(card, dt).map_err(invalid)?);
+        Ok(self)
     }
 
     /// Apply an explicit physical exterior propagation law before the first
@@ -179,7 +202,13 @@ impl LoadedDgPerformance {
             self.plate_forces[i].as_ref().map_or(0.0, |f| f.candidate(sample)));
         let pressures = std::array::from_fn(|i|
             self.spatial_pressures[i].as_ref().map_or(0.0, |p| p.candidate(sample)));
-        let drive = TubeDrive { upstream_pressure_pa: pressure, body_flow_m3_s: 0.0 };
+        // The opt-in constriction noise is a series source on the mouth side of the held blowing pressure; the held
+        // pressure itself (the gesture) is untouched. Absent, the drive is the gesture's pressure bit for bit.
+        let upstream_pressure_pa = match self.constriction_noise.as_mut() {
+            Some(noise) => pressure + noise.pressure_pa(pressure, self.system.load().duct().inlet_gas().density),
+            None => pressure,
+        };
+        let drive = TubeDrive { upstream_pressure_pa, body_flow_m3_s: 0.0 };
         let frame = if let Some(gas) = &mut self.finite_gas {
             gas.step_loaded(&mut self.system, drive, forces, pressures)?
         } else {
@@ -196,6 +225,9 @@ impl LoadedDgPerformance {
         if let Some(gas) = &mut self.finite_gas { gas.accept(sample); }
         self.last = Some(frame);
         let frame = self.last.as_ref().expect("accepted physical frame");
+        if let Some(noise) = self.constriction_noise.as_mut() {
+            noise.record(frame.aperture.bore_flow_m3_s);
+        }
         let output = match self.observation {
             ApertureObservation::Inlet => frame.aperture.bore_pressure_pa,
             ApertureObservation::TubeBaffled(_) => {

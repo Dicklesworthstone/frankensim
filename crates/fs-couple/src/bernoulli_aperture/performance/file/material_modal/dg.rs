@@ -41,7 +41,9 @@
 //! Or `reed HEIGHT WIDTH CLOSING_PA MASS STIFFNESS ZETA SOURCE_TOKEN` replaces `loss`/`blades` and every
 //! plate record with ONE typed, sourced lumped reed (the six numbers of a reed-performance `reed` row), so a
 //! DG bore plays the reed a modal-bore page plays. See `reed`; it has no mesh, material, closure or force
-//! port, requires `slit_length none` and HEIGHT equal to the `valve` REST_GAP.
+//! port, requires `slit_length none` and HEIGHT equal to the `valve` REST_GAP. An optional `contraction C_C`
+//! row directly after it gives the reed jet's vena contracta, and an optional `constriction_noise SEED
+//! DUCT_RADIUS_M` row after those adds Oldham and Ukpoho's duct-constriction noise as a seeded series pressure.
 
 use super::{
     BladePropagator, BladeState, LossSelection, MaterialCache,
@@ -63,6 +65,7 @@ use fs_exec::CancelGate;
 use fs_material::gas::GasState;
 use fs_material::gas_species::input::{GasRecord, ThermochemicalSources};
 use crate::pcm_wav::baffled::gas::GasPropagation;
+use crate::turbulence_noise::ConstrictionNoiseCard;
 
 /// Exact selector for material modal mechanics coupled to the original DG bore.
 pub const MATERIAL_MODAL_DG_VALVE_SCHEMA: &str = "frankensim-material-modal-dg-valve-v1";
@@ -79,6 +82,7 @@ pub struct MaterialModalDgValvePerformance {
     upstream_wall: Option<DgMaterialWallLayout>,
     solid: Option<solid::SolidValveRecord>,
     reed: Option<reed::ReedRecord>,
+    constriction_noise: Option<ConstrictionNoiseCard>,
 }
 
 impl MaterialModalDgValvePerformance {
@@ -279,6 +283,20 @@ impl MaterialModalDgValvePerformance {
             }
             Some(reed::read(&mut rows, rest_opening)?)
         } else { None };
+        // `constriction_noise SEED DUCT_RADIUS_M` after the reed (and its `contraction`), as the reed-performance
+        // file places it: Oldham and Ukpoho's duct-constriction noise as a seeded series pressure on the mouth side.
+        let constriction_noise = if reed.is_some() && rows.lines.clone().next().and_then(|line|
+            line.split_ascii_whitespace().next()) == Some("constriction_noise")
+        {
+            let mut row = rows.row("constriction_noise")?;
+            let at = row.line;
+            let seed: u64 = row.parse()?;
+            let duct_radius_m = row.scalar()?;
+            row.finish()?;
+            let card = ConstrictionNoiseCard { seed, duct_radius_m };
+            card.validate().map_err(|what| bad(at, what))?;
+            Some(card)
+        } else { None };
         let solid = if reed.is_none() && rows.lines.clone().next().and_then(|line|
             line.split_ascii_whitespace().next()) == Some("solid")
         {
@@ -425,6 +443,9 @@ impl MaterialModalDgValvePerformance {
                 sample_rate_hz: mechanics, samples, max_block, max_compile_work, max_controls,
             },
         ).map_err(PlateValveInputError::Gesture)?;
+        if let Some(card) = constriction_noise {
+            renderer = renderer.with_constriction_noise(card).map_err(PlateValveInputError::Gesture)?;
+        }
         if let Some(propagation) = observer_gas {
             renderer = renderer.with_observer_gas(&propagation, gate)
                 .map_err(PlateValveInputError::Gesture)?;
@@ -454,7 +475,7 @@ impl MaterialModalDgValvePerformance {
                 mechanics_rate_hz: mechanics, propagator, output_rate_hz: output,
                 samples, full_scale_pa, blades, modes, nodes, triangles,
             },
-            renderer, materials, gases, ambient, wall, upstream_wall, solid, reed,
+            renderer, materials, gases, ambient, wall, upstream_wall, solid, reed, constriction_noise,
         })
     }
 
@@ -470,6 +491,8 @@ impl MaterialModalDgValvePerformance {
     /// The typed lumped reed and its source token, when this source selects one.
     /// Plate and solid records are then empty: there is no plate.
     pub const fn reed_record(&self) -> Option<&reed::ReedRecord> { self.reed.as_ref() }
+    /// The card of the optional `constriction_noise` row (typed-reed sources only), if the file states one.
+    pub const fn constriction_noise(&self) -> Option<&ConstrictionNoiseCard> { self.constriction_noise.as_ref() }
     /// Ambient, prescribed local and computed exterior material receipts.
     pub fn gas_records(&self) -> &[GasRecord] { &self.gases }
     /// Original material wall source, shared with any plate using the same pack.

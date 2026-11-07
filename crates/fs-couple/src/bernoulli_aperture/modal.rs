@@ -121,6 +121,8 @@ pub struct ModalAperture {
     pressure_ports: [Option<pressure::MaterialPressurePort>; 2],
     material_gas: Option<fs_material::gas::GasState>,
     viscous_slit: Option<super::viscous::ViscousSlit>,
+    // The reed jet's vena contracta C_c in (0, 1] (`set_jet_contraction`); `None` keeps the flow width bit for bit.
+    jet_contraction: Option<f64>,
     viscosity: Option<viscosity::ApertureViscosity>,
     exact: Option<exact::ExactModes>,
     relaxation: Option<relaxation::ModalRelaxation>,
@@ -266,6 +268,7 @@ impl ModalAperture {
             pressure_ports: [None, None],
             material_gas: None,
             viscous_slit: None,
+            jet_contraction: None,
             viscosity: None,
             exact,
             relaxation: None,
@@ -315,6 +318,11 @@ impl ModalAperture {
                 "modal viscous slit must be selected before the first accepted sample",
             ));
         }
+        if self.jet_contraction.is_some() {
+            return Err(invalid(
+                "modal jet contraction is defined on the inviscid uniform slit only, not with a viscous slit",
+            ));
+        }
         law.evaluate(
             self.spec.width_m,
             self.gap(&self.state).max(0.0),
@@ -349,6 +357,44 @@ impl ModalAperture {
     #[must_use]
     pub const fn viscous_slit(&self) -> Option<super::viscous::ViscousSlit> {
         self.viscous_slit
+    }
+
+    /// The reed jet's vena contracta, as the reed-bore voice's `set_jet_contraction`: the jet leaves the opening with
+    /// the area `C_c w h`, so the continuous Bernoulli slit flow takes the width `C_c w` (and nothing else changes:
+    /// pressure area, swept volume, contact and the mechanical limits keep the physical width and gap). `C_c = 1`
+    /// is the original flow bit for bit, and so is not calling this at all. Defined on the inviscid uniform slit
+    /// only: a viscous slit, a spatial closure and a solid surface closure refuse it. Selected once, before the
+    /// first accepted sample.
+    ///
+    /// # Errors
+    /// A coefficient outside `(0, 1]`, a second selection, an advanced aperture, or a viscous or spatial slit.
+    pub fn set_jet_contraction(&mut self, coefficient: f64) -> Result<(), AcousticRealizeError> {
+        if !(coefficient > 0.0 && coefficient <= 1.0) {
+            return Err(invalid("modal jet contraction needs a coefficient C_c in (0, 1]"));
+        }
+        if self.samples != 0 || self.jet_contraction.is_some() {
+            return Err(invalid(
+                "modal jet contraction is selected once, before the first accepted sample",
+            ));
+        }
+        if self.viscous_slit.is_some() || self.closure.is_some() || self.solid_closure.is_some() {
+            return Err(invalid(
+                "modal jet contraction is defined on the inviscid uniform slit only",
+            ));
+        }
+        self.jet_contraction = Some(coefficient);
+        Ok(())
+    }
+
+    /// The selected vena contracta coefficient, if any.
+    #[must_use]
+    pub const fn jet_contraction(&self) -> Option<f64> {
+        self.jet_contraction
+    }
+
+    // The width the uniform Bernoulli flow sees: the physical width, or C_c times it.
+    fn jet_width_m(&self) -> f64 {
+        self.jet_contraction.map_or(self.spec.width_m, |c| c * self.spec.width_m)
     }
 
     // A fixed supply passage's added mass joins an unadvanced valve that was built (and band-admitted) with the
@@ -606,6 +652,7 @@ impl ModalAperture {
         }
         let gap = self.gap(&self.state);
         let z = self.load_impedance_pa_s_m3();
+        let jet_width = self.jet_width_m();
         let trial = if let Some(closure) = &self.closure {
             if let Some(exact) = &self.exact {
                 exact.free_velocity(
@@ -632,7 +679,7 @@ impl ModalAperture {
                 &shape[..n],
                 gap,
                 dt,
-                self.spec.width_m,
+                jet_width,
                 self.spec.density_kg_m3,
                 z,
                 drive,
@@ -650,7 +697,7 @@ impl ModalAperture {
                 &shape[..n],
                 gap,
                 dt,
-                self.spec.width_m,
+                jet_width,
                 self.spec.density_kg_m3,
                 z,
                 drive,
@@ -666,7 +713,7 @@ impl ModalAperture {
                 &shape[..n],
                 gap,
                 dt,
-                self.spec.width_m,
+                jet_width,
                 self.spec.density_kg_m3,
                 z,
                 drive,
@@ -742,7 +789,7 @@ impl ModalAperture {
                 .flow_m3_s
             }
             (None, _) => super::moving::volume_flow(
-                self.spec.width_m,
+                jet_width,
                 opening,
                 trial.dp,
                 self.spec.density_kg_m3,

@@ -11,7 +11,9 @@
 //! c = 2 zeta sqrt(k m). Nothing is inferred that the row does not state: the reed-performance file's
 //! zero-means-derived mass and stiffness are refused here, HEIGHT must equal the `valve` REST_GAP, the
 //! contact is the file's own `contact` row (the lay of a lumped reed is the writer's to state), and no
-//! viscous slit is selected. The row replaces `solid` or `loss`/`blades` and every plate record; it
+//! viscous slit is selected. An optional `contraction C_C` row directly after `reed` gives the jet's vena
+//! contracta (the flow width becomes C_c times the physical width, `ModalAperture::set_jet_contraction`),
+//! as the reed-performance file's row of that name does; absent, nothing changes bit for bit. The row replaces `solid` or `loss`/`blades` and every plate record; it
 //! carries no mesh, section, material memory, traction, closure or force port.
 
 use super::{PlateValveInputError, Reader, bad};
@@ -33,6 +35,7 @@ pub struct ReedRecord {
     stiffness_n_m: f64,
     damping_ratio: f64,
     source: String,
+    contraction: Option<f64>,
 }
 
 /// The host quantities the DG file supplies to every valve it builds.
@@ -59,6 +62,8 @@ impl ReedRecord {
     pub const fn damping_ratio(&self) -> f64 { self.damping_ratio }
     /// The token naming the description rows that sourced the six numbers.
     pub fn source(&self) -> &str { &self.source }
+    /// The jet's vena contracta C_c in (0, 1] from the optional `contraction` row, if the card states one.
+    pub const fn contraction(&self) -> Option<f64> { self.contraction }
     /// Effective pressure area A = (k / P_c) H [m^2], associated as the live reed's own
     /// `reed_bore::reed_pressure_face` associates it, so both routes carry the same bits.
     pub fn pressure_area_m2(&self) -> f64 { (self.stiffness_n_m / self.closing_pressure_pa) * self.rest_opening_m }
@@ -71,7 +76,7 @@ impl ReedRecord {
     pub(super) fn into_aperture(
         &self, host: ReedHost, contact: Obstacle, propagator: BladePropagator,
     ) -> Result<ModalAperture, AcousticRealizeError> {
-        ModalAperture::new_with_propagator(
+        let mut valve = ModalAperture::new_with_propagator(
             ModalApertureSpec {
                 rest_opening_m: self.rest_opening_m,
                 width_m: self.width_m,
@@ -92,7 +97,11 @@ impl ReedRecord {
             vec![BladeState { displacement_m: 0.0, velocity_m_s: 0.0 }],
             contact,
             propagator,
-        )
+        )?;
+        if let Some(coefficient) = self.contraction {
+            valve.set_jet_contraction(coefficient)?;
+        }
+        Ok(valve)
     }
 }
 
@@ -123,9 +132,23 @@ pub(super) fn read(rows: &mut Reader<'_>, rest_opening: f64) -> Result<ReedRecor
     if source.len() > MAX_SOURCE_TOKEN_BYTES || !source.bytes().all(|b| b.is_ascii_graphic()) {
         return Err(bad(line, "a typed reed needs a printable source token of at most 256 bytes"));
     }
+    // An optional `contraction C_C` row directly after the reed, as the reed-performance file places it: the jet's
+    // vena contracta. Absent, the flow width is the physical width bit for bit.
+    let contraction = if rows.lines.clone().next().and_then(|line|
+        line.split_ascii_whitespace().next()) == Some("contraction")
+    {
+        let mut row = rows.row("contraction")?;
+        let at = row.line;
+        let coefficient = row.scalar()?;
+        row.finish()?;
+        if !(coefficient > 0.0 && coefficient <= 1.0) {
+            return Err(bad(at, "a typed reed's contraction needs a coefficient C_c in (0, 1]"));
+        }
+        Some(coefficient)
+    } else { None };
     let record = ReedRecord {
         rest_opening_m, width_m, closing_pressure_pa, mass_kg, stiffness_n_m, damping_ratio,
-        source: source.to_string(),
+        source: source.to_string(), contraction,
     };
     let area = record.pressure_area_m2();
     let damping = record.damping_n_s_m();

@@ -1251,6 +1251,8 @@ thing that changes.
 
 ```text
 reed HEIGHT WIDTH CLOSING_PA MASS STIFFNESS ZETA SOURCE_TOKEN
+contraction C_C                      (optional, directly after reed)
+constriction_noise SEED DUCT_RADIUS_M   (optional, after those)
 ```
 
 The reed is one structural mode of the same exact `ModalAperture` the plates use (exact zero-order hold, the
@@ -1274,6 +1276,21 @@ reed from a wind description through `lower_reed_performance.reed_record()` (the
 (bore, gas, radiation, observation, limits, schedule) byte for byte. It prints the description rows that sourced the
 reed verbatim, with their status and source columns.
 
-The sidecar reports the record as `typed_reed` with its model scope. Mesh, section, material memory, traction,
+Two opt-in rows carry the physics the reed-performance file's rows of the same names carry, with the same grammar
+and the same law; a card without them is bit for bit what it was:
+
+- `contraction C_C`, C_c in (0, 1]: the reed jet's vena contracta. The continuous Bernoulli slit flow takes the
+  width `C_c w` (`ModalAperture::set_jet_contraction`); pressure area, swept volume, contact and the mechanical
+  limits keep the physical width and gap. `contraction 1` is the original flow bit for bit, and a card whose WIDTH
+  is `C_c` times the original renders bit for bit like the card with the row. Inviscid uniform slit only.
+- `constriction_noise SEED DUCT_RADIUS_M`: Oldham and Ukpoho's duct-constriction noise
+  (`turbulence_noise::ConstrictionNoise`), a seeded third-octave series pressure of rms K(St) times the held
+  blowing pressure on the mouth side, silent while the last accepted bore flow was not forward. It adds to the
+  pressure the mechanical solve sees, never to the gesture's held pressure, is drawn one white sample per
+  mechanical sample (so no callback partition changes it), and is an extrapolation in size, speed and shape from
+  dampers and plates in a 300 mm duct at 10 to 25 m/s. On a 0.87 mm duct it drives only 10 to 20 kHz.
+
+The sidecar reports the record as `typed_reed` with its model scope (and `jet_contraction` and
+`constriction_noise` when the card states them). Mesh, section, material memory, traction,
 closure and force ports do not exist for this source; DG spatial and nonlinear time refinement remain separate, and
 the reed is a lumped single-reed model, not a measured instrument.
