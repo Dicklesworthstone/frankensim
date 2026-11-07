@@ -274,6 +274,38 @@ ceiling bounds omitted displacement, not pressure-work error. This extension
 does not resolve nucleation/extinction, porosity, densification or a transient
 temperature field through the coating.
 
+### Live gas-film transport in the original deposition history
+
+`resistance::film::advance_resistive_chamber_adaptive_resolved` and
+`resistance::growing::advance_growing_integrated_chamber_resolved` accept a
+bounded source resolver for mass-transfer coefficients. Every physical full or
+half interval supplies the current original gas, canonical surface identities
+and both caloric states. Growing layers first rebind the actual mass-owned
+exposed area. The second half interval therefore resolves against its actual
+updated gas and deposit, rather than a coefficient frozen over the full window.
+
+The existing adaptive owner, molecular heat/mass streams, nonlinear coating
+contact, prescribed-power accounting and single gas reconstruction are retained.
+Only accepted half intervals contribute physical history. The fixed-film APIs
+use the same interval seam without allocating a source map. A resolved history
+reuses map nodes; each retained value is invalidated before source evaluation
+and must be overwritten or explicitly removed. Omitted IDs use the original
+free-molecular limit. Unknown IDs, negative/nonfinite coefficients and stale
+outputs refuse through the original chamber admission.
+
+Resolution also runs at zero-duration admission. The resolver must be
+deterministic for physical inputs, bounded, cancellation-aware and free of
+trial-committed physical side effects. Original source errors remain typed in
+`GasResistiveFilmError::Source`; core evolution errors remain separate. Either
+failure or late cancellation returns no partial gas or coating candidate.
+The coefficient is still frozen within each physical interval; the existing
+full/half comparison controls coupled temporal error. No extra spatial gas
+film, source extrapolation or continuum correlation is inferred by this seam.
+
+Focused G0/G3/G4 tests compare live rebinding with two original physical
+intervals, exercise changed gas inventory and mass-owned area, and cover stale
+outputs, original source errors, identity refusal and cancellation.
+
 ## Source-bound finite membrane entropy and thermal stress
 
 `HyperelasticMembrane::thermoelastic_state` prepares the original expansion

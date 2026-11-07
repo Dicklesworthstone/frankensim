@@ -110,6 +110,33 @@ pub fn advance_resistive_chamber_adaptive_driven<'catalog>(
     catalog: &'catalog ThermochemicalGasModel,
     duration_s: f64,
     controls: GasResistiveAdvanceSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<GasResistiveAdvanceCandidate<'catalog>, GasResistiveAdvanceError> {
+    let mut films = films;
+    advance_with_films(
+        surfaces,
+        accommodation,
+        &mut films,
+        powers,
+        gas,
+        catalog,
+        duration_s,
+        controls,
+        cancelled,
+    )
+}
+
+/// The same power/history owner with interval-resolved transport inputs.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn advance_with_films<'catalog>(
+    surfaces: &[GasResistiveSurface<'_>],
+    accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
+    films: &mut dyn super::film::TrialFilms,
+    powers: &BTreeMap<u64, GasResistivePower<'_>>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    duration_s: f64,
+    controls: GasResistiveAdvanceSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<GasResistiveAdvanceCandidate<'catalog>, GasResistiveAdvanceError> {
     poll(&mut cancelled)?;
@@ -140,6 +167,7 @@ pub fn advance_resistive_chamber_adaptive_driven<'catalog>(
                 poll(cancelled)?;
                 *drive = power.for_interval(dt)?;
             }
+            let films = films.resolve(rows, gas, cancelled)?;
             super::advance(
                 rows,
                 accommodation,

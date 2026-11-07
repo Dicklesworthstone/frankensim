@@ -20,6 +20,8 @@ pub mod advance;
 pub mod conductive;
 /// Explicit heat/power inputs with the original conservative history owner.
 pub mod driven;
+/// Live gas-film transport in the original adaptive deposition history.
+pub mod film;
 /// Mass-derived exposed area and material conductivity in that same adaptive history.
 pub mod growing;
 

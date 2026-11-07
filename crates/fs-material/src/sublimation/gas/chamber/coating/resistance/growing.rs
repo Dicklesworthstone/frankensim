@@ -297,11 +297,12 @@ pub fn advance_growing_resistive_chamber<'catalog>(
     controls: GasGrowingCoatingSolve,
     cancelled: impl FnMut() -> bool,
 ) -> Result<GasGrowingCoatingCandidate<'catalog>, GasResistiveAdvanceError> {
+    let mut films = films;
     advance_growing(
         surfaces,
         layers,
         accommodation,
-        films,
+        &mut films,
         None,
         gas,
         catalog,
@@ -336,11 +337,12 @@ pub fn advance_growing_integrated_chamber<'catalog>(
     controls: GasGrowingCoatingSolve,
     cancelled: impl FnMut() -> bool,
 ) -> Result<GasGrowingCoatingCandidate<'catalog>, GasResistiveAdvanceError> {
+    let mut films = films;
     advance_growing(
         surfaces,
         layers,
         accommodation,
-        films,
+        &mut films,
         powers,
         gas,
         catalog,
@@ -350,12 +352,60 @@ pub fn advance_growing_integrated_chamber<'catalog>(
     )
 }
 
+/// Evolve a growing source-integrated coating with live gas-film transport.
+///
+/// The resolver runs AFTER the original geometry has rebound each trial's
+/// exposed area. It receives the current finite gas and both original body
+/// states, including on the second half interval and zero-time admission.
+/// Source knots and regime checks can therefore follow evolving pressure,
+/// composition and temperatures. The same controller compares complete
+/// coupled full/half histories; no film state or rejected energy is committed.
+///
+/// Resolver output/error semantics are those of
+/// [super::film::advance_resistive_chamber_adaptive_resolved].
+#[allow(clippy::too_many_arguments)]
+pub fn advance_growing_integrated_chamber_resolved<'catalog, F, E>(
+    surfaces: &[GasResistiveSurface<'_>],
+    layers: &BTreeMap<u64, GasIntegratedGrowingCoating<'_>>,
+    accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
+    mut resolver: F,
+    powers: Option<&BTreeMap<u64, GasResistivePower<'_>>>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    duration_s: f64,
+    controls: GasGrowingCoatingSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<GasGrowingCoatingCandidate<'catalog>, super::film::GasResistiveFilmError<E>>
+where
+    F: FnMut(
+        &[GasResistiveSurface<'_>],
+        &ClosedGasParcel,
+        &mut BTreeMap<u64, f64>,
+        &mut dyn FnMut() -> bool,
+    ) -> Result<(), E>,
+{
+    super::film::with_resolved_films(&mut resolver, |films| {
+        advance_growing(
+            surfaces,
+            layers,
+            accommodation,
+            films,
+            powers,
+            gas,
+            catalog,
+            duration_s,
+            controls,
+            cancelled,
+        )
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn advance_growing<'catalog, M: GrowingModel>(
     surfaces: &[GasResistiveSurface<'_>],
     layers: &BTreeMap<u64, M>,
     accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
-    films: Option<&BTreeMap<u64, f64>>,
+    films: &mut dyn super::film::TrialFilms,
     powers: Option<&BTreeMap<u64, GasResistivePower<'_>>>,
     gas: &ClosedGasParcel,
     catalog: &'catalog ThermochemicalGasModel,
@@ -447,6 +497,7 @@ fn advance_growing<'catalog, M: GrowingModel>(
                 gas,
                 controls.maximum_deposit_volume_fraction,
             )?;
+            let films = films.resolve(&rebound, gas, cancelled)?;
             let mut candidate = if !M::NONLINEAR_INTERFACE && powers.is_none() {
                 // Preserve the original frozen path without allocating any
                 // interface objects or source maps inside its physical trials.
