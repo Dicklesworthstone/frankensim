@@ -144,6 +144,10 @@ name = "pulsed_optical_heating"
 required-features = ["optical-heating", "material-state"]
 
 [[example]]
+name = "phosphorescent_afterglow"
+required-features = ["optical-heating"]
+
+[[example]]
 name = "surface_optical_heating"
 required-features = ["optical-heating", "material-state"]
 
