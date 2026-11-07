@@ -419,6 +419,39 @@ where claimed below.
   Euler refinement, precession release and atomic refusals. This fixed-port,
   isothermal dry law supplies no empirical material validity, wear, thermal
   destination, actuator dynamics, changing ratio or simultaneous clutch network.
+- `RotorBank::backlash_stepper(coupling, duration)` adds one reciprocal signed-
+  ratio mesh with a finite dead zone on actual unwrapped relative phases.
+  For `x=q_first-ratio*q_second-center`, half-gap `g`, and penetrations
+  `z+=max(x-g,0)`, `z-=max(-x-g,0)`, storage is
+  `V=k+*z+^2/2+k-*z-^2/2`. Flanks have independent nonnegative stiffness and
+  compression-only viscous cushioning. Unloading returns elastic energy
+  without an attractive dashpot force; gap motion produces no contact force.
+  Each shaft half-stage uses the exact potential secant and path-averaged
+  compression loss. The scalar equation `y+alpha*effort(y)=y_free`, with
+  `alpha=delta^2*H/2` and complete native mobility
+  `H=b*(diag(1/J)+A^T I^-1 A)*b^T`, is strongly monotone. A finite analytical
+  bracket, direct gap/affine-flank cases, and at most 96 bisections avoid an
+  unbounded contact solve. Two stages surround one original gyrostat drift;
+  actual transferred impulse, stored phase, original constitutive law and
+  polarized elastic/kinetic work are admitted before publication. Receipts
+  separate both compressive flank impulses, potential changes, nonnegative
+  heat, drive/external work and native drift error. The raw work residual keeps
+  measured shaft-addition, carrier-reconstruction and phase-storage errors;
+  their componentwise `work_roundoff_allowance_j` is reported separately, never debited as heat or
+  subtracted from the residual. Requested impulses must satisfy the original
+  law on stored phases, while native erased-transfer/recoil refusal remains
+  authoritative even at nearly coincident gap crossings. Preparation/steps are O(N),
+  allocation-free and bounded by 64 rotors; cancellation polls each bisection
+  and stage boundary. Zero coefficients delegate to the original bank.
+  The local diagnostic `delta*H*c_max+delta^2*H*k_max/2` is limited to two.
+  Discrete path quantities do not resolve intra-subflow reversals or contact
+  times; zero average motion does not prove no compression/unloading. Refine
+  transitions and oscillations rather than treating energy closure as trajectory
+  accuracy. `tests/gyrostat_backlash.rs` covers analytic gap/contact arcs,
+  non-attractive unloading, damped passivity, the zero-gap linear limit,
+  independent oblique Euler refinement and bounded cancellation/refusal.
+  This fixed reduced law infers no tooth geometry, contact patch, changing mesh
+  stiffness, friction, wear, AGMA/ISO rating, material validation or gear network.
 - `InertiaTensor3::viscous_stepper` prepares the full material-frame law
   `tau = drive - D omega` for a fixed positive interval. Symmetric PSD damping
   is admitted with compensated principal-minor checks, including zero-row

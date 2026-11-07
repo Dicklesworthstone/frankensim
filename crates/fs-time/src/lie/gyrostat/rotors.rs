@@ -51,6 +51,13 @@ pub use geared::{
     GearedRotorStep,
 };
 
+#[path = "rotors/backlash.rs"]
+mod backlash;
+pub use backlash::{
+    BacklashContact, BacklashCoupling, BacklashFlank, BacklashStep, BacklashStepError,
+    BacklashStepper, MAX_BACKLASH_ROOT_ITERATIONS,
+};
+
 /// Maximum fixed-axis rotors in this allocation-free stepping lane.
 pub const MAX_AXIAL_ROTORS: usize = 64;
 
