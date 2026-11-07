@@ -27,6 +27,10 @@ use fs_math::det;
 /// Conservative, dissipative exchange on an explicitly authored surface graph.
 pub mod diffusion;
 
+/// Finite aqueous exchange with original Langmuir sites and surface diffusion.
+#[cfg(feature = "surface-soluble")]
+pub mod soluble;
+
 /// Explicit isothermal, nonionic insoluble-monolayer equation of state.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SurfactantLaw {

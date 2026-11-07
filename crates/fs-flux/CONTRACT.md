@@ -2329,6 +2329,37 @@ held inputs. Four native composed regressions define independent exact pair
 flows on expanding areas, translating ideal/Langmuir partition equilibrium,
 empty-graph mechanical recovery, and shared-budget/final-cancellation rollback.
 
+## Finite aqueous exchange with material surfaces
+
+The optional `surface-soluble` feature adds
+`surfactant::soluble::advance_soluble_surface`. The original `AqueousSolution`
+and original Langmuir face amounts exchange one explicitly selected nonionic
+species through a single finite-bath balance. The existing scalar site owner
+supplies backward-Euler adsorption/desorption; its rates obey detailed balance
+with the original nonideal bulk activity and one authored surface-minus-bulk
+standard chemical potential. Each face retains its own capacity and desorption
+rate. The original convex virial model supplies co-solute effects; a zero
+interaction matrix is its ideal limit. Missing bulk chemical-reference data
+refuses instead of receiving an invented datum.
+
+Existing partitioned surface-diffusion sweeps surround the simultaneous exchange
+stage. Sealed faces may receive solute by lateral diffusion. All faces share
+one actual bulk debit, while co-solutes and solvent volume remain unchanged.
+The complete method is first order because the kinetic stage is backward Euler;
+its maximum physical step and work bounds remain explicit. Geometry, topology,
+temperature and coefficients are held. Bulk spatial transport, moving mechanics,
+micellization, ionic adsorption and adsorption heat are outside this rung.
+
+The physical account restores the changing bulk reference term omitted by the
+source's reference-cancelled energy primitive, adds original surface energies
+and the authored standard-potential contribution, and checks both stage and
+original-to-final free-energy changes. Amount conservation, finite packing,
+source support, tension, work and final cancellation pass before either original
+inventory is replaced. Six actual-source regressions cover the independent
+finite-bath quadratic and Riccati transient, nonideal activity and reference
+invariance, stationary gross turnover, connected diffusion/exchange equilibrium,
+and late physical/work/cancellation rollback.
+
 ## Damped Newton BDF1 for stiff rheology
 
 `FluxSystem::bdf1_rheology_newton_step` advances the same fully implicit
