@@ -4,12 +4,16 @@
 
 use super::super::polarization::StringBodyTranslationConnection;
 use super::*;
+use fs_math::dd::Dd;
 
 pub(crate) struct PointCorrection {
     /// Subtract from the contact's original string row; torsion stays zero.
     pub string_shapes: Vec<f64>,
     /// Add each body row to the complete map; retain the actual opposite surface.
     pub bodies: Vec<ModalAttachment>,
+    /// Fixed point displacement from bridge rest extensions: g_i^T K_eff r.
+    /// Positive along this contact's declared direction; it is not actuator work.
+    pub displacement_offset_m: f64,
 }
 
 /// One original bridge and one independently directed bridge per string.
@@ -28,7 +32,7 @@ pub(crate) fn point_residual(
     let bridges = residual_bridges(strings, cards)?;
     let (cross, mut compliance) = stop_residual(&bridges, points)?;
     let mut corrections = Vec::with_capacity(points.len());
-    for (point, factor) in points.iter().zip(cross) {
+    for (point, &factor) in points.iter().zip(&cross) {
         poll(gate)?;
         let member = &strings[point.string];
         let connection = &member.connections[0];
@@ -39,6 +43,12 @@ pub(crate) fn point_residual(
             component: cards.len() + connection.body.component,
             shapes: connection.body.shapes.iter().map(|b| factor * b).collect(),
         };
+        let displacement_offset_m = factor * connection.rest_extension_m;
+        if !displacement_offset_m.is_finite() {
+            return Err(invalid(
+                "residual bridge rest displacement is not representable",
+            ));
+        }
         corrections.push(PointCorrection {
             string_shapes: bridge.into_iter().map(|b| factor * b).collect(),
             bodies: if body.shapes.iter().any(|b| *b != 0.0) {
@@ -46,6 +56,7 @@ pub(crate) fn point_residual(
             } else {
                 Vec::new()
             },
+            displacement_offset_m,
         });
     }
     let q = points.len();
@@ -66,10 +77,15 @@ pub(crate) fn point_residual(
             .ok_or_else(|| invalid("residual directed bridge lost its condensed pair"))?
             .law;
         let original = &member.connections[0];
-        if pair.coupled && (original.rest_extension_m != 0.0 || connection.rest_extension_m != 0.0)
-        {
+        // The same e1-h e0 rest coordinate used by the native elastic factor.
+        let rest = if pair.mix == 0.0 {
+            connection.rest_extension_m
+        } else {
+            connection.rest_extension_m - pair.mix * original.rest_extension_m
+        };
+        if !rest.is_finite() {
             return Err(invalid(
-                "coupled residual contact maps require zero bridge rest extensions",
+                "residual bridge rest displacement is not representable",
             ));
         }
         let first_axis = directions(&member.source).1;
@@ -107,6 +123,18 @@ pub(crate) fn point_residual(
                 continue;
             }
             let correction = &mut corrections[i];
+            // Sum before rounding so opposing support-rest contributions do
+            // not erase a representable weak point displacement. Constant rest
+            // coordinates are already included in the network's spring energy.
+            correction.displacement_offset_m = (Dd::from_f64(cross[i])
+                * Dd::from_f64(original.rest_extension_m)
+                + Dd::from_f64(factor) * Dd::from_f64(rest))
+            .to_f64();
+            if !correction.displacement_offset_m.is_finite() {
+                return Err(invalid(
+                    "residual bridge rest displacement is not representable",
+                ));
+            }
             if correction.string_shapes.len() != bridge.len() {
                 return Err(invalid(
                     "residual bridge maps must use the same material string basis",

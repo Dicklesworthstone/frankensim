@@ -134,8 +134,11 @@ impl MultiBowStringBank {
     /// maps remain reciprocal; retained modes are unchanged. Torsional modes
     /// remain resolved explicitly, with no invented omitted torsional response.
     /// Both bridge axes and their cross compliance contribute, including oblique
-    /// bow tangents and nonorthogonal supports. A coupled support pair must have
-    /// zero rest extensions; affine omitted-tail contact shifts are not supplied.
+    /// bow tangents and nonorthogonal supports. Constant bridge rest extensions
+    /// are admitted: their affine displacement cancels from slip increments and
+    /// supplies neither work nor an artificial initial shear-film strain. The
+    /// native network retains the bridge's complete spring/rest energy. Rest
+    /// extensions stay fixed; a time-varying support-rest drive is not wired.
     /// Each bridge retains its own receiving body; the bow's actual
     /// surface or resolved hair reaction remains independent.
     ///
@@ -173,6 +176,9 @@ impl MultiBowStringBank {
         let mut corrections = Vec::with_capacity(points.len());
         for (i, correction) in projected.into_iter().enumerate() {
             poll(gate)?;
+            // The fixed affine displacement cancels analytically in delta_x;
+            // inserting it into each endpoint would lose weak slip by subtraction.
+            // Existing physical film/series-drive histories remain unchanged.
             let original = self.system.port(i).ok_or_else(|| invalid("missing material bow port"))?;
             let mut left = original.left.clone();
             if left.shapes.len() != correction.string_shapes.len() {

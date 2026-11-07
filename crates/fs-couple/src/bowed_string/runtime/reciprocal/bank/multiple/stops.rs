@@ -16,6 +16,7 @@ use fs_dcontact::Obstacle;
 
 /// Prescribed migration along a retained material string, with contact work.
 pub mod stations;
+mod affine;
 
 /// Normal closure direction, either relative to the bow axis or independently declared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,8 +97,12 @@ impl MultiBowStringBank {
     /// on a different body. Both reactions use the same closure/force map.
     /// Oblique stops include both bridge axes and their full cross compliance,
     /// retaining every bridge's original receiving body and the contact receiver.
-    /// A coupled support pair requires zero rest extensions for these residual
-    /// contact maps; affine omitted-tail clearance shifts are not supplied.
+    /// Constant bridge rest extensions contribute their full affine omitted-tail
+    /// displacement. The native law uses clearance minus that displacement;
+    /// the original source law/clearance remains in `source().stops()`. Potential,
+    /// penetration, physical loss and static preload therefore use the same
+    /// shifted contact, without a new force law or extra actuator work. Rest
+    /// extensions remain fixed source data; time-varying support rest is not wired.
     /// Prescribed support translation follows the declared fixed normals.
     /// `with_stop_station_motion` also admits migration along the original span,
     /// retaining the complete source basis and accounting for attachment work.
@@ -117,12 +122,12 @@ impl MultiBowStringBank {
             || stops.len()+self.system.port_count() > 64 {
             return Err(error("string stops require one bounded binding before the first physical sample"));
         }
-        let mut geometry = self.stop_geometry(&stops, None, limits.max_setup_terms, gate)?;
-        let residual = if self.source.bank().residual_flexibility() {
-            Some(self.residual_stop_geometry(&stops, &mut geometry, gate)?)
-        } else { None };
-        let contacts = stops.iter().zip(geometry).map(|(stop, geometry)|
+        let geometry = self.stop_geometry(&stops, None, limits.max_setup_terms, gate)?;
+        let mut contacts: Vec<_> = stops.iter().zip(geometry).map(|(stop, geometry)|
             (ModalContact { left: geometry.left, right: geometry.right, law: stop.law.clone() }, stop.limits)).collect();
+        let residual = if self.source.bank().residual_flexibility() {
+            Some(self.residual_stop_contacts(&stops, &mut contacts, gate)?)
+        } else { None };
         self.system = match residual {
             Some((corrections, compliance)) => self.system
                 .with_obstacle_residual_ports_and_corrections(contacts, corrections, compliance, limits, gate),
@@ -150,7 +155,7 @@ impl MultiBowStringBank {
     // body columns, and the stops share the condensed omitted-mode compliance
     // (bank/residual.rs). Retain the actual receiver and return the additional
     // bridge-body corrections separately: a stop can load several participants.
-    fn residual_stop_geometry(&self, stops: &[MaterialStringStop], geometry: &mut [ObstacleGeometry],
+    fn residual_stop_contacts(&self, stops: &[MaterialStringStop], contacts: &mut [(ModalContact, ModalContactConfig)],
         gate: &CancelGate) -> Result<(Vec<Vec<ModalAttachment>>, Vec<f64>), RenderError>
     {
         let strings = self.source.bank().strings();
@@ -168,12 +173,15 @@ impl MultiBowStringBank {
         let (projected, compliance) = point_residual(strings, &self.cards,
             self.source.bank().translational_body_connections(), &ports, gate).map_err(source_error)?;
         let mut corrections = Vec::with_capacity(stops.len());
-        for (geometry, correction) in geometry.iter_mut().zip(projected) {
+        for ((contact, _), correction) in contacts.iter_mut().zip(projected) {
             if gate.is_requested() { return Err(RenderError::Coupled(ModalCouplingError::Cancelled)); }
-            if correction.string_shapes.len() != geometry.left.shapes.len() {
+            if correction.string_shapes.len() != contact.left.shapes.len() {
                 return Err(error("stop and bridge maps differ from the string's actual basis"));
             }
-            for (left, b) in geometry.left.shapes.iter_mut().zip(&correction.string_shapes) { *left -= b; }
+            for (left, b) in contact.left.shapes.iter_mut().zip(&correction.string_shapes) { *left -= b; }
+            if correction.displacement_offset_m != 0.0 {
+                contact.law = affine::lower(&contact.law, correction.displacement_offset_m)?;
+            }
             // Closure is left - receiver + factor*bridge_body. Its transpose
             // must load ALL participants; substituting the bridge for the
             // receiver would disconnect the stop's actual opposite reaction.

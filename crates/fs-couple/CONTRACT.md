@@ -3045,13 +3045,35 @@ retains a weak conditional direction; only negative correlation roundoff within
 orthogonality admission tolerance (1e-12) and scalar/orthogonal arithmetic remain.
 
 Fixed residual bow and stop maps use the same elastic factors in the complete
-Schur complement. Native bridge energy retains signed rest extensions. Adding
-residual contacts to a coupled pair with nonzero rest extensions refuses:
-affine omitted-tail contact offsets are not represented in this lane. More
-than one extra directed bridge per string, rotational/constant-loss residual
-bridges and the existing mixed-contact, migration, and nonlinear/history
-exclusions remain outside this lane. Preparation occurs once at binding,
-with no additional per-sample projection or integration path.
+Schur complement.
+
+Fixed residual contacts retain the affine displacement caused by the original
+bridge rest extensions. The same elastic Schur factors supply
+`offset_i = g_i^T K_eff r`, including scalar and orthogonal supports as well as
+the full coupled two-support case. Opposite contact normals reverse this shift;
+the complete reciprocal force columns and residual compliance are unchanged.
+
+A normal stop lowers its native reference clearance to
+`gap_effective = gap_original - offset_i`. This is the coordinate substitution
+`U(N^T q + offset_i - G R - gap_original)`, not a new contact law. The original
+material-bank stop retains its authored clearance, coefficients, quadrature
+weight, physical loss and provenance. Native potential/secant evaluation,
+penetration/material admission and released static preload use the same
+lowered law. Negative effective clearance represents initial interference and
+retains its contact energy; it is never clamped away.
+
+A fixed offset cancels analytically from bow/shear-film slip increments. It
+adds no artificial initial shear strain, dissipation or actuator work. The
+native network retains the full bridge/rest elastic energy, and omitted-tail
+storage and numerical loss keep their existing accounting. Zero offset keeps
+the original law and clearance bits. Rest extensions remain fixed source data;
+time-varying support rest, migrating residual maps and existing incompatible
+nonlinear/history lanes remain unsupported.
+
+More than one extra directed bridge per string, rotational/constant-loss
+residual bridges and the existing mixed-contact exclusions remain outside
+this lane. Preparation occurs once at binding, with no additional per-sample
+projection or integration path.
 
 Support corrections retain every original receiving body. The generic friction
 and normal-contact owners accept one sparse collection of signed attachments

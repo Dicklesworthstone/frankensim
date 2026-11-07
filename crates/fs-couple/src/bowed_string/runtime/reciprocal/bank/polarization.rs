@@ -154,8 +154,10 @@ impl ReciprocalStringBank {
     /// retain all static cross terms. Dashpots retain the first-order low-frequency
     /// reduction; no unresolved dynamic poles are invented. A coupled pair uses
     /// up to three native columns within the original connection/setup budgets.
-    /// Its signed rest extensions are preserved in the network, but subsequent
-    /// residual bow/stop maps require zero rest extensions for that coupled pair.
+    /// Its signed rest extensions are preserved in the network and in fixed
+    /// residual contact displacements. Stops lower their reference clearance;
+    /// constant offsets cancel analytically from incremental bow slip. Rest
+    /// extensions are fixed source data, not a time-varying actuator drive.
     /// A one-plane string refuses any direction with a
     /// nonzero second component.
     /// This does not infer a bridge's anisotropic law, rigid frame, geometry or

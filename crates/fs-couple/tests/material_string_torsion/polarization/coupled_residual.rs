@@ -1,6 +1,9 @@
 //! Full two-support condensation on the original bowed/obstacle owner.
 use super::*;
 
+#[path = "affine_residual.rs"]
+mod affine;
+
 fn coupled_bank(
     cx: &Cx<'_>,
     gate: &CancelGate,
@@ -209,7 +212,7 @@ fn g3_coupled_bridges_preserve_body_partition_rotation_and_contact_work() {
 }
 
 #[test]
-fn g0_affine_network_energy_survives_but_unrepresented_contact_offsets_and_budgets_refuse() {
+fn g0_affine_network_energy_survives_contact_binding_and_native_budgets_still_refuse() {
     with_cx(|cx, gate| {
         let rest = 2e-6;
         let bank = coupled_bank(cx, gate, true, false, rest, 8).unwrap();
@@ -218,15 +221,14 @@ fn g0_affine_network_energy_survives_but_unrepresented_contact_offsets_and_budge
         let expected =
             0.5 * (k[0] * rest * rest + 2.0 * k[1] * rest * other + k[2] * other * other);
         near(bank.system().total_energy_j().unwrap(), expected, 1e-17);
-        let error = multi(bank, gate)
+        let bowed = multi(bank, gate)
             .with_bow_residual_flexibility(gate)
-            .err()
             .unwrap();
-        assert!(error.to_string().contains("zero bridge rest extensions"));
+        near(bowed.system().total_energy_j().unwrap(), expected, 1e-17);
         assert!(
             multi(coupled_bank(cx, gate, true, false, rest, 8).unwrap(), gate)
                 .with_string_stops(vec![stop(TransverseDirection::Y)], stop_limits(), gate)
-                .is_err()
+                .is_ok()
         );
         assert!(coupled_bank(cx, gate, true, false, 0.0, 2).is_err());
     });
