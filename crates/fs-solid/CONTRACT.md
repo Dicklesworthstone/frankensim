@@ -1,5 +1,27 @@
 # fs-solid CONTRACT
 
+## Owned membrane histories for evolving native kinetics
+
+`membrane::visco::owned::OwnedFiniteViscoMembraneMotion` captures an accepted
+native membrane once, retaining an owned original patch/law binding and shared
+accepted displacement, Maxwell metrics, stress, pressure, resultants and velocity.
+Borrowed native views and candidate clones share immutable buffers. All physical
+advances delegate to the original native membrane momentum/material solve and
+retain its physical heat, pressure work and numerical kinetic-loss accounts.
+
+`with_kinetics` changes only finite positive branch relaxation times. Complete
+native law equality pins equilibrium energy, stretch domain, ordered branch
+energies, natural reference, solver controls and future law fields. It retains
+every accepted physical buffer and ledger exactly, uses the same original patch,
+and performs no transverse Newton solve. It supplies no heat, reference work,
+impulse or elapsed time. Temperature adapters must shift their immutable original
+spectrum; no public snapshot restoration can bind arbitrary histories to laws.
+
+`tests/visco_membrane_owned.rs` covers ownership beyond original source
+lifetimes, exact native pressure-interval agreement for both volume treatments
+and mass images, regional kinetics with retained memory, nonkinetic refusals,
+and late cancellation/work refusal.
+
 ## Conservative midpoint tensile onset and native fracture replay
 
 `initiation::dynamics::TensileElasticTetMotion::probe_midpoint` advances the

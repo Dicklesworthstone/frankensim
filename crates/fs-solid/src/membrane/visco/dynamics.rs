@@ -7,6 +7,8 @@
 //! kinetic damping are separate accounts. This is a first-order isothermal
 //! interval, not a conservative time integrator or a thermal evolution law.
 
+use std::sync::Arc;
+
 use super::super::{
     MembraneError, MembraneEvaluation, MembraneInertialPotential, MembranePatch, MembraneSolution,
     MembraneSolveSettings, finite_vectors, inertia::MembraneMassImage, poll,
@@ -21,9 +23,9 @@ pub use crate::inertia::InertialEnergy;
 /// Accepted material memory, motion and the selected original reference mass.
 #[derive(Clone, Debug)]
 pub struct FiniteViscoMembraneMotion<'a> {
-    membrane: FiniteViscoMembrane<'a>,
-    velocity_mps: Vec<[f64; 3]>,
-    mass_image: MembraneMassImage,
+    pub(super) membrane: FiniteViscoMembrane<'a>,
+    pub(super) velocity_mps: Arc<[[f64; 3]]>,
+    pub(super) mass_image: MembraneMassImage,
 }
 
 /// Complete proposed interval; dropping it leaves the accepted motion intact.
@@ -73,7 +75,7 @@ impl<'a> FiniteViscoMembraneMotion<'a> {
         poll(&mut cancelled)?;
         Ok(Self {
             membrane,
-            velocity_mps: velocity_mps.to_vec(),
+            velocity_mps: velocity_mps.into(),
             mass_image,
         })
     }
@@ -188,7 +190,7 @@ impl<'a> FiniteViscoMembraneMotion<'a> {
         Ok(FiniteViscoMembraneMotionStep {
             motion: Self {
                 membrane: step.membrane,
-                velocity_mps,
+                velocity_mps: velocity_mps.into(),
                 mass_image: self.mass_image,
             },
             equilibrium: step.equilibrium,

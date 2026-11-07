@@ -17,6 +17,10 @@
 /// Native inertial intervals with physical relaxation and separate numerical loss.
 pub mod dynamics;
 
+/// Owned accepted motion for evolving material kinetics without internal borrows.
+pub mod owned;
+pub use owned::{OwnedFiniteViscoMembraneMotion, OwnedFiniteViscoMembraneMotionStep};
+
 /// Prescribed natural-strain events with retained material memory and inventory.
 pub mod reference_change;
 pub use reference_change::{
