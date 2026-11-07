@@ -1,5 +1,8 @@
 //! G0/G1/G3/G4: retained porous thermal feedback and original reference inertia.
 
+#[path = "hyper_porous_thermal/pressure.rs"]
+mod pressure;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::plastic::finite::porous::thermal::{

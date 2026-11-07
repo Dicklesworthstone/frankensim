@@ -11576,3 +11576,32 @@ The existing physical-time frame owner now admits this fiber law for quasistatic
 `FrameInelasticEnergy` preserves the existing creep and yield-offset fields and adds a separate physical overstress channel. Native hardening remains recoverable storage. Physical dissipation is the sum of yield, creep and overstress work exactly once; material and inertial integration losses remain numerical and never become caloric heat. Existing creep conversions retain their previous values and semantics.
 
 Four structural regressions cover original-source force loading across measured knots, variable-duration hold relaxation and release; moment-driven bending and retained curvature; power-law inertial motion with both lumped and consistent reference mass; and clock, source, domain and cancellation refusals with usable retained history. The fixtures use independent scalar constitutive and momentum/work equations. Rust syntax, formatting, whitespace and those independent arithmetic checks passed. Native Cargo regression execution remains unverified in the resource-constrained shared environment. These tests establish model behavior only; they do not supply empirical alloy or forming calibration.
+
+
+## Current-area pressure in retained thermal porous compaction
+
+FiniteThermalPorousTetSolid::advance_with_pressure composes the original
+current-area surface force and analytic follower tangent with the SAME thermal
+porous advance and acceptance path. Supplied endpoint temperatures, old-temperature
+history admission, original reference mass and optional backward-Euler inertia
+remain with their original owners. Uniform pressure supplies -p delta V; other
+admitted fields retain the surface owner's declared-path work. The prepared
+pressure surface must bind the exact original mesh.
+
+The step retains a separate FinitePorousPressureEnergy account. Material endpoint
+defect, yield loss and reciprocal thermal exchange remain unchanged. Complete
+work includes pressure path work and its geometric correction, plus kinetic
+change and separately admitted numerical kinetic loss when present. Only the
+original physical caloric heat enters a thermal owner; pressure work and
+numerical defects are never deposited again as heat. The material-work allowance
+bounds the sum of absolute material and pressure corrections without cancellation.
+
+Three focused manufactured regressions specify thermal pressure continuation
+and elastic release against an independent hydrostatic return, free inertial
+compression against the consistent-mass formula, and translated pressure-patch
+work with graded mass and support reactions. They also specify caloric identity,
+late work/kinetic refusal, exact source/mesh admission, zero-pressure compatibility
+and retry/cancellation without changing the accepted owner. The existing dry
+porous, P1 locking, source calibration and prescribed-field limitations remain.
+
+Native regression execution remains unverified on the exhausted shared build host.

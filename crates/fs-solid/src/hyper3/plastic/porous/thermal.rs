@@ -24,11 +24,14 @@ use fs_material::plastic::finite::porous::thermal::{
     AffineThermalFinitePorous, FinitePorousThermalError, FinitePorousThermalIncrement,
     FiniteThermalPorousMaterial, FrozenThermalFinitePorous,
 };
+use fs_math::dd::Dd;
 
 use super::super::{
     FinitePlasticTetError, FinitePlasticTetState, IDENTITY, checkpoint, energy_gate, invalid,
     reference_size, validate_controls,
 };
+use super::FinitePorousPressureEnergy;
+use crate::hyper3::pressure::{ClosedTetPressureSurface, TetPressure};
 use crate::hyper3::{
     HyperTetError, HyperTetProblem, HyperTetSettings, HyperTetSolution, HyperelasticLawField,
     inertia_error,
@@ -78,6 +81,10 @@ pub struct FiniteThermalPorousTetStep<
     pub element_energy: Vec<FiniteThermoplasticElementEnergy>,
     pub energy: FiniteThermoplasticTetEnergy,
     pub inertia: Option<InertialEnergy>,
+    /// Original current-area pressure work and its separate geometric endpoint
+    /// correction. Material endpoint defect and physical caloric heat are
+    /// unchanged; the complete energy balance includes this pressure work.
+    pub pressure: Option<FinitePorousPressureEnergy>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -446,7 +453,7 @@ impl<'a, L: FiniteThermalPorousMaterial> FiniteThermalPorousTetSolid<'a, L> {
     /// Propose a mechanical endpoint at supplied element temperatures.
     /// The caloric owner closes the returned physical heat against its own
     /// storage and transport; numerical losses are never deposited into it.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     pub fn advance(
         &self,
         new_temperatures_k: &[f64],
@@ -458,8 +465,84 @@ impl<'a, L: FiniteThermalPorousMaterial> FiniteThermalPorousTetSolid<'a, L> {
         controls: FiniteThermoplasticControls,
         cx: &Cx<'_>,
     ) -> Result<FiniteThermalPorousTetStep<'a, L>, FiniteThermalPorousTetError> {
+        self.advance_loaded(
+            new_temperatures_k,
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            dt_s,
+            settings,
+            controls,
+            None,
+            cx,
+        )
+    }
+
+    /// Retain thermal compaction and optional original inertia under pressure
+    /// applied to the CURRENT surface, using the native force and follower tangent.
+    ///
+    /// The prescribed pressure field is held over the interval; its original
+    /// owner supplies uniform -p delta V or declared-path work for other fields.
+    /// Original mesh binding, temperature/history admission and thermal accounts
+    /// remain unchanged. Physical caloric heat is still yield heat plus reciprocal
+    /// thermal exchange: pressure work, geometric work correction and numerical
+    /// kinetic loss are not additional heat sources.
+    ///
+    /// The material work budget bounds the sum of absolute material endpoint
+    /// defect and pressure correction, without cancellation. Every refused
+    /// temperature/source, solve, final work or cancellation gate leaves the
+    /// accepted solid and its original inertia unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_pressure<'p>(
+        &self,
+        new_temperatures_k: &[f64],
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        dt_s: f64,
+        surface: &ClosedTetPressureSurface,
+        pressure: impl Into<TetPressure<'p>>,
+        settings: HyperTetSettings,
+        controls: FiniteThermoplasticControls,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteThermalPorousTetStep<'a, L>, FiniteThermalPorousTetError> {
+        self.advance_loaded(
+            new_temperatures_k,
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            dt_s,
+            settings,
+            controls,
+            Some((surface, pressure.into())),
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn advance_loaded(
+        &self,
+        new_temperatures_k: &[f64],
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        dt_s: f64,
+        settings: HyperTetSettings,
+        controls: FiniteThermoplasticControls,
+        pressure: Option<(&ClosedTetPressureSurface, TetPressure<'_>)>,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteThermalPorousTetStep<'a, L>, FiniteThermalPorousTetError> {
         checkpoint(cx)?;
         validate_controls(settings, controls.material)?;
+        if let Some((surface, field)) = pressure {
+            if !surface.matches_reference(self.state.nodes_m, self.state.tetrahedra) {
+                return Err(invalid(
+                    "thermal porous pressure surface must bind the exact original mesh",
+                )
+                .into());
+            }
+            surface.validate_pressure(field, cx)?;
+        }
         if !dt_s.is_finite()
             || dt_s <= 0.0
             || !controls.maximum_numerical_kinetic_loss_j.is_finite()
@@ -508,15 +591,37 @@ impl<'a, L: FiniteThermalPorousMaterial> FiniteThermalPorousTetSolid<'a, L> {
             })
             .transpose()
             .map_err(inertia_error)?;
-        let (equilibrium, force) = self.state.solve_endpoint(
-            HyperelasticLawField::PerElement(&frozen),
-            prescribed_m,
-            nodal_forces_n,
-            body_force_n_m3,
-            settings,
-            inertia.as_ref(),
-            cx,
-        )?;
+        let (equilibrium, force) = if pressure.is_some() {
+            let problem = HyperTetProblem {
+                nodes_m: self.state.nodes_m,
+                tetrahedra: self.state.tetrahedra,
+                material: HyperelasticLawField::PerElement(&frozen),
+                prescribed_m,
+                nodal_forces_n,
+                body_force_n_m3,
+                budget: self.state.budget,
+                settings,
+            };
+            let equilibrium = problem.solve_loaded_from(
+                Some(self.state.displacement_m.as_flattened()),
+                Some(&self.state.elements),
+                pressure,
+                None,
+                inertia.as_ref(),
+                cx,
+            )?;
+            (equilibrium, problem.external(&self.state.elements, 1.0))
+        } else {
+            self.state.solve_endpoint(
+                HyperelasticLawField::PerElement(&frozen),
+                prescribed_m,
+                nodal_forces_n,
+                body_force_n_m3,
+                settings,
+                inertia.as_ref(),
+                cx,
+            )?
+        };
         let new_u = equilibrium.displacement_m.as_flattened();
         let motion = inertia
             .as_ref()
@@ -610,10 +715,57 @@ impl<'a, L: FiniteThermalPorousMaterial> FiniteThermalPorousTetSolid<'a, L> {
         energy.dead_load_endpoint_work_j = work.dead_load_j;
         energy.support_endpoint_work_j = work.support_j;
         energy.equilibrium_work_residual_j = work.residual_j;
+        let pressure = pressure
+            .map(
+                |(surface, field)| -> Result<_, FiniteThermalPorousTetError> {
+                    let old_u = self.state.displacement_m.as_flattened();
+                    let pressure_force = surface.force_n(new_u, field, cx)?;
+                    let mut endpoint_work = Dd::ZERO;
+                    for (dof, (&force, (&after, &before))) in pressure_force
+                        .iter()
+                        .zip(new_u.iter().zip(old_u))
+                        .enumerate()
+                    {
+                        if dof % 256 == 0 {
+                            checkpoint(cx)?;
+                        }
+                        endpoint_work = endpoint_work
+                            + Dd::from_f64(force) * (Dd::from_f64(after) - Dd::from_f64(before));
+                    }
+                    let endpoint_work_j = endpoint_work.to_f64();
+                    let work_j = surface.work_j(old_u, new_u, field, cx)?;
+                    let correction = work_j - endpoint_work_j;
+                    energy.equilibrium_work_residual_j += endpoint_work_j;
+                    energy_gate(
+                        "thermal porous pressure/constitutive endpoint integration defect",
+                        energy.endpoint_work_defect_j.abs() + correction.abs(),
+                        controls.material.maximum_endpoint_work_defect_j,
+                    )?;
+                    Ok(FinitePorousPressureEnergy {
+                        endpoint_work_j,
+                        work_j,
+                        endpoint_work_correction_j: correction,
+                        external_work_defect_j: energy.endpoint_work_defect_j + correction,
+                    })
+                },
+            )
+            .transpose()?;
         energy.balance_error_j = work.dead_load_j + work.support_j
             - energy.internal_energy_change_j
             - energy.caloric_heat_j
             - energy.endpoint_work_defect_j;
+        if let Some(pressure) = pressure {
+            // Exact/path pressure work and its geometric correction remain a
+            // separate mechanical account. Neither changes caloric heat.
+            energy.balance_error_j = (Dd::from_f64(work.dead_load_j)
+                + Dd::from_f64(work.support_j)
+                + Dd::from_f64(pressure.work_j)
+                - Dd::from_f64(energy.internal_energy_change_j)
+                - Dd::from_f64(energy.caloric_heat_j)
+                - Dd::from_f64(energy.endpoint_work_defect_j)
+                - Dd::from_f64(pressure.endpoint_work_correction_j))
+            .to_f64();
+        }
         if let Some((_, value)) = &motion {
             energy_gate(
                 "porous backward-Euler kinetic loss",
@@ -656,7 +808,10 @@ impl<'a, L: FiniteThermalPorousMaterial> FiniteThermalPorousTetSolid<'a, L> {
                 "porous physical caloric decomposition",
                 energy.caloric_heat_j - energy.plastic_dissipation_j - energy.reversible_heat_j,
             ),
-            ("porous thermal equilibrium work", work.residual_j),
+            (
+                "porous thermal equilibrium work",
+                energy.equilibrium_work_residual_j,
+            ),
             (
                 "porous thermal complete work identity",
                 energy.balance_error_j,
@@ -729,6 +884,7 @@ impl<'a, L: FiniteThermalPorousMaterial> FiniteThermalPorousTetSolid<'a, L> {
             element_energy,
             energy,
             inertia,
+            pressure,
         })
     }
 }
