@@ -33,6 +33,7 @@ pub struct FiniteViscoPlaneMotion<'a> {
     solid: FiniteViscoPlaneSolid<'a>,
     velocity_mps: Arc<[[f64; 2]]>,
     reference_density_kg_m3: Arc<[f64]>,
+    reference_nodal_density_kg_m3: Option<Arc<[f64]>>,
     mass: Arc<ReferenceMass>,
 }
 
@@ -94,6 +95,53 @@ impl<'a> FiniteViscoPlaneMotion<'a> {
             solid,
             velocity_mps: initial_velocity_mps.into(),
             reference_density_kg_m3: reference_density_kg_m3.into(),
+            reference_nodal_density_kg_m3: None,
+            mass: Arc::new(mass),
+        })
+    }
+
+    /// Bind a positive original P1/Q1 nodal density [kg/m³] to native momentum.
+    /// The consistent mass integrates `rho_0*N_a*N_b` exactly, including a
+    /// bilinearly mapped Q1 element. Cell means are diagnostics, not replacement
+    /// densities. The complete field and prepared mass stay fixed through all
+    /// subsequent deformation, relaxation and material-reference changes.
+    /// This authored reference inventory does not imply a material calibration.
+    ///
+    /// # Errors
+    /// Invalid density, velocity, original geometry, mass-assembly byte cap,
+    /// unrepresentable mass, or cancellation.
+    pub fn try_new_with_nodal_density(
+        solid: FiniteViscoPlaneSolid<'a>,
+        reference_nodal_density_kg_m3: &[f64],
+        initial_velocity_mps: &[[f64; 2]],
+        maximum_mass_assembly_bytes: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self, FiniteViscoPlaneError> {
+        checkpoint(cx)?;
+        if initial_velocity_mps.len() != solid.reference_mesh().nodes.len()
+            || initial_velocity_mps
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite())
+        {
+            return Err(invalid(
+                "one finite velocity vector per original plane node required",
+            ));
+        }
+        let (mass, means) = ReferenceMass::from_plane_nodal_density(
+            solid.reference_mesh(),
+            solid.reference_thickness_m(),
+            reference_nodal_density_kg_m3,
+            maximum_mass_assembly_bytes,
+            cx,
+        )
+        .map_err(inertia_error)?;
+        checkpoint(cx)?;
+        Ok(Self {
+            solid,
+            velocity_mps: initial_velocity_mps.into(),
+            reference_density_kg_m3: means.into(),
+            reference_nodal_density_kg_m3: Some(reference_nodal_density_kg_m3.into()),
             mass: Arc::new(mass),
         })
     }
@@ -104,8 +152,14 @@ impl<'a> FiniteViscoPlaneMotion<'a> {
     pub fn velocity_mps(&self) -> &[[f64; 2]] {
         &self.velocity_mps
     }
+    /// Reference cell means in original element order. Graded bindings use
+    /// original-volume weighting and retain their full nodal field separately.
     pub fn reference_density_kg_m3(&self) -> &[f64] {
         &self.reference_density_kg_m3
+    }
+    /// Complete original nodal field, or None for a cellwise-density binding.
+    pub fn reference_nodal_density_kg_m3(&self) -> Option<&[f64]> {
+        self.reference_nodal_density_kg_m3.as_deref()
     }
     pub fn reference_mass_kg(&self) -> f64 {
         self.mass.reference_mass_kg()
@@ -130,6 +184,7 @@ impl<'a> FiniteViscoPlaneMotion<'a> {
                 solid: changed.solid,
                 velocity_mps: Arc::clone(&self.velocity_mps),
                 reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
+                reference_nodal_density_kg_m3: self.reference_nodal_density_kg_m3.clone(),
                 mass: Arc::clone(&self.mass),
             },
             energy: changed.energy,
@@ -242,6 +297,7 @@ impl<'a> FiniteViscoPlaneMotion<'a> {
                 solid: step.solid,
                 velocity_mps: velocity.as_chunks::<2>().0.to_vec().into(),
                 reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
+                reference_nodal_density_kg_m3: self.reference_nodal_density_kg_m3.clone(),
                 mass: Arc::clone(&self.mass),
             },
             equilibrium: step.equilibrium,

@@ -19,6 +19,7 @@ struct MotionSnapshot {
     solid: Snapshot,
     velocity: Vec<[f64; 2]>,
     density: Vec<f64>,
+    nodal_density: Option<Vec<f64>>,
     mass: f64,
 }
 
@@ -27,6 +28,7 @@ fn motion_snapshot(motion: &FiniteViscoPlaneMotion<'_>) -> MotionSnapshot {
         solid: snapshot(motion.solid()),
         velocity: motion.velocity_mps().to_vec(),
         density: motion.reference_density_kg_m3().to_vec(),
+        nodal_density: motion.reference_nodal_density_kg_m3().map(<[f64]>::to_vec),
         mass: motion.reference_mass_kg(),
     }
 }
@@ -214,6 +216,140 @@ fn g1_consistent_reference_acceleration_matches_backward_euler_motion_and_kineti
                 assert!(step.inertia.numerical_loss_j > 0.0);
                 assert!(step.reactions_n.is_empty());
                 check_motion_balance(&step);
+            }
+        }
+    });
+}
+
+#[test]
+fn g1_graded_plane_inventory_drives_centroid_forcing_and_survives_motion_and_reference_change() {
+    with_cx(|cx, _| {
+        let law = law();
+        let target = law.clone().with_reference_deformation(
+            ReferenceDeformation::try_new([1.04, 0.0, 0.0, 0.0, 0.98, 0.0, 0.0, 0.0, 1.02])
+                .unwrap(),
+        );
+        let (length, height, thickness) = (1.2, 0.5, 0.04);
+        let velocity = [0.25, -0.1];
+        let acceleration = [0.4, 0.2];
+        let dt = 0.05;
+        let mass = length * height * thickness * 3.5;
+        for mesh in [
+            Mesh2::triangles(length, height, 1, 1),
+            Mesh2::quads(length, height, 1, 1),
+        ] {
+            let density: Vec<_> = mesh
+                .nodes
+                .iter()
+                .map(|[x, _]| 2.0 + 3.0 * x / length)
+                .collect();
+            for exact in [false, true] {
+                let solid = FiniteViscoPlaneSolid::try_new(
+                    &mesh,
+                    ViscoelasticLawField::Uniform(&law),
+                    mode(exact),
+                    thickness,
+                    local(),
+                    cx,
+                )
+                .unwrap();
+                let motion = FiniteViscoPlaneMotion::try_new_with_nodal_density(
+                    solid,
+                    &density,
+                    &vec![velocity; mesh.nodes.len()],
+                    MASS_BYTES,
+                    cx,
+                )
+                .unwrap();
+                assert_eq!(
+                    motion.reference_nodal_density_kg_m3(),
+                    Some(density.as_slice())
+                );
+                close(motion.reference_mass_kg(), mass, 2e-13);
+                let loads = motion
+                    .reference_acceleration_load_n(&vec![acceleration; mesh.nodes.len()], cx)
+                    .unwrap();
+                let mut resultant = [0.0; 2];
+                let mut moment = 0.0;
+                for &(dof, force) in &loads {
+                    resultant[dof % 2] += force;
+                    let [x, y] = mesh.nodes[dof / 2];
+                    moment += if dof % 2 == 0 { -y * force } else { x * force };
+                }
+                close(resultant[0], mass * acceleration[0], 2e-13);
+                close(resultant[1], mass * acceleration[1], 2e-13);
+                // The density gradient moves the mass centroid from L/2 to
+                // 4L/7. A mean-density replacement yields the wrong moment.
+                close(
+                    moment,
+                    mass * (4.0 * length / 7.0 * acceleration[1] - 0.5 * height * acceleration[0]),
+                    2e-13,
+                );
+                let before = motion_snapshot(&motion);
+                let step = motion
+                    .advance(dt, &[], &[], &loads, newton(), motion_controls(), cx)
+                    .unwrap();
+                assert_eq!(motion_snapshot(&motion), before);
+                assert_eq!(
+                    step.motion.reference_nodal_density_kg_m3(),
+                    Some(density.as_slice())
+                );
+                assert_eq!(
+                    step.motion.reference_density_kg_m3(),
+                    motion.reference_density_kg_m3()
+                );
+                for (u, v) in step
+                    .motion
+                    .solid()
+                    .displacement_m()
+                    .iter()
+                    .zip(step.motion.velocity_mps())
+                {
+                    for c in 0..2 {
+                        close(v[c], velocity[c] + dt * acceleration[c], 2e-10);
+                        close(u[c], dt * (velocity[c] + dt * acceleration[c]), 2e-11);
+                    }
+                }
+                close(
+                    step.inertia.kinetic_before_j,
+                    0.5 * mass * velocity.iter().map(|v| v * v).sum::<f64>(),
+                    2e-13,
+                );
+                close(
+                    step.inertia.numerical_loss_j,
+                    0.5 * mass * dt * dt * acceleration.iter().map(|a| a * a).sum::<f64>(),
+                    2e-12,
+                );
+                check_motion_balance(&step);
+                let probe: Vec<_> = mesh
+                    .nodes
+                    .iter()
+                    .map(|[x, y]| [0.3 + 0.1 * x, -0.2 + 0.05 * y])
+                    .collect();
+                let original_action = step
+                    .motion
+                    .reference_acceleration_load_n(&probe, cx)
+                    .unwrap();
+                let event = step
+                    .motion
+                    .change_reference(ViscoelasticLawField::Uniform(&target), controls(), cx)
+                    .unwrap();
+                assert_eq!(
+                    event.motion.reference_nodal_density_kg_m3(),
+                    Some(density.as_slice())
+                );
+                assert_eq!(
+                    event.motion.reference_mass_kg().to_bits(),
+                    motion.reference_mass_kg().to_bits()
+                );
+                assert_eq!(event.motion.velocity_mps(), step.motion.velocity_mps());
+                assert_eq!(
+                    event
+                        .motion
+                        .reference_acceleration_load_n(&probe, cx)
+                        .unwrap(),
+                    original_action
+                );
             }
         }
     });

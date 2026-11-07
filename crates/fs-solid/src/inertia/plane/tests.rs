@@ -92,6 +92,144 @@ fn p1_mass_matches_exact_degree_two_coefficients_and_retains_nonrigid_inertia() 
 }
 
 #[test]
+fn g1_p1_nodal_density_integrates_cubic_mass_and_preserves_mass_centroid() {
+    with_cx(false, |cx| {
+        let mesh = triangle();
+        let rho = [2.0, 5.0, 11.0];
+        let volume = 3.0 * 0.2;
+        let (mass, means) =
+            ReferenceMass::from_plane_nodal_density(&mesh, 0.2, &rho, 1 << 20, cx).unwrap();
+        close(means[0], 6.0);
+        close(mass.reference_mass_kg(), volume * 6.0);
+        // Independent simplex monomial integral:
+        // integral(N_0^i N_1^j N_2^k)dV = 2 V i! j! k!/(i+j+k+2)!.
+        let factorial = [1.0, 1.0, 2.0, 6.0];
+        for a in 0..3 {
+            for b in 0..3 {
+                let expected = rho
+                    .iter()
+                    .enumerate()
+                    .map(|(c, value)| {
+                        let mut powers = [0; 3];
+                        powers[a] += 1;
+                        powers[b] += 1;
+                        powers[c] += 1;
+                        value * volume * powers.map(|p| factorial[p]).iter().product::<f64>() / 60.0
+                    })
+                    .sum::<f64>();
+                close(mass.matrix().get(2 * a, 2 * b), expected);
+                assert_eq!(
+                    mass.matrix().get(2 * a, 2 * b).to_bits(),
+                    mass.matrix().get(2 * b + 1, 2 * a + 1).to_bits()
+                );
+                assert_eq!(mass.matrix().get(2 * a, 2 * b + 1), 0.0);
+            }
+        }
+        let force = mass.action(&[1.0, 0.0, 1.0, 0.0, 1.0, 0.0], cx).unwrap();
+        for a in 0..3 {
+            close(
+                force[2 * a],
+                volume * (rho.iter().sum::<f64>() + rho[a]) / 12.0,
+            );
+        }
+        // Equal total mass cannot substitute for a graded inventory.
+        let mean = ReferenceMass::from_plane(&mesh, 0.2, &means, 1 << 20, cx).unwrap();
+        let velocity = [1.0, 0.0, -1.0, 0.0, 0.0, 0.0];
+        let kinetic = |m: &ReferenceMass| {
+            0.5 * m
+                .action(&velocity, cx)
+                .unwrap()
+                .iter()
+                .zip(velocity)
+                .map(|(p, v)| p * v)
+                .sum::<f64>()
+        };
+        assert!((kinetic(&mass) - kinetic(&mean)).abs() > 0.01);
+    });
+}
+
+#[test]
+fn g1_mapped_q1_nodal_density_matches_independent_tensor_polynomial_moments() {
+    with_cx(false, |cx| {
+        let (length, height, taper, thickness) = (1.7, 0.8, 0.6, 0.13);
+        // x=L*u*(1+taper*v), y=H*v; rho=(2+3u)*(1+2v).
+        // The v integrand of rho*N_a*N_b*det(J) is degree four, so 2x2
+        // Gauss would produce incorrect inertia even with correct total mass.
+        let mesh = Mesh2 {
+            nodes: vec![
+                [0.0, 0.0],
+                [length, 0.0],
+                [length * (1.0 + taper), height],
+                [0.0, height],
+            ],
+            elems: vec![vec![0, 1, 2, 3]],
+            patches: vec![],
+        };
+        let (mass, means) = ReferenceMass::from_plane_nodal_density(
+            &mesh,
+            thickness,
+            &[2.0, 5.0, 15.0, 6.0],
+            1 << 20,
+            cx,
+        )
+        .unwrap();
+        let scale = length * height * thickness;
+        let expected_mass = scale * 3.5 * (2.0 + 7.0 * taper / 6.0);
+        close(mass.reference_mass_kg(), expected_mass);
+        close(means[0], expected_mass / (scale * (1.0 + taper / 2.0)));
+        assert!((means[0] - 7.0).abs() > 0.2);
+        let factorial = [1.0, 1.0, 2.0, 6.0, 24.0, 120.0];
+        let beta = |p: usize, q: usize| factorial[p] * factorial[q] / factorial[p + q + 1];
+        let corners = [[0, 0], [1, 0], [1, 1], [0, 1]];
+        for a in 0..4 {
+            for b in 0..4 {
+                let u = corners[a][0] + corners[b][0];
+                let v = corners[a][1] + corners[b][1];
+                let mx = 2.0 * beta(u, 2 - u) + 3.0 * beta(u + 1, 2 - u);
+                let my = beta(v, 2 - v)
+                    + (2.0 + taper) * beta(v + 1, 2 - v)
+                    + 2.0 * taper * beta(v + 2, 2 - v);
+                close(mass.matrix().get(2 * a, 2 * b), scale * mx * my);
+                assert_eq!(
+                    mass.matrix().get(2 * a, 2 * b).to_bits(),
+                    mass.matrix().get(2 * b + 1, 2 * a + 1).to_bits()
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn g3_constant_nodal_density_preserves_original_plane_mass_bits() {
+    with_cx(false, |cx| {
+        for mesh in [triangle(), warped_quad()] {
+            let scalar = ReferenceMass::from_plane(&mesh, 0.2, &[7.0], 1 << 20, cx).unwrap();
+            let (nodal, means) = ReferenceMass::from_plane_nodal_density(
+                &mesh,
+                0.2,
+                &vec![7.0; mesh.nodes.len()],
+                1 << 20,
+                cx,
+            )
+            .unwrap();
+            assert_eq!(means, [7.0]);
+            assert_eq!(
+                scalar.reference_mass_kg().to_bits(),
+                nodal.reference_mass_kg().to_bits()
+            );
+            for row in 0..scalar.ndofs() {
+                for column in 0..scalar.ndofs() {
+                    assert_eq!(
+                        scalar.matrix().get(row, column).to_bits(),
+                        nodal.matrix().get(row, column).to_bits()
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[test]
 fn warped_q1_mass_matches_independent_polynomial_moments_and_original_density_inventory() {
     with_cx(false, |cx| {
         let mesh = warped_quad();
@@ -267,6 +405,21 @@ fn plane_mass_refuses_coverage_budget_massless_nodes_and_hidden_corner_folds() {
         for density in [&[][..], &[0.0][..], &[f64::NAN][..], &[7.0, 7.0][..]] {
             assert!(ReferenceMass::from_plane(&mesh, 0.2, density, 1 << 20, cx).is_err());
         }
+        for density in [
+            &[][..],
+            &[7.0][..],
+            &[7.0, 0.0, 7.0][..],
+            &[7.0, -1.0, 7.0][..],
+            &[7.0, f64::NAN, 7.0][..],
+            &[7.0, f64::INFINITY, 7.0][..],
+        ] {
+            assert!(
+                ReferenceMass::from_plane_nodal_density(&mesh, 0.2, density, 1 << 20, cx).is_err()
+            );
+        }
+        assert!(
+            ReferenceMass::from_plane_nodal_density(&mesh, 0.2, &[2.0, 5.0, 7.0], 0, cx).is_err()
+        );
         for thickness in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             assert!(ReferenceMass::from_plane(&mesh, thickness, &[7.0], 1 << 20, cx).is_err());
         }
@@ -298,6 +451,10 @@ fn plane_mass_refuses_coverage_budget_massless_nodes_and_hidden_corner_folds() {
         );
         assert!(checked_reference_element(&fold.nodes, &fold.elems[0]).is_none());
         assert!(ReferenceMass::from_plane(&fold, 0.2, &[7.0], 1 << 20, cx).is_err());
+        assert!(
+            ReferenceMass::from_plane_nodal_density(&fold, 0.2, &[2.0, 5.0, 7.0, 9.0], 1 << 20, cx)
+                .is_err()
+        );
     });
 }
 
@@ -311,6 +468,16 @@ fn plane_mass_and_flat_motion_observe_cancellation_before_publishing() {
         with_cx(true, |cancelled| {
             assert!(matches!(
                 ReferenceMass::from_plane(&mesh, 0.2, &[7.0], 1 << 20, cancelled),
+                Err(InertiaError::Cancelled)
+            ));
+            assert!(matches!(
+                ReferenceMass::from_plane_nodal_density(
+                    &mesh,
+                    0.2,
+                    &[2.0, 5.0, 7.0, 9.0],
+                    1 << 20,
+                    cancelled
+                ),
                 Err(InertiaError::Cancelled)
             ));
             assert!(matches!(

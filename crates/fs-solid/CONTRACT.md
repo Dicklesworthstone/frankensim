@@ -11384,3 +11384,23 @@ Five public integration tests also exercise original assembled-force power,
 prepared/callback equivalence and cancellation; those complete tests remain
 unexecuted in the available dependency environment. Component execution does
 not claim validation of the complete material/assembly/runtime closure.
+
+### Graded reference density in native plane viscoelastic motion
+
+`hyper2d::visco::dynamics::FiniteViscoPlaneMotion::try_new_with_nodal_density`
+retains positive original P1/Q1 nodal densities and prepares the consistent
+`integral(rho_0 N_a N_b dV_0)` mass once. P1 uses analytic cubic simplex
+moments; mapped Q1 uses 3-by-3 Gauss integration, including its varying
+Jacobian. Locally constant fields retain the existing mass arithmetic exactly.
+Reported cell means use original-volume weighting and never replace the
+graded operator. Original thickness and the full nodal field stay immutable
+through deformation, viscoelastic relaxation and material-reference changes.
+
+Native momentum, support reactions, acceleration loads and kinetic work all
+consume this same retained mass. Positive-density/geometry admission, bounded
+assembly storage and cancellation remain enforced. G0/G1/G3 regressions in
+`inertia/plane/tests.rs` and `tests/visco_plane_stress/dynamics.rs` cover
+independent simplex/tensor polynomial moments, shifted mass centroid and
+forcing, actual plane motion, reference-change preservation and constant-field
+bit parity. This is authored reference inventory, with no inferred material
+calibration, mass transfer, transverse inertia or current-density resampling.
