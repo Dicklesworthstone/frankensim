@@ -26,7 +26,7 @@ use fs_math::det;
 
 /// Conservative, dissipative exchange on an explicitly authored surface graph.
 pub mod diffusion;
-mod time_control;
+pub(in crate::capillary::surface) mod time_control;
 
 /// Finite aqueous exchange with original Langmuir sites and surface diffusion.
 #[cfg(feature = "surface-soluble")]

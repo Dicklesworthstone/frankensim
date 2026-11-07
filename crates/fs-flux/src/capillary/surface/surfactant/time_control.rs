@@ -4,13 +4,13 @@
 use super::det;
 
 #[derive(Clone, Copy)]
-pub(super) enum Order {
+pub(in crate::capillary::surface) enum Order {
     First,
     Second,
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct Limits {
+pub(in crate::capillary::surface) struct Limits {
     pub initial_step_s: f64,
     pub minimum_step_s: f64,
     pub maximum_step_s: f64,
@@ -18,7 +18,7 @@ pub(super) struct Limits {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub(super) struct Statistics {
+pub(in crate::capillary::surface) struct Statistics {
     pub trials: usize,
     pub accepted_intervals: usize,
     pub rejected_intervals: usize,
@@ -27,23 +27,23 @@ pub(super) struct Statistics {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct Trial {
-    end_s: f64,
+pub(in crate::capillary::surface) struct Trial {
+    pub end_s: f64,
     pub span_s: f64,
     pub halves_s: [f64; 2],
     pub fine_error_factor: f64,
 }
 
-pub(super) enum Error {
+pub(in crate::capillary::surface) enum Error {
     Invalid,
     TrialBudget { completed_trials: usize },
     TemporalAccuracy { step_s: f64, normalized_error: f64 },
     TimeResolution { elapsed_s: f64 },
 }
 
-pub(super) struct Schedule {
-    duration_s: f64,
-    elapsed_s: f64,
+pub(in crate::capillary::surface) struct Schedule {
+    target_s: f64,
+    time_s: f64,
     limits: Limits,
     order: Order,
     pub statistics: Statistics,
@@ -51,8 +51,22 @@ pub(super) struct Schedule {
 
 impl Schedule {
     pub fn new(duration_s: f64, limits: Limits, order: Order) -> Result<Self, Error> {
-        if !duration_s.is_finite()
-            || duration_s < 0.0
+        Self::interval(0.0, duration_s, limits, order)
+    }
+
+    /// The same schedule on an existing physical clock. Actual representable
+    /// stage times, rather than an independently accumulated relative clock,
+    /// determine both half steps and their error correction.
+    pub fn interval(
+        start_s: f64,
+        target_s: f64,
+        limits: Limits,
+        order: Order,
+    ) -> Result<Self, Error> {
+        if !start_s.is_finite()
+            || !target_s.is_finite()
+            || target_s < start_s
+            || !(target_s - start_s).is_finite()
             || [
                 limits.minimum_step_s,
                 limits.initial_step_s,
@@ -67,8 +81,8 @@ impl Schedule {
             return Err(Error::Invalid);
         }
         Ok(Self {
-            duration_s,
-            elapsed_s: 0.0,
+            target_s,
+            time_s: start_s,
             limits,
             order,
             statistics: Statistics {
@@ -79,7 +93,7 @@ impl Schedule {
     }
 
     pub fn complete(&self) -> bool {
-        self.elapsed_s >= self.duration_s
+        self.time_s >= self.target_s
     }
 
     /// Called before an owner's whole-comparison work reservation. It does not
@@ -96,18 +110,19 @@ impl Schedule {
 
     pub fn begin(&mut self) -> Result<Trial, Error> {
         self.check_trial_budget()?;
-        let remaining = self.duration_s - self.elapsed_s;
+        let remaining = self.target_s - self.time_s;
         let end_s = if self.statistics.suggested_next_step_s >= remaining {
-            self.duration_s
+            self.target_s
         } else {
-            self.elapsed_s + self.statistics.suggested_next_step_s
+            self.time_s + self.statistics.suggested_next_step_s
         };
-        let span_s = end_s - self.elapsed_s;
-        let first = 0.5 * span_s;
-        let second = span_s - first;
-        if end_s <= self.elapsed_s || end_s > self.duration_s || first <= 0.0 || second <= 0.0 {
+        let span_s = end_s - self.time_s;
+        let midpoint_s = self.time_s + 0.5 * span_s;
+        let first = midpoint_s - self.time_s;
+        let second = end_s - midpoint_s;
+        if end_s <= self.time_s || end_s > self.target_s || first <= 0.0 || second <= 0.0 {
             return Err(Error::TimeResolution {
-                elapsed_s: self.elapsed_s,
+                elapsed_s: self.time_s,
             });
         }
         // Compare the actual representable halves. For order p, the fine
@@ -152,7 +167,7 @@ impl Schedule {
         self.statistics.accepted_intervals += 1;
         self.statistics.maximum_accepted_normalized_error =
             self.statistics.maximum_accepted_normalized_error.max(error);
-        self.elapsed_s = trial.end_s;
+        self.time_s = trial.end_s;
         let growth = self.factor(error);
         self.statistics.suggested_next_step_s =
             if trial.span_s >= self.limits.maximum_step_s / growth {

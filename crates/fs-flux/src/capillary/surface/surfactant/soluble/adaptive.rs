@@ -445,7 +445,7 @@ fn step(
     Ok(report)
 }
 
-fn amount_error(
+pub(in crate::capillary::surface) fn amount_error(
     initial: f64,
     coarse: f64,
     fine: f64,
@@ -461,7 +461,10 @@ fn amount_error(
 // The exact same concentration/activity-coefficient law as the original root.
 // A vacant bath is activity zero, represented by -infinity only in this
 // comparison helper. Co-solute interactions retain their original inventories.
-fn log_activity(bulk: &AqueousSolution, species: usize) -> super::Result<f64> {
+pub(in crate::capillary::surface) fn log_activity(
+    bulk: &AqueousSolution,
+    species: usize,
+) -> super::Result<f64> {
     if bulk.solute_moles()[species] == 0.0 {
         return Ok(f64::NEG_INFINITY);
     }
@@ -484,7 +487,7 @@ fn log_activity(bulk: &AqueousSolution, species: usize) -> super::Result<f64> {
 // Normalize activities in log space, avoiding overflow/underflow from an
 // authored reference while preserving small differences with expm1. No rate,
 // reference, clipping or material limit is changed by the error estimator.
-fn activity_error(
+pub(in crate::capillary::surface) fn activity_error(
     initial: f64,
     coarse: f64,
     fine: f64,

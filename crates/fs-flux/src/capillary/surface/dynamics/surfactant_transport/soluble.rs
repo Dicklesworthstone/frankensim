@@ -6,7 +6,7 @@
 //! potential and is published once with the complete mechanical endpoint.
 //! Backward-Euler adsorption makes this composition FIRST order despite its
 //! symmetric arrangement. Refine the macro step independently of the chemical
-//! substep limit; no mechanical or coupled temporal-error estimate is implied.
+//! substep limit, or use [`adaptive`] for local coupled error control.
 //!
 //! Temperature, well-mixed solvent volume, topology, coefficients and nodal
 //! reference masses stay fixed. This represents a material surface exchanging
@@ -20,6 +20,9 @@ use crate::capillary::surface::surfactant::soluble::{
     advance_soluble_surface, energy_change,
 };
 use fs_material::osmosis::AqueousSolution;
+
+/// Coupled local time-error control of this original moving-surface map.
+pub mod adaptive;
 
 /// Original per-face Langmuir laws, finite-bath kinetics and held surface graph.
 #[derive(Clone, Copy, Debug)]

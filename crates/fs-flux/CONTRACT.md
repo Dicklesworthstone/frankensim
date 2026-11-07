@@ -8290,3 +8290,37 @@ source closure passed all 74 tests, including the prior 68 and these six new
 regressions. The existing stationary adaptive diffusion tests also passed after
 schedule extraction. This is focused native validation, not a full Cargo
 workspace build.
+
+## Adaptive coupled motion and finite-bath surface chemistry
+
+`CapillarySurfaceDynamics::advance_soluble_surfactant_adaptive_to` now completes
+an exact absolute-time interval through the original coupled chemical/mechanical
+endpoint. One complete proposal is compared with two original half proposals
+using the first-order estimator required by BE adsorption. Position, velocity,
+every face amount, finite bulk amount and original nonideal species activity
+receive explicit error scales. Each chemical half executes one native substep,
+so hidden subdivisions cannot mask the coupled comparison. The shared schedule
+uses actual representable half intervals on the accepted physical clock.
+
+All coarse and rejected work spends the same mechanical, chemical-substep,
+root and pair allowances. Trial checkpoints copy endpoint arrays, not accumulated
+trajectory history. Only accepted fine transfers, physical losses and telemetry
+are staged. Before publication, original-to-final bulk/surface amount, actual
+area/amount free energy, kinetic change and held-force work independently close
+against the accepted geometric, chemical and viscous accounts. Original history
+capacity is reserved before the existing publisher appends accepted telemetry
+once. A late failure or cancellation preserves every original physical state.
+
+The native fixed-topology, reference-mass, held-temperature, held-volume bath,
+coefficient and external-force scope remains. Only temporal-error rejection
+retries; physical/source/solver refusals propagate. Local error estimates do
+not certify global or spatial accuracy.
+
+A focused native Rust build of the actual surface, aqueous, adsorption and
+mechanical source closure passed 80 tests with zero failures: the prior 74 plus
+six new moving-adaptive regressions. These compare a continuous breathing/site
+ODE, exact two-half native recovery, first-order rejection, global budget and
+late cancellation rollback, motion-only refinement and unequal representable
+halves on a large clock. Existing stationary first/second-order adaptive tests
+also passed after the shared schedule extension. Full Cargo workspace
+validation is not claimed.
