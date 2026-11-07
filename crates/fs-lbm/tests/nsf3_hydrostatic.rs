@@ -266,3 +266,226 @@ fn zero_gravity_is_bit_exact_and_invalid_columns_refuse() {
         Err(NsfError::Cap { .. })
     ));
 }
+
+#[test]
+fn varying_acceleration_balances_pressure_and_stays_at_rest_on_every_axis() {
+    // The force changes magnitude and reverses direction. The pressure
+    // maximum near the center supports a restoring force, not a uniform
+    // force-density approximation or a mean-gravity exponential.
+    let acceleration = [14.0, 10.0, 5.0, 2.0, -2.0, -5.0, -10.0, -14.0];
+    for axis in 0..3 {
+        let mut s = spec();
+        s.dims = [3; 3];
+        s.dims[axis] = acceleration.len();
+        s.periodic = [false; 3];
+        s.wall = WallThermal::Isothermal(s.temperature_k);
+        s.workers = axis + 1;
+        let solid = |x: [usize; 3]| x[axis] == 2 && x[(axis + 1) % 3] == 0;
+        let mut flow = NsfGrid3::<D3q27>::new_isothermal_hydrostatic_profile(
+            s.clone(),
+            solid,
+            axis,
+            &acceleration,
+            3,
+        )
+        .unwrap();
+        let point = |j| {
+            let mut x = [1; 3];
+            x[axis] = j;
+            x
+        };
+        let initial: Vec<_> = (0..acceleration.len())
+            .map(|j| flow.cell(point(j)).0)
+            .collect();
+        close(initial[3], 1.0, 2e-15);
+        assert!(initial[3] > initial[0] && initial[4] > initial[7]);
+        assert_eq!(flow.gravity_m_s2(), [0.0; 3]);
+        for (j, &a) in acceleration.iter().enumerate() {
+            let mut expected = [0.0; 3];
+            expected[axis] = a;
+            assert_eq!(flow.body_acceleration_m_s2(point(j)).unwrap(), expected);
+        }
+        for j in 0..acceleration.len() - 1 {
+            let pressure_jump = s.pressure_pa * (initial[j + 1] - initial[j]);
+            let supported_load = 0.5
+                * s.dx_m
+                * flow.law().rho_ref_kg_m3
+                * (initial[j] * acceleration[j] + initial[j + 1] * acceleration[j + 1]);
+            close(pressure_jump, supported_load, 1e-9);
+        }
+        let mass = flow.total_mass_kg();
+        let energy = flow.total_energy_j();
+        for _ in 0..24 {
+            assert!(flow.step().unwrap().residual_rel < 2e-12);
+        }
+        for (j, &rho0) in initial.iter().enumerate() {
+            let (rho, velocity, temperature) = flow.cell(point(j));
+            close(rho, rho0, 3e-11 * rho0);
+            for u in velocity {
+                close(u, 0.0, 3e-11);
+            }
+            close(temperature, s.temperature_k, 3e-8);
+        }
+        close(flow.total_mass_kg(), mass, 3e-12 * mass);
+        close(flow.total_energy_j(), energy, 3e-12 * energy);
+        close(flow.kinetic_energy_j(), 0.0, 1e-19 * energy);
+        close(
+            flow.cumulative_ledger().body_force_work_j,
+            0.0,
+            3e-12 * energy,
+        );
+        close(
+            flow.cumulative_ledger().viscous_heating_j,
+            0.0,
+            3e-12 * energy,
+        );
+        assert_eq!(flow.cumulative_ledger().gravity_work_j, 0.0);
+    }
+}
+
+#[test]
+fn periodic_restoring_force_balances_pressure_across_the_seam() {
+    let acceleration = [0.0, 5.0, 9.0, 5.0, 0.0, -5.0, -9.0, -5.0];
+    let mut s = spec();
+    s.periodic = [true; 3];
+    let mut flow = NsfGrid3::<D3q27>::new_isothermal_hydrostatic_profile(
+        s.clone(),
+        |_| false,
+        2,
+        &acceleration,
+        2,
+    )
+    .unwrap();
+    let initial: Vec<_> = (0..8).map(|j| flow.cell([1, 1, j]).0).collect();
+    for j in 0..8 {
+        let k = (j + 1) % 8;
+        close(
+            s.pressure_pa * (initial[k] - initial[j]),
+            0.5 * s.dx_m
+                * flow.law().rho_ref_kg_m3
+                * (initial[j] * acceleration[j] + initial[k] * acceleration[k]),
+            1e-9,
+        );
+    }
+    let energy = flow.total_energy_j();
+    for _ in 0..32 {
+        assert!(flow.step().unwrap().residual_rel < 2e-12);
+    }
+    for (j, &rho0) in initial.iter().enumerate() {
+        let (rho, velocity, temperature) = flow.cell([1, 1, j]);
+        close(rho, rho0, 3e-11 * rho0);
+        for u in velocity {
+            close(u, 0.0, 3e-11);
+        }
+        close(temperature, s.temperature_k, 3e-8);
+    }
+    close(flow.total_energy_j(), energy, 3e-12 * energy);
+}
+
+#[test]
+fn varying_profile_converges_to_the_integrated_physical_potential() {
+    let height = 8_000.0;
+    let g = -9.80665;
+    let mut errors = Vec::new();
+    for intervals in [8, 16, 32] {
+        let mut s = spec();
+        s.dims = [1, 1, intervals + 1];
+        s.dx_m = height / intervals as f64;
+        let acceleration: Vec<_> = (0..=intervals)
+            .map(|j| g * (1.0 + j as f64 / intervals as f64))
+            .collect();
+        let flow = NsfGrid3::<D3q27>::new_isothermal_hydrostatic_profile(
+            s.clone(),
+            |_| false,
+            2,
+            &acceleration,
+            0,
+        )
+        .unwrap();
+        // Integral_0^H g*(1+z/H) dz = 3gH/2, independently of the
+        // finite-difference pressure recurrence used by the initializer.
+        let exact = (1.5 * g * height / (flow.law().gas_constant * s.temperature_k)).exp();
+        errors.push((flow.cell([0, 0, intervals]).0 - exact).abs());
+    }
+    for pair in errors.windows(2) {
+        assert!((3.9..4.1).contains(&(pair[0] / pair[1])), "{errors:?}");
+    }
+    assert!(errors[2] < 3e-5);
+}
+
+#[test]
+fn removing_spatial_support_releases_the_pressure_gradient_without_an_impulse() {
+    let acceleration = [4.0, 2.0, 0.0, -6.0, -10.0, -10.0, -10.0, -6.0];
+    let mut flow = NsfGrid3::<D3q27>::new_isothermal_hydrostatic_profile(
+        spec(),
+        |_| false,
+        2,
+        &acceleration,
+        0,
+    )
+    .unwrap();
+    let a = 10.0 * flow.law().dt_s.powi(2) / flow.law().dx_m;
+    flow.set_body_acceleration_si(&[], || false).unwrap();
+    close(flow.cell([1, 1, 5]).1[2], 0.0, 2e-15);
+    let energy = flow.total_energy_j();
+    let ledger = flow.step().unwrap();
+    assert!(flow.cell([1, 1, 5]).1[2] > 0.8 * a);
+    assert_eq!(ledger.body_force_work_j, 0.0);
+    assert_eq!(ledger.gravity_work_j, 0.0);
+    close(flow.total_energy_j(), energy, 3e-12 * energy);
+}
+
+#[test]
+fn constant_and_zero_profiles_reuse_the_existing_physics() {
+    let mut gravity =
+        NsfGrid3::<D3q27>::new_isothermal_hydrostatic(spec(), |_| false, 2, -9.80665, 3).unwrap();
+    let mut profile = NsfGrid3::<D3q27>::new_isothermal_hydrostatic_profile(
+        spec(),
+        |_| false,
+        2,
+        &[-9.80665; 8],
+        3,
+    )
+    .unwrap();
+    for _ in 0..4 {
+        for j in 0..8 {
+            assert_eq!(profile.cell([1, 1, j]), gravity.cell([1, 1, j]));
+        }
+        let g = gravity.step().unwrap();
+        let b = profile.step().unwrap();
+        assert_eq!(b.body_force_work_j, g.gravity_work_j);
+        assert_eq!(profile.total_energy_j(), gravity.total_energy_j());
+    }
+    let mut s = spec();
+    s.periodic = [true; 3];
+    let normal = NsfGrid3::<D3q27>::new(s.clone(), |_| false, |_| (1.0, [0.0; 3], 300.0)).unwrap();
+    let zero = NsfGrid3::<D3q27>::new_isothermal_hydrostatic_profile(s, |_| false, 2, &[0.0; 8], 3)
+        .unwrap();
+    assert_eq!(zero.state_hash(), normal.state_hash());
+}
+
+#[test]
+fn incompatible_periodic_pressure_and_invalid_layer_fields_refuse() {
+    let refused = |s, acceleration: &[f64]| {
+        assert!(NsfGrid3::<D3q27>::new_isothermal_hydrostatic_profile(
+            s, |_| false, 2, acceleration, 0,
+        ).is_err());
+    };
+    refused(spec(), &[1.0; 7]);
+    refused(spec(), &[f64::NAN; 8]);
+    refused(spec(), &[f64::INFINITY; 8]);
+    refused(spec(), &[1e10; 8]);
+    let mut periodic = spec();
+    periodic.periodic = [true; 3];
+    refused(periodic.clone(), &[9.80665; 8]);
+    refused(periodic.clone(), &[1e-20; 8]);
+    // Zero arithmetic mean acceleration is insufficient: the discrete
+    // log-pressure increment must close, including its nonlinear terms.
+    refused(periodic, &[10.0, 10.0, -20.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let mut capped = spec();
+    capped.maximum_cells = 1;
+    assert!(matches!(
+        NsfGrid3::<D3q27>::new_isothermal_hydrostatic_profile(capped, |_| false, 2, &[1.0; 8], 0,),
+        Err(NsfError::Cap { .. })
+    ));
+}

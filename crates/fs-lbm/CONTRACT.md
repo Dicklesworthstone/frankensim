@@ -14440,6 +14440,31 @@ outstanding. This initialization is not a general well-balanced perturbation
 scheme for arbitrary gravity directions or nonuniform temperature, and it
 adds no fluid-plus-gravitational-potential energy conservation claim.
 
+`NsfGrid3::new_isothermal_hydrostatic_profile` extends that resting state to
+one signed SI acceleration per layer, including spatial variation and force
+reversal. Adjacent layers obey
+`rho[j+1]/rho[j] = (1+b[j])/(1-b[j+1])`, so the pressure jump balances the
+trapezoidal **force density** `rho*a`, with each endpoint's own acceleration.
+The existing body-force owner supplies the physical Guo half-source and
+reports its work in `body_force_work_j`; uniform gravity stays disabled.
+No independent pressure evolution, forcing operator or profile sampling is
+added to the time step. The original cell cap bounds the retained body field;
+the all-zero profile delegates to the original uniform constructor. A constant
+profile reproduces the uniform-gravity pressure and evolution, with the work
+assigned to the corresponding body-force account.
+
+A periodic force axis is supported when its discrete pressure increments
+close around the entire loop. Compensated summation of
+`log1p(b[j])-log1p(-b[j])` checks that compatibility at floating-point tolerance;
+zero arithmetic mean acceleration alone does not establish it. An incompatible
+loop, nonfinite/unrepresentable layer force, `|b[j]| >= 1`, an invalid profile
+shape or an unsupported material state refuses. Six additional physical
+regression definitions cover varying/reversing forces along every axis with
+stationary walls and embedded solids, periodic seam balance, second-order
+convergence to an independently integrated varying-force potential, pressure
+release after removing support, constant/zero parity and invalid profiles.
+The same isothermal, axis-aligned scope and potential-energy limits apply.
+
 ### Held spatial body acceleration and vorticity production
 
 `NsfGrid3::with_body_acceleration_si` and `set_body_acceleration_si`
