@@ -11,6 +11,9 @@ use crate::BemError;
 use crate::panel2d::{Airfoil2d, PanelState2d, PreparedPanel2d};
 use fs_vpm::{VortexParticle, induced_velocity};
 
+mod adaptive;
+pub use adaptive::{PanelWakeAdaptiveOptions, PanelWakeAdaptiveReport};
+
 #[derive(Debug, Clone)]
 pub(super) struct PanelCoupling {
     panels: PreparedPanel2d,
@@ -172,22 +175,8 @@ impl WakeSim {
     ) -> Result<PanelWakeTransportReport, BemError> {
         checkpoint(&mut cancelled)?;
         self.admit_panel_incidence(alpha_chord)?;
-        if options.substeps == 0 || !(self.dt / options.substeps as f64 > 0.0) {
-            return Err(BemError::InvalidScalar {
-                name: "panel wake transport substeps",
-                value: options.substeps as f64,
-                requirement: "positive count with a representable positive substep",
-            });
-        }
-        if let Some(fraction) = options.max_displacement_fraction {
-            if !fraction.is_finite() || fraction <= 0.0 || fraction > 1.0 {
-                return Err(BemError::InvalidScalar {
-                    name: "panel wake displacement fraction",
-                    value: fraction,
-                    requirement: "finite fraction in (0, 1]",
-                });
-            }
-        }
+        admit_substeps(self.dt, options.substeps)?;
+        admit_displacement_fraction(options.max_displacement_fraction)?;
         let solves = options
             .substeps
             .checked_mul(2)
@@ -238,15 +227,93 @@ impl WakeSim {
         max_displacement_fraction: Option<f64>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PanelWakeTransportReport, BemError> {
+        // Fixed refinement admitted the complete count before preparation;
+        // ordinary one-step dispatch always requires exactly three solves.
+        let mut budget = CoupledSolveBudget::new(usize::MAX);
+        let candidate = PreparedTransport::new(self, alpha, cancelled)?.integrate(
+            substeps,
+            max_displacement_fraction,
+            &mut budget,
+            cancelled,
+        )?;
+        let report = candidate.report;
+        self.publish_panel_transport(candidate, cancelled)?;
+        Ok(report)
+    }
+
+    fn publish_panel_transport(
+        &mut self,
+        mut candidate: TransportCandidate,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), BemError> {
+        if candidate
+            .wake
+            .last()
+            .is_some_and(|vortex| vortex.gamma == 0.0)
+        {
+            candidate.wake.pop();
+        }
+        self.history
+            .try_reserve(1)
+            .map_err(|_| BemError::AllocationFailed {
+                operation: "panel wake history",
+            })?;
+        candidate.row.vortices = candidate.wake.len();
         checkpoint(cancelled)?;
-        if self.history.len() >= MAX_WAKE_STEPS {
+        // Every fallible stage is complete; no partial physical state escapes.
+        self.alpha = candidate.alpha;
+        self.steady_gamma = candidate.steady_gamma;
+        self.wake = candidate.wake;
+        self.panel_coupling
+            .as_mut()
+            .expect("native mode dispatch")
+            .state = Some(candidate.endpoint);
+        self.history.push(candidate.row);
+        Ok(())
+    }
+}
+
+/// All trials borrow one retained wake and one release geometry. Scratch is
+/// reused, but no trial can change the physical simulation before publication.
+struct PreparedTransport<'a> {
+    panels: &'a PreparedPanel2d,
+    retained: &'a [WakeVortex],
+    newborn: WakeVortex,
+    midpoint: Vec<WakeVortex>,
+    workspace: CouplingWorkspace,
+    alpha: f64,
+    freestream: [f64; 2],
+    core: f64,
+    dt: f64,
+    time: f64,
+    previous_bound: f64,
+    steady_gamma: f64,
+}
+
+struct TransportCandidate {
+    wake: Vec<WakeVortex>,
+    endpoint: PanelState2d,
+    alpha: f64,
+    steady_gamma: f64,
+    row: WakeStep,
+    report: PanelWakeTransportReport,
+}
+
+impl<'a> PreparedTransport<'a> {
+    fn new(
+        wake: &'a WakeSim,
+        alpha: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, BemError> {
+        checkpoint(cancelled)?;
+        if wake.history.len() >= MAX_WAKE_STEPS {
             return Err(BemError::WorkEnvelopeExceeded {
                 operation: "wake steps",
-                requested: self.history.len().saturating_add(1),
+                requested: wake.history.len().saturating_add(1),
                 max: MAX_WAKE_STEPS,
             });
         }
-        let count = self
+        let count = wake
             .wake
             .len()
             .checked_add(1)
@@ -256,64 +323,102 @@ impl WakeSim {
                 max: super::MAX_DIRECT_WAKE_VORTICES,
             })?;
         validate_direct_wake_work(count)?;
-        let coupling = self.panel_coupling.as_ref().expect("native mode dispatch");
-        let mut candidate = reserved(count, "panel wake candidate")?;
-        candidate.extend_from_slice(&self.wake);
-        candidate.push(WakeVortex {
-            pos: [self.te[0] + 0.3 * self.dt, self.te[1]],
+        let coupling = wake.panel_coupling.as_ref().expect("native mode dispatch");
+        let newborn = WakeVortex {
+            pos: [wake.te[0] + 0.3 * wake.dt, wake.te[1]],
             gamma: 0.0,
-        });
+        };
         let mut midpoint = reserved(count, "panel wake midpoint")?;
-        midpoint.extend_from_slice(&candidate);
-        let mut workspace = CouplingWorkspace::new(count, coupling.panels.midpoints().len())?;
-        let previous_bound = self.history.last().map_or(0.0, |row| row.bound);
+        midpoint.extend_from_slice(&wake.wake);
+        midpoint.push(newborn);
+        let workspace = CouplingWorkspace::new(count, coupling.panels.midpoints().len())?;
         let freestream = [fs_math::det::cos(alpha), fs_math::det::sin(alpha)];
         let steady_gamma =
             coupling.steady_basis[0] * freestream[0] + coupling.steady_basis[1] * freestream[1];
-        let core = fs_math::det::sqrt(self.core2);
+        Ok(Self {
+            panels: &coupling.panels,
+            retained: &wake.wake,
+            newborn,
+            midpoint,
+            workspace,
+            alpha,
+            freestream,
+            core: fs_math::det::sqrt(wake.core2),
+            dt: wake.dt,
+            time: (wake.history.len() as f64 + 1.0) * wake.dt,
+            previous_bound: wake.history.last().map_or(0.0, |row| row.bound),
+            steady_gamma,
+        })
+    }
+
+    fn integrate(
+        &mut self,
+        substeps: usize,
+        max_displacement_fraction: Option<f64>,
+        budget: &mut CoupledSolveBudget,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<TransportCandidate, BemError> {
+        let started = budget.used;
+        let mut candidate = reserved(self.retained.len() + 1, "panel wake candidate")?;
+        candidate.extend_from_slice(self.retained);
+        candidate.push(self.newborn);
         let h = self.dt / substeps as f64;
         let mut peak = 0.0_f64;
         let mut maximum_fraction = 0.0_f64;
         for step in 0..substeps {
-            let first = workspace.solve(
-                &coupling.panels,
+            let first = self.workspace.solve(
+                self.panels,
                 &mut candidate,
-                freestream,
-                core,
-                previous_bound,
+                self.freestream,
+                self.core,
+                self.previous_bound,
+                budget,
                 cancelled,
             )?;
-            for (i, (p, q)) in candidate.iter().zip(&mut midpoint).enumerate() {
+            for (i, (p, q)) in candidate.iter().zip(&mut self.midpoint).enumerate() {
                 checkpoint(cancelled)?;
-                let v = workspace.velocity(&coupling.panels, &first, p.pos, freestream, core)?;
+                let v = self.workspace.velocity(
+                    self.panels,
+                    &first,
+                    p.pos,
+                    self.freestream,
+                    self.core,
+                )?;
                 if step == 0 {
                     peak = peak.max(fs_math::det::sqrt(v[0].mul_add(v[0], v[1] * v[1])));
                 }
                 maximum_fraction = maximum_fraction.max(stage_fraction(
                     v,
                     h,
-                    core,
-                    workspace.clearance[i],
+                    self.core,
+                    self.workspace.clearance[i],
                     max_displacement_fraction,
                 )?);
                 q.pos = translated(p.pos, v, 0.5 * h)?;
             }
-            let middle = workspace.solve(
-                &coupling.panels,
-                &mut midpoint,
-                freestream,
-                core,
-                previous_bound,
+            let middle = self.workspace.solve(
+                self.panels,
+                &mut self.midpoint,
+                self.freestream,
+                self.core,
+                self.previous_bound,
+                budget,
                 cancelled,
             )?;
-            for (i, (p, q)) in candidate.iter_mut().zip(&midpoint).enumerate() {
+            for (i, (p, q)) in candidate.iter_mut().zip(&self.midpoint).enumerate() {
                 checkpoint(cancelled)?;
-                let v = workspace.velocity(&coupling.panels, &middle, q.pos, freestream, core)?;
+                let v = self.workspace.velocity(
+                    self.panels,
+                    &middle,
+                    q.pos,
+                    self.freestream,
+                    self.core,
+                )?;
                 maximum_fraction = maximum_fraction.max(stage_fraction(
                     v,
                     h,
-                    core,
-                    workspace.clearance[i],
+                    self.core,
+                    self.workspace.clearance[i],
                     max_displacement_fraction,
                 )?);
                 p.pos = translated(p.pos, v, h)?;
@@ -321,49 +426,62 @@ impl WakeSim {
         }
         // The endpoint solve publishes a body state satisfying the boundary
         // equations for the accepted geometry, rather than a stale midpoint.
-        let endpoint = workspace.solve(
-            &coupling.panels,
+        let endpoint = self.workspace.solve(
+            self.panels,
             &mut candidate,
-            freestream,
-            core,
-            previous_bound,
+            self.freestream,
+            self.core,
+            self.previous_bound,
+            budget,
             cancelled,
         )?;
-        let time = (self.history.len() as f64 + 1.0) * self.dt;
-        if !time.is_finite() || !peak.is_finite() || !steady_gamma.is_finite() {
+        if !self.time.is_finite() || !peak.is_finite() || !self.steady_gamma.is_finite() {
             return Err(BemError::NonFiniteResult {
                 operation: "panel wake endpoint",
             });
         }
-        if candidate.last().is_some_and(|vortex| vortex.gamma == 0.0) {
-            candidate.pop();
-        }
-        self.history
-            .try_reserve(1)
-            .map_err(|_| BemError::AllocationFailed {
-                operation: "panel wake history",
-            })?;
         let row = WakeStep {
-            t: time,
+            t: self.time,
             bound: endpoint.bound_circulation,
             vortices: candidate.len(),
             peak_speed: peak,
         };
-        checkpoint(cancelled)?;
-        // Every fallible stage is complete; no partial physical state escapes.
-        self.alpha = alpha;
-        self.steady_gamma = steady_gamma;
-        self.wake = candidate;
-        self.panel_coupling
-            .as_mut()
-            .expect("native mode dispatch")
-            .state = Some(endpoint);
-        self.history.push(row);
-        Ok(PanelWakeTransportReport {
-            substeps,
-            coupled_solves: 2 * substeps + 1,
-            max_displacement_fraction: maximum_fraction,
+        Ok(TransportCandidate {
+            wake: candidate,
+            endpoint,
+            alpha: self.alpha,
+            steady_gamma: self.steady_gamma,
+            row,
+            report: PanelWakeTransportReport {
+                substeps,
+                coupled_solves: budget.used - started,
+                max_displacement_fraction: maximum_fraction,
+            },
         })
+    }
+}
+
+struct CoupledSolveBudget {
+    used: usize,
+    maximum: usize,
+}
+
+impl CoupledSolveBudget {
+    fn new(maximum: usize) -> Self {
+        Self { used: 0, maximum }
+    }
+
+    fn charge(&mut self) -> Result<(), BemError> {
+        let next = self.used.checked_add(1);
+        if next.is_none_or(|count| count > self.maximum) {
+            return Err(BemError::WorkEnvelopeExceeded {
+                operation: "panel wake coupled solves",
+                requested: next.unwrap_or(usize::MAX),
+                max: self.maximum,
+            });
+        }
+        self.used = next.expect("admitted solve count");
+        Ok(())
     }
 }
 
@@ -392,6 +510,7 @@ impl CouplingWorkspace {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn solve(
         &mut self,
         panels: &PreparedPanel2d,
@@ -399,6 +518,7 @@ impl CouplingWorkspace {
         freestream: [f64; 2],
         core: f64,
         previous_bound: f64,
+        budget: &mut CoupledSolveBudget,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PanelState2d, BemError> {
         for (i, (vortex, particle)) in wake.iter().zip(&mut self.particles).enumerate() {
@@ -423,6 +543,7 @@ impl CouplingWorkspace {
             self.newborn[i] = induced_velocity(core::slice::from_ref(&unit), point, core);
         }
         checkpoint(cancelled)?;
+        budget.charge()?;
         let (state, shed) = panels.solve_kelvin(&self.incident, &self.newborn, previous_bound)?;
         checkpoint(cancelled)?;
         wake[retained].gamma = shed;
@@ -451,6 +572,30 @@ impl CouplingWorkspace {
         }
         Ok(velocity)
     }
+}
+
+fn admit_substeps(dt: f64, substeps: usize) -> Result<(), BemError> {
+    if substeps == 0 || !(dt / substeps as f64 > 0.0) {
+        return Err(BemError::InvalidScalar {
+            name: "panel wake transport substeps",
+            value: substeps as f64,
+            requirement: "positive count with a representable positive substep",
+        });
+    }
+    Ok(())
+}
+
+fn admit_displacement_fraction(fraction: Option<f64>) -> Result<(), BemError> {
+    if let Some(fraction) = fraction {
+        if !fraction.is_finite() || fraction <= 0.0 || fraction > 1.0 {
+            return Err(BemError::InvalidScalar {
+                name: "panel wake displacement fraction",
+                value: fraction,
+                requirement: "finite fraction in (0, 1]",
+            });
+        }
+    }
+    Ok(())
 }
 
 fn reserved<T>(count: usize, operation: &'static str) -> Result<Vec<T>, BemError> {

@@ -279,14 +279,51 @@ itself remains noninterruptible at the original panel ceiling. No wall-time
 or asynchronous cancellation-latency certificate is claimed. Cancellation,
 work refusal and failed resolution leave all accepted physical state intact.
 
+`step_panel_coupled_adaptive` adds whole-interval midpoint step doubling with
+explicit absolute/relative endpoint-position tolerances. Coarse and fine
+trials start from the SAME retained wake and release position, keep all old
+strengths, and use the original previous-bound Kelvin target at every stage.
+For counts N and 2N, each particle's estimated fine-position error is
+`|x_2N - x_N| / 3`; its allowance is
+`absolute + relative * max(core, |x_N - x_start|, |x_2N - x_start|)`.
+The relative scale uses material displacement, independent of coordinate
+origin. Absolute tolerance must be finite positive, relative tolerance finite
+nonnegative. The newborn participates in this comparison before any zero-
+strength omission. Nonrepresentable estimates/allowances refuse.
+
+Acceptance requires every normalized estimate <= 1 and publishes the fine
+midpoint geometry and its endpoint panel solution directly, without Richardson
+extrapolation. A failed comparison reuses its completed fine candidate as the
+next coarse result, doubling only the new integration. A stage-displacement
+guard refusal discards its incomplete candidate and doubles the count; the
+next comparison again uses adjacent resolutions. Other failures, including
+sampled body contact, propagate without retries. All trials share the original
+LU and transport scratch. Only one accepted history entry and at most one new
+packet publish, regardless of the number of trials.
+
+`PanelWakeAdaptiveOptions::max_substeps` bounds every trial, including the
+accepted fine integration, and doubling bounds the retry count. Its total
+coupled-solve cap is charged immediately before each Kelvin solve, counting
+coarse, fine and guard-refused work; no stage may exceed it. The adaptive
+report records completed integrations, guard refusals, rejected comparisons,
+actual total solves, accepted substeps, estimated maximum position error,
+maximum normalized error, and the accepted fine stage-displacement ratio.
+Cancellation is also polled between trials and during endpoint comparisons;
+refinement/work exhaustion and cancellation preserve the prior physical state.
+This is an asymptotic temporal position-error estimate for the held release
+interval, not an error bound on shedding, panel/core models, circulation/load
+discretization, or continuous body intersections.
+
 Traces identify this mode as `inviscid-panel-kelvin`. It supplies no unsteady
 Bernoulli pressure/load, viscous wall production, separation or measured
 Wagner/Theodorsen validation. `tests/panel_wake.rs` checks actual endpoint
 boundary reconstruction, Kelvin conservation and old-strength retention,
 prescribed incidence, geometric normalization, fixed-schedule second-order
 substep refinement, single emission, near-body/core resolution, budget and
-cancellation rollback, and refusal; the native module
-also exercises rollback on a body-contact candidate (G0/G3).
+cancellation rollback, adaptive refinement against a finer reference, exact
+fixed-result parity, reused-trial work accounting, guard retries and refusal;
+the native modules check origin-independent error scaling and rollback on a
+body-contact candidate (G0/G3).
 
 ## Purpose and layer
 

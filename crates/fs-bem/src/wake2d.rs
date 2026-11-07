@@ -23,7 +23,10 @@ mod convection;
 #[cfg(test)]
 mod convection_tests;
 mod panel;
-pub use panel::{PanelWakeTransportOptions, PanelWakeTransportReport};
+pub use panel::{
+    PanelWakeAdaptiveOptions, PanelWakeAdaptiveReport, PanelWakeTransportOptions,
+    PanelWakeTransportReport,
+};
 
 /// Largest admitted number of wake steps/vortices in one v1 state.
 pub const MAX_WAKE_STEPS: usize = 1_000_000;

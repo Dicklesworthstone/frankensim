@@ -2,7 +2,7 @@
 
 use fs_bem::BemError;
 use fs_bem::panel2d::{Airfoil2d, PreparedPanel2d, naca4_symmetric, solve};
-use fs_bem::wake2d::{PanelWakeTransportOptions, WakeSim};
+use fs_bem::wake2d::{PanelWakeAdaptiveOptions, PanelWakeTransportOptions, WakeSim};
 
 fn circulation(wake: &WakeSim) -> f64 {
     let mut sum = wake.history().last().map_or(0.0, |row| row.bound);
@@ -357,4 +357,264 @@ fn invalid_transport_settings_leave_the_native_state_unchanged() {
         );
         assert_same_native_state(&result, &start);
     }
+}
+
+fn adaptive(tolerance: f64) -> PanelWakeAdaptiveOptions {
+    PanelWakeAdaptiveOptions {
+        initial_substeps: 1,
+        max_substeps: 256,
+        max_coupled_solves: 2048,
+        absolute_position_tolerance: tolerance,
+        relative_position_tolerance: 0.0,
+        max_displacement_fraction: None,
+    }
+}
+
+fn position_difference(a: &WakeSim, b: &WakeSim) -> f64 {
+    assert_eq!(a.wake().len(), b.wake().len());
+    a.wake()
+        .iter()
+        .zip(b.wake())
+        .map(|(a, b)| (a.pos[0] - b.pos[0]).hypot(a.pos[1] - b.pos[1]))
+        .fold(0.0_f64, f64::max)
+}
+
+#[test]
+fn adaptive_transport_controls_error_without_repeating_shedding_or_completed_trials() {
+    let foil = naca4_symmetric(0.12, 24).unwrap();
+    let panels = PreparedPanel2d::new(&foil).unwrap();
+    let (dt, core, alpha) = (0.02, 0.04, 0.12);
+    let mut start = WakeSim::new_panel_coupled(&foil, 0.08, dt, core).unwrap();
+    for _ in 0..3 {
+        start.step().unwrap();
+    }
+    let mut coarse = start.clone();
+    coarse
+        .step_panel_coupled_with_transport(alpha, transport(1), || false)
+        .unwrap();
+    let mut fine = start.clone();
+    fine.step_panel_coupled_with_transport(alpha, transport(2), || false)
+        .unwrap();
+    let first_estimate = position_difference(&coarse, &fine) / 3.0;
+    assert!(
+        first_estimate > 1e-10,
+        "fixture must resolve temporal error"
+    );
+
+    let mut loose = start.clone();
+    let loose_report = loose
+        .step_panel_coupled_adaptive(alpha, adaptive(1.25 * first_estimate), || false)
+        .unwrap();
+    assert_eq!(loose_report.substeps, 2);
+    assert_eq!(loose_report.completed_trials, 2);
+    assert_eq!(loose_report.coupled_solves, 8);
+    assert_eq!(loose_report.guard_refusals, 0);
+    assert_eq!(loose_report.rejected_comparisons, 0);
+    assert_same_native_state(&loose, &fine);
+
+    let options = adaptive(first_estimate / 64.0);
+    let mut tight = start.clone();
+    let report = tight
+        .step_panel_coupled_adaptive(alpha, options, || false)
+        .unwrap();
+    assert!(report.substeps > loose_report.substeps);
+    assert!(report.rejected_comparisons > 0);
+    assert_eq!(report.guard_refusals, 0);
+    assert_eq!(report.completed_trials, report.rejected_comparisons + 2);
+    // Counts 1, 2, 4, ..., S each run ONCE; no repeated coarse integration.
+    assert_eq!(
+        report.coupled_solves,
+        4 * report.substeps - 2 + report.completed_trials,
+    );
+    assert!(report.max_error_ratio <= 1.0);
+    assert!(report.estimated_max_position_error <= options.absolute_position_tolerance);
+    let mut fixed = start.clone();
+    fixed
+        .step_panel_coupled_with_transport(alpha, transport(report.substeps), || false)
+        .unwrap();
+    assert_same_native_state(&tight, &fixed);
+    let mut reference = start.clone();
+    reference
+        .step_panel_coupled_with_transport(alpha, transport(256), || false)
+        .unwrap();
+    assert!(
+        position_difference(&tight, &reference) < 0.2 * position_difference(&loose, &reference)
+    );
+    for accepted in [&loose, &tight] {
+        assert_eq!(accepted.history().len(), start.history().len() + 1);
+        assert_eq!(accepted.wake().len(), start.wake().len() + 1);
+        assert_eq!(accepted.history().last().unwrap().t, 4.0 * dt);
+        for (old, next) in start.wake().iter().zip(accepted.wake()) {
+            assert_eq!(old.gamma.to_bits(), next.gamma.to_bits());
+        }
+        assert_boundary(accepted, &panels, alpha, core);
+    }
+    let mut capped = start.clone();
+    assert!(matches!(
+        capped.step_panel_coupled_adaptive(
+            alpha,
+            PanelWakeAdaptiveOptions {
+                max_substeps: 2,
+                ..options
+            },
+            || false,
+        ),
+        Err(BemError::WorkEnvelopeExceeded {
+            operation: "panel wake adaptive substeps",
+            requested: 4,
+            max: 2,
+        })
+    ));
+    assert_same_native_state(&capped, &start);
+}
+
+#[test]
+fn adaptive_guard_retries_are_charged_and_budget_refusals_are_atomic() {
+    let foil = naca4_symmetric(0.12, 24).unwrap();
+    let panels = PreparedPanel2d::new(&foil).unwrap();
+    let mut start = WakeSim::new_panel_coupled(&foil, 0.08, 0.02, 0.03).unwrap();
+    start.step().unwrap();
+    let mut options = PanelWakeAdaptiveOptions {
+        max_displacement_fraction: Some(0.5),
+        ..adaptive(1e-3)
+    };
+    let mut result = start.clone();
+    let report = result
+        .step_panel_coupled_adaptive(0.08, options, || false)
+        .unwrap();
+    assert!(report.guard_refusals > 0);
+    assert!(report.max_displacement_fraction <= 0.5);
+    // The final adjacent pair alone costs 3*S + 2 solves. Every guard
+    // refusal in this fixture has already performed at least one more.
+    assert!(report.coupled_solves >= 3 * report.substeps + 2 + report.guard_refusals);
+    assert_boundary(&result, &panels, 0.08, 0.03);
+    assert_eq!(result.history().len(), start.history().len() + 1);
+    assert_eq!(result.wake().len(), start.wake().len() + 1);
+    let mut fixed = start.clone();
+    fixed
+        .step_panel_coupled_with_transport(0.08, transport(report.substeps), || false)
+        .unwrap();
+    assert_same_native_state(&result, &fixed);
+
+    options.max_coupled_solves = report.coupled_solves;
+    let mut exact_budget = start.clone();
+    assert_eq!(
+        exact_budget
+            .step_panel_coupled_adaptive(0.08, options, || false)
+            .unwrap(),
+        report,
+    );
+    assert_same_native_state(&result, &exact_budget);
+    let mut refused = start.clone();
+    options.max_coupled_solves -= 1;
+    assert!(matches!(
+        refused.step_panel_coupled_adaptive(0.08, options, || false),
+        Err(BemError::WorkEnvelopeExceeded {
+            operation: "panel wake coupled solves", requested, max,
+        }) if requested == report.coupled_solves && max == report.coupled_solves - 1
+    ));
+    assert_same_native_state(&refused, &start);
+    options.max_coupled_solves = report.coupled_solves;
+    options.max_substeps = report.substeps / 2;
+    assert!(matches!(
+        refused.step_panel_coupled_adaptive(0.08, options, || false),
+        Err(BemError::WorkEnvelopeExceeded {
+            operation: "panel wake adaptive substeps",
+            ..
+        })
+    ));
+    assert_same_native_state(&refused, &start);
+}
+
+#[test]
+fn adaptive_cancellation_in_coarse_fine_and_publication_leaves_no_partial_interval() {
+    let foil = naca4_symmetric(0.12, 24).unwrap();
+    let mut start = WakeSim::new_panel_coupled(&foil, 0.08, 0.02, 0.03).unwrap();
+    start.step().unwrap();
+    let options = PanelWakeAdaptiveOptions {
+        initial_substeps: 2,
+        max_substeps: 4,
+        max_coupled_solves: 14,
+        ..adaptive(1.0)
+    };
+    let mut polls = 0;
+    let mut complete = start.clone();
+    let report = complete
+        .step_panel_coupled_adaptive(0.12, options, || {
+            polls += 1;
+            false
+        })
+        .unwrap();
+    assert_eq!(report.completed_trials, 2);
+    assert_eq!(report.coupled_solves, 14);
+    for stop in [1, polls / 4, 3 * polls / 4, polls] {
+        let mut refused = start.clone();
+        let mut visits = 0;
+        assert!(matches!(
+            refused.step_panel_coupled_adaptive(0.12, options, || {
+                visits += 1;
+                visits == stop
+            }),
+            Err(BemError::Cancelled {
+                operation: "panel wake transport"
+            })
+        ));
+        assert_eq!(visits, stop);
+        assert_same_native_state(&refused, &start);
+    }
+}
+
+#[test]
+fn invalid_adaptive_options_preserve_the_existing_wake() {
+    let foil = naca4_symmetric(0.12, 24).unwrap();
+    let mut start = WakeSim::new_panel_coupled(&foil, 0.08, 0.02, 0.03).unwrap();
+    start.step().unwrap();
+    let mut cases = vec![
+        PanelWakeAdaptiveOptions {
+            initial_substeps: 0,
+            ..adaptive(1e-6)
+        },
+        PanelWakeAdaptiveOptions {
+            initial_substeps: usize::MAX,
+            max_substeps: usize::MAX,
+            ..adaptive(1e-6)
+        },
+        PanelWakeAdaptiveOptions {
+            max_substeps: 1,
+            ..adaptive(1e-6)
+        },
+        PanelWakeAdaptiveOptions {
+            max_coupled_solves: 0,
+            ..adaptive(1e-6)
+        },
+    ];
+    cases.extend([f64::NAN, f64::INFINITY, 0.0, -1.0].map(adaptive));
+    cases.extend(
+        [f64::NAN, f64::INFINITY, -1.0].map(|value| PanelWakeAdaptiveOptions {
+            relative_position_tolerance: value,
+            ..adaptive(1e-6)
+        }),
+    );
+    cases.extend(
+        [f64::NAN, f64::INFINITY, 0.0, -1.0, 1.1].map(|value| PanelWakeAdaptiveOptions {
+            max_displacement_fraction: Some(value),
+            ..adaptive(1e-6)
+        }),
+    );
+    for options in cases {
+        let mut refused = start.clone();
+        assert!(
+            refused
+                .step_panel_coupled_adaptive(0.12, options, || false)
+                .is_err()
+        );
+        assert_same_native_state(&refused, &start);
+    }
+    let mut legacy = WakeSim::new(&foil, 0.08, 0.02, 0.03).unwrap();
+    assert!(
+        legacy
+            .step_panel_coupled_adaptive(0.12, adaptive(1e-6), || false)
+            .is_err()
+    );
+    assert!(legacy.history().is_empty());
 }
