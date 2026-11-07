@@ -48,6 +48,8 @@
 
 use crate::{DescriptorPortHamiltonian, PhsError, QuadraticStorage, StepRecord, step_descriptor};
 
+/// Finite SOC/OCV battery storage, polarization and a reciprocal bus terminal.
+pub mod battery;
 /// Bounded charge/voltage laws on the original capacitor coordinates.
 pub mod capacitance;
 /// Grounded reciprocal multi-terminal passive conductance.

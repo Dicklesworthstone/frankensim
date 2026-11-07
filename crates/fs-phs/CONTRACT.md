@@ -2865,3 +2865,47 @@ The exact production row and original accumulator were compiled and executed:
 12 tests passed, including nine existing accumulator regressions. The complete
 native coupled-owner regression remains unexecuted in the dependency-memory
 constrained environment.
+
+## Finite battery power with bounded SOC and polarization
+
+`circuit::battery::{BatteryOcvCurve, BatterySource}` provides a finite electrical
+source for native motor/converter composition. The retained state is remaining
+chemical charge, polarization charge and physical bus-capacitor charge, all in
+coulombs. The current-input/voltage-output bus port has positive power entering
+the source; discharged or regenerated energy therefore uses the same reciprocal
+port as other pHS components.
+
+The caller supplies usable capacity in coulombs and 2..4096 piecewise-linear
+SOC/OCV knots covering [0,1]. Positive nondecreasing OCV permits flat plateaus.
+Chemical energy is the source integral `integral OCV(q) dq`, referenced to empty,
+not `q*OCV`. Positive finite series resistance, polarization R/C and bus C are
+required. The same cell current depletes chemical charge, charges polarization
+and charges the bus; losses are `R_series*I_cell² + V_pol²/R_pol`. Independent
+physical source-square rows remain available through native composition.
+
+This owner supplies a componentwise discrete gradient, its analytic endpoint
+Jacobian and the complete continuous tangent. Chemical work integrates crossed
+source segments locally, without subtracting two large stored energies; flat
+plateaus need no artificial differential capacitance. Queries use binary source
+lookup and crossed-interval integration is bounded by the admitted knot count.
+Storage clones share immutable source data, and warm callbacks allocate nothing.
+The existing prepared native solver owns iteration, cancellation and output
+publication. Unsupported charge, including attempted exhaustion or overcharge,
+refuses without clipping or a hidden ideal source. Discrete-gradient Newton
+tangents use the right segment at source knots and the last at full charge.
+The continuous tangent requires the original law's two-sided derivative:
+unequal-slope knots and finite support endpoints refuse, even for zero
+directions; smooth segments, plateaus and collinear interior knots pass.
+Observation retains the complete driving-voltage difference in compensated
+arithmetic before division, and computes polarization heat as `(V_pol/R_pol)*V_pol`
+so cancellation or an overflowing intermediate square cannot erase finite power.
+
+The reported source is a frozen reversible equivalent circuit. It does not fit
+chemistry or claim electrochemical, thermal, hysteretic, aging, rate-dependent
+capacity or protection-event accuracy. The bus capacitor is physical retained
+storage, not a replacement for battery chemical capacity. Native discrete heat
+is the discrete-gradient quadrature, not exact continuous RMS loss. Regression
+coverage checks analytical source integrals, crossed-knot work/tangents,
+discharge sag and regenerative charging, component energy and coulomb balance,
+second-order convergence against an independently exponentiated constant-OCV RC
+transient, and transactional source-bound/cancellation refusals.
