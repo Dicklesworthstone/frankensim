@@ -1735,6 +1735,55 @@ reported rather than set to zero. Only negative quadratic-form residues
 bounded by assembly roundoff are zeroed. Evanescent propagation introduces
 no bulk heat.
 
+### Analytic frequency response of the full pressure space
+
+`PreparedHeterogeneous::{solve_with_frequency_derivative,
+solve_with_sources_frequency_derivative}` returns the original pressure and
+its complex derivative per **rad/s**, with the same equilibrated LU. The
+original sparse pressure equation is differentiated analytically:
+`A p' = i b + i omega b' + 2 omega M_beta p + Im(C_Y) p - i Re(C_Y) p`.
+Linear boundary traces, prepared quadratic boundary motion and volume sources
+retain their coherent amplitudes and independently supplied amplitude/phase
+slopes. A zero primary amplitude does not erase a nonzero source derivative.
+Exact pressure-release coordinates remain zero in both vectors. Derivative
+coefficients are pressure slopes, not a second physical field or energy state.
+
+Geometry, density, compressibility and the complete prepared complex boundary
+admittance are held fixed. A sampled spatial wall law is likewise frozen;
+this does not infer or differentiate an unspecified dispersive law. Thus this
+is a physical frequency-response tangent only within those fixed-coefficient
+assumptions. It introduces no finite difference, modal reduction, artificial
+loss, fitted pole or extra factorization. Additional storage is linear in the
+original DOF count; each solve retains at most two residual corrections.
+
+The sparse solve/tangent leaf retains double-double physical forcing and checks
+the separate original operator terms. The tangent residual denominator includes
+the separate source and operator-derivative terms, preserving coherent
+cancellation. Original source admission, residual tolerance and cancellation
+apply; a refusal leaves the retained factor reusable and publishes no partial
+response. Algebraic residuals do not establish spatial, geometric or resonance
+accuracy, a modal census, an isolated linewidth, or a decay quality factor.
+
+Seven native G1/G3 tests exercise the complete production numerical leaf using
+the original `fs-sparse`, `fs-math` and complex-LU implementations: a high-Q
+resonator at its peak, sealed low-frequency compliance, convergent pressure-soft
+duct standing waves, coherent delayed sources with complex boundary terms,
+zero-amplitude source slopes, physical-equation rescaling, and cancellation
+with factor reuse. The full FE crate and its thin geometry/source adapter were
+not built in that validation environment because the constellation runtime's
+registry dependencies were unavailable; these native tests do not claim that
+broader integration gate or instrument qualification.
+
+`HeterogeneousHelmholtzFe::survey_pressure_resonances` binds the existing
+shared driven-resonance survey to an original tetrahedral pressure observation
+under constant coherent velocity traces and fixed uniform admittances. Each
+frequency uses the original full-pressure solve and analytic tangent. The
+result identifies grid-resolved driven peaks; it supplies neither a free-mode
+census nor linewidth/decay-Q evidence. Two original-FE integration regressions
+specify a loaded duct's spatial resonance and silent constrained observations,
+input refusals and cancellation. These full-adapter tests were authored but not
+executed without the complete constellation dependency environment.
+
 `HeterogeneousHelmholtzFe::probe` prepares a one-sided observation using the
 original hierarchical basis and physical barycentric gradients retained from
 assembly. It queries the caller's original frozen material once at the exact

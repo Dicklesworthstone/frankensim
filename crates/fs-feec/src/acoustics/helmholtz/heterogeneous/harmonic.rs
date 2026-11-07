@@ -3,13 +3,30 @@
 use super::super::pressure_release::PressureReleaseConstraints;
 use super::super::tri_quadrature;
 use super::{
-    BoundaryVelocitySource, HeterogeneousError, HeterogeneousHelmholtzFe, SpatialBoundaryAdmittance,
-    VolumeVelocitySource, finite, invalid, poll,
+    BoundaryVelocitySource, HeterogeneousError, HeterogeneousHelmholtzFe,
+    SpatialBoundaryAdmittance, VolumeVelocitySource, finite, invalid, poll,
 };
 use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_with_cancel};
 use fs_math::{c64::C64, dd::Dd, det};
 use fs_sparse::{Coo, Csr};
 use std::collections::BTreeSet;
+
+mod frequency;
+mod resonance;
+pub use resonance::{ResonanceSurvey, ResonanceSurveyControls, ResonanceSurveyError};
+
+impl From<frequency::PressureError> for HeterogeneousError {
+    fn from(error: frequency::PressureError) -> Self {
+        match error {
+            frequency::PressureError::Invalid(what) => invalid(what).into(),
+            frequency::PressureError::Factor(error) => error.into(),
+            frequency::PressureError::Residual { observed, limit } => {
+                Self::Residual { observed, limit }
+            }
+            frequency::PressureError::Cancelled => Self::Cancelled,
+        }
+    }
+}
 
 /// Hard limit for the original dense full-pressure factorization.
 pub const MAX_HARMONIC_DOFS: usize = 1536;
@@ -95,6 +112,21 @@ pub struct HeterogeneousPressureField {
     /// Physical componentwise backward error. This is an algebraic solve
     /// diagnostic, not a bound on mesh, source, geometry or quadrature error.
     pub backward_error: f64,
+}
+
+/// Original pressure response and its analytic, frozen-coefficient tangent.
+#[derive(Debug, Clone)]
+pub struct HeterogeneousFrequencyResponse {
+    /// Original physical response, including its ordinary work and energy.
+    pub response: HeterogeneousPressureField,
+    /// Derivative of the original pressure coefficients per rad/s [Pa s/rad].
+    /// Pressure-release trace coefficients remain exactly zero. This is a
+    /// pressure tangent, not another physical pressure field or energy state.
+    pub pressure_derivative_pa_per_rad_s: Vec<C64>,
+    /// Componentwise backward error of the original differentiated equations.
+    /// The denominator retains separate source and operator-derivative terms.
+    /// This is not a bound on resonance, geometry or spatial-discretization error.
+    pub derivative_backward_error: f64,
 }
 
 impl HeterogeneousPressureField {
@@ -234,7 +266,11 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         for faces in admittances
             .iter()
             .map(|boundary| boundary.faces.as_slice())
-            .chain(spatial_admittances.iter().map(|field| field.faces.as_slice()))
+            .chain(
+                spatial_admittances
+                    .iter()
+                    .map(|field| field.faces.as_slice()),
+            )
         {
             for &face in faces {
                 poll(cancelled)?;
@@ -476,6 +512,90 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         self.solve_projected(&load, cancelled)
     }
 
+    /// Solve pressure and its analytic frequency derivative with the SAME LU.
+    ///
+    /// Derivatives are per angular frequency [rad/s], although preparation
+    /// accepts Hz. Optional velocity traces are `dv_in/domega`, including
+    /// coherent source phase changes. Missing derivative faces contribute zero;
+    /// their order and face set need not match the primary traces.
+    ///
+    /// Geometry, density, compressibility and all prepared admittances remain
+    /// FROZEN. In particular, a sampled spatial or complex wall admittance is
+    /// not differentiated through an unstated dispersive law. This is the full
+    /// physical frequency tangent only when those coefficients are independent
+    /// of frequency. No finite differences, modal truncation or fitted pole is
+    /// used. Exact pressure-release traces and their tangents stay zero.
+    pub fn solve_with_frequency_derivative(
+        &self,
+        inward_velocity: &[VelocityTrace],
+        inward_velocity_derivative: Option<&[VelocityTrace]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<HeterogeneousFrequencyResponse, HeterogeneousError> {
+        self.solve_with_sources_frequency_derivative(
+            inward_velocity,
+            inward_velocity_derivative,
+            &[],
+            &[],
+            cancelled,
+        )
+    }
+
+    /// Analytic frozen-coefficient response with every original source family.
+    ///
+    /// Each source triple is `(original_source, amplitude, d_amplitude/domega)`.
+    /// Boundary amplitudes are inward velocity [m/s]; volume amplitudes are
+    /// volume flow [m3/s]. Their derivatives are per rad/s. Both complete drives
+    /// are projected coherently through the same original source shapes before
+    /// solving; zero-amplitude sources still retain their supplied derivatives.
+    /// Linear trace slopes follow [`Self::solve_with_frequency_derivative`].
+    ///
+    /// Source counts, model binding, face conflicts, finite values and the
+    /// original residual tolerance apply to BOTH drives. The derivative reuses
+    /// the retained factor and at most two corrections with separate original
+    /// sparse physical terms in double-double arithmetic. No dense matrix is
+    /// allocated or factored again. Cancellation publishes neither a partial
+    /// primary response nor a partial derivative and leaves this factor reusable.
+    pub fn solve_with_sources_frequency_derivative(
+        &self,
+        inward_velocity: &[VelocityTrace],
+        inward_velocity_derivative: Option<&[VelocityTrace]>,
+        boundary_sources: &[(&BoundaryVelocitySource<'_, '_, '_>, C64, C64)],
+        volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<HeterogeneousFrequencyResponse, HeterogeneousError> {
+        poll(cancelled)?;
+        super::boundary_source::admit_count(boundary_sources.len())?;
+        super::source::admit_count(volume_sources.len())?;
+        let (boundary_values, boundary_slopes): (Vec<_>, Vec<_>) = boundary_sources
+            .iter()
+            .map(|&(source, amplitude, slope)| ((source, amplitude), (source, slope)))
+            .unzip();
+        let (volume_values, volume_slopes): (Vec<_>, Vec<_>) = volume_sources
+            .iter()
+            .map(|&(source, amplitude, slope)| ((source, amplitude), (source, slope)))
+            .unzip();
+        let load =
+            self.project_sources(inward_velocity, &boundary_values, &volume_values, cancelled)?;
+        let load_derivative = self.project_sources(
+            inward_velocity_derivative.unwrap_or(&[]),
+            &boundary_slopes,
+            &volume_slopes,
+            cancelled,
+        )?;
+        let pencil = self.pressure_pencil();
+        let primary = pencil.solve(&load, cancelled)?;
+        let derivative =
+            pencil.frequency_derivative(&primary.pressure, &load, &load_derivative, cancelled)?;
+        let mut response =
+            self.field(primary.pressure, &load, primary.backward_error, cancelled)?;
+        Self::source_work(&mut response, &boundary_values, &volume_values, cancelled)?;
+        Ok(HeterogeneousFrequencyResponse {
+            response,
+            pressure_derivative_pa_per_rad_s: derivative.pressure,
+            derivative_backward_error: derivative.backward_error,
+        })
+    }
+
     /// Drive the SAME full-pressure factor with simultaneous boundary motion
     /// and original-volume sources. Each amplitude is a complex peak volume
     /// flow [m^3/s] in `exp(+i omega t)`. Sources interfere before observation
@@ -507,6 +627,20 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<HeterogeneousPressureField, HeterogeneousError> {
+        let load =
+            self.project_sources(inward_velocity, boundary_sources, volume_sources, cancelled)?;
+        let mut field = self.solve_projected(&load, cancelled)?;
+        Self::source_work(&mut field, boundary_sources, volume_sources, cancelled)?;
+        Ok(field)
+    }
+
+    fn project_sources(
+        &self,
+        inward_velocity: &[VelocityTrace],
+        boundary_sources: &[(&BoundaryVelocitySource<'_, '_, '_>, C64)],
+        volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<C64>, HeterogeneousError> {
         poll(cancelled)?;
         self.admit_velocity_faces(inward_velocity, cancelled)?;
         super::boundary_source::admit_count(boundary_sources.len())?;
@@ -551,7 +685,15 @@ impl PreparedHeterogeneous<'_, '_, '_> {
             }
             *value = C64::new(real.to_f64(), imaginary.to_f64());
         }
-        let mut field = self.solve_projected(&load, cancelled)?;
+        Ok(load)
+    }
+
+    fn source_work(
+        field: &mut HeterogeneousPressureField,
+        boundary_sources: &[(&BoundaryVelocitySource<'_, '_, '_>, C64)],
+        volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), HeterogeneousError> {
         let mut work = Dd::from_f64(0.0);
         for &(source, amplitude) in boundary_sources {
             poll(cancelled)?;
@@ -574,7 +716,7 @@ impl PreparedHeterogeneous<'_, '_, '_> {
             return Err(invalid("harmonic prepared-source work overflow").into());
         }
         poll(cancelled)?;
-        Ok(field)
+        Ok(())
     }
 
     fn admit_velocity_faces(
@@ -604,102 +746,22 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         load: &[C64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<HeterogeneousPressureField, HeterogeneousError> {
-        let rhs = load
-            .iter()
-            .map(|v| C64::new(-self.omega * v.im, self.omega * v.re))
-            .collect::<Vec<_>>();
-        if rhs.iter().any(|&z| !finite(z)) {
-            return Err(invalid("harmonic velocity source overflow").into());
-        }
-        let mut free_pressure = self
-            .pressure_release
-            .free_dofs
-            .iter()
-            .zip(&self.scales)
-            .map(|(&original, &s)| rhs[original].scale(s))
-            .collect::<Vec<_>>();
-        self.factor
-            .solve_with_cancel(&mut free_pressure, &mut *cancelled)?;
-        let mut pressure = vec![C64::ZERO; self.model.ndof()];
-        for ((&original, &p), &scale) in self
-            .pressure_release
-            .free_dofs
-            .iter()
-            .zip(&free_pressure)
-            .zip(&self.scales)
-        {
-            pressure[original] = p.scale(scale);
-        }
-        for correction in 0..=2 {
-            poll(cancelled)?;
-            if pressure.iter().any(|&z| !finite(z)) {
-                return Err(invalid("nonfinite harmonic pressure").into());
-            }
-            let (mut residual, backward_error) = self.residual(&pressure, &rhs, cancelled)?;
-            if correction == 2 || backward_error < 1e-18 {
-                if backward_error > self.residual_tolerance {
-                    return Err(HeterogeneousError::Residual {
-                        observed: backward_error,
-                        limit: self.residual_tolerance,
-                    });
-                }
-                return self.field(pressure, load, backward_error, cancelled);
-            }
-            for (r, &scale) in residual.iter_mut().zip(&self.scales) {
-                *r = r.scale(scale);
-            }
-            self.factor
-                .solve_with_cancel(&mut residual, &mut *cancelled)?;
-            for (i, &original) in self.pressure_release.free_dofs.iter().enumerate() {
-                pressure[original] = pressure[original] + residual[i].scale(self.scales[i]);
-            }
-        }
-        unreachable!("the bounded correction loop returns on its last residual")
+        let solved = self.pressure_pencil().solve(load, cancelled)?;
+        self.field(solved.pressure, load, solved.backward_error, cancelled)
     }
 
-    fn residual(
-        &self,
-        pressure: &[C64],
-        rhs: &[C64],
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(Vec<C64>, f64), HeterogeneousError> {
-        let omega = Dd::from_f64(self.omega);
-        let omega2 = omega * omega;
-        let mut residual = vec![C64::ZERO; self.pressure_release.free_dofs.len()];
-        let mut worst: f64 = 0.0;
-        for (free_row, &row) in self.pressure_release.free_dofs.iter().enumerate() {
-            poll(cancelled)?;
-            let mut real = Dd::from_f64(rhs[row].re);
-            let mut imaginary = Dd::from_f64(rhs[row].im);
-            let mut scale = rhs[row].abs();
-            for (matrix, multiplier, rotate) in [
-                (&self.model.stiffness, Dd::from_f64(1.0), false),
-                (&self.model.mass, -omega2, false),
-                (&self.susceptance, -omega, false),
-                (&self.conductance, omega, true),
-            ] {
-                let (cols, vals) = matrix.row(row);
-                for (&col, &value) in cols.iter().zip(vals) {
-                    let coefficient = multiplier * Dd::from_f64(value);
-                    let p = pressure[col];
-                    if rotate {
-                        real = real + coefficient * Dd::from_f64(p.im);
-                        imaginary = imaginary - coefficient * Dd::from_f64(p.re);
-                    } else {
-                        real = real - coefficient * Dd::from_f64(p.re);
-                        imaginary = imaginary - coefficient * Dd::from_f64(p.im);
-                    }
-                    scale += coefficient.to_f64().abs() * p.abs();
-                }
-            }
-            let value = C64::new(real.to_f64(), imaginary.to_f64());
-            if !finite(value) || !scale.is_finite() {
-                return Err(invalid("unrepresentable physical pressure residual").into());
-            }
-            worst = worst.max(value.abs() / scale.max(f64::MIN_POSITIVE));
-            residual[free_row] = value;
+    fn pressure_pencil(&self) -> frequency::PressurePencil<'_> {
+        frequency::PressurePencil {
+            omega: self.omega,
+            stiffness: &self.model.stiffness,
+            mass: &self.model.mass,
+            conductance: &self.conductance,
+            susceptance: &self.susceptance,
+            factor: &self.factor,
+            scales: &self.scales,
+            free_dofs: &self.pressure_release.free_dofs,
+            residual_tolerance: self.residual_tolerance,
         }
-        Ok((residual, worst))
     }
 
     fn field(
