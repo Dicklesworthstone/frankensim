@@ -13,6 +13,10 @@
 //! z. Pressure datums, extrusion depth, source ownership and the native weak
 //! tangential SIP treatment retain their original meanings.
 
+use super::heating::{
+    PlanarStokesHeatError, PlanarStokesHeatStep, StokesHeatBinding, StokesSlipHeatRoute,
+    StokesThermalCells,
+};
 use super::{nonnegative, positive, solve_body_velocity};
 use fs_flux::{
     FluxSystem, MaterialBoundaryLoad, MaterialFluxError, MaterialFluxNumerics, MaterialFluxSystem,
@@ -21,6 +25,7 @@ use fs_flux::{
 use fs_la::{LuWorkspace, LuWorkspaceError};
 use fs_material::fluid_transport::FluidTransport;
 use fs_mbd::{DynamicsError, MassProperties, MomentumImpulseReceipt, Pose, RigidBodyState, Vec3};
+use fs_thermal::enthalpy::{DepositionSimulation, StepConfig};
 
 /// Physical whole-body coefficients, including the declared extrusion depth.
 /// Springs are independent in the fixed x/y/angle coordinates with rest at the
@@ -203,7 +208,9 @@ pub struct PlanarStokesStep {
     pub fluid_kinetic_change_j: f64,
     /// Bulk fluid viscous heat [J], using BDF1 endpoint quadrature
     /// `dt * depth * integral(2 mu D:D)`. This excludes wall slip and numerical
-    /// losses, is not an exact trajectory integral, and updates no thermal state.
+    /// losses and is not an exact trajectory integral. Standalone `step`
+    /// updates no thermal state; `step_with_heating` and `step_with_slip_heating`
+    /// deposit this heat through the admitted finite-cell receiver map.
     pub bulk_viscous_dissipation_j: f64,
     /// Actual represented linear momentum residuals [N].
     pub force_residual_n: [f64; 2],
@@ -455,7 +462,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarStokesMotion<'s, 'm, 'a, F> {
     /// Invalid time/controls, native solver errors, geometry-domain escape,
     /// unrepresentable pose/rates, failed balances or cancellation leave the
     /// entire accepted physical history unchanged.
-    #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+    #[allow(clippy::too_many_arguments)]
     pub fn step(
         &mut self,
         timestep_s: f64,
@@ -465,8 +472,36 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarStokesMotion<'s, 'm, 'a, F> {
         external_force_n: [f64; 2],
         external_torque_n_m: f64,
         controls: PlanarStokesControls,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<PlanarStokesStep, PlanarStokesError> {
+        let (state, step) = self.propose_step(
+            timestep_s,
+            force_density,
+            exterior,
+            pressure_offsets_pa,
+            external_force_n,
+            external_torque_n_m,
+            controls,
+            cancelled,
+        )?;
+        self.state = state;
+        Ok(step)
+    }
+
+    // The native momentum solve is shared with thermal composition. Only the
+    // reusable linear-solve workspace changes before physical acceptance.
+    #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+    fn propose_step(
+        &mut self,
+        timestep_s: f64,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        exterior: &[MaterialStokesBoundary<'_>],
+        pressure_offsets_pa: &[Option<f64>],
+        external_force_n: [f64; 2],
+        external_torque_n_m: f64,
+        controls: PlanarStokesControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(PlanarStokesState, PlanarStokesStep), PlanarStokesError> {
         poll(&mut cancelled)?;
         let dt = timestep_s;
         let time = self.state.time_s + dt;
@@ -688,13 +723,13 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarStokesMotion<'s, 'm, 'a, F> {
         }
         let accepted_velocity = flow.velocity_dofs().to_vec();
         poll(&mut cancelled)?;
-        self.state = PlanarStokesState {
+        let state = PlanarStokesState {
             body,
             velocity: accepted_velocity,
             coordinates: q1,
             time_s: time,
         };
-        Ok(PlanarStokesStep {
+        let step = PlanarStokesStep {
             flow,
             boundary_load: load,
             momentum,
@@ -716,6 +751,144 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarStokesMotion<'s, 'm, 'a, F> {
             force_residual_n: [residual[0], residual[1]],
             torque_residual_n_m: residual[2],
             mechanical_work_residual_j: work_residual,
+        };
+        Ok((state, step))
+    }
+
+    /// Advance planar flow/body motion and deposit its bulk strain heat.
+    ///
+    /// The same fixed-reference triangular-prism map as the guided path binds
+    /// the original finite thermal cells: geometry, density-derived mass and
+    /// clocks must match. Each cell retains its authored caloric law, sources,
+    /// reservoirs and contacts. The caller must bind the same physical fluid's
+    /// caloric law; a frozen transport snapshot alone cannot establish that.
+    ///
+    /// Heat is `dt * depth * integral(2 mu D:D)` from the actual accepted
+    /// endpoint, held during native thermal substeps. This is a first-order,
+    /// one-way split without thermal advection or viscosity feedback. Resolve
+    /// the approximation by refining both timesteps. Body dashpots, mechanical
+    /// work and numerical losses are not thermal sources.
+    ///
+    /// # Errors
+    /// Admission, motion, caloric-domain, budget and cancellation failures leave
+    /// fluid velocity, body momentum/pose, thermal state and both clocks intact.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_heating(
+        &mut self,
+        thermal: &mut DepositionSimulation<'_>,
+        cells: StokesThermalCells<'_>,
+        timestep_s: f64,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        exterior: &[MaterialStokesBoundary<'_>],
+        pressure_offsets_pa: &[Option<f64>],
+        external_force_n: [f64; 2],
+        external_torque_n_m: f64,
+        controls: PlanarStokesControls,
+        thermal_config: StepConfig,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PlanarStokesHeatStep, PlanarStokesHeatError> {
+        self.step_heating(
+            thermal, cells, None, timestep_s, force_density, exterior,
+            pressure_offsets_pa, external_force_n, external_torque_n_m, controls,
+            thermal_config, cancelled,
+        )
+    }
+
+    /// Also deposit native Navier-slip loss with an explicit fluid/wall split.
+    ///
+    /// Every exterior Navier-slip edge, including a perfect-slip edge, needs
+    /// exactly one route to an active wall cell outside the fluid map. Moving
+    /// body edges remain no-slip and cannot be routed. Bulk and slip heating use
+    /// the same accepted flow; material and boundary callbacks are not queried
+    /// again. All admission and approximation limits of
+    /// [`Self::step_with_heating`] apply.
+    ///
+    /// # Errors
+    /// Invalid/missing routes, original solver or thermal failures and
+    /// cancellation preserve every accepted owner, including late refusals.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_slip_heating(
+        &mut self,
+        thermal: &mut DepositionSimulation<'_>,
+        cells: StokesThermalCells<'_>,
+        routes: &[StokesSlipHeatRoute],
+        timestep_s: f64,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        exterior: &[MaterialStokesBoundary<'_>],
+        pressure_offsets_pa: &[Option<f64>],
+        external_force_n: [f64; 2],
+        external_torque_n_m: f64,
+        controls: PlanarStokesControls,
+        thermal_config: StepConfig,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PlanarStokesHeatStep, PlanarStokesHeatError> {
+        self.step_heating(
+            thermal, cells, Some(routes), timestep_s, force_density, exterior,
+            pressure_offsets_pa, external_force_n, external_torque_n_m, controls,
+            thermal_config, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_heating(
+        &mut self,
+        thermal: &mut DepositionSimulation<'_>,
+        cells: StokesThermalCells<'_>,
+        routes: Option<&[StokesSlipHeatRoute]>,
+        timestep_s: f64,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        exterior: &[MaterialStokesBoundary<'_>],
+        pressure_offsets_pa: &[Option<f64>],
+        external_force_n: [f64; 2],
+        external_torque_n_m: f64,
+        controls: PlanarStokesControls,
+        thermal_config: StepConfig,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PlanarStokesHeatStep, PlanarStokesHeatError> {
+        poll(&mut cancelled)?;
+        let binding = StokesHeatBinding {
+            mesh: self.system.mesh,
+            density_kg_m3: self.fluid.transport().density_kg_m3(),
+            depth_m: self.config.depth_m,
+            time_s: self.state.time_s,
+        };
+        binding.check_thermal_cells(thermal, cells, &mut cancelled)?;
+        let routes = match routes {
+            Some(routes) => binding.check_slip_heat_routes(
+                thermal, cells, &self.edges, exterior, routes, &mut cancelled,
+            )?,
+            None => std::collections::BTreeMap::new(),
+        };
+        let (state, motion) = self.propose_step(
+            timestep_s,
+            force_density,
+            exterior,
+            pressure_offsets_pa,
+            external_force_n,
+            external_torque_n_m,
+            controls,
+            &mut cancelled,
+        )?;
+        let (candidate, audit, heat_j) = binding.advance_heat(
+            thermal,
+            cells,
+            &routes,
+            &motion.flow,
+            pressure_offsets_pa,
+            timestep_s,
+            state.time_s,
+            motion.bulk_viscous_dissipation_j,
+            thermal_config,
+            &mut cancelled,
+        )?;
+        poll(&mut cancelled)?;
+        self.state = state;
+        *thermal = candidate;
+        Ok(PlanarStokesHeatStep {
+            motion,
+            thermal: audit,
+            deposited_viscous_heat_j: heat_j[0],
+            deposited_slip_heat_j: heat_j[1],
         })
     }
 }

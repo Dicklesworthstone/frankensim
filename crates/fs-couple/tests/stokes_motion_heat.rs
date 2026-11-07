@@ -1,5 +1,8 @@
 //! Physical Stokes strain heat reaches the same finite thermal state atomically.
 
+#[path = "stokes_motion_heat/planar.rs"]
+mod planar;
+
 use fs_couple::stokes_motion::heating::{
     GuidedStokesHeatError, StokesSlipHeatRoute, StokesThermalCells,
 };

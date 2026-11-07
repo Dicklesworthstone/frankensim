@@ -7,15 +7,19 @@
 //! pressure work, temperature-dependent viscosity or global passivity claim.
 //! An explicit wall route also deposits the accepted Navier-slip dissipation.
 //! Numerical flow damping and body dashpots are not deposited.
+//! Guided and planar motion share cell admission, slip partition and thermal
+//! stepping. Each publishes its fluid, body and heat histories together.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use fs_flux::{MaterialFluxError, MaterialStokesSolution, TriMesh};
 use fs_material::fluid_transport::FluidTransport;
 use fs_thermal::enthalpy::{
     CellId, DepositionError, DepositionObserver, DepositionSimulation, EnergyAudit, Event,
     StepConfig,
 };
 
+use super::planar::{PlanarStokesError, PlanarStokesStep};
 use super::{
     GuidedStokesControls, GuidedStokesError, GuidedStokesMotion, GuidedStokesStep,
     MaterialStokesBoundary, nonnegative, poll, positive,
@@ -89,6 +93,94 @@ pub struct GuidedStokesHeatStep {
     /// Physical interfacial Navier-slip heat supplied to fluid and wall cells [J].
     /// Zero for `step_with_heating`. Already included in `thermal.external_heat_j`.
     pub deposited_slip_heat_j: f64,
+}
+
+/// A refused planar fluid/body/thermal step preserves every accepted owner.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PlanarStokesHeatError {
+    /// Incomplete, ambiguous, geometrically inconsistent or unsynchronized map.
+    Binding(&'static str),
+    /// Original planar flow/body refusal, including composition cancellation.
+    Motion(PlanarStokesError),
+    /// Original thermal material, budget, energy or cancellation refusal.
+    Thermal(DepositionError),
+}
+
+impl std::fmt::Display for PlanarStokesHeatError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "planar Stokes thermal coupling refusal: {self:?}")
+    }
+}
+impl std::error::Error for PlanarStokesHeatError {}
+impl From<PlanarStokesError> for PlanarStokesHeatError {
+    fn from(error: PlanarStokesError) -> Self {
+        Self::Motion(error)
+    }
+}
+impl From<DepositionError> for PlanarStokesHeatError {
+    fn from(error: DepositionError) -> Self {
+        Self::Thermal(error)
+    }
+}
+
+/// Original planar momentum and finite thermal receipts at one accepted time.
+pub struct PlanarStokesHeatStep {
+    /// Original planar flow/body endpoint and its separate work accounts.
+    pub motion: PlanarStokesStep,
+    /// Native thermal audit, including viscous heat and all authored sources.
+    pub thermal: EnergyAudit,
+    /// Physical bulk heat supplied during native thermal substeps [J].
+    /// Already included in `thermal.external_heat_j`; never add it twice.
+    pub deposited_viscous_heat_j: f64,
+    /// Physical Navier-slip heat supplied to fluid and wall cells [J].
+    /// Zero for `step_with_heating`; included in `thermal.external_heat_j`.
+    pub deposited_slip_heat_j: f64,
+}
+
+// Shared thermal failures retain each motion owner's original public error.
+pub(super) enum StokesHeatFailure {
+    Binding(&'static str),
+    Flow(MaterialFluxError),
+    Thermal(DepositionError),
+    Cancelled,
+}
+impl From<DepositionError> for StokesHeatFailure {
+    fn from(error: DepositionError) -> Self {
+        Self::Thermal(error)
+    }
+}
+impl From<MaterialFluxError> for StokesHeatFailure {
+    fn from(error: MaterialFluxError) -> Self {
+        Self::Flow(error)
+    }
+}
+impl From<StokesHeatFailure> for GuidedStokesHeatError {
+    fn from(error: StokesHeatFailure) -> Self {
+        match error {
+            StokesHeatFailure::Binding(message) => Self::Binding(message),
+            StokesHeatFailure::Flow(error) => Self::Motion(GuidedStokesError::Flow(error)),
+            StokesHeatFailure::Thermal(error) => Self::Thermal(error),
+            StokesHeatFailure::Cancelled => Self::Motion(GuidedStokesError::Cancelled),
+        }
+    }
+}
+impl From<StokesHeatFailure> for PlanarStokesHeatError {
+    fn from(error: StokesHeatFailure) -> Self {
+        match error {
+            StokesHeatFailure::Binding(message) => Self::Binding(message),
+            StokesHeatFailure::Flow(error) => Self::Motion(PlanarStokesError::Flow(error)),
+            StokesHeatFailure::Thermal(error) => Self::Thermal(error),
+            StokesHeatFailure::Cancelled => Self::Motion(PlanarStokesError::Cancelled),
+        }
+    }
+}
+
+/// Frozen geometry, transport and start clock, without a mutable physical owner.
+pub(super) struct StokesHeatBinding<'m> {
+    pub(super) mesh: &'m TriMesh,
+    pub(super) density_kg_m3: f64,
+    pub(super) depth_m: f64,
+    pub(super) time_s: f64,
 }
 
 impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
@@ -205,11 +297,17 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<GuidedStokesHeatStep, GuidedStokesHeatError> {
         poll(&mut cancelled)?;
-        self.check_thermal_cells(thermal, cells, &mut cancelled)?;
+        let binding = StokesHeatBinding {
+            mesh: self.system.mesh,
+            density_kg_m3: self.fluid.transport().density_kg_m3(),
+            depth_m: self.config.depth_m,
+            time_s: self.state.time_s,
+        };
+        binding.check_thermal_cells(thermal, cells, &mut cancelled)?;
         let routes = match routes {
-            Some(routes) => {
-                self.check_slip_heat_routes(thermal, cells, exterior, routes, &mut cancelled)?
-            }
+            Some(routes) => binding.check_slip_heat_routes(
+                thermal, cells, &self.edges, exterior, routes, &mut cancelled,
+            )?,
             None => BTreeMap::new(),
         };
         let (state, motion) = self.propose_step(
@@ -221,22 +319,61 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
             controls,
             &mut cancelled,
         )?;
+        let (candidate, audit, heat_j) = binding.advance_heat(
+            thermal,
+            cells,
+            &routes,
+            &motion.flow,
+            pressure_offsets_pa,
+            timestep_s,
+            state.time_s,
+            motion.bulk_viscous_dissipation_j,
+            thermal_config,
+            &mut cancelled,
+        )?;
+        poll(&mut cancelled)?;
+        self.state = state;
+        *thermal = candidate;
+        Ok(GuidedStokesHeatStep {
+            motion,
+            thermal: audit,
+            deposited_viscous_heat_j: heat_j[0],
+            deposited_slip_heat_j: heat_j[1],
+        })
+    }
+}
+
+impl StokesHeatBinding<'_> {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn advance_heat<'a>(
+        &self,
+        thermal: &DepositionSimulation<'a>,
+        cells: StokesThermalCells<'_>,
+        routes: &BTreeMap<usize, StokesSlipHeatRoute>,
+        flow: &MaterialStokesSolution,
+        pressure_offsets_pa: &[Option<f64>],
+        timestep_s: f64,
+        end_time_s: f64,
+        bulk_viscous_heat_j: f64,
+        thermal_config: StepConfig,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(DepositionSimulation<'a>, EnergyAudit, [f64; 2]), StokesHeatFailure> {
         let mut source = ViscousHeat {
             watts: BTreeMap::new(),
             heat_j: [0.0; 2],
             supplied_heat_j: 0.0,
         };
-        let heating = motion.flow.viscous_dissipation().cell_heating_w_m3();
+        let heating = flow.viscous_dissipation().cell_heating_w_m3();
         if heating.len() != cells.triangle_cells.len() {
-            return Err(GuidedStokesHeatError::Binding(
+            return Err(StokesHeatFailure::Binding(
                 "incomplete native strain field",
             ));
         }
         for (index, (&id, &rate)) in cells.triangle_cells.iter().zip(heating).enumerate() {
             if index % 256 == 0 {
-                poll(&mut cancelled)?;
+                heat_poll(cancelled)?;
             }
-            let watts = rate * self.system.mesh.areas[index] * self.config.depth_m;
+            let watts = rate * self.mesh.areas[index] * self.depth_m;
             if !nonnegative(watts) {
                 return Err(DepositionError::Arithmetic.into());
             }
@@ -245,14 +382,12 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
         let mut slip_power_w = 0.0;
         for (index, (&edge, route)) in routes.iter().enumerate() {
             if index % 256 == 0 {
-                poll(&mut cancelled)?;
+                heat_poll(cancelled)?;
             }
-            let loss = motion
-                .flow
-                .boundary_loads(&[edge], [0.0; 2], pressure_offsets_pa)
-                .map_err(GuidedStokesError::Flow)?
+            let loss = flow
+                .boundary_loads(&[edge], [0.0; 2], pressure_offsets_pa)?
                 .slip_dissipation_w_per_m;
-            let watts = loss * self.config.depth_m;
+            let watts = loss * self.depth_m;
             if !nonnegative(watts) || (loss > 0.0 && watts == 0.0) {
                 return Err(DepositionError::Arithmetic.into());
             }
@@ -271,13 +406,13 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
             {
                 return Err(DepositionError::Arithmetic.into());
             }
-            let fluid_cell = cells.triangle_cells[self.system.mesh.edges[edge].tris.0];
+            let fluid_cell = cells.triangle_cells[self.mesh.edges[edge].tris.0];
             source.add_slip(fluid_cell, fluid_w)?;
             source.add_slip(route.wall_cell, wall_w)?;
             slip_power_w += watts;
         }
         let slip_heat_j = timestep_s * slip_power_w;
-        let expected_heat_j = motion.bulk_viscous_dissipation_j + slip_heat_j;
+        let expected_heat_j = bulk_viscous_heat_j + slip_heat_j;
         if !nonnegative(slip_heat_j)
             || !nonnegative(expected_heat_j)
             || (slip_power_w > 0.0 && slip_heat_j == 0.0)
@@ -285,7 +420,7 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
             return Err(DepositionError::Arithmetic.into());
         }
         let (candidate, source, audit) =
-            thermal.advance_observed(&source, state.time_s, thermal_config, || {
+            thermal.advance_observed(&source, end_time_s, thermal_config, || {
                 if cancelled() {
                     Err(DepositionError::Cancelled)
                 } else {
@@ -295,111 +430,104 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
         // This checks conversion and substep integration, not a new fluid
         // energy theorem. Thermal storage has its own original energy gate.
         let residual = [
-            source.heat_j[0] - motion.bulk_viscous_dissipation_j,
+            source.heat_j[0] - bulk_viscous_heat_j,
             source.heat_j[1] - slip_heat_j,
             source.supplied_heat_j - expected_heat_j,
         ]
         .into_iter()
         .max_by(|a, b| a.abs().total_cmp(&b.abs()))
         .unwrap_or(0.0);
-        if candidate.time_s() != state.time_s || residual.abs() > thermal_config.energy_tolerance_j
+        if candidate.time_s() != end_time_s || residual.abs() > thermal_config.energy_tolerance_j
         {
             return Err(DepositionError::EnergyBalance(residual).into());
         }
-        poll(&mut cancelled)?;
-        self.state = state;
-        *thermal = candidate;
-        Ok(GuidedStokesHeatStep {
-            motion,
-            thermal: audit,
-            deposited_viscous_heat_j: source.heat_j[0],
-            deposited_slip_heat_j: source.heat_j[1],
-        })
+        Ok((candidate, audit, source.heat_j))
     }
 
-    fn check_slip_heat_routes(
+    pub(super) fn check_slip_heat_routes(
         &self,
         thermal: &DepositionSimulation<'_>,
         cells: StokesThermalCells<'_>,
+        body_edges: &[usize],
         exterior: &[MaterialStokesBoundary<'_>],
         routes: &[StokesSlipHeatRoute],
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<BTreeMap<usize, StokesSlipHeatRoute>, GuidedStokesHeatError> {
+    ) -> Result<BTreeMap<usize, StokesSlipHeatRoute>, StokesHeatFailure> {
         let mut slip_edges = BTreeSet::new();
         for (index, boundary) in exterior.iter().enumerate() {
             if index % 256 == 0 {
-                poll(cancelled)?;
+                heat_poll(cancelled)?;
             }
             if let MaterialStokesBoundary::NavierSlip { edge, .. } = boundary
                 && !slip_edges.insert(*edge)
             {
-                return Err(GuidedStokesHeatError::Binding(
+                return Err(StokesHeatFailure::Binding(
                     "duplicate Navier-slip boundary",
                 ));
             }
         }
         let fluid_cells: BTreeSet<_> = cells.triangle_cells.iter().copied().collect();
-        let body_edges: BTreeSet<_> = self.edges.iter().copied().collect();
+        let body_edges: BTreeSet<_> = body_edges.iter().copied().collect();
         let mut admitted = BTreeMap::new();
         for (index, route) in routes.iter().enumerate() {
             if index % 256 == 0 {
-                poll(cancelled)?;
+                heat_poll(cancelled)?;
             }
             if !slip_edges.remove(&route.edge)
-                || route.edge >= self.system.mesh.edges.len()
-                || !self.system.mesh.is_boundary(route.edge)
+                || route.edge >= self.mesh.edges.len()
+                || !self.mesh.is_boundary(route.edge)
                 || body_edges.contains(&route.edge)
                 || !route.fluid_heat_fraction.is_finite()
                 || !(0.0..=1.0).contains(&route.fluid_heat_fraction)
                 || !thermal.cells().contains_key(&route.wall_cell)
                 || fluid_cells.contains(&route.wall_cell)
             {
-                return Err(GuidedStokesHeatError::Binding(
+                return Err(StokesHeatFailure::Binding(
                     "unique Navier-slip edge, active distinct wall receiver and fraction in [0,1] required",
                 ));
             }
             admitted.insert(route.edge, *route);
         }
         if !slip_edges.is_empty() {
-            return Err(GuidedStokesHeatError::Binding(
+            return Err(StokesHeatFailure::Binding(
                 "every Navier-slip edge needs a heat route",
             ));
         }
         Ok(admitted)
     }
 
-    fn check_thermal_cells(
+    pub(super) fn check_thermal_cells(
         &self,
         thermal: &DepositionSimulation<'_>,
         cells: StokesThermalCells<'_>,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(), GuidedStokesHeatError> {
-        let mesh = self.system.mesh;
-        let depth = self.config.depth_m;
+    ) -> Result<(), StokesHeatFailure> {
+        let mesh = self.mesh;
+        let depth = self.depth_m;
         let end_z = cells.plane_z_m + depth;
-        if thermal.time_s() != self.state.time_s
+        if thermal.time_s() != self.time_s
             || cells.triangle_cells.len() != mesh.tris.len()
             || !cells.plane_z_m.is_finite()
             || !end_z.is_finite()
             || !same(end_z - cells.plane_z_m, depth)
         {
-            return Err(GuidedStokesHeatError::Binding(
+            return Err(StokesHeatFailure::Binding(
                 "matching clocks, complete triangle map and representable extrusion required",
             ));
         }
         let mut seen = std::collections::BTreeSet::new();
         for (index, &id) in cells.triangle_cells.iter().enumerate() {
             if index % 256 == 0 {
-                poll(cancelled)?;
+                heat_poll(cancelled)?;
             }
             let cell = thermal
                 .cells()
                 .get(&id)
-                .ok_or(GuidedStokesHeatError::Binding(
+                .ok_or(StokesHeatFailure::Binding(
                     "inactive thermal triangle receiver",
                 ))?;
             if !seen.insert(id) {
-                return Err(GuidedStokesHeatError::Binding(
+                return Err(StokesHeatFailure::Binding(
                     "duplicate thermal triangle receiver",
                 ));
             }
@@ -407,7 +535,7 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
             let start = [x, y, cells.plane_z_m];
             let end = [x, y, end_z];
             let volume = mesh.areas[index] * depth;
-            let mass = self.fluid.transport().density_kg_m3() * volume;
+            let mass = self.density_kg_m3 * volume;
             let perimeter: f64 = mesh.tri_edges[index]
                 .iter()
                 .map(|&(edge, _)| mesh.edges[edge].len)
@@ -423,11 +551,19 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
                     same(cell.geometry.start_m[i], start[i]) && same(cell.geometry.end_m[i], end[i])
                 })
             {
-                return Err(GuidedStokesHeatError::Binding(
+                return Err(StokesHeatFailure::Binding(
                     "thermal geometry and mass must match the original fluid triangle prism",
                 ));
             }
         }
+        Ok(())
+    }
+}
+
+fn heat_poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), StokesHeatFailure> {
+    if cancelled() {
+        Err(StokesHeatFailure::Cancelled)
+    } else {
         Ok(())
     }
 }
