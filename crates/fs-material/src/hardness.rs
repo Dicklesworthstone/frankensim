@@ -9,6 +9,9 @@
 /// Original hardness evaluated along the native accumulated plastic history.
 pub mod plastic_history;
 
+/// Original hardness at material depths exposed by actual surface removal.
+pub mod depth;
+
 /// Original hardness at accepted native thermoplastic temperature/history.
 pub mod thermal_history;
 

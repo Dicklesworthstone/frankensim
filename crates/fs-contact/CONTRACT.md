@@ -3487,3 +3487,34 @@ global path-error bound or uniqueness theorem for arbitrary empirical k(p).
 The explicit initial pressure guess and existing cumulative physical envelopes
 remain binding. G1/G3 tests use independent large-step scalar, maintained-load,
 finite-spring and nonlinear local-coefficient equations plus atomic refusals.
+
+## Original hardness exposed by local material removal
+
+`plastic_source::depth_wear::SourceDepthHardnessWear` retains two original
+test-qualified H(depth) profiles, the fixed original ordered interface and k_A,
+k_B, homogeneous elasticity, complete native contact history, per-body material
+recession and inventories in one immutable accepted owner. Only actual removal
+advances original material depth. Relative plastic indentation remains entirely
+in its native owner and is never assigned to either body. Each cell wears with
+its own body's H_i(z_i); the contact pressure cap is min(H_A(z_A), H_B(z_B)).
+
+The first-order held-approach step holds beginning pressure, coefficients and
+local hardness during prescribed actual unsigned slip. A native heterogeneous-H
+Archard quadrature updates each original inventory once, with compensated volume
+closure against retained body recession. Original native recession is followed
+by cap refresh, sharing the prepared compliance kernel. Both original continuation
+receipts, including their signed parameter work and additional plastic work,
+accompany the complete successor; neither parameter work nor removal is labeled
+heat. Every continuation obeys the original plastic/footprint limits and the
+remaining homogeneous elastic depth after actual wear. Source, arithmetic,
+geometry or cancellation refusal publishes no partial history or inventory.
+
+Prepared continuous source profiles avoid source queries during stepping.
+External conditions and elasticity are fixed; this owner supplies no layered
+kernel, coating fracture, annealing, debris, friction closure or implicit wear
+integration. Physical slip refinement is required as hardness/pressure change.
+Synthetic G1/G3 checks cover independent graded-hardness wear integrals and
+first-order refinement, separate local denominators, both native work accounts,
+constant-profile equivalence in Dense/MatrixFree/FFT lanes and exact no-op
+histories. G0/G4 checks cover original claim/test ownership, interior support
+holes, negative hardness, actual body-depth limits and late refusal atomicity.

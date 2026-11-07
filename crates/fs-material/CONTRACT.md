@@ -575,6 +575,19 @@ Focused G0/G3 tests exercise distinct tests under the same property name,
 temperature refresh of original claims, full-bundle retention, exact context,
 changed-card/coverage refusal, and the declared-versus-typed admission boundary.
 
+`hardness::depth::ResolvedDepthHardness` prepares an exact original indentation
+test along the dimensional `exposed-material-depth` coordinate, from the
+reference surface to an explicit supported depth. Every other coordinate is a
+fixed external condition. Native source-line preparation checks continuous
+support and positive interior breakpoints, refusing holes, discrete-only data
+and extrapolation. The complete original support receipts remain available;
+ordinary positive piecewise-affine evaluation uses binary search without source
+queries or allocations. Typed endpoint export still requires the original card
+and pinned claim. Depth means original material exposed by actual removal; it is
+not indenter penetration, relative plastic indentation, inferred case depth,
+layered elasticity or a coating-failure law. Synthetic contact/wear tests check
+source holes, exact tests, graded-profile refinement and zero-depth endpoints.
+
 ## Bulk brittle crack bands through the original cohesive history
 
 `brittle::BrittleCrackBand` composes isotropic small-strain elasticity with the

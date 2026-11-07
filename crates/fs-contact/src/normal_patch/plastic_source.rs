@@ -10,6 +10,8 @@
 //! Material state and external conditions are fixed for each owner. Explicit
 //! thermal and wear continuations retain the original irreversible history.
 
+/// Original material-depth hardness exposed by local wear and cap refresh.
+pub mod depth_wear;
 /// Finite loading-device stiffness with original material and geometry bounds.
 pub mod drive;
 /// Prescribed normal force with original material and applicability bounds.
@@ -187,29 +189,7 @@ impl SourcePlasticContact {
         hardness: &[IndentationHardnessStatePoint; 2],
         envelope: PlasticContactEnvelope,
     ) -> Result<(), SourcePlasticContactError> {
-        if normal.adhesion_energy_j_per_m2() != 0.0
-            || normal
-                .elastic()
-                .interface()
-                .card()
-                .context()
-                .third_body
-                .is_some()
-        {
-            return Err(SourcePlasticContactError::Invalid(
-                "pressure saturation requires a nonadhesive dry interface without a third body",
-            ));
-        }
-        if normal
-            .interface_state()
-            .properties()
-            .iter()
-            .any(|property| !property.is_static_at_fixed_external_conditions())
-        {
-            return Err(SourcePlasticContactError::Invalid(
-                "pressure saturation requires static interface data at fixed external conditions",
-            ));
-        }
+        validate_fixed_normal(normal)?;
         let original = [
             normal.elastic().surface_a_state().resolved(),
             normal.elastic().surface_b_state().resolved(),
@@ -231,21 +211,7 @@ impl SourcePlasticContact {
                 ));
             }
         }
-        if !envelope.maximum_approach_m.is_finite()
-            || envelope.maximum_approach_m <= 0.0
-            || !envelope.maximum_plastic_depth_m.is_finite()
-            || envelope.maximum_plastic_depth_m < 0.0
-            || envelope
-                .half_space_depth_m
-                .iter()
-                .chain(envelope.maximum_patch_to_depth.iter())
-                .any(|value| !value.is_finite() || *value <= 0.0)
-        {
-            return Err(SourcePlasticContactError::Invalid(
-                "finite positive approach, depths, and ratios; nonnegative permanent depth bound",
-            ));
-        }
-        Ok(())
+        validate_envelope(envelope)
     }
 
     // The private callers have already admitted the sources and compiled the
@@ -343,49 +309,108 @@ impl SourcePlasticContact {
         candidate: &FiniteGapPlasticState,
         cx: &Cx<'_>,
     ) -> Result<(), SourcePlasticContactError> {
-        if candidate.owner_identity() != self.model.identity() {
-            return Err(FiniteGapPlasticError::ForeignState.into());
-        }
-        within(
-            "approach [m]",
-            candidate.approach_m(),
-            self.envelope.maximum_approach_m,
-        )?;
-        let maximum_depth = candidate
-            .plastic_depth_m()
-            .iter()
-            .copied()
-            .fold(0.0_f64, f64::max);
-        within(
-            "permanent relative indentation [m]",
-            maximum_depth,
-            self.envelope.maximum_plastic_depth_m,
-        )?;
-
-        // Include the farthest corner of each loaded cell. An area-equivalent
-        // disk would underestimate separated or elongated contact footprints.
-        let grid = self.model.config().grid;
-        let mut patch_radius = 0.0_f64;
-        for (index, pressure) in candidate.pressure_pa().iter().enumerate() {
-            if *pressure > 0.0 {
-                let x = (index % grid.cells_x) as f64 + 0.5 - 0.5 * grid.cells_x as f64;
-                let y = (index / grid.cells_x) as f64 + 0.5 - 0.5 * grid.cells_y as f64;
-                let corner_x = (x.abs() + 0.5) * grid.cell_width_m;
-                let corner_y = (y.abs() + 0.5) * grid.cell_depth_m;
-                patch_radius = patch_radius.max(corner_x.hypot(corner_y));
-            }
-        }
-        for side in 0..2 {
-            within(
-                "patch radius / homogeneous depth",
-                patch_radius / self.envelope.half_space_depth_m[side],
-                self.envelope.maximum_patch_to_depth[side],
-            )?;
-        }
-        cx.checkpoint()
-            .map_err(|_| FiniteGapPlasticError::Contact(super::FiniteGapContactError::Cancelled))?;
-        Ok(())
+        admit_native_candidate(&self.model, self.envelope, candidate, cx).map(|_| ())
     }
+}
+
+fn validate_fixed_normal(
+    normal: &BoundNormalInterfaceState,
+) -> Result<(), SourcePlasticContactError> {
+    if normal.adhesion_energy_j_per_m2() != 0.0
+        || normal
+            .elastic()
+            .interface()
+            .card()
+            .context()
+            .third_body
+            .is_some()
+    {
+        return Err(SourcePlasticContactError::Invalid(
+            "pressure saturation requires a nonadhesive dry interface without a third body",
+        ));
+    }
+    if normal
+        .interface_state()
+        .properties()
+        .iter()
+        .any(|property| !property.is_static_at_fixed_external_conditions())
+    {
+        return Err(SourcePlasticContactError::Invalid(
+            "pressure saturation requires static interface data at fixed external conditions",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_envelope(envelope: PlasticContactEnvelope) -> Result<(), SourcePlasticContactError> {
+    if !envelope.maximum_approach_m.is_finite()
+        || envelope.maximum_approach_m <= 0.0
+        || !envelope.maximum_plastic_depth_m.is_finite()
+        || envelope.maximum_plastic_depth_m < 0.0
+        || envelope
+            .half_space_depth_m
+            .iter()
+            .chain(envelope.maximum_patch_to_depth.iter())
+            .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err(SourcePlasticContactError::Invalid(
+            "finite positive approach, depths, and ratios; nonnegative permanent depth bound",
+        ));
+    }
+    Ok(())
+}
+
+// One physical envelope for uniform hardness and exposed-depth hardness.
+// Return the admitted farthest-cell radius so a wear owner can also check the
+// remaining original homogeneous ELASTIC depth without rescanning the grid.
+fn admit_native_candidate(
+    model: &FiniteGapPlasticModel,
+    envelope: PlasticContactEnvelope,
+    candidate: &FiniteGapPlasticState,
+    cx: &Cx<'_>,
+) -> Result<f64, SourcePlasticContactError> {
+    if candidate.owner_identity() != model.identity() {
+        return Err(FiniteGapPlasticError::ForeignState.into());
+    }
+    within(
+        "approach [m]",
+        candidate.approach_m(),
+        envelope.maximum_approach_m,
+    )?;
+    let maximum_depth = candidate
+        .plastic_depth_m()
+        .iter()
+        .copied()
+        .fold(0.0_f64, f64::max);
+    within(
+        "permanent relative indentation [m]",
+        maximum_depth,
+        envelope.maximum_plastic_depth_m,
+    )?;
+
+    // Include the farthest corner of each loaded cell. An area-equivalent
+    // disk would underestimate separated or elongated contact footprints.
+    let grid = model.config().grid;
+    let mut patch_radius = 0.0_f64;
+    for (index, pressure) in candidate.pressure_pa().iter().enumerate() {
+        if *pressure > 0.0 {
+            let x = (index % grid.cells_x) as f64 + 0.5 - 0.5 * grid.cells_x as f64;
+            let y = (index / grid.cells_x) as f64 + 0.5 - 0.5 * grid.cells_y as f64;
+            let corner_x = (x.abs() + 0.5) * grid.cell_width_m;
+            let corner_y = (y.abs() + 0.5) * grid.cell_depth_m;
+            patch_radius = patch_radius.max(corner_x.hypot(corner_y));
+        }
+    }
+    for side in 0..2 {
+        within(
+            "patch radius / homogeneous depth",
+            patch_radius / envelope.half_space_depth_m[side],
+            envelope.maximum_patch_to_depth[side],
+        )?;
+    }
+    cx.checkpoint()
+        .map_err(|_| FiniteGapPlasticError::Contact(super::FiniteGapContactError::Cancelled))?;
+    Ok(patch_radius)
 }
 
 fn within(quantity: &'static str, value: f64, limit: f64) -> Result<(), SourcePlasticContactError> {
