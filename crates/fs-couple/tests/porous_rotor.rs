@@ -1,4 +1,6 @@
 //! Native populations, finite polar inertia, and independently reconstructed wrenches.
+#[path = "porous_rotor/free_body.rs"]
+mod free_body;
 #[path = "porous_rotor/free_spherical.rs"]
 mod free_spherical;
 #[path = "porous_rotor/spherical.rs"]

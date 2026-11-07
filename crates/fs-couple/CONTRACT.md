@@ -4265,3 +4265,44 @@ original `new_shell` point remains the source observation owner; its complete
 energy must agree with the mapped reference energy. Preparation and comparison
 share an explicit work budget. No new eigensolve, approximate pole merge,
 branchwise constraint, damping fit or time integrator is introduced.
+
+## Oriented anisotropic porous-body momentum exchange
+
+`porous_momentum::free_body::FreePorousBody::new_with_support` binds centred
+spheres or body-aligned ellipsoids to the original D3Q19 fluid and finite rigid
+body. `step_candidate_with_principal_resistance` carries three nonnegative
+Darcy coefficients in the body's material axes and one isotropic Forchheimer
+coefficient. Native lattice force density uses physical fluid/skeleton slip;
+principal values are not accelerations or unscaled intrinsic permeabilities.
+The existing `free_spherical` module and `FreeSphericalPorousBody/Step` names
+remain aliases of this common owner, and the scalar sphere entry retains the
+native isotropic representation.
+
+Every six-impulse trial derives one geodesic midpoint attitude from the actual
+Cayley endpoints. That frame rotates both the cell-centre ellipsoid mask and
+the resistance tensor. The physical skeleton velocity remains the original
+work-conjugate COM velocity plus angular velocity crossed with the actual arm.
+Full dry inertia, its gyroscopic motion and the geometry/resistance axes remain
+independent. The original native flow solve supplies the reaction impulse and
+couple; its existing checks gate both participants' actual linear/angular
+momentum, midpoint work and nonnegative relative dissipation before publication.
+Incoming physical fluid momentum survives native force-frame rebinding when
+the material mask moves.
+
+Support dimensions, dry mass and inertia stay fixed. The enclosing sphere must
+fit within the closed stationary box at both endpoints, conservatively covering
+the straight COM segment and intervening rotations. The actual drag support is
+the oriented ellipsoid, not that bounding sphere. No excluded volume, interior
+fluid subtraction, porosity, thermal sink, moving impermeable wall, deformation,
+or subcell overlap model is inferred. Cell-centre mask discontinuities can
+require a smaller tick; failure or cancellation retains both original owners.
+Material axes are prepared once per trial, and the existing scratch grid and
+bounded native trial/cell work remain shared; no second integrator or per-cell
+matrix factorization is added.
+
+Seven focused native tests of the production support/frame code with original
+MBD vector/quaternion arithmetic pass. Three original-owner integration
+regressions specify anisotropic force/torque/work from independently reconstructed
+population velocities, scalar/sphere equivalence, and transactional refusal.
+Those complete coupled regressions remain unexecuted on the exhausted build host;
+no full-workspace or throughput claim is made.

@@ -12,7 +12,7 @@ impl Step<'_> {
         native_trials: usize,
         trial_cells: usize,
         gate: &CancelGate,
-    ) -> Result<FreeSphericalPorousStep, PorousMomentumError> {
+    ) -> Result<FreePorousStep, PorousMomentumError> {
         let m = self.motion;
         let c = self.controls.flow;
         let body = trial.mechanics.state_after;
@@ -151,13 +151,14 @@ impl Step<'_> {
             ));
         }
         poll(gate)?;
-        Ok(FreeSphericalPorousStep {
-            motion: FreeSphericalPorousBody {
+        Ok(FreePorousStep {
+            motion: FreePorousBody {
                 fluid,
                 body,
                 properties: m.properties,
                 units: m.units,
                 radius_m: m.radius_m,
+                support: m.support,
                 links: m.links.clone(),
                 cells: m.cells,
                 time_s: self.time_s,

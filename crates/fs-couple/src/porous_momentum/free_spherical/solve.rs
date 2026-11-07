@@ -5,10 +5,7 @@ use fs_lbm::d3q19::LinearResistance3;
 use fs_mbd::{Gravity, RigidBodyIntegrator, Wrench};
 
 impl Step<'_> {
-    pub(super) fn solve(
-        self,
-        gate: &CancelGate,
-    ) -> Result<FreeSphericalPorousStep, PorousMomentumError> {
+    pub(super) fn solve(self, gate: &CancelGate) -> Result<FreePorousStep, PorousMomentumError> {
         let c = self.controls.flow;
         let scratch = RefCell::new(self.motion.fluid.clone());
         let trials = Cell::new(0usize);
@@ -156,6 +153,12 @@ impl Step<'_> {
         if !lattice_origin.is_finite() {
             return Err(invalid("free porous midpoint origin is not representable"));
         }
+        // One prepared material frame per native trial. The Cayley endpoint
+        // rotation is shorter than pi; its geodesic half carries actual fixed
+        // body geometry and anisotropy without changing the work velocity.
+        let frame = midpoint_orientation(m.body.pose().orientation(), body.pose().orientation())?;
+        let support = PreparedSupport::new(m.support, frame);
+        let axes = support.resistance_axes(self.resistance);
         let [nx, ny, _] = m.fluid.dimensions();
         fluid.clone_from(&m.fluid);
         let exchange = fluid.step_with_darcy_forchheimer_and_wall_momentum(
@@ -165,11 +168,11 @@ impl Step<'_> {
                         + (dd(cell[i] as f64) + dd(0.5)) * dd(m.units.cell_size_m))
                     .to_f64()
                 }));
-                let inside = norm(arm) <= m.radius_m;
+                let inside = support.contains(arm);
                 let law = if inside {
                     self.resistance
                 } else {
-                    PorousRotorResistance::default()
+                    PrincipalPorousResistance::default()
                 };
                 let skeleton_velocity = if inside {
                     a(velocity.add(omega_world.cross(arm))).map(|u| u / self.units.velocity)
@@ -178,10 +181,10 @@ impl Step<'_> {
                 };
                 DarcyForchheimer3 {
                     linear: LinearResistance3 {
-                        principal: [law.darcy; 3],
+                        principal: law.darcy_principal,
+                        axes,
                         skeleton_velocity,
                         body_force: self.forcing[(z * ny + y) * nx + x],
-                        ..Default::default()
                     },
                     quadratic: law.forchheimer,
                 }

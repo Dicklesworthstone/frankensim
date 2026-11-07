@@ -15,8 +15,11 @@
 //! energy. No thermal store, heat partition, global energy theorem or trajectory
 //! error certificate is inferred. Resolve spatial and relaxation timescales.
 
+/// Unconstrained rigid porous supports with body-attached anisotropic resistance.
 #[path = "porous_momentum/free_spherical.rs"]
-pub mod free_spherical;
+pub mod free_body;
+/// Existing spherical entry points share the generalized finite-body owner.
+pub use free_body as free_spherical;
 #[path = "porous_momentum/rotor.rs"]
 pub mod rotor;
 #[path = "porous_momentum/spherical.rs"]
