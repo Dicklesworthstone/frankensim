@@ -14,6 +14,7 @@ use fs_solid::hyper3::plastic::porous::{FinitePorousTetError, FinitePorousTetSol
 use fs_solid::hyper3::plastic::{
     FinitePlasticLawField, FinitePlasticStepControls, FinitePlasticTetError,
 };
+use fs_solid::hyper3::pressure::{ClosedTetPressureSurface, TetPressure};
 use fs_solid::hyper3::{HyperTetError, HyperTetSettings};
 use fs_solid::linear3::TetAssemblyBudget;
 
@@ -198,6 +199,214 @@ fn force_driven_compaction_unloads_and_reloads_with_original_history_and_volume(
         near(heat, Y * alpha / 6.0, 4e-7);
         assert_eq!(solid.reference_nodes_m(), NODES);
         assert_eq!(solid.reference_tetrahedra(), TETS);
+    });
+}
+
+#[test]
+fn current_area_pressure_drives_permanent_compaction_and_exact_volume_work() {
+    with_cx(|cx, _| {
+        let material = law(A);
+        let surface =
+            ClosedTetPressureSurface::new(&NODES, &TETS, TetAssemblyBudget::standard(), 4, cx)
+                .unwrap();
+        let mut solid = FinitePorousTetSolid::try_new(
+            &NODES,
+            &TETS,
+            FinitePlasticLawField::Uniform(&material),
+            TetAssemblyBudget::standard(),
+            cx,
+        )
+        .unwrap();
+        let peak: f64 = 0.8;
+        let (alpha, plastic_j, peak_tau) = hydrostatic(peak);
+        let unloaded = plastic_j.cbrt();
+        let reloaded = (peak * unloaded).sqrt();
+        let mut old_stretch: f64 = 1.0;
+        for (index, (stretch, tau)) in [
+            (peak, peak_tau),
+            (unloaded, 0.0),
+            (reloaded, 0.5 * peak_tau),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // Cauchy pressure is -tau/J, whereas referential traction is
+            // tau/stretch. Confusing these gives a different compressed body.
+            let pressure_pa = -tau / stretch.powi(3);
+            let old_states = solid.element_states().to_vec();
+            let step = solid
+                .advance_with_pressure(
+                    &SUPPORTS,
+                    &[],
+                    [0.0; 3],
+                    &surface,
+                    pressure_pa,
+                    HyperTetSettings::default(),
+                    controls(),
+                    cx,
+                )
+                .unwrap();
+            let pressure = step.pressure.unwrap();
+            assert_eq!(solid.element_states(), old_states);
+            assert_eq!(step.energy.dead_load_endpoint_work_j, 0.0);
+            assert_eq!(step.energy.support_endpoint_work_j, 0.0);
+            for i in 0..9 {
+                near(
+                    step.solid.element_deformation()[0][i],
+                    if i % 4 == 0 { stretch } else { 0.0 },
+                    3e-8,
+                );
+            }
+            near(step.solid.element_states()[0].alpha, alpha, 3e-8);
+            near(step.solid.element_plastic_jacobians()[0], plastic_j, 3e-8);
+            near(step.solid.element_jacobians()[0], stretch.powi(3), 3e-8);
+            near(
+                pressure.work_j,
+                -pressure_pa * (stretch.powi(3) - old_stretch.powi(3)) / 6.0,
+                2e-7,
+            );
+            near(
+                pressure.endpoint_work_j,
+                -pressure_pa * stretch.powi(2) * (stretch - old_stretch) / 2.0,
+                2e-7,
+            );
+            near(step.energy.equilibrium_work_residual_j, 0.0, 2e-7);
+            near(
+                pressure.external_work_defect_j,
+                pressure.work_j
+                    - (step.energy.stored_after_j - step.energy.stored_before_j)
+                    - step.energy.plastic_dissipation_j,
+                2e-7,
+            );
+            near(
+                step.energy.plastic_dissipation_j,
+                if index == 0 { Y * alpha / 6.0 } else { 0.0 },
+                2e-7,
+            );
+            if index == 0 {
+                assert!(pressure.endpoint_work_correction_j > 0.1);
+            }
+            old_stretch = stretch;
+            solid = step.solid;
+        }
+    });
+}
+
+#[test]
+fn porous_pressure_patch_retains_support_work_and_refuses_late_without_mutation() {
+    with_cx(|cx, gate| {
+        let material = law(A);
+        let surface =
+            ClosedTetPressureSurface::new(&NODES, &TETS, TetAssemblyBudget::standard(), 4, cx)
+                .unwrap();
+        let solid = FinitePorousTetSolid::try_new(
+            &NODES,
+            &TETS,
+            FinitePlasticLawField::Uniform(&material),
+            TetAssemblyBudget::standard(),
+            cx,
+        )
+        .unwrap();
+        let target = affine(
+            &NODES,
+            [0.98, 0.0, 0.0, 0.0, 0.99, 0.0, 0.0, 0.0, 1.0],
+            [0.01, -0.02, 0.03],
+        );
+        let pressures = [3.0, 0.0, 0.0, 0.0];
+        let field = TetPressure::PerFace(&pressures);
+        let forces = [(3, -1.0)];
+        let mut strict = controls();
+        strict.maximum_endpoint_work_defect_j = 0.0;
+        let refused = solid
+            .advance_with_pressure(
+                &target,
+                &forces,
+                [0.0; 3],
+                &surface,
+                field,
+                HyperTetSettings::default(),
+                strict,
+                cx,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            refused,
+            FinitePorousTetError::Solid(FinitePlasticTetError::EnergyGate {
+                quantity: "porous pressure/constitutive endpoint integration defect",
+                ..
+            })
+        ));
+        let solve = || {
+            solid.advance_with_pressure(
+                &target,
+                &forces,
+                [0.0; 3],
+                &surface,
+                field,
+                HyperTetSettings::default(),
+                controls(),
+                cx,
+            )
+        };
+        let step = solve().unwrap();
+        let repeated = solve().unwrap();
+        assert_eq!(step.equilibrium, repeated.equilibrium);
+        assert_eq!(step.energy, repeated.energy);
+        assert_eq!(step.pressure, repeated.pressure);
+        let pressure = step.pressure.unwrap();
+        near(
+            pressure.work_j,
+            surface
+                .work_j(
+                    solid.displacement_m().as_flattened(),
+                    step.solid.displacement_m().as_flattened(),
+                    field,
+                    cx,
+                )
+                .unwrap(),
+            0.0,
+        );
+        near(
+            step.energy.dead_load_endpoint_work_j,
+            -step.solid.displacement_m()[1][0],
+            1e-15,
+        );
+        near(step.energy.equilibrium_work_residual_j, 0.0, 2e-7);
+        near(
+            pressure.external_work_defect_j,
+            step.energy.dead_load_endpoint_work_j
+                + step.energy.support_endpoint_work_j
+                + pressure.work_j
+                - step.energy.stored_after_j
+                - step.energy.plastic_dissipation_j,
+            2e-7,
+        );
+        assert_eq!(solid.displacement_m(), &[[0.0; 3]; 4]);
+        assert_eq!(solid.element_states()[0].alpha, 0.0);
+        let shifted = NODES.map(|x| [x[0] + 1.0, x[1], x[2]]);
+        let mismatched =
+            ClosedTetPressureSurface::new(&shifted, &TETS, TetAssemblyBudget::standard(), 4, cx)
+                .unwrap();
+        assert!(
+            solid
+                .advance_with_pressure(
+                    &target,
+                    &[],
+                    [0.0; 3],
+                    &mismatched,
+                    3.0,
+                    HyperTetSettings::default(),
+                    controls(),
+                    cx,
+                )
+                .is_err()
+        );
+        gate.request();
+        assert!(matches!(
+            solve().unwrap_err(),
+            FinitePorousTetError::Solid(FinitePlasticTetError::Native(HyperTetError::Cancelled))
+        ));
+        assert_eq!(solid.element_states()[0].alpha, 0.0);
     });
 }
 

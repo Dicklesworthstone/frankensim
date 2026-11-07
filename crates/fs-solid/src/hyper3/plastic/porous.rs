@@ -25,12 +25,14 @@ use fs_exec::Cx;
 use fs_material::plastic::finite::porous::{
     FinitePorous, FinitePorousError, FinitePorousMaterial, FinitePorousState, FrozenPorousTrial,
 };
+use fs_math::dd::Dd;
 
 use super::{
     AcceptedMotion, FinitePlasticLawField, FinitePlasticStepControls, FinitePlasticTetEnergy,
     FinitePlasticTetError, FinitePlasticTetState, IDENTITY, checkpoint, energy_gate, invalid,
     reference_size, validate_controls,
 };
+use crate::hyper3::pressure::{ClosedTetPressureSurface, TetPressure};
 use crate::hyper3::{
     HyperTetError, HyperTetProblem, HyperTetSettings, HyperTetSolution, HyperelasticLawField,
 };
@@ -58,6 +60,25 @@ pub struct FinitePorousTetStep<'a, L: FinitePorousMaterial = FinitePorous> {
     pub equilibrium: HyperTetSolution,
     /// Physical yield heat, retained storage and numerical work remain distinct.
     pub energy: FinitePlasticTetEnergy,
+    /// Present for an explicitly held current-area pressure load. The common
+    /// energy's equilibrium residual includes this pressure's endpoint work;
+    /// its dead-load field continues to contain only referential dead loads.
+    pub pressure: Option<FinitePorousPressureEnergy>,
+}
+
+/// Held-pressure work, separate from constitutive heat and endpoint quadrature.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FinitePorousPressureEnergy {
+    /// Current endpoint pressure force dotted with the nodal increment [J].
+    pub endpoint_work_j: f64,
+    /// Original pressure owner's work [J]. Uniform pressure uses -p delta V;
+    /// a per-face field uses the declared straight displacement segment.
+    pub work_j: f64,
+    /// `work_j - endpoint_work_j`, a signed geometric quadrature correction.
+    pub endpoint_work_correction_j: f64,
+    /// Dead/support endpoint work plus exact held-pressure work, minus the
+    /// storage change and physical plastic loss, excluding equilibrium error.
+    pub external_work_defect_j: f64,
 }
 
 /// Refusal from the original mechanical owner or native porous law.
@@ -294,6 +315,49 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
             settings,
             controls,
             None,
+            None,
+            cx,
+        )
+        .map(|(step, _)| step)
+    }
+
+    /// Compress or unload the accepted solid with actual current-area pressure.
+    ///
+    /// Positive differential pressure acts inward; all original pressure field
+    /// types retain their geometry, analytic follower tangent and work rule.
+    /// The supplied surface must bind this exact original mesh. Pressure is
+    /// held over this physical increment; a pressure ramp must be resolved by
+    /// successive increments. Uniform pressure work is exactly -p delta V,
+    /// rather than a dead referential force or endpoint-force approximation.
+    ///
+    /// The existing endpoint-work budget bounds the SUM of absolute material
+    /// and pressure endpoint defects, so their cancellation cannot hide an
+    /// under-resolved increment. Physical plastic heat never includes either.
+    /// This static path introduces no fluid equation of state or time integrator.
+    ///
+    /// # Errors
+    /// The same transactional gates as `advance`, plus original surface/field
+    /// admission. Every refusal leaves the accepted configuration/history usable.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_pressure<'p>(
+        &self,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        surface: &ClosedTetPressureSurface,
+        pressure: impl Into<TetPressure<'p>>,
+        settings: HyperTetSettings,
+        controls: FinitePlasticStepControls,
+        cx: &Cx<'_>,
+    ) -> Result<FinitePorousTetStep<'a, L>, FinitePorousTetError> {
+        self.advance_loaded(
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            settings,
+            controls,
+            None,
+            Some((surface, pressure.into())),
             cx,
         )
         .map(|(step, _)| step)
@@ -312,10 +376,19 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
         settings: HyperTetSettings,
         controls: FinitePlasticStepControls,
         inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
+        pressure: Option<(&ClosedTetPressureSurface, TetPressure<'_>)>,
         cx: &Cx<'_>,
     ) -> Result<(FinitePorousTetStep<'a, L>, Option<AcceptedMotion>), FinitePorousTetError> {
         checkpoint(cx)?;
         validate_controls(settings, controls)?;
+        if let Some((surface, field)) = pressure {
+            if !surface.matches_reference(self.state.nodes_m, self.state.tetrahedra) {
+                return Err(
+                    invalid("porous pressure surface must bind the exact original mesh").into(),
+                );
+            }
+            surface.validate_pressure(field, cx)?;
+        }
         for (element, state) in self.state.element_states.iter().enumerate() {
             if element % 1024 == 0 {
                 checkpoint(cx)?;
@@ -331,15 +404,37 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
                 .map_err(|source| FinitePorousTetError::Material { element, source })?;
         }
         let frozen = Self::freeze(&self.material, &self.state.element_states, cx)?;
-        let (equilibrium, force) = self.state.solve_endpoint(
-            HyperelasticLawField::PerElement(&frozen),
-            prescribed_m,
-            nodal_forces_n,
-            body_force_n_m3,
-            settings,
-            inertia,
-            cx,
-        )?;
+        let (equilibrium, force) = if pressure.is_some() {
+            let problem = HyperTetProblem {
+                nodes_m: self.state.nodes_m,
+                tetrahedra: self.state.tetrahedra,
+                material: HyperelasticLawField::PerElement(&frozen),
+                prescribed_m,
+                nodal_forces_n,
+                body_force_n_m3,
+                budget: self.state.budget,
+                settings,
+            };
+            let equilibrium = problem.solve_loaded_from(
+                Some(self.state.displacement_m.as_flattened()),
+                Some(&self.state.elements),
+                pressure,
+                None,
+                inertia,
+                cx,
+            )?;
+            (equilibrium, problem.external(&self.state.elements, 1.0))
+        } else {
+            self.state.solve_endpoint(
+                HyperelasticLawField::PerElement(&frozen),
+                prescribed_m,
+                nodal_forces_n,
+                body_force_n_m3,
+                settings,
+                inertia,
+                cx,
+            )?
+        };
         let new_u = equilibrium.displacement_m.as_flattened();
         let motion = inertia
             .map(|inertia| inertia.motion(new_u, cx))
@@ -414,6 +509,37 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
         energy.endpoint_work_defect_j = energy.internal_endpoint_work_j
             - (energy.stored_after_j - energy.stored_before_j)
             - energy.plastic_dissipation_j;
+        let pressure = pressure
+            .map(|(surface, field)| -> Result<_, FinitePorousTetError> {
+                let old_u = self.state.displacement_m.as_flattened();
+                let force = surface.force_n(new_u, field, cx)?;
+                let mut endpoint_work = Dd::ZERO;
+                for (dof, (&force, (&after, &before))) in
+                    force.iter().zip(new_u.iter().zip(old_u)).enumerate()
+                {
+                    if dof % 256 == 0 {
+                        checkpoint(cx)?;
+                    }
+                    endpoint_work = endpoint_work
+                        + Dd::from_f64(force) * (Dd::from_f64(after) - Dd::from_f64(before));
+                }
+                let endpoint_work_j = endpoint_work.to_f64();
+                let work_j = surface.work_j(old_u, new_u, field, cx)?;
+                let correction = work_j - endpoint_work_j;
+                energy.equilibrium_work_residual_j += endpoint_work_j;
+                energy_gate(
+                    "porous pressure/constitutive endpoint integration defect",
+                    energy.endpoint_work_defect_j.abs() + correction.abs(),
+                    controls.maximum_endpoint_work_defect_j,
+                )?;
+                Ok(FinitePorousPressureEnergy {
+                    endpoint_work_j,
+                    work_j,
+                    endpoint_work_correction_j: correction,
+                    external_work_defect_j: energy.endpoint_work_defect_j + correction,
+                })
+            })
+            .transpose()?;
         energy_gate(
             "porous assembled incremental-potential consistency",
             equilibrium.strain_energy_j - energy.incremental_potential_j,
@@ -465,6 +591,7 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
                 },
                 equilibrium,
                 energy,
+                pressure,
             },
             motion,
         ))

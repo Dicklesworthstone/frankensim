@@ -10384,6 +10384,29 @@ The `hyper_porous_retained` regressions specify force-driven compression,
 permanent volume loss on unloading, elastic reload against independent
 hydrostatic formulas, heterogeneous pressure sensitivity, rigid-motion
 covariance, physical work closure, refused-step retry and cancellation.
+
+`FinitePorousTetSolid::advance_with_pressure` now drives this same accepted
+history with current-area follower pressure on its exact original closed mesh.
+It reuses the native pressure force, analytic geometric tangent, globalization
+and support reactions for uniform, per-face and admitted spatial fields.
+Uniform pressure is Cauchy traction: its exact held-interval work is
+`-p * (V_after - V_before)`, not a frozen referential nodal force. Each material
+trial still borrows the old accepted plastic metric; no Newton iteration
+commits compaction. Pressure changes are resolved by successive held intervals.
+The current-area virtual-work and load-stiffness convention agrees with the
+[Abaqus Theory Guide, Pressure load stiffness](https://docs.software.vt.edu/abaqusv2025/English/SIMACAETHERefMap/simathe-c-pressloadsolids.htm).
+
+The returned optional pressure account separates exact held-field work,
+endpoint-force work, their signed geometric correction, and the total external
+work defect. Dead-force work retains its original meaning, while the common
+equilibrium residual includes pressure endpoint work. Acceptance bounds the
+SUM of absolute material and pressure endpoint defects by the original work
+budget, preventing cancellation from admitting an under-resolved step. Neither
+defect becomes plastic heat. Per-face work follows the original straight
+displacement-segment convention; it is not path-independent work. Focused
+native regressions cover pressure-driven compaction, zero-pressure release,
+elastic reload, exact volume work, patch/support accounting and atomic refusal.
+
 This is bounded fixed-temperature, rate-independent associated porous
 plasticity on displacement P1 tetrahedra. It does not infer evolving porosity,
 cell-wall densification, asymmetric yield, damage, contact, pore-fluid pressure,

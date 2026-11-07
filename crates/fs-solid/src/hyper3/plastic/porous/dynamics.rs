@@ -283,6 +283,7 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetMotion<'a, L> {
             settings,
             controls.material,
             Some(&inertia),
+            None,
             cx,
         )?;
         let (velocity_mps, inertia) = motion.expect("inertial endpoint returns native motion");
