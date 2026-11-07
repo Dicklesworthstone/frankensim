@@ -21,6 +21,9 @@
 //! routing or a temperature protection law. Material-domain and native drive
 //! refusals publish neither history; refinement is still needed for time error.
 
+/// Finite winding-current and magnetic storage on the same material/enthalpy residual.
+pub mod voltage;
+
 use super::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
     DriverAccount, ThermalDriver, admit_driver_unknowns, cell_driver_candidate, finite,
@@ -157,6 +160,7 @@ pub enum MotorThermalError {
     Source(ThermalMaterialError),
     Conductor(JouleHeatingError),
     Drive(RotorDriveError),
+    VoltageDrive(fs_mbd::rotordynamics::transient::drive::voltage::RotorVoltageError),
     Invalid(&'static str),
 }
 impl core::fmt::Display for MotorThermalError {

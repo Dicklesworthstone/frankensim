@@ -62,6 +62,7 @@ pub struct RotorVoltageMotor<'step, 'model> {
     stepper: &'step RotorMidpoint<'model>,
     motor: RotorWindingMotor,
     back_emf_impulse_per_speed: Dd,
+    electromechanical_feedback_impedance_time: Dd,
     feedback_impedance_time: Dd,
     current_increment_denominator: Dd,
 }
@@ -242,15 +243,16 @@ impl<'model> RotorMidpoint<'model> {
         self.solve_velocity_increment(&mut current_response[..self.model.n], &mut cancelled)?;
         let back_emf_impulse_per_speed =
             Dd::from_f64(h) * Dd::from_f64(motor.drive.torque_constant_nm_per_a);
+        let electromechanical_feedback_impedance_time =
+            Dd::from_f64(0.5) * back_emf_impulse_per_speed * Dd::from_f64(current_response[shaft]);
         let feedback_impedance_time = Dd::from_f64(h)
             * Dd::from_f64(motor.drive.winding_resistance_ohm)
-            + Dd::from_f64(0.5)
-                * back_emf_impulse_per_speed
-                * Dd::from_f64(current_response[shaft]);
+            + electromechanical_feedback_impedance_time;
         let current_increment_denominator =
             Dd::from_f64(motor.inductance_h) + Dd::from_f64(0.5) * feedback_impedance_time;
         for value in [
             back_emf_impulse_per_speed,
+            electromechanical_feedback_impedance_time,
             feedback_impedance_time,
             current_increment_denominator,
         ] {
@@ -265,6 +267,7 @@ impl<'model> RotorMidpoint<'model> {
             stepper: self,
             motor,
             back_emf_impulse_per_speed,
+            electromechanical_feedback_impedance_time,
             feedback_impedance_time,
             current_increment_denominator,
         })
@@ -272,6 +275,61 @@ impl<'model> RotorMidpoint<'model> {
 }
 
 impl RotorVoltageMotor<'_, '_> {
+    /// Declared motor, winding and bridge parameters for this prepared drive.
+    #[must_use]
+    pub fn motor(&self) -> RotorWindingMotor {
+        self.motor
+    }
+
+    /// Fixed duration of each coupled winding/rotor step [s].
+    #[must_use]
+    pub fn duration_s(&self) -> f64 {
+        self.stepper.duration_seconds
+    }
+
+    /// Rebind winding resistance to a caller-supplied material operating point.
+    ///
+    /// Returns a cheap immutable clone, with no mechanical solve or matrix
+    /// factorization. The electromagnetic feedback is cached separately: the
+    /// new scalar coupling is formed directly from R_new and that original
+    /// feedback, never by subtracting a possibly enormous old resistance.
+    /// Current, magnetic storage, nominal rotor spin and mechanical operators
+    /// are unchanged. The caller owns the temperature/phase-to-resistance law.
+    ///
+    /// # Errors
+    /// Nonfinite or negative resistance, unrepresentable or singular updated
+    /// coupling, or cancellation. The original prepared drive is unchanged.
+    pub fn with_winding_resistance(
+        &self,
+        resistance_ohm: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, RotorVoltageError> {
+        poll(&mut cancelled)?;
+        if !resistance_ohm.is_finite() || resistance_ohm < 0.0 {
+            return Err(RotorVoltageError::Invalid(
+                "finite nonnegative winding resistance required",
+            ));
+        }
+        let feedback_impedance_time = Dd::from_f64(self.duration_s())
+            * Dd::from_f64(resistance_ohm)
+            + self.electromechanical_feedback_impedance_time;
+        let current_increment_denominator =
+            Dd::from_f64(self.motor.inductance_h) + Dd::from_f64(0.5) * feedback_impedance_time;
+        for value in [feedback_impedance_time, current_increment_denominator] {
+            finite(value.hi)?;
+            finite(value.lo)?;
+        }
+        if current_increment_denominator == Dd::ZERO {
+            return Err(RotorVoltageError::SingularCoupling);
+        }
+        let mut rebound = self.clone();
+        rebound.motor.drive.winding_resistance_ohm = resistance_ohm;
+        rebound.feedback_impedance_time = feedback_impedance_time;
+        rebound.current_increment_denominator = current_increment_denominator;
+        poll(&mut cancelled)?;
+        Ok(rebound)
+    }
+
     /// Advance current and rotor motion under a held, uniformly curtailed voltage.
     ///
     /// The original command first meets the terminal-voltage capability. The

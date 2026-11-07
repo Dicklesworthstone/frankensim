@@ -644,3 +644,112 @@ fn preparation_and_every_observed_step_cancellation_preserve_both_physical_state
         accepted
     );
 }
+
+#[test]
+fn resistance_rebind_preserves_weak_coupling_matches_fresh_preparation_and_rolls_back() {
+    let model = RotorBearingModel::new(1, &[1.0], &[0.0], &[0.0], &[0.0], || false).unwrap();
+    let stepper = model
+        .at_speed(0.0, || false)
+        .unwrap()
+        .midpoint_stepper(0.3, 1e-12, || false)
+        .unwrap();
+    let huge_resistance = RotorWindingMotor {
+        drive: RotorCurrentDrive {
+            winding_resistance_ohm: 1e200,
+            ..motor().drive
+        },
+        ..motor()
+    };
+    let prepared = stepper.voltage_motor(huge_resistance, || false).unwrap();
+    assert_eq!(prepared.motor(), huge_resistance);
+    assert_eq!(prepared.duration_s(), 0.3);
+    let input = state(0.4, 0.2);
+    let saved = input.clone();
+    // The nonbinary duration makes h*R_old carry a large multiplication
+    // residual. Subtracting it from the total feedback would erase the weak
+    // electromagnetic term even with double-double arithmetic.
+    for resistance in [0.0, 0.3] {
+        let rebound = prepared
+            .with_winding_resistance(resistance, || false)
+            .unwrap();
+        let fresh_parameters = RotorWindingMotor {
+            drive: RotorCurrentDrive {
+                winding_resistance_ohm: resistance,
+                ..huge_resistance.drive
+            },
+            ..huge_resistance
+        };
+        let fresh = stepper.voltage_motor(fresh_parameters, || false).unwrap();
+        assert_eq!(rebound.motor(), fresh_parameters);
+        assert_eq!(rebound.duration_s(), fresh.duration_s());
+        assert_eq!(
+            rebound
+                .step(&input, &[-0.1], 2.0, limits(1000.0, 1000.0), || false)
+                .unwrap(),
+            fresh
+                .step(&input, &[-0.1], 2.0, limits(1000.0, 1000.0), || false)
+                .unwrap()
+        );
+    }
+    let reference = prepared.with_winding_resistance(0.3, || false).unwrap();
+    let baseline = reference
+        .step(&input, &[-0.1], 2.0, limits(1000.0, 1000.0), || false)
+        .unwrap();
+    for resistance in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            reference.with_winding_resistance(resistance, || false),
+            Err(RotorVoltageError::Invalid(_))
+        ));
+    }
+    let calls = Cell::new(0);
+    reference
+        .with_winding_resistance(0.7, || {
+            calls.set(calls.get() + 1);
+            false
+        })
+        .unwrap();
+    for stop in 1..=calls.get() {
+        let count = Cell::new(0);
+        assert!(matches!(
+            reference.with_winding_resistance(0.7, || {
+                count.set(count.get() + 1);
+                count.get() == stop
+            }),
+            Err(RotorVoltageError::Drive(RotorDriveError::Power(
+                RotorPowerError::Dynamics(RotorError::Cancelled)
+            )))
+        ));
+    }
+    assert_eq!(
+        reference
+            .step(&input, &[-0.1], 2.0, limits(1000.0, 1000.0), || false)
+            .unwrap(),
+        baseline
+    );
+    assert_eq!(prepared.motor(), huge_resistance);
+    assert_eq!(input, saved);
+
+    let active = RotorBearingModel::new(1, &[1.0], &[-4.0], &[0.0], &[0.0], || false).unwrap();
+    let active_step = active
+        .at_speed(0.0, || false)
+        .unwrap()
+        .midpoint_stepper(1.0, 1e-12, || false)
+        .unwrap();
+    let active_motor = active_step
+        .voltage_motor(
+            RotorWindingMotor {
+                drive: RotorCurrentDrive {
+                    winding_resistance_ohm: 1.0,
+                    ..motor().drive
+                },
+                inductance_h: 0.125,
+            },
+            || false,
+        )
+        .unwrap();
+    assert!(matches!(
+        active_motor.with_winding_resistance(0.25, || false),
+        Err(RotorVoltageError::SingularCoupling)
+    ));
+    assert_eq!(active_motor.motor().drive.winding_resistance_ohm, 1.0);
+}

@@ -1,6 +1,8 @@
 //! G1/G3/G4: independent motor/thermal balances, finite source feedback and rollback.
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
+#[path = "motor_enthalpy/voltage.rs"]
+mod voltage;
 
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitEnthalpySolve,
