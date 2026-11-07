@@ -1,5 +1,30 @@
 # fs-solid CONTRACT
 
+## Regional source temperatures in retained finite-strain membrane motion
+
+`OwnedFiniteViscoMembraneMotion::with_temperatures` evaluates one original
+engineering-length source per triangle at its prescribed absolute temperature.
+Every endpoint keeps the original datum and fixed source frame, including
+cooling and revisits. Exact per-triangle source/card coverage is required;
+unsupported temperatures and missing or foreign paths refuse.
+
+Preparation copies the original patch once and replaces only its sheet
+endpoints and cached constitutive laws. Native geometry, gradients, topology,
+grain, original corner density, mass and strain envelope are not rebuilt.
+The native viscous laws retain their equilibrium coefficients, branch energies,
+kinetics and solver controls; only the admitted natural map changes.
+
+The existing owned reference transaction retains displacement, velocity, time
+and viscous metrics while restoring transverse balance. Subsequent native
+advancement resolves the changed global forces and physical relaxation. Signed
+reference input, pressure-volume actuation, numerical defects and relaxation
+heat retain separate accounts. Prescribed temperatures do not constitute a
+reciprocal caloric evolution.
+
+`tests/visco_membrane_temperature.rs` covers constrained regional heating and
+subsequent relaxation, both volume treatments, graded inventory, original-datum
+revisits and source/work/cancellation atomicity.
+
 ## Spatial indentation hardness from accepted J2 history
 
 `SmallStrainTetProblem<ResolvedJ2Plasticity>::observe_hardness` evaluates each

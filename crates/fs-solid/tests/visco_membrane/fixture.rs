@@ -22,7 +22,7 @@ use fs_solver::nonlinear::NewtonKrylovConfig;
 pub const THICKNESS_M: f64 = 0.02;
 pub const MASS_KG_M2: f64 = 0.8;
 
-pub fn source(exact: bool) -> ResolvedSheet {
+pub fn source_card() -> MaterialCard {
     let provenance = Provenance {
         source: "synthetic native membrane history fixture; not measured data".into(),
         license: "test-only".into(),
@@ -64,7 +64,7 @@ pub fn source(exact: bool) -> ResolvedSheet {
             })
             .unwrap();
     }
-    let card = MaterialCard::assemble(
+    MaterialCard::assemble(
         MaterialStateId {
             chemistry: "synthetic membrane".into(),
             phase: "solid".into(),
@@ -74,7 +74,11 @@ pub fn source(exact: bool) -> ResolvedSheet {
         claims,
         vec![model],
     )
-    .unwrap();
+    .unwrap()
+}
+
+pub fn source(exact: bool) -> ResolvedSheet {
+    let card = source_card();
     let sheet = resolve_sheet(
         &card,
         &QueryPoint::new().with("T", 300.0).unwrap(),

@@ -15,6 +15,9 @@
 pub mod reference_change;
 pub use reference_change::OwnedFiniteViscoMembraneMotionReferenceChange;
 
+/// Per-triangle source temperatures with retained natural-strain history.
+pub mod temperature;
+
 use std::sync::Arc;
 
 use fs_material::sheet::SheetError;
