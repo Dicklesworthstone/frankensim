@@ -231,6 +231,38 @@ fn the_prepared_mode_ceiling_admits_its_van_loan_dimension_and_refuses_one_more_
     assert!(wide.admit(MAX_PREPARED_MODAL_MODES + 1, 1, 1, 0, None).is_err());
 }
 
+/// A refused admission prints the bytes (or multiply terms) it asked for and the limit it was held to, not only that
+/// the limit was exceeded: the card's author needs the figure to set the limit.
+#[test]
+fn a_refused_prepared_admission_prints_the_figure_it_asked_for_and_the_limit() {
+    // count 3, no memory, 2 losses, 1 link, no constant-loss anchor, no air bank: d = 9, extent 81, 130 matrices,
+    // (81 * 130) f64 entries and one link table entry.
+    let asked = (81 * 130 * core::mem::size_of::<f64>() + core::mem::size_of::<Option<Vec<f64>>>()) as f64;
+    let tight = PreparedModalBudget { max_modes: 3, max_dense_bytes: 84_000, max_multiply_terms: u64::MAX };
+    let Err(refused) = tight.admit(3, 2, 1, 0, None) else { panic!("84000 bytes must not admit a 3-mode network") };
+    match refused {
+        ModalCouplingError::Budget { what, value, limit } => {
+            assert_eq!(what, "prepared exact dense bytes (prepared-linear max_dense_bytes)");
+            assert_eq!(value, asked);
+            assert_eq!(limit, 84_000.0);
+        }
+        other => panic!("expected the budget refusal with its figures, got {other}"),
+    }
+    let text = tight.admit(3, 2, 1, 0, None).err().unwrap().to_string();
+    assert_eq!(text, format!("coupled prepared exact dense bytes (prepared-linear max_dense_bytes): {asked:e} exceeds {:e}", 84_000.0_f64));
+    assert!(text.contains("8.4264e4 exceeds 8.4e4"), "{text}");
+
+    let roomy = PreparedModalBudget { max_modes: 3, max_dense_bytes: usize::MAX, max_multiply_terms: 1_000 };
+    let Err(ModalCouplingError::Budget { what, value, limit }) = roomy.admit(3, 2, 1, 0, None) else {
+        panic!("1000 multiply terms must not admit a 3-mode network")
+    };
+    assert_eq!(what, "prepared exact multiply terms (prepared-linear max_multiply_terms)");
+    assert_eq!(limit, 1_000.0);
+    assert!(value > limit && value.is_finite(), "{value}");
+    // within both limits it still admits
+    assert!(PreparedModalBudget { max_modes: 3, max_dense_bytes: 84_264, max_multiply_terms: u64::MAX }.admit(3, 2, 1, 0, None).is_ok());
+}
+
 #[test]
 fn one_stage_costs_one_loss_sweep_and_the_shared_values_equal_a_direct_evaluation_bit_for_bit() {
     let mut system = fixture(48_000, true);

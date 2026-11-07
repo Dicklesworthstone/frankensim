@@ -211,11 +211,21 @@ impl PreparedModalBudget {
             .and_then(|n| n.checked_add(eigensolve_terms?))
             .and_then(|n| n.checked_add(air_terms?))
             .ok_or_else(|| invalid("prepared complete work overflow"))?;
+        // A refusal names the figure it asked for and the card's limit: a bare "exceeds" leaves the card's author
+        // nothing to set.
         if bytes > self.max_dense_bytes {
-            return Err(invalid("prepared exact dense bytes exceed max_dense_bytes"));
+            return Err(ModalCouplingError::Budget {
+                what: "prepared exact dense bytes (prepared-linear max_dense_bytes)",
+                value: bytes as f64,
+                limit: self.max_dense_bytes as f64,
+            });
         }
         if terms > self.max_multiply_terms {
-            return Err(invalid("prepared exact multiply terms exceed max_multiply_terms"));
+            return Err(ModalCouplingError::Budget {
+                what: "prepared exact multiply terms (prepared-linear max_multiply_terms)",
+                value: terms as f64,
+                limit: self.max_multiply_terms as f64,
+            });
         }
         Ok(DenseExponentialBudget {
             max_dimension: 2 * d,
