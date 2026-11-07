@@ -8,11 +8,24 @@
 use fs_exec::Cx;
 use fs_ivl::{Sign, orient3d};
 
+mod density;
+pub use density::{DensityMoments, tetrahedron_box_density_moments};
+
 #[cfg(test)]
 mod tests;
 
 type Point = [f64; 3];
 type Face = Vec<Point>;
+
+struct ClippedTetrahedron<const N: usize> {
+    faces: Vec<Vec<[f64; N]>>,
+    base: Point,
+    scale: f64,
+}
+
+fn position<const N: usize>(point: [f64; N]) -> Point {
+    [point[0], point[1], point[2]]
+}
 // A tetrahedron clipped by a box has at most ten supporting faces. The slack
 // admits retained collinear edge points without an unbounded geometry path.
 const MAX_FACES: usize = 16;
@@ -69,6 +82,27 @@ pub fn tetrahedron_box_moments(
     moment_origin: [f64; 3],
     cx: &Cx<'_>,
 ) -> Result<VolumeMoments, OverlapError> {
+    match clipped_tetrahedron(vertices, lower, upper, moment_origin, cx)? {
+        None => Ok(VolumeMoments::default()),
+        Some(clipped) => integrate(
+            &clipped.faces,
+            clipped.base,
+            clipped.scale,
+            moment_origin,
+            cx,
+        ),
+    }
+}
+
+// The first three coordinates are geometry. Additional entries are positive
+// affine fields carried by the SAME edge intersections and face topology.
+fn clipped_tetrahedron<const N: usize>(
+    vertices: [[f64; N]; 4],
+    lower: [f64; 3],
+    upper: [f64; 3],
+    moment_origin: [f64; 3],
+    cx: &Cx<'_>,
+) -> Result<Option<ClippedTetrahedron<N>>, OverlapError> {
     poll(cx)?;
     if vertices
         .iter()
@@ -81,11 +115,12 @@ pub fn tetrahedron_box_moments(
     {
         return Err(OverlapError::InvalidInput);
     }
-    let base = vertices[0];
-    let mut local = vertices.map(|p| core::array::from_fn(|i| p[i] - base[i]));
+    let base = position(vertices[0]);
+    let mut local = vertices
+        .map(|p| core::array::from_fn::<_, N, _>(|i| if i < 3 { p[i] - base[i] } else { p[i] }));
     let scale = local
         .iter()
-        .flatten()
+        .flat_map(|p| &p[..3])
         .map(|x| x.abs())
         .fold(0.0_f64, f64::max);
     if !scale.is_finite() {
@@ -95,18 +130,23 @@ pub fn tetrahedron_box_moments(
         return Err(OverlapError::DegenerateTetrahedron);
     }
     for point in &mut local {
-        for x in point {
+        for x in &mut point[..3] {
             *x /= scale;
         }
     }
-    let orientation = orient3d(local[0], local[1], local[2], local[3]);
+    let orientation = orient3d(
+        position(local[0]),
+        position(local[1]),
+        position(local[2]),
+        position(local[3]),
+    );
     if orientation == Sign::Zero {
         return Err(OverlapError::DegenerateTetrahedron);
     }
     let source_det = determinant(
-        sub(local[1], local[0]),
-        sub(local[2], local[0]),
-        sub(local[3], local[0]),
+        sub(position(local[1]), position(local[0])),
+        sub(position(local[2]), position(local[0])),
+        sub(position(local[3]), position(local[0])),
     );
     if source_det == 0.0
         || !source_det.is_finite()
@@ -131,7 +171,7 @@ pub fn tetrahedron_box_moments(
         let a = lower[i].max(min);
         let b = upper[i].min(max);
         if a >= b {
-            return Ok(VolumeMoments::default());
+            return Ok(None);
         }
         lo[i] = (a - base[i]) / scale;
         hi[i] = (b - base[i]) / scale;
@@ -139,7 +179,7 @@ pub fn tetrahedron_box_moments(
             return Err(OverlapError::Unrepresentable);
         }
     }
-    let mut faces: Vec<Face> = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
+    let mut faces: Vec<Vec<[f64; N]>> = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
         .map(|indices| indices.map(|i| local[i]).to_vec())
         .into();
     // orient3d has the opposite sign to det(v1-v0,v2-v0,v3-v0).
@@ -153,11 +193,11 @@ pub fn tetrahedron_box_moments(
             poll(cx)?;
             faces = clip(faces, axis, bound, keep_below)?;
             if faces.is_empty() {
-                return Ok(VolumeMoments::default());
+                return Ok(None);
             }
         }
     }
-    integrate(&faces, base, scale, moment_origin, cx)
+    Ok(Some(ClippedTetrahedron { faces, base, scale }))
 }
 
 fn poll(cx: &Cx<'_>) -> Result<(), OverlapError> {
@@ -171,18 +211,18 @@ fn determinant(a: Point, b: Point, c: Point) -> f64 {
         + a[1] * (b[2] * c[0] - b[0] * c[2])
         + a[2] * (b[0] * c[1] - b[1] * c[0])
 }
-fn order(a: &Point, b: &Point) -> core::cmp::Ordering {
+fn order<const N: usize>(a: &[f64; N], b: &[f64; N]) -> core::cmp::Ordering {
     a[0].total_cmp(&b[0])
         .then(a[1].total_cmp(&b[1]))
         .then(a[2].total_cmp(&b[2]))
 }
 
-fn intersection(
-    mut a: Point,
-    mut b: Point,
+fn intersection<const N: usize>(
+    mut a: [f64; N],
+    mut b: [f64; N],
     axis: usize,
     bound: f64,
-) -> Result<Point, OverlapError> {
+) -> Result<[f64; N], OverlapError> {
     // Neighboring faces visit an edge in opposite directions. A canonical
     // endpoint order gives the identical shared intersection in both faces.
     if order(&a, &b).is_gt() {
@@ -200,11 +240,21 @@ fn intersection(
     }
     let mut p = core::array::from_fn(|i| a[i] + t * (b[i] - a[i]));
     p[axis] = bound;
+    // Convex interpolation keeps a positive carried density positive even
+    // when two endpoint values have a large ratio. Geometric bits are unchanged.
+    for i in 3..N {
+        p[i] = (1.0 - t) * a[i] + t * b[i];
+    }
     Ok(p)
 }
 
-fn clip(faces: Vec<Face>, axis: usize, bound: f64, below: bool) -> Result<Vec<Face>, OverlapError> {
-    let inside = |p: Point| {
+fn clip<const N: usize>(
+    faces: Vec<Vec<[f64; N]>>,
+    axis: usize,
+    bound: f64,
+    below: bool,
+) -> Result<Vec<Vec<[f64; N]>>, OverlapError> {
+    let inside = |p: [f64; N]| {
         if below {
             p[axis] <= bound
         } else {
@@ -228,15 +278,20 @@ fn clip(faces: Vec<Face>, axis: usize, bound: f64, below: bool) -> Result<Vec<Fa
                 polygon.push(intersection(a, b, axis, bound)?);
             }
         }
-        polygon.dedup();
-        if polygon.len() > 1 && polygon.first() == polygon.last() {
+        // Topology is determined by geometry alone; independently rounded
+        // copies of an affine attribute cannot create extra cap vertices.
+        polygon.dedup_by(|a, b| position(*a) == position(*b));
+        if polygon.len() > 1
+            && position(*polygon.first().expect("nonempty polygon"))
+                == position(*polygon.last().expect("nonempty polygon"))
+        {
             polygon.pop();
         }
         if polygon.len() > MAX_FACE_VERTICES {
             return Err(OverlapError::GeometryLimit);
         }
         for &point in &polygon {
-            if point[axis] == bound && !cap.contains(&point) {
+            if point[axis] == bound && !cap.iter().any(|p| position(*p) == position(point)) {
                 cap.push(point);
             }
         }

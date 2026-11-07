@@ -882,3 +882,40 @@ pass has no vertex insertion or multi-face removal, so a configuration it
 cannot improve is reported below target, not hidden. The floor is met by
 improvement after each snap, not by `volumetricize` itself (its census still
 shows about 1 deg).
+
+## Density-weighted tetrahedron/Cartesian intersections
+
+`overlap::tetrahedron_box_density_moments` retains an explicitly supplied
+positive P1 density field through the SAME bounded six-plane clipping as the
+original geometric-moment entry. Clipped vertices carry one normalized affine
+density scalar; their identity and cap membership depend only on XYZ.
+Convex interpolation preserves positive density, and integration-center
+position/density use the same face-occurrence weights.
+
+The result contains unweighted volume, physical mass, and first and raw second
+mass moments about the explicit input origin. Positive tetrahedral decomposition
+integrates the cubic `rho*x_i*x_j` polynomial exactly on measured f64 geometry.
+These moments integrate affine enthalpy/linear momentum, angular momentum and
+quadratic kinetic storage without a centroid-density or uniform-density
+substitution. The rotational inertia tensor is trace(second)*I-second.
+A caller transporting an affine material cell supplies its original rho/J;
+this owner does not infer material sources, phase changes or thermal expansion.
+
+The original volume-only path keeps its own moment integration and uses the
+same three-coordinate clipping specialization. The density path adds one
+scalar per clipped vertex and constant-size polynomial work, without another
+geometry solve or adaptive quadrature. Binary-factored moment products retain
+representable combined density, volume and coordinate scales. Nonpositive or
+unrepresentable normalized density/mass refuses; no absolute density floor is
+introduced. Existing geometry limits, cancellation points, orientation checks
+and complete-result publication apply. Coverage/conservation audits remain
+with the caller, and neither path claims certified intersection bounds.
+
+The production numerical leaf's six Rust tests passed with the pinned compiler:
+independent cubic Dirichlet integrals, density-weighted centroid/rotation,
+vertex/density transforms, origin translation, extreme representable products
+and invalid input. Five additional native overlap regression definitions cover
+six-plane and thin-box cuts, density-weighted storage, partition conservation,
+orientation, world/unit transforms, the uniform-density limit and cancellation.
+Those native integration tests have not been compiled or run in the constrained
+environment; the numerical-leaf pass is not a full-crate build claim.
