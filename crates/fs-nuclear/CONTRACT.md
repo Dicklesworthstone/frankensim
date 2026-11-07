@@ -2935,3 +2935,42 @@ arithmetic, survive the reduction and are charged by the existing response
 audit in emitted joules. Three regressions verify analytic ballistic invariance,
 improved agreement with an independent scattering ODE at tighter tolerance,
 original-ID mapping, zero-heat receivers, retained numerical charges and refusal.
+
+## Material-bound photon transport on the decay heat clock
+
+`NuclearHeating::with_photon_slab` and
+`NuclearHeating::with_refined_photon_slab` derive a planar photon problem from
+the original material cells. The shared input builder checks original material
+identities, radiation kind, energy grid, source coverage and ordered collinear,
+contiguous geometry. Reference density is stored mass divided by original
+volume; layer depth is volume divided by an explicitly declared common area.
+The geometry tolerance must resolve each layer and cannot admit a reversed
+physical segment. The core's dimension/storage admission precedes material
+coefficient expansion.
+
+The prepared response enters `with_grouped_decay_radiation`, retaining the
+same nuclear reports, original caloric laws, receiver binding, accepted clocks,
+heat credits and atomic rollback. All optical layers remain bound, including a
+transparent or scattering-only layer receiving zero heat. Refinement changes
+only the temporary photon calculation. Its final response addresses the
+original material cells, so accepted decay heat is still credited once.
+
+Both routes apply to the existing deterministic and stochastic decay,
+production, activation, burnup, migration, diffusion and compatible kinetic
+source adapters. The photon kernels are fixed material data with explicit
+applicability; there is no inferred thermal emissivity, temperature-dependent
+opacity, expansion or replacement mass/material law. The infinite-planar,
+isotropic-scattering, steady-transport and local charged-particle deposition
+assumptions remain explicit.
+
+Six thermal regressions cover independent parent/daughter shielding and
+receiver calorimetry, original-mass effects, zero-heat optical-layer binding,
+geometry/material and exact callback refusal, refined original-ID heating,
+nuclear-history preservation, whole/split histories and early resource refusal.
+The radioactive
+`fs-couple` facade exports the transport/material/refinement types. The runnable
+`evaluated_decay_emissions` example now combines the original published Co-60
+decay records with explicitly manufactured photon kernels and a spatially
+refined response; its CSV separates direct decay heat, shield heat and photon
+escape, and checks the original radiation account at every interval. It does
+not claim that its illustrative shielding coefficients are evaluated data.

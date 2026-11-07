@@ -48,6 +48,9 @@ mod spectral_tests;
 #[path = "spectral_transport_tests.rs"]
 mod spectral_transport_tests;
 
+#[path = "photon_tests.rs"]
+mod photon_tests;
+
 // Manufactured caloric/source data isolate the coupling equations. These
 // coefficients are not nuclear isotope data or an empirical validation deck.
 struct LinearLaw {

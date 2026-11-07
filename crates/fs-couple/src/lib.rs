@@ -65,6 +65,14 @@ pub mod radioactive {
         GroupedRadiationResponse, GroupedRadiationResponseLimits,
         GroupedRadiationSourceResponse, RadiationGroupResponse,
     };
+    pub use fs_nuclear::radiation::transport::{
+        PhotonCollision, PhotonOrdinate, PhotonSlabCell, PhotonSlabLimits,
+        PhotonSlabResponse, gauss_legendre_4, prepare_slab_response,
+    };
+    pub use fs_nuclear::radiation::transport::material::{PhotonMassCollision, PhotonMassMaterial};
+    pub use fs_nuclear::radiation::transport::refinement::{
+        PhotonSlabRefinement, RefinedPhotonSlabResponse, refine_slab_response,
+    };
     pub use fs_nuclear::decay::{
         DecayBranch, DecayBudget, DecayError, DecayInventory, DecayModel,
         DecayNuclide, DecayStep, PreparedDecay,
@@ -82,6 +90,7 @@ pub mod radioactive {
         CaptureActivationCellSource, CaptureActivationHeating,
         DecayProductionCellSource, DecayProductionHeating,
         DecayRadiationEmitter, DecayRadiationHeatSource,
+        PhotonSlabGeometry, PhotonSlabLayer,
         FissionHeatingAudit, FissionThermalError, NuclearHeating, RadiationReceiver,
     };
 }
