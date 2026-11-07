@@ -470,7 +470,7 @@ impl TensorShellRelaxation {
 
     fn validate_component(
         &self,
-        component: &fs_modal::ModalAcousticTimeModel,
+        component: &fs_modal::time::ModalAcousticTimeModel,
     ) -> Result<(), AcousticRealizeError> {
         if component.modes().len() != self.mode_count()
             || component.modes().iter().enumerate().any(|(i, mode)| {

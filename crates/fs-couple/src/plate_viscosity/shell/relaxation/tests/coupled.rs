@@ -2,7 +2,7 @@
 use super::*;
 use crate::render::schedule::force::coupled::ModalCouplingConfig;
 use fs_math::c64::C64;
-use fs_modal::{
+use fs_modal::time::{
     ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel,
 };
 

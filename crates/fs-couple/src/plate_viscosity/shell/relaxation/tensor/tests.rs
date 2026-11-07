@@ -535,7 +535,7 @@ fn source_shell_refuses_changed_mass_shear_band_basis_and_incomplete_history() {
 
 #[test]
 fn source_shell_retains_original_stiffness_and_refuses_unrelated_modal_mechanics() {
-    use fs_modal::{ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel};
+    use fs_modal::time::{ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel};
     let (model, pairs, material) = fixture(ShellMass::Consistent);
     let modes: Vec<_> = pairs.iter().map(|m| m.phi.clone()).collect();
     let gate = CancelGate::new_clock_free();
