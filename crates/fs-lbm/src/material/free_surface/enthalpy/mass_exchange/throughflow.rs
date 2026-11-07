@@ -146,11 +146,15 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
                     "throughflow requires correctly signed nonzero streams",
                 ));
             }
-            buoyancy::liquid_temperature(
-                self.caloric,
-                exchange.specific_enthalpy_j_kg,
-                self.flow.scaling.material().density_kg_m3(),
-            )?;
+            if side == 0 {
+                inflow::admit_liquid_stream(self.caloric, exchange.specific_enthalpy_j_kg)?;
+            } else {
+                buoyancy::liquid_temperature(
+                    self.caloric,
+                    exchange.specific_enthalpy_j_kg,
+                    self.flow.scaling.material().density_kg_m3(),
+                )?;
+            }
             inflow::admit_velocity(
                 velocity.map(|u| u / scale),
                 self.flow.scaling.flow().u_lattice,

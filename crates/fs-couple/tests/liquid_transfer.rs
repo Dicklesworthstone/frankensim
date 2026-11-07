@@ -638,3 +638,6 @@ fn g4_prepared_native_transfers_discard_cleanly_and_publish_the_immediate_outcom
         unchanged(receiver, &immediate_receiver);
     });
 }
+
+#[path = "liquid_transfer/density.rs"]
+mod density;

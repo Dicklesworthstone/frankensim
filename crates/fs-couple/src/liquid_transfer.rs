@@ -10,8 +10,11 @@
 //! Each grid has an explicit origin and orientation in one inertial frame;
 //! their mapped cell centers must coincide. Thus the stream has one application
 //! point, with no missing connector torque or gravitational transport work.
-//! Both owners retain the same original material/temperature/caloric objects
-//! and accepted physical time. Ordinary native steps advance their clocks.
+//! Owners retain the same original caloric object, complete material claims
+//! and external context. Their temperature references, physical densities and
+//! lattice scalings may differ. The accepted receiver still has to satisfy its
+//! own storage-density law; no thermodynamic density is imposed as pressure.
+//! Ordinary native steps advance their synchronized physical clocks.
 //!
 //! The audited energy is original thermal enthalpy plus resolved kinetic
 //! energy. No compressible pressure-work, capillary-energy, remeshing accuracy
@@ -72,6 +75,33 @@ pub struct LiquidMassTransferReport {
     /// Signed sum of actual enthalpy and kinetic changes [J], not a pressure
     /// work/internal-energy or capillary-energy theorem.
     pub enthalpy_kinetic_defect_j: f64,
+    pub reference_volumes: LiquidMassTransferVolumes,
+}
+
+/// Reference-volume inventory carried between the original physical scalings.
+/// These use actual represented kg divided by each owner's reference kg/m3.
+/// They are not pressure-density-derived VOF geometry, an inferred pressure
+/// impulse, or a replacement for an unmodeled thermal expansion solve.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LiquidMassTransferVolumes {
+    pub withdrawn_m3: f64,
+    pub received_m3: f64,
+    pub net_change_m3: f64,
+}
+
+/// Several finite original donors mixed at ONE coincident receiver interface.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiquidMassTransferBatchReport {
+    pub physical_time_s: f64,
+    pub point_m: [f64; 3],
+    /// One actual withdrawal per authored donor/transfer pair, in that order.
+    pub donors: Vec<FreeSurfaceMassOutflowReport>,
+    /// One native multistream mixture, including stream velocity dispersion.
+    pub receiver: FreeSurfaceMassInflowReport,
+    pub mass_defect_kg: f64,
+    pub momentum_defect_kg_m_s: [f64; 3],
+    pub enthalpy_kinetic_defect_j: f64,
+    pub reference_volumes: LiquidMassTransferVolumes,
 }
 
 /// Transfer actual donor matter into the original receiver's momentum state.
@@ -86,6 +116,10 @@ pub struct LiquidMassTransferReport {
 /// mixing; local momentum increments are rotated into world axes before their
 /// joint check. No grid resampling, moving-frame work or extra mixing heat is
 /// introduced. Original native per-owner reports retain their local axes.
+/// Different thermal references/densities are admitted only when the complete
+/// original material claims and caloric object agree and the receiver's mixed
+/// endpoint still fits its own reference-density model. Its population density
+/// is never reset to make an otherwise unsupported mixture pass.
 /// Each liquid builds only its original native proposal; neither complete
 /// trajectory nor its unchanged material/history bindings are cloned.
 pub fn transfer_interface_mass(
@@ -110,9 +144,9 @@ pub fn transfer_interface_mass(
             "liquid transfer needs positive mass and finite nonnegative budgets",
         ));
     }
-    if !donor.shares_mass_transfer_source(receiver) {
+    if !donor.shares_mass_transfer_material(receiver) {
         return Err(Error::Invalid(
-            "liquid transfer must retain the same original surface, temperature and caloric sources",
+            "liquid transfer must retain the original caloric object, complete source claims and nonthermal context",
         ));
     }
     let physical_time_s = donor.physical_time_s();
@@ -177,6 +211,8 @@ pub fn transfer_interface_mass(
             .ok_or(Error::Invalid(
                 "liquid transfer requires retained donor enthalpy",
             ))?;
+    let donor_density = donor.flow().scaling().material().density_kg_m3();
+    let receiver_density = receiver.flow().scaling().material().density_kg_m3();
     let donor_proposal = donor.prepare_interface_outflow(
         &[FreeSurfaceMassOutflow {
             exchange: FreeSurfaceMassExchange {
@@ -236,6 +272,10 @@ pub fn transfer_interface_mass(
             "joint native liquid mass, momentum or enthalpy-plus-kinetic balance exceeded budget",
         ));
     }
+    let reference_volumes = reference_volumes(
+        -withdrawal.exchange.mass_change_kg / donor_density,
+        mixing.exchange.mass_change_kg / receiver_density,
+    )?;
     poll(gate)?;
     // Both proposals exclusively borrow their original owners. No state can
     // become stale, and publication after the joint check cannot fail halfway.
@@ -249,6 +289,256 @@ pub fn transfer_interface_mass(
         mass_defect_kg,
         momentum_defect_kg_m_s,
         enthalpy_kinetic_defect_j,
+        reference_volumes,
+    })
+}
+
+/// Mix finite streams from distinct original donors in one atomic transaction.
+///
+/// Each donor has one authored packet; all packets meet the same receiver cell,
+/// pose and world point. The existing multistream receiver combines them ONCE,
+/// retaining both their mean momentum and relative kinetic variance as physical
+/// mixing heat. Sequential pairwise publication would reject a temporary
+/// unsupported temperature or change the inelastic mixing result.
+///
+/// Temperature/reference density and dx/dt may differ across original owners.
+/// The exact original caloric object, every optional source claim, typed axes,
+/// nonthermal conditions, synchronized clock and each local native admission
+/// remain required. In particular, an accepted mixture needing an unmodeled
+/// receiver density/volume change refuses the whole batch; balanced hot/cold
+/// feeds or an admitted constant-density part of the source law can pass.
+///
+/// `maximum_streams` bounds authored participants and proposal storage. Controls
+/// bound every native transaction and the joint actual mass, world momentum and
+/// enthalpy-plus-kinetic defects. The source owners debit their actual native
+/// withdrawals; receiver rounding remains an explicit joint defect. No caller
+/// trajectory is cloned, no clock advances, and no original participant changes
+/// until every candidate and the final cancellation poll have passed.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn transfer_interface_mass_streams<'s, 'm>(
+    donors: &mut [&mut MaterialFreeSurfaceEnthalpy3<'s, 'm>],
+    receiver: &mut MaterialFreeSurfaceEnthalpy3<'_, '_>,
+    transfers: &[LiquidMassTransfer],
+    maximum_streams: usize,
+    controls: FreeSurfaceMassExchangeControls,
+    gate: &CancelGate,
+) -> Result<LiquidMassTransferBatchReport, Error> {
+    poll(gate)?;
+    if donors.is_empty()
+        || donors.len() != transfers.len()
+        || donors.len() > maximum_streams
+        || [
+            controls.mass_tolerance_kg,
+            controls.energy_tolerance_j,
+            controls.momentum_tolerance_kg_m_s,
+        ]
+        .into_iter()
+        .any(|x| !x.is_finite() || x < 0.0)
+    {
+        return Err(Error::Invalid(
+            "liquid stream batch requires bounded matching donors and finite budgets",
+        ));
+    }
+    let receiver_pose = transfers[0];
+    let physical_time_s = receiver.physical_time_s();
+    if !physical_time_s.is_finite() {
+        return Err(Error::Invalid(
+            "liquid stream batch needs a finite accepted clock",
+        ));
+    }
+    let point_m = center(
+        receiver,
+        receiver_pose.receiver,
+        receiver_pose.receiver_origin_m,
+        receiver_pose.receiver_axes_to_world,
+    )?;
+    let receiver_density = receiver.flow().scaling().material().density_kg_m3();
+    let mut outgoing = Vec::new();
+    let mut incoming = Vec::new();
+    let mut donor_densities = Vec::new();
+    outgoing
+        .try_reserve_exact(donors.len())
+        .map_err(|_| Error::Invalid("liquid stream withdrawal allocation refused"))?;
+    incoming
+        .try_reserve_exact(donors.len())
+        .map_err(|_| Error::Invalid("liquid stream inflow allocation refused"))?;
+    donor_densities
+        .try_reserve_exact(donors.len())
+        .map_err(|_| Error::Invalid("liquid stream source allocation refused"))?;
+    let mut total_incoming = 0.0;
+    for (donor, transfer) in donors.iter().zip(transfers) {
+        poll(gate)?;
+        if !transfer.mass_kg.is_finite()
+            || transfer.mass_kg <= 0.0
+            || transfer.receiver != receiver_pose.receiver
+            || transfer.receiver_origin_m != receiver_pose.receiver_origin_m
+            || transfer.receiver_axes_to_world != receiver_pose.receiver_axes_to_world
+            || !donor.shares_mass_transfer_material(receiver)
+            || donor.physical_time_s() != physical_time_s
+        {
+            return Err(Error::Invalid(
+                "liquid streams changed original source, clock or common receiver",
+            ));
+        }
+        if center(
+            donor,
+            transfer.donor,
+            transfer.donor_origin_m,
+            transfer.donor_axes_to_world,
+        )? != point_m
+        {
+            return Err(Error::Invalid(
+                "liquid stream centers must coincide with the receiver in one world frame",
+            ));
+        }
+        let mass = -donor
+            .project_interface_mass_exchange(transfer.donor, -transfer.mass_kg)?
+            .mass_change_kg;
+        total_incoming += mass;
+        let p = transfer.donor;
+        let velocity_m_s = donor
+            .flow()
+            .sample_at_si(p[0], p[1], p[2])?
+            .ok_or(Error::Invalid("liquid stream requires an occupied donor"))?
+            .velocity_m_s;
+        let receiver_velocity = if transfer.donor_axes_to_world == transfer.receiver_axes_to_world {
+            velocity_m_s
+        } else {
+            vector(
+                transfer.receiver_axes_to_world.rotate_world_to_body(
+                    transfer
+                        .donor_axes_to_world
+                        .rotate_body_to_world(vec3(velocity_m_s)),
+                ),
+            )
+        };
+        let h = donor.specific_enthalpy_at(p).ok_or(Error::Invalid(
+            "liquid stream lost its original donor enthalpy",
+        ))?;
+        outgoing.push(FreeSurfaceMassOutflow {
+            exchange: FreeSurfaceMassExchange {
+                coordinates: p,
+                mass_kg: -transfer.mass_kg,
+                specific_enthalpy_j_kg: h,
+                heat_j: 0.0,
+            },
+            velocity_m_s,
+        });
+        incoming.push(FreeSurfaceMassInflow {
+            exchange: FreeSurfaceMassExchange {
+                coordinates: transfer.receiver,
+                mass_kg: mass,
+                specific_enthalpy_j_kg: h,
+                heat_j: 0.0,
+            },
+            velocity_m_s: receiver_velocity,
+        });
+        donor_densities.push(donor.flow().scaling().material().density_kg_m3());
+    }
+    // Collective capacity, before allocating a native proposal for any donor.
+    receiver.project_interface_mass_exchange(receiver_pose.receiver, total_incoming)?;
+    let mut prepared = Vec::new();
+    prepared
+        .try_reserve_exact(donors.len())
+        .map_err(|_| Error::Invalid("liquid stream proposal allocation refused"))?;
+    for ((donor, outflow), inflow) in donors.iter_mut().zip(&outgoing).zip(&mut incoming) {
+        poll(gate)?;
+        let candidate =
+            donor.prepare_interface_outflow(core::slice::from_ref(outflow), 0.0, controls, gate)?;
+        inflow.exchange.mass_kg = -candidate.report().exchange.mass_change_kg;
+        prepared.push(candidate);
+    }
+    let receiver_proposal = receiver.prepare_interface_inflow(&incoming, controls, gate)?;
+    let mixing = receiver_proposal.report();
+    let mass_defect_kg = sum(prepared
+        .iter()
+        .map(|p| p.report().exchange.mass_change_kg)
+        .chain(core::iter::once(mixing.exchange.mass_change_kg)));
+    let receiver_change = vector(
+        receiver_pose
+            .receiver_axes_to_world
+            .rotate_body_to_world(vec3(mixing.exchange.momentum_change_kg_m_s)),
+    );
+    let momentum_defect_kg_m_s = core::array::from_fn(|axis| {
+        sum(prepared
+            .iter()
+            .zip(transfers)
+            .map(|(p, transfer)| {
+                vector(
+                    transfer
+                        .donor_axes_to_world
+                        .rotate_body_to_world(vec3(p.report().exchange.momentum_change_kg_m_s)),
+                )[axis]
+            })
+            .chain(core::iter::once(receiver_change[axis])))
+    });
+    // Cancel the transported caloric datums before the smaller kinetic terms.
+    let enthalpy_kinetic_defect_j = sum(prepared
+        .iter()
+        .map(|p| p.report().exchange.enthalpy_change_j)
+        .chain(core::iter::once(mixing.exchange.enthalpy_change_j))
+        .chain(prepared.iter().map(|p| p.report().kinetic_energy_change_j))
+        .chain(core::iter::once(mixing.kinetic_energy_change_j)));
+    if !mass_defect_kg.is_finite()
+        || mass_defect_kg.abs() > controls.mass_tolerance_kg
+        || momentum_defect_kg_m_s.iter().any(|x| !x.is_finite())
+        || momentum_defect_kg_m_s.iter().map(|x| x.abs()).sum::<f64>()
+            > controls.momentum_tolerance_kg_m_s
+        || !enthalpy_kinetic_defect_j.is_finite()
+        || enthalpy_kinetic_defect_j.abs() > controls.energy_tolerance_j
+    {
+        return Err(Error::Invalid(
+            "joint liquid stream mass, momentum or enthalpy-plus-kinetic balance exceeded budget",
+        ));
+    }
+    let reference_volumes = reference_volumes(
+        sum(prepared
+            .iter()
+            .zip(&donor_densities)
+            .map(|(p, density)| -p.report().exchange.mass_change_kg / density)),
+        mixing.exchange.mass_change_kg / receiver_density,
+    )?;
+    // Reserve receipt storage before the first infallible native publication.
+    let mut reports = Vec::new();
+    reports
+        .try_reserve_exact(prepared.len())
+        .map_err(|_| Error::Invalid("liquid stream receipt allocation refused"))?;
+    poll(gate)?;
+    for candidate in prepared {
+        reports.push(candidate.publish());
+    }
+    let mixing = receiver_proposal.publish();
+    Ok(LiquidMassTransferBatchReport {
+        physical_time_s,
+        point_m,
+        donors: reports,
+        receiver: mixing,
+        mass_defect_kg,
+        momentum_defect_kg_m_s,
+        enthalpy_kinetic_defect_j,
+        reference_volumes,
+    })
+}
+
+fn reference_volumes(
+    withdrawn_m3: f64,
+    received_m3: f64,
+) -> Result<LiquidMassTransferVolumes, Error> {
+    let net_change_m3 = received_m3 - withdrawn_m3;
+    if [withdrawn_m3, received_m3, net_change_m3]
+        .into_iter()
+        .any(|v| !v.is_finite())
+        || withdrawn_m3 <= 0.0
+        || received_m3 <= 0.0
+    {
+        return Err(Error::Invalid(
+            "liquid transfer reference volume is unrepresentable",
+        ));
+    }
+    Ok(LiquidMassTransferVolumes {
+        withdrawn_m3,
+        received_m3,
+        net_change_m3,
     })
 }
 
@@ -290,7 +580,7 @@ fn poll(gate: &CancelGate) -> Result<(), Error> {
     }
 }
 
-fn sum(values: [f64; 4]) -> f64 {
+fn sum(values: impl IntoIterator<Item = f64>) -> f64 {
     let mut result = 0.0;
     let mut correction = 0.0;
     for value in values {

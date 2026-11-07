@@ -236,9 +236,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         let count = size[0]
             .checked_mul(size[1])
             .and_then(|n| n.checked_mul(size[2]))
-            .filter(|n| {
-                *n > 0 && *n <= controls.volume.volume.max_cells && *n <= self.controls.max_cells
-            })
+            .filter(|n| *n > 0 && *n <= controls.volume.volume.max_cells)
             .ok_or(FreeSurfaceSlabHeatError::Invalid(
                 "slab heat exceeds its original grid budget",
             ))?;

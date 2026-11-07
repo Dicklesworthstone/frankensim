@@ -99,8 +99,11 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     /// Multiple streams may enter the same interface. They are combined once
     /// using mass-weighted velocity and enthalpy, while their relative kinetic
     /// energy remains explicit and becomes mixing heat exactly once. Every
-    /// stream must independently fit this liquid's original caloric source and
-    /// velocity domain; different material/composition laws are not inferred.
+    /// stream must independently be pure liquid on the original caloric chart
+    /// and fit the velocity domain. Its density may differ from receiver storage.
+    /// The mixed endpoint must still satisfy that original storage-density
+    /// admission; unmodeled thermal expansion refuses. No new composition law
+    /// or population-density rescaling is inferred.
     /// The report has one sample per interface. Co-located streams share that
     /// sample's represented/requested mass ratio, which the source owners use
     /// to debit their individual mass, momentum and carried energy. Reduction
@@ -109,7 +112,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     /// This is an instantaneous open-system update at the accepted clock, not
     /// resolved jet-impact dynamics, droplet nucleation, pressure work, arbitrary
     /// evaporation recoil or a global VOF momentum-conservation claim. Native
-    /// interface capacity, phase/density source admission and coupled
+    /// interface capacity, endpoint phase/density admission and coupled
     /// surface/contact-history restrictions are unchanged. Failure publishes
     /// neither populations, fill, enthalpy nor refreshed material state.
     pub fn mix_interface_inflow(
@@ -177,13 +180,10 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
                     "complete mixing requires positive incoming mass",
                 ));
             }
-            // This boundary supplies liquid, so the incoming state itself
-            // must fit the original chart and fixed storage-density owner.
-            buoyancy::liquid_temperature(
-                self.caloric,
-                inflow.exchange.specific_enthalpy_j_kg,
-                self.flow.scaling.material().density_kg_m3(),
-            )?;
+            // A mass-specific incoming state need not have the receiver's
+            // reference density. Only the ACCEPTED mixture occupies its fixed
+            // storage; the original endpoint material refresh still checks it.
+            admit_liquid_stream(self.caloric, inflow.exchange.specific_enthalpy_j_kg)?;
             admit_velocity(
                 inflow.velocity_m_s.map(|u| u / scale),
                 self.flow.scaling.flow().u_lattice,
@@ -254,6 +254,20 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             report,
         })
     }
+}
+
+/// Incoming mass owns its original specific enthalpy, independently of the
+/// receiver's numerical mass unit. Endpoint refresh remains the density gate.
+pub(super) fn admit_liquid_stream(
+    caloric: &EquilibriumEnthalpyPhaseCurve,
+    h: f64,
+) -> Result<(), Error> {
+    if caloric.state_at_specific_enthalpy(h)?.phase() != SolidLiquidPhase::Liquid {
+        return Err(Error::Invalid(
+            "incoming stream must be pure liquid on the original caloric chart",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn admit_velocity(native: [f64; 3], maximum: f64) -> Result<(), Error> {

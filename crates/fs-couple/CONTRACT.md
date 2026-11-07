@@ -5759,3 +5759,36 @@ candidate replaces both source representations at their existing clock. Native
 regression fixtures cover unequal reference densities/Jacobians, analytic cuboid
 inventories, actual fill geometry, continuing thermal liquid motion and refusal/
 retry for source identity, clock, heat inventory, retained owners and work budgets.
+
+## Conservative mixing across original liquid density references
+
+`liquid_transfer::transfer_interface_mass` accepts distinct temperature/source
+bindings and physical density/dx/dt scalings when the exact original caloric
+object, immutable material-card identity, complete optional property
+requirements and selected claims agree. The named temperature value may
+differ; typed axes, nonthermal coordinates, viscosity and surface conventions
+remain fixed. Equal sampled coefficients or material names are insufficient.
+
+`transfer_interface_mass_streams` withdraws one actual packet from each
+bounded original donor and mixes all streams once at one coincident receiver
+interface and world point. Their native withdrawals supply physical kg,
+original specific enthalpy and Guo-corrected velocity; rotations retain the
+common inertial-frame momentum account. The existing multistream receiver
+retains velocity dispersion and deposits the physical complete-mixing loss
+as heat exactly once. Collective capacity is checked before donor proposals.
+Actual mass, world momentum and enthalpy-plus-kinetic defects pass their
+bounds before a final cancellation poll and infallible joint publication.
+No clock advances.
+
+Incoming pure-liquid calorics need not have the receiver's reference density.
+The accepted receiver must still satisfy its own original storage-density
+admission. Balanced hot/cold feeds and source-density plateaus can therefore
+mix different-density streams; an unmodeled endpoint expansion refuses
+atomically. No population-density reset, density averaging or replacement
+composition/EOS law repairs an incompatible result.
+
+The reference-volume report divides actual withdrawn/received masses by
+their own physical reference densities. It exposes their signed volume
+difference separately from low-Mach pressure geometry. This instantaneous
+coincident-port model adds no resolved connector flow, pressure work,
+capillary energy or general total-energy theorem.

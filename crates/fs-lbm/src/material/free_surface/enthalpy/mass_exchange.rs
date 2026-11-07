@@ -34,6 +34,7 @@ struct MassExchangeCandidate {
 impl MassExchangeCandidate {
     fn publish(self, owner: &mut MaterialFreeSurfaceEnthalpy3<'_, '_>) {
         owner.flow.lattice = self.lattice;
+        owner.volume_slab = None;
         owner.h = self.h;
         owner.states = self.states;
         owner.rheology_samples = self.rheology;

@@ -2000,7 +2000,13 @@ a perfectly inelastic local mixing law: with actual represented incoming mass
 `u + (dm/M)*(v_in-u)` and `0.5*dm*(m/M)*|v_in-u|^2` becomes liquid enthalpy.
 This is the authored loss of relative kinetic energy under complete mixing;
 numerical remap defects are never converted to heat. Incoming enthalpy must
-itself invert to pure liquid at the original fixed caloric density. The incoming
+invert to pure liquid on the SAME original caloric chart; its density need
+not equal receiver storage before mixing. The accepted mixture still passes
+the original phase, source and reference-density gates. An unsupported final
+thermal density/volume change refuses the whole transaction. Positive
+throughflow streams use this same incoming admission; outgoing restrictions
+remain unchanged. Every accepted mass transaction invalidates a retained
+planar thermal-source continuation binding. The incoming
 and accepted velocities must both fit the original scenario's speed domain.
 
 The native update retains canonical population density exactly, preserving

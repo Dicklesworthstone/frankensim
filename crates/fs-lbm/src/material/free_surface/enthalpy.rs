@@ -664,6 +664,40 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             && core::ptr::eq(self.caloric, other.caloric)
     }
 
+    /// Same original caloric datum and complete source claims at potentially
+    /// different thermal reference states. Only the named temperature value may
+    /// differ: card identity, every optional property requirement/selected claim,
+    /// typed axes, nonthermal conditions and source-model conventions must agree.
+    ///
+    /// This admits no density approximation. Each original owner still checks
+    /// its accepted and mixed endpoint against its own storage-density law.
+    /// The stricter borrowed-object identity test remains available separately.
+    #[must_use]
+    pub fn shares_mass_transfer_material(
+        &self,
+        other: &MaterialFreeSurfaceEnthalpy3<'_, '_>,
+    ) -> bool {
+        if self.shares_mass_transfer_source(other) {
+            return true;
+        }
+        let a = self.flow.scaling.material();
+        let b = other.flow.scaling.material();
+        let temperature_axis = self.law.temperature_axis();
+        core::ptr::eq(self.caloric, other.caloric)
+            && temperature_axis == other.law.temperature_axis()
+            && self.law.viscosity_basis() == other.law.viscosity_basis()
+            && a.viscosity_basis() == b.viscosity_basis()
+            && a.capillarity() == b.capillarity()
+            && a.rheology_axes() == b.rheology_axes()
+            && a.rheology_pressure_axis() == b.rheology_pressure_axis()
+            && same_transfer_bundle(a.material(), b.material(), temperature_axis)
+            && same_transfer_bundle(
+                self.law.reference_state().material(),
+                other.law.reference_state().material(),
+                temperature_axis,
+            )
+    }
+
     /// Select conversion on this original thermal trajectory, including an
     /// already bound planar, height-graph or local thermocapillary surface.
     ///
@@ -1384,6 +1418,31 @@ fn admit_capillary_source(
         ));
     }
     Ok(())
+}
+
+fn same_transfer_bundle(
+    a: &fs_material::state_point::ResolvedMaterialStatePoint,
+    b: &fs_material::state_point::ResolvedMaterialStatePoint,
+    temperature_axis: &str,
+) -> bool {
+    a.card_identity() == b.card_identity()
+        && a.axis_quantities() == b.axis_quantities()
+        && a.query_point()
+            .iter()
+            .filter(|(axis, _)| axis != temperature_axis)
+            .eq(b
+                .query_point()
+                .iter()
+                .filter(|(axis, _)| axis != temperature_axis))
+        && a.properties().len() == b.properties().len()
+        && a.properties()
+            .iter()
+            .zip(b.properties())
+            .all(|(left, right)| {
+                left.requirement() == right.requirement()
+                    && left.answer().receipt.selected == right.answer().receipt.selected
+                    && left.source_axes() == right.source_axes()
+            })
 }
 
 fn poll(gate: &CancelGate) -> Result<(), Error> {
