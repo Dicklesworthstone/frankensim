@@ -16,10 +16,15 @@
 //! Purely reactive compliance has a real-contour pole and explicitly refuses;
 //! a lossless surface-wave contour prescription is outside this implementation.
 
-use super::reflection::{self, ReflectionCoordinates, prepare_reflected_tail};
+use super::reflection::{
+    self, ReflectionCoordinates, ReflectionSpectralWeight, prepare_reflected_tail,
+};
 use super::*;
 use crate::curle3d::{CompactSourcePhasor, PreparedCompactSourceObserver};
 use fs_material::fluid_acoustics::FluidAcousticState;
+
+mod force;
+pub use force::{ImpedanceWallForceDiagnostics, PreparedImpedanceWallForce};
 
 const SCOPE: &str = "Prescribed stationary compact 3D volume source in one homogeneous \
 lossless fluid, spherical reflection from an infinite passive locally reacting impedance \
@@ -181,34 +186,21 @@ impl PreparedImpedanceWallMonopole {
             ]
         } else {
             let mut kernel = WallKernel::new(wall, coordinates)?;
-            let rho = wall.fluid().density_kg_m3();
-            let bound = prepare_reflected_tail(
-                coordinates.height.to_f64(),
-                kernel.k,
+            let bound = kernel.prepare_tail(
                 limits.into(),
                 [0, 1],
-                [
-                    det::ln(coordinates.omega) + det::ln(rho) - det::ln(4.0 * PI) + kernel.log_gain,
-                    -det::ln(4.0 * PI) + kernel.log_gain,
-                ],
+                [kernel.log_pressure, -det::ln(4.0 * PI)],
                 [1, 2],
                 cancelled,
             )?;
-            kernel.tail_extent = bound.0;
-            let peak = kernel.k / kernel.z.abs();
-            kernel.split = if peak > 0.0 && peak < kernel.tail_extent {
-                Some(peak)
-            } else {
-                None
-            };
             let tail = [
-                bound.1[0],
+                bound[0],
                 if coordinates.range == 0.0 {
                     0.0
                 } else {
-                    bound.1[1]
+                    bound[1]
                 },
-                bound.1[1],
+                bound[1],
             ];
             let result = integrate_spectrum::<3, 1>(&kernel, tail, limits.into(), cancelled)?;
             diagnostics.evaluations = result.evaluations;
@@ -332,7 +324,7 @@ struct WallKernel {
     z: C64,
     unit_z: C64,
     log_z_over_k: f64,
-    log_density: f64,
+    log_pressure: f64,
     log_gain: f64,
     tail_extent: f64,
     split: Option<f64>,
@@ -361,7 +353,8 @@ impl WallKernel {
             z,
             unit_z: C64::new(z.re / z.abs(), z.im / z.abs()),
             log_z_over_k: det::ln(z.abs()) - det::ln(k),
-            log_density: det::ln(wall.fluid().density_kg_m3()),
+            log_pressure: det::ln(coordinates.omega) + det::ln(wall.fluid().density_kg_m3())
+                - det::ln(4.0 * PI),
             log_gain,
             tail_extent: 0.0,
             split: None,
@@ -398,6 +391,71 @@ impl WallKernel {
         let reference = C64::from_re(det::exp(-scale));
         (product - reference) / (product + reference)
     }
+
+    fn prepare_tail(
+        &mut self,
+        limits: QuadratureLimits,
+        degrees: [u32; 2],
+        log_scales: [f64; 2],
+        channels: [usize; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<[f64; 2], AeroacError> {
+        let (extent, bounds) = prepare_reflected_tail(
+            self.coordinates.height.to_f64(),
+            self.k,
+            limits,
+            degrees,
+            log_scales.map(|scale| scale + self.log_gain),
+            channels,
+            cancelled,
+        )?;
+        self.tail_extent = extent;
+        let peak = self.k / self.z.abs();
+        self.split = (peak > 0.0 && peak < extent).then_some(peak);
+        Ok(bounds)
+    }
+
+    // Share the original outgoing Green weight with analytic source/receiver
+    // derivatives. The physical prefactors belong to each source's channels.
+    fn sample_weight(
+        &self,
+        region: usize,
+        x: f64,
+    ) -> Result<ReflectionSpectralWeight, AeroacError> {
+        let (q, zeta, measure) = self.point(region, x);
+        let r = self.coefficient(zeta);
+        let magnitude = r.abs();
+        if !magnitude.is_finite() {
+            return Err(nonfinite("wall spectral reflection"));
+        }
+        if magnitude == 0.0 {
+            return Ok(ReflectionSpectralWeight {
+                q,
+                zeta,
+                unit: C64::ZERO,
+                log_magnitude: 0.0,
+            });
+        }
+        let phase = self.coordinates.height * Dd::from_f64(zeta.re);
+        let decay = (self.coordinates.height * Dd::from_f64(zeta.im)).to_f64();
+        if !phase.hi.is_finite() || !phase.lo.is_finite() || !decay.is_finite() {
+            return Err(nonfinite("wall spectral propagation"));
+        }
+        let (sin, cos) = det::sin_cos_dd(phase);
+        let direction = if region == 0 {
+            C64::ONE
+        } else {
+            C64::new(0.0, -1.0)
+        };
+        Ok(ReflectionSpectralWeight {
+            q,
+            zeta,
+            unit: C64::new(cos.to_f64(), sin.to_f64())
+                * direction
+                * C64::new(r.re / magnitude, r.im / magnitude),
+            log_magnitude: det::ln(measure) + det::ln(magnitude) - decay,
+        })
+    }
 }
 
 impl Spectrum<3> for WallKernel {
@@ -429,45 +487,23 @@ impl Spectrum<3> for WallKernel {
             && (r1 - rm).abs() <= 0.125 * scale
     }
     fn sample(&self, region: usize, x: f64) -> Result<[C64; 3], AeroacError> {
-        let (q, zeta, measure) = self.point(region, x);
-        let r = self.coefficient(zeta);
-        let magnitude = r.abs();
-        if !magnitude.is_finite() {
-            return Err(nonfinite("wall spectral reflection"));
-        }
-        if magnitude == 0.0 {
-            return Ok([C64::ZERO; 3]);
-        }
-        let phase = self.coordinates.height * Dd::from_f64(zeta.re);
-        let decay = (self.coordinates.height * Dd::from_f64(zeta.im)).to_f64();
-        if !phase.hi.is_finite() || !phase.lo.is_finite() || !decay.is_finite() {
-            return Err(nonfinite("wall spectral propagation"));
-        }
-        let (sin, cos) = det::sin_cos_dd(phase);
-        let direction = if region == 0 {
-            C64::ONE
-        } else {
-            C64::new(0.0, -1.0)
-        };
-        let unit = C64::new(cos.to_f64(), sin.to_f64())
-            * direction
-            * C64::new(r.re / magnitude, r.im / magnitude);
-        let log_weight = det::ln(measure) + det::ln(magnitude) - decay - det::ln(4.0 * PI);
-        let arg = q * self.coordinates.range;
-        let normal_abs = zeta.abs();
+        let weight = self.sample_weight(region, x)?;
+        let arg = weight.q * self.coordinates.range;
+        let normal_abs = weight.zeta.abs();
         let normal = if normal_abs == 0.0 {
             C64::ZERO
         } else {
-            C64::new(-zeta.re / normal_abs, -zeta.im / normal_abs)
+            C64::new(-weight.zeta.re / normal_abs, -weight.zeta.im / normal_abs)
         };
+        let log_velocity = -det::ln(4.0 * PI);
         let values = [
-            log_weighted(
-                unit,
-                log_weight + det::ln(self.coordinates.omega) + self.log_density,
-                j0(arg),
+            weight.scaled(C64::ONE, self.log_pressure, j0(arg)),
+            weight.scaled(
+                C64::new(0.0, 1.0),
+                log_velocity + det::ln(weight.q),
+                j1(arg),
             ),
-            log_weighted(unit * C64::new(0.0, 1.0), log_weight + det::ln(q), j1(arg)),
-            log_weighted(unit * normal, log_weight + det::ln(normal_abs), j0(arg)),
+            weight.scaled(normal, log_velocity + det::ln(normal_abs), j0(arg)),
         ];
         if values.iter().any(|v| !finite(*v)) {
             return Err(nonfinite("wall reflected spectrum"));

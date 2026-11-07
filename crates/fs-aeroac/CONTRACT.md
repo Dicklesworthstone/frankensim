@@ -2,8 +2,8 @@
 
 ## Spherical reflection at a local impedance plane
 
-`curle3d::refraction::full_wave::wall` propagates a prescribed compact volume
-source through the outgoing angular spectrum of an infinite locally reacting
+`curle3d::refraction::full_wave::wall` propagates prescribed compact volume and
+force sources through the outgoing angular spectrum of an infinite locally reacting
 wall. Its outward normal points from fluid into wall, `p=Z*u_n`, with specific
 impedance in Pa s/m and exp(-i omega t). The original lossless fluid supplies
 density and sound speed. Frequency-dependent wall laws must be evaluated by
@@ -40,6 +40,20 @@ boundary law and wall absorption, lossy surface-mode response, reciprocity,
 an independent exponential-integral reference for a narrow passive surface mode
 within a fixed work budget, three quadrature tolerance rungs, cancellation and
 work/physical refusals.
+
+`PreparedImpedanceWallForce` differentiates the original source position in this
+same Green field for a physical complex force ON fluid [N]. Seven analytic
+channels retain pressure, the full velocity tensor, opposite mixed-derivative
+signs and transverse motion on the symmetry axis. Exact rigid/release image
+forces reverse their normal component. Finite walls share the monopole's
+coefficient, surface-mode split, resolution and tail owner, with the extra
+derivative powers included in force-specific error bounds. Preparation caches
+reflected and coherent total 4-by-3 Cartesian matrices; application performs
+compensated linear reductions without allocation, integration or numerical
+differentiation. `impedance_wall_force` tests rotated analytic images, all
+pressure/velocity source derivatives, Robin pressure/velocity and passive wall
+absorption, independent narrow-surface-mode references within a fixed work
+budget, finite reflected self-fields, original-clock harmonic lines and refusals.
 
 ## Exact physical records and sampled harmonic receivers
 
