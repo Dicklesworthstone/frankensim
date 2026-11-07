@@ -126,9 +126,13 @@ pub const MAX_DG_ELEMENTS: usize = 512;
 /// takes the sparse Krylov propagator above this size (see the module documentation).
 pub const MAX_DG_PROPAGATOR_DOFS: usize = 2048;
 
-/// Largest total DOF count the sparse Krylov propagator admits after [`DgDuct::with_dof_cap`].
-/// The assembled generator is still held dense (8 N^2 bytes: 2.1 GB at this size).
-pub const MAX_DG_SPARSE_DOFS: usize = 16384;
+/// Largest total DOF count the sparse Krylov propagator admits after [`DgDuct::with_dof_cap`] (16384 until the
+/// oboe's 9.6 and 20 kHz design bands: a pole ceiling of 48 or 56 at degree 2 or 3 counts 18.9 k and 27.8 k).
+/// The assembled generator is still held dense while the propagator is built (8 N^2 bytes: 8.6 GB at this size, only
+/// for an operator whose ACTUAL state reaches it; `min_poles` takes far fewer than the ceiling the card counts). The
+/// cap gates admission and enters no arithmetic: `dof_cap` is read by `with_dof_cap`, by `propagator` and by the spatial
+/// wall-memory attachment, each to refuse, so no bit of a duct admitted under a smaller cap depends on this number.
+pub const MAX_DG_SPARSE_DOFS: usize = 32768;
 
 /// Jordan–Wielandt eigenvalues within this fraction of the spectral radius are null
 /// singular values of `G` (the closed–closed duct's uniform-pressure mode).

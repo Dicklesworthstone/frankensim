@@ -4365,3 +4365,11 @@ and undamped resonance refusal. This is a smooth slender, inviscid,
 quasi-one-dimensional acoustic model. Shocks, separation, entropy/composition
 or vorticity waves, wall/bulk loss, radiation, a mean supply system and
 three-dimensional or experimental qualification are not inferred.
+
+## Sparse DOF cap 32768 (the oboe's 9.6 and 20 kHz design bands)
+
+This section amends the sparse Krylov section above, which states `MAX_DG_SPARSE_DOFS = 16384` and a `dg_bore` `MAX_DOFS` "up to 16384": both are now **32768**.
+
+- Why: the `dg_bore` card's DOF pre-check counts the pole CEILING, `2 K (P + 1) + 2 K Q c + 4 (1 + c)` per chimney, whatever `min_poles` then takes. The wall-loss fit of the oboe bore needs a ceiling of 45 to 48 poles at a 9.6 kHz band and 49 to 56 at 20 kHz (the fit refuses 44 and 48 respectively; measured on the 19 mm bell with `K = 51`, `P = 1`), so degree 2 at 9.6 kHz counts 386 x 49 = 18 914 and degree 3 at 20 kHz counts about 27 800. The former cap refused both before the fit.
+- The cap gates admission and enters no arithmetic. `dof_cap` is read by `DgDuct::with_dof_cap`, by `DgDuct::propagator` and by the spatial wall-memory attachment, each only to refuse; the Krylov kernel, its tolerances, its substeps and its cached solves are sized by the operator, not by the cap. A duct admitted under a smaller cap steps to the same bits under the raised one (test `the_sparse_cap_gates_admission_only_and_no_bit_below_the_old_cap_depends_on_it`: the 2184-DOF bore under caps 4096, 16384 and 32768, 96 steps, responses, port outputs, energy ledger and final state bit for bit).
+- Memory is the cost of an operator that really reaches the new size: the assembled generator is held dense while the propagator is built, 8 N^2 bytes, 8.6 GB at 32768 actual DOFs. `min_poles` ducts carry far fewer actual states than the ceiling count (the oboe's all-in card, ceiling count 11 644, ran in 59 MB).

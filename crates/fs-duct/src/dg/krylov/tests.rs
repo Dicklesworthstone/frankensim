@@ -175,6 +175,43 @@ fn a_duct_that_did_not_opt_in_refuses_above_the_dense_cap_as_before() {
     assert!(duct.with_dof_cap(MAX_DG_SPARSE_DOFS).is_ok());
 }
 
+// The sparse cap gates admission and enters no arithmetic: the same duct under the caps 4096, the former 16384 and the
+// present maximum steps to the same bits, in its responses, port outputs, energy ledger and state.
+#[test]
+fn the_sparse_cap_gates_admission_only_and_no_bit_below_the_old_cap_depends_on_it() {
+    assert_eq!(MAX_DG_SPARSE_DOFS, 32768);
+    // 21 elements, order 3, 4 wall points, 12 poles: 2184 DOFs, above the dense cap and far under every sparse cap.
+    let mut runs = Vec::new();
+    for cap in [4096, 16384, MAX_DG_SPARSE_DOFS] {
+        let duct = bore(0.001, 21, 3, 12, 4, cap);
+        assert_eq!((duct.dof_cap(), duct.total_dofs()), (cap, 2184));
+        let propagator = duct.propagator(DT, TOL).unwrap();
+        assert!(propagator.krylov_report().is_some());
+        let mut state = duct.zero_state();
+        let mut trace = Vec::new();
+        for k in 0..96 {
+            let response = propagator.multiport_response(&state).unwrap();
+            let out = propagator.step(&mut state, &input(effort(k))).unwrap();
+            trace.push([
+                response.history_pressure_pa[0].to_bits(),
+                response.impedance_pa_s_m3[0].to_bits(),
+                out.port_outputs[0].conjugate_rate.to_bits(),
+                out.ledger.stored_energy_j.to_bits(),
+            ]);
+        }
+        let tilde: Vec<u64> = state.tilde.iter().map(|x| x.to_bits()).collect();
+        runs.push((trace, tilde));
+    }
+    assert_eq!(runs[0], runs[1], "the old cap and a smaller one are the same arithmetic");
+    assert_eq!(runs[1], runs[2], "the raised cap is the same arithmetic");
+    // Admission: the new maximum is admitted, one more is refused, and the old maximum is still inside the range.
+    let geometry = Duct { segments: vec![Segment::Cylinder { radius: 0.001, length: 0.57 }] };
+    let duct = DgDuct::new(&geometry, &gas(), DgMesh { elements: 6, order: 3 }, DgBoundary::Port(PortId(0)), DgBoundary::Closed).unwrap();
+    assert!(duct.clone().with_dof_cap(32768).is_ok());
+    assert!(duct.clone().with_dof_cap(16384).is_ok());
+    assert!(duct.with_dof_cap(32769).is_err());
+}
+
 #[test]
 fn an_unconverged_run_is_reported_and_a_solve_refuses() {
     let duct = bore(0.001, 3, 3, 10, 4, MAX_DG_PROPAGATOR_DOFS);
