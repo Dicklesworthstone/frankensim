@@ -1,8 +1,8 @@
-//! Full-tensor viscous torque on a rigid body, with prepared implicit stages.
+//! Full-tensor viscous torque on a rigid body, with prepared dissipative stages.
 //!
-//! The body-frame law is tau = drive - D (omega - Omega_bath). Two implicit
-//! midpoint torque stages surround the existing compensated free rigid-body
-//! flow. The stationary entry sets Omega_bath = 0; the rotating-bath entry
+//! The body-frame law is tau = drive - D (omega - Omega_bath). Two prepared
+//! midpoint or exponential torque stages surround the existing compensated free
+//! rigid-body flow. The stationary entry sets Omega_bath = 0; the rotating-bath entry
 //! holds its prescribed spin in space and reports its signed source work.
 //! Gyroscopic transport stays in its original owner. Relative-slip heat,
 //! applied work and the free flow's numerical energy defect remain separate.
@@ -22,12 +22,16 @@ pub mod pair;
 
 type Vector = [Dd; 3];
 
+#[path = "viscous/exponential.rs"]
+mod exponential;
+
 /// A fixed full inertia, body-frame viscous tensor and positive time interval.
 ///
-/// Preparation admits symmetric positive-semidefinite D and caches ONE native
-/// 3-by-3 Cholesky factor of I + dt D / 4. Subsequent steps are allocation-free
-/// and use two Cholesky solves; no per-step eigensolve or numerical Jacobian
-/// is introduced. Zero drag needs no factorization.
+/// Preparation admits symmetric positive-semidefinite D. `viscous_stepper`
+/// caches one native 3-by-3 Cholesky factor of I + dt D / 4;
+/// `viscous_exponential_stepper` caches a spectral relaxation instead.
+/// Subsequent steps are allocation-free with no per-step eigensolve,
+/// transcendental evaluation or numerical Jacobian. Zero drag needs no factor.
 ///
 /// This is linear viscous drag relative to a stationary or prescribed rotating
 /// environment, not dry friction, quadratic aerodynamic drag or a general
@@ -42,6 +46,7 @@ pub struct ViscousRigidBodyStepper {
     factor: Option<Cholesky>,
     factor_scale: f64,
     relaxation_rate_bound_per_s: f64,
+    exponential: Option<exponential::ExponentialRelaxation>,
 }
 
 /// Accepted original-body motion with separate drive, drag and numerical work.
@@ -61,9 +66,11 @@ pub struct ViscousRigidBodyStep {
     /// Actual spatial momentum change minus drive and drag impulses [N m s].
     /// Includes native group arithmetic and final public-state rounding.
     pub angular_momentum_residual_space: Vec3,
-    /// Signed drive work at the two implicit-stage mean angular rates [J].
+    /// Signed drive work integrated over the two torque stages [J].
     pub drive_work_j: f64,
-    /// Nonnegative sum(dt_stage * relative_spin_mid^T D relative_spin_mid) [J].
+    /// Nonnegative integrated relative-slip viscous work [J]. Midpoint stages
+    /// use dt_stage * relative_spin_mid^T D relative_spin_mid; exponential
+    /// stages integrate the frozen-attitude linear relaxation analytically.
     /// Relative spin is omega for the stationary entry and omega - Omega_bath
     /// for the rotating-bath entry. This is mechanical loss, with no automatic
     /// thermal destination. Numerical and free-flow errors are never heat.
@@ -166,6 +173,50 @@ impl InertiaTensor3 {
             factor,
             factor_scale,
             relaxation_rate_bound_per_s: rate,
+            exponential: None,
+        })
+    }
+
+    /// Prepare exponential full-tensor relaxation for stiff linear drag.
+    ///
+    /// A single 3-by-3 symmetric eigensolve in inertia-normalized coordinates
+    /// prepares the exact frozen-attitude torque subflow, including held drive,
+    /// prescribed rotating-bath work and relative-slip heat. Subsequent viscous
+    /// stages allocate nothing, factor nothing, and evaluate no transcendentals;
+    /// the native free-rotation stage retains its original arithmetic.
+    /// Relaxation has no midpoint sign reversal or relaxation-number cutoff.
+    ///
+    /// Two exact dissipative half-stages surround the existing native free flow.
+    /// This composition is second order, not an exact solution of the coupled
+    /// tumbling/attitude problem: refine the timestep to resolve rotation, spatial
+    /// drive and bath reorientation, even when the relaxation itself is stiff.
+    /// The original PSD tensor is retained; an unresolved spectral decomposition
+    /// refuses rather than altering the constitutive law. Zero drag delegates
+    /// to the original native zero-drag arithmetic.
+    pub fn viscous_exponential_stepper(
+        self,
+        damping_body: Mat3,
+        duration_s: f64,
+    ) -> Result<ViscousRigidBodyStepper, LieStepError> {
+        scalar(duration_s, "exponential viscous rigid-body duration")?;
+        let half_s = 0.5 * duration_s;
+        if duration_s <= 0.0 || half_s == 0.0 {
+            return Err(invalid("positive resolved exponential viscous duration"));
+        }
+        let damping_body = admit_damping(damping_body)?;
+        if damping_body.max_abs() == 0.0 {
+            return self.viscous_stepper(damping_body, duration_s);
+        }
+        let exponential = exponential::ExponentialRelaxation::prepare(self, damping_body, half_s)?;
+        Ok(ViscousRigidBodyStepper {
+            inertia: self,
+            damping_body,
+            duration_s,
+            half_s,
+            factor: None,
+            factor_scale: 1.0,
+            relaxation_rate_bound_per_s: exponential.rate_bound(),
+            exponential: Some(exponential),
         })
     }
 }
@@ -186,12 +237,12 @@ impl ViscousRigidBodyStepper {
         self.damping_body
     }
 
-    /// Advance angular momentum under held drive and implicit viscous drag.
+    /// Advance angular momentum under held drive and prepared viscous drag.
     ///
     /// Drive torque can be held in body or spatial coordinates. A spatial
     /// drive is transformed at BOTH actual endpoint attitudes. The viscous
-    /// torque uses each implicit stage's actual mean angular velocity, never
-    /// the stale initial velocity. Work pairs those same efforts and rates.
+    /// torque uses the actual midpoint rate or integrated exponential response
+    /// according to preparation. Work pairs those same efforts and rates.
     ///
     /// The symmetric splitting is second order for this smooth held law.
     /// Torque impulse tails remain in DD through native free rotation.
@@ -210,16 +261,17 @@ impl ViscousRigidBodyStepper {
 
     /// Couple the body to a bath with constant spatial angular velocity [rad/s].
     ///
-    /// Each implicit stage uses tau_drag = -D (omega_mid - R^-1 Omega_space).
+    /// Each stage uses tau_drag = -D (omega - R^-1 Omega_space), integrated
+    /// with the midpoint or exponential response selected at preparation.
     /// The prescribed bath spin is transformed at BOTH accepted endpoint
     /// attitudes. Its work is tau_drag dot Omega_bath times stage duration;
     /// the nonnegative relative-slip quadratic form is the dissipated energy.
     /// A faster bath can therefore accelerate the body while producing heat.
     ///
-    /// Uses the same cached factor and symmetric second-order composition.
+    /// Uses the same prepared response and symmetric second-order composition.
     /// Exactly zero bath spin or zero damping takes the stationary arithmetic.
     /// Body and bath spin must be resolved by timestep refinement, in addition
-    /// to the preparation-time relaxation limit. No finite bath inertia,
+    /// to any midpoint preparation-time relaxation limit. No finite bath inertia,
     /// changing bath law, translational drag, heat partition or adjoint is
     /// inferred. All supplied state remains unchanged on refusal.
     pub fn step_in_rotating_bath(
@@ -233,7 +285,7 @@ impl ViscousRigidBodyStepper {
             bath_angular_velocity_space,
             "viscous spatial bath angular velocity",
         )?;
-        let bath = if self.factor.is_none()
+        let bath = if self.damping_body.max_abs() == 0.0
             || components(bath_angular_velocity_space)
                 .iter()
                 .all(|x| *x == 0.0)
@@ -325,6 +377,9 @@ impl ViscousRigidBodyStepper {
         drive: Vector,
         bath: Option<Vector>,
     ) -> Result<Stage, LieStepError> {
+        if let Some(exponential) = &self.exponential {
+            return exponential.stage(self.inertia, self.damping_body, momentum, drive, bath);
+        }
         let before = velocity(self.inertia, momentum)?;
         let mut midpoint = before;
         if let Some(factor) = &self.factor {

@@ -538,6 +538,25 @@ where claimed below.
   in `tests/viscous_rigid_body.rs` specify exponential spin/phase/heat
   refinement, passivity, material-frame covariance, the native zero-drag
   limit and invalid/unresolved-input refusals.
+- `InertiaTensor3::viscous_exponential_stepper` adds a stiff-relaxation
+  preparation for the same full-inertia/full-tensor viscous owner and receipts.
+  One inertia-normalized 3-by-3 eigensolve prepares each held half-stage;
+  viscous stages use fixed stack storage, with no allocation, factorization or
+  transcendental evaluation; the free-rotation arithmetic is unchanged.
+  Decay and held-force response are exponential,
+  with no midpoint relaxation-number cutoff or artificial sign reversal.
+  Relative-slip heat is integrated independently as two positive squares per
+  mode, using cancellation-free small-relaxation series; it is never an energy
+  residual. Drive and prescribed-bath work use the matching integrated rates.
+  Momentum increments preserve weak transverse loss beside a dominant spin.
+  Original PSD admission, numerical spectral residual/orthogonality checks and
+  stage impulse/work checks refuse unresolved inputs without changing the
+  authored tensor. Zero damping preserves native zero-drag arithmetic.
+  The exact frozen-attitude torque stages retain the same second-order free-flow
+  composition: strong damping does not make large-step attitude, tumbling or
+  spatially held source orientation exact. `tests/viscous_exponential.rs`
+  checks independent stiff axial and cross-axis decay, driven bath work/heat,
+  material covariance, weak/zero-drag limits and attitude refinement.
 - `ViscousRigidBodyStepper::step_in_rotating_bath` holds a prescribed angular
   velocity in space, transforms it at both accepted endpoint attitudes, and
   reuses the same cached midpoint factor for
