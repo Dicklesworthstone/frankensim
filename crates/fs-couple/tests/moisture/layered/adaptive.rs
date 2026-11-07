@@ -3,6 +3,9 @@ use super::super::atmosphere as air;
 use super::*;
 use fs_couple::moisture::adaptive::{MoistureAdvanceError, MoistureTimeControls};
 
+#[path = "adaptive/sdirk.rs"]
+mod sdirk;
+
 const CAPACITY: [f64; 2] = [0.032, 0.012];
 const HALF: [f64; 2] = [0.016, 0.048];
 

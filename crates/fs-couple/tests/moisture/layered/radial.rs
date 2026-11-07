@@ -5,6 +5,8 @@ use fs_couple::moisture::radial::{
     layered::{MoistureLayeredRadial, MoistureRadialLayer},
 };
 
+#[path = "radial/adaptive.rs"]
+mod adaptive;
 #[path = "radial/atmosphere.rs"]
 mod atmosphere;
 #[path = "radial/sdirk.rs"]

@@ -4754,3 +4754,32 @@ cover independent finite-bath balances, both curved geometries, opposing shared
 exchange, sealed internal diffusion with kinetic dissolution, and source/budget
 refusals. Rust parsing and formatting were checked; these new integration
 regressions have not been executed in the full dependency build.
+
+### Adaptive heterogeneous slab and radial diffusion
+
+`MoistureLayeredSlab::advance_sdirk2_adaptive_to` and the backward-Euler and
+SDIRK2 `MoistureLayeredRadial` duration methods reuse the original bounded
+step-doubling controller. Every original layer contributes its local moisture
+and source activity, and an additional L1 physical-water discrepancy weights
+each local difference by that cell's actual dry mass. Unequal shell storage and
+opposing layer exchanges cannot disappear through signed cancellation. Its
+absolute scale is `reservoir_water_absolute_tolerance_kg`; relative scales use
+transported water from the last accepted state.
+
+The second-order controller charges both native implicit stages, including
+failed trials. Activity-stage range refusals shorten the proposal without
+clipping the state or changing the method. Only accepted fine transfers enter
+the complete-duration ledger: each internal interface has one debit and one
+credit, and the whole-body account contains only exterior exchange.
+`FiniteMoistureAtmosphere::advance_layered_radial_adaptive_to` uses the original
+first-order coupled endpoint and additionally compares actual vapor mass and
+humidity; final checks retain both total and per-carrier gas mass.
+
+Geometry, temperature and boundary conditions stay fixed within a duration.
+Local error estimates do not certify global accuracy, and cancellation or a
+late failure publishes no accepted prefix. Five authored regressions cover
+independent continuous exchange, both time methods and curved geometries,
+mass-weighted error with sealed exteriors, an inadmissible SDIRK stage followed
+by a bounded retry, work exhaustion after an accepted interval, and finite-air
+layer/gas accounts. Source and fixture review and Rust formatting passed; the
+new native integration tests remain unrun in the full dependency build.

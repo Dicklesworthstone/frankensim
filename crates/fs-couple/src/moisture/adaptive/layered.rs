@@ -10,8 +10,14 @@ use crate::moisture::{
         AtmosphereMoistureError, AtmosphereMoistureSolve, AtmosphereMoistureStep,
         FiniteMoistureAtmosphere,
     },
-    layered::{MoistureLayeredFace, MoistureLayeredReport, MoistureLayeredSlab},
+    layered::{
+        MoistureLayeredFace, MoistureLayeredReport, MoistureLayeredSdirk2Report,
+        MoistureLayeredSlab,
+    },
 };
+
+mod radial;
+mod sdirk;
 
 /// Whole-stack accuracy and water accounts, plus each original material layer.
 #[derive(Clone, Debug)]
@@ -30,6 +36,11 @@ pub(super) trait LayeredTransport {
 impl LayeredTransport for MoistureLayeredReport {
     fn transport(&self) -> &MoistureLayeredReport {
         self
+    }
+}
+impl LayeredTransport for MoistureLayeredSdirk2Report {
+    fn transport(&self) -> &MoistureLayeredReport {
+        &self.endpoint
     }
 }
 impl LayeredTransport for AtmosphereMoistureStep<MoistureLayeredReport> {
@@ -94,6 +105,57 @@ pub(super) fn observe(stack: &MoistureLayeredSlab) -> Snapshot<'_> {
         reservoir_water_kg: None,
         activity: None,
     }
+}
+
+/// Actual local water discrepancy across unlike materials. Reference dry mass
+/// weights each local difference before summing; internal redistribution cannot
+/// cancel between cells or layers. Relative scales use transported water.
+fn water_distance<'a, 'b, 'c, E>(
+    fields: impl IntoIterator<
+        Item = (
+            binding::MoistureField<'a>,
+            binding::MoistureField<'b>,
+            binding::MoistureField<'c>,
+        ),
+    >,
+    controls: MoistureTimeControls,
+    cx: &Cx<'_>,
+) -> Result<f64, MoistureAdvanceError<E>> {
+    let mut difference = WaterSum::default();
+    let mut coarse_change = WaterSum::default();
+    let mut fine_change = WaterSum::default();
+    for (old, coarse, fine) in fields {
+        checkpoint(cx)?;
+        for (i, ((&before, &a), &b)) in old
+            .moisture
+            .iter()
+            .zip(coarse.moisture)
+            .zip(fine.moisture)
+            .enumerate()
+        {
+            if i % 128 == 0 {
+                checkpoint(cx)?;
+            }
+            let mass = old.dry_mass_at(i);
+            difference.add(mass * (a - b).abs());
+            coarse_change.add(mass * (a - before).abs());
+            fine_change.add(mass * (b - before).abs());
+        }
+    }
+    let changes = [coarse_change.total(), fine_change.total()];
+    let allowance = controls.reservoir_water_absolute_tolerance_kg
+        + controls.relative_tolerance * changes[0].max(changes[1]);
+    let error = difference.total();
+    if changes.iter().any(|x| !x.is_finite())
+        || !positive(allowance)
+        || !error.is_finite()
+        || error < 0.0
+    {
+        return Err(MoistureAdvanceError::Invalid(
+            "unrepresentable layered temporal water comparison",
+        ));
+    }
+    Ok(error / allowance)
 }
 
 pub(super) fn finish<R, E>(
