@@ -4,14 +4,17 @@
 //! Reciprocal work uses the same original consistent face mass in both fluid
 //! and wall equations. No reciprocal wall impedance or modal reduction occurs.
 
-use super::super::time::{ResistiveBoundary, mechanical::MechanicalBoundary};
+use super::super::time::{
+    ResistiveBoundary,
+    mechanical::{MechanicalBoundary, traction::WallTractionProfile},
+};
 use super::{
     BoundaryAdmittance, BoundaryVelocitySource, C64, Coo, Csr, HeterogeneousError,
     HeterogeneousHelmholtzFe, HeterogeneousPressureField, MAX_HARMONIC_DOFS, PreparedHeterogeneous,
     PressureReleaseConstraints, ResonanceSurvey, ResonanceSurveyControls, ResonanceSurveyError,
     VelocityTrace, VolumeVelocitySource, frequency, invalid, poll,
 };
-use frequency::coupled::{CoupledPencil, Wall};
+use frequency::coupled::{CoupledPencil, Wall, WallTraction};
 pub use frequency::coupled::{
     MechanicalHarmonicLimits, MechanicalWallAccounting, MechanicalWallFrequencyDerivative,
     MechanicalWallPhasors,
@@ -37,10 +40,10 @@ impl MechanicalHarmonicField {
             + self.acoustic.compressional_energy_j
             + self.wall_accounting.total_energy_j()
     }
-    /// Source work minus real-Robin heat and independently evaluated wall heat.
+    /// Fluid and applied mechanical work minus real-Robin and wall heat.
     #[must_use]
     pub fn power_balance_residual_w(&self) -> f64 {
-        self.acoustic.input_power_w
+        self.acoustic.input_power_w + self.wall_accounting.wall_traction_power_w
             - self.acoustic.boundary_dissipation_w
             - self.wall_accounting.dissipation_w()
     }
@@ -71,6 +74,30 @@ pub struct PreparedMechanicalHarmonic<'m, 'f, 'c> {
     conductance: Csr,
     boundaries: Vec<MechanicalBoundary>,
     pencil: CoupledPencil,
+}
+
+/// One reusable applied traction shape on one complete harmonic wall owner.
+/// Peak amplitudes are Pa, positive outward like interior pressure. The cached
+/// consistent force uses the ORIGINAL hierarchical trace, with no area or
+/// impedance normalization. Repeated solves reuse both this column and the LU.
+pub struct PreparedMechanicalHarmonicTraction<'p, 'm, 'f, 'c> {
+    owner: &'p PreparedMechanicalHarmonic<'m, 'f, 'c>,
+    wall: usize,
+    coefficients: Vec<f64>,
+    column: WallTraction,
+}
+
+impl PreparedMechanicalHarmonicTraction<'_, '_, '_, '_> {
+    #[must_use]
+    pub const fn wall(&self) -> usize {
+        self.wall
+    }
+
+    /// Dimensionless coefficients in the owner's original `wall_dofs` order.
+    #[must_use]
+    pub fn coefficients(&self) -> &[f64] {
+        &self.coefficients
+    }
 }
 
 impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
@@ -313,7 +340,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
     }
 }
 
-impl PreparedMechanicalHarmonic<'_, '_, '_> {
+impl<'m, 'f, 'c> PreparedMechanicalHarmonic<'m, 'f, 'c> {
     #[must_use]
     pub const fn frequency_hz(&self) -> f64 {
         self.frequency_hz
@@ -329,6 +356,54 @@ impl PreparedMechanicalHarmonic<'_, '_, '_> {
     #[must_use]
     pub fn wall_dofs(&self, wall: usize) -> Option<&[usize]> {
         self.pencil.wall_dofs(wall)
+    }
+
+    /// Project an original wall shape once. All mechanical coordinates survive
+    /// pressure release on an adjacent fluid face. Storage is O(wall DOFs).
+    pub fn prepare_wall_traction(
+        &self,
+        profile: &WallTractionProfile,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedMechanicalHarmonicTraction<'_, 'm, 'f, 'c>, HeterogeneousError> {
+        poll(cancelled)?;
+        let dofs = self
+            .wall_dofs(profile.wall)
+            .ok_or_else(|| invalid("traction wall index"))?;
+        let coefficients = profile.local_coefficients(dofs, cancelled)?;
+        let column = self
+            .pencil
+            .prepare_traction(profile.wall, &coefficients, cancelled)?;
+        Ok(PreparedMechanicalHarmonicTraction {
+            owner: self,
+            wall: profile.wall,
+            coefficients,
+            column,
+        })
+    }
+
+    fn traction_columns<'p>(
+        &self,
+        tractions: &[(&'p PreparedMechanicalHarmonicTraction<'_, 'm, 'f, 'c>, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<(&'p WallTraction, C64)>, HeterogeneousError> {
+        poll(cancelled)?;
+        super::super::source::admit_count(tractions.len())?;
+        tractions
+            .iter()
+            .map(|&(source, amplitude)| {
+                poll(cancelled)?;
+                if !core::ptr::eq(source.owner, self)
+                    || !amplitude.re.is_finite()
+                    || !amplitude.im.is_finite()
+                {
+                    return Err(invalid(
+                        "finite traction amplitude and original prepared harmonic owner required",
+                    )
+                    .into());
+                }
+                Ok((&source.column, amplitude))
+            })
+            .collect()
     }
 
     pub fn solve(
@@ -349,6 +424,28 @@ impl PreparedMechanicalHarmonic<'_, '_, '_> {
         volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MechanicalHarmonicField, HeterogeneousError> {
+        self.solve_with_wall_tractions(
+            inward_velocity,
+            boundary_sources,
+            volume_sources,
+            &[],
+            cancelled,
+        )
+    }
+
+    /// Coherent fluid sources and independently applied wall tractions [Pa].
+    /// Tractions force momentum through W*shape, not prescribed wall motion.
+    /// Fluid input power, applied mechanical power and internal pressure work
+    /// remain separate signed accounts; no incoherent source-power sum is used.
+    pub fn solve_with_wall_tractions(
+        &self,
+        inward_velocity: &[VelocityTrace],
+        boundary_sources: &[(&BoundaryVelocitySource<'_, '_, '_>, C64)],
+        volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
+        tractions: &[(&PreparedMechanicalHarmonicTraction<'_, 'm, 'f, 'c>, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MechanicalHarmonicField, HeterogeneousError> {
+        let columns = self.traction_columns(tractions, cancelled)?;
         let load = PreparedHeterogeneous::project_sources_for(
             self.model,
             &self.pressure_release,
@@ -357,8 +454,11 @@ impl PreparedMechanicalHarmonic<'_, '_, '_> {
             volume_sources,
             cancelled,
         )?;
-        let solution = self.pencil.solve(&load, cancelled)?;
+        let (solution, traction_power) = self
+            .pencil
+            .solve_with_tractions(&load, &columns, cancelled)?;
         let mut field = self.field(solution, &load, cancelled)?;
+        field.wall_accounting.wall_traction_power_w = traction_power;
         PreparedHeterogeneous::source_work(
             &mut field.acoustic,
             boundary_sources,
@@ -397,9 +497,43 @@ impl PreparedMechanicalHarmonic<'_, '_, '_> {
         volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64, C64)],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MechanicalHarmonicFrequencyResponse, HeterogeneousError> {
+        self.solve_with_wall_tractions_frequency_derivative(
+            inward_velocity,
+            inward_velocity_derivative,
+            boundary_sources,
+            volume_sources,
+            &[],
+            cancelled,
+        )
+    }
+
+    /// Each source triple is (original source, peak amplitude, d/domega).
+    /// Traction derivatives are Pa/(rad/s), supplied independently of the
+    /// acoustic m/s or m^3/s spectra. The exact RHS derivative and complete
+    /// operator tangent use the same LU, including every Maxwell coordinate.
+    pub fn solve_with_wall_tractions_frequency_derivative(
+        &self,
+        inward_velocity: &[VelocityTrace],
+        inward_velocity_derivative: Option<&[VelocityTrace]>,
+        boundary_sources: &[(&BoundaryVelocitySource<'_, '_, '_>, C64, C64)],
+        volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64, C64)],
+        tractions: &[(
+            &PreparedMechanicalHarmonicTraction<'_, 'm, 'f, 'c>,
+            C64,
+            C64,
+        )],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MechanicalHarmonicFrequencyResponse, HeterogeneousError> {
         poll(cancelled)?;
         super::super::boundary_source::admit_count(boundary_sources.len())?;
         super::super::source::admit_count(volume_sources.len())?;
+        super::super::source::admit_count(tractions.len())?;
+        let (traction_values, traction_slopes): (Vec<_>, Vec<_>) = tractions
+            .iter()
+            .map(|&(source, value, slope)| ((source, value), (source, slope)))
+            .unzip();
+        let columns = self.traction_columns(&traction_values, cancelled)?;
+        let column_slopes = self.traction_columns(&traction_slopes, cancelled)?;
         let (boundary_values, boundary_slopes): (Vec<_>, Vec<_>) = boundary_sources
             .iter()
             .map(|&(source, value, slope)| ((source, value), (source, slope)))
@@ -424,15 +558,22 @@ impl PreparedMechanicalHarmonic<'_, '_, '_> {
             &volume_slopes,
             cancelled,
         )?;
-        let primary = self.pencil.solve(&load, cancelled)?;
-        let mut derivative =
-            self.pencil
-                .frequency_derivative(&primary.pressure, &load, &slope, cancelled)?;
+        let (primary, traction_power) = self
+            .pencil
+            .solve_with_tractions(&load, &columns, cancelled)?;
+        let mut derivative = self.pencil.frequency_derivative_with_tractions(
+            &primary.pressure,
+            &load,
+            &slope,
+            &column_slopes,
+            cancelled,
+        )?;
         let wall_derivatives =
             self.pencil
                 .wall_derivatives(&primary.pressure, &derivative.pressure, cancelled)?;
         derivative.pressure.truncate(self.model.ndof());
         let mut response = self.field(primary, &load, cancelled)?;
+        response.wall_accounting.wall_traction_power_w = traction_power;
         PreparedHeterogeneous::source_work(
             &mut response.acoustic,
             &boundary_values,
@@ -474,3 +615,6 @@ impl PreparedMechanicalHarmonic<'_, '_, '_> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod traction_tests;

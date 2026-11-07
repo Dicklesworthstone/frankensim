@@ -22,7 +22,7 @@ pub struct WallTractionProfile {
 }
 
 impl WallTractionProfile {
-    pub(super) fn local_coefficients(
+    pub(in crate::acoustics::helmholtz::heterogeneous) fn local_coefficients(
         &self,
         dofs: &[usize],
         cancelled: &mut impl FnMut() -> bool,

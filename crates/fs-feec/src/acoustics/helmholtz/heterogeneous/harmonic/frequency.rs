@@ -207,13 +207,13 @@ pub(super) fn mechanical_admittance(
 impl PressurePencil<'_> {
     fn admit(
         &self,
-        load: &[C64],
+        load_len: usize,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), PressureError> {
         poll(cancelled)?;
         let n = self.stiffness.nrows();
         if n == 0
-            || load.len() != n
+            || load_len != n
             || [
                 self.stiffness,
                 self.mass,
@@ -238,7 +238,6 @@ impl PressurePencil<'_> {
             || self.omega * self.omega == 0.0
             || !self.residual_tolerance.is_finite()
             || self.residual_tolerance <= 0.0
-            || load.iter().any(|&value| !finite(value))
         {
             return Err(PressureError::Invalid(
                 "invalid prepared pressure pencil or source",
@@ -252,7 +251,7 @@ impl PressurePencil<'_> {
         load: &[C64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PressureSolution, PressureError> {
-        self.admit(load, cancelled)?;
+        self.admit(load.len(), cancelled)?;
         let mut forcing = Forcing {
             values: Vec::with_capacity(load.len()),
             magnitude: Vec::with_capacity(load.len()),
@@ -280,11 +279,12 @@ impl PressurePencil<'_> {
         load_derivative: &[C64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PressureSolution, PressureError> {
-        self.admit(load, cancelled)?;
+        self.admit(load.len(), cancelled)?;
         if pressure.len() != load.len()
             || load_derivative.len() != load.len()
             || pressure
                 .iter()
+                .chain(load)
                 .chain(load_derivative)
                 .any(|&value| !finite(value))
         {
@@ -297,15 +297,68 @@ impl PressurePencil<'_> {
             values: vec![[Dd::from_f64(0.0); 2]; load.len()],
             magnitude: vec![0.0; load.len()],
         };
+        for &row in self.free_dofs {
+            poll(cancelled)?;
+            forcing.values[row] = [
+                -Dd::from_f64(load[row].im) - omega * Dd::from_f64(load_derivative[row].im),
+                Dd::from_f64(load[row].re) + omega * Dd::from_f64(load_derivative[row].re),
+            ];
+            forcing.magnitude[row] = load[row].abs() + self.omega * load_derivative[row].abs();
+        }
+        self.frequency_derivative_rhs(pressure, forcing, cancelled)
+    }
+
+    /// Actual physical RHS, already including any i*omega factor belonging to
+    /// fluid velocity sources. Mechanical momentum forces have no such factor.
+    fn solve_rhs(
+        &self,
+        forcing: &Forcing,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PressureSolution, PressureError> {
+        self.admit_rhs(forcing, cancelled)?;
+        self.solve_forcing(forcing, cancelled)
+    }
+
+    fn admit_rhs(
+        &self,
+        forcing: &Forcing,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), PressureError> {
+        self.admit(forcing.values.len(), cancelled)?;
+        if forcing.magnitude.len() != forcing.values.len()
+            || forcing
+                .values
+                .iter()
+                .flatten()
+                .any(|v| !v.hi.is_finite() || !v.lo.is_finite())
+            || forcing.magnitude.iter().any(|v| !v.is_finite() || *v < 0.0)
+        {
+            return Err(PressureError::Invalid("invalid complete harmonic RHS"));
+        }
+        Ok(())
+    }
+
+    /// Solve A*x' = rhs' - A'*x, retaining DD physical forcing through the
+    /// original-equation residual correction and the same prepared LU.
+    fn frequency_derivative_rhs(
+        &self,
+        pressure: &[C64],
+        mut forcing: Forcing,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PressureSolution, PressureError> {
+        self.admit_rhs(&forcing, cancelled)?;
+        if pressure.len() != forcing.values.len() || pressure.iter().any(|&v| !finite(v)) {
+            return Err(PressureError::Invalid(
+                "invalid complete harmonic tangent state",
+            ));
+        }
+        let omega = Dd::from_f64(self.omega);
         // Eliminated rows are reactions, not equations; exact zero pressure
         // and zero tangent are lifted into those coordinates after solving.
         for &row in self.free_dofs {
             poll(cancelled)?;
-            let mut real =
-                -Dd::from_f64(load[row].im) - omega * Dd::from_f64(load_derivative[row].im);
-            let mut imaginary =
-                Dd::from_f64(load[row].re) + omega * Dd::from_f64(load_derivative[row].re);
-            let mut magnitude = load[row].abs() + self.omega * load_derivative[row].abs();
+            let [mut real, mut imaginary] = forcing.values[row];
+            let mut magnitude = forcing.magnitude[row];
             for (matrix, multiplier, rotate) in [
                 (self.mass, Dd::from_f64(2.0) * omega, false),
                 (self.susceptance, Dd::from_f64(1.0), false),

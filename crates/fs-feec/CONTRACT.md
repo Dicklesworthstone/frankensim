@@ -2658,3 +2658,42 @@ ownership, extent and cancellation. Selective pinned formatting and whitespace
 checks passed, and reciprocal source/physics review found no concrete blocker.
 Native Rust compilation and test execution remain unavailable in the exhausted
 shared build environment; these regressions are authored, not claimed executed.
+
+### Harmonic applied traction and analytic frequency response
+
+Complete harmonic mechanical walls accept reusable owner-bound
+`WallTractionProfile` projections in the original global hierarchical trace,
+including pressure-release-shared mechanical coordinates. Complex peak traction
+amplitudes are Pa, positive outward; their actual weak momentum RHS is
+`W * shape * amplitude`. `PreparedMechanicalHarmonicTraction` retains this
+signed consistent projection, so repeated responses reuse the original complete
+LU without face reassembly, impedance inversion, modal condensation or added
+damping. The same complete pressure, displacement, velocity and Maxwell memory
+coordinates remain present at a local wall-impedance zero.
+
+`solve_with_wall_tractions` combines the original fluid sources and mechanical
+forces coherently. `solve_with_wall_tractions_frequency_derivative` accepts
+explicit Pa/(rad/s) traction-amplitude slopes. External forces and their slopes
+remain in double-double through the direct-RHS solve, analytic operator tangent
+and original-equation residual correction. Mechanical force is never divided
+by frequency to disguise it as a fluid velocity source.
+
+`wall_traction_power_w` is the independent signed
+`Re((W * traction)^H velocity)/2` account. `acoustic.input_power_w` remains
+solely fluid-source work, and `fluid_to_wall_power_w` remains solely internal
+pressure exchange. Total and wall balances include external mechanical work
+once; the fluid balance excludes it. Existing fluid-only APIs delegate with
+no traction and retain their behavior. Prepared columns occupy O(wall trace
+DOFs); repeated forcing performs no surface assembly or factorization.
+
+Profiles and spectra refuse invalid coordinates, duplicate or nonfinite data,
+foreign owners and cancellation. Active traction counts retain the existing
+128-source bound. The original locally reacting wall scope is unchanged; this
+does not infer shell bending, lateral elastic waves or nonlinear forcing.
+
+Four focused regressions specify independent P1 acoustic/Maxwell equations and
+analytic source slopes, P2 surface work and strong coherent cancellation,
+regular coupled response at a local lossless wall-impedance zero, and source
+admission, binding and cancellation. Bounded independent source/physics review,
+pinned formatting and whitespace checks passed. Native Rust compilation and
+these four regression groups remain unexecuted in this environment.

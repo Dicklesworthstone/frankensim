@@ -4,7 +4,8 @@
 //! small physical relaxation extensions explicit, as in the exact time owner.
 
 use super::{
-    PressureError, PressurePencil, PressureSolution, finite, poll, quadratic_nonnegative, real_form,
+    Forcing, PressureError, PressurePencil, PressureSolution, finite, poll, quadratic_nonnegative,
+    real_form,
 };
 use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_with_cancel};
 use fs_math::{c64::C64, dd::Dd, det};
@@ -59,6 +60,9 @@ pub struct MechanicalWallAccounting {
     pub resistance_dissipation_w: f64,
     pub relaxation_dissipation_w: f64,
     pub fluid_to_wall_power_w: f64,
+    /// Signed external mechanical work, independent of fluid source work and
+    /// internal pressure exchange: 1/2 Re((W*traction)^H v).
+    pub wall_traction_power_w: f64,
 }
 
 impl MechanicalWallAccounting {
@@ -70,10 +74,10 @@ impl MechanicalWallAccounting {
     pub fn dissipation_w(self) -> f64 {
         self.resistance_dissipation_w + self.relaxation_dissipation_w
     }
-    /// Independently evaluated reversible exchange minus actual wall heat.
+    /// Fluid exchange plus external mechanical work minus actual wall heat.
     #[must_use]
     pub fn power_balance_residual_w(self) -> f64 {
-        self.fluid_to_wall_power_w - self.dissipation_w()
+        self.fluid_to_wall_power_w + self.wall_traction_power_w - self.dissipation_w()
     }
 }
 
@@ -85,6 +89,13 @@ pub(crate) struct Wall {
     pub(crate) resistance: f64,
     /// Original (sqrt(k), 1/tau), admitted through the wall's material owner.
     pub(crate) arms: Vec<(f64, f64)>,
+}
+
+/// One cached, signed consistent W*shape force column in its original wall.
+/// The public prepared source additionally binds this to its exact owner.
+pub(crate) struct WallTraction {
+    wall: usize,
+    force: Vec<Dd>,
 }
 
 pub(crate) struct CoupledPencil {
@@ -352,6 +363,146 @@ impl CoupledPencil {
         self.walls.get(wall).map(|w| w.dofs.as_slice())
     }
 
+    pub(crate) fn prepare_traction(
+        &self,
+        wall: usize,
+        coefficients: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<WallTraction, PressureError> {
+        let original = self
+            .walls
+            .get(wall)
+            .ok_or(PressureError::Invalid("traction wall index"))?;
+        if coefficients.len() != original.dofs.len() || coefficients.iter().any(|v| !v.is_finite())
+        {
+            return Err(PressureError::Invalid(
+                "original finite wall traction shape required",
+            ));
+        }
+        let mut force = vec![Dd::ZERO; coefficients.len()];
+        for (row, output) in force.iter_mut().enumerate() {
+            poll(cancelled)?;
+            let (columns, values) = original.mass.row(row);
+            for (&column, &value) in columns.iter().zip(values) {
+                *output = *output + Dd::from_f64(value) * Dd::from_f64(coefficients[column]);
+            }
+            if !output.hi.is_finite() || !output.lo.is_finite() {
+                return Err(PressureError::Invalid("wall traction projection overflow"));
+            }
+        }
+        poll(cancelled)?;
+        Ok(WallTraction { wall, force })
+    }
+
+    /// Full physical RHS: fluid i*omega*b and wall W*traction. Supplying a
+    /// fluid slope requests rhs' = i*b + i*omega*b' and W*traction', without
+    /// dividing mechanical forcing by frequency or differentiating that ratio.
+    fn traction_forcing(
+        &self,
+        load: &[C64],
+        slope: Option<&[C64]>,
+        tractions: &[(&WallTraction, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Forcing, PressureError> {
+        poll(cancelled)?;
+        if load.len() != self.fluid_dofs
+            || load.iter().any(|&v| !finite(v))
+            || slope.is_some_and(|s| s.len() != load.len() || s.iter().any(|&v| !finite(v)))
+        {
+            return Err(PressureError::Invalid(
+                "original finite acoustic source and slope required",
+            ));
+        }
+        let n = self.blocks[0].nrows();
+        let mut forcing = Forcing {
+            values: vec![[Dd::ZERO; 2]; n],
+            magnitude: vec![0.0; n],
+        };
+        for (row, &value) in load.iter().enumerate() {
+            poll(cancelled)?;
+            let (rhs, magnitude) = if let Some(slope) = slope {
+                let w = Dd::from_f64(self.omega);
+                (
+                    [
+                        -Dd::from_f64(value.im) - w * Dd::from_f64(slope[row].im),
+                        Dd::from_f64(value.re) + w * Dd::from_f64(slope[row].re),
+                    ],
+                    value.abs() + self.omega * slope[row].abs(),
+                )
+            } else {
+                let rhs = C64::new(-self.omega * value.im, self.omega * value.re);
+                ([Dd::from_f64(rhs.re), Dd::from_f64(rhs.im)], rhs.abs())
+            };
+            forcing.values[row] = rhs;
+            forcing.magnitude[row] = magnitude;
+        }
+        for &(traction, amplitude) in tractions {
+            poll(cancelled)?;
+            if !finite(amplitude) {
+                return Err(PressureError::Invalid(
+                    "finite wall traction amplitude required",
+                ));
+            }
+            let start = self.offsets[traction.wall] + traction.force.len();
+            for (local, &force) in traction.force.iter().enumerate() {
+                poll(cancelled)?;
+                let row = start + local;
+                forcing.values[row][0] =
+                    forcing.values[row][0] + force * Dd::from_f64(amplitude.re);
+                forcing.values[row][1] =
+                    forcing.values[row][1] + force * Dd::from_f64(amplitude.im);
+                forcing.magnitude[row] += force.to_f64().abs() * amplitude.abs();
+            }
+        }
+        Ok(forcing)
+    }
+
+    pub(crate) fn solve_with_tractions(
+        &self,
+        load: &[C64],
+        tractions: &[(&WallTraction, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(PressureSolution, f64), PressureError> {
+        if tractions.is_empty() {
+            return Ok((self.solve(load, cancelled)?, 0.0));
+        }
+        let forcing = self.traction_forcing(load, None, tractions, cancelled)?;
+        let solution = self.pencil().solve_rhs(&forcing, cancelled)?;
+        let mut power = Dd::ZERO;
+        for (wall, &offset) in self.walls.iter().zip(&self.offsets) {
+            let n = wall.dofs.len();
+            for row in offset + n..offset + 2 * n {
+                poll(cancelled)?;
+                let v = solution.pressure[row];
+                power = power
+                    + Dd::from_f64(0.5)
+                        * (forcing.values[row][0] * Dd::from_f64(v.re)
+                            + forcing.values[row][1] * Dd::from_f64(v.im));
+            }
+        }
+        if !power.hi.is_finite() || !power.lo.is_finite() {
+            return Err(PressureError::Invalid("wall traction work overflow"));
+        }
+        poll(cancelled)?;
+        Ok((solution, power.to_f64()))
+    }
+
+    pub(crate) fn frequency_derivative_with_tractions(
+        &self,
+        state: &[C64],
+        load: &[C64],
+        slope: &[C64],
+        traction_slopes: &[(&WallTraction, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PressureSolution, PressureError> {
+        if traction_slopes.is_empty() {
+            return self.frequency_derivative(state, load, slope, cancelled);
+        }
+        let forcing = self.traction_forcing(load, Some(slope), traction_slopes, cancelled)?;
+        self.pencil()
+            .frequency_derivative_rhs(state, forcing, cancelled)
+    }
+
     pub(crate) fn wall_fields(
         &self,
         state: &[C64],
@@ -419,6 +570,7 @@ impl CoupledPencil {
                 resistance_dissipation_w: a[3],
                 relaxation_dissipation_w: a[4],
                 fluid_to_wall_power_w: a[5],
+                wall_traction_power_w: 0.0,
             },
         ))
     }
