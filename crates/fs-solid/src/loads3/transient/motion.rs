@@ -447,7 +447,7 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         load: &TetLoadCase3<'_, '_>,
         h: f64,
         cx: &Cx<'_>,
-    ) -> Result<(f64, f64, f64, f64, f64, f64), TransientError3> {
+    ) -> Result<energy::StepEnergy, TransientError3> {
         let previous = self.prescribed.as_ref().ok_or(TransientError3::Invalid(
             "missing previous prescribed support state",
         ))?;
@@ -462,7 +462,6 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         )?;
         let endpoint = self.endpoint(next, reduced, load.nodal_forces_n(), cx)?;
         let full = old[0].len();
-        let mut dq = vec![0.0; full];
         let mut midpoint = std::array::from_fn(|_| vec![0.0; full]);
         for d in 0..full {
             if d % 256 == 0 {
@@ -472,10 +471,11 @@ impl TetTransientRun3<'_, '_, '_, '_> {
             // The accepted Newmark increment is h*v_mid. Subtracting rounded
             // absolute displacements can erase resolved acceleration-driven
             // support work about a nonzero displacement datum.
-            dq[d] = number(h * midpoint[1][d])?;
         }
+        let displacement = |d: usize| Dd::from_f64(h)
+            * (Dd::from_f64(0.5 * old[1][d]) + Dd::from_f64(0.5 * endpoint.motion[1][d]));
         let actions = self.problem.apply_full_kinematics(&midpoint, cx)?;
-        let mut damping = 0.0;
+        let mut damping = Dd::default();
         for d in 0..full {
             if d % 256 == 0 {
                 check(cx)?;
@@ -484,32 +484,37 @@ impl TetTransientRun3<'_, '_, '_, '_> {
                 self.config.mass_damping_per_s * actions.mv[d]
                     + self.config.stiffness_damping_s * actions.kv[d],
             )?;
-            damping = number(midpoint[1][d].mul_add(cv, damping))?;
+            damping = damping + Dd::from_f64(midpoint[1][d]) * Dd::from_f64(cv);
         }
-        let damping = number(h * damping)?;
-        let mut mechanical = 0.0;
+        let damping = energy::retained(Dd::from_f64(h) * damping)?;
+        let mut mechanical = Dd::default();
         for forces in [&self.full_force[..], load.nodal_forces_n()] {
             for &(d, f) in forces {
                 check(cx)?;
-                mechanical = number((0.5 * f).mul_add(dq[d], mechanical))?;
+                mechanical = mechanical + Dd::from_f64(0.5 * f) * displacement(d);
             }
         }
-        let thermal = number(inner(&next.thermal, &dq))?;
-        let mut support = 0.0;
+        let mut thermal = Dd::default();
+        for d in 0..full {
+            if d % 256 == 0 { check(cx)?; }
+            thermal = thermal + Dd::from_f64(next.thermal[d]) * displacement(d);
+        }
+        let mut support = Dd::default();
         for &d in self.problem.fixed_dofs {
             check(cx)?;
-            let average = number(0.5 * previous.reactions[d] + 0.5 * endpoint.reactions[d])?;
-            support = number(average.mul_add(dq[d], support))?;
+            let average = Dd::from_f64(0.5 * previous.reactions[d])
+                + Dd::from_f64(0.5 * endpoint.reactions[d]);
+            support = support + average * displacement(d);
         }
+        let kinetic_change = energy::full_change(self.problem, true, &old[1], &endpoint.motion[1], cx)?;
+        let strain_change = energy::full_change(self.problem, false, &old[0], &endpoint.motion[0], cx)?;
+        let account = energy::StepEnergy {
+            kinetic: endpoint.kinetic, strain: endpoint.strain, kinetic_change, strain_change,
+            mechanical: energy::retained(mechanical)?, support: energy::retained(support)?,
+            thermal: energy::retained(thermal)?, damping,
+        };
         check(cx)?;
         next.reactions = endpoint.reactions;
-        Ok((
-            endpoint.kinetic,
-            endpoint.strain,
-            mechanical,
-            support,
-            thermal,
-            damping,
-        ))
+        Ok(account)
     }
 }

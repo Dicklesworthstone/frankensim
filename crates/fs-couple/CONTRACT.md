@@ -258,6 +258,16 @@ integration, impulse-work and force-splitting defects retain their original
 gates and never supply physical heat. `FiniteSolidStep::kinetic_change_j`
 exposes the same increment used by the original acceptance calculation.
 
+Dynamic source-bound tetrahedral thermoelasticity consumes the native Newmark
+owner's retained kinetic increment, independent force/support work and explicit
+Rayleigh loss. It retains those quantities through stress-work and combined
+caloric acceptance instead of subtracting absolute kinetic diagnostics. Rayleigh
+energy stays explicitly exported; local reversible constitutive heat alone
+feeds its original material cells. The underlying consistent mass, stationary
+support restriction, source ranges and time-refinement obligations are unchanged.
+Its finite-gas cavity composition consumes the same retained mechanical storage
+and work rather than rounding them again before the combined gas/wall balance.
+
 ## Original specific heat in coupled capacity admission
 
 Electrical, dielectric, magnetic, piezoelectric, thermoelastic, creep and

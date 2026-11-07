@@ -17,6 +17,8 @@ pub struct ThermalTransientStep3 {
     /// Kinetic plus V/2 (epsilon-epsilon_free):C:(epsilon-epsilon_free) [J].
     pub kinetic_plus_elastic_before_j: f64,
     pub kinetic_plus_elastic_after_j: f64,
+    /// Original shifted elastic-storage change, evaluated element by element.
+    pub elastic_energy_change_j: f64,
     /// Work supplied TO mechanics by the changing stress-free strain [J].
     pub thermal_material_work_j: f64,
     /// Signed work from the changing constitutive tensor at fixed mass [J].
@@ -135,8 +137,9 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
             stiffness_changed.then_some(&self.operators.stiffness), h_s, cx)?;
         candidate.thermal_strains = Some(captured);
         let after = candidate.recover_response(mesh_frame, maximum_strain, cx)?;
-        let mut work = 0.0;
-        let mut stiffness_work = 0.0;
+        let mut work = Dd::default();
+        let mut stiffness_work = Dd::default();
+        let mut elastic_change = Dd::default();
         for (element, &volume) in self.operators.element_volumes_m3.iter().enumerate() {
             check(cx)?;
             let old_strain = free_strain(self.thermal_strains.as_ref(), element);
@@ -144,29 +147,54 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
             let old_stress = before.stress.elements()[element].stress_mandel_pa();
             let next_stress = after.stress.elements()[element].stress_mandel_pa();
             for component in 0..6 {
-                let average = number(0.5*old_stress[component] + 0.5*next_stress[component])?;
-                work = number(work - volume*average*(next_strain[component]-old_strain[component]))?;
+                let average = Dd::from_f64(0.5 * old_stress[component])
+                    + Dd::from_f64(0.5 * next_stress[component]);
+                let delta = Dd::from_f64(next_strain[component]) - Dd::from_f64(old_strain[component]);
+                work = work - Dd::from_f64(volume) * average * delta;
             }
+            let old_material = material_at(self.problem.materials, element).ok_or(
+                TransientError3::Invalid("missing accepted element material"))?;
+            let next_material = material_at(problem.materials, element).ok_or(
+                TransientError3::Invalid("missing refreshed element material"))?;
+            let old_elastic = before.stress.elements()[element].elastic_strain_mandel();
+            let next_elastic = after.stress.elements()[element].elastic_strain_mandel();
+            // Evaluate the original quadratic independently of stress work:
+            // delta(Psi) = e_bar' C0 delta(e) + e1' delta(C) e1 / 2.
+            // Coefficient differences are formed before common strain products.
+            let mut fixed_leading = Dd::default();
+            let mut fixed_tail = Dd::default();
+            let mut changed = Dd::default();
+            for i in 0..6 { for j in 0..6 {
+                let mean = Dd::from_f64(0.5 * old_elastic[i]) + Dd::from_f64(0.5 * next_elastic[i]);
+                let delta = Dd::from_f64(next_elastic[j]) - Dd::from_f64(old_elastic[j]);
+                let coefficient = Dd::from_f64(old_material.stiffness_mandel_pa()[i][j]);
+                fixed_leading = fixed_leading + Dd::from_f64(mean.hi) * coefficient * Dd::from_f64(delta.hi);
+                fixed_tail = fixed_tail + Dd::from_f64(mean.lo) * coefficient * delta
+                    + Dd::from_f64(mean.hi) * coefficient * Dd::from_f64(delta.lo);
+                let difference = Dd::from_f64(next_material.stiffness_mandel_pa()[i][j]) - coefficient;
+                changed = changed + Dd::from_f64(0.5 * next_elastic[i]) * difference
+                    * Dd::from_f64(next_elastic[j]);
+            }}
+            elastic_change = elastic_change + Dd::from_f64(volume) * (fixed_leading + fixed_tail + changed);
             if stiffness_changed {
-                let old_material = material_at(self.problem.materials, element).ok_or(
-                    TransientError3::Invalid("missing accepted element material"))?;
-                let next_material = material_at(problem.materials, element).ok_or(
-                    TransientError3::Invalid("missing refreshed element material"))?;
-                let old_elastic = before.stress.elements()[element].elastic_strain_mandel();
-                let next_elastic = after.stress.elements()[element].elastic_strain_mandel();
                 for i in 0..6 { for j in 0..6 {
-                    let delta = number(next_material.stiffness_mandel_pa()[i][j]
-                        - old_material.stiffness_mandel_pa()[i][j])?;
-                    stiffness_work = number(stiffness_work
-                        + 0.5*volume*old_elastic[i]*delta*next_elastic[j])?;
+                    let delta = Dd::from_f64(next_material.stiffness_mandel_pa()[i][j])
+                        - Dd::from_f64(old_material.stiffness_mandel_pa()[i][j]);
+                    stiffness_work = stiffness_work + Dd::from_f64(0.5 * volume)
+                        * Dd::from_f64(old_elastic[i]) * delta * Dd::from_f64(next_elastic[j]);
                 }}
             }
         }
         let old_energy = before.kinetic_plus_elastic_energy_j;
         let next_energy = after.kinetic_plus_elastic_energy_j;
-        let defect = number(next_energy-old_energy + native.damping_loss_j
-            - native.mechanical_work_j - native.support_work_j - work - stiffness_work)?;
-        let scale = old_energy.abs().max(next_energy.abs()).max(work.abs()).max(stiffness_work.abs())
+        let elastic_change = energy::retained(elastic_change)?;
+        let work = energy::retained(work)?;
+        let stiffness_work = energy::retained(stiffness_work)?;
+        let defect = energy::retained(native.retained_kinetic_energy_change_j() + elastic_change
+            + native.retained_damping_loss_j() - native.retained_external_work_j()
+            - work - stiffness_work)?.to_f64();
+        let scale = native.kinetic_energy_change_j.abs().max(elastic_change.to_f64().abs())
+            .max(work.to_f64().abs()).max(stiffness_work.to_f64().abs())
             .max(native.damping_loss_j.abs()).max(native.mechanical_work_j.abs());
         let allowance = number(self.config.absolute_energy_tolerance_j
             + self.config.relative_energy_tolerance*scale)?;
@@ -177,7 +205,8 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
         Ok((candidate, ThermalTransientStep3 { native,
             kinetic_plus_elastic_before_j: old_energy,
             kinetic_plus_elastic_after_j: next_energy,
-            thermal_material_work_j: work, stiffness_material_work_j: stiffness_work,
+            elastic_energy_change_j: elastic_change.to_f64(),
+            thermal_material_work_j: work.to_f64(), stiffness_material_work_j: stiffness_work.to_f64(),
             physical_balance_error_j: defect }))
     }
 }

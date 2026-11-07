@@ -28,6 +28,56 @@ fn config() -> TransientConfig3 {
 }
 
 #[test]
+fn local_kinetic_exchange_survives_a_disconnected_coasting_inventory() {
+    with_cx(false, |cx| {
+        let active = TetElasticMaterial::try_new(6.0, 60.0, 0.0, [73; 32]).unwrap();
+        let spectator = TetElasticMaterial::try_new(6.0 * 2.0_f64.powi(80), 60.0, 0.0, [74; 32]).unwrap();
+        let materials = [active, spectator];
+        let nodes: Vec<_> = NODES.into_iter().chain(NODES.map(|mut p| { p[0] += 3.0; p })).collect();
+        let tets = [[0, 1, 2, 3], [4, 5, 6, 7]];
+        let fixed: Vec<_> = (0..12).filter(|d| *d != 3).collect();
+        let p = TetLinearElasticProblem { nodes_m: &nodes, tetrahedra: &tets,
+            materials: TetMaterialField::PerElement(&materials), fixed_dofs: &fixed,
+            budget: TetAssemblyBudget::default() };
+        let g = TetLoadGeometry3::new(&nodes, &tets, TetAssemblyBudget::default(), 8, cx).unwrap();
+        let load = g.assemble(&[], VolumeLoad3::None, &[(3, 0.25)], cx).unwrap();
+        let zero = [[0.0; 3]; 8];
+        let mut velocities = zero;
+        velocities[4..].fill([0.125, 0.0, 0.0]);
+        let cfg = TransientConfig3 { absolute_energy_tolerance_j: 1e-12,
+            relative_energy_tolerance: 1e-10, ..config() };
+        let mut run = load.begin_transient(&p, None, 0.0, &zero, &velocities, cfg, cx).unwrap();
+        let before = run.state().kinetic_energy_j;
+        let report = run.advance(&load, 1.0 / 128.0, cx).unwrap();
+        let motion = run.nodal_motion(cx).unwrap();
+        let expected = 0.05 * motion[1][1][0].powi(2);
+        assert!(expected > 1e-6);
+        assert_eq!(run.state().kinetic_energy_j, before);
+        assert!((report.kinetic_energy_change_j - expected).abs() < 1e-14);
+        assert!((report.mechanical_work_j - 0.25 * motion[0][1][0]).abs() < 1e-14);
+        assert!(report.balance_error_j.abs() < 1e-12);
+        assert!(report.strain_energy_change_j > 0.0);
+        // The physical thermal-material owner must consume the native increment
+        // too; its own absolute kinetic-plus-elastic diagnostics also coincide.
+        let frame = fs_blake3::ContentHash([75; 32]);
+        let thermal: Vec<_> = materials.iter().map(|material|
+            TetThermalStrainState::try_new(300.0, 300.0, [0.0; 6],
+                material.material_state_identity, frame, 0.05).unwrap()).collect();
+        let (next, thermal_report) = run.advance_thermal_candidate(&p,
+            TetThermalStrainField::PerElement(&thermal), &load, 1.0 / 128.0,
+            frame, 0.05, cx).unwrap();
+        let after = next.nodal_motion(cx).unwrap();
+        let expected_change = 0.05 * (after[1][1][0] - motion[1][1][0])
+            * (after[1][1][0] + motion[1][1][0]);
+        assert!((thermal_report.native.kinetic_energy_change_j - expected_change).abs() < 1e-14);
+        assert_eq!(thermal_report.kinetic_plus_elastic_before_j,
+            thermal_report.kinetic_plus_elastic_after_j);
+        assert!(thermal_report.physical_balance_error_j.abs() < 1e-12);
+        assert!(thermal_report.elastic_energy_change_j > 0.0);
+    });
+}
+
+#[test]
 fn g1_single_free_component_has_consistent_mass_frequency_and_second_order() {
     with_cx(false, |cx| {
         // E=60, nu=0, rho=6, V=1/6: K_33=10 N/m, M_33=0.1 kg.

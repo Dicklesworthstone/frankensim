@@ -57,6 +57,40 @@ fn close(a: f64, b: f64) {
 }
 
 #[test]
+fn unresolved_support_velocity_cannot_hide_its_work_in_background_kinetic_energy() {
+    with_cx(false, |cx| {
+        // Numerical stress fixture: a large mass moving at an ordinary speed.
+        // The requested acceleration's velocity increment is below one ULP,
+        // while its independent reaction work is about half a joule.
+        let m = TetElasticMaterial::try_new(6.0 * 2.0_f64.powi(54), 60.0, 0.0, [79; 32]).unwrap();
+        let fixed: Vec<_> = (0..12).collect();
+        let p = problem(&m, &fixed);
+        let g = geometry(cx);
+        let load = g.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        let velocities = [[1.0, 0.0, 0.0]; 4];
+        let config = TransientConfig3 {
+            absolute_energy_tolerance_j: 1e-10, relative_energy_tolerance: 1e-10,
+            ..Default::default()
+        };
+        let mut run = load.begin_transient_with_supports(&p, None, 0.0,
+            &ZERO, &velocities, &ZERO, config, cx).unwrap();
+        let before = run.nodal_motion(cx).unwrap();
+        let result = run.advance_with_support_accelerations(&load,
+            &[(0, 1.0), (3, 1.0), (6, 1.0), (9, 1.0)], 2.0_f64.powi(-54), cx);
+        match result {
+            Err(TransientError3::Energy { defect_j, allowance_j }) => {
+                assert!((defect_j + 0.5).abs() < 1e-14, "{defect_j}");
+                assert!(allowance_j < 1e-8);
+            }
+            other => panic!("rounded support velocity must refuse unresolved work: {other:?}"),
+        }
+        assert_eq!(run.nodal_motion(cx).unwrap(), before);
+        assert_eq!(run.state().step, 0);
+        assert_eq!(run.state().time_s, 0.0);
+    });
+}
+
+#[test]
 fn g1_initial_acceleration_includes_mass_stiffness_and_both_damping_cross_terms() {
     with_cx(false, |cx| {
         let m = material();

@@ -8237,6 +8237,23 @@ owner fixtures cover coupled counter-motion and the separate BE/centered work
 identities; their full integration execution remains pending the native
 dependency/resource blocker. The shared arithmetic leaf has executed directly.
 
+The native tetrahedral `loads3::transient` Newmark owner also evaluates kinetic
+and unshifted strain increments through its original sparse operators; moving
+supports use the original full element actions, including free/fixed mass
+coupling. Source and reaction work remain independent and retained through the
+gate. Changing stiffness contributes its original coefficient difference before
+contraction with displacement. Interval transfers, rather than unchanged stored
+energy, scale the relative work tolerance. Public increments and retained native
+kinetic/work/loss getters support subsequent physical heat composition.
+
+Thermal material refresh independently evaluates the original shifted element
+storage and retains it with kinetic energy through physical admission. Rayleigh
+loss remains the explicitly supplied damping model; no numerical residual becomes
+heat. Regressions cover a resolved local acceleration beside a disconnected
+coasting inventory and transactional refusal when a prescribed velocity rounds
+away but support work is nonzero. These integration definitions await the full
+native build; they do not inherit the arithmetic leaf's executed result.
+
 ## Conservative finite-strain elastic motion
 
 `hyper3::mixed::conservative::{ConservativeTetDefinition, ConservativeTetSolid}`

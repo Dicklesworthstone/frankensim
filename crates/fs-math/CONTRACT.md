@@ -18,6 +18,12 @@ floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
   cover coupled counter-motion, exchanged inventories, retained work residuals,
   fallible/cancelled actions and incomplete outputs. This new path adds no
   universal relative bound, interval enclosure or dual-ISA qualification.
+- `quadratic::endpoint_work` contracts the mean endpoint force with actual
+  endpoint displacement using the same separate leading/cross/trailing
+  reductions. It retains mean and difference tails without allocation and
+  polls every 256 components. Force interpolation, physical units and heat
+  interpretation remain with the owner. Two additional native tests cover
+  cancelling force means, displacement tails, shapes and refusal paths.
 - `decay::{remaining_fraction, decayed_fraction, attenuate, relax_toward}` —
   allocation-free scalar exponential kernels for nonnegative integrated hazard,
   including its infinite limit. Separate survival/loss evaluation retains tiny
@@ -204,6 +210,7 @@ Scalar arithmetic is straight-line and needs no poll points. The vector
 `quadratic::increment` path polls the caller's cancellation probe every 256
 coordinates and around each action; the action receives that same probe and
 retains its own bounded checkpoints and typed refusal.
+`quadratic::endpoint_work` has the same bounded vector polling and no callback.
 
 ## Unsafe boundary
 None.

@@ -15,6 +15,7 @@
 pub mod cavity;
 
 use super::*;
+use fs_math::dd::Dd;
 use fs_solid::loads3::transient::{
     TransientConfig3, response::TransientResponse3, checkpoint::TetTransientCheckpoint3,
 };
@@ -170,9 +171,9 @@ impl<'s, 'm> DynamicThermoelasticSolid<'s, 'm> {
                 state.maximum_absolute_mandel_strain, cx).map_err(SolidEnthalpyError::from)?;
             let potentials = dynamic_potentials(&state, &response, &self.laws, config, cx)?;
             let mut cells = Vec::with_capacity(self.source.cells.len());
-            let mut stress_work = 0.0;
-            let mut internal_change = 0.0;
-            let mut reversible_heat = 0.0;
+            let mut stress_work = Dd::default();
+            let mut internal_change = Dd::default();
+            let mut reversible_heat = Dd::default();
             for (i, bound) in self.source.cells.iter().enumerate() {
                 check(cx)?;
                 let old = &self.response.stress.elements()[i];
@@ -207,20 +208,25 @@ impl<'s, 'm> DynamicThermoelasticSolid<'s, 'm> {
                     || potential_residual.abs() > config.energy_tolerance_j {
                     return Err(ThermoelasticFeedbackError::Invalid("dynamic source potential and native stress/material work disagree"));
                 }
-                stress_work = finite(stress_work + mechanical_work_j)?;
-                internal_change = finite(internal_change + change)?;
-                reversible_heat = finite(reversible_heat + reversible_heat_j)?;
+                stress_work = stress_work + Dd::from_f64(mechanical_work_j);
+                internal_change = internal_change + Dd::from_f64(change);
+                reversible_heat = reversible_heat + Dd::from_f64(reversible_heat_j);
                 cells.push(ThermoelasticCellStep {
                     cell: bound.source.cell, temperature_k, potentials: [a, b],
                     mechanical_work_j, expansion_work_j, stiffness_work_j,
                     reversible_heat_j, free_energy_residual_j,
                 });
             }
-            let kinetic_energy_change_j = finite(run.state().kinetic_energy_j - self.kinetic_energy_j())?;
-            let mechanical_work_j = finite(native.native.mechanical_work_j + native.native.support_work_j)?;
+            // Preserve the original mass increment through the independent
+            // stress/caloric checks. Public absolute energies are diagnostics.
+            let kinetic_change = native.native.retained_kinetic_energy_change_j();
+            let mechanical_work = native.native.retained_external_work_j();
+            let damping_loss = native.native.retained_damping_loss_j();
+            let kinetic_energy_change_j = finite(kinetic_change.to_f64())?;
+            let mechanical_work_j = finite(mechanical_work.to_f64())?;
             let damping_export_j = native.native.damping_loss_j;
-            let mechanical_residual_j = finite(kinetic_energy_change_j + stress_work
-                + damping_export_j - mechanical_work_j)?;
+            let mechanical_residual_j = finite((kinetic_change + stress_work
+                + damping_loss - mechanical_work).to_f64())?;
             if mechanical_residual_j.abs() > config.energy_tolerance_j {
                 return Err(ThermoelasticFeedbackError::Invalid("native stress work, kinetic energy, damping and applied work disagree"));
             }
@@ -228,11 +234,13 @@ impl<'s, 'm> DynamicThermoelasticSolid<'s, 'm> {
             let heat_defect_j = finite(applied.iter().zip(&cells)
                 .map(|(used, cell)| (used - cell.reversible_heat_j).abs()).sum())?;
             let external_heat_j = finite(audit.external_heat_j - applied_heat_j)?;
-            let thermal_residual_j = finite(audit.stored_energy_change_j - audit.incoming_energy_j
-                - external_heat_j - reversible_heat)?;
-            let combined_residual_j = finite(kinetic_energy_change_j + internal_change
-                + audit.stored_energy_change_j + damping_export_j - audit.incoming_energy_j
-                - mechanical_work_j - external_heat_j)?;
+            let thermal_residual_j = finite((Dd::from_f64(audit.stored_energy_change_j)
+                - Dd::from_f64(audit.incoming_energy_j) - Dd::from_f64(external_heat_j)
+                - reversible_heat).to_f64())?;
+            let combined_residual_j = finite((kinetic_change + internal_change
+                + Dd::from_f64(audit.stored_energy_change_j) + damping_loss
+                - Dd::from_f64(audit.incoming_energy_j) - mechanical_work
+                - Dd::from_f64(external_heat_j)).to_f64())?;
             defects = [heat_defect_j, combined_residual_j];
             if heat_defect_j <= config.heat_tolerance_j
                 && thermal_residual_j.abs() <= config.energy_tolerance_j
@@ -240,10 +248,10 @@ impl<'s, 'm> DynamicThermoelasticSolid<'s, 'm> {
                 let motion = run.into_checkpoint(cx).map_err(SolidEnthalpyError::from)?;
                 let report = DynamicThermoelasticReport {
                     iterations: iteration, thermal_audit: audit, native, cells,
-                    kinetic_energy_change_j, internal_energy_change_j: internal_change,
-                    mechanical_work_j, damping_export_j, reversible_heat_j: reversible_heat,
+                    kinetic_energy_change_j, internal_energy_change_j: finite(internal_change.to_f64())?,
+                    mechanical_work_j, damping_export_j, reversible_heat_j: finite(reversible_heat.to_f64())?,
                     applied_heat_j, external_heat_j, mechanical_residual_j,
-                    thermal_residual_j, combined_residual_j, heat_defect_j,
+                    thermal_residual_j, combined_residual_j, heat_defect_j, internal_change,
                 };
                 let solid = Self {
                     source: self.source, laws: self.laws.clone(), state, motion, response,
@@ -313,6 +321,14 @@ pub struct DynamicThermoelasticReport {
     pub thermal_residual_j: f64,
     pub combined_residual_j: f64,
     pub heat_defect_j: f64,
+    internal_change: Dd,
+}
+impl DynamicThermoelasticReport {
+    /// Retained kinetic plus constitutive internal storage, excluding caloric
+    /// storage and exported damping, for composition with a finite gas source.
+    pub fn retained_mechanical_energy_change_j(&self) -> Dd {
+        self.native.native.retained_kinetic_energy_change_j() + self.internal_change
+    }
 }
 
 pub struct DynamicThermoelasticCandidate<'s, 'm, 't, O> {

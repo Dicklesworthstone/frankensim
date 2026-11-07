@@ -20,6 +20,7 @@ use crate::shell_time::DynamicState;
 use fs_solver::krylov::CgState;
 use fs_solver::op::LinearOp;
 use fs_sparse::{Csr, precond::Precond};
+use fs_math::dd::Dd;
 use std::sync::Arc;
 
 /// Physical stress, inertia and support reactions at accepted endpoints.
@@ -37,6 +38,7 @@ pub mod motion;
 /// Source-refreshed thermal strain with physical elastic energy and input work.
 pub mod thermal;
 mod thermal_damping;
+mod energy;
 /// Detached exact native history across changing material-state lifetimes.
 pub mod checkpoint;
 
@@ -217,7 +219,23 @@ pub struct TransientStep3 {
     pub stiffness_parameter_work_j: f64,
     pub damping_loss_j: f64,
     pub quadratic_energy_j: f64,
+    /// Original consistent-mass storage increment, not rounded-total subtraction.
+    pub kinetic_energy_change_j: f64,
+    /// Original unshifted stiffness storage increment, including coefficient changes.
+    pub strain_energy_change_j: f64,
     pub balance_error_j: f64,
+    kinetic_change: Dd,
+    external_work: Dd,
+    damping_loss: Dd,
+}
+
+impl TransientStep3 {
+    /// Retained kinetic increment for composition before diagnostic rounding.
+    pub const fn retained_kinetic_energy_change_j(&self) -> Dd { self.kinetic_change }
+    /// Actual external-force plus support work, excluding thermal parameter work.
+    pub const fn retained_external_work_j(&self) -> Dd { self.external_work }
+    /// The declared physical Rayleigh loss; no integration residual is included.
+    pub const fn retained_damping_loss_j(&self) -> Dd { self.damping_loss }
 }
 
 /// Immutable operators plus the last accepted state. Clone is a same-process
@@ -476,10 +494,9 @@ impl TetTransientRun3<'_, '_, '_, '_> {
             }
             (q, v, a, iterations, force_residual_n)
         };
-        let mut dq = Vec::with_capacity(n); let mut average_v = Vec::with_capacity(n);
+        let mut average_v = Vec::with_capacity(n);
         for i in 0..n {
             if i % 256 == 0 { check(cx)?; }
-            dq.push(number(q[i]-self.state.displacement[i])?);
             average_v.push(0.5*v[i]+0.5*self.state.velocity[i]);
         }
         // A nodal bound applies to the vector norm, not individual components.
@@ -491,42 +508,54 @@ impl TetTransientRun3<'_, '_, '_, '_> {
                 return Err(TransientError3::Invalid("candidate exceeds displacement allowance"));
             }
         }
-        let (kinetic, strain, mechanical_work_j, support_work_j,
-            thermal_equivalent_work_j, damping_loss_j) = if let Some(supports) = &mut next_supports {
+        let mut account = if let Some(supports) = &mut next_supports {
             self.supported_accounting(supports, [&q, &v, &a], load_next, h_s, cx)?
         } else {
             let (kinetic, strain) = self.energy(&q, &v, cx)?;
-            let average_force: Vec<_> = force.iter().zip(&self.force).map(|(a,b)| 0.5*a+0.5*b).collect();
-            let thermal_work = if let Some(next) = thermal_next {
-                let average: Vec<_> = self.thermal.iter().zip(next).map(|(a,b)| 0.5*a+0.5*b).collect();
-                number(inner(&average, &dq))?
-            } else { number(inner(&self.thermal, &dq))? };
             let damping_loss = if let Some(previous) = changing_damping {
-                self.material_damping_loss(previous, &average_v, h_s, cx)?
+                Dd::from_f64(self.material_damping_loss(previous, &average_v, h_s, cx)?)
             } else {
-                number(h_s*inner(&average_v, &self.apply(eta,zeta,&average_v,cx)?))?
+                let cv = self.apply(eta, zeta, &average_v, cx)?;
+                let mut loss = Dd::default();
+                for i in 0..n {
+                    if i % 256 == 0 { check(cx)?; }
+                    loss = loss + Dd::from_f64(average_v[i]) * Dd::from_f64(cv[i]);
+                }
+                energy::retained(Dd::from_f64(h_s) * loss)?
             };
-            (kinetic, strain, number(inner(&average_force, &dq))?, 0.0, thermal_work, damping_loss)
-        };
-        let stiffness_parameter_work_j = if let Some(previous) = stiffness_before {
-            let mut old_action = vec![0.0; n];
-            Operator { m: &self.operators.mass, k: previous, cm: 0.0, ck: 1.0, cx }
-                .apply(&q, &mut old_action);
-            check(cx)?;
-            let new_action = self.apply(0.0, 1.0, &q, cx)?;
-            let mut work = 0.0;
-            for i in 0..n {
-                if i % 256 == 0 { check(cx)?; }
-                work = number(work + 0.5*self.state.displacement[i]
-                    * number(new_action[i]-old_action[i])?)?;
+            energy::StepEnergy {
+                kinetic, strain,
+                kinetic_change: energy::sparse_change(&self.operators.mass, &self.state.velocity, &v, cx)?,
+                strain_change: energy::sparse_change(stiffness_before.unwrap_or(&self.operators.stiffness),
+                    &self.state.displacement, &q, cx)?,
+                mechanical: energy::source_work(&self.state.displacement, &q, &self.force, &force, cx)?,
+                support: Dd::default(),
+                thermal: energy::source_work(&self.state.displacement, &q,
+                    &self.thermal, thermal_force, cx)?,
+                damping: damping_loss,
             }
+        };
+        let stiffness_work = if let Some(previous) = stiffness_before {
+            let [change, work] = energy::coefficient_change(previous, &self.operators.stiffness,
+                &self.state.displacement, &q, cx)?;
+            account.strain_change = energy::retained(account.strain_change + change)?;
             work
-        } else { 0.0 };
-        let quadratic_energy_j = number(kinetic+strain)?;
-        let balance_error_j = number(quadratic_energy_j - self.state.total_energy_j
-            + damping_loss_j - mechanical_work_j - thermal_equivalent_work_j - support_work_j
-            - stiffness_parameter_work_j)?;
-        let scale = self.state.total_energy_j.abs().max(quadratic_energy_j.abs())
+        } else { Dd::default() };
+        let kinetic = account.kinetic;
+        let strain = account.strain;
+        let quadratic_energy_j = number(kinetic + strain)?;
+        let balance_error_j = energy::retained(account.kinetic_change + account.strain_change
+            + account.damping - account.mechanical - account.thermal - account.support
+            - stiffness_work)?.to_f64();
+        let mechanical_work_j = account.mechanical.to_f64();
+        let support_work_j = account.support.to_f64();
+        let thermal_equivalent_work_j = account.thermal.to_f64();
+        let damping_loss_j = account.damping.to_f64();
+        let stiffness_parameter_work_j = stiffness_work.to_f64();
+        let kinetic_energy_change_j = account.kinetic_change.to_f64();
+        let strain_energy_change_j = account.strain_change.to_f64();
+        // An unrelated coasting inventory cannot relax the interval's work gate.
+        let scale = kinetic_energy_change_j.abs().max(strain_energy_change_j.abs())
             .max(mechanical_work_j.abs()).max(thermal_equivalent_work_j.abs()).max(damping_loss_j.abs())
             .max(support_work_j.abs()).max(stiffness_parameter_work_j.abs());
         let allowance = number(self.config.absolute_energy_tolerance_j + self.config.relative_energy_tolerance*scale)?;
@@ -535,7 +564,10 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         }
         let report = TransientStep3 { time_s: next_time, step_size_s: h_s, iterations, force_residual_n,
             mechanical_work_j, support_work_j, thermal_equivalent_work_j, stiffness_parameter_work_j,
-            damping_loss_j, quadratic_energy_j, balance_error_j };
+            damping_loss_j, quadratic_energy_j, kinetic_energy_change_j, strain_energy_change_j,
+            balance_error_j, kinetic_change: account.kinetic_change,
+            external_work: energy::retained(account.mechanical + account.support)?,
+            damping_loss: account.damping };
         let full_force = load_next.nodal_forces_n().to_vec();
         let thermal = thermal_next.map(<[f64]>::to_vec);
         check(cx)?;

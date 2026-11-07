@@ -155,6 +155,62 @@ impl TetLinearElasticProblem<'_> {
         Ok(out)
     }
 
+    /// One original full storage action into caller-owned workspace. This keeps
+    /// support cross rows without assembling a full matrix or evaluating the
+    /// three unrelated kinematic actions needed by endpoint stress recovery.
+    pub(crate) fn apply_full_storage(
+        &self, field: &[f64], out: &mut [f64], mass: bool, cx: &Cx<'_>,
+    ) -> Result<(), TetElasticError> {
+        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        self.validate_budget()?;
+        self.materials.validate(self.tetrahedra.len())?;
+        let full = self.nodes_m.len().checked_mul(3).ok_or(TetElasticError::SizeOverflow)?;
+        if field.len() != full || out.len() != full {
+            return Err(TetElasticError::InvalidStressObservation {
+                what: "full storage action needs node-major xyz fields",
+            });
+        }
+        for (input, output) in field.chunks(256).zip(out.chunks_mut(256)) {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            if input.iter().any(|v| !v.is_finite()) {
+                return Err(TetElasticError::InvalidStressObservation {
+                    what: "nonfinite full storage input",
+                });
+            }
+            output.fill(0.0);
+        }
+        for (element, tet) in self.tetrahedra.iter().enumerate() {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            validate_connectivity(element, tet, self.nodes_m.len())?;
+            let geometry = TetGeometry::try_new(element, tet.map(|n| self.nodes_m[n]),
+                self.budget.minimum_scaled_jacobian)?;
+            let material = self.materials.at(element);
+            let action = if mass {
+                let matrix = p1_tet_consistent_mass(geometry.volume, material.density_kg_m3);
+                core::array::from_fn(|i| (0..12).fold(0.0, |value, j|
+                    matrix[i][j].mul_add(field[3 * tet[j / 3] + j % 3], value)))
+            } else {
+                let b = strain_displacement_matrix(&geometry);
+                let strain = relative_mandel_strain(tet.len(),
+                    |d| core::array::from_fn(|i| b[i][d]),
+                    |d| field[3 * tet[d / 3] + d % 3]);
+                let stress = core::array::from_fn(|i| (0..6).fold(0.0, |value, j|
+                    material.stiffness_mandel_pa[i][j].mul_add(strain[j], value)));
+                relative_mandel_force(&b, &stress, geometry.volume)
+            };
+            for i in 0..12 {
+                let row = 3 * tet[i / 3] + i % 3;
+                out[row] += action[i];
+                if !out[row].is_finite() {
+                    return Err(TetElasticError::InvalidStressObservation {
+                        what: "nonfinite full storage action",
+                    });
+                }
+            }
+        }
+        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)
+    }
+
     /// Actual transposed element actions, including all free/fixed cross rows.
     /// The seed is zero on fixed rows when used by the support-motion adjoint.
     /// Transpose the relative strain map and canonical material entries, rather

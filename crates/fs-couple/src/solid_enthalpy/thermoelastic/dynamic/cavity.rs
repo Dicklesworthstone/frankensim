@@ -341,13 +341,18 @@ impl<'s, 'm> ThermoelasticCavity<'s, 'm> {
             let gas_work = number((0.5 * p0 + 0.5 * p1) * swept)?;
             let exterior_work = number(self.exterior_pressure_pa * swept)?;
             let reference_work = dot_motion(&self.reference_loads_n, &before[0], &after[0])?;
-            let pressure_defect = number(report.mechanical_work_j - gas_work + exterior_work - reference_work)?;
+            let pressure_defect = number((report.native.native.retained_external_work_j()
+                - Dd::from_f64(gas_work) + Dd::from_f64(exterior_work)
+                - Dd::from_f64(reference_work)).to_f64())?;
             let external_solid = number(report.external_heat_j - film.heat_j)?;
             let gas_defect = number(gas_energy_change_j + gas_work - external_gas_heat_j + film.heat_j)?;
-            let total = number(gas_energy_change_j + report.thermal_audit.stored_energy_change_j
-                + report.internal_energy_change_j + report.kinetic_energy_change_j + report.damping_export_j
-                + exterior_work - reference_work - report.thermal_audit.incoming_energy_j
-                - external_solid - external_gas_heat_j)?;
+            let total = number((Dd::from_f64(gas_energy_change_j)
+                + Dd::from_f64(report.thermal_audit.stored_energy_change_j)
+                + report.retained_mechanical_energy_change_j()
+                + report.native.native.retained_damping_loss_j()
+                + Dd::from_f64(exterior_work) - Dd::from_f64(reference_work)
+                - Dd::from_f64(report.thermal_audit.incoming_energy_j)
+                - Dd::from_f64(external_solid) - Dd::from_f64(external_gas_heat_j)).to_f64())?;
             let interface_defect = number(film.samples.iter().map(|row| row.heat_into_solid_j).sum::<f64>() - film.heat_j)?;
             let balance = CavityBalance {
                 solid: report, contacts: film.samples, gas_energy_change_j, gas_to_solid_heat_j: film.heat_j,

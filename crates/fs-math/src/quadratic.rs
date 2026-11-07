@@ -6,6 +6,7 @@
 //! operator accuracy and any positivity requirement remain with the caller.
 
 use crate::dd::Dd;
+use core::convert::Infallible;
 
 /// Two independent terms of a fixed symmetric quadratic form.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -31,6 +32,42 @@ pub enum QuadraticError<E> {
     NonFinite,
     /// The original operator refused its action.
     Operator(E),
+}
+
+/// Work of the mean endpoint force on the actual endpoint displacement.
+///
+/// Computes `sum((force_before + force_after)/2 * (after - before))`
+/// without rounding either the mean or displacement before contraction.
+/// Leading, cross and trailing terms are reduced separately, as in
+/// [`increment`]. No force law, interpolation accuracy or heat interpretation
+/// is inferred. All four fields must have the same length. The operation is
+/// allocation-free and polls cancellation every 256 components.
+pub fn endpoint_work<C: FnMut() -> bool>(
+    before: &[f64],
+    after: &[f64],
+    force_before: &[f64],
+    force_after: &[f64],
+    cancelled: &mut C,
+) -> Result<Dd, QuadraticError<Infallible>> {
+    poll(cancelled)?;
+    if [after.len(), force_before.len(), force_after.len()]
+        .iter().any(|&n| n != before.len())
+    {
+        return Err(QuadraticError::Dimension);
+    }
+    let mut work = Layers::default();
+    for i in 0..before.len() {
+        if i % 256 == 0 { poll(cancelled)?; }
+        let delta = Dd::from_f64(finite(after[i])?) - Dd::from_f64(finite(before[i])?);
+        let mean = Dd::from_f64(0.5 * finite(force_before[i])?)
+            + Dd::from_f64(0.5 * finite(force_after[i])?);
+        work.leading = work.leading + Dd::from_f64(mean.hi) * Dd::from_f64(delta.hi);
+        work.cross = work.cross + Dd::from_f64(mean.lo) * Dd::from_f64(delta.hi)
+            + Dd::from_f64(mean.hi) * Dd::from_f64(delta.lo);
+        work.trailing = work.trailing + Dd::from_f64(mean.lo) * Dd::from_f64(delta.lo);
+    }
+    poll(cancelled)?;
+    work.finish()
 }
 
 /// Evaluate a symmetric quadratic increment without subtracting rounded totals.
@@ -156,9 +193,30 @@ fn finite<E>(value: f64) -> Result<f64, QuadraticError<E>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{QuadraticError, increment};
+    use super::{QuadraticError, endpoint_work, increment};
     use crate::dd::Dd;
     use std::convert::Infallible;
+
+    #[test]
+    fn actual_endpoint_work_retains_force_means_and_displacement_tails() {
+        let common = 2.0_f64.powi(54);
+        let work = endpoint_work(&[0.0, 0.0], &[4.0, -4.0],
+            &[common, common], &[common + 4.0, common - 4.0], &mut || false).unwrap();
+        assert_eq!(work, Dd::from_f64(16.0));
+        let work = endpoint_work(&[common, 1.0], &[2.0, common],
+            &[1.0, 1.0], &[1.0, 1.0], &mut || false).unwrap();
+        assert_eq!(work, Dd::from_f64(1.0));
+    }
+
+    #[test]
+    fn endpoint_work_reports_shape_nonfinite_and_cancellation() {
+        assert_eq!(endpoint_work(&[0.0], &[1.0], &[], &[1.0], &mut || false),
+            Err(QuadraticError::Dimension));
+        assert_eq!(endpoint_work(&[0.0], &[1.0], &[f64::INFINITY], &[1.0], &mut || false),
+            Err(QuadraticError::NonFinite));
+        assert_eq!(endpoint_work(&[0.0], &[1.0], &[1.0], &[1.0], &mut || true),
+            Err(QuadraticError::Cancelled));
+    }
 
     #[test]
     fn coupled_countermotion_retains_storage_and_separate_euler_loss() {
