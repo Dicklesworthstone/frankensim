@@ -1,5 +1,7 @@
 //! Independent calorimetry, NTU and manufactured-Q exchanger regressions.
 
+mod response;
+
 use super::*;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_evidence::ValidityDomain;

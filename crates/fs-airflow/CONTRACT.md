@@ -4996,3 +4996,41 @@ and an original conducting two-bath surface against an independent integrated
 conductivity/plate balance. The new Rust files were formatted and the touched
 modules parsed; native compilation and execution remain blocked by the exhausted
 8 GiB build environment. No executed test pass is claimed.
+
+## Analytic two-stream inlet and conductance response
+
+`CaloricHeatExchanger::solve_with_inlet_response` first admits the original
+steady heat exchange, including source support, both Q/UA gates, endpoint
+calorimetry and entropy. It then returns `ExchangerInletResponse` for signed
+heat versus each inlet's specific enthalpy and versus held UA. This response
+keeps the independent original caloric laws and datums; it does not differentiate
+an averaged Cp or an outlet-temperature chord.
+
+For varying Cp, bounded quadrature integrates inverse-capacity temperature-gap
+moments on the same original source breaks and interior-pinch geometry as the
+primal solve. Differentiating the implicit UA equation includes the cold-side
+counterflow dependence on total heat. Stable integral identities retain both
+own-stream outlet-enthalpy gains directly, including a weak finite-conductance
+anchor that would disappear in subtraction from a rounded unit transfer gain.
+Constant Cp, zero UA and equal inlet temperatures have their analytic limits;
+equal-temperature response uses the actual local Cp of each source.
+
+`ExchangerResponseConfig` controls the absolute and relative enthalpy-gain
+accuracy. Analytic derivative bounds and explicit floating-point allowances
+propagate into the reported heat sensitivities, both own-stream gains and
+conductance sensitivity. Cancellation and original quadrature/work bounds
+remain active. Insufficient accuracy or unresolved arithmetic refuses the
+response. The derivatives are evaluated at the admitted heat: the separately
+reported primal heat error is not silently incorporated as a certified
+sensitivity interval. These allowances are numerical estimates with analytic
+truncation bounds, not interval arithmetic or material-source uncertainty.
+
+The ordinary `solve` path shares only the source-break and panel-geometry
+helpers and does not compute derivative moments. Six added regressions cover
+independent NTU derivatives and reciprocal balances, independently integrated
+nonlinear moments, stream reversal and independent datums, actual Cp kinks,
+equal-temperature and near-equal-capacity limits, weak transfer and retained
+counterflow anchors, zero UA, accuracy refusal and cancellation. All four
+changed Rust files were parsed with the pinned formatter. Native Cargo
+compilation and test execution were unavailable in this resource-exhausted
+session.

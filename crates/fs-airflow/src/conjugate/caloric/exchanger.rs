@@ -23,6 +23,9 @@ use fs_material::thermal::transport::ThermalTransportError;
 use fs_material::thermal::transport::isobaric::IsobaricHeatCapacityLaw;
 use fs_math::{dd::Dd, det};
 
+mod response;
+pub use response::{ExchangerInletResponse, ExchangerResponseConfig};
+
 #[cfg(test)]
 mod tests;
 
@@ -595,6 +598,19 @@ struct Pair<'a> {
     driving: f64,
 }
 
+/// Original paired-interval geometry shared by value and response quadrature.
+#[derive(Clone, Copy)]
+struct PanelGeometry {
+    width: f64,
+    minimum: f64,
+    gaps: [f64; 3],
+    derivatives: [f64; 4],
+    capacity_min: [f64; 2],
+    alpha: [f64; 2],
+    capacities: [[f64; 3]; 2],
+    temperature_scale: f64,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Measure {
     ua: f64,
@@ -675,26 +691,7 @@ impl Pair<'_> {
             });
         }
 
-        let mut breaks = vec![0.0, heat];
-        breaks.extend(
-            self.hot
-                .anchors
-                .iter()
-                .map(|a| a.heat)
-                .filter(|&q| q > 0.0 && q < heat),
-        );
-        breaks.extend(
-            self.cold
-                .anchors
-                .iter()
-                .map(|a| self.cold_progress(heat, a.heat))
-                .filter(|&q| q > 0.0 && q < heat),
-        );
-        breaks.sort_by(f64::total_cmp);
-        breaks.dedup();
-        if breaks.len() > config.max_quadrature_panels {
-            return Err(ExchangerError::WorkLimit);
-        }
+        let breaks = self.source_breaks(heat, config)?;
         let mut sum = Dd::ZERO;
         let mut errors = Dd::ZERO;
         let mut visited = 0usize;
@@ -771,7 +768,41 @@ impl Pair<'_> {
         })
     }
 
-    fn panel(&self, heat: f64, left: f64, right: f64) -> Result<Measure, ExchangerError> {
+    fn source_breaks(
+        &self,
+        heat: f64,
+        config: ExchangerConfig,
+    ) -> Result<Vec<f64>, ExchangerError> {
+        let mut breaks = vec![0.0, heat];
+        breaks.extend(
+            self.hot
+                .anchors
+                .iter()
+                .map(|a| a.heat)
+                .filter(|&q| q > 0.0 && q < heat),
+        );
+        breaks.extend(
+            self.cold
+                .anchors
+                .iter()
+                .map(|a| self.cold_progress(heat, a.heat))
+                .filter(|&q| q > 0.0 && q < heat),
+        );
+        breaks.sort_by(f64::total_cmp);
+        breaks.dedup();
+        if breaks.len() > config.max_quadrature_panels {
+            return Err(ExchangerError::WorkLimit);
+        }
+        Ok(breaks)
+    }
+
+    #[inline]
+    fn panel_geometry(
+        &self,
+        heat: f64,
+        left: f64,
+        right: f64,
+    ) -> Result<PanelGeometry, ExchangerError> {
         let width = right - left;
         let middle = left + 0.5 * width;
         let (ha, ca) = self.point(heat, left)?;
@@ -821,12 +852,36 @@ impl Pair<'_> {
         let v2 = (rh * ah + rc * ac) / minimum;
         let v3 = 3.0 * (rh * ah * ah + rc * ac * ac) / minimum;
         let v4 = 15.0 * (rh * ah * ah * ah + rc * ac * ac * ac) / minimum;
+        Ok(PanelGeometry {
+            width,
+            minimum,
+            gaps: [da, dm, db],
+            derivatives: [v1, v2, v3, v4],
+            capacity_min: [hot_min, cold_min],
+            alpha: [ah, ac],
+            capacities: [
+                [ha.capacity, hm.capacity, hb.capacity],
+                [ca.capacity, cm.capacity, cb.capacity],
+            ],
+            temperature_scale: ha.temperature + hb.temperature + ca.temperature + cb.temperature,
+        })
+    }
+
+    fn panel(&self, heat: f64, left: f64, right: f64) -> Result<Measure, ExchangerError> {
+        let geometry = self.panel_geometry(heat, left, right)?;
+        let PanelGeometry {
+            width,
+            minimum,
+            gaps: [da, dm, db],
+            derivatives: [v1, v2, v3, v4],
+            temperature_scale: scale,
+            ..
+        } = geometry;
         // Simpson error on the normalized interval u in [0,1]:
         // |E| <= width/2880 * sup |d^4(1/gap)/du^4|.
         let truncation = (width / minimum) / 2880.0
             * (24.0 * v1 * v1 * v1 * v1 + 36.0 * v1 * v1 * v2 + 6.0 * v2 * v2 + 8.0 * v1 * v3 + v4);
         let ua = (width / 6.0) * (1.0 / da + 4.0 / dm + 1.0 / db);
-        let scale = ha.temperature + hb.temperature + ca.temperature + cb.temperature;
         let roundoff = 64.0 * f64::EPSILON * ua * (1.0 + scale / minimum);
         if !ua.is_finite() || ua <= 0.0 || truncation.is_nan() || roundoff.is_nan() {
             return Err(ExchangerError::Unresolved("UA panel arithmetic"));
