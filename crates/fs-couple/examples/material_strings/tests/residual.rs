@@ -95,21 +95,31 @@ fn a_released_preload_reaches_the_stopped_card_with_the_record() {
 // The stopped force-loaded card with longitudinal waves for its stretching: the stop stays
 // condensed, the nonlinear static preload settles it in series with the omitted modes, and
 // the nonlinear steps play with their storage booked. The card releases its 0.5 N load at
-// sample zero.
-fn longitudinal_stopped(residual: bool) -> input::Spec {
+// sample zero; `held` keeps that same load on its port instead, so the stop stays loaded.
+// `stretched_stopped` is the same card on its own geometric stretching.
+fn longitudinal_stopped(residual: bool, held: bool) -> input::Spec {
+    nonlinear_stopped(residual, held, "longitudinal-waves 0.2 0.01 128 100000 1e-11 1e-10 2 1 2")
+}
+fn stretched_stopped(residual: bool, held: bool) -> input::Spec {
+    nonlinear_stopped(residual, held, "geometric-stretching 0.2 128 100000 1e-11 1e-10")
+}
+fn nonlinear_stopped(residual: bool, held: bool, law: &str) -> input::Spec {
     let record = if residual { "residual-flexibility exact-static-green\n" } else { "" };
-    let text = include_str!("../nonlinear-stopped-preload.material-strings").replace("48000 4096", "48000 129")
+    let mut text = include_str!("../nonlinear-stopped-preload.material-strings").replace("48000 4096", "48000 129")
         .replace("cylinder-gas-loading 0.001 30 4\n", "")
-        .replace("geometric-stretching 0.2 128 100000 1e-11 1e-10",
-            &format!("{record}longitudinal-waves 0.2 0.01 128 100000 1e-11 1e-10 2 1 2"));
+        .replace("geometric-stretching 0.2 128 100000 1e-11 1e-10", &format!("{record}{law}"));
+    if held {
+        assert!(text.contains("port 0 0.2 centreline 0.5\nforce 0 0 0\n"), "the card's release moved");
+        text = text.replace("port 0 0.2 centreline 0.5\nforce 0 0 0\n", "port 0 0.2 centreline 0.5\nforce 0 0 0.5\n");
+    }
     input::Spec::parse(text.as_bytes()).unwrap()
 }
 
 #[test]
 fn a_stopped_preload_with_longitudinal_waves_keeps_the_condensed_stop() {
     scoped(|cx, gate| {
-        let mut soft = stopped(cx, gate, longitudinal_stopped(true)).unwrap();
-        let mut plain = stopped(cx, gate, longitudinal_stopped(false)).unwrap();
+        let mut soft = stopped(cx, gate, longitudinal_stopped(true, false)).unwrap();
+        let mut plain = stopped(cx, gate, longitudinal_stopped(false, false)).unwrap();
         let bank = soft.performance.bank();
         assert!(bank.source().bank().longitudinal_waves().is_some());
         assert!(bank.source().bank().cylinder_gas_loading().is_none());
@@ -122,11 +132,44 @@ fn a_stopped_preload_with_longitudinal_waves_keeps_the_condensed_stop() {
         assert!(preload > 0.0 && (preload-total).abs() <= 1e-12*total, "preload {preload} against the ledger's {total}");
         let expected = pressure(&mut soft, 37);
         assert!(expected.iter().any(|p| p.abs() > 1e-12));
-        assert_eq!(expected, pressure(&mut stopped(cx, gate, longitudinal_stopped(true)).unwrap(), 128));
+        assert_eq!(expected, pressure(&mut stopped(cx, gate, longitudinal_stopped(true, false)).unwrap(), 128));
         let frame = soft.performance.bank().system().last_frame().unwrap();
         assert!(frame.nonlinear.is_some(), "the steps left the nonlinear owner");
         assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
         assert!(expected.iter().zip(&pressure(&mut plain, 128)).any(|(x, y)| (x-y).abs() > 1e-12));
+    });
+}
+
+// The same card with its load held, on both strain laws, with and without the record: from
+// the exact static equilibrium every nonlinear step plays, and the loaded stop still stores
+// R G R / 2 in the omitted modes at the last frame.
+#[test]
+fn a_held_stopped_preload_plays_on_both_strain_laws() {
+    scoped(|cx, gate| {
+        for (law, card) in [("longitudinal-waves", longitudinal_stopped as fn(bool, bool) -> input::Spec),
+            ("geometric-stretching", stretched_stopped)] {
+            for residual in [true, false] {
+                let case = format!("{law}, residual {}", if residual { "on" } else { "off" });
+                let mut held = stopped(cx, gate, card(residual, true))
+                    .unwrap_or_else(|error| panic!("{case}: the held card refused: {error:?}"));
+                assert_eq!(held.performance.bank().system().obstacle_residual_compliance().is_some(), residual, "{case}");
+                let report = *held.performance.bank().system().nonlinear_preload_diagnostics()
+                    .unwrap_or_else(|| panic!("{case}: no preload diagnostics"));
+                assert!(report.force_residual <= report.force_tolerance,
+                    "{case}: preload force residual {} against {}", report.force_residual, report.force_tolerance);
+                let mut out = vec![0.0; held.spec.samples as usize];
+                for chunk in out.chunks_mut(128) {
+                    held.performance.block(chunk).unwrap_or_else(|error| panic!("{case}: the held render refused: {error:?}"));
+                }
+                let frame = held.performance.bank().system().last_frame().unwrap_or_else(|| panic!("{case}: no last frame"));
+                assert!(frame.nonlinear.is_some(), "{case}: the held steps left the nonlinear owner");
+                assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j,
+                    "{case}: energy residual {} against {}", frame.energy_residual_j, frame.energy_tolerance_j);
+                if residual {
+                    assert!(frame.obstacle_residual_energy_j > 0.0, "{case}: the held stop stores nothing in the omitted modes");
+                }
+            }
+        }
     });
 }
 

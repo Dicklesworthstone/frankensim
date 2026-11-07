@@ -80,10 +80,16 @@ and a stopped note's stop pair carried the residual cross terms
 (`stop_compliance_m_N`).
 
 A stopped note whose finger load stays held on a nonlinear string (geometric
-stretching or longitudinal waves) refuses at its first sample: from the exact
-static equilibrium the step does not move, and the reaction iteration cannot
-settle on the string storage's discrete gradient at a rounding-sized
-increment. Released preloads render. This case is open.
+stretching or longitudinal waves) starts from the exact static equilibrium,
+where a step moves the coordinates by far less than their size. The string
+storages give the nonlinear owner their own discrete gradients: the
+longitudinal string's exact one, and for geometric stretching the midpoint
+gradient with its analytic energy remainder. Neither subtracts the endpoint
+energies, whose rounding, divided by a rounding-sized step, kept the reaction
+iteration from settling at the first sample. The held preload now plays on
+both strain laws, with and without the residual-flexibility record, and
+released preloads render as before. The A4 page and the melody phrase's A4
+notes were rendered before this change.
 
 The four open strings are tuned to equal temperament (A4 = 440 Hz) by a tension
 factor per string. Each factor is read from the assembled instrument's own

@@ -2430,8 +2430,8 @@ pitch changes.
   the condensed stops. Its static preload settles every trial's closures in
   series with the same compliance, and the first sample holds those reactions;
   each step books f G f / 2 and dR G dR / 2 in its nonlinear energy balance.
-  The omitted modes' compliance is held at the static tension while the
-  tension moves.
+  A held load plays as well as a released one. The omitted modes' compliance
+  is held at the static tension while the tension moves.
 - Refused: moving or migrating stops,
   additional directed translational bridges, rotational and constant-loss bridges, and a string with other than
   one bridge connection.
@@ -2500,7 +2500,8 @@ strictly increasing one-based axial sine indices. This record selects the same
 indices for each original string; the Rust API accepts a separate selection per
 string. Both transverse planes contribute to the same material strain
 `u_x + (y_x² + z_x²)/2`. The existing `fs-nlmodal::LongitudinalString` supplies
-the strain energy and gradient; no separate instrument solver is introduced.
+the strain energy, its gradient and its exact discrete gradient, which never
+divides by the step; no separate instrument solver is introduced.
 
 Solid material density and EA determine the longitudinal frequencies
 `omega_j = j*pi/L*sqrt(EA/mu_solid)`. Transverse motion retains its actual
@@ -2670,8 +2671,9 @@ Both transverse planes contribute to one shared strain and tension. The same
 loaded string mass normalizes the geometric storage, including selected gas
 added inertia. The original complete linear network and scalar or simultaneous
 friction solver participate in each `fs_phs::discrete_gradient` constitutive
-trial; both reaction residual and full storage/work balance must close before
-state is published.
+trial; the geometric storage supplies its analytic energy remainder, so the
+correction never subtracts endpoint energies. Both reaction residual and full
+storage/work balance must close before state is published.
 The acceleration observer uses the endpoint geometric force. Existing gesture
 scheduling and PCM writing consume this same state.
 

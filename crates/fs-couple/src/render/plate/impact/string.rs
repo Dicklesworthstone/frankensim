@@ -251,6 +251,36 @@ impl StringPotential {
         self.storage.gradient(&x[..2*q.len()], &mut g[..2*q.len()]);
         for (i, v) in out.iter_mut().enumerate() { *v = g[2*i]; }
     }
+    /// Whether the owner's exact constitutive discrete gradient can run on this
+    /// SAME storage: it needs exactly symmetric channels and positive
+    /// frequencies. A `geometric_remainder` (zeroed frequencies) never has one.
+    pub(crate) fn has_discrete_gradient_rule(&self) -> bool {
+        self.storage.discrete_gradient_rule().is_some() && self.storage.validate().is_ok()
+    }
+    /// The owner's exact discrete gradient between coordinate sets `a` and `b`
+    /// through the storage's (q, p = 0) embedding; NaN if it is unavailable.
+    pub(crate) fn discrete_gradient(&self, a: &[f64], b: &[f64], midpoint: &[f64], out: &mut [f64]) {
+        let n = self.mode_count();
+        let rule = self.storage.discrete_gradient_rule();
+        if a.len() != n || b.len() != n || midpoint.len() != n || out.len() != n || rule.is_none() {
+            out.fill(f64::NAN); return;
+        }
+        let (mut x, mut g) = ([[0.0; 2*MAX_IMPACT_MODES]; 3], [0.0; 2*MAX_IMPACT_MODES]);
+        for i in 0..n { x[0][2*i] = a[i]; x[1][2*i] = b[i]; x[2][2*i] = midpoint[i]; }
+        if let Some(rule) = rule {
+            fs_phs::ConstitutiveDiscreteGradient::evaluate(rule, &x[0][..2*n], &x[1][..2*n], &x[2][..2*n], &mut g[..2*n]);
+        }
+        for (i, v) in out.iter_mut().enumerate() { *v = g[2*i]; }
+    }
+    /// The owner's analytic H(b) - H(a) - gradH(m).(b - a) through the same
+    /// embedding: no endpoint-energy subtraction, so no cancellation as b -> a.
+    pub(crate) fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], midpoint: &[f64]) -> Option<f64> {
+        let n = self.mode_count();
+        if a.len() != n || b.len() != n || midpoint.len() != n { return None; }
+        let mut x = [[0.0; 2*MAX_IMPACT_MODES]; 3];
+        for i in 0..n { x[0][2*i] = a[i]; x[1][2*i] = b[i]; x[2][2*i] = midpoint[i]; }
+        self.storage.midpoint_energy_remainder(&x[0][..2*n], &x[1][..2*n], &x[2][..2*n])
+    }
     /// Exact derivative of the owner's admitted diagonal stress channel.
     /// Coefficients come from that SAME storage, never a fitted Duffing constant.
     pub fn hessian_vector(&self, q: &[f64], d: &[f64], out: &mut [f64]) {

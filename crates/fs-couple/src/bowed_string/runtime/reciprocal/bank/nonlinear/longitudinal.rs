@@ -22,7 +22,7 @@ use fs_material::section::axial::ConcentricAxialViscosity;
 use fs_material::state_point::ResolvedMaterialStatePoint;
 use fs_math::{c64::C64, det};
 use fs_nlmodal::{KcStringParams, longitudinal::LongitudinalString};
-use fs_phs::Storage;
+use fs_phs::{ConstitutiveDiscreteGradient, Storage};
 
 mod fluid;
 mod loss;
@@ -229,6 +229,48 @@ impl Storage for MaterialLongitudinalString {
                 &slopes,
                 axial,
                 axial,
+                &mut gradient,
+                axial_gradient,
+            )
+            .is_err()
+        {
+            out.fill(f64::NAN);
+            return;
+        }
+        for plane in 0..self.planes {
+            for mode in 0..self.transverse_modes {
+                transverse_gradient[plane * self.transverse_modes + mode] = self.slope_scales[mode]
+                    * gradient[plane * (self.transverse_modes + 1) + mode + 1];
+            }
+        }
+    }
+    // The owner's exact discrete gradient, never fs-phs's endpoint-subtraction
+    // fallback: from a static equilibrium a held step moves q by far less than
+    // q, and H(b) - H(a) then carries eps*|H| of rounding divided by |b - a|.
+    fn discrete_gradient_rule(&self) -> Option<&dyn ConstitutiveDiscreteGradient> {
+        Some(self)
+    }
+}
+// Slopes are linear in q (each plane's index 0 stays zero), so pulling the
+// slope gradient back through `slope_scales` keeps the owner's identity
+// slope_gradient . (slopes_b - slopes_a) + axial terms = energy(b) - energy(a).
+impl ConstitutiveDiscreteGradient for MaterialLongitudinalString {
+    fn evaluate(&self, a: &[f64], b: &[f64], _midpoint: &[f64], out: &mut [f64]) {
+        let n = self.coordinate_count();
+        if a.len() != n || b.len() != n || out.len() != n {
+            out.fill(f64::NAN);
+            return;
+        }
+        let (slopes_a, slopes_b) = (self.slopes(a), self.slopes(b));
+        let mut gradient = vec![0.0; slopes_a.len()];
+        let (transverse_gradient, axial_gradient) = out.split_at_mut(self.transverse_count());
+        if self
+            .model
+            .discrete_gradient(
+                &slopes_a,
+                &slopes_b,
+                &a[self.transverse_count()..],
+                &b[self.transverse_count()..],
                 &mut gradient,
                 axial_gradient,
             )
@@ -734,4 +776,43 @@ fn observe(
         .collect();
     law.observe(&q)
         .map_err(|e| ImpactError::Owner(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::bank::tests::{discrete_gradient_ratios, signed};
+
+    // The finite-strain relaxation tests' string: 0.5 m, EA 20 kN at 20 N, two
+    // transverse modes in two planes and four axial modes. The points keep
+    // slopes near 0.01 and axial strains near 1e-3, inside both envelopes.
+    #[test]
+    fn the_longitudinal_string_has_an_exact_and_continuous_discrete_gradient() {
+        let (length, solid, transverse, ea, tension) = (0.5, 0.002, 0.003, 20_000.0, 20.0);
+        let indices = vec![1, 2, 3, 4];
+        let model = LongitudinalString::new(
+            KcStringParams { length, lin_density: solid, tension, ea }, 2, 2, &indices).unwrap();
+        let string = MaterialLongitudinalString {
+            model,
+            resolution: LongitudinalStringResolution { axial_modes: indices, maximum_slope: 0.2, maximum_strain: 0.01 },
+            transverse_modes: 2,
+            planes: 2,
+            slope_scales: (1..=2).map(|n|
+                (2.0_f64 / (transverse * length)).sqrt() * n as f64 * core::f64::consts::PI / length).collect(),
+            solid_linear_density_kg_m: solid,
+            transverse_linear_density_kg_m: transverse,
+            axial_rigidity_n: ea,
+            prestress_n: tension,
+            axial_component: 1,
+            elastic_frequency_band_rad_s: None,
+            axial_material_loss: None,
+            finite_strain_viscosity: false,
+            axial_fluid_component: None,
+        };
+        let (identity, continuity) = discrete_gradient_ratios(&string, 24, &mut |state| {
+            (0..8).map(|i| (if i < 4 { 2.0e-5 } else { 1.0e-6 }) * signed(state)).collect()
+        });
+        assert!(identity <= 1.0, "energy identity ratio {identity:e}");
+        assert!(continuity <= 1.0, "continuity ratio {continuity:e}");
+    }
 }

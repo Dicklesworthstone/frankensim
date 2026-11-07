@@ -14,7 +14,7 @@ use crate::render::schedule::force::coupled::contact::friction::nonlinear::{
     ModalPotential, ModalPotentialBinding, NonlinearModalConfig,
 };
 use fs_exec::CancelGate;
-use fs_phs::Storage;
+use fs_phs::{ConstitutiveDiscreteGradient, Storage};
 
 /// Source-defined axial and winding-shear memory on the same mean strain.
 pub mod relaxation;
@@ -48,12 +48,28 @@ impl MaterialStringBankSource {
     }
 }
 struct GeometricStorage(StringPotential);
+// The owner's own discrete gradient, never fs-phs's endpoint-subtraction
+// fallback: from a static equilibrium a held step moves q by far less than q,
+// and H(b) - H(a) then carries eps*|H| of rounding divided by |b - a|. The
+// exact rule runs when the storage admits it; the bound remainder (zeroed
+// frequencies) does not, so Gonzalez uses the owner's analytic remainder.
 impl Storage for GeometricStorage {
     fn hamiltonian(&self, q: &[f64]) -> f64 {
         self.0.potential(q)
     }
     fn gradient(&self, q: &[f64], out: &mut [f64]) {
         self.0.gradient(q, out);
+    }
+    fn discrete_gradient_rule(&self) -> Option<&dyn ConstitutiveDiscreteGradient> {
+        self.0.has_discrete_gradient_rule().then_some(self as &dyn ConstitutiveDiscreteGradient)
+    }
+    fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], midpoint: &[f64]) -> Option<f64> {
+        self.0.midpoint_energy_remainder(a, b, midpoint)
+    }
+}
+impl ConstitutiveDiscreteGradient for GeometricStorage {
+    fn evaluate(&self, a: &[f64], b: &[f64], midpoint: &[f64], out: &mut [f64]) {
+        self.0.discrete_gradient(a, b, midpoint, out);
     }
 }
 impl ModalPotential for GeometricStorage {
@@ -209,4 +225,113 @@ fn observe(source: &MaterialStringBankSource, components: &[ModalAcousticTimeMod
         memory_source.add_observation(string, cards[string].length_m, memory, &mut observation)?;
     }
     Ok(observation)
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+    use crate::modal_acoustic_time::ModalAcousticState;
+
+    /// A fixed splitmix64 stream in [-1, 1), so every run checks the same pairs.
+    pub(in super::super) fn signed(state: &mut u64) -> f64 {
+        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        2.0 * ((z ^ (z >> 31)) >> 11) as f64 / (1_u64 << 53) as f64 - 1.0
+    }
+
+    /// Worst ratios, each admitted at <= 1, of the discrete gradient that the
+    /// nonlinear owner evaluates (`fs_phs::discrete_gradient`) at `trials`
+    /// points: (energy identity, continuity). For d = b - a, n coordinates and
+    /// r = max|d| / max|a|, from 1 ulp to 1e-8 of max|a| (log-spaced), plus
+    /// three large steps for the identity alone:
+    ///   identity   |H(b) - H(a) - g.d| <= 8 (n+4) eps (|H(a)| + |H(b)| + sum|g_i d_i|);
+    ///   continuity |g - gradH(m)| <= 64 (n+4) eps max|gradH(m)| + 16 r^2 max|gradH(m)|.
+    pub(in super::super) fn discrete_gradient_ratios(storage: &dyn Storage, trials: usize,
+        point: &mut dyn FnMut(&mut u64) -> Vec<f64>) -> (f64, f64)
+    {
+        let mut state = 0x5EED_0F_D15C_0E7E_u64;
+        let (mut identity, mut continuity) = (0.0_f64, 0.0_f64);
+        for _ in 0..trials {
+            let a = point(&mut state);
+            let n = a.len();
+            let direction: Vec<f64> = (0..n).map(|_| signed(&mut state)).collect();
+            let scale = a.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            let small = 17;
+            let steps: Vec<f64> = (0..small).map(|k| 1e-8 * (f64::EPSILON / 1e-8).powf(k as f64 / (small - 1) as f64))
+                .chain([1e-6, 1e-4, 1e-2]).collect();
+            for (k, &step) in steps.iter().enumerate() {
+                let b: Vec<f64> = a.iter().zip(&direction).map(|(a, d)| a + step * scale * d).collect();
+                let d: Vec<f64> = a.iter().zip(&b).map(|(a, b)| b - a).collect();
+                let r = d.iter().fold(0.0_f64, |m, v| m.max(v.abs())) / scale;
+                if r == 0.0 { continue; }
+                let g = fs_phs::discrete_gradient(storage, &a, &b);
+                let (ha, hb) = (storage.hamiltonian(&a), storage.hamiltonian(&b));
+                let work: f64 = g.iter().zip(&d).map(|(g, d)| g * d).sum();
+                let size: f64 = g.iter().zip(&d).map(|(g, d)| (g * d).abs()).sum();
+                let bound = 8.0 * (n + 4) as f64 * f64::EPSILON * (ha.abs() + hb.abs() + size);
+                let ratio = (hb - ha - work).abs() / bound;
+                assert!(ratio.is_finite(), "identity ratio is not finite at r {r:e}");
+                identity = identity.max(ratio);
+                if k < small {
+                    let m: Vec<f64> = a.iter().zip(&b).map(|(&a, &b)| f64::midpoint(a, b)).collect();
+                    let mut gm = vec![0.0; n];
+                    storage.gradient(&m, &mut gm);
+                    let top = gm.iter().fold(0.0_f64, |s, v| s.max(v.abs()));
+                    let gap = g.iter().zip(&gm).fold(0.0_f64, |s, (g, m)| s.max((g - m).abs()));
+                    let bound = 64.0 * (n + 4) as f64 * f64::EPSILON * top + 16.0 * r * r * top;
+                    assert!(top > 0.0, "the test point has no force");
+                    continuity = continuity.max(gap / bound);
+                }
+            }
+        }
+        (identity, continuity)
+    }
+
+    const MODES: usize = 16;
+    // A violin-like steel span (16 sine modes) and its full linear-plus-quartic potential.
+    fn violin_span() -> StringPotential {
+        let wire = WireSpan {
+            endpoints_m: [[0.0, 0.0], [0.33, 0.0]],
+            linear_density_kg_m: 6.0e-4,
+            tension_n: 70.0,
+            bending_stiffness_n_m2: 2.0e-5,
+            damping_per_s: vec![0.0; MODES],
+        };
+        let body = wire.stretching_body(vec![ModalAcousticState::default(); MODES],
+            StringStretching { axial_rigidity_n: 1.0e4, maximum_slope: 0.2 }).unwrap();
+        let BodyPotential::String(potential) = body.potential else { panic!("the span lost its string storage") };
+        potential
+    }
+    // About 0.3 mm of the fundamental, falling as 1/k over the modes.
+    fn span_ratios(storage: &GeometricStorage) -> (f64, f64) {
+        let mass = 0.5 * 6.0e-4 * 0.33_f64;
+        discrete_gradient_ratios(storage, 24, &mut |state| {
+            (0..MODES).map(|k| 3.0e-4 * mass.sqrt() * signed(state) / (k + 1) as f64).collect()
+        })
+    }
+
+    // The bank binds the quartic remainder, with the linear frequencies left to the
+    // exact linear owner. Its zeroed frequencies leave the owner's exact rule out, so
+    // this is Gonzalez's form on the owner's analytic remainder.
+    #[test]
+    fn the_bound_geometric_remainder_has_an_exact_and_continuous_discrete_gradient() {
+        let storage = GeometricStorage(violin_span().geometric_remainder().unwrap());
+        assert!(storage.discrete_gradient_rule().is_none(), "the zero-frequency remainder took the exact rule");
+        let (identity, continuity) = span_ratios(&storage);
+        assert!(identity <= 1.0, "energy identity ratio {identity:e}");
+        assert!(continuity <= 1.0, "continuity ratio {continuity:e}");
+    }
+
+    // The full potential keeps its positive frequencies, so the owner's exact rule
+    // runs, through the adapter's [q, p] layout.
+    #[test]
+    fn the_full_string_potential_takes_the_owners_exact_discrete_gradient() {
+        let storage = GeometricStorage(violin_span());
+        assert!(storage.discrete_gradient_rule().is_some(), "the owner's exact rule was not forwarded");
+        let (identity, continuity) = span_ratios(&storage);
+        assert!(identity <= 1.0, "energy identity ratio {identity:e}");
+        assert!(continuity <= 1.0, "continuity ratio {continuity:e}");
+    }
 }
