@@ -71,9 +71,8 @@ fn si_acceleration_switches_drive_the_native_trajectory_and_freefall_cancels_gra
         let mut input = domain();
         input.gravity_m_s2 = [0.3, -0.2, 0.1];
         let mut fluid = setup.free_surface3(input, |_, _, _| true).unwrap();
-        // The historical binary constructor seeds raw rest populations, so
-        // the accepted physical velocity includes its initial half source.
-        // Free fall preserves that velocity; each later source supplies only
+        // Material construction starts at physical rest. Free fall preserves
+        // that velocity; each later source supplies only
         // the independently known dt*(body-origin) increment.
         let mut velocity = fluid.sample_at_si(8, 8, 6).unwrap().unwrap().velocity_m_s;
         for (body, origin) in [

@@ -6423,25 +6423,39 @@ including an explicitly typed absolute-temperature axis under any source name.
 Other response curves and dynamic frequency/rate/strain bounds refuse.
 
 The existing material momentum-scaling helper owns nu_lattice and tau for both
-thermal and free-surface consumers. Explicit dx/dt convert rho0*g to the native
-constant Guo force density and sigma to sigma/(rho0*(dx/dt)^2*dx). Construction
+thermal and free-surface consumers. Explicit dx/dt convert gravity to native
+acceleration and sigma to sigma/(rho0*(dx/dt)^2*dx). Construction
 bounds the full possible voxel domain, validates tile coordinates and refuses
 initial liquid inside a permanently solid tile. The source-bound wrapper returns
 native ledger, regional mass and unregioned carry in kg, and wet-cell density,
 Guo-corrected velocity and incompressible pressure perturbation in SI. Gas
 populations are never presented as liquid samples.
 
+The native `rho_lattice*g_lattice` law is the default for both binary and
+supplied-state sparse material constructors, including supplied pressure.
 `MaterialFreeSurfaceScaling::with_density_dependent_gravity` explicitly selects
-the native `rho_lattice*g_lattice` law for both binary and supplied-state sparse
-constructors, including supplied pressure. Binary initialization starts at
-physical rest in the selected source frame; supplied velocities are retained.
+that same default. Binary initialization starts at physical rest in the selected
+source frame; supplied velocities are retained.
 `MaterialFreeSurface3::rebind_gravity` replaces this held SI acceleration without
 instantaneous impulse, retaining the original material, pressure reference and
 dx/dt units. All components are admitted before native publication; nonzero
 loads that disappear in conversion refuse. The current numerical density sets
 gravity, while sourced reference density still owns the SI mass/pressure units.
-Independent local-force/Boussinesq authority and LegacyGlobal replay remain
-incompatible with this explicit uniform-acceleration mode. Four SI regressions
+The native owner retains a private material-gravity descriptor. Existing thermal,
+Marangoni and Lorentz owners explicitly bind their complete force field with
+current-density gravity. Nonzero extra forces retain the original first-order
+held-force split and endpoint Guo reframe; zero extra force keeps or restores
+native density-aware gravity, including its endpoint pressure closure. Source
+Boussinesq acceleration is `rho(T)/rho0*g` at any numerical pressure density,
+while additional Lorentz and surface loads remain force densities. Complete
+rigid-frame forcing takes over material gravity once, using current density
+for its complete acceleration. These transfers preserve physical velocity,
+stress and extensive inventories without an extra impulse or heat source.
+Independently authored native/affine acceleration and LegacyGlobal replay still
+refuse incompatible composition. Native handoff regressions cover unequal
+densities, zero-extra restoration, force moments, cancellation and ownership;
+the thermal regression varies pressure density independently of source rho(T).
+The SI regressions
 specify equal acceleration across source and pressure-density changes, refreshed
 gas-pressure trajectories, no-impulse/atomic load replacement, and zero-load
 compatibility. This does not supply a compressible or thermally expanding liquid.
@@ -8200,8 +8214,9 @@ its receipts remain available; no material-name expansion coefficient is
 introduced. Optional original rheology controls compose through the same
 thermal attachment and constitutive samples.
 
-The native receiving owner retains its reference gravity load and adds the
-bounded source-density departure. Its Guo-frame rebind preserves physical
+The native receiving owner applies its material-owned gravity to current carrier
+density, with the bounded source-density departure in the acceleration.
+Its Guo-frame rebind preserves physical
 velocity and stress without adding an impulse, time or heat. Transfer rereads
 actual receiving mass and both momenta after attachment, using the original
 per-fragment projection and shared absolute error budgets. Mechanical

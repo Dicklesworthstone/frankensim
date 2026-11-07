@@ -246,7 +246,9 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         frame: ThermalRigidFrame,
         gate: &CancelGate,
     ) -> Result<(), Error> {
-        let reference = self.flow.lattice.reference_force();
+        let reference = lattice.material_gravity().ok_or(Error::Invalid(
+            "thermal frame forcing requires the material-owned uniform gravity",
+        ))?;
         let origin_acceleration = match frame.native {
             ThermalFrameSource::Rigid(native) => native.origin_acceleration,
             ThermalFrameSource::Coriolis(_) => [0.0; 3],
@@ -266,12 +268,13 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             // Remove exactly the existing owner's complete gravity load,
             // including its density departure. Surface stress stays as a
             // force density, never as another gravity or inertial term.
+            let actual_gravity = reference.map(|acceleration| density * acceleration);
             let (gravity, departure) = match self.buoyancy {
                 Some(binding) => (
-                    binding.force(&self.flow, state)?,
+                    binding.force(state, actual_gravity)?,
                     binding.density_departure(state),
                 ),
-                None => (reference, 0.0),
+                None => (actual_gravity, 0.0),
             };
             let total = match &resolved.forces {
                 Some(forces) => *forces.get(&(key, lane)).ok_or(Error::Invalid(

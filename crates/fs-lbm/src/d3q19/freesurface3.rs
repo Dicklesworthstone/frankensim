@@ -402,6 +402,9 @@ pub struct FreeSurface3 {
     /// Uniform or affine acceleration in fixed grid coordinates. Its complete
     /// accepted F=rho*a(x) history remains in local_force; None preserves held forces.
     body_acceleration: Option<BodyAccelerationField3>,
+    /// Material-owned uniform gravity, retained when a complete coupled force
+    /// temporarily owns the Guo frame. Independent acceleration clears it.
+    material_gravity: Option<[f64; 3]>,
 }
 
 impl core::fmt::Debug for FreeSurface3 {
@@ -415,6 +418,7 @@ impl core::fmt::Debug for FreeSurface3 {
             .field("planar_piston", &self.planar_piston)
             .field("geometry_epoch", &self.geometry_epoch)
             .field("body_acceleration", &self.body_acceleration)
+            .field("material_gravity", &self.material_gravity)
             .field("carry", &self.carry)
             .field("conversions", &self.conversions)
             .field("worst_step_violation", &self.worst_step_violation)
@@ -627,6 +631,7 @@ impl FreeSurface3 {
             fill_smooth: BTreeMap::new(),
             local_force: None,
             body_acceleration: None,
+            material_gravity: None,
         };
 
         // Interface insertion: any fluid cell with a gas neighbor.

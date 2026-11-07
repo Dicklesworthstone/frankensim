@@ -361,6 +361,7 @@ impl FreeSurface3 {
             fill_smooth: BTreeMap::new(),
             local_force: None,
             body_acceleration: None,
+            material_gravity: None,
         };
         let mut interfaces = Vec::new();
         for (&key, tile) in &result.tiles {

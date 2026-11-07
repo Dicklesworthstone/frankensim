@@ -102,7 +102,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
                 self.flow.lattice.rebind_surface_tensions(tensions, gate)?;
             }
             if let Some(forces) = resolved.forces {
-                self.flow.lattice.rebind_force_field(forces, gate)?;
+                self.flow.lattice.rebind_material_force_field(forces, gate)?;
             }
             self.states = resolved.states;
             self.rheology_samples = resolved.rheology;

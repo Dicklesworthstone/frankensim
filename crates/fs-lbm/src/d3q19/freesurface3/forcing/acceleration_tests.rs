@@ -40,6 +40,7 @@ fn cell(coordinates: [usize; 3], density: f64, velocity: [f64; 3]) -> FreeSurfac
 
 fn unchanged(before: &FreeSurface3, after: &FreeSurface3) {
     assert_eq!(before.body_acceleration, after.body_acceleration);
+    assert_eq!(before.material_gravity, after.material_gravity);
     same_physical_state(before, after);
 }
 
@@ -89,6 +90,108 @@ fn moments(surface: &FreeSurface3, xyz: [usize; 3]) -> ([f64; 3], [[f64; 3]; 3])
         }
     }
     (momentum, stress)
+}
+
+#[test]
+fn g3_material_force_handoff_restores_actual_density_gravity_without_impulse() {
+    let cells = [
+        cell([2, 2, 2], 0.6, [0.02, -0.01, 0.005]),
+        cell([5, 5, 5], 1.4, [-0.01, 0.02, -0.005]),
+    ];
+    let gate = CancelGate::new_clock_free();
+    let gravity = [0.002, -0.003, 0.001];
+    let mut flow = surface(&cells, [0.0; 3]);
+    flow.rebind_material_gravity(gravity, &gate).unwrap();
+    let before = flow.clone();
+    let forces = flow.material_gravity_forces(&gate).unwrap();
+    flow.rebind_material_force_field(forces, &gate).unwrap();
+    unchanged(&before, &flow);
+
+    let extra = [0.0003, 0.0004, -0.0002];
+    let mut forces = flow.material_gravity_forces(&gate).unwrap();
+    for force in forces.values_mut() {
+        for d in 0..3 {
+            force[d] += extra[d];
+        }
+    }
+    flow.rebind_material_force_field(forces, &gate).unwrap();
+    assert_eq!(flow.body_acceleration(), None);
+    assert_eq!(flow.material_gravity(), Some(gravity));
+    for c in cells {
+        let sample = flow
+            .sample_at(c.coordinates[0], c.coordinates[1], c.coordinates[2])
+            .unwrap();
+        let actual = flow
+            .force_density_at(c.coordinates[0], c.coordinates[1], c.coordinates[2])
+            .unwrap();
+        for d in 0..3 {
+            assert_eq!(actual[d], sample.density * gravity[d] + extra[d]);
+        }
+    }
+    let forces = flow.material_gravity_forces(&gate).unwrap();
+    flow.rebind_material_force_field(forces, &gate).unwrap();
+    assert_eq!(flow.body_acceleration(), Some(gravity));
+    assert_eq!(flow.ledger_mass(), before.ledger_mass());
+    for c in cells {
+        let (old_p, old_s) = moments(&before, c.coordinates);
+        let (new_p, new_s) = moments(&flow, c.coordinates);
+        for (old, new) in old_p
+            .into_iter()
+            .chain(old_s.into_iter().flatten())
+            .zip(new_p.into_iter().chain(new_s.into_iter().flatten()))
+        {
+            assert!((old - new).abs() < 3e-15);
+        }
+    }
+
+    let before = flow.clone();
+    let mut incomplete = flow.material_gravity_forces(&gate).unwrap();
+    incomplete.pop_first();
+    assert!(flow.rebind_material_force_field(incomplete, &gate).is_err());
+    unchanged(&before, &flow);
+    let forces = flow.material_gravity_forces(&gate).unwrap();
+    gate.request();
+    assert!(matches!(
+        flow.rebind_material_force_field(forces, &gate),
+        Err(FreeSurfaceError3::Cancelled)
+    ));
+    unchanged(&before, &flow);
+}
+
+#[test]
+fn g1_complete_frame_replaces_material_gravity_but_not_independent_acceleration() {
+    let cells = [
+        cell([2, 2, 2], 0.6, [0.01; 3]),
+        cell([5, 5, 5], 1.4, [-0.01; 3]),
+    ];
+    let gate = CancelGate::new_clock_free();
+    let gravity = [0.001, -0.002, 0.003];
+    let next = [-0.002, 0.001, -0.001];
+    let mut flow = surface(&cells, [0.0; 3]);
+    flow.rebind_material_gravity(gravity, &gate).unwrap();
+    RigidFrame3::default()
+        .prepare_free_surface_step(&mut flow, next, &gate)
+        .unwrap();
+    assert_eq!(flow.body_acceleration(), None);
+    for c in cells {
+        let actual = flow
+            .force_density_at(c.coordinates[0], c.coordinates[1], c.coordinates[2])
+            .unwrap();
+        for d in 0..3 {
+            assert!((actual[d] - c.density * next[d]).abs() < 2e-17);
+        }
+    }
+    let mut independent = surface(&cells, [0.0; 3]);
+    independent
+        .rebind_body_acceleration(gravity, &gate)
+        .unwrap();
+    let before = independent.clone();
+    assert!(
+        RigidFrame3::default()
+            .prepare_free_surface_step(&mut independent, next, &gate)
+            .is_err()
+    );
+    unchanged(&before, &independent);
 }
 
 #[test]

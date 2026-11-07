@@ -92,6 +92,7 @@ impl Coriolis3 {
     /// Canonical density, fill, tracked mass, physical velocity and corrected
     /// stress retain the same guarantees as [`RigidFrame3::prepare_free_surface_step`].
     /// Historical replay and independent body-acceleration ownership refuse.
+    /// Material-owned gravity is explicitly replaced by this complete source.
     pub fn prepare_free_surface_step(
         self,
         surface: &mut FreeSurface3,
@@ -163,10 +164,10 @@ impl RigidFrame3 {
     /// full-flow scheme. The original low-Mach and resolution limits still apply.
     /// Historical `LegacyGlobal` replay is refused because it does not use the
     /// current physical Guo frame for every gas-link reconstruction.
-    /// A separately selected `FreeSurface3::rebind_body_acceleration` owner is
-    /// also refused, including an owned zero acceleration. That mode owns its
-    /// density-dependent endpoint source and cannot become a held force field
-    /// implicitly. This entry never combines independent acceleration owners.
+    /// The material adapter's uniform gravity transfers to this complete source
+    /// without a second gravity load. A separately selected native acceleration
+    /// still refuses, including an owned zero or affine acceleration. This
+    /// entry never combines independent acceleration owners.
     pub fn prepare_free_surface_step(
         self,
         surface: &mut FreeSurface3,
@@ -223,7 +224,7 @@ impl RigidFrame3 {
             )
             .into());
         }
-        if surface.body_acceleration_field().is_some() {
+        if surface.body_acceleration_field().is_some() && !surface.owns_material_gravity() {
             return Err(FreeSurfaceError3::Transport(
                 "rigid-frame forcing cannot replace an independent body-acceleration owner",
             )
@@ -272,7 +273,10 @@ impl RigidFrame3 {
                 forces.insert((key, lane), next);
             }
         }
-        surface.rebind_force_field(forces, gate)?;
+        // The complete frame source already includes gravity and uses actual
+        // cell density. Publish its ownership only after the Guo reframe passes.
+        surface.rebind_force_field_inner(forces, false, || check_cancel(gate))?;
+        surface.body_acceleration = None;
         Ok(())
     }
 
@@ -628,6 +632,12 @@ impl FreeSurface3 {
         // The existing stream already uses this descriptor only to close the
         // endpoint pressure, refresh F_next, and initialize newly wet cells.
         candidate.body_acceleration = Some(next);
+        if candidate.material_gravity.is_some() {
+            candidate.material_gravity = match next {
+                BodyAccelerationField3::Uniform(acceleration) => Some(acceleration),
+                BodyAccelerationField3::Affine { .. } => None,
+            };
+        }
         candidate.step_inner(gate, None, None, pressure)?;
         check_cancel(gate)?;
         *self = candidate;
@@ -724,6 +734,111 @@ impl FreeSurface3 {
         }
         self.rebind_force_field_inner(forces, true, checkpoint)?;
         self.body_acceleration = Some(field);
+        self.material_gravity = None;
+        Ok(())
+    }
+
+    /// Select the material adapter's uniform gravity. Unlike an independently
+    /// authored acceleration, this owner can hand off to a complete thermal or
+    /// frame force law that already includes that same physical gravity.
+    pub(crate) fn rebind_material_gravity(
+        &mut self,
+        acceleration: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), FreeSurfaceError3> {
+        self.rebind_material_gravity_checked(acceleration, || check_cancel(gate))
+    }
+
+    pub(crate) fn rebind_material_gravity_checked(
+        &mut self,
+        acceleration: [f64; 3],
+        checkpoint: impl FnMut() -> Result<(), FreeSurfaceError3>,
+    ) -> Result<(), FreeSurfaceError3> {
+        self.rebind_body_acceleration_checked(acceleration, checkpoint)?;
+        self.material_gravity = Some(acceleration);
+        Ok(())
+    }
+
+    pub(crate) const fn material_gravity(&self) -> Option<[f64; 3]> {
+        self.material_gravity
+    }
+
+    fn owns_material_gravity(&self) -> bool {
+        self.material_gravity.is_some_and(|acceleration| {
+            self.body_acceleration == Some(BodyAccelerationField3::Uniform(acceleration))
+        })
+    }
+
+    /// Actual carrier-density gravity at one wet cell, without velocity/stress
+    /// reconstruction. Coupled force maps use this same acceleration convention.
+    pub(crate) fn material_gravity_force_at(
+        &self,
+        key: u64,
+        lane: usize,
+    ) -> Result<[f64; 3], FreeSurfaceError3> {
+        let acceleration = self.material_gravity.ok_or(FreeSurfaceError3::Transport(
+            "coupled material forcing requires its original uniform gravity",
+        ))?;
+        let tile = self.tiles.get(&key).ok_or(FreeSurfaceError3::Transport(
+            "material gravity needs an active wet cell",
+        ))?;
+        if lane >= TILE_CELLS || tile.cells[lane] == Cell3::Gas {
+            return Err(FreeSurfaceError3::Transport(
+                "material gravity needs a wet cell",
+            ));
+        }
+        let slot = self.grid.slot_of(key).expect("active material cell");
+        body_force(self.grid.populations(slot, lane).iter().sum(), acceleration)
+    }
+
+    pub(crate) fn material_gravity_forces(
+        &self,
+        gate: &CancelGate,
+    ) -> Result<BTreeMap<(u64, usize), [f64; 3]>, FreeSurfaceError3> {
+        check_cancel(gate)?;
+        let mut forces = BTreeMap::new();
+        for (&key, tile) in &self.tiles {
+            check_cancel(gate)?;
+            for lane in 0..TILE_CELLS {
+                if tile.cells[lane] != Cell3::Gas {
+                    forces.insert((key, lane), self.material_gravity_force_at(key, lane)?);
+                }
+            }
+        }
+        Ok(forces)
+    }
+
+    /// Bind a COMPLETE material force field on an enclosing private candidate.
+    /// Its gravity component uses current rho, and additional physical forces
+    /// stay force densities. A nonzero extra force selects the existing held
+    /// force split. When extras vanish, restore native density-aware gravity so
+    /// zero buoyancy/Marangoni/Lorentz force retains the original trajectory.
+    /// No impulse, mass, heat or extra sparse force map is introduced.
+    pub(crate) fn rebind_material_force_field(
+        &mut self,
+        forces: BTreeMap<(u64, usize), [f64; 3]>,
+        gate: &CancelGate,
+    ) -> Result<(), FreeSurfaceError3> {
+        check_cancel(gate)?;
+        let gravity = self.material_gravity.ok_or(FreeSurfaceError3::Transport(
+            "complete material forces cannot replace independent acceleration",
+        ))?;
+        if self.body_acceleration.is_some() && !self.owns_material_gravity() {
+            return Err(FreeSurfaceError3::Transport(
+                "complete material forces cannot replace independent acceleration",
+            ));
+        }
+        let mut gravity_only = true;
+        for (index, (&(key, lane), &force)) in forces.iter().enumerate() {
+            if index % TILE_CELLS == 0 {
+                check_cancel(gate)?;
+            }
+            gravity_only &= force == self.material_gravity_force_at(key, lane)?;
+        }
+        // Original admission checks complete wet-cell coverage and reframes
+        // atomically. Pure gravity keeps the required full endpoint history.
+        self.rebind_force_field_inner(forces, gravity_only, || check_cancel(gate))?;
+        self.body_acceleration = gravity_only.then_some(BodyAccelerationField3::Uniform(gravity));
         Ok(())
     }
 

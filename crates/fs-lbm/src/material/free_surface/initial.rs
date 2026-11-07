@@ -173,7 +173,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         )?;
         self.apply_collision(&mut lattice)?;
         if self.density_dependent_gravity {
-            lattice.rebind_body_acceleration_checked(gravity, || {
+            lattice.rebind_material_gravity_checked(gravity, || {
                 cx.checkpoint().map_err(|_| {
                     crate::d3q19::freesurface3::FreeSurfaceError3::Cancelled
                 })

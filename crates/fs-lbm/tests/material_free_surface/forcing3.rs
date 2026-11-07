@@ -43,7 +43,7 @@ fn source_density_and_pressure_density_share_the_same_si_acceleration() {
                 for numerical_density in [0.96, 1.04] {
                     let domain = MaterialFreeSurfaceDomain3 {
                         cells: [12; 3],
-                        gravity_m_s2: [0.0; 3],
+                        gravity_m_s2: [0.2, -0.3, 0.1],
                         max_cells: 12usize.pow(3),
                         ..domain()
                     };
@@ -55,7 +55,6 @@ fn source_density_and_pressure_density_share_the_same_si_acceleration() {
                             * (numerical_density - 1.0);
                     let mut flow = plan_free_surface_from_material(&source, dx, dt, 0.1)
                         .unwrap()
-                        .with_density_dependent_gravity()
                         .with_pressure_reference(100_000.0)
                         .unwrap()
                         .free_surface3_from_cells_with_pressure(
@@ -67,9 +66,13 @@ fn source_density_and_pressure_density_share_the_same_si_acceleration() {
                         )
                         .unwrap();
                     let mut expected = initial_velocity;
-                    for gravity in [[0.2, -0.3, 0.1], [-0.1, 0.15, -0.05], [0.0; 3]] {
+                    for (step, gravity) in [[0.2, -0.3, 0.1], [-0.1, 0.15, -0.05], [0.0; 3]]
+                        .into_iter().enumerate()
+                    {
                         let before = flow.sample_at_si(6, 6, 6).unwrap().unwrap();
-                        flow.rebind_gravity(gravity, &gate).unwrap();
+                        // The first interval exercises construction's DEFAULT
+                        // gravity without selecting or rebinding its force law.
+                        if step != 0 { flow.rebind_gravity(gravity, &gate).unwrap(); }
                         let rebound = flow.sample_at_si(6, 6, 6).unwrap().unwrap();
                         assert_eq!(rebound.density_kg_m3, before.density_kg_m3);
                         for d in 0..3 {
@@ -106,7 +109,6 @@ fn source_pressure_and_interface_evolution_refresh_the_same_gravity_law() {
         ..domain()
     };
     let mut flow = plan(&source)
-        .with_density_dependent_gravity()
         .with_pressure_reference(100_000.0)
         .unwrap()
         .free_surface3(domain, |_, _, z| z < 6)
@@ -145,7 +147,10 @@ fn replacing_si_gravity_preserves_accepted_state_and_refuses_atomically() {
     let source = liquid(1200.0, 0.12, None);
     let gate = CancelGate::new_clock_free();
     let mut flow = plan(&source).free_surface3(domain(), drop).unwrap();
-    assert_eq!(flow.lattice().body_acceleration(), None);
+    assert_eq!(
+        flow.lattice().body_acceleration(),
+        Some([0.0, 0.0, -0.0001])
+    );
     flow.step_with_gate(&gate).unwrap();
     let before = flow.clone();
     let gravity = [-0.2, 0.1, 0.3];
@@ -205,7 +210,7 @@ fn replacing_si_gravity_preserves_accepted_state_and_refuses_atomically() {
 }
 
 #[test]
-fn zero_acceleration_retains_native_trajectory_and_source_scaling() {
+fn explicit_gravity_selection_matches_the_default_trajectory_and_source_scaling() {
     let source = liquid(1000.0, 0.1, None);
     let zero = MaterialFreeSurfaceDomain3 {
         gravity_m_s2: [0.0; 3],
@@ -216,7 +221,7 @@ fn zero_acceleration_retains_native_trajectory_and_source_scaling() {
         .with_density_dependent_gravity()
         .free_surface3(zero, drop)
         .unwrap();
-    assert_eq!(reference.lattice().body_acceleration(), None);
+    assert_eq!(reference.lattice().body_acceleration(), Some([0.0; 3]));
     assert_eq!(acceleration.lattice().body_acceleration(), Some([0.0; 3]));
     for _ in 0..3 {
         assert_eq!(

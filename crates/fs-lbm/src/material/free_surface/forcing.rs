@@ -219,9 +219,9 @@ impl MaterialFreeSurface3<'_> {
 /// Advance one physical timestep from the accepted gravity/acceleration
     /// to `next_gravity_m_s2`, retaining both actual-density force endpoints.
     ///
-    /// Select [`MaterialFreeSurfaceScaling::with_density_dependent_gravity`]
-    /// at construction, or first call [`Self::rebind_gravity`] without advancing
-    /// time. For homogeneous constant-density interior flow the velocity
+    /// Material-bound construction already selects density-aware gravity;
+    /// [`Self::rebind_gravity`] can replace it without advancing time.
+    /// For homogeneous constant-density interior flow the velocity
     /// increment is `dt * (gravity_before + gravity_after) / 2` at any admitted
     /// sourced density and fixed numerical pressure-density level. When density
     /// evolves, the momentum source uses each endpoint's own `rho * gravity`;
@@ -290,8 +290,8 @@ impl MaterialFreeSurface3<'_> {
     /// The complete held force is replaced, so initial gravity is not counted
     /// twice. Translation, centrifugal/Euler acceleration and the shared
     /// energy-neutral midpoint Coriolis source use each wet cell's CURRENT
-    /// numerical density. This differs from the constructor's frozen rho0*g
-    /// reference force. No thermal/buoyancy owner is implicitly composed here.
+    /// numerical density, as does the constructor's gravity. No thermal/buoyancy
+    /// owner is implicitly composed here.
     ///
     /// Physical units always come from this trajectory's original source and
     /// dx/dt. Conversion, force preparation and native evolution take place in

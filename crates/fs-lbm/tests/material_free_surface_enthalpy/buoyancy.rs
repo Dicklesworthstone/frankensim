@@ -139,6 +139,81 @@ fn g3_zero_density_departure_preserves_the_original_gravity_path_exactly() {
 }
 
 #[test]
+fn g3_boussinesq_acceleration_is_independent_of_numerical_pressure_density() {
+    let card = card(0.1, 980.0);
+    let law = LiquidTemperatureLaw::try_new(
+        &card,
+        &point(300.0),
+        "T",
+        LiquidViscosityBasis::Dynamic,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    let source = resolve_liquid_surface_state(
+        &card,
+        &point(300.0),
+        LiquidViscosityBasis::Dynamic,
+        LiquidCapillarity::Neglected,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    let chart = caloric(&card);
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        for pressure_density in [0.96, 1.04] {
+            let flow = plan_free_surface_from_material(&source, 0.001, 0.001, 0.1)
+                .unwrap()
+                .with_pressure_reference(100_000.0)
+                .unwrap()
+                .free_surface3_from_cells_with_pressure(
+                    MaterialFreeSurfaceDomain3 {
+                        gravity_m_s2: [0.0, 0.0, -1.0],
+                        ..domain()
+                    },
+                    &initial(true),
+                    0.05,
+                    |_| 100_000.0 + 1000.0 * fs_lbm::CS2 * (pressure_density - 1.0),
+                    cx,
+                )
+                .unwrap();
+            let mut thermal = flow
+                .with_boussinesq_enthalpy(
+                    &law,
+                    &chart,
+                    FreeSurfaceEnthalpyControls::default(),
+                    config(Case::default()),
+                    |_| 200_000.0,
+                    &gate,
+                )
+                .unwrap();
+            let initial = thermal.flow().sample_at_si(3, 3, 3).unwrap().unwrap();
+            let mass = thermal.flow().ledger_mass_kg().unwrap();
+            let energy = thermal.total_enthalpy_j().unwrap();
+            let expected_increment = -0.001 * 0.99; // rho(400 K)/rho(300 K)
+            near(
+                thermal.flow().lattice().force_density_at(3, 3, 3).unwrap()[2],
+                pressure_density * expected_increment,
+                3e-11,
+            );
+            thermal.step(&gate).unwrap();
+            let endpoint = thermal.flow().sample_at_si(3, 3, 3).unwrap().unwrap();
+            near(
+                endpoint.velocity_m_s[2] - initial.velocity_m_s[2],
+                expected_increment,
+                3e-11,
+            );
+            near(
+                thermal.flow().lattice().force_density_at(3, 3, 3).unwrap()[2],
+                endpoint.density_kg_m3 / 1000.0 * expected_increment,
+                3e-11,
+            );
+            near(thermal.flow().ledger_mass_kg().unwrap(), mass, 2e-11);
+            near(thermal.total_enthalpy_j().unwrap(), energy, 2e-11);
+        }
+    });
+}
+
+#[test]
 fn g1_density_source_and_changed_heat_drive_the_native_held_force_impulse() {
     let run = |hot_density| {
         let card = card(0.1, hot_density);

@@ -575,7 +575,7 @@ impl<'s> MaterialFreeSurface3<'s> {
             candidate.flow.lattice.rebind_surface_tensions(surface_tensions, gate)?;
         }
         if let Some(forces) = resolved.forces {
-            candidate.flow.lattice.rebind_force_field(forces, gate)?;
+            candidate.flow.lattice.rebind_material_force_field(forces, gate)?;
         }
         candidate.states = resolved.states;
         candidate.rheology_samples = resolved.rheology;
@@ -1017,11 +1017,10 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         };
         self.resolve_surface_fields(&lattice, &mut resolved, &mut surface, gate)?;
         if let Some(additional) = additional_forces {
-            let reference = self.flow.lattice.reference_force();
-            let forces = resolved.forces.get_or_insert_with(|| masses.keys().filter_map(|location| {
-                if let MassLocation3::Cell(key, lane) = *location { Some(((key, lane), reference)) }
-                else { None }
-            }).collect());
+            if resolved.forces.is_none() {
+                resolved.forces = Some(lattice.material_gravity_forces(gate)?);
+            }
+            let forces = resolved.forces.as_mut().expect("complete material force field");
             for (&location, extra) in additional {
                 poll(gate)?;
                 let MassLocation3::Cell(key, lane) = location else {
@@ -1052,6 +1051,9 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         let prepared_wetting = if graph_wetting { prepared_wetting } else {
             self.prepare_wetting(&mut lattice, &resolved.states, wetting_outer_gas, gate)?
         };
+        if let Some(forces) = resolved.forces.take() {
+            lattice.rebind_material_force_field(forces, gate)?;
+        }
         let (mut trace, wall_exchange) = match wall {
             Some(boundary) => {
                 let (trace, exchange) = boundary.step(
@@ -1097,19 +1099,16 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         if let Some(core) = &self.electrical {
             core.admit(&lattice, &endpoint.states, gate)?;
         }
-        let endpoint_forces = endpoint.forces.or_else(|| {
-            (additional_forces.is_some() || frame.is_some()).then(|| {
-                let reference = lattice.reference_force();
-                trace.after.keys().filter_map(|location| {
-                    if let MassLocation3::Cell(key, lane) = *location { Some(((key, lane), reference)) }
-                    else { None }
-                }).collect()
-            })
-        });
+        let endpoint_forces =
+            if endpoint.forces.is_none() && (additional_forces.is_some() || frame.is_some()) {
+                Some(lattice.material_gravity_forces(gate)?)
+            } else {
+                endpoint.forces
+            };
         if let Some(forces) = endpoint_forces {
             // This changes the Guo population frame without adding an impulse.
             // The accepted force now belongs to the accepted advected h state.
-            lattice.rebind_force_field(forces, gate)?;
+            lattice.rebind_material_force_field(forces, gate)?;
         }
         #[cfg(feature = "enthalpy-coupling")]
         let magnetic_motion = self.electrical.as_ref().map(|core|
@@ -1242,7 +1241,8 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             if let MassLocation3::Cell(key, lane) = location {
                 tau.insert((key, lane), local_tau);
                 if let (Some(binding), Some(forces)) = (self.buoyancy, &mut forces) {
-                    forces.insert((key, lane), binding.force(&self.flow, &state)?);
+                    let gravity = lattice.material_gravity_force_at(key, lane)?;
+                    forces.insert((key, lane), binding.force(&state, gravity)?);
                 }
             }
             states.insert(location, state);

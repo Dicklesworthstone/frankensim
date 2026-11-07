@@ -91,9 +91,8 @@ pub struct MaterialFreeSurfaceScaling<'a> {
 pub struct MaterialFreeSurfaceDomain3<'a> {
     /// Global cell counts, each a positive multiple of the native tile edge.
     pub cells: [usize; 3],
-    /// Gravity [m/s²]. The default retains the reference-density force rho0*g.
-    /// Select [`MaterialFreeSurfaceScaling::with_density_dependent_gravity`]
-    /// to apply this acceleration to each cell's current numerical density.
+    /// Gravity [m/s²], applied to each cell's current numerical mass density.
+    /// Pressure-density changes do not change the prescribed acceleration.
     pub gravity_m_s2: [f64; 3],
     /// Existing neutral/wetting fill ghost, explicitly chosen by the scenario.
     /// Neither choice infers a measured contact angle from material names.
@@ -211,7 +210,7 @@ pub fn plan_free_surface_from_material(
         mass_unit_kg,
         surface_tension_lattice,
         planar_wetting: None,
-        density_dependent_gravity: false,
+        density_dependent_gravity: true,
         bulk_viscosity: None,
     })
 }
@@ -276,11 +275,11 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
     /// perturbation carried by the native populations. This selects the same
     /// density convention already used by the dense 2-D owner. It does not
     /// supply a liquid EOS, thermal expansion or phase-density volume flux.
-    /// Existing constructors retain reference-density gravity unless selected.
+    /// This is the default for material-bound sparse 3-D constructors.
     ///
-    /// This uniform acceleration owns the complete body-force law. Independent
-    /// thermal buoyancy, Lorentz or other local force bindings refuse; their
-    /// physical source model must not silently replace or double this gravity.
+    /// Existing thermal, Lorentz and frame owners explicitly compose or replace
+    /// this gravity in their complete force law, without a second gravity load.
+    /// Independently authored native/affine acceleration retains its own owner.
     #[must_use]
     pub fn with_density_dependent_gravity(mut self) -> Self {
         self.density_dependent_gravity = true;
@@ -409,7 +408,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         )?;
         self.apply_collision(&mut lattice)?;
         if self.density_dependent_gravity {
-            lattice.rebind_body_acceleration(gravity, &CancelGate::new_clock_free())?;
+            lattice.rebind_material_gravity(gravity, &CancelGate::new_clock_free())?;
         }
         if let Some((wall, wetting)) = self.planar_wetting {
             lattice.set_planar_contact_angle(wall, wetting.contact_angle_radians())?;
@@ -452,7 +451,7 @@ impl<'a> MaterialFreeSurface3<'a> {
         gate: &CancelGate,
     ) -> Result<(), MaterialLbmError> {
         let gravity = self.scaling.gravity_vector_lattice(gravity_m_s2)?;
-        self.lattice.rebind_body_acceleration(gravity, gate)?;
+        self.lattice.rebind_material_gravity(gravity, gate)?;
         self.scaling.density_dependent_gravity = true;
         Ok(())
     }

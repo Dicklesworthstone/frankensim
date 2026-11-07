@@ -464,12 +464,10 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             }
         };
         if !extra.is_empty() {
-            let forces = forces.get_or_insert_with(|| {
-                tensions
-                    .keys()
-                    .map(|&location| (location, lattice.reference_force()))
-                    .collect()
-            });
+            if forces.is_none() {
+                *forces = Some(lattice.material_gravity_forces(gate)?);
+            }
+            let forces = forces.as_mut().expect("complete material force field");
             for (location, traction) in extra {
                 poll(gate)?;
                 let force = forces.get_mut(&location).ok_or(Error::Invalid(
@@ -487,12 +485,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         } else if forces.is_none() && self.thermocapillary.is_some() {
             // A former gradient may vanish. Restore the original force frame
             // at every endpoint without adding a second half-force impulse.
-            *forces = Some(
-                tensions
-                    .keys()
-                    .map(|&location| (location, lattice.reference_force()))
-                    .collect(),
-            );
+            *forces = Some(lattice.material_gravity_forces(gate)?);
         }
         Ok(Some(tensions))
     }

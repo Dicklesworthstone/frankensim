@@ -23,7 +23,9 @@ impl BoussinesqLiquid {
             .reference_state()
             .transport_state()
             .map_err(MaterialLbmError::from)?;
-        let existing = flow.lattice.reference_force();
+        let existing = flow.lattice.material_gravity().ok_or(Error::Invalid(
+            "Boussinesq forcing requires the material-owned uniform gravity",
+        ))?;
         for axis in 0..3 {
             if flow.scaling.gravity_lattice(config.gravity_m_s2[axis])? != existing[axis] {
                 return Err(Error::Invalid(
@@ -36,15 +38,17 @@ impl BoussinesqLiquid {
 
     pub(super) fn force(
         self,
-        flow: &MaterialFreeSurface3<'_>,
         state: &ResolvedLiquidState,
-    ) -> Result<[f64; 3], Error> {
+        gravity: [f64; 3],
+    ) -> Result<[f64; 3], Error>{
         let departure = self.density_departure(state);
-        let mut total = flow.lattice.reference_force();
+        let mut total = gravity;
         for axis in 0..3 {
-            let acceleration = departure * self.config.gravity_m_s2[axis];
-            let perturbation = flow.scaling.gravity_lattice(acceleration)?;
-            if acceleration != 0.0 && perturbation == 0.0 {
+            // Gravity already contains the actual carrier density. Apply the
+            // same sourced Boussinesq acceleration at every numerical pressure
+            // density, matching the rigid-frame owner and its reference inertia.
+            let perturbation = departure * gravity[axis];
+            if departure != 0.0 && gravity[axis] != 0.0 && perturbation == 0.0 {
                 return Err(Error::Invalid(
                     "liquid buoyancy force underflows lattice units",
                 ));
@@ -129,9 +133,10 @@ impl<'s> MaterialFreeSurface3<'s> {
     /// original h chart still owns thermal storage, including its actual slope.
     /// `material_at` retains the unprojected source density and all receipts.
     ///
-    /// Gravity must match the original domain. Its rho0*g reference load stays
-    /// present at the free surface; only (rho(T)-rho0)*g is added. No ideal-gas
-    /// expansion coefficient or material-name rule replaces the density source.
+    /// Gravity must match the material-owned domain acceleration. Its complete
+    /// force is rho_lattice*(rho(T)/rho0)*g_lattice, so numerical pressure-density
+    /// changes do not alter the Boussinesq acceleration. No ideal-gas expansion
+    /// coefficient or material-name rule replaces the density source.
     /// Attachment changes only the Guo population frame, preserving initial
     /// physical velocity and force-corrected stress even for an evolved flow.
     /// Each step holds the post-thermal force during native momentum, then

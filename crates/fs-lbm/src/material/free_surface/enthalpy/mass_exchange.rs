@@ -545,7 +545,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             lattice.rebind_surface_tensions(tensions, gate)?;
         }
         if let Some(forces) = resolved.forces {
-            lattice.rebind_force_field(forces, gate)?;
+            lattice.rebind_material_force_field(forces, gate)?;
         }
         #[cfg(feature = "enthalpy-coupling")]
         if let Some(core) = &self.electrical {
