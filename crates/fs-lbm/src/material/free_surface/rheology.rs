@@ -31,6 +31,7 @@ pub use crate::material::transport::rheology::RheologySolve;
 
 mod impulse;
 mod motion;
+pub mod sgs;
 mod two_dimensional;
 
 pub use two_dimensional::MaterialFreeSurfaceRheology2;
@@ -41,6 +42,7 @@ pub enum FreeSurfaceRheologyError {
     Material(MaterialStatePointError),
     Flow(MaterialLbmError),
     DenseFlow(crate::freesurface::FreeSurfaceMomentumError2),
+    Sgs(crate::d3q19::freesurface3::sgs::FreeSurfaceSgsError3),
     Convergence {
         coordinates: [usize; 3],
         iterations: usize,
@@ -54,6 +56,7 @@ impl core::fmt::Display for FreeSurfaceRheologyError {
             Self::Material(e) => write!(f, "isothermal free-surface source: {e}"),
             Self::Flow(e) => write!(f, "isothermal free-surface flow: {e}"),
             Self::DenseFlow(e) => write!(f, "isothermal dense free-surface flow: {e}"),
+            Self::Sgs(e) => write!(f, "isothermal free-surface SGS: {e}"),
             Self::Convergence {
                 coordinates,
                 iterations,
@@ -302,7 +305,7 @@ impl<'m> IsothermalRheologyLaw<'m> {
 pub struct IsothermalRheologySample {
     /// `sqrt(2 dev(D):dev(D))` [1/s], from force-corrected native stress.
     pub shear_rate_per_s: f64,
-    /// Molecular `1/2 + 3 nu dt/dx^2`, used by the next collision.
+    /// Molecular `1/2 + 3 nu dt/dx^2`, excluding any explicitly bound SGS viscosity.
     pub collision_tau: f64,
     pub iterations: usize,
     /// Absolute local constitutive defect in dimensionless tau.

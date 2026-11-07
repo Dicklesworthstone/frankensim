@@ -15,6 +15,9 @@ mod motion;
 #[path = "material_free_surface_rheology/frame.rs"]
 mod frame;
 
+#[path = "material_free_surface_rheology/sgs.rs"]
+mod sgs;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};

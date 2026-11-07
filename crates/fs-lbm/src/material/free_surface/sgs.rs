@@ -69,7 +69,7 @@ impl From<FreeSurfaceSgsError3> for MaterialFreeSurfaceSgsError3 {
 }
 
 impl MaterialFreeSurfaceSgsConfig3 {
-    fn lattice(self, dx: f64) -> Result<SgsConfig, MaterialFreeSurfaceSgsError3> {
+    pub(super) fn lattice(self, dx: f64) -> Result<SgsConfig, MaterialFreeSurfaceSgsError3> {
         positive(self.filter_width_m, "SGS filter width must be positive metres")?;
         let config = SgsConfig {
             model: self.model,
@@ -85,14 +85,14 @@ impl MaterialFreeSurfaceSgsConfig3 {
     }
 }
 
-struct SgsUnits {
+pub(super) struct SgsUnits {
     volume: f64,
     viscosity: f64,
     power: f64,
 }
 
 impl SgsUnits {
-    fn new(scale: &MaterialFreeSurfaceScaling<'_>) -> Result<Self, MaterialLbmError> {
+    pub(super) fn new(scale: &MaterialFreeSurfaceScaling<'_>) -> Result<Self, MaterialLbmError> {
         let dx = scale.cell_size_m;
         Ok(Self {
             volume: positive(dx * dx * dx, "SGS volume unit is unrepresentable")?,
@@ -109,7 +109,7 @@ impl SgsUnits {
         })
     }
 
-    fn report(
+    pub(super) fn report(
         self,
         raw: FreeSurfaceSgsReport3,
     ) -> Result<MaterialFreeSurfaceSgsReport3, MaterialLbmError> {

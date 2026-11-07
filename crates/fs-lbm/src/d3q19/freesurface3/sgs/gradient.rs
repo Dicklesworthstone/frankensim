@@ -2,13 +2,32 @@
 
 use super::*;
 use crate::d3q19::freesurface3::{
-    FreeSurfaceKinematicsError3, FreeSurfaceKinematicsWorkspace3, WetGradientStencil3,
+    FreeSurfaceKinematics3, FreeSurfaceKinematicsError3, FreeSurfaceKinematicsWorkspace3,
+    WetGradientStencil3,
 };
 
 impl From<FreeSurfaceKinematicsError3> for FreeSurfaceSgsError3 {
     fn from(error: FreeSurfaceKinematicsError3) -> Self {
         Self::Kinematics(error)
     }
+}
+
+/// Shared occupied-liquid stencil admission and full-gradient closure.
+pub(crate) fn gradient_sgs_at(
+    field: &FreeSurfaceKinematics3<'_>,
+    coordinates: [usize; 3],
+    config: SgsConfig,
+) -> Result<([[f64; 3]; 3], f64), FreeSurfaceSgsError3> {
+    let invalid = |reason| FreeSurfaceSgsError3::Cell { coordinates, reason };
+    let sample = field.sample_at(coordinates[0], coordinates[1], coordinates[2])?
+        .ok_or_else(|| invalid("gradient SGS requires a liquid sample at every occupied cell"))?;
+    if sample.stencils.iter().any(|s| matches!(s,
+        WetGradientStencil3::ForwardFirstOrder | WetGradientStencil3::BackwardFirstOrder
+    )) {
+        return Err(invalid("gradient SGS requires second-order liquid stencils"));
+    }
+    let gradient = sample.kinematics.gradient();
+    Ok((gradient, eddy_viscosity(config.model, config.filter_width_lu, gradient)?))
 }
 
 impl FreeSurface3 {
@@ -74,24 +93,7 @@ impl FreeSurface3 {
                     report.wet_cells += 1;
                     continue;
                 }
-                let sample = field
-                    .sample_at(coordinates[0], coordinates[1], coordinates[2])?
-                    .ok_or_else(|| {
-                        invalid("gradient SGS requires a liquid sample at every occupied cell")
-                    })?;
-                if sample.stencils.iter().any(|s| {
-                    matches!(
-                        s,
-                        WetGradientStencil3::ForwardFirstOrder
-                            | WetGradientStencil3::BackwardFirstOrder
-                    )
-                }) {
-                    return Err(invalid(
-                        "gradient SGS requires second-order liquid stencils",
-                    ));
-                }
-                let gradient = sample.kinematics.gradient();
-                let eddy = eddy_viscosity(config.model, config.filter_width_lu, gradient)?;
+                let (gradient, eddy) = gradient_sgs_at(&field, coordinates, config)?;
                 let ratio = eddy / molecular_nu;
                 if !ratio.is_finite() || ratio > config.maximum_eddy_to_molecular {
                     return Err(SgsError::ViscosityRatioExceeded {

@@ -14646,3 +14646,31 @@ contrast; Rayleigh initially vanishes for equal prescribed temperatures. The
 `material_buoyancy` regressions cover isothermal 2-D/3-D startup, adiabatic source
 energy and physical temperature rise, and tight-budget conservative material
 refresh.
+
+### Source-resolved free-surface rheology with bound SGS
+
+`MaterialFreeSurfaceRheology3::with_sgs_si` binds one immutable exploratory
+closure in `MaterialFreeSurfaceRheologySgs3`. The original material source and
+physical units remain authoritative. Smagorinsky trial-rate viscosity or
+WALE/Vreman full native velocity-gradient viscosity joins the molecular
+relaxation inside the existing bounded constitutive root. The source query is
+still the canonical Guo-corrected deviatoric stress invariant. Active gradient
+closures retain the original occupied-liquid second-order stencil and workspace
+admission. Zero coefficient delegates the original molecular trajectory and
+needs no gradient workspace.
+
+The same accepted material response supplies independent molecular bulk
+viscosity. Source-local bulk is installed before collision and rebuilt after
+native interface conversion, including every newly wet cell. Original
+collision, mass transport, pressure reconstruction and conversion remain the
+only evolution owners; ordinary and prescribed-gas-pressure steps share this
+path. Molecular shear power, molecular bulk power and modeled deviatoric power
+are reported separately in SI without thermal deposition. One native candidate
+publishes only after endpoint source, speed, viscosity-ratio and cancellation
+gates. The successful scratch cache exposes endpoint total tau; source samples
+retain molecular tau. This explicit wrapper prevents a later unbound step from
+consuming a source query fitted under modeled relaxation. Integration regression
+definitions in `tests/material_free_surface_rheology/sgs.rs` cover nonlinear
+all-closure forcing, exact disabled-source trajectory and newly wet bulk
+coverage. SGS remains exploratory, without turbulence qualification or a
+subgrid free-interface model.

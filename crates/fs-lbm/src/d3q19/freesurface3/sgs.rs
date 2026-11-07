@@ -31,6 +31,7 @@ use fs_math::det;
 
 mod gradient;
 mod motion;
+pub(crate) use gradient::gradient_sgs_at;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FreeSurfaceSgsError3 {
@@ -86,14 +87,15 @@ pub struct FreeSurfaceSgsReport3 {
 /// entry on the next preparation. Outputs are consumable only after success.
 #[derive(Default)]
 pub struct FreeSurfaceSgsWorkspace3 {
-    tau: BTreeMap<(u64, usize), f64>,
+    pub(crate) tau: BTreeMap<(u64, usize), f64>,
 }
 
 impl FreeSurfaceSgsWorkspace3 {
     /// Relaxation in the current scratch cache, valid only after preparation
     /// succeeds. A refused preparation may leave partial scratch. After success,
-    /// gas, inactive and out-of-domain cells return None. A step's report/cache
-    /// describe its input state; the next preparation admits newly wet cells.
+    /// gas, inactive and out-of-domain cells return None. Native SGS steps leave
+    /// the input cache; the source-rheology SGS owner refreshes the endpoint
+    /// cache after admitting newly wet cells and their original material source.
     pub fn relaxation_at(&self, coordinates: [usize; 3]) -> Option<f64> {
         let MassLocation3::Cell(key, lane) = FreeSurface3::transport_location(coordinates)? else {
             return None;
@@ -308,7 +310,7 @@ impl FreeSurface3 {
     }
 }
 
-fn molecular_relaxation(model: CollisionModel3) -> Result<f64, FreeSurfaceSgsError3> {
+pub(crate) fn molecular_relaxation(model: CollisionModel3) -> Result<f64, FreeSurfaceSgsError3> {
     match model {
         CollisionModel3::Bgk { tau } | CollisionModel3::Trt { tau, .. } => Ok(tau),
         CollisionModel3::CentralMomentBulk { shear_rate, .. } => Ok(1.0 / shear_rate),

@@ -17,6 +17,7 @@
 
 mod model;
 pub use model::{SgsConfig, SgsError, SgsModel, SgsUse, eddy_viscosity};
+pub(crate) use model::smagorinsky_viscosity;
 mod vreman;
 pub use vreman::vreman_eddy_viscosity;
 

@@ -134,9 +134,10 @@ pub fn eddy_viscosity(
             strain2 += s * s;
         }
     }
-    let rate = if !wale {
-        det::sqrt(2.0 * strain2)
-    } else {
+    if !wale {
+        return smagorinsky_viscosity(coefficient, filter_width, scale * det::sqrt(2.0 * strain2));
+    }
+    let rate = {
         let square: [[f64; 3]; 3] = core::array::from_fn(|i| {
             core::array::from_fn(|j| (0..3).map(|k| g[i][k] * g[k][j]).sum())
         });
@@ -163,6 +164,28 @@ pub fn eddy_viscosity(
     } else {
         Err(SgsError::NonFiniteViscosity)
     }
+}
+
+/// The same Smagorinsky closure for an already resolved shear invariant.
+/// Constitutive roots supply the trial rate; no fictitious gradient is needed.
+pub(crate) fn smagorinsky_viscosity(
+    cs: f64,
+    filter_width: f64,
+    shear_rate: f64,
+) -> Result<f64, SgsError> {
+    SgsModel::Smagorinsky { cs }.validate()?;
+    if !(filter_width.is_finite() && filter_width > 0.0) {
+        return Err(SgsError::InvalidFilterWidth);
+    }
+    if !shear_rate.is_finite() || shear_rate < 0.0 {
+        return Err(SgsError::NonFiniteGradient);
+    }
+    if shear_rate == 0.0 || cs == 0.0 {
+        return Ok(0.0);
+    }
+    let length = cs * filter_width;
+    let viscosity = length * (length * shear_rate);
+    if viscosity.is_finite() { Ok(viscosity) } else { Err(SgsError::NonFiniteViscosity) }
 }
 
 #[cfg(test)]
