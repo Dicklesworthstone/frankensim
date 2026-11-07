@@ -10,6 +10,13 @@ use fs_orbit::{
 };
 use fs_phs::PortHamiltonian;
 
+mod response;
+pub use response::{
+    PhsForcedBranchStabilityControls, PhsForcedPortBranchControls, PhsForcedPortBranchError,
+    PhsForcedPortBranchPoint, continue_forced_port_response_analytic_scaled_seeded,
+    continue_forced_port_response_scaled_seeded,
+};
+
 /// One accepted nonlinear frequency-response point with original physical work.
 #[derive(Debug, Clone)]
 pub struct PhsFrequencyResponsePoint {

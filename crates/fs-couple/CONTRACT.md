@@ -5277,3 +5277,54 @@ integrated Kelvin/relaxation heat, check full channel admission and retain
 zero-Kelvin Maxwell identity. They exercise the actual material, geometry,
 projection, passive factor and pHS propagation owners; they do not substitute
 for execution of the complete coupled rendering wrapper.
+
+## Physical forced-response branches through frequency folds
+
+`phs_orbit::continue_forced_port_response_scaled_seeded` composes the existing
+full-state pseudo-arclength, physical port-spectrum and optional variational
+Floquet owners. Its analytic counterpart admits the complete continuous storage
+Hessian, including every nonlinear coupling and explicit material-memory row.
+The same declared Hessian enters the original continuation state Jacobian and
+optional shooting tangent. Storage-owned exact quadratic metadata or continuous
+tangents are discovered automatically; an unavailable or refusing tangent does
+not become a quadratic surrogate or an undeclared state finite difference.
+The native corrector's parameter column retains its existing frequency probe.
+
+The forcing's original DC values, harmonic amplitudes and relative phases stay
+fixed while its common fundamental changes. All Fourier coordinates, memory
+states, normalized HB/AFT/arclength defects and physical cycle work are retained.
+Returned points remain in continuation traversal order, including frequency
+reversals; they are not sorted into a single-valued frequency graph. Each point
+observes the original nonlinear `G^T gradient(H)` through the existing shifted
+FFT-grid refinement. The output preserves real DC and negative-time peak phasors
+`2 conj(c_k)`; output order is independent of retained state order.
+
+Requested stability starts all three existing variational time grids from that
+point's complete physical phase-zero state at its own authored clock. Every
+original multiplier remains present. Physical seed-agreement, grid comparison
+and unit-circle guards retain their existing semantics, including `Unresolved`.
+The returned HB state is not replaced by a shooting correction. Omitted stability
+returns `None`, never an implicit stable label. There is no global attraction,
+unique-branch, exact bifurcation-location, infinite-tail or physical hysteresis
+trajectory claim. Source laws remain smooth, deterministic and read-only.
+
+The original continuation/Newton/AFT caps bound branch construction. At most
+`max_steps+1` points receive an audit and bounded spectrum query, plus three
+individually bounded variational queries when requested. A conservative bound
+for all retained numerical-result arrays is checked before source evaluations;
+it includes every optional monodromy, spectrum and refinement trace, excluding
+allocator metadata and separately owned transient workspaces. The original ODE
+adapter is wrapped only to poll cancellation at AFT source/tangent evaluations;
+cycle audits poll per sample. Existing observation/shooting cancellation remains
+active. Native dense solves and individual source calls remain atomic. A refusal
+or cancellation publishes no partial branch and leaves the authored input intact.
+
+Four G1/G3/G4 integration regressions cover independent original Maxwell phasors,
+physical work and all three decay multipliers; two frequency folds with original
+nonlinear restoring effort checked by independent Fourier convolution and a
+complete memory Hessian; a manufactured nonlinear periodic response with stable
+and parametrically unstable original Floquet maps; and tangent, payload,
+cancellation and deterministic-replay boundaries. These tests are authored but
+not claimed executed while the full `fs-couple` dependency closure is unavailable.
+Formatting and the bounded native-API/physics review are separate from numerical
+execution; no complete workspace or experimental-validation claim is made.

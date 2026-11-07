@@ -48,6 +48,9 @@ pub mod sideband;
 
 mod continuation;
 pub use continuation::{
+    PhsForcedBranchStabilityControls, PhsForcedPortBranchControls, PhsForcedPortBranchError,
+    PhsForcedPortBranchPoint, continue_forced_port_response_analytic_scaled_seeded,
+    continue_forced_port_response_scaled_seeded,
     PhsFrequencyResponsePoint, PhsScaledFrequencyResponsePoint,
     continue_forced_frequency_response, continue_forced_frequency_response_scaled_seeded,
 };
