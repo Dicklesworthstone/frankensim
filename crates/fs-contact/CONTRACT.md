@@ -1013,6 +1013,17 @@ Slip/spin coordinates have an explicit torsional length and conjugate forces.
 Canonical patch ordering makes simultaneous transitions invariant to input
 permutation. No branch smoothing is introduced.
 
+Newton–Krylov uses the analytic fixed-branch tangent of the original regional
+elastic/Coulomb return. Its local blocks follow the constrained elastic
+compliance projection, including the mixed shear/spin cross derivatives; the
+same block is used for every Krylov direction at one Newton point. Exact yield
+equality keeps the law's elastic branch. A static-to-kinetic traction drop
+remains a discontinuity, with no claim of a classical derivative across it.
+Blocks and work vectors are reused: each action needs two mobility-factor
+products and O(N) local work, without a dense contact matrix, additional law
+evaluations, or velocity difference stencils. `difference_step_mps` remains a
+positive compatibility field and no longer changes the solve.
+
 Acceptance independently checks endpoint velocity balance, each regional
 Coulomb cone and associated-flow complementarity, and mechanical work plus
 stored-energy change, physical heat, distinct elastic/mechanical backward-Euler
@@ -1021,10 +1032,15 @@ regional history; parameter work is not thermalized. Prepare/retry leave
 accepted history unchanged. Commit consumes all contact work once. Release
 requires explicit export of retained elastic storage; recontact starts unloaded.
 
-Seven native physical regression groups cover analytic stick/partial/gross
+Native physical regressions cover analytic stick/partial/gross
 slide, shared-body recoil and permutation, mixed slip/spin and frame covariance,
 checkpoint/release/recontact, cancellation/nonconvergence, timestep refinement,
-and changing coefficients. Normal-load/geometry admission, normal complementarity,
+and changing coefficients. Tangent regressions check the original return inside
+all three modes, passive symmetric response, paused kinetic history and elastic
+unloading, and linear Krylov actions at an exact yield boundary. A full shear/spin
+coupling case closes independent impulse and energy balances with three law
+evaluations, independent of the former difference scale.
+Normal-load/geometry admission, normal complementarity,
 impact timing/restitution, Painleve classification, global uniqueness and
 classical adjoints remain outside this tangential solver. Regional plastic
 increments in `PartialSlipStep` expose the original constitutive flow for the

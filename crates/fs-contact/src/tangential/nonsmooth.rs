@@ -12,7 +12,6 @@
 //! loss is reported separately from the law's physical heat and elastic loss.
 
 use fs_exec::CancelGate;
-use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
 use fs_solver::{
     NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, SolverRunProgress,
 };
@@ -23,6 +22,9 @@ use fs_tribo::partial_slip::{
 };
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
+
+mod linearization;
+use linearization::{PartialSlipProblem, impulse_tangent};
 
 /// Identity of this bounded nonsmooth tangential solver.
 pub const NONSMOOTH_TANGENTIAL_MODEL_ID: &str = "fs-contact/coupled-partial-slip-backward-euler-v1";
@@ -56,6 +58,9 @@ pub struct NonsmoothControls {
     pub maximum_evaluations: usize,
     pub maximum_newton_iterations: usize,
     pub maximum_mechanical_dofs: usize,
+    /// Positive scale retained for caller compatibility. The original return
+    /// map now supplies an analytic branch tangent, so no velocity perturbation
+    /// is taken and the solution does not depend on this value.
     pub difference_step_mps: f64,
     pub velocity_tolerance_mps: f64,
     pub cone_tolerance: f64,
@@ -385,15 +390,32 @@ impl NonsmoothTangentialState {
         let (velocity, nonlinear) = if dimension == 0 {
             (Vec::new(), None)
         } else {
-            let problem = FallibleFiniteDifference::new(
+            let problem = PartialSlipProblem::new(
                 dimension,
-                controls.difference_step_mps,
-                |x: &[f64]| evaluate(x).map(|(residual, _, _)| residual),
-            )
-            .map_err(numerical)?;
+                &factor,
+                mobility.mechanical_dofs,
+                gate,
+                |x: &[f64]| {
+                    let (residual, steps, _) = evaluate(x)?;
+                    let blocks = steps
+                        .iter()
+                        .zip(&order)
+                        .map(|(step, &i)| {
+                            poll(gate)?;
+                            impulse_tangent(
+                                contacts[i].law,
+                                step,
+                                contacts[i].torsional_length_m,
+                                dt_s,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok((residual, blocks))
+                },
+            );
             let construction = NewtonKrylovState::new(&problem, free.clone(), controls.newton);
             if let Some(error) = problem.take_failure() {
-                return Err(numerical(error));
+                return Err(error);
             }
             let mut solver = construction?;
             let result =
@@ -401,7 +423,7 @@ impl NonsmoothTangentialState {
                     gate.is_requested() || problem.has_failed()
                 });
             if let Some(error) = problem.take_failure() {
-                return Err(numerical(error));
+                return Err(error);
             }
             poll(gate)?;
             if result.progress != SolverRunProgress::Complete || !result.report.converged {
@@ -576,12 +598,6 @@ impl NonsmoothTangentialState {
     }
 }
 
-fn numerical(error: FiniteDifferenceError<NonsmoothTangentialError>) -> NonsmoothTangentialError {
-    match error {
-        FiniteDifferenceError::Source(source) => source,
-        FiniteDifferenceError::Invalid(message) => NonsmoothTangentialError::Invalid(message),
-    }
-}
 fn poll(gate: &CancelGate) -> Result<(), NonsmoothTangentialError> {
     if gate.is_requested() {
         Err(NonsmoothTangentialError::Cancelled)

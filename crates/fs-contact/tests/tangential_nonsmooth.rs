@@ -586,3 +586,57 @@ fn changing_coefficients_preserves_preload_and_exports_parameter_work() {
     state.commit(trial).unwrap();
     assert_eq!(state.contact_checkpoint("patch").unwrap().law(), &softened);
 }
+
+#[test]
+fn coupled_shear_spin_solves_with_three_law_evaluations_and_no_stencil_scale() {
+    let l = law();
+    let p = patch("patch", 1e6);
+    let i = interface();
+    let gate = CancelGate::new();
+    let state = NonsmoothTangentialState::new(1, 8).unwrap();
+    let original = state.clone();
+    // This full mobility couples both shear axes to spin. With dt=0.01,
+    // elastic storage gives -dp/dv=diag(1,1,100). The endpoint
+    // [0.1,-0.2,0.01] therefore has impulse [-0.1,0.2,-1], and B B^T
+    // times that impulse is [0.144,0.082,-0.192]. The free velocity below
+    // follows directly from mechanical impulse balance.
+    let factor = [0.8, 0.0, 0.0, 0.3, 0.7, 0.0, -0.2, 0.1, 0.4];
+    for former_stencil in [1e-200, 1e-5, 1e200] {
+        let mut c = controls();
+        c.maximum_evaluations = 3;
+        c.difference_step_mps = former_stencil;
+        c.newton.forcing_minimum = 1e-10;
+        c.newton.forcing_maximum = 1e-10;
+        let trial = state
+            .prepare(
+                &[contact(&l, &p, &i, "one")],
+                &[[-0.044, -0.282, 0.202]],
+                TangentialMobility {
+                    mechanical_dofs: 3,
+                    factor: &factor,
+                },
+                0.01,
+                c,
+                &gate,
+            )
+            .unwrap();
+        assert_eq!(trial.evaluations(), 3);
+        let solved = &trial.contacts()[0];
+        assert_eq!(solved.law.state, PartialSlipStateKind::Sticking);
+        for j in 0..3 {
+            close(solved.endpoint_velocity_mps[j], [0.1, -0.2, 0.01][j]);
+            close(solved.impulse_ns[j], [-0.1, 0.2, -1.0][j]);
+            close(
+                trial.mass_weighted_velocity_increment()[j],
+                [0.18, 0.04, -0.4][j],
+            );
+        }
+        close(trial.audit().storage_change_j, 0.03);
+        close(trial.audit().physical_heat_j, 0.0);
+        close(trial.audit().elastic_numerical_loss_j, 0.03);
+        close(trial.audit().mechanical_numerical_loss_j, 0.097);
+        close(trial.audit().mechanical_work_j, -0.157);
+        close(trial.audit().energy_residual_j, 0.0);
+        assert_eq!(state, original);
+    }
+}
