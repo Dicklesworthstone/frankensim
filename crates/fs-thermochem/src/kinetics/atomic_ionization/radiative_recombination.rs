@@ -37,6 +37,8 @@ use fs_matdb::Provenance;
 use fs_math::det::{exp, ln};
 use fs_qty::{Area, Energy, Temperature};
 
+pub mod spectrum;
+
 const LIGHT_SPEED_M_S: f64 = 299_792_458.0;
 
 /// V1 Maxwellian admission ceiling kT/(m_e*c²), not a physical-error bound.

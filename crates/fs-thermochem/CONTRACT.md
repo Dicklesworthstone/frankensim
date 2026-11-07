@@ -4025,3 +4025,32 @@ their common-temperature derivatives, source charge/nucleus balance and
 generic photon/Milne energy moments against independent analytic formulas.
 These are manufactured ground-state laws, not experimental validation or a
 multilevel, continuum-lowered, dense-plasma or total-recombination model.
+
+
+## Differential reciprocal recombination emission
+
+`AtomicRadiativeRecombinationV1::spectrum` prepares the original Milne source
+at an admitted Maxwellian electron temperature without allocation.
+`RecombinationSpectrumV1::evaluate` returns the photon-energy differential
+event coefficient, captured-electron kinetic-energy density and the original
+photoionization cross section at that energy. It retains the original onset,
+ground-state statistical weights, finite support and nonrelativistic temperature
+admission. The density is angle-integrated, per joule of photon energy; neither
+a frequency Jacobian nor an angular/escape factor is inferred.
+
+`tail_bound` analytically integrates the retained global cross-section envelope
+above a supplied energy, including beyond original source coverage. It returns
+absolute event, captured-electron and emitted-photon energy bounds. This is
+conditional on the original envelope assertion, not source extrapolation or an
+interval/physical-uncertainty certificate. The outward arithmetic allowance
+scales with log-term magnitudes; positive omitted bounds retain a least-positive
+representable value on underflow. Differential positive underflow refuses.
+A consumer may deliberately omit an insignificant far tail only by retaining
+and checking its bound while continuing to evaluate any applicable absorption law.
+
+This closure owns no populations, angular field, photon transport or evolution.
+Focused tests independently evaluate constant-cross-section differential and
+incomplete-gamma moments, recover shifted-onset totals through composite Simpson
+refinement, and exercise original-domain, zero-law and underflow behavior.
+Manufactured source agreement is numerical verification, not experimental
+recombination validation.

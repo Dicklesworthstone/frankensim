@@ -1,5 +1,7 @@
 //! Analytic Maxwellian and independent published-source checks for Milne capture.
 
+mod spectrum;
+
 use super::{channel, close};
 use crate::electron_collision::{
     AVOGADRO_PER_MOL, BOLTZMANN_J_PER_K as KB, MaxwellianRateControlsV1,
