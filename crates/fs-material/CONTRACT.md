@@ -12836,6 +12836,19 @@ Initial/scheduled liquid-seed admission and source identity remain strict.
 This endpoint belongs to the first-order split and requires timestep refinement;
 it does not infer coverage, nucleation, moving geometry or a sublimation law.
 
+`advance_deposition_to_freezing_with_heat` in that same boundary module adds
+reciprocal gas heat to the complete event clock. Each native thermal trial
+uses one shared gas-heat/phase trial; scalar and timeline facades consume that
+same physical owner and candidate assembly. A clipped gas event exposes only
+an event bracket, never a publishable shorter-clock state. The timeline owns
+all event retries, avoiding nested searches and charging discarded native work
+to the original allowance. Native-only terminal selection is permitted only
+when any following gas sensible heat is inactive at the fusion endpoint.
+Whole-window sensible, vapor, fusion and neighbor-cell accounts retain their
+original owners. Zero gas heat coefficient delegates exactly to the native
+boundary API before inspecting unused heat controls. The same split-domain,
+fixed-geometry, source and explicit interface-handoff limitations apply.
+
 ### Several retained films sharing one finite atmosphere
 
 `evaporation::gas::chamber::equilibrium` extends the original chamber reduction

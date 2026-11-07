@@ -187,6 +187,384 @@ fn phase_defect(transfer: &EquilibriumFreezingCandidate<'_, '_>) -> f64 {
     }
 }
 
+/// One complete original heat/phase trial, without a nested event-time search.
+/// A bracket carries no endpoint that a coupled caller could publish by mistake.
+#[derive(Clone, Debug, PartialEq)]
+pub(in crate::evaporation::gas) enum FreezingHeatTrial<'curve, 'catalog> {
+    Accepted(EquilibriumFreezingHeatCandidate<'curve, 'catalog>),
+    Bracket { residual_energy_j: f64 },
+}
+
+struct TrialStart {
+    original_step: GasEvaporationStep,
+    native_heat: super::GasFilmHeatSolve,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_trial_start<L: EvaporationLaw + ?Sized>(
+    inventory: EquilibriumEvaporation<'_>,
+    law: &L,
+    binding: &GasLiquidBinding,
+    bulk: LiquidSurfaceState,
+    gas: &ClosedGasParcel,
+    catalog: &ThermochemicalGasModel,
+    mass_transfer_coefficient_m_s: f64,
+    duration_s: f64,
+    phase_controls: GasEvaporationSolve,
+    heat_controls: EquilibriumGasHeatSolve,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<TrialStart, GasEvaporationError> {
+    poll(&mut cancelled)?;
+    validate_controls(phase_controls, duration_s, mass_transfer_coefficient_m_s)?;
+    let mut native_heat =
+        heat_controls.original_controls(inventory, bulk.specific_enthalpy_j_kg)?;
+    let original = advance_equilibrium_surface(
+        inventory,
+        law,
+        binding,
+        bulk,
+        gas,
+        catalog,
+        mass_transfer_coefficient_m_s,
+        0.0,
+        phase_controls,
+        &mut cancelled,
+    )?;
+    // Preserve the exact source knot as the existing heat solver's far bound.
+    // Its original bisection can then accept an exactly represented h_s.
+    native_heat.pure_liquid_enthalpy_range_j_kg[0] =
+        native_heat.pure_liquid_enthalpy_range_j_kg[0].max(inventory.solid_at_melting_h_j_kg);
+    Ok(TrialStart {
+        original_step: original.exchange().step().clone(),
+        native_heat,
+    })
+}
+
+fn zero_heat_candidate<'curve, 'catalog>(
+    inventory: EquilibriumEvaporation<'curve>,
+    bulk: LiquidSurfaceState,
+    transfer: EquilibriumFreezingCandidate<'curve, 'catalog>,
+) -> EquilibriumFreezingHeatCandidate<'curve, 'catalog> {
+    EquilibriumFreezingHeatCandidate {
+        inventory,
+        phase_initial_bulk: bulk,
+        heat: GasFilmHeatStep::default(),
+        step: transfer.exchange().step().clone(),
+        phase: *transfer.phase(),
+        boundary: *transfer.boundary(),
+        sum_absolute_energy_residual_j: phase_defect(&transfer),
+        endpoint: Endpoint::Transfer(transfer),
+        trials: 0,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepared_trial<'curve, 'catalog, L: EvaporationLaw + ?Sized>(
+    inventory: EquilibriumEvaporation<'curve>,
+    law: &L,
+    binding: &GasLiquidBinding,
+    bulk: LiquidSurfaceState,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    mass_transfer_coefficient_m_s: f64,
+    heat_transfer_coefficient_w_m2_k: f64,
+    duration_s: f64,
+    phase_controls: GasEvaporationSolve,
+    start: &TrialStart,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<FreezingHeatTrial<'curve, 'catalog>, GasEvaporationError> {
+    poll(&mut cancelled)?;
+    let original_step = &start.original_step;
+    let native_heat = start.native_heat;
+    let initial_t = original_step.surface_temperature_k[0];
+    let boundary_h = inventory.solid_at_melting_h_j_kg;
+    let temperature = |h| {
+        inventory
+            .curve()
+            .temperature_at_specific_enthalpy(h)
+            .map_err(|_| {
+                EvaporationError::Invalid("original bulk fusion caloric chart refused heat trial")
+            })
+    };
+    let heat_trial = sensible_heat(
+        bulk,
+        gas,
+        initial_t,
+        &temperature,
+        heat_transfer_coefficient_w_m2_k,
+        duration_s,
+        phase_controls,
+        native_heat,
+        &mut cancelled,
+    );
+    let (heated_bulk, heated_gas, heat) = match heat_trial {
+        Ok(candidate) => candidate,
+        Err(GasEvaporationError::HeatOutsideBracket {
+            residual_temperature_k,
+        }) if native_heat.pure_liquid_enthalpy_range_j_kg[0] == boundary_h
+            && gas.state().state().temperature < initial_t
+            && phase_controls.gas.gas.maximum_temperature_k >= initial_t
+            && residual_temperature_k[1] < 0.0 =>
+        {
+            // With the gas-to-initial-body-temperature end available, the
+            // only cooling bracket cut off here is the exact solid knot.
+            // Its original heat-equation residual locates a time bracket;
+            // no gas or condensed endpoint from this refused trial is used.
+            let residual = finite(
+                residual_temperature_k[1]
+                    * (heat_transfer_coefficient_w_m2_k * bulk.area_m2 * duration_s),
+            )?;
+            return Ok(FreezingHeatTrial::Bracket {
+                residual_energy_j: residual,
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    let heat_gap = finite(heated_bulk.mass_kg * (heated_bulk.specific_enthalpy_j_kg - boundary_h))?;
+
+    // Disabled transport or exact saturation permits the heat endpoint
+    // itself to terminate the interface. Never suppress an active stream.
+    if heat.heat_into_liquid_j < 0.0 {
+        let exact_q = finite(bulk.mass_kg * (boundary_h - bulk.specific_enthalpy_j_kg))?;
+        let correction = finite(exact_q - heat.liquid_enthalpy_change_j)?;
+        let absolute_defect = finite(heat.energy_residual_j.abs() + correction.abs())?;
+        if absolute_defect <= phase_controls.gas.energy_tolerance_j
+            && (native_heat.pure_liquid_enthalpy_range_j_kg[0]
+                ..=native_heat.pure_liquid_enthalpy_range_j_kg[1])
+                .contains(&boundary_h)
+            && zero_flux_at_freezing(
+                inventory,
+                law,
+                binding,
+                &heated_gas,
+                catalog,
+                mass_transfer_coefficient_m_s,
+                phase_controls,
+            )?
+        {
+            let caloric = inventory.caloric_with_completion(boundary_h, true)?;
+            let exposure = finite(heat_transfer_coefficient_w_m2_k * bulk.area_m2 * duration_s)?;
+            let residual_t = finite(
+                (heated_gas.state().state().temperature - caloric.temperature_k)
+                    - exact_q / exposure,
+            )?;
+            if exposure > 0.0
+                && residual_t.abs() <= native_heat.temperature_tolerance_k
+                && heated_gas.state().state().temperature <= caloric.temperature_k
+            {
+                let final_bulk = LiquidSurfaceState {
+                    specific_enthalpy_j_kg: boundary_h,
+                    ..bulk
+                };
+                let mut heat = heat;
+                heat.heat_into_liquid_j = exact_q;
+                heat.liquid_enthalpy_change_j = exact_q;
+                heat.energy_residual_j = finite(exact_q + heat.gas_internal_energy_change_j)?;
+                heat.temperature_equation_residual_k = residual_t;
+                let mut empty_phase = original_step.clone();
+                empty_phase.duration_s = duration_s;
+                empty_phase.surface_temperature_k[1] = caloric.temperature_k;
+                empty_phase.gas_temperature_k[1] = heated_gas.state().state().temperature;
+                empty_phase.vapor_partial_pressure_pa[1] = check_interface_endpoint(
+                    law,
+                    binding,
+                    caloric.temperature_k,
+                    heated_gas.state().state().temperature,
+                    0.0,
+                    &heated_gas,
+                    mass_transfer_coefficient_m_s,
+                    duration_s,
+                    phase_controls,
+                )?;
+                let absolute_defect = absolute_defect.max(heat.energy_residual_j.abs());
+                let (step, absolute_defect) = combine_step(
+                    original_step,
+                    empty_phase,
+                    heat,
+                    absolute_defect,
+                    phase_controls,
+                )?;
+                let phase = inventory.partition_step_with_completion(
+                    bulk,
+                    final_bulk,
+                    0.0,
+                    phase_controls.gas.mass_tolerance_kg,
+                    true,
+                )?;
+                poll(&mut cancelled)?;
+                return Ok(FreezingHeatTrial::Accepted(
+                    EquilibriumFreezingHeatCandidate {
+                        inventory,
+                        endpoint: Endpoint::HeatOnly {
+                            bulk: final_bulk,
+                            gas: heated_gas,
+                            catalog,
+                        },
+                        phase_initial_bulk: final_bulk,
+                        heat,
+                        step,
+                        phase,
+                        boundary: FreezingBoundaryStep {
+                            elapsed_duration_s: duration_s,
+                            remaining_duration_s: 0.0,
+                            freezing_completed: true,
+                            condensed_energy_residual_j: correction,
+                        },
+                        sum_absolute_energy_residual_j: absolute_defect,
+                        trials: 1,
+                    },
+                ));
+            }
+        }
+    }
+
+    let residual = if heat_gap <= 0.0 {
+        // The active phase owner cannot start from a completed solid. This
+        // is only an upper time bracket; no vapor endpoint is fabricated.
+        heat_gap
+    } else {
+        let transfer = advance_to_freezing(
+            inventory,
+            law,
+            binding,
+            heated_bulk,
+            &heated_gas,
+            catalog,
+            mass_transfer_coefficient_m_s,
+            duration_s,
+            phase_controls,
+            &mut cancelled,
+        )?;
+        let event = *transfer.boundary();
+        if event.elapsed_duration_s == duration_s {
+            let absolute_defect = finite(heat.energy_residual_j.abs() + phase_defect(&transfer))?;
+            let (step, absolute_defect) = combine_step(
+                original_step,
+                transfer.exchange().step().clone(),
+                heat,
+                absolute_defect,
+                phase_controls,
+            )?;
+            let phase = inventory.partition_step_with_completion(
+                bulk,
+                transfer.exchange().liquid(),
+                step.transferred_mass_kg,
+                phase_controls.gas.mass_tolerance_kg,
+                event.freezing_completed,
+            )?;
+            poll(&mut cancelled)?;
+            return Ok(FreezingHeatTrial::Accepted(
+                EquilibriumFreezingHeatCandidate {
+                    inventory,
+                    endpoint: Endpoint::Transfer(transfer),
+                    phase_initial_bulk: heated_bulk,
+                    heat,
+                    step,
+                    phase,
+                    boundary: FreezingBoundaryStep {
+                        remaining_duration_s: 0.0,
+                        ..event
+                    },
+                    sum_absolute_energy_residual_j: absolute_defect,
+                    trials: 1,
+                },
+            ));
+        } else {
+            // Positive post-heat seed, but phase would finish too early.
+            // The frozen-rate extensive residual has this sign and root.
+            // Scaling by dt bounds it even for an enormous upper horizon.
+            finite(heat_gap * ((event.elapsed_duration_s - duration_s) / duration_s))?
+        }
+    };
+    Ok(FreezingHeatTrial::Bracket {
+        residual_energy_j: residual,
+    })
+}
+
+/// One common-duration trial for callers that already own a complete coupled
+/// time search. Even zero heat returns a bracket when vapor would finish early:
+/// preceding native heat must be replayed, never relabeled with that short clock.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::evaporation::gas) fn single_trial_to_freezing_with_heat<
+    'curve,
+    'catalog,
+    L: EvaporationLaw + ?Sized,
+>(
+    inventory: EquilibriumEvaporation<'curve>,
+    law: &L,
+    binding: &GasLiquidBinding,
+    bulk: LiquidSurfaceState,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    mass_transfer_coefficient_m_s: f64,
+    heat_transfer_coefficient_w_m2_k: f64,
+    duration_s: f64,
+    phase_controls: GasEvaporationSolve,
+    heat_controls: EquilibriumGasHeatSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<FreezingHeatTrial<'curve, 'catalog>, GasEvaporationError> {
+    if !nonnegative(heat_transfer_coefficient_w_m2_k) {
+        return Err(invalid(
+            "finite nonnegative sensible heat coefficient required",
+        ));
+    }
+    if heat_transfer_coefficient_w_m2_k == 0.0 {
+        let transfer = advance_to_freezing(
+            inventory,
+            law,
+            binding,
+            bulk,
+            gas,
+            catalog,
+            mass_transfer_coefficient_m_s,
+            duration_s,
+            phase_controls,
+            cancelled,
+        )?;
+        if transfer.boundary().elapsed_duration_s != duration_s {
+            let gap = finite(
+                bulk.mass_kg * (bulk.specific_enthalpy_j_kg - inventory.solid_at_melting_h_j_kg),
+            )?;
+            return Ok(FreezingHeatTrial::Bracket {
+                residual_energy_j: finite(
+                    gap * ((transfer.boundary().elapsed_duration_s - duration_s) / duration_s),
+                )?,
+            });
+        }
+        return Ok(FreezingHeatTrial::Accepted(zero_heat_candidate(
+            inventory, bulk, transfer,
+        )));
+    }
+    let mut cancelled = cancelled;
+    let start = prepare_trial_start(
+        inventory,
+        law,
+        binding,
+        bulk,
+        gas,
+        catalog,
+        mass_transfer_coefficient_m_s,
+        duration_s,
+        phase_controls,
+        heat_controls,
+        &mut cancelled,
+    )?;
+    prepared_trial(
+        inventory,
+        law,
+        binding,
+        bulk,
+        gas,
+        catalog,
+        mass_transfer_coefficient_m_s,
+        heat_transfer_coefficient_w_m2_k,
+        duration_s,
+        phase_controls,
+        &start,
+        cancelled,
+    )
+}
+
 /// Advance at most the requested duration, locating a shared heat/phase event.
 ///
 /// Zero heat delegates exactly to the original analytic phase boundary, without
@@ -228,32 +606,14 @@ pub fn advance_to_freezing_with_heat<'curve, 'catalog, L: EvaporationLaw + ?Size
             phase_controls,
             cancelled,
         )?;
-        return Ok(EquilibriumFreezingHeatCandidate {
-            inventory,
-            phase_initial_bulk: bulk,
-            heat: GasFilmHeatStep::default(),
-            step: transfer.exchange().step().clone(),
-            phase: *transfer.phase(),
-            boundary: *transfer.boundary(),
-            sum_absolute_energy_residual_j: phase_defect(&transfer),
-            endpoint: Endpoint::Transfer(transfer),
-            trials: 0,
-        });
+        return Ok(zero_heat_candidate(inventory, bulk, transfer));
     }
-    poll(&mut cancelled)?;
-    validate_controls(
-        phase_controls,
-        maximum_duration_s,
-        mass_transfer_coefficient_m_s,
-    )?;
-    let mut native_heat =
-        heat_controls.original_controls(inventory, bulk.specific_enthalpy_j_kg)?;
     if !(1..=256).contains(&event_controls.maximum_iterations) {
         return Err(invalid(
             "freezing event requires 1..=256 complete thermal trials",
         ));
     }
-    let original = advance_equilibrium_surface(
+    let start = prepare_trial_start(
         inventory,
         law,
         binding,
@@ -261,26 +621,12 @@ pub fn advance_to_freezing_with_heat<'curve, 'catalog, L: EvaporationLaw + ?Size
         gas,
         catalog,
         mass_transfer_coefficient_m_s,
-        0.0,
+        maximum_duration_s,
         phase_controls,
+        heat_controls,
         &mut cancelled,
     )?;
-    let original_step = original.exchange().step();
-    let initial_t = original_step.surface_temperature_k[0];
     let boundary_h = inventory.solid_at_melting_h_j_kg;
-    // The terminal interface never needs to evaluate a published solid heat
-    // endpoint. Preserve the exact source knot as the heat solver's far bound;
-    // this also lets its original bisection accept an exactly represented h_s.
-    native_heat.pure_liquid_enthalpy_range_j_kg[0] =
-        native_heat.pure_liquid_enthalpy_range_j_kg[0].max(boundary_h);
-    let temperature = |h| {
-        inventory
-            .curve()
-            .temperature_at_specific_enthalpy(h)
-            .map_err(|_| {
-                EvaporationError::Invalid("original bulk fusion caloric chart refused heat trial")
-            })
-    };
     let mut near_time = 0.0;
     let mut near_residual = finite(bulk.mass_kg * (bulk.specific_enthalpy_j_kg - boundary_h))?;
     let mut far_time = maximum_duration_s;
@@ -310,203 +656,31 @@ pub fn advance_to_freezing_with_heat<'curve, 'catalog, L: EvaporationLaw + ?Size
     };
     let mut duration_s = maximum_duration_s;
     for trials in 1..=event_controls.maximum_iterations {
-        poll(&mut cancelled)?;
-        let heat_trial = sensible_heat(
+        let trial = prepared_trial(
+            inventory,
+            law,
+            binding,
             bulk,
             gas,
-            initial_t,
-            &temperature,
+            catalog,
+            mass_transfer_coefficient_m_s,
             heat_transfer_coefficient_w_m2_k,
             duration_s,
             phase_controls,
-            native_heat,
+            &start,
             &mut cancelled,
-        );
-        let (heated_bulk, heated_gas, heat) = match heat_trial {
-            Ok(candidate) => candidate,
-            Err(GasEvaporationError::HeatOutsideBracket {
-                residual_temperature_k,
-            }) if native_heat.pure_liquid_enthalpy_range_j_kg[0] == boundary_h
-                && gas.state().state().temperature < initial_t
-                && phase_controls.gas.gas.maximum_temperature_k >= initial_t
-                && residual_temperature_k[1] < 0.0 =>
-            {
-                // With the gas-to-initial-body-temperature end available, the
-                // only cooling bracket cut off here is the exact solid knot.
-                // Its original heat-equation residual locates a time bracket;
-                // no gas or condensed endpoint from this refused trial is used.
-                let residual = finite(
-                    residual_temperature_k[1]
-                        * (heat_transfer_coefficient_w_m2_k * bulk.area_m2 * duration_s),
-                )?;
-                match next_time(duration_s, residual) {
-                    Some(next) => {
-                        duration_s = next;
-                        continue;
-                    }
-                    None => break,
+        )?;
+        let residual = match trial {
+            FreezingHeatTrial::Accepted(mut candidate) => {
+                if candidate.boundary.freezing_completed || duration_s == maximum_duration_s {
+                    candidate.boundary.remaining_duration_s = maximum_duration_s - duration_s;
+                    candidate.trials = trials;
+                    return Ok(candidate);
                 }
-            }
-            Err(error) => return Err(error),
-        };
-        let heat_gap =
-            finite(heated_bulk.mass_kg * (heated_bulk.specific_enthalpy_j_kg - boundary_h))?;
-
-        // Disabled transport or exact saturation permits the heat endpoint
-        // itself to terminate the interface. Never suppress an active stream.
-        if heat.heat_into_liquid_j < 0.0 {
-            let exact_q = finite(bulk.mass_kg * (boundary_h - bulk.specific_enthalpy_j_kg))?;
-            let correction = finite(exact_q - heat.liquid_enthalpy_change_j)?;
-            let absolute_defect = finite(heat.energy_residual_j.abs() + correction.abs())?;
-            if absolute_defect <= phase_controls.gas.energy_tolerance_j
-                && (native_heat.pure_liquid_enthalpy_range_j_kg[0]
-                    ..=native_heat.pure_liquid_enthalpy_range_j_kg[1])
-                    .contains(&boundary_h)
-                && zero_flux_at_freezing(
-                    inventory,
-                    law,
-                    binding,
-                    &heated_gas,
-                    catalog,
-                    mass_transfer_coefficient_m_s,
-                    phase_controls,
-                )?
-            {
-                let caloric = inventory.caloric_with_completion(boundary_h, true)?;
-                let exposure =
-                    finite(heat_transfer_coefficient_w_m2_k * bulk.area_m2 * duration_s)?;
-                let residual_t = finite(
-                    (heated_gas.state().state().temperature - caloric.temperature_k)
-                        - exact_q / exposure,
-                )?;
-                if exposure > 0.0
-                    && residual_t.abs() <= heat_controls.temperature_tolerance_k
-                    && heated_gas.state().state().temperature <= caloric.temperature_k
-                {
-                    let final_bulk = LiquidSurfaceState {
-                        specific_enthalpy_j_kg: boundary_h,
-                        ..bulk
-                    };
-                    let mut heat = heat;
-                    heat.heat_into_liquid_j = exact_q;
-                    heat.liquid_enthalpy_change_j = exact_q;
-                    heat.energy_residual_j = finite(exact_q + heat.gas_internal_energy_change_j)?;
-                    heat.temperature_equation_residual_k = residual_t;
-                    let mut empty_phase = original_step.clone();
-                    empty_phase.duration_s = duration_s;
-                    empty_phase.surface_temperature_k[1] = caloric.temperature_k;
-                    empty_phase.gas_temperature_k[1] = heated_gas.state().state().temperature;
-                    empty_phase.vapor_partial_pressure_pa[1] = check_interface_endpoint(
-                        law,
-                        binding,
-                        caloric.temperature_k,
-                        heated_gas.state().state().temperature,
-                        0.0,
-                        &heated_gas,
-                        mass_transfer_coefficient_m_s,
-                        duration_s,
-                        phase_controls,
-                    )?;
-                    let absolute_defect = absolute_defect.max(heat.energy_residual_j.abs());
-                    let (step, absolute_defect) = combine_step(
-                        original_step,
-                        empty_phase,
-                        heat,
-                        absolute_defect,
-                        phase_controls,
-                    )?;
-                    let phase = inventory.partition_step_with_completion(
-                        bulk,
-                        final_bulk,
-                        0.0,
-                        phase_controls.gas.mass_tolerance_kg,
-                        true,
-                    )?;
-                    poll(&mut cancelled)?;
-                    return Ok(EquilibriumFreezingHeatCandidate {
-                        inventory,
-                        endpoint: Endpoint::HeatOnly {
-                            bulk: final_bulk,
-                            gas: heated_gas,
-                            catalog,
-                        },
-                        phase_initial_bulk: final_bulk,
-                        heat,
-                        step,
-                        phase,
-                        boundary: FreezingBoundaryStep {
-                            elapsed_duration_s: duration_s,
-                            remaining_duration_s: maximum_duration_s - duration_s,
-                            freezing_completed: true,
-                            condensed_energy_residual_j: correction,
-                        },
-                        sum_absolute_energy_residual_j: absolute_defect,
-                        trials,
-                    });
-                }
-            }
-        }
-
-        let residual = if heat_gap <= 0.0 {
-            // The active phase owner cannot start from a completed solid. This
-            // is only an upper time bracket; no vapor endpoint is fabricated.
-            heat_gap
-        } else {
-            let transfer = advance_to_freezing(
-                inventory,
-                law,
-                binding,
-                heated_bulk,
-                &heated_gas,
-                catalog,
-                mass_transfer_coefficient_m_s,
-                duration_s,
-                phase_controls,
-                &mut cancelled,
-            )?;
-            let event = *transfer.boundary();
-            if event.elapsed_duration_s == duration_s {
-                if event.freezing_completed || duration_s == maximum_duration_s {
-                    let absolute_defect =
-                        finite(heat.energy_residual_j.abs() + phase_defect(&transfer))?;
-                    let (step, absolute_defect) = combine_step(
-                        original_step,
-                        transfer.exchange().step().clone(),
-                        heat,
-                        absolute_defect,
-                        phase_controls,
-                    )?;
-                    let phase = inventory.partition_step_with_completion(
-                        bulk,
-                        transfer.exchange().liquid(),
-                        step.transferred_mass_kg,
-                        phase_controls.gas.mass_tolerance_kg,
-                        event.freezing_completed,
-                    )?;
-                    poll(&mut cancelled)?;
-                    return Ok(EquilibriumFreezingHeatCandidate {
-                        inventory,
-                        endpoint: Endpoint::Transfer(transfer),
-                        phase_initial_bulk: heated_bulk,
-                        heat,
-                        step,
-                        phase,
-                        boundary: FreezingBoundaryStep {
-                            remaining_duration_s: maximum_duration_s - duration_s,
-                            ..event
-                        },
-                        sum_absolute_energy_residual_j: absolute_defect,
-                        trials,
-                    });
-                }
-                let final_bulk = transfer.exchange().liquid();
+                let final_bulk = candidate.bulk();
                 finite(final_bulk.mass_kg * (final_bulk.specific_enthalpy_j_kg - boundary_h))?
-            } else {
-                // Positive post-heat seed, but phase would finish too early.
-                // The frozen-rate extensive residual has this sign and root.
-                // Scaling by dt bounds it even for an enormous upper horizon.
-                finite(heat_gap * ((event.elapsed_duration_s - duration_s) / duration_s))?
             }
+            FreezingHeatTrial::Bracket { residual_energy_j } => residual_energy_j,
         };
         match next_time(duration_s, residual) {
             Some(next) => duration_s = next,

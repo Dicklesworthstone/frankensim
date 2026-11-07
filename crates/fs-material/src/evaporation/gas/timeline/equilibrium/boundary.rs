@@ -1,6 +1,6 @@
 //! Complete freezing on the original network and finite-gas clock.
 //!
-//! The parent timeline retries the complete native-heat/phase proposal when a
+//! The parent timeline retries the complete native/gas-heat/phase proposal when a
 //! phase event cuts its interval. Discarded network heat never survives with a
 //! shorter vapor clock. The first all-solid native substep also bounds the
 //! search, including a covered interface or disabled vapor transfer. Source
@@ -9,9 +9,10 @@
 //! first-order split's need for physical timestep refinement.
 
 use super::{
-    ClosedGasParcel, DepositionError, DepositionSimulation, EquilibriumTimelineSurface,
-    GasEvaporationSolve, GasEvaporationTimelineCandidate, GasEvaporationTimelineError, StepConfig,
-    ThermochemicalGasModel, advance_deposition,
+    ClosedGasParcel, DepositionError, DepositionSimulation, EquilibriumGasHeatSolve,
+    EquilibriumTimelineSurface, GasEvaporationSolve, GasEvaporationTimelineCandidate,
+    GasEvaporationTimelineError, GasFilmHeatSolve, StepConfig, ThermochemicalGasModel,
+    TimelineSurface, advance_deposition,
 };
 
 /// Time consumed by the whole coupled proposal and time left for a new owner.
@@ -78,6 +79,71 @@ pub fn advance_deposition_to_freezing<'thermal, 'catalog>(
         thermal_config,
         phase_config,
         None,
+        true,
+        checkpoint,
+    )?;
+    let boundary = FreezingTimelineBoundary {
+        elapsed_duration_s: exchange.thermal().time_s() - thermal.time_s(),
+        remaining_duration_s: target_s - exchange.thermal().time_s(),
+        freezing_completed: exchange
+            .audit()
+            .phase_inventory
+            .as_ref()
+            .is_some_and(|phase| phase.final_state.liquid_mass_kg == 0.0),
+    };
+    Ok(EquilibriumFreezingTimelineCandidate { exchange, boundary })
+}
+
+/// Network heat, reciprocal gas heat and vapor share one terminal interval.
+///
+/// A single gas-heat/phase trial follows each native thermal trial. The parent
+/// event bracket owns all retries, so there is no nested event-search cost or
+/// independently shortened heat clock. The sensible coefficient must exclude
+/// vapor-carried energy. Zero coefficient delegates exactly to the native-heat
+/// endpoint above before inspecting unused gas-heat controls.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_deposition_to_freezing_with_heat<'thermal, 'catalog>(
+    thermal: &DepositionSimulation<'thermal>,
+    surface: EquilibriumTimelineSurface<'_>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    target_s: f64,
+    thermal_config: StepConfig,
+    phase_config: GasEvaporationSolve,
+    heat_transfer_coefficient_w_m2_k: f64,
+    heat_config: EquilibriumGasHeatSolve,
+    checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<EquilibriumFreezingTimelineCandidate<'thermal, 'catalog>, GasEvaporationTimelineError> {
+    if heat_transfer_coefficient_w_m2_k == 0.0 {
+        return advance_deposition_to_freezing(
+            thermal,
+            surface,
+            gas,
+            catalog,
+            target_s,
+            thermal_config,
+            phase_config,
+            checkpoint,
+        );
+    }
+    let mut normalized: TimelineSurface<'_> = surface.into();
+    normalized.enthalpy_range_j_kg = heat_config.bulk_enthalpy_range_j_kg;
+    let exchange = advance_deposition(
+        thermal,
+        normalized,
+        gas,
+        catalog,
+        target_s,
+        thermal_config,
+        phase_config,
+        Some((
+            heat_transfer_coefficient_w_m2_k,
+            GasFilmHeatSolve {
+                pure_liquid_enthalpy_range_j_kg: heat_config.bulk_enthalpy_range_j_kg,
+                temperature_tolerance_k: heat_config.temperature_tolerance_k,
+                maximum_iterations: heat_config.maximum_iterations,
+            },
+        )),
         true,
         checkpoint,
     )?;

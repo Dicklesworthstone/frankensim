@@ -15,7 +15,10 @@ pub mod multiple;
 use super::equilibrium::{
     EquilibriumEvaporation, PhaseInventoryStep, advance_equilibrium_surface,
     boundary::{advance_to_freezing, zero_flux_at_freezing},
-    heat::{EquilibriumGasHeatSolve, advance_equilibrium_surface_with_heat},
+    heat::{
+        EquilibriumGasHeatSolve, advance_equilibrium_surface_with_heat,
+        boundary::{FreezingHeatTrial, single_trial_to_freezing_with_heat},
+    },
 };
 use super::{
     GasEvaporationError, GasEvaporationSolve, GasEvaporationStep, GasFilmHeatSolve,
@@ -30,6 +33,7 @@ use fs_thermal::enthalpy::{
 use fs_thermal::evaporation::{EvaporationError, EvaporationLaw, LiquidSurfaceState};
 use fs_thermal::sublimation::SolidSurfaceState;
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 
 /// Explicit original cell, constitutive identity and admitted pure-liquid branch.
 #[derive(Clone, Copy)]
@@ -110,7 +114,7 @@ pub struct GasEvaporationTimelineAudit {
     pub phase_steps: usize,
     /// Native thermal work, INCLUDING discarded heat/phase attempts.
     pub attempted_thermal_substeps: usize,
-    /// Explicit step-limit refusals that shortened an attempted interval.
+    /// Discarded constitutive step-limit or terminal-event trials.
     pub rejected_intervals: usize,
     pub last_step: Option<GasEvaporationStep>,
     /// Original active/birth-to-final partition on the sharp equilibrium lane.
@@ -383,9 +387,9 @@ fn advance_deposition<'thermal, 'catalog>(
     mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<GasEvaporationTimelineCandidate<'thermal, 'catalog>, GasEvaporationTimelineError> {
     checkpoint()?;
-    if stop_at_freezing && (surface.inventory.is_none() || film_heat.is_some()) {
+    if stop_at_freezing && surface.inventory.is_none() {
         return Err(DepositionError::InvalidInput(
-            "freezing completion requires the original fusion inventory and native heat lane",
+            "freezing completion requires the original fusion inventory",
         )
         .into());
     }
@@ -582,7 +586,18 @@ fn advance_deposition<'thermal, 'catalog>(
                     && has_crossing
                     && first_solid.is_none_or(|(time, _, _)| time == stop)
                     && headroom.abs() + heat.residual_j.abs() + audit.thermal.residual_j.abs()
-                        <= thermal_config.energy_tolerance_j;
+                        <= thermal_config.energy_tolerance_j
+                    && match film_heat {
+                        None => true,
+                        Some((coefficient, _)) => {
+                            area == 0.0
+                                || coefficient == 0.0
+                                || next_gas.state().state().temperature
+                                    == inventory
+                                        .caloric_with_completion(solid_h, true)?
+                                        .temperature_k
+                        }
+                    };
                 if terminal_heat {
                     // The phase owner still admits the original binding and
                     // liquid seed. No zero-liquid film step is manufactured.
@@ -681,6 +696,47 @@ fn advance_deposition<'thermal, 'catalog>(
                     }
                 };
                 let proposal = match (surface.inventory, film_heat) {
+                    (Some(inventory), Some((coefficient, heat_config))) if stop_at_freezing => {
+                        // One complete gas-heat/phase trial per native-heat
+                        // trial. Never nest a second event search inside this
+                        // owner or retain heat from a discarded shorter clock.
+                        single_trial_to_freezing_with_heat(
+                            inventory,
+                            surface.law,
+                            surface.binding,
+                            liquid,
+                            &next_gas,
+                            catalog,
+                            surface.mass_transfer_coefficient_m_s,
+                            coefficient,
+                            stop - start,
+                            phase_config,
+                            EquilibriumGasHeatSolve {
+                                bulk_enthalpy_range_j_kg: heat_config
+                                    .pure_liquid_enthalpy_range_j_kg,
+                                temperature_tolerance_k: heat_config.temperature_tolerance_k,
+                                maximum_iterations: heat_config.maximum_iterations,
+                            },
+                            cancelled,
+                        )
+                        .map(|trial| match trial {
+                            FreezingHeatTrial::Accepted(candidate) => {
+                                let (bulk, gas, catalog, step, heat, _, boundary) =
+                                    candidate.into_parts();
+                                ControlFlow::Continue((
+                                    bulk,
+                                    gas,
+                                    catalog,
+                                    step,
+                                    heat.heat_into_liquid_j,
+                                    Some(boundary),
+                                ))
+                            }
+                            FreezingHeatTrial::Bracket { residual_energy_j } => {
+                                ControlFlow::Break(residual_energy_j)
+                            }
+                        })
+                    }
                     (Some(inventory), Some((coefficient, heat_config))) => {
                         advance_equilibrium_surface_with_heat(
                             inventory,
@@ -703,7 +759,14 @@ fn advance_deposition<'thermal, 'catalog>(
                         )
                         .map(|candidate| {
                             let (bulk, gas, catalog, step, heat, _) = candidate.into_parts();
-                            (bulk, gas, catalog, step, heat.heat_into_liquid_j, None)
+                            ControlFlow::Continue((
+                                bulk,
+                                gas,
+                                catalog,
+                                step,
+                                heat.heat_into_liquid_j,
+                                None,
+                            ))
                         })
                     }
                     (Some(inventory), None) if stop_at_freezing => advance_to_freezing(
@@ -721,7 +784,7 @@ fn advance_deposition<'thermal, 'catalog>(
                     .map(|candidate| {
                         let (exchange, _, boundary) = candidate.into_parts();
                         let (bulk, gas, catalog, step) = exchange.into_parts();
-                        (bulk, gas, catalog, step, 0.0, Some(boundary))
+                        ControlFlow::Continue((bulk, gas, catalog, step, 0.0, Some(boundary)))
                     }),
                     (Some(inventory), None) => advance_equilibrium_surface(
                         inventory,
@@ -738,7 +801,7 @@ fn advance_deposition<'thermal, 'catalog>(
                     .map(|candidate| {
                         let (exchange, _) = candidate.into_parts();
                         let (bulk, gas, catalog, step) = exchange.into_parts();
-                        (bulk, gas, catalog, step, 0.0, None)
+                        ControlFlow::Continue((bulk, gas, catalog, step, 0.0, None))
                     }),
                     (None, Some((coefficient, heat_config))) => advance_surface_with_gas_and_heat(
                         surface.law,
@@ -756,7 +819,14 @@ fn advance_deposition<'thermal, 'catalog>(
                     )
                     .map(|candidate| {
                         let (liquid, gas, catalog, step, heat) = candidate.into_parts();
-                        (liquid, gas, catalog, step, heat.heat_into_liquid_j, None)
+                        ControlFlow::Continue((
+                            liquid,
+                            gas,
+                            catalog,
+                            step,
+                            heat.heat_into_liquid_j,
+                            None,
+                        ))
                     }),
                     (None, None) => advance_surface_with_gas(
                         surface.law,
@@ -772,14 +842,27 @@ fn advance_deposition<'thermal, 'catalog>(
                     )
                     .map(|candidate| {
                         let (liquid, gas, catalog, step) = candidate.into_parts();
-                        (liquid, gas, catalog, step, 0.0, None)
+                        ControlFlow::Continue((liquid, gas, catalog, step, 0.0, None))
                     }),
                 };
                 if let Some(error) = checkpoint_error {
                     return Err(error.into());
                 }
                 let candidate = match proposal {
-                    Ok(value) => value,
+                    Ok(ControlFlow::Continue(value)) => value,
+                    Ok(ControlFlow::Break(residual)) => {
+                        let search = freezing_search
+                            .as_mut()
+                            .ok_or(DepositionError::Arithmetic)?;
+                        stop = search
+                            .observe(stop, residual)?
+                            .ok_or(DepositionError::Arithmetic)?;
+                        audit.rejected_intervals = audit
+                            .rejected_intervals
+                            .checked_add(1)
+                            .ok_or(DepositionError::Arithmetic)?;
+                        continue;
+                    }
                     Err(error) => {
                         if let Some(original) = chart_error.into_inner() {
                             return Err(original.into());

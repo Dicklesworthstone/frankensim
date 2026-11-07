@@ -154,6 +154,29 @@ fn evaporative_freezing_replays_both_owners_at_one_common_duration() {
     .unwrap();
     assert_eq!(&replayed_heat, result.heat());
     assert_eq!(&replayed_phase, result.transfer().unwrap());
+    let FreezingHeatTrial::Accepted(single) = single_trial_to_freezing_with_heat(
+        inventory,
+        &Phase,
+        &binding(0.0),
+        initial,
+        &original_gas,
+        &source,
+        TRANSFER,
+        1.0,
+        time,
+        phase_controls(),
+        heat_controls(&chart),
+        || false,
+    )
+    .unwrap() else {
+        panic!("the common-duration event must remain an accepted single trial");
+    };
+    assert_eq!(single.bulk(), result.bulk());
+    assert_eq!(single.gas(), result.gas());
+    assert_eq!(single.heat(), result.heat());
+    assert_eq!(single.step(), result.step());
+    assert_eq!(single.boundary().remaining_duration_s, 0.0);
+    assert_eq!(single.trials(), 1);
 }
 
 #[test]
@@ -331,6 +354,32 @@ fn zero_heat_keeps_exact_phase_event_parity_and_ignores_unused_controls() {
         assert_eq!(result.boundary(), phase.boundary());
         assert_eq!(result.heat(), &GasFilmHeatStep::default());
         assert_eq!(result.trials(), 0);
+        let single = single_trial_to_freezing_with_heat(
+            inventory,
+            &Phase,
+            &binding(0.0),
+            initial,
+            &original_gas,
+            &source,
+            TRANSFER,
+            0.0,
+            duration,
+            phase_controls(),
+            unused,
+            || false,
+        )
+        .unwrap();
+        if phase.boundary().elapsed_duration_s < duration {
+            assert!(
+                matches!(single, FreezingHeatTrial::Bracket { residual_energy_j }
+                if residual_energy_j < 0.0)
+            );
+        } else {
+            let FreezingHeatTrial::Accepted(single) = single else {
+                panic!("a full-duration phase endpoint must remain available");
+            };
+            assert_eq!(single.transfer(), Some(&phase));
+        }
     }
 }
 
