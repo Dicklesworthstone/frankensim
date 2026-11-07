@@ -1,5 +1,7 @@
 //! Molecular heat must enter the implicit endpoint before its one native kick.
 
+mod feedback;
+
 use super::*;
 use crate::conjugate::FvBoundary;
 use crate::conjugate::flow::{

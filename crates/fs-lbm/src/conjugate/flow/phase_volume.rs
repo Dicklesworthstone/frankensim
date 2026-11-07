@@ -15,6 +15,8 @@ pub use conduction::{
     ImplicitConjugateResistiveThermalVolumeMomentumStep,
     ImplicitConjugateThermalVolumeMomentumStep, ImplicitConjugateThermalVolumeReport,
     ImplicitConjugateThermalVolumeStep, ImplicitConjugateViscousThermalVolumeMomentumStep,
+    ImplicitThermoviscousThermalVolumeMomentumStep, ThermalViscosityFeedbackControls,
+    ThermalViscosityFeedbackReport,
     ImplicitResistanceHeatWork, ImplicitThermalVolumeLinearControls,
     ImplicitThermalVolumeSolveControls, ImplicitThermalVolumeWorkspace, ThermalVolumeBathExchange,
     ThermalVolumeBoundaries, ThermalVolumeBoundaryFace, ThermalVolumeContact,

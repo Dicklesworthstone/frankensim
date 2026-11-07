@@ -1,6 +1,13 @@
 //! One original molecular kick supplies the same implicit caloric endpoint.
 
+mod feedback;
+pub use feedback::{
+    ImplicitThermoviscousThermalVolumeMomentumStep, ThermalViscosityFeedbackControls,
+    ThermalViscosityFeedbackReport,
+};
+
 use super::*;
+use crate::conjugate::flow::material_momentum::PreparedMaterialViscosity;
 use crate::conjugate::flow::{
     MaterialMomentumViscosityInput, MaterialViscosityControls, StaggeredBoundaryPressure,
     ThermalVolumeMomentumInput, ViscousThermalVolumeMomentumStep,
@@ -276,27 +283,69 @@ impl FlowField {
             heat_budget,
             gate,
         )?;
-        let heated = ThermalVolumeMomentumInput {
-            volume: CoexistenceVolumeInput {
-                net_enthalpy_increment_j: &combined,
-                ..input.volume
-            },
-            momentum_kg_m_s: &viscous.momentum_kg_m_s,
-            ..input
-        };
-        let mut accepted = self.implicit_conjugate_then_advance(
+        let prepared = self.prepare_implicit_conjugate_heat(
             domain,
             conductivity,
             baths,
             solids,
             contacts,
-            heated.volume,
+            CoexistenceVolumeInput {
+                net_enthalpy_increment_j: &combined,
+                ..input.volume
+            },
             ConductiveThermalVolumeControls {
                 volume: controls.evolution.volume,
                 max_conductive_faces: controls.max_conductive_faces,
             },
             solve,
             workspace,
+            gate,
+        )?;
+        self.finish_implicit_viscous_thermal_volume(
+            domain,
+            faces,
+            profile,
+            conductivity,
+            input,
+            controls,
+            prepared,
+            viscous,
+            molecular_assembly,
+            0.0,
+            heat_budget,
+            gate,
+        )
+    }
+
+    /// One material/pressure route consumes the accepted heat and momentum.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_implicit_viscous_thermal_volume(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        profile: Option<StaggeredBoundaryPressure<'_>>,
+        conductivity: &PreparedPhaseConductivity<'_>,
+        input: ThermalVolumeMomentumInput<'_>,
+        controls: ConductiveThermalVolumeMomentumControls,
+        prepared: PreparedImplicitHeat,
+        viscous: PreparedMaterialViscosity,
+        molecular_assembly: Dd,
+        coupling_defect_j: f64,
+        heat_budget: f64,
+        gate: &CancelGate,
+    ) -> Result<ImplicitConjugateViscousThermalVolumeMomentumStep, ChtError> {
+        let heated = ThermalVolumeMomentumInput {
+            momentum_kg_m_s: &viscous.momentum_kg_m_s,
+            ..input
+        };
+        let mut accepted = self.finish_implicit_conjugate_heat(
+            prepared,
+            conductivity,
+            input.volume,
+            ConductiveThermalVolumeControls {
+                volume: controls.evolution.volume,
+                max_conductive_faces: controls.max_conductive_faces,
+            },
             gate,
             |volume| {
                 let input = ThermalVolumeMomentumInput { volume, ..heated };
@@ -323,7 +372,8 @@ impl FlowField {
             },
             |evolution| &evolution.thermal,
         )?;
-        let viscous_defect = (molecular_assembly
+        let heat_defect = molecular_assembly + Dd::from_f64(coupling_defect_j);
+        let viscous_defect = (heat_defect
             + Dd::from_f64(
                 accepted
                     .evolution
@@ -333,7 +383,7 @@ impl FlowField {
                     .absolute_enthalpy_defect_j,
             ))
         .to_f64();
-        let total = (molecular_assembly + Dd::from_f64(accepted.report.absolute_enthalpy_defect_j))
+        let total = (heat_defect + Dd::from_f64(accepted.report.absolute_enthalpy_defect_j))
             .to_f64();
         finite("flow.implicit_viscous_enthalpy_defect", viscous_defect)?;
         finite("flow.implicit_viscous_total_enthalpy_defect", total)?;

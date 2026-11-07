@@ -27,7 +27,7 @@ pub struct ViscousThermalVolumeMomentumStep {
     pub absolute_enthalpy_defect_j: f64,
 }
 
-fn admit_viscous_thermal_input(
+pub(in crate::conjugate::flow) fn admit_viscous_thermal_input(
     domain: &VoxelDomain,
     input: ThermalVolumeMomentumInput<'_>,
     controls: ThermalVolumeMomentumControls,

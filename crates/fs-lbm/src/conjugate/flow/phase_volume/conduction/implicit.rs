@@ -29,6 +29,8 @@ mod viscous;
 pub use viscous::{
     ImplicitConductiveViscousThermalVolumeMomentumStep,
     ImplicitConjugateViscousThermalVolumeMomentumStep,
+    ImplicitThermoviscousThermalVolumeMomentumStep, ThermalViscosityFeedbackControls,
+    ThermalViscosityFeedbackReport,
 };
 mod solid;
 pub use solid::{
@@ -115,6 +117,8 @@ struct ImplicitAdvance<T> {
 
 /// Original-state heat interval, before any pressure/material-flow trial.
 struct PreparedImplicitHeat {
+    /// Exact native pretransport endpoint, including bound finite solids.
+    endpoint_samples: Vec<Option<PhaseConductivitySample>>,
     combined: Vec<f64>,
     increments: Vec<f64>,
     report: ImplicitConductiveThermalVolumeReport,
@@ -232,17 +236,7 @@ impl FlowField {
         advance: impl FnOnce(CoexistenceVolumeInput<'_>) -> Result<T, ChtError>,
         thermal: impl Fn(&T) -> &ThermalVolumeStep,
     ) -> Result<ImplicitAdvance<T>, ChtError> {
-        let PreparedImplicitHeat {
-            combined,
-            increments,
-            mut report,
-            solid_endpoints,
-            solid_authored_heat_j,
-            solid_enthalpy_change_j,
-            solid_to_fluid_heat_j,
-            solid_boundary_heat_j,
-            absolute_solid_boundary_heat_j,
-        } = self.prepare_implicit_conjugate_heat(
+        let prepared = self.prepare_implicit_conjugate_heat(
             domain,
             conductivity,
             baths,
@@ -254,6 +248,36 @@ impl FlowField {
             workspace,
             gate,
         )?;
+        self.finish_implicit_conjugate_heat(
+            prepared, conductivity, input, controls, gate, advance, thermal,
+        )
+    }
+
+    /// Finish one already accepted native heat interval without replaying it.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_implicit_conjugate_heat<T>(
+        &self,
+        prepared: PreparedImplicitHeat,
+        conductivity: &PreparedPhaseConductivity<'_>,
+        input: CoexistenceVolumeInput<'_>,
+        controls: ConductiveThermalVolumeControls,
+        gate: &CancelGate,
+        advance: impl FnOnce(CoexistenceVolumeInput<'_>) -> Result<T, ChtError>,
+        thermal: impl Fn(&T) -> &ThermalVolumeStep,
+    ) -> Result<ImplicitAdvance<T>, ChtError> {
+        let PreparedImplicitHeat {
+            endpoint_samples,
+            combined,
+            increments,
+            mut report,
+            solid_endpoints,
+            solid_authored_heat_j,
+            solid_enthalpy_change_j,
+            solid_to_fluid_heat_j,
+            solid_boundary_heat_j,
+            absolute_solid_boundary_heat_j,
+        } = prepared;
+        drop(endpoint_samples);
         poll(gate)?;
         let evolution = advance(CoexistenceVolumeInput {
             net_enthalpy_increment_j: &combined,
@@ -789,6 +813,7 @@ impl FlowField {
         }
         poll(gate)?;
         Ok(PreparedImplicitHeat {
+            endpoint_samples: final_samples,
             combined,
             increments,
             solid_endpoints,

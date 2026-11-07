@@ -12648,6 +12648,28 @@ fluid, bath and finite-wall caloric graph. The molecular impulse is not applied
 again after conduction. Both viscosities remain frozen over this first-order
 split; implicit conduction does not imply implicit viscosity-temperature feedback.
 
+The endpoint-coupled entry
+`advance_isotropic_implicit_conjugate_thermoviscous_thermal_volume_momentum_with_baths`
+adds bounded thermal feedback for both shear and independent bulk viscosity.
+Every trial solves the original fluid and finite-solid caloric histories with
+authored heat plus a guessed molecular heat vector. The original material source
+is resolved at that exact native thermal endpoint, before advection; its shear
+and bulk responses drive the existing native momentum kick using original M/P
+and actual M/V inertia. Fluid states must remain fully liquid with no
+unrepresented Darcy resistance; finite solids keep their own caloric owners.
+The sum of absolute cellwise differences between heat used by the graph and
+physical heat produced by momentum must fit the feedback tolerance and the
+shared thermal and molecular energy gates. Accepted thermal transport retains
+the graph's used heat, while the molecular report retains actual physical heat;
+their signed and non-cancelling mismatch is explicit, never silently redeposited.
+Only the accepted trial advances pressure and material transport. Rejected
+trials consume bounded computation without accumulating physical history.
+Thermal residual evaluations, thermal linear iterations and molecular sweeps
+have whole-call limits, and unchanged coefficient fields reuse their original
+momentum solve. This couples temperature-dependent viscosity within the existing
+first-order split; it does not claim simultaneous endpoint shear rheology,
+unconditional fixed-point convergence or an inferred bulk constitutive law.
+
 Four source-bound regressions cover graded actual inertia distinct from source
 reference density, original liquid-viscosity changes, moving-wall work and
 physical heat, current-state reconstruction, quiescent compatibility and atomic
