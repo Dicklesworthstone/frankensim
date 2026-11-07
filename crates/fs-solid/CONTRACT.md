@@ -12269,3 +12269,36 @@ accepted geometry still requires `try_new`. Focused existing epoch assertions
 cover heated same-anchor reuse, original-reference preservation, wrong-volume
 and output-only refusal, and cancellation. The host remains unavailable; this
 increment has source review but no new formatting or native-runtime claim.
+
+
+### Sustained rigid-tool forming on retained thermal plastic history
+
+With `contact`, `FiniteThermoplasticTetSolid::advance_with_plane_contact`
+consumes the original `fs-contact::sustained` force-space complementarity solve.
+Each force response calls the same native finite thermoplastic equilibrium from
+accepted deformation, plastic metric, source family, temperature and optional
+consistent reference inertia. Fixed-normal rigid planes translate over the
+actual interval. There is no penalty stiffness, surrogate compliance, impulse
+to force conversion, friction inference or competing constitutive update.
+
+At most 21 explicit original node/plane rows enter the native solve. Every
+original vertex is admitted against every plane at both endpoints, preventing
+an omitted candidate from permitting penetration. Affine plane and nodal paths
+then retain nonnegative gaps to their compensated arithmetic precision. The
+original interval tetrahedron query independently excludes collapse throughout
+the declared chord under an explicit work budget. This is a discrete geometric
+scope, not exact-flow CCD, self-contact, curved tooling or automatic discovery.
+
+Original dead-load work, body-contact work, prescribed-tool work and tool
+reactions remain separate. Signed normal endpoint-work defects are bounded by
+the sum of absolute row defects; they are not heat. The original material heat,
+reference inertia, numerical kinetic loss and material endpoint defect retain
+their owners. Independent load decomposition and complete energy gates apply
+before publication. Physical arrival, unloading and material kinetics require
+interval refinement. All accepted histories remain unchanged on refusal.
+
+Three synthetic regression definitions cover heated compression/dwell/release,
+rotated geometry and work ports, original inertia and normal-work refusal,
+omitted-row penetration and cancellation. Rust parsing/formatting passed;
+independent scalar fixture calculations do not substitute for native compilation
+or test execution, which remain unverified in this environment.

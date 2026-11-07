@@ -36,6 +36,7 @@ fs-mesh = { path = "../fs-mesh" }
 fs-phs = { path = "../fs-phs" }
 fs-plate = { path = "../fs-plate" }
 fs-qty = { path = "../fs-qty" }
+fs-query = { path = "../fs-query" }
 fs-scenario = { path = "../fs-scenario" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
@@ -60,3 +61,4 @@ required-features = ["contact"]
 
 [lints]
 workspace = true
+

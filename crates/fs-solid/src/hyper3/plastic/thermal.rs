@@ -19,7 +19,9 @@
 //! original momentum solve as fixed-temperature finite plasticity. This module
 //! does not infer density from a source or update mass with thermal expansion.
 //! It retains the parent P1 locking limitations, and supplies no evolving
-//! conductance, phase change, contact or new thermal solver. Held follower
+//! conductance, phase change or new thermal solver. Its `contact` child
+//! admits frictionless translating rigid planes through the original sustained
+//! complementarity owner. Held follower
 //! pressure reuses the original current-area load, tangent and path-work owner.
 
 use std::sync::Arc;
@@ -55,6 +57,9 @@ pub use super::porous::FinitePorousPressureEnergy as FiniteThermoplasticPressure
 
 /// Zero-duration momentum transfer with complete thermal and plastic memory.
 pub mod impulse;
+/// Finite-duration frictionless rigid tooling through the native thermal solid.
+#[cfg(feature = "contact")]
+pub mod contact;
 pub use crate::inertia::{
     SolidImpulseControls, SolidImpulseReport, SolidMomentum, SolidPointKinematics,
     SolidPointMobility, SolidPointMobilityMatrix, TetImpulsePoint,
@@ -967,3 +972,4 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
         })
     }
 }
+

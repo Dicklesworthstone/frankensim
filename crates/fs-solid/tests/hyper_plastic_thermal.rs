@@ -6,6 +6,10 @@ mod nodal_density;
 #[path = "hyper_plastic_thermal/pressure.rs"]
 mod pressure;
 
+#[path = "hyper_plastic_thermal/contact.rs"]
+#[cfg(feature = "contact")]
+mod contact;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::plastic::finite::thermal::{
@@ -440,3 +444,4 @@ fn softening_held_finite_shape_then_thermal_momentum_reverse_flow_is_atomic() {
         }
     });
 }
+

@@ -2839,6 +2839,7 @@ dependencies = [
  "fs-phs",
  "fs-plate",
  "fs-qty",
+ "fs-query",
  "fs-rand",
  "fs-scenario",
  "fs-solver",
