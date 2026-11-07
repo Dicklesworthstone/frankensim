@@ -11,6 +11,9 @@
 //! a supplied solution's origin or unobserved intermediate mechanical states.
 
 use fs_exec::Cx;
+use fs_material::hardness::cyclic_history::{
+    CyclicHardnessError, ResolvedCyclicHardness, SourceBoundHardnessLaw,
+};
 use fs_material::hardness::plastic_history::{J2HardnessError, ResolvedJ2Hardness};
 use fs_material::plastic::J2State;
 use fs_material::plastic::source::ResolvedJ2Plasticity;
@@ -107,6 +110,97 @@ impl SmallStrainTetProblem<'_, ResolvedJ2Plasticity> {
                         yield_tolerance_pa,
                     )
                     .map_err(|error| J2HardnessObservationError::Element { element, error })?,
+            );
+        }
+        poll()?;
+        Ok(hardness_pa)
+    }
+}
+
+/// Prepared original cyclic hardness in native element connectivity order.
+/// The complete native source law, including every ordered backstress branch,
+/// must match the actual element law retained by the solid problem.
+#[derive(Clone, Debug)]
+pub enum CyclicHardnessField<'a, L: SourceBoundHardnessLaw> {
+    Uniform(&'a ResolvedCyclicHardness<L>),
+    PerElement(&'a [&'a ResolvedCyclicHardness<L>]),
+}
+
+/// Atomic cyclic-hardness field refusal; native solution and sources are read-only.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CyclicHardnessObservationError {
+    Invalid(&'static str),
+    Element {
+        element: usize,
+        error: CyclicHardnessError,
+    },
+    Cancelled,
+}
+
+impl core::fmt::Display for CyclicHardnessObservationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Invalid(reason) => write!(f, "solid cyclic hardness observation: {reason}"),
+            Self::Element { element, error } => {
+                write!(f, "solid cyclic hardness element {element}: {error}")
+            }
+            Self::Cancelled => f.write_str("solid cyclic hardness observation cancelled"),
+        }
+    }
+}
+impl std::error::Error for CyclicHardnessObservationError {}
+
+impl<L: SourceBoundHardnessLaw> SmallStrainTetProblem<'_, L> {
+    /// Observe complete native Voce/Chaboche endpoints at every element.
+    /// Original branch order, nonlinear yield, history bounds and continuous
+    /// hardness support are retained. Observation performs no constitutive
+    /// update or per-element source allocation; the result has one scalar per
+    /// element and is returned only when every point and cancellation gate pass.
+    pub fn observe_cyclic_hardness(
+        &self,
+        solution: &SmallStrainTetSolution<L::State>,
+        sources: CyclicHardnessField<'_, L>,
+        yield_tolerance_pa: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<f64>, CyclicHardnessObservationError> {
+        let poll = || {
+            cx.checkpoint()
+                .map_err(|_| CyclicHardnessObservationError::Cancelled)
+        };
+        poll()?;
+        let count = self.tetrahedra.len();
+        if count == 0
+            || count > self.budget.maximum_tetrahedra
+            || self.nodes_m.len() > self.budget.maximum_nodes
+            || self.laws.validate_count(count).is_err()
+            || solution.element_strain.len() != count
+            || solution.element_stress.len() != count
+            || solution.element_states.len() != count
+            || solution.displacement_m.len() != self.nodes_m.len()
+            || matches!(&sources, CyclicHardnessField::PerElement(values) if values.len() != count)
+        {
+            return Err(CyclicHardnessObservationError::Invalid(
+                "hardness sources and native solution must cover the original admitted mesh",
+            ));
+        }
+        let mut hardness_pa = Vec::with_capacity(count);
+        for element in 0..count {
+            if element % 256 == 0 {
+                poll()?;
+            }
+            let source = match &sources {
+                CyclicHardnessField::Uniform(source) => *source,
+                CyclicHardnessField::PerElement(values) => values[element],
+            };
+            hardness_pa.push(
+                source
+                    .hardness_pa_at_accepted(
+                        self.laws.at(element),
+                        &solution.element_strain[element],
+                        &solution.element_states[element],
+                        yield_tolerance_pa,
+                    )
+                    .map_err(|error| CyclicHardnessObservationError::Element { element, error })?,
             );
         }
         poll()?;

@@ -12,6 +12,9 @@ pub mod plastic_history;
 /// Original hardness at material depths exposed by actual surface removal.
 pub mod depth;
 
+/// Original hardness on complete native Voce and Chaboche cyclic histories.
+pub mod cyclic_history;
+
 /// Original hardness at accepted native thermoplastic temperature/history.
 pub mod thermal_history;
 

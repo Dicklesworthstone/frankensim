@@ -46,6 +46,25 @@ field to the existing Archard owner without averaging hardness. Prescribed
 surface pressure/slip quadrature is a coupling fixture, not a contact solve or
 measured material qualification. Late source/range refusal remains atomic.
 
+## Spatial indentation hardness from complete cyclic history
+
+`SmallStrainTetProblem::observe_cyclic_hardness` observes the original prepared
+hardness source on each native source-bound Voce or Chaboche element. Uniform
+and heterogeneous fields preserve the accepted Newton solution, all independent
+backstress branches and their exact named source order. The material observer
+checks complete native history, actual nonlinear yield and original support;
+no additional return map or per-element source cloning occurs. Only a complete
+scalar field is returned, with indexed refusal or cancellation leaving inputs
+unchanged. The existing J2 observer remains available with its original API.
+
+`tests/plastic3_hardness_cyclic.rs` continues two separately sourced solid
+coupons through nonproportional loading and reversal under physical boundary
+tractions, checks the native nonsymmetric solve and complete branch histories,
+and observes each local hardness and original indentation test. A native Voce
+solve checks the uniform field. Late source, support and branch-state failures
+publish no partial field. The fixtures do not certify intermediate trajectories,
+coupled thermal history, measured cyclic-hardness accuracy or fatigue life.
+
 ## Owned finite-strain membrane reference continuation
 
 `OwnedFiniteViscoMembraneMotion::change_reference` delegates to the original

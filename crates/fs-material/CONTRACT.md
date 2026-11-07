@@ -615,6 +615,21 @@ receipts and adds no work, storage or heat. The spatial solid observer composes
 this same route for each original element. Numerical admission is not evidence
 that an arbitrary supplied tensor came from a converged physical trajectory.
 
+`hardness::cyclic_history::ResolvedCyclicHardness` extends the same prepared
+original H(alpha) source to native source-bound Voce, single-branch Chaboche and
+ordered multi-branch Chaboche laws at fixed external conditions. The complete
+mechanical source, nonlinear coefficients and named branch order remain binding,
+even when two branches happen to have equal coefficients. Every branch passes
+the native history bounds and the accepted endpoint passes its actual nonlinear
+yield surface before hardness is sampled. A cyclic state is never projected
+onto a bare linear-J2 yield surface. Scalar observation allocates nothing;
+optional typed export also enforces the originally prepared support interval.
+Dynamic backstress recovery does not erase accumulated strain or supply
+annealing kinetics, and an independent hardness change adds no work or heat.
+`tests/hardness_cyclic_history.rs` exercises native loading, unloading, reversal,
+nonproportional recovery, full typed-source retention and atomic source/history
+refusals. These synthetic checks do not establish a fatigue-life relation.
+
 `hardness::thermal_history::ThermoplasticHardnessSource` observes an independent
 original H(T, accumulated-equivalent-plastic-strain) test at accepted native
 `CaloricPoint` states. J2, Voce/viscous and complete N-branch Chaboche histories
