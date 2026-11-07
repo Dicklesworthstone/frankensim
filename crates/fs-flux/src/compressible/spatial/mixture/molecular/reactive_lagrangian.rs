@@ -93,6 +93,54 @@ impl ReactingEuler3d {
         self.attach_reacting_lagrangian(operator, subgrid, maximum_workspace_bytes, &mut cancelled)
     }
 
+    /// Attach fixed-ratio Lagrangian turbulence beside this reactor's physical
+    /// channel walls. Configure both original no-slip molecular walls first;
+    /// this attachment reads those accepted velocities and thermal laws.
+    /// Exactly one Euler axis reflects and the other two are periodic.
+    ///
+    /// Uses the same complete reacting history transaction as the periodic
+    /// attachment. Normal histories never wrap through a wall, and departure
+    /// outside the physical channel refuses without publishing a partial step.
+    pub fn attach_lagrangian_dynamic_channel_sgs<L: TransportLaw>(
+        &self,
+        operator: &mut MolecularTransport3d<L>,
+        config: sgs::MixtureLagrangianSubgridConfig,
+        maximum_workspace_bytes: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), ReactiveError> {
+        poll(&mut cancelled)?;
+        config.validate()?;
+        let required = self.required_lagrangian_dynamic_sgs_workspace_bytes(operator)?;
+        admit_workspace(required, maximum_workspace_bytes)?;
+        operator.admit_lagrangian_channel_walls(self.flow())?;
+        let subgrid = SubgridTransport::new_lagrangian_channel(self.flow(), config)?;
+        self.attach_reacting_lagrangian(operator, subgrid, maximum_workspace_bytes, &mut cancelled)
+    }
+
+    /// Attach independent momentum, heat and common-species memories to a
+    /// reacting physical channel with already configured no-slip walls.
+    /// The original finite-rate mechanism remains the chemical source; this
+    /// introduces no turbulent reaction-rate or flame-structure closure.
+    ///
+    /// Current accepted-start wall data feed the shared tangential Favre
+    /// filter. Every internal phase and retry holds the same three fits;
+    /// source transport and conservative wall fluxes use current stage fields.
+    pub fn attach_lagrangian_dynamic_channel_species_sgs<L: TransportLaw>(
+        &self,
+        operator: &mut MolecularTransport3d<L>,
+        config: sgs::MixtureLagrangianSpeciesSubgridConfig,
+        maximum_workspace_bytes: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), ReactiveError> {
+        poll(&mut cancelled)?;
+        config.validate()?;
+        let required = self.required_lagrangian_dynamic_species_sgs_workspace_bytes(operator)?;
+        admit_workspace(required, maximum_workspace_bytes)?;
+        operator.admit_lagrangian_channel_walls(self.flow())?;
+        let subgrid = SubgridTransport::new_lagrangian_channel_species(self.flow(), config)?;
+        self.attach_reacting_lagrangian(operator, subgrid, maximum_workspace_bytes, &mut cancelled)
+    }
+
     fn required_lagrangian_reacting_bytes<L: TransportLaw>(
         &self,
         operator: &MolecularTransport3d<L>,
@@ -175,6 +223,31 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             .and_then(SubgridTransport::lagrangian_species_report)
     }
 
+    /// Normal axis of the physical-wall history, or None for other geometries.
+    pub fn lagrangian_channel_normal_axis(&self) -> Option<usize> {
+        self.sgs
+            .as_ref()
+            .and_then(SubgridTransport::lagrangian_channel_normal_axis)
+    }
+
+    fn admit_lagrangian_channel_walls(
+        &self,
+        flow: &MixtureEuler3d,
+    ) -> Result<(), DissipationError> {
+        use crate::compressible::spatial::molecular::sgs::{channel_axis, channel_wall_values};
+        let normal = channel_axis(&flow.grid, flow.boundaries).map_err(|_| {
+            DissipationError::Invalid(
+                "Lagrangian channel requires three cells per axis, two periodic axes and one reflecting wall pair",
+            )
+        })?;
+        channel_wall_values(normal, &self.walls).map_err(|_| {
+            DissipationError::Invalid(
+                "Lagrangian reacting channel requires two configured no-slip molecular walls",
+            )
+        })?;
+        Ok(())
+    }
+
     fn admit_lagrangian_flow(&self, flow: &MixtureEuler3d) -> Result<(), DissipationError> {
         if self.gas() != flow.gas() || self.grid != flow.grid || self.boundaries != flow.boundaries
         {
@@ -207,7 +280,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             .ok_or(DissipationError::Invalid(
                 "missing reacting Lagrangian owner",
             ))?
-            .prepare_lagrangian(filter, flow, cancelled)
+            .prepare_lagrangian_with_walls(filter, flow, &self.walls, cancelled)
     }
 
     pub(in crate::compressible::spatial::mixture) fn restore_lagrangian_history(

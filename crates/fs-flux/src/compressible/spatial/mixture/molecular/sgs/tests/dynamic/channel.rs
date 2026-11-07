@@ -1,4 +1,6 @@
 use super::*;
+
+mod lagrangian;
 use fs_gas::multicomponent::dissipation::SoretDufourTransport;
 use fs_lbm::sgs3::dynamic::channel::components::ChannelDynamicComponents;
 use fs_lbm::sgs3::dynamic::channel::{

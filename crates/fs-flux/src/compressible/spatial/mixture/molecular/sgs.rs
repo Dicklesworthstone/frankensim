@@ -206,6 +206,7 @@ impl SubgridTransport {
             config.admit_wall(wall).map_err(DissipationError::Invalid)?;
         }
         match &self.closure {
+            ViscosityClosure::Lagrangian(dynamic) => dynamic.admit_wall(side, wall),
             ViscosityClosure::DynamicChannelThermal(dynamic) => dynamic.admit_wall(wall),
             ViscosityClosure::ChannelDynamicSpecies(_)
                 if !matches!(wall, MolecularWall3d::NoSlip { .. }) =>

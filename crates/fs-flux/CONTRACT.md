@@ -7907,6 +7907,52 @@ SIGKILLs in earlier full and metadata-only builds. The shared core passed 68
 real-source tests. A separate executed core probe confirmed the consumer shear
 fixture has exactly zero momentum fit and positive heat/species diffusivities.
 
+### Lagrangian turbulence beside reacting and nonreacting mixture walls
+
+`MolecularEuler3d::with_lagrangian_dynamic_channel_sgs` and
+`with_lagrangian_dynamic_channel_species_sgs` attach the shared wall-aware
+history producer to the original complete molecular/advection split.
+The first selects momentum with authored Prandtl/Schmidt ratios; the second
+fits independent momentum, temperature and common all-species histories.
+Exactly one Euler axis has reflecting ends, the other two are periodic,
+and every axis has at least three fluid cells. The supplied physical
+lower/upper walls must be explicitly no-slip. Their tangential motion and
+isothermal/adiabatic laws remain with the original molecular owner.
+
+The reacting owner provides corresponding
+`attach_lagrangian_dynamic_channel_sgs` and
+`attach_lagrangian_dynamic_channel_species_sgs` methods. Configure the
+borrowed molecular operator's no-slip walls before attachment. These methods
+preserve the original mechanism and complete D/C/A/C/D transaction.
+Source-owned finite-rate chemistry and subgrid transport coexist; no
+unresolved reaction-rate or flame-structure closure is inferred.
+
+Each accepted-start fit reads current physical wall velocities and heat
+conditions. Only tangential directions are test filtered or periodically
+wrapped. History interpolation uses the original core's bounded half-cell
+extension and refuses a trajectory that crosses an impermeable wall.
+Common species use interior normal derivatives. All coefficients remain
+held across internal phases and rejected whole intervals; conservative
+faces still use current stage strain, density, source calorics, mass-frame
+closure and referenced enthalpy. Original molecular wall heat/work and
+impermeable species flux remain intact.
+
+The physical normal axis is exposed by `lagrangian_channel_normal_axis`;
+configuration, sample-time and fit-report getters are shared with periodic
+histories. Numerical storage remains 216 or 448 bytes/cell beyond the
+original solver, with no new per-step history fields. The same accepted-step
+transaction commits or rolls back every history and report.
+
+Three nonreacting regression groups cover all axes and current wall data,
+original wall fluxes, accepted-start evolution/conservation, late
+cancellation/replay, budgets and the exact zero-SGS molecular limit.
+One reacting-channel regression composes real finite-rate heat release,
+moving isothermal walls, three fit reports and transactional replay.
+These consumer sources passed pinned formatting/parsing and bounded
+production review; they were not compiled or executed here. The wall-aware
+core passed all 74 real-source SGS tests. First-order authored-memory,
+resolved-wall exploratory and unqualified-turbulence boundaries remain.
+
 ### Explicit diffusive closure for evolving-mixture pressure outlets
 
 The spatial mixture `MolecularTransport3d` accepts an explicitly authored

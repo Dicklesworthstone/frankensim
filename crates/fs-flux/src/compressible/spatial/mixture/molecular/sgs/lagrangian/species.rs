@@ -60,7 +60,7 @@ impl SubgridTransport {
         config: MixtureLagrangianSpeciesSubgridConfig,
     ) -> Result<Self, DissipationError> {
         config.validate()?;
-        Self::new_lagrangian_owner(flow, LagrangianConfig::Species(config))
+        Self::new_lagrangian_owner(flow, LagrangianConfig::Species(config), None)
     }
 
     pub(in crate::compressible::spatial::mixture::molecular) fn lagrangian_species_config(

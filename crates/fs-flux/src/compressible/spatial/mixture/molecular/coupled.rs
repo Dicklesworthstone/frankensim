@@ -9,6 +9,8 @@ pub use crate::compressible::mixture::molecular::{
 };
 
 #[cfg(feature = "experimental-sgs")]
+mod lagrangian_channel;
+#[cfg(feature = "experimental-sgs")]
 mod lagrangian_species;
 
 /// Complete accepted volumetric multicomponent molecular/advection interval.
@@ -709,7 +711,12 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     .sgs
                     .as_mut()
                     .expect("the Lagrangian mixture owner was just selected")
-                    .prepare_lagrangian(&mut filter, &self.accepted, &mut cancelled)?;
+                    .prepare_lagrangian_with_walls(
+                        &mut filter,
+                        &self.accepted,
+                        &self.molecular.walls,
+                        &mut cancelled,
+                    )?;
                 let fit = trial.reports();
                 let report = self.step_prepared(
                     maximum_duration,

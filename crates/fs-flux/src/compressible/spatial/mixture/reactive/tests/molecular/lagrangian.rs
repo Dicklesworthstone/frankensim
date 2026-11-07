@@ -9,6 +9,8 @@ use crate::compressible::spatial::mixture::molecular::sgs::{
 };
 use fs_lbm::sgs3::dynamic::lagrangian::scalar::components::LagrangianDynamicComponents;
 
+mod channel;
+
 type Operator = MolecularTransport3d<ConstantTransport>;
 type Fits = (
     Option<DynamicSgsReport>,
