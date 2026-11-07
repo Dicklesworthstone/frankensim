@@ -436,3 +436,6 @@ pub mod reclosure;
 
 /// Damaged-area rigid friction during progressive cohesive degradation.
 pub mod frictional_damage;
+
+/// Intact viscoelastic bonds on this original mechanical load line.
+pub mod relaxation;

@@ -8177,6 +8177,54 @@ initiation-sensitive endpoint/path gradients, weak modes, admission,
 viscosity and thermal history. They do not supply a measured adhesive
 calibration or validate arbitrary nonproportional experiments.
 
+### Intact viscoelastic adhesive layers
+
+`cohesive::relaxation::IntactViscoelasticBond` supplies small-strain, fixed-frame
+normal/shear adhesive relaxation on an explicitly intact, massless thin layer.
+For original thickness h, each local strain is its physical jump divided by h.
+Independent effective normal and shear `GeneralizedMaxwell` spectra are required;
+the normal spectrum already represents the specified joint's lateral restraint.
+No Poisson-ratio assumption turns bulk E/K into interface normal data. Both shear
+directions share the supplied shear spectrum. Compression remains the same intact
+material; debonding, contact, friction, healing and temperature evolution are outside
+this law. It cannot be attached to a damaged `CohesivePoint` or reset its history.
+
+The original `PronyState` and exact `PronyRamp` own memory and physical heat.
+`prepare(dt)` evaluates exponential ramp coefficients once per law/duration,
+reusing them across trials and both shear directions. `ViscoelasticBondPoint::trial`
+returns a new immutable state, endpoint traction, analytic vector mean traction,
+and independent incremental work, storage and heat per original bonded area.
+Its local accounts do not subtract accumulated inventories. Held jumps relax;
+straight-ramp subdivision preserves the constitutive result. Endpoint and mean
+stiffnesses are distinct exact derivatives at fixed accepted memory and duration.
+A prepared ramp from another law refuses even if its numeric coefficients match.
+
+There are at most 64 branches per mode. Authored jump-norm, jump-rate and elapsed-time
+bounds are enforced without truncation; those model-use bounds are not inferred
+experimental qualification. Source binding requires the original ordered interface,
+`cohesive_bondline_thickness` [m], and separate
+`cohesive_normal_relaxation`/`cohesive_shear_relaxation` property families:
+`_branch_count` [-], `_equilibrium_modulus` [Pa], and one-based indexed
+`_modulus_N` [Pa]/`_time_N` [s]. Every declared branch and the complete original
+query/receipt bundle are retained; missing modes, incompatible units and evolving
+coefficient inputs refuse. The normal modulus is an effective normal joint response,
+not an automatic alias for bulk Young or bulk compression modulus.
+
+The existing `fs-couple::cohesive_contact::CohesiveLoadLine::trial_relaxation`
+consumes the affine work-mean traction through its original area, complete 3x3
+mechanical compliance, prepared LU workspace and physical/compatibility gates.
+It needs one linear solve and one material trial, without finite differences or
+a new motion solver. Actual free motion and the complete energy window remain
+with the mechanical caller; temporal refinement still governs the approximation
+of an inertial trajectory by straight jump ramps.
+
+Constitutive background: Abaqus, Time Domain Viscoelasticity, traction-separation
+elasticity, <https://docs.software.vt.edu/abaqusv2026/English/SIMACAEMATRefMap/simamat-c-timevisco.htm>.
+Focused numerical tests check independent relaxation formulas, the original scalar
+Maxwell owner, reversals, subdivision, shear covariance, tangents, retryable domain
+refusals, cross-axis compliance and bonded-mass work/heat closure. Fixtures are
+manufactured coefficients, not a measured epoxy or silicone calibration.
+
 ## Solid-vapor constitutive laws
 
 `sublimation` supplies the shared `fs_thermal::sublimation::SublimationLaw`

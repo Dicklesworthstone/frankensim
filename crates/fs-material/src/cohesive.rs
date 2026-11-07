@@ -30,6 +30,9 @@ pub mod source;
 /// Anisotropic initiation and source-defined mode-dependent fracture energy.
 pub mod mixed_mode;
 
+/// Intact thin-bond relaxation with independent normal/shear memory spectra.
+pub mod relaxation;
+
 /// Explicit physical bond viscosity and timed constitutive steps.
 pub mod rate;
 pub use rate::{CohesiveRateStep, CohesiveViscosity};

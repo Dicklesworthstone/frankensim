@@ -4329,3 +4329,23 @@ regressions specify anisotropic force/torque/work from independently reconstruct
 population velocities, scalar/sphere equivalence, and transactional refusal.
 Those complete coupled regressions remain unexecuted on the exhausted build host;
 no full-workspace or throughput claim is made.
+
+### Intact viscoelastic bonds on the cohesive load line
+
+`CohesiveLoadLine::trial_relaxation` consumes the original source-bound
+`fs-material::cohesive::relaxation` history and a prepared exact Maxwell ramp.
+It solves `g = g_free - S A mean_traction(g)` through the same full 3x3
+mechanical compliance, area and LU workspace. The hereditary mean map is affine,
+so one direct solve replaces nonlinear iterations; endpoint traction is never
+substituted for the force whose work advances the bodies. Original jump-increment,
+force, material-work, compatibility and cancellation gates remain active. Refusal
+leaves accepted internal strains and elapsed time unchanged. The caller retains
+its native free-motion map and complete energy audit. This is an intact massless
+thin bond, with independent normal/shear relaxation; no fracture, friction,
+finite-rotation objectivity or exact continuous inertial trajectory is inferred.
+
+The native regression advances a bonded mass using the physical mean force,
+checks independent relaxed displacement limits and closes external work against
+kinetic energy, stored bond energy and independently integrated physical heat.
+A separate ordered-interface regression supplies the original source spectra and
+checks missing-mode, units, external-temperature and elapsed-time refusals.
