@@ -1206,6 +1206,29 @@ a physical step. The focused regressions compare direct/network-observed states
 and audits, conduction-driven viscosity and pressure, and late-observer refusal.
 
 
+## Native nodal heat and continuing tetrahedral dynamics
+
+`solid_enthalpy::spatial::SpatialSolidEnthalpy::resolve_at` binds an explicitly
+timed native nodal enthalpy field to the existing source-backed solid state.
+`SpatialSolidState::advance_transient_candidate` passes that state to the
+original tetrahedral Newmark thermal-update owner. Displacement, velocity,
+acceleration and step history continue; the original operator owner retains
+reference mass and rebuilds changed stiffness.
+
+The previous mechanical material/eigenstrain state and clock must match the
+accepted run. Both endpoints retain their reference mesh, frame, material
+assignment, caloric chart, source laws, strain envelope and reference inventory.
+Untimed equilibrium states, stale history and incompatible replacement states
+refuse. Native support, load, cancellation and energy checks remain active;
+failed proposals publish no heat or motion state.
+
+This is prescribed one-way thermal loading on stationary reference geometry.
+Signed thermal/stiffness work and Rayleigh loss retain the native mechanical
+accounts; none is silently deposited into or removed from nodal enthalpy.
+The caller accepts heat and motion together and resolves thermal events and
+time refinement explicitly. It does not add reciprocal thermoelastic feedback
+or a moving-mesh heat law.
+
 ## One scenario control transaction for fluid inlets and outlets
 
 `scenario_open_boundary::rebind_open_faces3` composes the existing velocity and

@@ -13,14 +13,16 @@
 //! cannot conceal a molten or unsupported node. The native heat owner keeps
 //! its own conductivity quadrature and caloric balance unchanged.
 //!
-//! This path is one-way, stationary-reference heat to quasistatic mechanics.
+//! This path is one-way, stationary-reference heat to quasistatic mechanics
+//! or the original continuing tetrahedral Newmark trajectory. Timed states
+//! retain the explicit thermal clock across the inertial handoff.
 //! Elastic storage is reported by the native stress owner, separately from
 //! the native caloric audit. Mechanical work is not silently converted into
 //! heat, and deformation does not silently change the transport geometry.
 
+mod conductivity;
 /// Native nodal heat and continuing pressure-driven modal motion.
 pub mod motion;
-mod conductivity;
 mod source;
 
 pub use conductivity::SpatialConductivitySource;
@@ -47,6 +49,8 @@ use fs_solid::linear3::{
     TetAssemblyBudget, TetElasticError, TetElasticMaterial, TetLinearElasticProblem,
     TetMaterialField, TetThermalStrainField, TetThermalStrainState,
 };
+use fs_solid::loads3::transient::thermal::ThermalTransientStep3;
+use fs_solid::loads3::transient::{TetTransientRun3, TransientError3};
 use fs_solid::loads3::{LoadError3, TetLoadCase3, TetLoadGeometry3};
 
 use super::{
@@ -124,7 +128,8 @@ impl From<SolidEnthalpyError> for SpatialSolidEnthalpyError {
         match e {
             SolidEnthalpyError::Cancelled
             | SolidEnthalpyError::Solid(TetElasticError::Cancelled)
-            | SolidEnthalpyError::Loads(LoadError3::Cancelled) => Self::Cancelled,
+            | SolidEnthalpyError::Loads(LoadError3::Cancelled)
+            | SolidEnthalpyError::Transient(TransientError3::Cancelled) => Self::Cancelled,
             _ => Self::Solid(e),
         }
     }
@@ -151,6 +156,11 @@ impl From<TetElasticError> for SpatialSolidEnthalpyError {
 }
 impl From<LoadError3> for SpatialSolidEnthalpyError {
     fn from(e: LoadError3) -> Self {
+        SolidEnthalpyError::from(e).into()
+    }
+}
+impl From<TransientError3> for SpatialSolidEnthalpyError {
+    fn from(e: TransientError3) -> Self {
         SolidEnthalpyError::from(e).into()
     }
 }
@@ -264,10 +274,8 @@ impl<'a, 'm: 'a, 'c: 'a> SpatialSolidEnthalpy<'a, 'm, 'c> {
         }
         let mut bound = Vec::with_capacity(sources.len());
         let mut conductivities = Vec::with_capacity(sources.len());
-        for (index, (source, conductivity_source)) in sources
-            .into_iter()
-            .zip(conductivity_sources)
-            .enumerate()
+        for (index, (source, conductivity_source)) in
+            sources.into_iter().zip(conductivity_sources).enumerate()
         {
             poll(cx)?;
             let reference =
@@ -324,7 +332,9 @@ impl<'a, 'm: 'a, 'c: 'a> SpatialSolidEnthalpy<'a, 'm, 'c> {
     /// Admitted frame and pinned principal selections, by original material
     /// index. The native conductivity receipts retain the exact source queries.
     pub fn conductivity_source(&self, material_index: usize) -> Option<&SpatialConductivitySource> {
-        self.sources.get(material_index).map(|s| &s.conductivity_source)
+        self.sources
+            .get(material_index)
+            .map(|s| &s.conductivity_source)
     }
     /// Native load geometry on precisely the same reference mesh.
     pub fn geometry(&self, cx: &Cx<'_>) -> Result<TetLoadGeometry3<'_>, SpatialSolidEnthalpyError> {
@@ -404,6 +414,8 @@ impl<'a, 'm: 'a, 'c: 'a> SpatialSolidEnthalpy<'a, 'm, 'c> {
                 reference_elastic: source.reference_elastic.clone(),
                 reference_density_kg_m3: source.reference_density_kg_m3,
                 reference_volume_m3: self.thermal.mesh().element_volume(element),
+                stiffness_model: source.source.stiffness_model,
+                expansion_model: source.source.expansion_model,
             });
         }
         poll(cx)?;
@@ -415,8 +427,31 @@ impl<'a, 'm: 'a, 'c: 'a> SpatialSolidEnthalpy<'a, 'm, 'c> {
             samples,
             budget: self.budget,
             mesh_frame: self.mesh_frame,
+            time_s: None,
             maximum_absolute_mandel_strain: self.maximum_absolute_mandel_strain,
         })
+    }
+
+    /// Resolve a native nodal heat field at its explicitly supplied physical
+    /// time. The heat owner has no implicit absolute clock: the caller must use
+    /// the start/endpoint times of the actual admitted heat interval. Untimed
+    /// [`Self::resolve`] states remain valid for equilibrium and modal queries,
+    /// but cannot advance a full inertial trajectory.
+    pub fn resolve_at(
+        &self,
+        specific_h: &[f64],
+        time_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<SpatialSolidState<'_>, SpatialSolidEnthalpyError> {
+        poll(cx)?;
+        if !time_s.is_finite() {
+            return Err(SpatialSolidEnthalpyError::Invalid(
+                "spatial thermal state requires a finite explicit physical time",
+            ));
+        }
+        let mut state = self.resolve(specific_h, cx)?;
+        state.time_s = Some(time_s);
+        Ok(state)
     }
 
     /// Native heat and quasistatic stress/geometry accept as one candidate.
@@ -571,6 +606,8 @@ pub struct SpatialTetMaterialSample {
     pub reference_elastic: ResolvedMaterialStatePoint,
     pub reference_density_kg_m3: f64,
     pub reference_volume_m3: f64,
+    pub stiffness_model: ThermalStiffnessModel,
+    pub expansion_model: ThermalExpansionModel,
 }
 
 /// Source-resolved fields for native loads, stress and other solid consumers.
@@ -583,9 +620,14 @@ pub struct SpatialSolidState<'a> {
     samples: Vec<SpatialTetMaterialSample>,
     budget: TetAssemblyBudget,
     mesh_frame: ContentHash,
+    time_s: Option<f64>,
     maximum_absolute_mandel_strain: f64,
 }
 impl SpatialSolidState<'_> {
+    /// Explicit thermal time, when resolved through `resolve_at`.
+    pub const fn time_s(&self) -> Option<f64> {
+        self.time_s
+    }
     pub fn materials(&self) -> &[TetElasticMaterial] {
         &self.materials
     }
@@ -604,6 +646,108 @@ impl SpatialSolidState<'_> {
             budget: self.budget,
         }
     }
+
+    fn matches_problem(&self, problem: &TetLinearElasticProblem<'_>) -> bool {
+        self.nodes_m == problem.nodes_m
+            && self.tetrahedra == problem.tetrahedra
+            && match problem.materials {
+                TetMaterialField::Uniform(material) => self.materials.iter().all(|m| m == material),
+                TetMaterialField::PerElement(materials) => materials == self.materials,
+            }
+    }
+
+    fn matches_transient(&self, run: &TetTransientRun3<'_, '_, '_, '_>) -> bool {
+        let thermal_matches = match run.thermal_strain_field() {
+            Some(TetThermalStrainField::Uniform(state)) => self.strains.iter().all(|s| s == state),
+            Some(TetThermalStrainField::PerElement(states)) => states == self.strains,
+            None => false,
+        };
+        self.time_s
+            .is_some_and(|time| time.to_bits() == run.state().time_s.to_bits())
+            && self.matches_problem(run.material_problem())
+            && thermal_matches
+    }
+
+    /// Continue the original full tetrahedral motion through this native nodal
+    /// heat endpoint. Both states must be resolved with `resolve_at`; the prior
+    /// state's clock, material identities and thermal strain must match the
+    /// accepted run exactly. Supply this endpoint's `problem()` and retain it
+    /// alongside both resolved states for the lifetime of the returned run.
+    ///
+    /// The native owner keeps reference mass and stationary zero supports,
+    /// rebuilds changed stiffness and retains displacement/velocity/acceleration.
+    /// Expansion work, stiffness work and supplied Rayleigh damping retain
+    /// their original separate accounts. This is prescribed one-way thermal
+    /// loading: none of those accounts is silently debited from nodal enthalpy.
+    /// The caller accepts the original heat result and this motion candidate
+    /// together. Every refusal leaves both supplied histories unchanged.
+    pub fn advance_transient_candidate<'g, 'm, 'p, 's>(
+        &self,
+        previous: &Self,
+        run: &TetTransientRun3<'g, 'm, '_, '_>,
+        problem: &'p TetLinearElasticProblem<'s>,
+        loads: &TetLoadCase3<'_, '_>,
+        cx: &Cx<'_>,
+    ) -> Result<(TetTransientRun3<'g, 'm, 'p, 's>, ThermalTransientStep3), SpatialSolidEnthalpyError>
+    {
+        poll(cx)?;
+        let (Some(start_s), Some(end_s)) = (previous.time_s, self.time_s) else {
+            return Err(SpatialSolidEnthalpyError::Invalid(
+                "inertial thermal loading requires explicitly timed spatial endpoints",
+            ));
+        };
+        if !previous.matches_transient(run)
+            || !self.matches_problem(problem)
+            || self.nodes_m != previous.nodes_m
+            || self.tetrahedra != previous.tetrahedra
+            || self.mesh_frame != previous.mesh_frame
+            || self.maximum_absolute_mandel_strain.to_bits()
+                != previous.maximum_absolute_mandel_strain.to_bits()
+            || self.samples.len() != previous.samples.len()
+        {
+            return Err(SpatialSolidEnthalpyError::Invalid(
+                "spatial transient endpoints must retain exact mesh, frame, material, thermal and clock bindings",
+            ));
+        }
+        for (old, next) in previous.samples.iter().zip(&self.samples) {
+            poll(cx)?;
+            if old.element != next.element
+                || old.material_index != next.material_index
+                || old.phase.phase_curve_identity() != next.phase.phase_curve_identity()
+                || old.reference_elastic != next.reference_elastic
+                || old.expansion.reference() != next.expansion.reference()
+                || old.stiffness_model != next.stiffness_model
+                || old.expansion_model != next.expansion_model
+                || old.reference_density_kg_m3.to_bits() != next.reference_density_kg_m3.to_bits()
+                || old.reference_volume_m3.to_bits() != next.reference_volume_m3.to_bits()
+            {
+                return Err(SpatialSolidEnthalpyError::Invalid(
+                    "spatial heating must retain the original material assignment, caloric chart, source laws and reference inventory",
+                ));
+            }
+        }
+        let dt_s = end_s - start_s;
+        if !dt_s.is_finite()
+            || dt_s <= 0.0
+            || (run.state().time_s + dt_s).to_bits() != end_s.to_bits()
+        {
+            return Err(SpatialSolidEnthalpyError::Invalid(
+                "spatial heat and motion must share one distinct representable endpoint",
+            ));
+        }
+        let candidate = run.advance_thermal_candidate(
+            problem,
+            self.thermal_strains(),
+            loads,
+            dt_s,
+            self.mesh_frame,
+            self.maximum_absolute_mandel_strain,
+            cx,
+        )?;
+        poll(cx)?;
+        Ok(candidate)
+    }
+
     pub fn solve(
         &self,
         loads: &TetLoadCase3<'_, '_>,

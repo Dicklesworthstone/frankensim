@@ -1,6 +1,7 @@
 //! Independent P1 diffusion and affine thermoelastic oracles on the SAME mesh.
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::ContentHash;
+use fs_conduction::ConductionProblem;
 use fs_conduction::bc::{ThermalBoundary, ThermalBoundaryBuilder};
 use fs_conduction::field::ScalarField;
 use fs_conduction::material::{CONDUCTIVITY_DIMS, LiquidMassFractionConductivity};
@@ -256,6 +257,240 @@ fn fixture(
     )
     .unwrap();
     (card, caloric)
+}
+
+#[test]
+fn g1_spatial_heat_drives_retained_inertial_motion_and_source_stiffness_work() {
+    with_cx(|cx| {
+        let (card, caloric) = fixture(2., 60., 1e-5, 10., 500., 45.);
+        let mesh = mesh();
+        let native = native(&mesh, caloric.curve(), 6., cx);
+        let context = point(300.);
+        let model = bind(&native, source(&card, caloric.curve(), &context), cx).unwrap();
+        let geometry = model.geometry(cx).unwrap();
+        let loads = geometry.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        let fixed: Vec<_> = (0..12).filter(|&d| d != 3).collect();
+        let boundary = boundary(&mesh);
+        let input = ScalarField::uniform("resolved volumetric heating", 60_000.).unwrap();
+        let old = [200., 400., 0., 200.];
+        let old_bits = old.map(f64::to_bits);
+        let dt = 0.01;
+        let mut fields = vec![old.to_vec()];
+        for _ in 0..2 {
+            let heat = native
+                .advance(
+                    cx,
+                    ConductionProblem {
+                        mesh: &mesh,
+                        boundary: &boundary,
+                        material: model.conductivity().model_for(0).unwrap(),
+                        element_materials: Some(model.conductivity()),
+                        source: &input,
+                    },
+                    None,
+                    fields.last().unwrap(),
+                    dt,
+                    thermal_config(),
+                )
+                .unwrap();
+            near(heat.stored_energy_change_j, 100., 1e-8);
+            near(heat.energy_residual_j, 0., 1e-8);
+            fields.push(heat.specific_enthalpy_j_kg);
+        }
+        let states: Vec<_> = fields
+            .iter()
+            .enumerate()
+            .map(|(i, h)| model.resolve_at(h, i as f64 * dt, cx).unwrap())
+            .collect();
+        let problems: Vec<_> = states.iter().map(|state| state.problem(&fixed)).collect();
+        let mut displacement = [[0.; 3]; 4];
+        let mut velocity = [[0.; 3]; 4];
+        displacement[1][0] = 0.001;
+        velocity[1][0] = 0.02;
+        let mut run = loads
+            .begin_transient(
+                &problems[0],
+                Some(states[0].thermal_strains()),
+                0.,
+                &displacement,
+                &velocity,
+                fs_solid::loads3::transient::TransientConfig3 {
+                    mass_damping_per_s: 0.4,
+                    ..Default::default()
+                },
+                cx,
+            )
+            .unwrap();
+
+        // Independent one-DOF P1 oracle: V=1/6, rho=6, nu=1/4 gives
+        // M=1/10, K=E/5, F_thermal=E*free_strain/3. The retained source
+        // gives E(T)=60-0.15*(T-300), and integral alpha=1e-5*(r+.005*r^2).
+        let mass = 0.1;
+        let damping = 0.04;
+        let (mut q, mut v) = (0.001, 0.02);
+        let mut young = 57.;
+        let strain = 1e-5 * (20. + 0.005 * 20_f64.powi(2));
+        let mut a = (young * strain / 3. - young * q / 5. - damping * v) / mass;
+        near(run.state().acceleration[0], a, 1e-12);
+        for i in 1..states.len() {
+            let previous = run.state().clone();
+            let rise = 20. + 10. * i as f64;
+            let next_young = 60. - 0.15 * rise;
+            let next_strain = 1e-5 * (rise + 0.005 * rise * rise);
+            let stiffness = next_young / 5.;
+            let b = dt * dt / 4.;
+            let predicted_q = q + dt * v + b * a;
+            let predicted_v = v + 0.5 * dt * a;
+            let next_a =
+                (next_young * next_strain / 3. - stiffness * predicted_q - damping * predicted_v)
+                    / (mass + 0.5 * dt * damping + b * stiffness);
+            let next_q = predicted_q + b * next_a;
+            let next_v = predicted_v + 0.5 * dt * next_a;
+            let (candidate, report) = states[i]
+                .advance_transient_candidate(&states[i - 1], &run, &problems[i], &loads, cx)
+                .unwrap();
+            near(candidate.state().displacement[0], next_q, 1e-13);
+            near(candidate.state().velocity[0], next_v, 1e-12);
+            near(candidate.state().acceleration[0], next_a, 1e-10);
+            near(
+                report.native.stiffness_parameter_work_j,
+                0.5 * (next_young - young) / 5. * q * next_q,
+                1e-14,
+            );
+            let elastic = next_young / 15.
+                * ((next_q - next_strain).powi(2)
+                    + 2. * next_strain.powi(2)
+                    + 0.5 * (next_q - 3. * next_strain).powi(2));
+            near(
+                report.kinetic_plus_elastic_after_j,
+                0.5 * mass * next_v.powi(2) + elastic,
+                1e-13,
+            );
+            near(report.physical_balance_error_j, 0., 1e-13);
+            assert!(report.stiffness_material_work_j.abs() > 1e-10);
+            assert!(report.thermal_material_work_j.abs() > 1e-10);
+            assert!(report.native.damping_loss_j > 0.);
+            near(
+                states[i].samples()[0].phase.temperature_k(),
+                300. + rise,
+                1e-9,
+            );
+            let attenuation = (1. + 4. * 2. * dt / 60_f64).powi(-(i as i32));
+            near(fields[i][1] / 10., rise + 20. * attenuation, 2e-8);
+            near(fields[i][2] / 10., rise - 20. * attenuation, 2e-8);
+            assert_eq!(states[i].materials()[0].density_kg_m3, 6.);
+            assert!(states[i].samples()[0].phase.bulk_density_kg_m3() < 6.);
+            let response = candidate
+                .recover_response(solid_config().mesh_frame, 0.1, cx)
+                .unwrap();
+            near(
+                response.stress.elements()[0].stress_mandel_pa()[0],
+                1.2 * next_young * next_q - 2. * next_young * next_strain,
+                1e-11,
+            );
+            assert_eq!(candidate.state().step, i);
+            assert_eq!(Some(candidate.state().time_s), states[i].time_s());
+            assert_eq!(run.state(), &previous);
+            (q, v, a, young) = (next_q, next_v, next_a, next_young);
+            run = candidate;
+        }
+        assert_eq!(old.map(f64::to_bits), old_bits);
+        assert!(
+            states[2]
+                .advance_transient_candidate(&states[0], &run, &problems[2], &loads, cx,)
+                .is_err()
+        );
+    });
+}
+
+#[test]
+fn g4_spatial_inertial_handoff_rejects_stale_clock_fields_and_cancellation_atomically() {
+    with_cx(|cx| {
+        let (card, caloric) = fixture(2., 60., 1e-5, 10., 500., 45.);
+        let mesh = mesh();
+        let native = native(&mesh, caloric.curve(), 6., cx);
+        let context = point(300.);
+        let model = bind(&native, source(&card, caloric.curve(), &context), cx).unwrap();
+        let geometry = model.geometry(cx).unwrap();
+        let loads = geometry.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        let fixed: Vec<_> = (0..12).filter(|&d| d != 3).collect();
+        let old = [200., 400., 0., 200.];
+        let heated = old.map(|h| h + 100.);
+        let start = model.resolve_at(&old, 2., cx).unwrap();
+        let end = model.resolve_at(&heated, 2.01, cx).unwrap();
+        let start_problem = start.problem(&fixed);
+        let end_problem = end.problem(&fixed);
+        let run = loads
+            .begin_transient(
+                &start_problem,
+                Some(start.thermal_strains()),
+                2.,
+                &[[0.; 3]; 4],
+                &[[0.; 3]; 4],
+                Default::default(),
+                cx,
+            )
+            .unwrap();
+        let original = run.state().clone();
+        let stale_material = model.resolve_at(&heated, 2., cx).unwrap();
+        let stale_time = model.resolve_at(&old, 1., cx).unwrap();
+        let untimed = model.resolve(&old, cx).unwrap();
+        for previous in [&stale_material, &stale_time, &untimed] {
+            assert!(matches!(
+                end.advance_transient_candidate(previous, &run, &end_problem, &loads, cx,),
+                Err(SpatialSolidEnthalpyError::Invalid(_))
+            ));
+        }
+        assert!(matches!(
+            end.advance_transient_candidate(&start, &run, &start_problem, &loads, cx,),
+            Err(SpatialSolidEnthalpyError::Invalid(_))
+        ));
+        assert!(
+            start
+                .advance_transient_candidate(&start, &run, &start_problem, &loads, cx,)
+                .is_err()
+        );
+        assert!(model.resolve_at(&heated, f64::NAN, cx).is_err());
+        let changed_supports: Vec<_> = (0..12).filter(|&d| d != 6).collect();
+        let changed_problem = end.problem(&changed_supports);
+        assert!(
+            end.advance_transient_candidate(&start, &run, &changed_problem, &loads, cx,)
+                .is_err()
+        );
+        assert_eq!(run.state(), &original);
+
+        let gate = CancelGate::new();
+        gate.request();
+        ArenaPool::new(ArenaConfig::default()).scope(|arena| {
+            let cancelled = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 3,
+                    kernel_id: 17,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            assert!(matches!(
+                end.advance_transient_candidate(&start, &run, &end_problem, &loads, &cancelled,),
+                Err(SpatialSolidEnthalpyError::Cancelled)
+            ));
+        });
+        assert_eq!(run.state(), &original);
+        let (accepted, _) = end
+            .advance_transient_candidate(&start, &run, &end_problem, &loads, cx)
+            .unwrap();
+        let (replayed, _) = end
+            .advance_transient_candidate(&start, &run, &end_problem, &loads, cx)
+            .unwrap();
+        assert_eq!(accepted.state(), replayed.state());
+        assert_eq!(accepted.state().time_s, 2.01);
+        assert_eq!(run.state(), &original);
+        assert_eq!(old, [200., 400., 0., 200.]);
+    });
 }
 
 #[test]
