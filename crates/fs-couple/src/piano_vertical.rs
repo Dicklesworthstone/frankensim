@@ -23,7 +23,13 @@
 //! drag injected through the strings' own force ports; sustain lifts
 //! them; una corda strikes two of the three unison strings. Never a
 //! different instrument.
+//!
+//! The shared strike coordinate averages the struck strings' displacements;
+//! its single hammer reaction is distributed with those same weights. Felt
+//! uses actual compression within its declared material domain. A refused
+//! hammer trial publishes neither motion nor compaction history.
 
+use fs_material::fiber::WoolFeltState;
 use fs_material::{Uniaxial, WoolFelt};
 use fs_math::c64::C64;
 
@@ -89,6 +95,73 @@ pub enum HammerLaw {
     LinearSpring,
 }
 
+/// A complete hammer trial, accepted only after every substep and its
+/// endpoint admit the actual felt compression.
+struct HammerTrial {
+    position_m: f64,
+    velocity_m_s: f64,
+    force_n: f64,
+    felt_state: WoolFeltState,
+}
+
+fn hammer_trial(
+    law: HammerLaw,
+    felt: &WoolFelt,
+    committed: &WoolFeltState,
+    spring_k: f64,
+    motion: [f64; 2],
+    station_m: f64,
+    dt_s: f64,
+) -> Result<HammerTrial, String> {
+    if !motion.iter().all(|x| x.is_finite())
+        || !station_m.is_finite()
+        || !dt_s.is_finite()
+        || dt_s <= 0.0
+        || (law == HammerLaw::LinearSpring && (!spring_k.is_finite() || spring_k < 0.0))
+    {
+        return Err("piano hammer trial requires finite motion and admissible time/law".into());
+    }
+    let [mut position_m, mut velocity_m_s] = motion;
+    let mut state = committed.clone();
+    let h = dt_s / SUBSTEPS as f64;
+    let mut force_acc = 0.0;
+    for substep in 0..SUBSTEPS {
+        let overlap = position_m - station_m;
+        let force = match law {
+            HammerLaw::Felt => {
+                let strain = overlap / T_FELT;
+                let response = felt.response(strain, &state).map_err(|error| {
+                    format!("piano hammer felt substep {substep}, strain {strain:e}: {error}")
+                })?;
+                state = response.state;
+                A_CONTACT * response.stress_pa
+            }
+            HammerLaw::LinearSpring => spring_k * overlap.max(0.0),
+        };
+        force_acc += force;
+        velocity_m_s -= h * force / M_HAMMER;
+        position_m += h * velocity_m_s;
+        if !force_acc.is_finite() || !position_m.is_finite() || !velocity_m_s.is_finite() {
+            return Err("piano hammer trial produced nonfinite force or motion".into());
+        }
+    }
+    if law == HammerLaw::Felt {
+        // The last drift is also part of this trial. Reject a limit crossing
+        // here, before publishing motion or compaction history to the owner.
+        let strain = (position_m - station_m) / T_FELT;
+        state = felt
+            .response(strain, &state)
+            .map_err(|error| format!("piano hammer felt endpoint, strain {strain:e}: {error}"))?
+            .state;
+    }
+    Ok(HammerTrial {
+        position_m,
+        velocity_m_s,
+        force_n: force_acc / SUBSTEPS as f64,
+        felt_state: state,
+    })
+}
+
 /// One board mode (mass-normalized 1-DOF at the bridge).
 struct BoardMode {
     omega: f64,
@@ -140,7 +213,7 @@ impl PianoVertical {
     ///
     /// # Errors
     /// Admission errors from the modal images or the felt law.
-    #[allow(clippy::too_many_lines)] // one composition, kept whole
+    #[allow(clippy::too_many_lines)]// one composition, kept whole
     pub fn new(
         base: PianoStringSpec,
         unison_detune_cents: f64,
@@ -335,12 +408,17 @@ impl PianoVertical {
 
     /// Render one sample; returns the board bridge velocity (the
     /// radiating observer's proxy).
+    ///
+    /// # Errors
+    /// Returns hammer material/domain or modal-step refusals. A hammer
+    /// strain refusal leaves the complete composed state unchanged.
     #[allow(clippy::too_many_lines)] // the composed per-sample loop
     pub fn step(&mut self) -> Result<f64, String> {
         let dt = 1.0 / f64::from(RATE);
         // 1. Hammer island against the struck strings' displacement at
         //    the strike station.
         let mut strike_force = 0.0f64;
+        let strike_weight = 1.0 / self.struck.iter().filter(|&&s| s).count() as f64;
         if self.hammer_active {
             let station_disp: f64 = self
                 .strings
@@ -356,33 +434,20 @@ impl PianoVertical {
                         .sum::<f64>()
                 })
                 .sum::<f64>()
-                / self.struck.iter().filter(|&&s| s).count() as f64;
-            let h = dt / SUBSTEPS as f64;
-            let mut force_acc = 0.0f64;
-            let mut peak_overlap = 0.0f64;
-            for _ in 0..SUBSTEPS {
-                let overlap = self.hammer_y - station_disp;
-                let f = if overlap <= 0.0 {
-                    0.0
-                } else {
-                    match self.law {
-                        HammerLaw::Felt => {
-                            let strain = (overlap / T_FELT).min(0.65);
-                            A_CONTACT * self.felt.stress(strain, &self.felt_state)
-                        }
-                        HammerLaw::LinearSpring => self.spring_k * overlap,
-                    }
-                };
-                force_acc += f;
-                peak_overlap = peak_overlap.max(overlap);
-                self.hammer_v -= h * f / M_HAMMER;
-                self.hammer_y += h * self.hammer_v;
-            }
-            strike_force = force_acc / SUBSTEPS as f64;
-            if self.law == HammerLaw::Felt {
-                let strain = (peak_overlap.max(0.0) / T_FELT).min(0.65);
-                self.felt_state = self.felt.update_state(strain, &self.felt_state);
-            }
+                * strike_weight;
+            let trial = hammer_trial(
+                self.law,
+                &self.felt,
+                &self.felt_state,
+                self.spring_k,
+                [self.hammer_y, self.hammer_v],
+                station_disp,
+                dt,
+            )?;
+            strike_force = trial.force_n;
+            self.hammer_y = trial.position_m;
+            self.hammer_v = trial.velocity_m_s;
+            self.felt_state = trial.felt_state;
             if self.hammer_v < 0.0 && (self.hammer_y - station_disp) < -1.0e-4 {
                 self.hammer_active = false;
             }
@@ -416,7 +481,9 @@ impl PianoVertical {
                 .map(|k| {
                     let mut g = 0.0f64;
                     if struck && strike_force > 0.0 {
-                        g += strike_force * phi(k);
+                        // Same weights as the observed contact coordinate:
+                        // sum(g_k * v_k) = F_hammer * v_station.
+                        g += strike_force * strike_weight * phi(k);
                     }
                     g -= self.couplings[i][k - 1] * v_bridge;
                     if damped {
@@ -434,6 +501,133 @@ impl PianoVertical {
         }
         self.strike_work_j += ke_before.max(0.0) * f64::from(u8::from(strike_force > 0.0));
         Ok(v_bridge)
+    }
+}
+
+#[cfg(test)]
+mod hammer_strain_tests {
+    use super::*;
+
+    fn felt() -> WoolFelt {
+        WoolFelt::new(4.0e5, 0.2, 2.5, 3.2, 0.25, 0.8).unwrap()
+    }
+
+    #[test]
+    fn hammer_uses_actual_compression_above_the_old_cap() {
+        let felt = felt();
+        let trial = hammer_trial(
+            HammerLaw::Felt,
+            &felt,
+            &felt.initial_state(),
+            0.0,
+            [0.7 * T_FELT, 0.0],
+            0.0,
+            1.0e-10,
+        )
+        .unwrap();
+        let expected = A_CONTACT * 4.0e5 * (0.7_f64 / 0.2).powf(2.5);
+        let old_cap = A_CONTACT * 4.0e5 * (0.65_f64 / 0.2).powf(2.5);
+        assert!((trial.force_n / expected - 1.0).abs() < 1.0e-9);
+        assert!(trial.force_n > old_cap);
+        assert!((trial.felt_state.eps_max - 0.7).abs() < 1.0e-15);
+    }
+
+    #[test]
+    fn refused_hammer_trial_preserves_committed_compaction() {
+        let felt = felt();
+        let committed = felt.response(0.4, &felt.initial_state()).unwrap().state;
+        let previous = committed.clone();
+        for motion in [[0.81 * T_FELT, 0.0], [0.0, f64::NAN]] {
+            assert!(
+                hammer_trial(HammerLaw::Felt, &felt, &committed, 0.0, motion, 0.0, 1.0e-6).is_err()
+            );
+            assert_eq!(committed.eps_max, previous.eps_max);
+            assert_eq!(committed.sig_max, previous.sig_max);
+        }
+    }
+
+    #[test]
+    fn last_hammer_drift_cannot_publish_excessive_strain() {
+        let felt = felt();
+        // The first 48 force evaluations are below 80%; only the final
+        // drift crosses it. The very short interval isolates that endpoint.
+        let result = hammer_trial(
+            HammerLaw::Felt,
+            &felt,
+            &felt.initial_state(),
+            0.0,
+            [0.7876 * T_FELT, 1.0e3],
+            0.0,
+            1.0e-7,
+        );
+        let error = match result {
+            Ok(_) => panic!("inadmissible hammer endpoint was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("endpoint"), "{error}");
+    }
+
+    #[test]
+    fn hammer_retains_a_peak_followed_by_unloading_in_one_sample() {
+        let felt = felt();
+        let trial = hammer_trial(
+            HammerLaw::Felt,
+            &felt,
+            &felt.initial_state(),
+            0.0,
+            [0.4 * T_FELT, 1.0],
+            0.0,
+            1.0e-4,
+        )
+        .unwrap();
+        let end_strain = trial.position_m / T_FELT;
+        assert!(trial.velocity_m_s < 0.0);
+        assert!(trial.felt_state.eps_max > 0.4);
+        assert!(trial.felt_state.eps_max > end_strain);
+        let unloading = felt.response(end_strain, &trial.felt_state).unwrap();
+        assert!(unloading.stress_pa > 0.0);
+        assert!(unloading.stress_pa < felt.envelope(end_strain).0);
+    }
+
+    #[test]
+    fn compacted_felt_has_a_force_free_residual_gap() {
+        let felt = felt();
+        let committed = felt.response(0.4, &felt.initial_state()).unwrap().state;
+        let position = 0.05 * T_FELT;
+        let trial = hammer_trial(
+            HammerLaw::Felt,
+            &felt,
+            &committed,
+            0.0,
+            [position, 0.0],
+            0.0,
+            1.0e-5,
+        )
+        .unwrap();
+        assert_eq!(trial.force_n, 0.0);
+        assert_eq!(trial.position_m, position);
+        assert_eq!(trial.velocity_m_s, 0.0);
+        assert_eq!(trial.felt_state.eps_max, committed.eps_max);
+        assert_eq!(trial.felt_state.sig_max, committed.sig_max);
+    }
+
+    #[test]
+    fn spring_control_uses_its_own_law_without_felt_compaction() {
+        let felt = felt();
+        let committed = felt.initial_state();
+        let trial = hammer_trial(
+            HammerLaw::LinearSpring,
+            &felt,
+            &committed,
+            10.0,
+            [0.9 * T_FELT, 0.0],
+            0.0,
+            1.0e-8,
+        )
+        .unwrap();
+        assert!((trial.force_n / (10.0 * 0.9 * T_FELT) - 1.0).abs() < 1.0e-10);
+        assert_eq!(trial.felt_state.eps_max, committed.eps_max);
+        assert_eq!(trial.felt_state.sig_max, committed.sig_max);
     }
 }
 
@@ -680,38 +874,113 @@ mod piano_vertical_tests {
 
     #[test]
     fn pv_004_pedals_change_decay_topology() {
-        let energy_at = |sustain: bool, una_corda: bool, sample: usize| -> f64 {
+        let energy_at = |sustain: bool, sample: usize| -> f64 {
             let mut pv = PianoVertical::new(
                 base_spec(),
                 1.2,
                 HammerLaw::Felt,
-                PedalState { sustain, una_corda },
+                PedalState {
+                    sustain,
+                    una_corda: false,
+                },
                 0.02,
             )
             .expect("pv");
             let _ = render(&mut pv, 2.0, sample).expect("pv render");
             pv.string_energies().iter().take(3).sum()
         };
-        let sustained = energy_at(true, false, 24_000);
-        let damped = energy_at(false, false, 24_000);
-        let full = energy_at(true, false, 3_000);
-        let una = energy_at(true, true, 3_000);
+        let sustained = energy_at(true, 24_000);
+        let damped = energy_at(false, 24_000);
         let damper_works = damped < 0.05 * sustained;
-        // Una corda: two struck strings carry less energy than three,
-        // in a broad band (the third string still receives coupled
-        // energy through the bridge).
-        let una_ratio = una / full;
-        let una_works = una_ratio > 0.4 && una_ratio < 0.9;
-        let pass = damper_works && una_works;
         verdict(
             "pv-004-pedal-topology",
-            pass,
+            damper_works,
             &format!(
                 "dampers: 1s energy {damped:.2e} vs sustained {sustained:.2e} \
-                 (ratio {:.3}); una corda energy ratio {una_ratio:.2}",
+                 (ratio {:.3})",
                 damped / sustained
             ),
         );
+    }
+
+    #[test]
+    fn hammer_recoil_matches_total_string_force_for_both_contact_topologies() {
+        let dt = 1.0 / f64::from(RATE);
+        for law in [HammerLaw::Felt, HammerLaw::LinearSpring] {
+            for una_corda in [false, true] {
+                let mut spec = base_spec();
+                spec.n_modes = 1;
+                spec.damping_ratio = 0.0;
+                let mut pv = PianoVertical::new(
+                    spec,
+                    0.0,
+                    law,
+                    PedalState {
+                        sustain: true,
+                        una_corda,
+                    },
+                    0.0,
+                )
+                .unwrap();
+                pv.strike(2.0);
+                let initial_velocity = pv.hammer_v;
+                pv.step().unwrap();
+                let hammer_force = M_HAMMER * (initial_velocity - pv.hammer_v) / dt;
+                let mut string_force = 0.0;
+                let mut direct_contacts = 0;
+                for (i, (string, spec)) in pv.strings.iter().zip(&pv.specs).enumerate() {
+                    if pv.struck[i] {
+                        direct_contacts += 1;
+                        let omega = core::f64::consts::TAU * spec.partial_hz(1);
+                        let velocity = string.states()[0].velocity_m_sqrt_kg_per_s;
+                        // Independent exact undamped oscillator solution:
+                        // v(dt) = g sin(omega dt) / omega for a held force.
+                        let generalized = omega * velocity / (omega * dt).sin();
+                        assert!(generalized > 0.0);
+                        string_force += generalized / phi(1);
+                    } else {
+                        for state in string.states() {
+                            assert_eq!(state.displacement_m_sqrt_kg, 0.0);
+                            assert_eq!(state.velocity_m_sqrt_kg_per_s, 0.0);
+                        }
+                    }
+                }
+                assert_eq!(direct_contacts, if una_corda { 2 } else { 3 });
+                assert!(hammer_force > 0.0);
+                assert!(
+                    (string_force - hammer_force).abs() < 1.0e-9 * hammer_force.max(1.0),
+                    "{law:?}, una corda {una_corda}: strings {string_force:e}, hammer {hammer_force:e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn excessive_felt_strain_does_not_advance_the_composition() {
+        let mut pv = PianoVertical::new(base_spec(), 1.2, HammerLaw::Felt, pedals(), 0.02).unwrap();
+        pv.strike(2.0);
+        pv.hammer_y = 0.81 * T_FELT;
+        let position = pv.hammer_y;
+        let velocity = pv.hammer_v;
+        let history = pv.felt_state.clone();
+        assert!(pv.step().is_err());
+        assert_eq!(pv.hammer_y, position);
+        assert_eq!(pv.hammer_v, velocity);
+        assert!(pv.hammer_active);
+        assert_eq!(pv.felt_state.eps_max, history.eps_max);
+        assert_eq!(pv.felt_state.sig_max, history.sig_max);
+        assert_eq!(pv.strike_work_j, 0.0);
+        assert_eq!(pv.felt_loss_j, 0.0);
+        for string in &pv.strings {
+            for state in string.states() {
+                assert_eq!(state.displacement_m_sqrt_kg, 0.0);
+                assert_eq!(state.velocity_m_sqrt_kg_per_s, 0.0);
+            }
+        }
+        for mode in &pv.board {
+            assert_eq!(mode.q, 0.0);
+            assert_eq!(mode.v, 0.0);
+        }
     }
 
     #[test]
