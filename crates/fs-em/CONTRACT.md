@@ -4967,6 +4967,20 @@ relative-error guarantee near every null is implied. Longitudinal/evanescent
 components, real/proper statistics, both illumination faces, source clocks,
 spatial/shutter kernels and original admission/cancellation remain shared.
 
+The same direct projection queries also accept
+`AngularSpectrumExposureApertureJonesProjection`. Its finite dimensionless
+complex weights define the real observed signals
+`Re(sum_j a† E_j exp(i omega_j t))` and
+`Re(sum_j b† H_j exp(i omega_j t))`, with conjugated analyzer weights.
+They select circular and elliptical polarization using the original phasors;
+real moment matrices alone cannot recover that information. Projection keeps
+the grouped double-double low parts through a crossed-circular null, before
+any field products. Real sources retain carrier sums over subcycle shutters;
+proper factors keep their original phase statistics. These explicitly authored
+frequency-independent observations over the supplied spectral lines are not a
+causal broadband polarizer, detector absorption model or source back-action.
+The real-weight API and post-hoc real moment projection remain available.
+
 The original reading, full moments and direct projection require respectively
 12, 21 and 3 scalar products per ordered mode/frequency pair. Direct field
 projection costs O(NF), with no new material solve or FFT. Five new numerical

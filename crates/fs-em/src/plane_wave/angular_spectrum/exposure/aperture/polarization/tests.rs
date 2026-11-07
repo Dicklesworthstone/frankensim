@@ -433,3 +433,187 @@ fn correlation_and_projection_limits_and_cancellation_are_explicit() {
     huge[0][0][0] = Dd::from_f64(f64::MAX);
     assert!(overflow.prepare_field(&mut huge, &mut || false).is_err());
 }
+
+#[test]
+fn jones_analyzers_resolve_circular_handedness_without_cycle_averaging() {
+    let field = parts(&[vec![[
+        C64::ONE,
+        C64::new(0.0, 1.0),
+        C64::ZERO,
+        C64::new(0.0, -1.0),
+        C64::ONE,
+        C64::ZERO,
+    ]]]);
+    let area = AngularSpectrumAperture::try_new([0.0; 2], [0.7, 0.4]).unwrap();
+    let window = HarmonicWindow::new(0.31, 0.07).unwrap();
+    let r = core::f64::consts::FRAC_1_SQRT_2;
+    for handedness in [-1.0, 1.0] {
+        let weights = [C64::from_re(r), C64::new(0.0, handedness * r), C64::ZERO];
+        let analyzer =
+            AngularSpectrumExposureApertureJonesProjection::try_new(weights, weights).unwrap();
+        let actual = observe::<RealKernel, _>(
+            &[0.0],
+            &[0.0],
+            &[1.0],
+            &field,
+            area,
+            window,
+            Projected::new(analyzer),
+        );
+        let proper = observe::<ProperKernel, _>(
+            &[0.0],
+            &[0.0],
+            &[1.0],
+            &field,
+            area,
+            window,
+            Projected::new(analyzer),
+        );
+        let (electric, magnetic, mixed, cycle) = if handedness > 0.0 {
+            // a†E=sqrt(2), a†H=-i sqrt(2). The REAL signals are
+            // sqrt(2) cos(t), sqrt(2) sin(t); retain the subcycle carrier.
+            let start = window.start_s();
+            let end = start + window.duration_s();
+            let cosine = ((2.0 * end).sin() - (2.0 * start).sin()) / (2.0 * window.duration_s());
+            let sine = ((2.0 * start).cos() - (2.0 * end).cos()) / (2.0 * window.duration_s());
+            (1.0 + cosine, 1.0 - cosine, sine, 1.0)
+        } else {
+            (0.0, 0.0, 0.0, 0.0)
+        };
+        close(actual.electric_mean_squared_v2_m2, electric, 3e-15);
+        close(actual.magnetic_mean_squared_a2_m2, magnetic, 3e-15);
+        close(actual.electric_magnetic_mean_product_w_m2, mixed, 3e-15);
+        close(proper.electric_mean_squared_v2_m2, cycle, 3e-15);
+        close(proper.magnetic_mean_squared_a2_m2, cycle, 3e-15);
+        close(proper.electric_magnetic_mean_product_w_m2, 0.0, 3e-15);
+    }
+}
+
+#[test]
+fn complex_elliptical_analyzers_match_space_time_phase_quadrature() {
+    let kx = [0.2, -0.7];
+    let ky = [0.3];
+    let omega = [1.3, 2.1];
+    let fields: Vec<Vec<[C64; 6]>> = (0..2)
+        .map(|f| {
+            (0..2)
+                .map(|m| {
+                    core::array::from_fn(|c| {
+                        C64::new(
+                            (1 + f + c) as f64 / (7.0 * (m + 1) as f64),
+                            (c as f64 - 2.0) * (m as f64 - 1.5) / (11.0 * (f + 1) as f64),
+                        )
+                    })
+                })
+                .collect()
+        })
+        .collect();
+    let electric = [C64::new(0.3, -0.7), C64::new(-0.4, 0.2), C64::new(0.1, 0.3)];
+    let magnetic = [C64::new(-0.2, 0.1), C64::new(0.6, -0.4), C64::new(0.5, 0.2)];
+    let analyzer =
+        AngularSpectrumExposureApertureJonesProjection::try_new(electric, magnetic).unwrap();
+    assert_eq!(analyzer.electric_weights(), electric);
+    assert_eq!(analyzer.magnetic_weights(), magnetic);
+    let projected: Vec<Vec<[C64; 6]>> = fields
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|v| {
+                    // Independent ordinary-complex projection; the oracle integrates the
+                    // actual real signals over space, time and four proper-factor phases.
+                    let mut out = [C64::ZERO; 6];
+                    for c in 0..3 {
+                        out[0] = out[0] + electric[c].conj() * v[c];
+                        out[3] = out[3] + magnetic[c].conj() * v[c + 3];
+                    }
+                    out
+                })
+                .collect()
+        })
+        .collect();
+    let area = AngularSpectrumAperture::try_new([-0.19, 0.23], [0.7, 0.9]).unwrap();
+    for profile in [
+        HarmonicWindowProfile::Uniform,
+        HarmonicWindowProfile::Triangular,
+    ] {
+        let window = HarmonicWindow::with_profile(0.17, 0.43, profile).unwrap();
+        for proper in [false, true] {
+            let actual = if proper {
+                observe::<ProperKernel, _>(
+                    &kx,
+                    &ky,
+                    &omega,
+                    &parts(&fields),
+                    area,
+                    window,
+                    Projected::new(analyzer),
+                )
+            } else {
+                observe::<RealKernel, _>(
+                    &kx,
+                    &ky,
+                    &omega,
+                    &parts(&fields),
+                    area,
+                    window,
+                    Projected::new(analyzer),
+                )
+            };
+            let expected = super::super::tests::reference_matrix(
+                &kx, &ky, &omega, &projected, area, window, proper,
+            );
+            for (value, expected) in [
+                (actual.electric_mean_squared_v2_m2, expected[0][0]),
+                (actual.magnetic_mean_squared_a2_m2, expected[3][3]),
+                (actual.electric_magnetic_mean_product_w_m2, expected[0][3]),
+            ] {
+                // Match the scale-aware Simpson tolerance of the original
+                // full-moment oracle; these authored weights need not be unit.
+                close(value, expected, 3e-7 * expected.abs().max(1.0));
+            }
+        }
+    }
+}
+
+#[test]
+fn crossed_circular_analyzer_preserves_dd_residuals_and_refuses_invalid_weights() {
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(
+            AngularSpectrumExposureApertureJonesProjection::try_new(
+                [C64::new(0.0, value), C64::ZERO, C64::ZERO],
+                [C64::ZERO; 3],
+            )
+            .is_err()
+        );
+    }
+    let analyzer = AngularSpectrumExposureApertureJonesProjection::try_new(
+        [C64::ONE, C64::new(0.0, -1.0), C64::ZERO],
+        [C64::ZERO; 3],
+    )
+    .unwrap();
+    let tiny = 1e-20;
+    let mut field = [[Dd::ZERO; 2]; 6];
+    field[0][0] = Dd::from_pair(1.0, tiny);
+    field[1][1] = Dd::ONE;
+    let area = AngularSpectrumAperture::try_new([0.0; 2], [1.0; 2]).unwrap();
+    let window = HarmonicWindow::new(0.0, core::f64::consts::TAU).unwrap();
+    let actual = observe::<RealKernel, _>(
+        &[0.0],
+        &[0.0],
+        &[1.0],
+        &[vec![field]],
+        area,
+        window,
+        Projected::new(analyzer),
+    );
+    close(
+        actual.electric_mean_squared_v2_m2 / (0.5 * tiny * tiny),
+        1.0,
+        3e-14,
+    );
+    assert_eq!(actual.magnetic_mean_squared_a2_m2, 0.0);
+    assert!(matches!(
+        Projected::new(analyzer).prepare_field(&mut [field], &mut || true),
+        Err(AngularSpectrumError::Cancelled)
+    ));
+}

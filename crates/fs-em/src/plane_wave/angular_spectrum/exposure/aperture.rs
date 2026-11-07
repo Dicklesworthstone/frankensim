@@ -26,7 +26,8 @@ pub use control::{
     PreparedAngularSpectrumApertureEnergyControl,
 };
 pub use polarization::{
-    AngularSpectrumExposureApertureMoments, AngularSpectrumExposureApertureProjection,
+    AngularSpectrumExposureApertureJonesProjection, AngularSpectrumExposureApertureMoments,
+    AngularSpectrumExposureApertureProjection,
     AngularSpectrumExposureApertureProjectionReading,
 };
 pub use stress::AngularSpectrumExposureApertureStress;

@@ -1,6 +1,67 @@
 //! Polarization correlations through original grouped and two-face sources.
 use super::*;
-use fs_em::plane_wave::angular_spectrum::AngularSpectrumExposureApertureProjection;
+use fs_em::plane_wave::angular_spectrum::{
+    AngularSpectrumExposureApertureJonesProjection, AngularSpectrumExposureApertureProjection,
+};
+
+#[test]
+fn g1_circular_analyzers_distinguish_native_maxwell_handedness() {
+    let medium = material(1.0, 1.0);
+    let stack =
+        PlanarDielectricLayers::try_new(&medium, DielectricResponse::Lossless(&medium), 1.0, &[])
+            .unwrap();
+    let lines = [constant(&stack, [C64::ONE, C64::new(0.0, 1.0)])];
+    let bank = AngularSpectrumExposure::try_new(&lines[0], &lines, limits(), || false).unwrap();
+    let factors =
+        [AngularSpectrumExposure::try_new(&lines[0], &lines, limits(), || false).unwrap()];
+    let ensemble = AngularSpectrumExposureEnsemble::try_new_with_statistics(
+        &lines[0],
+        None,
+        &factors,
+        &[AngularSpectrumFactorStatistics::ProperComplex],
+        ensemble_limits(),
+        || false,
+    )
+    .unwrap();
+    let area = AngularSpectrumAperture::try_new([0.2, -0.7], [0.4, 0.9]).unwrap();
+    let window = HarmonicWindow::new(0.17, core::f64::consts::TAU).unwrap();
+    let r = core::f64::consts::FRAC_1_SQRT_2;
+    for handedness in [-1.0, 1.0] {
+        let weights = [C64::from_re(r), C64::new(0.0, handedness * r), C64::ZERO];
+        let analyzer =
+            AngularSpectrumExposureApertureJonesProjection::try_new(weights, weights).unwrap();
+        for side in [Side::Incident, Side::Transmitted] {
+            for actual in [
+                bank.measure_aperture_projection(
+                    side,
+                    0.19,
+                    area,
+                    window,
+                    analyzer,
+                    aperture_limits(),
+                    || false,
+                )
+                .unwrap(),
+                ensemble
+                    .measure_aperture_projection(
+                        side,
+                        0.19,
+                        area,
+                        window,
+                        analyzer,
+                        aperture_limits(),
+                        || false,
+                    )
+                    .unwrap(),
+            ] {
+                let expected = if handedness == 1.0 { 1.0 } else { 0.0 };
+                near(actual.electric_mean_squared_v2_m2, expected, 3e-14);
+                near(actual.magnetic_mean_squared_a2_m2, expected, 3e-14);
+                near(actual.electric_magnetic_mean_product_w_m2, 0.0, 3e-14);
+            }
+        }
+    }
+}
 
 #[test]
 fn g1_grouped_original_sources_retain_crossed_analyzer_residuals() {
@@ -169,6 +230,40 @@ fn g1_two_face_mixed_source_correlations_match_real_phase_ensemble_quadrature() 
             direct.electric_magnetic_mean_product_w_m2,
             contracted.electric_magnetic_mean_product_w_m2,
             3e-14,
+        );
+        let a = [C64::new(0.3, -0.7), C64::new(-0.4, 0.2), C64::new(0.1, 0.3)];
+        let b = [C64::new(-0.2, 0.1), C64::new(0.6, -0.4), C64::new(0.5, 0.2)];
+        let complex = AngularSpectrumExposureApertureJonesProjection::try_new(a, b).unwrap();
+        let projected_e = (0..3).fold(C64::ZERO, |sum, i| sum + a[i].conj() * e[i]);
+        let projected_h = (0..3).fold(C64::ZERO, |sum, i| sum + b[i].conj() * h[i]);
+        let expected = phase_reference(
+            [
+                projected_e,
+                C64::ZERO,
+                C64::ZERO,
+                projected_h,
+                C64::ZERO,
+                C64::ZERO,
+            ],
+            window,
+        );
+        let actual = ensemble
+            .measure_illumination_aperture_projection(
+                side,
+                0.17,
+                area,
+                window,
+                complex,
+                aperture_limits(),
+                || false,
+            )
+            .unwrap();
+        near(actual.electric_mean_squared_v2_m2, expected[0][0], 4e-12);
+        near(actual.magnetic_mean_squared_a2_m2, expected[3][3], 4e-12);
+        near(
+            actual.electric_magnetic_mean_product_w_m2,
+            expected[0][3],
+            4e-12,
         );
     }
 }
