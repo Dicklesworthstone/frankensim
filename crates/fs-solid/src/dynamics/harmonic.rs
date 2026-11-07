@@ -32,7 +32,7 @@ impl SolidFlow {
         flow_budget: DenseExponentialBudget,
         cx: &Cx<'_>,
     ) -> Result<Self, ExactLinearSolidError> {
-        let ports = system.m;
+        let ports = system.port_dim();
         let plan = PreparedExactTones::new_owned_with_resistance_channels_controlled(
             system,
             frequencies,

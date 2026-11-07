@@ -81,6 +81,11 @@ pub struct SolidSustainedStep<P, S = ExactLinearSolidStep> {
     pub native: S,
     /// Stable contact-ID order, also used by `solve` and the path callback.
     pub contact_ids: Vec<u64>,
+    /// Coefficients actually used by the accepted force solve, in contact-ID
+    /// order. Static/kinetic admission may replace a static coefficient here.
+    pub friction_coefficients: Vec<f64>,
+    /// Additional coupled solves after previously resting contacts broke away.
+    pub friction_regime_resolves: usize,
     pub solve: SolveReport,
     pub path_admission: P,
     pub displacement_change_m: Vec<f64>,
@@ -161,6 +166,25 @@ fn dot(a: &[f64], b: &[f64]) -> Dd {
         sum + Dd::from_f64(a) * Dd::from_f64(b)
     })
 }
+fn tangent_speed(
+    contact: &SolidSustainedContact<'_>,
+    velocity: &[f64],
+) -> Result<f64, &'static str> {
+    let v1 = finite(
+        dot(contact.velocity_weights[1], velocity)
+            - Dd::from_f64(contact.prescribed_surface_velocity_mps[1]),
+    )?;
+    let v2 = finite(
+        dot(contact.velocity_weights[2], velocity)
+            - Dd::from_f64(contact.prescribed_surface_velocity_mps[2]),
+    )?;
+    let speed = v1.hypot(v2);
+    if speed.is_finite() {
+        Ok(speed)
+    } else {
+        Err("unrepresentable contact tangent speed")
+    }
+}
 fn negative(value: Dd) -> bool {
     value.hi < 0.0 || (value.hi == 0.0 && value.lo < 0.0)
 }
@@ -231,6 +255,40 @@ impl ExactLinearSolid {
         advance(
             self,
             contacts,
+            initial_forces_n,
+            external_force_n,
+            controls,
+            cx,
+            admit_path,
+        )
+    }
+
+    /// Resolve distinct static capture and kinetic sliding coefficients.
+    ///
+    /// Each contact's `friction_coefficient` is its static bound. Supply the
+    /// kinetic coefficients in the same input order, with `0 <= mu_k <= mu_s`.
+    /// Incoming slip selects the kinetic bound immediately. A resting contact
+    /// first attempts static capture; resolved motion switches it to kinetic
+    /// friction and re-solves every coupled force from the original state.
+    /// Every contact can switch only once, and all attempts share the response
+    /// and native-work budgets. The path witness exposes the selected bounds.
+    /// Stopping, reversal and other interior mode changes still require the
+    /// original whole-path admission and event resolution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_sustained_static_kinetic_contacts<P, E>(
+        &mut self,
+        contacts: &[SolidSustainedContact<'_>],
+        kinetic_coefficients: &[f64],
+        initial_forces_n: &[[f64; 3]],
+        external_force_n: &[f64],
+        controls: SolidSustainedControls,
+        cx: &Cx<'_>,
+        admit_path: impl FnOnce(&SolidSustainedPath<'_, '_>) -> Result<P, E>,
+    ) -> Result<SolidSustainedStep<P>, SolidSustainedError<E>> {
+        advance_with_kinetic(
+            self,
+            contacts,
+            Some(kinetic_coefficients),
             initial_forces_n,
             external_force_n,
             controls,
@@ -314,6 +372,29 @@ pub(crate) fn advance<B: Native, P, E>(
     cx: &Cx<'_>,
     admit_path: impl FnOnce(&SolidSustainedPath<'_, '_, B::Owner>) -> Result<P, E>,
 ) -> Result<SolidSustainedStep<P, B::Step>, SolidSustainedError<E, B::Error>> {
+    advance_with_kinetic(
+        body,
+        contacts,
+        None,
+        initial_forces_n,
+        external_force_n,
+        controls,
+        cx,
+        admit_path,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn advance_with_kinetic<B: Native, P, E>(
+    body: &mut B,
+    contacts: &[SolidSustainedContact<'_>],
+    kinetic_coefficients: Option<&[f64]>,
+    initial_forces_n: &[[f64; 3]],
+    external_force_n: &[f64],
+    controls: SolidSustainedControls,
+    cx: &Cx<'_>,
+    admit_path: impl FnOnce(&SolidSustainedPath<'_, '_, B::Owner>) -> Result<P, E>,
+) -> Result<SolidSustainedStep<P, B::Step>, SolidSustainedError<E, B::Error>> {
     poll(cx)?;
     body.admit(cx).map_err(native_error::<E, B>)?;
     let before = body.state();
@@ -340,6 +421,18 @@ pub(crate) fn advance<B: Native, P, E>(
             "held preparation, complete finite loads, contact count and tolerances required",
         ));
     }
+    if let Some(kinetic) = kinetic_coefficients {
+        if kinetic.len() != m
+            || contacts
+                .iter()
+                .zip(kinetic)
+                .any(|(c, mu)| !mu.is_finite() || *mu < 0.0 || *mu > c.friction_coefficient)
+        {
+            return Err(SolidSustainedError::Invalid(
+                "one finite kinetic coefficient within each static bound required",
+            ));
+        }
+    }
     let (nn, mm) = (n as u128, m as u128);
     bound(
         "native response scratch bytes",
@@ -362,8 +455,8 @@ pub(crate) fn advance<B: Native, P, E>(
     {
         return Err(SolidSustainedError::Invalid("duplicate contact identity"));
     }
-    let ordered: Vec<_> = order.iter().map(|&i| contacts[i]).collect();
-    let initial: Vec<_> = order.iter().map(|&i| initial_forces_n[i]).collect();
+    let mut ordered: Vec<_> = order.iter().map(|&i| contacts[i]).collect();
+    let mut initial: Vec<_> = order.iter().map(|&i| initial_forces_n[i]).collect();
     for c in &ordered {
         if !c.gap_m.is_finite()
             || c.gap_m < 0.0
@@ -394,7 +487,17 @@ pub(crate) fn advance<B: Native, P, E>(
             });
         }
     }
-    let friction: Vec<_> = ordered.iter().map(|c| c.friction_coefficient).collect();
+    if let Some(kinetic) = kinetic_coefficients {
+        for (c, &original_index) in ordered.iter_mut().zip(&order) {
+            let speed = tangent_speed(c, before.velocity)?;
+            // Static strength is available only to an actually resting trace.
+            // The audit tolerance must not turn a small incoming slip into a
+            // fictitious static capture over a finite held-force interval.
+            if speed > 0.0 {
+                c.friction_coefficient = kinetic[original_index];
+            }
+        }
+    }
     let scales: Vec<_> = ordered.iter().map(|c| c.scales).collect();
     let mut workspace = body.workspace().map_err(native_error::<E, B>)?;
     let mut total_force = vec![0.0; n];
@@ -403,72 +506,118 @@ pub(crate) fn advance<B: Native, P, E>(
     let mut evaluations = 0usize;
     let mut exhausted = None;
     let mut cancelled = || cx.checkpoint().is_err();
-    let result = fs_contact::sustained::solve::solve(
-        &friction,
-        &scales,
-        &initial,
-        controls.solve,
-        &mut |forces, stop| {
-            if stop() {
-                return Err(B::cancelled());
-            }
-            let required = (evaluations as u128 + 2) * terms_per_response;
-            if required > controls.maximum_response_multiply_terms as u128 {
-                exhausted = Some(required);
-                return Err(B::invalid(
-                    "sustained native response work budget exhausted",
-                ));
-            }
-            for (j, load) in total_force.iter_mut().enumerate() {
-                let mut sum = Dd::from_f64(external_force_n[j]);
-                for (c, force) in ordered.iter().zip(forces) {
-                    for a in 0..3 {
-                        sum = sum + Dd::from_f64(c.velocity_weights[a][j]) * Dd::from_f64(force[a]);
+    let mut friction_regime_resolves = 0usize;
+    let mut feasibility_refinements = 0usize;
+    let solve = loop {
+        let friction: Vec<_> = ordered.iter().map(|c| c.friction_coefficient).collect();
+        let evaluations_before = evaluations;
+        let mut solve_controls = controls.solve;
+        solve_controls.maximum_response_evaluations = solve_controls
+            .maximum_response_evaluations
+            .saturating_sub(evaluations);
+        if evaluations != 0 && solve_controls.maximum_response_evaluations < 2 {
+            return Err(SolidSustainedError::Budget {
+                resource: "sustained contact response evaluations",
+                required: evaluations as u128 + 2,
+                maximum: controls.solve.maximum_response_evaluations as u128,
+            });
+        }
+        let result = fs_contact::sustained::solve::solve(
+            &friction,
+            &scales,
+            &initial,
+            solve_controls,
+            &mut |forces, stop| {
+                if stop() {
+                    return Err(B::cancelled());
+                }
+                let required = (evaluations as u128 + 2) * terms_per_response;
+                if required > controls.maximum_response_multiply_terms as u128 {
+                    exhausted = Some(required);
+                    return Err(B::invalid(
+                        "sustained native response work budget exhausted",
+                    ));
+                }
+                for (j, load) in total_force.iter_mut().enumerate() {
+                    let mut sum = Dd::from_f64(external_force_n[j]);
+                    for (c, force) in ordered.iter().zip(forces) {
+                        for a in 0..3 {
+                            sum = sum
+                                + Dd::from_f64(c.velocity_weights[a][j]) * Dd::from_f64(force[a]);
+                        }
                     }
+                    *load = finite(sum).map_err(B::invalid)?;
                 }
-                *load = finite(sum).map_err(B::invalid)?;
-            }
-            evaluations += 1;
-            body.evaluate(&total_force, &mut workspace, cx)?;
-            if stop() {
-                return Err(B::cancelled());
-            }
-            for (i, du) in displacement.iter_mut().enumerate() {
-                *du = body.displacement(&workspace)[i] - before.displacement[i];
-            }
-            let mut paths = Vec::with_capacity(m);
-            for c in &ordered {
-                let mut path = [0.0; 3];
-                for a in 0..3 {
-                    let relative = dot(c.velocity_weights[a], &displacement)
-                        - Dd::from_f64(h) * Dd::from_f64(c.prescribed_surface_velocity_mps[a]);
-                    path[a] = finite(relative + Dd::from_f64(if a == 0 { c.gap_m } else { 0.0 }))
-                        .map_err(B::invalid)?;
+                evaluations += 1;
+                body.evaluate(&total_force, &mut workspace, cx)?;
+                if stop() {
+                    return Err(B::cancelled());
                 }
-                paths.push(path);
+                for (i, du) in displacement.iter_mut().enumerate() {
+                    *du = body.displacement(&workspace)[i] - before.displacement[i];
+                }
+                let mut paths = Vec::with_capacity(m);
+                for c in &ordered {
+                    let mut path = [0.0; 3];
+                    for a in 0..3 {
+                        let relative = dot(c.velocity_weights[a], &displacement)
+                            - Dd::from_f64(h) * Dd::from_f64(c.prescribed_surface_velocity_mps[a]);
+                        path[a] =
+                            finite(relative + Dd::from_f64(if a == 0 { c.gap_m } else { 0.0 }))
+                                .map_err(B::invalid)?;
+                    }
+                    paths.push(path);
+                }
+                final_forces.copy_from_slice(forces);
+                Ok(paths)
+            },
+            &mut cancelled,
+        );
+        if let Some(required) = exhausted {
+            return Err(SolidSustainedError::Budget {
+                resource: "native response multiply terms",
+                required,
+                maximum: controls.maximum_response_multiply_terms as u128,
+            });
+        }
+        let mut solve = result.map_err(|error| match error {
+            SolveError::Cancelled => SolidSustainedError::Cancelled,
+            SolveError::Response(error) if B::is_cancelled(&error) => {
+                SolidSustainedError::Cancelled
             }
-            final_forces.copy_from_slice(forces);
-            Ok(paths)
-        },
-        &mut cancelled,
-    );
-    if let Some(required) = exhausted {
-        return Err(SolidSustainedError::Budget {
-            resource: "native response multiply terms",
-            required,
-            maximum: controls.maximum_response_multiply_terms as u128,
-        });
-    }
-    let solve = result.map_err(|error| match error {
-        SolveError::Cancelled => SolidSustainedError::Cancelled,
-        SolveError::Response(error) if B::is_cancelled(&error) => SolidSustainedError::Cancelled,
-        error => SolidSustainedError::Solve(Box::new(error)),
-    })?;
-    if evaluations != solve.response_evaluations || final_forces != solve.forces_n {
-        return Err(SolidSustainedError::Invalid(
-            "missing original final force replay",
-        ));
-    }
+            error => SolidSustainedError::Solve(Box::new(error)),
+        })?;
+        if evaluations - evaluations_before != solve.response_evaluations
+            || final_forces != solve.forces_n
+        {
+            return Err(SolidSustainedError::Invalid(
+                "missing original final force replay",
+            ));
+        }
+        feasibility_refinements += solve.feasibility_refinements;
+        let mut switched = false;
+        if let Some(kinetic) = kinetic_coefficients {
+            for (i, (c, &original_index)) in ordered.iter_mut().zip(&order).enumerate() {
+                let mu_k = kinetic[original_index];
+                if c.friction_coefficient != mu_k
+                    && (solve.paths_m[i][1].hypot(solve.paths_m[i][2])
+                        > controls.displacement_tolerance_m
+                        || tangent_speed(c, body.velocity(&workspace))?
+                            > controls.velocity_tolerance_mps)
+                {
+                    c.friction_coefficient = mu_k;
+                    switched = true;
+                }
+            }
+        }
+        if !switched {
+            solve.response_evaluations = evaluations;
+            solve.feasibility_refinements = feasibility_refinements;
+            break solve;
+        }
+        friction_regime_resolves += 1;
+        initial.copy_from_slice(&solve.forces_n);
+    };
     poll(cx)?;
     let work = body
         .work(&total_force, &workspace, cx)
@@ -501,6 +650,7 @@ pub(crate) fn advance<B: Native, P, E>(
     .map_err(SolidSustainedError::Path)?;
     poll(cx)?;
     let contact_ids = ordered.iter().map(|c| c.id).collect();
+    let friction_coefficients = ordered.iter().map(|c| c.friction_coefficient).collect();
     // Original physical, cumulative-work and viscosity gates precede its
     // sole publication; no fallible contact operation follows acceptance.
     let native = body
@@ -509,6 +659,8 @@ pub(crate) fn advance<B: Native, P, E>(
     Ok(SolidSustainedStep {
         native,
         contact_ids,
+        friction_coefficients,
+        friction_regime_resolves,
         solve,
         path_admission,
         displacement_change_m: displacement,

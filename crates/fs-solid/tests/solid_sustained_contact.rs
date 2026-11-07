@@ -616,3 +616,6 @@ fn g4_path_refusal_cancellation_and_native_budgets_leave_exact_retry() {
 
 #[path = "solid_sustained_contact/elliptic.rs"]
 mod elliptic;
+
+#[path = "solid_sustained_contact/static_kinetic.rs"]
+mod static_kinetic;

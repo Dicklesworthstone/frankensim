@@ -93,6 +93,42 @@ impl SupportedSpectralSolid {
             admit_path,
         )
     }
+
+    /// Resolve static capture and kinetic sliding with original support motion
+    /// and actuator work. Contact coefficients are static, and kinetic bounds
+    /// are supplied in the same contact order with `0 <= mu_k <= mu_s`.
+    /// All coupled regime re-solves retain the same predecessor, support input
+    /// and global response/work budgets. The path callback observes the selected
+    /// bounds and must still exclude interior stopping or mode changes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_sustained_static_kinetic_contacts<P, E>(
+        &mut self,
+        support_acceleration_end_mps2: &[f64],
+        contacts: &[SolidSustainedContact<'_>],
+        kinetic_coefficients: &[f64],
+        initial_forces_n: &[[f64; 3]],
+        external_force_n: &[f64],
+        controls: SolidSustainedControls,
+        cx: &Cx<'_>,
+        admit_path: impl FnOnce(&SolidSustainedPath<'_, '_, Self>) -> core::result::Result<P, E>,
+    ) -> core::result::Result<
+        SolidSustainedStep<P, SupportedSolidStep>,
+        SolidSustainedError<E, SupportedSolidError>,
+    > {
+        contact::advance_with_kinetic(
+            &mut Interval {
+                body: self,
+                acceleration_end: support_acceleration_end_mps2,
+            },
+            contacts,
+            Some(kinetic_coefficients),
+            initial_forces_n,
+            external_force_n,
+            controls,
+            cx,
+            admit_path,
+        )
+    }
 }
 
 impl Native for Interval<'_> {

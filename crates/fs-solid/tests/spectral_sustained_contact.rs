@@ -211,6 +211,42 @@ fn admit_rigid(
 }
 
 #[test]
+fn distinct_static_and_kinetic_bounds_use_the_complete_spectral_flow() {
+    with_cx(|cx, _| {
+        let h = 0.125;
+        for (incoming, load) in [(0.0, 3.0), (0.0, 6.0), (1.0, 0.0)] {
+            let mut solid = point(h, [incoming, 0.0, 0.0], cx);
+            let step = solid
+                .advance_sustained_static_kinetic_contacts(
+                    &[contact(h, 0.6, [0.0; 3])],
+                    &[0.25],
+                    &[[0.0; 3]],
+                    &[load, -8.0, 0.0],
+                    controls(),
+                    cx,
+                    |p| admit_rigid(p, &I),
+                )
+                .unwrap();
+            let sliding = incoming > 0.0 || load > 4.8;
+            let friction = if sliding { 2.0 } else { load };
+            let acceleration = load - friction;
+            let travel = incoming * h + 0.5 * acceleration * h * h;
+            near(step.solve.forces_n[0][1], -friction, 1e-8);
+            near(solid.velocity_mps()[0], incoming + acceleration * h, 1e-9);
+            near(solid.displacement_m()[0], travel, 1e-10);
+            near(step.frictional_dissipation_j, friction * travel, 1e-9);
+            assert_eq!(
+                step.friction_coefficients,
+                [if sliding { 0.25 } else { 0.6 }]
+            );
+            assert_eq!(step.friction_regime_resolves, usize::from(load > 4.8));
+            near(solid.time_s(), h, 0.0);
+            energy(&step);
+        }
+    });
+}
+
+#[test]
 fn g1_spectral_sticking_breakaway_and_circular_sliding_retain_original_work() {
     with_cx(|cx, _| {
         let h = 0.125;

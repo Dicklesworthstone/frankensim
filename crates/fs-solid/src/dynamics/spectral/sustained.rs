@@ -80,6 +80,38 @@ impl CompleteSpectralSolid {
             admit_path,
         )
     }
+
+    /// Use separate static and kinetic bounds on the complete modal response.
+    /// Contact coefficients are static; `kinetic_coefficients` use the same
+    /// input order and must lie between zero and their static bounds. Incoming
+    /// slip selects kinetic friction; resting contacts that break away trigger
+    /// a coupled re-solve under the shared response/work budgets. The original
+    /// physical audits and mandatory whole-path admission still gate acceptance.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_sustained_static_kinetic_contacts<P, E>(
+        &mut self,
+        contacts: &[SolidSustainedContact<'_>],
+        kinetic_coefficients: &[f64],
+        initial_forces_n: &[[f64; 3]],
+        external_force_n: &[f64],
+        controls: SolidSustainedControls,
+        cx: &Cx<'_>,
+        admit_path: impl FnOnce(&SolidSustainedPath<'_, '_, Self>) -> core::result::Result<P, E>,
+    ) -> core::result::Result<
+        SolidSustainedStep<P>,
+        SolidSustainedError<E, CompleteSpectralSolidError>,
+    > {
+        contact::advance_with_kinetic(
+            self,
+            contacts,
+            Some(kinetic_coefficients),
+            initial_forces_n,
+            external_force_n,
+            controls,
+            cx,
+            admit_path,
+        )
+    }
 }
 
 impl Native for CompleteSpectralSolid {

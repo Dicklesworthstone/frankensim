@@ -169,7 +169,7 @@ fn rotated_oblique_ellipse_uses_maximum_dissipation_not_opposite_velocity() {
     with_cx(|cx, _| {
         let h = 0.125;
         let velocity = [1.2, 0.0, 0.9];
-        let mu = [0.8, 0.2];
+        let mu: [f64; 2] = [0.8, 0.2];
         let u = [0.6, 0.8];
         let vp = [
             u[0] * velocity[0] + u[1] * velocity[2],

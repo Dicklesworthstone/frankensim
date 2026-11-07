@@ -1650,6 +1650,36 @@ with cross mass and load partition, native continuation, and transactional
 refusal including the original whole-supported energy gate. Geometry/event
 discovery and allocation of frictional loss to thermal owners remain separate.
 
+### Distinct static and kinetic sustained friction
+
+`advance_sustained_static_kinetic_contacts` on `ExactLinearSolid`,
+`CompleteSpectralSolid` and `SupportedSpectralSolid` resolves separate static
+capture and kinetic sliding strengths. Each contact's existing coefficient is
+the static bound; a same-order kinetic slice must satisfy `0 <= mu_k <= mu_s`.
+Any nonzero incoming relative tangential speed selects kinetic friction before
+the first force response. A resting trace first attempts static capture. If
+that coupled solution has resolved tangential travel or endpoint speed, the
+trace switches to its kinetic bound and all coupled forces are solved again
+from the same original native predecessor. Each contact switches at most once.
+
+Every re-solve shares the original response-count and native-product budgets,
+prepared matrices, source/support inputs and reusable response scratch. No
+intermediate trial state, clock, energy or support account is published. The
+receipt reports the selected coefficients and number of regime re-solves in
+canonical contact-ID order; `solve.response_evaluations` and feasibility
+refinements include every attempt. The final solve retains its Newton report.
+Equal static/kinetic coefficients retain the original single-cone result.
+
+The final physical mode/work gates and mandatory whole-path callback apply to
+the selected friction law. The callback receives those actual coefficients.
+Interior stopping, reversal, loading changes or recapture still require event
+resolution; this held-force interval does not replace that geometric/temporal
+owner. Relative frictional loss stays separate from physical viscosity,
+surface work, support-actuator work and any downstream thermal allocation.
+Focused native regressions cover static hold, breakaway acceleration/work,
+pre-existing slip, translating surfaces, support reactions and actuator work,
+equal-coefficient equivalence and atomic budget/invalid-input/path refusals.
+
 ### Sustained directional Coulomb ellipses
 
 `advance_sustained_elliptic_contacts` on `ExactLinearSolid`,

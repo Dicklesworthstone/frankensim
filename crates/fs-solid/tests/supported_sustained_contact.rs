@@ -185,6 +185,84 @@ fn admit_steady(
 }
 
 #[test]
+fn kinetic_sliding_keeps_prescribed_support_reactions_and_actuator_work() {
+    with_cx(|cx, _| {
+        let h = 0.125;
+        for boost in [[0.0, 0.0], [7.0, -2.0]] {
+            let mut solid = point(h, boost, cx);
+            let step = solid
+                .advance_sustained_static_kinetic_contacts(
+                    &[0.0],
+                    &[contact(h, 0.8, [0.0, boost[0], boost[1]])],
+                    &[0.5],
+                    &[[10.0, -3.0, -4.0]],
+                    &[3.0, -10.0, 0.0],
+                    controls(),
+                    cx,
+                    admit_steady,
+                )
+                .unwrap();
+            near(step.solve.forces_n[0][1], -3.0, 1e-9);
+            near(step.solve.forces_n[0][2], -4.0, 1e-9);
+            near(step.native.support_reaction_n[0], 4.0, 1e-9);
+            near(step.support_work_j, 4.0 * (4.0 + boost[1]) * h, 1e-9);
+            near(step.frictional_dissipation_j, 25.0 * h, 1e-9);
+            assert_eq!(step.friction_coefficients, [0.5]);
+            assert_eq!(step.friction_regime_resolves, 0);
+            energy(&step);
+        }
+    });
+}
+
+#[test]
+fn supported_resting_contacts_capture_or_break_away_from_the_original_state() {
+    with_cx(|cx, _| {
+        let h = 0.125;
+        for load in [9.0, 14.0] {
+            let mut solid = point(h, [-3.0, -4.0], cx);
+            let friction = if load > 12.0 { 6.0 } else { load };
+            let acceleration = load - friction;
+            let step = solid
+                .advance_sustained_static_kinetic_contacts(
+                    &[0.0],
+                    &[contact(h, 0.6, [0.0; 3])],
+                    &[0.3],
+                    &[[0.0; 3]],
+                    &[load, -20.0, 0.0],
+                    controls(),
+                    cx,
+                    |p| {
+                        // M=I, K=0 and the support is stationary. The original
+                        // free trajectory is this constant-acceleration curve.
+                        near(p.total_force_n[0], acceleration, 1e-8);
+                        near(p.total_force_n[1], 0.0, 1e-8);
+                        assert!(acceleration >= 0.0);
+                        near(p.velocity_after_mps[0], h * acceleration, 1e-9);
+                        near(
+                            p.displacement_change_m[0],
+                            0.5 * h * h * acceleration,
+                            1e-10,
+                        );
+                        near(p.velocity_after_mps[2], 0.0, 0.0);
+                        Ok::<_, &'static str>(())
+                    },
+                )
+                .unwrap();
+            near(step.solve.forces_n[0][1], -friction, 1e-8);
+            near(
+                step.frictional_dissipation_j,
+                friction * 0.5 * h * h * acceleration,
+                1e-9,
+            );
+            near(step.support_work_j, 0.0, 1e-9);
+            assert_eq!(step.friction_regime_resolves, usize::from(load > 12.0));
+            near(solid.time_s(), h, 0.0);
+            energy(&step);
+        }
+    });
+}
+
+#[test]
 fn g1_contact_loads_on_prescribed_coordinates_retain_actuator_work_and_boosts() {
     with_cx(|cx, _| {
         let h = 0.125;
