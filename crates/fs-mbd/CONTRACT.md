@@ -51,6 +51,28 @@ entry includes an independent continuous rotated symmetric-top reference for
 all three explicit paths, with spatial momentum and kinetic-energy checks.
 Native group admission and representability limits apply to the shared drift.
 
+## Fourth-order free rigid-body motion
+
+`RigidBodyIntegrator::step_free_fourth_order` composes the shared compensated
+principal-axis Hamiltonian flows with fourth-order symmetric coefficients.
+Full nonprincipal inertia uses the cached original principal frame; the hot
+path allocates nothing and performs no factorization or nonlinear solve.
+Seven merged residual axis flows and one commuting spherical flow advance
+asymmetric rotation. Spherical and axisymmetric bodies retain the original
+exact flow. Every attitude increment transports angular momentum by its
+inverse, preserving spatial spin to roundoff. The existing compensated native
+translation remains exact for the integrator's configured uniform gravity.
+
+This optional entry accepts no external wrench, contact or dissipative law;
+its negative internal stages belong only to smooth free rotation. It does not
+change existing step defaults or upgrade the order of a caller's surrounding
+load splitting. Finite asymmetric energy and phase require timestep refinement;
+no exact-energy or discrete-adjoint claim is made. The independent Euler-flow
+order and equal-flow-count accuracy tests live at the shared `fs-time` owner.
+Native `tests/angular_momentum_stages.rs` additionally checks full-inertia
+linear/spin/orbital momentum, long-trajectory reversibility, analytic gravity
+ballistics and the external orbital angular impulse from uniform gravity.
+
 
 ## Simultaneous internal-wrench networks and finite motion
 

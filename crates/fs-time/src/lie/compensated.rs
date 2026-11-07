@@ -50,6 +50,39 @@ pub fn rigid_body_momentum_step(
     Ok((finish_attitude(rotation, increment)?, next))
 }
 
+/// Fourth-order free rotation with retained principal-frame angular momentum.
+///
+/// This uses the symmetric Yoshida composition of the original residual
+/// Hamiltonians. Adjacent rotations about the same principal axis are merged,
+/// and the commuting spherical flow is evaluated only once. An asymmetric
+/// body therefore needs seven scalar axis flows and one spherical flow,
+/// instead of twelve exponentials from three complete second-order steps.
+/// Spherical and axisymmetric bodies retain the original exact flow bitwise.
+/// Each flow pairs the attitude increment with inverse momentum transport:
+/// spatial angular momentum is preserved without a projection or rescaling.
+///
+/// The internal negative substeps are valid for this smooth conservative free
+/// flow only. They must not be reused as negative diffusion, contact or damping
+/// steps. Fourth-order phase and energy errors require resolved fixed steps;
+/// this is not exact energy conservation for an asymmetric body. No allocation,
+/// iteration, per-step factorization or additional public state is introduced.
+/// Coefficients follow Yoshida, Phys. Lett. A 150 (1990), 262--268,
+/// <https://doi.org/10.1016/0375-9601(90)90092-3>.
+///
+/// # Errors
+/// The same finite-parameter, arithmetic and group refusals as
+/// [`rigid_body_momentum_step`]. Negative durations give the inverse map.
+pub fn rigid_body_momentum_step_fourth_order(
+    rotation: So3,
+    momentum: [Dd; 3],
+    inertia: Vec3,
+    h: f64,
+) -> Result<(So3, [Dd; 3]), LieStepError> {
+    let momentum = admit(momentum, inertia, h)?;
+    let (increment, next) = principal_step_order(momentum, inertia, h, true)?;
+    Ok((finish_attitude(rotation, increment)?, next))
+}
+
 /// The same compensated map for a full SPD inertia in fixed body coordinates.
 ///
 /// `principal_to_body` is the admitted, fixed principal frame and `inertia`
@@ -72,15 +105,57 @@ pub fn rigid_body_momentum_step_in_frame(
     principal_to_body: So3,
     h: f64,
 ) -> Result<(So3, [Dd; 3]), LieStepError> {
+    step_in_frame(
+        rotation,
+        momentum_body,
+        inertia,
+        principal_to_body,
+        h,
+        false,
+    )
+}
+
+/// Full-tensor counterpart of [`rigid_body_momentum_step_fourth_order`].
+///
+/// The cached principal frame is fixed throughout the step. Both public
+/// momentum endpoints remain in the original body coordinates, and the same
+/// conjugated group increment drives attitude and momentum. The fourth-order
+/// claim concerns the free smooth rotation only, not a surrounding forced,
+/// dissipative, constrained or adaptive composition.
+///
+/// # Errors
+/// The same refusals as [`rigid_body_momentum_step_fourth_order`].
+pub fn rigid_body_momentum_step_fourth_order_in_frame(
+    rotation: So3,
+    momentum_body: [Dd; 3],
+    inertia: Vec3,
+    principal_to_body: So3,
+    h: f64,
+) -> Result<(So3, [Dd; 3]), LieStepError> {
+    step_in_frame(rotation, momentum_body, inertia, principal_to_body, h, true)
+}
+
+fn step_in_frame(
+    rotation: So3,
+    momentum_body: Vector,
+    inertia: Vec3,
+    principal_to_body: So3,
+    h: f64,
+    fourth_order: bool,
+) -> Result<(So3, Vector), LieStepError> {
     if principal_to_body == So3::identity() || (inertia.x == inertia.y && inertia.y == inertia.z) {
         // Spherical inertia has no preferred principal frame. Preserve its
         // analytic unchanged body momentum instead of rotating it roundtrip.
-        return rigid_body_momentum_step(rotation, momentum_body, inertia, h);
+        return if fourth_order {
+            rigid_body_momentum_step_fourth_order(rotation, momentum_body, inertia, h)
+        } else {
+            rigid_body_momentum_step(rotation, momentum_body, inertia, h)
+        };
     }
     let original = admit(momentum_body, inertia, h)?;
     let basis = product(principal_to_body);
     let principal = rotate(conjugate(basis), original)?;
-    let (increment, _) = principal_step(principal, inertia, h)?;
+    let (increment, _) = principal_step_order(principal, inertia, h, fourth_order)?;
     let vector = rotate(basis, [increment[1], increment[2], increment[3]])?;
     let body_increment = [increment[0], vector[0], vector[1], vector[2]];
     let next = rotate(conjugate(body_increment), original)?;
@@ -109,9 +184,18 @@ fn admit(momentum: Vector, inertia: Vec3, h: f64) -> Result<Vector, LieStepError
 }
 
 fn principal_step(
+    momentum: Vector,
+    inertia: Vec3,
+    h: f64,
+) -> Result<(Product, Vector), LieStepError> {
+    principal_step_order(momentum, inertia, h, false)
+}
+
+fn principal_step_order(
     mut momentum: Vector,
     inertia: Vec3,
     h: f64,
+    fourth_order: bool,
 ) -> Result<(Product, Vector), LieStepError> {
     let moments = [inertia.x, inertia.y, inertia.z];
     let mut axes = [0, 1, 2];
@@ -140,6 +224,25 @@ fn principal_step(
         axis_step(b, 1.0)?;
     } else if moments[b] == reference {
         axis_step(a, 1.0)?;
+    } else if fourth_order {
+        // S4(h) = S2(w1*h) S2(w0*h) S2(w1*h), with
+        // 2*w1+w0=1 and 2*w1^3+w0^3=0. Merge the two adjacent A flows
+        // at each composition boundary; the commuting spherical flow below
+        // has the original full duration rather than three rounded durations.
+        const W1: f64 = 1.351_207_191_959_657_8;
+        const W0: f64 = 1.0 - 2.0 * W1;
+        const JOINED_HALF: f64 = 0.5 * (1.0 - W1);
+        for (axis, fraction) in [
+            (a, 0.5 * W1),
+            (b, W1),
+            (a, JOINED_HALF),
+            (b, W0),
+            (a, JOINED_HALF),
+            (b, W1),
+            (a, 0.5 * W1),
+        ] {
+            axis_step(axis, fraction)?;
+        }
     } else {
         axis_step(a, 0.5)?;
         axis_step(b, 1.0)?;

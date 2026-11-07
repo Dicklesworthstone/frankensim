@@ -1230,8 +1230,14 @@ impl RigidBodyState {
             properties.mass,
             components(properties.principal_inertia_body),
             properties.principal_to_body.components(),
-            [components(self.linear_momentum_world), components(self.angular_momentum_body)],
-            [components(after.linear_momentum_world), components(after.angular_momentum_body)],
+            [
+                components(self.linear_momentum_world),
+                components(self.angular_momentum_body),
+            ],
+            [
+                components(after.linear_momentum_world),
+                components(after.angular_momentum_body),
+            ],
         );
         Ok(())
     }
@@ -1426,12 +1432,10 @@ impl MomentumWork {
     fn add(&mut self, before: Vec3, after: Vec3, momentum: [Dd; 3]) {
         let old = [before.x, before.y, before.z];
         let new = [after.x, after.y, after.z];
-        let mean = core::array::from_fn(|i| {
-            Dd::from_f64(0.5 * old[i]) + Dd::from_f64(0.5 * new[i])
-        });
+        let mean =
+            core::array::from_fn(|i| Dd::from_f64(0.5 * old[i]) + Dd::from_f64(0.5 * new[i]));
         self.add_compensated(mean, momentum);
     }
-
 }
 
 fn midpoint_momentum_pairing(before: Vec3, after: Vec3, momentum: [Dd; 3]) -> Dd {
@@ -2365,6 +2369,16 @@ fn free_rotation_step_compensated(
     properties: MassProperties,
     duration_seconds: f64,
 ) -> Result<(UnitQuaternion, [Dd; 3]), DynamicsError> {
+    free_rotation_step_compensated_order(orientation, momentum, properties, duration_seconds, false)
+}
+
+fn free_rotation_step_compensated_order(
+    orientation: UnitQuaternion,
+    momentum: [Dd; 3],
+    properties: MassProperties,
+    duration_seconds: f64,
+    fourth_order: bool,
+) -> Result<(UnitQuaternion, [Dd; 3]), DynamicsError> {
     properties.angular_velocity_body_checked(verlet::rounded(
         momentum,
         "free_rotation.angular_momentum",
@@ -2379,7 +2393,12 @@ fn free_rotation_step_compensated(
         .map_err(|_| DynamicsError::InvalidOrientation)
     };
     let moments = properties.principal_inertia_body;
-    let (next, momentum) = fs_time::lie::compensated::rigid_body_momentum_step_in_frame(
+    let free_step = if fourth_order {
+        fs_time::lie::compensated::rigid_body_momentum_step_fourth_order_in_frame
+    } else {
+        fs_time::lie::compensated::rigid_body_momentum_step_in_frame
+    };
+    let (next, momentum) = free_step(
         rotation(orientation)?,
         momentum,
         fs_ga::Vec3::new(moments.x, moments.y, moments.z),

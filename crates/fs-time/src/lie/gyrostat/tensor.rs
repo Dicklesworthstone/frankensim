@@ -223,6 +223,31 @@ impl InertiaTensor3 {
         )
     }
 
+    /// Fourth-order smooth free rotation in this tensor's original body frame.
+    ///
+    /// Reuses the cached principal frame and the merged conservative subflows
+    /// of [`crate::lie::compensated::rigid_body_momentum_step_fourth_order_in_frame`].
+    /// No internal rotor, force, damping or constraint step is composed here.
+    /// Spherical and axisymmetric bodies retain the original exact free map.
+    ///
+    /// # Errors
+    /// The same finite-parameter, arithmetic and group refusals as
+    /// [`Self::compensated_momentum_step`].
+    pub fn compensated_momentum_step_fourth_order(
+        self,
+        rotation: So3,
+        momentum_body: [Dd; 3],
+        dt: f64,
+    ) -> Result<(So3, [Dd; 3]), LieStepError> {
+        super::super::compensated::rigid_body_momentum_step_fourth_order_in_frame(
+            rotation,
+            momentum_body,
+            self.principal,
+            self.principal_to_body,
+            dt,
+        )
+    }
+
     /// Rigid rotation under a time- and orientation-dependent torque.
     ///
     /// This is the full-inertia counterpart of

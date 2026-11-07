@@ -104,6 +104,21 @@ where claimed below.
   nonlinear solve, renormalization or momentum projection. Nonfinite or
   unrepresentable derived arithmetic refuses; this is neither an interval
   certificate nor an exact-energy claim for asymmetric finite steps.
+- `lie::compensated::{rigid_body_momentum_step_fourth_order,
+  rigid_body_momentum_step_fourth_order_in_frame}` advances smooth free rotation
+  with the symmetric fourth-order Yoshida composition. The cached full tensor
+  exposes this as `InertiaTensor3::compensated_momentum_step_fourth_order`.
+  Adjacent equal-axis flows merge, and the commuting spherical flow runs once:
+  asymmetric rotation uses eight elementary flows instead of twelve for three
+  complete second-order steps. All phases, products and paired inverse momentum
+  transports retain DD tails. Spherical/axisymmetric cases retain the original
+  exact flow bitwise. `tests/lie_compensated.rs` verifies fourth-order convergence
+  against an independent continuous Euler/quaternion RK4 oracle, phase accuracy
+  at equal elementary-flow count, spatial momentum, retained momentum norm,
+  signed-time reversibility, and exact-top parity. Negative internal substeps
+  apply only to this conservative free flow. This entry neither increases the
+  order of separately composed loads/contact/damping nor claims exact asymmetric
+  energy, a discrete adjoint, or a wall-clock speedup.
 - `lie::rigid_body_torque_step(R, omega_body, I, torque_body, h)` and
   `lie::rigid_body_spatial_torque_step(R, omega_body, I, torque_space, h)`
   apply held center-of-mass torques through symmetric momentum half-kicks
@@ -1079,8 +1094,9 @@ per-relation and aggregate reset-target caps.
   solve tolerance. Revolve checkpointing (O(N) memory today) remains follow-up
   work. The variational lane's group update solves the
   midpoint transported-momentum fixed point; no claim of equivalence
-  to any OTHER published DEP variant. No higher-order compositions
-  (Yoshida/Suzuki), no splitting beyond kick–drift–kick.
+  to any OTHER published DEP variant. The DEP lane has no higher-order
+  compositions or splitting beyond kick–drift–kick; the separate compensated
+  free-rotation lane explicitly provides the fourth-order composition above.
 - No Krylov φ-actions for large nonsymmetric A (needs Arnoldi);
   `ExpEuler` is dense-symmetric only. No Rosenbrock/SDIRK families,
   no BDF/multistep.

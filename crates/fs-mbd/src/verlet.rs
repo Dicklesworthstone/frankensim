@@ -1,7 +1,7 @@
 //! Native Verlet stages for configuration-coupled endpoint forces.
 use super::{
     DynamicsDiagnostics, DynamicsError, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState,
-    StepReceipt, Vec3, Wrench, finite_derived, free_rotation_step_compensated,
+    StepReceipt, Vec3, Wrench, finite_derived, free_rotation_step_compensated_order,
 };
 use fs_math::dd::Dd;
 
@@ -43,6 +43,40 @@ impl RigidBodyIntegrator {
         wrench_before: Wrench,
         duration_seconds: f64,
     ) -> Result<VerletStage, DynamicsError> {
+        self.begin_verlet_order(state, properties, wrench_before, duration_seconds, false)
+    }
+
+    /// Advance a freely rotating full-inertia body with fourth-order accuracy.
+    ///
+    /// The smooth conservative rotation uses seven merged principal-axis flows
+    /// and one commuting spherical flow, preserving spatial angular momentum
+    /// through matched attitude and momentum transport. Translation under this
+    /// integrator's uniform gravity remains exact. With zero gravity, both
+    /// linear and spin-plus-orbital angular momentum are preserved to roundoff.
+    /// Spherical and axisymmetric free rotation retain the native exact map.
+    ///
+    /// No external wrench, contact, joint or dissipative law is advanced here.
+    /// The negative internal composition stages belong to free rotation only.
+    /// Fixed timesteps still require refinement for asymmetric energy and phase;
+    /// fourth order is not exact energy conservation or a discrete adjoint.
+    pub fn step_free_fourth_order(
+        self,
+        state: RigidBodyState,
+        properties: MassProperties,
+        duration_seconds: f64,
+    ) -> Result<StepReceipt, DynamicsError> {
+        self.begin_verlet_order(state, properties, Wrench::ZERO, duration_seconds, true)?
+            .finish(Wrench::ZERO)
+    }
+
+    fn begin_verlet_order(
+        self,
+        state: RigidBodyState,
+        properties: MassProperties,
+        wrench_before: Wrench,
+        duration_seconds: f64,
+        fourth_order: bool,
+    ) -> Result<VerletStage, DynamicsError> {
         if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
             return Err(DynamicsError::InvalidStepDuration);
         }
@@ -64,11 +98,12 @@ impl RigidBodyIntegrator {
             wrench_before.torque_body,
             duration_seconds,
         );
-        let (orientation_after, angular_momentum_drifted) = free_rotation_step_compensated(
+        let (orientation_after, angular_momentum_drifted) = free_rotation_step_compensated_order(
             state.pose.orientation,
             angular_kicked,
             properties,
             duration_seconds,
+            fourth_order,
         )?;
         let position_after = drift_position(
             state.pose.position_world,

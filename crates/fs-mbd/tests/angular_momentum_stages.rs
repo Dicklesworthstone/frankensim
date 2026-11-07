@@ -295,6 +295,131 @@ fn asymmetric_body() -> (MassProperties, RigidBodyState) {
 }
 
 #[test]
+fn fourth_order_free_body_preserves_linear_spin_and_orbital_momentum_and_reverses() {
+    let (properties, spin) = asymmetric_body();
+    let initial = RigidBodyState::new(
+        Pose::new(Vec3::new(1.2, -0.4, 0.7), spin.pose().orientation()).unwrap(),
+        Vec3::new(0.5, 0.9, -0.2),
+        spin.angular_momentum_body(),
+    )
+    .unwrap();
+    let before = engine().diagnostics(initial, properties).unwrap();
+    let mut state = initial;
+    let dt = 0.125;
+    for _ in 0..128 {
+        state = engine()
+            .step_free_fourth_order(state, properties, dt)
+            .unwrap()
+            .state_after;
+        assert_eq!(
+            state.linear_momentum_world(),
+            initial.linear_momentum_world()
+        );
+        vector_close(world_spin(state), world_spin(initial), 2e-12);
+        vector_close(
+            engine()
+                .diagnostics(state, properties)
+                .unwrap()
+                .angular_momentum_world,
+            before.angular_momentum_world,
+            2e-12,
+        );
+    }
+    vector_close(
+        state.pose().position_world(),
+        initial.pose().position_world().add(
+            initial
+                .linear_momentum_world()
+                .scale(16.0 / properties.mass()),
+        ),
+        5e-14,
+    );
+    state = reversed(state);
+    for _ in 0..128 {
+        state = engine()
+            .step_free_fourth_order(state, properties, dt)
+            .unwrap()
+            .state_after;
+    }
+    vector_close(
+        state.pose().position_world(),
+        initial.pose().position_world(),
+        5e-14,
+    );
+    rotation_close(
+        state.pose().orientation(),
+        initial.pose().orientation(),
+        2e-12,
+    );
+    vector_close(
+        state.angular_momentum_body(),
+        initial.angular_momentum_body().scale(-1.0),
+        2e-12,
+    );
+}
+
+#[test]
+fn fourth_order_free_body_keeps_exact_uniform_gravity_and_external_angular_impulse() {
+    let (properties, spin) = asymmetric_body();
+    let position = Vec3::new(1.2, -0.4, 0.7);
+    let momentum = Vec3::new(0.5, 0.9, -0.2);
+    let initial = RigidBodyState::new(
+        Pose::new(position, spin.pose().orientation()).unwrap(),
+        momentum,
+        spin.angular_momentum_body(),
+    )
+    .unwrap();
+    let acceleration = Vec3::new(0.3, -9.81, -0.5);
+    let integrator = RigidBodyIntegrator::new(Gravity::new(acceleration).unwrap());
+    let duration = 1.7;
+    let after = integrator
+        .step_free_fourth_order(initial, properties, duration)
+        .unwrap()
+        .state_after;
+    let velocity = momentum.scale(1.0 / properties.mass());
+    let force = acceleration.scale(properties.mass());
+    vector_close(
+        after.pose().position_world(),
+        position
+            .add(velocity.scale(duration))
+            .add(acceleration.scale(0.5 * duration * duration)),
+        5e-14,
+    );
+    vector_close(
+        after.linear_momentum_world(),
+        momentum.add(force.scale(duration)),
+        5e-14,
+    );
+    vector_close(world_spin(after), world_spin(initial), 5e-14);
+    // Independently integrate x(t) cross (m g). The acceleration term
+    // contributes no torque because g cross g is zero.
+    let angular_impulse = position
+        .cross(force)
+        .scale(duration)
+        .add(velocity.cross(force).scale(0.5 * duration * duration));
+    let before_diagnostics = integrator.diagnostics(initial, properties).unwrap();
+    let after_diagnostics = integrator.diagnostics(after, properties).unwrap();
+    vector_close(
+        after_diagnostics
+            .angular_momentum_world
+            .sub(before_diagnostics.angular_momentum_world),
+        angular_impulse,
+        2e-13,
+    );
+    let back = integrator
+        .step_free_fourth_order(reversed(after), properties, duration)
+        .unwrap()
+        .state_after;
+    vector_close(back.pose().position_world(), position, 5e-14);
+    vector_close(back.linear_momentum_world(), momentum.scale(-1.0), 5e-14);
+    rotation_close(
+        back.pose().orientation(),
+        initial.pose().orientation(),
+        5e-14,
+    );
+}
+
+#[test]
 fn differing_endpoint_torques_close_world_spin_and_reverse_in_their_own_frames() {
     let (properties, initial) = asymmetric_body();
     let first = Vec3::new(0.31, -0.27, 0.14);

@@ -2,7 +2,10 @@
 
 use fs_ga::{Quat, So3, So3Tangent, Vec3};
 use fs_math::dd::Dd;
-use fs_time::lie::compensated::{rigid_body_momentum_step, rigid_body_momentum_step_in_frame};
+use fs_time::lie::compensated::{
+    rigid_body_momentum_step, rigid_body_momentum_step_fourth_order,
+    rigid_body_momentum_step_fourth_order_in_frame, rigid_body_momentum_step_in_frame,
+};
 use fs_time::lie::{rigid_body_spatial_torque_step, rigid_body_step, rigid_body_torque_step};
 
 const LARGE: f64 = 9_007_199_254_740_992.0;
@@ -257,6 +260,135 @@ fn asymmetric_full_tensor_converges_to_euler_equations_and_preserves_momentum() 
         assert!(errors[d] / errors[d + 1] > 3.8, "errors: {errors:?}");
         assert!(errors[d] / errors[d + 1] < 4.2, "errors: {errors:?}");
     }
+}
+
+#[test]
+fn fourth_order_full_tensor_matches_independent_euler_flow_and_preserves_momentum() {
+    let frame = attitude([0.3, -0.6, 0.15]);
+    let initial_rotation = attitude([-0.2, 0.4, 0.1]);
+    let moments = [2.0, 3.0, 4.0];
+    let initial_momentum = [1.7, -1.4, 2.9];
+    let reference = rk4(
+        ode_state(initial_momentum, initial_rotation, [0.0; 3]),
+        inverse_inertia(moments, frame),
+        3.0,
+        8192,
+    );
+    let initial_space = values(initial_rotation.rotate(vector(initial_momentum)).unwrap());
+    let initial_norm = initial_momentum
+        .map(Dd::from_f64)
+        .map(|v| v * v)
+        .into_iter()
+        .fold(Dd::ZERO, |a, b| a + b);
+    let mut errors = [0.0; 3];
+    for (sample, count) in [8, 16, 32].into_iter().enumerate() {
+        let mut rotation = initial_rotation;
+        let mut momentum = initial_momentum.map(Dd::from_f64);
+        for _ in 0..count {
+            (rotation, momentum) = rigid_body_momentum_step_fourth_order_in_frame(
+                rotation,
+                momentum,
+                vector(moments),
+                frame,
+                3.0 / count as f64,
+            )
+            .unwrap();
+        }
+        errors[sample] = attitude_error(rotation, ode_rotation(reference));
+        for d in 0..3 {
+            errors[sample] += (momentum[d].to_f64() - reference[d]).abs();
+        }
+        let space = values(rotation.rotate(vector(momentum.map(Dd::to_f64))).unwrap());
+        for d in 0..3 {
+            assert!((space[d] - initial_space[d]).abs() < 7.0e-14);
+        }
+        let norm = momentum
+            .map(|v| v * v)
+            .into_iter()
+            .fold(Dd::ZERO, |a, b| a + b);
+        assert!((norm - initial_norm).to_f64().abs() < 3.0e-26);
+    }
+    for sample in 0..2 {
+        assert!(errors[sample] / errors[sample + 1] > 14.5, "{errors:?}");
+        assert!(errors[sample] / errors[sample + 1] < 17.5, "{errors:?}");
+    }
+    let mut second_rotation = initial_rotation;
+    let mut second_momentum = initial_momentum.map(Dd::from_f64);
+    // Even twice as many second-order steps use as many elementary flows as
+    // the merged fourth-order lane. Compare physical phase at equal flow count.
+    for _ in 0..32 {
+        (second_rotation, second_momentum) = rigid_body_momentum_step_in_frame(
+            second_rotation,
+            second_momentum,
+            vector(moments),
+            frame,
+            3.0 / 32.0,
+        )
+        .unwrap();
+    }
+    assert!(errors[1] < 0.05 * attitude_error(second_rotation, ode_rotation(reference)));
+}
+
+#[test]
+fn fourth_order_flow_reverses_and_retains_exact_symmetric_top_paths() {
+    let frame = attitude([0.3, -0.6, 0.15]);
+    let initial_rotation = attitude([-0.2, 0.4, 0.1]);
+    let initial = [
+        Dd::from_pair(0.7, 1.0e-17),
+        Dd::from_pair(-0.4, -1.0e-17),
+        Dd::from_pair(0.9, 2.0e-17),
+    ];
+    let inertia = vector([2.0, 3.0, 4.0]);
+    let (rotation, momentum) = rigid_body_momentum_step_fourth_order_in_frame(
+        initial_rotation,
+        initial,
+        inertia,
+        frame,
+        0.7,
+    )
+    .unwrap();
+    let (rotation, momentum) =
+        rigid_body_momentum_step_fourth_order_in_frame(rotation, momentum, inertia, frame, -0.7)
+            .unwrap();
+    assert!(attitude_error(rotation, initial_rotation) < 3.0e-15);
+    for d in 0..3 {
+        assert!((momentum[d] - initial[d]).to_f64().abs() < 8.0e-29);
+    }
+    for moments in [[2.0; 3], [2.0, 2.0, 3.0], [3.0, 2.0, 2.0], [2.0, 3.0, 2.0]] {
+        assert_eq!(
+            rigid_body_momentum_step_fourth_order_in_frame(
+                initial_rotation,
+                initial,
+                vector(moments),
+                frame,
+                0.7,
+            )
+            .unwrap(),
+            rigid_body_momentum_step_in_frame(
+                initial_rotation,
+                initial,
+                vector(moments),
+                frame,
+                0.7,
+            )
+            .unwrap(),
+        );
+    }
+    for duration in [0.0, f64::INFINITY, f64::NAN] {
+        assert!(
+            rigid_body_momentum_step_fourth_order(initial_rotation, initial, inertia, duration,)
+                .is_err()
+        );
+    }
+    assert!(
+        rigid_body_momentum_step_fourth_order(
+            initial_rotation,
+            initial,
+            vector([2.0, -3.0, 4.0]),
+            0.7,
+        )
+        .is_err()
+    );
 }
 
 #[test]
