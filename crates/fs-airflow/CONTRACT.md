@@ -925,12 +925,14 @@ Re/Pr/k. Natural and aiding mixed convection retain the original isobaric
 ideal-gas expansion 1/T and its derivative -1/T^2, actual signed drive,
 source-domain checks and exact sphere/mixed equilibrium heat limits.
 
-Analytic source tangents come from the original native Sutherland, USSA/Eucken
-and named Wilke/WMS gas models, including composition-dependent mixing
-denominator derivatives. No source fits or production finite differences are
-introduced. Active thermochemical transport derivatives explicitly refuse;
-bulk-held circular developing laws still accept the original thermochemical
-source because their wall-property derivative is exactly zero. Each bulk,
+Analytic source tangents come from the original native Sutherland, USSA/Eucken,
+named Wilke/WMS and supported thermochemical gas models, including actual
+NASA heat-capacity slopes and composition-dependent mixing denominator
+derivatives. The thermochemical path differentiates its selected original
+transport claims; unsupported derivative forms and genuine source kinks refuse.
+No source fits or production finite differences are introduced. Bulk-held
+circular developing laws retain exactly zero wall-property derivatives and do
+not require an active transport tangent. Each bulk,
 film and viscosity query rechecks declared temperature support. Original
 humid-gas saturation and named-species domains remain mandatory; rectangular
 four-isothermal-wall sections still require a whole-perimeter thermal owner
@@ -939,11 +941,14 @@ supply an empirical model-accuracy bound or expand any correlation's domain.
 
 Focused gas regressions exercise original pressure/composition, exact material
 queries, film and wall-viscosity chain rules, natural/mixed expansion, phase and
-geometry refusal, and bulk-held thermochemical source support. A native
+geometry refusal, and bulk-held and active thermochemical source support. A
+manufactured NASA/transport homogeneity identity independently checks the
+nonzero Cp derivative through the film-temperature correlation. A native
 conducting-wall regression independently balances the analytic k(T) half-cell,
 finite plate strip and gray radiation, then checks accepted backward-Euler
-storage and separate bath energy/entropy accounts for dry air and a named gas
-mixture. These runnable tests do not claim experimental validation.
+storage and separate bath energy/entropy accounts for dry air, a named gas
+mixture and an original thermochemical mixture with variable heat capacity.
+These runnable tests do not claim experimental validation.
 
 `source::observer::SourceConvectionObserver` supplies these heat rates to the
 original explicit `DepositionSimulation::advance_observed` timeline and composes

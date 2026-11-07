@@ -258,3 +258,24 @@ fn original_gas_changes_accepted_conducting_wall_history_with_separate_bath_acco
     assert_eq!(dry.reference().state().temperature, 300.0);
     assert_eq!(mixture.reference().state().temperature, 300.0);
 }
+
+#[test]
+fn original_thermochemical_calorics_drive_the_same_implicit_wall_and_bath_accounts() {
+    let make = |slope| {
+        IsobaricGasLaw::try_from_model(
+            thermochemical_source::model_transport_with_heat_capacity_slope(0.8, slope),
+            thermochemical_source::point(300.0, 100000.0),
+        ).unwrap()
+    };
+    let constant_cp = make(0.0);
+    let variable_cp = make(0.002);
+    let saved = variable_cp.reference().clone();
+    // The original transport claims, density, pressure and composition are
+    // identical. A higher actual gas Cp increases Pr and the plate's heat flux;
+    // the native finite solid therefore cools farther in this same interval.
+    let constant_temperature = advance(&constant_cp);
+    let variable_temperature = advance(&variable_cp);
+    assert!(variable_temperature < constant_temperature - 1e-4);
+    assert!(variable_temperature > 300.0);
+    assert_eq!(variable_cp.reference(), &saved);
+}

@@ -1,8 +1,11 @@
-//! Analytic temperature response of the original engineering gas transport.
+//! Analytic temperature response of the original retained gas transport.
 //!
 //! Differentiate the existing Sutherland/USSA/Eucken and Wilke/WMS equations
 //! at fixed pressure and composition. Values still come from the original
-//! gas evaluator. This derivative does not add source or accuracy authority.
+//! gas evaluator. NASA-9 source gases retain their actual selected transport
+//! claims and shared Wilke owner. This adds no source or accuracy authority.
+
+mod thermochemical;
 
 use super::{GasRecord, GasSpec, GasState, IsobaricGasLaw, MaterialError, Source, Temperature};
 use crate::fluid_transport::FluidTransport;
@@ -13,13 +16,13 @@ use fs_math::det;
 
 /// One original admitted gas record and its local isobaric transport response.
 /// All derivatives hold the original mole fractions fixed, including water.
-/// They describe the declared engineering models, not measured uncertainty.
+/// They describe the declared constitutive models, not measured uncertainty.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IsobaricGasTransportTangent {
     pub gas: GasRecord,
     /// d rho / d T at fixed pressure/composition [kg/(m³ K)].
     pub density_derivative_kg_m3_k: f64,
-    /// d Cp / d T [J/(kg K²)]; zero for these calorically perfect models.
+    /// d Cp / d T [J/(kg K²)]; zero only for calorically perfect models.
     pub specific_heat_derivative_j_kg_k2: f64,
     /// d k / d T [W/(m K²)].
     pub conductivity_derivative_w_m_k2: f64,
@@ -38,10 +41,13 @@ impl IsobaricGasLaw {
     /// differences. The additional derivative work uses stack storage for at
     /// most six species; it does not clone/query a material database.
     ///
-    /// At a domain boundary this is the derivative along the admitted branch;
-    /// it does not extend phase or temperature support. Thermochemical source
-    /// claims require their own original derivative seam and explicitly refuse
-    /// here. Their value-only [`Self::at_temperature`] queries remain available.
+    /// Thermochemical gases differentiate original NASA-9 Cp and selected
+    /// constant or linear-temperature transport claims. Their original Wilke
+    /// evaluation supplies viscosity and WMS denominator derivatives. No source
+    /// is reselected, numerically perturbed or replaced by an engineering fit.
+    /// At a domain endpoint this is the inward derivative; interior source
+    /// jumps/corners and discrete-only transport refuse. Unsupported derivative
+    /// forms do not change value-only [`Self::at_temperature`] admission.
     pub fn transport_temperature_tangent(
         &self,
         temperature: Temperature,
@@ -50,20 +56,24 @@ impl IsobaricGasLaw {
         gas.transport_state()?;
         let t = temperature.value();
         let pressure = gas.state().pressure;
-        let [viscosity, conductivity] = match &self.source {
+        let [specific_heat, viscosity, conductivity] = match &self.source {
             Source::MoistAir { .. } if self.reference.state().water_mole_fraction == 0.0 => {
                 let logarithmic = component_log_derivatives(GasSpec::dry_air_ussa1976(), t);
                 [
+                    0.0,
                     gas.state().dynamic_viscosity * logarithmic[0],
                     gas.state().thermal_conductivity * logarithmic[1],
                 ]
             }
-            Source::MoistAir { composition } => mixture_derivatives(
-                &[GasSpec::dry_air_ussa1976(), GasSpec::water_vapor_nist()],
-                composition.fractions(),
-                t,
-                pressure,
-            )?,
+            Source::MoistAir { composition } => {
+                let [viscosity, conductivity] = mixture_derivatives(
+                    &[GasSpec::dry_air_ussa1976(), GasSpec::water_vapor_nist()],
+                    composition.fractions(),
+                    t,
+                    pressure,
+                )?;
+                [0.0, viscosity, conductivity]
+            }
             Source::Mixture {
                 species,
                 composition,
@@ -77,21 +87,25 @@ impl IsobaricGasLaw {
                 for (target, species) in specs.iter_mut().zip(species) {
                     *target = species.spec();
                 }
-                mixture_derivatives(
+                let [viscosity, conductivity] = mixture_derivatives(
                     &specs[..species.len()],
                     composition.fractions(),
                     t,
                     pressure,
-                )?
+                )?;
+                [0.0, viscosity, conductivity]
             }
-            Source::Thermochemical { .. } => {
-                return Err(invalid(
-                    "thermochemical transport requires original source temperature derivatives",
-                ));
+            Source::Thermochemical { model, .. } => {
+                let GasRecord::Thermochemical(snapshot) = &gas else {
+                    return Err(invalid(
+                        "thermochemical derivative lost its original snapshot",
+                    ));
+                };
+                thermochemical::derivatives(model, snapshot)?
             }
         };
         let density = -gas.state().density / t;
-        if ![density, viscosity, conductivity]
+        if ![density, specific_heat, viscosity, conductivity]
             .into_iter()
             .all(f64::is_finite)
             || density == 0.0
@@ -103,7 +117,7 @@ impl IsobaricGasLaw {
         Ok(IsobaricGasTransportTangent {
             gas,
             density_derivative_kg_m3_k: density,
-            specific_heat_derivative_j_kg_k2: 0.0,
+            specific_heat_derivative_j_kg_k2: specific_heat,
             conductivity_derivative_w_m_k2: conductivity,
             dynamic_viscosity_derivative_pa_s_k: viscosity,
         })

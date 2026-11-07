@@ -11,6 +11,11 @@ pub mod maxwell_stefan;
 /// Source-bound dilute-gas collision properties with explicit kinetic assumptions.
 pub mod kinetic;
 
+mod temperature_tangent;
+pub use temperature_tangent::{
+    WilkeGasViscosityTemperatureTangentV1, WilkeTemperatureTangentErrorV1,
+};
+
 use core::fmt;
 
 use fs_qty::semantic::{Composition, CompositionBasis, SemanticError};
@@ -575,17 +580,33 @@ fn interaction_factor(
     i: usize,
     j: usize,
 ) -> Result<f64, WilkeGasViscosityErrorV1> {
+    interaction_terms(
+        component_i.dynamic_viscosity.value(), component_i.molar_mass.value(),
+        component_j.dynamic_viscosity.value(), component_j.molar_mass.value(), i, j,
+    ).map(|(factor, _)| factor)
+}
+
+// Both the value and tangent use this SAME original interaction operation
+// tree. Returning its root product requires no additional value-path work.
+fn interaction_terms(
+    viscosity_i: f64,
+    mass_i: f64,
+    viscosity_j: f64,
+    mass_j: f64,
+    i: usize,
+    j: usize,
+) -> Result<(f64, f64), WilkeGasViscosityErrorV1> {
     let viscosity_ratio = require_positive_finite(
         i,
         Some(j),
         WilkeArithmeticValueV1::ViscosityRatio,
-        component_i.dynamic_viscosity.value() / component_j.dynamic_viscosity.value(),
+        viscosity_i / viscosity_j,
     )?;
     let reverse_mass_ratio = require_positive_finite(
         i,
         Some(j),
         WilkeArithmeticValueV1::ReverseMolarMassRatio,
-        component_j.molar_mass.value() / component_i.molar_mass.value(),
+        mass_j / mass_i,
     )?;
     let mass_quarter_root = require_positive_finite(
         i,
@@ -615,7 +636,7 @@ fn interaction_factor(
         i,
         Some(j),
         WilkeArithmeticValueV1::ForwardMolarMassRatio,
-        component_i.molar_mass.value() / component_j.molar_mass.value(),
+        mass_i / mass_j,
     )?;
     let denominator_radicand = require_positive_finite(
         i,
@@ -629,12 +650,13 @@ fn interaction_factor(
         WilkeArithmeticValueV1::InteractionDenominator,
         fs_math::det::sqrt(denominator_radicand),
     )?;
-    require_positive_finite(
+    let factor = require_positive_finite(
         i,
         Some(j),
         WilkeArithmeticValueV1::InteractionFactor,
         numerator / denominator,
-    )
+    )?;
+    Ok((factor, root_product))
 }
 
 fn require_positive_finite(

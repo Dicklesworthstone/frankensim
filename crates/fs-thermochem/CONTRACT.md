@@ -1943,6 +1943,18 @@ Cantera's independent NASA-9 documentation is retained as a development
 cross-reference, never a runtime dependency:
 <https://cantera.org/dev/reference/thermo/species-thermo.html>.
 
+`Nasa9StandardStateModelV1::evaluate_heat_capacity_temperature_derivative`
+analytically differentiates that same retained Cp polynomial and returns a
+dimensioned J/(mol K²) quantity. It allocates nothing and uses the original
+temperature/region and finite-Cp admission. At a shared source seam, both Cp
+and its derivative must agree between the two original regions to rounding
+tolerance; raw jumps or derivative corners refuse. Source-domain endpoints
+use inward derivatives. Caloric reference offsets do not alter Cp or its
+tangent. This does not extrapolate, certify positive Cp/Cv along a path, or
+turn source uncertainty into a derivative error bound. Focused regressions
+cover original polynomial channels, independent differences, reference shifts,
+source gaps, endpoints and shared-seam refusal.
+
 ## Frozen ideal-gas mixture operation tree
 
 For exact canonical mole fractions `x_i`, common reference pressure `p0`, and
@@ -2036,6 +2048,19 @@ positive and finite. Cantera's `GasTransport` documentation is retained as a
 development cross-reference for the rule and units, never as a runtime
 dependency:
 <https://cantera.org/3.1/cxx/d8/d58/classCantera_1_1GasTransport.html>.
+
+`WilkeGasViscosityEvaluationV1::temperature_tangent` consumes pure dmu/dT in
+the evaluation's canonical species order and differentiates the same retained
+values, fractions, masses and interaction operation tree. It returns dmu_mix/dT
+and every dD_i/dT for reuse by the WMS conductivity owner. Signed/zero slopes
+are admitted, the pure-species limit is exact, and invalid lengths or
+unrepresentable arithmetic refuse. The original value evaluation and receipt
+are unchanged. Work remains bounded O(N²), with stack logarithmic derivatives
+and one O(N) result vector, without a pair matrix or perturbed value solve.
+The caller must bind the supplied slopes to the original pure source laws;
+this algebra establishes neither their physical validity nor derivative
+uncertainty. Regressions compare complete mixture and denominator tangents
+with differences of original evaluations, common scaling and signed pure limits.
 
 ## Standard-state reaction-equilibrium operation tree
 

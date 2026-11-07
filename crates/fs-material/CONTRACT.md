@@ -4980,21 +4980,38 @@ response, humid cooling refusal and source/domain preservation.
 
 `IsobaricGasLaw::transport_temperature_tangent` retains that same evaluated
 `GasRecord` and returns analytic isobaric derivatives of density, Cp, conductivity
-and dynamic viscosity for the original engineering gas models. The derivative
+and dynamic viscosity for the original engineering and thermochemical gas models. The derivative
 holds pressure and mole fractions fixed, including water. It differentiates
 Sutherland viscosity, the original USSA/Eucken conductivity, and the complete
 Wilke/WMS quotient, including each temperature-dependent interaction denominator.
-Ideal-gas density gives `-rho/T`; these models' frozen Cp gives zero. Values and
+Ideal-gas density gives `-rho/T`; calorically perfect models' frozen Cp gives zero. Values and
 phase/domain admission remain with `at_temperature`, and mixture interaction
 values use the original native function. Additional derivative storage is a
-fixed stack array for at most six species. No finite-difference material query,
+fixed stack array for at most six engineering species. No finite-difference material query,
 replacement transport fit or experimental accuracy claim is introduced.
 At a validity endpoint the tangent belongs only to the admitted branch.
-Thermochemical transport derivatives explicitly refuse until their original
-source derivative seam exists; value-only thermochemical queries are unchanged.
+Thermochemical Cp derivatives come from the original NASA-9 region owner,
+weighted by the retained mole fractions and converted with the same mixture
+molar mass. Pure transport tangents differentiate the actual selected constant
+or linear-temperature claims; constants require explicit nonzero thermal
+validity. Source-domain endpoints use their inward derivatives. Interior curve
+corners and NASA-9 Cp jumps/corners refuse unless adjacent values/slopes agree
+to rounding tolerance. Tabulated-only points and unsupported source forms
+retain their value admission without gaining derivative support.
+
+The already evaluated native Wilke mixture supplies its analytic viscosity and
+interaction-denominator derivatives. WMS conductivity differentiates its own
+selected pure conductivity and reuses those same denominators and derivatives.
+Additional work is bounded by the original 128-species admission, uses fixed
+stack component arrays plus one O(N) denominator vector, and builds no N-by-N
+matrix. Derivative work performs no extra material queries, source reselection,
+model clone or altered caloric reference. The complete source-bearing gas record
+and original pressure/composition/context remain unchanged.
 Focused G0/G1/G3 tests compare original values, independently differentiated
 pure-gas equations, high-order differences of the original mixture evaluator,
-pressure scaling, component permutation, saturation and source-boundary refusal.
+pressure scaling, component permutation, variable NASA-9 Cp, unequal pure
+transport slopes, source knots, explicit constant support, saturation and
+source-boundary refusal. These derivatives add no model accuracy or phase claim.
 
 `IsobaricGasLaw::specific_enthalpy_change` supplies the retained gas's relative
 isobaric h increment without subtracting large formation enthalpies. Legacy

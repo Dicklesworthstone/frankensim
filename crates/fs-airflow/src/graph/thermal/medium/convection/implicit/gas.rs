@@ -13,11 +13,12 @@ use fs_material::gas_species::input::temperature::IsobaricGasLaw;
 /// Natural convection uses the original ideal-gas isobaric expansion `1/T`;
 /// no liquid expansion or dry-air replacement is introduced.
 ///
-/// Sutherland/USSA/Eucken and named Wilke/WMS mixtures have native analytic
-/// transport tangents. An active thermochemical transport tangent currently
-/// refuses because its original claim derivative interface is unavailable.
-/// Bulk-held laws without a wall-viscosity correction still accept the original
-/// thermochemical gas law, using zero wall-property derivatives exactly.
+/// Sutherland/USSA/Eucken, named mixtures and supported original thermochemical
+/// sources supply analytic transport tangents. Thermochemical NASA calorics,
+/// selected transport claims and Wilke/WMS denominator derivatives stay with
+/// their source owners; unsupported derivatives and genuine source kinks refuse.
+/// Bulk-held laws without a wall-viscosity correction retain exactly zero
+/// wall-property derivatives and need no active transport tangent.
 ///
 /// Gas and liquid sources share physical geometry, equilibrium heat limits,
 /// correlation-domain admission and explicit property-temperature conventions.

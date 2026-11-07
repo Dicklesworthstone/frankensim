@@ -29,6 +29,11 @@ impl Packs {
 }
 fn packs(name: &str, mass: f64, cp_r: f64, mu: f64, k: f64,
     variable_transport: bool, energy_reference_k: f64) -> Packs {
+    packs_with_heat_capacity_slope(name, mass, cp_r, mu, k,
+        variable_transport, energy_reference_k, 0.0)
+}
+fn packs_with_heat_capacity_slope(name: &str, mass: f64, cp_r: f64, mu: f64, k: f64,
+    variable_transport: bool, energy_reference_k: f64, cp_r_slope_per_k: f64) -> Packs {
     let artifact = hash(name);
     let provenance = Provenance { source: format!("synthetic {name}; not measured"),
         license: "CC0-1.0".into(), artifact: Some(artifact) };
@@ -45,7 +50,8 @@ fn packs(name: &str, mass: f64, cp_r: f64, mu: f64, k: f64,
     let mut parameters = std::collections::BTreeMap::new();
     for (i, power) in [2, 1, 0, -1, -2, -3, -4, 1, 0].into_iter().enumerate() {
         parameters.insert(format!("a{i}"), LawParameter {
-            value: if i == 2 { cp_r } else if i == 7 { energy_reference_k } else { 0.0 },
+            value: if i == 2 { cp_r } else if i == 3 { cp_r_slope_per_k }
+                else if i == 7 { energy_reference_k } else { 0.0 },
             dims: Dims([0, 0, 0, power, 0, 0]) });
     }
     parameters.insert("reference_pressure".into(), LawParameter { value: 100000.0, dims: Pressure::DIMS });
@@ -114,8 +120,25 @@ pub fn model_pr072() -> ThermochemicalGasModel {
 pub fn model_transport_with_reference(
     fraction: f64, variable_transport: bool, energy_reference_k: f64,
 ) -> ThermochemicalGasModel {
-    let a = packs("A", 0.028, 3.5, 1.8e-5, 0.026, variable_transport, energy_reference_k);
-    let b = packs("B", 0.004, 2.5, 2.0e-5, 0.08, variable_transport, energy_reference_k);
+    model_transport_with_calorics(fraction, variable_transport, energy_reference_k, 0.0)
+}
+
+/// Manufactured Cp/R = c + slope*T and original linear transport claims.
+/// Both species have the same molar heat-capacity slope; their masses differ.
+pub fn model_transport_with_heat_capacity_slope(
+    fraction: f64, cp_r_slope_per_k: f64,
+) -> ThermochemicalGasModel {
+    model_transport_with_calorics(fraction, true, 0.0, cp_r_slope_per_k)
+}
+
+fn model_transport_with_calorics(
+    fraction: f64, variable_transport: bool, energy_reference_k: f64,
+    cp_r_slope_per_k: f64,
+) -> ThermochemicalGasModel {
+    let a = packs_with_heat_capacity_slope("A", 0.028, 3.5, 1.8e-5, 0.026,
+        variable_transport, energy_reference_k, cp_r_slope_per_k);
+    let b = packs_with_heat_capacity_slope("B", 0.004, 2.5, 2.0e-5, 0.08,
+        variable_transport, energy_reference_k, cp_r_slope_per_k);
     let composition = Composition::new(
         CompositionBasis::MoleFraction, vec![fraction, 1.0-fraction]).unwrap();
     // The mixture owner admits active species only, as in with_composition.

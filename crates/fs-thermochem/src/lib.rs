@@ -26,6 +26,7 @@ pub mod decay;
 pub mod coulomb;
 mod enthalpy;
 mod entropy;
+mod temperature_tangent;
 pub mod electron_collision;
 pub mod eos;
 pub mod equilibrium;
@@ -44,6 +45,9 @@ use fs_qty::{Dims, MolarMass, Pressure, Qty, Temperature};
 
 pub use caloric::{Nasa9CaloricReferenceV1, Nasa9CaloricRegionCorrectionV1,
     NASA9_CONTINUOUS_CALORIC_EVALUATOR_VERSION_V1};
+pub use temperature_tangent::{
+    MolarHeatCapacityTemperatureDerivativeV1, Nasa9TemperatureDerivativeErrorV1,
+};
 
 pub use fs_qty::chemistry::{
     ChargeVector, ChemistryError, ConservationCertificate, ElementId, ElementalMatrix,

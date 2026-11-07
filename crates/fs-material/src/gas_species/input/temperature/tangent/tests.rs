@@ -188,7 +188,7 @@ fn g0_temperature_phase_and_original_source_limits_are_retained() {
 }
 
 #[test]
-fn g0_thermochemical_values_do_not_imply_unsupported_transport_derivatives() {
+fn g1_thermochemical_transport_retains_original_values_and_nonconstant_cp() {
     use crate::thermochemical_gas::tests::{model_in_domains, point};
     let model = model_in_domains(
         vec![0.8, 0.2],
@@ -199,10 +199,39 @@ fn g0_thermochemical_values_do_not_imply_unsupported_transport_derivatives() {
     );
     let law = IsobaricGasLaw::try_from_model(model, point(300.0, 100000.0)).unwrap();
     let original = law.clone();
-    law.at_temperature(Temperature::new(315.0)).unwrap();
+    for t in [290.0, 300.0, 315.0, 330.0] {
+        let response = law
+            .transport_temperature_tangent(Temperature::new(t))
+            .unwrap();
+        assert_eq!(
+            response.gas,
+            law.at_temperature(Temperature::new(t)).unwrap()
+        );
+        let cp_derivative = 0.8 * 0.001 * fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K
+            / (0.8 * 0.028 + 0.2 * 0.004);
+        near(
+            response.specific_heat_derivative_j_kg_k2,
+            cp_derivative,
+            2e-14,
+        );
+        // All pure transport curves share one multiplier in this fixture, so
+        // each original Wilke denominator is temperature-independent.
+        near(
+            response.dynamic_viscosity_derivative_pa_s_k,
+            response.gas.state().dynamic_viscosity / (40.0 + t - 290.0),
+            3e-14,
+        );
+        near(
+            response.conductivity_derivative_w_m_k2,
+            response.gas.state().thermal_conductivity / (40.0 + t - 290.0),
+            3e-14,
+        );
+    }
     assert!(
-        matches!(law.transport_temperature_tangent(Temperature::new(315.0)),
-        Err(MaterialError::State { what }) if what.contains("original source temperature derivatives"))
+        law.transport_temperature_tangent(Temperature::new(331.0))
+            .is_err()
     );
     assert_eq!(law, original);
 }
+
+mod thermochemical;

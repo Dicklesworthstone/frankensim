@@ -7,6 +7,9 @@ use fs_airflow::graph::thermal::medium::convection::{
 };
 use fs_material::gas_species::input::{read_gas_record, temperature::IsobaricGasLaw};
 
+#[path = "../../../finite_gas_convection/source.rs"]
+mod thermochemical_source;
+
 fn gas(text: &str) -> IsobaricGasLaw {
     IsobaricGasLaw::try_from_record(
         read_gas_record(&mut text.split_ascii_whitespace(), None, None).unwrap(),
