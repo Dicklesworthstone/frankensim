@@ -157,6 +157,16 @@ impl FilamentWake {
                 } else {
                     &inserted.last().expect("previous subdivision exists").nodes
                 };
+                for (((&a, &b), &start), &end) in
+                    row.nodes.iter().zip(next).zip(previous).zip(&nodes)
+                {
+                    if !preserves_straight_segment(a, b, start, end) {
+                        return Err(refusal(
+                            "wake-refinement-unrepresentable",
+                            "rounded subdivision changes a physical filament direction",
+                        ));
+                    }
+                }
                 let length = longest_edge(previous, &nodes)?;
                 admit_length(length, max_edge_length_m)?;
                 longest_after = longest_after.max(length);
@@ -170,7 +180,16 @@ impl FilamentWake {
                     age_ticks: row.age_ticks,
                 });
             }
-            let length = longest_edge(&inserted.last().expect("split inserted a row").nodes, next)?;
+            let last = &inserted.last().expect("split inserted a row").nodes;
+            for (((&a, &b), &start), &end) in row.nodes.iter().zip(next).zip(last).zip(next) {
+                if !preserves_straight_segment(a, b, start, end) {
+                    return Err(refusal(
+                        "wake-refinement-unrepresentable",
+                        "rounded subdivision changes a physical filament direction",
+                    ));
+                }
+            }
+            let length = longest_edge(last, next)?;
             admit_length(length, max_edge_length_m)?;
             longest_after = longest_after.max(length);
         }
@@ -186,6 +205,45 @@ impl FilamentWake {
         self.rows = output;
         Ok(report)
     }
+}
+
+/// Bound transverse rounding by the PARENT segment's local length, rather
+/// than world coordinates or a tiny child's length. This admits harmless
+/// unequal collinear subdivisions but rejects large-origin zigzags and lost
+/// or reversed children. Degenerate original edges may remain degenerate.
+pub(crate) fn preserves_straight_segment(
+    a: [f64; 3],
+    b: [f64; 3],
+    start: [f64; 3],
+    end: [f64; 3],
+) -> bool {
+    let parent = std::array::from_fn::<_, 3, _>(|i| b[i] - a[i]);
+    let child = std::array::from_fn::<_, 3, _>(|i| end[i] - start[i]);
+    let length = parent[0].hypot(parent[1]).hypot(parent[2]);
+    let child_length = child[0].hypot(child[1]).hypot(child[2]);
+    if !length.is_finite() || !child_length.is_finite() {
+        return false;
+    }
+    if length == 0.0 {
+        return child_length == 0.0;
+    }
+    if child_length == 0.0 {
+        return false;
+    }
+    let direction = parent.map(|v| v / length);
+    let forward = (0..3)
+        .map(|i| (child[i] / child_length) * direction[i])
+        .sum::<f64>();
+    forward > 0.0
+        && [start, end].into_iter().all(|point| {
+            let relative = std::array::from_fn::<_, 3, _>(|i| (point[i] - a[i]) / length);
+            let cross = [
+                direction[1] * relative[2] - direction[2] * relative[1],
+                direction[2] * relative[0] - direction[0] * relative[2],
+                direction[0] * relative[1] - direction[1] * relative[0],
+            ];
+            cross.into_iter().all(|v| v.abs() <= 128.0 * f64::EPSILON)
+        })
 }
 
 fn longest_edge(a: &[[f64; 3]], b: &[[f64; 3]]) -> Result<f64, Refusal> {

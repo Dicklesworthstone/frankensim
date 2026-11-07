@@ -33,6 +33,7 @@ pub use advection::{
 #[path = "filament3d/remesh.rs"]
 mod remesh;
 pub use remesh::StreamwiseRefinement;
+pub(crate) use remesh::preserves_straight_segment;
 
 #[path = "filament3d/impulse.rs"]
 mod impulse;

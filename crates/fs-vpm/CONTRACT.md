@@ -1158,6 +1158,38 @@ integrals per station, finite-core velocity/Jacobian/curl at multiple core
 growth rates, retained material age and buffers, attached near/far continuity,
 row limits, idempotence and cancellation/late-refusal atomicity.
 
+## Retained far-field material refinement
+
+`FarField::refine_segments(max_segment_length_m, max_segments, cancelled)`
+subdivides retained physical filaments until every segment meets the positive
+length target within 64 machine epsilons. The complete source count and,
+separately, cell count must fit the explicit capacity. New endpoints enter the
+existing shared material-vertex binding during coupled near/far advection, so
+subsequent nonuniform flow can bend a previously long retained filament.
+
+Every child keeps the full parent circulation and base core; accumulated core
+diffusion remains a separate unchanged offset. Original endpoints retain their
+exact coordinate identities, and children meet at identical stored positions.
+Nodal circulation closure, the exact velocity/Jacobian/curl, and both geometric
+filament impulses survive subdivision to roundoff. This adds spatial resolution
+for future motion; it does not recover unresolved historical curvature or add a
+viscous tube-stretching law. Prepared trees and image snapshots must be rebuilt.
+
+Only changed cells allocate replacement source buffers and rebuild their
+continuous-segment multipole moments. Other cell buffers and bits survive.
+Work is linear in original plus resulting source counts; all replacements stay
+private until final publication, including cancellation and allocation failure.
+Near and far subdivision share a coordinate-resolution guard: rounded children
+must progress along the parent and keep each normalized transverse cross-product
+component within 128 machine epsilons, measured against the parent length. Large-origin zigzags and collapsed nonzero children
+refuse; harmless unequal collinear subdivisions remain admitted.
+
+`tests/far_refinement3d.rs` checks signed mixed-core field/impulse invariance,
+continued diffusion, all cancellation checkpoints, exact capacity, dimensional
+rescaling and large-origin geometry. A native coupled-advection case resolves
+new material vertices under a quadratic divergence-free incident field and
+compares their motion with the analytic trajectory and the unresolved chord.
+
 ## Complete physical wake impulse and interval exchange
 
 `FarField::hydrodynamic_impulse_per_density(near, origin_m, max_sources,

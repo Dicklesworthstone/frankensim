@@ -36,6 +36,10 @@ mod topology;
 mod impulse;
 pub use impulse::{WakeImpulse, WakeImpulseExchange};
 
+#[path = "farfield3d/remesh.rs"]
+mod remesh;
+pub use remesh::FarSegmentRefinement;
+
 /// Registered core-evolution mode (enters identity).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WakeCoreEvolutionMode {
