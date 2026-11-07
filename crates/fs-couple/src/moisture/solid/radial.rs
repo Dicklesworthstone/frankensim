@@ -7,6 +7,9 @@
 //! Geometry, free strain, local constitutive state and wet inertia stay distinct.
 
 use super::*;
+use crate::moisture::adaptive::{
+    MoistureAdvanceError, MoistureAdvanceReport, MoistureTimeControls,
+};
 use crate::moisture::radial::{MoistureRadial, RadialMoistureSymmetry};
 
 #[path = "radial/mesh.rs"]
@@ -282,6 +285,68 @@ impl MoistureRadialSolid {
         let (moisture, report) = moisture.advance_sdirk2(dt_s, faces, transport, nonlinear, cx)?;
         let solid = self.resolve(&moisture, cx)?;
         poll(cx)?;
+        Ok(MoistureRadialSolidStep {
+            moisture,
+            transport: report,
+            solid,
+        })
+    }
+
+    /// Resolve compatible mechanics after an accuracy-controlled complete
+    /// backward-Euler duration. Any late refusal discards every private prefix.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn advance_adaptive_to(
+        &self,
+        moisture: &MoistureRadial,
+        target_s: f64,
+        faces: &[MoistureFace; 2],
+        transport: MoistureStepConfig,
+        nonlinear: MoistureNonlinearConfig,
+        time: MoistureTimeControls,
+        cx: &Cx<'_>,
+    ) -> Result<
+        MoistureRadialSolidStep<MoistureAdvanceReport<MoistureStepReport, 2>>,
+        MoistureAdvanceError<MoistureError>,
+    > {
+        let (moisture, report) =
+            moisture.advance_adaptive_to(target_s, faces, transport, nonlinear, time, cx)?;
+        self.resolve_adaptive(moisture, report, cx)
+    }
+
+    /// The same atomic solid endpoint after second-order time-error control.
+    /// The original reference-chart diffusion and small-strain mechanical
+    /// assumptions remain; no evolving mechanical trajectory is reconstructed.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn advance_sdirk2_adaptive_to(
+        &self,
+        moisture: &MoistureRadial,
+        target_s: f64,
+        faces: &[MoistureFace; 2],
+        transport: MoistureStepConfig,
+        nonlinear: MoistureNonlinearConfig,
+        time: MoistureTimeControls,
+        cx: &Cx<'_>,
+    ) -> Result<
+        MoistureRadialSolidStep<MoistureAdvanceReport<MoistureSdirk2Report, 2>>,
+        MoistureAdvanceError<MoistureError>,
+    > {
+        let (moisture, report) =
+            moisture.advance_sdirk2_adaptive_to(target_s, faces, transport, nonlinear, time, cx)?;
+        self.resolve_adaptive(moisture, report, cx)
+    }
+
+    fn resolve_adaptive<Report>(
+        &self,
+        moisture: MoistureRadial,
+        report: Report,
+        cx: &Cx<'_>,
+    ) -> Result<MoistureRadialSolidStep<Report>, MoistureAdvanceError<MoistureError>> {
+        let map = |error| match error {
+            MoistureError::Cancelled => MoistureAdvanceError::Cancelled,
+            error => MoistureAdvanceError::FinalInventory(error),
+        };
+        let solid = self.resolve(&moisture, cx).map_err(map)?;
+        poll(cx).map_err(map)?;
         Ok(MoistureRadialSolidStep {
             moisture,
             transport: report,

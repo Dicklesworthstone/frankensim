@@ -66,7 +66,8 @@ pub(super) trait ReservoirField<const FACES: usize>: Sized {
                 .moisture
                 .iter()
                 .zip(old.moisture)
-                .map(|(new, before)| (new - before) * old.dry_mass_per_cell_kg),
+                .enumerate()
+                .map(|(i, (new, before))| (new - before) * old.dry_mass_at(i)),
         )
     }
 }

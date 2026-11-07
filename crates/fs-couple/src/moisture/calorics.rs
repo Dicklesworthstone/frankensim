@@ -186,7 +186,7 @@ fn finish<Field: ReservoirField<N>, const N: usize>(
     let next = native.moisture().inventory();
     if old.identity != next.identity
         || old.moisture.len() != next.moisture.len()
-        || old.dry_mass_per_cell_kg.to_bits() != next.dry_mass_per_cell_kg.to_bits()
+        || !old.same_dry_masses(&next)
     {
         return Err(invalid(
             "native transport changed the original dry skeleton inventory",
@@ -214,7 +214,7 @@ fn finish<Field: ReservoirField<N>, const N: usize>(
     let mut bound_sum = Dd::ZERO;
     let mut binding_sum = Dd::ZERO;
     let mut segments = 0usize;
-    for (&a, &b) in old.moisture.iter().zip(next.moisture) {
+    for (i, (&a, &b)) in old.moisture.iter().zip(next.moisture).enumerate() {
         poll(cx)?;
         segments = segments
             .checked_add(law.integration_segments(a, b)?)
@@ -225,7 +225,7 @@ fn finish<Field: ReservoirField<N>, const N: usize>(
                 maximum: controls.maximum_source_segments,
             });
         }
-        let mass = Dd::from_f64(old.dry_mass_per_cell_kg);
+        let mass = Dd::from_f64(old.dry_mass_at(i));
         let dm = mass * Dd::from_f64(b - a);
         let release = mass * Dd::from_f64(law.integral(a, b)?);
         let bound = Dd::from_f64(h) * dm - release;

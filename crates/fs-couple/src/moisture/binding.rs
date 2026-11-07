@@ -182,7 +182,15 @@ pub(super) fn at_prescribed_temperature(
     Ok(transport)
 }
 
-/// Geometry-independent view of an accepted equal-reference-volume inventory.
+/// Immutable dry-skeleton measure of a native finite-volume field.
+/// Curved/nonuniform cells retain their individual physical inventories.
+#[derive(Clone, Copy)]
+pub(super) enum DryMasses<'a> {
+    Uniform(f64),
+    Cells(&'a [f64]),
+}
+
+/// Geometry-independent view of an accepted physical inventory.
 /// The mechanical owner supplies actual cell geometry, never a surrogate slab.
 #[derive(Clone, Copy)]
 pub(super) struct MoistureField<'a> {
@@ -190,11 +198,32 @@ pub(super) struct MoistureField<'a> {
     pub reference: &'a ResolvedMaterialStatePoint,
     pub transport: &'a ResolvedMaterialStatePoint,
     pub moisture: &'a [f64],
-    pub dry_mass_per_cell_kg: f64,
+    pub dry_masses: DryMasses<'a>,
     pub time_s: f64,
     pub identity: ContentHash,
 }
 impl MoistureField<'_> {
+    pub fn dry_mass_at(&self, cell: usize) -> f64 {
+        match self.dry_masses {
+            DryMasses::Uniform(mass) => mass,
+            DryMasses::Cells(masses) => masses[cell],
+        }
+    }
+    pub fn dry_mass_kg(&self) -> f64 {
+        match self.dry_masses {
+            DryMasses::Uniform(mass) => mass * self.moisture.len() as f64,
+            DryMasses::Cells(masses) => masses.iter().sum(),
+        }
+    }
+    pub fn same_dry_masses(&self, other: &Self) -> bool {
+        match (self.dry_masses, other.dry_masses) {
+            (DryMasses::Uniform(a), DryMasses::Uniform(b)) => a.to_bits() == b.to_bits(),
+            (DryMasses::Cells(a), DryMasses::Cells(b)) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits())
+            }
+            _ => false,
+        }
+    }
     pub fn temperature_kelvin(&self) -> f64 {
         self.transport
             .state_coordinate("temperature")
@@ -207,12 +236,13 @@ impl MoistureField<'_> {
             .map_err(|_| MoistureError::Invalid("unrepresentable dry-basis moisture coordinate"))
     }
     pub fn wet_mass_kg(&self) -> f64 {
-        self.dry_mass_per_cell_kg * self.moisture.len() as f64 + self.water_mass_kg()
+        self.dry_mass_kg() + self.water_mass_kg()
     }
     pub fn water_mass_kg(&self) -> f64 {
         self.moisture
             .iter()
-            .map(|m| m * self.dry_mass_per_cell_kg)
+            .enumerate()
+            .map(|(i, m)| m * self.dry_mass_at(i))
             .sum()
     }
 }

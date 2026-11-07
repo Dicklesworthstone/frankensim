@@ -319,7 +319,7 @@ impl MoistureCartesian {
             reference: &self.reference,
             transport: &self.transport,
             moisture: &self.moisture,
-            dry_mass_per_cell_kg: self.dry_mass_per_cell_kg,
+            dry_masses: binding::DryMasses::Uniform(self.dry_mass_per_cell_kg),
             time_s: self.time_s,
             identity: self.identity,
         }

@@ -268,7 +268,7 @@ impl MoistureSolidSource {
                 &point,
                 self.expansion_selection.clone(),
             )?;
-            let mass = field.dry_mass_per_cell_kg * (1. + m);
+            let mass = field.dry_mass_at(i) * (1. + m);
             let density = mass / volume;
             let mut hash =
                 DomainHasher::new("org.frankensim.fs-couple.moisture-solid-local-state.v1");

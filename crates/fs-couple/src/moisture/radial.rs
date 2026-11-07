@@ -266,6 +266,18 @@ impl MoistureRadial {
         &self.transport
     }
 
+    pub(super) fn field(&self) -> binding::MoistureField<'_> {
+        binding::MoistureField {
+            card: &self.card,
+            reference: &self.reference,
+            transport: &self.transport,
+            moisture: &self.moisture,
+            dry_masses: binding::DryMasses::Cells(&self.dry_masses_kg),
+            time_s: self.time_s,
+            identity: self.identity,
+        }
+    }
+
     fn water(&self, moisture: &[f64]) -> f64 {
         moisture
             .iter()

@@ -3254,6 +3254,29 @@ linear modes, a nonlinear dry-front ODE, finite surface resistance and weighted
 water balances define six focused native regressions. A converged stage is not
 a global temporal-error estimate.
 
+### Accuracy-controlled radial durations
+
+`MoistureRadial::advance_adaptive_to` and `advance_sdirk2_adaptive_to` reuse
+the existing whole-duration temporal controller around the original backward
+Euler and SDIRK2 endpoints. The shared borrowed inventory now explicitly owns
+either uniform or per-cell dry masses. Generic water, caloric, reservoir and
+solid accounts consume that physical measure, so nonuniform radial shells are
+never interpreted as equal storage cells.
+
+Each comparison resolves both componentwise moisture and the L1 sum of actual
+shell water discrepancies; opposite internal errors cannot cancel in a closed
+specimen. Relative scales use transported changes. For radial calls,
+`reservoir_water_absolute_tolerance_kg` also controls this shell-water norm.
+Only accepted fine-step transfers enter one fixed whole-duration water budget.
+The existing controller charges rejected/stage work, bounds retries, handles
+typed physical stage refusals and publishes no successful prefix after a later
+failure. Matching native-solid convenience methods resolve the mechanical
+endpoint after the complete admitted duration. The estimate remains local and
+asymptotic; boundaries are held within the duration and environmental events
+require explicit cuts. Six focused native regressions use unequal-shell modes,
+nonlinear dry-front solutions, an independent mass-weighted error ratio and
+work/cancellation rollback.
+
 ### Radial diffusion driving native solid mechanics
 
 `moisture::solid::MoistureRadialSolid` maps every original cylindrical or

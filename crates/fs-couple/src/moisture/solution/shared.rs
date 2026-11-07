@@ -419,10 +419,16 @@ impl FiniteMoistureSolution {
             let old = body.field.inventory();
             let end = next.moisture.inventory();
             originals.push(water_sum(
-                old.moisture.iter().map(|m| m * old.dry_mass_per_cell_kg),
+                old.moisture
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| m * old.dry_mass_at(i)),
             ));
             endpoints.push(water_sum(
-                end.moisture.iter().map(|m| m * end.dry_mass_per_cell_kg),
+                end.moisture
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| m * end.dry_mass_at(i)),
             ));
         }
         let solid_water_kg = [

@@ -15,6 +15,7 @@
 mod finite;
 mod layered;
 mod paired;
+mod radial;
 mod shared;
 
 pub use layered::LayeredMoistureAdvanceReport;
@@ -54,6 +55,7 @@ pub struct MoistureTimeControls {
     /// Absolute error in dimensionless RH or solution water activity.
     pub activity_absolute_tolerance: f64,
     /// Resolves external water even when solution activity is nearly constant.
+    /// Radial fields also use this for the L1 sum of shell water discrepancies.
     pub reservoir_water_absolute_tolerance_kg: f64,
     /// Multiplies each coordinate's change from the last accepted state; [0,1).
     pub relative_tolerance: f64,
@@ -427,7 +429,7 @@ fn same_field(a: &(u64, MoistureField<'_>), b: &(u64, MoistureField<'_>)) -> boo
     a.0 == b.0
         && a.1.identity == b.1.identity
         && a.1.moisture.len() == b.1.moisture.len()
-        && a.1.dry_mass_per_cell_kg.to_bits() == b.1.dry_mass_per_cell_kg.to_bits()
+        && a.1.same_dry_masses(&b.1)
 }
 fn distance<E>(
     old: &Snapshot<'_>,
@@ -834,7 +836,7 @@ fn evolve_fields_with_method<S: Clone, R: ReportTransfers<N>, E: Retryable, cons
             if i % 128 == 0 {
                 checkpoint(cx)?;
             }
-            changed.add((after - before) * old.1.dry_mass_per_cell_kg);
+            changed.add((after - before) * old.1.dry_mass_at(i));
         }
         let change = changed.total();
         let transfers = water[slot].map(WaterSum::total);
