@@ -1,4 +1,5 @@
 mod exposure;
+mod sequential;
 
 use super::super::super::tests::{bindings, camera, settings, with_cx};
 use super::*;

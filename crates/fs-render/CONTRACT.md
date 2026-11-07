@@ -4306,7 +4306,7 @@ payloads preserve the original mandatory-ray API. Different per-pixel windows
 can express authored row timing; moving geometry, time-varying optical laws,
 and nonlinear sensor response are not inferred. Unsupported source interval
 averages refuse rather than substituting sampled instantaneous values.
-Area-source and molecular transient lens coupling remain separate work.
+Area-source transient lens coupling remains separate work.
 
 `CurvedCameraRaster::sample_pixel_sequential` and
 `sample_pixel_sensor_sequential` integrate the same full optical seeds into
@@ -4327,6 +4327,23 @@ Mueller events and heterogeneous acceptance draws. The generic
 `CurvedSequentialRayleighPixelSample` retains per-wavelength volume and flight
 counts; clipped lanes retain zero work. Zero scattering preserves the complete
 surface-only sample. Native volume/work limits abort the whole observation.
+
+With `volumes`, `TransientCurvedRayleighCameraScene::sample_sequential_ray_at_time`
+and its uniform/heterogeneous original-variate counterparts continue timed
+full-Stokes lens seeds through the existing molecular history walk. Every
+surface source retains the physical sensor clock and its own lens-plus-scene
+group delay along the actual curved, multiply scattered path. Rayleigh events
+remain instantaneous; null candidates add neither history queries nor extra
+collision weights and do not reset the accumulated delay or polarization.
+`sample_pixel_sequential_rayleigh_transient_at_time` and
+`sample_pixel_sensor_sequential_rayleigh_transient_at_time` reuse the same
+optional-lane visible/QE integrations and independent surface/free-flight
+counter domains. Their `TransientSequentialRayleighPixelSample` retains the
+original per-wavelength collision and flight counts; clipped lanes have zero
+work and retain their proposal mass. Analyzer placement remains at the sensor,
+and source/cancellation failures abort the complete observation. Frozen media
+and finite surface-source histories remain the original scope; fluorescent
+lifetimes and evolving volume sources are not supplied.
 
 The motion path reconstructs only the supplied interpolation model. It does not
 invent mechanical bandwidth, unwrap rotations absent from keyframes, smooth a

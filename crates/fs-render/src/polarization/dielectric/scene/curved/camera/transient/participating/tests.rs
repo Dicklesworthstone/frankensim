@@ -1,5 +1,6 @@
 mod analyzer;
 mod exposure;
+mod sequential;
 
 use super::super::{
     LIGHT_M_S, SurfaceEmissionHistory, SurfaceEmissionHistoryBinding, SurfaceEmissionQuery,

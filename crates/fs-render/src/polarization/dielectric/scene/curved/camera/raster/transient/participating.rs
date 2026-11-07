@@ -19,6 +19,8 @@ use fs_exec::Cx;
 use fs_math::dd::Dd;
 
 pub mod exposure;
+mod sequential;
+pub use sequential::TransientSequentialRayleighPixelSample;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TransientRayleighPixelSample {
