@@ -139,8 +139,10 @@ fn vortex_in(boundaries: Boundaries3d) -> Euler3d {
 fn g1_variable_molecular_viscosity_dissipates_the_original_planar_and_spatial_vortex() {
     // The old midpoint-coefficient cross stress gives dK/dt=+3.613333... .
     // Original cell sampling and compatible mechanics give -2.366666... .
-    for no_slip in [false, true] {
-        let boundaries = if no_slip {
+    // Periodic, no-slip, finite Navier, and natural free-slip domains use
+    // the same molecular energy identity, including variable material data.
+    for wall_mode in 0..4 {
+        let boundaries = if wall_mode != 0 {
             Boundaries3d {
                 x: WALL,
                 y: WALL,
@@ -183,31 +185,41 @@ fn g1_variable_molecular_viscosity_dissipates_the_original_planar_and_spatial_vo
         )
         .unwrap();
         let mut spatial_op = operator(&space, Profile::Linear, 0.0, false);
-        if no_slip {
+        if wall_mode != 0 {
             for (plane_side, space_side) in [
                 (planar::BoundarySide::XMin, BoundarySide::XMin),
                 (planar::BoundarySide::XMax, BoundarySide::XMax),
                 (planar::BoundarySide::YMin, BoundarySide::YMin),
                 (planar::BoundarySide::YMax, BoundarySide::YMax),
             ] {
-                planar_op = planar_op
-                    .with_wall(
-                        plane_side,
-                        planar::molecular::MolecularWall2d::NoSlip {
-                            velocity: [0.0; 2],
-                            thermal: WallThermalCondition::Adiabatic,
-                        },
-                    )
-                    .unwrap();
-                spatial_op = spatial_op
-                    .with_wall(
-                        space_side,
-                        MolecularWall3d::NoSlip {
-                            velocity: [0.0; 3],
-                            thermal: WallThermalCondition::Adiabatic,
-                        },
-                    )
-                    .unwrap();
+                let planar_wall = match wall_mode {
+                    1 => planar::molecular::MolecularWall2d::NoSlip {
+                        velocity: [0.0; 2],
+                        thermal: WallThermalCondition::Adiabatic,
+                    },
+                    2 => planar::molecular::MolecularWall2d::NavierSlip {
+                        velocity: [0.0; 2],
+                        thermal: WallThermalCondition::Adiabatic,
+                        slip_length_m: 0.3,
+                        fluid_heat_fraction: 1.0,
+                    },
+                    _ => planar::molecular::MolecularWall2d::SlipAdiabatic,
+                };
+                let spatial_wall = match wall_mode {
+                    1 => MolecularWall3d::NoSlip {
+                        velocity: [0.0; 3],
+                        thermal: WallThermalCondition::Adiabatic,
+                    },
+                    2 => MolecularWall3d::NavierSlip {
+                        velocity: [0.0; 3],
+                        thermal: WallThermalCondition::Adiabatic,
+                        slip_length_m: 0.3,
+                        fluid_heat_fraction: 1.0,
+                    },
+                    _ => MolecularWall3d::SlipAdiabatic,
+                };
+                planar_op = planar_op.with_wall(plane_side, planar_wall).unwrap();
+                spatial_op = spatial_op.with_wall(space_side, spatial_wall).unwrap();
             }
         }
         assert!(planar_op.uses_compatible_molecular_stress());
@@ -293,7 +305,7 @@ fn g0_nonlinear_material_bounds_use_cells_and_extreme_face_peaks_keep_stress_hea
 }
 
 #[test]
-fn g0_compatible_scope_preserves_finite_slip_baths_and_constant_interior_bits() {
+fn g0_compatible_scope_admits_all_reflecting_walls_and_preserves_bath_and_sgs_fallback() {
     let flow = field(
         gas(0.0),
         CartesianGrid::new(3, 3, 3, 0.2, 0.3, 0.4).unwrap(),
@@ -324,10 +336,7 @@ fn g0_compatible_scope_preserves_finite_slip_baths_and_constant_interior_bits() 
                 },
             )
             .unwrap();
-        assert_eq!(
-            navier.uses_compatible_molecular_stress(),
-            slip_length_m == 0.0
-        );
+        assert!(navier.uses_compatible_molecular_stress());
     }
     #[cfg(feature = "experimental-sgs")]
     {
@@ -408,55 +417,141 @@ fn g0_prescribed_walls_use_cell_stress_and_keep_original_heat_at_extreme_wall_sa
         let mut wall_velocity = [0.0; 3];
         wall_velocity[a] = 0.4;
         wall_velocity[b] = -0.3;
-        let wall = MolecularWall3d::NoSlip {
-            velocity: wall_velocity,
-            thermal: WallThermalCondition::Isothermal(Temperature::new(2.0)),
-        };
-        let mut reference = operator(&flow, Profile::Constant, 0.2, false)
-            .with_wall(side, wall)
-            .unwrap();
-        let mut peaked = operator(&flow, Profile::FacePeak, 0.2, false)
-            .with_wall(side, wall)
-            .unwrap();
-        // Cell mu=1, but the original isothermal wall midpoint has mu=1e30.
-        // Neither the momentum/work flux nor its rate may inherit that sample.
-        let rate = prepare(&mut reference, &flow);
-        close(prepare(&mut peaked, &flow), rate, 2e-12);
-        for d in 0..3 {
-            for (actual, expected) in peaked.work.flux[d].iter().zip(&reference.work.flux[d]) {
-                close(actual.normal_momentum, expected.normal_momentum, 2e-13);
-                for tangent in 0..2 {
-                    close(
-                        actual.transverse_momentum[tangent],
-                        expected.transverse_momentum[tangent],
-                        2e-13,
-                    );
+        for slip_length in [0.0, 0.7] {
+            let thermal = WallThermalCondition::Isothermal(Temperature::new(2.0));
+            let heat_fraction = if slip_length == 0.0 { 1.0 } else { 0.35 };
+            let wall = if slip_length == 0.0 {
+                MolecularWall3d::NoSlip {
+                    velocity: wall_velocity,
+                    thermal,
                 }
-                close(actual.energy, expected.energy, 2e-13);
+            } else {
+                MolecularWall3d::NavierSlip {
+                    velocity: wall_velocity,
+                    thermal,
+                    slip_length_m: slip_length,
+                    fluid_heat_fraction: heat_fraction,
+                }
+            };
+            let mut reference = operator(&flow, Profile::Constant, 0.2, false)
+                .with_wall(side, wall)
+                .unwrap();
+            let mut peaked = operator(&flow, Profile::FacePeak, 0.2, false)
+                .with_wall(side, wall)
+                .unwrap();
+            // Cell mu=1, but the original thermal wall midpoint has mu=1e30.
+            // Traction, physical slip heat, and rate use the cell material.
+            let rate = prepare(&mut reference, &flow);
+            close(prepare(&mut peaked, &flow), rate, 2e-12);
+            for d in 0..3 {
+                for (actual, expected) in peaked.work.flux[d].iter().zip(&reference.work.flux[d]) {
+                    close(actual.normal_momentum, expected.normal_momentum, 2e-13);
+                    for tangent in 0..2 {
+                        close(
+                            actual.transverse_momentum[tangent],
+                            expected.transverse_momentum[tangent],
+                            2e-13,
+                        );
+                    }
+                    close(actual.energy, expected.energy, 2e-13);
+                }
+            }
+            let mut face = [1; 3];
+            face[axis] = if side.sign() > 0.0 { 3 } else { 0 };
+            let flux = peaked.work.flux[axis][grid.cell_face(axis, face)];
+            face[axis] = if side.sign() > 0.0 { 2 } else { 0 };
+            let cell = grid.index(face);
+            let p = peaked.work.primitive[cell];
+            let g = peaked.work.gradient[cell];
+            let h = 0.5 * grid.spacing[axis];
+            let normal = -(4.0 / 3.0) * side.sign() * p.velocity[axis] / h
+                - (2.0 / 3.0) * (g[a][a] + g[b][b]);
+            let shear = [a, b].map(|t| {
+                (side.sign() * (wall_velocity[t] - p.velocity[t]) + h * g[axis][t])
+                    / (h + slip_length)
+            });
+            let relative_trace = [a, b].map(|t| {
+                slip_length / (h + slip_length)
+                    * (p.velocity[t] - wall_velocity[t] - side.sign() * h * g[axis][t])
+            });
+            let dissipation = -side.sign()
+                * (shear[0] * relative_trace[0] + shear[1] * relative_trace[1]);
+            assert!(dissipation >= 0.0);
+            let heat = -0.2 * side.sign() * (2.0 - p.temperature) / h;
+            close(flux.normal_momentum, -normal, 2e-13);
+            for t in 0..2 {
+                close(flux.transverse_momentum[t], -shear[t], 2e-13);
+            }
+            close(
+                flux.energy,
+                -shear[0] * wall_velocity[a] - shear[1] * wall_velocity[b]
+                    + side.sign() * (1.0 - heat_fraction) * dissipation
+                    + heat,
+                2e-13,
+            );
+        }
+    }
+}
+
+#[test]
+fn g1_large_navier_slip_converges_to_the_same_natural_free_slip_gradient() {
+    let flow = field(
+        gas(0.0),
+        CartesianGrid::new(3, 3, 3, 0.2, 0.3, 0.4).unwrap(),
+        WALLS,
+        |x| [
+            1.0,
+            0.03 * x[1] - 0.02 * x[2],
+            0.04 * x[0] + 0.01 * x[2],
+            -0.02 * x[0] + 0.03 * x[1],
+            1.0 + 0.2 * x[0] + 0.1 * x[1],
+        ],
+    );
+    let mut free = operator(&flow, Profile::Linear, 0.0, false);
+    let mut large = operator(&flow, Profile::Linear, 0.0, false);
+    for side in BoundarySide::ALL {
+        large = large
+            .with_wall(
+                side,
+                MolecularWall3d::NavierSlip {
+                    velocity: [0.0; 3],
+                    thermal: WallThermalCondition::Adiabatic,
+                    slip_length_m: 1e12,
+                    fluid_heat_fraction: 1.0,
+                },
+            )
+            .unwrap();
+    }
+    assert!(free.uses_compatible_molecular_stress());
+    assert!(large.uses_compatible_molecular_stress());
+    let rate = prepare(&mut free, &flow);
+    close(prepare(&mut large, &flow), rate, 2e-12);
+    // The natural wall trace includes the normal-velocity cross derivative.
+    // Matching only face traction while retaining an even ghost would fail
+    // this comparison of the actual interior stress gradients.
+    for (actual, expected) in large.work.gradient.iter().zip(&free.work.gradient) {
+        for component in 0..3 {
+            for derivative in 0..3 {
+                close(
+                    actual[component][derivative],
+                    expected[component][derivative],
+                    2e-11,
+                );
             }
         }
-        let mut face = [1; 3];
-        face[axis] = if side.sign() > 0.0 { 3 } else { 0 };
-        let flux = peaked.work.flux[axis][grid.cell_face(axis, face)];
-        face[axis] = if side.sign() > 0.0 { 2 } else { 0 };
-        let cell = grid.index(face);
-        let p = peaked.work.primitive[cell];
-        let g = peaked.work.gradient[cell];
-        let h = 0.5 * grid.spacing[axis];
-        let normal =
-            -(4.0 / 3.0) * side.sign() * p.velocity[axis] / h - (2.0 / 3.0) * (g[a][a] + g[b][b]);
-        let shear =
-            [a, b].map(|t| side.sign() * (wall_velocity[t] - p.velocity[t]) / h + g[axis][t]);
-        let heat = -0.2 * side.sign() * (2.0 - p.temperature) / h;
-        close(flux.normal_momentum, -normal, 2e-13);
-        for t in 0..2 {
-            close(flux.transverse_momentum[t], -shear[t], 2e-13);
+    }
+    for axis in 0..3 {
+        for (actual, expected) in large.work.flux[axis].iter().zip(&free.work.flux[axis]) {
+            close(actual.normal_momentum, expected.normal_momentum, 3e-9);
+            for tangent in 0..2 {
+                close(
+                    actual.transverse_momentum[tangent],
+                    expected.transverse_momentum[tangent],
+                    3e-9,
+                );
+            }
+            close(actual.energy, expected.energy, 3e-9);
         }
-        close(
-            flux.energy,
-            -shear[0] * wall_velocity[a] - shear[1] * wall_velocity[b] + heat,
-            2e-13,
-        );
     }
 }
 
@@ -473,58 +568,68 @@ fn moving_channel() -> Euler3d {
     )
 }
 
-fn moving_operator(flow: &Euler3d) -> MolecularTransport3d<SampledViscosity> {
+fn moving_operator(flow: &Euler3d, slip_length: f64) -> MolecularTransport3d<SampledViscosity> {
+    let velocity = [0.0, 0.1, 0.0];
+    let thermal = WallThermalCondition::Adiabatic;
+    let wall = if slip_length == 0.0 {
+        MolecularWall3d::NoSlip { velocity, thermal }
+    } else {
+        MolecularWall3d::NavierSlip {
+            velocity,
+            thermal,
+            slip_length_m: slip_length,
+            fluid_heat_fraction: 1.0,
+        }
+    };
     operator(flow, Profile::Linear, 0.01, false)
-        .with_wall(
-            BoundarySide::XMin,
-            MolecularWall3d::NoSlip {
-                velocity: [0.0, 0.1, 0.0],
-                thermal: WallThermalCondition::Adiabatic,
-            },
-        )
+        .with_wall(BoundarySide::XMin, wall)
         .unwrap()
 }
 
 #[test]
 fn g1_moving_wall_curl_uses_the_same_cell_stress_as_conservative_wall_power() {
-    let mut flow = moving_channel();
-    let mut op = moving_operator(&flow);
-    assert!(op.uses_compatible_molecular_stress());
-    let initial = flow.states().to_vec();
-    let before = flow.totals();
-    let time = flow.time();
-    let mut work = op
-        .vorticity_workspace(op.required_vorticity_workspace_bytes().unwrap())
-        .unwrap();
-    let observed = op.vorticity(&flow, &mut work, || false).unwrap();
-    // The first cell receives 2*mu*Uwall/h² tangential acceleration.
-    // The centered curl in the neighboring interior cell is -mu*Uwall/h³.
-    close(
-        observed[1].stress[2],
-        -300.0 * 0.1 / 0.25_f64.powi(3),
-        3e-10,
-    );
-    close(observed[1].stress[0], 0.0, 2e-13);
-    close(observed[1].stress[1], 0.0, 2e-13);
-    assert_eq!(flow.states(), initial);
-    assert_eq!(flow.time(), time);
-    let report = op
-        .advance(
-            &mut flow,
-            Time::new(1e-7),
-            MolecularControl::default(),
-            || false,
-        )
-        .unwrap();
-    assert!(flow.totals().energy > before.energy);
-    assert!(flow.totals().momentum[1] > before.momentum[1]);
-    let mut outward_energy = 0.0;
-    for impulse in op.boundary_impulses(BoundarySide::XMin) {
-        close(impulse.energy, 0.1 * impulse.momentum[1], 2e-13);
-        outward_energy += impulse.energy;
+    for slip_length in [0.0, 0.125] {
+        let mut flow = moving_channel();
+        let mut op = moving_operator(&flow, slip_length);
+        assert!(op.uses_compatible_molecular_stress());
+        let initial = flow.states().to_vec();
+        let before = flow.totals();
+        let time = flow.time();
+        let mut work = op
+            .vorticity_workspace(op.required_vorticity_workspace_bytes().unwrap())
+            .unwrap();
+        let observed = op.vorticity(&flow, &mut work, || false).unwrap();
+        // With h=cell spacing, the first cell receives
+        // mu*Uwall/[h*(h/2+b)] acceleration. Its neighbor's centered curl
+        // is -mu*Uwall/[2*h^2*(h/2+b)], including the no-slip limit.
+        close(
+            observed[1].stress[2],
+            -300.0 * 0.1 / (2.0 * 0.25_f64.powi(2) * (0.125 + slip_length)),
+            3e-10,
+        );
+        close(observed[1].stress[0], 0.0, 2e-13);
+        close(observed[1].stress[1], 0.0, 2e-13);
+        assert_eq!(flow.states(), initial);
+        assert_eq!(flow.time(), time);
+        let report = op
+            .advance(
+                &mut flow,
+                Time::new(1e-7),
+                MolecularControl::default(),
+                || false,
+            )
+            .unwrap();
+        assert!(flow.totals().energy > before.energy);
+        assert!(flow.totals().momentum[1] > before.momentum[1]);
+        let mut outward_energy = 0.0;
+        for impulse in op.boundary_impulses(BoundarySide::XMin) {
+            // All interface heat returns to the fluid in this case.
+            close(impulse.energy, 0.1 * impulse.momentum[1], 2e-13);
+            outward_energy += impulse.energy;
+        }
+        close(flow.totals().energy - before.energy, -outward_energy, 3e-13);
+        close(report.conservation_residual.energy, 0.0, 3e-13);
     }
-    close(flow.totals().energy - before.energy, -outward_energy, 3e-13);
-    close(report.conservation_residual.energy, 0.0, 3e-13);
 }
 
 #[test]
@@ -533,7 +638,7 @@ fn g4_variable_material_late_cancellation_preserves_flow_and_replays_native_sour
         let make_flow = || if moving { moving_channel() } else { vortex() };
         let make_op = |flow: &Euler3d| {
             if moving {
-                moving_operator(flow)
+                moving_operator(flow, 0.125)
             } else {
                 operator(flow, Profile::Linear, 0.01, false)
             }

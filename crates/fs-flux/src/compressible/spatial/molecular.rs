@@ -2,10 +2,12 @@
 //!
 //! The original transport law supplies actual temperature, pressure and frozen
 //! composition coefficients. Compatible molecular stress samples cell values
-//! on periodic, zero-flux, free-slip and prescribed no-slip domains; Fourier
-//! heat keeps its native face sampling. Stress work and Fourier heat share one
-//! conservative total-energy flux; kinetic energy lost to viscosity becomes
-//! internal energy without an additional heat source. These operators do not
+//! on periodic, zero-flux and reflecting domains, with the full compatible
+//! no-slip/Navier/free-slip wall trace. Fourier heat keeps its native face
+//! sampling. Stress work and Fourier heat share one conservative total-energy
+//! flux. Bulk viscous loss remains internal energy; interfacial slip friction
+//! follows its authored fluid/wall heat partition, without an additional volume
+//! heating source. These operators do not
 //! resolve a physical shock thickness without an adequate grid and source data.
 
 pub use super::mixture::molecular::MolecularWall3d;
@@ -81,10 +83,10 @@ struct MolecularWorkspace {
 /// enables heat and stress exchange through complete source-admitted uniform
 /// or face-resolved reservoirs. All workspaces are preallocated.
 /// Compatible cell-weighted molecular stress retains sixteen bytes of
-/// viscosity scratch per cell, including prescribed no-slip wall motion and
-/// its actual mechanical power. Positive Navier slip, enabled molecular bath
-/// exchange or an authored equilibrium SGS wall keeps the original full
-/// mechanical discretization.
+/// viscosity scratch per cell, including prescribed wall motion, physical
+/// Navier-slip dissipation, and the corresponding natural free-slip limit.
+/// Enabled molecular bath exchange or an authored equilibrium SGS wall keeps
+/// the original full mechanical discretization.
 /// SGS retains its authored face closure and has no new dissipation guarantee.
 pub struct MolecularTransport3d<L> {
     gas: FrozenGas,
@@ -631,6 +633,35 @@ fn spatial<L: TransportLaw>(
             poll(cancelled)?;
         }
         let c = grid.coordinates(cell);
+        if compatible {
+            *derivatives = crate::compressible::stress::velocity_gradient(
+                grid.spacing,
+                primitive[cell].velocity,
+                |axis, side| {
+                    let outside = if side == 0 {
+                        c[axis] == 0
+                    } else {
+                        c[axis] + 1 == grid.shape[axis]
+                    };
+                    if outside
+                        && let AxisBoundaries::Ends { lower, upper } = boundaries.axis(axis)
+                        && [lower, upper][side] == BoundaryCondition::Reflecting
+                    {
+                        let (velocity, slip, _) = walls[2 * axis + side].stress_boundary();
+                        return crate::compressible::stress::GradientSample::Wall {
+                            velocity,
+                            slip,
+                        };
+                    }
+                    let sample = evolve::neighbour(primitive, grid, boundaries, c, axis, side == 1);
+                    crate::compressible::stress::GradientSample::Cell([
+                        sample[1], sample[2], sample[3],
+                    ])
+                },
+            )
+            .map_err(MolecularError::Invalid)?;
+            continue;
+        }
         for axis in 0..3 {
             let mut lower = evolve::neighbour(primitive, grid, boundaries, c, axis, false);
             let mut upper = evolve::neighbour(primitive, grid, boundaries, c, axis, true);
@@ -764,8 +795,7 @@ fn spatial<L: TransportLaw>(
                 && !wall
                 && (viscosity[left] != molecular_viscosity
                     || viscosity[right] != molecular_viscosity);
-            let replace_wall =
-                compatible && wall_model.is_some_and(|model| model.no_slip_velocity().is_some());
+            let replace_wall = compatible && wall;
             let conductivity = coefficients.thermal_conductivity.value();
             if ![mu, bulk, conductivity]
                 .into_iter()
@@ -880,16 +910,20 @@ fn spatial<L: TransportLaw>(
             let mut normal_stress =
                 longitudinal * normal_derivative + cross * transverse_divergence;
             let (mut shear_stress, mut energy) = if let Some(model) = wall_model {
-                if compatible && let Some(wall_velocity) = model.no_slip_velocity() {
-                    let traction = crate::compressible::stress::no_slip_traction(
+                if compatible {
+                    let (wall_velocity, slip, heat_fraction) = model.stress_boundary();
+                    let stress = crate::compressible::stress::wall_stress(
                         axis,
                         sign,
                         0.5 * grid.spacing[axis],
                         pl.velocity,
                         wall_velocity,
+                        slip,
                         viscosity[left],
                         |component, derivative| gradient[left][component][derivative],
-                    );
+                    )
+                    .map_err(MolecularError::Invalid)?;
+                    let traction = stress.traction;
                     normal_stress = traction[axis];
                     let shear = tangential.map(|t| traction[t]);
                     let heat = model.conductive_energy_flux(
@@ -900,6 +934,7 @@ fn spatial<L: TransportLaw>(
                     );
                     let energy = -shear[0] * wall_velocity[tangential[0]]
                         - shear[1] * wall_velocity[tangential[1]]
+                        + sign * (1.0 - heat_fraction) * stress.slip_dissipation
                         + heat;
                     (shear, energy)
                 } else {

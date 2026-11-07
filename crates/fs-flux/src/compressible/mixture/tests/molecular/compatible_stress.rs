@@ -269,10 +269,55 @@ fn loads(op: &MolecularTransport2d<VariableTransport>) -> Vec<([f64; 3], [f64; 2
         .collect()
 }
 
+fn reflecting_vortex() -> MixtureEuler2d {
+    let a = [0.2, 0.3, 0.1, 0.3];
+    let b = [0.0, 1.0, 0.0, -1.0];
+    field(
+        equal_mass_gas(),
+        CartesianGrid::new(4, 4, 1.0, 1.0, 1.0).unwrap(),
+        Boundaries2d { x: WALLS, y: WALLS },
+        |p| {
+            let (x, y) = (p[0] as usize, p[1] as usize);
+            (
+                [0.4, 0.6, 0.0],
+                [-a[x] * b[y], a[y] * b[x]],
+                if x == 0 && y == 0 { 2.0 } else { 1.0 },
+            )
+        },
+    )
+}
+
+fn reflecting_operator(
+    flow: &MixtureEuler2d,
+    method: Method,
+    slip: Option<f64>,
+) -> MolecularTransport2d<VariableTransport> {
+    let mut op = operator(flow, Material::HotSpot, method, 0.0);
+    if let Some(slip_length_m) = slip {
+        for side in SIDES {
+            let mut velocity = [0.0; 2];
+            velocity[1 - side.axis()] = 0.1 * side.sign();
+            op = op
+                .with_wall(
+                    side,
+                    MolecularWall2d::NavierSlip {
+                        velocity,
+                        thermal: WallThermalCondition::Adiabatic,
+                        slip_length_m,
+                        fluid_heat_fraction: 0.35,
+                    },
+                )
+                .unwrap();
+        }
+    }
+    assert!(op.uses_compatible_molecular_stress());
+    op
+}
+
 #[test]
-fn late_cancellation_preserves_the_accepted_variable_source_epoch_and_loads() {
-    let mut reference = vortex();
-    let mut reference_op = operator(&reference, Material::HotSpot, Method::Ssp, 0.0);
+fn late_cancellation_preserves_the_accepted_variable_source_epoch_and_slip_wall_loads() {
+    let mut reference = reflecting_vortex();
+    let mut reference_op = reflecting_operator(&reference, Method::Ssp, Some(0.17));
     advance(&mut reference, &mut reference_op, Method::Ssp, 1e-7);
     let controls = DissipationControl {
         maximum_step_s: 1e-7,
@@ -285,8 +330,8 @@ fn late_cancellation_preserves_the_accepted_variable_source_epoch_and_loads() {
             false
         })
         .unwrap();
-    let mut flow = vortex();
-    let mut op = operator(&flow, Material::HotSpot, Method::Ssp, 0.0);
+    let mut flow = reflecting_vortex();
+    let mut op = reflecting_operator(&flow, Method::Ssp, Some(0.17));
     advance(&mut flow, &mut op, Method::Ssp, 1e-7);
     let before = flow.states().to_vec();
     let report = *op.last_step().unwrap();
@@ -312,7 +357,7 @@ fn late_cancellation_preserves_the_accepted_variable_source_epoch_and_loads() {
 }
 
 #[test]
-fn no_slip_is_compatible_while_positive_slip_and_baths_keep_the_original_operator() {
+fn all_reflecting_slip_laws_are_compatible_while_baths_keep_the_original_operator() {
     let flow = wall_field();
     let op = operator(&flow, Material::Smooth, Method::Ssp, 0.05);
     assert!(op.uses_compatible_molecular_stress());
@@ -340,7 +385,7 @@ fn no_slip_is_compatible_while_positive_slip_and_baths_keep_the_original_operato
                 slip_length_m: 0.1,
                 fluid_heat_fraction: 0.5,
             },
-            false,
+            true,
         ),
     ] {
         let op = operator(&flow, Material::Smooth, Method::Ssp, 0.05)
@@ -477,5 +522,31 @@ fn heated_no_slip_preserves_original_species_enthalpy_and_heat_without_unused_wa
         assert_eq!(loads(&spike), loads(&constant));
         assert_ne!(actual.states(), before);
         assert!(report.maximum_parabolic_number < 0.001);
+    }
+}
+
+#[test]
+fn large_navier_slip_converges_to_natural_free_slip_through_every_planar_integrator() {
+    for method in [Method::Ssp, Method::Rkl, Method::Adaptive] {
+        let mut free = reflecting_vortex();
+        let initial_kinetic = kinetic(&free);
+        let mut free_op = reflecting_operator(&free, method, None);
+        let mut finite = reflecting_vortex();
+        let mut finite_op = reflecting_operator(&finite, method, Some(1e200));
+        check(advance(&mut free, &mut free_op, method, 1e-7));
+        check(advance(&mut finite, &mut finite_op, method, 1e-7));
+        assert!(kinetic(&free) < initial_kinetic);
+        for (a, b) in free.states().iter().zip(finite.states()) {
+            close(*a, *b, 1e-13);
+        }
+        for (a, b) in loads(&free_op).iter().zip(loads(&finite_op)) {
+            assert_eq!(a.0, [0.0; 3]);
+            assert_eq!(b.0, [0.0; 3]);
+            for component in 0..2 {
+                close(a.1[component], b.1[component], 1e-13);
+            }
+            close(a.2, b.2, 1e-13);
+            assert_eq!(a.2, 0.0);
+        }
     }
 }

@@ -120,13 +120,14 @@ struct Workspace {
 /// supply the original bath energy effort. Refine the boundary layer independently.
 /// Unbound Transmissive faces still refuse.
 ///
-/// On periodic, free-slip and prescribed no-slip domains, source viscosities
-/// are sampled at cells for the compatible full-tensor stress stencil. Molecular
-/// kinetic energy minus the actual prescribed-wall work dissipates
-/// semidiscretely for varying positive shear/bulk viscosity. The zero-length
-/// Navier limit is the same no-slip law. Species, enthalpy and Fourier heat keep
-/// their original source face law. Baths and positive finite-slip lengths keep
-/// the original full operator; no finite-step dissipation claim is made.
+/// On periodic and reflecting domains, source viscosities are sampled at cells
+/// for the compatible full-tensor stress stencil. Molecular kinetic energy
+/// minus actual wall work dissipates semidiscretely for varying positive
+/// shear/bulk viscosity. No-slip, finite Navier and natural free-slip walls share
+/// the same strain and physical interfacial friction law; Navier heat retains
+/// its authored fluid/wall partition. Species, enthalpy and Fourier heat keep
+/// their original source face law. Baths retain the original full operator;
+/// no finite-step dissipation claim is made.
 pub struct MolecularTransport2d<L: TransportLaw> {
     source: PlanarTransport<L>,
     grid: CartesianGrid,
@@ -638,6 +639,29 @@ fn spatial<L: TransportLaw>(
     }
     for (index, row) in gradient.iter_mut().enumerate() {
         poll(cancelled)?;
+        if compatible {
+            let value = stress::velocity_gradient(
+                grid.spacing,
+                primitive[index].velocity,
+                |axis, side| {
+                    let (neighbor, reflected) =
+                        cartesian::neighbour(grid, boundaries, index, axis, side == 1);
+                    if reflected {
+                        let (velocity, slip, _) = walls[2 * axis + side].stress_boundary();
+                        stress::GradientSample::Wall { velocity, slip }
+                    } else {
+                        stress::GradientSample::Cell(primitive[neighbor].velocity)
+                    }
+                },
+            )
+            .map_err(DissipationError::Invalid)?;
+            for axis in 0..2 {
+                for component in 0..2 {
+                    row[2 * axis + component] = value[component][axis];
+                }
+            }
+            continue;
+        }
         for axis in 0..2 {
             let low = reservoirs
                 .velocity_neighbour(grid, boundaries, walls, primitive, index, axis, false)?;
@@ -772,46 +796,51 @@ fn spatial<L: TransportLaw>(
                             output,
                             &mut *cancelled,
                         )?;
-                        // Keep that source's conductive heat exactly. The
-                        // shared finite-slip kernel supplies only mechanical
-                        // work and the authored interfacial heat partition.
-                        let (shear, mechanical_energy) = wall.shear_and_energy(
-                            axis,
-                            sign,
-                            p.velocity,
-                            p.temperature,
-                            distance,
-                            receipt.dynamic_viscosity_pa_s,
-                            0.0,
-                        );
-                        output[species + 1] = -shear[tangent];
-                        output[species + 2] = mechanical_energy + receipt.reduced_heat_flux_w_m2;
-                        if !output.iter().all(|value| value.is_finite()) {
-                            return Err(DissipationError::Invalid(
-                                "Navier molecular wall flux overflow",
-                            ));
+                        if !compatible {
+                            // Preserve the complete original bath-domain law.
+                            let (shear, mechanical_energy) = wall.shear_and_energy(
+                                axis,
+                                sign,
+                                p.velocity,
+                                p.temperature,
+                                distance,
+                                receipt.dynamic_viscosity_pa_s,
+                                0.0,
+                            );
+                            output[species + 1] = -shear[tangent];
+                            output[species + 2] =
+                                mechanical_energy + receipt.reduced_heat_flux_w_m2;
+                            if !output.iter().all(|value| value.is_finite()) {
+                                return Err(DissipationError::Invalid(
+                                    "Navier molecular wall flux overflow",
+                                ));
+                            }
                         }
                         receipt
                     }
                 };
-                if compatible && let Some(velocity) = wall.no_slip_velocity() {
-                    let traction = stress::no_slip_traction(
+                if compatible {
+                    let (velocity, slip, fluid_heat_fraction) = wall.stress_boundary();
+                    let mechanics = stress::wall_stress(
                         axis,
                         sign,
                         0.5 * grid.spacing[axis],
                         primitive[cell].velocity,
                         velocity,
+                        slip,
                         viscosity[cell],
                         |component, derivative| gradient[cell][2 * derivative + component],
-                    );
-                    // These are the SAME prescribed-wall tractions whose
-                    // work enters total energy and the native load receipt.
-                    // Source Fourier heat is retained before mechanical work.
+                    )
+                    .map_err(DissipationError::Invalid)?;
+                    let traction = mechanics.traction;
+                    // Replace all wall mechanics, including interfacial heat.
+                    // The source receipt contributes only its unchanged heat.
                     output[species] = -traction[axis];
                     output[species + 1] = -traction[tangent];
                     output[species + 2] = receipt.nonmechanical_energy_flux_w_m2
                         - velocity[0] * traction[0]
-                        - velocity[1] * traction[1];
+                        - velocity[1] * traction[1]
+                        + sign * (1.0 - fluid_heat_fraction) * mechanics.slip_dissipation;
                     if !output.iter().all(|value| value.is_finite()) {
                         return Err(DissipationError::Invalid(
                             "planar compatible wall flux overflow",

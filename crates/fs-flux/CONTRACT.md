@@ -3403,31 +3403,37 @@ species owners: `mixture::molecular::MolecularTransport2d` and
 steps consume the same wall law. The authored wall velocity is constant on a
 flat reflecting side and has zero normal component. Slip length `b` is finite
 and nonnegative; the friction-heat fraction `chi` is finite and in `[0,1]`.
-The original gas transport source still owns face viscosity, bulk viscosity
-and conductivity at the actual cell/wall temperature and pressure. No
-accommodation coefficient, mean free path or rarefied-gas applicability is
-inferred from `b`.
+The original gas transport source owns shear and bulk viscosity at each actual
+cell state for compatible mechanics. Its original cell/wall temperature and
+pressure sampling still owns Fourier conductivity. No accommodation coefficient,
+mean free path or rarefied-gas applicability is inferred from `b`.
 
-For physical cell-to-wall distance `h = dx/2`, the tangential fluid trace and
-traction on the fluid are
+For physical cell-to-wall distance `h = dx/2`, outward sign `s`, and
+centered cross derivative `C_t u_n`, the compatible tangential fluid trace
+and traction on the fluid satisfy
 
 ```text
-u_f = (h*u_wall + b*u_cell)/(h+b)
-t   = mu*(u_wall-u_cell)/(h+b).
+r   = u_wall-u_cell+s*h*C_t u_n
+u_f = u_wall-b*r/(h+b)
+t   = mu*r/(h+b).
 ```
 
-The same trace supplies the reflected velocity ghosts used by adjacent
-interior cross derivatives. Normal velocity remains impermeable. Since the
-wall velocity and `b` are constant on a side, the physical tangential derivative
-of the fluid trace is `b/(h+b)` times the adjacent-cell derivative; the complete
-normal viscous stress retains this contribution. Fourier conduction uses `h`,
-independently of momentum slip. `b = 0` uses the original no-slip arithmetic,
-and increasing `b` tends toward zero tangential traction. Per-stage evaluation
-adds no allocations. The existing conservative face flux, boundary impulse
-integration, admissibility retries and atomic publication remain the owners.
+The shared local trace solve couples adjacent off-diagonal gradients through
+the complete symmetric Newtonian strain. Normal velocity remains impermeable;
+normal traction retains the adjacent cell's full cross divergence required by
+the compatible adjoint. The simpler series formula with
+`r = u_wall-u_cell` applies when the cross derivative vanishes. Natural
+free-slip uses the matching zero-traction trace instead of an even tangential
+ghost. Fourier conduction uses `h`, independently of momentum slip.
+`b = 0` uses the same compatible no-slip branch, and increasing `b`
+approaches the complete natural free-slip operator. Per-stage evaluation adds
+no allocations. Conservative face fluxes, boundary impulse integration,
+admissibility retries and atomic publication remain with the existing owners.
+Bath and explicitly configured equilibrium-SGS domains retain their complete
+native wall discretization.
 
 The massless interface dissipates
-`D = -t·(u_f-u_wall) = mu*b*|u_wall-u_cell|²/(h+b)² >= 0` per unit area.
+`D = -t·(u_f-u_wall) = mu*b*|r|²/(h+b)² >= 0` per unit area.
 Actual wall mechanical power is `t·u_wall`, while fluid traction work is
 `t·u_f = t·u_wall-D`. The caller explicitly sends fraction `chi` of this
 friction heat to the fluid and the complement to the prescribed wall. The
@@ -3441,24 +3447,25 @@ original conservative energy update. The conductive thermal condition and
 this authored interface heat partition are separate physical inputs; wall
 temperature and conjugate wall heat storage are not solved here.
 
-The evolving-species owners use the same ghost, tangential-trace and
-traction/heat kernel as frozen gas. Their original `PlanarTransport` and
-`SpatialTransport` sources admit the impermeable species boundary, normal
-stress and Fourier heat at actual local mole composition and cell/wall
-temperature. The returned dynamic viscosity supplies the shared finite-slip
-stress, while already evaluated conductive heat is retained exactly. This
-needs one material query per face, preserves zero wall flux for every species,
-and does not add another chemical or viscous volume heat source. Original
-conservative boundary integration carries the authored interface heat partition
-through both molecular halves of a reactive step. Zero slip uses the original
-no-slip source path and arithmetic.
+The evolving-species owners use the same compatible trace and traction/heat
+kernel as frozen gas. Their original `PlanarTransport` and
+`SpatialTransport` sources admit the impermeable species boundary and Fourier
+heat at actual local mole composition and cell/wall temperature. Actual cell
+source viscosity supplies compatible stress and its mechanical bound; the
+already evaluated source-owned nonmechanical energy remains intact. This
+preserves zero wall flux for every species and adds no chemical or viscous
+volume heat source. Original conservative boundary integration carries the
+authored interface heat partition through both molecular halves of a reactive
+step. Zero slip uses the same compatible no-slip path and arithmetic.
 
 The planar evolving-species operator binds four fixed-size side values through
 `with_wall`; periodic/open sides and normal wall motion refuse. Its SSP RK2
 and stabilized RKL2 paths use the identical source/ghost/face owner, so adaptive
 and composed stepping retain the same physical boundary law. Complete held
 reservoirs keep their original exterior traces and source-owned heat/species
-efforts. Default free-slip configurations preserve their original behavior.
+efforts. Compatible free-slip gradients use the natural zero-traction trace;
+the numerical wall trace changes when normal-velocity cross derivatives are
+nonzero.
 
 Channel filters and equilibrium SGS wall closures that require no slip still
 refuse this condition explicitly, including when reconfiguring an existing
@@ -3511,10 +3518,11 @@ contribute to normal viscous traction; species, tangential traction, heat and
 wall work are zero. `with_wall` also admits the shared no-slip and finite
 Navier-slip conditions described above, with fixed tangential wall velocity,
 adiabatic/isothermal conductive data and an explicit interfacial heat fraction.
-The source-owned no-slip closure supplies the full stress and heat at the
-actual local composition; finite slip retains its normal stress and conduction
-and uses the common fluid trace and tangential traction/work law. Species
-remain impermeable in every wall condition. A transmissive Euler end without
+Compatible wall mechanics uses actual cell source viscosities and the shared
+complete stress/trace law, while original wall-temperature sampling owns
+conduction. The same traction supplies mechanical work and physical interface
+friction heat. Species remain impermeable in every wall condition.
+A transmissive Euler end without
 the explicit source-owned reservoir below still refuses molecular evolution:
 zero-gradient wave continuation supplies no molecular composition/temperature
 boundary law. Normal support traction includes signed `p-tau_nn` when composed
@@ -8040,26 +8048,26 @@ Every proposal checks whole-field component amounts, per-cell capacity, total en
 
 ### Compatible molecular stress with variable viscosity
 
-Frozen-composition planar and spatial molecular owners now sample the original
+Frozen-composition planar and spatial molecular owners sample the original
 transport law at cells and use a shared compatible Newtonian mechanical
-stencil on periodic, zero-diffusive-flux, SlipAdiabatic and prescribed no-slip
-domains. Normal face derivatives use arithmetic cell viscosities; each
-centered cross derivative carries its own cell coefficient before face
-averaging. For nonnegative shear and bulk viscosity, prescribed wall power
-minus the semidiscrete molecular kinetic-energy rate is a sum of squared
-symmetric/deviatoric centered strains and nonnegative normal-derivative
-residuals. Smooth periodic variable-material manufactured fields retain
-second-order force convergence. This prevents a demonstrated positive-viscosity
-stencil from creating unforced kinetic energy and spurious vorticity while
-conserving total energy and the actual boundary work.
+stencil on periodic, zero-diffusive-flux and reflecting domains, including
+natural free-slip, prescribed no-slip and finite Navier slip. Normal face
+derivatives use arithmetic cell viscosities; each centered cross derivative
+carries its own cell coefficient before face averaging. For nonnegative shear
+and bulk viscosity, prescribed wall power minus the semidiscrete molecular
+kinetic-energy rate equals the nonnegative bulk strain/residual quadratic plus
+physical interfacial slip dissipation. Smooth periodic variable-material
+manufactured fields retain second-order force convergence. This prevents a
+demonstrated positive-viscosity stencil from creating unforced kinetic energy
+and spurious vorticity while conserving total energy and actual boundary work.
 
 `uses_compatible_molecular_stress` reports the complete-domain selection.
-No-slip walls may have constant tangential velocity and their original
-adiabatic or isothermal thermal condition; zero-length Navier slip is the same
-Dirichlet case. Positive finite Navier slip, enabled molecular bath exchange
-in 3D, or an explicitly configured equilibrium SGS wall law retains the entire
-original mechanical discretization. The dissipation identity is not claimed
-for that fallback, arbitrary time steps, shocks or the combined SGS model.
+No-slip and Navier walls may have constant tangential velocity and their
+original adiabatic or isothermal thermal condition; zero-length Navier slip
+is the same Dirichlet case. Enabled molecular bath exchange in 3D or an
+explicitly configured equilibrium SGS wall law retains the entire original
+mechanical discretization. The dissipation identity is not claimed for that
+fallback, arbitrary time steps, shocks or the combined SGS model.
 Ordinary interior SGS face viscosity, ratio/source admission and heat remain
 authored contributions. Modeled viscosity is retained separately so replacing
 a large molecular midpoint sample cannot erase finite modeled stress.
@@ -8087,13 +8095,13 @@ replace a full Cargo or DSR gate.
 
 ### Compatible molecular stress for evolving mixtures
 
-The planar and spatial evolving-mixture molecular owners use the shared compatible Newtonian stress discretization on supported impermeable or zero-exchange domains. Planar domains admit periodic boundaries, reflecting `SlipAdiabatic` walls and stationary or tangentially moving no-slip walls, including zero-length Navier slip. Spatial domains additionally admit pressure outlets explicitly configured with `PressureOutletPolicy::ZeroDiffusiveFlux`; admission still rejects a pressure outlet without that policy. Baths, positive finite-slip lengths and explicitly configured equilibrium SGS wall laws retain the original mechanical discretization for the whole domain. `uses_compatible_molecular_stress()` reports this selection.
+The planar and spatial evolving-mixture molecular owners use the shared compatible Newtonian stress discretization on supported impermeable or zero-exchange domains. Planar domains admit periodic boundaries and all valid reflecting wall laws: natural free-slip, prescribed no-slip and finite Navier slip. Spatial domains additionally admit pressure outlets explicitly configured with `PressureOutletPolicy::ZeroDiffusiveFlux`; admission still rejects a pressure outlet without that policy. Baths and explicitly configured equilibrium SGS wall laws retain the original mechanical discretization for the whole domain. `uses_compatible_molecular_stress()` reports this selection.
 
-At every SSP, retry, RKL, and adaptive spatial evaluation, the original transport source samples molecular shear and bulk viscosities at each current cell's temperature, pressure, and composition. Normal face derivatives use arithmetic cell viscosities; cross derivatives are weighted by their originating cell viscosity before averaging. The matched prescribed-wall traction retains the complete adjacent-cell cross stress and uses the actual prescribed velocity for mechanical power. This preserves nonnegative semidiscrete molecular dissipation after accounting for wall work. It does not assert monotone enstrophy, arbitrary-time-step kinetic monotonicity, or a dissipation guarantee for the independently authored SGS model or fallback boundary domains.
+At every SSP, retry, RKL, and adaptive spatial evaluation, the original transport source samples molecular shear and bulk viscosities at each current cell's temperature, pressure, and composition. Normal face derivatives use arithmetic cell viscosities; cross derivatives are weighted by their originating cell viscosity before averaging. The shared local slip solve supplies the same complete gradient to interior stress, wall traction and ordinary interior SGS. Prescribed-wall power minus the semidiscrete molecular kinetic-energy rate equals nonnegative bulk viscous dissipation plus physical Navier interface friction. This does not assert monotone enstrophy, arbitrary-time-step kinetic monotonicity, or a dissipation guarantee for the independently authored SGS model or fallback boundary domains.
 
 `PlanarTransport::coefficients_from_primitive` and `SpatialTransport::coefficients_from_primitive` expose original-source cell coefficient admission without a second material law or a face diffusion solve. The source validates the actual primitive, coefficients, longitudinal viscosity, and binary diffusivity matrix using prepared scratch. `TransportFaceReport` additionally exposes `bulk_viscosity_pa_s`, `nonmechanical_energy_flux_w_m2`, and `nonmechanical_diffusivity_m2_s`. The latter two receipts retain original species-enthalpy, Fourier, Soret, and Dufour contributions before mechanical work and separate their admission bound from mechanical diffusivity.
 
-Compatible face traction and its conservative mechanical work are formed directly. This avoids cancellation when an unused nonlinear midpoint viscosity is much larger than either cell viscosity. Species fluxes and the source-owned nonmechanical energy flux retain their original values; no additional viscous-heating source is introduced. Interior faces whose two cell coefficient pairs exactly equal the original face coefficient pair retain original flux arithmetic. Compatible mechanical rate admission nevertheless always uses the cell stress bound and the minimum current stage density, including matching-coefficient faces and mechanically active spatial singleton/all-wall domains. The original thermal-wall source continues to supply Fourier heat and its diffusion bound. Ordinary interior SGS remains separate and retains its source model and ratio semantics.
+Compatible face traction and its conservative mechanical work are formed directly. This avoids cancellation when an unused nonlinear midpoint viscosity is much larger than either cell viscosity. Species fluxes and the source-owned nonmechanical energy flux retain their original values. Wall mechanics also uses the shared physical slip dissipation and authored fluid/wall heat partition; it replaces the complete native mechanical contribution without retaining an old friction-heat remainder. No additional viscous-heating source is introduced. Interior faces whose two cell coefficient pairs exactly equal the original face coefficient pair retain original flux arithmetic. Compatible mechanical rate admission always uses the cell stress bound and the minimum current stage density, including matching-coefficient faces and mechanically active spatial singleton/all-wall domains. The original thermal-wall source continues to supply Fourier heat and its diffusion bound. Ordinary interior SGS remains separate and retains its source model and ratio semantics.
 
 Each owner prepares one shear/bulk coefficient pair per cell, adding 16 bytes per cell to the required and actual base workspace accounting. Stabilized and adaptive workspace requirements inherit the increased base size. Source sampling and all face work remain inside the existing staged commit/cancellation boundary.
 
@@ -8101,14 +8109,14 @@ Regression coverage adds five planar and three spatial owner test groups for the
 
 ### Prescribed-wall vorticity and compatible mechanical power
 
-Frozen planar and spatial molecular owners use the shared
-`stress::no_slip_traction` for supported prescribed walls. It retains the full
-cell-centered cross stress paired with the same odd velocity ghost used by the
-interior gradient. Replacing that cross stress with derivatives of the exact
-constant wall trace would break the discrete mechanical energy identity.
-Each face uses its own prescribed tangential velocity for mechanical work,
-including corners and singleton axes; no velocities from different planes are
-averaged. Total-energy flux is the same traction's wall work plus the original
+The prescribed no-slip branch of the shared `stress::wall_stress` kernel uses
+`stress::no_slip_traction`. It retains the full cell-centered cross stress
+paired with the same odd velocity ghost used by the interior gradient.
+Replacing that cross stress with derivatives of the exact constant wall trace
+would break the discrete mechanical energy identity. Each face uses its own
+prescribed tangential velocity for mechanical work, including corners and
+singleton axes; no velocities from different planes are averaged. For no
+slip, total-energy flux is the same traction's wall work plus the original
 source's Fourier heat. Source coefficients at thermal wall states continue to
 own conduction, while cell viscosities own compatible stress and its rate bound.
 
@@ -8137,6 +8145,52 @@ These owner regressions passed source parsing/formatting and bounded review,
 but were not compiled or executed in this environment. The shared kernel's
 nine native tests establish the numerical wall identity and the separately
 qualified Couette refinement evidence.
+
+### Finite Navier slip and natural free-slip mechanics
+
+Compatible frozen-gas and evolving-mixture wall mechanics solves the fluid trace from
+the complete Navier traction, including the tangential derivative of normal
+velocity. With half-cell distance `d`, slip length `b`, outward sign `s`
+and centered cross derivative `C_t u_n`, the trace satisfies
+`u_f = (b u + d U_wall - b d s C_t u_n)/(b+d)`. The implementation uses
+relative velocities and stable geometric weights instead of this literal
+potentially overflowing expression. Natural free-slip imposes zero tangential
+traction with `u_f = u - d s C_t u_n`; its former even tangential ghost is
+therefore replaced in compatible domains. This makes large finite slip
+approach the same complete free-slip operator, including its neighboring
+stress and vorticity production.
+
+At corners and singleton axes, each off-diagonal gradient pair is a local
+two-by-two solve. Both `b/(b+d)` and `d/(b+d)` are retained independently;
+the determinant is formed from positive complements, without subtracting
+nearly equal products. Unrepresentable finite geometric weights and nonzero
+physical Navier traction refuse instead of silently erasing friction or
+changing the boundary to free-slip. A purely free-slip
+singular pair selects zero rotation only when both provisional derivatives
+are exactly zero. Zero-length Navier slip follows the prescribed no-slip
+branch exactly. Zero viscosity needs no division by viscosity. These changes
+reuse the existing stage gradient and viscosity caches, with no new field
+buffers, global iteration, or caller/workspace arguments.
+
+For each wall, physical interface friction is `D = -t dot (u_f-U_wall) >= 0`,
+where `t` is the outward-normal traction exerted on the fluid. If `chi`
+is the authored fluid heat share, the inward total-energy flux is
+`t dot U_wall - (1-chi)D + q_heat`. Thus wall power minus kinetic-energy
+rate equals bulk viscous dissipation plus interface friction, while internal
+fluid energy receives bulk dissipation plus `chi D`. Fourier heat retains
+its original thermal-wall source sampling. The prescribed-wall mechanical
+rate bound remains conservative under the local dissipative slip elimination.
+Enabled baths and explicit equilibrium SGS wall laws keep the complete native
+fallback; the shared identity is not asserted for that fallback or for SGS.
+
+This extension's Rust regressions were authored and source-reviewed after the
+execution environment became unavailable; they have not been compiled or run,
+and the earlier native test results above apply to the preceding no-slip
+implementation. An independent scalar-resistance JavaScript reference for
+`mu(x)=1+x`, `b=0.3` Couette flow gives 32-to-64-cell error ratios 2.0130
+for wall load and 2.0003 for the solved velocity profile. The finite-slip
+interface uses the adjacent cell viscosity, so this case is first order;
+the earlier no-slip convergence result is not extended to finite slip.
 
 ## Finite aqueous exchange on moving material surfaces
 

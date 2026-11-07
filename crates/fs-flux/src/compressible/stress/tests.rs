@@ -757,4 +757,12 @@ fn zero_length_zero_shear_and_natural_free_slip_have_exact_limits() {
             }
         }
     }
+    // Traction underflows, but its product with the finite slip velocity
+    // would still yield representable physical heat (~1e-300). Refuse this
+    // state instead of silently returning a frictionless zero/zero receipt.
+    let underflow = wall_stress(
+        0, 1.0, 0.5, [0.0, 1e100], [0.0; 2], Slip::Length(1e200),
+        Viscosity { shear: 1e-300, bulk: 0.0 }, |_, _| 0.0,
+    );
+    assert_eq!(underflow.unwrap_err(), "physical Navier traction is unrepresentable");
 }

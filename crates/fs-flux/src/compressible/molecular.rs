@@ -199,11 +199,11 @@ struct MolecularWorkspace {
 /// half-cell distance and admit prescribed tangential motion or temperature.
 /// The same energy flux carries their wall work and Fourier heat; no separate
 /// viscous heat source is added. Transmissive ends have zero molecular flux.
-/// Periodic, zero-flux, free-slip and prescribed no-slip domains use compatible
-/// cell-weighted molecular stress, retaining sixteen bytes of viscosity scratch
-/// per cell. No-slip traction includes the centered cross terms paired with
-/// the cell gradients, and its work uses the prescribed wall velocity.
-/// Positive Navier slip keeps the original full mechanical discretization.
+/// Periodic, zero-flux and reflecting domains use compatible cell-weighted
+/// molecular stress, retaining sixteen bytes of viscosity scratch per cell.
+/// Reflecting-wall gradients jointly resolve full Newtonian cross stress and
+/// prescribed no-slip, finite Navier, or natural free-slip traces. Wall work
+/// and the authored slip-friction heat partition share the energy flux.
 pub struct MolecularTransport2d<L> {
     gas: FrozenGas,
     grid: CartesianGrid,
@@ -261,8 +261,8 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
     }
 
     /// Whether the complete domain admits the compatible molecular stress
-    /// identity. Prescribed no-slip motion contributes its actual wall power;
-    /// positive Navier slip retains the original mechanical discretization.
+    /// identity. Prescribed motion contributes wall power; finite Navier slip
+    /// includes its physical interfacial dissipation and authored heat share.
     pub fn uses_compatible_molecular_stress(&self) -> bool {
         self.walls
             .iter()
@@ -607,14 +607,46 @@ fn spatial<L: TransportLaw>(
         }
     }
     let [nx, _] = grid.shape;
-    // Each original cell gradient serves its neighboring faces. Mirror all
-    // velocity components at an authored no-slip wall; the Euler pressure
-    // boundary remains impermeable and retains its original slip ghost.
+    // Each cell gradient serves neighboring faces. Compatible reflecting traces
+    // are coupled through the symmetric cross strain, including at corners.
+    // The Euler pressure boundary retains its original impermeable ghost.
     for (cell, derivatives) in gradient.iter_mut().enumerate() {
         if cell % 64 == 0 {
             poll(cancelled)?;
         }
         let coordinates = [cell % nx, cell / nx];
+        if compatible {
+            *derivatives = super::stress::velocity_gradient(
+                grid.spacing,
+                primitive[cell].velocity,
+                |axis, side| {
+                    let outside = if side == 0 {
+                        coordinates[axis] == 0
+                    } else {
+                        coordinates[axis] + 1 == grid.shape[axis]
+                    };
+                    if outside
+                        && let AxisBoundaries::Ends { lower, upper } = boundaries.axis(axis)
+                        && [lower, upper][side] == BoundaryCondition::Reflecting
+                    {
+                        let (velocity, slip, _) = walls[2 * axis + side].stress_boundary();
+                        return super::stress::GradientSample::Wall { velocity, slip };
+                    }
+                    let sample = neighbour(
+                        primitive,
+                        grid,
+                        boundaries,
+                        coordinates[0],
+                        coordinates[1],
+                        axis,
+                        side == 1,
+                    );
+                    super::stress::GradientSample::Cell([sample[1], sample[2]])
+                },
+            )
+            .map_err(MolecularError::Invalid)?;
+            continue;
+        }
         for axis in 0..2 {
             let mut lower = neighbour(
                 primitive,
@@ -777,16 +809,20 @@ fn spatial<L: TransportLaw>(
                 let mut normal_stress = longitudinal * normal_gradient + cross * tangent_transverse;
                 let (mut shear_stress, mut energy) = if let Some(model) = wall_model {
                     let sign = if face == 0 { -1.0 } else { 1.0 };
-                    if compatible && let Some(wall_velocity) = model.no_slip_velocity() {
-                        let traction = super::stress::no_slip_traction(
+                    if compatible {
+                        let (wall_velocity, slip, heat_fraction) = model.stress_boundary();
+                        let stress = super::stress::wall_stress(
                             axis,
                             sign,
                             0.5 * grid.spacing[axis],
                             pl.velocity,
                             wall_velocity,
+                            slip,
                             viscosity[left],
                             |component, derivative| gradient[left][component][derivative],
-                        );
+                        )
+                        .map_err(MolecularError::Invalid)?;
+                        let traction = stress.traction;
                         normal_stress = traction[axis];
                         let heat = model.conductive_energy_flux(
                             sign,
@@ -796,7 +832,9 @@ fn spatial<L: TransportLaw>(
                         );
                         (
                             traction[tangent],
-                            -traction[tangent] * wall_velocity[tangent] + heat,
+                            -traction[tangent] * wall_velocity[tangent]
+                                + sign * (1.0 - heat_fraction) * stress.slip_dissipation
+                                + heat,
                         )
                     } else {
                         let (shear, energy) = model.shear_and_energy(

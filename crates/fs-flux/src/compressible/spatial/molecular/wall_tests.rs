@@ -107,7 +107,7 @@ fn g1_navier_slip_uses_series_traction_and_explicit_interfacial_heat_on_all_side
 }
 
 #[test]
-fn g1_navier_fluid_trace_retains_the_physical_tangential_normal_stress() {
+fn g1_navier_adjoint_normal_stress_approaches_the_physical_fluid_trace() {
     let grid = CartesianGrid::new(3, 3, 3, 0.25, 0.25, 0.25).unwrap();
     let (mu, bulk, slip, slope) = (0.02, 0.003, 0.15, 0.05);
     for side in BoundarySide::ALL {
@@ -138,10 +138,12 @@ fn g1_navier_fluid_trace_retains_the_physical_tangential_normal_stress() {
         prepare(&mut op, &flow);
         let mut face = [1; 3];
         face[axis] = if side.sign() > 0.0 { 3 } else { 0 };
-        // u_t at the wall is slope*b*x_t, so d_t u_t = slope*b.
+        // The compatible normal traction pairs with the adjacent cell's
+        // transverse strain. Its O(h) correction tends to the physical
+        // fluid-trace derivative slope*b as the wall cell is refined.
         close(
             op.work.flux[axis][grid.cell_face(axis, face)].normal_momentum,
-            -(bulk - 2.0 * mu / 3.0) * slope * slip,
+            -(bulk - 2.0 * mu / 3.0) * slope * (slip + 0.5 * grid.spacing[axis]),
             2e-14,
         );
     }

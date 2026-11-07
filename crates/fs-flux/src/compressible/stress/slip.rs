@@ -324,6 +324,9 @@ pub(in crate::compressible) fn wall_stress<const D: usize>(
                     return Err("nonfinite compatible Navier relative velocity");
                 }
                 let outward = product_over_length(cell.shear, relative, wall_distance, length);
+                if outward == 0.0 && relative != 0.0 {
+                    return Err("physical Navier traction is unrepresentable");
+                }
                 let slip_velocity = -response * relative;
                 if slip_velocity == 0.0 && relative != 0.0 && outward != 0.0 {
                     return Err("physical Navier slip trace is unrepresentable");

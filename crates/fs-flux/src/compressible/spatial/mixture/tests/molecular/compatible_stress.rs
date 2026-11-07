@@ -342,7 +342,7 @@ fn g4_cell_sampling_budget_boundary_scope_and_late_cancellation_remain_transacti
             },
         )
         .unwrap();
-    assert!(!finite.uses_compatible_molecular_stress());
+    assert!(finite.uses_compatible_molecular_stress());
     let outlet = field(
         equal_mass_gas(),
         grid,
@@ -525,6 +525,90 @@ fn heated_no_slip_keeps_source_soret_dufour_and_enthalpy_with_large_unused_wall_
             assert_eq!(left.species_masses, right.species_masses);
             assert_eq!(left.momentum, right.momentum);
             assert_eq!(left.energy, right.energy);
+        }
+    }
+}
+
+#[test]
+fn large_navier_slip_matches_natural_free_slip_with_source_cross_heat_in_all_integrators() {
+    let grid = CartesianGrid::new(3, 3, 3, 0.25, 0.25, 0.25).unwrap();
+    let boundaries = Boundaries3d { x: WALLS, y: WALLS, z: WALLS };
+    for integrator in 0..3 {
+        let mut results = Vec::new();
+        for finite in [false, true] {
+            let mut flow = field(equal_mass_gas(), grid, boundaries, |p| {
+                let first = 0.3 + 0.1 * p[0];
+                (
+                    [first, 1.0 - first, 0.0],
+                    [0.2 * p[1] - 0.1, 0.12 - 0.15 * p[2], 0.1 * p[0] - 0.05],
+                    1.0 + 0.1 * p[2],
+                )
+            });
+            let initial_kinetic = kinetic(&flow);
+            let mut op = operator(&flow, Material::WallComposition);
+            if finite {
+                for side in BoundarySide::ALL {
+                    let mut velocity = [0.0; 3];
+                    velocity[(side.axis() + 1) % 3] = 0.1 * side.sign();
+                    op = op
+                        .with_wall(
+                            side,
+                            MolecularWall3d::NavierSlip {
+                                velocity,
+                                thermal: WallThermalCondition::Adiabatic,
+                                slip_length_m: 1e200,
+                                fluid_heat_fraction: 0.35,
+                            },
+                        )
+                        .unwrap();
+                }
+            }
+            assert!(op.uses_compatible_molecular_stress());
+            let duration = Time::new(1e-7);
+            let report = match integrator {
+                0 => op
+                    .advance(&mut flow, duration, DissipationControl::default(), || false)
+                    .unwrap(),
+                1 => op
+                    .advance_stabilized(
+                        &mut flow,
+                        duration,
+                        StabilizedDissipationControl::default(),
+                        || false,
+                    )
+                    .unwrap()
+                    .transport,
+                _ => op
+                    .advance_adaptive(
+                        &mut flow,
+                        duration,
+                        AdaptiveDissipationControl::default(),
+                        || false,
+                    )
+                    .unwrap()
+                    .stabilized
+                    .transport,
+            };
+            check(report);
+            assert!(kinetic(&flow) < initial_kinetic);
+            let mut boundary = Vec::new();
+            for side in BoundarySide::ALL {
+                for load in op.boundary_impulses(side) {
+                    assert_eq!(load.species_masses, [0.0; 3]);
+                    boundary.extend(load.momentum);
+                    boundary.push(load.energy);
+                    if !finite {
+                        assert_eq!(load.energy, 0.0);
+                    }
+                }
+            }
+            results.push((flow.states().to_vec(), boundary));
+        }
+        for (a, b) in results[0].0.iter().zip(&results[1].0) {
+            close(*a, *b, 1e-13);
+        }
+        for (a, b) in results[0].1.iter().zip(&results[1].1) {
+            close(*a, *b, 1e-13);
         }
     }
 }

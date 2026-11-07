@@ -1,12 +1,14 @@
 //! Authored impermeable walls shared by planar and volumetric molecular flow.
 use super::WallThermalCondition;
+use crate::compressible::stress::Slip;
 
 /// Molecular behavior of one flat physical reflecting side.
 ///
 /// `D` is the dimension of the original Cartesian velocity field. The wall
 /// velocity is spatially constant on this side. Its normal component must be
 /// zero: translating geometry requires a separate conservative moving-volume
-/// owner. `SlipAdiabatic` retains its original zero tangential traction.
+/// owner. `SlipAdiabatic` imposes zero tangential traction, including the
+/// normal-velocity cross derivative in its natural velocity trace.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MolecularWall<const D: usize> {
     /// Stationary, adiabatic, impermeable slip wall.
@@ -20,10 +22,13 @@ pub enum MolecularWall<const D: usize> {
     },
     /// Finite Navier slip at a massless interface with authored friction heat.
     ///
-    /// For cell-to-wall distance `h` and slip length `b`, the fluid trace is
-    /// `u_f = (h u_wall + b u_cell)/(h+b)` in each tangential direction. The
-    /// traction on the fluid is `t = mu (u_wall-u_cell)/(h+b)`. The interface
-    /// dissipates `D = -t·(u_f-u_wall) >= 0` [W/m²]. A fraction `chi` returns
+    /// The complete tangential traction on the fluid satisfies
+    /// `t = (mu/b) (u_wall-u_f)` for positive slip length `b`. Its symmetric
+    /// Newtonian strain includes the tangential derivative of normal velocity.
+    /// The compatible cell closure solves this trace together with adjacent
+    /// wall traces; the elementary `h+b` series formula applies when that
+    /// cross derivative vanishes. The interface dissipates
+    /// `D = -t·(u_f-u_wall) >= 0` [W/m²]. A fraction `chi` returns
     /// to the fluid as heat; the complementary heat goes to the wall. Thus
     /// the inward fluid energy transfer is `t·u_wall - (1-chi)D + q_heat`.
     /// This equals actual fluid traction work `t·u_f + chi D + q_heat`.
@@ -73,10 +78,34 @@ impl<const D: usize> MolecularWall<D> {
         }
     }
 
-    /// Wall traces admitted by the cell-weighted mechanical energy identity.
-    /// Finite Navier slip retains its original interfacial-friction operator.
+    /// Reflecting wall traces admitted by the cell-weighted mechanical energy
+    /// identity. Construction independently validates the authored slip data.
     pub(in crate::compressible) fn supports_compatible_stress(self) -> bool {
-        matches!(self, Self::SlipAdiabatic) || self.no_slip_velocity().is_some()
+        match self {
+            Self::SlipAdiabatic | Self::NoSlip { .. } => true,
+            Self::NavierSlip { slip_length_m, .. } => {
+                slip_length_m.is_finite() && slip_length_m >= 0.0
+            }
+        }
+    }
+
+    /// Prescribed velocity, tangential slip law, and fluid friction-heat share
+    /// for the shared compatible gradient and traction kernels. Normalize the
+    /// zero-slip case before selecting its now-inactive heat fraction.
+    pub(in crate::compressible) fn stress_boundary(self) -> ([f64; D], Slip, f64) {
+        if let Some(velocity) = self.no_slip_velocity() {
+            return (velocity, Slip::Length(0.0), 1.0);
+        }
+        match self {
+            Self::SlipAdiabatic => ([0.0; D], Slip::Free, 1.0),
+            Self::NavierSlip {
+                velocity,
+                slip_length_m,
+                fluid_heat_fraction,
+                ..
+            } => (velocity, Slip::Length(slip_length_m), fluid_heat_fraction),
+            Self::NoSlip { .. } => unreachable!(),
+        }
     }
 
     /// Geometry owners independently require a physical reflecting side.
@@ -154,9 +183,11 @@ impl<const D: usize> MolecularWall<D> {
         }
     }
 
-    /// Mirror about the same physical fluid trace used by the wall traction.
+    /// Native fallback mirror about the fluid trace used by its wall traction.
     /// Normal velocity always reflects about zero. Zero slip uses the original
     /// no-slip arithmetic; free-slip sides retain the Euler reflection ghost.
+    /// Compatible owners instead solve the full symmetric-strain slip trace
+    /// through `stress::velocity_gradient`, including cross derivatives.
     pub(in crate::compressible) fn velocity_ghost(
         self,
         normal_axis: usize,

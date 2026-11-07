@@ -95,7 +95,9 @@ fn g1_planar_navier_walls_use_local_mole_composition_temperature_and_four_orient
             let h = 0.5 * grid.spacing[axis];
             let x_a = first / concentration;
             let face_t = 0.5 * (cell_temperature + wall_temperature);
-            let mu = 0.02 * face_t * (1.0 + x_a);
+            // Cell viscosity owns mechanics; the original wall-temperature
+            // source retains its conductive heat coefficient.
+            let mu = 0.02 * cell_temperature * (1.0 + x_a);
             let conductivity = 0.03 * face_t * (1.0 + 0.5 * x_a);
             let traction = mu * (wall_velocity[tangent] - velocity[tangent]) / (h + slip);
             let loss =
@@ -115,7 +117,7 @@ fn g1_planar_navier_walls_use_local_mole_composition_temperature_and_four_orient
 }
 
 #[test]
-fn g1_planar_navier_tangential_trace_enters_normal_stress() {
+fn g1_planar_navier_cell_divergence_enters_compatible_normal_stress() {
     let grid = CartesianGrid::new(3, 3, 0.25, 0.25, 0.6).unwrap();
     let (mu, bulk, slip, slope, duration) = (0.02, 0.003, 0.15, 0.05, 1e-8);
     for side in SIDES {
@@ -151,11 +153,13 @@ fn g1_planar_navier_tangential_trace_enters_normal_stress() {
             .unwrap(),
         );
         // The central face is away from periodic tangential end differences.
-        // Its fluid trace is slope*b*x_t, so div_t u_f = slope*b exactly.
+        // Compatible cross stress carries the cell-centered divergence:
+        // d_t u_t = slope*(d+b), with d the actual half-cell wall distance.
         let impulse = op.boundary_impulses(side).nth(1).unwrap();
         close(
             impulse.momentum[axis] / (duration * grid.spacing[tangent] * grid.depth),
-            -side.sign() * (bulk - 2.0 * mu / 3.0) * slope * slip,
+            -side.sign() * (bulk - 2.0 * mu / 3.0) * slope
+                * (0.5 * grid.spacing[axis] + slip),
             3e-9,
         );
         assert_eq!(impulse.species_masses, [0.0; 3]);
@@ -366,5 +370,73 @@ fn g0_planar_zero_slip_matches_no_slip_and_wall_admission_is_explicit() {
             ),
             Err(DissipationError::Invalid(_))
         ));
+    }
+}
+
+#[test]
+fn g1_planar_navier_cross_strain_drives_traction_and_physical_interface_heat() {
+    let grid = CartesianGrid::new(3, 3, 0.25, 0.25, 0.6).unwrap();
+    let (cross, duration) = (0.07, 1e-8);
+    for side in SIDES {
+        let (axis, tangent) = (side.axis(), 1 - side.axis());
+        for mu in [0.0, 0.02] {
+            for slip in [0.0, 0.17, 1e200] {
+                for fraction in [0.0, 0.35, 1.0] {
+                    let mut velocity = [0.0; 2];
+                    velocity[tangent] = 0.15;
+                    let mut wall_velocity = [0.0; 2];
+                    wall_velocity[tangent] = 0.4;
+                    let mut flow = field(equal_mass_gas(), grid, channel(axis), |x| {
+                        let mut u = velocity;
+                        u[axis] = cross * (x[tangent] - 0.375);
+                        ([0.4, 0.6, 0.0], u, 2.0)
+                    });
+                    let mut op = prepare(&flow, law(flow.gas(), 0.01, mu, 0.003, 0.0))
+                        .with_wall(
+                            side,
+                            MolecularWall2d::NavierSlip {
+                                velocity: wall_velocity,
+                                thermal: WallThermalCondition::Adiabatic,
+                                slip_length_m: slip,
+                                fluid_heat_fraction: fraction,
+                            },
+                        )
+                        .unwrap();
+                    assert!(op.uses_compatible_molecular_stress());
+                    check(
+                        op.advance(
+                            &mut flow,
+                            Time::new(duration),
+                            DissipationControl::default(),
+                            || false,
+                        )
+                        .unwrap(),
+                    );
+                    // At this face u_n=0 and d_t u_n=cross exactly. Full
+                    // symmetric strain adds s*d*cross to the relative slip
+                    // velocity; the earlier normal-only shear omitted it.
+                    let distance = 0.5 * grid.spacing[axis];
+                    let relative = wall_velocity[tangent] - velocity[tangent]
+                        + side.sign() * distance * cross;
+                    let traction = mu * relative / (distance + slip);
+                    // This form stays finite when b^2 would overflow and
+                    // vanishes without dividing by viscosity when mu=0.
+                    let friction = mu * (slip / (distance + slip))
+                        * (relative / (distance + slip)) * relative;
+                    let outward_energy = -wall_velocity[tangent] * traction
+                        + (1.0 - fraction) * friction;
+                    let impulse = op.boundary_impulses(side).nth(1).unwrap();
+                    let area_time = duration * grid.spacing[tangent] * grid.depth;
+                    let scale = if slip > 1e100 { slip } else { 1.0 };
+                    close(impulse.momentum[tangent] / area_time * scale, -traction * scale, 3e-8);
+                    close(impulse.energy / area_time * scale, outward_energy * scale, 3e-8);
+                    if mu > 0.0 && slip > 1e100 {
+                        assert_ne!(impulse.momentum[tangent], 0.0);
+                        assert!(friction > 0.0);
+                    }
+                    assert_eq!(impulse.species_masses, [0.0; 3]);
+                }
+            }
+        }
     }
 }
