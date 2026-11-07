@@ -139,6 +139,57 @@ that physics and is intentionally absent. The fit's original source evidence
 is retained without claiming measured rotational validity, anisotropic
 hysteresis, temperature-dependent magnetic entropy or continuum error bounds.
 
+## Axisymmetric magnetic loads on native mechanical bodies
+
+The original linear and nonlinear axisymmetric fields expose
+`maxwell_wrench` and `impressed_current_wrench`, returning native
+`fs_ga::Wrench` values in SI units. Their actual accepted geometry, material
+snapshots, impressed currents and affine per-cell B remain authoritative.
+A complete `2*pi` rotational sweep is required; a sector is not multiplied
+into a full-body result and its missing azimuthal cut faces are not inferred.
+
+The original `TriComplex2::trace_for_faces` owns the closed Maxwell surface.
+Every edge of positive swept area must lie inside the mesh, with zero impressed
+current and the same source-resolved induced-linear material on both sides.
+All contour edges share that one exterior snapshot, rather than merely matching
+numeric permeability. Nonlinear cores and bounded recoil magnets may lie inside
+this collar. The exterior is assumed mechanically inert, without striction or
+a field-dependent pressure law. Edges at r=0 have zero swept area and need no
+fictitious negative-radius neighbour.
+
+The axial traction is
+`Bz*Hr*n_r + (Bz*Hz-Br*Hr)*n_z/2`, integrated under `dS=2*pi*r*ds`.
+Two-point Gaussian edge integration resolves its cubic radial/stress product
+exactly for the original affine discrete field, including sloping edges.
+The separate impressed-current method integrates only
+`Fz=-integral J_phi*Br dV`, using exact radially weighted triangle moments.
+It is the free-current Lorentz contribution, not a substitute for the load on
+a magnetic core or permanent magnet. It must not be added to an overlapping
+Maxwell load.
+
+The supplied `PlanarFrame` places the meridional [r,z] plane: the first
+direction is radial at phi=0, the second direction is the magnetic axis, and
+the frame origin is an axis point at z=0. The moment origin is expressed in
+that same receiving frame. Azimuthal integration cancels radial net force and
+intrinsic torque; the returned torque is the moment of the axial force about
+the requested origin. Radial tractions can still produce hoop stress, which
+this net wrench does not distribute to structural nodes. Native mechanical
+dynamics can consume the result when body frame and moment origin agree.
+
+The existing `MaxwellForceLimits` bounds original cells and edges, with
+bounded polling, canonical mesh-order compensated reduction and no partial
+publication on cancellation or refusal. This is an instantaneous static load;
+moving geometry requires another field solve and a coupled mechanical/source
+work account. It provides neither a force enclosure nor a qualification claim.
+
+`tests/axisymmetric_force.rs` specifies source-free quadrupoles on axis,
+sloping and toroidal surfaces; coil-force refinement against independent
+Lorentz and fixed-current interaction-coenergy references; permanent-magnet
+force refinement without an impressed-current surrogate; saturated-core loads;
+polarity, frame/origin and native body acceleration; and source, contour,
+sector, budget and cancellation refusals. Method agreement is numerical
+consistency evidence; mesh and contour refinement remain necessary.
+
 ## Axisymmetric reversible saturation and permanent-magnet recoil
 
 `planar::axisymmetric::nonlinear::AxisymmetricNonlinearMagnetostatics`

@@ -208,7 +208,7 @@ pub(crate) fn integrate_traction(
     ))
 }
 
-fn triangle_orientation(mesh: &TriComplex2, cell: usize) -> Result<f64, ContourError> {
+pub(crate) fn triangle_orientation(mesh: &TriComplex2, cell: usize) -> Result<f64, ContourError> {
     let [p, q, r] = mesh.faces()[cell].map(|v| mesh.vertices()[v as usize]);
     let determinant = (q[0] - p[0]).mul_add(r[1] - p[1], -(q[1] - p[1]) * (r[0] - p[0]));
     if !determinant.is_finite() || determinant == 0.0 {

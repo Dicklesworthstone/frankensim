@@ -17,10 +17,12 @@
 //! A prescribed trace is `u` [T] on complete exterior edges of positive swept
 //! area; every component needs such a trace. Unprescribed physical edges have
 //! zero tangential H. Axis edges impose regularity only. A finite outer boundary
-//! must be chosen explicitly: no infinite-domain boundary, magnetic force,
-//! nonlinear material, eddy-current or arbitrary angular-sector excitation is
-//! inferred. Results are finite-element estimates, not continuum enclosures.
+//! must be chosen explicitly. The force methods integrate complete-revolution
+//! loads; the nonlinear owner supplies reversible saturation and recoil. No
+//! infinite-domain boundary, eddy current or arbitrary angular-sector excitation
+//! is inferred. Results are finite-element estimates, not continuum enclosures.
 
+mod force;
 /// Reversible saturation and bounded recoil on this same cylindrical geometry.
 pub mod nonlinear;
 
