@@ -26,6 +26,10 @@
 use super::super::scalar::{DynamicScalarConfig, DynamicScalarReport, PeriodicDynamicScalar};
 use super::*;
 
+/// Joint stress, heat and common-component pathline histories.
+#[path = "scalar/components.rs"]
+pub mod components;
+
 /// Explicit scalar-memory controls, independent of momentum-memory controls.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LagrangianScalarConfig {
@@ -227,8 +231,23 @@ impl LagrangianDynamicScalar {
         density: &[f64],
         velocity: &[[f64; 3]],
         scalar: &[f64],
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<LagrangianScalarTrial<'_>, DynamicSgsError> {
+        self.prepare_scaled(momentum, config, time, density, velocity, scalar, cancelled)
+            .map(|(trial, _)| trial)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_scaled(
+        &mut self,
+        momentum: LagrangianSgsConfig,
+        config: LagrangianScalarConfig,
+        time: f64,
+        density: &[f64],
+        velocity: &[[f64; 3]],
+        scalar: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(LagrangianScalarTrial<'_>, InputScales), DynamicSgsError> {
         poll(&mut cancelled, 0)?;
         config.validate()?;
         if scalar.len() != self.scalar.history.len() {
@@ -269,67 +288,93 @@ impl LagrangianDynamicScalar {
             config.memory_time,
             config.maximum_departure_cells,
         )?;
-        let mut report = DynamicScalarReport {
-            minimum_raw_coefficient: f64::INFINITY,
-            ..DynamicScalarReport::default()
-        };
-        let mut amplitude: f64 = 0.0;
-        for cell in 0..self.scalar.history.len() {
-            poll(&mut cancelled, cell)?;
-            let pair = update.pair(
-                cell,
-                velocity[cell],
-                &self.scalar.history,
-                &self.scalar.workspace.contraction,
-            )?;
-            let raw = if pair[1] == 0.0 {
-                report.undetermined_cells += 1;
-                0.0
-            } else {
-                pair[0] / pair[1]
-            };
-            if !raw.is_finite() {
-                return Err(DynamicSgsError::Cell {
-                    cell,
-                    reason: "unrepresentable Lagrangian scalar coefficient",
-                });
-            }
-            report.minimum_raw_coefficient = report.minimum_raw_coefficient.min(raw);
-            report.backscatter_limited_cells += usize::from(raw < 0.0);
-            let coefficient = raw.max(0.0);
-            if coefficient > config.maximum_coefficient {
-                return Err(DynamicSgsError::Coefficient {
-                    cell,
-                    observed: coefficient,
-                    maximum: config.maximum_coefficient,
-                });
-            }
-            let diffusivity =
-                coefficient * flow.strain_rate[cell] * scales.velocity * flow.filter_width;
-            if !diffusivity.is_finite() {
-                return Err(DynamicSgsError::Cell {
-                    cell,
-                    reason: "unrepresentable Lagrangian scalar diffusivity",
-                });
-            }
-            self.scalar.workspace.diffusivity[cell] = diffusivity;
-            // The vector basis has been fully consumed by contractions. Reuse
-            // its first lane for C_phi, even when centered strain vanishes.
-            self.scalar.workspace.basis[cell][0] = coefficient;
-            self.scalar.candidate[cell] = pair;
-            amplitude = amplitude.max(pair[0].abs()).max(pair[1]);
-            report.maximum_coefficient = report.maximum_coefficient.max(coefficient);
-            report.maximum_diffusivity = report.maximum_diffusivity.max(diffusivity);
-        }
-        let log_scale = update.normalize(&mut self.scalar.candidate, amplitude, &mut cancelled)?;
-        poll(&mut cancelled, 0)?;
-        Ok(LagrangianScalarTrial {
-            momentum,
-            scalar: &mut self.scalar,
-            log_scale,
-            report,
-        })
+        let (report, log_scale) = prepare_history(
+            &mut self.scalar.workspace,
+            &self.scalar.history,
+            &mut self.scalar.candidate,
+            &update,
+            flow,
+            scales,
+            velocity,
+            config.maximum_coefficient,
+            &mut cancelled,
+        )?;
+        Ok((
+            LagrangianScalarTrial {
+                momentum,
+                scalar: &mut self.scalar,
+                log_scale,
+                report,
+            },
+            scales,
+        ))
     }
+}
+
+// Heat and a same-unit component bank share emission and history rescaling,
+// while keeping their sources, physical scales and accepted banks separate.
+#[allow(clippy::too_many_arguments)]
+fn prepare_history(
+    workspace: &mut PeriodicDynamicScalar,
+    history: &[[f64; 2]],
+    candidate: &mut [[f64; 2]],
+    update: &HistoryUpdate,
+    flow: &PeriodicDynamicSgs,
+    scales: InputScales,
+    velocity: &[[f64; 3]],
+    maximum_coefficient: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(DynamicScalarReport, Option<f64>), DynamicSgsError> {
+    let mut report = DynamicScalarReport {
+        minimum_raw_coefficient: f64::INFINITY,
+        ..DynamicScalarReport::default()
+    };
+    let mut amplitude: f64 = 0.0;
+    for cell in 0..history.len() {
+        poll(cancelled, cell)?;
+        let pair = update.pair(cell, velocity[cell], history, &workspace.contraction)?;
+        let raw = if pair[1] == 0.0 {
+            report.undetermined_cells += 1;
+            0.0
+        } else {
+            pair[0] / pair[1]
+        };
+        if !raw.is_finite() {
+            return Err(DynamicSgsError::Cell {
+                cell,
+                reason: "unrepresentable Lagrangian scalar coefficient",
+            });
+        }
+        report.minimum_raw_coefficient = report.minimum_raw_coefficient.min(raw);
+        report.backscatter_limited_cells += usize::from(raw < 0.0);
+        let coefficient = raw.max(0.0);
+        if coefficient > maximum_coefficient {
+            return Err(DynamicSgsError::Coefficient {
+                cell,
+                observed: coefficient,
+                maximum: maximum_coefficient,
+            });
+        }
+        let diffusivity =
+            coefficient * flow.strain_rate[cell] * scales.velocity * flow.filter_width;
+        if !diffusivity.is_finite() {
+            return Err(DynamicSgsError::Cell {
+                cell,
+                reason: "unrepresentable Lagrangian scalar diffusivity",
+            });
+        }
+        workspace.diffusivity[cell] = diffusivity;
+        // The vector basis has been fully consumed by contractions. Reuse
+        // its first lane for C_phi, even when centered strain vanishes.
+        workspace.basis[cell][0] = coefficient;
+        candidate[cell] = pair;
+        amplitude = amplitude.max(pair[0].abs()).max(pair[1]);
+        report.maximum_coefficient = report.maximum_coefficient.max(coefficient);
+        report.maximum_diffusivity = report.maximum_diffusivity.max(diffusivity);
+    }
+    let log_scale = update.normalize(candidate, amplitude, cancelled)?;
+    poll(cancelled, 0)?;
+    Ok((report, log_scale))
 }
 
 #[cfg(test)]

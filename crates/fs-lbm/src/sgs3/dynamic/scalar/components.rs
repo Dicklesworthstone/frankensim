@@ -54,7 +54,7 @@ impl DynamicComponentsConfig {
 /// Output and scratch may only be consumed after the entire combined fit
 /// succeeds. A refusal may overwrite scratch but never modifies input fields.
 pub struct PeriodicDynamicComponents {
-    scalar: PeriodicDynamicScalar,
+    pub(in super::super) scalar: PeriodicDynamicScalar,
     contractions: Vec<[f64; 2]>,
     components: usize,
 }
@@ -215,6 +215,39 @@ impl PeriodicDynamicComponents {
                 cancelled,
             );
         }
+        let domain =
+            self.prepare_contractions(flow, density, scales, common_scale, values, cancelled)?;
+        self.scalar
+            .fit_from(flow, config.fit_config(), scales, domain, cancelled)
+    }
+
+    // Instantaneous and pathline fits share the complete common-normalized
+    // objective. Keep the unfitted sources so each history can relax them in
+    // its own physical normalization, including a zero current source.
+    pub(in super::super) fn prepare_contractions(
+        &mut self,
+        flow: &PeriodicDynamicSgs,
+        density: &[f64],
+        scales: InputScales,
+        common_scale: f64,
+        values: &impl Fn(usize, usize) -> f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<[f64; 2], DynamicSgsError> {
+        if common_scale == 0.0 || scales.velocity == 0.0 {
+            for (cell, (source, total)) in self
+                .scalar
+                .contraction
+                .iter_mut()
+                .zip(&mut self.contractions)
+                .enumerate()
+            {
+                poll(cancelled, cell)?;
+                *source = [0.0; 2];
+                *total = [0.0; 2];
+            }
+            poll(cancelled, 0)?;
+            return Ok([0.0; 2]);
+        }
         for (tile, pairs) in self.contractions.chunks_mut(64).enumerate() {
             poll(cancelled, tile * 64)?;
             pairs.fill([0.0; 2]);
@@ -277,13 +310,7 @@ impl PeriodicDynamicComponents {
         // small component's weight before the common objective is formed.
         flow.geometry
             .average_planes(self.scalar.shape, &mut self.scalar.contraction, cancelled)?;
-        self.scalar.fit_from(
-            flow,
-            config.fit_config(),
-            scales,
-            [numerator.value, denominator.value],
-            cancelled,
-        )
+        Ok([numerator.value, denominator.value])
     }
 }
 

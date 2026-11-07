@@ -14652,6 +14652,40 @@ nonnegative emitted transport and signed history. No adaptive-timescale
 calibration, wall/inflow memory, scalar variance, reaction-rate, SGS energy or
 DNS/turbulence-accuracy qualification is supplied.
 
+### Joint Lagrangian stress, heat and component histories
+
+`sgs3::dynamic::lagrangian::scalar::components::LagrangianDynamicComponents`
+adds a common same-unit component history to the original paired momentum/heat
+owner. Every component, including closure and absent species, contributes to
+one summed Germano objective with a common variation scale. Separate physical
+`rho^2 u^2 phi_common^2` history scaling prevents trace components or changing
+field amplitudes from acquiring spurious weight. All three fits reuse one
+current Favre preparation and the original scalar and pathline kernels.
+
+`LagrangianComponentsConfig` supplies an explicit positive memory time in the
+sample-time units, a per-axis departure limit in cells, a coefficient bound
+and exploratory-use policy. Each fit retains its own memory time and signed
+numerator/denominator history. Zero current sources still advect and decay
+accepted memory; emitted coefficients remain nonnegative and independent of
+centered strain. The native face owner supplies its actual current strain and
+physical diffusion admission.
+
+One exclusive trial exposes all three coefficient sets and reports. Its
+infallible commit publishes every history, logarithmic scale and the common
+sample time together. Refusal, cancellation and dropped trials preserve all
+accepted banks. Numerical payload is 376 bytes/cell, independent of component
+count; filtering work is linear in cells times components, with bounded
+polling and no transposed component field or per-preparation field allocation.
+
+Six added regressions cover scalar equivalence, component order/units/trace
+weighting, independently reconstructed physical-history relaxation, joint
+rollback/retry, storage/admission and centered-null/uniform-source memory.
+All 68 real-source SGS tests passed with pinned nightly-2026-07-06 and the
+actual compiled fs-math dependency. This bounded probe is not a full crate
+build or DSR gate. Periodic Cartesian domains, first-order pathline integration
+and explicit authored timescales remain; wall/inflow memory, adaptive memory
+calibration, reaction-rate and SGS-energy closure are not supplied.
+
 ## Dense source-resolved shear rheology
 
 `MaterialFreeSurfaceRheology2` binds the original `IsothermalRheologyLaw`
