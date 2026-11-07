@@ -370,6 +370,32 @@ where claimed below.
   `tests/gyrostat_locked.rs` specify analytic coaxial recoil/work, independent
   Euler-equation refinement, spatial covariance, empty-selection and zero-drive
   parity, reversal and atomic refusal.
+- `RotorBank::dry_clutch_stepper(law, duration)` advances one finite-capacity
+  dry clutch or shaft/carrier brake. A two-shaft port has slip
+  `v=s_first-ratio*s_second` and torques `(-effort, ratio*effort)`; signed
+  ratios retain full carrier recoil. Authored capacities obey
+  `static >= kinetic >= 0`. With fixed attitude and held loads,
+  `v'=a-H*effort`, where `H=b*(diag(1/J)+A^T I^-1 A)*b^T`.
+  Its exact scalar flow resolves finite slip, synchronization, static hold
+  within capacity, and overloaded reversal. Each half-stage has at most two
+  constant-torque pieces; two such stages surround one original native drift.
+  Phase and work integrate each piece, including the stopped part of a step.
+  Every original rotor impulse/recoil gate remains authoritative. An explicit
+  retained branch admits synchronization rounding without a capture-speed
+  deadband; fresh nonzero slip slides, and precession-created native slip is
+  re-evaluated before the second stage. Sticking phases use the one constrained
+  angle without projecting canonical momenta. Signed drive, friction and
+  external work, nonnegative friction heat, integrated effort, sliding angle,
+  half-stage event times and native drift defect remain distinct in receipts.
+  Preparation and stepping are O(N), allocation-free and bounded by 64 rotors.
+  Zero capacities delegate exactly to the original held-torque bank. Smooth
+  sliding is second order; general precessing transitions require refinement,
+  with no claimed event-time certificate or transition convergence order.
+  `tests/gyrostat_clutch.rs` covers analytic stop/hold/breakaway/reversal,
+  signed-ratio synchronization, external-work closure, independent oblique
+  Euler refinement, precession release and atomic refusals. This fixed-port,
+  isothermal dry law supplies no empirical material validity, wear, thermal
+  destination, actuator dynamics, changing ratio or simultaneous clutch network.
 - `InertiaTensor3::viscous_stepper` prepares the full material-frame law
   `tau = drive - D omega` for a fixed positive interval. Symmetric PSD damping
   is admitted with compensated principal-minor checks, including zero-row

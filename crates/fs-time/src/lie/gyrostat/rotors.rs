@@ -37,6 +37,13 @@ pub use locked::{
     LockedRotorDrift, LockedRotorImpulse, LockedRotorStep, RotorLock, RotorLockEngagement,
 };
 
+#[path = "rotors/clutch.rs"]
+mod clutch;
+pub use clutch::{
+    DryClutchLaw, DryClutchMode, DryClutchPort, DryClutchStage, DryClutchState, DryClutchStep,
+    DryClutchStepper,
+};
+
 /// Maximum fixed-axis rotors in this allocation-free stepping lane.
 pub const MAX_AXIAL_ROTORS: usize = 64;
 
