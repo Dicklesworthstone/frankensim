@@ -4,19 +4,29 @@
 //! diagonal observation covariance takes the existing path unchanged, while a
 //! correlated covariance is whitened into factor-form scalar observations.
 //! A correlated batch retains its UD factor until final dense publication.
+//! Explicitly independent batches can also incorporate threshold events by
+//! Gaussian conditional moments, with sequential approximations identified.
 
 use fs_blake3::DomainHasher;
 use fs_exec::Cx;
 
-use crate::factor::{FactorBelief, batch::{FactorBatchDiagnostics, assimilate_sequence}};
+use crate::factor::{
+    FactorBelief,
+    batch::{FactorBatchDiagnostics, assimilate_sequence},
+};
 
 use super::{
     AssimError, Belief, Observation, assimilate_all, canonical_f64_bits, canonicalize_zero,
     validate_leaf_identity,
 };
 
+mod censored;
+
 const AUDIT_ID_DOMAIN: &str = "org.frankensim.fs-assimilate.robust-observation-audit.v1";
 const AUDIT_ID_PREFIX: &str = "robust-observation-audit:v1:";
+const INDEPENDENT_AUDIT_ID_DOMAIN: &str =
+    "org.frankensim.fs-assimilate.robust-observation-audit.v2";
+const INDEPENDENT_AUDIT_ID_PREFIX: &str = "robust-observation-audit:v2:";
 
 /// Maximum number of numerically available observations in the dense
 /// correlated path.
@@ -105,8 +115,10 @@ impl RobustObservation {
 
     /// Declare a one-sided censored reading.
     ///
-    /// The v1 robust core records and refuses this pathology rather than
-    /// treating the threshold as an ordinary Gaussian value.
+    /// [`ObservationBatch::independent`] incorporates this event through its
+    /// conditional moments. The supplied observation's value is not a reading
+    /// of the latent value and does not enter the update. The general covariance
+    /// constructor still refuses censoring rather than assuming independence.
     pub fn censored(
         observation: Observation,
         threshold: f64,
@@ -128,8 +140,10 @@ impl RobustObservation {
 
     /// Declare a range-saturated reading.
     ///
-    /// The clipped observation value must equal one declared endpoint. The v1
-    /// core audits and refuses the record instead of assimilating the clip.
+    /// The clipped observation value must equal one declared endpoint. In an
+    /// explicitly independent batch, the lower endpoint means `y <= lower`
+    /// and the upper endpoint means `y >= upper`. A zero-width range has no
+    /// identifiable direction and remains an audited refusal.
     pub fn saturated(observation: Observation, lower: f64, upper: f64) -> Result<Self, AssimError> {
         if !lower.is_finite() || !upper.is_finite() {
             return Err(AssimError::NonFinitePathologyParameter {
@@ -231,6 +245,7 @@ pub struct ObservationBatch {
     covariance: Vec<Vec<f64>>,
     cholesky: Vec<Vec<f64>>,
     diagonal: bool,
+    independent: bool,
 }
 
 impl ObservationBatch {
@@ -332,7 +347,57 @@ impl ObservationBatch {
             covariance,
             cholesky,
             diagonal,
+            independent: false,
         })
+    }
+
+    /// Declare independent Gaussian measurement noise for every present row.
+    ///
+    /// Each row retains its checked scalar noise variance. Ordinary readings
+    /// are assimilated first in the existing canonical content order. Censored
+    /// and nondegenerate saturated rows then contribute threshold events in
+    /// canonical operator/threshold/noise/instrument order. One event gives the
+    /// conditional mean and covariance of the Gaussian prior after ordinary
+    /// readings; the resulting distribution is generally not Gaussian. With
+    /// multiple events, each subsequent update uses a Gaussian approximation
+    /// to those moments, which the audit explicitly identifies.
+    ///
+    /// Shared calibration/noise, correlated censoring and delayed readings
+    /// require a different model. This constructor must not erase such known
+    /// dependence; the covariance constructor never infers independence for
+    /// threshold records. Existing record and available-row limits apply.
+    pub fn independent(records: Vec<RobustObservation>, cx: &Cx<'_>) -> Result<Self, AssimError> {
+        if records.is_empty() {
+            return Err(AssimError::EmptyObservations);
+        }
+        if records.len() > super::MAX_DENSE_OBSERVATIONS {
+            return Err(AssimError::ObservationCountLimit {
+                count: records.len(),
+                max: super::MAX_DENSE_OBSERVATIONS,
+            });
+        }
+        cx.checkpoint()
+            .map_err(|_| robust_cancelled("batch preflight", 0, 1))?;
+        let variances: Vec<f64> = records
+            .iter()
+            .filter_map(|record| match &record.state {
+                ObservationState::Available(observation) => Some(observation.noise_var()),
+                _ => None,
+            })
+            .collect();
+        if variances.len() > MAX_CORRELATED_OBSERVATIONS {
+            return Err(AssimError::ObservationCountLimit {
+                count: variances.len(),
+                max: MAX_CORRELATED_OBSERVATIONS,
+            });
+        }
+        let mut covariance = vec![vec![0.0; variances.len()]; variances.len()];
+        for (index, variance) in variances.into_iter().enumerate() {
+            covariance[index][index] = variance;
+        }
+        let mut batch = Self::new(records, covariance, cx)?;
+        batch.independent = true;
+        Ok(batch)
     }
 
     /// Read-only record list in covariance-row declaration order.
@@ -359,14 +424,26 @@ impl ObservationBatch {
 pub enum ObservationDisposition {
     /// The ordinary observation contributed to the published posterior.
     Accepted,
+    /// A censored event contributed Gaussian-prior conditional moments. This
+    /// does not assert a Gaussian conditional distribution.
+    AcceptedCensoredMoments,
+    /// A clipping event contributed Gaussian-prior conditional moments.
+    AcceptedSaturatedMoments,
+    /// A censored event contributed to a multi-event, sequential Gaussian
+    /// moment approximation; the joint posterior moments are not exact.
+    AcceptedCensoredMomentApproximation,
+    /// A clipping event contributed to a sequential Gaussian approximation.
+    AcceptedSaturatedMomentApproximation,
     /// The record was absent and reduced the effective degrees of freedom.
     ExcludedMissing,
     /// The record was otherwise usable but the batch contained a pathology
     /// that requires fail-closed refusal.
     WithheldByBatchRefusal,
-    /// A censored likelihood is not implemented in v1.
+    /// The required independent threshold model was not admitted, or the
+    /// complete batch was withheld by another unsupported pathology.
     RefusedCensored,
-    /// A clipped likelihood is not implemented in v1.
+    /// The independent clipping model was not admitted, its direction was
+    /// ambiguous, or the complete batch was withheld.
     RefusedSaturated,
     /// Temporal state augmentation is not implemented in v1.
     RefusedDelayed,
@@ -406,10 +483,25 @@ impl ObservationAudit {
         self.outcome
     }
 
-    /// Count of scalar readings that actually contributed to the posterior.
+    /// Count of scalar readings/events incorporated into the posterior. This
+    /// is a record count, not a claim of equal information per observation.
     #[must_use]
     pub fn effective_dof(&self) -> usize {
         self.effective_dof
+    }
+
+    /// Whether multiple threshold events required sequential Gaussian moment
+    /// closure. A single event has exact Gaussian-prior moment formulas, but
+    /// still does not have a Gaussian conditional distribution.
+    #[must_use]
+    pub fn uses_sequential_moment_approximation(&self) -> bool {
+        self.entries.iter().any(|(_, disposition)| {
+            matches!(
+                disposition,
+                ObservationDisposition::AcceptedCensoredMomentApproximation
+                    | ObservationDisposition::AcceptedSaturatedMomentApproximation
+            )
+        })
     }
 
     /// Domain-separated receipt binding the prior, batch, disposition, and
@@ -433,6 +525,8 @@ pub struct RobustAssimilation {
 
 impl RobustAssimilation {
     /// Published posterior, present only when `audit().outcome() == Updated`.
+    /// For threshold events this is a Gaussian representation of conditional
+    /// moments, not the exact non-Gaussian conditional distribution.
     #[must_use]
     pub fn posterior(&self) -> Option<&Belief> {
         self.posterior.as_ref()
@@ -455,7 +549,8 @@ impl RobustAssimilation {
 
 /// Apply a checked robust batch.
 ///
-/// Missing readings are excluded. Censored, saturated, and delayed readings
+/// Missing readings are excluded. Censored and saturated readings require an
+/// explicitly [`ObservationBatch::independent`] batch; delayed readings always
 /// return a fail-closed audited refusal with no posterior. An exactly diagonal
 /// covariance delegates the original observations to [`assimilate_all`]
 /// unchanged. A correlated covariance is deterministically Cholesky-whitened
@@ -468,16 +563,19 @@ pub fn assimilate_observation_batch(
 ) -> Result<RobustAssimilation, AssimError> {
     cx.checkpoint()
         .map_err(|_| robust_cancelled("robust admission", 0, 1))?;
-    let has_refused_pathology = batch.records.iter().any(|record| {
-        matches!(
-            record.state,
-            ObservationState::Censored { .. }
-                | ObservationState::Saturated { .. }
-                | ObservationState::Delayed { .. }
-        )
+    let has_refused_pathology = batch.records.iter().any(|record| match record.state {
+        ObservationState::Censored { .. } => !batch.independent,
+        ObservationState::Saturated { lower, upper, .. } => !batch.independent || lower == upper,
+        ObservationState::Delayed { .. } => true,
+        _ => false,
     });
     if has_refused_pathology {
         return build_result(prior, batch, None, BatchOutcome::RefusedPathology, cx);
+    }
+
+    if batch.independent && threshold_count(batch) != 0 {
+        let posterior = censored::assimilate_independent(prior, batch, cx)?;
+        return build_result(prior, batch, Some(posterior), BatchOutcome::Updated, cx);
     }
 
     let available: Vec<&Observation> = batch
@@ -517,7 +615,8 @@ pub fn assimilate_observation_batch(
     } else {
         let whitened = whiten_observations(&available, &batch.cholesky, cx)?;
         let factor = FactorBelief::from_belief(prior, cx)?;
-        let (updated, diagnostics) = assimilate_sequence(&factor, &whitened.active, cx)?.into_parts();
+        let (updated, diagnostics) =
+            assimilate_sequence(&factor, &whitened.active, cx)?.into_parts();
         let diagnostics = diagnostics.with_whitening_rows(
             whitened.active_rows,
             whitened.state_independent_rows,
@@ -657,7 +756,11 @@ fn whiten_observations(
     let mut correction = 0.0_f64;
     for (index, (operator, value)) in operators.into_iter().zip(values).enumerate() {
         cx.checkpoint().map_err(|_| {
-            robust_cancelled("whitened row classification", index as u128, observations.len() as u128)
+            robust_cancelled(
+                "whitened row classification",
+                index as u128,
+                observations.len() as u128,
+            )
         })?;
         if operator.iter().all(|coefficient| *coefficient == 0.0) {
             // Do not silently relabel scaling underflow as state independence.
@@ -676,7 +779,10 @@ fn whiten_observations(
             state_independent_rows.push(index);
         } else {
             active.push(Observation::new(
-                operator, value, 1.0, format!("robust-whitened-{index:03}"),
+                operator,
+                value,
+                1.0,
+                format!("robust-whitened-{index:03}"),
             )?);
             active_rows.push(index);
         }
@@ -690,7 +796,12 @@ fn whiten_observations(
     if active.is_empty() {
         return Err(AssimError::ZeroObservationOperator);
     }
-    Ok(WhitenedObservations { active, active_rows, state_independent_rows, constant_misfit })
+    Ok(WhitenedObservations {
+        active,
+        active_rows,
+        state_independent_rows,
+        constant_misfit,
+    })
 }
 
 fn build_result(
@@ -700,6 +811,7 @@ fn build_result(
     outcome: BatchOutcome,
     cx: &Cx<'_>,
 ) -> Result<RobustAssimilation, AssimError> {
+    let approximate = threshold_count(batch) > 1;
     let entries = batch
         .records
         .iter()
@@ -710,6 +822,20 @@ fn build_result(
                 }
                 ObservationState::Available(_) => ObservationDisposition::WithheldByBatchRefusal,
                 ObservationState::Missing { .. } => ObservationDisposition::ExcludedMissing,
+                ObservationState::Censored { .. } if outcome == BatchOutcome::Updated => {
+                    if approximate {
+                        ObservationDisposition::AcceptedCensoredMomentApproximation
+                    } else {
+                        ObservationDisposition::AcceptedCensoredMoments
+                    }
+                }
+                ObservationState::Saturated { .. } if outcome == BatchOutcome::Updated => {
+                    if approximate {
+                        ObservationDisposition::AcceptedSaturatedMomentApproximation
+                    } else {
+                        ObservationDisposition::AcceptedSaturatedMoments
+                    }
+                }
                 ObservationState::Censored { .. } => ObservationDisposition::RefusedCensored,
                 ObservationState::Saturated { .. } => ObservationDisposition::RefusedSaturated,
                 ObservationState::Delayed { .. } => ObservationDisposition::RefusedDelayed,
@@ -719,7 +845,16 @@ fn build_result(
         .collect::<Vec<_>>();
     let effective_dof = entries
         .iter()
-        .filter(|(_, disposition)| *disposition == ObservationDisposition::Accepted)
+        .filter(|(_, disposition)| {
+            matches!(
+                disposition,
+                ObservationDisposition::Accepted
+                    | ObservationDisposition::AcceptedCensoredMoments
+                    | ObservationDisposition::AcceptedSaturatedMoments
+                    | ObservationDisposition::AcceptedCensoredMomentApproximation
+                    | ObservationDisposition::AcceptedSaturatedMomentApproximation
+            )
+        })
         .count();
     let receipt_id = audit_receipt(prior, batch, posterior.as_ref(), outcome, &entries, cx)?;
     Ok(RobustAssimilation {
@@ -734,6 +869,19 @@ fn build_result(
     })
 }
 
+fn threshold_count(batch: &ObservationBatch) -> usize {
+    batch
+        .records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.state,
+                ObservationState::Censored { .. } | ObservationState::Saturated { .. }
+            )
+        })
+        .count()
+}
+
 fn audit_receipt(
     prior: &Belief,
     batch: &ObservationBatch,
@@ -742,7 +890,18 @@ fn audit_receipt(
     entries: &[(String, ObservationDisposition)],
     cx: &Cx<'_>,
 ) -> Result<String, AssimError> {
-    let mut hasher = DomainHasher::new(AUDIT_ID_DOMAIN);
+    let (domain, prefix) = if batch.independent {
+        (INDEPENDENT_AUDIT_ID_DOMAIN, INDEPENDENT_AUDIT_ID_PREFIX)
+    } else {
+        (AUDIT_ID_DOMAIN, AUDIT_ID_PREFIX)
+    };
+    let mut hasher = DomainHasher::new(domain);
+    if batch.independent {
+        hash_bytes(
+            &mut hasher,
+            b"independent-noise;ordinary-first;threshold-content-order;gaussian-moments-v1",
+        );
+    }
     hash_belief(&mut hasher, prior, cx)?;
     hash_u64(&mut hasher, batch.records.len() as u64);
     for (index, record) in batch.records.iter().enumerate() {
@@ -775,7 +934,7 @@ fn audit_receipt(
     }
     cx.checkpoint()
         .map_err(|_| robust_cancelled("robust audit finalize", 1, 2))?;
-    Ok(format!("{AUDIT_ID_PREFIX}{}", hasher.finalize()))
+    Ok(format!("{prefix}{}", hasher.finalize()))
 }
 
 fn hash_record(hasher: &mut DomainHasher, record: &RobustObservation) {
@@ -889,6 +1048,10 @@ fn outcome_tag(outcome: BatchOutcome) -> u8 {
 fn disposition_tag(disposition: ObservationDisposition) -> u8 {
     match disposition {
         ObservationDisposition::Accepted => 0,
+        ObservationDisposition::AcceptedCensoredMoments => 6,
+        ObservationDisposition::AcceptedSaturatedMoments => 7,
+        ObservationDisposition::AcceptedCensoredMomentApproximation => 8,
+        ObservationDisposition::AcceptedSaturatedMomentApproximation => 9,
         ObservationDisposition::ExcludedMissing => 1,
         ObservationDisposition::WithheldByBatchRefusal => 2,
         ObservationDisposition::RefusedCensored => 3,

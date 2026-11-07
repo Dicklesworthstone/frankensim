@@ -53,14 +53,30 @@ linear-Gaussian core of weak-constraint assimilation.
   finite, exactly symmetric, interval-certified PSD, and then strictly
   Cholesky-positive. The dense correlated dimension is capped at
   `MAX_CORRELATED_OBSERVATIONS = 256`.
+- `ObservationBatch::independent(records, &Cx)` — explicitly declares mutually
+  independent Gaussian measurement noise for present ordinary, censored, and
+  saturated records. Each record retains its checked scalar noise variance.
+  Ordinary readings are assimilated first; threshold events follow in
+  canonical operator/threshold/noise/instrument order. Known shared calibration
+  or correlated censoring requires a different model and must not be erased by
+  this declaration.
 - `assimilate_observation_batch(&Belief, &ObservationBatch, &Cx) ->
   RobustAssimilation` — excludes missing readings, returns a no-posterior audit
-  for censored/saturated/delayed records, delegates an exactly diagonal usable
+  for unsupported pathologies, delegates an exactly diagonal ordinary usable
   batch to `assimilate_all` without changing its observations, and
-  Cholesky-whitens a correlated batch before using the same scalar Joseph
-  updater. `ObservationAudit` retains every instrument disposition, the
+  Cholesky-whitens a correlated batch before updating its retained UD factor.
+  `ObservationAudit` retains every instrument disposition, the
   effective observation degrees of freedom, terminal `BatchOutcome`, and a
   domain-separated receipt. A refused result cannot expose a partial posterior.
+- Independent threshold updates use Gaussian-prior conditional mean and
+  covariance formulas. The returned `Belief` represents those moments of a
+  generally non-Gaussian conditional distribution. A single event is labeled
+  `AcceptedCensoredMoments` or `AcceptedSaturatedMoments`; multiple events use
+  sequential Gaussian moment closure and the corresponding
+  `Accepted*MomentApproximation` dispositions.
+  `ObservationAudit::uses_sequential_moment_approximation()` exposes that
+  distinction. A clipped lower endpoint means `y <= lower`, an upper endpoint
+  means `y >= upper`, and equal endpoints refuse because direction is ambiguous.
 - `FiniteDifferenceSettings::new(relative_step,
   max_standardized_innovation)` — checked positive finite policy for
   scale-aware central differencing and the local innovation gate.
@@ -308,13 +324,25 @@ linear-Gaussian core of weak-constraint assimilation.
   gate refuses singular PSD and unresolved positive-definite cases because
   whitening requires an invertible factor.
 - Missing records contribute no synthetic value and reduce effective degrees
-  of freedom. A censored, saturated, or delayed record refuses the complete
-  publication boundary: otherwise-available records are reported as withheld,
-  and no partially assimilated belief escapes.
+  of freedom. Censored and saturated records require an explicitly independent
+  batch. Delayed records, ambiguous clipping, and threshold records in a
+  general covariance batch refuse the complete publication boundary:
+  otherwise-available records are reported as withheld, and no partially
+  assimilated belief escapes. Unobserved placeholder values do not enter the
+  threshold update or its canonical ordering.
 - Robust audit receipts use
   `robust-observation-audit:v1:<64 lowercase hex>` and bind the prior, ordered
   records and pathology metadata, complete observation covariance,
   dispositions, terminal outcome, and published posterior if present.
+  Explicitly independent batches use `robust-observation-audit:v2` and bind
+  their noise, ordering, and moment policy; the general covariance constructor
+  retains the v1 identity. Threshold covariance is formed as the existing
+  Joseph conditional covariance plus a nonnegative rank-one residual term,
+  then revalidated through the existing PSD gate. A differentiated Laplace
+  continued fraction retains rare-tail conditional standard deviation until
+  physical scaling, avoiding both subtraction of nearly equal moments and
+  premature variance underflow. This numerical tail evaluation is not
+  interval-certified.
 - A nonlinear central-difference probe for component `i` requests
   `relative_step * max(1, |mean_i|)` and refuses unless binary64 addition and
   subtraction produce two distinct finite states, each distinct from the
@@ -517,6 +545,14 @@ batches; correlated-noise posterior difference from a naive diagonal update;
 posterior invariant revalidation; covariance PSD/noise-authority/identity
 refusals; pathology metadata validation; and pre-cancellation.
 
+`tests/censored.rs`: independent Gaussian integral references for both tails
+and multivariate cross covariance; central/continued-fraction switch and rare
+events through a standardized threshold of `1e8`; clipping/event equivalence;
+placeholder exclusion; ordinary-before-event ordering; explicit sequential
+approximation labels; deterministic permutation behavior; unchanged general
+covariance refusal; delay/ambiguous-clip refusal; unit rescaling; and
+cancellation, cost, and poll-budget refusal.
+
 `tests/nonlinear.rs` (bead `f85xj.12.4`, G0/G3/G4): exact reduction of a
 dyadically probed linear model to the established scalar updater; actual
 finite-difference probe retention; deterministic replay and model-identity
@@ -563,12 +599,14 @@ and clean pre-cancellation.
   full weak-constraint 4D-Var over a nonlinear forward model uses Proposal 1's
   CERTIFIED adjoints (adjoint-certs) and is the fuller deliverable — this crate
   is the Kalman/Gauss-Newton core.
-- Robust v1 does not implement censored or clipped likelihoods, temporal state
-  augmentation for delayed sensors, robust M-estimation, or
-  sparse/shared-factor covariance beyond the dense cap.
-  Censored, saturated, and delayed records are typed audited refusals, not
-  silently Gaussianized data. A time constant is retained as metadata but is
-  not a delay correction.
+- The robust covariance constructor does not implement correlated censored or
+  clipped likelihoods. The explicitly independent path implements conditional
+  moment formulas for one Gaussian-prior threshold event, and labeled
+  sequential Gaussian approximations for multiple events. Neither path claims
+  an exact non-Gaussian posterior distribution. Temporal augmentation for
+  delayed sensors, robust M-estimation, and sparse/shared-factor covariance
+  beyond the dense cap remain separate work. A time constant is retained as
+  metadata but is not a delay correction.
 - The finite-difference observation v1 seam is one local linearization,
   not `fs-ad` automatic differentiation, a derivative
   certificate, or a nonlinear-posterior accuracy guarantee. It does not select
@@ -588,7 +626,7 @@ and clean pre-cancellation.
   for whitening. This is not a condition-number certificate, an exact
   correlated-posterior proof, or authority for covariance/calibration
   provenance. Singular PSD covariance is refused rather than pseudoinverted.
-- `effective_dof` is the count of scalar readings actually passed to the update;
+- `effective_dof` counts scalar readings and threshold events incorporated;
   it is not a statistical rank, residual degrees-of-freedom estimate, or
   likelihood-complexity certificate.
 - The robust audit receipt is content-addressed replay evidence, not an
