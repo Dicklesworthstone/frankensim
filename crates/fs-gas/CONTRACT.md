@@ -1,5 +1,44 @@
 # fs-gas contract
 
+
+## Original real-gas heat exchange in compressive fields
+
+With `material,experimental-euler`, `RealGasEuler1d::step_with_walls` advances
+the original homogeneous Peng–Robinson field and then applies the shared
+implicit wall kernel over the actual accepted wave duration. A prepared
+`RealGasWallOperator` binds one contact per original cell, the unchanged
+material/context/energy gauge and physical mesh. Each local source freezes
+its post-transport density and uses the original finite internal-energy
+increment and actual density-dependent Cv, including PR departure calorics.
+Neither constant Cv nor ideal-gas Cp-R replaces that original derivative.
+
+Reservoirs, authored constant-capacity walls and retained original finite
+Cp/h/u laws share the existing bounded heat solve; latent inventories remain
+energy coordinates. Source-bearing finite walls retain their declared storage
+and work convention. The gas total-energy account, wall h/u storage, external
+reservoir heat and prescribed sliding-wall work remain separate. Relative-slip
+drag heating is retained once in gas internal energy and adds no external heat.
+The whole-field storage residual subtracts actual boundary transport and drive
+work; it does not reinterpret wall enthalpy as rigid-body internal energy.
+
+Wave and source candidates share the original retry/commit boundary. Gas
+states, pressure/temperature/acoustic caches, finite-wall inventories, reports
+and clock publish together only after complete source admission and the final
+cancellation poll. Source or gauge/mesh mismatch, missing original wall law,
+unsupported thermal endpoints and exhausted heat work refuse atomically. Wall
+candidate arrays allocate at construction; no per-step field clone or second
+thermodynamic solver is introduced. Splitting is first order, conductance and
+drag remain authored engineering inputs, and this does not add spatial thermal
+diffusion, evolving composition, phase flash or moving end-wall geometry.
+
+The `material_nonideal_flow::thermal` native regressions specify independent
+closed-form PR energy checks for heating/cooling and post-compression density,
+nonlinear finite Cp and latent storage, datum invariance, sliding work and
+late-cancellation/domain rollback. This extension was checked with the pinned
+Rust parser and scoped source/diff review; these native regressions were not
+executed because the required sibling workspace dependencies and remote build
+tools were unavailable in this session.
+
 ## Energy-selective kinetic alpha escape
 
 `AlphaEscapeTable` retains an identified, ordered table of nonnegative escape

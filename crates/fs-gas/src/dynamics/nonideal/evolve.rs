@@ -1,12 +1,13 @@
 //! Fixed-domain real-gas evolution sharing the native finite-volume machinery.
 
-use super::{RealGas, RealGasFlowError};
+use super::{RealGas, RealGasFlowError, RealGasWallOperator};
 use crate::body_force::ForceChange;
 use crate::dynamics::evolve::{Stage, forward, totals};
 use crate::dynamics::{
     Conserved, Error, FaceFlux, Mesh1d, Primitive, Reconstruction, StepControl, StepReport, Totals,
     allocated, poll, positive,
 };
+use crate::multicomponent::wall_exchange::WallControl;
 use fs_qty::{Length, Time};
 
 /// One end of a stationary constant-area real-gas interval.
@@ -48,7 +49,8 @@ struct Workspace {
 /// Every Euler stage and final average resolves through the original real-gas
 /// source. Bounded retries halve dt; refusal/cancellation publishes no state.
 /// Numerical scratch is allocated once; native material resolution retains its
-/// own allocations. No phase change, viscous transport or moving wall is added.
+/// own allocations. Optional local wall sources use the same gas calorics;
+/// no gas phase flash, spatial viscous transport or moving end wall is added.
 pub struct RealGasEuler1d {
     gas: RealGas,
     states: Vec<Conserved>,
@@ -179,14 +181,51 @@ impl RealGasEuler1d {
     /// Advance by at most the supplied duration. CFL and retries use the same
     /// controls/report as the original gas owner. This entry explicitly requires
     /// piecewise-constant spatial reconstruction; no implicit MUSCL downgrade.
-    #[allow(clippy::too_many_lines)]
     pub fn step(
         &mut self,
         maximum_duration: Time,
         controls: StepControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, RealGasFlowError> {
+        self.step_inner(maximum_duration, controls, None, cancelled)
+    }
+
+    /// Advance the original wave field, then implicit wall heat/drag over the
+    /// ACTUAL accepted duration. Finite-wall storage, gas states, cached EOS
+    /// primitives, reports and clock publish atomically after the final poll.
+    ///
+    /// This is first-order transport/source splitting. `walls.last_report()`
+    /// retains the original finite-storage and reservoir/drive accounts;
+    /// `StepReport` includes the actual gas wall impulse, heat and work.
+    pub fn step_with_walls(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        walls: &mut RealGasWallOperator<'_>,
+        wall_controls: WallControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, RealGasFlowError> {
+        self.step_inner(
+            maximum_duration,
+            controls,
+            Some((walls, wall_controls)),
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn step_inner(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        mut walls: Option<(&mut RealGasWallOperator<'_>, WallControl)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, RealGasFlowError> {
         poll(&mut cancelled)?;
+        if let Some((walls, wall_controls)) = &walls {
+            walls.validate_binding(self)?;
+            wall_controls.validate()?;
+        }
         if !positive(maximum_duration.value())
             || !positive(controls.cfl)
             || controls.cfl > 0.45
@@ -230,9 +269,22 @@ impl RealGasEuler1d {
                 controls.cfl,
                 &mut self.work,
                 &mut cancelled,
-            );
+            )
+            .and_then(|(a, b)| {
+                let thermal = match &mut walls {
+                    Some((walls, wall_controls)) => Some(walls.prepare(
+                        &mut self.work.candidate,
+                        &mut self.work.candidate_primitive,
+                        Time::new(dt),
+                        *wall_controls,
+                        &mut cancelled,
+                    )?),
+                    None => None,
+                };
+                Ok((a, b, thermal))
+            });
             match result {
-                Ok((a, b)) => {
+                Ok((a, b, mut thermal)) => {
                     let after = totals(&self.work.candidate, self.mesh.volumes(), &mut cancelled)?;
                     let factor = 0.5 * dt * area;
                     let left = Totals::from_array(core::array::from_fn(|k| {
@@ -246,9 +298,31 @@ impl RealGasEuler1d {
                             * ((a.left.array()[k] + b.left.array()[k])
                                 - (a.right.array()[k] + b.right.array()[k]))
                     }));
+                    let (wall_impulse, wall_heat, wall_work) =
+                        thermal.as_ref().map_or((0.0, 0.0, 0.0), |report| {
+                            (
+                                -report.wall_impulse_ns,
+                                report.heat_to_gas_j,
+                                report.mechanical_work_to_gas_j,
+                            )
+                        });
+                    let source = [0.0, wall_impulse, wall_heat + wall_work];
                     let residual = Totals::from_array(core::array::from_fn(|k| {
-                        after.array()[k] - before.array()[k] - boundary.array()[k]
+                        after.array()[k] - before.array()[k] - boundary.array()[k] - source[k]
                     }));
+                    if let Some(report) = &mut thermal {
+                        report.gas_wall_storage_residual_j = after.energy
+                            - before.energy
+                            - boundary.energy
+                            + report.wall_storage_change_j
+                            - report.external_heat_to_gas_j
+                            - report.mechanical_work_to_gas_j;
+                        if !report.gas_wall_storage_residual_j.is_finite() {
+                            return Err(RealGasFlowError::Invalid(
+                                "nonfinite real-gas wall storage balance",
+                            ));
+                        }
+                    }
                     if after
                         .array()
                         .iter()
@@ -266,6 +340,9 @@ impl RealGasEuler1d {
                     core::mem::swap(&mut self.states, &mut self.work.candidate);
                     core::mem::swap(&mut self.primitive, &mut self.work.candidate_primitive);
                     self.time += dt;
+                    if let (Some((walls, _)), Some(report)) = (&mut walls, thermal) {
+                        walls.commit(report);
+                    }
                     return Ok(StepReport {
                         elapsed: Time::new(dt),
                         maximum_cfl: a.signal_rate.max(b.signal_rate) * dt,
@@ -281,9 +358,9 @@ impl RealGasEuler1d {
                         area_momentum_impulse: 0.0,
                         gravity_momentum_impulse: 0.0,
                         gravity_work: 0.0,
-                        wall_momentum_impulse: 0.0,
-                        wall_heat: 0.0,
-                        wall_work: 0.0,
+                        wall_momentum_impulse: wall_impulse,
+                        wall_heat,
+                        wall_work,
                         source_change: ForceChange::default(),
                         conservation_residual: residual,
                     });

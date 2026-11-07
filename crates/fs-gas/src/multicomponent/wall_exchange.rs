@@ -277,6 +277,9 @@ pub enum WallExchangeError {
     Flow(FlowError),
     /// Original fixed-composition caloric/source admission refused.
     FrozenFlow(crate::dynamics::Error),
+    /// Original homogeneous real-gas density/energy/source admission refused.
+    #[cfg(all(feature = "material", feature = "experimental-euler"))]
+    RealGas(Box<crate::dynamics::nonideal::RealGasFlowError>),
     /// Original source-bound molecular or material transport law refused.
     Transport(super::dissipation::DissipationError),
     /// Original fixed-amount wall heat-storage source refused.
@@ -354,6 +357,15 @@ impl From<crate::dynamics::Error> for WallExchangeError {
         match value {
             crate::dynamics::Error::Cancelled => Self::Cancelled,
             other => Self::FrozenFlow(other),
+        }
+    }
+}
+#[cfg(all(feature = "material", feature = "experimental-euler"))]
+impl From<crate::dynamics::nonideal::RealGasFlowError> for WallExchangeError {
+    fn from(error: crate::dynamics::nonideal::RealGasFlowError) -> Self {
+        match error {
+            crate::dynamics::nonideal::RealGasFlowError::Cancelled => Self::Cancelled,
+            other => Self::RealGas(Box::new(other)),
         }
     }
 }

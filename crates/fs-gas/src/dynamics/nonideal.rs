@@ -16,6 +16,8 @@
 
 mod evolve;
 pub use evolve::{RealGasBoundaries, RealGasBoundary, RealGasEuler1d};
+mod thermal;
+pub use thermal::{RealGasWallContact, RealGasWallOperator, RealGasWallReport};
 
 use super::{Conserved, Error, FaceFlux, Primitive, poll, positive};
 use fs_matdb::QueryPoint;
@@ -70,6 +72,8 @@ pub enum RealGasFlowError {
     Energy(GasEnergyError),
     /// Existing geometry, shared numerical flux or CFL admission refused.
     Numerical(Error),
+    /// Original implicit gas/wall source refused before publication.
+    Thermal(Box<crate::multicomponent::wall_exchange::WallExchangeError>),
     StepRetries {
         attempts: usize,
         last: Box<RealGasFlowError>,
@@ -101,6 +105,14 @@ impl From<Error> for RealGasFlowError {
         match error {
             Error::Cancelled => Self::Cancelled,
             other => Self::Numerical(other),
+        }
+    }
+}
+impl From<crate::multicomponent::wall_exchange::WallExchangeError> for RealGasFlowError {
+    fn from(error: crate::multicomponent::wall_exchange::WallExchangeError) -> Self {
+        match error {
+            crate::multicomponent::wall_exchange::WallExchangeError::Cancelled => Self::Cancelled,
+            other => Self::Thermal(Box::new(other)),
         }
     }
 }
