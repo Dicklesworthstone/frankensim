@@ -149,6 +149,23 @@ impl UniaxialNortonJ2 {
         strain: f64,
         old: &UniaxialNortonJ2State,
     ) -> Result<UniaxialNortonJ2Response> {
+        self.response_with_memory(strain, old, old.equivalent_creep_strain)
+            .map(|(response, _)| response)
+    }
+
+    // The original coupled axial root owns both flows. Keep its kinetic memory
+    // separate from irreversible alpha and retain the actual solved dc, even
+    // when adding it to accepted signed/accumulated history rounds away.
+    pub(in crate::creep) fn response_with_memory(
+        &self,
+        strain: f64,
+        old: &UniaxialNortonJ2State,
+        kinetic_memory: f64,
+    ) -> Result<(UniaxialNortonJ2Response, f64)> {
+        require(
+            kinetic_memory.is_finite() && kinetic_memory >= 0.0,
+            "axial creep kinetic memory must be finite and nonnegative",
+        )?;
         let backbone = self.backbone();
         let old_tensor = old.tensor_history();
         backbone.validate_state(&old_tensor)?;
@@ -158,7 +175,7 @@ impl UniaxialNortonJ2 {
         let relaxed = backbone.relaxation(
             trial.abs(),
             old.equivalent_plastic_strain,
-            old.equivalent_creep_strain,
+            kinetic_memory,
             &self.stiffness,
         )?;
         let state = UniaxialNortonJ2State {
@@ -175,12 +192,15 @@ impl UniaxialNortonJ2 {
             stress_pa.is_finite() && tangent_pa.is_finite(),
             "axial stress or tangent is not representable",
         )?;
-        Ok(UniaxialNortonJ2Response {
-            strain: tensor,
-            stress_pa,
-            tangent_pa,
-            state,
-        })
+        Ok((
+            UniaxialNortonJ2Response {
+                strain: tensor,
+                stress_pa,
+                tangent_pa,
+                state,
+            },
+            relaxed.delta_c,
+        ))
     }
 
     /// Audit one candidate through the original full-tensor energy owner.

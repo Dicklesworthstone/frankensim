@@ -14,8 +14,12 @@ use super::{Fiber, FiberLaw, Section};
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::MaterialError;
 use fs_material::creep::plastic::uniaxial::UniaxialNortonJ2;
+use fs_material::creep::recovery::plastic::uniaxial::UniaxialRecoveringNortonJ2;
 use fs_material::creep::recovery::uniaxial::UniaxialRecoveringNorton;
 use fs_material::creep::thermal::uniaxial::{UniaxialThermalNorton, UniaxialThermalNortonJ2};
+use fs_material::creep::thermal::uniaxial::recovery::{
+    UniaxialThermalRecoveringNorton, UniaxialThermalRecoveringNortonJ2,
+};
 use fs_material::creep::uniaxial::UniaxialNorton;
 use fs_material::fiber::{ManderConcrete, MenegottoPintoSteel};
 use fs_material::plastic::chaboche::axial::UniaxialChaboche;
@@ -147,8 +151,11 @@ impl FiberMaterial {
             FiberLaw::Norton(law) => Self::norton(law, density_kg_m3),
             FiberLaw::RecoveringNorton(law) => Self::recovering_norton(law, density_kg_m3),
             FiberLaw::NortonJ2(law) => Self::norton_j2(law, density_kg_m3),
+            FiberLaw::RecoveringNortonJ2(law) => Self::recovering_norton_j2(law, density_kg_m3),
             FiberLaw::ThermalNorton(law) => Self::thermal_norton(law, density_kg_m3),
             FiberLaw::ThermalNortonJ2(law) => Self::thermal_norton_j2(law, density_kg_m3),
+            FiberLaw::ThermalRecoveringNorton(law) => Self::thermal_recovering_norton(law, density_kg_m3),
+            FiberLaw::ThermalRecoveringNortonJ2(law) => Self::thermal_recovering_norton_j2(law, density_kg_m3),
             FiberLaw::J2(law) => Self::j2(law, density_kg_m3),
             FiberLaw::Voce(law) => Self::voce(law, density_kg_m3),
             FiberLaw::Chaboche(law) => Self::chaboche(law, density_kg_m3),
@@ -214,6 +221,21 @@ impl FiberMaterial {
         })
     }
 
+    /// Joint permanent creep/plasticity and recovering resistance with explicit
+    /// reference density. Original source authority stays inside the native law.
+    pub fn recovering_norton_j2(law: UniaxialRecoveringNortonJ2, density_kg_m3: f64) -> Result<Self> {
+        require(
+            positive(density_kg_m3),
+            "recovering creep/plastic fiber density must be finite and positive",
+        )?;
+        Ok(Self {
+            law: FiberLaw::RecoveringNortonJ2(law),
+            density_kg_m3,
+            source: None,
+            chaboche_branch_properties: None,
+        })
+    }
+
     /// Sourced thermal expansion plus Norton creep with explicit reference density.
     /// The law retains its original expansion/mechanical receipts; this density
     /// remains a separate authored reference-mass input.
@@ -246,6 +268,42 @@ impl FiberMaterial {
         )?;
         Ok(Self {
             law: FiberLaw::ThermalNortonJ2(law),
+            density_kg_m3,
+            source: None,
+            chaboche_branch_properties: None,
+        })
+    }
+
+    /// Sourced expansion and recovering primary creep with authored reference
+    /// density. Thermal/mechanical claims remain attached to the original law.
+    pub fn thermal_recovering_norton(
+        law: UniaxialThermalRecoveringNorton,
+        density_kg_m3: f64,
+    ) -> Result<Self> {
+        require(
+            positive(density_kg_m3),
+            "thermal recovering creep fiber density must be finite and positive",
+        )?;
+        Ok(Self {
+            law: FiberLaw::ThermalRecoveringNorton(law),
+            density_kg_m3,
+            source: None,
+            chaboche_branch_properties: None,
+        })
+    }
+
+    /// Sourced expansion and joint recovering creep/plasticity with authored
+    /// reference density. No thermal or inertial property is inferred here.
+    pub fn thermal_recovering_norton_j2(
+        law: UniaxialThermalRecoveringNortonJ2,
+        density_kg_m3: f64,
+    ) -> Result<Self> {
+        require(
+            positive(density_kg_m3),
+            "thermal recovering creep/plastic fiber density must be finite and positive",
+        )?;
+        Ok(Self {
+            law: FiberLaw::ThermalRecoveringNortonJ2(law),
             density_kg_m3,
             source: None,
             chaboche_branch_properties: None,

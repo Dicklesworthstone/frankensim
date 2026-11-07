@@ -14,6 +14,8 @@
 
 /// Original source binding for all joint creep, recovery and plastic claims.
 pub mod source;
+/// Exact free-sided axial restriction retaining both permanent histories.
+pub mod uniaxial;
 
 use super::{CreepRecoveryParameters, RecoveryStep, validate_resistance};
 use crate::creep::plastic::{NortonJ2, NortonJ2State};
@@ -81,6 +83,14 @@ impl RecoveringNortonJ2 {
         self.recovery.rate_s
     }
 
+    pub(super) const fn prepared_norton_j2(&self) -> &NortonJ2 {
+        &self.prepared
+    }
+
+    pub(super) fn next_resistance(&self, old: f64, delta: f64, alpha: f64) -> Result<f64> {
+        self.recovery.next_resistance(old, delta, alpha)
+    }
+
     /// Admit both original physical histories and their separate creep resistance.
     pub fn validate_history(&self, strain: &Voigt, state: &RecoveringNortonJ2State) -> Result<()> {
         self.native.validate_history(strain, &state.native)?;
@@ -103,7 +113,7 @@ impl RecoveringNortonJ2 {
         let (next, delta) =
             self.prepared
                 .response_with_memory(strain, &old.native, old.resistance_strain)?;
-        let resistance_strain = self.recovery.next_resistance(
+        let resistance_strain = self.next_resistance(
             old.resistance_strain,
             delta,
             next.state.creep.equivalent_creep_strain,
@@ -139,7 +149,7 @@ impl RecoveringNortonJ2 {
             tolerances,
             old.resistance_strain,
         )?;
-        let resistance_strain = self.recovery.next_resistance(
+        let resistance_strain = self.next_resistance(
             old.resistance_strain,
             delta,
             next.state.creep.equivalent_creep_strain,

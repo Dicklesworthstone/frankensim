@@ -11,6 +11,9 @@
 //! strain is then shifted by `f(T) I`. Energy admission is delegated back to
 //! the original tensor thermocreep owner, so no second heat or return map exists.
 
+/// Thermal axial laws with independently recovering primary-creep resistance.
+pub mod recovery;
+
 use super::expansion::{ExpandingCreepSource, ThermalCreep, ThermalCreepState};
 use crate::creep::plastic::source::{NortonJ2Source, ResolvedNortonJ2};
 use crate::creep::plastic::uniaxial::{UniaxialNortonJ2, UniaxialNortonJ2State};

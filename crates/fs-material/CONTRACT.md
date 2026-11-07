@@ -18942,3 +18942,32 @@ softening, an independent rotated tensor free-energy/entropy account, unequal
 thermal layers and source/capacity refusals. Scope is fixed-axis small-strain
 solid plasticity, not finite-rotation texture, melting, fracture or an empirical
 calibration. No J2 property/history substitute or heat fraction is inferred.
+
+### Complete free-sided recovering creep/yield and thermal histories
+
+`creep::recovery::plastic::uniaxial::UniaxialRecoveringNortonJ2` restricts the
+same simultaneous recovering tensor law to free-sided axial stress. The original
+joint axial return uses Young's modulus in its balance and retains the actual
+solved creep increment. Signed creep/plastic strains, both accumulated paths
+and recovering resistance stay independent. The native recovering tensor law
+checks the compatible lateral strain, stress, histories and full work account;
+there is no fitted axial replacement or extra stress/tangent root. All fifteen
+original source receipts remain attached to source-resolved fibers.
+
+`creep::thermal::uniaxial::recovery` supplies standalone and joint thermal
+recovering fibers through one shared implementation. Each accepted state retains
+its actual temperature alongside the complete mechanical history. Old compatible
+strain is reconstructed at that retained temperature; trial free strain and both
+Arrhenius kinetics use the explicit endpoint temperature. The original thermal
+tensor owner supplies elastic/hardening storage, physical creep/plastic heat,
+signed reciprocal heat, `T` times mechanical entropy and numerical loss. The
+source constructor resolves this tensor once and builds its axial reduction
+from the same resolved mechanical law and selected expansion claim.
+
+Manufactured regressions specify independent axial return/tangent equations,
+source continuation, thermal loading and softening, stress-free hot dwell,
+reloading, all retained histories, the exact native tensor energy account and
+condensed tangent. Scoped parsing, formatting and scalar reference checks do
+not replace native compilation or execution. These are bounded small-strain
+material laws with prescribed endpoint temperature; a thermal fiber alone does
+not solve heat transport, add damage or establish calibrated service life.

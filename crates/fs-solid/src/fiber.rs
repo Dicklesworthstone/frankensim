@@ -16,12 +16,19 @@
 use crate::SolidError;
 use fs_la::batched::{BatchMat, BatchVec, batch_cholesky, batch_cholesky_solve};
 use fs_material::creep::plastic::uniaxial::{UniaxialNortonJ2, UniaxialNortonJ2State};
+use fs_material::creep::recovery::plastic::uniaxial::{
+    UniaxialRecoveringNortonJ2, UniaxialRecoveringNortonJ2State,
+};
 use fs_material::creep::recovery::uniaxial::{
     UniaxialRecoveringNorton, UniaxialRecoveringNortonState,
 };
 use fs_material::creep::thermal::uniaxial::{
     UniaxialThermalNorton, UniaxialThermalNortonJ2, UniaxialThermalNortonJ2State,
     UniaxialThermalNortonState,
+};
+use fs_material::creep::thermal::uniaxial::recovery::{
+    UniaxialThermalRecoveringNorton, UniaxialThermalRecoveringNortonJ2,
+    UniaxialThermalRecoveringNortonJ2State, UniaxialThermalRecoveringNortonState,
 };
 use fs_material::creep::uniaxial::{UniaxialNorton, UniaxialNortonState};
 use fs_material::fiber::{ManderConcrete, ManderState, MenegottoPintoSteel, MpState, Uniaxial};
@@ -44,10 +51,16 @@ pub enum FiberLaw {
     RecoveringNorton(UniaxialRecoveringNorton),
     /// Simultaneous axial Norton creep and isotropic J2 with separate memories.
     NortonJ2(UniaxialNortonJ2),
+    /// Simultaneous permanent creep/plasticity with separate recovering resistance.
+    RecoveringNortonJ2(UniaxialRecoveringNortonJ2),
     /// Sourced thermal expansion plus Norton creep and reciprocal heat.
     ThermalNorton(UniaxialThermalNorton),
     /// Sourced thermal expansion plus simultaneous Norton/J2 response.
     ThermalNortonJ2(UniaxialThermalNortonJ2),
+    /// Sourced thermal expansion, primary-resistance recovery and reciprocal heat.
+    ThermalRecoveringNorton(UniaxialThermalRecoveringNorton),
+    /// Sourced thermal expansion with joint recovering creep/J2 and native heat.
+    ThermalRecoveringNortonJ2(UniaxialThermalRecoveringNortonJ2),
     /// Free-sided axial restriction of the shared three-dimensional J2 law.
     /// Isotropic and Prager hardening retain separate reversal histories.
     J2(UniaxialJ2),
@@ -72,10 +85,16 @@ pub enum FiberState {
     RecoveringNorton(UniaxialRecoveringNortonState),
     /// Signed creep/plastic strains and their separate accumulated path lengths.
     NortonJ2(UniaxialNortonJ2State),
+    /// Both permanent histories and independently recovering creep resistance.
+    RecoveringNortonJ2(UniaxialRecoveringNortonJ2State),
     /// Signed creep history plus the accepted sourced temperature.
     ThermalNorton(UniaxialThermalNortonState),
     /// Signed creep/plastic histories plus the accepted sourced temperature.
     ThermalNortonJ2(UniaxialThermalNortonJ2State),
+    /// Permanent creep, recovering resistance and accepted source temperature.
+    ThermalRecoveringNorton(UniaxialThermalRecoveringNortonState),
+    /// Both permanent histories, recovering resistance and accepted temperature.
+    ThermalRecoveringNortonJ2(UniaxialThermalRecoveringNortonJ2State),
     /// Signed axial plastic strain and accumulated equivalent plastic strain.
     J2(UniaxialJ2State),
     /// The same exact axial plastic subspace, with a saturating yield radius.
@@ -110,11 +129,20 @@ impl From<UniaxialRecoveringNorton> for FiberLaw {
 impl From<UniaxialNortonJ2> for FiberLaw {
     fn from(law: UniaxialNortonJ2) -> Self { Self::NortonJ2(law) }
 }
+impl From<UniaxialRecoveringNortonJ2> for FiberLaw {
+    fn from(law: UniaxialRecoveringNortonJ2) -> Self { Self::RecoveringNortonJ2(law) }
+}
 impl From<UniaxialThermalNorton> for FiberLaw {
     fn from(law: UniaxialThermalNorton) -> Self { Self::ThermalNorton(law) }
 }
 impl From<UniaxialThermalNortonJ2> for FiberLaw {
     fn from(law: UniaxialThermalNortonJ2) -> Self { Self::ThermalNortonJ2(law) }
+}
+impl From<UniaxialThermalRecoveringNorton> for FiberLaw {
+    fn from(law: UniaxialThermalRecoveringNorton) -> Self { Self::ThermalRecoveringNorton(law) }
+}
+impl From<UniaxialThermalRecoveringNortonJ2> for FiberLaw {
+    fn from(law: UniaxialThermalRecoveringNortonJ2) -> Self { Self::ThermalRecoveringNortonJ2(law) }
 }
 
 /// A section: fibers plus committed states.
@@ -147,8 +175,11 @@ impl Section {
                 FiberLaw::Norton(l) => FiberState::Norton(l.initial_state()),
                 FiberLaw::RecoveringNorton(l) => FiberState::RecoveringNorton(l.initial_state()),
                 FiberLaw::NortonJ2(l) => FiberState::NortonJ2(l.initial_state()),
+                FiberLaw::RecoveringNortonJ2(l) => FiberState::RecoveringNortonJ2(l.initial_state()),
                 FiberLaw::ThermalNorton(l) => FiberState::ThermalNorton(l.initial_state()),
                 FiberLaw::ThermalNortonJ2(l) => FiberState::ThermalNortonJ2(l.initial_state()),
+                FiberLaw::ThermalRecoveringNorton(l) => FiberState::ThermalRecoveringNorton(l.initial_state()),
+                FiberLaw::ThermalRecoveringNortonJ2(l) => FiberState::ThermalRecoveringNortonJ2(l.initial_state()),
                 FiberLaw::J2(l) => FiberState::J2(l.initial_state()),
                 FiberLaw::Voce(l) => FiberState::Voce(l.initial_state()),
                 FiberLaw::Chaboche(l) => FiberState::Chaboche(l.initial_state()),
@@ -215,12 +246,27 @@ impl Section {
                         .map_err(|error| refused(&error.to_string()))?;
                     (response.stress_pa, response.tangent_pa)
                 }
+                (FiberLaw::RecoveringNortonJ2(l), FiberState::RecoveringNortonJ2(s)) => {
+                    let response = l.response(eps, s)
+                        .map_err(|error| refused(&error.to_string()))?;
+                    (response.stress_pa, response.tangent_pa)
+                }
                 (FiberLaw::ThermalNorton(l), FiberState::ThermalNorton(s)) => {
                     let response = l.response(eps, s)
                         .map_err(|error| refused(&error.to_string()))?;
                     (response.stress_pa, response.tangent_pa)
                 }
                 (FiberLaw::ThermalNortonJ2(l), FiberState::ThermalNortonJ2(s)) => {
+                    let response = l.response(eps, s)
+                        .map_err(|error| refused(&error.to_string()))?;
+                    (response.stress_pa, response.tangent_pa)
+                }
+                (FiberLaw::ThermalRecoveringNorton(l), FiberState::ThermalRecoveringNorton(s)) => {
+                    let response = l.response(eps, s)
+                        .map_err(|error| refused(&error.to_string()))?;
+                    (response.stress_pa, response.tangent_pa)
+                }
+                (FiberLaw::ThermalRecoveringNortonJ2(l), FiberState::ThermalRecoveringNortonJ2(s)) => {
                     let response = l.response(eps, s)
                         .map_err(|error| refused(&error.to_string()))?;
                     (response.stress_pa, response.tangent_pa)
@@ -330,10 +376,19 @@ impl Section {
                     *s = l.update_state(eps, s)
                 }
                 (FiberLaw::NortonJ2(l), FiberState::NortonJ2(s)) => *s = l.update_state(eps, s),
+                (FiberLaw::RecoveringNortonJ2(l), FiberState::RecoveringNortonJ2(s)) => {
+                    *s = l.update_state(eps, s)
+                }
                 (FiberLaw::ThermalNorton(l), FiberState::ThermalNorton(s)) => {
                     *s = l.update_state(eps, s)
                 }
                 (FiberLaw::ThermalNortonJ2(l), FiberState::ThermalNortonJ2(s)) => {
+                    *s = l.update_state(eps, s)
+                }
+                (FiberLaw::ThermalRecoveringNorton(l), FiberState::ThermalRecoveringNorton(s)) => {
+                    *s = l.update_state(eps, s)
+                }
+                (FiberLaw::ThermalRecoveringNortonJ2(l), FiberState::ThermalRecoveringNortonJ2(s)) => {
                     *s = l.update_state(eps, s)
                 }
                 (FiberLaw::J2(l), FiberState::J2(s)) => *s = l.update_state(eps, s),

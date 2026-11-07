@@ -10703,3 +10703,25 @@ owner mismatch, budgets and cancellation. These observe represented endpoint
 stresses, not unsampled space/time peaks, rate-dependent strength calibration,
 progressive damage or fracture evolution.
 
+
+### Joint and thermal recovery throughout native member paths
+
+The shared timed-fiber adapter also admits `RecoveringNortonJ2`,
+`ThermalRecoveringNorton` and `ThermalRecoveringNortonJ2`. Section response,
+static creep steps and backward-Euler motion keep their existing assembly,
+mass, Newton and work owners. The joint fibers retain both permanent strain
+paths and hardening storage; the thermal fibers additionally retain their
+actual accepted temperature, original expansion receipts and reciprocal heat.
+Rebinding never advances any history or silently replaces the recovery family,
+kinetic calibration, energetic hardening, fixed source context or expansion law.
+
+`creep_recovery_plastic_fiber`, `thermal_creep_recovery_fiber` and
+`thermal_creep_recovery_plastic_fiber` expose accepted laws and histories without
+another timed trial. Independent member regressions cover load/clamp/dwell/reload,
+variable-duration joint momentum, heated yielding and an unloaded temperature
+gradient bending a previously crept cantilever while local resistance recovers
+at different rates. Physical heat, signed reciprocal exchange and material/
+inertial numerical losses remain distinct. Temperature is prescribed between
+intervals; this path reports its heat account but does not add caloric transport.
+All original small-geometry, source, clock and atomic refusal gates remain.
+Native compilation and test execution are still pending the prescribed runner.
