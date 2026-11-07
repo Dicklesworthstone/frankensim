@@ -16,6 +16,8 @@
 
 /// Accuracy-controlled histories carrying both condensed temperatures and one gas.
 pub mod advance;
+/// Mass-derived exposed area and material conductivity in that same adaptive history.
+pub mod growing;
 
 use std::collections::{BTreeMap, BTreeSet};
 

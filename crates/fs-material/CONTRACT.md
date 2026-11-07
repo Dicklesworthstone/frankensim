@@ -94,6 +94,45 @@ exponential and finite-gas ODE limits; G3 covers accepted integrals, datums and
 surface order; G4 covers inventory retry, work/minimum-step limits and cancellation.
 
 
+### Growing resistive coatings on the original finite-gas history
+
+`sublimation::gas::chamber::coating::resistance::growing::advance_growing_resistive_chamber`
+composes the shared two-temperature adaptive history with the original
+mass-owned coating geometry and borrowed `ConductivityLaw`. Planar, spherical
+and cylindrical layers derive current thickness and exposed area from the
+actual deposit mass. Conductivity is queried at the current deposit-specific
+enthalpy on its original material chart. The declared contact resistance uses
+the fixed inner contact area. Source errors retain `DepositionError`; no source
+law, caloric chart, effective heat capacity or molecular stream is replaced.
+
+Each full or half interval refreshes area and thermal conductance before the
+original chamber runs. Its accepted endpoint refreshes outer area and exact
+mass-derived recession; the next half step therefore uses the newly deposited
+mass, altered area and layer resistance. The single adaptive owner accepts only
+the conservative two-half-step history. Thickness and conductance join its
+independent support/deposit enthalpy increments, temperatures, deposit mass,
+gas-species inventories, gas sensible energy and interface-heat error controls.
+Canonical model references are prepared once and borrowed across linear walks;
+material evidence is not reselected inside trial loops.
+
+The gas volume is the caller's fixed accessible volume after excluding fixed
+supports. Total deposited volume must remain below the authored fraction of
+that volume, at most one percent. This is a dilute-displacement approximation,
+not an error bound for omitted pressure work. Constant phase density is checked
+against the original phase law at every sampled state. Conductivity is frozen
+at the start of each physical interval; quasi-steady full-thickness resistance
+and lumped deposit storage are a two-node approximation. No porosity, thermal
+expansion, spatial profile, gas-volume work, bare birth or extinction transition
+is inferred by this history owner.
+
+G0/G1/G3 regressions in `resistance/growing/tests.rs` compare two original
+physical half intervals with an independently calculated planar circuit, check
+curved outer area against direct mass/volume formulas while inner contact area
+stays fixed, and preserve original conductivity-domain errors, density/volume
+admission and transactional cancellation.
+
+
+
 ## Source-bound finite membrane entropy and thermal stress
 
 `HyperelasticMembrane::thermoelastic_state` prepares the original expansion
