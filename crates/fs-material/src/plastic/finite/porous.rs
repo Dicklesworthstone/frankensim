@@ -19,6 +19,9 @@
 /// Explicit source binding for the native finite pressure-sensitive law.
 pub mod source;
 
+/// Thermal expansion, coefficient evolution and heat through the same compaction history.
+pub mod thermal;
+
 mod voce;
 
 use super::voce::FiniteVoceHardening;

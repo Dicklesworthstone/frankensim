@@ -1,5 +1,41 @@
 # fs-material — CONTRACT
 
+## Thermal finite porous compression
+
+`plastic::finite::porous::thermal::AffineThermalFinitePorous` extends the
+original finite pressure-sensitive return with explicit affine temperature
+dependence of shear/bulk moduli, yield and energetic hardening, including
+optional Voce saturation. The ellipse parameter and saturation rate stay
+fixed. Isotropic logarithmic expansion gives `Fm=F/theta(T)`; the native
+non-isochoric plastic metric remains intact. Elastic volume is
+`Je=J/(theta^3*Jp)`. The exact total-Piola tangent scales the native tangent
+by `1/theta^2`, retaining its geometric and nonlinear hardening terms.
+
+Original-volume free energy supplies fixed-history entropy, internal energy,
+the mechanical heat-capacity contribution and the Piola/temperature derivative.
+The complete temperature interval and native strain/history limits are admitted
+at construction. Caloric owners must combine their own capacity with the
+declared mechanical lower bound; that bound is not a uniqueness theorem for
+the coupled plastic/thermal return. Old history is checked at its old temperature
+before an endpoint-temperature return, so heating can cause further compaction
+at unchanged total deformation. Physical yield heat, signed reversible caloric
+transfer and signed mechanical endpoint-work defect remain distinct.
+
+`ResolvedAffineThermalFinitePorous` binds exact affine or affine-Voce thermal
+model selectors, law/state v1, with all eighteen base parameters mandatory and
+three additional Voce parameters when selected. One typed absolute-temperature
+source axis covers the full family interval; original card, reference context
+and fixed external conditions persist. `FiniteThermalPorousMaterial` exposes
+the complete family and cannot bypass thermal mapping through an isothermal
+material adapter. The seven `plastic_finite_porous_thermal` regressions specify
+independent hot hydrostatic compaction/unloading, noncoaxial tangent and thermal
+derivatives, heat/storage bookkeeping, isothermal and zero-saturation limits,
+temperature/history admission and source retention/refusal.
+
+This is a dry, symmetric, rate-independent thermal extension. It infers no
+evolving pore fraction, cell-wall densification, pore-fluid pressure, phase
+transition, separate Taylor--Quinney fraction or measured calibration.
+
 ## Source-prepared natural strain for finite membranes
 
 `sheet::hyperelastic::expansion` binds a reusable `PreparedFreeExpansion`
