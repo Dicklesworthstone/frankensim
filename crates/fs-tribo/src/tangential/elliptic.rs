@@ -294,11 +294,11 @@ fn capacities(mu: [f64; 2], normal: f64) -> Result<[f64; 2], TriboError> {
     Ok(result)
 }
 
-fn to_principal(axis: [f64; 2], vector: [f64; 2]) -> Result<[f64; 2], TriboError> {
+pub(crate) fn to_principal(axis: [f64; 2], vector: [f64; 2]) -> Result<[f64; 2], TriboError> {
     from_principal([axis[0], -axis[1]], vector)
 }
 
-fn from_principal(axis: [f64; 2], vector: [f64; 2]) -> Result<[f64; 2], TriboError> {
+pub(crate) fn from_principal(axis: [f64; 2], vector: [f64; 2]) -> Result<[f64; 2], TriboError> {
     let result = [
         axis[0] * vector[0] - axis[1] * vector[1],
         axis[1] * vector[0] + axis[0] * vector[1],
@@ -325,7 +325,7 @@ fn inside(force: [f64; 2], caps: [f64; 2]) -> bool {
 
 // Support point of the kinetic ellipse; scaling avoids squaring dimensional
 // forces or multiplying dimensional force by displacement before normalization.
-fn support(caps: [f64; 2], slip: [f64; 2]) -> Result<[f64; 2], TriboError> {
+pub(crate) fn support(caps: [f64; 2], slip: [f64; 2]) -> Result<[f64; 2], TriboError> {
     let scale = caps[0].max(caps[1]);
     let motion = slip[0].abs().max(slip[1].abs());
     if scale == 0.0 || motion == 0.0 {

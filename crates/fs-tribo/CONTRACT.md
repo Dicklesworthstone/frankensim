@@ -2509,3 +2509,58 @@ All 123 original-source resistive-film tests pass through the existing narrow
 Rust facade with real `fs-math` and `fs-rand` dependencies, including all 20
 power-law tests. This focused run does not claim a full constellation build
 or cross-ISA execution.
+
+## Elliptical Hertz footprints with original orthotropic sliding traction
+
+`sliding_patch::elliptic::EllipticHertzSlidingPatch` integrates the original
+`EllipticCoulomb` kinetic support over a supplied elliptical Hertz pressure
+field. The two positive semi-axes and footprint direction are independent of
+the retained material texture. Local slip is the actual rigid field
+`u + omega J r`; local acting force is the negative original associated
+ellipse support. It is not a direction-dependent scalar coefficient or two
+independent component clamps. The original ordered static/kinetic coefficients
+and texture remain inspectable, although this prescribed-sliding owner uses
+only the kinetic support.
+
+With `r=A z`, the original normal load has measure
+`3 N/(2 pi) sqrt(1-|z|^2) dz` on the unit disk. Unoriented lines through the
+zero-slip point give exact first and second signed radial Hertz moments; force,
+centre torque and local physical heat therefore require only one angular
+integral. For a stationary point outside the disk, `p=sin(theta)` removes the
+rim square-root loss of regularity and avoids forming a remote displaced
+origin. Inside and outside formulas use the same boundary limit. Four-point
+Gauss quadrature has 1..=256 caller-supplied panels per half-angle interval;
+rank-one kinetic friction splits that interval at its actual directional
+discontinuity. At most 4096 native support evaluations use bounded stack
+storage and poll cancellation at each angular node.
+
+Symmetric directions retain both the support half-mean and half-difference
+using a rationalized norm difference. This preserves torque at very small
+representable spin rather than subtracting nearly equal resultant forces.
+When the two weighted norms differ by more than a factor of four, original
+direct supports avoid amplifying roundoff near a one-sided zero. A nonzero
+motion ratio that cannot be represented refuses rather than silently becoming
+pure translation or central spin. Pure translation uses the original point
+support exactly; an isotropic law on a circular footprint delegates to the
+existing exact `HertzSlidingPatch`, independent of quadrature resolution.
+
+The returned `HertzSlidingWrench` contains the pressure-integrated acting force,
+spin moment, independently integrated nonnegative local friction power and
+their generalized-power residual. Complete rest selects zero without solving
+static friction. No material history, body momentum, normal evolution, slip
+onset, rolling-deformation loss, heat partition or calibration is inferred.
+Strong finite shape/texture anisotropy can require many angular panels;
+declared resolution and a small work residual are not convergence certificates.
+
+Nine native integration tests compare exact circular and original point-law
+limits, an independent two-dimensional Hertz surface integral, a live
+32/64/128-panel angular refinement on a sharply directional fixture, arbitrary
+frame rotation and axis gauges, velocity reversal/scaling, rank-one pressure
+first moments, torque down to spin `1e-280`, the stationary-point rim crossing,
+and transactional cancellation/input refusal. The narrow fixture's maximum
+force/moment/power errors against 256 panels decrease from `2.48996e-4` through
+`9.51483e-6` to `4.72019e-8`. One additional native unit regression checks the
+original rank-one support immediately on both sides of a one-sided zero.
+All ten tests pass through the isolated original-source dry-tribology build
+with actual `fs-math` and `fs-rand`; this is not a full constellation build or
+experimental validation.

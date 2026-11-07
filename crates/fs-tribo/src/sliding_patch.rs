@@ -32,6 +32,9 @@ pub mod contact;
 /// Shared speed-dependent friction resolved over the original Hertz patch.
 pub mod rate_dependent;
 
+/// Elliptical Hertz footprints with the original orthotropic Coulomb traction.
+pub mod elliptic;
+
 fn finite(value: f64, field: &'static str) -> Result<f64, TriboError> {
     crate::finite(value, field)?;
     Ok(value)
