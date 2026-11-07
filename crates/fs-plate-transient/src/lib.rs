@@ -13,6 +13,9 @@ pub use fs_plate::PlateModel;
 mod transient;
 pub use transient::*;
 
+/// Atomic native dynamics and source-bound signed DKT surface fatigue.
+pub mod fatigue;
+
 pub mod moving_load;
 pub use moving_load::{
     MovingPlateLoad, MovingPlateLoadBudget, MovingPlateLoadError, PlateLoadKeyframe,

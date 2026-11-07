@@ -45,6 +45,8 @@
 //! downstream through fs-modal).
 
 pub mod loading;
+/// Source-bound signed surface stress and streaming fatigue on native DKT plates.
+pub mod fatigue;
 /// Retained plane-stress plastic histories on the original DKT bending field.
 pub mod plastic;
 pub mod viscosity;

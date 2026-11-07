@@ -1928,3 +1928,38 @@ certificates. No missing strength or interaction is inferred.
 `laminate_strength_shell` contains analytical rotated-membrane/interaction and
 zero-resultant thermal-bilayer oracles, spatial envelope coverage, and original
 source/temperature, budget, nonfinite and cancellation refusal regressions.
+
+## Source-bound DKT stress-life fatigue
+
+`fatigue::FatiguePlate` assembles the original native DKT pencil from retained
+homogeneous isotropic material states and per-element thicknesses. Its immutable
+gauges recover signed normal stress at original midside quadrature points and
+signed through-thickness depths. The native convention is epsilon(z) = z B q:
+positive transverse-displacement curvature compresses the positive-z face.
+Original plane-stress stiffness converts engineering twist exactly once, and
+uniform membrane pretension contributes T/h to both normal stresses, including
+at zero transverse displacement. Piecewise section properties remain local.
+
+Gauge admission binds chemistry, process and absolute temperature; source-backed
+S-N curves also bind the original card, named material state and every fixed
+physical query coordinate. Elastic properties must retain fixed external source
+conditions. The same section data creates stiffness, inertia and prepared
+nine-entry stress rows, so an unrelated assembled pencil cannot substitute for
+the observed material. There are no source queries or constitutive solves during
+stress recovery.
+
+Complete quadratic rotation-field Bernstein controls enforce the declared
+small-slope domain. Linear vertex curvature and both faces bound the engineering
+strain throughout each triangle and thickness, including pretension. Explicit
+geometry, gauge, sample and aggregate-residue limits bound preparation and
+observation. `PlateFatigueObservation` stages all gauges together, retains open
+rainflow histories across clones, previews endpoint half cycles without closing
+the live history, and finalizes atomically and idempotently.
+
+`tests/fatigue.rs` checks the signed bending/twist relation, both faces and the
+midsurface, pretension and rigid motion, original matrix equivalence, heterogeneous
+sections, analytic Goodman/Miner cycles, source mismatch and transactional refusal.
+This fixed-condition elastic observer excludes laminate-effective calibration,
+plastic reconstruction, thermal cycling and unobserved material viscous stress.
+Miner damage neither changes the native pencil nor supplies heat, cracks or a
+validated service-life certificate.

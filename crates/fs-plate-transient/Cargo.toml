@@ -13,6 +13,7 @@ layer = "L3"
 [dependencies]
 fs-contact = { path = "../fs-contact" }
 fs-dcontact = { path = "../fs-dcontact" }
+fs-material = { path = "../fs-material" }
 fs-phs = { path = "../fs-phs" }
 fs-plate = { path = "../fs-plate" }
 fs-sparse = { path = "../fs-sparse" }
@@ -23,7 +24,6 @@ fs-solver = { path = "../fs-solver" }
 fs-la = { path = "../fs-la" }
 fs-evidence = { path = "../fs-evidence" }
 fs-matdb = { path = "../fs-matdb" }
-fs-material = { path = "../fs-material" }
 fs-qty = { path = "../fs-qty" }
 fs-tribo = { path = "../fs-tribo" }
 

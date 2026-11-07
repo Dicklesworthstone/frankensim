@@ -310,3 +310,30 @@ smooth force pulses and reports their amplitudes and signed sampled drive work.
 `tests/plate_multi_impact.rs` covers singleton equivalence, shared momentum and
 coupling, body permutation, local and parameter derivatives, force-history
 trajectory pullbacks, original source refusal and aggregate admission.
+
+## Fatigue on accepted native plate trajectories
+
+`fatigue::PlateFatigueRun` couples the original generalized-alpha mechanical
+state to a source-bound `FatiguePlate` observer. It requires the exact original
+plate pencil, unscaled elastic stiffness and no unobserved material bending
+viscosity. Initial acceleration comes from the original mass solve at the actual
+initial force; every step uses the original intermediate-time forcing callback,
+implicit solve and accepted endpoint. Explicit macroscopic Rayleigh damping
+affects motion without masquerading as additional local constitutive stress.
+
+A mechanics, forcing, fatigue-domain, budget or cancellation failure publishes
+neither new motion nor new damage. The observer stages its gauges once per step;
+after acceptance the mechanical candidate is moved without another fallible
+operation. Checkpoint clones retain displacement, velocity, acceleration and
+unresolved cycles together. Only the current state and bounded residues persist;
+the native step telemetry history is cleared after each accepted step. Prefix
+previews and finalization retain the material owner's endpoint-half-cycle
+semantics.
+
+`tests/fatigue.rs` compares the trajectory with the original native solver and
+an analytic midpoint oscillator, checks signed face stresses and three-cycle
+Miner damage, demonstrates physical damping's reduction in accumulated damage,
+and covers restart, source-pencil identity, sample limits and late cancellation.
+Physical timestep refinement remains necessary to resolve stress turning points.
+The fixed-condition elastic estimate adds no crack law, stiffness degradation,
+thermal cycling or service-life validation.
