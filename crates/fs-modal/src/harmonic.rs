@@ -38,13 +38,16 @@ mod frequency;
 pub use frequency::{
     HarmonicFrequencyControls, HarmonicFrequencyResponse, HarmonicPortFrequencyResponse,
 };
+mod parameter;
+pub use parameter::{
+    HarmonicParameterControls, HarmonicParameterResponse, HarmonicPortParameterResponse,
+};
 mod interference;
 pub use interference::{
     HarmonicEnsembleControls, HarmonicFactorStatistics, HarmonicForceFactor, HarmonicForceTone,
     HarmonicImpedanceSample, HarmonicInterferenceControls, HarmonicInterferenceLoad,
     HarmonicInterferenceMoments, MAX_ENSEMBLE_FORCE_TONES, MAX_INTERFERENCE_FACTORS,
-    MAX_INTERFERENCE_TONES, PreparedHarmonicInterference,
-    PreparedHarmonicInterferenceEnsemble,
+    MAX_INTERFERENCE_TONES, PreparedHarmonicInterference, PreparedHarmonicInterferenceEnsemble,
 };
 /// Local driven-response extrema and half-magnitude-squared linewidths.
 pub mod resonance;
@@ -408,19 +411,17 @@ impl PreparedHarmonicResponse {
             }
         }
         let compact_port_factor = match (&port_load, &port_scaling, layout) {
-            (Some(load), Some(scaling), MatrixLayout::Diagonal) => {
-                Some(CompactPortFactor::new(
-                    &operator,
-                    load,
-                    &coordinate_exponents,
-                    time_exponent,
-                    mu,
-                    angular_frequency_rad_s,
-                    scaling,
-                    controls.maximum_relative_residual,
-                    cx,
-                )?)
-            }
+            (Some(load), Some(scaling), MatrixLayout::Diagonal) => Some(CompactPortFactor::new(
+                &operator,
+                load,
+                &coordinate_exponents,
+                time_exponent,
+                mu,
+                angular_frequency_rad_s,
+                scaling,
+                controls.maximum_relative_residual,
+                cx,
+            )?),
             _ => None,
         };
         if compact_port_factor.is_none()
@@ -557,7 +558,9 @@ impl PreparedHarmonicResponse {
         let n = natural_frequencies_rad_s.len();
         admit_layout(n, controls, MatrixLayout::Diagonal)?;
         if damping_rates_per_s.len() != n {
-            return Err(invalid("one modal damping rate per natural frequency required"));
+            return Err(invalid(
+                "one modal damping rate per natural frequency required",
+            ));
         }
         let load = PreparedPortImpedance::new(n, force_map, ports, impedance, port_controls, cx)?;
         Self::prepare_modal_coefficients(

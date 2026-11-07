@@ -397,6 +397,43 @@ mutual nonreciprocal, rank-deficient and lossless loads, physical power, and a
 mixed-scale force fixture with a huge uncoupled response. Genuine unsupported
 poles, core resource limits and cancellation refuse explicitly.
 
+`solve_with_parameter_derivative` reuses the same prepared factor for signed
+physical M/C/K/F directions at fixed frequency, coordinate basis, attachment
+map and load impedance. It consumes the existing `QuadraticParameterDirection`
+in original row-major coordinates: mass and stiffness directions are symmetric
+but need not be positive; the full velocity direction can change both viscous
+and gyroscopic coupling. A direction can introduce coupling into a diagonal
+base. The differentiated equation is
+`A q_theta = F_theta - K_theta q + omega^2 M_theta q - C_theta v`.
+No perturbed factorization, eigenvector derivative or numerical-scaling
+derivative is used. Binary-normalized products and DD RHS accumulation retain
+physical units without first overflowing `omega^2` or matrix/state products.
+
+The output includes original-coordinate motion derivatives and independently
+differentiated input, viscous and fixed-load boundary work. In particular,
+the viscous derivative includes `v^H D_theta v / 2`, while a changed purely
+skew gyroscope contributes no direct heat. A published-coordinate row audit
+uses the uncancelled component envelope as well as the ordinary tangent-solve
+backward check. Neither is a forward-error certificate at a narrow resonance.
+Signed power products retain binary exponents through cancellation before
+recovering physical units, including lossless source-phase rotations and
+motion in a damping direction's nullspace.
+Additional payload admission is `512*n + 384*p`; work admission is
+`256*(n*n+n*p+p*p)+256*(n+p+k)`, with `64*(n*n*p+k*k)` added for a compact
+loaded factor of dimension k. Direction/source inputs and the original factor
+are excluded. No derivative matrix or second factor is allocated; dense
+directions require quadratic work even on a compact base. Cancellation,
+malformed directions, unrepresentable arithmetic and exhausted budgets
+publish no partial result or changed owner.
+
+Tests in `tests/harmonic_parameter.rs` compare scalar resonance slopes with
+closed forms, keep a finite nonzero sensitivity at an exact dark response,
+retain signed gyroscopic coupling, compare coupled loaded motion/work against
+independent physical perturbations, check coordinate-unit changes and typed
+refusals. These are derivatives of the supplied finite-dimensional mechanical
+pencil, not constitutive identification, changing physical-basis derivatives,
+derivatives of B or Z, material/geometry qualification, or truncation bounds.
+
 `solve_with_frequency_derivative` reuses that same prepared factor for the exact
 continuous frequency tangent, including authored `dF/domega` and the complete
 physical `dZ/domega`. Loaded owners require an explicit finite impedance-slope
