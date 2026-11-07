@@ -308,6 +308,53 @@ impl PreparedFreeExpansion {
         } else {
             index - 1
         };
+        self.tangent_on_segment(geometry, segment)
+    }
+
+    /// Evaluate the original expansion path where its thermal tangent is
+    /// two-sided. Source endpoints and genuine changes of source slope refuse;
+    /// a redundant knot with the same slopes remains admissible. This does not
+    /// smooth or resample the measurements. The piecewise affine natural
+    /// stretches have exactly zero second derivative at an admitted point.
+    ///
+    /// One binary search and at most two adjacent segments are inspected.
+    /// Thermodynamic reductions use this entry when they require a unique
+    /// temperature derivative rather than the ordinary one-sided convention.
+    pub fn at_temperature_with_smooth_tangent(
+        &self,
+        temperature_k: f64,
+    ) -> Result<FreeExpansionGeometryTangent, ThermalTransportError> {
+        let [lower, upper] = self.temperature_span_k();
+        if !temperature_k.is_finite() || temperature_k <= lower || temperature_k >= upper {
+            return Err(ThermalTransportError::Invalid(
+                "a two-sided expansion-source temperature neighborhood is required",
+            ));
+        }
+        let (geometry, index) = self.sample_with_index(temperature_k)?;
+        let at_knot = self.knots[index].temperature == temperature_k;
+        let segment = if at_knot { index } else { index - 1 };
+        let result = self.tangent_on_segment(geometry, segment)?;
+        if at_knot {
+            let left = self.tangent_on_segment(geometry, index - 1)?;
+            if left
+                .principal_stretch_derivatives_per_k
+                .into_iter()
+                .zip(result.principal_stretch_derivatives_per_k)
+                .any(|(a, b)| a != b && (a - b).abs() > 128.0 * f64::EPSILON * a.abs().max(b.abs()))
+            {
+                return Err(ThermalTransportError::Invalid(
+                    "a slope-changing expansion knot has no unique thermal tangent",
+                ));
+            }
+        }
+        Ok(result)
+    }
+
+    fn tangent_on_segment(
+        &self,
+        geometry: FreeExpansionGeometrySample,
+        segment: usize,
+    ) -> Result<FreeExpansionGeometryTangent, ThermalTransportError> {
         let [left, right] = [self.knots[segment], self.knots[segment + 1]];
         let width = right.temperature - left.temperature;
         let mut derivatives = [0.0; 3];

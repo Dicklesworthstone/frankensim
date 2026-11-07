@@ -1,5 +1,34 @@
 # fs-material — CONTRACT
 
+## Source-bound finite membrane entropy and thermal stress
+
+`HyperelasticMembrane::thermoelastic_state` prepares the original expansion
+path's exact local thermal jet, reduces the original finite-compliance potential
+through transverse equilibrium, and applies the existing engineering Green-strain
+chain rule. `frozen_visco_thermoelastic_state` adds the complete explicit native
+Maxwell history while retaining the exact source equilibrium and natural map.
+Neither query advances time, changes accepted memory or creates heat.
+
+Mechanical entropy, internal energy, heat capacity and thermal resultants use
+the original reference thickness and area. The entropy-constrained tangent adds
+the thermal outer-product correction using an explicit positive caloric capacity
+plus the mechanical contribution exactly once. This numeric caloric argument
+does not grant source admission or define its thermodynamic reference.
+
+`SheetExpansionReference::thermal_reference_jet` reuses the source owner's
+`at_temperature_with_smooth_tangent`: one binary search checks at most two
+adjacent original segments. True slope changes and source endpoints refuse a
+two-sided derivative; redundant datum knots remain valid. Fixed directional
+source permutations retain their exact axes. Existing three-dimensional
+thermodynamic consumers share this source derivative admission, including their
+explicit one-sided finite-heating endpoint convention.
+
+Exact-volume thermal potentials and reciprocal transient heat exchange remain
+separate owners. Four source-backed regressions compare relaxed energies and
+thermal resultants, entropy-constrained tangents, source support and retained
+nonproportional viscous memory. Source fixture model domains now retain the same
+typed Kelvin descriptor as their original expansion queries.
+
 ## Finite-strain thermodynamics with retained viscous memory
 
 `ViscoHyperelastic::frozen_thermoelastic_state` derives mechanical Helmholtz

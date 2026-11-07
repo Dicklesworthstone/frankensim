@@ -12,6 +12,8 @@
 
 /// Reusable engineering-length paths with retained original sheet inventory.
 pub mod expansion;
+/// Source-bound entropy, heat capacity and thermal stress of finite membranes.
+pub mod thermoelastic;
 
 use super::{
     AREAL_DENSITY, MEMBRANE_PROPERTIES, ResolvedSheet, SheetError, SheetLaw, SheetResponse,

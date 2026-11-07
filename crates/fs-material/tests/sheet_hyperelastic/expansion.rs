@@ -1,4 +1,7 @@
 //! Source preparation changes natural strain, never the original sheet inventory.
+#[path = "expansion/thermoelastic.rs"]
+mod thermoelastic;
+
 use super::*;
 use fs_blake3::ContentHash;
 use fs_matdb::{ClaimSelection, SelectionPolicy};
@@ -70,7 +73,12 @@ fn thermal_card(axis: &str, model_span: [f64; 2]) -> MaterialCard {
     }
     let mut models = original.models().to_vec();
     for model in &mut models {
-        model.validity = ValidityDomain::unconstrained().with("T", model_span[0], model_span[1]);
+        model.validity = ValidityDomain::unconstrained().with_quantity(
+            "T",
+            QuantitySpec::dimensional(Temperature::DIMS),
+            model_span[0],
+            model_span[1],
+        );
     }
     MaterialCard::assemble(original.id().clone(), claims, models).unwrap()
 }

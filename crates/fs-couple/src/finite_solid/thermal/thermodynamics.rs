@@ -81,45 +81,16 @@ fn expansion_jet_at_temperature(
 ) -> Result<ThermalReferenceJet, FiniteThermoelasticSourceError> {
     let path = source.source();
     let [lower, upper] = path.temperature_span_k();
-    if two_sided && (temperature <= lower || temperature >= upper) {
-        return Err(invalid(
-            "adiabatic waves require a two-sided expansion-source temperature neighborhood",
-        ));
+    // Finite heat transactions may reach an original source endpoint using
+    // its one-sided derivative. Interior slope changes still have no unique
+    // thermal jet; the shared source owner checks the adjacent segments only.
+    let tangent = if !two_sided && (temperature == lower || temperature == upper) {
+        path.at_temperature_with_tangent(temperature)
+    } else {
+        path.at_temperature_with_smooth_tangent(temperature)
     }
-    let tangent = path
-        .at_temperature_with_tangent(temperature)
-        .map_err(FiniteThermoelasticSourceError::Expansion)?;
+    .map_err(FiniteThermoelasticSourceError::Expansion)?;
     let slopes = tangent.principal_stretch_derivatives_per_k();
-    let mut previous = None;
-    for knot in path.temperatures_k() {
-        if knot == temperature && temperature > lower {
-            // At the preceding knot the native right-interval derivative is
-            // exactly the left derivative at this knot. No differencing or
-            // resampling of mechanical energy is used to infer a source slope.
-            let left = path
-                .at_temperature_with_tangent(
-                    previous.ok_or_else(|| {
-                        invalid("a two-sided expansion-source interval is required")
-                    })?,
-                )
-                .map_err(FiniteThermoelasticSourceError::Expansion)?
-                .principal_stretch_derivatives_per_k();
-            if left
-                .into_iter()
-                .zip(slopes)
-                .any(|(a, b)| !same_derivative(a, b))
-            {
-                return Err(invalid(
-                    "a slope-changing expansion knot has no unique thermoelastic linearization",
-                ));
-            }
-            break;
-        }
-        if knot > temperature {
-            break;
-        }
-        previous = Some(knot);
-    }
     let q = match source.frame() {
         ExpansionThermalFrame::Isotropic => [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         ExpansionThermalFrame::FixedPrincipal {
