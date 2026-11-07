@@ -35,6 +35,8 @@ pub mod certified;
 pub mod relaxation;
 /// Constant-loss-factor (hysteretic) material loss by modal strain-energy shares.
 pub mod hysteretic;
+/// Full constitutive CST/DKT shell loss on the original mass-normalized basis.
+pub mod shell;
 
 fn invalid(what: &'static str) -> AcousticRealizeError {
     AcousticRealizeError::InvalidDescription { what }
@@ -552,6 +554,11 @@ impl ModalPlateViscosity {
     /// or vanish on rigid-body modes.
     /// Complete pivoted Cholesky extracts one passive channel per active rank direction and verifies
     /// that $\sum_k (\sqrt{R}\,\mathbf{b}_k)(\sqrt{R}\,\mathbf{b}_k)^T$ reconstructs $C_{\text{modal}}$ within $10^{-10}$.
+    /// Positive pivots are retained down to the local compensated-arithmetic
+    /// uncertainty, independently of the strongest damping direction. This
+    /// matrix-only interface cannot distinguish physical weak loss from positive
+    /// error already present in its input; producers must preserve their known
+    /// null spaces when projecting physical source operators.
     pub fn from_psd_modal_matrix(
         matrix: Vec<f64>,
         n: usize,
@@ -599,36 +606,44 @@ impl ModalPlateViscosity {
             }
         }
 
-        // Complete diagonal-pivoted Cholesky on the symmetric PSD matrix.
-        let mut rem = matrix.clone();
+        // Form the Cholesky columns through a compensated LDL Schur complement.
+        // Neither sqrt rounding nor the arbitrary reference resistance belongs
+        // in that subtraction: both can invent loss in an exactly dependent row
+        // or erase a resolved, weak dissipative direction.
+        use fs_math::dd::Dd;
+        let mut rem: Vec<_> = matrix.iter().copied().map(Dd::from_f64).collect();
         for i in 0..n {
-            if rem[i * n + i] < 0.0 && rem[i * n + i] >= -1e-12 * max_diag {
-                rem[i * n + i] = 0.0;
+            if matrix[i * n + i] < 0.0 && matrix[i * n + i] >= -1e-12 * max_diag {
+                rem[i * n + i] = Dd::ZERO;
             }
         }
         let r_sqrt = resistance.sqrt();
-        // Pivots below this factor's own PSD, symmetry and reconstruction
-        // tolerance (1e-10 of the largest diagonal) are roundoff in the modal
-        // projection, not damping channels. Rigid-mode rows of a glue box
-        // measured 4e-13 and -7e-14 relative, and at 1e-13 one became a
-        // spurious seventh channel.
-        let pivot_tol = 1e-10 * max_diag;
+        // Track only error introduced HERE, starting from exact f64 inputs.
+        // fs_math::Dd documents relative error <= 2^-103 for division and
+        // <= 2^-104 for add/multiply; this larger bound also covers arithmetic
+        // used to propagate the absolute error estimates. Untouched small
+        // diagonal inputs therefore have no tolerance tied to max_diag.
+        const DD_ROUNDOFF: f64 = 16.0 * f64::EPSILON * f64::EPSILON;
+        let mut uncertainty = vec![0.0; matrix.len()];
+        let mut ratios = vec![Dd::ZERO; n];
+        let mut ratio_uncertainty = vec![0.0; n];
+        let negative_tolerance = Dd::from_f64(-1e-10 * max_diag);
         let mut columns: Vec<Vec<f64>> = Vec::new();
         let mut used = vec![false; n];
 
         for _step in 0..n {
             poll(gate)?;
             let mut best_p = None;
-            let mut best_diag = pivot_tol;
+            let mut best_diag = Dd::ZERO;
             for i in 0..n {
                 if !used[i] {
                     let d_i = rem[i * n + i];
-                    if d_i < -1e-10 * max_diag {
+                    if d_i.lt(negative_tolerance) {
                         return Err(invalid(
                             "modal damping matrix is not positive semidefinite (negative Cholesky pivot)",
                         ));
                     }
-                    if d_i > best_diag {
+                    if best_diag.lt(d_i) && Dd::from_f64(uncertainty[i * n + i]).lt(d_i) {
                         best_diag = d_i;
                         best_p = Some(i);
                     }
@@ -639,32 +654,64 @@ impl ModalPlateViscosity {
             };
             used[p] = true;
             let root_p = best_diag.sqrt();
+            let pivot_lower = best_diag.to_f64() - uncertainty[p * n + p];
+            if !pivot_lower.is_finite() || pivot_lower <= 0.0 {
+                return Err(invalid("PSD modal damping pivot scale is unrepresentable"));
+            }
             let mut col = vec![0.0; n];
-            col[p] = root_p / r_sqrt;
+            col[p] = root_p.to_f64() / r_sqrt;
             for i in 0..n {
                 if !used[i] {
-                    col[i] = (rem[i * n + p] / root_p) / r_sqrt;
+                    col[i] = (rem[i * n + p] / root_p).to_f64() / r_sqrt;
+                    ratios[i] = rem[i * n + p] / best_diag;
+                    let ratio_abs = ratios[i].abs().to_f64();
+                    ratio_uncertainty[i] = (uncertainty[i * n + p]
+                        + ratio_abs * uncertainty[p * n + p]) / pivot_lower
+                        + DD_ROUNDOFF * ratio_abs;
                 }
+            }
+            if col[p] == 0.0 || col.iter().any(|value| !value.is_finite()) {
+                return Err(invalid("material damping channel scale is unrepresentable"));
             }
             for i in 0..n {
                 if !used[i] {
-                    let l_ip = col[i] * r_sqrt;
                     for j in i..n {
                         if !used[j] {
-                            let l_jp = col[j] * r_sqrt;
-                            rem[i * n + j] -= l_ip * l_jp;
+                            // Divide the larger coupling by the pivot first.
+                            // Dividing the smaller one can underflow although
+                            // their complete Schur product is representable.
+                            let (a, b) = if rem[i * n + p].abs().lt(rem[j * n + p].abs()) {
+                                (j, i)
+                            } else {
+                                (i, j)
+                            };
+                            let update = ratios[a] * rem[b * n + p];
+                            let error = uncertainty[i * n + j]
+                                + ratios[a].abs().to_f64() * uncertainty[b * n + p]
+                                + ratio_uncertainty[a]
+                                    * rem[b * n + p].abs().to_f64()
+                                + ratio_uncertainty[a] * uncertainty[b * n + p]
+                                + DD_ROUNDOFF * rem[i * n + j].abs().to_f64()
+                                + DD_ROUNDOFF * update.abs().to_f64();
+                            let residual = rem[i * n + j] - update;
+                            if !error.is_finite() || !residual.hi.is_finite() || !residual.lo.is_finite() {
+                                return Err(invalid("PSD modal damping Schur complement is unrepresentable"));
+                            }
+                            uncertainty[i * n + j] = error;
+                            uncertainty[j * n + i] = error;
+                            rem[i * n + j] = residual;
                             rem[j * n + i] = rem[i * n + j];
                         }
                     }
                 }
             }
-            rem[p * n + p] = 0.0;
+            rem[p * n + p] = Dd::ZERO;
             columns.push(col);
         }
 
         // Verify remaining diagonal entries are non-negative within tolerance and full matrix reconstructs.
         for i in 0..n {
-            if !used[i] && rem[i * n + i] < -1e-10 * max_diag {
+            if !used[i] && rem[i * n + i].lt(negative_tolerance) {
                 return Err(invalid(
                     "modal damping matrix is not positive semidefinite (negative residual diagonal)",
                 ));
@@ -711,6 +758,13 @@ impl ModalPlateViscosity {
 mod directional_material_tests {
     use super::*;
 
+    fn channel_power(law: &ModalPlateViscosity, velocity: &[f64]) -> f64 {
+        law.channel_shapes().iter().map(|column| {
+            let speed: f64 = column.iter().zip(velocity).map(|(a, b)| a * b).sum();
+            law.reference_resistance_n_s_m() * speed * speed
+        }).sum()
+    }
+
     #[test]
     fn material_projection_preserves_undamped_common_motion() {
         let gate=CancelGate::new();
@@ -732,6 +786,123 @@ mod directional_material_tests {
         // A strictly positive tensor stays on its original unpivoted owner.
         let full=ModalPlateViscosity::factor(vec![4.0,1.0,1.0,9.0],2,1.0,&gate).unwrap();
         assert_eq!(full.channel_shapes()[0],vec![2.0,0.5]);
+    }
+
+    #[test]
+    fn weak_direction_survives_beside_strong_loss_and_an_exact_null() {
+        let gate = CancelGate::new();
+        for weak in [1e-14, 1e-100] {
+            for resistance in [1e-12, 1.0, 1e12] {
+                let c = vec![1.0, 0.0, 0.0, 0.0, weak, 0.0, 0.0, 0.0, 0.0];
+                let law = ModalPlateViscosity::factor(c.clone(), 3, resistance, &gate).unwrap();
+                assert_eq!(law.matrix_per_s(), c);
+                assert_eq!(law.channel_count(), 2);
+                let power = channel_power(&law, &[0.0, 1.0, 0.0]);
+                assert!((power / weak - 1.0).abs() < 3e-15, "{power} != {weak}");
+                assert_eq!(channel_power(&law, &[0.0, 0.0, 1.0]), 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn correlated_weak_loss_and_dependent_rows_keep_their_physical_rank() {
+        let gate = CancelGate::new();
+        let diagonal = 1.0 + 1e-14;
+        let weak_power = diagonal - 1.0;
+        for resistance in [1e-12, 1.0, 1e12] {
+            let c = vec![1.0, 1.0, 0.0, 1.0, diagonal, 0.0, 0.0, 0.0, 0.0];
+            let law = ModalPlateViscosity::from_psd_modal_matrix(c, 3, resistance, &gate).unwrap();
+            assert_eq!(law.channel_count(), 2);
+            let power = channel_power(&law, &[-1.0, 1.0, 0.0]);
+            assert!((power / weak_power - 1.0).abs() < 5e-14, "{power} != {weak_power}");
+            assert_eq!(channel_power(&law, &[0.0, 0.0, 7.0]), 0.0);
+
+            // The LDL ratio 2/3 is not binary-exact. Its arithmetic residue is
+            // not a second physical channel in this exact rank-one tensor.
+            let dependent = ModalPlateViscosity::from_psd_modal_matrix(
+                vec![9.0, 6.0, -3.0, 6.0, 4.0, -2.0, -3.0, -2.0, 1.0],
+                3, resistance, &gate,
+            ).unwrap();
+            assert_eq!(dependent.channel_count(), 1);
+            assert!(channel_power(&dependent, &[2.0, -3.0, 0.0]) < 1e-28);
+            assert!((channel_power(&dependent, &[1.0, 2.0, -1.0]) - 64.0).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn weak_and_null_power_is_covariant_under_a_dense_orthogonal_basis_change() {
+        let gate = CancelGate::new();
+        // Exact dyadic coefficients keep both the weak eigenvalue and the two
+        // null directions representable after a genuinely dense basis change.
+        let q = [
+            [0.5, 0.5, 0.5, 0.5],
+            [0.5, -0.5, 0.5, -0.5],
+            [0.5, 0.5, -0.5, -0.5],
+            [0.5, -0.5, -0.5, 0.5],
+        ];
+        let weak = 2.0_f64.powi(-46);
+        for scale in [2.0_f64.powi(-200), 1.0, 2.0_f64.powi(200)] {
+            let mut matrix = vec![0.0; 16];
+            for i in 0..4 {
+                for j in 0..4 {
+                    matrix[4 * i + j] = scale * (q[i][0] * q[j][0] + weak * q[i][1] * q[j][1]);
+                }
+            }
+            let law = ModalPlateViscosity::from_psd_modal_matrix(matrix, 4, 7.0, &gate).unwrap();
+            assert_eq!(law.channel_count(), 2);
+            for original in [[0.0, 1.0, 0.0, 0.0], [2.0, -3.0, 5.0, 7.0]] {
+                let rotated: Vec<_> = q.iter().map(|row| {
+                    row.iter().zip(original).map(|(a, b)| a * b).sum()
+                }).collect();
+                let expected = scale * (original[0] * original[0] + weak * original[1] * original[1]);
+                let actual = channel_power(&law, &rotated);
+                assert!((actual / expected - 1.0).abs() < 5e-14, "{actual} != {expected}");
+            }
+            for null in [2, 3] {
+                let velocity: Vec<_> = q.iter().map(|row| row[null]).collect();
+                assert!(channel_power(&law, &velocity) <= 1e-28 * scale);
+            }
+        }
+    }
+
+    #[test]
+    fn retained_weak_channel_drives_finite_physical_decay_and_heat() {
+        use fs_modal::time::{LinearForceTransition, ModalAcousticState};
+        let weak = 1e-14;
+        let law = ModalPlateViscosity::factor(
+            vec![1.0, 0.0, 0.0, 0.0, weak, 0.0, 0.0, 0.0, 0.0],
+            3, 2.0, &CancelGate::new(),
+        ).unwrap();
+        let rate = channel_power(&law, &[0.0, 1.0, 0.0]);
+        let flow = LinearForceTransition::try_new_with_damping_rate(0.0, rate, 1.0 / weak).unwrap();
+        let frame = flow.advance_with_energy(
+            ModalAcousticState { displacement_m_sqrt_kg: 0.0, velocity_m_sqrt_kg_per_s: 1.0 },
+            0.0, 0.0,
+        ).unwrap();
+        let velocity = (-1.0_f64).exp();
+        let heat = -0.5 * (-2.0_f64).exp_m1();
+        assert!((frame.state.velocity_m_sqrt_kg_per_s - velocity).abs() < 2e-14);
+        assert!((frame.viscous_dissipation_j - heat).abs() < 2e-14);
+        assert_eq!(frame.input_work_j, 0.0);
+        assert!((0.5 * frame.state.velocity_m_sqrt_kg_per_s.powi(2)
+            + frame.viscous_dissipation_j - 0.5).abs() < 2e-14);
+    }
+
+    #[test]
+    fn representable_cross_update_preserves_null_motion_at_widely_separated_scales() {
+        for (strong, cross) in [(1e200, 1e-200), (1e308, 1e-100)] {
+            let law = ModalPlateViscosity::from_psd_modal_matrix(
+                vec![
+                    strong, cross, strong,
+                    cross, 1e-200, cross,
+                    strong, cross, strong,
+                ],
+                3, 1.0, &CancelGate::new(),
+            ).unwrap();
+            assert_eq!(law.channel_count(), 2);
+            assert_eq!(channel_power(&law, &[1.0, 0.0, -1.0]), 0.0);
+            assert!((channel_power(&law, &[0.0, 1.0, 0.0]) / 1e-200 - 1.0).abs() < 3e-15);
+        }
     }
 
     #[test]

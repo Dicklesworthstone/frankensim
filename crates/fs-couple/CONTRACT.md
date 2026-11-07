@@ -2085,6 +2085,51 @@ directional/reflected moving field is inferred.
 `tests/moving_quadrupole_pcm.rs` covers history/bandwidth/clearance refusal,
 coherent cancellation, block invariance, atomic failure and native WAV parity.
 
+## Weak directional modal damping
+
+`ModalPlateViscosity::from_psd_modal_matrix` retains positive dissipative
+directions resolved by its compensated arithmetic even beside a much stronger
+direction and an exact null. Its pivoted factor uses the existing double-double
+owner for LDL Schur updates, with locally propagated arithmetic uncertainty.
+Square roots and the arbitrary reference resistance enter only the realized
+channels. Larger coupling ratios are formed before smaller cross terms to
+avoid losing representable updates across widely separated scales. The former
+`1e-10 * max_diagonal` positive-loss cutoff is absent; negative-pivot admission
+and full reconstruction checks retain their existing boundaries. The ordinary
+strictly positive-definite Cholesky path is unchanged.
+
+This matrix-only API cannot identify positive source/projection error as an
+exact physical null. Producers remain responsible for preserving their known
+null spaces, and numerical Ritz vectors are checked by their actual physical
+power rather than an assumed exact channel count. Focused native regressions
+retain `1e-14` and `1e-100` loss ratios, correlated weak directions, dependent
+rows, dense basis covariance, extreme-scale null motion and finite decay/heat
+over a weak channel's physical relaxation time. These checks are ordinary
+floating-point validation, not an interval or source-applicability certificate.
+
+## CST/DKT shell material damping
+
+`ModalPlateViscosity::from_cst_dkt_shell` consumes the original CST/DKT shell
+mesh, sparse mass pencil, reduced basis and one `ShellViscosity` per facet.
+The spatial owner projects the passive membrane/bending resultant tensor,
+including signed membrane-bending coupling, before the existing common owner
+factors every retained modal cross term into dashpot channels. Physical strain
+rates exclude numerical drilling stabilization. The supplied mass-normalized
+basis is checked against the complete original mass matrix, including its
+consistent and translation/director terms; no mode, frequency or normalization
+is changed. Work admission covers projection, mass products, Gram checks and
+factorization, with cancellation before publication.
+
+The same channels enter `CoupledModalSystem` and its separate physical-loss
+accounts. They introduce no spring, numerical damping, thermal destination or
+new integrator. Source validity, frequency-band applicability, modal
+completeness and use of the same original mesh remain caller obligations.
+MITC and tied-shell kinematics retain their existing owners. The focused tests
+compare sparse spatial power, the full modal quadratic form and channel power;
+exercise lumped and consistent inertia, basis permutations, zero loss and
+refusals; and compare coupled decay with an independently refined RK4 solution
+of the original full modal equation while checking physical heat closure.
+
 ## Material tensile admission on nonlinear acoustic strings
 
 `NonlinearMaterialString::with_tensile_limit` explicitly binds one named static

@@ -367,5 +367,30 @@ fn g0_glue_loss_nonnegative_and_counted_once() {
         assert!((diag - direct).abs() <= 1e-11 * direct.max(1.0));
     }
     assert!(active_flexible > 0, "flexible modes across glue seam must experience positive glue damping");
-    assert!(modal_visc.channel_count() > 0 && modal_visc.channel_count() <= 6);
+    // These are numerical Ritz vectors: their small resolved seam slip is
+    // part of the supplied matrix, not a certificate of exactly six null
+    // directions. Check physical power rather than imposing a rank cutoff
+    // that would also erase genuinely weak material loss.
+    assert!(modal_visc.channel_count() > 0 && modal_visc.channel_count() <= phis.len());
+    let connections = modal_visc.connections(0);
+    for mode in 0..6 {
+        let realized: f64 = connections.iter().map(|link| {
+            link.damping_n_s_m * link.left.shapes[mode].powi(2)
+        }).sum();
+        assert!(realized <= 1e-9, "rigid mode {mode} acquired channel loss {realized:e}");
+    }
+    let velocity: Vec<_> = (0..phis.len()).map(|i| {
+        if i % 2 == 0 { 0.1 * (i + 1) as f64 } else { -0.07 * (i + 1) as f64 }
+    }).collect();
+    let mut physical = vec![0.0; tied.model.free];
+    for (shape, &rate) in phis.iter().zip(&velocity) {
+        for (entry, &value) in physical.iter_mut().zip(shape) { *entry += rate * value; }
+    }
+    let direct = tied.glue_dissipation_rate(&physical).unwrap();
+    let realized: f64 = connections.iter().map(|link| {
+        let slip: f64 = link.left.shapes.iter().zip(&velocity).map(|(s, v)| s * v).sum();
+        link.damping_n_s_m * slip * slip
+    }).sum();
+    assert!((realized - direct).abs() <= 1e-10 * direct.max(1.0),
+        "mixed modal channels {realized:e} differ from original glue work {direct:e}");
 }
