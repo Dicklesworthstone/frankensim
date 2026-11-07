@@ -2136,6 +2136,17 @@ rows, dense basis covariance, extreme-scale null motion and finite decay/heat
 over a weak channel's physical relaxation time. These checks are ordinary
 floating-point validation, not an interval or source-applicability certificate.
 
+### Original stiffness in hereditary factorization
+
+The shared regional relaxation factor supplies its original dimensional
+stiffness entries to the compensated PSD fallback. Diagonal normalization is
+confined to the established strictly positive-definite Cholesky path; a failed
+Cholesky must not make rounded normalized entries the material source. This
+preserves resolved weak strain energy and exact dependencies for regional
+plate memory, shell substrate relaxation and coating relaxation, with the
+existing full-form reconstruction and cancellation checks. Successful
+positive-definite channel arithmetic remains unchanged.
+
 ## CST/DKT shell material damping
 
 `ModalPlateViscosity::from_cst_dkt_shell` consumes the original CST/DKT shell

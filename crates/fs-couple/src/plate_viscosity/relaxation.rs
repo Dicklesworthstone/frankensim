@@ -211,26 +211,31 @@ pub(crate) fn factor(form: &[f64], n: usize, gate: &CancelGate)
     }
     let normalized: Vec<_> = (0..size*size).map(|i|
         form[n*active[i/size]+active[i%size]]/scales[i/size]/scales[i%size]).collect();
-    let factors = match fs_la::factor::cholesky(&normalized,size) {
+    let rows = match fs_la::factor::cholesky(&normalized,size) {
         // Preserve successful positive-definite projections and their channel
         // order exactly. A material patch need not be positive definite on the
         // complete instrument's modes, however: use the SAME pivoted PSD owner
         // as localized interface loss if the unpivoted factor refuses.
-        Ok(root) => (0..size).map(|channel|
-            (0..size).map(|i| root.l(i,channel)).collect::<Vec<_>>()).collect(),
+        Ok(root) => (0..size).map(|channel| {
+            let mut row = vec![0.0; n];
+            for (i, &mode) in active.iter().enumerate() {
+                row[mode] = scales[i] * root.l(i, channel);
+            }
+            row
+        }).collect(),
+        // The compensated owner must receive the ORIGINAL entries. Normalizing
+        // them first can round away a weak correlated strain direction or turn
+        // an exact dependence into a spurious material history. Its own LDL
+        // arithmetic handles dimensional scales without a global rank cutoff.
         Err(_) => super::ModalPlateViscosity::from_psd_modal_matrix(
-            normalized, size, 1.0, gate,
+            form.to_vec(), n, 1.0, gate,
         )?.columns,
     };
-    let mut rows = Vec::with_capacity(factors.len());
-    for factor in factors {
+    for row in &rows {
         poll(gate)?;
-        let mut row = vec![0.0;n];
-        for (i,&mode) in active.iter().enumerate() { row[mode] = scales[i]*factor[i]; }
         if row.iter().any(|v| !v.is_finite()) || row.iter().all(|v| *v == 0.0) {
             return Err(invalid("regional material strain factor is unrepresentable"));
         }
-        rows.push(row);
     }
     for i in 0..n { for j in 0..n {
         poll(gate)?;
@@ -277,5 +282,31 @@ mod tests {
         let expected: Vec<Vec<_>> = (0..2).map(|j|
             (0..2).map(|i| scale[i] * original.l(i, j)).collect()).collect();
         assert_eq!(factor(&form, 2, &gate).unwrap(), expected);
+    }
+
+    #[test]
+    fn localized_memory_preserves_resolved_weak_strain_and_exact_dependence() {
+        let gate = CancelGate::new_clock_free();
+        // Two physical branch strains: sqrt(a)*(x+y+z) and sqrt(delta)*(y+z).
+        // y=-z is an exactly unstrained direction, while x=-y resolves the
+        // weak branch. Both must survive independently of the strong strain.
+        for (a, increment) in [(1.0, 2.0_f64.powi(-42)),
+            (1.0, 2.0_f64.powi(-48)), (3.7, 2.0_f64.powi(-48))] {
+            let b = a + increment;
+            let delta = b - a;
+            let form = [a, a, a, a, b, b, a, b, b];
+            let rows = factor(&form, 3, &gate).unwrap();
+            let energy = |q: [f64; 3]| -> f64 {
+                rows.iter().map(|row| {
+                    0.5 * row.iter().zip(q).map(|(c, x)| c * x).sum::<f64>().powi(2)
+                }).sum()
+            };
+            let weak = energy([-1.0, 1.0, 0.0]);
+            assert!((weak / (0.5 * delta) - 1.0).abs() < 2e-7,
+                "weak stored energy {weak:e} lost for stiffness {delta:e}");
+            assert_eq!(energy([0.0, 1.0, -1.0]), 0.0,
+                "unstrained material direction must carry no branch energy");
+            assert_eq!(rows.len(), 2);
+        }
     }
 }
