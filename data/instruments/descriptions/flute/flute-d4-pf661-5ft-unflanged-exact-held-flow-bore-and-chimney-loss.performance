@@ -1,0 +1,235 @@
+frankensim-flue-performance-v1
+clock 288000 48000
+output 120000 5 1000000
+gas mixture 299.30 101325 mole 5 N2 0.7546 O2 0.1788 Ar 0.0090 CO2 0.0242 H2O 0.0334
+exterior 293.15 101325 0
+network 42 41
+duct_node inlet
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node junction
+duct_node junction
+duct_node junction
+duct_node junction
+duct_node junction
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection -1
+duct_node junction
+duct_node reflection -1
+duct_node junction
+duct_node reflection -1
+duct_node reflection -1
+duct_section 0 1 0.0044000 0.0061025 1e-10
+duct_section 1 2 0.0175000 0.0084668 1e-10
+duct_section 1 3 0.0283750 0.0086419 1e-10
+duct_section 3 4 0.0283750 0.0088585 1e-10
+duct_section 4 5 0.0283750 0.0090751 1e-10
+duct_section 5 6 0.0283750 0.0092917 1e-10
+duct_section 6 7 0.0370000 0.0094000 1e-10
+duct_section 7 8 0.0132000 0.0099000 1e-10
+duct_section 8 9 0.0461611 0.0095040 1e-10
+duct_section 9 10 0.0018973 0.0037000 1e-10
+duct_section 9 11 0.0172167 0.0095230 1e-10
+duct_section 11 12 0.0019080 0.0039000 1e-10
+duct_section 11 13 0.0163218 0.0095227 1e-10
+duct_section 13 14 0.0018879 0.0035000 1e-10
+duct_section 13 15 0.0323107 0.0095278 1e-10
+duct_section 15 16 0.0021829 0.0066000 1e-10
+duct_section 15 17 0.0188890 0.0095779 1e-10
+duct_section 17 18 0.0021829 0.0066000 1e-10
+duct_section 17 19 0.0206890 0.0095711 1e-10
+duct_section 19 20 0.0021829 0.0066000 1e-10
+duct_section 19 21 0.0228890 0.0095643 1e-10
+duct_section 21 22 0.0021829 0.0066000 1e-10
+duct_section 21 23 0.0214727 0.0096050 1e-10
+duct_section 23 24 0.0021985 0.0094752 1e-10
+duct_section 23 25 0.0241448 0.0095989 1e-10
+duct_section 25 26 0.0022656 0.0071000 1e-10
+duct_section 25 27 0.0253332 0.0095685 1e-10
+duct_section 27 28 0.0022656 0.0071000 1e-10
+duct_section 27 29 0.0269332 0.0095645 1e-10
+duct_section 29 30 0.0022656 0.0071000 1e-10
+duct_section 29 31 0.0284332 0.0095611 1e-10
+duct_section 31 32 0.0022656 0.0071000 1e-10
+duct_section 31 33 0.0311967 0.0095612 1e-10
+duct_section 33 34 0.0023811 0.0077000 1e-10
+duct_section 33 35 0.0334020 0.0095847 1e-10
+duct_section 35 36 0.0072231 0.0077000 1e-10
+duct_section 35 37 0.0322438 0.0096107 1e-10
+duct_section 37 38 0.0072231 0.0077000 1e-10
+duct_section 37 39 0.0342438 0.0096043 1e-10
+duct_section 39 40 0.0072231 0.0077000 1e-10
+duct_section 39 41 0.0406219 0.0095441 1e-10
+radiation compact-baffled
+flue 0.00618 0.00113 0.00750 0.00029 0 0
+windway none
+mouth_loss contraction 0.6 0.3 Auvray2014-TableI-alpha_vc(Zen-On-recorder-mouth;flute-embouchure-not-measured)
+jet_card json {"schema":"fs-aeroac.jet-card/v1","claim_kind":"edge-tone-tonal","claim":{"stage":1,"locked_strouhal":0.05,"ladder_band_lo":0.7,"ladder_band_hi":1.4,"multi_stable_strouhal":[0.05],"hysteresis_recorded":true,"saturated_force_rms":null},"authority":"X-Est","profile":{"u_centerline":0.08,"slot_half":1,"momentum_thickness":1.75},"band_db":null,"residual":null,"validity":{"reynolds_lo":1000,"reynolds_hi":2500,"h_over_delta":10,"requires_receptivity_edge":true,"seeded_amplitude_claims_only":true},"provenance":{"rig_fingerprint":0,"receipts":["de la Cuadra et al. 2008 Acta Acustica 94(5) Sec. 7: maximum amplification at Str_h 0.025; Re 1000 to 2500 (Eq. 5); convection ratio 0.4 (Auvray 2012, Terrien 2014)"],"classification":"published-parameter estimate for a lip jet, not a measured jet card"},"scope":"fs-aeroac outputs are relative spectral shapes and scaling laws from a 2D incompressible base flow via Curle's analogy; they are NOT absolute SPL predictions. 2D line-source (cylindrical-spreading) results additionally need a 2D-to-3D span correction before any comparison to measured levels."}
+jet 90 1e-6 3 0
+jet_response forced-bickley 0.1 90
+momentum_drive bickley-profile
+jet_spreading bickley
+jet_swing_limit fletcher-1976
+jet_cut_width station
+jet_limits 1 0.3 65536
+jet_noise 14 1.3e-3 0.045 0.115 700
+wave_memory_bytes 67108864
+fractional 3000 0.01
+viscothermal sections 27 exact-held-flow
+loss_section 7 2 200 3000
+loss_section 12 2 200 3000
+loss_section 35 1 200 3000
+loss_section 37 1 200 3000
+loss_section 39 1 200 3000
+loss_section 1 3 200 3000
+loss_section 2 5 200 3000
+loss_section 3 5 200 3000
+loss_section 4 5 200 3000
+loss_section 5 5 200 3000
+loss_section 6 7 200 3000
+loss_section 8 9 200 3000
+loss_section 10 3 200 3000
+loss_section 14 6 200 3000
+loss_section 16 3 200 3000
+loss_section 18 4 200 3000
+loss_section 20 4 200 3000
+loss_section 22 4 200 3000
+loss_section 24 5 200 3000
+loss_section 26 5 200 3000
+loss_section 28 5 200 3000
+loss_section 30 5 200 3000
+loss_section 32 6 200 3000
+loss_section 34 6 200 3000
+loss_section 36 6 200 3000
+loss_section 38 7 200 3000
+loss_section 40 8 200 3000
+receiver -0.64250 0 1.524 4 16 2800
+observer_gas stokes-kirchhoff 4096 1000000 50000000
+outlets 41 3 unflanged
+outlet 36 -0.1090000 0
+outlet 38 -0.0760000 0
+outlet 40 -0.0410000 0
+mouth_aperture rectangle 0.010 0.012
+mouth_radiation -0.6425000 0 4 4
+mouth_reaction window-cylinder exact-held-flow
+window embouchure 16 0.0098740 0.0118488 0.0058387 lip one-sided face 0.0018
+jet_forcing_area open-strip source
+controls 4096 300000
+gesture
+frankensim-gesture-schedule-v1
+control_rate_hz	1000
+tracks	1
+track	blow	blowing-pressure
+initial	pressure-pa	0e0
+events	84
+event	0e0	2.3255814e-2	pressure-pa	6.08e1
+event	2.3255814e-2	2.3255814e-2	pressure-pa	1.095e2
+event	4.6511628e-2	2.3255814e-2	pressure-pa	1.014e2
+event	6.9767442e-2	2.3255814e-2	pressure-pa	1.135e2
+event	9.3023256e-2	2.3255814e-2	pressure-pa	1.419e2
+event	1.1627907e-1	2.3255814e-2	pressure-pa	1.743e2
+event	1.39534884e-1	2.3255814e-2	pressure-pa	1.986e2
+event	1.62790698e-1	2.3255814e-2	pressure-pa	2.027e2
+event	1.86046512e-1	2.3255814e-2	pressure-pa	2.189e2
+event	2.09302326e-1	2.3255814e-2	pressure-pa	2.473e2
+event	2.3255814e-1	2.3255814e-2	pressure-pa	2.919e2
+event	2.55813953e-1	2.3255814e-2	pressure-pa	3.32e2
+event	2.79069767e-1	2.3255814e-2	pressure-pa	3.608e2
+event	3.02325581e-1	2.3255814e-2	pressure-pa	3.486e2
+event	3.25581395e-1	2.3255814e-2	pressure-pa	3.405e2
+event	3.48837209e-1	2.3255814e-2	pressure-pa	3.324e2
+event	3.72093023e-1	2.3255814e-2	pressure-pa	3.243e2
+event	3.95348837e-1	2.3255814e-2	pressure-pa	3.324e2
+event	4.18604651e-1	2.3255814e-2	pressure-pa	3.527e2
+event	4.41860465e-1	2.3255814e-2	pressure-pa	3.851e2
+event	4.65116279e-1	2.3255814e-2	pressure-pa	3.973e2
+event	4.88372093e-1	2.3255814e-2	pressure-pa	3.649e2
+event	5.11627907e-1	2.3255814e-2	pressure-pa	3.446e2
+event	5.34883721e-1	2.3255814e-2	pressure-pa	3.324e2
+event	5.58139535e-1	2.3255814e-2	pressure-pa	3.405e2
+event	5.81395349e-1	2.3255814e-2	pressure-pa	3.568e2
+event	6.04651163e-1	2.3255814e-2	pressure-pa	3.77e2
+event	6.27906977e-1	2.3255814e-2	pressure-pa	3.932e2
+event	6.51162791e-1	2.3255814e-2	pressure-pa	3.892e2
+event	6.74418605e-1	2.3255814e-2	pressure-pa	3.851e2
+event	6.97674419e-1	2.3255814e-2	pressure-pa	3.973e2
+event	7.20930233e-1	2.3255814e-2	pressure-pa	3.548e2
+event	7.44186047e-1	2.3255814e-2	pressure-pa	3.446e2
+event	7.67441861e-1	2.3255814e-2	pressure-pa	3.473e2
+event	7.90697675e-1	2.3255814e-2	pressure-pa	3.28e2
+event	8.13953489e-1	2.3255814e-2	pressure-pa	3.395e2
+event	8.37209303e-1	2.3255814e-2	pressure-pa	3.595e2
+event	8.60465117e-1	2.3255814e-2	pressure-pa	3.755e2
+event	8.83720931e-1	2.3255814e-2	pressure-pa	3.832e2
+event	9.06976745e-1	2.3255814e-2	pressure-pa	3.81e2
+event	9.30232559e-1	2.3255814e-2	pressure-pa	3.647e2
+event	9.53488373e-1	2.3255814e-2	pressure-pa	3.418e2
+event	9.76744187e-1	2.3255814e-2	pressure-pa	3.289e2
+event	1e0	2.3255814e-2	pressure-pa	3.171e2
+event	1.02325581e0	2.3255814e-2	pressure-pa	3.401e2
+event	1.04651163e0	2.3255814e-2	pressure-pa	3.638e2
+event	1.06976744e0	2.3255814e-2	pressure-pa	3.63e2
+event	1.09302326e0	2.3255814e-2	pressure-pa	3.662e2
+event	1.11627907e0	2.3255814e-2	pressure-pa	3.612e2
+event	1.13953488e0	2.3255814e-2	pressure-pa	3.517e2
+event	1.1627907e0	2.3255814e-2	pressure-pa	3.327e2
+event	1.18604651e0	2.3255814e-2	pressure-pa	3.411e2
+event	1.20930233e0	2.3255814e-2	pressure-pa	3.481e2
+event	1.23255814e0	2.3255814e-2	pressure-pa	3.69e2
+event	1.25581395e0	2.3255814e-2	pressure-pa	3.815e2
+event	1.27906977e0	2.3255814e-2	pressure-pa	3.899e2
+event	1.30232558e0	2.3255814e-2	pressure-pa	3.896e2
+event	1.3255814e0	2.3255814e-2	pressure-pa	3.548e2
+event	1.34883721e0	2.3255814e-2	pressure-pa	3.474e2
+event	1.37209302e0	2.3255814e-2	pressure-pa	3.631e2
+event	1.39534884e0	2.3255814e-2	pressure-pa	3.559e2
+event	1.41860465e0	2.3255814e-2	pressure-pa	3.423e2
+event	1.44186047e0	2.3255814e-2	pressure-pa	3.511e2
+event	1.46511628e0	2.3255814e-2	pressure-pa	3.545e2
+event	1.48837209e0	2.3255814e-2	pressure-pa	3.455e2
+event	1.51162791e0	2.3255814e-2	pressure-pa	3.6e2
+event	1.53488372e0	2.3255814e-2	pressure-pa	3.839e2
+event	1.55813954e0	2.3255814e-2	pressure-pa	3.897e2
+event	1.58139535e0	2.3255814e-2	pressure-pa	3.679e2
+event	1.60465116e0	2.3255814e-2	pressure-pa	3.496e2
+event	1.62790698e0	2.3255814e-2	pressure-pa	3.222e2
+event	1.65116279e0	2.3255814e-2	pressure-pa	3.068e2
+event	1.67441861e0	2.3255814e-2	pressure-pa	3.263e2
+event	1.69767442e0	2.3255814e-2	pressure-pa	3.565e2
+event	1.72093023e0	2.3255814e-2	pressure-pa	3.705e2
+event	1.74418605e0	2.3255814e-2	pressure-pa	3.72e2
+event	1.76744186e0	2.3255814e-2	pressure-pa	3.665e2
+event	1.79069767e0	2.3255814e-2	pressure-pa	3.456e2
+event	1.81395349e0	2.3255814e-2	pressure-pa	3.396e2
+event	1.8372093e0	2.3255814e-2	pressure-pa	3.421e2
+event	1.86046512e0	2.3255814e-2	pressure-pa	3.619e2
+event	1.88372093e0	2.3255814e-2	pressure-pa	3.627e2
+event	1.90697674e0	2.3255814e-2	pressure-pa	3.475e2
+event	1.95e0	1.05e-2	pressure-pa	0e0
