@@ -293,6 +293,16 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
     for every block size and worker count.
   - `lu_complex` runs the blocked path on the workers that a scoped
     `with_lu_workers` declares, one by default.
+  - `eigen_complex::solve_tridiagonal_complex(lower, diag, upper, rhs,
+    columns)` solves a complex TRIDIAGONAL system for several right-hand
+    sides with the same operation graph as `lu_complex` plus `solve`, minus
+    the structural zeros (updates by a zero are `x - (+-0)`, exactly `x`):
+    magnitude pivots, lowest index on ties, whole-row swaps, the same
+    singular step. Every nonzero result is bit-identical to a dense
+    factorization of the matrix; only the sign of a zero may differ. O(n)
+    work and no n x n storage. Tested bitwise against `lu_complex` on
+    diagonally dominant, swap-heavy, mixed-scale, near-singular and
+    integer (tie, exact-zero and singular) matrices of 1 to 140 unknowns.
   - x86-64 FMA codegen lives in a registered capsule.
   - Tested bitwise against a frozen copy of the original operation graph:
     block sizes 1 to 1000, 1 to 8 workers, pivot ties, a singular pivot

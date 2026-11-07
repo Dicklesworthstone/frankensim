@@ -16,7 +16,7 @@ use crate::{
     Duct, DuctError, DuctResponse, LoadSpec, LossModel, OpenHoleFlow, Segment,
     SegmentWave, Termination,
 };
-use fs_la::eigen_complex::lu_complex;
+use fs_la::eigen_complex::{lu_complex, solve_tridiagonal_complex};
 use fs_material::gas::GasState;
 use fs_math::{c64::C64, det};
 use fs_phs::WallPin;
@@ -1487,6 +1487,11 @@ fn pure_shunt_admittance(block: &TwoPort) -> Option<C64> {
 /// The chain is a ladder of the blocks' own admittances (`TwoPort::admittance`, finite for an opaque line);
 /// a port hole's T-junction is split into its two series halves, a node and the hole branch, so no
 /// block is inverted and no ABCD product is formed.
+///
+/// The nodal matrix of that ladder is tridiagonal (every stamp couples a node to the next, everything else sits
+/// on the diagonal), so it is factored by `fs_la::eigen_complex::solve_tridiagonal_complex`: the dense owner's
+/// operation graph without its structural zeros, bit-identical to a dense `lu_complex` factorization of the same
+/// matrix, in O(size) instead of O(size^3) per frequency.
 pub(crate) fn open_hole_port_admittance(
     chain: &PreparedChain,
     open_holes: &[PreparedOpenHole],
@@ -1494,12 +1499,73 @@ pub(crate) fn open_hole_port_admittance(
     z_load: Option<C64>,
     options: ComposeOptions,
 ) -> Result<Vec<C64>, DuctError> {
+    let Some(ladder) = port_ladder(chain, open_holes, ports, z_load, options)? else {
+        return Ok(Vec::new());
+    };
+    let size = ladder.diag.len();
+    let m = ladder.c_hat.len();
+    let mut solutions = vec![C64::ZERO; size * m];
+    for j in 0..m {
+        let at = j * size + ladder.internal[j];
+        solutions[at] = solutions[at] + ladder.c_hat[j];
+    }
+    solve_tridiagonal_complex(&ladder.lower, &ladder.diag, &ladder.upper, &mut solutions, m)
+        .map_err(|_| DuctError::Singular)?;
+    port_matrix(&ladder, &solutions)
+}
+
+/// The nodal matrix behind [`open_hole_port_admittance`], as its three diagonals (`lower[i] = Y[i + 1][i]`,
+/// `upper[i] = Y[i][i + 1]`), the node of each port's orifice terminal, and each port's open-chimney admittance.
+struct PortLadder {
+    lower: Vec<C64>,
+    diag: Vec<C64>,
+    upper: Vec<C64>,
+    internal: Vec<usize>,
+    c_hat: Vec<C64>,
+}
+
+/// Add a block's 2 x 2 admittance between node `a` and node `a + 1`.
+fn stamp_pair(ladder: &mut PortLadder, a: usize, m2: [C64; 4]) {
+    ladder.diag[a] = ladder.diag[a] + m2[0];
+    ladder.upper[a] = ladder.upper[a] + m2[1];
+    ladder.lower[a] = ladder.lower[a] + m2[2];
+    ladder.diag[a + 1] = ladder.diag[a + 1] + m2[3];
+}
+
+/// `Y` seen at the orifice terminals from the solutions of `Y v_j = c_hat_j e_internal(j)`, one per port, stored
+/// one after the other.
+fn port_matrix(ladder: &PortLadder, solutions: &[C64]) -> Result<Vec<C64>, DuctError> {
+    let size = ladder.diag.len();
+    let m = ladder.c_hat.len();
+    let mut port = vec![C64::ZERO; m * m];
+    for j in 0..m {
+        let v = &solutions[j * size..(j + 1) * size];
+        for i in 0..m {
+            let delta = if i == j { C64::ONE } else { C64::ZERO };
+            let entry = -(ladder.c_hat[i] * (v[ladder.internal[i]] - delta));
+            if !finite(entry) {
+                return Err(DuctError::Singular);
+            }
+            port[i * m + j] = entry;
+        }
+    }
+    Ok(port)
+}
+
+/// Stamp the nodal ladder of the first `ports` open holes; `None` when there is no port.
+fn port_ladder(
+    chain: &PreparedChain,
+    open_holes: &[PreparedOpenHole],
+    ports: usize,
+    z_load: Option<C64>,
+    options: ComposeOptions,
+) -> Result<Option<PortLadder>, DuctError> {
     if ports > MAX_ORIFICE_PORTS {
         return Err(bad("at most sixteen open holes can carry a coupled orifice"));
     }
     let m = ports.min(open_holes.len());
     if m == 0 {
-        return Ok(Vec::new());
+        return Ok(None);
     }
     let holes = &open_holes[..m];
     let reference = chain.reference_impedance;
@@ -1535,35 +1601,38 @@ pub(crate) fn open_hole_port_admittance(
             },
         }
     }
-    let mut y = vec![C64::ZERO; size * size];
-    let stamp = |y: &mut [C64], a: usize, b: usize, m2: [C64; 4]| {
-        y[a * size + a] = y[a * size + a] + m2[0];
-        y[a * size + b] = y[a * size + b] + m2[1];
-        y[b * size + a] = y[b * size + a] + m2[2];
-        y[b * size + b] = y[b * size + b] + m2[3];
+    // Every stamp joins node `left` to node `left + 1` (`next == left + 1` after every block), so the matrix
+    // is tridiagonal: the three diagonals are all there is.
+    let mut y = PortLadder {
+        lower: vec![C64::ZERO; size - 1],
+        diag: vec![C64::ZERO; size],
+        upper: vec![C64::ZERO; size - 1],
+        internal: vec![0usize; m],
+        c_hat: Vec::with_capacity(m),
     };
     let (mut left, mut next) = (0usize, 1usize);
-    let mut internal = vec![0usize; m];
     for item in &ladder {
         match item {
             LadderBlock::Series(ym) => {
-                stamp(&mut y, left, next, *ym);
+                debug_assert_eq!(next, left + 1);
+                stamp_pair(&mut y, left, *ym);
                 left = next;
                 next += 1;
             }
             LadderBlock::Shunt(g) => {
-                y[left * size + left] = y[left * size + left] + *g;
+                y.diag[left] = y.diag[left] + *g;
             }
             LadderBlock::Port(j) => {
                 let z = holes[*j].half_series_impedance;
                 if z == C64::ZERO {
-                    internal[*j] = left;
+                    y.internal[*j] = left;
                 } else {
+                    debug_assert_eq!(next, left + 1);
                     let g = z.recip();
                     let series = [g, -g, -g, g];
-                    stamp(&mut y, left, next, series);
-                    stamp(&mut y, next, next + 1, series);
-                    internal[*j] = next;
+                    stamp_pair(&mut y, left, series);
+                    stamp_pair(&mut y, next, series);
+                    y.internal[*j] = next;
                     left = next + 1;
                     next += 2;
                 }
@@ -1571,13 +1640,12 @@ pub(crate) fn open_hole_port_admittance(
         }
     }
     debug_assert_eq!(next, size);
-    y[0] = y[0] + C64::from_re(1.0 / reference);
+    y.diag[0] = y.diag[0] + C64::from_re(1.0 / reference);
     match z_load {
         None => {}
-        Some(z) if finite(z) && z != C64::ZERO => y[left * size + left] = y[left * size + left] + z.recip(),
+        Some(z) if finite(z) && z != C64::ZERO => y.diag[left] = y.diag[left] + z.recip(),
         _ => return Err(DuctError::Singular),
     }
-    let mut c_hat = Vec::with_capacity(m);
     for (j, hole) in holes.iter().enumerate() {
         let open = C64::from_re(hole.sigma) / hole.open_chimney_impedance;
         let [closed_p, closed_u] = hole.closed_return_coordinates;
@@ -1592,26 +1660,11 @@ pub(crate) fn open_hole_port_admittance(
         if !finite(open) || !finite(closed) {
             return Err(DuctError::Singular);
         }
-        let node = internal[j];
-        y[node * size + node] = y[node * size + node] + open + closed;
-        c_hat.push(open);
+        let node = y.internal[j];
+        y.diag[node] = y.diag[node] + open + closed;
+        y.c_hat.push(open);
     }
-    let lu = lu_complex(&y, size).map_err(|_| DuctError::Singular)?;
-    let mut port = vec![C64::ZERO; m * m];
-    for j in 0..m {
-        let mut v = vec![C64::ZERO; size];
-        v[internal[j]] = v[internal[j]] + c_hat[j];
-        lu.solve(&mut v);
-        for i in 0..m {
-            let delta = if i == j { C64::ONE } else { C64::ZERO };
-            let entry = -(c_hat[i] * (v[internal[i]] - delta));
-            if !finite(entry) {
-                return Err(DuctError::Singular);
-            }
-            port[i * m + j] = entry;
-        }
-    }
-    Ok(port)
+    Ok(Some(y))
 }
 
 /// [`evaluate_in_exterior_and_holes`] plus the orifice-terminal admittance of the first `ports` open holes.

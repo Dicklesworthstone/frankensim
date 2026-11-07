@@ -17,7 +17,7 @@ use fs_math::c64::C64;
 mod cancellable;
 pub use cancellable::{
     LuComplexError, lu_complex_blocked_with_cancel, lu_complex_blocked_workspace_bytes,
-    lu_complex_with_cancel,
+    lu_complex_with_cancel, solve_tridiagonal_complex,
 };
 
 mod svd;

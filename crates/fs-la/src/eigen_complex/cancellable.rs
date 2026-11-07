@@ -6,6 +6,9 @@ use super::{C64, LuComplex};
 mod fma;
 /// Blocked, thread-parallel elimination with the same operation graph.
 mod blocked;
+/// Tridiagonal solve with the same operation graph, skipping structural zeros only.
+mod banded;
+pub use banded::solve_tridiagonal_complex;
 
 /// A cancelled operation is distinct from a numerically singular factorization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,3 +248,5 @@ impl LuComplex {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod banded_tests;
