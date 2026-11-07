@@ -1213,6 +1213,41 @@ independent Cp/Cv balances, an analytic temperature-dependent reaction/bath
 trajectory, finite-body melting and both expansion works, exact replay,
 source/domain refusal and early/late cancellation.
 
+### Heated and cooled reactions in rigid material parcels
+
+`material::isochoric::MaterialIsochoricReactor` connects the prepared rigid
+chemical stages to the same source-bearing `ClosedGasParcel`. Adiabatic,
+held-bath and finite-body calls reuse original temperature-dependent species
+Cv and formation energy. Signed heat and composition evolve together; the
+material owner reconstructs their one final endpoint with
+`replace_model_with_heat`, without requiring a separately heated feed or an
+adiabatic product intermediate. All final transport and acoustic properties
+therefore use the accepted products, temperature and pressure.
+
+Mass and volume retain their original bits. Actual material `Delta U = Q`,
+initial/final chemical U, mass, density, temperature, pressure and generated
+fractions must satisfy the declared cross-owner tolerances. A finite body's
+original Cp/enthalpy chart, latent inventory and expansion work remain in its
+existing owner: `Delta Ugas + Delta Hbody` and
+`Delta Ugas + Delta Ubody + Wbody` are checked separately before publication.
+Reaction formation energy is included once. Gas pressure work is zero; body
+enthalpy is never relabelled as rigid-gas storage.
+
+Source mismatch, unsupported product transport, exhausted work and final
+cancellation leave the complete gas parcel and input body unchanged. Zero
+duration skips material re-inversion after admission and preserves both
+states exactly. The prepared chemistry and dense feed storage are reusable;
+material endpoint resolution still allocates. Neutral dilute-gas source and
+absolute energy-resolution restrictions above continue to apply.
+
+The three regressions in `material/tests/isochoric.rs` cover independent
+variable-Cv/variable-Cp reaction and heat trajectories with both implicit
+methods, heating and cooling, body expansion work, updated material response,
+unchanged inputs, repeatability, source/domain refusal and early/late
+cancellation. Pinned read-only Rust parsing and scoped whitespace checks
+passed; these new native regressions remain unexecuted because the shared
+environment lacks sibling checkouts and available compilation memory.
+
 ### Caller-owned end ports and local cell sources
 
 `Euler1d::step_with_ports(max, controls, ports, cancelled)` advances a

@@ -23,6 +23,7 @@ use fs_thermochem::{
 };
 
 mod isobaric;
+mod isochoric;
 
 #[cfg(feature = "experimental-euler")]
 mod transport;

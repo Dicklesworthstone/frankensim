@@ -1,13 +1,15 @@
 //! Finite-rate sealed reactors using the common source-bearing gas parcel.
 //!
-//! The L3 kinetics owner chooses the composition after an actual elapsed time.
-//! The existing material owner then reconstructs one state at the parcel's
-//! original mass, volume and total internal energy, or at prescribed pressure
-//! through [`isobaric`]. Transport and acoustics use those same products and
-//! sources. No additional reaction heat is applied.
+//! The L3 kinetics owner evolves composition and any declared thermal exchange
+//! over the actual elapsed time. The existing material owner reconstructs one
+//! endpoint at the original mass and fixed volume through [`isochoric`], or at
+//! prescribed pressure through [`isobaric`]. Transport and acoustics use those
+//! same products and sources. No additional reaction heat is applied.
 
 /// Constant-pressure chemistry and heat exchange on the common material parcel.
 pub mod isobaric;
+/// Fixed-volume chemistry and heat exchange on the common material parcel.
+pub mod isochoric;
 
 /// Conservative homogeneous real-gas normal-shock and piston compression.
 pub mod nonideal_shock;
@@ -101,6 +103,8 @@ pub enum MaterialKineticsError {
     Balance(MaterialKineticsBalance),
     /// Constant-pressure chemistry and the actual material endpoint disagree.
     IsobaricBalance(isobaric::MaterialIsobaricBalance),
+    /// Fixed-volume chemistry and the actual material endpoint disagree.
+    IsochoricBalance(isochoric::MaterialIsochoricBalance),
     /// Cancellation before the complete update was published.
     Cancelled,
 }
