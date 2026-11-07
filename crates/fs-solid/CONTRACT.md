@@ -10883,3 +10883,27 @@ inertial numerical losses remain distinct. Temperature is prescribed between
 intervals; this path reports its heat account but does not add caloric transport.
 All original small-geometry, source, clock and atomic refusal gates remain.
 Native compilation and test execution are still pending the prescribed runner.
+
+## Tabulated malleability in native structural consumers
+
+The original small-strain continuum and plane-stress owners accept
+`fs_material::plastic::tabulated::TabulatedJ2` through `SmallStrainLaw`.
+Layered membrane/bending sections retain the same native plane-stress histories
+and energetic hardening, including partly yielded thickness and springback.
+`FiberLaw::Tabulated` carries its exact free-sided axial restriction through
+existing section and beam/frame mechanics; checked responses and commits
+refuse unsupported accumulated plastic strain without changing accepted fibers.
+No structural consumer refits the curve or inserts missing material data.
+
+The original finite tetrahedron and in-plane sheet owners accept the explicit
+Kirchhoff table selected on `FiniteJ2`; their retained plastic metric, physical
+work gates, reference volumes and traction-free thickness remain unchanged.
+Existing locking, small-shell-rotation, finite-sheet geometry and material
+applicability limits continue to apply. Synthetic regressions in
+`tests/plastic_tabulated.rs` exercise native plane-stress loading/release,
+permanent lateral and thickness strain, partial section yielding and bending
+springback, force-based beam/frame release and atomic fiber refusal.
+`tests/hyper_plastic.rs` and `tests/finite_plastic_sheet.rs` add finite
+compression/release checks with solved free sides and thickness. These numerical
+checks do not establish metal-specific calibration or finite shell forming,
+contact geometry, necking or fracture limits.

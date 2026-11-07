@@ -33,7 +33,9 @@ use fs_material::creep::thermal::uniaxial::recovery::{
 use fs_material::creep::uniaxial::{UniaxialNorton, UniaxialNortonState};
 use fs_material::fiber::{ManderConcrete, ManderState, MenegottoPintoSteel, MpState, Uniaxial};
 use fs_material::plastic::chaboche::axial::{UniaxialChaboche, UniaxialChabocheState};
-use fs_material::plastic::reduction::{UniaxialJ2, UniaxialJ2State, UniaxialVoce};
+use fs_material::plastic::reduction::{
+    UniaxialJ2, UniaxialJ2State, UniaxialTabulated, UniaxialVoce,
+};
 
 /// Bounded runtime dispatch of exact native multi-backstress axial laws.
 pub mod chaboche;
@@ -66,6 +68,8 @@ pub enum FiberLaw {
     J2(UniaxialJ2),
     /// Native Voce isotropic saturation with retained linear Prager translation.
     Voce(UniaxialVoce),
+    /// Native bounded measured-curve hardening, with retained Prager translation.
+    Tabulated(UniaxialTabulated),
     /// Independent nonlinear backstress recovery with native Voce isotropic hardening.
     Chaboche(UniaxialChaboche),
     /// Two through eight independently evolving native recovery branches.
@@ -99,6 +103,8 @@ pub enum FiberState {
     J2(UniaxialJ2State),
     /// The same exact axial plastic subspace, with a saturating yield radius.
     Voce(UniaxialJ2State),
+    /// Signed axial plastic strain and accumulated strain on the supplied table.
+    Tabulated(UniaxialJ2State),
     /// Signed axial plastic history and independently retained backstress.
     Chaboche(UniaxialChabocheState),
     /// Ordered native histories, with the same branch count as the fiber law.
@@ -144,6 +150,9 @@ impl From<UniaxialThermalRecoveringNorton> for FiberLaw {
 impl From<UniaxialThermalRecoveringNortonJ2> for FiberLaw {
     fn from(law: UniaxialThermalRecoveringNortonJ2) -> Self { Self::ThermalRecoveringNortonJ2(law) }
 }
+impl From<UniaxialTabulated> for FiberLaw {
+    fn from(law: UniaxialTabulated) -> Self { Self::Tabulated(law) }
+}
 
 /// A section: fibers plus committed states.
 #[derive(Debug, Clone)]
@@ -182,6 +191,7 @@ impl Section {
                 FiberLaw::ThermalRecoveringNortonJ2(l) => FiberState::ThermalRecoveringNortonJ2(l.initial_state()),
                 FiberLaw::J2(l) => FiberState::J2(l.initial_state()),
                 FiberLaw::Voce(l) => FiberState::Voce(l.initial_state()),
+                FiberLaw::Tabulated(l) => FiberState::Tabulated(l.initial_state()),
                 FiberLaw::Chaboche(l) => FiberState::Chaboche(l.initial_state()),
                 FiberLaw::ChabocheBranches(l) => FiberState::ChabocheBranches(l.initial_state()),
                 FiberLaw::Steel(l) => FiberState::Steel(l.initial_state()),
@@ -300,6 +310,13 @@ impl Section {
                     }
                     (response.stress_pa, response.tangent_pa)
                 }
+                (FiberLaw::Tabulated(l), FiberState::Tabulated(s)) => match l.response(eps, s) {
+                    // The native checked reduction admits the full compatible
+                    // tensor strain and the table's accumulated-strain support.
+                    Ok(response) => (response.stress_pa, response.tangent_pa),
+                    Err(error) if checked => return Err(refused(&error.to_string())),
+                    Err(_) => (f64::NAN, f64::NAN),
+                },
                 (FiberLaw::Chaboche(l), FiberState::Chaboche(s)) => match l.response(eps, s) {
                     Ok(response) => (response.stress_pa, response.tangent_pa),
                     Err(error) if checked => {
@@ -393,6 +410,12 @@ impl Section {
                 }
                 (FiberLaw::J2(l), FiberState::J2(s)) => *s = l.update_state(eps, s),
                 (FiberLaw::Voce(l), FiberState::Voce(s)) => *s = l.update_state(eps, s),
+                (FiberLaw::Tabulated(l), FiberState::Tabulated(s)) => {
+                    *s = l.response(eps, s)
+                        .map_err(|error| SolidError::MaterialRefused {
+                            what: error.to_string(),
+                        })?.state;
+                }
                 (FiberLaw::Chaboche(l), FiberState::Chaboche(s)) => *s = l.update_state(eps, s),
                 (FiberLaw::ChabocheBranches(l), FiberState::ChabocheBranches(s)) => {
                     l.commit(eps, s)

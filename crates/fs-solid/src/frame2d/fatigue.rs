@@ -531,6 +531,7 @@ fn modulus(law: &FiberLaw) -> Option<f64> {
     Some(match law {
         FiberLaw::J2(law) => law.backbone().elastic.youngs,
         FiberLaw::Voce(law) => law.backbone().backbone().elastic.youngs,
+        FiberLaw::Tabulated(law) => law.backbone().backbone().elastic.youngs,
         FiberLaw::Chaboche(law) => chaboche_modulus(law),
         FiberLaw::ChabocheBranches(law) => match law {
             ChabocheFiberLaw::Two(l) => chaboche_modulus(l),
@@ -561,7 +562,9 @@ fn sample(
         ));
     }
     let stress = match (&fiber.law, state) {
-        (FiberLaw::J2(_), FiberState::J2(state)) | (FiberLaw::Voce(_), FiberState::Voce(state)) => {
+        (FiberLaw::J2(_), FiberState::J2(state))
+        | (FiberLaw::Voce(_), FiberState::Voce(state))
+        | (FiberLaw::Tabulated(_), FiberState::Tabulated(state)) => {
             e * (strain - state.plastic_strain())
         }
         (FiberLaw::Chaboche(_), FiberState::Chaboche(state)) => {
@@ -608,6 +611,7 @@ fn same_law(left: &FiberLaw, right: &FiberLaw) -> bool {
     match (left, right) {
         (FiberLaw::J2(a), FiberLaw::J2(b)) => a == b,
         (FiberLaw::Voce(a), FiberLaw::Voce(b)) => a == b,
+        (FiberLaw::Tabulated(a), FiberLaw::Tabulated(b)) => a == b,
         (FiberLaw::Chaboche(a), FiberLaw::Chaboche(b)) => a == b,
         (FiberLaw::ChabocheBranches(a), FiberLaw::ChabocheBranches(b)) => a == b,
         (FiberLaw::Steel(a), FiberLaw::Steel(b)) => {

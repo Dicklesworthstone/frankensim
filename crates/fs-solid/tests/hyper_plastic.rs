@@ -191,6 +191,58 @@ fn check_uniaxial_with_hardening(
 }
 
 #[test]
+fn tabulated_compression_solves_free_sides_and_retains_permanent_set_after_release() {
+    use fs_material::plastic::tabulated::{HardeningPoint, TabulatedHardening};
+    with_cx(|cx| {
+        let (nodes, tets) = cube();
+        let mut parameters = *law().parameters();
+        parameters.hardening_modulus_pa = 0.0;
+        let mut limits = *law().limits();
+        limits.maximum_accumulated_plastic_strain = 0.5;
+        let table = TabulatedHardening::new(vec![
+            HardeningPoint { plastic_strain: 0.0, yield_stress_pa: YIELD },
+            HardeningPoint { plastic_strain: 0.04, yield_stress_pa: 5e6 },
+            HardeningPoint { plastic_strain: 0.1, yield_stress_pa: 6e6 },
+            HardeningPoint { plastic_strain: 0.5, yield_stress_pa: 6e6 },
+        ]).unwrap();
+        let material = FiniteJ2::new(parameters, limits).unwrap()
+            .with_tabulated_hardening(table).unwrap();
+        let mut solid = FinitePlasticTetSolid::try_new(
+            &nodes, &tets, FinitePlasticLawField::Uniform(&material),
+            TetAssemblyBudget::standard(), cx,
+        ).unwrap();
+        let mut physical_heat = 0.0;
+        for index in 1..=6 {
+            let a = -0.03 * f64::from(index);
+            let step = solid.advance(
+                &rollers(&nodes, Some(a.exp())), &[], [0.0;3],
+                HyperTetSettings::default(), controls(), cx,
+            ).unwrap();
+            assert!(step.equilibrium.steps[0].linear_iterations > 0);
+            physical_heat += step.energy.plastic_dissipation_j;
+            solid = step.solid;
+        }
+        // Final state lies on the measured plateau: exact free-sided Hencky
+        // reduction gives |log(lambda)| = alpha + Y_plateau/E.
+        let alpha = 0.18 - 6e6 / E;
+        let hardening_storage = 0.5 * 3e6 * 0.04
+            + 0.5 * (3e6 + 4e6) * 0.06 + 4e6 * (alpha - 0.1);
+        check_uniaxial_with_hardening(&solid, -0.18, -alpha, alpha, hardening_storage);
+        close(physical_heat, YIELD * alpha, 0.005);
+        let released = solid.advance(
+            &rollers(&nodes, None), &[], [0.0;3],
+            HyperTetSettings::default(), controls(), cx,
+        ).unwrap();
+        check_uniaxial_with_hardening(&released.solid, -alpha, -alpha, alpha, hardening_storage);
+        close(released.energy.plastic_dissipation_j, 0.0, 0.005);
+        for (node, x) in nodes.iter().enumerate() {
+            close(released.solid.displacement_m()[node][0], ((-alpha).exp()-1.0)*x[0], 3e-8);
+            close(released.solid.displacement_m()[node][1], ((0.5*alpha).exp()-1.0)*x[1], 3e-8);
+        }
+    });
+}
+
+#[test]
 fn voce_coupon_solves_lateral_contraction_unloading_and_reverse_flow_with_stored_saturation() {
     with_cx(|cx| {
         let (nodes, tets) = cube();

@@ -126,6 +126,51 @@ fn tension_and_compression_solve_free_lateral_motion_and_permanent_shape() {
 }
 
 #[test]
+fn tabulated_forming_retains_solved_thickness_and_springback_on_triangles_and_quads() {
+    use fs_material::plastic::tabulated::{HardeningPoint, TabulatedHardening};
+    with_cx(|cx, _| {
+        let original = law(YIELD);
+        let mut parameters = *original.parameters();
+        parameters.hardening_modulus_pa = 0.0;
+        let mut limits = *original.limits();
+        limits.maximum_accumulated_plastic_strain = 0.5;
+        let curve = TabulatedHardening::new(vec![
+            HardeningPoint { plastic_strain: 0.0, yield_stress_pa: YIELD },
+            HardeningPoint { plastic_strain: 0.04, yield_stress_pa: 5e6 },
+            HardeningPoint { plastic_strain: 0.5, yield_stress_pa: 5e6 },
+        ]).unwrap();
+        let material = FiniteJ2::new(parameters, limits).unwrap()
+            .with_tabulated_hardening(curve).unwrap();
+        for mesh in [Mesh2::triangles(1.0,1.0,1,1), Mesh2::quads(1.0,1.0,1,1)] {
+            let thickness = vec![THICKNESS; mesh.elems.len()];
+            let mut sheet = FinitePlasticSheet::try_new(&mesh,
+                FinitePlasticLawField::Uniform(&material), &thickness,
+                PlaneStressSettings::default(), budget(), cx).unwrap();
+            for step in 1..=4 {
+                sheet = sheet.advance(&rollers(&mesh,Some(1.0-0.05*f64::from(step))), &[],
+                    IncrementSettings::default(),controls(),cx).unwrap().sheet;
+            }
+            let alpha = -0.8_f64.ln()-5e6/E;
+            let transverse = (NU*5e6/E+alpha/2.0).exp();
+            for state in sheet.quadrature_states() { close(state.alpha,alpha,3e-8); }
+            for value in sheet.quadrature_thickness_m() { close(value,THICKNESS*transverse,3e-10); }
+            let released = sheet.advance(&rollers(&mesh,None), &[],
+                IncrementSettings::default(),controls(),cx).unwrap();
+            for (node,&[x,y]) in mesh.nodes.iter().enumerate() {
+                close(released.sheet.displacement_m()[node][0],((-alpha).exp()-1.0)*x,3e-8);
+                close(released.sheet.displacement_m()[node][1],((alpha/2.0).exp()-1.0)*y,3e-8);
+            }
+            for value in released.sheet.quadrature_thickness_m() {
+                close(value,THICKNESS*(alpha/2.0).exp(),3e-10);
+            }
+            close(released.energy.plastic_dissipation_j,0.0,1e-6);
+            let stored = 0.5*(5e6-YIELD)*0.04+(5e6-YIELD)*(alpha-0.04);
+            close(released.sheet.stored_energy_j(),THICKNESS*stored,2e-4);
+        }
+    });
+}
+
+#[test]
 fn native_sheet_tangent_matches_force_differences_at_frozen_formed_history() {
     with_cx(|cx, _| {
         let mesh = Mesh2::quads(1.0, 1.0, 1, 1);

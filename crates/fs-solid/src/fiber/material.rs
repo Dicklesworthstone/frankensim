@@ -27,7 +27,7 @@ use fs_material::plastic::chaboche::source::{
     BackstressProperties, ResolvedChabocheBranches, ResolvedChabocheJ2,
     chaboche_branch_requirements, chaboche_requirements,
 };
-use fs_material::plastic::reduction::{UniaxialJ2, UniaxialVoce};
+use fs_material::plastic::reduction::{UniaxialJ2, UniaxialTabulated, UniaxialVoce};
 use fs_material::plastic::source::{
     HardeningPropertyBasis, J2SourceError, ResolvedJ2Plasticity, j2_requirements,
 };
@@ -158,6 +158,7 @@ impl FiberMaterial {
             FiberLaw::ThermalRecoveringNortonJ2(law) => Self::thermal_recovering_norton_j2(law, density_kg_m3),
             FiberLaw::J2(law) => Self::j2(law, density_kg_m3),
             FiberLaw::Voce(law) => Self::voce(law, density_kg_m3),
+            FiberLaw::Tabulated(law) => Self::tabulated(law, density_kg_m3),
             FiberLaw::Chaboche(law) => Self::chaboche(law, density_kg_m3),
             FiberLaw::ChabocheBranches(law) => {
                 require(
@@ -320,6 +321,21 @@ impl FiberMaterial {
         )?;
         Ok(Self {
             law: FiberLaw::J2(law),
+            density_kg_m3,
+            source: None,
+            chaboche_branch_properties: None,
+        })
+    }
+
+    /// Authored tabulated work hardening and explicit reference density. The
+    /// bounded curve remains in its native law; no source authority is inferred.
+    pub fn tabulated(law: UniaxialTabulated, density_kg_m3: f64) -> Result<Self> {
+        require(
+            positive(density_kg_m3),
+            "tabulated fiber density must be finite and positive",
+        )?;
+        Ok(Self {
+            law: FiberLaw::Tabulated(law),
             density_kg_m3,
             source: None,
             chaboche_branch_properties: None,
@@ -784,6 +800,7 @@ impl RcSection {
                     FiberLaw::Steel(_)
                         | FiberLaw::J2(_)
                         | FiberLaw::Voce(_)
+                        | FiberLaw::Tabulated(_)
                         | FiberLaw::Chaboche(_)
                         | FiberLaw::ChabocheBranches(_)
                 ),
