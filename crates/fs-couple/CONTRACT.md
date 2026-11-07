@@ -1,3 +1,29 @@
+## Complete heat assemblies on current and voltage motors
+
+Current- and finite-inductance voltage-driven material motors accept
+`MotorHeatNetwork<A: HeatAssembly>`, deriving their original material cells
+from the exact prepared heat owner. Complete thermal-contact, integrated-layer,
+closed-radiation and composed reservoir/finite-link source evaluations
+participate in the same native motor/enthalpy endpoint residual. Winding and
+bridge heat enter their authored cells exactly once, including an explicitly
+homogenized common receiver.
+
+Full associated source samples and typed refusals survive. Graph electrical
+ports and prepared contact/emissivity laws with unowned field dependence
+refuse, and the existing corrected combined-energy gate admits the closed-radiation numerical net.
+The original cached rotor/current owners, material winding claims, source
+limits and joint publication retain their existing responsibilities. Original
+geometry, fixed mechanical/L/Kt coefficients, source domains, midpoint-current
+loss quadrature and first-order thermal limitations remain.
+
+Focused regression definitions cover independent contact/current/voltage
+balances, original-entry recovery, and typed late failure/cancellation rollback.
+A cross-crate regression uses the actual finite-coolant convection assembly:
+changing liquid viscosity reaches winding resistance, source-limited current,
+rotor motion and both finite caloric bodies through the same residual.
+Native execution remains unverified because the execution workspace became
+unavailable before the targeted tests could run.
+
 ## Translating supports with omitted-mode contact compliance
 
 Fixed-map normal support translation composes with the original omitted-mode

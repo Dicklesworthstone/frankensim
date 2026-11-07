@@ -23,9 +23,12 @@
 
 /// Finite winding-current and magnetic storage on the same material/enthalpy residual.
 pub mod voltage;
+/// Complete source-owned contact, radiation, layer and coolant heat transfer.
+pub mod heat;
 
 use super::{
-    CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
+    CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients,
+    DrivenCoefficients,
     DriverAccount, ThermalDriver, admit_driver_unknowns, cell_driver_candidate, finite,
     magnetic::same_material,
     material::{
@@ -107,8 +110,9 @@ impl MaterialRotorCurrentDrive<'_> {
 }
 
 #[derive(Clone, Debug)]
-pub struct MotorThermalSample {
-    pub network: MaterialNetworkSample,
+pub struct MotorThermalSample<S = MaterialNetworkSample> {
+    /// Complete original transport results at the accepted thermal endpoint.
+    pub network: S,
     pub winding: Arc<ResolvedConductor>,
     pub winding_cell: CellId,
     pub bridge_cell: CellId,
@@ -126,19 +130,19 @@ pub struct MotorThermalStep {
     pub supplied_to_kinetic_and_heat_j: f64,
 }
 
-pub struct MotorEnthalpyCandidate<'t, 'r> {
+pub struct MotorEnthalpyCandidate<'t, 'r, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'t>,
     motor: MaterialRotorCurrentDrive<'r>,
-    report: CircuitEnthalpyReport<MotorThermalSample, MotorThermalStep>,
+    report: CircuitEnthalpyReport<MotorThermalSample<S>, MotorThermalStep>,
 }
-impl<'t, 'r> MotorEnthalpyCandidate<'t, 'r> {
+impl<'t, 'r, S> MotorEnthalpyCandidate<'t, 'r, S> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
     pub fn motor(&self) -> &MaterialRotorCurrentDrive<'r> {
         &self.motor
     }
-    pub fn report(&self) -> &CircuitEnthalpyReport<MotorThermalSample, MotorThermalStep> {
+    pub fn report(&self) -> &CircuitEnthalpyReport<MotorThermalSample<S>, MotorThermalStep> {
         &self.report
     }
     /// Publish motion and thermal history together. Winding and bridge heat in
@@ -148,7 +152,7 @@ impl<'t, 'r> MotorEnthalpyCandidate<'t, 'r> {
     ) -> (
         DepositionSimulation<'t>,
         MaterialRotorCurrentDrive<'r>,
-        CircuitEnthalpyReport<MotorThermalSample, MotorThermalStep>,
+        CircuitEnthalpyReport<MotorThermalSample<S>, MotorThermalStep>,
     ) {
         (self.thermal, self.motor, self.report)
     }
@@ -170,6 +174,9 @@ impl core::fmt::Display for MotorThermalError {
 }
 impl std::error::Error for MotorThermalError {}
 type Error = CircuitEnthalpyError<MotorThermalError>;
+fn motor_error<E: From<MotorThermalError>>(error: Error) -> CircuitEnthalpyError<E> {
+    error.map_source(E::from)
+}
 fn invalid(reason: &'static str) -> Error {
     CircuitEnthalpyError::Source(MotorThermalError::Invalid(reason))
 }
@@ -376,11 +383,33 @@ impl MotorThermalNetwork<'_> {
         thermal: &DepositionSimulation<'_>,
         native: &'r RotorMidpoint<'r>,
         state: RotorTransientState,
-        mut parameters: RotorCurrentDrive,
+        parameters: RotorCurrentDrive,
         cancelled: impl FnMut() -> bool,
     ) -> Result<MaterialRotorCurrentDrive<'r>, Error> {
         let cancel = RefCell::new(cancelled);
-        check(&cancel)?;
+        self.bind_resolved(thermal, native, state, parameters, || {
+            let network = self.network();
+            let prepared = network
+                .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
+                .map_err(material)?;
+            let sample = prepared
+                .resolve(thermal, || (*cancel.borrow_mut())())
+                .map_err(material)?;
+            self.resolve_winding(thermal, &sample.source, None, &cancel)
+        }, &cancel)
+    }
+
+    // Both transport frontends bind the same native motion and material winding.
+    fn bind_resolved<'r, E: From<MotorThermalError>>(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        native: &'r RotorMidpoint<'r>,
+        state: RotorTransientState,
+        mut parameters: RotorCurrentDrive,
+        resolve: impl FnOnce() -> Result<ResolvedConductor, CircuitEnthalpyError<E>>,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<MaterialRotorCurrentDrive<'r>, CircuitEnthalpyError<E>> {
+        check(cancel).map_err(motor_error::<E>)?;
         if state.velocity.is_empty()
             || state.velocity.len() > MAX_ROTOR_DOFS
             || state.displacement.len() != state.velocity.len()
@@ -391,20 +420,13 @@ impl MotorThermalNetwork<'_> {
                 .chain(&state.velocity)
                 .any(|x| !x.is_finite())
         {
-            return Err(invalid(
+            return Err(motor_error(invalid(
                 "motor must retain finite original rotor coordinates and a valid shaft index",
-            ));
+            )));
         }
-        let network = self.network();
-        let prepared = network
-            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        let sample = prepared
-            .resolve(thermal, || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        let winding = Arc::new(self.resolve_winding(thermal, &sample.source, None, &cancel)?);
+        let winding = Arc::new(resolve()?);
         parameters.winding_resistance_ohm = winding.resistance_ohm();
-        check(&cancel)?;
+        check(cancel).map_err(motor_error::<E>)?;
         Ok(MaterialRotorCurrentDrive {
             native,
             time_s: thermal.time_s(),
@@ -442,6 +464,43 @@ impl MotorThermalNetwork<'_> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
+        let network = self.network();
+        let prepared = network
+            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
+            .map_err(material)?;
+        self.step_resolved_candidate(
+            thermal, target_s, motor, external_force, commanded_current_a, power,
+            controls, initial_energy_increments_j,
+            |state, original| {
+                let coefficients = prepared
+                    .resolve(state, || (*cancel.borrow_mut())())
+                    .map_err(material)?;
+                let winding = self.resolve_winding(state, &coefficients.source, original, &cancel)?;
+                Ok((coefficients, winding))
+            },
+            &cancel,
+        )
+    }
+
+    // A source callback changes only transport composition. Every trial still
+    // restarts this original native motor and uses one physical heat deposition.
+    #[allow(clippy::too_many_arguments)]
+    fn step_resolved_candidate<'t, 'r, S, E: From<MotorThermalError>>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        motor: &MaterialRotorCurrentDrive<'r>,
+        external_force: &[f64],
+        commanded_current_a: f64,
+        power: RotorDrivePowerControl,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        resolve: impl Fn(&DepositionSimulation<'t>, Option<&ResolvedConductor>)
+            -> Result<(CircuitThermalCoefficients<S>, ResolvedConductor), CircuitEnthalpyError<E>>,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<MotorEnthalpyCandidate<'t, 'r, S>, CircuitEnthalpyError<E>> {
+        check(cancel).map_err(motor_error::<E>)?;
+        admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
         let dt = finite(target_s - thermal.time_s())?;
         let h = motor.native.duration_seconds();
         let represented_end = finite(thermal.time_s() + h)?;
@@ -453,22 +512,15 @@ impl MotorThermalNetwork<'_> {
             || motor.winding_cell != self.winding.cell
             || motor.bridge_cell != self.bridge_cell
         {
-            return Err(invalid(
+            return Err(motor_error(invalid(
                 "motor and heat require unchanged receivers and the same positive native interval",
-            ));
+            )));
         }
-        let network = self.network();
-        let prepared = network
-            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        let accepted = prepared
-            .resolve(thermal, || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        let original = self.resolve_winding(thermal, &accepted.source, None, &cancel)?;
+        let (_, original) = resolve(thermal, None)?;
         if !same_conductor(&original, &motor.winding) {
-            return Err(invalid(
+            return Err(motor_error(invalid(
                 "winding source, geometry and resistance must match the accepted thermal state",
-            ));
+            )));
         }
         let (thermal, motor, report) = cell_driver_candidate(
             thermal,
@@ -476,16 +528,9 @@ impl MotorThermalNetwork<'_> {
             controls,
             initial_energy_increments_j,
             |trial, _remaining| {
-                check(&cancel)?;
-                let coefficients = prepared
-                    .resolve(trial, || (*cancel.borrow_mut())())
-                    .map_err(material)?;
-                let winding = Arc::new(self.resolve_winding(
-                    trial,
-                    &coefficients.source,
-                    Some(&motor.winding),
-                    &cancel,
-                )?);
+                check(cancel).map_err(motor_error::<E>)?;
+                let (coefficients, winding) = resolve(trial, Some(&motor.winding))?;
+                let winding = Arc::new(winding);
                 let parameters = RotorCurrentDrive {
                     winding_resistance_ohm: winding.resistance_ohm(),
                     ..motor.parameters
@@ -500,9 +545,10 @@ impl MotorThermalNetwork<'_> {
                         power,
                         || (*cancel.borrow_mut())(),
                     )
-                    .map_err(drive_error)?;
+                    .map_err(drive_error).map_err(motor_error::<E>)?;
                 let (step, heat_j, supplied_j) =
-                    physical_account(drive, controls.total_energy_tolerance_j)?;
+                    physical_account(drive, controls.total_energy_tolerance_j)
+                        .map_err(motor_error::<E>)?;
                 let next = MaterialRotorCurrentDrive {
                     native: motor.native,
                     time_s: target_s,
@@ -512,7 +558,7 @@ impl MotorThermalNetwork<'_> {
                     winding_cell: motor.winding_cell,
                     bridge_cell: motor.bridge_cell,
                 };
-                check(&cancel)?;
+                check(cancel).map_err(motor_error::<E>)?;
                 Ok(DrivenCoefficients {
                     circuit: MotorDriver {
                         motor: next,
@@ -531,41 +577,47 @@ impl MotorThermalNetwork<'_> {
                     circuit_trials: 1,
                 })
             },
-            |candidate, duration, checkpoint| {
-                let mut heat_by_cell: BTreeMap<CellId, Dd> = BTreeMap::new();
-                for (cell, heat) in [
-                    (
-                        candidate.motor.winding_cell,
-                        candidate.step.drive.winding_heat_j,
-                    ),
-                    (
-                        candidate.motor.bridge_cell,
-                        candidate.step.drive.bridge_heat_j,
-                    ),
-                ] {
-                    checkpoint()?;
-                    let total = heat_by_cell.entry(cell).or_insert(Dd::ZERO);
-                    *total = *total + Dd::from_f64(heat);
-                }
-                let mut powers = BTreeMap::new();
-                for (cell, heat) in heat_by_cell {
-                    checkpoint()?;
-                    let heat = scalar(heat)?;
-                    let power = finite(heat / duration)?;
-                    if heat > 0.0 && power == 0.0 {
-                        return Err(invalid("motor heat is unrepresentable as a thermal rate"));
-                    }
-                    powers.insert(cell, power);
-                }
-                Ok(powers)
-            },
+            |candidate, duration, checkpoint| receiver_powers(
+                [
+                    (candidate.motor.winding_cell, candidate.step.drive.winding_heat_j),
+                    (candidate.motor.bridge_cell, candidate.step.drive.bridge_heat_j),
+                ],
+                duration, checkpoint,
+            ),
             || (*cancel.borrow_mut())(),
         )?;
-        check(&cancel)?;
+        check(cancel).map_err(motor_error::<E>)?;
         Ok(MotorEnthalpyCandidate {
             thermal,
             motor,
             report,
         })
     }
+}
+
+
+// The two drive approximations share exactly-once receiver aggregation, including
+// an explicitly homogenized winding/bridge cell. No residual supplies this heat.
+fn receiver_powers<E: From<MotorThermalError>>(
+    receivers: [(CellId, f64); 2],
+    duration: f64,
+    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<BTreeMap<CellId, f64>, CircuitEnthalpyError<E>> {
+    let mut heat_by_cell: BTreeMap<CellId, Dd> = BTreeMap::new();
+    for (cell, heat) in receivers {
+        checkpoint()?;
+        let total = heat_by_cell.entry(cell).or_insert(Dd::ZERO);
+        *total = *total + Dd::from_f64(heat);
+    }
+    let mut powers = BTreeMap::new();
+    for (cell, heat) in heat_by_cell {
+        checkpoint()?;
+        let heat = scalar(heat).map_err(motor_error::<E>)?;
+        let power = finite(heat / duration)?;
+        if heat > 0.0 && power == 0.0 {
+            return Err(motor_error(invalid("motor heat is unrepresentable as a thermal rate")));
+        }
+        powers.insert(cell, power);
+    }
+    Ok(powers)
 }

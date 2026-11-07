@@ -23,6 +23,8 @@ mod spatial_conduction;
 mod magnetostrictive;
 #[path = "finite_links/frame.rs"]
 mod frame;
+#[path = "finite_links/motor.rs"]
+mod motor;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::links::{
     SourceConvectiveLink, evaluate_source_link_convection,
 };

@@ -67,19 +67,19 @@ pub struct RotorVoltageThermalStep {
     pub supplied_to_stored_and_heat_j: f64,
 }
 
-pub struct RotorVoltageEnthalpyCandidate<'t, 'step, 'model> {
+pub struct RotorVoltageEnthalpyCandidate<'t, 'step, 'model, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'t>,
     motor: MaterialRotorVoltageDrive<'step, 'model>,
-    report: CircuitEnthalpyReport<MotorThermalSample, RotorVoltageThermalStep>,
+    report: CircuitEnthalpyReport<MotorThermalSample<S>, RotorVoltageThermalStep>,
 }
-impl<'t, 'step, 'model> RotorVoltageEnthalpyCandidate<'t, 'step, 'model> {
+impl<'t, 'step, 'model, S> RotorVoltageEnthalpyCandidate<'t, 'step, 'model, S> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
     pub fn motor(&self) -> &MaterialRotorVoltageDrive<'step, 'model> {
         &self.motor
     }
-    pub fn report(&self) -> &CircuitEnthalpyReport<MotorThermalSample, RotorVoltageThermalStep> {
+    pub fn report(&self) -> &CircuitEnthalpyReport<MotorThermalSample<S>, RotorVoltageThermalStep> {
         &self.report
     }
     /// Publish current, rotor and heat histories together. Both reported loss
@@ -89,7 +89,7 @@ impl<'t, 'step, 'model> RotorVoltageEnthalpyCandidate<'t, 'step, 'model> {
     ) -> (
         DepositionSimulation<'t>,
         MaterialRotorVoltageDrive<'step, 'model>,
-        CircuitEnthalpyReport<MotorThermalSample, RotorVoltageThermalStep>,
+        CircuitEnthalpyReport<MotorThermalSample<S>, RotorVoltageThermalStep>,
     ) {
         (self.thermal, self.motor, self.report)
     }
@@ -196,7 +196,27 @@ impl MotorThermalNetwork<'_> {
         cancelled: impl FnMut() -> bool,
     ) -> Result<MaterialRotorVoltageDrive<'step, 'model>, Error> {
         let cancel = RefCell::new(cancelled);
-        check(&cancel)?;
+        self.bind_voltage_resolved(thermal, native, state, || {
+            let network = self.network();
+            let prepared = network
+                .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
+                .map_err(material)?;
+            let sample = prepared
+                .resolve(thermal, || (*cancel.borrow_mut())())
+                .map_err(material)?;
+            self.resolve_winding(thermal, &sample.source, None, &cancel)
+        }, &cancel)
+    }
+
+    pub(super) fn bind_voltage_resolved<'step, 'model, E: From<MotorThermalError>>(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        native: &RotorVoltageMotor<'step, 'model>,
+        state: RotorWindingState,
+        resolve: impl FnOnce() -> Result<ResolvedConductor, CircuitEnthalpyError<E>>,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<MaterialRotorVoltageDrive<'step, 'model>, CircuitEnthalpyError<E>> {
+        check(cancel).map_err(motor_error::<E>)?;
         let parameters = native.motor();
         if !state.current_a.is_finite()
             || state.rotor.velocity.is_empty()
@@ -210,27 +230,20 @@ impl MotorThermalNetwork<'_> {
                 .chain(&state.rotor.velocity)
                 .any(|x| !x.is_finite())
         {
-            return Err(invalid(
+            return Err(motor_error(invalid(
                 "inductive motor needs finite continuing current and original rotor coordinates",
-            ));
+            )));
         }
         scalar(
             Dd::from_f64(parameters.inductance_h)
                 * Dd::from_f64(0.5 * state.current_a)
                 * Dd::from_f64(state.current_a),
-        )?;
-        let network = self.network();
-        let prepared = network
-            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        let sample = prepared
-            .resolve(thermal, || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        let winding = Arc::new(self.resolve_winding(thermal, &sample.source, None, &cancel)?);
+        ).map_err(motor_error::<E>)?;
+        let winding = Arc::new(resolve()?);
         let native = native
             .with_winding_resistance(winding.resistance_ohm(), || (*cancel.borrow_mut())())
-            .map_err(voltage_error)?;
-        check(&cancel)?;
+            .map_err(voltage_error).map_err(motor_error::<E>)?;
+        check(cancel).map_err(motor_error::<E>)?;
         Ok(MaterialRotorVoltageDrive {
             native,
             time_s: thermal.time_s(),
@@ -263,6 +276,41 @@ impl MotorThermalNetwork<'_> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
+        let network = self.network();
+        let prepared = network
+            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
+            .map_err(material)?;
+        self.step_voltage_resolved_candidate(
+            thermal, target_s, motor, external_force, commanded_voltage_v, power,
+            controls, initial_energy_increments_j,
+            |state, original| {
+                let coefficients = prepared
+                    .resolve(state, || (*cancel.borrow_mut())())
+                    .map_err(material)?;
+                let winding = self.resolve_winding(state, &coefficients.source, original, &cancel)?;
+                Ok((coefficients, winding))
+            },
+            &cancel,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn step_voltage_resolved_candidate<'t, 'step, 'model, S, E: From<MotorThermalError>>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        motor: &MaterialRotorVoltageDrive<'step, 'model>,
+        external_force: &[f64],
+        commanded_voltage_v: f64,
+        power: RotorVoltageControl,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        resolve: impl Fn(&DepositionSimulation<'t>, Option<&ResolvedConductor>)
+            -> Result<(CircuitThermalCoefficients<S>, ResolvedConductor), CircuitEnthalpyError<E>>,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<RotorVoltageEnthalpyCandidate<'t, 'step, 'model, S>, CircuitEnthalpyError<E>> {
+        check(cancel).map_err(motor_error::<E>)?;
+        admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
         let dt = finite(target_s - thermal.time_s())?;
         let h = motor.native.duration_s();
         let represented_end = finite(thermal.time_s() + h)?;
@@ -274,22 +322,15 @@ impl MotorThermalNetwork<'_> {
             || motor.winding_cell != self.winding.cell
             || motor.bridge_cell != self.bridge_cell
         {
-            return Err(invalid(
+            return Err(motor_error(invalid(
                 "inductive motor and heat require unchanged receivers and the same native interval",
-            ));
+            )));
         }
-        let network = self.network();
-        let prepared = network
-            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        let accepted = prepared
-            .resolve(thermal, || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        let original = self.resolve_winding(thermal, &accepted.source, None, &cancel)?;
+        let (_, original) = resolve(thermal, None)?;
         if !same_conductor(&original, &motor.winding) {
-            return Err(invalid(
+            return Err(motor_error(invalid(
                 "inductive winding source and resistance must match accepted enthalpy",
-            ));
+            )));
         }
         let (thermal, motor, report) = cell_driver_candidate(
             thermal,
@@ -297,20 +338,13 @@ impl MotorThermalNetwork<'_> {
             controls,
             initial_energy_increments_j,
             |trial, _remaining| {
-                check(&cancel)?;
-                let coefficients = prepared
-                    .resolve(trial, || (*cancel.borrow_mut())())
-                    .map_err(material)?;
-                let winding = Arc::new(self.resolve_winding(
-                    trial,
-                    &coefficients.source,
-                    Some(&motor.winding),
-                    &cancel,
-                )?);
+                check(cancel).map_err(motor_error::<E>)?;
+                let (coefficients, winding) = resolve(trial, Some(&motor.winding))?;
+                let winding = Arc::new(winding);
                 let native = motor
                     .native
                     .with_winding_resistance(winding.resistance_ohm(), || (*cancel.borrow_mut())())
-                    .map_err(voltage_error)?;
+                    .map_err(voltage_error).map_err(motor_error::<E>)?;
                 let drive = native
                     .step(
                         &motor.state,
@@ -319,14 +353,15 @@ impl MotorThermalNetwork<'_> {
                         power,
                         || (*cancel.borrow_mut())(),
                     )
-                    .map_err(voltage_error)?;
+                    .map_err(voltage_error).map_err(motor_error::<E>)?;
                 let (step, heat_j, stored_change_j, supplied_j) =
-                    physical_account(drive, controls.total_energy_tolerance_j)?;
+                    physical_account(drive, controls.total_energy_tolerance_j)
+                        .map_err(motor_error::<E>)?;
                 let state = RotorWindingState {
                     rotor: step.drive.motion.state_after.clone(),
                     current_a: step.drive.winding_current_after_a,
                 };
-                check(&cancel)?;
+                check(cancel).map_err(motor_error::<E>)?;
                 Ok(DrivenCoefficients {
                     circuit: VoltageDriver {
                         motor: MaterialRotorVoltageDrive {
@@ -353,39 +388,16 @@ impl MotorThermalNetwork<'_> {
                     circuit_trials: 1,
                 })
             },
-            |candidate, duration, checkpoint| {
-                let mut heat_by_cell: BTreeMap<CellId, Dd> = BTreeMap::new();
-                for (cell, heat) in [
-                    (
-                        candidate.motor.winding_cell,
-                        candidate.step.drive.winding_heat_j,
-                    ),
-                    (
-                        candidate.motor.bridge_cell,
-                        candidate.step.drive.bridge_heat_j,
-                    ),
-                ] {
-                    checkpoint()?;
-                    let total = heat_by_cell.entry(cell).or_insert(Dd::ZERO);
-                    *total = *total + Dd::from_f64(heat);
-                }
-                let mut powers = BTreeMap::new();
-                for (cell, heat) in heat_by_cell {
-                    checkpoint()?;
-                    let heat = scalar(heat)?;
-                    let power = finite(heat / duration)?;
-                    if heat > 0.0 && power == 0.0 {
-                        return Err(invalid(
-                            "inductive motor heat is unrepresentable as a thermal rate",
-                        ));
-                    }
-                    powers.insert(cell, power);
-                }
-                Ok(powers)
-            },
+            |candidate, duration, checkpoint| receiver_powers(
+                [
+                    (candidate.motor.winding_cell, candidate.step.drive.winding_heat_j),
+                    (candidate.motor.bridge_cell, candidate.step.drive.bridge_heat_j),
+                ],
+                duration, checkpoint,
+            ),
             || (*cancel.borrow_mut())(),
         )?;
-        check(&cancel)?;
+        check(cancel).map_err(motor_error::<E>)?;
         Ok(RotorVoltageEnthalpyCandidate {
             thermal,
             motor,

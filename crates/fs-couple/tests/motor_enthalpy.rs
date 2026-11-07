@@ -3,6 +3,8 @@
 mod common;
 #[path = "motor_enthalpy/voltage.rs"]
 mod voltage;
+#[path = "motor_enthalpy/heat.rs"]
+mod heat;
 
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitEnthalpySolve,
