@@ -41,6 +41,9 @@ use fs_math::det;
 mod storage;
 use storage::SynchronousStorage;
 
+/// Finite DC bus, physical leg modulation and averaged channel conduction.
+pub mod inverter;
+
 /// Explicit frozen machine data, in SI units, with no inferred source card.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SynchronousMotorParameters {

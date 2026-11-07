@@ -1,5 +1,42 @@
 # fs-phs — Contract
 
+## Finite-bus averaged synchronous inverter
+
+`circuit::synchronous::inverter::AveragedSynchronousInverter` composes one finite
+DC capacitor with the original synchronous machine. Its six states retain DC
+charge, two stator fluxes, relative angle and absolute rotor/stator momenta. The
+source current and two external shaft torques remain physical power ports. One
+capacitor has separate source/bridge current ports; its storage is counted once.
+
+Each prepared step accepts three actual high-side fractions in [0,1], with
+complementary low-side fractions. The native power-invariant Clarke vector
+supplies winding voltage and draws its reciprocal signed DC current. Current
+is evaluated directly, including at zero bus voltage; regeneration charges the
+finite bus. Frozen high/low on-resistances contribute their actual duty-weighted
+phase conduction to the original winding-side resistance. Six channel heats,
+winding copper and bearing heat describe the same native dissipation. Reported
+phase voltages include each voltage drop and the resulting floating-neutral
+shift; machine terminal work is distinct from bridge input work.
+
+Modulation refreshes the original J/R and matching resistance witness in fixed
+storage. A positive source-derived 2x2 electrical factor, checked against the
+unchanged R by the existing componentwise native gate, retains zero/rank-one
+losses and weak signed off-diagonal coupling without subtracting large phase
+factor products. Native Newton traversal and Jacobian factors refresh every
+step; the original component discrete gradient and Hamiltonian remain unchanged.
+Warm calls allocate nothing and rebuild no interconnection. Any solve/report
+refusal or final cancellation restores previous J/R/witness and duty metadata,
+and leaves both caller output buffers unchanged.
+
+This is forced-synchronous averaged conduction with nonnegative initial and
+accepted DC charge, without clipping or a between-endpoint positivity theorem.
+Unequal high/low resistances can change actual loss under a common duty shift;
+the ideal voltage/current map remains common-mode invariant. No dead time,
+diode/recovery/switching/gate heat, ripple RMS correction or device safe-area
+claim is inferred. Focused `tests/circuit_synchronous_inverter.rs` checks physical
+bridge states, power/neutral/current signs, successive modulation and witness
+refresh, refusals, and an independent changing-duty d/q/finite-bus ODE refinement.
+
 ## Synchronous PM and reluctance electromechanics
 
 `circuit::synchronous::SynchronousMotor` retains two stator-frame flux linkages,
