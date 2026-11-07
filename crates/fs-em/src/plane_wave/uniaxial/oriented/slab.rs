@@ -17,7 +17,7 @@ use super::{DielectricResponse, Incidence, OrientedUniaxialInterface, Reflection
 use fs_material::field_storage::linear_magnetic_permeability;
 use fs_math::{c64::C64, det};
 
-mod kernel;
+pub(super) mod kernel;
 pub use kernel::{SlabRegion, SlabWave, UniaxialSlabResponse};
 
 mod spectrum;

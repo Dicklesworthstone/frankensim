@@ -33,6 +33,9 @@ pub mod spectrum;
 /// Coherent scattering and internal fields of one finite transparent crystal.
 pub mod slab;
 
+/// Coherent stacks of finite crystals with independent original global axes.
+pub mod stack;
+
 const C0: f64 = 299_792_458.0;
 type Result<T> = core::result::Result<T, ReflectionError>;
 

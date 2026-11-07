@@ -793,3 +793,89 @@ fn finite_crystal_slab_and_spectrum_retain_original_ports_and_both_interfaces() 
             .is_err()
     );
 }
+
+#[test]
+fn coherent_crystal_stack_retains_original_layers_and_matches_the_single_slab_owner() {
+    use crate::plane_wave::{
+        angular_spectrum::AngularSpectrumError,
+        uniaxial::oriented::{
+            OrientedUniaxialInterface,
+            slab::OrientedUniaxialSlab,
+            stack::{OrientedUniaxialStack, PreparedUniaxialStackSpectrum, StackRegion,
+                UniaxialStackLayer, UniaxialStackLimits},
+            spectrum::{UniaxialIncidentMode, UniaxialSpectrumLimits},
+        },
+    };
+    let (ordinary_a, extraordinary_a)=axes(
+        [1.4,1.6],[1.8,2.0],[0.0;2],Some(MU),[400.0,800.0],0);
+    let (ordinary_b, extraordinary_b)=axes(
+        [1.3,1.45],[1.65,1.85],[0.0;2],Some(1.2*MU),[400.0,800.0],1);
+    let a=UniaxialOpticalResponse::try_new(&ordinary_a,&extraordinary_a,SPAN).unwrap();
+    let b=UniaxialOpticalResponse::try_new(&ordinary_b,&extraordinary_b,SPAN).unwrap();
+    let outside=incident(1.0,MU);
+    let exit=incident(1.2,0.8*MU);
+    let layers=[
+        UniaxialStackLayer::try_new(a,[1.0,2.0,3.0],0.4e-6).unwrap(),
+        UniaxialStackLayer::try_new(b,[2.0,-1.0,1.0],0.3e-6).unwrap(),
+    ];
+    let limits=UniaxialStackLimits {maximum_layers:2,maximum_workspace_bytes:50_000};
+    let stack=OrientedUniaxialStack::try_new(
+        DielectricResponse::Lossless(&outside),DielectricResponse::Lossless(&exit),
+        &layers,limits).unwrap();
+    assert!(core::ptr::eq(stack.layers(),layers.as_slice()));
+    assert!(core::ptr::eq(stack.incident_response().material(),&outside));
+    assert!(core::ptr::eq(stack.exit_response().material(),&exit));
+    let one_layer=[layers[0]];
+    let one_stack=OrientedUniaxialStack::try_new(
+        DielectricResponse::Lossless(&outside),DielectricResponse::Lossless(&exit),
+        &one_layer,limits).unwrap();
+    let entrance=OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside),a,layers[0].optic_axis()).unwrap();
+    let slab=OrientedUniaxialSlab::try_new(&entrance,
+        DielectricResponse::Lossless(&exit),layers[0].thickness_m()).unwrap();
+    let input=[
+        UniaxialIncidentMode {tangential_phase_index:0.4,incidence_plane_axis:[1.0,0.0],
+            electric_v_m:[C64::new(0.7,0.2),C64::new(-0.3,0.5)]},
+        UniaxialIncidentMode {tangential_phase_index:-0.5,incidence_plane_axis:[3.0,4.0],
+            electric_v_m:[C64::ONE,C64::ZERO]},
+    ];
+    let spectrum_limits=UniaxialSpectrumLimits {maximum_modes:2,maximum_workspace_bytes:100_000};
+    for wavelength in [400.0,550.0,800.0] {
+        let omega=frequency(wavelength);
+        let x=one_stack.response_at_tangential_index(omega,0.4,input[0].electric_v_m,||false).unwrap();
+        let y=slab.response_at_tangential_index(omega,0.4,input[0].electric_v_m).unwrap();
+        for j in 0..3 {
+            complex_near(x.reflected_electric_v_m[j],y.reflected_electric_v_m[j],4e-13);
+            complex_near(x.transmitted_electric_v_m[j],y.transmitted_electric_v_m[j],4e-13);
+        }
+        let prepared=PreparedUniaxialStackSpectrum::prepare(
+            &stack,omega,&input,spectrum_limits,||false).unwrap();
+        assert!(core::ptr::eq(prepared.source(),&stack));
+        assert_eq!(prepared.retained_mode_count(),2);
+        assert!(prepared.workspace_bytes()<=spectrum_limits.maximum_workspace_bytes);
+        for (z,left,right) in [
+            (0.0,StackRegion::TotalIncidentSide,StackRegion::Layer(0)),
+            (layers[0].thickness_m(),StackRegion::Layer(0),StackRegion::Layer(1)),
+            (stack.thickness_m(),StackRegion::Layer(1),StackRegion::Transmitted),
+        ] {
+            let x=prepared.field_at(left,[0.2e-6,-0.1e-6,z],||false).unwrap();
+            let y=prepared.field_at(right,[0.2e-6,-0.1e-6,z],||false).unwrap();
+            for j in 0..2 {
+                complex_near(x.electric_v_m[j],y.electric_v_m[j],5e-13);
+                complex_near(x.magnetic_a_m[j],y.magnetic_a_m[j],5e-15);
+            }
+            near(x.poynting_w_m2[2],y.poynting_w_m2[2],5e-15);
+        }
+    }
+    assert!(stack.response_at_tangential_index(frequency(399.0),0.4,input[0].electric_v_m,||false).is_err());
+    assert!(OrientedUniaxialStack::try_new(DielectricResponse::Lossless(&outside),
+        DielectricResponse::Lossless(&exit),&layers,
+        UniaxialStackLimits {maximum_layers:1,..limits}).is_err());
+    assert!(matches!(PreparedUniaxialStackSpectrum::prepare(
+        &stack,frequency(399.0),&input,
+        UniaxialSpectrumLimits {maximum_modes:0,..spectrum_limits},||false),
+        Err(AngularSpectrumError::Invalid(_))));
+    assert!(matches!(PreparedUniaxialStackSpectrum::prepare(
+        &stack,frequency(399.0),&input,spectrum_limits,||true),
+        Err(AngularSpectrumError::Cancelled)));
+}

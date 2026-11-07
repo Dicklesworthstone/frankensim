@@ -6508,3 +6508,62 @@ numerically unresolved systems or unrepresentable positive propagating output
 power. Existing half-space critical support remains unchanged. Absorbing
 anisotropy, crystal multilayer stacks, varying optic axes and causal transient
 reservoirs remain outside this capability.
+
+### Coherent stacks of arbitrarily oriented transparent crystals
+
+`uniaxial::oriented::stack::OrientedUniaxialStack` retains the original
+lossless isotropic entrance and exit responses and an ordered borrowed slice
+of `UniaxialStackLayer`. Each layer binds its original two-axis
+`UniaxialOpticalResponse`, same-state scalar permeability, positive physical
+thickness and independently authored fixed global optic axis. All source laws
+are resolved at the requested positive frequency; their original support and
+transparency refusals remain authoritative.
+
+The existing dimensional forward/backward Maxwell basis is shared with the
+single-slab owner, including polar-E/axial-H normal-coordinate reversal for
+tilted axes. A right-to-left fixed 4x4 Schur reflection sweep eliminates each
+remaining load, preserving the noncommuting backward-phase/reflection/
+forward-phase order. A forward amplitude sweep then recovers all four
+internal eigenmode fields. Every evanescent mode remains anchored at its
+decaying face; no inverse exponentially decaying transfer factor is formed.
+Preparation and numerical storage scale linearly with the layer count.
+The original row-scaled pivoting owner now accepts fixed array sizes and
+retains its existing size-eight single-slab arithmetic.
+
+Results retain full reflected and transmitted vector fields, original
+physical face positions, four internal waves per layer, independently
+evaluated R/T and physical-point E/H/Poynting queries. Every tangential E/H
+interface trace and each layer's normal flux must agree before a snapshot is
+returned. The propagating incident port and any positive propagating output
+power must be representable. Exactly coalesced internal critical modes,
+unresolved boundary systems, failed flux/continuity gates and unsupported
+source data refuse explicitly. The exit itself may be critical or evanescent.
+Global coordinates identify the layer; either adjacent trace is available at
+a shared face.
+
+`PreparedUniaxialStackSpectrum` resolves all original source laws once and
+solves each nonzero authored `UniaxialIncidentMode` against every original
+global layer axis. All four waves in the selected layer and all incident
+directions interfere before the common compensated Poynting contraction.
+Preparation is O(modes times layers); each nonempty spectrum point query is
+O(modes), with no allocation, material reevaluation or boundary solve.
+Exactly zero source coefficients may be omitted; nonzero coefficients are
+never filtered or renormalized. Layer, mode and logical workspace bounds
+precede allocations/solves, and cancellation returns no partial result.
+
+This is a monochromatic stack of parallel, homogeneous, transparent uniaxial
+layers. It supplies no absorbing anisotropy, biaxial crystal, rough interface,
+continuously varying axis, inferred coherence, transient reservoir or
+continuum-error certificate. Large cumulative face coordinates must retain
+distinct representable boundaries.
+
+Nine focused numerical regression groups were authored for independent
+isotropic TE/TM characteristic matrices with magnetic contrast, noncommuting
+resonant waveplates, tilted-layer subdivision and axis-sign invariance,
+evanescent tunneling, many-layer Bragg reflection, critical/refusal behavior,
+global rotation, coherent fringes, resource bounds and cancellation.
+An additional native source/material integration case covers original layer
+retention, spectral support, single-slab agreement and every coherent
+interface. These new checks have not been executed: the execution environment
+became unavailable before the first actual-source probe returned. Earlier
+single-slab results do not establish the new stack or its refactored helpers.

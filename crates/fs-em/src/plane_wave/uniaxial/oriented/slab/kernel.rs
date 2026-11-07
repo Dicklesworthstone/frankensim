@@ -1,6 +1,6 @@
 //! Fixed-size two-face Maxwell matching with bounded propagation factors.
 use super::super::super::kernel::{UniaxialWaveKind, binary_scale, outgoing_root};
-use super::super::kernel::{Input as ModeInput, eigenbasis};
+use super::super::kernel::{Eigenbasis, Input as ModeInput, eigenbasis};
 use super::super::spectrum::{FieldSum, UniaxialSpectrumField, rotate, transverse_phase};
 use super::super::{Incidence, ResolvedFrequency};
 use crate::plane_wave::angular_spectrum::{AngularSpectrumError, modes::propagation};
@@ -20,8 +20,8 @@ pub enum SlabRegion {
     Transmitted,
 }
 
-/// One actual internal eigenmode. Forward fields are anchored at z=0;
-/// backward fields at z=d. The wavevector is always in global coordinates:
+/// One actual internal eigenmode. Forward fields are anchored at the selected
+/// layer's entrance; backward fields at its exit. The wavevector is global:
 /// a backward evanescent mode has Im(kz)>0 and decays as z decreases.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SlabWave {
@@ -176,27 +176,27 @@ pub(super) struct Input {
     pub(super) axis: [f64; 3],
 }
 
-fn positive(v: f64) -> Result<f64> {
+pub(in super::super) fn positive(v: f64) -> Result<f64> {
     if v.is_finite() && v > 0.0 {
         Ok(v)
     } else {
         Err("uniaxial slab wave data must be positive and representable")
     }
 }
-fn finite(v: C64) -> bool {
+pub(in super::super) fn finite(v: C64) -> bool {
     v.re.is_finite() && v.im.is_finite()
 }
-fn tangential(e: Vector, h: Vector) -> [C64; 4] {
+pub(in super::super) fn tangential(e: Vector, h: Vector) -> [C64; 4] {
     [e[0], e[1], h[0], h[1]]
 }
-fn flux(e: Vector, h: Vector) -> f64 {
+pub(in super::super) fn flux(e: Vector, h: Vector) -> f64 {
     let product = |j: usize, k: usize| {
         Dd::from_f64(e[j].re) * Dd::from_f64(h[k].re)
             + Dd::from_f64(e[j].im) * Dd::from_f64(h[k].im)
     };
     ((product(0, 1) - product(1, 0)) * Dd::from_f64(0.5)).to_f64()
 }
-fn combine(waves: [SlabWave; 2], coefficients: [C64; 2]) -> (Vector, Vector) {
+pub(in super::super) fn combine(waves: [SlabWave; 2], coefficients: [C64; 2]) -> (Vector, Vector) {
     let e = core::array::from_fn(|j| {
         waves[0].electric_v_m[j] * coefficients[0] + waves[1].electric_v_m[j] * coefficients[1]
     });
@@ -233,55 +233,8 @@ pub(super) fn solve(
         incidence,
         electric,
     };
-    let basis = eigenbasis(original)?;
-    // Under z'=-z, E is polar, H axial: E=(Ex',Ey',-Ez'),
-    // H=(-Hx',-Hy',Hz'), k=(kx',ky',-kz'). The optic axis transforms as E.
-    // This obtains the OTHER extraordinary root even for a tilted tensor;
-    // simply negating the forward kz would be physically incorrect.
-    let reversed = eigenbasis(ModeInput {
-        axis: [data.axis[0], data.axis[1], -data.axis[2]],
-        ..original
-    })?;
-    if basis
-        .modes
-        .iter()
-        .chain(&reversed.modes)
-        .any(|m| m.kind == UniaxialWaveKind::Critical)
-    {
-        return Err("coalesced critical crystal modes require a generalized slab basis");
-    }
+    let (basis, mut forward, mut backward) = crystal_basis(original)?;
     let kscale = positive((f.omega / C0) * basis.scale)?;
-    let hscale = positive(basis.scale / (f.mut_ * C0))?;
-    let mut forward = basis.modes.map(|m| SlabWave {
-        wave_kind: m.kind,
-        normal_wavenumber_rad_m: m.z.scale(kscale),
-        electric_v_m: m.e,
-        magnetic_a_m: m.h.map(|v| v.scale(hscale)),
-    });
-    let mut backward = reversed.modes.map(|m| SlabWave {
-        wave_kind: m.kind,
-        normal_wavenumber_rad_m: -m.z.scale(kscale),
-        electric_v_m: [m.e[0], m.e[1], -m.e[2]],
-        magnetic_a_m: [
-            -m.h[0].scale(hscale),
-            -m.h[1].scale(hscale),
-            m.h[2].scale(hscale),
-        ],
-    });
-    for (basis_mode, wave) in basis
-        .modes
-        .iter()
-        .zip(&forward)
-        .chain(reversed.modes.iter().zip(&backward))
-    {
-        let k = wave.normal_wavenumber_rad_m;
-        if !finite(k)
-            || basis_mode.z.re != 0.0 && k.re == 0.0
-            || basis_mode.z.im != 0.0 && k.im == 0.0
-        {
-            return Err("uniaxial slab internal wavenumber is unrepresentable");
-        }
-    }
     let incident_hscale = positive(basis.scale / (f.mui * C0))?;
     let (p, qi, i) = (basis.p, basis.qi, basis.i);
     let incident_k = positive(kscale * qi)?;
@@ -427,7 +380,63 @@ pub(super) fn solve(
     Ok(result)
 }
 
-fn exit_basis(omega: f64, p: f64, index: f64, mu: f64) -> Result<[SlabWave; 2]> {
+/// Original dimensional forward/backward basis, shared by slabs and stacks.
+pub(in super::super) fn crystal_basis(
+    original: ModeInput,
+) -> Result<(Eigenbasis, [SlabWave; 2], [SlabWave; 2])> {
+    let basis = eigenbasis(original)?;
+    // Under z'=-z, E is polar, H axial: E=(Ex',Ey',-Ez'),
+    // H=(-Hx',-Hy',Hz'), k=(kx',ky',-kz'). The optic axis transforms as E.
+    // This obtains the OTHER extraordinary root even for a tilted tensor;
+    // simply negating the forward kz would be physically incorrect.
+    let reversed = eigenbasis(ModeInput {
+        axis: [original.axis[0], original.axis[1], -original.axis[2]],
+        ..original
+    })?;
+    if basis
+        .modes
+        .iter()
+        .chain(&reversed.modes)
+        .any(|m| m.kind == UniaxialWaveKind::Critical)
+    {
+        return Err("coalesced critical crystal modes require a generalized slab basis");
+    }
+    let kscale = positive((original.omega / C0) * basis.scale)?;
+    let hscale = positive(basis.scale / (original.mut_ * C0))?;
+    let forward = basis.modes.map(|m| SlabWave {
+        wave_kind: m.kind,
+        normal_wavenumber_rad_m: m.z.scale(kscale),
+        electric_v_m: m.e,
+        magnetic_a_m: m.h.map(|v| v.scale(hscale)),
+    });
+    let backward = reversed.modes.map(|m| SlabWave {
+        wave_kind: m.kind,
+        normal_wavenumber_rad_m: -m.z.scale(kscale),
+        electric_v_m: [m.e[0], m.e[1], -m.e[2]],
+        magnetic_a_m: [
+            -m.h[0].scale(hscale),
+            -m.h[1].scale(hscale),
+            m.h[2].scale(hscale),
+        ],
+    });
+    for (basis_mode, wave) in basis
+        .modes
+        .iter()
+        .zip(&forward)
+        .chain(reversed.modes.iter().zip(&backward))
+    {
+        let k = wave.normal_wavenumber_rad_m;
+        if !finite(k)
+            || basis_mode.z.re != 0.0 && k.re == 0.0
+            || basis_mode.z.im != 0.0 && k.im == 0.0
+        {
+            return Err("uniaxial slab internal wavenumber is unrepresentable");
+        }
+    }
+    Ok((basis, forward, backward))
+}
+
+pub(in super::super) fn exit_basis(omega: f64, p: f64, index: f64, mu: f64) -> Result<[SlabWave; 2]> {
     let scale = binary_scale(index.max(p.abs()));
     let n = positive(index / scale)?;
     if p != 0.0 && p / scale == 0.0 {
@@ -459,8 +468,10 @@ fn exit_basis(omega: f64, p: f64, index: f64, mu: f64) -> Result<[SlabWave; 2]> 
 
 /// Row scaling and partial pivoting; an unresolved pivot is a refusal, never
 /// a fabricated zero mode or a regularized material. All work is fixed-size.
-fn solve_boundary(mut a: [[C64; 8]; 8], mut b: [C64; 8]) -> Result<[C64; 8]> {
-    for row in 0..8 {
+pub(in super::super) fn solve_boundary<const N: usize>(
+    mut a: [[C64; N]; N], mut b: [C64; N],
+) -> Result<[C64; N]> {
+    for row in 0..N {
         let scale = positive(a[row].iter().fold(0.0_f64, |v, z| v.max(z.abs())))?;
         if a[row].iter().any(|&z| !finite(z)) || !finite(b[row]) {
             return Err("finite slab boundary data required");
@@ -468,9 +479,9 @@ fn solve_boundary(mut a: [[C64; 8]; 8], mut b: [C64; 8]) -> Result<[C64; 8]> {
         a[row] = a[row].map(|v| C64::new(v.re / scale, v.im / scale));
         b[row] = C64::new(b[row].re / scale, b[row].im / scale);
     }
-    for column in 0..8 {
+    for column in 0..N {
         let mut pivot = column;
-        for row in column + 1..8 {
+        for row in column + 1..N {
             if a[row][column].abs() > a[pivot][column].abs() {
                 pivot = row;
             }
@@ -480,19 +491,19 @@ fn solve_boundary(mut a: [[C64; 8]; 8], mut b: [C64; 8]) -> Result<[C64; 8]> {
         }
         a.swap(pivot, column);
         b.swap(pivot, column);
-        for row in column + 1..8 {
+        for row in column + 1..N {
             let factor = a[row][column] / a[column][column];
             a[row][column] = C64::ZERO;
-            for j in column + 1..8 {
+            for j in column + 1..N {
                 a[row][j] = a[row][j] - factor * a[column][j];
             }
             b[row] = b[row] - factor * b[column];
         }
     }
-    let mut x = [C64::ZERO; 8];
-    for row in (0..8).rev() {
+    let mut x = [C64::ZERO; N];
+    for row in (0..N).rev() {
         let mut rhs = b[row];
-        for j in row + 1..8 {
+        for j in row + 1..N {
             rhs = rhs - a[row][j] * x[j];
         }
         x[row] = rhs / a[row][row];
