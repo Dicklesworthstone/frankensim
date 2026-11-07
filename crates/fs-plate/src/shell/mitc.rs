@@ -428,7 +428,7 @@ fn admit_coupled_block(a: &[f64; 9], b: &[f64; 9], d: &[f64; 9], semidefinite: b
 // Shared admission and physical Gram factor for the work-conjugate A/B/D
 // block. The factor has the original dimensional row scales; strain-rate
 // contraction therefore gives material power as a sum of squares.
-fn factor_coupled_block(a: &[f64; 9], b: &[f64; 9], d: &[f64; 9], semidefinite: bool)
+pub(super) fn factor_coupled_block(a: &[f64; 9], b: &[f64; 9], d: &[f64; 9], semidefinite: bool)
     -> Result<[[f64; 6]; 6], PlateError>
 {
     let bad = || PlateError::BadSection {

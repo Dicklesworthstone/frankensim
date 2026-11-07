@@ -1,5 +1,36 @@
 # CONTRACT: fs-plate
 
+## Physical viscosity on CST/DKT shells
+
+`shell::viscosity` supplies complete passive membrane, membrane/bending and
+bending loss on the existing flat-facet shell field. Sparse spatial assembly
+uses the original facet rotations and global-axis support map. Direct
+projection first evaluates the same CST strains and DKT curvature quadrature,
+then the original constitutive Gram channels, retaining weak loss, exact null
+channels and every modal cross term. Neither operation changes elastic or
+inertial operators or dissipates the numerical drilling gauge, prestress or
+unrelated reinforcement. Symmetric A/B/D passivity uses the existing physical
+six-component resultant owner shared with MITC; no second constitutive solver
+or fitted modal damping law is introduced.
+
+The thickness strain is `epsilon(z)=epsilon0+z*kappa`; the native DKT
+`beta=-grad(w)` field already supplies its signed first-moment curvature.
+This preserves signed B work for offset layers while leaving all D-only
+quadratic work unchanged. Supplied resultants are in each original facet frame
+with explicit SI units. Material source applicability, frequency support and
+thermal state remain caller obligations. Projection yields `Phi^T C Phi`, with
+units 1/s only for a mass-normalized basis; it does not certify modes or a
+modal truncation.
+
+Checked element, full/free-coordinate, mode and work bounds precede output
+allocation. Cancellation at element and projection-row boundaries publishes
+no partial result. The public `ShellModel` does not retain its mesh: callers
+must supply its original CST/DKT geometry. Dimension/map checks do not prove
+identity, and MITC oblique supports or tied assembly coordinates require their
+own physical expansion owners. Focused regressions cover independent affine
+strain work and B reversal, rigid/drilling nulls, original DKT parity, facet
+rotation and supports, weak semidefinite loss, bounds and cancellation.
+
 ## Physical ply shear on the native MITC field
 
 `MitcShellModel::prepare_laminate_shear` binds an original equilibrated laminate

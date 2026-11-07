@@ -18,6 +18,8 @@ use section::Section;
 pub mod inertia;
 pub use inertia::{CstDktMass, ReferenceDensityMoments};
 use inertia::ReferenceInertia;
+/// Physical membrane/bending loss on the original CST/DKT strain field.
+pub mod viscosity;
 
 impl ReferenceDensityMoments {
     /// Consume the existing laminate owner's exact mass moments, normalized by
@@ -435,12 +437,7 @@ fn local_stiffness_with_alpha<S: Section>(g:&FacetGeometry, s:&S, element:usize,
     let mut k=[0.0;324];
     // Explicit effective A, or the legacy homogeneous solid-section lowering.
     let a=s.membrane()?;
-    let mut b=[[0.0;18];3];
-    for i in 0..3 {
-        let [dx,dy]=g.gradient[i];
-        b[0][6*i]=dx; b[1][6*i+1]=dy;
-        b[2][6*i]=dy; b[2][6*i+1]=dx;
-    }
+    let b=membrane_strain_rows(g);
     for i in 0..18 { for j in 0..18 { for p in 0..3 { for q in 0..3 {
         k[i*18+j]+=g.area_m2*b[p][i]*a[3*p+q]*b[q][j];
     }}}}
@@ -448,6 +445,20 @@ fn local_stiffness_with_alpha<S: Section>(g:&FacetGeometry, s:&S, element:usize,
     for (value, extra) in k.iter_mut().zip(bending) { *value += extra; }
     Ok(k)
 }
+
+// One CST strain map and one DKT slope-to-physical-rotation convention for
+// elastic work and physical viscosity. Neither contains the drilling gauge.
+fn membrane_strain_rows(g: &FacetGeometry) -> [[f64; 18]; 3] {
+    let mut b=[[0.0;18];3];
+    for i in 0..3 {
+        let [dx,dy]=g.gradient[i];
+        b[0][6*i]=dx; b[1][6*i+1]=dy;
+        b[2][6*i]=dy; b[2][6*i+1]=dx;
+    }
+    b
+}
+const DKT_SHELL_SLOTS: [usize; 9] = [2,4,3,8,10,9,14,16,15];
+const DKT_SHELL_SIGNS: [f64; 9] = [1.0,-1.0,1.0,1.0,-1.0,1.0,1.0,-1.0,1.0];
 // Project this positive remainder separately from membrane energy. Subtracting
 // two nearly equal dense stiffnesses would destroy positive small eigenvalues.
 pub(super) fn local_bending_stiffness<S: Section>(g:&FacetGeometry, s:&S, element:usize)
@@ -459,8 +470,8 @@ fn local_bending_stiffness_with_alpha<S: Section>(g:&FacetGeometry, s:&S, elemen
     let mut k=[0.0;324];
     let a=s.membrane()?;
     let (kb,_) = dkt_stiffness(&g.x,&g.y,&s.plate().d,element)?;
-    let slots=[2,4,3,8,10,9,14,16,15];
-    let signs=[1.0,-1.0,1.0,1.0,-1.0,1.0,1.0,-1.0,1.0];
+    let slots=DKT_SHELL_SLOTS;
+    let signs=DKT_SHELL_SIGNS;
     for i in 0..9 { for j in 0..9 { k[slots[i]*18+slots[j]]+=signs[i]*kb[9*i+j]*signs[j]; }}
     // Positive penalty on theta_z - (v_x-u_y)/2. Its lumped three-point
     // integration also controls nonconstant drilling modes without grounding
