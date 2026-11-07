@@ -7963,13 +7963,13 @@ replace a full Cargo or DSR gate.
 
 ### Compatible molecular stress for evolving mixtures
 
-The planar and spatial evolving-mixture molecular owners use the shared compatible Newtonian stress discretization when every domain boundary belongs to the supported closed/zero-exchange class. Planar domains admit periodic boundaries and reflecting `SlipAdiabatic` walls. Spatial domains additionally admit pressure outlets explicitly configured with `PressureOutletPolicy::ZeroDiffusiveFlux`. Admission still rejects a pressure outlet without that policy. Any bath, prescribed no-slip wall, or Navier wall retains the original mechanical discretization for the whole domain. `uses_compatible_molecular_stress()` reports this selection.
+The planar and spatial evolving-mixture molecular owners use the shared compatible Newtonian stress discretization on supported impermeable or zero-exchange domains. Planar domains admit periodic boundaries, reflecting `SlipAdiabatic` walls and stationary or tangentially moving no-slip walls, including zero-length Navier slip. Spatial domains additionally admit pressure outlets explicitly configured with `PressureOutletPolicy::ZeroDiffusiveFlux`; admission still rejects a pressure outlet without that policy. Baths, positive finite-slip lengths and explicitly configured equilibrium SGS wall laws retain the original mechanical discretization for the whole domain. `uses_compatible_molecular_stress()` reports this selection.
 
-At every SSP, retry, RKL, and adaptive spatial evaluation, the original transport source samples molecular shear and bulk viscosities at each current cell's temperature, pressure, and composition. Normal face derivatives use arithmetic cell viscosities; cross derivatives are weighted by their originating cell viscosity before averaging. This preserves the discrete adjoint pairing needed for nonnegative semidiscrete molecular kinetic-energy dissipation on the supported domains. It does not assert monotone enstrophy, arbitrary-time-step kinetic monotonicity, or a dissipation guarantee for the independently authored SGS model or the fallback boundary domains.
+At every SSP, retry, RKL, and adaptive spatial evaluation, the original transport source samples molecular shear and bulk viscosities at each current cell's temperature, pressure, and composition. Normal face derivatives use arithmetic cell viscosities; cross derivatives are weighted by their originating cell viscosity before averaging. The matched prescribed-wall traction retains the complete adjacent-cell cross stress and uses the actual prescribed velocity for mechanical power. This preserves nonnegative semidiscrete molecular dissipation after accounting for wall work. It does not assert monotone enstrophy, arbitrary-time-step kinetic monotonicity, or a dissipation guarantee for the independently authored SGS model or fallback boundary domains.
 
 `PlanarTransport::coefficients_from_primitive` and `SpatialTransport::coefficients_from_primitive` expose original-source cell coefficient admission without a second material law or a face diffusion solve. The source validates the actual primitive, coefficients, longitudinal viscosity, and binary diffusivity matrix using prepared scratch. `TransportFaceReport` additionally exposes `bulk_viscosity_pa_s`, `nonmechanical_energy_flux_w_m2`, and `nonmechanical_diffusivity_m2_s`. The latter two receipts retain original species-enthalpy, Fourier, Soret, and Dufour contributions before mechanical work and separate their admission bound from mechanical diffusivity.
 
-Compatible face traction and its conservative mechanical work are formed directly. This avoids cancellation when an unused nonlinear midpoint viscosity is much larger than either cell viscosity. Species fluxes and the source-owned nonmechanical energy flux retain their original values; no additional viscous-heating source is introduced. Faces whose two cell coefficient pairs exactly equal the original face coefficient pair retain original flux arithmetic. Compatible mechanical rate admission nevertheless always uses the cell stress bound and the minimum current stage density, including matching-coefficient faces and mechanically active spatial singleton/all-wall domains. Original SGS contributions remain separate and retain their source model and ratio semantics.
+Compatible face traction and its conservative mechanical work are formed directly. This avoids cancellation when an unused nonlinear midpoint viscosity is much larger than either cell viscosity. Species fluxes and the source-owned nonmechanical energy flux retain their original values; no additional viscous-heating source is introduced. Interior faces whose two cell coefficient pairs exactly equal the original face coefficient pair retain original flux arithmetic. Compatible mechanical rate admission nevertheless always uses the cell stress bound and the minimum current stage density, including matching-coefficient faces and mechanically active spatial singleton/all-wall domains. The original thermal-wall source continues to supply Fourier heat and its diffusion bound. Ordinary interior SGS remains separate and retains its source model and ratio semantics.
 
 Each owner prepares one shear/bulk coefficient pair per cell, adding 16 bytes per cell to the required and actual base workspace accounting. Stabilized and adaptive workspace requirements inherit the increased base size. Source sampling and all face work remain inside the existing staged commit/cancellation boundary.
 
@@ -7999,3 +7999,17 @@ evaluated on the analytic sampled profile approached first order at the wall;
 there is no blanket second-order local wall-stress claim. Full flow-owner
 regressions were source-reviewed and parser-checked but not compiled or run in
 the resource-constrained environment.
+
+The same prescribed-wall kernel is consumed by both evolving-mixture owners.
+Momentum transfer, boundary loads and conservative energy use the same actual
+traction; original species, enthalpy, Soret/Dufour and wall heat remain with the
+transport source. No extra buffers or stage arguments are introduced. Spatial
+inertial-wall midpoint probes retain their existing fresh stage evaluation and
+actual load transaction. Focused owner regressions cover stationary and moving
+wall work through SSP/RKL/adaptive steps, composition-dependent shear and bulk
+viscosity under axis rotations, thermal transport with a very large unused wall
+viscosity, zero/positive slip selection, and explicit equilibrium-SGS fallback.
+These owner regressions passed source parsing/formatting and bounded review,
+but were not compiled or executed in this environment. The shared kernel's
+nine native tests establish the numerical wall identity and the separately
+qualified Couette refinement evidence.

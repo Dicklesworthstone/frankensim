@@ -29,6 +29,12 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
 }
 
 impl SubgridTransport {
+    pub(in crate::compressible::spatial::mixture::molecular) fn has_equilibrium_wall(
+        &self,
+    ) -> bool {
+        self.wall_models.iter().any(Option::is_some)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(in crate::compressible::spatial::mixture::molecular) fn add_wall(
         &self,

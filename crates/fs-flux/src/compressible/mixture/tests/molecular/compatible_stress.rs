@@ -312,26 +312,41 @@ fn late_cancellation_preserves_the_accepted_variable_source_epoch_and_loads() {
 }
 
 #[test]
-fn any_prescribed_wall_or_bath_keeps_the_complete_original_mechanical_operator() {
+fn no_slip_is_compatible_while_positive_slip_and_baths_keep_the_original_operator() {
     let flow = wall_field();
     let op = operator(&flow, Material::Smooth, Method::Ssp, 0.05);
     assert!(op.uses_compatible_molecular_stress());
-    for wall in [
-        MolecularWall2d::NoSlip {
-            velocity: [0.0; 2],
-            thermal: WallThermalCondition::Adiabatic,
-        },
-        MolecularWall2d::NavierSlip {
-            velocity: [0.0; 2],
-            thermal: WallThermalCondition::Adiabatic,
-            slip_length_m: 0.1,
-            fluid_heat_fraction: 0.5,
-        },
+    for (wall, compatible) in [
+        (
+            MolecularWall2d::NoSlip {
+                velocity: [0.0; 2],
+                thermal: WallThermalCondition::Adiabatic,
+            },
+            true,
+        ),
+        (
+            MolecularWall2d::NavierSlip {
+                velocity: [0.0; 2],
+                thermal: WallThermalCondition::Adiabatic,
+                slip_length_m: 0.0,
+                fluid_heat_fraction: 0.5,
+            },
+            true,
+        ),
+        (
+            MolecularWall2d::NavierSlip {
+                velocity: [0.0; 2],
+                thermal: WallThermalCondition::Adiabatic,
+                slip_length_m: 0.1,
+                fluid_heat_fraction: 0.5,
+            },
+            false,
+        ),
     ] {
         let op = operator(&flow, Material::Smooth, Method::Ssp, 0.05)
             .with_wall(BoundarySide::XMin, wall)
             .unwrap();
-        assert!(!op.uses_compatible_molecular_stress());
+        assert_eq!(op.uses_compatible_molecular_stress(), compatible);
     }
     let bath = MixtureEuler2d::new_with_reservoirs(
         flow.gas().clone(),
@@ -357,4 +372,110 @@ fn any_prescribed_wall_or_bath_keeps_the_complete_original_mechanical_operator()
     assert!(
         !operator(&bath, Material::Smooth, Method::Ssp, 0.05).uses_compatible_molecular_stress()
     );
+}
+
+#[test]
+fn variable_source_no_slip_dissipates_relative_to_the_actual_moving_wall_work() {
+    let a = [0.2, 0.3, 0.1, 0.3];
+    let b = [0.0, 1.0, 0.0, -1.0];
+    let duration = 1e-8;
+    for method in [Method::Ssp, Method::Rkl, Method::Adaptive] {
+        for (lid_speed, dissipation) in [(0.0, 10.131666666666667), (0.4, 9.971666666666667)] {
+            let mut flow = field(
+                equal_mass_gas(),
+                CartesianGrid::new(4, 4, 1.0, 1.0, 1.0).unwrap(),
+                Boundaries2d { x: WALLS, y: WALLS },
+                |p| {
+                    let (x, y) = (p[0] as usize, p[1] as usize);
+                    (
+                        [0.4, 0.6, 0.0],
+                        [-a[x] * b[y], a[y] * b[x]],
+                        if x == 0 && y == 0 { 2.0 } else { 1.0 },
+                    )
+                },
+            );
+            let mut op = operator(&flow, Material::HotSpot, method, 0.0);
+            for side in SIDES {
+                let velocity = if side == BoundarySide::YMax {
+                    [lid_speed, 0.0]
+                } else {
+                    [0.0; 2]
+                };
+                op = op
+                    .with_wall(
+                        side,
+                        MolecularWall2d::NoSlip {
+                            velocity,
+                            thermal: WallThermalCondition::Adiabatic,
+                        },
+                    )
+                    .unwrap();
+            }
+            assert!(op.uses_compatible_molecular_stress());
+            let before = kinetic(&flow);
+            check(advance(&mut flow, &mut op, method, duration));
+            let mut outward_work = 0.0;
+            for side in SIDES {
+                let speed = if side == BoundarySide::YMax {
+                    lid_speed
+                } else {
+                    0.0
+                };
+                for load in op.boundary_impulses(side) {
+                    assert_eq!(load.species_masses, [0.0; 3]);
+                    close(load.energy, speed * load.momentum[0], 2e-17);
+                    outward_work += load.energy;
+                }
+            }
+            // Independent cell quadratic form, with odd wall traces and the
+            // physical 3-D deviatoric trace. It includes boundary/corner cross
+            // derivatives; the old stationary-wall operator gives -8.66666...
+            // instead of -10.13166... for this original hot-spot source.
+            close(
+                (kinetic(&flow) - before + outward_work) / duration,
+                -dissipation,
+                0.003,
+            );
+            assert_eq!(flow.time().value(), 0.0);
+        }
+    }
+}
+
+#[test]
+fn heated_no_slip_preserves_original_species_enthalpy_and_heat_without_unused_wall_stiffness() {
+    let initial = || {
+        field(
+            equal_mass_gas(),
+            CartesianGrid::new(4, 3, 1.0, 1.0, 1.0).unwrap(),
+            Boundaries2d { x: WALLS, y: WALLS },
+            |p| {
+                let y = 0.4 + 0.03 * p[0];
+                ([y, 1.0 - y, 0.0], [0.0; 2], 1.0)
+            },
+        )
+    };
+    for method in [Method::Ssp, Method::Rkl, Method::Adaptive] {
+        let mut actual = initial();
+        let mut expected = initial();
+        let before = actual.states().to_vec();
+        let mut spike = operator(&actual, Material::MidpointSpike, method, 0.2);
+        let mut constant = operator(&expected, Material::Constant, method, 0.2);
+        for side in SIDES {
+            let wall = MolecularWall2d::NoSlip {
+                velocity: [0.0; 2],
+                thermal: WallThermalCondition::Isothermal(Temperature::new(3.0)),
+            };
+            spike = spike.with_wall(side, wall).unwrap();
+            constant = constant.with_wall(side, wall).unwrap();
+        }
+        // Cell mu=1; the actual wall heat law samples mu=1e30 at mean T=2.
+        // That unused mechanical face value cannot erase heat or dictate dt.
+        let report = advance(&mut actual, &mut spike, method, 1e-5);
+        check(report);
+        check(advance(&mut expected, &mut constant, method, 1e-5));
+        assert_eq!(actual.states(), expected.states());
+        assert_eq!(loads(&spike), loads(&constant));
+        assert_ne!(actual.states(), before);
+        assert!(report.maximum_parabolic_number < 0.001);
+    }
 }

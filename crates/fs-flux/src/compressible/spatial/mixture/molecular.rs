@@ -130,10 +130,12 @@ struct Workspace {
 /// successful field stages reuse flat buffers; no independent reservoir
 /// inventory is introduced.
 /// Compatible cell-weighted molecular stress applies on periodic,
-/// zero-diffusive-outlet and free-slip domains. Any bath or prescribed
-/// no-slip/Navier wall retains the original full mechanical discretization.
+/// zero-diffusive-outlet, free-slip and prescribed no-slip domains, including
+/// zero-length Navier slip. The same boundary traction supplies actual wall
+/// work; source Fourier heat remains separate. Baths, positive slip lengths and
+/// authored equilibrium SGS wall laws retain the original full discretization.
 /// Its sixteen-byte/cell cache is included in the combined workspace budget.
-/// SGS remains a separate authored face model without a new energy guarantee.
+/// Interior SGS stays a separate face model without a new energy guarantee.
 pub struct MolecularTransport3d<L: TransportLaw> {
     source: SpatialTransport<L>,
     grid: CartesianGrid,
@@ -287,7 +289,12 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     /// identity. Prescribed wall/bath work and any modeled SGS contribution
     /// retain their original qualifications.
     pub fn uses_compatible_molecular_stress(&self) -> bool {
-        compatible_stress_domain(self.boundaries, &self.walls)
+        compatible_stress_domain(
+            self.boundaries,
+            &self.walls,
+            #[cfg(feature = "experimental-sgs")]
+            self.sgs.as_ref(),
+        )
     }
     /// Configure one physical reflecting side. Periodic axes have no wall.
     /// Normal wall motion is refused until conservative moving geometry exists.
@@ -943,7 +950,12 @@ fn spatial<'a, L: TransportLaw>(
     let reservoirs = reservoirs.into();
     let species = source.gas().species_count();
     let width = species + 4;
-    let compatible = compatible_stress_domain(boundaries, walls);
+    let compatible = compatible_stress_domain(
+        boundaries,
+        walls,
+        #[cfg(feature = "experimental-sgs")]
+        sgs.as_deref(),
+    );
     let mut minimum_density = f64::INFINITY;
     let mut maximum_cell_stress_scale: f64 = 0.0;
     for (row, value) in states.chunks_exact(width).zip(primitive.iter_mut()) {
@@ -1121,7 +1133,7 @@ fn spatial<'a, L: TransportLaw>(
             } => {
                 let side = side_for(axis, sign > 0.0);
                 let wall = walls[side_index(side)];
-                let receipt = match wall {
+                let mut receipt = match wall {
                     MolecularWall3d::SlipAdiabatic => source.wall_from_primitive(
                         normal(cell, axis),
                         -sign * 2.0 * primitive[cell].velocity[axis] / grid.spacing[axis],
@@ -1199,6 +1211,37 @@ fn spatial<'a, L: TransportLaw>(
                         receipt
                     }
                 };
+                if compatible && let Some(velocity) = wall.no_slip_velocity() {
+                    let traction = stress::no_slip_traction(
+                        axis,
+                        sign,
+                        0.5 * grid.spacing[axis],
+                        primitive[cell].velocity,
+                        velocity,
+                        viscosity[cell],
+                        |component, derivative| gradient[cell][derivative][component],
+                    );
+                    output[species] = -traction[axis];
+                    output[species + 1] = -traction[a];
+                    output[species + 2] = -traction[b];
+                    output[species + 3] = receipt.nonmechanical_energy_flux_w_m2
+                        - velocity[0] * traction[0]
+                        - velocity[1] * traction[1]
+                        - velocity[2] * traction[2];
+                    // Wall-temperature sampling still owns Fourier heat.
+                    // The compatible mechanical operator uses cell values,
+                    // not the unused midpoint wall viscosity's rate bound.
+                    receipt.diffusivity_m2_s = receipt
+                        .nonmechanical_diffusivity_m2_s
+                        .max(viscosity[cell].scale::<3>() / minimum_density);
+                    if !output.iter().all(|value| value.is_finite())
+                        || !receipt.diffusivity_m2_s.is_finite()
+                    {
+                        return Err(DissipationError::Invalid(
+                            "compatible molecular wall flux overflow",
+                        ));
+                    }
+                }
                 #[cfg(feature = "experimental-sgs")]
                 let receipt = if let Some(sgs) = sgs.as_ref() {
                     sgs.add_wall(
@@ -1310,10 +1353,16 @@ fn side_for(axis: usize, upper: bool) -> BoundarySide {
     }
 }
 
-fn compatible_stress_domain(boundaries: Boundaries3d, walls: &[MolecularWall3d; 6]) -> bool {
-    walls
-        .iter()
-        .all(|wall| matches!(wall, MolecularWall3d::SlipAdiabatic))
+fn compatible_stress_domain(
+    boundaries: Boundaries3d,
+    walls: &[MolecularWall3d; 6],
+    #[cfg(feature = "experimental-sgs")] subgrid: Option<&SubgridTransport>,
+) -> bool {
+    #[cfg(feature = "experimental-sgs")]
+    if subgrid.is_some_and(SubgridTransport::has_equilibrium_wall) {
+        return false;
+    }
+    walls.iter().all(|wall| wall.supports_compatible_stress())
         && (0..3).all(|axis| match boundaries.axis(axis) {
             AxisBoundaries::Periodic => true,
             AxisBoundaries::Ends { lower, upper } => [lower, upper].into_iter().all(|condition| {

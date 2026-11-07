@@ -120,12 +120,13 @@ struct Workspace {
 /// supply the original bath energy effort. Refine the boundary layer independently.
 /// Unbound Transmissive faces still refuse.
 ///
-/// On fully periodic or adiabatic free-slip domains, source viscosities are
-/// sampled at cells and combined with the compatible full-tensor stress stencil.
-/// Its molecular contribution dissipates kinetic energy semidiscretely even
-/// for varying positive shear/bulk viscosity. Species and heat keep the original
-/// face law. Any bath, no-slip or finite-slip side retains the original full
-/// mechanical operator; no unsupported boundary-work or finite-step claim is made.
+/// On periodic, free-slip and prescribed no-slip domains, source viscosities
+/// are sampled at cells for the compatible full-tensor stress stencil. Molecular
+/// kinetic energy minus the actual prescribed-wall work dissipates
+/// semidiscretely for varying positive shear/bulk viscosity. The zero-length
+/// Navier limit is the same no-slip law. Species, enthalpy and Fourier heat keep
+/// their original source face law. Baths and positive finite-slip lengths keep
+/// the original full operator; no finite-step dissipation claim is made.
 pub struct MolecularTransport2d<L: TransportLaw> {
     source: PlanarTransport<L>,
     grid: CartesianGrid,
@@ -724,7 +725,7 @@ fn spatial<L: TransportLaw>(
                 condition: BoundaryCondition::Reflecting,
             } => {
                 let wall = walls[wall_index(axis, sign)];
-                match wall {
+                let receipt = match wall {
                     MolecularWall2d::SlipAdiabatic => source.wall_from_primitive(
                         normal(cell, axis),
                         -sign * 2.0 * primitive[cell].velocity[axis] / grid.spacing[axis],
@@ -792,7 +793,32 @@ fn spatial<L: TransportLaw>(
                         }
                         receipt
                     }
+                };
+                if compatible && let Some(velocity) = wall.no_slip_velocity() {
+                    let traction = stress::no_slip_traction(
+                        axis,
+                        sign,
+                        0.5 * grid.spacing[axis],
+                        primitive[cell].velocity,
+                        velocity,
+                        viscosity[cell],
+                        |component, derivative| gradient[cell][2 * derivative + component],
+                    );
+                    // These are the SAME prescribed-wall tractions whose
+                    // work enters total energy and the native load receipt.
+                    // Source Fourier heat is retained before mechanical work.
+                    output[species] = -traction[axis];
+                    output[species + 1] = -traction[tangent];
+                    output[species + 2] = receipt.nonmechanical_energy_flux_w_m2
+                        - velocity[0] * traction[0]
+                        - velocity[1] * traction[1];
+                    if !output.iter().all(|value| value.is_finite()) {
+                        return Err(DissipationError::Invalid(
+                            "planar compatible wall flux overflow",
+                        ));
+                    }
                 }
+                receipt
             }
             cartesian::FaceKind::Boundary {
                 cell,
@@ -909,7 +935,7 @@ fn compatible_boundaries(boundaries: Boundaries2d, walls: &[MolecularWall2d; 4])
                 .enumerate()
                 .all(|(side, condition)| {
                     condition == BoundaryCondition::Reflecting
-                        && walls[2 * axis + side] == MolecularWall2d::SlipAdiabatic
+                        && walls[2 * axis + side].supports_compatible_stress()
                 })
         }
     })

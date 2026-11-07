@@ -143,6 +143,18 @@ fn prepared(
 }
 
 #[test]
+fn authored_equilibrium_wall_keeps_its_complete_native_traction_operator() {
+    let velocity = [0.0, 0.02, 0.0];
+    let flow = channel(0, velocity);
+    let original = prepared(&flow, 0, [0.0; 3], 0);
+    assert!(original.uses_compatible_molecular_stress());
+    let modeled = original
+        .with_equilibrium_sgs_wall(BoundarySide::XMin, wall_config())
+        .unwrap();
+    assert!(!modeled.uses_compatible_molecular_stress());
+}
+
+#[test]
 fn equilibrium_sgs_wall_mixture_faces_preserve_species_and_native_work_for_local_and_dynamic_models()
  {
     for axis in 0..3 {

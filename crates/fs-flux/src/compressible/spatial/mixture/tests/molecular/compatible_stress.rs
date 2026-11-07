@@ -12,6 +12,7 @@ use fs_thermochem::{
 enum Material {
     Constant,
     Composition,
+    WallComposition,
     CellPeaks,
     FacePeak,
 }
@@ -38,7 +39,7 @@ impl TransportLaw for VariableTransport {
         let midpoint = (1.25..1.75).contains(&temperature.value());
         value.dynamic_viscosity = DynViscosity::new(match self.material {
             Material::Constant => 1.0,
-            Material::Composition => 1.0 + 299.0 * fractions[0],
+            Material::Composition | Material::WallComposition => 1.0 + 299.0 * fractions[0],
             Material::CellPeaks => {
                 if midpoint {
                     1.0
@@ -54,6 +55,9 @@ impl TransportLaw for VariableTransport {
                 }
             }
         });
+        if matches!(self.material, Material::WallComposition) {
+            value.bulk_viscosity = DynViscosity::new(0.1 + 0.2 * fractions[0]);
+        }
         Ok(value)
     }
 }
@@ -326,7 +330,19 @@ fn g4_cell_sampling_budget_boundary_scope_and_late_cancellation_remain_transacti
             },
         )
         .unwrap();
-    assert!(!prescribed.uses_compatible_molecular_stress());
+    assert!(prescribed.uses_compatible_molecular_stress());
+    let finite = prescribed
+        .with_wall(
+            BoundarySide::XMin,
+            MolecularWall3d::NavierSlip {
+                velocity: [0.0; 3],
+                thermal: WallThermalCondition::Adiabatic,
+                slip_length_m: 0.1,
+                fluid_heat_fraction: 0.5,
+            },
+        )
+        .unwrap();
+    assert!(!finite.uses_compatible_molecular_stress());
     let outlet = field(
         equal_mass_gas(),
         grid,
@@ -350,4 +366,165 @@ fn g4_cell_sampling_budget_boundary_scope_and_late_cancellation_remain_transacti
     )
     .unwrap();
     assert!(open.uses_compatible_molecular_stress());
+}
+
+#[test]
+fn original_composition_shear_and_bulk_obey_the_prescribed_wall_work_budget_on_every_axis() {
+    let profile = [0.2, 0.3, 0.1, 0.3];
+    let wave = [0.0, 1.0, 0.0, -1.0];
+    let duration = 1e-8;
+    for inactive in 0..3 {
+        let a = (inactive + 1) % 3;
+        let b = (inactive + 2) % 3;
+        let shape: [usize; 3] = std::array::from_fn(|axis| if axis == inactive { 1 } else { 4 });
+        let axes: [AxisBoundaries; 3] = std::array::from_fn(|axis| {
+            if axis == inactive {
+                AxisBoundaries::Periodic
+            } else {
+                WALLS
+            }
+        });
+        for (lid_speed, dissipation) in [(0.0, 10.267166666666667), (0.4, 10.107166666666667)] {
+            let mut flow = field(
+                equal_mass_gas(),
+                CartesianGrid::new(shape[0], shape[1], shape[2], 1.0, 1.0, 1.0).unwrap(),
+                Boundaries3d {
+                    x: axes[0],
+                    y: axes[1],
+                    z: axes[2],
+                },
+                |x| {
+                    let (i, j) = (x[a] as usize, x[b] as usize);
+                    let species_a = if i == 0 && j == 0 { 1.0 } else { 0.0 };
+                    let mut velocity = [0.0; 3];
+                    velocity[a] = -profile[i] * wave[j];
+                    velocity[b] = profile[j] * wave[i];
+                    ([species_a, 1.0 - species_a, 0.0], velocity, 1.0)
+                },
+            );
+            let mut op = operator(&flow, Material::WallComposition);
+            let lid = BoundarySide::ALL[2 * b + 1];
+            for side in BoundarySide::ALL {
+                if side.axis() == inactive {
+                    continue;
+                }
+                let mut velocity = [0.0; 3];
+                if side == lid {
+                    velocity[a] = lid_speed;
+                }
+                op = op
+                    .with_wall(
+                        side,
+                        MolecularWall3d::NoSlip {
+                            velocity,
+                            thermal: WallThermalCondition::Adiabatic,
+                        },
+                    )
+                    .unwrap();
+            }
+            assert!(op.uses_compatible_molecular_stress());
+            let before = kinetic(&flow);
+            let cells = flow.states().to_vec();
+            let report = op
+                .advance(
+                    &mut flow,
+                    Time::new(duration),
+                    DissipationControl::default(),
+                    || false,
+                )
+                .unwrap();
+            check(report);
+            let mut outward_work = 0.0;
+            for side in BoundarySide::ALL {
+                if side.axis() == inactive {
+                    continue;
+                }
+                let speed = if side == lid { lid_speed } else { 0.0 };
+                for load in op.boundary_impulses(side) {
+                    assert_eq!(load.species_masses, [0.0; 3]);
+                    close(load.energy, speed * load.momentum[a], 2e-17);
+                    outward_work += load.energy;
+                }
+            }
+            // Independently summed cell form: mu=1+299*x_A, kappa=.1+.2*x_A.
+            // Rotating this extruded fixture checks derivative-first source
+            // caches and normal/tangent momentum permutations on all six sides.
+            close(
+                (kinetic(&flow) - before + outward_work) / duration,
+                -dissipation,
+                0.003,
+            );
+            assert_ne!(flow.cell(0).unwrap().partial_densities, &cells[..3]);
+            for i in 0..flow.cell_count() {
+                assert_eq!(flow.cell(i).unwrap().partial_densities[2], 0.0);
+            }
+            assert_eq!(flow.time().value(), 0.0);
+        }
+    }
+}
+
+#[test]
+fn heated_no_slip_keeps_source_soret_dufour_and_enthalpy_with_large_unused_wall_viscosity() {
+    let initial = || {
+        field(
+            equal_mass_gas(),
+            CartesianGrid::new(2, 2, 2, 1.0, 1.0, 1.0).unwrap(),
+            Boundaries3d {
+                x: WALLS,
+                y: WALLS,
+                z: WALLS,
+            },
+            |x| {
+                let y = 0.4 + 0.03 * (x[0] + x[1]);
+                ([y, 1.0 - y, 0.0], [0.0; 3], 1.0)
+            },
+        )
+    };
+    let mut actual = initial();
+    let mut expected = initial();
+    let before = actual.states().to_vec();
+    let mut spike = operator(&actual, Material::FacePeak);
+    let mut constant = operator(&expected, Material::Constant);
+    for side in BoundarySide::ALL {
+        let wall = MolecularWall3d::NoSlip {
+            velocity: [0.0; 3],
+            thermal: WallThermalCondition::Isothermal(Temperature::new(2.0)),
+        };
+        spike = spike.with_wall(side, wall).unwrap();
+        constant = constant.with_wall(side, wall).unwrap();
+    }
+    let report = spike
+        .advance_stabilized(
+            &mut actual,
+            Time::new(1e-5),
+            StabilizedDissipationControl::default(),
+            || false,
+        )
+        .unwrap()
+        .transport;
+    check(report);
+    check(
+        constant
+            .advance_stabilized(
+                &mut expected,
+                Time::new(1e-5),
+                StabilizedDissipationControl::default(),
+                || false,
+            )
+            .unwrap()
+            .transport,
+    );
+    assert_eq!(actual.states(), expected.states());
+    assert_ne!(actual.states(), before);
+    assert!(report.maximum_parabolic_number < 0.002);
+    for side in BoundarySide::ALL {
+        for (left, right) in spike
+            .boundary_impulses(side)
+            .zip(constant.boundary_impulses(side))
+        {
+            assert_eq!(left.species_masses, right.species_masses);
+            assert_eq!(left.momentum, right.momentum);
+            assert_eq!(left.energy, right.energy);
+        }
+    }
 }
