@@ -12,9 +12,12 @@
 //! thermal network, without an inferred moving-area transport approximation.
 
 pub mod material;
+/// Current-area pressure drives the same retained thermal feedback.
+pub mod pressure;
 /// The original explicit cell/query protocol also binds porous families.
 pub use super::FiniteThermoplasticCell as FiniteThermalPorousCell;
 pub use material::FiniteThermalPorousMaterialBinding;
+pub use pressure::{FiniteThermalPorousPressureCandidate, FiniteThermalPorousPressureEnergy};
 
 use std::collections::BTreeSet;
 
@@ -290,13 +293,18 @@ impl<'a> FiniteThermalPorousSolid<'a> {
 
 /// Atomic native thermal/porous/observer proposal. A refusal mutates none of the
 /// accepted inputs; consumers commit the complete candidate as one endpoint.
-pub struct FiniteThermalPorousCandidate<'a, 't, O> {
+pub struct FiniteThermalPorousCandidate<
+    'a,
+    't,
+    O,
+    A = fs_solid::hyper3::plastic::thermal::FiniteThermoplasticTetEnergy,
+> {
     thermal: DepositionSimulation<'t>,
     solid: FiniteThermalPorousSolid<'a>,
     observer: O,
-    report: FiniteThermoplasticReport<HyperTetSolution>,
+    report: FiniteThermoplasticReport<HyperTetSolution, A>,
 }
-impl<'a, 't, O> FiniteThermalPorousCandidate<'a, 't, O> {
+impl<'a, 't, O, A> FiniteThermalPorousCandidate<'a, 't, O, A> {
     pub const fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
@@ -306,7 +314,7 @@ impl<'a, 't, O> FiniteThermalPorousCandidate<'a, 't, O> {
     pub const fn observer(&self) -> &O {
         &self.observer
     }
-    pub const fn report(&self) -> &FiniteThermoplasticReport<HyperTetSolution> {
+    pub const fn report(&self) -> &FiniteThermoplasticReport<HyperTetSolution, A> {
         &self.report
     }
     pub fn into_parts(
@@ -315,7 +323,7 @@ impl<'a, 't, O> FiniteThermalPorousCandidate<'a, 't, O> {
         DepositionSimulation<'t>,
         FiniteThermalPorousSolid<'a>,
         O,
-        FiniteThermoplasticReport<HyperTetSolution>,
+        FiniteThermoplasticReport<HyperTetSolution, A>,
     ) {
         (self.thermal, self.solid, self.observer, self.report)
     }

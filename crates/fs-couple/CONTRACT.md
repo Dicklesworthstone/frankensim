@@ -3332,3 +3332,39 @@ the 16/32/64-subdivision RK4 convergence checks and energy closure without
 tolerance changes. The additional full coupled-attachment regression covers
 component offsets, prior histories, initialization, loss counting and cold
 binding; it is authored but unexecuted in the available dependency closure.
+
+## Thermal porous follower pressure through enthalpy feedback
+
+`finite_plastic::porous::FiniteThermalPorousSolid::advance_with_pressure` and
+`advance_with_pressure_and_coupling` carry the original finite-solid follower
+pressure through every native thermal proposal. The existing bounded Picard or
+IQN-ILS iteration repeatedly solves from the same accepted deformation,
+temperature, plastic metric and optional velocity. Original material/caloric
+objects, reference volume, reference density and cell mass remain bound.
+
+The pressure-aware candidate retains the original material report plus the
+native `FinitePorousPressureEnergy`. Uniform pressure uses `-p delta(V)`;
+per-face pressure retains the straight-displacement-segment work convention,
+and spatial pressure fields retain their native potentials. The coupled energy
+identity includes pressure path work once and the complete signed external-work
+defect (material endpoint defect plus pressure endpoint correction). The
+material's endpoint defect remains independently visible. Only original
+physical yield heat and reciprocal thermal exchange are deposited into the
+caloric timeline. Pressure correction and backward-Euler numerical kinetic loss
+never become heat. Existing unpressured calls retain their report type and
+arithmetic path; the shared feedback owner subtracts additional pressure work
+only when it is nonzero. That pressure-aware identity uses compensated sums
+for opposing boundary work and keeps kinetic change and numerical loss separate
+inside the reduction.
+
+Focused G1/G3 regressions extend `finite_porous_enthalpy`: a free displacement
+and its temperature/plastic volume are recovered from an independent
+hydrostatic pressure and caloric root with both coupling methods; prescribed
+motion checks exact volume work, source reference mass, numerical-loss
+separation, zero-pressure compatibility, late observer/iteration rollback and
+successful retry. These are authored constitutive fixtures, not experimental
+validation. The supplied thermal network still uses reference conductances; no
+deformed heat-transfer area, wetting law, exterior-fluid evolution, pore-fluid
+transport or global time-accuracy certificate is inferred.
+
+Native regression execution remains unverified on the exhausted shared build host.
