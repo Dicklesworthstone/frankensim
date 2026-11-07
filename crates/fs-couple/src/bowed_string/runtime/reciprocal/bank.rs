@@ -412,12 +412,17 @@ impl ReciprocalStringBank {
     /// different stations and different receiving bodies. The static spring
     /// Schur complement and first-order viscous reduction use at most three
     /// native connection columns per pair, within the declared network budget.
+    /// Resolved torsional springs/dashpots can share these receiving bodies:
+    /// their angular rows have exactly zero bending participation, so they
+    /// pass through the bending Schur reduction unchanged. Body-mediated twist/
+    /// transverse exchange remains in the same coupled solve. Omitted torsion
+    /// is not approximated by this bending compliance.
     /// Fixed bows opt into the same correction with
     /// `MultiBowStringBank::with_bow_residual_flexibility` after their assembly.
     ///
     /// # Errors
     /// After motion, playback or bound nonlinear storage; repeated; beside
-    /// rotational bridges, constant-loss bridge anchors, more than one extra
+    /// constant-loss bridge anchors, more than one extra
     /// directed bridge per string or other than one original bridge; or
     /// the original assembly's own refusals.
     pub fn with_residual_flexibility(mut self, gate: &CancelGate) -> Result<Self, ReciprocalStringError> {
@@ -628,7 +633,7 @@ fn assemble_sources(
         return Err(invalid("reciprocal assembly requires aligned strings, bodies and an interior bow"));
     }
     if residual && (sources.is_none()
-        || !rotational_body_connections.is_empty() || !constant_loss.is_empty()
+        || !constant_loss.is_empty()
         || connections.iter().any(|c| c.len() != 1)) {
         // One original bridge; a directed companion shares its full matrix below.
         return Err(invalid("residual flexibility requires one plain original bridge per material string"));
@@ -698,6 +703,9 @@ fn assemble_sources(
     for connection in rotational_body_connections {
         poll(gate)?;
         let members = sources.ok_or_else(|| invalid("a rotational bridge requires original material string sources"))?;
+        // lower verifies an exactly zero bending prefix. The residual Schur
+        // elimination therefore cannot alter this resolved torque law; its
+        // receiving body still couples twist and bending in the native solve.
         links.push(connection.lower(cards, members, &bodies)?);
     }
     for connection in body_connections {

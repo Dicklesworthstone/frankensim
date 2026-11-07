@@ -10,6 +10,9 @@ use fs_dcontact::Obstacle;
 #[path = "coupled_residual.rs"]
 mod coupled;
 
+#[path = "rotational_residual.rs"]
+mod rotational;
+
 fn multi(bank: ReciprocalStringBank, gate: &CancelGate) -> MultiBowStringBank {
     bank.with_additional_bows(
         vec![],

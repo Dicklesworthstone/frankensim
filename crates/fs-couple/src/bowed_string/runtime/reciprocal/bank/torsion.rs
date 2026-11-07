@@ -196,6 +196,9 @@ impl StringBodyRotationConnection {
             }
             *value = scaled;
         }
+        if left[..transverse_modes].iter().any(|x| *x != 0.0) {
+            return Err(invalid("a torsional bridge cannot include transverse bending participation"));
+        }
         if left.iter().any(|x| !x.is_finite()) || left[transverse_modes..].iter().all(|x| *x == 0.0) {
             return Err(invalid("rotational bridge's string surface map is not representable"));
         }
@@ -215,6 +218,12 @@ impl ReciprocalStringBank {
     /// The original pressure weights and dry-interface binding survive. Body
     /// modal initial states are retained; string states must still be at rest.
     /// All source identities and rotational inputs survive multibow scheduling.
+    /// Omitted-bending residual flexibility may bind before or after these
+    /// links. The actual lowered angular row is checked to have an exactly
+    /// zero bending prefix, so its spring, dashpot, rest angle and torque map
+    /// remain unchanged by that Schur reduction. Both transverse polarizations
+    /// and retained torsion still exchange energy through their shared body.
+    /// No omitted torsional compliance or extra torsional loss is invented.
     ///
     /// This prepares the complete network again, without redoing any material
     /// queries or body eigenproblem. It cannot modify an ongoing performance.

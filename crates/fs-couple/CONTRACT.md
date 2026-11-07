@@ -3070,10 +3070,36 @@ the original law and clearance bits. Rest extensions remain fixed source data;
 time-varying support rest, migrating residual maps and existing incompatible
 nonlinear/history lanes remain unsupported.
 
-More than one extra directed bridge per string, rotational/constant-loss
-residual bridges and the existing mixed-contact exclusions remain outside
-this lane. Preparation occurs once at binding, with no additional per-sample
-projection or integration path.
+Resolved torsional termination springs/dashpots may coexist with scalar or
+two-polarization bending residual supports, in either binding order. The actual
+source-derived angular row has an exactly zero transverse prefix; rotational
+lowering checks that invariant explicitly. Eliminating omitted bending modes
+therefore leaves the original torque law, angular receiving-body map, rest angle
+and resolved rotary inertia unchanged. The complete native modal operator still
+exchanges twist/transverse energy through a shared body.
+
+The original work-conjugate lowering remains `x = r theta`, `F = tau/r`,
+`k_x = k_theta/r^2`, with the material section's actual outer radius. Native
+spring/rest energy and viscous torque loss remain with the original network.
+No omitted torsional compliance or extra torsional loss is inferred from the
+bending Green function. This does not add a six-DOF or geometrically exact rod
+termination, contact-foot separation, or dynamic unresolved poles. Bow residual
+corrections leave the retained twist row unchanged; normal stop corrections
+retain zero twist participation. Every torque law consumes its own native
+connection column, alongside the coupled bending factorization.
+
+More than one extra directed bridge per string, constant-loss residual bridges
+and the existing mixed-contact exclusions remain outside this lane. Preparation
+occurs once at binding, with no additional per-sample projection or integration
+path.
+
+Focused execution: 54 actual-source angular/torque/Schur/column cases at 4/16/64
+retained bending modes, three support-axis relationships, two receiving bodies
+and signed rest angles agreed with independent 100,000-mode bending tails and
+the original physical angular work/energy. Full bank binding-order, torque-driven
+release and bow/stop continuation regressions are authored in
+`tests/material_string_torsion/polarization/rotational_residual.rs`; their native
+integration execution remains unperformed in this resource-constrained session.
 
 Support corrections retain every original receiving body. The generic friction
 and normal-contact owners accept one sparse collection of signed attachments
