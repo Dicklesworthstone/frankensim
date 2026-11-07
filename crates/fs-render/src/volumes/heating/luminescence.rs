@@ -21,7 +21,10 @@
 pub mod absorption;
 pub mod phosphorescence;
 pub use absorption::{AbsorbingLuminescenceEnvironment, LuminescenceAbsorptionTolerance};
-pub use phosphorescence::{PhosphorescenceReceiver, SingletTripletLimits, SingletTripletSource};
+pub use phosphorescence::{
+    PhosphorescenceAnnihilation, PhosphorescenceReceiver, SingletTripletLimits,
+    SingletTripletSource,
+};
 mod recycling;
 pub use fs_thermal::luminescence::recycling::RecyclingLimits;
 use phosphorescence::SingletTripletFeedback;
@@ -174,6 +177,8 @@ pub struct LuminescenceEnergy<const M: usize> {
     pub prompt_heat_j: f64,
     /// Stored excitation released by nonradiative transitions, joules.
     pub nonradiative_heat_j: f64,
+    /// Heat from triplet-pair events after any productive singlet creation, joules.
+    pub annihilation_heat_j: f64,
     /// Heat supplied by downhill singlet-to-triplet intersystem crossing.
     pub crossing_heat_j: f64,
     /// Heat drawn from the thermal bath by uphill triplet-to-singlet crossing.
@@ -218,6 +223,7 @@ struct Accounts<const N: usize, const M: usize> {
     unresolved: [CheckedSum; M],
     prompt: CheckedSum,
     dark: CheckedSum,
+    annihilation: CheckedSum,
     crossing: CheckedSum,
     reverse_crossing: CheckedSum,
     relaxation: CheckedSum,
@@ -239,6 +245,7 @@ impl<const N: usize, const M: usize> Default for Accounts<N, M> {
             unresolved: [CheckedSum::default(); M],
             prompt: CheckedSum::default(),
             dark: CheckedSum::default(),
+            annihilation: CheckedSum::default(),
             crossing: CheckedSum::default(),
             reverse_crossing: CheckedSum::default(),
             relaxation: CheckedSum::default(),
@@ -734,6 +741,7 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
                 match &mut self.singlet_triplet {
                     Some(coupling) => Some(coupling.advance(
                         &self.source,
+                        cell.grid_cell,
                         cell.state_stored_j,
                         pump.value()?,
                         duration_s,
@@ -786,8 +794,10 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
                     (emitted, relaxation, 0.0, 0.0)
                 }
             };
+            let annihilation = coupled.map_or(0.0, |step| step.annihilation_heat_j);
             let mut heat = CheckedSum::default();
             heat.add(prompt)?;
+            heat.add(annihilation)?;
             heat.add(step.nonradiative_heat_j)?;
             heat.add(relaxation)?;
             heat.add(crossing)?;
@@ -846,6 +856,7 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
             accounts.roundoff.add(balance.value()?.abs())?;
             accounts.prompt.add(prompt)?;
             accounts.dark.add(step.nonradiative_heat_j)?;
+            accounts.annihilation.add(annihilation)?;
             accounts.crossing.add(crossing)?;
             accounts.reverse_crossing.add(reverse_crossing)?;
             accounts.relaxation.add(relaxation)?;
@@ -1007,6 +1018,7 @@ impl<const N: usize, const M: usize> Accounts<N, M> {
             unresolved_radiation_j: [0.0; M],
             prompt_heat_j: self.prompt.value()?,
             nonradiative_heat_j: self.dark.value()?,
+            annihilation_heat_j: self.annihilation.value()?,
             crossing_heat_j: self.crossing.value()?,
             reverse_crossing_heat_absorbed_j: self.reverse_crossing.value()?,
             relaxation_heat_j: self.relaxation.value()?,
@@ -1020,6 +1032,7 @@ impl<const N: usize, const M: usize> Accounts<N, M> {
         for value in [
             energy.prompt_heat_j,
             energy.nonradiative_heat_j,
+            energy.annihilation_heat_j,
             energy.crossing_heat_j,
             -energy.reverse_crossing_heat_absorbed_j,
             energy.relaxation_heat_j,

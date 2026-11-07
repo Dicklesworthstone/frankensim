@@ -1,5 +1,7 @@
 //! Coupled phosphorescent photon return, receiver heat and dark persistence.
 
+mod annihilation;
+
 use super::*;
 use fs_blake3::ContentHash;
 use fs_render::volumes::heating::exchange::RadiativeThermalCell;
@@ -226,7 +228,11 @@ fn pulse(heating: Heating, end_s: f64) -> Heating {
 
 fn partition(heating: &Heating) {
     let e = heating.energy();
-    let heat = e.prompt_heat_j + e.nonradiative_heat_j + e.relaxation_heat_j + e.crossing_heat_j
+    let heat = e.prompt_heat_j
+        + e.nonradiative_heat_j
+        + e.annihilation_heat_j
+        + e.relaxation_heat_j
+        + e.crossing_heat_j
         - e.reverse_crossing_heat_absorbed_j
         + e.secondary_absorption_heat_j;
     close(heat, heating.pump_energy().thermal_input_j);

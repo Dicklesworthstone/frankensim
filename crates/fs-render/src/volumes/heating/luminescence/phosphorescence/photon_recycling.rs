@@ -7,6 +7,7 @@
 
 use super::super::absorption::AbsorbingLuminescenceEnvironment;
 use super::super::{Cell, LuminescenceSource, LuminescentOpticalHeating};
+use super::annihilation::NetworkAnnihilation;
 use super::{
     CoupledStep, HC_J_NM, SingletTripletFeedback, SingletTripletLimits, finite, invalid,
     preserve_checkpoint, sum,
@@ -72,7 +73,8 @@ pub(in super::super) struct CoupledRecyclingStep<const M: usize> {
 impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
     /// Recycle emitted photons through explicitly admitted spin-state channels.
     /// Bind after the singlet/triplet source and absorbing optical environment,
-    /// before the first native advance. Missing receiver mappings stay passive.
+    /// before optional annihilation binding and the first native advance.
+    /// Missing receiver mappings stay passive.
     /// A mapped, initially unilluminated receiver acquires the same sourced
     /// singlet/triplet material law, refreshed at its own native temperature.
     ///
@@ -91,13 +93,12 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
         if self.pending.is_some()
             || self.energy.duration_s != 0.0
             || self.recycling.is_some()
-            || self
-                .singlet_triplet
-                .as_ref()
-                .is_none_or(|coupling| coupling.photon_recycling.is_some())
+            || self.singlet_triplet.as_ref().is_none_or(|coupling| {
+                coupling.photon_recycling.is_some() || coupling.annihilation.is_some()
+            })
         {
             return Err(invalid(
-                "phosphorescent photon recycling requires an unadvanced coupled source",
+                "phosphorescent recycling requires unadvanced coupling before annihilation binding",
             ));
         }
         self.check_state(thermal, true, &mut checkpoint)?;
@@ -258,10 +259,21 @@ impl<const M: usize> SingletTripletFeedback<M> {
             pump_rates.push([finite(pump.value()? / energies[0])?, 0.0]);
             models.push(model);
         }
+        let annihilation = self
+            .annihilation
+            .as_ref()
+            .and_then(|feedback| feedback.network_parameters(cells));
         self.photon_recycling
             .as_mut()
             .expect("bound photon recycling")
-            .advance::<M>(&models, &populations, &pump_rates, duration_s, checkpoint)
+            .advance::<M>(
+                &models,
+                &populations,
+                &pump_rates,
+                duration_s,
+                annihilation.as_ref(),
+                checkpoint,
+            )
             .map(Some)
     }
 }
@@ -384,6 +396,7 @@ impl PhotonRecyclingFeedback {
         populations: &[[f64; 2]],
         pump_rates: &[[f64; 2]],
         duration_s: f64,
+        annihilation: Option<&NetworkAnnihilation>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<CoupledRecyclingStep<M>, OpticalHeatingError> {
         let same_models = self.prepared.plan.models() == models;
@@ -405,11 +418,28 @@ impl PhotonRecyclingFeedback {
             })?;
             self.prepared = Arc::new(Prepared { duration_s, plan });
         }
-        let native = preserve_checkpoint(checkpoint, |cancelled| {
-            self.prepared
-                .plan
-                .advance_with_cancel(populations, pump_rates, cancelled)
-        })?;
+        let (native, annihilation_heat_j) = match annihilation {
+            Some(annihilation) => {
+                let step = preserve_checkpoint(checkpoint, |cancelled| {
+                    self.prepared.plan.advance_with_annihilation(
+                        populations,
+                        pump_rates,
+                        &annihilation.laws,
+                        annihilation.limits,
+                        cancelled,
+                    )
+                })?;
+                (step.linear, Some(step.annihilation_heat_j))
+            }
+            None => (
+                preserve_checkpoint(checkpoint, |cancelled| {
+                    self.prepared
+                        .plan
+                        .advance_with_cancel(populations, pump_rates, cancelled)
+                })?,
+                None,
+            ),
+        };
         let mut cells = Vec::with_capacity(models.len());
         let mut recycled_excitation_j = Vec::with_capacity(models.len());
         let mut receiver_partition = vec![CheckedSum::default(); models.len()];
@@ -423,6 +453,7 @@ impl PhotonRecyclingFeedback {
                 relaxation_heat_j: sum(native.relaxation_heat_j[index])?,
                 crossing_heat_j: native.crossing_heat_j[index],
                 reverse_crossing_heat_absorbed_j: native.reverse_crossing_heat_absorbed_j[index],
+                annihilation_heat_j: annihilation_heat_j.as_ref().map_or(0.0, |heat| heat[index]),
             });
             let recycled = sum(native.recycled_energy_j[index])?;
             recycled_excitation_j.push(recycled);

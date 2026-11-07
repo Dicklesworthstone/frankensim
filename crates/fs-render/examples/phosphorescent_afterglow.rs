@@ -2,10 +2,12 @@
 //!
 //! Run: cargo run -p fs-render --example phosphorescent_afterglow \
 //!   --no-default-features --features optical-heating
+//! Add `-- --triplet-pairs` to enable density-dependent delayed fluorescence.
 //!
 //! All coefficients are SYNTHETIC: this demonstrates spin-state kinetics,
 //! thermal conservation and volume observation, not a measured phosphor.
-//! The dilute model has no traps, saturation or oxygen chemistry. A 0.5 s
+//! Optional pair encounters use an explicitly authored coefficient and active
+//! volume. The model has no traps, saturation or oxygen chemistry. A 0.5 s
 //! optical pulse excites a 1 cm cube; the singlet has a 100 ns intrinsic
 //! lifetime while the triplet continues to emit for seconds.
 
@@ -18,7 +20,8 @@ use fs_render::volumes::heating::illumination::schedule::{
     SpectralPowerSchedule, SpectralPowerSegment,
 };
 use fs_render::volumes::heating::luminescence::{
-    LuminescenceSource, LuminescentOpticalHeating, SingletTripletLimits, SingletTripletSource,
+    LuminescenceSource, LuminescentOpticalHeating, PhosphorescenceAnnihilation,
+    SingletTripletLimits, SingletTripletSource,
 };
 use fs_render::volumes::transport::luminescence::LuminescenceGrid;
 use fs_render::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget, MassAbsorptionSpectrum};
@@ -27,6 +30,8 @@ use fs_thermal::enthalpy::{
     DepositionSimulation, Event, MaterialId, StepConfig, ThermalLaw, TimedEvent,
 };
 use fs_thermal::luminescence::ArrheniusQuenching;
+use fs_thermal::luminescence::transfer::annihilation::TripletAnnihilation;
+use fs_thermal::luminescence::transfer::recycling::AnnihilationLimits;
 use std::error::Error;
 
 struct Caloric;
@@ -63,7 +68,7 @@ fn state(
     )?)
 }
 
-fn run(cx: &Cx<'_>) -> Result<(), Box<dyn Error>> {
+fn run(cx: &Cx<'_>, triplet_pairs: bool) -> Result<(), Box<dyn Error>> {
     let density = [1000.0];
     let medium = AbsorbingGrid::try_new(
         cx,
@@ -148,6 +153,23 @@ fn run(cx: &Cx<'_>) -> Result<(), Box<dyn Error>> {
         &thermal,
         || Ok(()),
     )?;
+    let heating = if triplet_pairs {
+        // Pair-event coefficient, not the two-triplet loss coefficient.
+        // Counts refer to the complete 1 cm cube: V = 1e-6 m³.
+        heating.with_triplet_annihilation(
+            &[PhosphorescenceAnnihilation {
+                grid_cell: 0,
+                law: TripletAnnihilation::try_new(1e-22, 1e-6, 0.8)?,
+            }],
+            AnnihilationLimits {
+                absolute_energy_tolerance_j: 1e-13,
+                relative_tolerance: 1e-6,
+                maximum_substeps: 512,
+            },
+        )?
+    } else {
+        heating
+    };
     let mut heating = heating.with_pump_schedule(SpectralPowerSchedule::try_new(
         &[SpectralPowerSegment {
             start_s: 0.0,
@@ -157,9 +179,11 @@ fn run(cx: &Cx<'_>) -> Result<(), Box<dyn Error>> {
         }],
         1,
     )?)?;
-    println!("Synthetic dilute singlet/triplet example; pump switches off at 0.5 s.");
     println!(
-        "time_s,singlet_W,triplet_W,stored_J,native_heat_J,temperature_K,triplet_radiance_W_m2_sr,closure_J"
+        "Synthetic singlet/triplet example; pair encounters={triplet_pairs}; pump switches off at 0.5 s."
+    );
+    println!(
+        "time_s,singlet_W,triplet_W,stored_J,native_heat_J,annihilation_heat_J,temperature_K,singlet_radiance_W_m2_sr,triplet_radiance_W_m2_sr,closure_J"
     );
     for target in [0.25, 0.5, 1.0, 2.0, 5.0, 10.0] {
         let (next, accepted, _) = thermal.advance_observed(&heating, target, config, || Ok(()))?;
@@ -181,12 +205,14 @@ fn run(cx: &Cx<'_>) -> Result<(), Box<dyn Error>> {
             0.03,
         )?;
         println!(
-            "{target:.2},{:.9e},{:.9e},{:.9e},{:.9e},{:.9},{:.9e},{:.3e}",
+            "{target:.2},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9},{:.9e},{:.9e},{:.3e}",
             emission[0],
             emission[1],
             heating.energy().stored_excitation_j,
             heating.pump_energy().thermal_input_j,
+            heating.energy().annihilation_heat_j,
             thermal.temperature_k(CellId(1))?,
+            observed.emitted_radiance_w_m2_sr[0],
             observed.emitted_radiance_w_m2_sr[1],
             heating.energy().residual_j,
         );
@@ -195,20 +221,29 @@ fn run(cx: &Cx<'_>) -> Result<(), Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let arguments: Vec<_> = std::env::args().skip(1).collect();
+    let triplet_pairs = match arguments.as_slice() {
+        [] => false,
+        [flag] if flag == "--triplet-pairs" => true,
+        _ => return Err("usage: phosphorescent_afterglow [--triplet-pairs]".into()),
+    };
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     pool.scope(|arena| {
-        run(&Cx::new(
-            &gate,
-            arena,
-            StreamKey {
-                seed: 0,
-                kernel_id: 194,
-                tile: 0,
-                iteration: 0,
-            },
-            Budget::INFINITE,
-            ExecMode::Deterministic,
-        ))
+        run(
+            &Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 0,
+                    kernel_id: 194,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            ),
+            triplet_pairs,
+        )
     })
 }

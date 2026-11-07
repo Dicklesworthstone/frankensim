@@ -3,8 +3,9 @@
 //! The pump excites the original singlet source. Intersystem crossing transfers
 //! actual populations to a separate triplet store; reverse crossing takes the
 //! state-energy gap from the bath. Each state keeps its own photon spectrum.
-//! This dilute first-order mechanism does not imply trap-mediated persistent
-//! luminescence, ground-state depletion, annihilation or measured spin rates.
+//! The base crossing mechanism is dilute and first order. Photon recycling and
+//! pair annihilation require separate explicit bindings; neither establishes
+//! trap-mediated persistence, ground-state depletion or measured spin rates.
 
 use super::{
     LuminescenceSource, LuminescentOpticalHeating, finite, invalid, partition, rate_power,
@@ -20,8 +21,11 @@ use std::sync::Arc;
 #[cfg(feature = "material-state")]
 use std::{collections::BTreeMap, sync::Mutex};
 
+mod annihilation;
 #[cfg(feature = "material-state")]
 mod material;
+use annihilation::AnnihilationFeedback;
+pub use annihilation::{AnnihilationLimits, PhosphorescenceAnnihilation, TripletAnnihilation};
 mod photon_recycling;
 pub use photon_recycling::PhosphorescenceReceiver;
 use photon_recycling::PhotonRecyclingFeedback;
@@ -148,6 +152,7 @@ pub(super) struct SingletTripletFeedback<const M: usize> {
     pub(super) source: SingletTripletSource<M>,
     prepared: Option<Arc<Prepared>>,
     photon_recycling: Option<PhotonRecyclingFeedback>,
+    annihilation: Option<AnnihilationFeedback>,
     #[cfg(feature = "material-state")]
     temperatures: Mutex<TemperatureCache>,
     #[cfg(feature = "material-state")]
@@ -160,6 +165,7 @@ impl<const M: usize> Clone for SingletTripletFeedback<M> {
             source: self.source.clone(),
             prepared: self.prepared.clone(),
             photon_recycling: self.photon_recycling.clone(),
+            annihilation: self.annihilation.clone(),
             // Only immutable source/propagator data are shared. A candidate
             // starts with its own empty cache, independent of accepted stores.
             #[cfg(feature = "material-state")]
@@ -179,6 +185,7 @@ pub(super) struct CoupledStep<const M: usize> {
     pub relaxation_heat_j: f64,
     pub crossing_heat_j: f64,
     pub reverse_crossing_heat_absorbed_j: f64,
+    pub annihilation_heat_j: f64,
 }
 
 impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
@@ -212,6 +219,7 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
             source: coupling,
             prepared: None,
             photon_recycling: None,
+            annihilation: None,
             #[cfg(feature = "material-state")]
             temperatures: Mutex::new(TemperatureCache::default()),
             #[cfg(feature = "material-state")]
@@ -296,12 +304,23 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
             }
         }
         let source_identity = hash.finalize();
-        match &coupling.photon_recycling {
+        let source_identity = match &coupling.photon_recycling {
             Some(recycling) => {
                 let mut hash =
                     DomainHasher::new("org.frankensim.render.singlet-triplet-recycling-source.v1");
                 hash.update(source_identity.as_bytes());
                 hash.update(recycling.identity().as_bytes());
+                hash.finalize()
+            }
+            None => source_identity,
+        };
+        match &coupling.annihilation {
+            Some(annihilation) => {
+                let mut hash = DomainHasher::new(
+                    "org.frankensim.render.singlet-triplet-annihilation-source.v1",
+                );
+                hash.update(source_identity.as_bytes());
+                hash.update(annihilation.identity().as_bytes());
                 hash.finalize()
             }
             None => source_identity,
@@ -399,6 +418,7 @@ impl<const M: usize> SingletTripletFeedback<M> {
     pub(super) fn advance(
         &mut self,
         singlet: &LuminescenceSource<M>,
+        grid_cell: usize,
         stores_j: [f64; 2],
         pump_w: f64,
         duration_s: f64,
@@ -406,6 +426,21 @@ impl<const M: usize> SingletTripletFeedback<M> {
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<CoupledStep<M>, OpticalHeatingError> {
         let model = self.model_at_temperature(singlet, temperature_k)?;
+        if let Some(annihilation) = &mut self.annihilation
+            && let Some(step) = annihilation.advance(
+                grid_cell,
+                singlet,
+                &self.source.triplet,
+                model,
+                stores_j,
+                pump_w,
+                duration_s,
+                self.source.limits,
+                checkpoint,
+            )?
+        {
+            return Ok(step);
+        }
         if self
             .prepared
             .as_ref()
@@ -451,6 +486,7 @@ impl<const M: usize> SingletTripletFeedback<M> {
             relaxation_heat_j: finite(singlet_heat + triplet_heat)?,
             crossing_heat_j: step.crossing_heat_j,
             reverse_crossing_heat_absorbed_j: step.reverse_crossing_heat_absorbed_j,
+            annihilation_heat_j: 0.0,
         })
     }
 

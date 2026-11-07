@@ -3094,10 +3094,32 @@ G1/G3/G4 regressions in `tests/optical_heating/phosphorescence.rs` compare
 population/energy transfer with independent Bateman solutions, observe dark
 afterglow through the existing radiance grid, exercise reverse-crossing bath
 exchange and thermal quenching, and check partition/restart, retry and refusal.
-This is a dilute molecular singlet/triplet mechanism with explicitly supplied
-rates. It does not claim finite ground-state depletion, triplet annihilation,
-trap-mediated persistent phosphors, coherent spin dynamics, oxygen transport,
-measured material constants or an automatically enforced detailed-balance law.
+The unextended crossing mechanism is dilute and first order. Optional
+`with_triplet_annihilation` binds a `PhosphorescenceAnnihilation` law to each
+explicitly selected active optical cell. Its pair-event coefficient, active
+population volume and singlet yield remain authored inputs; the renderer
+never substitutes thermal mass or volume. Each event consumes two triplets
+and creates at most one singlet, with per-event energy admission. The
+separate `annihilation_heat_j` account also enters the actual native thermal
+source and global energy closure.
+
+Both independent cells and full spectral photon-recycling networks use the
+native controlled nonlinear owner. Original linear rates still refresh at
+each cell's actual temperature, and absent or zero-rate pair laws retain the
+original linear path. Independent cells incur no coupled-network state cap;
+nonlinear accuracy/work controls apply per independent cell or once to the
+complete coupled network. Bind photon recycling before annihilation when
+unpumped active receivers are needed. Law getters and source identity retain
+the explicit coefficients, volume, yield, cell mapping and numerical controls.
+The density and productive-afterglow regressions include independently
+derived steady-state and external ODE references; these are manufactured
+physics fixtures, not measured material data.
+
+The `phosphorescent_afterglow` example accepts `--triplet-pairs` and reports
+pair heat together with singlet and triplet radiance. None of these paths
+claims finite ground-state depletion, trap-mediated persistent phosphors,
+coherent spin dynamics, oxygen transport, measured material constants or an
+automatically enforced detailed-balance law.
 
 With `material-state`, `SingletTripletSource::try_material_temperature`
 binds a complete `fs_material::phosphorescence::PhosphorescenceStatePoint`
