@@ -3360,6 +3360,19 @@ a shear modulus 4 to 5 times steel's, so it may hold more than the string's own 
 bending viscosity is written as 0 because no transverse internal loss is measured; such a string loses
 transverse energy only to its air drag and its supports.
 
+`packs/violin-string-super-sensitive-e-pickering1985-music-wire-section.fsmatpk` is Pickering's Super Sensitive
+solid-steel E (row s02), for `bending-loss thermoelastic`. `xtask matdb-pack` builds it from the source that
+`gen_super_sensitive_e_pack.py` writes into `data/matdb/seed-v1`. It keeps the printed mean radius (0.132 mm; use that
+radius in the string record) and linear density, but takes music wire's moduli instead of the stiffnesses that the
+printed partials and pendulum imply: Young's modulus 212 GPa (Heptonstall, Waller & Robertson) and shear modulus
+79.29 GPa (Fuchs 1968, Table 2, quoting the SAE Manual on Helical Springs), with Heptonstall's Table 3 expansion, heat
+capacity and conductivity at 293.15 K only. Its manifest declares `T` an absolute temperature, which the thermoelastic
+law requires. That the string is high-carbon music wire is the pack author's assumption. Its inharmonicity follows
+from steel, not from Pickering's printed cents; by the Dominant method those read E 2.3 and G 5.3 times these values.
+Its torsional loss factor, 0.0021, is the printed decrement treated as for the Dominant strings, with the string's
+share of the swing energy taken from the printed stiffness. The bending viscosity is written as 0: the thermoelastic
+law supplies that loss, and any further anelastic loss is unknown.
+
 This executable selects homogeneous, bonded or close-wound circular strings, fixed tension or
 fixed-extension supports and fixed rotational ends. Its shared body is the legacy
 simply supported isotropic flat plate or an explicit material plate, shell or

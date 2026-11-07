@@ -1,0 +1,39 @@
+frankensim.matdb-source.v1
+observation	super-sensitive-e-section	Super Sensitive E string, solid steel (the table's note 2); new, medium gauge (for the Super Sensitive E strings both medium and thin were chosen), bought from well-known distributors; the table has one row per string type, and the paper says six of each were measured where possible with an extremely small spread	Solid circular section of Pickering (1985) as committed in violin-strings-whole-pickering-jcas1985, row s02: radius 0.000132 m (mean relaxed diameter / 2); density = linear density 0.000443 kg/m / (pi r^2). The printed tension 84.01 N tuned it to E on his 0.329 m bed.	A solid steel string (the table's note 2). Temperature and humidity are not stated by the source. The validity band omega 0 to 2 pi 40 kHz and T 280 to 320 K is the band in which this use is DECLARED by the pack author, not a measured band.
+observation	music-wire-moduli	High-carbon steel music wire	young_modulus 2.12e+11 Pa from the committed pack steel-music-wire-string-heptonstall-ligo-p1400229 (Heptonstall, Waller & Robertson, Section III.A, tensile tests on untreated music wire); shear_modulus 7.929e+10 Pa from the committed pack music-wire-spring-moduli-fuchs-1968 (Fuchs 1968, Table 2: music wire, cold wound, G = 11.5 Msi, quoting the SAE Manual on Helical Springs)	ASSUMPTION named by the pack author: Pickering's solid-steel E is high-carbon music wire. Pickering's own measurements do not give these moduli: by the method of gen_dominant_string_packs.py his partials (B 0.000124333024, rms 0.82 cents over 2-8) and torsional stiffness (k 24.67 g cm/rad) read E 4.80423151e+11 Pa and G 4.17263244e+11 Pa on this string, 2.3 and 5.3 times these; steel's E gives B 5.48653851e-05 on his bed. So this string's inharmonicity follows from steel's E, not from his printed cents. The G value is a secondary spring-industry figure. Both are written over the declared use band of this pack (T 280 to 320 K), not their sources' single temperature.
+observation	super-sensitive-e-twist-loss	the same string	Pickering (1985) printed damping coefficient 0.38 = 100 x the logarithmic decrement of his torsion pendulum (p. 6: 4.12 g, 5.4016 Hz, effective torsional stiffness 30.355 g cm/rad) clamped at the string's centre, swinging at 7.273 Hz: system loss factor 0.001210; the string's own torsional loss factor 0.001405 to 0.002698 (the pendulum's own loss from 0 to 0.001051, the least over the table's 35 strings of the value that gives a string all of its system loss, reached by s03); written 0.002051, the midpoint	The string's share of the swing energy uses Pickering's printed k, which his measured swing frequency gives; that k reads more than music wire's G implies (see music-wire-moduli), so the share, and with it this loss factor, belong to his clamped specimen. Measured near 7 Hz and applied as a CONSTANT loss factor at every twist mode's own frequency, as in the Dominant packs: kelvin_voigt_shear_viscosity = eta_t G / omega_ref with the music-wire G and shear_viscosity_constant_loss_reference_omega = omega_ref = 2 pi 200 rad/s, an encoding frequency only. The constant-Q form is measured for wound strings (Wollman, Smith & Wolfe 2010; Woodhouse & Loach 1999); for a solid string it is an assumption.
+observation	super-sensitive-e-bending-loss	the same string	No measurement: Pickering (1985) reports no transverse damping	kelvin_voigt_bending_viscosity is written as 0. The thermal values below let the card select the circular thermoelastic bending loss of a homogeneous solid section; any further anelastic loss stays UNKNOWN (a steel violin E's measured bending loss factor 0.002: Galluzzo, Woodhouse & Mansour 2017, Acta Acust. 103:1080-1099, Table 1).
+observation	music-wire-thermal	Music wire thermal parameters used by the authors	Table 3 lists thermal expansion 1.1 x 10^-5 /K, thermal conductivity 49 W/m/K and specific heat capacity 486 J/kg/K with the density and modulus, as inputs to their thermoelastic-loss predictions (their eqs. 4-6) Copied from the committed pack steel-music-wire-string-heptonstall-ligo-p1400229 (observation hl-table3-thermal).	ASSUMPTION named by the pack author: Pickering's solid-steel E is high-carbon music wire. Pickering gives no steel grade or supplier specification for the string. The values are held at 293.15 K, the only temperature they are given for; a card held at another temperature refuses them.
+scalar	density	super-sensitive-e-section	density	8092.93386	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	T	280	320	K
+validity	density	omega	0	251327.412	rad/s
+scalar	young_modulus	music-wire-moduli	young_modulus	2.12e+11	Pa	constant
+uncertainty	young_modulus	unstated	-	-	-	-
+validity	young_modulus	T	280	320	K
+validity	young_modulus	omega	0	251327.412	rad/s
+scalar	shear_modulus	music-wire-moduli	shear_modulus	7.929e+10	Pa	constant
+uncertainty	shear_modulus	unstated	-	-	-	-
+validity	shear_modulus	T	280	320	K
+validity	shear_modulus	omega	0	251327.412	rad/s
+scalar	kelvin_voigt_bending_viscosity	super-sensitive-e-bending-loss	kelvin_voigt_bending_viscosity	0	Pa*s	constant
+uncertainty	kelvin_voigt_bending_viscosity	unstated	-	-	-	-
+validity	kelvin_voigt_bending_viscosity	T	280	320	K
+validity	kelvin_voigt_bending_viscosity	omega	0	251327.412	rad/s
+scalar	kelvin_voigt_shear_viscosity	super-sensitive-e-twist-loss	kelvin_voigt_shear_viscosity	129440.729	Pa*s	constant
+uncertainty	kelvin_voigt_shear_viscosity	unstated	-	-	-	-
+validity	kelvin_voigt_shear_viscosity	T	280	320	K
+validity	kelvin_voigt_shear_viscosity	omega	0	251327.412	rad/s
+scalar	shear_viscosity_constant_loss_reference_omega	super-sensitive-e-twist-loss	shear_viscosity_constant_loss_reference_omega	1256.63706	rad/s	constant
+uncertainty	shear_viscosity_constant_loss_reference_omega	unstated	-	-	-	-
+validity	shear_viscosity_constant_loss_reference_omega	T	280	320	K
+validity	shear_viscosity_constant_loss_reference_omega	omega	0	251327.412	rad/s
+scalar	linear_thermal_expansion_coefficient	music-wire-thermal	linear_thermal_expansion_coefficient	1.1e-5	K^-1	constant
+uncertainty	linear_thermal_expansion_coefficient	unstated	-	-	-	-
+validity	linear_thermal_expansion_coefficient	T	293.15	293.15	K
+scalar	specific_heat_capacity	music-wire-thermal	specific_heat_capacity	486	J/kg/K	constant
+uncertainty	specific_heat_capacity	unstated	-	-	-	-
+validity	specific_heat_capacity	T	293.15	293.15	K
+scalar	thermal_conductivity	music-wire-thermal	thermal_conductivity	49	W/m/K	constant
+uncertainty	thermal_conductivity	unstated	-	-	-	-
+validity	thermal_conductivity	T	293.15	293.15	K

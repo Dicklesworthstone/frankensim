@@ -1,0 +1,8 @@
+frankensim.matdb-manifest.v3
+pack_id	violin-string-super-sensitive-e-pickering1985-music-wire-section
+redistribution	permitted	Numerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; derived by the pack author from the committed packs violin-strings-whole-pickering-jcas1985, steel-music-wire-string-heptonstall-ligo-p1400229 and music-wire-spring-moduli-fuchs-1968 (whose own terms apply) and the pendulum constants of Pickering's method text
+citation	Pickering N.C. (1985), Physical Properties of Violin Strings, Journal of the Catgut Acoustical Society 44:6-8 (November 1985), the table on p. 7 and the method text on p. 6; Heptonstall A., Waller M., Robertson N.A., Investigation of mechanical properties of cryogenically treated music wire, LIGO document P1400229 / arXiv:1506.03778, Section III.A and Table 3; Fuchs H.O. (1968), Minimum-Weight Springs, 3rd Aerospace Mechanisms Symposium (JPL), NASA, Table 2 (quoting the SAE Manual on Helical Springs); derived by the pack author
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1
+axis	T	T	absolute-temperature
+axis	omega	omega	dimensional
