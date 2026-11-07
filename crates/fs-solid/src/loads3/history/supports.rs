@@ -96,6 +96,16 @@ impl TetLoadHistory3<'_> {
         &self, geometry: &'g TetLoadGeometry3<'m>, problem: &'p TetLinearElasticProblem<'s>,
         supports: &[SupportMotion3<'_>], time_s: f64, maximum_displacement_m: f64, cx: &Cx<'_>,
     ) -> Result<TetSupportSample3<'g, 'm, 'p, 's>, LoadHistoryError3> {
+        self.at_with_supports_reference_density(geometry, problem, supports, None,
+            time_s, maximum_displacement_m, cx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn at_with_supports_reference_density<'g, 'm, 'p, 's>(
+        &self, geometry: &'g TetLoadGeometry3<'m>, problem: &'p TetLinearElasticProblem<'s>,
+        supports: &[SupportMotion3<'_>], reference_density_kg_m3: Option<&[f64]>,
+        time_s: f64, maximum_displacement_m: f64, cx: &Cx<'_>,
+    ) -> Result<TetSupportSample3<'g, 'm, 'p, 's>, LoadHistoryError3> {
         use LoadHistoryError3 as E;
         poll(cx)?;
         if !time_s.is_finite() || !maximum_displacement_m.is_finite() || maximum_displacement_m <= 0.0 {
@@ -112,7 +122,8 @@ impl TetLoadHistory3<'_> {
             Some(maximum_displacement_m),
             cx,
         )?;
-        let loads = self.at(geometry, problem, time_s, cx)?;
+        let loads = self.at_reference_density(geometry, problem, reference_density_kg_m3,
+            time_s, cx)?;
         poll(cx)?;
         Ok(TetSupportSample3 {
             loads,
@@ -134,6 +145,20 @@ impl TetLoadHistory3<'_> {
         time_s: f64,
         cx: &Cx<'_>,
     ) -> Result<TetSupportAccelerationSample3<'g, 'm, 'p, 's>, LoadHistoryError3> {
+        self.at_with_support_accelerations_reference_density(geometry, problem, supports,
+            None, time_s, cx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn at_with_support_accelerations_reference_density<'g, 'm, 'p, 's>(
+        &self,
+        geometry: &'g TetLoadGeometry3<'m>,
+        problem: &'p TetLinearElasticProblem<'s>,
+        supports: &[SupportAcceleration3<'_>],
+        reference_density_kg_m3: Option<&[f64]>,
+        time_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<TetSupportAccelerationSample3<'g, 'm, 'p, 's>, LoadHistoryError3> {
         let prescribed_m_s2 = sampled_components(
             supports
                 .iter()
@@ -145,7 +170,8 @@ impl TetLoadHistory3<'_> {
             None,
             cx,
         )?;
-        let loads = self.at(geometry, problem, time_s, cx)?;
+        let loads = self.at_reference_density(geometry, problem, reference_density_kg_m3,
+            time_s, cx)?;
         poll(cx)?;
         Ok(TetSupportAccelerationSample3 {
             loads,

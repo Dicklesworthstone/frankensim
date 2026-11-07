@@ -80,6 +80,7 @@ impl TetTransientRun3<'_, '_, '_, '_> {
                 thermal,
                 self.config.mass_damping_per_s,
                 self.config.stiffness_damping_s,
+                self.nodal_reference_density.as_deref(),
                 cx,
             )
             .map_err(TransientError3::from)?;

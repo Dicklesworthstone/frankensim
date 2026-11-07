@@ -8,6 +8,9 @@ use fs_solid::loads3::transient::{TransientConfig3, TransientError3};
 #[path = "transient3/thermal_damping.rs"]
 mod thermal_damping;
 
+#[path = "transient3/reference_density.rs"]
+mod reference_density;
+
 const NODES: [[f64; 3]; 4] = [[0.0,0.0,0.0], [1.0,0.0,0.0], [0.0,1.0,0.0], [0.0,0.0,1.0]];
 const TETS: [[usize; 4]; 1] = [[0,1,2,3]];
 const ZERO: [[f64; 3]; 4] = [[0.0; 3]; 4];

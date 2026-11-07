@@ -123,6 +123,7 @@ pub struct PrescribedInitialPullback3 {
 pub struct PrescribedTransientAdjoint3<'g, 'm, 'p, 's> {
     reduced: TransientAdjoint3<'g, 'm>,
     problem: &'p TetLinearElasticProblem<'s>,
+    nodal_reference_density: Option<Arc<[f64]>>,
     fixed: Arc<[usize]>,
     full_dofs: usize,
 }
@@ -181,6 +182,7 @@ impl<'g, 'm, 'p, 's> TetTransientRun3<'g, 'm, 'p, 's> {
         Ok(PrescribedTransientAdjoint3 {
             reduced,
             problem: self.problem,
+            nodal_reference_density: self.nodal_reference_density.clone(),
             fixed: Arc::from(fixed),
             full_dofs,
         })
@@ -253,7 +255,8 @@ impl PrescribedTransientAdjoint3<'_, '_, '_, '_> {
             full[d] = lambda[i];
         }
         self.problem
-            .transpose_full_kinematic_actions(&full, cx)
+            .transpose_full_kinematic_actions(&full,
+                self.nodal_reference_density.as_deref(), cx)
             .map_err(TransientError3::from)
             .map_err(TransientAdjointError3::from)
     }

@@ -42,10 +42,11 @@ pub(super) fn sparse_change(
 
 pub(super) fn full_change(
     problem: &TetLinearElasticProblem<'_>, mass: bool,
-    before: &[f64], after: &[f64], cx: &Cx<'_>,
+    before: &[f64], after: &[f64], nodal_reference_density: Option<&[f64]>, cx: &Cx<'_>,
 ) -> Result<Dd, TransientError3> {
     quadratic::increment(before, after, |x, y, _| {
-        problem.apply_full_storage(x, y, mass, cx).map_err(TransientError3::from)
+        problem.apply_full_storage(x, y, mass, nodal_reference_density, cx)
+            .map_err(TransientError3::from)
     }, &mut || cx.checkpoint().is_err())
         .map(|value| value.change).map_err(failure)
 }

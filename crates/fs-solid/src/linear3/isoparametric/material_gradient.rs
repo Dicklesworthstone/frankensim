@@ -17,6 +17,7 @@ impl TetLinearElasticProblem<'_> {
         thermal: Option<TetThermalStrainField<'_>>,
         eta: f64,
         zeta: f64,
+        nodal_reference_density: Option<&[f64]>,
         cx: &Cx<'_>,
     ) -> Result<(Vec<[f64; 2]>, [f64; 2]), TetElasticError>{
         let invalid = |what| TetElasticError::InvalidStressObservation { what };
@@ -72,7 +73,8 @@ impl TetLinearElasticProblem<'_> {
                 }
                 None => [0.0; 6],
             };
-            let me = p1_tet_consistent_mass(geometry.volume, material.density_kg_m3);
+            let me = p1_tet_reference_mass(geometry.volume, material.density_kg_m3,
+                *tet, nodal_reference_density)?;
             let b = strain_displacement_matrix(&geometry);
             let strain = |field: &[[f64; 3]]| {
                 relative_mandel_strain(

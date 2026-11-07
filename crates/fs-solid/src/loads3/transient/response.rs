@@ -68,7 +68,8 @@ impl TetTransientRun3<'_, '_, '_, '_> {
     ) -> Result<crate::prestress::PrestressedTetAssembly, TransientError3> {
         let response = self.recover_response(mesh_frame, maximum_strain, cx)?;
         self.problem.assemble_constitutive_tangent_from_stress(
-            response.stress, constitutive_materials, cx).map_err(TransientError3::from)
+            response.stress, constitutive_materials,
+            self.nodal_reference_density.as_deref(), cx).map_err(TransientError3::from)
     }
 
     /// Recover stress, inertia, damping and physical support forces WITHOUT a
@@ -86,7 +87,7 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         let fields = self.problem.recover_kinematic_response(&motion,
             self.thermal_strains.as_ref().map(FrozenThermal3::field), self.state.time_s,
             self.state.step, self.config.mass_damping_per_s, self.config.stiffness_damping_s,
-            mesh_frame, maximum_strain, cx)?;
+            mesh_frame, maximum_strain, self.nodal_reference_density.as_deref(), cx)?;
         let mut external = vec![[0.0; 3]; self.geometry.nodes.len()];
         for &(d, f) in &self.full_force { check(cx)?; external[d/3][d%3] = f; }
         let mut imbalance = external.clone();

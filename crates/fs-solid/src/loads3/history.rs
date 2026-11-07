@@ -143,8 +143,9 @@ impl TetLoadHistory3<'_> {
     ///
     /// Only `Acceleration` and `FixedAcceleration` volume histories are
     /// accepted. The returned endpoint feeds native static equilibrium,
-    /// including restrained-node forces and reactions. This is force projection;
-    /// it does not bind graded inertia to `begin_transient` or `advance_history`.
+    /// including restrained-node forces and reactions. For inertial evolution,
+    /// `begin_transient_with_nodal_reference_density` retains the same field in
+    /// both the mass operator and every subsequent `advance_history` sample.
     /// Retain the same original field across heated/deformed snapshots of a
     /// closed specimen; current-density queries must not replace its inventory.
     ///

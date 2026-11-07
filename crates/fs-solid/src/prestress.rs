@@ -60,7 +60,7 @@ impl TetLinearElasticProblem<'_> {
     ) -> Result<PrestressedTetAssembly, TetElasticError> {
         let stress = self.recover_eigenstrain_stress(solution, strains, mesh_frame,
             maximum_absolute_mandel_strain, cx)?;
-        self.assemble_tangent_from_stress(stress, cx)
+        self.assemble_tangent_from_stress(stress, None, cx)
     }
     /// Assemble a thermal-prestressed vibration/stability pencil.
     ///
@@ -84,7 +84,7 @@ impl TetLinearElasticProblem<'_> {
     ) -> Result<PrestressedTetAssembly, TetElasticError> {
         let stress = self.recover_thermal_stress(solution, thermal, mesh_frame,
             maximum_absolute_mandel_strain, cx)?;
-        self.assemble_tangent_from_stress(stress, cx)
+        self.assemble_tangent_from_stress(stress, None, cx)
     }
 
     /// The same initial-stress pencil for equilibrium with explicit dead nodal
@@ -102,7 +102,7 @@ impl TetLinearElasticProblem<'_> {
     ) -> Result<PrestressedTetAssembly, TetElasticError> {
         let stress = self.recover_thermal_stress_with_nodal_forces(solution, thermal,
             nodal_forces_n, mesh_frame, maximum_absolute_mandel_strain, cx)?;
-        self.assemble_tangent_from_stress(stress, cx)
+        self.assemble_tangent_from_stress(stress, None, cx)
     }
 
     /// Initial-stress pencil about the same prescribed-displacement equilibrium.
@@ -123,7 +123,7 @@ impl TetLinearElasticProblem<'_> {
             solution, thermal, nodal_forces_n, prescribed_m,
             maximum_prescribed_displacement_m, mesh_frame,
             maximum_absolute_mandel_strain, cx)?;
-        self.assemble_tangent_from_stress(stress, cx)
+        self.assemble_tangent_from_stress(stress, None, cx)
     }
 
     /// Preserve the original recovered stress while using an explicitly
@@ -162,7 +162,7 @@ impl TetLinearElasticProblem<'_> {
             }
             result => result?,
         };
-        self.assemble_constitutive_tangent_from_stress(stress, constitutive_materials, cx)
+        self.assemble_constitutive_tangent_from_stress(stress, constitutive_materials, None, cx)
     }
 
     // Only native stress-recovery owners call this seam. In particular the
@@ -170,7 +170,8 @@ impl TetLinearElasticProblem<'_> {
     // stress arrays cannot bypass original geometry/material/history binding.
     pub(crate) fn assemble_constitutive_tangent_from_stress(
         &self, stress: TetThermalStressReport,
-        constitutive_materials: TetMaterialField<'_>, cx: &Cx<'_>,
+        constitutive_materials: TetMaterialField<'_>,
+        nodal_reference_density: Option<&[f64]>, cx: &Cx<'_>,
     ) -> Result<PrestressedTetAssembly, TetElasticError> {
         checkpoint(cx)?;
         let count = self.tetrahedra.len();
@@ -196,7 +197,8 @@ impl TetLinearElasticProblem<'_> {
                 TetMaterialField::Uniform(value) => value,
                 TetMaterialField::PerElement(values) => &values[element],
             };
-            if original.density_kg_m3.to_bits() != tangent.density_kg_m3.to_bits() {
+            if nodal_reference_density.is_none()
+                && original.density_kg_m3.to_bits() != tangent.density_kg_m3.to_bits() {
                 return Err(invalid(
                     "an incremental constitutive tangent cannot replace reference inertial density"));
             }
@@ -211,7 +213,7 @@ impl TetLinearElasticProblem<'_> {
             materials: constitutive_materials, fixed_dofs: self.fixed_dofs,
             budget: self.budget,
         };
-        let mut result = problem.assemble_tangent_from_stress(stress, cx)?;
+        let mut result = problem.assemble_tangent_from_stress(stress, nodal_reference_density, cx)?;
         // The original identity binds the accepted stress; the new one ALSO
         // binds the selected incremental constitutive law and exact coefficients.
         hash.update(result.identity().as_bytes());
@@ -228,9 +230,13 @@ impl TetLinearElasticProblem<'_> {
     }
 
     fn assemble_tangent_from_stress(
-        &self, stress: TetThermalStressReport, cx: &Cx<'_>,
+        &self, stress: TetThermalStressReport,
+        nodal_reference_density: Option<&[f64]>, cx: &Cx<'_>,
     ) -> Result<PrestressedTetAssembly, TetElasticError> {
-        let mut pencil = self.assemble(cx)?;
+        let mut pencil = match nodal_reference_density {
+            Some(density) => self.assemble_with_nodal_reference_density(density, cx)?,
+            None => self.assemble(cx)?,
+        };
         checkpoint(cx)?;
         let mut reduced = vec![None; self.nodes_m.len().checked_mul(3)
             .ok_or(TetElasticError::SizeOverflow)?];
@@ -311,6 +317,13 @@ impl TetLinearElasticProblem<'_> {
         }
         let mut hash = DomainHasher::new("org.frankensim.fs-solid.reference-initial-stress-pencil.v1");
         hash.update(stress.identity().as_bytes());
+        if let Some(density) = nodal_reference_density {
+            hash.update(b"nodal-reference-density");
+            for value in density {
+                checkpoint(cx)?;
+                hash.update(&value.to_bits().to_le_bytes());
+            }
+        }
         let identity = hash.finalize();
         checkpoint(cx)?;
         Ok(PrestressedTetAssembly { pencil, elastic_stiffness, geometric_stiffness, stress, identity })

@@ -22,9 +22,10 @@ impl TetLinearElasticProblem<'_> {
     /// Keep the public modal assembly's NoFreeDofs contract unchanged.
     pub(crate) fn assemble_prescribed_dynamics(
         &self,
+        nodal_reference_density: Option<&[f64]>,
         cx: &Cx<'_>,
     ) -> Result<TetElasticAssembly, TetElasticError> {
-        match self.assemble(cx) {
+        match self.assemble_reference_mass(nodal_reference_density, cx) {
             Ok(assembly) => return Ok(assembly),
             Err(TetElasticError::NoFreeDofs) => {}
             Err(error) => return Err(error),
@@ -47,7 +48,14 @@ impl TetLinearElasticProblem<'_> {
                 self.budget.minimum_scaled_jacobian,
             )?;
             minimum = minimum.min(geometry.scaled_jacobian);
-            total_mass += self.materials.at(element).density_kg_m3 * geometry.volume;
+            total_mass += match nodal_reference_density {
+                Some(density) => crate::inertia::p1_tet_nodal_mass(
+                    geometry.volume, tet.map(|node| density[node]),
+                ).map_err(|_| TetElasticError::InvalidMaterial {
+                    what: "unrepresentable prescribed-body reference mass",
+                })?.mass_kg,
+                None => self.materials.at(element).density_kg_m3 * geometry.volume,
+            };
             if !total_mass.is_finite() {
                 return Err(TetElasticError::InvalidMaterial {
                     what: "nonfinite prescribed-body mass",
@@ -72,6 +80,7 @@ impl TetLinearElasticProblem<'_> {
     pub(crate) fn apply_full_kinematics(
         &self,
         motion: &[Vec<f64>; 3],
+        nodal_reference_density: Option<&[f64]>,
         cx: &Cx<'_>,
     ) -> Result<TetFullActions3, TetElasticError> {
         cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
@@ -120,7 +129,8 @@ impl TetLinearElasticProblem<'_> {
             )?;
             let material = self.materials.at(element);
             let b = strain_displacement_matrix(&geometry);
-            let me = p1_tet_consistent_mass(geometry.volume, material.density_kg_m3);
+            let me = p1_tet_reference_mass(geometry.volume, material.density_kg_m3,
+                *tet, nodal_reference_density)?;
             let stiffness_action = |field: &[f64]| {
                 let strain = relative_mandel_strain(
                     tet.len(),
@@ -159,7 +169,8 @@ impl TetLinearElasticProblem<'_> {
     /// support cross rows without assembling a full matrix or evaluating the
     /// three unrelated kinematic actions needed by endpoint stress recovery.
     pub(crate) fn apply_full_storage(
-        &self, field: &[f64], out: &mut [f64], mass: bool, cx: &Cx<'_>,
+        &self, field: &[f64], out: &mut [f64], mass: bool,
+        nodal_reference_density: Option<&[f64]>, cx: &Cx<'_>,
     ) -> Result<(), TetElasticError> {
         cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
         self.validate_budget()?;
@@ -186,7 +197,8 @@ impl TetLinearElasticProblem<'_> {
                 self.budget.minimum_scaled_jacobian)?;
             let material = self.materials.at(element);
             let action = if mass {
-                let matrix = p1_tet_consistent_mass(geometry.volume, material.density_kg_m3);
+                let matrix = p1_tet_reference_mass(geometry.volume, material.density_kg_m3,
+                    *tet, nodal_reference_density)?;
                 core::array::from_fn(|i| (0..12).fold(0.0, |value, j|
                     matrix[i][j].mul_add(field[3 * tet[j / 3] + j % 3], value)))
             } else {
@@ -218,6 +230,7 @@ impl TetLinearElasticProblem<'_> {
     pub(crate) fn transpose_full_kinematic_actions(
         &self,
         seed: &[f64],
+        nodal_reference_density: Option<&[f64]>,
         cx: &Cx<'_>,
     ) -> Result<(Vec<f64>, Vec<f64>), TetElasticError> {
         cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
@@ -260,7 +273,8 @@ impl TetLinearElasticProblem<'_> {
             )?;
             let material = self.materials.at(element);
             let b = strain_displacement_matrix(&geometry);
-            let me = p1_tet_consistent_mass(geometry.volume, material.density_kg_m3);
+            let me = p1_tet_reference_mass(geometry.volume, material.density_kg_m3,
+                *tet, nodal_reference_density)?;
             let strain_seed = relative_mandel_strain(
                 tet.len(),
                 |d| core::array::from_fn(|i| b[i][d]),
@@ -362,7 +376,7 @@ mod strain_tests {
             let a = [0.25, -0.5, 0.75];
             let motion = [vec![u; 4], vec![v; 4], vec![a; 4]];
             let response = p
-                .recover_kinematic_response(&motion, None, 0.0, 0, 0.25, 1e6, FRAME, 1e-20, cx)
+                .recover_kinematic_response(&motion, None, 0.0, 0, 0.25, 1e6, FRAME, 1e-20, None, cx)
                 .unwrap();
             assert_eq!(response.stress.elements[0].elastic_strain_mandel, [0.0; 6]);
             assert_eq!(response.stress.elements[0].stress_mandel_pa, [0.0; 6]);
@@ -372,11 +386,11 @@ mod strain_tests {
                 * TetGeometry::try_new(0, NODES, p.budget.minimum_scaled_jacobian)
                     .unwrap()
                     .volume;
-            let actions = p.apply_full_kinematics(&flatten(&motion), cx).unwrap();
+            let actions = p.apply_full_kinematics(&flatten(&motion), None, cx).unwrap();
             assert_eq!(actions.ku, vec![0.0; 12]);
             assert_eq!(actions.kv, vec![0.0; 12]);
             let (mt, kt) = p
-                .transpose_full_kinematic_actions(&flatten(&motion)[1], cx)
+                .transpose_full_kinematic_actions(&flatten(&motion)[1], None, cx)
                 .unwrap();
             assert_eq!(kt, vec![0.0; 12]);
             for node in 0..4 {
@@ -389,7 +403,7 @@ mod strain_tests {
                 }
             }
             let (scales, damping) = p
-                .transient_material_contraction(&motion, &vec![v; 4], None, 0.25, 1e6, cx)
+                .transient_material_contraction(&motion, &vec![v; 4], None, 0.25, 1e6, None, cx)
                 .unwrap();
             assert_eq!(scales[0][0], 0.0);
             assert_eq!(damping[1], 0.0);
@@ -428,7 +442,7 @@ mod strain_tests {
                 }
             }
             let recover = |m: &[Vec<[f64; 3]>; 3]| {
-                p.recover_kinematic_response(m, field, 0.0, 0, 0.0, 0.2, FRAME, 0.05, cx)
+                p.recover_kinematic_response(m, field, 0.0, 0, 0.0, 0.2, FRAME, 0.05, None, cx)
                     .unwrap()
             };
             let a = recover(&motion);
@@ -440,8 +454,8 @@ mod strain_tests {
             );
             assert_eq!(a.damping_n, b.damping_n);
             assert_eq!(a.inertia_n, b.inertia_n);
-            let plain = p.apply_full_kinematics(&flatten(&motion), cx).unwrap();
-            let shifted = p.apply_full_kinematics(&flatten(&translated), cx).unwrap();
+            let plain = p.apply_full_kinematics(&flatten(&motion), None, cx).unwrap();
+            let shifted = p.apply_full_kinematics(&flatten(&translated), None, cx).unwrap();
             assert_eq!(plain.ku, shifted.ku);
             assert_eq!(plain.kv, shifted.kv);
 
@@ -478,20 +492,20 @@ mod strain_tests {
             close(directional, (observation(h) - observation(-h)) / (2.0 * h));
 
             let seed: Vec<_> = motion[2].iter().flatten().copied().collect();
-            let (_, kt) = p.transpose_full_kinematic_actions(&seed, cx).unwrap();
+            let (_, kt) = p.transpose_full_kinematic_actions(&seed, None, cx).unwrap();
             close(
                 seed.iter().zip(&plain.ku).map(|(x, y)| x * y).sum(),
                 flatten(&motion)[0].iter().zip(kt).map(|(x, y)| x * y).sum(),
             );
             let gradient = p
-                .transient_material_contraction(&motion, &motion[2], field, 0.0, 0.2, cx)
+                .transient_material_contraction(&motion, &motion[2], field, 0.0, 0.2, None, cx)
                 .unwrap();
             let translated_gradient = p
-                .transient_material_contraction(&translated, &translated[1], field, 0.0, 0.2, cx)
+                .transient_material_contraction(&translated, &translated[1], field, 0.0, 0.2, None, cx)
                 .unwrap();
             // Use the same relative cotangent for the translated comparison.
             let base_gradient = p
-                .transient_material_contraction(&motion, &motion[1], field, 0.0, 0.2, cx)
+                .transient_material_contraction(&motion, &motion[1], field, 0.0, 0.2, None, cx)
                 .unwrap();
             assert_eq!(base_gradient.0[0][0], translated_gradient.0[0][0]);
             assert_eq!(base_gradient.1[1], translated_gradient.1[1]);
@@ -527,6 +541,7 @@ impl TetLinearElasticProblem<'_> {
         zeta: f64,
         mesh_frame: ContentHash,
         maximum_strain: f64,
+        nodal_reference_density: Option<&[f64]>,
         cx: &Cx<'_>,
     ) -> Result<TetKinematicResponse3, TetElasticError> {
         let invalid = |what| TetElasticError::InvalidStressObservation { what };
@@ -557,6 +572,13 @@ impl TetLinearElasticProblem<'_> {
         let mut source = DomainHasher::new("org.frankensim.fs-solid.dynamic-motion-response.v1");
         source.update(tet_geometry_identity(self.nodes_m, self.tetrahedra)?.as_bytes());
         source.update(&time_s.to_bits().to_le_bytes());
+        if let Some(density) = nodal_reference_density {
+            source.update(b"nodal-reference-density");
+            for value in density {
+                cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+                source.update(&value.to_bits().to_le_bytes());
+            }
+        }
         hash_usize(&mut source, step)?;
         for value in [eta, zeta] {
             source.update(&value.to_bits().to_le_bytes());
@@ -650,7 +672,8 @@ impl TetLinearElasticProblem<'_> {
             });
             let force = relative_mandel_force(&b, &stress_mandel_pa, geometry.volume);
             let kv = relative_mandel_force(&b, &rate_stress, geometry.volume);
-            let me = p1_tet_consistent_mass(geometry.volume, material.density_kg_m3);
+            let me = p1_tet_reference_mass(geometry.volume, material.density_kg_m3,
+                *tet, nodal_reference_density)?;
             for d in 0..12 {
                 let fi = finite(force[d])?;
                 let mut ma = 0.0;

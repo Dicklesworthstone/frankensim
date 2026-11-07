@@ -41,6 +41,7 @@ mod thermal_damping;
 mod energy;
 /// Detached exact native history across changing material-state lifetimes.
 pub mod checkpoint;
+mod density;
 
 /// Explicit resource, solve, motion and energy allowances, all in coherent SI.
 #[derive(Debug, Clone, Copy)]
@@ -246,6 +247,7 @@ pub struct TetTransientRun3<'g, 'm, 'p, 's> {
     pub(super) geometry: &'g TetLoadGeometry3<'m>,
     pub(super) problem: &'p TetLinearElasticProblem<'s>,
     operators: Arc<TetElasticAssembly>,
+    nodal_reference_density: Option<Arc<[f64]>>,
     state: DynamicState,
     thermal: Vec<f64>,
     thermal_strains: Option<response::FrozenThermal3>,
@@ -264,7 +266,7 @@ impl<'g, 'm> TetLoadCase3<'g, 'm> {
         displacement_m: &[[f64; 3]], velocity_m_s: &[[f64; 3]], config: TransientConfig3,
         cx: &Cx<'_>) -> Result<TetTransientRun3<'g, 'm, 'p, 's>, TransientError3> {
         self.begin_transient_impl(problem, thermal, time_s, displacement_m, velocity_m_s,
-            None, None, config, cx)
+            None, None, None, config, cx)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -272,7 +274,8 @@ impl<'g, 'm> TetLoadCase3<'g, 'm> {
         thermal: Option<TetThermalStrainField<'_>>, time_s: f64,
         displacement_m: &[[f64; 3]], velocity_m_s: &[[f64; 3]],
         prescribed_acceleration_m_s2: Option<&[[f64; 3]]>,
-        initial_reduced_momentum: Option<&[f64]>, config: TransientConfig3,
+        initial_reduced_momentum: Option<&[f64]>,
+        nodal_reference_density: Option<Arc<[f64]>>, config: TransientConfig3,
         cx: &Cx<'_>) -> Result<TetTransientRun3<'g, 'm, 'p, 's>, TransientError3> {
         check(cx)?; config.validate()?; number(time_s)?;
         if initial_reduced_momentum.is_some() && prescribed_acceleration_m_s2.is_some() {
@@ -300,7 +303,8 @@ impl<'g, 'm> TetLoadCase3<'g, 'm> {
         request.budget.maximum_free_dofs = request.budget.maximum_free_dofs.min(config.maximum_free_dofs);
         // A fully clamped solid still stores thermal stress energy. Reuse the
         // native zero-free-DOF assembly, which keeps all geometry/mass checks.
-        let operators = Arc::new(request.assemble_prescribed_dynamics(cx)?);
+        let operators = Arc::new(request.assemble_prescribed_dynamics(
+            nodal_reference_density.as_deref(), cx)?);
         for &d in problem.fixed_dofs {
             check(cx)?;
             if prescribed_acceleration_m_s2.is_none()
@@ -332,6 +336,7 @@ impl<'g, 'm> TetLoadCase3<'g, 'm> {
         let q: Vec<_> = operators.free_dofs.iter().map(|&d| displacement_m[d/3][d%3]).collect();
         let v: Vec<_> = operators.free_dofs.iter().map(|&d| velocity_m_s[d/3][d%3]).collect();
         let mut run = TetTransientRun3 { geometry: self.geometry, problem, operators,
+            nodal_reference_density,
             state: DynamicState { time_s, step: 0, displacement: q, velocity: v,
                 acceleration: vec![0.0; n], kinetic_energy_j: 0.0, strain_energy_j: 0.0,
                 total_energy_j: 0.0 }, thermal, thermal_strains, force: vec![0.0; n],

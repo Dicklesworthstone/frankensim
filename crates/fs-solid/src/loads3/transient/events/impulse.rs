@@ -193,7 +193,8 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         let mut momentum = vec![Dd::default(); full];
         let kinetic_change = quadratic::increment(&before_velocity, &after_velocity,
             |x, y, _| {
-                self.problem.apply_full_storage(x, y, true, cx)
+                self.problem.apply_full_storage(x, y, true,
+                    self.nodal_reference_density.as_deref(), cx)
                     .map_err(TransientError3::from)?;
                 for (i, (total, &action)) in momentum.iter_mut().zip(y.iter()).enumerate() {
                     if i % 256 == 0 { check(cx)?; }

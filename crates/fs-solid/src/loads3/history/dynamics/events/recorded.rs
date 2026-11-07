@@ -52,6 +52,7 @@ impl EventLoadHistory3<'_> {
             .left_at(
                 run.geometry,
                 run.problem,
+                run.nodal_reference_density_kg_m3(),
                 end_time_s,
                 run.maximum_displacement_m(),
                 cx,
@@ -63,6 +64,7 @@ impl EventLoadHistory3<'_> {
                 &self.history,
                 run.geometry,
                 run.problem,
+                run.nodal_reference_density_kg_m3(),
                 end_time_s,
                 run.maximum_displacement_m(),
                 cx,

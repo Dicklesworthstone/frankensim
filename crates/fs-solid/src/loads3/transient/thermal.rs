@@ -55,7 +55,9 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
     /// Advance the SAME accepted motion using one new absolute thermal state.
     /// The caller retains the refreshed material problem; its complete source
     /// identities are retained by the returned run and native stress recovery.
-    /// Reference density stays bit-identical. A changed Mandel tensor rebuilds
+    /// Reference density stays bit-identical. Explicit nodal inventory remains
+    /// authoritative even when the refreshed card's current density changes.
+    /// A changed Mandel tensor rebuilds
     /// the native endpoint stiffness; an unchanged tensor reuses its operator.
     /// Changed stiffness uses Cbar = eta*M + zeta*(K_old+K_next)/2 at the
     /// midpoint velocity, keeping Rayleigh loss nonnegative for the admitted K.
@@ -92,7 +94,8 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
                 TransientError3::Invalid("missing accepted element material"))?;
             let after = material_at(problem.materials, element).ok_or(
                 TransientError3::Invalid("missing refreshed element material"))?;
-            if before.density_kg_m3.to_bits() != after.density_kg_m3.to_bits() {
+            if self.nodal_reference_density.is_none()
+                && before.density_kg_m3.to_bits() != after.density_kg_m3.to_bits() {
                 return Err(TransientError3::Invalid("thermal material refresh cannot change reference density"));
             }
             stiffness_changed |= before.stiffness_mandel_pa().iter().flatten()
@@ -106,7 +109,8 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
             return Err(TransientError3::Invalid("thermal refresh changed the original free-DOF map"));
         }
         let operators = if stiffness_changed {
-            let refreshed = problem.assemble_prescribed_dynamics(cx)?;
+            let refreshed = problem.assemble_prescribed_dynamics(
+                self.nodal_reference_density.as_deref(), cx)?;
             if refreshed.free_dofs != self.operators.free_dofs
                 || refreshed.element_volumes_m3 != self.operators.element_volumes_m3
                 || refreshed.total_mass_kg.to_bits() != self.operators.total_mass_kg.to_bits() {
@@ -128,6 +132,7 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
         let captured = response::FrozenThermal3::capture(thermal, cx)?;
         let mut candidate = TetTransientRun3 {
             geometry: self.geometry, problem, operators,
+            nodal_reference_density: self.nodal_reference_density.clone(),
             state: self.state.clone(), thermal: self.thermal.clone(),
             thermal_strains: self.thermal_strains.clone(), force: self.force.clone(),
             full_force: self.full_force.clone(), config: self.config, prescribed: None,

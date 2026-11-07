@@ -3181,6 +3181,33 @@ pub(crate) fn p1_tet_consistent_mass(volume_m3: f64, density_kg_m3: f64) -> [[f6
     me
 }
 
+/// Full displacement tile for the same reference inventory as reduced assembly.
+/// A retained P1 field supersedes material density for every inertial action.
+pub(crate) fn p1_tet_reference_mass(
+    volume_m3: f64,
+    material_density_kg_m3: f64,
+    tet: [usize; 4],
+    nodal_reference_density: Option<&[f64]>,
+) -> Result<[[f64; 12]; 12], TetElasticError> {
+    let Some(density) = nodal_reference_density else {
+        return Ok(p1_tet_consistent_mass(volume_m3, material_density_kg_m3));
+    };
+    let mut samples = [0.0; 4];
+    for (a, node) in tet.into_iter().enumerate() {
+        samples[a] = *density.get(node).ok_or(TetElasticError::InvalidMaterial {
+            what: "one reference density per mesh node required",
+        })?;
+    }
+    let mass = crate::inertia::p1_tet_nodal_mass(volume_m3, samples).map_err(|_| {
+        TetElasticError::InvalidMaterial {
+            what: "nodal density yields unrepresentable consistent reference mass",
+        }
+    })?;
+    Ok(core::array::from_fn(|i| core::array::from_fn(|j| {
+        if i % 3 == j % 3 { mass.coefficients[i / 3][j / 3] } else { 0.0 }
+    })))
+}
+
 /// Scalar off-diagonal P1 mass entry; diagonal shape weights are twice this.
 /// Shared with matrix-free body-acceleration loads before support elimination.
 pub(crate) fn p1_tet_mass_scale(volume_m3: f64, density_kg_m3: f64) -> f64 {

@@ -59,6 +59,8 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
     /// The native initializer rebuilds the actual operators, solves velocity
     /// from that momentum, then re-equilibrates acceleration under the explicit
     /// new load and thermal field. The clock and consumed step count are kept.
+    /// An explicitly authored nodal reference density is retained unchanged;
+    /// only runs using material density replace their inertia with the card.
     ///
     /// This is externally supplied material reconfiguration, not mass transport,
     /// continuous parameter evolution or a caloric heat transfer. Required work
@@ -97,7 +99,7 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
         let before = self.recover_response(mesh_frame, controls.maximum_strain, cx)?;
         let mut candidate = load_after.begin_transient_impl(
             problem_after, thermal_after, self.state.time_s, &motion[0], &motion[1],
-            None, Some(&momentum), self.config, cx)?;
+            None, Some(&momentum), self.nodal_reference_density.clone(), self.config, cx)?;
         if candidate.free_dofs() != self.free_dofs()
             || candidate.state.displacement != self.state.displacement {
             return Err(TransientError3::Invalid("material reconfiguration changed the physical displacement coordinates"));

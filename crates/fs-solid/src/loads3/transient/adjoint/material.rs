@@ -7,6 +7,9 @@
 //! NODAL force remain fixed. Full prescribed-support inertia and damping are
 //! included. For mass-dependent external forcing, add its explicit force
 //! derivative through the returned force cotangent.
+//! An explicit nodal reference field replaces rho_e above: sRho scales that
+//! field within element e, including its spatial gradient. These element scale
+//! derivatives do not differentiate an overridden material-card density.
 use super::*;
 
 /// Bounds for full-node scratch and element-gradient output, checked before

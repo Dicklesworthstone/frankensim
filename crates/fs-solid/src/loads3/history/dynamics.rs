@@ -38,6 +38,24 @@ impl TetLoadHistory3<'_> {
             velocity_m_s, config, cx)?)
     }
 
+    /// Initialize graded inertia and density-weighted acceleration forcing from
+    /// the same original nodal reference inventory. Subsequent history adapters
+    /// reuse the retained field, including support and recorded trajectories.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_transient_with_nodal_reference_density<'g, 'm, 'p, 's>(
+        &self, geometry: &'g TetLoadGeometry3<'m>,
+        problem: &'p TetLinearElasticProblem<'s>, reference_density_kg_m3: &[f64],
+        thermal: Option<TetThermalStrainField<'_>>, time_s: f64,
+        displacement_m: &[[f64; 3]], velocity_m_s: &[[f64; 3]],
+        config: TransientConfig3, cx: &Cx<'_>,
+    ) -> Result<TetTransientRun3<'g, 'm, 'p, 's>, TransientHistoryError3> {
+        let initial = self.at_reference_density(geometry, problem,
+            Some(reference_density_kg_m3), time_s, cx)?;
+        Ok(initial.case.begin_transient_with_nodal_reference_density(
+            problem, reference_density_kg_m3, thermal, time_s, displacement_m,
+            velocity_m_s, config, cx)?)
+    }
+
     /// Initialize driven supports from the SAME physical-time sample as every
     /// distributed force. Initial displacement and velocity are full node-major
     /// xyz vectors in world coordinates. Each restrained displacement must
@@ -149,7 +167,8 @@ impl TetTransientRun3<'_, '_, '_, '_> {
             return Err(TransientError3::Invalid("history endpoint must be finite and later").into());
         }
         let geometry = self.geometry; let problem = self.problem;
-        let endpoint = history.at(geometry, problem, time, cx)?;
+        let endpoint = history.at_reference_density(geometry, problem,
+            self.nodal_reference_density_kg_m3(), time, cx)?;
         Ok(self.advance(&endpoint.case, h_s, cx)?)
     }
 
@@ -182,8 +201,9 @@ impl TetTransientRun3<'_, '_, '_, '_> {
                 "support history step must reach a finite later endpoint",
             ).into());
         }
-        let endpoint = history.at_with_supports(
-            self.geometry, self.problem, supports, time, self.maximum_displacement_m(), cx,
+        let endpoint = history.at_with_supports_reference_density(
+            self.geometry, self.problem, supports, self.nodal_reference_density_kg_m3(),
+            time, self.maximum_displacement_m(), cx,
         )?;
         Ok(self.advance_with_supports(
             &endpoint.loads.case, endpoint.prescribed_dofs_m(), h_s, cx,
@@ -211,10 +231,11 @@ impl TetTransientRun3<'_, '_, '_, '_> {
             )
             .into());
         }
-        let endpoint = history.at_with_support_accelerations(
+        let endpoint = history.at_with_support_accelerations_reference_density(
             self.geometry,
             self.problem,
             supports,
+            self.nodal_reference_density_kg_m3(),
             time,
             cx,
         )?;
@@ -244,7 +265,8 @@ impl crate::loads3::transient::adjoint::trajectory::RecordedTransient3<'_, '_, '
             return Err(TransientError3::Invalid("recorded history step must reach a finite later time").into());
         }
         let geometry = self.run().geometry; let problem = self.run().problem;
-        let endpoint = history.at(geometry, problem, time, cx)?;
+        let endpoint = history.at_reference_density(geometry, problem,
+            self.run().nodal_reference_density_kg_m3(), time, cx)?;
         self.advance(&endpoint.case, h_s, cx)
     }
 }
@@ -264,8 +286,9 @@ impl crate::loads3::transient::adjoint::support::trajectory::RecordedPrescribedT
         if !h_s.is_finite() || h_s <= 0.0 || !time.is_finite() || time <= start {
             return Err(TransientError3::Invalid("recorded acceleration history needs a finite later endpoint").into());
         }
-        let endpoint = history.at_with_support_accelerations(
-            self.run().geometry, self.run().problem, supports, time, cx,
+        let endpoint = history.at_with_support_accelerations_reference_density(
+            self.run().geometry, self.run().problem, supports,
+            self.run().nodal_reference_density_kg_m3(), time, cx,
         )?;
         self.advance_with_support_accelerations(
             &endpoint.loads.case, endpoint.prescribed_dofs_m_s2(), h_s, cx,
@@ -287,8 +310,9 @@ impl crate::loads3::transient::adjoint::support::trajectory::RecordedPrescribedT
         if !h_s.is_finite() || h_s <= 0.0 || !time.is_finite() || time <= start {
             return Err(TransientError3::Invalid("recorded support history needs a finite later endpoint").into());
         }
-        let endpoint = history.at_with_supports(
-            self.run().geometry, self.run().problem, supports, time,
+        let endpoint = history.at_with_supports_reference_density(
+            self.run().geometry, self.run().problem, supports,
+            self.run().nodal_reference_density_kg_m3(), time,
             self.run().maximum_displacement_m(), cx,
         )?;
         self.advance_with_supports(&endpoint.loads.case, endpoint.prescribed_dofs_m(), h_s, cx)

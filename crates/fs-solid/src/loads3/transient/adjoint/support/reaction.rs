@@ -61,6 +61,7 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         let seed = reaction_seed(full, self.free_dofs(), rows, cx)?;
         let motion_seed = motion_pullback(
             self.problem,
+            self.nodal_reference_density.as_deref(),
             &seed,
             self.config.mass_damping_per_s,
             self.config.stiffness_damping_s,
@@ -109,6 +110,7 @@ impl PrescribedTransientAdjoint3<'_, '_, '_, '_> {
         let seed = reaction_seed(self.full_dofs, self.free_dofs(), rows, cx)?;
         motion_pullback(
             self.problem,
+            self.nodal_reference_density.as_deref(),
             &seed,
             self.reduced.primal_config.mass_damping_per_s,
             self.reduced.primal_config.stiffness_damping_s,
@@ -172,13 +174,14 @@ fn reaction_seed(
 
 fn motion_pullback(
     problem: &TetLinearElasticProblem<'_>,
+    nodal_reference_density: Option<&[f64]>,
     seed: &[f64],
     eta: f64,
     zeta: f64,
     cx: &Cx<'_>,
 ) -> Result<NodalMotionCotangent3, TransientAdjointError3> {
     let (mass, stiffness) = problem
-        .transpose_full_kinematic_actions(seed, cx)
+        .transpose_full_kinematic_actions(seed, nodal_reference_density, cx)
         .map_err(TransientError3::from)?;
     let mut motion = NodalMotionCotangent3 {
         q: vec![[0.0; 3]; problem.nodes_m.len()],
@@ -224,6 +227,7 @@ fn direct_material(
             thermal,
             run.config.mass_damping_per_s,
             run.config.stiffness_damping_s,
+            run.nodal_reference_density.as_deref(),
             cx,
         )
         .map_err(TransientError3::from)?;

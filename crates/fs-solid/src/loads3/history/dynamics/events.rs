@@ -47,28 +47,32 @@ impl SupportSchedule3<'_> {
             Self::Acceleration(_) => true,
         }
     }
+    #[allow(clippy::too_many_arguments)]
     fn at<'g, 'm, 'p, 's>(
         self,
         history: &TetLoadHistory3<'_>,
         geometry: &'g TetLoadGeometry3<'m>,
         problem: &'p TetLinearElasticProblem<'s>,
+        reference_density_kg_m3: Option<&[f64]>,
         time: f64,
         maximum_displacement_m: f64,
         cx: &Cx<'_>,
     ) -> Result<ScheduledSupportSample3<'g, 'm, 'p, 's>, TransientHistoryError3> {
         Ok(match self {
             Self::Displacement(rows) => {
-                ScheduledSupportSample3::Displacement(history.at_with_supports(
+                ScheduledSupportSample3::Displacement(history.at_with_supports_reference_density(
                     geometry,
                     problem,
                     rows,
+                    reference_density_kg_m3,
                     time,
                     maximum_displacement_m,
                     cx,
                 )?)
             }
             Self::Acceleration(rows) => ScheduledSupportSample3::Acceleration(
-                history.at_with_support_accelerations(geometry, problem, rows, time, cx)?,
+                history.at_with_support_accelerations_reference_density(
+                    geometry, problem, rows, reference_density_kg_m3, time, cx)?,
             ),
         })
     }
@@ -211,6 +215,25 @@ impl<'a> EventLoadHistory3<'a> {
         Ok(EventTransientRun3 { schedule: self, run })
     }
 
+    /// Event-aligned dynamics with the same graded reference density in the
+    /// initial inertia and every left/right acceleration-force sample.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_transient_with_nodal_reference_density<'h, 'g, 'm, 'p, 's>(
+        &'h self, geometry: &'g TetLoadGeometry3<'m>,
+        problem: &'p TetLinearElasticProblem<'s>, reference_density_kg_m3: &[f64],
+        thermal: Option<TetThermalStrainField<'_>>, time_s: f64,
+        displacement_m: &[[f64; 3]], velocity_m_s: &[[f64; 3]],
+        config: TransientConfig3, cx: &Cx<'_>,
+    ) -> Result<EventTransientRun3<'h, 'a, 'g, 'm, 'p, 's>, TransientHistoryError3> {
+        if self.supports.is_driven() {
+            return Err(invalid("support schedules require explicit initial support velocity and acceleration"));
+        }
+        let run = self.history.begin_transient_with_nodal_reference_density(
+            geometry, problem, reference_density_kg_m3, thermal, time_s,
+            displacement_m, velocity_m_s, config, cx)?;
+        Ok(EventTransientRun3 { schedule: self, run })
+    }
+
     /// Initialize the bound supports and forces at one right-continuous time.
     /// Full initial velocity and fixed-component acceleration are explicit,
     /// as in `TetLoadHistory3::begin_transient_with_support_history`. Later
@@ -296,7 +319,7 @@ impl<'a> EventLoadHistory3<'a> {
     // Sample small constant replacements only where a held vector changes.
     // Never clone an entire payload table or approximate t-minus by next_down.
     fn left_at<'g, 'm, 'p, 's>(&self, geometry: &'g TetLoadGeometry3<'m>,
-        problem: &'p TetLinearElasticProblem<'s>, time: f64,
+        problem: &'p TetLinearElasticProblem<'s>, reference_density_kg_m3: Option<&[f64]>, time: f64,
         maximum_displacement_m: f64, cx: &Cx<'_>)
         -> Result<ScheduledSupportSample3<'g, 'm, 'p, 's>, TransientHistoryError3> {
         let mut frames = FrameTree::new();
@@ -356,6 +379,7 @@ impl<'a> EventLoadHistory3<'a> {
                     &left,
                     geometry,
                     problem,
+                    reference_density_kg_m3,
                     time,
                     maximum_displacement_m,
                     cx,
@@ -379,6 +403,7 @@ impl<'a> EventLoadHistory3<'a> {
                     &left,
                     geometry,
                     problem,
+                    reference_density_kg_m3,
                     time,
                     maximum_displacement_m,
                     cx,
@@ -493,12 +518,14 @@ impl<'g, 'm, 'p, 's> EventTransientRun3<'_, '_, 'g, 'm, 'p, 's> {
         let start_time_s = self.run.state().time_s;
         let end_time_s = self.schedule.endpoint(start_time_s, target_s, maximum_step_s)?;
         let geometry = self.run.geometry; let problem = self.run.problem;
-        let left = self.schedule.left_at(geometry, problem, end_time_s,
+        let left = self.schedule.left_at(geometry, problem,
+            self.run.nodal_reference_density_kg_m3(), end_time_s,
             self.run.maximum_displacement_m(), cx)?;
         let right = self.schedule.supports.at(
             &self.schedule.history,
             geometry,
             problem,
+            self.run.nodal_reference_density_kg_m3(),
             end_time_s,
             self.run.maximum_displacement_m(),
             cx,

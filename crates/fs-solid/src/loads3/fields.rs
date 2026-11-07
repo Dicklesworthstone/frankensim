@@ -104,9 +104,9 @@ impl<'m> TetLoadGeometry3<'m> {
     /// The field is authored reference inventory, not a current-density refresh
     /// or material-source claim. Surface and point forces are superposed once.
     ///
-    /// The returned load feeds native static equilibrium. This method only
-    /// projects forces: it does not replace the mass of a transient run, whose
-    /// existing constructors still use the solve material's cellwise density.
+    /// The returned load feeds native static equilibrium or a transient run
+    /// initialized with `begin_transient_with_nodal_reference_density` and the
+    /// same field. Force projection alone does not change an existing run's mass.
     ///
     /// # Errors
     /// Wrong counts, nonpositive/nonfinite density, nonfinite acceleration,

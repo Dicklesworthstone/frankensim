@@ -104,6 +104,7 @@ impl<'g, 'm> TetLoadCase3<'g, 'm> {
             velocity_m_s,
             Some(prescribed_acceleration_m_s2),
             None,
+            None,
             config,
             cx,
         )
@@ -310,7 +311,8 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         rhs: &mut [f64],
         cx: &Cx<'_>,
     ) -> Result<(), TransientError3> {
-        let actions = self.problem.apply_full_kinematics(&supports.motion, cx)?;
+        let actions = self.problem.apply_full_kinematics(&supports.motion,
+            self.nodal_reference_density.as_deref(), cx)?;
         for (i, &d) in self.free_dofs().iter().enumerate() {
             if i % 256 == 0 {
                 check(cx)?;
@@ -383,7 +385,8 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         cx: &Cx<'_>,
     ) -> Result<Endpoint, TransientError3> {
         let motion = self.full_motion(supports, reduced, cx)?;
-        let actions = self.problem.apply_full_kinematics(&motion, cx)?;
+        let actions = self.problem.apply_full_kinematics(&motion,
+            self.nodal_reference_density.as_deref(), cx)?;
         let kinetic = number(0.5 * inner(&motion[1], &actions.mv))?;
         let strain = number(0.5 * inner(&motion[0], &actions.ku))?;
         let mut reactions = vec![0.0; motion[0].len()];
@@ -474,7 +477,8 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         }
         let displacement = |d: usize| Dd::from_f64(h)
             * (Dd::from_f64(0.5 * old[1][d]) + Dd::from_f64(0.5 * endpoint.motion[1][d]));
-        let actions = self.problem.apply_full_kinematics(&midpoint, cx)?;
+        let actions = self.problem.apply_full_kinematics(&midpoint,
+            self.nodal_reference_density.as_deref(), cx)?;
         let mut damping = Dd::default();
         for d in 0..full {
             if d % 256 == 0 {
@@ -506,8 +510,10 @@ impl TetTransientRun3<'_, '_, '_, '_> {
                 + Dd::from_f64(0.5 * endpoint.reactions[d]);
             support = support + average * displacement(d);
         }
-        let kinetic_change = energy::full_change(self.problem, true, &old[1], &endpoint.motion[1], cx)?;
-        let strain_change = energy::full_change(self.problem, false, &old[0], &endpoint.motion[0], cx)?;
+        let kinetic_change = energy::full_change(self.problem, true, &old[1], &endpoint.motion[1],
+            self.nodal_reference_density.as_deref(), cx)?;
+        let strain_change = energy::full_change(self.problem, false, &old[0], &endpoint.motion[0],
+            self.nodal_reference_density.as_deref(), cx)?;
         let account = energy::StepEnergy {
             kinetic: endpoint.kinetic, strain: endpoint.strain, kinetic_change, strain_change,
             mechanical: energy::retained(mechanical)?, support: energy::retained(support)?,
