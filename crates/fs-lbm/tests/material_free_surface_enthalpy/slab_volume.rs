@@ -10,6 +10,8 @@ use fs_lbm::material::free_surface::enthalpy::{
 use fs_material::liquid::surface::ResolvedLiquidSurfaceState;
 use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve};
 
+mod heat;
+
 #[derive(Clone, Copy)]
 struct Case {
     face: Face3,

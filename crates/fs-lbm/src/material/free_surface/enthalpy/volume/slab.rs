@@ -166,7 +166,7 @@ pub(super) fn remap(
 // Finite factors and positive finite denominators. Binary scaling prevents
 // density*volume, squared speed and inverse tiny dt from overflowing before a
 // representable final mass/momentum/energy is formed.
-fn product_ratio(factors: [f64; 4], denominators: [f64; 2]) -> f64 {
+pub(super) fn product_ratio(factors: [f64; 4], denominators: [f64; 2]) -> f64 {
     fn parts(mut value: f64) -> (f64, i32) {
         let mut shift = 0;
         if value < f64::MIN_POSITIVE {

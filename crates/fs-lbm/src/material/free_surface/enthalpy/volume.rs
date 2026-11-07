@@ -19,6 +19,12 @@ use fs_math::dd::Dd;
 
 mod slab;
 
+pub mod heat;
+pub use heat::{
+    FreeSurfaceSlabHeatControls, FreeSurfaceSlabHeatError, FreeSurfaceSlabHeatPlan,
+    FreeSurfaceSlabHeatReport, FreeSurfaceSlabHeatStep,
+};
+
 /// Only this source split may create a continuation binding. Exact native
 /// moments are checked before its affine velocity is used as a predictor.
 #[derive(Clone)]
@@ -123,6 +129,32 @@ pub struct FreeSurfaceSlabVolumeStep<'s, 'm> {
 }
 
 impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
+    fn admit_uniform_slab_sources(
+        &self,
+        net_specific_enthalpy_increment_j_kg: f64,
+    ) -> Result<(), Error> {
+        if !net_specific_enthalpy_increment_j_kg.is_finite()
+            || self.phase_conduction.is_some()
+            || self.buoyancy.is_some()
+            || self.rheology.is_some()
+            || self.wetting.is_some()
+            || self.thermocapillary.is_some()
+            || self.surface_temperature_forces
+            || self.flow.scaling.bulk_viscosity.is_some()
+        {
+            return Err(Error::Invalid(
+                "uniform thermal slab cannot discard a coupled source or nonfinite heat",
+            ));
+        }
+        #[cfg(feature = "enthalpy-coupling")]
+        if self.electrical.is_some() {
+            return Err(Error::Invalid(
+                "uniform thermal slab cannot discard its electrical owner",
+            ));
+        }
+        Ok(())
+    }
+
     /// Current accepted source/chart/reference discrepancy for the explicit
     /// accuracy binding. All ordinary constructors retain None and their exact
     /// original density admission. A continued heat step must remain inside
@@ -216,25 +248,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
                 ));
             }
         }
-        if !net_specific_enthalpy_increment_j_kg.is_finite()
-            || self.phase_conduction.is_some()
-            || self.buoyancy.is_some()
-            || self.rheology.is_some()
-            || self.wetting.is_some()
-            || self.thermocapillary.is_some()
-            || self.surface_temperature_forces
-            || self.flow.scaling.bulk_viscosity.is_some()
-        {
-            return Err(Error::Invalid(
-                "uniform thermal slab cannot discard a coupled source or nonfinite heat",
-            ));
-        }
-        #[cfg(feature = "enthalpy-coupling")]
-        if self.electrical.is_some() {
-            return Err(Error::Invalid(
-                "uniform thermal slab cannot discard its electrical owner",
-            ));
-        }
+        self.admit_uniform_slab_sources(net_specific_enthalpy_increment_j_kg)?;
         let dt = self.flow.scaling.timestep_s();
         let dx = self.flow.scaling.cell_size_m();
         if controls.volume.projection.duration_s != dt {

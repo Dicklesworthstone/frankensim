@@ -15600,3 +15600,30 @@ large common transport, permutations and mass scaling. Native integration
 regressions specify deformed reference inventory, moment/enthalpy
 conservation, refusal and continuing flow behavior. MR28 remains open for
 its broader phase and history obligations.
+
+## Supplied heat drives conservative liquid slab expansion
+
+`MaterialFreeSurfaceEnthalpy3::prepare_uniform_slab_heat` closes an authored
+heat interval against original caloric storage and the existing pressure
+owner's mechanical correction work: Q = M*delta_h + W. Fixed-pressure enthalpy
+already contains ambient p*dV; correction pressure does not change the
+thermodynamic source context. Projection loss and all native/face/affine
+mapping changes retain their separate numerical accounts and never become heat.
+
+On the admitted original slab metric, affine normal motion gives
+W = B*u*(u-u0). B is measured once by the original pressure owner's energy
+audit on an already-compatible unit-speed field. Scalar trials use the SAME
+original chart and analytic specific-volume tangent, with a caller-selected
+finite sign bracket, evaluation limit and joule residual. No repeated 3-D
+pressure solve or material-property refresh occurs inside the scalar solve.
+The owned original-source caloric endpoint keeps the accepted density and
+expansion law available for the continuing native liquid.
+
+`FreeSurfaceSlabHeatPlan::advance` delegates to the existing conservative
+native slab step and independently gates its measured pressure work and
+represented enthalpy against supplied heat. The plan borrows the original
+trajectory; failed preparation or advancement changes no accepted state.
+All six orientations, a partial terminal layer and subcell slabs retain the
+existing mass, momentum, geometry, source and cancellation gates. Repeated
+calls remain thermal source splitting; arbitrary flowing geometries, viscous
+integration, capillarity and melting require their existing physical owners.
