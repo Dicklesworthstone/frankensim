@@ -10,8 +10,9 @@
 //! attached area, frame, material arms, poses and mass properties remain fixed.
 //! Full inertia can change angular rates on other axes; those are not clamped.
 //! Constitutive path integration is exact, while the inertial midpoint phase is
-//! a time discretization. Every nonzero endpoint rate reversal refuses for
-//! refinement: its turning point could yield even when the net step is elastic.
+//! a time discretization. A reversing step is admitted only when a guarded
+//! native mode-energy bound excludes yield anywhere on its elastic orbit.
+//! Otherwise it refuses: an elastic net step can hide yielding at a turn.
 //! Pose evolution, normal-area evolution, history transport, arbitrary vector
 //! rolling and heat allocation remain with their physical owners.
 
@@ -117,7 +118,7 @@ pub enum RigidAdhesiveRollingError {
         evaluations: usize,
         angle_residual_rad: f64,
     },
-    /// A net-angle trial cannot certify the maximum shift of a reversing path.
+    /// The turning orbit could not be shown to remain below rolling yield.
     UnresolvedRollingReversal,
     Audit(Box<RigidAdhesiveRollingReport>),
 }
@@ -304,7 +305,9 @@ pub fn prepare_rigid_adhesive_rolling(
     let after = phase.bodies_after;
     let final_points = points(after, native.geometry.properties, native.geometry.arms)?;
     let rate_after = finite(relative_spin(final_points).dot(native.axis))?;
-    if (rate_before > 0.0 && rate_after < 0.0) || (rate_before < 0.0 && rate_after > 0.0) {
+    if ((rate_before > 0.0 && rate_after < 0.0) || (rate_before < 0.0 && rate_after > 0.0))
+        && !admits_elastic_turn(&native, contact.source, &step, rate_before)
+    {
         return Err(RigidAdhesiveRollingError::UnresolvedRollingReversal);
     }
     let midpoint = (Dd::from_f64(rate_before) + Dd::from_f64(rate_after)) * Dd::from_f64(0.5);
@@ -488,6 +491,90 @@ fn solve(
         evaluations,
         angle_residual_rad: residual,
     })
+}
+
+// At held geometry, a scalar couple impulse j gives omega=omega0+W*j and
+// K=K0+omega0*j+W*j^2/2. Hence K-omega^2/(2W) is invariant. Initial rolling
+// storage plus omega0^2/(2W) bounds every point of the conservative scalar orbit.
+// This guarded floating-point screen is not an interval or trajectory certificate.
+fn admits_elastic_turn(
+    native: &NativePair,
+    source: &SourceJkrRollingContact,
+    step: &SourceJkrRollingStep,
+    rate: f64,
+) -> bool {
+    let rolling = step.rolling();
+    if rolling.plastic_rolling_increment_m != 0.0
+        || rolling.irreversible_loss_j != 0.0
+        || (rolling.storage_before_j != 0.0 && !rolling.storage_before_j.is_normal())
+    {
+        return false;
+    }
+    // Normwise roundoff allowance for the fixed quaternion rotations, inverse
+    // principal inertias and projections, including the admitted quaternion
+    // norm drift. Unlike a relative error on omega or W, these absolute bounds
+    // retain cancellation and inertia-conditioning effects. They do not use
+    // the caller's authored mechanics/audit tolerances.
+    const GUARD: f64 = 4096.0 * f64::EPSILON;
+    let (mut inverse_scale, mut rate_scale) = (0.0, 0.0);
+    for i in 0..2 {
+        let inertia = native.geometry.properties[i].principal_inertia_body();
+        let minimum = inertia.x.min(inertia.y).min(inertia.z);
+        let inverse = minimum.recip().next_up();
+        let momentum = native.before[i].angular_momentum_body();
+        let norm = if momentum == Vec3::ZERO {
+            0.0
+        } else {
+            ((momentum.x.abs() + momentum.y.abs()).next_up() + momentum.z.abs()).next_up()
+        };
+        let amplitude = if norm == 0.0 {
+            0.0
+        } else {
+            (norm / minimum).next_up()
+        };
+        if !inverse.is_normal() || (norm != 0.0 && (!norm.is_normal() || !amplitude.is_normal())) {
+            return false;
+        }
+        inverse_scale = (inverse_scale + inverse).next_up();
+        if amplitude > 0.0 {
+            rate_scale = (rate_scale + amplitude).next_up();
+        }
+    }
+    let mobility_error = (GUARD * inverse_scale).next_up();
+    let rate_error = (GUARD * rate_scale).next_up();
+    let mobility_lower = (native.mobility - mobility_error).next_down();
+    let rate_upper = (rate.abs() + rate_error).next_up();
+    if !mobility_error.is_normal()
+        || !rate_error.is_normal()
+        || !mobility_lower.is_normal()
+        || mobility_lower <= 0.0
+        || !rate_upper.is_normal()
+    {
+        return false;
+    }
+    let moment = source.law().critical_moment_n_m();
+    let angle = source.law().critical_rolling_angle_rad();
+    if !moment.is_normal() || !angle.is_normal() {
+        return false;
+    }
+    let yield_lower = (Dd::from_f64(0.5) * Dd::from_f64(moment) * Dd::from_f64(angle))
+        .to_f64()
+        .next_down();
+    if !yield_lower.is_normal() || yield_lower <= 0.0 {
+        return false;
+    }
+    let reduced_rate = Dd::from_f64(rate_upper) / Dd::from_f64(mobility_lower.sqrt());
+    let energy_scale = moment.sqrt() * angle.sqrt();
+    if !reduced_rate.to_f64().is_normal() || !energy_scale.is_normal() {
+        return false;
+    }
+    let speed = reduced_rate / Dd::from_f64(energy_scale);
+    let fraction =
+        Dd::from_f64(rolling.storage_before_j) / Dd::from_f64(yield_lower) + speed * speed;
+    let upper = fraction.to_f64().next_up();
+    // Also covers ordinary rounded energy coefficients (Mcrit*theta_crit is
+    // formed in a different order from the original prepared yield storage).
+    upper.is_finite() && upper >= 0.0 && upper < 1.0 - GUARD
 }
 fn finite(value: f64) -> Result<f64, RigidAdhesiveRollingError> {
     if value.is_finite() {

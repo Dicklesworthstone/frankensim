@@ -8096,10 +8096,16 @@ Recoverable rolling energy and irreversible yield loss remain separate, and
 neither includes the original normal JKR storage or an assumed heat partition.
 
 The constitutive increment is a monotone scalar path. The inertial update is a
-time discretization, and every nonzero endpoint rate reversal refuses for
-refinement: a hidden turning point can yield despite an elastic net-angle trial.
-This phase does not enforce no-slip rolling, integrate poses,
-evolve normal area, transport memory or supply general vector rolling. G1/G3/G4
+time discretization. Endpoint reversals require a zero-loss elastic trial and
+a guarded initial mode-energy bound strictly below yield storage; this excludes
+hidden yield anywhere on the elastic orbit. Absolute roundoff allowances use
+original angular momenta and minimum principal inertias to raise the rate and
+lower mobility, retaining cancellation and conditioning effects. The fixed
+4096-epsilon margin is independent of authored audit tolerances. Unresolved,
+subnormal or nonfinite bounds refuse; this is a conservative floating-point
+admission screen, not an interval or time-accuracy certificate. Other reversals
+still require refinement. This phase does not enforce no-slip rolling, integrate
+poses, evolve normal area, transport memory or supply general vector rolling. G1/G3/G4
 cases in `tests/adhesive_rolling.rs` cover analytic elastic pair recoil, tensile
 yielding, full inertia in rotated frames, weak work beside common translation,
 and atomic cancellation, geometry and numerical-budget refusals.

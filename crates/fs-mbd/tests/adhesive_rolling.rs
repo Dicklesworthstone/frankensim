@@ -475,7 +475,10 @@ fn g3_elastic_looking_net_step_cannot_hide_yield_before_a_turning_point() {
         &mut state,
         contact,
         dt,
-        controls(),
+        RigidAdhesiveRollingControls {
+            energy_tolerance_j: 1.0,
+            ..controls()
+        },
         &CancelGate::new(),
     );
     assert!(
@@ -487,4 +490,66 @@ fn g3_elastic_looking_net_step_cannot_hide_yield_before_a_turning_point() {
     );
     assert_eq!(bodies, f.bodies);
     assert_eq!(state, initial);
+}
+
+#[test]
+fn g1_guarded_elastic_orbit_admits_rocking_but_refuses_ambiguous_yield() {
+    let source = source(false);
+    let radius = source.normal_source().effective_radius_m();
+    let stiffness = source.law().stiffness_n_per_m() * radius * radius;
+    let critical = source.law().critical_rolling_angle_rad();
+    for rotated in [false, true] {
+        let frequency = (stiffness * fixture(0.0, 0.0, rotated).mobility()).sqrt();
+        let dt = 4.0 / frequency;
+        let policy = RigidAdhesiveRollingControls {
+            maximum_step_s: 1.1 * dt,
+            energy_tolerance_j: 1.0,
+            ..controls()
+        };
+        for speed in [0.8, 1.0] {
+            let f = fixture(speed * critical * frequency, 1e12, rotated);
+            let contact = f.contact(&source);
+            let state = contact
+                .initial_state(&f.bodies, &f.properties, policy, &CancelGate::new())
+                .unwrap();
+            let result = prepare_rigid_adhesive_rolling(
+                &f.bodies,
+                &f.properties,
+                &state,
+                contact,
+                dt,
+                policy,
+                &CancelGate::new(),
+            );
+            if speed == 1.0 {
+                assert!(
+                    matches!(
+                        result,
+                        Err(RigidAdhesiveRollingError::UnresolvedRollingReversal)
+                    ),
+                    "{result:?}"
+                );
+                continue;
+            }
+            let candidate = result.unwrap();
+            let report = &candidate.report;
+            assert!(
+                report.rolling_rate_before_rad_s > 0.0 && report.rolling_rate_after_rad_s < 0.0
+            );
+            close(report.angle_increment_rad, 0.64 * critical, 1e-18);
+            close(
+                report.rolling_rate_after_rad_s,
+                -0.48 * critical * frequency,
+                1e-13,
+            );
+            assert_eq!(report.contact.rolling().irreversible_loss_j, 0.0);
+            assert_eq!(report.evaluations, 1);
+            close(report.total_energy_residual_j, 0.0, 1e-25);
+            close(
+                report.contact.rolling().storage_after_j,
+                0.5 * stiffness * (0.64 * critical).powi(2),
+                1e-25,
+            );
+        }
+    }
 }
