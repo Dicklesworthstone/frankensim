@@ -9924,3 +9924,34 @@ shutter depolarization, covariance identity, frame rotation, finite-pixel chroma
 integration and energy, weak-axis retention, independent time-quadrature
 convergence, and work/cancellation/range admission. Their execution is tracked
 separately from the completed pinned-rustfmt and source review.
+
+### Direct-beam absorption through native latent enthalpy states
+
+`TemperatureOpticalHeating::try_new_enthalpy` consumes the existing
+`EnthalpyAbsorptionTable` and explicit `EnthalpyOpticalCell` bindings. The
+original enthalpy optical compiler and native binding checks remain the owners
+of spectral interpolation, caloric identity, material identity, storage basis
+and h support. An independent kelvin domain also remains binding. Zero and
+negative h retain the original source datum; no phase fraction or optical
+mixing rule is inferred.
+
+The same cached DDA, positive attenuation kernels, native accepted-time
+accounting, power schedules and complete-trajectory refinement serve both
+temperature and enthalpy coordinates. Native h enters the optical snapshot
+identity and source queries, including dark intervals and final/event endpoint
+checks. The solver uses precompiled spectral lanes with bounded per-cell state-table
+lookups, without new geometry traversal or spectral source searches during an advance.
+
+`try_new_enthalpy_two_photon` composes authored linear kappa(h) with the
+existing monochromatic bulk beta(T). Both coefficients read the same native
+start state, and the existing pulse owner integrates each affine waveform.
+Beta does not acquire an inferred phase dependence. Combined source table/knot
+limits, local irradiance support, cancellation and transactional publication
+remain binding.
+
+Focused regressions cover native latent storage, caloric datum invariance,
+original-source refusals, transparent-cell endpoints and temperature-path
+parity. Public integration regressions additionally cover analytic latent
+heating, downstream shielding, nonlinear pulses, events/restart and native
+time refinement. Geometry, density and beam area remain prescribed; hysteresis,
+phase mixing, carrier storage and material saturation are not inferred.

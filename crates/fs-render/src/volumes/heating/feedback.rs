@@ -1,8 +1,9 @@
-//! Temperature-dependent beam absorption on the native enthalpy timeline.
+//! State-dependent beam absorption on the native enthalpy timeline.
 //!
 //! The original DDA is traversed once. At each accepted thermal substep the
-//! original caloric laws supply each intersected cell's temperature; the
-//! declared mass-absorption table supplies its spectrum. Serial Beer transport
+//! original caloric laws supply each intersected cell's temperature; an
+//! optional source-bound enthalpy table also reads its original stored h.
+//! The declared mass-absorption table supplies its spectrum. Serial Beer transport
 //! therefore updates downstream shielding as upstream cells heat. Coefficients
 //! are frozen only over that one native explicit step, giving first-order time
 //! accuracy. Optional affine power schedules integrate the nonlinear optical
@@ -24,7 +25,7 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
 use fs_thermal::enthalpy::{
-    CellId, DepositionError, DepositionObserver, DepositionSimulation, Event,
+    CellId, DepositionError, DepositionObserver, DepositionSimulation, Event, MaterialId,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -33,6 +34,11 @@ mod refinement;
 pub use refinement::{FeedbackConvergence, FeedbackRefinement};
 
 mod pulse;
+
+/// Absorption on the original caloric coordinate, including latent plateaus.
+pub mod enthalpy;
+use enthalpy::{CompiledAbsorption, PreparedBinding, SourceTable};
+pub use enthalpy::{EnthalpyAbsorptionTable, EnthalpyOpticalCell};
 
 /// Source-bound two-photon absorption on the same native thermal history.
 pub mod nonlinear;
@@ -141,7 +147,8 @@ pub struct OpticalFeedbackBudget {
     pub max_path_cells: usize,
     /// Total linear and optional nonlinear source tables.
     pub max_tables: usize,
-    /// Total knots in linear and optional nonlinear temperature tables.
+    /// Total knots in all linear and optional nonlinear state tables, including
+    /// the explicit enthalpy tables admitted by `try_new_enthalpy`.
     pub max_total_temperature_knots: usize,
     /// Whole native advance; counts each attempted source preparation and,
     /// for two-photon feedback, each endpoint irradiance-domain validation.
@@ -201,7 +208,7 @@ impl From<OpticalHeatingError> for OpticalFeedbackError {
 }
 impl core::fmt::Display for OpticalFeedbackError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "temperature-dependent optical heating refused: {self:?}")
+        write!(f, "state-dependent optical heating refused: {self:?}")
     }
 }
 impl std::error::Error for OpticalFeedbackError {}
@@ -341,6 +348,7 @@ struct BoundSegment {
     path: BeamCellSegment,
     thermal_cell: CellId,
     table: usize,
+    material_id: Option<MaterialId>,
 }
 
 #[derive(Debug)]
@@ -348,7 +356,7 @@ struct FeedbackModel<const N: usize> {
     identity: ContentHash,
     beam: IncidentBeam<N>,
     wavelength_bounds_nm: (f64, f64),
-    tables: Vec<CompiledTable<N>>,
+    tables: Vec<CompiledAbsorption<N>>,
     path: Vec<BoundSegment>,
     budget: OpticalFeedbackBudget,
     power_tolerance_w: f64,
@@ -390,11 +398,42 @@ impl<const N: usize> TemperatureOpticalHeating<N> {
         power_tolerance_w: f64,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, OpticalFeedbackError> {
+        Self::compile_beam(
+            cx,
+            grid,
+            beam,
+            tables.iter().map(SourceTable::Temperature),
+            bindings.iter().map(|cell| PreparedBinding {
+                cell: *cell,
+                material_id: None,
+            }),
+            thermal,
+            budget,
+            power_tolerance_w,
+            "org.frankensim.render.temperature-beam.v1",
+            &mut checkpoint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compile_beam<'a>(
+        cx: &Cx<'_>,
+        grid: &AbsorbingGrid<'_>,
+        beam: IncidentBeam<N>,
+        tables: impl ExactSizeIterator<Item = SourceTable<'a>>,
+        bindings: impl ExactSizeIterator<Item = PreparedBinding>,
+        thermal: &DepositionSimulation<'_>,
+        budget: OpticalFeedbackBudget,
+        power_tolerance_w: f64,
+        identity_domain: &str,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, OpticalFeedbackError> {
         checkpoint()?;
+        let table_count = tables.len();
         if N == 0
             || thermal.cells().is_empty()
-            || tables.is_empty()
-            || tables.len() > budget.max_tables
+            || table_count == 0
+            || table_count > budget.max_tables
             || bindings.len() > budget.max_path_cells
             || budget.max_source_evaluations == 0
             || !nonnegative(power_tolerance_w)
@@ -412,19 +451,20 @@ impl<const N: usize> TemperatureOpticalHeating<N> {
             budget.max_path_cells,
         )?;
         let mut selected = BTreeMap::new();
-        for binding in bindings {
+        for prepared in bindings {
             checkpoint()?;
-            if selected.insert(binding.grid_cell, *binding).is_some() {
+            let binding = prepared.cell;
+            if selected.insert(binding.grid_cell, prepared).is_some() {
                 return Err(OpticalHeatingError::DuplicateCell(binding.grid_cell).into());
             }
-            if binding.absorption_table >= tables.len() {
-                return Err(invalid("unknown temperature-dependent absorption table"));
+            if binding.absorption_table >= table_count {
+                return Err(invalid("unknown state-dependent absorption table"));
             }
             if !thermal.cells().contains_key(&binding.thermal_cell) {
                 return Err(OpticalHeatingError::InactiveCell(binding.thermal_cell).into());
             }
         }
-        let mut hash = DomainHasher::new("org.frankensim.render.temperature-beam.v1");
+        let mut hash = DomainHasher::new(identity_domain);
         hash.update(grid.content_identity().as_bytes());
         for value in [
             beam.origin.x,
@@ -443,21 +483,22 @@ impl<const N: usize> TemperatureOpticalHeating<N> {
         }
         let mut compiled = Vec::new();
         compiled
-            .try_reserve_exact(tables.len())
+            .try_reserve_exact(table_count)
             .map_err(|_| OpticalFeedbackError::Budget)?;
         let mut count = 0usize;
         let mut bounds = (0.0_f64, f64::MAX);
         for table in tables {
             checkpoint()?;
             count = count
-                .checked_add(table.rows.len())
+                .checked_add(table.knot_count())
                 .ok_or(OpticalFeedbackError::Budget)?;
             if count > budget.max_total_temperature_knots {
                 return Err(OpticalFeedbackError::Budget);
             }
-            bounds.0 = bounds.0.max(table.wavelength_bounds_nm.0);
-            bounds.1 = bounds.1.min(table.wavelength_bounds_nm.1);
-            compiled.push(table.compile(&beam.wavelengths_nm, &mut hash, &mut checkpoint)?);
+            let domain = table.wavelength_bounds_nm();
+            bounds.0 = bounds.0.max(domain.0);
+            bounds.1 = bounds.1.min(domain.1);
+            compiled.push(table.compile(&beam.wavelengths_nm, &mut hash, checkpoint)?);
         }
         hash.update(&bounds.0.to_bits().to_le_bytes());
         hash.update(&bounds.1.to_bits().to_le_bytes());
@@ -467,9 +508,13 @@ impl<const N: usize> TemperatureOpticalHeating<N> {
             .map_err(|_| OpticalFeedbackError::Budget)?;
         for segment in path {
             checkpoint()?;
-            let binding = selected
+            let prepared = selected
                 .remove(&segment.cell_index)
                 .ok_or(OpticalHeatingError::UnmappedCell(segment.cell_index))?;
+            let binding = prepared.cell;
+            if let Some(material_id) = prepared.material_id {
+                hash.update(&material_id.0.to_le_bytes());
+            }
             hash.update(&(segment.cell_index as u64).to_le_bytes());
             hash.update(&binding.thermal_cell.0.to_le_bytes());
             hash.update(&(binding.absorption_table as u64).to_le_bytes());
@@ -477,6 +522,7 @@ impl<const N: usize> TemperatureOpticalHeating<N> {
                 path: segment,
                 thermal_cell: binding.thermal_cell,
                 table: binding.absorption_table,
+                material_id: prepared.material_id,
             });
         }
         if !selected.is_empty() {
@@ -494,7 +540,7 @@ impl<const N: usize> TemperatureOpticalHeating<N> {
             power_tolerance_w,
             two_photon: None,
         });
-        let (power, sources_w) = model.evaluate(thermal, &mut checkpoint)?;
+        let (power, sources_w) = model.evaluate(thermal, checkpoint)?;
         let sums = EnergySums::default();
         let energy = sums.value()?;
         Ok(Self {
@@ -572,8 +618,12 @@ impl<const N: usize> FeedbackModel<N> {
         for (index, segment) in self.path.iter().enumerate() {
             checkpoint()?;
             let temperature = thermal.temperature_k(segment.thermal_cell)?;
-            let coefficients = self.tables[segment.table].at(segment.thermal_cell, temperature)?;
+            let (coefficients, enthalpy) =
+                self.tables[segment.table].at(thermal, segment, temperature)?;
             hash.update(&temperature.to_bits().to_le_bytes());
+            if let Some(h) = enthalpy {
+                hash.update(&h.to_bits().to_le_bytes());
+            }
             let mut heat = CheckedSum::default();
             for lane in 0..N {
                 let (removed, remaining) = if let Some(nonlinear) = &self.two_photon {
@@ -643,7 +693,7 @@ impl<const N: usize> FeedbackModel<N> {
             power.residual_w[lane] = balance.value()?;
             if power.residual_w[lane].abs() > self.power_tolerance_w {
                 return Err(invalid(
-                    "temperature-dependent beam power is not conserved within roundoff allowance",
+                    "state-dependent beam power is not conserved within roundoff allowance",
                 ));
             }
         }
@@ -657,7 +707,7 @@ impl<const N: usize> FeedbackModel<N> {
         power.thermal_input_w = total.value()?;
         if (power.thermal_input_w - declared.value()?).abs() > self.power_tolerance_w {
             return Err(invalid(
-                "mapped heat disagrees with temperature-dependent absorption",
+                "mapped heat disagrees with state-dependent absorption",
             ));
         }
         checkpoint()?;
@@ -688,12 +738,12 @@ impl<const N: usize> FeedbackModel<N> {
             let temperature = thermal.temperature_k(segment.thermal_cell)?;
             let table = &self.tables[segment.table];
             if let Some(nonlinear) = &self.two_photon {
-                let coefficient = table.at(segment.thermal_cell, temperature)?[0];
+                let coefficient = table.at(thermal, segment, temperature)?.0[0];
                 incident = nonlinear
                     .absorb(index, segment, temperature, incident, coefficient)?
                     .1;
             } else {
-                table.check_temperature(segment.thermal_cell, temperature)?;
+                table.check(thermal, segment, temperature)?;
             }
         }
         Ok(())

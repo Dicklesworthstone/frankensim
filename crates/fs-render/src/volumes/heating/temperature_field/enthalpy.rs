@@ -133,6 +133,73 @@ impl EnthalpyAbsorptionTable {
     pub fn specific_enthalpy_bounds_j_kg(&self) -> (f64, f64) {
         (self.0.rows[0].0, self.0.rows[self.0.rows.len() - 1].0)
     }
+
+    pub(in crate::volumes::heating) fn knot_count(&self) -> usize {
+        self.0.rows.len()
+    }
+
+    /// The direct-beam consumer uses the same spectral compiler and native
+    /// caloric binding as the participating-medium field.
+    pub(in crate::volumes::heating) fn compile_beam<const N: usize>(
+        &self,
+        wavelengths_nm: &[f64; N],
+        hash: &mut DomainHasher,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<CompiledEnthalpyAbsorption<N>, OpticalFeedbackError> {
+        self.0
+            .compile(wavelengths_nm, hash, checkpoint)
+            .map(CompiledEnthalpyAbsorption)
+    }
+}
+
+/// A narrow consumer view; interpolation and caloric-coordinate admission stay
+/// with the original enthalpy optical owner.
+pub(in crate::volumes::heating) struct CompiledEnthalpyAbsorption<const N: usize>(
+    CompiledOpticalTable<N>,
+);
+
+impl<const N: usize> core::fmt::Debug for CompiledEnthalpyAbsorption<N> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CompiledEnthalpyAbsorption")
+            .field("temperature_bounds_k", &self.0.temperature_bounds_k)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<const N: usize> CompiledEnthalpyAbsorption<N> {
+    pub(in crate::volumes::heating) fn native_value(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        id: CellId,
+        material_id: MaterialId,
+        temperature_k: f64,
+    ) -> Result<f64, OpticalFeedbackError> {
+        let (minimum_k, maximum_k) = self.0.temperature_bounds_k;
+        if !temperature_k.is_finite() || !(minimum_k..=maximum_k).contains(&temperature_k) {
+            return Err(OpticalFeedbackError::TemperatureDomain {
+                thermal_cell: id,
+                temperature_k,
+                minimum_k,
+                maximum_k,
+            });
+        }
+        BoundEnthalpy {
+            material_id,
+            domain: self.0.enthalpy.expect("compiled enthalpy source"),
+        }
+        .native_value(thermal, id)
+    }
+
+    pub(in crate::volumes::heating) fn at(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        id: CellId,
+        material_id: MaterialId,
+        temperature_k: f64,
+    ) -> Result<(f64, [f64; N]), OpticalFeedbackError> {
+        let h = self.native_value(thermal, id, material_id, temperature_k)?;
+        Ok((h, self.0.at(id, temperature_k, h)?))
+    }
 }
 
 /// Source-bound mass scattering [m²/kg] versus native specific enthalpy [J/kg].

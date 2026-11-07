@@ -266,8 +266,12 @@ impl<const N: usize> FeedbackModel<N> {
         for (index, segment) in self.path.iter().enumerate() {
             checkpoint()?;
             let temperature = thermal.temperature_k(segment.thermal_cell)?;
-            let coefficients = self.tables[segment.table].at(segment.thermal_cell, temperature)?;
+            let (coefficients, enthalpy) =
+                self.tables[segment.table].at(thermal, segment, temperature)?;
             hash.update(&temperature.to_bits().to_le_bytes());
+            if let Some(h) = enthalpy {
+                hash.update(&h.to_bits().to_le_bytes());
+            }
             let mut heat = CheckedSum::default();
             for lane in 0..N {
                 let linear = absorb_beam(

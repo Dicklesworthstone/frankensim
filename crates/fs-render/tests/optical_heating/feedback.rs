@@ -6,6 +6,9 @@ mod nonlinear;
 #[path = "feedback/pulse.rs"]
 mod pulse;
 
+#[path = "feedback/enthalpy.rs"]
+mod enthalpy;
+
 use fs_blake3::ContentHash;
 use fs_render::volumes::heating::feedback::{
     FeedbackRefinement, IncidentBeam, OpticalFeedbackBudget, OpticalFeedbackError,

@@ -179,32 +179,15 @@ impl TemperatureOpticalHeating<1> {
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, OpticalFeedbackError> {
         checkpoint()?;
-        if !nonlinear.beam_area_m2.is_finite()
-            || nonlinear.beam_area_m2 <= 0.0
-            || nonlinear.tables.is_empty()
-        {
-            return Err(invalid(
-                "positive finite beam area and explicit nonlinear source tables required",
-            ));
-        }
-        let total_tables = linear_tables
-            .len()
-            .checked_add(nonlinear.tables.len())
-            .ok_or(OpticalFeedbackError::Budget)?;
-        let total_knots = linear_tables
-            .iter()
-            .map(|t| t.knot_count())
-            .chain(nonlinear.tables.iter().map(|t| t.0.rows.len()))
-            .try_fold(0usize, |sum, n| {
-                sum.checked_add(n).ok_or(OpticalFeedbackError::Budget)
-            })?;
-        if total_tables > budget.max_tables
-            || total_knots > budget.max_total_temperature_knots
-            || nonlinear.cells.len() > budget.max_path_cells
-        {
-            return Err(OpticalFeedbackError::Budget);
-        }
-        let mut result = Self::try_new(
+        admit(
+            linear_tables.len(),
+            linear_tables
+                .iter()
+                .map(TemperatureAbsorptionTable::knot_count),
+            nonlinear,
+            budget,
+        )?;
+        let result = Self::try_new(
             cx,
             grid,
             beam,
@@ -215,6 +198,15 @@ impl TemperatureOpticalHeating<1> {
             power_tolerance_w,
             &mut checkpoint,
         )?;
+        Self::attach_two_photon(result, nonlinear, thermal, &mut checkpoint)
+    }
+
+    pub(super) fn attach_two_photon(
+        mut result: Self,
+        nonlinear: TwoPhotonFeedback<'_>,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, OpticalFeedbackError> {
         // This is a newly constructed, unshared model: no accepted state or
         // candidate is mutated while adding the nonlinear constitutive owner.
         let model = Arc::get_mut(&mut result.model)
@@ -250,7 +242,7 @@ impl TemperatureOpticalHeating<1> {
             retained.push(table.clone());
         }
         let (lo, hi) = model.wavelength_bounds_nm;
-        if lo >= hi || !(lo..=hi).contains(&beam.wavelengths_nm[0]) {
+        if lo >= hi || !(lo..=hi).contains(&model.beam.wavelengths_nm[0]) {
             return Err(VolumeTransportError::Wavelength.into());
         }
         let mut path_tables = Vec::new();
@@ -277,11 +269,43 @@ impl TemperatureOpticalHeating<1> {
             tables: retained,
             path_tables,
         });
-        let (power, sources) = model.evaluate(thermal, &mut checkpoint)?;
+        let (power, sources) = model.evaluate(thermal, checkpoint)?;
         result.power = power;
         result.sources_w = sources;
         Ok(result)
     }
+}
+
+// Shared by the temperature and enthalpy linear-coordinate constructors.
+pub(super) fn admit(
+    linear_tables: usize,
+    linear_knots: impl Iterator<Item = usize>,
+    nonlinear: TwoPhotonFeedback<'_>,
+    budget: OpticalFeedbackBudget,
+) -> Result<(), OpticalFeedbackError> {
+    if !nonlinear.beam_area_m2.is_finite()
+        || nonlinear.beam_area_m2 <= 0.0
+        || nonlinear.tables.is_empty()
+    {
+        return Err(invalid(
+            "positive finite beam area and explicit nonlinear source tables required",
+        ));
+    }
+    let total_tables = linear_tables
+        .checked_add(nonlinear.tables.len())
+        .ok_or(OpticalFeedbackError::Budget)?;
+    let total_knots = linear_knots
+        .chain(nonlinear.tables.iter().map(|t| t.0.rows.len()))
+        .try_fold(0usize, |sum, n| {
+            sum.checked_add(n).ok_or(OpticalFeedbackError::Budget)
+        })?;
+    if total_tables > budget.max_tables
+        || total_knots > budget.max_total_temperature_knots
+        || nonlinear.cells.len() > budget.max_path_cells
+    {
+        return Err(OpticalFeedbackError::Budget);
+    }
+    Ok(())
 }
 
 impl CompiledTwoPhoton {
