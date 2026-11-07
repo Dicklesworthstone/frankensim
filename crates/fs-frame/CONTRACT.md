@@ -58,6 +58,15 @@ their own battery: fs-truss (layout LP + sizing), fs-solid/fs-material
   the initial state, and all N source rows count against the sample limit.
   The original `run(&[f64], dt)` retains its unchecked step-end semantics and
   fixed 30-correction behavior.
+  The separately authored viscous coefficient uses the retained virgin
+  section's one-sided bending tangent, with the declared geometry, mass and
+  damping ratio. It is not refitted from a yielded or reversing hinge when a
+  record is split, resumed or cloned. `tests/story_acceleration.rs` compares
+  nonlinear displacement, restoring shear and endpoint rates bit-for-bit
+  across uninterrupted, single-step and multi-sample continuations. This
+  preserves the selected initial-stiffness damping law; it does not identify
+  a microscopic loss mechanism or keep modal damping ratios constant after
+  material degradation. Hysteretic fiber work remains a distinct mechanism.
   `frame-008` additionally pins the PEER/OpenSees Gallery Peknold El Centro 1940
   NS record (1,559 samples, 0.02 s, values in g), converts by exactly
   9.80665 m/s² per g, and produces a bounded diagnostic response. Its source

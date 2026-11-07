@@ -274,6 +274,10 @@ pub struct StoryFrame {
     /// Parameters.
     pub params: StoryParams,
     hinge: Section,
+    // The virgin section's one-sided elastic bending tangent. A history
+    // boundary must not refit the separately authored viscous mechanism from
+    // the current plastic/reversal state. Geometry factors remain explicit.
+    initial_hinge_tangent_n_m2: f64,
     /// Committed drift.
     pub x: f64,
     /// Committed velocity.
@@ -295,9 +299,16 @@ impl StoryFrame {
     /// A story at rest.
     #[must_use]
     pub fn new(params: StoryParams) -> StoryFrame {
+        let hinge = scaled_section(params.scale);
+        // Preserve the original small positive-drift reference: concrete is
+        // compression-only, so evaluating exactly zero selects both faces'
+        // compression tangents instead of this one-sided bending limit.
+        let initial_hinge_tangent_n_m2 =
+            hinge.respond(0.0, 1e-9 / (params.h * params.lp)).tangent[1][1];
         StoryFrame {
             params,
-            hinge: scaled_section(params.scale),
+            hinge,
+            initial_hinge_tangent_n_m2,
             x: 0.0,
             v: 0.0,
             a: 0.0,
@@ -315,10 +326,14 @@ impl StoryFrame {
         (v, dv_dx)
     }
 
-    /// Initial (elastic) story stiffness.
+    /// Initial (elastic) story stiffness, using the virgin section reference.
+    ///
+    /// The material reference survives yielding, reversal, cloning and history
+    /// continuation. This does not return the current tangent or update the
+    /// viscous law to compensate for material degradation.
     #[must_use]
     pub fn initial_stiffness(&self) -> f64 {
-        self.restoring(1e-9).1
+        2.0 * self.initial_hinge_tangent_n_m2 / (self.params.h * self.params.h * self.params.lp)
     }
 
     fn damping_coefficient(&self) -> f64 {
@@ -764,8 +779,12 @@ mod sampled_history_tests {
             ..StoryParams::default()
         };
         let dt = 0.125f64;
+        // Area scaling reduces force, not fiber strain. Keep the prescribed
+        // free drift within the actual concrete strain domain as well.
+        let acceleration_m_s2 = 1.0 / 1024.0;
+        let tolerance = 1e-14 * acceleration_m_s2;
         for samples in 2usize..=8 {
-            let acceleration = vec![1.0; samples];
+            let acceleration = vec![acceleration_m_s2; samples];
             let motion = GroundMotion::new(&acceleration, dt);
             let mut fine = StoryFrame::new(params);
             let mut coarse = fine.clone();
@@ -779,9 +798,9 @@ mod sampled_history_tests {
             #[allow(clippy::cast_precision_loss)]
             let time = (samples - 1) as f64 * dt;
             for response in [fine, coarse] {
-                assert!((response.x + 0.5 * time * time).abs() < 1e-14);
-                assert!((response.v + time).abs() < 1e-14);
-                assert!((response.a + 1.0).abs() < 1e-14);
+                assert!((response.x + 0.5 * acceleration_m_s2 * time * time).abs() < tolerance);
+                assert!((response.v + acceleration_m_s2 * time).abs() < tolerance);
+                assert!((response.a + acceleration_m_s2).abs() < tolerance);
             }
         }
         let mut frame = StoryFrame::new(params);
