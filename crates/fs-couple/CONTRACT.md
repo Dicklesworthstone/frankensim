@@ -1,3 +1,25 @@
+## Source-bound incandescent heating on native enthalpy
+
+`incandescent::PreparedIncandescentSource` holds one signed current or voltage
+drive on the original `MaterialOhmicNode`. Its actual resistivity/conductivity
+source segments bound positive Joule feedback once per drive. Each proposed
+step passes endpoint power to `LumpedEnthalpyEndpoint::solve_with_internal_power`,
+retaining the original sensible/latent calorics, convection, radiation, Biot
+admission, cancellation, bisection ceiling and thermal residual budgets.
+
+The electrical path must fill the declared thermal volume. Card identity,
+complete temperature support, caloric/transport fixed source conditions and
+quantity conventions must agree. Exact original electrical receipts survive
+the accepted endpoint. Prescribed heat and terminal work are counted once;
+rendering observes temperature without adding another cooling debit.
+
+The exposed maximum step is a sufficient feedback bound, not a temporal-error
+estimate. Mass and fixed geometry remain declared inputs. Electrical phase
+dependence, expansion and spatial current/temperature fields need their native
+coupled owners and are not inferred. `tests/incandescent.rs` supplies authored
+analytic current/voltage cases, turn-off cooling, latent storage, source-context
+refusals and cancellation; it makes no measured-filament calibration claim.
+
 ## Coherent crystal absorption on native thermal cells
 
 `layered_wave_heating::substrate::crystal::PreparedCrystalWaveHeating` binds

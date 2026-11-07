@@ -155,6 +155,8 @@ pub mod gesture_path;
 mod gas_field_input;
 pub mod glottis;
 pub mod iqn_ils;
+/// Source-bound incandescent heating on the original finite enthalpy owner.
+pub mod incandescent;
 /// Shared native impulse and work stage for finite-inertia induction rotors.
 pub mod induction_rotor;
 /// Reciprocal three-dimensional eddy-current and finite rotor-inertia feedback.
