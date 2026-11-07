@@ -36,6 +36,8 @@ mod calibration;
 pub mod oriented;
 /// Original material-card support for the directional constitutive parameters.
 pub mod source;
+/// Source-bound thermal softening and reciprocal heat for fixed material axes.
+pub mod thermal;
 
 use super::energy::{EnergyTolerances, IncrementEnergy, StoredEnergy};
 use crate::elastic::{IsotropicElastic, bulk_shear_stiffness};
@@ -897,12 +899,32 @@ impl Hill48 {
         strain: &Voigt,
         tolerances: EnergyTolerances,
     ) -> Result<HillEnergyIncrement, HillError> {
+        self.advance_with_energy_from(self, old_strain, old_state, strain, tolerances)
+    }
+
+    /// Native endpoint-frozen work account for a checked coefficient change.
+    /// The thermal owner adds the frozen-history coefficient storage change
+    /// and mechanical entropy. A softened endpoint must not reject an old
+    /// state that was admissible at its actual previous temperature.
+    pub(crate) fn advance_with_energy_from(
+        &self,
+        previous: &Self,
+        old_strain: &Voigt,
+        old_state: &HillState,
+        strain: &Voigt,
+        tolerances: EnergyTolerances,
+    ) -> Result<HillEnergyIncrement, HillError> {
         if !positive(tolerances.energy_j_m3) || !positive(tolerances.yield_pa) {
             return Err(HillError::Parameters(
                 "energy and yield allowances must be finite and positive",
             ));
         }
-        self.validate_committed_history(old_strain, old_state, tolerances.yield_pa)?;
+        if self.coefficients != previous.coefficients {
+            return Err(HillError::Parameters(
+                "thermal Hill history requires the same fixed anisotropic metric",
+            ));
+        }
+        previous.validate_committed_history(old_strain, old_state, tolerances.yield_pa)?;
         let response = self.response(strain, old_state)?;
         if response.yield_residual_pa > tolerances.yield_pa
             || (response.plastic_increment > 0.0

@@ -18873,3 +18873,49 @@ native section history and heated solid dwell/reload. Scoped Rust parsing and
 format checks do not constitute compilation or test execution. Finite-strain
 recovery, kinematic hardening, tertiary damage and rupture remain outside these
 bounded phenomenological laws.
+
+## Hill plasticity in energetic layered sections
+
+`plastic::section::energy::NativeSectionEnergyLaw` admits the original `Hill48`,
+`OrientedHill48` and `ResolvedHill48` owners. The same checked native return
+retains local-axis plastic strain and its Hill work-conjugate multiplier,
+recoverable elastic/isotropic/kinematic storage, physical yield heat and separate
+backward-Euler numerical loss. Layered plane-stress quadrature and the existing
+native shell energy/dynamics paths now consume these laws without a J2 history
+projection or inferred heat fraction. Coefficients and material axes remain fixed
+over an isothermal account; invalid incoming or substituted endpoint histories
+refuse through the original owners.
+
+`tests/plastic_section/hill.rs` supplies authored directional coupon, rotation,
+partial-thickness yield/springback, source-parity and history-refusal regressions.
+These are numerical conformance cases, not measured rolled-alloy calibration,
+finite-strain forming, texture evolution or fracture predictions.
+
+## Source-bound thermal Hill plasticity
+
+`plastic::hill::thermal::{ThermalHillSource, ThermalHill}` bind the original
+oriented Hill return to the same fully solid caloric card and retained source
+claims. The fixed Hill metric and frame preserve local plastic strain and its
+work-conjugate accumulated multiplier. E(T) and energetic H(T) are affine, nu
+and reference density are fixed, yield resistance may vary with temperature,
+and selected constant isotropic expansion supplies stress-free strain. Every
+source-line cell is admitted; unsupported axes, nonaffine stored coefficients,
+metric drift, mismatched context/claims and nonpositive combined heat capacity
+refuse. The capacity gate uses the caloric owner's actual sensible-capacity
+bounds, not an endpoint enthalpy secant.
+
+Old history is validated at its actual old temperature before the original
+endpoint return. A valid state may therefore yield under heating at fixed total
+strain. The original physical yield work, frozen-history coefficient storage,
+mechanical entropy and signed reversible heat close the discrete first law;
+backward-Euler loss remains separate. Native point evaluations retain the
+original analytical tangent and fixed-array scalar return. Layer preparation
+resolves endpoint sources once before native equilibrium evaluations.
+
+The direct `ThermalSectionSourceFamily` implementation preserves complete Hill
+history in existing layered sections and thermoplastic shells, including their
+motion/contact/thermal owners. `tests/plastic_hill_thermal.rs` covers constrained
+softening, an independent rotated tensor free-energy/entropy account, unequal
+thermal layers and source/capacity refusals. Scope is fixed-axis small-strain
+solid plasticity, not finite-rotation texture, melting, fracture or an empirical
+calibration. No J2 property/history substitute or heat fraction is inferred.

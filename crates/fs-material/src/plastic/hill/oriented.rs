@@ -133,6 +133,18 @@ impl OrientedHill48 {
         self.law.stored_energy(&self.local_strain(strain), state)
     }
 
+    /// Inspect the accepted local history at its actual spatial strain without
+    /// advancing the return map or changing the material frame.
+    pub fn validate_committed_history(
+        &self,
+        strain: &Voigt,
+        state: &HillState,
+        tolerance_pa: f64,
+    ) -> Result<(), HillError> {
+        self.law
+            .validate_committed_history(&self.local_strain(strain), state, tolerance_pa)
+    }
+
     /// Preserve the original work/heat account under the fixed rotation.
     pub fn advance_with_energy(
         &self,
@@ -143,6 +155,31 @@ impl OrientedHill48 {
     ) -> Result<HillEnergyIncrement, HillError> {
         let mut increment = self.law.advance_with_energy(
             &self.local_strain(old_strain),
+            old,
+            &self.local_strain(strain),
+            tolerance,
+        )?;
+        increment.strain = *strain;
+        increment.response = self.spatial_response(increment.response)?;
+        Ok(increment)
+    }
+
+    pub(crate) fn advance_with_energy_from(
+        &self,
+        previous: &Self,
+        old_strain: &Voigt,
+        old: &HillState,
+        strain: &Voigt,
+        tolerance: EnergyTolerances,
+    ) -> Result<HillEnergyIncrement, HillError> {
+        if self.material_to_spatial != previous.material_to_spatial {
+            return Err(HillError::Parameters(
+                "thermal Hill history requires the original material frame",
+            ));
+        }
+        let mut increment = self.law.advance_with_energy_from(
+            &previous.law,
+            &previous.local_strain(old_strain),
             old,
             &self.local_strain(strain),
             tolerance,

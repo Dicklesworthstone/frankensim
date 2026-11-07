@@ -10645,3 +10645,17 @@ fibers. Four manufactured frame regressions specify load/hold/dwell/reload,
 variable-duration momentum with both mass formulations, source refresh and
 atomic refusal. Scoped parsing and source checks passed; native execution is
 pending the prescribed build runner.
+
+## Energetic Hill plastic shells
+
+The existing generic plastic-shell equilibrium, energy and retained-inertia
+owners consume native fixed-axis Hill laws through the material section-energy
+adapter. `tests/plastic_shell/hill.rs` exercises directional membrane flow with
+free width/shear, genuine zero-load release and permanent extension, reversed
+oriented layer stacks with plastic membrane/bending coupling, and backward-Euler
+motion with original reference inertia. Physical yield heat remains distinct
+from hardening storage, numerical material loss, kinetic loss and drilling-gauge
+energy. Local Hill histories survive every accepted point update.
+
+Scope remains small strain and small rotation with an authored fixed material
+metric and frame; these fixtures do not calibrate sheet forming or texture.

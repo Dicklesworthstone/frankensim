@@ -2251,3 +2251,21 @@ The extended native regression covers independent two-temperature friction,
 both side assignments, fixed-interface-temperature cache liveness and physical
 work/heat balance. Five exact-source admission checks passed; the full native
 regression awaits the pinned sibling dependencies and prescribed build runner.
+
+## Anisotropic thermal plastic shells
+
+The original `shell_plastic_enthalpy` family boundary accepts source-bound
+thermal Hill laws with complete local-axis histories. Layer equilibrium,
+reference drilling/inertia, source-resolved thermal feedback and conservative
+cell heat remain owned by the existing native paths. No J2 yield/hardening
+claims or state projection are required for an explicitly sourced Hill card.
+Physical yield heat enters the original caloric graph once; storage changes,
+mechanical entropy, reversible exchange and numerical losses stay separate.
+
+`tests/solid_plastic_enthalpy/shell/hill.rs` exercises heated rolling and oblique
+sheets under two loaded intervals and actual free unloading. An independent
+uniaxial/caloric oracle checks directional flow, softened reference yield,
+retained plastic memory, transverse contraction/shear, endpoint temperature,
+physical heat and permanent dimensions. Source fixtures are authored numerical
+cases. Scope remains fully solid, fixed material metric/frame and small strain
+and rotation; the original source, geometry, step and energy refusals apply.

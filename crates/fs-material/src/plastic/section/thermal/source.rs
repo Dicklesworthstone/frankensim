@@ -10,6 +10,7 @@ use crate::creep::thermal::{FeedbackError as CreepFeedbackError, admit_zero_expa
 use crate::creep::{CreepLaw, CreepTolerances};
 use crate::phase::{EquilibriumPhaseState, ResolvedHeatCapacityCurve};
 use crate::plastic::energy::EnergyTolerances;
+use crate::plastic::hill::thermal::ThermalHillError;
 use crate::plastic::thermal::family::{ThermoplasticFamilyError, ThermoplasticSourceFamily};
 use crate::state_point::{
     MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
@@ -46,6 +47,7 @@ pub struct ThermalSectionIncrement<S> {
 #[derive(Debug)]
 pub enum ThermalSectionSourceError {
     Plastic(ThermoplasticFamilyError),
+    Hill(ThermalHillError),
     Creep(CreepFeedbackError),
     Transport(ThermalMaterialError),
     Invalid(&'static str),
@@ -54,6 +56,7 @@ impl core::fmt::Display for ThermalSectionSourceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Plastic(e) => e.fmt(f),
+            Self::Hill(e) => e.fmt(f),
             Self::Creep(e) => e.fmt(f),
             Self::Transport(e) => e.fmt(f),
             Self::Invalid(what) => write!(f, "thermal section source: {what}"),
@@ -64,6 +67,11 @@ impl std::error::Error for ThermalSectionSourceError {}
 impl From<ThermoplasticFamilyError> for ThermalSectionSourceError {
     fn from(error: ThermoplasticFamilyError) -> Self {
         Self::Plastic(error)
+    }
+}
+impl From<ThermalHillError> for ThermalSectionSourceError {
+    fn from(error: ThermalHillError) -> Self {
+        Self::Hill(error)
     }
 }
 impl From<CreepFeedbackError> for ThermalSectionSourceError {
