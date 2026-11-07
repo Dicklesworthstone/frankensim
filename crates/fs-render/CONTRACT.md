@@ -9241,8 +9241,9 @@ specify total-internal-reflection phase, actual escaped-path admission and
 infinite absorption; those scene regressions have not yet been executed.
 
 This is an explicitly authored, piecewise-constant angular source law. It adds
-no atmospheric solution, polarized EXR decoding, environment next-event
-sampling, time-varying polarization or coherence between distinct paths.
+no atmospheric solution, polarized EXR decoding, time-varying polarization or
+coherence between distinct paths. Its native direct-source proposal and
+complementary camera weighting are specified below.
 
 ## Intensity-dependent two-photon beam absorption and native heat
 
@@ -9361,3 +9362,57 @@ refinement, changing shielding, weak/dark/opaque limits, area scaling, native
 latent/event/restart behavior, and transactional source-domain/work refusal.
 These are numerical constitutive checks, not measured-material qualification
 or a certified global time-error bound.
+
+## Polarized environment next-event sampling on native clear paths
+
+`camera::environment::sampling::CurvedEnvironmentCameraScene` borrows the
+original camera and its calibrated environment. Each continuous native surface
+receiver takes one original environment-map direction proposal, including its
+existing luminance-times-solid-angle distribution and conditional PDF. The
+sampler retains the exact selected row-major texel; a rounded pole or seam is
+not re-inverted into another texel's intensity or polarization. Original
+spectral Stokes fractions, map placement and physical incoming-light frames
+remain intact. Polarized power does not replace or modify the scalar proposal.
+
+Diffuse, coated-diffuse, rough dielectric and rough/brushed conductor receiving
+responses reuse the original native reciprocal BSDF evaluator. The actual
+incoming direction selects the original adjacent source-side medium. Passive
+camera analyzers act at launch, before any interaction. Source radiance, the
+physical receiving cosine, the native solid-angle BSDF, camera prefix, original
+local-index conversion and proposal PDF are each applied once. Positive
+products recover representable values through logarithms when an intermediate
+overflows or underflows; exact optical zeros stay zero, while an unresolved
+positive range failure refuses the complete sample.
+
+A direct proposal represents only a homogeneous, nonabsorbing source segment
+with no intervening surface. The original first-boundary event owner propagates
+the actual receiving contact's departure witness without a ray-origin offset
+or removal of that object. Any subsequent surface blocks this direct strategy.
+At a finite distance limit, the original outward-bounded geometry owner must
+also prove that the remaining infinite halfline escapes. A budget ending inside
+possible geometry is unresolved visibility, not an assumed clear or dark ray.
+Source samples and cumulative geometry work have explicit caps; optical field
+evaluations and shadow-query counts remain observable. No per-ray allocation
+or new geometric representation is introduced.
+
+The original camera continuation and its Philox domain are unchanged; source
+directions use a disjoint counter domain or explicit independent samples.
+Complementary power-heuristic weights compare the same two solid-angle
+proposals. Only a last continuous departure followed by a supported clear
+escape receives the environment endpoint weight. An intervening delta event
+clears that competitor, so unrepresented refractive or reflected chains retain
+their camera contribution. Encountered surface and thermal emission retain
+their original accumulator and are never multiplied by the environment weight.
+A homogeneous absorbing infinite tail has the original exact-zero environment
+response; curved-index source segments retain camera transport without an
+invented angular Jacobian.
+
+This consumer does not estimate scattering survival to infinity. Active
+molecular/particle fields and heterogeneous infinite tails need an original
+finite-support or tail law before their environment proposal can be admitted.
+Focused native regressions specify original-texel spectral/frame consistency,
+analytic diffuse MIS with independent surface emission, rough-metal linear and
+circular polarization, native blockers, unresolved distance limits and delta
+chains. The actual source sampler, source-frame and MIS/range arithmetic passed
+a bounded numerical execution; the full native scene regressions were authored
+but not executed in the constrained shared build environment.

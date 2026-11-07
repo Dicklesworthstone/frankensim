@@ -55,7 +55,7 @@ pub(in super::super::super) struct SurfaceResponse {
     /// Diffuse reflectance for the legacy diffuse path; otherwise a full
     /// reciprocal polarized radiance-BSDF contraction per steradian.
     pub(in super::super::super) factor: f64,
-    pub(in super::super) pdf: f64,
+    pub(in super::super::super) pdf: f64,
 }
 
 impl SurfaceReceiver {
@@ -132,6 +132,30 @@ impl SurfaceReceiver {
             frame, bundle.interface_state(), binding)?;
         Ok(SurfaceResponse { normal: face_normal(contact, endpoint.ray.dir),
             factor: response.factor, pdf: response.pdf })
+    }
+
+    /// Evaluate an incoming infinite-direction source at this exact native
+    /// receiving contact. The direction selects its original adjacent medium;
+    /// no source bundle, synthetic receiving surface or microfacet draw exists.
+    pub(in super::super::super) fn directional_response(
+        self, camera: &CurvedCameraScene<'_, '_>, source_frame: PolarizationFrame,
+        source_stokes: Stokes,
+    ) -> Result<(SurfaceResponse, usize), AreaLightCameraError> {
+        let native = camera.scene.bindings.get(self.contact.witness.boundary_id)
+            .ok_or(AreaLightCameraError::NumericalRange)?;
+        let source_medium = arrival_medium(native.interaction, self.contact,
+            source_frame.direction())?;
+        if let Some((normal, rho)) = self.diffuse {
+            let cosine = -normal.dot(source_frame.direction());
+            if !cosine.is_finite() { return Err(AreaLightCameraError::NumericalRange); }
+            return Ok((SurfaceResponse { normal,
+                factor: if cosine > 0.0 { rho } else { 0.0 },
+                pdf: cosine.max(0.0) / core::f64::consts::PI }, source_medium));
+        }
+        let response = self.evaluate(camera, self.contact, self.incoming.ray().origin,
+            source_medium, source_frame, source_stokes, 0)?;
+        Ok((SurfaceResponse { normal: face_normal(self.contact, source_frame.direction()),
+            factor: response.factor, pdf: response.pdf }, source_medium))
     }
 
     /// Validate the native recorded proposal at its exact sampled direction.

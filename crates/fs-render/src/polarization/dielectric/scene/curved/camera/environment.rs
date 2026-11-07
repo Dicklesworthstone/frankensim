@@ -17,6 +17,9 @@ use fs_exec::Cx;
 use fs_geom::Vec3;
 use fs_math::det;
 
+/// Directional source proposals with native visibility and complementary MIS.
+pub mod sampling;
+
 #[derive(Clone, Copy, Debug)]
 enum Samples<'a> {
     Uniform(&'a SourcePolarization),

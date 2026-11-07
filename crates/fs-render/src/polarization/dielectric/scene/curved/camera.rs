@@ -71,7 +71,8 @@ use fs_exec::Cx;
 use fs_geom::Vec3;
 
 mod emission;
-mod environment;
+/// Authored polarized environment observations and direct-source sampling.
+pub mod environment;
 mod polarized_source;
 pub use polarized_source::SourcePolarization;
 /// Finite-source emission histories on native group-delay paths.

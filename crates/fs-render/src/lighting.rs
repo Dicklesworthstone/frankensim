@@ -503,6 +503,15 @@ impl EnvironmentMap {
     /// selecting this environment, not the scene's outer light mixture.
     #[must_use]
     pub fn sample(&self, u1: f64, u2: f64) -> Option<EnvironmentLightSample> {
+        self.sample_with_texel(u1, u2).map(|(sample, _)| sample)
+    }
+
+    /// Retain the exact original source texel alongside its proposal. Native
+    /// directional source attributes must not re-invert a rounded seam/pole
+    /// direction and accidentally select a neighboring texel's polarization.
+    pub(crate) fn sample_with_texel(
+        &self, u1: f64, u2: f64,
+    ) -> Option<(EnvironmentLightSample, usize)> {
         if self.total_weight <= 0.0 || !unit_sample(u1) || !unit_sample(u2) {
             return None;
         }
@@ -525,12 +534,12 @@ impl EnvironmentMap {
             sin_theta * det::sin(phi),
         );
         let pixel_index = row_start + column;
-        Some(EnvironmentLightSample {
+        Some((EnvironmentLightSample {
             direction,
             emission: environment_emission(self.pixels[pixel_index]),
             pdf_solid_angle: linear_srgb_luminance(self.pixels[pixel_index].map(f64::from))
                 / self.total_weight,
-        })
+        }, pixel_index))
     }
 
     /// Evaluate piecewise-constant radiance and its conditional directional
