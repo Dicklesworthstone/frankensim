@@ -68,6 +68,8 @@ pub mod finite_solid;
 pub mod rigid_cohesive;
 /// Source-backed Hertz sliding/spin recoil and finite-cell temperature feedback.
 pub mod hertz;
+/// Event-resolved spherical spin braking with original finite-body heat feedback.
+pub mod sphere_plane;
 pub mod hertz_rolling;
 pub mod rolling;
 

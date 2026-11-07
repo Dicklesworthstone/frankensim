@@ -2053,6 +2053,48 @@ work/heat; actual mechanical-transformer power and total energy; native
 admission and tiny density perturbations. Exact-source tests used genuine
 material and pHS owners; no full workspace Cargo/DSR pass is claimed.
 
+## Finite-body thermal feedback through spherical Hertz spin events
+
+`friction_heat::sphere_plane::propose_sphere_plane_hertz_heat` composes the
+original sphere Hertz support trajectory with the original finite enthalpy
+network. Actual spin arrest, static retention, breakaway, motor reversal and
+attitude remain with the native mechanical owner. Every coupled trial starts
+from the same opaque accepted motion. Its solved common face temperature
+refreshes the original pinned static/kinetic claims once; that snapshot retains
+the actual native normal reaction and separately declared footprint radius.
+
+Only integrated sustained physical friction loss enters the existing massless
+face. Both finite bodies retain their own temperatures and conductivities;
+signed body heat includes ordinary hot-to-cold exchange. Native motor work,
+external thermal sources and the independently bounded static constraint-work
+residual remain separate. The latter is never thermalized. The combined gate
+reconstructs actual compensated native kinetic change plus caloric change,
+less outside heat, mechanical supply and the explicit static residual. Motion,
+thermal cells, original source receipt and material callback payload leave the
+owner together after all original and combined gates pass.
+
+This is a stationary circular contact-column, area-averaged thermal model.
+The original thermal face must match the actual Hertz centre, normal and radius;
+ordered thermal body IDs and the sphere-A/plane-B side geometry are checked.
+The exact pure normal-axis spin subspace admits no COM or plane motion,
+tangential drive, impact heat or displaced footprint. No velocity, force or
+momentum is projected to meet these limits. Original material/caloric identity
+and the applicability of the contact-column approximation remain with their
+material owner. Radial flash gradients, material transport through a spinning
+footprint, normal compliance, thermal expansion and whole-sphere thermal
+geometry are not inferred. Endpoint coefficients are held over each native
+window; backward-Euler thermal transport and thermal sampling require temporal
+refinement independently of exact held-coefficient stopping.
+
+Five focused G1/G3/G4 native tests pass in
+`tests/sphere_plane_friction_heat.rs`: independent analytic spin/attitude and
+two-body conduction, first-order convergence against an independently integrated
+continuous thermal-fade ODE, heat-induced static breakaway with motor work,
+opposed-motor reversal and signed-axis covariance, and late source/cancellation
+rollback with exact retry. The 8/16/32-window maximum physical-state errors are
+0.0531229, 0.0268324 and 0.0134851. These verify the bounded model with synthetic
+source cards, not measured calibration, full-workspace Cargo/DSR or throughput.
+
 ## Motor torque in source-derived directional sphere contact
 
 `friction_heat::directional::sphere_plane::advance_source_sphere_plane_with_torque`
