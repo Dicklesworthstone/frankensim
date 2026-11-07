@@ -52,6 +52,49 @@ The shared finite thermoplastic energy carrier separates yield heat, signed reve
 
 This is a dry associated porous law on a compressible displacement-only P1 solid. Its original volumetric-locking, constitutive calibration and time-discretization limits remain. Supplied temperatures belong to an external caloric owner; numerical work defects are never relabelled as physical heat.
 
+## Native thermal tensile motion and conservative fracture replay
+
+`expansion::initiation::dynamics::ThermalTensileElasticTetMotion` continues
+accepted elastic thermal prehistory with explicit velocity, physical time and
+step budget. Density from the same original selected source bundle is bound
+once to reference geometry and cached as consistent P1 mass. Later current
+density queries cannot replace that inventory or supply an impulse.
+
+`probe_midpoint` uses the existing centered inertia and nonlinear P1 owner.
+A borrowed original elastic response evaluates C_next times the mean of OLD
+mechanical strain and NEW mechanical strain, with analytic endpoint tangent
+C_next/2. Integrated free expansion enters the actual total-to-mechanical
+conversion. True physical endpoint stresses are restored before shared native
+strain-chord inspection; work-conjugate mean stresses remain separate.
+
+The distinct `Onset` and `Activation` results retain the old motion and the
+exact proposed source, endpoint supports, ordered interval-MEAN forces and
+solver settings. Activation precedes an elastic solve and has no predictor or
+fraction API. Both wrappers keep the static endpoint-force replay owner private.
+Their common handoff retains the SAME reference density/mass Arcs, actual
+velocity, kinetic storage, clock and consumed steps after original source,
+expansion, stress and storage continuity checks. Native thermal brittle
+midpoint replay performs the complete interval and consumes one step.
+
+Static and inertial elastic consumers share coefficient/eigenstrain/material
+energy recovery. Independent gates admit mean response work, mechanical work,
+eigenstrain work, coefficient work, elastic storage, equilibrium and kinetic
+balance. Native numerical kinetic loss must be zero. A refused prediction,
+handoff or replay publishes no physical successor. The coefficient-first
+thermal ordering is not a global second-order or continuous-event theorem;
+strain-chord fractions are not physical times. Source changes, thermal paths,
+reversals and force means still require physical resolution.
+
+Two native integration regressions specify a free-coordinate solve with
+nonzero old strain/velocity and changed stiffness/density/expansion, then
+cooling-induced plane discovery and softening replay. A second journey checks
+coefficient-triggered fracture in a translating, expanding body. Independent
+bilinear-work and full consistent-P1 kinetic formulas test retained density
+when current values differ, consumed budgets, separate energy ports and
+atomic refusal/replay. Focused formatting, module-path, API/physics review and
+scalar calculations completed; native Rust execution remains unavailable
+without the required runners and pinned constellation checkouts.
+
 ## Thermal tensile onset with original-source fracture handoff
 
 `expansion::initiation::ThermalTensileElasticTetSolid` retains virgin elastic

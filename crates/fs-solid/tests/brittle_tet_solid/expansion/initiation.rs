@@ -349,6 +349,9 @@ fn thermal_coefficient_work_is_separate_and_critical_start_has_its_own_activatio
 #[path = "initiation/activation.rs"]
 mod activation;
 
+#[path = "initiation/dynamics.rs"]
+mod dynamics;
+
 #[test]
 fn fully_restrained_isotropic_cooling_requires_a_physical_principal_direction_hint() {
     with_cx(false, |cx| {

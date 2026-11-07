@@ -105,6 +105,45 @@ pub struct ThermalBrittleTetMotionStep<'a> {
 }
 
 impl<'a> ThermalBrittleTetMotion<'a> {
+    /// The tensile predecessor already bound the original reference inventory.
+    /// Its material handoff checks the source, expansion, strain and storage;
+    /// this internal transfer retains the same inertia and physical clock.
+    /// Current source density may differ from the frozen reference density.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::brittle::solid::expansion) fn from_tensile_handoff(
+        solid: ThermalBrittleTetSolid<'a>,
+        velocity_mps: Vec<[f64; 3]>,
+        reference_density_kg_m3: Arc<[f64]>,
+        mass: Arc<P1ReferenceMass>,
+        kinetic_energy_j: f64,
+        time_s: f64,
+        maximum_steps: usize,
+        accepted_steps: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self, BrittleTetDynamicError> {
+        checkpoint(cx)?;
+        if velocity_mps.len() != solid.geometry.nodes_m().len()
+            || mass.ndofs() != 3 * velocity_mps.len()
+            || reference_density_kg_m3.len() != solid.materials.len()
+            || accepted_steps > maximum_steps
+            || maximum_steps == 0
+        {
+            return Err(BrittleTetDynamicError::Invalid(
+                "thermal tensile handoff must preserve original motion and inventory dimensions",
+            ));
+        }
+        Ok(Self {
+            solid,
+            velocity_mps,
+            reference_density_kg_m3,
+            mass,
+            kinetic_energy_j,
+            time_s,
+            maximum_steps,
+            accepted_steps,
+        })
+    }
+
     /// Retain an accepted thermal solid and bind its sourced density snapshots
     /// once to the supplied original reference geometry.
     ///

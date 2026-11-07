@@ -22,6 +22,9 @@
 //! physical direction hint; later predicted events ignore fracture-induced
 //! redistribution, as in the nonthermal tensile predictor.
 
+/// Retained thermal midpoint motion through either tensile initiation stage.
+pub mod dynamics;
+
 use std::sync::Arc;
 
 use fs_evidence::ModelCard;
