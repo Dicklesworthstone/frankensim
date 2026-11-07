@@ -26,6 +26,8 @@ mod gauss;
 pub mod hysteretic;
 mod solve;
 mod sources;
+/// Nonlinear fields on original three-dimensional tetrahedral geometry.
+pub mod spatial;
 pub mod tangent;
 
 use super::{ElectrostaticError, finite, geometry, poll, positive};

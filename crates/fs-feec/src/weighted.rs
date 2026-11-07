@@ -29,6 +29,36 @@ pub enum CellWeight {
 }
 
 impl CellWeight {
+    /// Admit the original coefficient without assembling its global Hodge.
+    /// Matrix-free field tangents use the same scalar and interval-SPD gates
+    /// as [`weighted_mass_matrix`]; geometry retains its separate admission.
+    pub fn validate(self, cell: usize, degree: u8) -> Result<(), WeightedError> {
+        if degree > 3 {
+            return Err(WeightedError::InvalidDegree(degree));
+        }
+        match self {
+            Self::Scalar(value) => {
+                if !value.is_finite() || value <= 0.0 {
+                    return Err(WeightedError::InvalidCoefficient {
+                        cell,
+                        reason: "scalar must be finite and strictly positive",
+                    });
+                }
+                Ok(())
+            }
+            Self::AffineScalar(values) => validate_affine_scalar(&values, cell),
+            Self::Tensor(tensor) => {
+                if !matches!(degree, 1 | 2) {
+                    return Err(WeightedError::InvalidCoefficient {
+                        cell,
+                        reason: "tensor weights require one- or two-forms",
+                    });
+                }
+                validate_tensor(&tensor, cell)
+            }
+        }
+    }
+
     /// Factor an admitted 3D weight without multiplying its scale into the
     /// quadrature prematurely. Constant affine input keeps scalar arithmetic.
     pub(crate) fn normalized_3d(self) -> (f64, [[f64; 3]; 3], Option<[f64; 4]>) {
@@ -346,26 +376,7 @@ pub fn weighted_mass_matrix(
         .ok_or(WeightedError::DimensionOverflow)?;
     for (cell, weight) in weights.iter().enumerate() {
         poll(cancelled)?;
-        match weight {
-            CellWeight::Scalar(value) => {
-                if !value.is_finite() || *value <= 0.0 {
-                    return Err(WeightedError::InvalidCoefficient {
-                        cell,
-                        reason: "scalar must be finite and strictly positive",
-                    });
-                }
-            }
-            CellWeight::AffineScalar(values) => validate_affine_scalar(values, cell)?,
-            CellWeight::Tensor(tensor) => {
-                if !matches!(degree, 1 | 2) {
-                    return Err(WeightedError::InvalidCoefficient {
-                        cell,
-                        reason: "tensor weights require one- or two-forms",
-                    });
-                }
-                validate_tensor(tensor, cell)?;
-            }
-        }
+        weight.validate(cell, degree)?;
         validate_geometry(complex, geo, cell, degree)?;
     }
     let mut entries = Vec::new();

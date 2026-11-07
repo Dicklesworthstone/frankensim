@@ -223,7 +223,7 @@ fn root(parent: &mut [usize], mut v: usize) -> usize {
 }
 
 /// Shared checked volume geometry; physical formulations retain their own laws.
-struct SpatialGeometry {
+pub(crate) struct SpatialGeometry {
     mesh: TetComplex,
     positions_m: Vec<[f64; 3]>,
     geometry: ElementGeometry,
@@ -231,7 +231,40 @@ struct SpatialGeometry {
     components: Vec<usize>,
 }
 
-fn prepare_geometry(
+impl SpatialGeometry {
+    pub(crate) fn mesh(&self) -> &TetComplex {
+        &self.mesh
+    }
+
+    pub(crate) fn positions_m(&self) -> &[[f64; 3]] {
+        &self.positions_m
+    }
+
+    pub(crate) fn elements(&self) -> &ElementGeometry {
+        &self.geometry
+    }
+
+    pub(crate) fn components(&self) -> &[usize] {
+        &self.components
+    }
+
+    pub(crate) fn exterior_faces(&self) -> Vec<usize> {
+        self.faces
+            .iter()
+            .enumerate()
+            .filter_map(|(face, geometry)| (geometry.cells.len() == 1).then_some(face))
+            .collect()
+    }
+
+    pub(crate) fn exterior_normal(&self, face: usize) -> Option<[f64; 3]> {
+        self.faces
+            .get(face)
+            .filter(|geometry| geometry.cells.len() == 1)
+            .map(|geometry| geometry.outward_normal)
+    }
+}
+
+pub(crate) fn prepare_geometry(
     positions_m: Vec<[f64; 3]>,
     tetrahedra: Vec<[u32; 4]>,
     limits: WeightedAssemblyLimits,

@@ -18,14 +18,17 @@
 //! Its maintaining source owns any changing-polarization work or storage law.
 //! Formulation reference: <https://mfem.org/electromagnetics/#electrostatics>.
 
-mod force;
 /// Distributed dielectric memory and Ohmic charge relaxation on tetrahedra.
 pub mod dispersion;
+mod force;
+pub mod network;
 mod terminals;
 mod virtual_work;
-pub mod network;
-pub use network::{SpatialCapacitanceControls, SpatialCapacitanceMatrix, SpatialCapacitanceResponse};
+pub use network::{
+    SpatialCapacitanceControls, SpatialCapacitanceMatrix, SpatialCapacitanceResponse,
+};
 pub use terminals::SpatialCapacitance;
+pub(crate) use terminals::electrode_faces_on_geometry;
 
 use super::{
     ScalarBoundary, SpatialGeometry, SpatialMagneticError, dot, prepare_geometry,
@@ -728,7 +731,9 @@ impl SpatialElectrostatics {
             impressed_polarization_c_m2: sources.polarization,
             sheets: sources.sheets,
             charged_sheet_vertices: sources.charged_sheet_vertices,
-            has_imposed_displacement: boundary.displacement.iter()
+            has_imposed_displacement: boundary
+                .displacement
+                .iter()
                 .any(|trace| trace.outward_displacement_c_m2 != 0.0),
             voltage_v,
             relative_voltage_v: relative,

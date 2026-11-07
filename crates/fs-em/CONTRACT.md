@@ -4381,6 +4381,36 @@ work limits, reusing residual scratch for each linear right-hand side.
 Synthetic regressions cover nonlinear interface jumps, depolarization, prescribed
 flux signs, mixed electrodes and exact radial source-work moments.
 
+`electrostatic::nonlinear::spatial::SpatialNonlinearElectrostatics` extends
+the same Gauss/Newton owner to the original native tetrahedral geometry.
+Each cell retains a source-resolved scalar/oriented linear dielectric or the
+original isotropic reversible D(|E|) curve. Geometry and gradients are prepared
+once; the analytic three-dimensional material tangent is applied matrix-free
+through native checked CG with diagonal equilibration and compensated charge
+reductions. Its positivity uses the same interval gate as the original weighted
+Whitney Hodge, including accepted fields requiring no Newton update.
+
+Complete exterior-face electrodes accept mixed prescribed voltage and total
+charge, including one grounded conductor with volume sources, floating metals,
+and conductors joining dielectric components. Exact constant-cell charge
+moments are rho*Volume/4. Every electrical component retains its own physical
+reference and independently closes Gauss balance; physical storage and coenergy
+remain separate and their sum is checked against the original charge/potential
+pairing. The accepted field exposes original E, D, full dD/dE, per-cell storage,
+terminal reactions and independent physical residuals.
+
+`spatial::tangent::SpatialDifferentialCapacitance` under this nonlinear owner
+reuses one prepared bias tangent across terminal columns. Floating total
+charges and volume sources stay fixed; reciprocity, gauge invariance and
+component charge are checked without replacing the nonlinear field by a global
+Q=C V model. Source endpoints and genuine constitutive kinks refuse an
+unspecified two-sided derivative. The native 3D snapshot has no polarization
+history, impressed P, surface-charge/flux source adapter, finite charge
+transport or inferred open-domain boundary. Six synthetic regression groups
+specify rotated nonlinear plates, anisotropic native-Hodge parity with space
+charge, trapped middle-conductor charge, independent extreme gauges, a
+single-conductor charged tetrahedron and source/work/cancellation bounds.
+
 `electrostatic::nonlinear::axisymmetric::AxisymmetricNonlinearElectrostatics`
 uses this same prepared nonlinear Gauss/Newton and differential-capacitance
 owner on the original revolved metric. Constant cell fields integrate against

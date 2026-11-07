@@ -63,6 +63,10 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   jumps are integrated per element before shared degrees of freedom are
   summed. The ordinary and weighted paths share one closed-form Whitney
   element rule; the ordinary path retains its previous arithmetic order.
+  `CellWeight::validate` exposes this same scalar positivity, degree and
+  interval-SPD coefficient admission without assembling a global Hodge.
+  Matrix-free material tangents share the exact gate; geometry admission
+  remains separate, and the assembled owner delegates to it unchanged.
   `CellWeight::AffineScalar` retains four positive scalar samples in stored
   tetrahedron order, with independent values on either side of an interface.
   Exact cubic barycentric moments integrate this spatial density through all

@@ -58,12 +58,22 @@ pub(super) fn electrode_faces(
     terminals: &[&[usize]],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Vec<Vec<usize>>, Vec<Vec<usize>>)> {
+    electrode_faces_on_geometry(&problem.geometry, terminals, cancelled)
+}
+
+/// The same original exterior-face admission serves nonlinear dielectric laws.
+/// Physical traces depend on geometry, not on a prepared linear stiffness.
+pub(crate) fn electrode_faces_on_geometry(
+    geometry: &SpatialGeometry,
+    terminals: &[&[usize]],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Vec<Vec<usize>>, Vec<Vec<usize>>)> {
     let mut used = BTreeSet::new();
-    let mut assigned = vec![None; problem.mesh().vertex_count];
+    let mut assigned = vec![None; geometry.mesh.vertex_count];
     let mut vertices = Vec::with_capacity(terminals.len());
     let mut canonical_faces = Vec::with_capacity(terminals.len());
     for (terminal, faces) in terminals.iter().enumerate() {
-        if faces.is_empty() || faces.len() > problem.geometry.faces.len() {
+        if faces.is_empty() || faces.len() > geometry.faces.len() {
             return Err(invalid(
                 "nonempty bounded exterior face electrodes required",
             ));
@@ -72,19 +82,13 @@ pub(super) fn electrode_faces(
         let mut ordered_faces = BTreeSet::new();
         for &face in *faces {
             check(cancelled)?;
-            if problem
-                .geometry
-                .faces
-                .get(face)
-                .is_none_or(|f| f.cells.len() != 1)
-                || !used.insert(face)
-            {
+            if geometry.faces.get(face).is_none_or(|f| f.cells.len() != 1) || !used.insert(face) {
                 return Err(invalid(
                     "electrodes require distinct original exterior faces",
                 ));
             }
             ordered_faces.insert(face);
-            for &v in &problem.mesh().faces[face] {
+            for &v in &geometry.mesh.faces[face] {
                 let v = v as usize;
                 if assigned[v].is_some_and(|other| other != terminal) {
                     return Err(invalid("different electrodes cannot share a vertex"));
