@@ -319,3 +319,34 @@ impl MaterialFreeSurface2<'_> {
         })
     }
 }
+
+impl MaterialFreeSurface3<'_> {
+    /// Prepare a borrowed compact impulse transaction for reciprocal coupling.
+    ///
+    /// Physical controls are converted through this owner's original density,
+    /// length and velocity scales and retain its scenario speed limit. Samples,
+    /// staged impulses and the returned native readback are explicitly in
+    /// LATTICE units. A composing physical owner converts them through scaling()
+    /// and admits its complete reciprocal SI accounts before candidate.commit().
+    ///
+    /// The borrow protects populations, source bindings and geometry while the
+    /// other participant prepares its opposite impulse. No time, heat, fill,
+    /// material state or force epoch changes, and dropping either stage refuses
+    /// publication without cloning the liquid.
+    pub fn prepare_native_impulse_stencil(
+        &mut self,
+        indices: &[usize],
+        controls: MaterialFreeSurfaceImpulseControls3,
+        gate: &CancelGate,
+    ) -> Result<crate::d3q19::freesurface3::FreeSurfaceImpulseStencil3<'_>, MaterialFreeSurfaceImpulseError> {
+        poll(gate)?;
+        let count = self.lattice.domain_cells().into_iter().try_fold(
+            1usize, |n, edge| n.checked_mul(edge),
+        ).ok_or(ImpulseError::Invalid("physical impulse domain size overflows"))?;
+        let (native, _) = prepare_controls(
+            self.scaling, self.scaling.mass_unit_kg, count, controls.max_cells,
+            [controls.maximum_speed_m_s, controls.maximum_momentum_defect_kg_m_s, controls.maximum_work_defect_j],
+        )?;
+        Ok(self.lattice.prepare_impulse_stencil(indices, native, gate)?)
+    }
+}

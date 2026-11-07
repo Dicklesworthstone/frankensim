@@ -5792,3 +5792,16 @@ their own physical reference densities. It exposes their signed volume
 difference separately from low-Mach pressure geometry. This instantaneous
 coincident-port model adds no resolved connector flow, pressure work,
 capillary energy or general total-energy theorem.
+
+
+## Reciprocal liquid/rigid viscous momentum source
+
+`liquid_momentum::apply_rigid_drag_native` and its material-bound adapter exchange momentum between a compact stencil of original 3-D free-surface liquid cells and the original finite `RigidBodyState`. The declared homogeneous inverse-time rate multiplies each cell’s actual retained liquid mass, including partial interface fill. The six-coordinate kinetic metric includes native mass, arbitrary principal-axis orientation and full rigid inertia. A bounded symmetric eigensolve integrates both rigid-response modes and remaining liquid slip modes exactly for the frozen geometry; large source durations relax slip without explicit-step reversal. Work and storage use SI units and the same actual momenta.
+
+This is an operator-split viscous **source**: grid positions, rigid pose, source material/scaling, force, fill, collision/transport clocks and native free-rotation integration are held fixed. The source duration is not a drift/flow step. The authored rate is not inferred viscosity, hydrodynamic added mass, contact, excluded volume or an impermeable boundary. Reported nonnegative drag dissipation is mechanical kinetic loss; no heat owner is implicitly changed.
+
+All selected physical velocities, true wet masses and body-point speeds are admitted before solving. Actual population readback and native mechanical impulse receipts supply linear momentum, moment about the fixed native COM, signed kinetic change and a relative-velocity work-loss account. Local readback defects, global conservation defects and independently integrated body-response defects cannot cancel. The complete fluid candidate and finite-body reaction are prepared before either publishes. Refusal or cancellation preserves both owners. Memory is proportional to selected cells, with one fixed six-dimensional solve and no dense domain impulse field or whole-grid clone.
+
+The material adapter obtains dx, velocity and mass units from the original immutable liquid binding and enforces its scenario speed before staging. Source density and scaling cannot be independently replaced by the caller.
+
+Fourteen focused native tests passed in this session: six exact-map cases use the production kinetic-metric solve with original Jacobi eigenvectors and double-double arithmetic; five coupling cases use production staging, original sparse population storage, the shared impulse kernel and original full-inertia MBD state/work/impulse methods; three compact-stencil cases check actual populations, readback and refusal. These cover analytical finite two-mass relaxation, independent vector-force/torque RK4, mixed retained masses, rotated inertia, semigroup and Galilean behavior, stiff relaxation, physical balances and late rollback. The selected-source harness does not execute unrelated collision/streaming or the complete material graph. Two original-material regressions are included but were not executed under the current full-Cargo resource limit.

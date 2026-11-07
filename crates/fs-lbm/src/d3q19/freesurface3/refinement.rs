@@ -238,6 +238,27 @@ impl FreeSurface3 {
                 "dyadic target exceeds its cell or active-tile budget",
             ));
         }
+        // The original binary constructor retains authored solid keys even
+        // outside its physical domain. Validate those keys before allocating
+        // children: doubling an otherwise valid far Morton key can overflow
+        // the encoder's range and panic instead of producing a candidate.
+        let source_tiles = source_cells.map(|n| n / TILE);
+        let parent_morton_limit = (1u32 << MORTON_COORD_BITS) / 2;
+        for &key in &self.solid {
+            check_cancel(gate)?;
+            let (x, y, z) = demorton3(key);
+            if [x, y, z]
+                .into_iter()
+                .zip(source_tiles)
+                .any(|(coordinate, extent)| {
+                    coordinate as usize >= extent || coordinate >= parent_morton_limit
+                })
+            {
+                return Err(invalid(
+                    "dyadic source solid is outside the physical or refinable Morton domain",
+                ));
+            }
+        }
         let sigma = scale(self.sigma, 2.0)?;
         if !crate::admit_explicit_capillary_coefficient(sigma)
             || sigma * Self::CURVATURE_LIMIT / CS2_3 >= 1.0

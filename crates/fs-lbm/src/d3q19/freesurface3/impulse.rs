@@ -6,6 +6,8 @@ use crate::impulse::{ImpulseControls, ImpulseError, ImpulseReport, ImpulseSum, p
 use fs_exec::CancelGate;
 
 mod wrench;
+mod stencil;
+pub use stencil::{FreeSurfaceImpulseCandidate3, FreeSurfaceImpulseCell3, FreeSurfaceImpulseReadback3, FreeSurfaceImpulseStencil3};
 
 impl FreeSurface3 {
     /// Apply one instantaneous liquid impulse per original geometric cell.

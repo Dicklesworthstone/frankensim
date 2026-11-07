@@ -66,6 +66,10 @@ mod forcing;
 pub use forcing::BodyAccelerationField3;
 mod conversion_momentum;
 mod impulse;
+pub use impulse::{
+    FreeSurfaceImpulseCandidate3, FreeSurfaceImpulseCell3, FreeSurfaceImpulseReadback3,
+    FreeSurfaceImpulseStencil3,
+};
 mod refinement;
 pub use refinement::{DyadicRefinementControls3, DyadicRefinementInventory3, DyadicRefinementReport3};
 pub use conversion_momentum::ConversionMomentumReport3;

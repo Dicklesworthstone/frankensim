@@ -391,3 +391,42 @@ fn repeated_refinement_retains_the_same_physical_inventory_and_viscosity() {
     );
     assert_eq!(twice.geometry_epoch(), source.geometry_epoch() + 2);
 }
+
+#[test]
+fn retained_out_of_domain_solids_refuse_before_child_morton_encoding() {
+    let gate = CancelGate::new_clock_free();
+    let half_limit = 1u32 << (MORTON_COORD_BITS - 1);
+    for axis in 0..3 {
+        // An ordinary outside tile plus the first overflowing parent and the
+        // highest representable source key all pass the original constructor.
+        for coordinate in [1, half_limit, 2 * half_limit - 1] {
+            let mut solid = [0u32; 3];
+            solid[axis] = coordinate;
+            let source = FreeSurface3::with_solid_tiles(
+                4,
+                4,
+                4,
+                0.83,
+                [0.0; 3],
+                0.0,
+                ContactModel3::Neutral,
+                &[(solid[0], solid[1], solid[2])],
+                |_, _, _| true,
+            )
+            .unwrap();
+            let original_bits = source.grid.state_bits();
+            let original_solid = source.solid.clone();
+            let original_mass = source.ledger_mass().to_bits();
+            assert!(matches!(
+                source.refine_dyadic(controls(), &gate),
+                Err(FreeSurfaceError3::Transport(
+                    "dyadic source solid is outside the physical or refinable Morton domain"
+                ))
+            ));
+            assert_eq!(source.grid.state_bits(), original_bits);
+            assert_eq!(source.solid, original_solid);
+            assert_eq!(source.ledger_mass().to_bits(), original_mass);
+            assert_eq!(source.geometry_epoch(), 0);
+        }
+    }
+}

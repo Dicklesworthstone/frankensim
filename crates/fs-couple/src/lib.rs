@@ -164,6 +164,8 @@ pub mod spatial_induction;
 pub mod stokes_motion;
 /// Declared gas chemistry, finite atmospheric heat and native moving liquid.
 pub mod liquid_gas;
+/// Exact reciprocal drag sources on native liquid and finite rigid momenta.
+pub mod liquid_momentum;
 /// Conservative matter and momentum transfer between original finite liquid owners.
 pub mod liquid_transfer;
 /// Reciprocal molecular streams on original finite gas inventories and bulk momenta.
