@@ -8376,9 +8376,13 @@ The original `PronyState` and exact `PronyRamp` own memory and physical heat.
 reusing them across trials and both shear directions. `ViscoelasticBondPoint::trial`
 returns a new immutable state, endpoint traction, analytic vector mean traction,
 and independent incremental work, storage and heat per original bonded area.
-Its local accounts do not subtract accumulated inventories. Held jumps relax;
-straight-ramp subdivision preserves the constitutive result. Endpoint and mean
-stiffnesses are distinct exact derivatives at fixed accepted memory and duration.
+Its local accounts do not subtract accumulated inventories. Branch storage uses
+the prepared `PronyRamp::spring_increment`, retaining weak relaxation release
+even when the endpoint spring strain rounds to its accepted value. Independent
+analytic held-jump checks resolve storage and heat down to `dt/tau = 1e-17`.
+Held jumps relax; straight-ramp subdivision preserves the constitutive result.
+Endpoint and mean stiffnesses are distinct exact derivatives at fixed accepted
+memory and duration.
 A prepared ramp from another law refuses even if its numeric coefficients match.
 
 There are at most 64 branches per mode. Authored jump-norm, jump-rate and elapsed-time

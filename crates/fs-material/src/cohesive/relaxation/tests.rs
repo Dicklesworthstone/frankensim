@@ -51,6 +51,72 @@ fn held_separation_relaxes_with_independent_normal_and_shear_memory() {
 }
 
 #[test]
+fn weak_relaxation_retains_analytic_storage_release_and_heat() {
+    let law = law();
+    let loaded = law
+        .bonded_point()
+        .trial(&law.prepare(1e-4).unwrap(), [2e-5, -1e-5, 0.5e-5], 1e-10)
+        .unwrap()
+        .point;
+    for rate in [1e-17, 1e-14, 1e-10, 1e-6, 0.1, 1.0, 10.0] {
+        let duration = rate * law.spectra[0].terms[0].1;
+        // Independently integrate decay of each accepted spring's energy:
+        // h*E*q0^2*(1-exp(-2*dt/tau))/2. This stays resolved when its
+        // endpoint and total stored-energy inventory round unchanged.
+        let expected_heat = law.thickness
+            * loaded
+                .states
+                .iter()
+                .enumerate()
+                .map(|(i, state)| {
+                    law.spectra[usize::from(i > 0)]
+                        .terms
+                        .iter()
+                        .zip(&state.q)
+                        .map(|(&(e, tau), &q)| 0.5 * e * q * q * -(-2.0 * duration / tau).exp_m1())
+                        .sum::<f64>()
+                })
+                .sum::<f64>();
+        let tolerance = 1e-13 * expected_heat;
+        let step = loaded
+            .trial(&law.prepare(duration).unwrap(), loaded.jump_m(), tolerance)
+            .expect("weak physical relaxation must pass its energy gate");
+        assert_eq!(step.work_j_m2, 0.0);
+        assert!(step.stored_change_j_m2 < 0.0 && step.viscous_dissipated_j_m2 > 0.0);
+        assert!((step.stored_change_j_m2 + expected_heat).abs() <= tolerance);
+        assert!((step.viscous_dissipated_j_m2 - expected_heat).abs() <= tolerance);
+        assert!(step.defect_j_m2.abs() <= tolerance);
+        if rate == 1e-17 {
+            assert_eq!(step.traction_pa, loaded.traction_pa());
+            assert_eq!(step.point.stored_energy_j_m2(), loaded.stored_energy_j_m2());
+        }
+    }
+}
+
+#[test]
+fn unstressed_bond_has_exactly_zero_work_storage_and_heat() {
+    let law = law();
+    let mut point = law.bonded_point();
+    for duration in [1e-18, 1e-4, 0.1, 1.0] {
+        let step = point
+            .trial(&law.prepare(duration).unwrap(), [0.0; 3], 1e-30)
+            .unwrap();
+        assert_eq!(step.traction_pa, [0.0; 3]);
+        assert_eq!(step.mean_traction_pa, [0.0; 3]);
+        for value in [
+            step.work_j_m2,
+            step.stored_change_j_m2,
+            step.viscous_dissipated_j_m2,
+            step.defect_j_m2,
+            step.point.stored_energy_j_m2(),
+        ] {
+            assert_eq!(value.to_bits(), 0);
+        }
+        point = step.point;
+    }
+}
+
+#[test]
 fn complete_memory_work_and_heat_match_the_original_scalar_owner_on_reversals() {
     let law = law();
     let ramp = law.prepare(0.07).unwrap();

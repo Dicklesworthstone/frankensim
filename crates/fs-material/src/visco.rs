@@ -657,6 +657,7 @@ pub fn prony_ramp(q0: f64, delta: f64, r: f64) -> (f64, f64, f64) {
 pub struct PronyRamp {
     instantaneous: bool,
     decay: f64,
+    decay_loss: f64,
     ramp: f64,
     mean_ramp: f64,
     heat_shift: f64,
@@ -673,6 +674,7 @@ impl PronyRamp {
             return Self {
                 instantaneous: true,
                 decay: 1.0,
+                decay_loss: 0.0,
                 ramp: 1.0,
                 mean_ramp: 0.5,
                 heat_shift: 0.5,
@@ -707,6 +709,7 @@ impl PronyRamp {
         Self {
             instantaneous: false,
             decay: a,
+            decay_loss: s,
             ramp: b,
             mean_ramp: c,
             heat_shift: h,
@@ -730,6 +733,22 @@ impl PronyRamp {
             self.ramp * q0 + self.mean_ramp * delta,
             loss,
         )
+    }
+
+    /// Elastic branch-strain change, evaluated before rounding the endpoint.
+    ///
+    /// Uses `expm1(-r)*q0 + ramp*delta`, with coefficients already prepared by
+    /// [`Self::new`]. Unlike `apply(q0, delta).0 - q0`, this retains the storage
+    /// release of a held branch when `dt/tau` is too small to change its rounded
+    /// endpoint. Multiply by half the branch modulus and the endpoint-strain
+    /// sum to obtain the local stored-energy change independently of heat.
+    #[must_use]
+    #[inline]
+    pub fn spring_increment(&self, q0: f64, delta: f64) -> f64 {
+        if self.instantaneous {
+            return delta;
+        }
+        self.ramp * delta - self.decay_loss * q0
     }
 }
 
@@ -2502,6 +2521,69 @@ mod tests {
                     whole.apply(initial, increment),
                     prony_ramp(initial, increment, rate)
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn g3_prony_spring_increment_resolves_weak_relaxation_storage() {
+        for rate in [1e-17, 1e-14, 1e-10, 1e-6, 0.1, 1.0, 100.0, f64::INFINITY] {
+            let ramp = PronyRamp::new(rate);
+            for initial in [0.01, -0.02] {
+                let (end, _, heat) = ramp.apply(initial, 0.0);
+                let increment = ramp.spring_increment(initial, 0.0);
+                let storage = (0.5 * increment) * (end + initial);
+                // Independent exponential spring energy, without subtracting
+                // rounded endpoint energies or deriving heat from a residual.
+                let expected = 0.5 * initial * initial * (-2.0 * rate).exp_m1();
+                assert!(increment != 0.0 && storage < 0.0 && heat > 0.0);
+                for (actual, reference) in [(storage, expected), (heat, -expected)] {
+                    assert!(
+                        (actual - reference).abs() <= 8e-15 * reference.abs(),
+                        "rate={rate}: {actual:e} versus analytic {reference:e}"
+                    );
+                }
+                if rate == 1e-17 {
+                    assert_eq!(end, initial, "rounded endpoints hide the increment");
+                }
+            }
+            assert_eq!(ramp.spring_increment(0.0, 0.0).to_bits(), 0);
+            assert_eq!(ramp.apply(0.0, 0.0), (0.0, 0.0, 0.0));
+        }
+        let instantaneous = PronyRamp::new(0.0);
+        assert_eq!(instantaneous.apply(0.01, 0.0), (0.01, 0.01, 0.0));
+        assert_eq!(instantaneous.spring_increment(0.01, 0.0).to_bits(), 0);
+        assert_eq!(instantaneous.spring_increment(0.01, 1e-20), 1e-20);
+    }
+
+    #[test]
+    fn g3_prony_spring_increment_matches_analytic_loading_and_reversal() {
+        for rate in [0.1, 1.0, 8.0] {
+            let ramp = PronyRamp::new(rate);
+            for (initial, delta) in [(0.0, 0.008), (0.003, -0.008), (-0.007, 0.002)] {
+                let (end, mean, heat) = ramp.apply(initial, delta);
+                let storage = 0.5 * ramp.spring_increment(initial, delta) * (end + initial);
+                // Integrate q(u)=v+c*exp(-rate*u) on u in [0,1].
+                let a = (-rate).exp();
+                let v = delta / rate;
+                let c = initial - v;
+                let expected_end = v + c * a;
+                let expected_storage = 0.5 * (expected_end - initial) * (expected_end + initial);
+                let expected_heat =
+                    rate * v * v + 2.0 * v * c * (1.0 - a) + 0.5 * c * c * (1.0 - a * a);
+                let expected_work = delta * (v + c * (1.0 - a) / rate);
+                let scale = initial * initial + expected_end * expected_end + expected_heat;
+                for (actual, expected) in [
+                    (storage, expected_storage),
+                    (heat, expected_heat),
+                    (mean * delta, expected_work),
+                    (mean * delta, storage + heat),
+                ] {
+                    assert!(
+                        (actual - expected).abs() <= 2e-12 * scale,
+                        "rate={rate}: {actual:e} versus analytic {expected:e}"
+                    );
+                }
             }
         }
     }

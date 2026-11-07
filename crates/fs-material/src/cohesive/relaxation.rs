@@ -286,11 +286,13 @@ impl<'a> ViscoelasticBondPoint<'a> {
             let mut lost = 0.0;
             for j in 0..old.q.len() {
                 let e = law.terms[j].0;
-                let (q, average, loss) = prepared.ramps[mode][j].apply(old.q[j], increment);
+                let ramp = &prepared.ramps[mode][j];
+                let (q, average, loss) = ramp.apply(old.q[j], increment);
+                let spring_increment = ramp.spring_increment(old.q[j], increment);
                 next.q[j] = finite(q)?;
                 mean[i] = finite(mean[i] + e * average)?;
                 end = finite(end + e * q)?;
-                stored = finite(stored + (0.5 * e * (q - old.q[j])) * (q + old.q[j]))?;
+                stored = finite(stored + (0.5 * e * spring_increment) * (q + old.q[j]))?;
                 lost = finite(lost + e * loss)?;
             }
             if lost < 0.0 {
