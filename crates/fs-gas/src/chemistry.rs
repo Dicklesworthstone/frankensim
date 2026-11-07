@@ -30,6 +30,8 @@ pub mod energy;
 pub mod heat;
 /// Source-bound two-temperature atomic ionization and three-body recombination.
 pub mod ionization;
+/// Coupled atomic charge-state ladders sharing one evolving electron pool.
+pub mod ionization_network;
 
 /// Coupled electron-impact, photoionization and escaping radiative recombination.
 pub mod collisional_radiative;

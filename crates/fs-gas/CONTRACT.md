@@ -7682,3 +7682,48 @@ cancellation/replay and source refusal after a feasible prefix. These fixtures
 are numerical physics checks, not measured kinetic or heat-transfer calibration.
 Pinned Rust parsing/formatting was checked; the new native tests have not been
 executed because the shared host has no available compilation memory or disk.
+
+
+## Coupled atomic charge-state networks with shared electrons
+
+`chemistry::ionization_network::advance_ionization_network` advances multiple
+original atomic charge-stage ladders through one shared electron population and
+temperature. Each original edge supplies impact ionization, its thermodynamic
+three-body reverse, photoionization and reciprocal radiative capture. Sources
+must share the exact original thermodynamic bank and structural electron.
+Canonical lower/upper species ordering makes input permutations equivalent.
+Duplicate reaction identities or edges, branching stage definitions and cycles
+refuse; disconnected ladders and omitted frozen spectator stages are explicit.
+
+One symmetric composition couples positive exponential-midpoint edge updates.
+Every edge queries the current shared electron density and temperature. A
+single full/two-half comparison controls species, electron temperature and each
+edge's integrated reaction and radiation accounts. Prepared indices and reused
+population/account buffers avoid per-trial species allocation and nested public
+adaptive solves. Accepted plus rejected attempts, channels, and all edge rate
+queries have explicit bounds. This is a local second-order split estimate, not
+an unsplit, unconditionally stiff, global-error or empirical accuracy claim.
+
+Publication independently reconstructs each actual species change against
+integrated stoichiometry, each connected nucleus inventory, and shared charge.
+Original adjacent energy gaps define levels relative to each conserved ladder
+root, removing conserved elemental/charge reference offsets before subtraction.
+Actual endpoint level storage and electron sensible energy then close against
+separately accumulated absorbed and escaping photon energy. Heavy translational
+population roundoff is included at the fixed heavy temperature. Per-edge gross
+photoionization and radiative capture remain distinct from net collisional and
+net charge-stage progress. Exact neutral darkness stays neutral; illumination
+may create the first electrons without a seed. No partial state publishes after
+cancellation, source refusal, exhausted work or a failed conservation check.
+
+This lane holds geometry, heavy temperature and local incident intensities
+fixed. The maintained field supplies an external photon reservoir; its finite
+transport and diffuse recombination feedback are not supplied by this owner.
+Emitted photons escape and photoelectron kinetic energy thermalizes immediately.
+Excited states, molecules, charge exchange, heavy-pool exchange/evolution,
+continuum lowering, hydrodynamics and electrical work are not inferred.
+Focused tests compare a simultaneous independent analytic-source H/He ladder
+ODE, resolved second-order refinement, canonical source ordering, conserved
+formation-reference shifts, first photoelectron birth, and transactional
+admission/work/cancellation cases. NIST level gaps with manufactured cross
+sections establish numerical checks, not validated H/He plasma kinetics.
