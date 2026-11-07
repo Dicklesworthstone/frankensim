@@ -14,6 +14,7 @@ use super::{Fiber, FiberLaw, Section};
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::MaterialError;
 use fs_material::creep::plastic::uniaxial::UniaxialNortonJ2;
+use fs_material::creep::recovery::uniaxial::UniaxialRecoveringNorton;
 use fs_material::creep::thermal::uniaxial::{UniaxialThermalNorton, UniaxialThermalNortonJ2};
 use fs_material::creep::uniaxial::UniaxialNorton;
 use fs_material::fiber::{ManderConcrete, MenegottoPintoSteel};
@@ -144,6 +145,7 @@ impl FiberMaterial {
     pub fn authored(law: FiberLaw, density_kg_m3: f64) -> Result<Self> {
         match law {
             FiberLaw::Norton(law) => Self::norton(law, density_kg_m3),
+            FiberLaw::RecoveringNorton(law) => Self::recovering_norton(law, density_kg_m3),
             FiberLaw::NortonJ2(law) => Self::norton_j2(law, density_kg_m3),
             FiberLaw::ThermalNorton(law) => Self::thermal_norton(law, density_kg_m3),
             FiberLaw::ThermalNortonJ2(law) => Self::thermal_norton_j2(law, density_kg_m3),
@@ -177,6 +179,22 @@ impl FiberMaterial {
         )?;
         Ok(Self {
             law: FiberLaw::Norton(law),
+            density_kg_m3,
+            source: None,
+            chaboche_branch_properties: None,
+        })
+    }
+
+    /// Recovering primary creep with explicit reference density. Original
+    /// primary/recovery receipts remain inside a source-bound law; supplying
+    /// density here does not promote it to sourced material data.
+    pub fn recovering_norton(law: UniaxialRecoveringNorton, density_kg_m3: f64) -> Result<Self> {
+        require(
+            positive(density_kg_m3),
+            "recovering creep fiber density must be finite and positive",
+        )?;
+        Ok(Self {
+            law: FiberLaw::RecoveringNorton(law),
             density_kg_m3,
             source: None,
             chaboche_branch_properties: None,

@@ -6,8 +6,9 @@
 //! and reference lengths. Physical creep/plastic loss, thermoelastic storage,
 //! and signed reciprocal heat remain distinct.
 //!
-//! This checked path admits linear geometry, stationary supports and Norton,
-//! joint Norton/J2, or their sourced thermal-expansion wrappers. Temperature
+//! This checked path admits linear geometry, stationary supports and Norton
+//! (including independent resistance recovery), joint Norton/J2, or their
+//! sourced thermal-expansion wrappers. Temperature
 //! is prescribed through original source-bound laws between intervals; this
 //! owner reports reciprocal heat but does not itself solve a caloric field.
 //! Nodal rotations and the sum of absolute quadrature curvature are bounded;
@@ -16,6 +17,10 @@
 use super::{Frame2d, Geometry, SectionModel, SolidError, StaticStep};
 use crate::fiber::{FiberLaw, FiberState};
 use fs_material::creep::plastic::uniaxial::{UniaxialNortonJ2, UniaxialNortonJ2State};
+use fs_material::creep::recovery::CreepRecoveryParameters;
+use fs_material::creep::recovery::uniaxial::{
+    UniaxialRecoveringNorton, UniaxialRecoveringNortonState,
+};
 use fs_material::creep::thermal::uniaxial::{
     UniaxialThermalNorton, UniaxialThermalNortonJ2, UniaxialThermalNortonJ2State,
     UniaxialThermalNortonState,
@@ -140,6 +145,7 @@ fn energy_gate(residual: f64, tolerance: f64) -> Result<(), FrameCreepError> {
 #[derive(Clone, Copy)]
 enum CreepPoint<'a> {
     Norton(&'a UniaxialNorton, &'a UniaxialNortonState),
+    RecoveringNorton(&'a UniaxialRecoveringNorton, &'a UniaxialRecoveringNortonState),
     NortonJ2(&'a UniaxialNortonJ2, &'a UniaxialNortonJ2State),
     ThermalNorton(&'a UniaxialThermalNorton, &'a UniaxialThermalNortonState),
     ThermalNortonJ2(&'a UniaxialThermalNortonJ2, &'a UniaxialThermalNortonJ2State),
@@ -148,6 +154,9 @@ impl<'a> CreepPoint<'a> {
     fn new(law: &'a FiberLaw, state: &'a FiberState) -> Result<Self, FrameCreepError> {
         match (law, state) {
             (FiberLaw::Norton(law), FiberState::Norton(state)) => Ok(Self::Norton(law, state)),
+            (FiberLaw::RecoveringNorton(law), FiberState::RecoveringNorton(state)) => {
+                Ok(Self::RecoveringNorton(law, state))
+            }
             (FiberLaw::NortonJ2(law), FiberState::NortonJ2(state)) => {
                 Ok(Self::NortonJ2(law, state))
             }
@@ -165,6 +174,7 @@ impl<'a> CreepPoint<'a> {
     fn kinetics(self) -> &'a NortonCreep {
         match self {
             Self::Norton(law, _) => law.backbone(),
+            Self::RecoveringNorton(law, _) => law.kinetics(),
             Self::NortonJ2(law, _) => law.backbone().creep(),
             Self::ThermalNorton(law, _) => law.kinetics(),
             Self::ThermalNortonJ2(law, _) => law.kinetics(),
@@ -173,6 +183,7 @@ impl<'a> CreepPoint<'a> {
     fn material(self) -> Option<&'a ResolvedMaterialStatePoint> {
         match self {
             Self::Norton(law, _) => law.material(),
+            Self::RecoveringNorton(law, _) => law.material(),
             Self::NortonJ2(law, _) => law.material(),
             Self::ThermalNorton(law, _) => law.material(),
             Self::ThermalNortonJ2(law, _) => law.material(),
@@ -182,26 +193,33 @@ impl<'a> CreepPoint<'a> {
         match self {
             Self::ThermalNorton(law, _) => Some(law.expansion_material()),
             Self::ThermalNortonJ2(law, _) => Some(law.expansion_material()),
-            Self::Norton(..) | Self::NortonJ2(..) => None,
+            Self::Norton(..) | Self::RecoveringNorton(..) | Self::NortonJ2(..) => None,
         }
     }
     fn hardening(self) -> Option<f64> {
         match self {
-            Self::Norton(..) | Self::ThermalNorton(..) => None,
+            Self::Norton(..) | Self::RecoveringNorton(..) | Self::ThermalNorton(..) => None,
             Self::NortonJ2(law, _) => Some(law.backbone().plastic().hardening),
             Self::ThermalNortonJ2(law, _) => Some(law.hardening()),
         }
     }
     fn yield_stress(self) -> Option<f64> {
         match self {
-            Self::Norton(..) | Self::ThermalNorton(..) => None,
+            Self::Norton(..) | Self::RecoveringNorton(..) | Self::ThermalNorton(..) => None,
             Self::NortonJ2(law, _) => Some(law.backbone().plastic().yield_stress),
             Self::ThermalNortonJ2(law, _) => Some(law.yield_stress()),
+        }
+    }
+    fn recovery_parameters(self) -> Option<&'a CreepRecoveryParameters> {
+        match self {
+            Self::RecoveringNorton(law, _) => Some(law.backbone().recovery_parameters()),
+            _ => None,
         }
     }
     fn tensor_strain(self, strain: f64) -> Result<(), FrameCreepError> {
         match self {
             Self::Norton(law, state) => law.tensor_strain(strain, state),
+            Self::RecoveringNorton(law, state) => law.tensor_strain(strain, state),
             Self::NortonJ2(law, state) => law.tensor_strain(strain, state),
             Self::ThermalNorton(law, state) => law.tensor_strain(strain, state),
             Self::ThermalNortonJ2(law, state) => law.tensor_strain(strain, state),
@@ -236,6 +254,12 @@ impl<'a> CreepPoint<'a> {
                     increment.state.equivalent_creep_strain,
                 );
                 (increment.energy, agrees)
+            }
+            (Self::RecoveringNorton(law, state), Self::RecoveringNorton(_, accepted)) => {
+                let increment = law
+                    .advance_with_energy(old_strain, state, new_strain, tolerances)
+                    .map_err(FrameCreepError::Material)?;
+                (increment.energy, increment.state == *accepted)
             }
             (Self::NortonJ2(law, state), Self::NortonJ2(_, accepted)) => {
                 let increment = law
@@ -293,6 +317,7 @@ impl Frame2d {
                     .any(|fiber| matches!(
                         &fiber.law,
                         FiberLaw::Norton(_)
+                            | FiberLaw::RecoveringNorton(_)
                             | FiberLaw::NortonJ2(_)
                             | FiberLaw::ThermalNorton(_)
                             | FiberLaw::ThermalNortonJ2(_)
@@ -322,6 +347,24 @@ impl Frame2d {
         };
         match (&s.fibers.get(fiber)?.law, s.states.get(fiber)?) {
             (FiberLaw::Norton(law), FiberState::Norton(state)) => Some((law, state)),
+            _ => None,
+        }
+    }
+
+    /// Read permanent creep and recovering resistance without another timed trial.
+    pub fn creep_recovery_fiber(
+        &self,
+        element: usize,
+        section: usize,
+        fiber: usize,
+    ) -> Option<(&UniaxialRecoveringNorton, &UniaxialRecoveringNortonState)> {
+        let SectionModel::Fiber(s) = self.elements.get(element)?.sections.get(section)? else {
+            return None;
+        };
+        match (&s.fibers.get(fiber)?.law, s.states.get(fiber)?) {
+            (FiberLaw::RecoveringNorton(law), FiberState::RecoveringNorton(state)) => {
+                Some((law, state))
+            }
             _ => None,
         }
     }
@@ -384,7 +427,8 @@ impl Frame2d {
     /// nonthermal source coordinates must remain identical. `temperature_axis`
     /// is the original explicit coordinate used by each sourced family; authored
     /// laws have no source coordinate. Reference geometry and inertia stay fixed.
-    /// Norton and joint Norton/J2 laws retain their original history family.
+    /// Norton, recovering Norton and joint Norton/J2 retain their original
+    /// history family; recovering laws also retain their recovery parameters.
     /// Sourced yield stress may follow temperature; authored yield stays fixed.
     pub fn with_creep_laws<L: Clone + Into<FiberLaw>>(
         &self,
@@ -420,6 +464,7 @@ impl Frame2d {
                             && old.kinetics().parameters() == law.kinetics().parameters()
                             && old.kinetics().strain_hardening()
                                 == law.kinetics().strain_hardening()
+                            && old.recovery_parameters() == law.recovery_parameters()
                             && old.hardening() == law.hardening(),
                         "creep history cannot silently change elastic/hardening storage or kinetic parameters",
                     )?;

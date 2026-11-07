@@ -10422,3 +10422,24 @@ requires physical timestep refinement; it does not establish finite-rotation
 creep dynamics or coupled thermal transport. Focused analytical and history
 regressions are in `tests/frame_creep_dynamics.rs`; native execution remains
 pending an available prescribed build runner.
+
+## Recovering primary creep in native frames
+
+`FiberLaw::RecoveringNorton` carries the original free-sided recovering law and
+all three axial histories through the native section and frame paths. Loaded
+holds, clamped relaxation, unloaded dwell and reloading use the same constitutive
+owner. `solve_creep_step` and `advance_creep_backward_euler` retain the actual
+physical duration, consistent tangent and complete frozen trial state. Their
+work gates delegate to the original tensor recovery account; resistance decay
+supplies neither physical heat nor stored energy.
+
+`Frame2d::creep_recovery_fiber` inspects accepted histories without advancing
+creep. Rebinding preserves original kinetic/recovery coefficients, primary
+resistance calibration, source claim identities and every fixed nonthermal
+condition, while allowing a supported temperature or duration to change.
+Authored density remains authored even when the law itself retains all thirteen
+source receipts. Untimed static and Newmark paths continue to refuse timed
+fibers. Four manufactured frame regressions specify load/hold/dwell/reload,
+variable-duration momentum with both mass formulations, source refresh and
+atomic refusal. Scoped parsing and source checks passed; native execution is
+pending the prescribed build runner.
