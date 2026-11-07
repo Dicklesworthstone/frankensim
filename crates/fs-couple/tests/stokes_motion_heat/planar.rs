@@ -34,7 +34,7 @@ fn planar_config() -> PlanarStokesConfig {
     }
 }
 
-fn planar_motion<'s, 'm, 'a, F: FluidTransport + ?Sized>(
+pub(super) fn planar_motion<'s, 'm, 'a, F: FluidTransport + ?Sized>(
     system: &'s FluxSystem<'m>,
     fluid: &'a F,
     edges: &[usize],
@@ -136,16 +136,26 @@ fn g1_rotating_boundary_heats_by_strain_while_rigid_rotation_produces_no_heat() 
         // body's translation plus rotation about (0.5, 1). Its symmetric
         // strain has 2 mu D:D = mu * (SPEED + omega)^2 everywhere.
         let field = |x: [f64; 2]| [SPEED * x[1], omega * (x[0] - 0.5)];
+        let stress = MU * (SPEED + omega);
+        let traction = |_: [f64; 2], n: [f64; 2]| [stress * n[1], stress * n[0]];
+        // Side tractions admit all three rigid impedance probes. Sealing every
+        // exterior normal velocity would forbid the unit vertical response.
         let exterior: Vec<_> = (0..mesh.edges.len())
             .filter(|edge| mesh.is_boundary(*edge) && !edges.contains(edge))
-            .map(|edge| MaterialStokesBoundary::Velocity { edge, value: &field })
+            .map(|edge| {
+                if mesh.edges[edge].normal[1] < -0.5 {
+                    MaterialStokesBoundary::Velocity { edge, value: &field }
+                } else {
+                    MaterialStokesBoundary::TotalTraction { edge, value: &traction }
+                }
+            })
             .collect();
         let mut motion = planar_motion(
             &system, &fluid, &edges, field, [SPEED, 0.0, omega],
         );
         let (mut thermal, ids) = initial_thermal(&mesh, &law, false, |_, _| {});
         let step = motion.step_with_heating(
-            &mut thermal, binding(&ids), 0.05, &zero, &exterior, &[Some(0.0)],
+            &mut thermal, binding(&ids), 0.05, &zero, &exterior, &[None],
             [DEPTH * MU * (SPEED + omega), 0.0], 0.0,
             PlanarStokesControls::default(), thermal_config(), || false,
         ).unwrap();
@@ -320,11 +330,17 @@ fn observed_planar_heat_preserves_rotation_slip_and_atomic_observer_history() {
         } else {
             (0..mesh.edges.len())
                 .filter(|edge| mesh.is_boundary(*edge) && !edges.contains(edge))
-                .map(|edge| MaterialStokesBoundary::Velocity { edge, value: &field })
+                .map(|edge| {
+                    if mesh.edges[edge].normal[1] < -0.5 {
+                        MaterialStokesBoundary::Velocity { edge, value: &field }
+                    } else {
+                        MaterialStokesBoundary::TotalTraction { edge, value: &traction }
+                    }
+                })
                 .collect()
         };
         let routes = slip_routes(&boundaries, 0.25);
-        let pressure = [if with_slip { None } else { Some(0.0) }];
+        let pressure = [None];
         let (original, ids) = initial_thermal_with_events(
             &mesh, &law, true,
             |i, cell| { if i == 0 { cell.specific_h_j_kg = 1.0; } },

@@ -16,6 +16,8 @@
 //! fluid volume, convection, thermal pressure work or finite-motion claim.
 //! Incompressible pressure gauges remain explicit. The source material and its
 //! frozen Newtonian transport state are retained by the original binding.
+//! Explicit [`feedback`] steps instead sample source viscosity from the original
+//! thermal cells for each interval while retaining that fixed density and mesh.
 //!
 //! Three native solves per step (zero motion, homogeneous unit motion, endpoint)
 //! avoid a partitioned added-mass fixed-point iteration. Source and exterior
@@ -34,6 +36,9 @@ pub mod planar;
 
 /// Physical bulk viscous heat on the original finite-cell thermal timeline.
 pub mod heating;
+
+/// Source viscosity sampled from the original finite thermal cells each interval.
+pub mod feedback;
 
 /// Finite guided translation on the original nonlinear moving-domain flow.
 pub mod translating;
@@ -209,9 +214,10 @@ pub struct GuidedStokesStep {
     pub mechanical_work_residual_j: f64,
 }
 
-/// The original fixed mesh, material binding and guided rigid body share one
-/// accepted history. The borrow prevents replacing the mesh/material underneath
-/// continuation; this lane deliberately freezes the admitted transport state.
+/// The original fixed mesh and guided rigid body share one accepted history.
+/// Ordinary methods retain the frozen construction material. Explicit thermal
+/// feedback methods resolve a checked source for their requested interval,
+/// preserving the original density, mesh and mechanical reference pose.
 pub struct GuidedStokesMotion<'s, 'm, 'a, F: FluidTransport + ?Sized> {
     system: &'s FluxSystem<'m>,
     fluid: MaterialFluxSystem<'s, 'm, 'a, F>,
@@ -307,7 +313,8 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> GuidedStokesMotion<'s, 'm, 'a, F> {
     pub const fn state(&self) -> &GuidedStokesState {
         &self.state
     }
-    /// The original source-bearing material owner used by every native solve.
+    /// The original source-bearing material used by ordinary frozen-material steps.
+    /// Temperature-feedback receipts retain the source resolved for their interval.
     #[must_use]
     pub const fn material(&self) -> &F {
         self.fluid.material()

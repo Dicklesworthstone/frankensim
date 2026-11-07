@@ -138,7 +138,7 @@ impl<E: std::error::Error + 'static> std::error::Error for GuidedStokesObservedH
     }
 }
 
-fn unobserved_error(
+pub(super) fn unobserved_error(
     error: GuidedStokesObservedHeatError<DepositionError>,
 ) -> GuidedStokesHeatError {
     match error {

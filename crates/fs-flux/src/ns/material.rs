@@ -334,6 +334,31 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, 'a, F> {
         })
     }
 
+    /// Bind the same native operator and numerical controls to another original
+    /// material owner. The new binding reads that owner's transport once; the
+    /// current binding and any caller-owned flow history remain unchanged.
+    ///
+    /// This is material preparation, not an evolution or mass-transfer rule.
+    /// A coupled consumer carrying a fixed-density history must separately
+    /// require the new density to equal its admitted reference density.
+    ///
+    /// # Errors
+    /// Propagates the new material's transport refusal and native admission.
+    pub fn with_material<'b, G: FluidTransport + ?Sized>(
+        &self,
+        material: &'b G,
+    ) -> Result<MaterialFluxSystem<'s, 'm, 'b, G>, MaterialFluxError> {
+        MaterialFluxSystem::new(
+            self.system,
+            material,
+            MaterialFluxNumerics {
+                penalty: self.params.sigma,
+                linear_tolerance: self.params.tol,
+                max_linear_iterations: self.params.max_iters,
+            },
+        )
+    }
+
     /// Original material owner, retaining its claims and query conditions.
     #[must_use]
     pub const fn material(&self) -> &F {

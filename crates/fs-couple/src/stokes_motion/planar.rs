@@ -13,6 +13,8 @@
 //! z. Pressure datums, extrusion depth, source ownership and the native weak
 //! tangential SIP treatment retain their original meanings.
 
+mod feedback;
+
 use super::heating::{
     PlanarStokesHeatError, PlanarStokesHeatStep, PlanarStokesObservedHeatError, StokesHeatBinding,
     StokesSlipHeatRoute, StokesThermalCells, unobserved_planar_error,
@@ -337,7 +339,8 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarStokesMotion<'s, 'm, 'a, F> {
     pub const fn state(&self) -> &PlanarStokesState {
         &self.state
     }
-    /// Original source-bearing material; transport is frozen once at binding.
+    /// Original construction source. Ordinary methods retain its frozen transport;
+    /// temperature-feedback steps retain their resolved source in the returned receipt.
     #[must_use]
     pub const fn material(&self) -> &F {
         self.fluid.material()

@@ -3,6 +3,12 @@
 #[path = "stokes_motion_heat/planar.rs"]
 mod planar;
 
+#[path = "stokes_motion_heat/feedback.rs"]
+mod feedback;
+
+#[path = "stokes_motion_heat/planar_feedback.rs"]
+mod planar_feedback;
+
 use std::collections::BTreeMap;
 
 use fs_couple::stokes_motion::heating::{

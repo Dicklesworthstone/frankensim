@@ -778,3 +778,64 @@ fn material_rheology_refuses_source_density_and_nonconvergence_without_publicati
     ));
     assert_eq!(previous, vec![0.0; system.n_u]);
 }
+
+#[test]
+fn g1_rebound_material_reaches_original_flow_and_keeps_source_and_numerics() {
+    let mesh = mesh();
+    let system = FluxSystem::new(&mesh);
+    let cold = transport(2.0, 0.3);
+    let numerics = MaterialFluxNumerics {
+        penalty: 37.0,
+        linear_tolerance: 1e-11,
+        max_linear_iterations: 512,
+    };
+    let flow = MaterialFluxSystem::new(&system, &cold, numerics).unwrap();
+    let reads = Rc::new(Cell::new(0));
+    let warm = RheologyResponse {
+        transport: transport(2.0, 0.8),
+        point: MaterialFluxRheologyPoint {
+            cell: 0,
+            position_m: [0.5, 0.5],
+            shear_rate_per_s: 0.4,
+        },
+        temperature_k: 320.0,
+        reads: Rc::clone(&reads),
+    };
+    let rebound = flow.with_material(&warm).unwrap();
+    assert!(std::ptr::eq(rebound.material(), &warm));
+    assert_eq!(reads.get(), 1);
+    assert_eq!(flow.transport(), &cold);
+    assert_eq!(rebound.transport(), &warm.transport);
+
+    // The existing operator, including its nondefault penalty, is retained.
+    let direct = MaterialFluxSystem::new(&system, &warm.transport, numerics).unwrap();
+    let force = |p: [f64; 2]| [-p[1], p[0]];
+    let (operator, rhs) = rebound.assemble_stokes(&force, &no_slip).unwrap();
+    let (expected_operator, expected_rhs) = direct.assemble_stokes(&force, &no_slip).unwrap();
+    assert_eq!(rhs, expected_rhs);
+    for row in 0..system.n_u {
+        for column in 0..system.n_u {
+            assert_eq!(operator.get(row, column), expected_operator.get(row, column));
+        }
+    }
+
+    // Unit-area Couette flow has exact bulk heat mu * shear^2. Changing only
+    // the source viscosity changes this physical heat without changing strain.
+    let velocity = |p: [f64; 2]| [0.4 * p[1], 0.0];
+    let before = flow.solve_stokes(&zero_force, &velocity).unwrap();
+    let after = rebound.solve_stokes(&zero_force, &velocity).unwrap();
+    let reference = direct.solve_stokes(&zero_force, &velocity).unwrap();
+    assert_eq!(after.velocity_dofs(), reference.velocity_dofs());
+    let (error, divergence) = system.velocity_error(&after.discrete().x, &velocity);
+    assert!(error < 2e-10 && divergence < 2e-10);
+    near(before.viscous_dissipation().total_power_w_per_m(), 0.3 * 0.4_f64.powi(2), 2e-10);
+    near(after.viscous_dissipation().total_power_w_per_m(), 0.8 * 0.4_f64.powi(2), 2e-10);
+    assert_eq!(reads.get(), 1, "solving and heat output must not requery the source");
+
+    let mut stale = GasState::try_new(&GasSpec::dry_air_ussa1976(), 300.0, 101_325.0).unwrap();
+    stale.density *= 2.0;
+    assert!(matches!(flow.with_material(&stale), Err(MaterialFluxError::Material(_))));
+    let retried = flow.solve_stokes(&zero_force, &velocity).unwrap();
+    assert_eq!(before.velocity_dofs(), retried.velocity_dofs());
+    assert_eq!(before.viscous_dissipation(), retried.viscous_dissipation());
+}
