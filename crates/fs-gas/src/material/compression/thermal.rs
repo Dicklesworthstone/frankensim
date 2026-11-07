@@ -23,6 +23,9 @@ use fs_material::thermochemical_gas::energy::entropy::GasEntropySolve;
 use fs_qty::{Time, Volume};
 use fs_thermochem::kinetics::IdealGasKineticsV1;
 
+/// Adaptive gas, heat and finite-body enthalpy comparisons on the same interval kernel.
+pub mod adaptive;
+
 type Error = MaterialCompressionError;
 
 /// Volume inversion and caller-bounded compression/heat/reaction splitting.

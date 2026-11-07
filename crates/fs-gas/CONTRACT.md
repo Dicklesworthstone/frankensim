@@ -7895,3 +7895,64 @@ balance, closed compression, forced area scaling, periodic seam admission and
 cancel/retry publication. Those full real-gas integration tests were not run
 in this constrained environment; the focused native result does not replace
 the repository Cargo/DSR gate.
+
+### Adaptive heat exchange during reacting material compression
+
+`material::compression::thermal::adaptive` adds
+`advance_with_heat_bath_adaptive` and `advance_with_finite_body_adaptive` to the
+prepared thermal compression reactor. Every full/two-half comparison uses the
+same original `advance_interval_with` composition, native simultaneous reacting
+thermal stages and original volume-work owner as fixed thermal compression.
+The prepared kinetics workspace is reused; each probe owns its gas state and
+finite-body enthalpy/phase state. The two fine intervals carry the first half's
+actual body state into the second. Coarse and rejected states publish nothing.
+
+Five independent raw comparison channels control gas temperature, every original
+species amount, gas pressure work, exchanged heat and actual finite-body enthalpy.
+The last channel compares original body mass times the full/fine specific
+enthalpy difference, including latent inventory when temperature is unchanged.
+Specific enthalpies are subtracted in compensated precision before mass scaling.
+Relative allowances use interval changes, so formation/enthalpy datums, large
+carrier inventories and earlier work/heat cannot dilute the error criterion.
+The original ordered species comparison is shared with adiabatic adaptation;
+canonical species keys are bound once, including initially absent products,
+without cloning source cards or rebuilding per-trial maps.
+
+Only accepted fine work, heat, stored-energy changes, body expansion work and
+original source residuals enter physical totals. Chemical work across all
+successful probes, including coarse and rejected trajectories, is separately
+counted with checked arithmetic. Gas and coupled gas/body first-law residuals
+remain direct compensated sums of their original-owner residuals; they are not
+reconstructed by subtracting large aggregate energies. Body heat is never added
+again to gas formation heat or pressure work. Existing source-stage entropy
+diagnostics retain their documented material-reconciliation limitation.
+
+Positive absolute allowances, a relative allowance in [0,1), ordered finite time
+bounds, at most 4096 accepted comparisons and at most 12288 original interval
+evaluations are explicit. Every moving full/fine comparison costs three probes.
+Rejected work consumes the same global evaluation budget. Native chemistry
+retains its own per-call work, accuracy, mass, energy and entropy gates.
+Full, midpoint and both quarter times must be distinct represented values; the
+exact final remainder and requested terminal volume are retained. Fixed volume
+uses one native reacting thermal interval after adaptive-control admission;
+zero duration preserves the original gas and body exactly. Whole-stroke
+accuracy, work, source/domain, representability or final-cancellation refusal
+preserves both original endpoints, including after an accepted private prefix.
+
+Step selection reuses the original integrator-dependent heuristic. Acceptance
+always checks the raw discrepancy with no Richardson divisor, extrapolation,
+species clipping or nominal heat capacity. These local comparisons include
+native integration differences; tolerances below that accuracy may refuse at
+the minimum step. No global time-error bound, unconditional stiff accuracy,
+piston inertia, spatial wall law or physical validation is claimed.
+
+Focused regressions cover analytic bath compression/cooling and expansion/
+heating, heat-only refinement, body-enthalpy-only refinement through a latent
+plateau with shifted energy datums, density-dependent collision inventory
+control, original variable gas Cv and body Cp, distinct body expansion work,
+one-call fixed-volume compatibility, exact no-op states, accepted/rejected work
+limits, minimum-step and represented-clock refusal, late cancellation/replay
+and source refusal after a feasible prefix. Native execution and pinned
+formatting have not run because the execution environment is unavailable;
+source/API review and independent analytic reference calculations are separate
+from runtime verification.

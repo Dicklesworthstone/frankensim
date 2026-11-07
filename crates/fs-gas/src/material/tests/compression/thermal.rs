@@ -1,4 +1,6 @@
 //! Independent work/heat trajectories on the common source-bearing gas parcel.
+mod adaptive;
+
 use super::*;
 use crate::chemistry::IsochoricKineticsMethod;
 use crate::chemistry::heat::{HeatBath, ThermalConductance, material::FiniteHeatBody};

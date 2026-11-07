@@ -15,7 +15,7 @@ use super::{
 };
 use crate::chemistry::IsochoricKineticsMethod;
 use fs_qty::{Time, Volume};
-use fs_thermochem::{Nasa9StandardStateModelV1, kinetics::IdealGasKineticsV1};
+use fs_thermochem::{SpeciesId, kinetics::IdealGasKineticsV1};
 
 /// Three original interval evaluations per full/two-half comparison.
 pub const MAX_COMPRESSION_EVALUATIONS: usize = 3 * MAX_COMPRESSION_SUBSTEPS;
@@ -321,7 +321,7 @@ pub fn advance_closed_parcel_compression_adaptive(
             )?;
         }
         let errors = compare(
-            species,
+            species.iter().map(|source| source.species()),
             [&candidate, &coarse, &fine],
             [
                 coarse_report.boundary_work_on_gas_j,
@@ -393,7 +393,7 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), AdaptiveMaterialComp
 }
 
 /// Only a step-size heuristic: acceptance always tests the raw comparison.
-fn error_root(error: f64, method: IsochoricKineticsMethod) -> f64 {
+pub(super) fn error_root(error: f64, method: IsochoricKineticsMethod) -> f64 {
     match method {
         IsochoricKineticsMethod::BackwardEuler => fs_math::det::sqrt(error),
         IsochoricKineticsMethod::Sdirk2 | IsochoricKineticsMethod::ExactFirstOrder { .. } => {
@@ -402,7 +402,7 @@ fn error_root(error: f64, method: IsochoricKineticsMethod) -> f64 {
     }
 }
 
-fn scaled_difference(
+pub(super) fn scaled_difference(
     initial: f64,
     coarse: f64,
     fine: f64,
@@ -421,8 +421,8 @@ fn scaled_difference(
     Ok(difference / scale)
 }
 
-fn compare(
-    sources: &[Nasa9StandardStateModelV1],
+pub(super) fn compare<'s>(
+    sources: impl IntoIterator<Item = &'s SpeciesId>,
     states: [&ClosedGasParcel; 3],
     work: [f64; 2],
     controls: AdaptiveMaterialCompressionSolve,
@@ -462,7 +462,7 @@ fn compare(
             if mixture
                 .components()
                 .get(indices[i])
-                .is_some_and(|model| model.species() == source.species())
+                .is_some_and(|model| model.species() == source)
             {
                 amounts[i] = total_moles[i] * mixture.mole_composition().fractions()[indices[i]];
                 if !positive(amounts[i]) {
