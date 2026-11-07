@@ -21,6 +21,8 @@ use std::collections::BTreeSet;
 // The primary shear-deformable shell supplies the same projected spectra and
 // existing memory runtime as the CST/DKT model-form rung.
 mod mitc;
+/// Complete source-resolved three-dimensional memory on the primary shell.
+pub mod tensor;
 
 /// Complete positive material strain channels on the unchanged shell basis.
 /// Each row c [1/s] has storage `(c.q-z)^2/2` [J] and heat rate

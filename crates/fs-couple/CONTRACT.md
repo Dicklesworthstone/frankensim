@@ -4380,3 +4380,44 @@ two-mass/oblique-spring response including its passive third coordinate,
 loading/unloading and shear reversals, complete work, and atomic refusal/retry.
 Changed Rust parses with the pinned toolchain; these native integration
 regressions remain unexecuted in the full-storage workspace environment.
+
+## Source-resolved full tensor memory on the primary shear shell
+
+`plate_viscosity::shell::relaxation::tensor::TensorShellRelaxation` binds each
+original MITC facet to a homogeneous `ResolvedTensorMaterial`, explicit layer
+faces, proper material rotation and positive shear correction. Its original
+seven area sites and two thickness Gauss points retain membrane/bending work,
+both transverse shears and arbitrary Maxwell in-plane/shear couplings. The
+complete material constraint eliminates only sigma_zz, through the original
+`PlaneStressPoint` owner; branches are never reduced independently.
+
+Each complete equilibrium A/B/D/shear section and all three corner reference
+inertia moments must agree with the original source. Unsupported equilibrium
+cross terms refuse. Original support expansion, static bubble condensation,
+mass choice and mass-orthonormal modes remain authoritative. The explicit shear
+correction acts once as a congruence on both retained shears and mixed work;
+this equivalent-single-layer model does not recover a three-dimensional shear
+profile. Numerical drilling never becomes material memory or physical heat.
+
+The original compensated projection Phi^T K Phi must be nonnegative and
+diagonal in the supplied basis. Its retained diagonal also checks the target
+component's frequencies before attachment; equal mode count is insufficient.
+Spatial mode signs and orientation in degenerate eigenspaces remain caller
+obligations because the generic modal runtime carries no spatial mode shapes.
+
+The unit-volume material coordinate transform is prepared once per facet.
+Exact linear projection retains identical source-constrained rates; the
+existing equal-time coordinate owner shares driven histories without fitting,
+pole merging or rank truncation. Every original point history reconstructs
+before strain/traction observation. Setup, retained states and observation
+points have explicit capacities. Relaxed and unrelaxed initialization use the
+original modal-memory owner; no new propagator or loss account is introduced.
+
+The coupled attachment checks its complete linear frequency bound against
+all source bands and installs accepted-endpoint quadrature strain checks,
+including a conservative allowance for unscaled transverse strain. These are
+point checks, not spatial or between-step peak certificates. Kelvin viscosity
+is explicitly refused by this pure-Maxwell image; temperature is frozen and
+no live thermal work, measured damping authority or nonlinear failure law is
+inferred. Independent full-tensor complex constitutive contraction and the
+existing exact pHS/RK4 heat comparison are the focused numerical test seams.

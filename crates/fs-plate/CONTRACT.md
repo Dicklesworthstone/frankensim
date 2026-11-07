@@ -2244,3 +2244,12 @@ new factorization and supplies no source-temperature or frequency authority.
 The source-bound shell temperature bridge exercises actual affine CST strain
 work across warm/cold factors, including a case where re-factorization lost
 4.04% of the original weak-channel scaling.
+
+## Original MITC material projection data
+
+`MitcShellModel::original_geometry` exposes immutable references to the exact
+mesh, directors and equilibrium sections retained by assembly.
+`ShearShellSection::coupled_matrices` exposes the same facet-frame A/B/D/shear
+coefficients used by the native operator, including the original rotation and
+shear correction once. These accessors permit source-bound full-tensor material
+projection without a duplicate specimen or a changed elastic condensation.

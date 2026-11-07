@@ -374,7 +374,10 @@ impl ShearShellSection {
         (a, d, shear)
     }
 
-    fn coupled_matrices(&self) -> ([f64; 9], [f64; 9], [f64; 9], [[f64; 2]; 2]) {
+    /// Physical A/B/D and transverse-shear resultants in the original facet
+    /// frame. The declared material rotation and shear correction are applied
+    /// exactly once, using the same coefficients as native assembly.
+    pub fn coupled_matrices(&self) -> ([f64; 9], [f64; 9], [f64; 9], [[f64; 2]; 2]) {
         let s = det::sin(self.material_angle_rad);
         let c = det::cos(self.material_angle_rad);
         let t = [
@@ -501,6 +504,14 @@ pub struct MitcShellModel {
     reference_inertia: Option<Vec<[ShearShellInertia; 3]>>,
 }
 impl MitcShellModel {
+    /// Immutable geometry, directors and equilibrium sections that assembled
+    /// this pencil. Constitutive projection must use these original owners so
+    /// support expansion and elastic director condensation remain consistent.
+    #[must_use]
+    pub fn original_geometry(&self) -> (&ShellMesh, &NodalDirectors, &[ShearShellSection]) {
+        (&self.mesh, &self.directors, &self.sections)
+    }
+
     /// The existing eigenproblem carrier, in the declared support coordinates.
     #[must_use]
     pub const fn pencil(&self) -> &ShellModel {
