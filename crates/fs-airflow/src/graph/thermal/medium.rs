@@ -9,6 +9,8 @@
 //! no pump correction or liquid phase validity is inferred.
 
 pub mod convection;
+/// Source-backed molecular gas-film resistance for solid/vapor deposition.
+pub mod mass_transfer;
 pub mod fan;
 pub mod series;
 pub mod steady_gas;

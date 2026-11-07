@@ -1,5 +1,52 @@
 # CONTRACT: fs-airflow
 
+## Source-backed gas films for deposition
+
+`graph::thermal::medium::mass_transfer::evaluate_laminar_plate_gas_film`
+binds the original `BinaryDiffusionMaterial` to a thermal fluid owner. The
+selected vapor must belong to its two distinct typed species; the other is
+the declared carrier. Molecular diffusivity is resolved at explicit film
+temperature and total pressure, preserving other source coordinates, selected
+claims and receipts. Thermal and momentum views must agree at that temperature.
+The generic fluid interface does not expose pressure or chemical identity, so
+matching pressure/composition remains caller authority. Typed T/p aliases and
+legacy untyped `T`/`p` coordinates refuse rather than retain stale source
+applicability values. `at_film_state` refreshes the same selected diffusivity law;
+source exhaustion cannot silently select another claim.
+
+The source is Seader and Henley, *Separation Process Principles*, 2nd ed.,
+Wiley, section 3.4, Eqs. (3-132), (3-137)--(3-138), available in the
+[publisher's chapter](https://catalogimages.wiley.com/images/db/pdf/0471464805.ch3.pdf).
+The model uses `Sc = nu/D_AB`, `Re = U L/nu`,
+`Sh_L = 0.664 sqrt(Re) Sc^(1/3)` and `k_m = Sh_L D_AB/L`.
+It admits positive speed, `Re <= 5e5`, and the conservative `Sc >= 0.6`
+subset of the source's `Sc > 0.5` analogy. A flat, attached, thin laminar
+boundary layer, zero streamwise pressure gradient, uniform interface
+concentration and weak mass transfer are physical assumptions. Source support
+does not establish those assumptions or propagate an uncertainty bound.
+
+Surface strips retain their physical flow-facing leading edge. The stable
+coefficient `k_[a,b] = k_[0,b]/(1 + sqrt(a/b))` avoids cumulative subtraction
+and preserves integrated film transfer under subdivision at a common state
+and concentration difference. Numerical cells do not restart the boundary
+layer. Transport properties are frozen during each receiving phase step;
+local variations require an independently admitted strip approximation.
+
+`surface_kinetics` returns the existing thermal `SurfaceKinetics`, with
+independently authored accommodation and this resolved film coefficient.
+The reusable `mass_transfer::laminar_plate` owner also accepts explicitly
+authored independent viscosity and diffusivity; the source adapter delegates
+to that same checked geometry, correlation and kinetics handoff.
+Original scalar coating, surface and chamber owners retain signed transfer,
+finite inventory limits, latent/carried energy and recession. The caller binds
+the same volatile species and compatible gas state to that owner. Its existing
+gas-temperature pressure conversion and dilute linear film approximation are
+unchanged. This bridge supplies no Lewis-number assumption, Stefan flow,
+turbulent correlation, stagnant-gas diffusion geometry, nucleation or gas-flow
+feedback. Tests cover actual source T/p, original claims and pair identity,
+independent molecular transport, strip refinement, source/domain refusal,
+cancellation and conserved deposition onto a bare substrate.
+
 ## Original coolant inlet and wall linearization
 
 `CaloricAirPath::linearize` prepares the complete inlet/wall temperature
