@@ -6099,3 +6099,42 @@ the ORIGINAL target; final independent charge and energy checks remain active.
 `tests/hysteretic_electrostatic_path.rs` exercises linear work convergence,
 charge/bias invariance, exact major-loop heating, changing-direction memory
 against an independently subdivided path, and atomic global-budget refusals.
+
+### Dispersive Jones observations on original spectral lines
+
+`AngularSpectrumExposureApertureJonesSpectrum` borrows a validated, strictly
+ordered table of `(angular_frequency_rad_s, JonesProjection)` pairs. The four
+`measure_{illumination_}aperture_spectral_projection` queries on exposure and
+ensemble owners apply the response at each original grouped frequency before
+quadratic products. They observe `Re(sum_j a(omega_j)† E_j exp(i omega_j t))`
+and the corresponding magnetic signal. Complex conjugation, absolute spectral
+phase, real-source carrier sums, proper-factor beats, both physical faces and
+the original source clock remain explicit. Frequency-dependent retardance and
+common delay therefore change the actual finite-shutter observation.
+
+`AngularSpectrumExposure::angular_frequencies_rad_s` exposes the original sorted
+group keys. The table must cover every retained frequency in the mean and all
+factors, including equal-frequency groups that combine multiple authored lines.
+Coverage is checked before spatial caches or Maxwell reconstruction. Matching is
+exact; unused entries are allowed, while missing frequencies refuse. There is
+no inferred phase interpolation, extrapolation, material continuation or
+frequency-to-wavelength round-trip matching. The caller retains the actual
+calibration/material response; finite samples establish no broadband passivity,
+causality, absorption or back-action model.
+
+Each response acts on all spatial modes in the original Cartesian basis;
+angle-dependent optical scattering remains with the physical field owners.
+Admission and coverage are cancellable and allocate nothing. Coverage and
+response lookups cost O(log S) per group for S samples, never per spatial mode.
+The same double-double accumulator still forms three scalar products per
+ordered mode/frequency pair. Existing source/query bounds, reconstruction,
+spatial/shutter kernels and factor statistics remain authoritative. Borrowed
+table storage belongs to the caller. Constant and real-weight queries retain
+their original arithmetic and require no spectral table or lookup.
+
+Focused regressions cover a chromatic quarter-/half-wave analyzer, common-delay
+equivalence to shifting the authored shutter, independent spatial/time/phase
+quadrature, exact support refusals and cancellation, and bitwise equality for
+constant tables. The original-source integration regression exercises all four
+query variants through the Maxwell frequency banks and both illumination faces;
+numerical-kernel probes alone do not execute that reconstruction.

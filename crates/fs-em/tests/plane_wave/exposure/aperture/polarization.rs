@@ -1,8 +1,171 @@
 //! Polarization correlations through original grouped and two-face sources.
 use super::*;
 use fs_em::plane_wave::angular_spectrum::{
-    AngularSpectrumExposureApertureJonesProjection, AngularSpectrumExposureApertureProjection,
+    AngularSpectrumExposureApertureJonesProjection, AngularSpectrumExposureApertureJonesSpectrum,
+    AngularSpectrumExposureApertureProjection,
 };
+
+#[test]
+fn g1_dispersive_analyzers_follow_original_frequency_banks_on_both_faces() {
+    let medium = material(1.0, 1.0);
+    let stacks = [1.0, 2.0].map(|omega| {
+        PlanarDielectricLayers::try_new(&medium, DielectricResponse::Lossless(&medium), omega, &[])
+            .unwrap()
+    });
+    let circular = [C64::ONE, C64::new(0.0, 1.0)];
+    let lines = [
+        constant(&stacks[0], circular),
+        constant(&stacks[1], circular),
+    ];
+    let bank = AngularSpectrumExposure::try_new(&lines[0], &lines, limits(), || false).unwrap();
+    assert_eq!(bank.angular_frequencies_rad_s(), &[1.0, 2.0]);
+    let factors =
+        [AngularSpectrumExposure::try_new(&lines[0], &lines, limits(), || false).unwrap()];
+    let ensemble = AngularSpectrumExposureEnsemble::try_new(
+        &lines[0],
+        None,
+        &factors,
+        ensemble_limits(),
+        || false,
+    )
+    .unwrap();
+    let illumination: Vec<_> = lines
+        .iter()
+        .map(|line| {
+            line.prepare_illumination(
+                &[[C64::ZERO; 2]; 4],
+                AngularSpectrumIlluminationLimits {
+                    maximum_layer_mode_pairs: 4096,
+                    maximum_workspace_bytes: 8 << 20,
+                    maximum_fft_work: 1 << 20,
+                },
+                || false,
+            )
+            .unwrap()
+        })
+        .collect();
+    let two_face =
+        AngularSpectrumExposure::try_new_illumination(&lines[0], &illumination, limits(), || false)
+            .unwrap();
+    let two_face_factors =
+        [
+            AngularSpectrumExposure::try_new_illumination(
+                &lines[0],
+                &illumination,
+                limits(),
+                || false,
+            )
+            .unwrap(),
+        ];
+    let two_face_ensemble = AngularSpectrumExposureEnsemble::try_new(
+        &lines[0],
+        None,
+        &two_face_factors,
+        ensemble_limits(),
+        || false,
+    )
+    .unwrap();
+    let r = core::f64::consts::FRAC_1_SQRT_2;
+    let quarter = [C64::from_re(r), C64::new(0.0, r), C64::ZERO];
+    let half = [C64::from_re(r), C64::from_re(-r), C64::ZERO];
+    let samples = [
+        (
+            bank.angular_frequencies_rad_s()[0],
+            AngularSpectrumExposureApertureJonesProjection::try_new(quarter, quarter).unwrap(),
+        ),
+        (
+            bank.angular_frequencies_rad_s()[1],
+            AngularSpectrumExposureApertureJonesProjection::try_new(half, half).unwrap(),
+        ),
+    ];
+    let spectrum =
+        AngularSpectrumExposureApertureJonesSpectrum::try_new(&samples, || false).unwrap();
+    let area = AngularSpectrumAperture::try_new([0.2, -0.7], [0.4, 0.9]).unwrap();
+    let window = HarmonicWindow::new(0.17, core::f64::consts::TAU).unwrap();
+    for (side, face) in [
+        (Side::Incident, Face::TotalLeft),
+        (Side::Transmitted, Face::OutgoingRight),
+    ] {
+        for actual in [
+            bank.measure_aperture_spectral_projection(
+                side,
+                0.19,
+                area,
+                window,
+                spectrum,
+                aperture_limits(),
+                || false,
+            )
+            .unwrap(),
+            ensemble
+                .measure_aperture_spectral_projection(
+                    side,
+                    0.19,
+                    area,
+                    window,
+                    spectrum,
+                    aperture_limits(),
+                    || false,
+                )
+                .unwrap(),
+            two_face
+                .measure_illumination_aperture_spectral_projection(
+                    face,
+                    0.19,
+                    area,
+                    window,
+                    spectrum,
+                    aperture_limits(),
+                    || false,
+                )
+                .unwrap(),
+            two_face_ensemble
+                .measure_illumination_aperture_spectral_projection(
+                    face,
+                    0.19,
+                    area,
+                    window,
+                    spectrum,
+                    aperture_limits(),
+                    || false,
+                )
+                .unwrap(),
+        ] {
+            // One unit from the quarter-wave circular selection plus one half
+            // from the second frequency's half-wave response; no beat survives.
+            near(actual.electric_mean_squared_v2_m2, 1.5, 4e-14);
+            near(actual.magnetic_mean_squared_a2_m2, 1.5, 4e-14);
+            near(actual.electric_magnetic_mean_product_w_m2, 0.0, 4e-14);
+        }
+    }
+    let incomplete =
+        AngularSpectrumExposureApertureJonesSpectrum::try_new(&samples[..1], || false).unwrap();
+    assert!(
+        bank.measure_aperture_spectral_projection(
+            Side::Incident,
+            0.0,
+            area,
+            window,
+            incomplete,
+            aperture_limits(),
+            || false,
+        )
+        .is_err()
+    );
+    assert!(
+        two_face_ensemble
+            .measure_illumination_aperture_spectral_projection(
+                Face::TotalLeft,
+                0.0,
+                area,
+                window,
+                incomplete,
+                aperture_limits(),
+                || false,
+            )
+            .is_err()
+    );
+}
 
 #[test]
 fn g1_circular_analyzers_distinguish_native_maxwell_handedness() {

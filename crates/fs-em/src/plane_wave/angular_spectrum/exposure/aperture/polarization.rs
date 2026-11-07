@@ -9,6 +9,9 @@
 
 use super::*;
 
+mod spectral;
+pub use spectral::AngularSpectrumExposureApertureJonesSpectrum;
+
 /// Complete real second moments of E and H over the authored area and shutter.
 ///
 /// EE and HH are symmetric; EH[i][j] is <E_i H_j>, whose antisymmetric part
@@ -394,32 +397,74 @@ impl Accumulator for Full {
     }
 }
 
-struct Projected {
+trait ProjectionLaw {
+    fn admit_frequencies(
+        &self,
+        _angular_frequencies_rad_s: &[f64],
+        _cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), AngularSpectrumError> {
+        Ok(())
+    }
+    fn at(
+        &self,
+        angular_frequency_rad_s: f64,
+    ) -> Result<(AngularSpectrumExposureApertureJonesProjection, bool), AngularSpectrumError>;
+}
+
+struct ConstantProjection {
     projection: AngularSpectrumExposureApertureJonesProjection,
     real: bool,
+}
+impl ProjectionLaw for ConstantProjection {
+    fn at(
+        &self,
+        _angular_frequency_rad_s: f64,
+    ) -> Result<(AngularSpectrumExposureApertureJonesProjection, bool), AngularSpectrumError> {
+        Ok((self.projection, self.real))
+    }
+}
+
+fn real_weights(projection: AngularSpectrumExposureApertureJonesProjection) -> bool {
+    projection
+        .electric
+        .iter()
+        .chain(&projection.magnetic)
+        .all(|z| z.im == 0.0)
+}
+
+struct Projected<P = ConstantProjection> {
+    projection: P,
     sums: [Dd; 3],
 }
 impl Projected {
     fn new(projection: impl Into<AngularSpectrumExposureApertureJonesProjection>) -> Self {
         let projection = projection.into();
         Self {
-            projection,
-            real: projection
-                .electric
-                .iter()
-                .chain(&projection.magnetic)
-                .all(|z| z.im == 0.0),
+            projection: ConstantProjection {
+                projection,
+                real: real_weights(projection),
+            },
             sums: [Dd::ZERO; 3],
         }
     }
 }
-impl Accumulator for Projected {
+impl<P: ProjectionLaw> Accumulator for Projected<P> {
     type Output = AngularSpectrumExposureApertureProjectionReading;
+    fn admit_frequencies(
+        &self,
+        angular_frequencies_rad_s: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), AngularSpectrumError> {
+        self.projection
+            .admit_frequencies(angular_frequencies_rad_s, cancelled)
+    }
     fn prepare_field(
         &self,
+        angular_frequency_rad_s: f64,
         field: &mut [FieldParts],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), AngularSpectrumError> {
+        let (projection, real) = self.projection.at(angular_frequency_rad_s)?;
         for (i, value) in field.iter_mut().enumerate() {
             if i % 32 == 0 {
                 poll(cancelled)?;
@@ -428,17 +473,16 @@ impl Accumulator for Projected {
             for component in 0..3 {
                 for part in 0..2 {
                     e[part] = e[part]
-                        + Dd::from_f64(self.projection.electric[component].re)
-                            * value[component][part];
+                        + Dd::from_f64(projection.electric[component].re) * value[component][part];
                     h[part] = h[part]
-                        + Dd::from_f64(self.projection.magnetic[component].re)
+                        + Dd::from_f64(projection.magnetic[component].re)
                             * value[component + 3][part];
                 }
-                if !self.real {
+                if !real {
                     // Conjugate analyzer weights before the quadratic kernel.
                     // Keep DD low parts through crossed-circular dark ports.
-                    let ei = Dd::from_f64(self.projection.electric[component].im);
-                    let hi = Dd::from_f64(self.projection.magnetic[component].im);
+                    let ei = Dd::from_f64(projection.electric[component].im);
+                    let hi = Dd::from_f64(projection.magnetic[component].im);
                     e[0] = e[0] + ei * value[component][1];
                     e[1] = e[1] - ei * value[component][0];
                     h[0] = h[0] + hi * value[component + 3][1];

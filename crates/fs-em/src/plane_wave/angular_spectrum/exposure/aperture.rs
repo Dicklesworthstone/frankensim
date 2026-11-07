@@ -26,7 +26,8 @@ pub use control::{
     PreparedAngularSpectrumApertureEnergyControl,
 };
 pub use polarization::{
-    AngularSpectrumExposureApertureJonesProjection, AngularSpectrumExposureApertureMoments,
+    AngularSpectrumExposureApertureJonesProjection, AngularSpectrumExposureApertureJonesSpectrum,
+    AngularSpectrumExposureApertureMoments,
     AngularSpectrumExposureApertureProjection,
     AngularSpectrumExposureApertureProjectionReading,
 };
@@ -188,6 +189,7 @@ where
     let (mut real, mut proper) = (false, false);
     for (bank, is_proper) in banks() {
         poll(cancelled)?;
+        sum.admit_frequencies(&bank.frequencies, cancelled)?;
         let f = bank.frequency_count();
         frequency_pairs = frequency_pairs
             .checked_add(
@@ -331,8 +333,16 @@ trait Kernel: Copy {
 // authored projections share all source, phase, area and shutter preparation.
 trait Accumulator {
     type Output;
+    fn admit_frequencies(
+        &self,
+        _angular_frequencies_rad_s: &[f64],
+        _cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), AngularSpectrumError> {
+        Ok(())
+    }
     fn prepare_field(
         &self,
+        _angular_frequency_rad_s: f64,
         _field: &mut [FieldParts],
         _cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), AngularSpectrumError> {
@@ -557,7 +567,7 @@ fn accumulate_bank<K: Kernel, A: Accumulator>(
         .map_err(|_| bad("aperture frequency field allocation failed"))?;
     for group in 0..f {
         let mut field = bank.frequency_modal_parts(group, side, distance, cancelled)?;
-        sum.prepare_field(&mut field, cancelled)?;
+        sum.prepare_field(bank.frequencies[group], &mut field, cancelled)?;
         if K::CENTER_FIELDS {
             center_fields_dd(
                 &mut field,

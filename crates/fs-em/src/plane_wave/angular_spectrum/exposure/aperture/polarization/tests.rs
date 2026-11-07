@@ -17,6 +17,7 @@ fn observe<K: Kernel, A: Accumulator>(
     window: HarmonicWindow,
     mut sum: A,
 ) -> A::Output {
+    sum.admit_frequencies(omega, &mut || false).unwrap();
     let grid = AngularSpectrumGrid {
         width: kx.len(),
         height: ky.len(),
@@ -26,7 +27,7 @@ fn observe<K: Kernel, A: Accumulator>(
     let temporal = pair_kernels::<K>(omega.len(), window, |i| -omega[i], &mut || false).unwrap();
     let mut fields = fields.to_vec();
     for (i, field) in fields.iter_mut().enumerate() {
-        sum.prepare_field(field, &mut || false).unwrap();
+        sum.prepare_field(omega[i], field, &mut || false).unwrap();
         if K::CENTER_FIELDS {
             center_fields(
                 field,
@@ -423,7 +424,7 @@ fn correlation_and_projection_limits_and_cancellation_are_explicit() {
         AngularSpectrumExposureApertureProjection::try_new([1.0, 0.0, 0.0], [0.0; 3]).unwrap();
     let projected = Projected::new(projection);
     assert!(matches!(
-        projected.prepare_field(&mut [[[Dd::ZERO; 2]; 6]], &mut || true),
+        projected.prepare_field(1.0, &mut [[[Dd::ZERO; 2]; 6]], &mut || true),
         Err(AngularSpectrumError::Cancelled)
     ));
     let overflow = Projected::new(
@@ -431,7 +432,11 @@ fn correlation_and_projection_limits_and_cancellation_are_explicit() {
     );
     let mut huge = [[[Dd::ZERO; 2]; 6]];
     huge[0][0][0] = Dd::from_f64(f64::MAX);
-    assert!(overflow.prepare_field(&mut huge, &mut || false).is_err());
+    assert!(
+        overflow
+            .prepare_field(1.0, &mut huge, &mut || false)
+            .is_err()
+    );
 }
 
 #[test]
@@ -613,7 +618,9 @@ fn crossed_circular_analyzer_preserves_dd_residuals_and_refuses_invalid_weights(
     );
     assert_eq!(actual.magnetic_mean_squared_a2_m2, 0.0);
     assert!(matches!(
-        Projected::new(analyzer).prepare_field(&mut [field], &mut || true),
+        Projected::new(analyzer).prepare_field(1.0, &mut [field], &mut || true),
         Err(AngularSpectrumError::Cancelled)
     ));
 }
+
+mod spectral;

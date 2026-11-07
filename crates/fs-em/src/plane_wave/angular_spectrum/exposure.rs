@@ -33,6 +33,7 @@ pub use aperture::{
     PreparedAngularSpectrumApertureInterferometer,
     AngularSpectrumApertureControlLimits, AngularSpectrumApertureEnergyGradient,
     AngularSpectrumExposureApertureLimits, AngularSpectrumExposureApertureJonesProjection,
+    AngularSpectrumExposureApertureJonesSpectrum,
     AngularSpectrumExposureApertureMoments,
     AngularSpectrumExposureApertureProjection, AngularSpectrumExposureApertureProjectionReading,
     AngularSpectrumExposureApertureReading, AngularSpectrumExposureApertureStress,
@@ -319,6 +320,11 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
     }
     pub fn frequency_count(&self) -> usize {
         self.frequencies.len()
+    }
+    /// Sorted distinct positive angular frequencies of the retained source
+    /// groups, in rad/s. Equal-frequency authored lines share one group.
+    pub fn angular_frequencies_rad_s(&self) -> &[f64] {
+        &self.frequencies
     }
     pub fn workspace_bytes(&self) -> usize {
         self.workspace_bytes
