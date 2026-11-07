@@ -182,9 +182,10 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     /// Each stage borrows the original Euler owner's held, source-admitted
     /// trace at the physical face. Normal gradients use half a cell; mechanical
     /// work uses the prescribed bath velocity. The original transport law is
-    /// evaluated at the cell/bath midpoint temperature and pressure. No modeled
-    /// SGS bath flux or additional numerical storage is introduced. Unbound
-    /// transmissive sides and pressure-only outlets retain zero molecular flux.
+    /// evaluated at the cell/bath midpoint temperature and pressure. Modeled
+    /// bath flux requires a separate local SGS reservoir selection. No additional
+    /// numerical storage is introduced. Unbound transmissive sides and
+    /// pressure-only outlets retain zero molecular flux.
     /// This does not sample a time-dependent inlet during molecular stages.
     pub fn with_reservoir_exchange(mut self) -> Self {
         self.reservoir_exchange = true;
@@ -805,23 +806,52 @@ fn spatial<L: TransportLaw>(
                     "nonnegative finite molecular coefficients required",
                 ));
             }
+            let bath_gradient = if bath.is_some() {
+                Some(reservoir::tangential_gradient(
+                    grid,
+                    boundaries,
+                    reservoirs.ok_or(MolecularError::Invalid("missing molecular reservoir"))?,
+                    axis,
+                    sign,
+                    adjacent,
+                    &gradient[adjacent],
+                )?)
+            } else {
+                None
+            };
             #[cfg(feature = "experimental-sgs")]
             let (mu, conductivity, modeled_mu) =
-                if let Some(sgs) = subgrid.as_ref().filter(|_| !wall && bath.is_none()) {
-                    sgs.face_coefficients(
-                        gas,
-                        left,
-                        right,
-                        axis,
-                        index,
-                        grid.spacing[axis],
-                        primitive,
-                        gradient,
-                        temperature,
-                        pressure,
-                        mu,
-                        conductivity,
-                    )?
+                if let Some(sgs) = subgrid.as_ref().filter(|_| !wall) {
+                    if let Some(derivatives) = bath_gradient {
+                        sgs.reservoir_face_coefficients(
+                            gas,
+                            axis,
+                            index,
+                            pl,
+                            pr,
+                            distance,
+                            derivatives,
+                            temperature,
+                            pressure,
+                            mu,
+                            conductivity,
+                        )?
+                    } else {
+                        sgs.face_coefficients(
+                            gas,
+                            left,
+                            right,
+                            axis,
+                            index,
+                            grid.spacing[axis],
+                            primitive,
+                            gradient,
+                            temperature,
+                            pressure,
+                            mu,
+                            conductivity,
+                        )?
+                    }
                 } else {
                     (mu, conductivity, 0.0)
                 };
@@ -876,19 +906,6 @@ fn spatial<L: TransportLaw>(
                 sign * 2.0 * pl.velocity[axis] / grid.spacing[axis]
             } else {
                 (pr.velocity[axis] - pl.velocity[axis]) / distance
-            };
-            let bath_gradient = if bath.is_some() {
-                Some(reservoir::tangential_gradient(
-                    grid,
-                    boundaries,
-                    reservoirs.ok_or(MolecularError::Invalid("missing molecular reservoir"))?,
-                    axis,
-                    sign,
-                    adjacent,
-                    &gradient[adjacent],
-                )?)
-            } else {
-                None
             };
             let wall_trace_fraction = wall_model.map_or(1.0, |model| {
                 model.tangential_trace_fraction(0.5 * grid.spacing[axis])

@@ -7092,9 +7092,10 @@ cache. Tangential profile derivatives use centered differences, periodic
 wrapping or quadratic one-sided end differences; two faces use a linear
 derivative and a single face resolves no variation. The original midpoint
 stress approximation combines these with adjacent-cell tangential derivatives.
-Local SGS sees the consistent adjacent gradients; its modeled flux at the
-externally maintained bath remains zero. Periodic/channel dynamic-fit admission
-is unchanged. No additional numerical buffers or per-face allocations are
+Local SGS sees the consistent adjacent gradients. Modeled flux at the
+externally maintained bath remains zero unless the separate local SGS bath
+selection below is enabled. Periodic/channel dynamic-fit admission is
+unchanged. No additional numerical buffers or per-face allocations are
 introduced.
 
 SSP RK2, native RKL2 (including retry anchors and endpoint admission), both
@@ -7113,6 +7114,41 @@ owner swaps, and active interior SGS with unchanged molecular bath flux. These
 are source/stencil/balance fixtures, not gas-specific turbulence, DNS, wall-law,
 nonreflecting-boundary or experimental validation. Composition remains frozen.
 
+
+### Opt-in local SGS exchange with frozen-gas reservoirs
+
+`with_local_sgs_reservoir_exchange` on `MolecularTransport3d` and
+`MolecularEuler3d` explicitly extends an authored local Smagorinsky, WALE or
+Vreman closure to complete source-admitted uniform/profile reservoirs. It
+also enables molecular reservoir exchange. Molecular-only bath exchange
+remains the default when only `with_reservoir_exchange` is selected.
+
+The full constitutive tensor uses the existing half-cell normal differences
+and midpoint cell/profile tangential derivatives. Authored physical filter
+widths are unchanged, including directional Vreman widths. Face density is
+the cell/bath average; heat transport uses the original caloric source at
+midpoint temperature and pressure. Bulk viscosity stays molecular and
+total-energy stress work uses the prescribed bath velocity. The augmented
+coefficients enter the original conservative face flux and diffusion bound;
+excess eddy-to-molecular viscosity refuses rather than clips.
+
+This selection adds no numerical arrays and follows the original held or
+physical-stage reservoir sampling in standalone and coupled SSP/RKL paths.
+Missing local authorship and dynamic/Lagrangian fits refuse: exterior filter
+samples and histories are not inferred. Unbound sides and pressure-only
+outlets retain zero bath diffusion. The selection adds neither inflow
+fluctuations nor a DNS, entropy or shock-interaction accuracy claim.
+
+Five consumer regression groups cover six profile faces with all three
+closures, variable density/source heat capacity, zero-model trajectory
+identity, exact augmented diffusion bounds, ratio refusal, closure admission,
+and complete SSP/RKL conservation/cancellation/replay. These sources were
+parsed and reviewed but not compiled or executed. Separately, three tests of
+the exact production `reservoir_face_gradient` and original `tangents`
+functions passed under the pinned Rust compiler with warnings denied:
+full affine tensors on all normals and half-cell distances, rigid rotation,
+and common velocity boosts/uniform comotion. That isolated mathematical
+check does not establish a full native consumer build or integration gate.
 
 ## Stage-time coherent Mann forcing of native compressible flow
 
@@ -7196,8 +7232,9 @@ The original gas, original transport law and its actual midpoint source
 admission own every heat/stress/work evaluation. All six bath normals,
 half-cell conductances, tangential profile derivatives, cell-gradient ghosts,
 wall conditions and selected interior SGS follow the same immutable active or
-staged reservoir view. Bath faces retain molecular-only exchange under the
-existing SGS contract. Density/composition/caloric ownership does not change.
+staged reservoir view. Bath faces retain molecular-only exchange unless the
+explicit local SGS reservoir policy is enabled; that policy observes the same
+stage trace. Density/composition/caloric ownership does not change.
 
 The provider must be a replayable read-only observation: identical arguments
 return identical physical data, including repeated or nonmonotone time

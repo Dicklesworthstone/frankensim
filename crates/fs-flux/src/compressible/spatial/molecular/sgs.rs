@@ -26,6 +26,10 @@
 //! Reflecting boundaries retain their adiabatic slip semantics unless an
 //! explicit wall is authored. [`EquilibriumWallConfig`] optionally supplies
 //! smooth adiabatic wall stress when the viscous sublayer is not resolved.
+//! Complete reservoirs remain molecular-only unless local SGS bath exchange is
+//! explicitly enabled. That policy uses the admitted bath trace, half-cell
+//! normal differences and the same tangential tensor as the bath stress. It
+//! supplies no exterior Germano fit, Lagrangian history or inflow fluctuations.
 //! No coefficient or turbulent Prandtl number is chosen implicitly.
 //!
 //! References: Nicoud & Ducros (1999), doi:10.1023/A:1009995426001;
@@ -73,6 +77,40 @@ pub(in crate::compressible::spatial) fn face_gradient(
             }
         })
     })
+}
+
+/// Convert the bath stress stencil to a full component-first velocity tensor.
+/// Tangential input rows follow the two derivative axes; their columns are
+/// velocity components in normal-frame order `[normal, tangent1, tangent2]`.
+pub(in crate::compressible::spatial) fn reservoir_face_gradient(
+    left_velocity: [f64; 3],
+    right_velocity: [f64; 3],
+    tangential_gradient: [[f64; 3]; 2],
+    normal_axis: usize,
+    distance: f64,
+) -> [[f64; 3]; 3] {
+    let [a, b] = tangents(normal_axis);
+    let mut result = [[0.0; 3]; 3];
+    for (column, component) in [normal_axis, a, b].into_iter().enumerate() {
+        result[component][normal_axis] =
+            (right_velocity[component] - left_velocity[component]) / distance;
+        result[component][a] = tangential_gradient[0][column];
+        result[component][b] = tangential_gradient[1][column];
+    }
+    result
+}
+
+fn local_eddy_viscosity(
+    model: SgsModel,
+    widths: [f64; 3],
+    filter_width: f64,
+    gradient: [[f64; 3]; 3],
+) -> Result<f64, MolecularError> {
+    match model {
+        SgsModel::Vreman { cv } => vreman_eddy_viscosity(cv, widths, gradient),
+        model => eddy_viscosity(model, filter_width, gradient),
+    }
+    .map_err(MolecularError::Subgrid)
 }
 
 /// Explicit subgrid controls; enabling the Cargo feature alone changes no flow.
@@ -125,6 +163,42 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         Ok(result)
     }
 
+    /// Extend explicitly authored local SGS stress and heat to complete baths.
+    ///
+    /// This also enables molecular reservoir exchange. Source-admitted bath
+    /// traces supply the half-cell normal and profile tangential gradients;
+    /// density and caloric properties use the same cell/bath midpoint as the
+    /// molecular coefficients. Conservative work uses the prescribed bath
+    /// velocity. The authored viscosity-ratio limit and stage diffusion bound
+    /// include the modeled bath transport.
+    ///
+    /// Requires local Smagorinsky, WALE or Vreman SGS. Dynamic and Lagrangian
+    /// fits refuse: no exterior filter samples or histories are fabricated.
+    /// Unbound sides and pressure-only outlets retain zero diffusive flux.
+    pub fn with_local_sgs_reservoir_exchange(mut self) -> Result<Self, MolecularError> {
+        let Some(SubgridTransport {
+            closure: SubgridClosure::Local {
+                reservoir_exchange, ..
+            },
+            ..
+        }) = self.sgs.as_mut()
+        else {
+            return Err(MolecularError::Invalid(
+                "reservoir SGS exchange requires an authored local closure",
+            ));
+        };
+        *reservoir_exchange = true;
+        self.reservoir_exchange = true;
+        Ok(self)
+    }
+
+    /// Whether complete reservoirs use the explicitly selected local SGS law.
+    pub fn local_sgs_reservoir_exchange_enabled(&self) -> bool {
+        self.sgs
+            .as_ref()
+            .is_some_and(SubgridTransport::local_reservoir_exchange_enabled)
+    }
+
     /// Exact local controls; `None` for molecular-only or dynamic SGS flow.
     pub fn subgrid_config(&self) -> Option<SubgridConfig> {
         self.sgs.as_ref().and_then(|s| match &s.closure {
@@ -150,6 +224,7 @@ enum SubgridClosure {
         config: SubgridConfig,
         widths: [f64; 3],
         filter_width: f64,
+        reservoir_exchange: bool,
     },
     Dynamic(dynamic::DynamicTransport),
     Lagrangian(lagrangian::LagrangianTransport),
@@ -158,6 +233,16 @@ enum SubgridClosure {
 }
 
 impl SubgridTransport {
+    fn local_reservoir_exchange_enabled(&self) -> bool {
+        matches!(
+            &self.closure,
+            SubgridClosure::Local {
+                reservoir_exchange: true,
+                ..
+            }
+        )
+    }
+
     pub(super) fn requires_no_slip_wall(&self) -> bool {
         match &self.closure {
             SubgridClosure::ChannelDynamicThermal(_) => true,
@@ -180,6 +265,7 @@ impl SubgridTransport {
                 config,
                 widths,
                 filter_width,
+                reservoir_exchange: false,
             },
             dynamic_coefficient_squared: allocated(flow.states.len(), 0.0)?,
         })
@@ -207,6 +293,58 @@ impl SubgridTransport {
                 cancelled,
             ),
         }
+    }
+
+    /// Local bath constitutive law on the exact conservative stress stencil.
+    /// Disabled policies return before touching the caloric source or closure.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn reservoir_face_coefficients(
+        &self,
+        gas: &FrozenGas,
+        axis: usize,
+        face: usize,
+        left: Primitive,
+        right: Primitive,
+        distance: f64,
+        tangential_gradient: [[f64; 3]; 2],
+        temperature: f64,
+        pressure: f64,
+        molecular_mu: f64,
+        molecular_conductivity: f64,
+    ) -> Result<(f64, f64, f64), MolecularError> {
+        let SubgridClosure::Local {
+            config,
+            widths,
+            filter_width,
+            reservoir_exchange: true,
+        } = &self.closure
+        else {
+            return Ok((molecular_mu, molecular_conductivity, 0.0));
+        };
+        if config.model.coefficient() == 0.0 {
+            return Ok((molecular_mu, molecular_conductivity, 0.0));
+        }
+        let gradient = reservoir_face_gradient(
+            left.velocity,
+            right.velocity,
+            tangential_gradient,
+            axis,
+            distance,
+        );
+        let nu = local_eddy_viscosity(config.model, *widths, *filter_width, gradient)?;
+        let mu_t = (0.5 * left.density + 0.5 * right.density) * nu;
+        add_eddy_transport(
+            gas,
+            axis,
+            face,
+            temperature,
+            pressure,
+            mu_t,
+            molecular_mu,
+            molecular_conductivity,
+            config.turbulent_prandtl,
+            config.maximum_eddy_to_molecular,
+        )
     }
 
     /// Total viscosity/conductivity plus the separately retained modeled
@@ -252,6 +390,7 @@ impl SubgridTransport {
             config,
             widths,
             filter_width,
+            ..
         } = &self.closure
         {
             if config.model.coefficient() == 0.0 {
@@ -265,11 +404,7 @@ impl SubgridTransport {
                 axis,
                 distance,
             );
-            let nu = match config.model {
-                SgsModel::Vreman { cv } => vreman_eddy_viscosity(cv, *widths, g),
-                model => eddy_viscosity(model, *filter_width, g),
-            }
-            .map_err(MolecularError::Subgrid)?;
+            let nu = local_eddy_viscosity(config.model, *widths, *filter_width, g)?;
             (
                 (0.5 * primitive[left].density + 0.5 * primitive[right].density) * nu,
                 0.0,
@@ -371,32 +506,59 @@ impl SubgridTransport {
                 );
             }
         };
-        // Preserve the original molecular arithmetic and source calls exactly.
-        if mu_t == 0.0 {
-            return Ok((molecular_mu, molecular_conductivity, 0.0));
-        }
-        let ratio = mu_t / molecular_mu;
-        if !ratio.is_finite() || ratio > maximum_ratio {
-            return Err(MolecularError::SubgridViscosityRatio {
-                axis,
-                face,
-                observed: ratio,
-                maximum: maximum_ratio,
-            });
-        }
-        let cp = gas
-            .source()
-            .evaluate_properties(Temperature::new(temperature), Pressure::new(pressure))
-            .map_err(Error::from)?
-            .mass_specific_cp()
-            .value();
-        let mu = molecular_mu + mu_t;
-        let conductivity = molecular_conductivity + mu_t * (cp / prandtl);
-        if !positive(cp) || !mu.is_finite() || !conductivity.is_finite() {
-            return Err(MolecularError::Invalid(
-                "unrepresentable subgrid stress or heat coefficient",
-            ));
-        }
-        Ok((mu, conductivity, mu_t))
+        add_eddy_transport(
+            gas,
+            axis,
+            face,
+            temperature,
+            pressure,
+            mu_t,
+            molecular_mu,
+            molecular_conductivity,
+            prandtl,
+            maximum_ratio,
+        )
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_eddy_transport(
+    gas: &FrozenGas,
+    axis: usize,
+    face: usize,
+    temperature: f64,
+    pressure: f64,
+    mu_t: f64,
+    molecular_mu: f64,
+    molecular_conductivity: f64,
+    prandtl: f64,
+    maximum_ratio: f64,
+) -> Result<(f64, f64, f64), MolecularError> {
+    // Preserve the original molecular arithmetic and source calls exactly.
+    if mu_t == 0.0 {
+        return Ok((molecular_mu, molecular_conductivity, 0.0));
+    }
+    let ratio = mu_t / molecular_mu;
+    if !ratio.is_finite() || ratio > maximum_ratio {
+        return Err(MolecularError::SubgridViscosityRatio {
+            axis,
+            face,
+            observed: ratio,
+            maximum: maximum_ratio,
+        });
+    }
+    let cp = gas
+        .source()
+        .evaluate_properties(Temperature::new(temperature), Pressure::new(pressure))
+        .map_err(Error::from)?
+        .mass_specific_cp()
+        .value();
+    let mu = molecular_mu + mu_t;
+    let conductivity = molecular_conductivity + mu_t * (cp / prandtl);
+    if !positive(cp) || !mu.is_finite() || !conductivity.is_finite() {
+        return Err(MolecularError::Invalid(
+            "unrepresentable subgrid stress or heat coefficient",
+        ));
+    }
+    Ok((mu, conductivity, mu_t))
 }

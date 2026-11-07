@@ -567,3 +567,7 @@ fn g1_local_sgs_uses_bath_ghosts_but_leaves_the_bath_flux_molecular() {
         "reservoir gradients must affect interior modeled transport"
     );
 }
+
+#[cfg(feature = "experimental-sgs")]
+#[path = "sgs/reservoir_tests.rs"]
+mod local_sgs;

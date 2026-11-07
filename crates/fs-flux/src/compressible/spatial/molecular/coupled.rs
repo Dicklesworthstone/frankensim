@@ -82,6 +82,25 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         self.molecular.reservoir_exchange_enabled()
     }
 
+    /// Enable local SGS stress and heat at complete reservoirs in both halves.
+    /// Uses the same admitted bath traces as molecular exchange, including
+    /// timed-stage sampling. Dynamic and Lagrangian closures refuse.
+    /// Changing this selection invalidates the previous complete-step report.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn with_local_sgs_reservoir_exchange(mut self) -> Result<Self, MolecularError> {
+        let changed = !self.molecular.local_sgs_reservoir_exchange_enabled();
+        self.molecular = self.molecular.with_local_sgs_reservoir_exchange()?;
+        if changed {
+            self.last_step = None;
+        }
+        Ok(self)
+    }
+
+    #[cfg(feature = "experimental-sgs")]
+    pub fn local_sgs_reservoir_exchange_enabled(&self) -> bool {
+        self.molecular.local_sgs_reservoir_exchange_enabled()
+    }
+
     /// Apply the same physical wall to both molecular half steps. Euler keeps
     /// its impermeable pressure boundary; wall work/heat enter the combined
     /// conservative exchange report only through the molecular face flux.
