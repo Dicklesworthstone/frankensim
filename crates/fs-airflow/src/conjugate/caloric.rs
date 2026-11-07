@@ -13,6 +13,9 @@
 //! responses differentiate this same original source-caloric march. The
 //! constant-Cp adjoint/transfer APIs accept `AirPath`, never this distinct path.
 
+/// Finite, source-caloric co-current and counterflow heat exchangers.
+pub mod exchanger;
+
 mod linearization;
 pub use linearization::{CaloricPathLinearization, CaloricPathTangent, CaloricSegmentTangent};
 

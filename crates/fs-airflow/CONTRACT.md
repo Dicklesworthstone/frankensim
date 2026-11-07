@@ -4839,3 +4839,52 @@ rotor/inverter transient, cavitation model or automatic map extrapolation.
 Focused pump, reservoir and stored-cooling tests exercise input conservation,
 shutoff consumption, interior-curve infeasibility, thermal feedback, jointly
 stored energy and transactional refusal.
+
+## Finite two-stream heat exchange with original caloric sources
+
+`conjugate::caloric::exchanger::CaloricHeatExchanger` solves steady co-current
+or counterflow exchange between two `ExchangerStream` owners with prescribed
+positive mass rates and total UA. Each retains its original
+`IsobaricHeatCapacityLaw`, supported temperature interval, source knots and
+fixed composition. The fluids may have different isobars and independent
+enthalpy datums: they exchange heat, not mass.
+
+One shared heat rate determines both original relative-enthalpy outlet
+inverses. The required conductance is the integral of heat progress divided
+by the actual local stream-temperature difference. Counterflow reverses cold
+progress along the hot direction. The integral is split at BOTH original
+Cp-knot sets. On each paired affine-Cp interval, equality of the positive
+capacity rates locates every possible interior stationary temperature gap;
+positive inlet/outlet gaps alone cannot admit an interior thermal pinch.
+
+Constant Cp uses the stable analytic NTU relation, including equal and nearly
+equal capacity rates. Variable Cp uses a bounded scalar bracket and Simpson
+quadrature with analytic fourth-derivative truncation bounds plus an explicit
+floating-point allowance. Heat and conductance acceptance gates both apply.
+The numerical allowance is not an interval-arithmetic certificate or source
+uncertainty. Quadrature work and nonlinear iterations have explicit caps,
+with cancellation during source preparation, panel work and publication.
+
+The report retains the reciprocal signed heat, both relative enthalpy changes,
+rounded outlet temperatures, original-source endpoint caloric residuals and
+their explicit numerical allowances. Original entropy integrals include the
+stated first-order correction for unresolved endpoint energy, with a separate
+signed entropy allowance; negative production is never clipped. Endpoint
+rounding allowances do not relax the independent Q/UA gates. Original source
+support limits both streams, and further exchange outside either law refuses.
+
+This is a held-UA, steady, single-phase exchanger. It introduces no wall/fluid
+inventory, pressure loss, pump work, phase change, external heater or mass
+mixing. Extreme constant-Cp saturation that rounds a terminal temperature gap
+to zero remains an explicit numerical refusal because the represented heat
+cannot support the required finite conductance inversion.
+
+
+Nine focused regression tests cover independent constant-Cp NTU limits, equal
+and nearly equal capacity rates, reciprocal stream reversal, weak heat below
+absolute-temperature resolution, nonlinear manufactured heat and entropy,
+actual original-Cp slope changes, distinct datums and isobars, interior
+counterflow pinch, both source-domain limits, zero transfer and explicit
+saturation, bounded work, nonconvergence and cancellation. The three Rust
+sources were parsed with the pinned formatter. Native Cargo compilation and
+test execution were not available in this resource-exhausted session.
