@@ -16,6 +16,7 @@ use fs_qty::{QuantitySpec, Temperature};
 mod components;
 mod buoyancy;
 mod rheology;
+mod reference_density;
 
 fn thermal_card(rho: f64, hot_nu: f64) -> MaterialCard {
     let mut claims = ClaimSet::new();

@@ -15287,3 +15287,40 @@ rank refusal, invalid inventory, speed limits and dependent-receipt/cancellation
 atomicity. SI receipt regressions exercise distinct mass/momentum/angular/work
 units, authored-origin transport and unrepresentable readback. The material
 integration regression compares the same physical wrench at two timesteps.
+
+## Original-reference density through deformed tetrahedral liquid ingress
+
+`free_surface3_from_reference_tetrahedra` and
+`free_surface3_from_reference_tetrahedra_with_enthalpy` retain original
+reference positions and per-tetrahedron P1 corner density on the current
+snapshot's original connectivity. Positive affine deformation transports
+density as rho_reference/J. Original mass remains the reference integral;
+first and second mass moments use its affine push-forward. Current
+tetrahedron/cell intersections use the existing exact density-moment owner.
+Original P1 velocity and enthalpy retain their cubic kinetic and quadratic
+thermal mass integrals.
+
+These entries use the existing component momentum correction, native
+initializer, thermal attachment and projection-error accounts. The receiver
+retains its original uniform physical density and supplied geometric fill.
+Explicit kg/m3 density and m3 occupied-volume bounds admit the measured
+reference/current compatibility. Original overlap mass partition and actual
+per-cell native mass defects share the existing absolute mass bound.
+Numerical pressure cannot replace physical density, and native fill is not
+rescaled to conceal an incompatible source inventory.
+
+The report retains reference and deformed density moments, maximum measured
+current-density discrepancy, mass partition/readback defects, and actual
+native occupied volume from fill_fraction*dx^3. Thermal ingress repeats this
+audit after final native stress/constitutive attachment. Signed kinetic and
+gravitational projection changes remain numerical accounts and never become
+heat. The input must already be liquid with an independently admitted
+disposition of stored solid stress/history; this does not supply melting,
+general variable-density VOF or a phase-density transition.
+
+The production kinetic regressions cover the independent graded-density
+cubic form, exact uniform-density compatibility, and retained variance beside
+large common transport, permutations and mass scaling. Native integration
+regressions specify deformed reference inventory, moment/enthalpy
+conservation, refusal and continuing flow behavior. MR28 remains open for
+its broader phase and history obligations.

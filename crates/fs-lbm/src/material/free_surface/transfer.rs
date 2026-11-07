@@ -27,15 +27,22 @@ use std::collections::BTreeMap;
 pub mod enthalpy;
 
 mod components;
+mod density;
 mod kinetic;
 mod momentum;
 pub use components::TetLiquidComponentTransfer;
+pub use density::{
+    TetReferenceDensityTransferControls, TetReferenceDensityTransferReport,
+    TetrahedralLiquidReferenceDensity,
+};
 pub use kinetic::LiquidKineticFrame;
 
 use fs_exec::Cx;
 use fs_la::factor::lu;
 use fs_math::dd::Dd;
-use fs_mesh::overlap::{OverlapError, tetrahedron_box_moments};
+use fs_mesh::overlap::{
+    DensityMoments, OverlapError, tetrahedron_box_density_moments, tetrahedron_box_moments,
+};
 
 use super::{
     MaterialFreeSurface3, MaterialFreeSurfaceDomain3, MaterialFreeSurfaceInitialCell3,
@@ -118,6 +125,8 @@ pub struct TetLiquidTransferReport {
     /// Every piece independently preserves mass and both momenta. These are
     /// ingress lineage and audits, not persistent labels after native merging.
     pub components: Vec<TetLiquidComponentTransfer>,
+    /// Present only when the handoff retains an original reference-density field.
+    pub reference_density: Option<TetReferenceDensityTransferReport>,
     source_kinetic: kinetic::Inventory,
     kinetic_change: Dd,
 }
@@ -130,7 +139,8 @@ impl TetLiquidTransferReport {
         &self,
         reference_velocity_m_s: [f64; 3],
     ) -> Result<LiquidKineticFrame, TetLiquidTransferError> {
-        self.source_kinetic.in_frame(reference_velocity_m_s)
+        self.source_kinetic
+            .in_frame(reference_velocity_m_s)
             .ok_or_else(|| invalid("source kinetic inventory cannot use this velocity reference"))
     }
 
@@ -173,6 +183,8 @@ impl From<MaterialLbmError> for TetLiquidTransferError {
 struct CellIntegral {
     component: usize,
     volume: f64,
+    /// Exact current overlap mass when an original density field is retained.
+    reference_mass: f64,
     momentum: [f64; 3],
     strain_integral: [f64; 6],
     enthalpy_j: f64,
@@ -187,6 +199,9 @@ struct TransferredFields {
     source_by_component_j: Vec<f64>,
     /// Retained original P1 storage, also used after native thermal attachment.
     source_kinetic: Vec<kinetic::Inventory>,
+    /// Original overlap mass and geometry for the FINAL thermal/native readback.
+    reference_cells: BTreeMap<[usize; 3], (f64, f64)>,
+    reference_density_controls: Option<TetReferenceDensityTransferControls>,
 }
 
 fn invalid(what: &'static str) -> TetLiquidTransferError {
@@ -242,7 +257,10 @@ fn native_cell_mass_kg(
 ) -> Result<f64, TetLiquidTransferError> {
     let location = crate::d3q19::freesurface3::FreeSurface3::transport_location(coordinates)
         .ok_or_else(|| invalid("receiving liquid cell has no native mass location"))?;
-    let mass = flow.lattice.transport_cell_mass(location).map_err(MaterialLbmError::from)?
+    let mass = flow
+        .lattice
+        .transport_cell_mass(location)
+        .map_err(MaterialLbmError::from)?
         * flow.scaling.mass_unit_kg();
     if !mass.is_finite() || mass <= 0.0 {
         return Err(invalid("receiving liquid mass is unrepresentable"));
@@ -256,23 +274,31 @@ fn kinetic_change(
     cx: &Cx<'_>,
 ) -> Result<Dd, TetLiquidTransferError> {
     if source.len() != target.len() {
-        return Err(invalid("liquid kinetic inventories have different components"));
+        return Err(invalid(
+            "liquid kinetic inventories have different components",
+        ));
     }
     let mut change = Dd::ZERO;
     for (&before, &after) in source.iter().zip(target) {
         checkpoint(cx)?;
-        change = change + before.change_to(after)
-            .ok_or_else(|| invalid("liquid kinetic storage change is unrepresentable"))?;
+        change = change
+            + before
+                .change_to(after)
+                .ok_or_else(|| invalid("liquid kinetic storage change is unrepresentable"))?;
     }
     if !change.hi.is_finite() || !change.lo.is_finite() {
-        return Err(invalid("combined liquid kinetic storage change is unrepresentable"));
+        return Err(invalid(
+            "combined liquid kinetic storage change is unrepresentable",
+        ));
     }
     Ok(change)
 }
 
 fn symmetric_strain(gradient: [[f64; 3]; 3]) -> [f64; 6] {
     [
-        gradient[0][0], gradient[1][1], gradient[2][2],
+        gradient[0][0],
+        gradient[1][1],
+        gradient[2][2],
         0.5 * gradient[0][1] + 0.5 * gradient[1][0],
         0.5 * gradient[0][2] + 0.5 * gradient[2][0],
         0.5 * gradient[1][2] + 0.5 * gradient[2][1],
@@ -316,8 +342,46 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         limits: TetLiquidTransferLimits,
         cx: &Cx<'_>,
     ) -> Result<(MaterialFreeSurface3<'a>, TetLiquidTransferReport), TetLiquidTransferError> {
+        let (flow, report, _) =
+            self.transfer_tetrahedra(domain, grid_origin_m, source, None, None, None, limits, cx)?;
+        Ok((flow, report))
+    }
+
+    /// Retain original reference mass through a deformed, already-liquid mesh.
+    ///
+    /// Each affine current tetrahedron uses rho_reference/J and the exact
+    /// original density-weighted first/second moments. Explicit density and
+    /// volume bounds must admit the SAME constant-density native liquid.
+    /// Source mass, P1 momentum, angular momentum and cubic kinetic storage are
+    /// measured against the original reference inventory, not rho_native*V.
+    /// The native fill still describes the supplied geometric intersections;
+    /// density differences never become numerical pressure or extra occupied
+    /// volume. A general graded current-density liquid needs a different owner.
+    /// Original elastic/plastic history must already have its own admitted
+    /// disposition; this handoff does not perform melting or release stress.
+    #[allow(clippy::too_many_arguments)]
+    pub fn free_surface3_from_reference_tetrahedra(
+        self,
+        domain: MaterialFreeSurfaceDomain3<'_>,
+        grid_origin_m: [f64; 3],
+        source: TetrahedralLiquidState<'_>,
+        reference: TetrahedralLiquidReferenceDensity<'_>,
+        density_controls: TetReferenceDensityTransferControls,
+        limits: TetLiquidTransferLimits,
+        cx: &Cx<'_>,
+    ) -> Result<(MaterialFreeSurface3<'a>, TetLiquidTransferReport), TetLiquidTransferError> {
         let (flow, report, _) = self.transfer_tetrahedra(
-            domain, grid_origin_m, source, None, None, limits, cx,
+            domain,
+            grid_origin_m,
+            source,
+            None,
+            None,
+            Some(density::Binding {
+                field: reference,
+                controls: density_controls,
+            }),
+            limits,
+            cx,
         )?;
         Ok((flow, report))
     }
@@ -331,9 +395,17 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         source: TetrahedralLiquidState<'_>,
         source_h: Option<&[f64]>,
         rheology: Option<&super::enthalpy::rheology::RheologyBinding>,
+        reference: Option<density::Binding<'_>>,
         limits: TetLiquidTransferLimits,
         cx: &Cx<'_>,
-    ) -> Result<(MaterialFreeSurface3<'a>, TetLiquidTransferReport, TransferredFields), TetLiquidTransferError> {
+    ) -> Result<
+        (
+            MaterialFreeSurface3<'a>,
+            TetLiquidTransferReport,
+            TransferredFields,
+        ),
+        TetLiquidTransferError,
+    > {
         checkpoint(cx)?;
         // Only an admitted original thermal/rheology binding can cross this
         // boundary with an evolving source. The same geometric and moment
@@ -357,6 +429,11 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         {
             return Err(invalid("invalid tetrahedral source or input count limit"));
         }
+        if let Some(binding) = reference {
+            binding.admit(source)?;
+        }
+        let mut reference_report = reference.map(|_| TetReferenceDensityTransferReport::default());
+        let mut reference_cells = BTreeMap::new();
         let dx = self.cell_size_m();
         let cell_volume = dx * dx * dx;
         let rho = self.material().density_kg_m3();
@@ -377,7 +454,9 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         for component in &components {
             checkpoint(cx)?;
             let tet = source.tetrahedra[component.source_tetrahedra[0]];
-            thermal.source_kinetic.push(kinetic::Inventory::new(source.velocities_m_s[tet[0] as usize]));
+            thermal.source_kinetic.push(kinetic::Inventory::new(
+                source.velocities_m_s[tet[0] as usize],
+            ));
         }
         let mut overlap_tests = 0usize;
         for (tet_index, indices) in source.tetrahedra.iter().enumerate() {
@@ -413,17 +492,55 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                     "source tetrahedron has no representable positive volume",
                 ));
             }
-            integrate_source(&mut original, p, v, whole.volume * rho, grid_origin_m);
-            integrate_source(&mut components[component].source, p, v, whole.volume * rho, grid_origin_m);
-            thermal.source_kinetic[component].add_tetrahedron(whole.volume * rho, v);
+            let reference_tet = if let Some(binding) = reference {
+                overlap_tests = overlap_tests
+                    .checked_add(1)
+                    .filter(|n| *n <= limits.max_overlap_tests)
+                    .ok_or_else(|| invalid("reference/current intersection budget exhausted"))?;
+                Some(binding.tetrahedron(tet_index, *indices, p, whole.volume, rho, cx)?)
+            } else {
+                None
+            };
             let gradient = field_gradient(p, v)?;
+            if let Some(tet) = &reference_tet {
+                tet.add_report(
+                    reference_report.as_mut().expect("reference binding"),
+                    grid_origin_m,
+                )?;
+                tet.add_source(&mut original, v[0], gradient, grid_origin_m);
+                tet.add_source(
+                    &mut components[component].source,
+                    v[0],
+                    gradient,
+                    grid_origin_m,
+                );
+                thermal.source_kinetic[component].add_density_tetrahedron(
+                    tet.original.mass,
+                    tet.reference_density,
+                    v,
+                );
+            } else {
+                integrate_source(&mut original, p, v, whole.volume * rho, grid_origin_m);
+                integrate_source(
+                    &mut components[component].source,
+                    p,
+                    v,
+                    whole.volume * rho,
+                    grid_origin_m,
+                );
+                thermal.source_kinetic[component].add_tetrahedron(whole.volume * rho, v);
+            }
             let strain = symmetric_strain(gradient);
             let h = source_h.map(|values| indices.map(|i| values[i as usize]));
-            let h_gradient = h.map(|values| field_gradient(p, values.map(|value| [value])))
+            let h_gradient = h
+                .map(|values| field_gradient(p, values.map(|value| [value])))
                 .transpose()?;
             if let Some(values) = h {
-                let energy = rho * whole.volume
-                    * (values.into_iter().map(|value| 0.25 * value).sum::<f64>());
+                let energy = if let Some(tet) = &reference_tet {
+                    tet.specific_field_integral(values)
+                } else {
+                    rho * whole.volume * (values.into_iter().map(|value| 0.25 * value).sum::<f64>())
+                };
                 thermal.source_j += energy;
                 thermal.source_by_component_j[component] += energy;
             }
@@ -434,6 +551,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                 (((upper_tet[a] - grid_origin_m[a]) / dx).ceil() as usize).min(domain.cells[a])
             });
             let mut covered = 0.0;
+            let mut covered_mass = 0.0;
             for z in first[2]..end[2] {
                 for y in first[1]..end[1] {
                     for x in first[0]..end[0] {
@@ -446,11 +564,30 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                         let low = core::array::from_fn(|a| grid_origin_m[a] + c[a] as f64 * dx);
                         let high =
                             core::array::from_fn(|a| grid_origin_m[a] + (c[a] + 1) as f64 * dx);
-                        let overlap = tetrahedron_box_moments(p, low, high, p[0], cx)?;
+                        let overlap = if let Some(tet) = &reference_tet {
+                            tetrahedron_box_density_moments(
+                                p,
+                                tet.current_density,
+                                low,
+                                high,
+                                p[0],
+                                cx,
+                            )?
+                        } else {
+                            let geometric = tetrahedron_box_moments(p, low, high, p[0], cx)?;
+                            // Preserve the original uniform-density arithmetic below.
+                            DensityMoments {
+                                volume: geometric.volume,
+                                mass: rho * geometric.volume,
+                                first: geometric.first,
+                                second: geometric.second,
+                            }
+                        };
                         if overlap.volume == 0.0 {
                             continue;
                         }
                         covered += overlap.volume;
+                        covered_mass += overlap.mass;
                         if !cells.contains_key(&c)
                             && (cells.len() >= limits.max_wet_cells
                                 || cells.len() >= domain.max_cells)
@@ -458,7 +595,8 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                             return Err(invalid("occupied target-cell budget exhausted"));
                         }
                         let target = cells.entry(c).or_insert_with(|| CellIntegral {
-                            component, ..CellIntegral::default()
+                            component,
+                            ..CellIntegral::default()
                         });
                         if target.component != component {
                             return Err(invalid(
@@ -466,18 +604,38 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                             ));
                         }
                         target.volume += overlap.volume;
+                        target.reference_mass += overlap.mass;
                         for (integral, rate) in target.strain_integral.iter_mut().zip(strain) {
                             *integral += overlap.volume * rate;
                         }
                         if let (Some(values), Some(gradient)) = (h, h_gradient) {
-                            target.enthalpy_j += rho
-                                * (values[0] * overlap.volume + dot(gradient[0], overlap.first));
+                            target.enthalpy_j += if reference_tet.is_some() {
+                                values[0] * overlap.mass + dot(gradient[0], overlap.first)
+                            } else {
+                                rho * (values[0] * overlap.volume + dot(gradient[0], overlap.first))
+                            };
                         }
                         for a in 0..3 {
-                            target.momentum[a] +=
-                                rho * (v[0][a] * overlap.volume + dot(gradient[a], overlap.first));
+                            target.momentum[a] += if reference_tet.is_some() {
+                                v[0][a] * overlap.mass + dot(gradient[a], overlap.first)
+                            } else {
+                                rho * (v[0][a] * overlap.volume + dot(gradient[a], overlap.first))
+                            };
                         }
                     }
+                }
+            }
+            if let Some(tet) = &reference_tet {
+                let report = reference_report.as_mut().expect("reference binding");
+                report.overlap_mass_partition_defect_kg += (covered_mass - tet.original.mass).abs();
+                report.overlap_volume_partition_defect_m3 += (covered - whole.volume).abs();
+                if !report.overlap_mass_partition_defect_kg.is_finite()
+                    || !report.overlap_volume_partition_defect_m3.is_finite()
+                    || report.overlap_mass_partition_defect_kg > limits.mass_tolerance_kg
+                {
+                    return Err(invalid(
+                        "current overlap mass does not partition the original reference inventory",
+                    ));
                 }
             }
             if !covered.is_finite()
@@ -505,15 +663,24 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
             // the actual resulting mass discrepancy is audited below as well.
             let fill_fraction = fill.min(1.0);
             let mass = rho * cell_volume * fill_fraction;
-            let strain = integral.strain_integral.map(|value| value / integral.volume);
+            if reference.is_some() {
+                reference_cells.insert(coordinates, (integral.reference_mass, integral.volume));
+            }
+            let strain = integral
+                .strain_integral
+                .map(|value| value / integral.volume);
             if strain.iter().any(|value| !value.is_finite()) {
-                return Err(invalid("overlap-averaged P1 liquid strain is unrepresentable"));
+                return Err(invalid(
+                    "overlap-averaged P1 liquid strain is unrepresentable",
+                ));
             }
             thermal.strain_per_s.insert(coordinates, strain);
             if source_h.is_some() {
                 let h = integral.enthalpy_j / mass;
                 if !h.is_finite() || !thermal.source_j.is_finite() {
-                    return Err(invalid("transferred specific or extensive enthalpy is not finite"));
+                    return Err(invalid(
+                        "transferred specific or extensive enthalpy is not finite",
+                    ));
                 }
                 // Use the actual admitted native mass, including bounded
                 // geometric roundoff clipping; no thermal energy is discarded.
@@ -524,33 +691,49 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                 fill_fraction,
                 velocity_m_s: scale(integral.momentum, 1.0 / mass),
             });
-            components[integral.component].cell_indices.push(initial.len() - 1);
+            components[integral.component]
+                .cell_indices
+                .push(initial.len() - 1);
             component_for_cell.push(integral.component);
         }
         components::correct(&mut initial, &components, rho * cell_volume, dx, limits, cx)?;
         let mut predicted = LiquidTransferMoments::default();
-        let mut candidate_kinetic: Vec<_> = thermal.source_kinetic.iter()
-            .map(|inventory| inventory.empty_like()).collect();
+        let mut candidate_kinetic: Vec<_> = thermal
+            .source_kinetic
+            .iter()
+            .map(|inventory| inventory.empty_like())
+            .collect();
         for (cell, &component) in initial.iter().zip(&component_for_cell) {
             checkpoint(cx)?;
             let mass = rho * cell_volume * cell.fill_fraction;
-            accumulate_cell(&mut predicted, mass, centre(cell.coordinates, dx), cell.velocity_m_s);
+            accumulate_cell(
+                &mut predicted,
+                mass,
+                centre(cell.coordinates, dx),
+                cell.velocity_m_s,
+            );
             candidate_kinetic[component].add_cell(mass, cell.velocity_m_s);
         }
         check_projection(
-            &original, &predicted,
+            &original,
+            &predicted,
             kinetic_change(&thermal.source_kinetic, &candidate_kinetic, cx)?,
-            domain.gravity_m_s2, limits,
+            domain.gravity_m_s2,
+            limits,
         )?;
         let mut flow = self.free_surface3_from_cells_inner(domain, &initial, cx)?;
         if source_h.is_none() {
             let bulk_rate = self.bulk_relaxation_rate_at(self.material().material())?;
             for (&coordinates, &strain) in &thermal.strain_per_s {
                 checkpoint(cx)?;
-                flow.lattice.initialize_strain_at_with_bulk(
-                    coordinates, strain.map(|value| value * self.timestep_s()), self.flow.tau,
-                    bulk_rate,
-                ).map_err(MaterialLbmError::from)?;
+                flow.lattice
+                    .initialize_strain_at_with_bulk(
+                        coordinates,
+                        strain.map(|value| value * self.timestep_s()),
+                        self.flow.tau,
+                        bulk_rate,
+                    )
+                    .map_err(MaterialLbmError::from)?;
             }
         }
         // Thermal ingress seeds the same strain after resolving each target's
@@ -577,7 +760,8 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
             accumulate_cell(
                 &mut actual_components[component_for_cell[index]],
                 mass,
-                centre(cell.coordinates, dx), sample.velocity_m_s,
+                centre(cell.coordinates, dx),
+                sample.velocity_m_s,
             );
             candidate_kinetic[component_for_cell[index]].add_cell(mass, sample.velocity_m_s);
         }
@@ -586,22 +770,44 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                 "native mass ledger and initialized physical cells disagree",
             ));
         }
+        if let (Some(binding), Some(report)) = (reference, reference_report.as_mut()) {
+            density::audit_native(
+                &flow,
+                report,
+                &reference_cells,
+                binding.controls,
+                limits.mass_tolerance_kg,
+                cx,
+            )?;
+        }
         let kinetic_change = kinetic_change(&thermal.source_kinetic, &candidate_kinetic, cx)?;
         let (centroid_shift_m, kinetic_energy_change_j, gravitational_energy_change_j) =
             check_projection(
-                &original, &actual, kinetic_change,
-                domain.gravity_m_s2, limits,
+                &original,
+                &actual,
+                kinetic_change,
+                domain.gravity_m_s2,
+                limits,
             )?;
         let mut source_kinetic = thermal.source_kinetic[0].empty_like();
         for inventory in &thermal.source_kinetic {
             checkpoint(cx)?;
-            source_kinetic.add_inventory(*inventory)
+            source_kinetic
+                .add_inventory(*inventory)
                 .ok_or_else(|| invalid("combined source kinetic inventory is unrepresentable"))?;
         }
         let components = components::reports(
-            components, actual_components, &thermal.source_kinetic, &candidate_kinetic,
-            &initial, domain.gravity_m_s2, limits, cx,
+            components,
+            actual_components,
+            &thermal.source_kinetic,
+            &candidate_kinetic,
+            &initial,
+            domain.gravity_m_s2,
+            limits,
+            cx,
         )?;
+        thermal.reference_cells = reference_cells;
+        thermal.reference_density_controls = reference.map(|binding| binding.controls);
         checkpoint(cx)?;
         Ok((
             flow,
@@ -615,6 +821,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
                 overlap_tests,
                 wet_cells: initial.len(),
                 components,
+                reference_density: reference_report,
                 source_kinetic,
                 kinetic_change,
             },
@@ -807,7 +1014,8 @@ fn check_projection(
     );
     if !norm(shift).is_finite()
         || norm(shift) > limits.maximum_centroid_shift_m
-        || !kinetic.hi.is_finite() || !kinetic.lo.is_finite()
+        || !kinetic.hi.is_finite()
+        || !kinetic.lo.is_finite()
         || !potential.is_finite()
         || Dd::from_f64(limits.maximum_projection_energy_change_j)
             .lt(kinetic.abs() + Dd::from_f64(potential.abs()))

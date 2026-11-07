@@ -104,6 +104,46 @@ impl Inventory {
         }
     }
 
+    /// Exact cubic P1 density/velocity mass form on the original reference tet.
+    /// Density weights are normalized in retained precision; mass is the SAME
+    /// independently integrated original inventory. Positive square terms keep
+    /// subcell motion beside a large common translation without mass lumping.
+    pub(super) fn add_density_tetrahedron(
+        &mut self,
+        mass: f64,
+        density: [f64; 4],
+        velocity: [[f64; 3]; 4],
+    ) {
+        if density.iter().all(|rho| *rho == density[0]) {
+            self.add_tetrahedron(mass, velocity);
+            return;
+        }
+        let scale = density.into_iter().fold(0.0_f64, f64::max);
+        let weights = density.map(|rho| Dd::from_f64(rho) / Dd::from_f64(scale));
+        let weight_sum = weights.into_iter().fold(Dd::ZERO, |a, b| a + b);
+        let mass = Dd::from_f64(mass);
+        self.mass = self.mass + mass;
+        for axis in 0..3 {
+            let relative =
+                velocity.map(|v| Dd::from_f64(v[axis]) - Dd::from_f64(self.reference[axis]));
+            let sum = relative.into_iter().fold(Dd::ZERO, |a, b| a + b);
+            let squares = relative.into_iter().fold(Dd::ZERO, |a, b| a + b * b);
+            let mut first = Dd::ZERO;
+            let mut second = Dd::ZERO;
+            for i in 0..4 {
+                let shifted_sum = sum + relative[i];
+                first = first + weights[i] * shifted_sum;
+                second = second
+                    + weights[i]
+                        * (shifted_sum * shifted_sum + squares + relative[i] * relative[i]);
+            }
+            self.momentum[axis] =
+                self.momentum[axis] + mass * first / (Dd::from_f64(5.0) * weight_sum);
+            self.kinetic[axis] =
+                self.kinetic[axis] + mass * second / (Dd::from_f64(60.0) * weight_sum);
+        }
+    }
+
     /// Actual original liquid mass and force-corrected cell velocity.
     pub(super) fn add_cell(&mut self, mass: f64, velocity: [f64; 3]) {
         let mass = Dd::from_f64(mass);
@@ -275,5 +315,106 @@ mod tests {
             frame.relative_kinetic_energy_j,
             [2.0, 18.0, 0.0].map(Dd::from_f64)
         );
+    }
+    #[test]
+    fn graded_density_matches_independent_cubic_barycentric_integrals() {
+        let rho = [3.0, 7.0, 14.0, 24.0];
+        let velocity = [
+            [1.0, -2.0, 0.5],
+            [-3.0, 1.0, 2.0],
+            [2.0, 4.0, -1.0],
+            [0.0, -1.0, 3.0],
+        ];
+        let mut source = Inventory::new([0.0; 3]);
+        source.add_density_tetrahedron(2.0, rho, velocity); // V=1/6, sum(rho)=48.
+        let frame = source.in_frame([0.0; 3]).unwrap();
+        let factorial = |n: usize| (1..=n).product::<usize>() as f64;
+        let integral = |indices: &[usize]| {
+            let mut counts = [0usize; 4];
+            for &index in indices {
+                counts[index] += 1;
+            }
+            counts.into_iter().map(factorial).product::<f64>() / factorial(indices.len() + 3)
+        };
+        assert_eq!(frame.mass_kg, Dd::from_f64(2.0));
+        for axis in 0..3 {
+            let mut momentum = 0.0;
+            let mut kinetic = 0.0;
+            for a in 0..4 {
+                for b in 0..4 {
+                    momentum += rho[a] * velocity[b][axis] * integral(&[a, b]);
+                    for c in 0..4 {
+                        kinetic += 0.5
+                            * rho[a]
+                            * velocity[b][axis]
+                            * velocity[c][axis]
+                            * integral(&[a, b, c]);
+                    }
+                }
+            }
+            assert!((frame.relative_momentum_kg_m_s[axis].to_f64() - momentum).abs() < 2e-14);
+            assert!((frame.relative_kinetic_energy_j[axis].to_f64() - kinetic).abs() < 2e-14);
+        }
+    }
+
+    #[test]
+    fn uniform_density_retains_the_original_p1_inventory_bits() {
+        let velocity = [
+            [5.0, -2.0, 1.0],
+            [-3.0, 0.0, 2.0],
+            [4.0, 7.0, -1.0],
+            [1.0, -5.0, 3.0],
+        ];
+        let mut original = Inventory::new([4.0, -2.0, 0.5]);
+        let mut weighted = original;
+        original.add_tetrahedron(37.0, velocity);
+        weighted.add_density_tetrahedron(37.0, [7913.0; 4], velocity);
+        assert_eq!(weighted, original);
+    }
+
+    #[test]
+    fn graded_density_variance_survives_bulk_transport_permutation_and_mass_scaling() {
+        let speed = 2.0_f64.powi(54);
+        let reference = [speed, 0.0, 0.0];
+        let rho = [1.0, 2.0, 3.0, 4.0];
+        let velocity = [
+            [speed, 1.0, 0.0],
+            [speed, -1.0, 0.0],
+            [speed, 0.0, 0.0],
+            [speed, 0.0, 0.0],
+        ];
+        let mut original = Inventory::new(reference);
+        original.add_density_tetrahedron(40.0, rho, velocity);
+        let source = original.in_frame(reference).unwrap();
+        let expected_k = 26.0 / 15.0;
+        assert!((source.relative_momentum_kg_m_s[1].to_f64() + 0.8).abs() < 1e-15);
+        assert!((source.relative_kinetic_energy_j[1].to_f64() - expected_k).abs() < 1e-15);
+        let mut target = original.empty_like();
+        target.add_cell(40.0, [speed, -0.02, 0.0]);
+        let change = original.change_to(target).unwrap().to_f64();
+        assert!((change - (0.008 - expected_k)).abs() < 1e-14);
+        assert_eq!(20.0 * speed * speed + expected_k, 20.0 * speed * speed);
+        let permutation = [3, 1, 0, 2];
+        let mut reordered = Inventory::new(reference);
+        reordered.add_density_tetrahedron(
+            40.0,
+            permutation.map(|i| rho[i]),
+            permutation.map(|i| velocity[i]),
+        );
+        assert!((reordered.change_to(target).unwrap().to_f64() - change).abs() < 1e-14);
+        let mut scaled = Inventory::new(reference);
+        scaled.add_density_tetrahedron(320.0, rho.map(|value| 8.0 * value), velocity);
+        let frame = scaled.in_frame(reference).unwrap();
+        assert_eq!(frame.mass_kg, Dd::from_f64(8.0) * source.mass_kg);
+        for axis in 0..3 {
+            assert_eq!(
+                frame.relative_momentum_kg_m_s[axis],
+                Dd::from_f64(8.0) * source.relative_momentum_kg_m_s[axis]
+            );
+            assert_eq!(
+                frame.relative_kinetic_energy_j[axis],
+                Dd::from_f64(8.0) * source.relative_kinetic_energy_j[axis]
+            );
+        }
     }
 }
