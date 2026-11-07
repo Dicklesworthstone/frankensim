@@ -6663,6 +6663,16 @@ prescribed launch schedule; each hit receives its actual incident/launch ratio,
 including earlier reflection and Beer attenuation. Original positive absorbed
 power supplies its heat fraction, even when reflectance rounds to one.
 
+`MirrorPathIllumination` pairs each history with its physically weighted launch
+schedule. `SurfaceIlluminationSource<N>::from_mirror_paths` and
+`SurfaceOpticalHeating<N>::try_new_from_mirror_paths` combine many histories and
+wavelengths on one native thermal clock. Each exact launch wavelength selects
+its lane in the common ordered packet; other lanes carry zero power and neutral
+response padding. No untraced optical spectrum, wavelength interpolation or
+coherence between histories is inferred. Source IDs follow path/hit order and
+source/segment budgets cover the whole batch. Splitting a path requires splitting
+its scheduled watts; the compiler does not divide by the number of rays.
+
 Geometry object IDs have explicit native material/cell/temperature bindings.
 Repeated visits and mirrors sharing a cell sum without a second Fresnel factor.
 Optical identities retain the original conductor/coating source, actual geometry
@@ -6674,16 +6684,18 @@ Capped surviving light, bulk absorption and other surface interactions acquire
 no extra thermal credit. Sampled histories retain their supplied estimator
 weights; ensemble normalization belongs in the launch schedules.
 
-This is monochromatic transport through frozen geometry/optics, with aggregate
-coating/substrate heat assigned to each mirror's receiver. Original thermal
-schedule cuts, caloric/latent storage, conduction, temperature domains and
+Each history remains monochromatic transport through frozen geometry/optics,
+with aggregate coating/substrate heat assigned to each mirror's receiver.
+Original thermal schedule cuts, caloric/latent storage, conduction, temperature domains and
 rollback remain authoritative. Zero or unrepresentable power normalization,
 missing receiver bindings and exceeded budgets refuse. The absorbed fraction
 reconstructed from reference watts must agree with the retained original s/p
 boundary-flux fraction; unresolved reference loss requires rescaling the launch
 beam and retracing. Native regressions cover coated-mirror heating after
 attenuation, exact pulse fluence, repeated reflection into a latent plateau,
-source identity and weak positive enthalpy increments.
+source identity and weak positive enthalpy increments. Spectral batch checks
+compare two-color coating heat and native temperature against independent Airy
+and Beer formulas and preserve heat when weighted histories are split.
 
 Native integration checks cover independent conductor/film R/T/A references,
 exact rectangular/triangular pulse fluence into a latent plateau, clear-glass and

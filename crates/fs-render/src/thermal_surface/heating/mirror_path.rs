@@ -7,17 +7,28 @@
 //! existing compensated receiver reduction. Geometry and optics remain frozen
 //! over the receivers' explicitly declared temperature domains.
 
-use super::response::response_hash;
+use super::response::{response_hash, validate_packet};
 use super::{
     DepositionError, DepositionSimulation, DomainHasher, SpectralPowerSchedule,
-    SurfaceHeatingBudget, SurfaceHeatingError, SurfaceHeatingReceiver,
-    SurfaceHeatingTolerance, SurfaceIlluminationSource, SurfaceOpticalHeating,
-    SurfacePowerResponse, invalid,
+    SurfaceHeatingBudget, SurfaceHeatingError, SurfaceHeatingReceiver, SurfaceHeatingTolerance,
+    SurfaceIlluminationSource, SurfaceOpticalHeating, SurfacePowerResponse, invalid,
 };
 use crate::polarization::dielectric::scene::MirrorPathResult;
 use crate::polarization::dielectric::transport::PolarizedBeam;
 use crate::volumes::heating::illumination::schedule::SpectralPowerSegment;
 use std::collections::BTreeMap;
+
+/// One native monochromatic history and its physical launch-power schedule.
+///
+/// Power already includes that history's spatial, spectral and ensemble
+/// quadrature weight. Splitting one source into several histories therefore
+/// requires splitting its scheduled watts; no implicit ray-count average is
+/// applied. All histories in one batch use the same receiver-object namespace.
+#[derive(Clone, Copy, Debug)]
+pub struct MirrorPathIllumination<'a> {
+    pub path: &'a MirrorPathResult,
+    pub power: &'a SpectralPowerSchedule<1>,
+}
 
 impl SurfaceIlluminationSource<1> {
     /// Compile one monochromatic native mirror path into real thermal sources.
@@ -104,12 +115,11 @@ impl SurfaceIlluminationSource<1> {
             hash_beam(&mut hash, &reflected);
             hash.update(&incoming.to_bits().to_le_bytes());
             let absorbed = ratio(hit.balance.absorbed_power_w(), incoming)?;
-            let native_absorbed = hit.balance.absorbed_fraction().ok_or_else(|| {
-                invalid("a dark mirror has no physical power normalization")
-            })?;
-            if (absorbed - native_absorbed).abs()
-                > 128.0 * f64::EPSILON * native_absorbed
-            {
+            let native_absorbed = hit
+                .balance
+                .absorbed_fraction()
+                .ok_or_else(|| invalid("a dark mirror has no physical power normalization"))?;
+            if (absorbed - native_absorbed).abs() > 128.0 * f64::EPSILON * native_absorbed {
                 return Err(invalid(
                     "reference mirror loss is unresolved; rescale the launch beam and retrace",
                 ));
@@ -132,6 +142,135 @@ impl SurfaceIlluminationSource<1> {
         }
         checkpoint()?;
         Ok(sources)
+    }
+}
+
+impl<const N: usize> SurfaceIlluminationSource<N> {
+    /// Compile multiple wavelengths and histories into one native heat owner.
+    ///
+    /// Each launch wavelength must exactly match a lane in the strictly ordered
+    /// shared packet. Histories may have different hit counts, polarization,
+    /// reference powers and pulse schedules. Their physical heat adds on one
+    /// thermal timeline, including repeated visits and different colors sharing
+    /// a receiver. IDs follow input-path order, then hit order within each path.
+    ///
+    /// Only the traced lane carries incident watts. Other response lanes are
+    /// lossless padding with identically zero power, not evaluations of that
+    /// material at untraced wavelengths. There is no spectral interpolation,
+    /// coherent interference between histories, extra Fresnel solve or implicit
+    /// averaging. Geometry and optical state remain frozen as in the single
+    /// path adapter. The aggregate source/segment budget applies to the batch.
+    pub fn from_mirror_paths(
+        wavelengths_nm: [f64; N],
+        paths: &[MirrorPathIllumination<'_>],
+        first_source_id: u64,
+        receivers: &BTreeMap<u64, SurfaceHeatingReceiver>,
+        budget: SurfaceHeatingBudget,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Vec<Self>, SurfaceHeatingError> {
+        checkpoint()?;
+        validate_packet(&wavelengths_nm, &[0.5; N])?;
+        if paths.is_empty() {
+            return Err(invalid("at least one native mirror history is required"));
+        }
+        let mut count = 0usize;
+        let mut segments = 0usize;
+        for input in paths {
+            checkpoint()?;
+            let hits = input.path.mirrors.len();
+            if hits == 0 {
+                return Err(invalid("each native mirror history needs at least one hit"));
+            }
+            packet_lane(&wavelengths_nm, input.path.source_beam().wavelength_nm())?;
+            count = count.checked_add(hits).ok_or(SurfaceHeatingError::Budget)?;
+            segments = hits
+                .checked_mul(input.power.segment_count())
+                .and_then(|n| segments.checked_add(n))
+                .ok_or(SurfaceHeatingError::Budget)?;
+            if count > budget.max_sources || segments > budget.max_total_power_segments {
+                return Err(SurfaceHeatingError::Budget);
+            }
+        }
+        let last_offset = u64::try_from(count - 1).map_err(|_| SurfaceHeatingError::Budget)?;
+        first_source_id
+            .checked_add(last_offset)
+            .ok_or_else(|| invalid("mirror thermal source ID range overflows"))?;
+        let mut sources = Vec::new();
+        sources
+            .try_reserve_exact(count)
+            .map_err(|_| SurfaceHeatingError::Budget)?;
+        for input in paths {
+            checkpoint()?;
+            let lane = packet_lane(&wavelengths_nm, input.path.source_beam().wavelength_nm())?;
+            let offset = u64::try_from(sources.len()).map_err(|_| SurfaceHeatingError::Budget)?;
+            let start_id = first_source_id
+                .checked_add(offset)
+                .ok_or_else(|| invalid("mirror thermal source ID range overflows"))?;
+            // Reuse the original per-hit admission and normalization, including
+            // refusal of unresolved reference loss. This performs no optics.
+            for source in SurfaceIlluminationSource::from_mirror_path(
+                input.path,
+                start_id,
+                input.power,
+                receivers,
+                budget,
+                &mut checkpoint,
+            )? {
+                checkpoint()?;
+                let mut reflected = [1.0; N];
+                let mut transmitted = [0.0; N];
+                let mut absorbed = [0.0; N];
+                reflected[lane] = source.response.reflected_fraction()[0];
+                transmitted[lane] = source.response.transmitted_fraction()[0];
+                absorbed[lane] = source.response.absorbed_fraction()[0];
+                let response = SurfacePowerResponse::finish(
+                    response_hash(b"native-mirror-packet", source.response.identity())?,
+                    wavelengths_nm,
+                    reflected,
+                    transmitted,
+                    absorbed,
+                )?;
+                sources.push(Self {
+                    source_id: source.source_id,
+                    thermal_cell: source.thermal_cell,
+                    material_id: source.material_id,
+                    temperature_bounds_k: source.temperature_bounds_k,
+                    response,
+                    power: packet_schedule(&source.power, lane, &mut checkpoint)?,
+                });
+            }
+        }
+        checkpoint()?;
+        Ok(sources)
+    }
+}
+
+impl<const N: usize> SurfaceOpticalHeating<N> {
+    /// Bind simultaneous spectral mirror histories to one native thermal clock.
+    ///
+    /// All schedules share the original physical time axis. The existing
+    /// observer cuts steps at every source transition and sums their absorbed
+    /// watts into the same native enthalpy cells. No history is retraced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_from_mirror_paths(
+        wavelengths_nm: [f64; N],
+        paths: &[MirrorPathIllumination<'_>],
+        first_source_id: u64,
+        receivers: &BTreeMap<u64, SurfaceHeatingReceiver>,
+        thermal: &DepositionSimulation<'_>,
+        budget: SurfaceHeatingBudget,
+        tolerance: SurfaceHeatingTolerance,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, SurfaceHeatingError> {
+        let sources = SurfaceIlluminationSource::from_mirror_paths(
+            wavelengths_nm,
+            paths,
+            first_source_id,
+            receivers,
+            budget,
+            &mut checkpoint,
+        )?;
+        Self::try_new(&sources, thermal, budget, tolerance, checkpoint)
     }
 }
 
@@ -166,6 +305,43 @@ impl SurfaceOpticalHeating<1> {
     }
 }
 
+fn packet_lane<const N: usize>(
+    wavelengths_nm: &[f64; N],
+    wavelength_nm: f64,
+) -> Result<usize, SurfaceHeatingError> {
+    wavelengths_nm
+        .binary_search_by(|value| value.total_cmp(&wavelength_nm))
+        .map_err(|_| invalid("each native launch wavelength must match an explicit packet lane"))
+}
+
+fn packet_schedule<const N: usize>(
+    original: &SpectralPowerSchedule<1>,
+    lane: usize,
+    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<SpectralPowerSchedule<N>, SurfaceHeatingError> {
+    let mut segments = Vec::new();
+    segments
+        .try_reserve_exact(original.segment_count())
+        .map_err(|_| SurfaceHeatingError::Budget)?;
+    for segment in original.segments() {
+        checkpoint()?;
+        let mut start_power_w = [0.0; N];
+        let mut end_power_w = [0.0; N];
+        start_power_w[lane] = segment.start_power_w[0];
+        end_power_w[lane] = segment.end_power_w[0];
+        segments.push(SpectralPowerSegment {
+            start_s: segment.start_s,
+            end_s: segment.end_s,
+            start_power_w,
+            end_power_w,
+        });
+    }
+    Ok(SpectralPowerSchedule::try_new(
+        &segments,
+        original.segment_count(),
+    )?)
+}
+
 fn ratio(numerator: f64, denominator: f64) -> Result<f64, SurfaceHeatingError> {
     let value = numerator / denominator;
     if !value.is_finite() || value < 0.0 || (numerator > 0.0 && value == 0.0) {
@@ -193,7 +369,9 @@ fn scaled_schedule(
         let scaled = |value: f64| {
             let result = value * scale;
             if !result.is_finite() || (value > 0.0 && result == 0.0) {
-                Err(invalid("native mirror incident schedule is not representable"))
+                Err(invalid(
+                    "native mirror incident schedule is not representable",
+                ))
             } else {
                 Ok([result])
             }
@@ -217,8 +395,20 @@ fn hash_beam(hash: &mut DomainHasher, beam: &PolarizedBeam) {
     let h = beam.frame().horizontal();
     let s = beam.power();
     for value in [
-        beam.wavelength_nm(), origin.x, origin.y, origin.z,
-        k.x, k.y, k.z, h.x, h.y, h.z, s.i, s.q, s.u, s.v,
+        beam.wavelength_nm(),
+        origin.x,
+        origin.y,
+        origin.z,
+        k.x,
+        k.y,
+        k.z,
+        h.x,
+        h.y,
+        h.z,
+        s.i,
+        s.q,
+        s.u,
+        s.v,
     ] {
         hash.update(&value.to_bits().to_le_bytes());
     }
