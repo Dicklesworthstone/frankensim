@@ -22,7 +22,7 @@ use crate::{
     PhsError, PortHamiltonian, PreparedStepError, PreparedStepRecord, QuadraticStorage,
     storage_energy_change,
 };
-use fs_math::{Dd, det};
+use fs_math::{dd::Dd, det};
 
 /// Two finite external capacitors, in input/output bus order. Their charges are
 /// additional continuing storage, not replacements for the original bus charge.

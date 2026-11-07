@@ -20,6 +20,8 @@ use super::{
 use crate::linear_exact::LinearSplitBudget;
 use crate::{PhsError, PreparedStepError, PreparedStepRecord, storage_energy_change};
 
+/// Prescribed gates with continuing finite-energy capacitor source/load states.
+pub mod capacitor_fed;
 /// Switched trajectories driven by finite voltage-source and load resistances.
 pub mod voltage_driven;
 
