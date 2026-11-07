@@ -4,7 +4,8 @@
 //! enter `K - omega^2 M - i omega C` under `exp(-i omega t)`. Authored Rayleigh
 //! damping is optional through explicit zero coefficients; it is not inferred
 //! from a material name or substituted for the original section viscosity.
-//! Stationary supports use the frame's original free-coordinate map.
+//! Stationary supports use the frame's original free-coordinate map. Prescribed
+//! harmonic supports additionally retain its full cross inertia and reactions.
 
 use super::linear::{FrameLinearError, FrameLinearPencil};
 use super::{Frame2d, Rayleigh};
@@ -13,7 +14,7 @@ use fs_exec::Cx;
 use fs_math::c64::C64;
 use fs_modal::harmonic::{
     HarmonicPortControls, HarmonicResponse, HarmonicResponseControls, HarmonicResponseError,
-    PreparedHarmonicResponse,
+    PreparedHarmonicResponse, PreparedSupportedHarmonicResponse, SupportedHarmonicResponse,
 };
 
 /// Original frame/source refusal or shared forced-response refusal.
@@ -68,6 +69,22 @@ fn invalid(what: &'static str) -> FrameHarmonicError {
 fn poll(cx: &Cx<'_>) -> Result<(), FrameHarmonicError> {
     cx.checkpoint()
         .map_err(|_| HarmonicResponseError::Cancelled.into())
+}
+fn validate_controls(
+    omega_rad_s: f64,
+    controls: HarmonicResponseControls,
+) -> Result<(), FrameHarmonicError> {
+    if !omega_rad_s.is_finite()
+        || omega_rad_s < 0.0
+        || !controls.maximum_relative_residual.is_finite()
+        || controls.maximum_relative_residual <= 0.0
+        || controls.maximum_relative_residual >= 1.0
+    {
+        return Err(invalid(
+            "finite nonnegative frequency and residual budget in (0,1) required",
+        ));
+    }
+    Ok(())
 }
 
 /// A physical effort/flow load evaluated at the requested frequency.
@@ -188,7 +205,111 @@ impl FrameHarmonicOperator<'_> {
     }
 }
 
+/// Original native frame driven by prescribed harmonic support motion.
+/// Full consistent inertia and support/free material damping remain intact.
+/// The original frame's `fixed` map identifies prescribed coordinates; a zero
+/// phasor keeps an individual support stationary. Preparation changes no state.
+pub struct FrameSupportedHarmonicOperator<'a> {
+    source: &'a Frame2d,
+    response: PreparedSupportedHarmonicResponse,
+}
+
+impl FrameSupportedHarmonicOperator<'_> {
+    /// Original geometry, material bindings and accepted state, unchanged.
+    pub fn source(&self) -> &Frame2d {
+        self.source
+    }
+
+    /// Unprescribed original node-major `[ux, uy, theta]` indices.
+    pub fn free_dofs(&self) -> &[usize] {
+        self.response.free_dofs()
+    }
+
+    /// Prescribed original node-major indices, ordered as displacement inputs
+    /// and returned support forces/moments.
+    pub fn support_dofs(&self) -> &[usize] {
+        self.response.support_dofs()
+    }
+
+    /// Solve full native applied forces/moments [N/N m] and prescribed support
+    /// displacement/rotation [m/rad]. Inputs are peak phasors on one clock under
+    /// `exp(-i omega t)`. Returned motion covers EVERY original frame coordinate.
+    /// Reactions are the forces/moments BY supports ON the frame, with supplied
+    /// applied support loads subtracted once. Their signed work joins full
+    /// physical viscous power; fixed/kinematic reactions are not inferred from
+    /// a free-coordinate work residual. No accepted frame state is mutated.
+    pub fn solve(
+        &self,
+        full_forces: &[C64],
+        support_displacements: &[C64],
+        cx: &Cx<'_>,
+    ) -> Result<SupportedHarmonicResponse, FrameHarmonicError> {
+        Ok(self
+            .response
+            .solve(full_forces, support_displacements, cx)?)
+    }
+}
+
 impl Frame2d {
+    /// Prepare moving supports on the SAME native elastic/material-viscous
+    /// frame pencil as the stationary harmonic path. The free load includes
+    /// `-(K_fc-omega^2 M_fc-i omega C_fc) q_c`, retaining consistent cross mass,
+    /// support rotations and relative support phases. Full M must be SPD;
+    /// no fictitious inertia is assigned to massless rotational coordinates.
+    /// Rigid full-frame stiffness modes are allowed, including at DC, provided
+    /// the free supported block is invertible. An all-prescribed frame needs
+    /// no factorization. Existing material frequency domains remain binding.
+    ///
+    /// Coordinates/payload bound the full native assembly, as in the stationary
+    /// path. The same 512*n*n+512*n+2048*elements source envelope also covers
+    /// the supported owner's retained full/free arrays and one complete solve.
+    /// This is a finite-dimensional particular response; it does not model
+    /// actuator dynamics, nonlinear geometry or startup transients.
+    pub fn prepare_supported_harmonic_response(
+        &self,
+        omega_rad_s: f64,
+        rayleigh: Rayleigh,
+        controls: HarmonicResponseControls,
+        cx: &Cx<'_>,
+    ) -> Result<FrameSupportedHarmonicOperator<'_>, FrameHarmonicError> {
+        poll(cx)?;
+        validate_controls(omega_rad_s, controls)?;
+        let pencil = self.prepare_complete_linear_pencil(
+            rayleigh,
+            controls.maximum_coordinates,
+            controls.maximum_payload_bytes,
+            cx,
+        )?;
+        if let Some((low, high)) = pencil.material_omega_band_rad_s {
+            if omega_rad_s < low || omega_rad_s > high {
+                return Err(invalid(
+                    "harmonic frequency lies outside original frame viscosity support",
+                ));
+            }
+        }
+        let supports: Vec<_> = self
+            .fixed
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &fixed)| fixed.then_some(i))
+            .collect();
+        let response = PreparedSupportedHarmonicResponse::try_new(
+            &pencil.mass,
+            &pencil.damping,
+            &pencil.stiffness,
+            self.ndof(),
+            &supports,
+            omega_rad_s,
+            controls,
+            cx,
+        )?;
+        poll(cx)?;
+        Ok(FrameSupportedHarmonicOperator {
+            source: self,
+            response,
+        })
+    }
+
     /// Prepare the full original frame's forced response at one frequency.
     ///
     /// Only fixed linear geometry and elastic sections are admitted. Every free
@@ -254,16 +375,7 @@ impl Frame2d {
         cx: &Cx<'_>,
     ) -> Result<FrameHarmonicOperator<'_>, FrameHarmonicError> {
         poll(cx)?;
-        if !omega_rad_s.is_finite()
-            || omega_rad_s < 0.0
-            || !controls.maximum_relative_residual.is_finite()
-            || controls.maximum_relative_residual <= 0.0
-            || controls.maximum_relative_residual >= 1.0
-        {
-            return Err(invalid(
-                "finite nonnegative frequency and residual budget in (0,1) required",
-            ));
-        }
+        validate_controls(omega_rad_s, controls)?;
         let n = self.ndof();
         let load = load
             .map(|load| load.reduced_controls(n).map(|controls| (load, controls)))

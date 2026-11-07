@@ -65,6 +65,111 @@ fn close(actual: C64, expected: C64, tolerance: f64) {
 }
 
 #[test]
+fn g1_native_base_excitation_retains_consistent_cross_mass_and_support_work() {
+    with_cx(&CancelGate::new(), |cx| {
+        let frame = frame(1.0, 0.0, true, FrameMassFormulation::ConsistentReference);
+        let accepted = frame.displacements().to_vec();
+        let rayleigh = Rayleigh {
+            a0: 0.25,
+            a1: 0.0625,
+        };
+        let base = C64::new(0.2, -0.1);
+        let mut forces = [C64::ZERO; 6];
+        forces[0] = C64::new(0.7, -0.2);
+        forces[3] = C64::new(0.3, 0.4);
+        // Exact axial Hermite/linear integrals: M00=M11=2, M01=1,
+        // K00=K11=8, K01=-8; C00=C11=1 and C01=-1/4.
+        for omega in [0.0, 0.7, 2.0, 3.2] {
+            let p = frame
+                .prepare_supported_harmonic_response(omega, rayleigh, controls(), cx)
+                .unwrap();
+            assert!(std::ptr::eq(p.source(), &frame));
+            assert_eq!(p.support_dofs(), &[0, 1, 2, 4, 5]);
+            assert_eq!(p.free_dofs(), &[3]);
+            let a = C64::new(8.0 - 2.0 * omega * omega, -omega);
+            let cross = C64::new(-8.0 - omega * omega, 0.25 * omega);
+            let q = (forces[3] - cross * base) / a;
+            let reaction = a * base + cross * q - forces[0];
+            let r = p
+                .solve(
+                    &forces,
+                    &[base, C64::ZERO, C64::ZERO, C64::ZERO, C64::ZERO],
+                    cx,
+                )
+                .unwrap();
+            close(r.displacement[3], q, 2e-12);
+            close(r.support_reaction[0], reaction, 2e-12);
+            let v0 = C64::new(base.im, -base.re).scale(omega);
+            let v1 = C64::new(q.im, -q.re).scale(omega);
+            let inner = |a: C64, b: C64| a.re * b.re + a.im * b.im;
+            let heat = 0.5 * (v0.norm_sq() + v1.norm_sq() - 0.5 * inner(v0, v1));
+            assert!((r.average_viscous_power_w - heat).abs() < 2e-12 * heat.max(1.0));
+            assert!(
+                (r.average_support_power_w - 0.5 * inner(reaction, v0)).abs()
+                    < 2e-12 * heat.max(1.0)
+            );
+            assert!(r.power_balance_residual_w.abs() < 2e-12 * heat.max(1.0));
+            assert!(r.relative_residual < 1e-12);
+        }
+        assert_eq!(frame.displacements(), accepted);
+    });
+}
+
+#[test]
+fn g1_native_rotating_support_keeps_bending_inertia_and_static_rigid_motion() {
+    with_cx(&CancelGate::new(), |cx| {
+        let frame = frame(1.0, 0.0, false, FrameMassFormulation::ConsistentReference);
+        let rayleigh = Rayleigh { a0: 0.1, a1: 0.02 };
+        let base_y = C64::new(0.2, -0.1);
+        let base_rotation = C64::new(-0.3, 0.4);
+        // Independent complete bending matrices in [y0,theta0,y1,theta1].
+        let k = [
+            24.0, 12.0, -24.0, 12.0, 12.0, 8.0, -12.0, 4.0, -24.0, -12.0, 24.0, -12.0, 12.0, 4.0,
+            -12.0, 8.0,
+        ];
+        let mass_numerators = [
+            156.0, 22.0, 54.0, -13.0, 22.0, 4.0, 13.0, -3.0, 54.0, 13.0, 156.0, -22.0, -13.0, -3.0,
+            -22.0, 4.0,
+        ];
+        for omega in [0.0, 2.3] {
+            let p = frame
+                .prepare_supported_harmonic_response(omega, rayleigh, controls(), cx)
+                .unwrap();
+            let a = |i| {
+                let m = mass_numerators[i] / 70.0;
+                C64::new(
+                    k[i] - omega * omega * m,
+                    -omega * (rayleigh.a0 * m + rayleigh.a1 * k[i]),
+                )
+            };
+            let f2 = -(a(8) * base_y + a(9) * base_rotation);
+            let f3 = -(a(12) * base_y + a(13) * base_rotation);
+            let determinant = a(10) * a(15) - a(11) * a(14);
+            let q2 = (a(15) * f2 - a(11) * f3) / determinant;
+            let q3 = (a(10) * f3 - a(14) * f2) / determinant;
+            let r = p
+                .solve(&[C64::ZERO; 6], &[C64::ZERO, base_y, base_rotation], cx)
+                .unwrap();
+            close(r.displacement[4], q2, 5e-12);
+            close(r.displacement[5], q3, 5e-12);
+            let q = [base_y, base_rotation, q2, q3];
+            for i in 0..2 {
+                let expected = (0..4).fold(C64::ZERO, |sum, j| sum + a(i * 4 + j) * q[j]);
+                assert!(
+                    (r.support_reaction[i + 1] - expected).abs() < 5e-12 * expected.abs().max(1.0)
+                );
+            }
+            if omega == 0.0 {
+                close(r.displacement[4], base_y + base_rotation, 5e-12);
+                close(r.displacement[5], base_rotation, 5e-12);
+                assert_eq!(r.average_support_power_w, 0.0);
+            }
+            assert!(r.power_balance_residual_w.abs() < 5e-12 * r.average_viscous_power_w.max(1.0));
+        }
+    });
+}
+
+#[test]
 fn g1_native_axial_resonance_has_the_original_mass_phase_and_power() {
     with_cx(&CancelGate::new(), |cx| {
         let frame = frame(1.0, 0.0, true, FrameMassFormulation::ConsistentReference);

@@ -67,6 +67,8 @@ pub mod tet10;
 pub mod source;
 /// Passive tensor-Prony element operators and exact strain-ramp histories.
 pub mod visco;
+/// Full-coordinate harmonic base excitation and physical support reactions.
+pub mod harmonic;
 /// Generic source-bound initial strain, sharing the thermal solid kernels.
 pub mod eigenstrain;
 use eigenstrain::EigenstrainFieldView;

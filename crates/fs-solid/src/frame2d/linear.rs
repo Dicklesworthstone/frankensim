@@ -1,7 +1,7 @@
 //! Shared native linear frame pencil for forced response and free decay.
 //!
-//! This is the original assembled coordinate system with stationary supports,
-//! not a modal image. Keeping one preparation prevents different resonance
+//! This is the original assembled coordinate system, optionally retaining the
+//! support rows, not a modal image. Keeping one preparation prevents resonance
 //! queries from silently selecting different inertia, viscosity or couplings.
 
 use super::{Frame2d, Geometry, Rayleigh, SectionModel};
@@ -79,6 +79,41 @@ impl Frame2d {
         maximum_payload_bytes: usize,
         cx: &Cx<'_>,
     ) -> Result<FrameLinearPencil, FrameLinearError> {
+        self.prepare_linear_pencil_impl(
+            rayleigh,
+            maximum_coordinates,
+            maximum_payload_bytes,
+            false,
+            cx,
+        )
+    }
+
+    /// Retain support inertia, stiffness and damping for imposed motion and
+    /// reactions. The same native source assembly serves both partitions.
+    pub(super) fn prepare_complete_linear_pencil(
+        &self,
+        rayleigh: Rayleigh,
+        maximum_coordinates: usize,
+        maximum_payload_bytes: usize,
+        cx: &Cx<'_>,
+    ) -> Result<FrameLinearPencil, FrameLinearError> {
+        self.prepare_linear_pencil_impl(
+            rayleigh,
+            maximum_coordinates,
+            maximum_payload_bytes,
+            true,
+            cx,
+        )
+    }
+
+    fn prepare_linear_pencil_impl(
+        &self,
+        rayleigh: Rayleigh,
+        maximum_coordinates: usize,
+        maximum_payload_bytes: usize,
+        complete: bool,
+        cx: &Cx<'_>,
+    ) -> Result<FrameLinearPencil, FrameLinearError> {
         poll(cx)?;
         let n = self.ndof();
         if n == 0
@@ -134,7 +169,7 @@ impl Frame2d {
         }
         let mass = self.reference_mass()?;
         let (free_dofs, massless) = self.mass_partition(&mass);
-        if free_dofs.is_empty() || !massless.is_empty() {
+        if (!complete && free_dofs.is_empty()) || !massless.is_empty() {
             return Err(invalid(
                 "linear frame requires positive inertia on every free coordinate; use consistent member mass",
             ));
@@ -152,13 +187,18 @@ impl Frame2d {
             .rayleigh_reference_stiffness
             .as_ref()
             .unwrap_or(&stiffness);
-        let nf = free_dofs.len();
+        let rows: Vec<_> = if complete {
+            (0..n).collect()
+        } else {
+            free_dofs.clone()
+        };
+        let nf = rows.len();
         let mut m = vec![0.0; nf * nf];
         let mut k = vec![0.0; nf * nf];
         let mut c = vec![0.0; nf * nf];
-        for (i, &row) in free_dofs.iter().enumerate() {
+        for (i, &row) in rows.iter().enumerate() {
             poll(cx)?;
-            for (j, &col) in free_dofs[..=i].iter().enumerate() {
+            for (j, &col) in rows[..=i].iter().enumerate() {
                 let full = row * n + col;
                 let reduced = i * nf + j;
                 m[reduced] = mass.entry(row, col);

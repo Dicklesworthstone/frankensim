@@ -7043,6 +7043,38 @@ resonance, full consistent bending inertia, heterogeneous nonproportional loss,
 rotational covariance, reciprocity, source-band boundaries, physical power,
 singular limits, budgets, cancellation and unchanged accepted state.
 
+### Prescribed harmonic support motion and reactions
+
+`Frame2d::prepare_supported_harmonic_response` retains the original full
+reference M/C/K before support elimination. Its support map is the frame's
+original fixed DOFs; those translations and rotations can now have independently
+phased displacement phasors. `TetElasticAssembly::prepare_supported_harmonic_response`
+provides the same physical solve for the native P1/P2 tetrahedral and hexahedral
+assembly carrier, with an explicit complete viscosity matrix or explicit zero
+viscosity. Its prescribed supports are sorted global labels still present in
+the assembly: assemble without eliminating the desired support coordinates
+first. Previously eliminated cross terms and reactions cannot be recovered.
+
+Both adapters use `fs_modal::harmonic::PreparedSupportedHarmonicResponse`:
+`A_ff q_f = F_f - A_fc q_c`, `A = K - omega^2 M - i omega C`.
+The original consistent cross inertia, material/Rayleigh cross damping and
+relative support phases remain. Returned displacement/velocity spans every
+represented coordinate. Reactions `R_c = (Aq-F)_c` are forces or moments BY the
+supports ON the structure, including subtraction of applied support loads.
+Independent applied and support work plus full symmetric-viscosity loss close
+the cycle-power account; skew gyroscopic terms are nondissipative. Empty and
+all-prescribed maps are supported. The original source is immutable.
+
+G1/G3 checks in `tests/frame2d_harmonic.rs` and
+`tests/solid_harmonic_supports.rs` cover analytic base excitation with consistent
+cross mass, source-coordinate mapping, damping and support force/power, native
+tetrahedral motion, DC support translation and total rigid-body inertial
+reaction. Shared bounds and cancellation remain active. This is steady linear
+harmonic response: it does not evolve startup transients, infer actuator
+dynamics, deposit thermal energy, or restore coordinates already removed from
+an assembly. Arbitrary boundary impedances use the separate stationary-support
+API below; their composition with moving supports is not implied.
+
 ### Physical boundary loads on the native frame
 
 `Frame2d::prepare_harmonic_response_with_port_impedance` takes the full
