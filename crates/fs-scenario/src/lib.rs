@@ -71,6 +71,7 @@ pub use frame::{
     Frame, FrameId, FrameMotion, FrameMotionKind, FrameMotionLoweringError, FrameTree,
     FrameTreeMotorPath, WORLD,
 };
+pub use sample::{DEFAULT_SAMPLING_BUDGET, SamplingBudget, SamplingError};
 pub use scenario::{
     Combination, ContactLaw, ContactModel, DEFAULT_VALIDATION_BUDGET, Environment, LoadCase,
     Scenario, ValidationBudget, ValidationError, ValidationPlan, Violation,

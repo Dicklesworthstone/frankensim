@@ -234,6 +234,22 @@ flagships.
   `(chirp t_start_s t_end_s frequency_start_hz frequency_end_hz phase_at_start_rad offset amplitude)`;
   the final two values use ordinary dimensioned quantity forms and decoding
   re-runs the immutable source constructor. Existing forms retain their bytes.
+  `TimeSignal::sample_uniform` and its checkpoint sibling evaluate the shared
+  physical clock at `start_s + i/sample_rate_hz`, without accumulated-step drift.
+  They validate the source once, preserve dimensions, and publish only complete
+  buffers. `SamplingBudget` caps both sample count and output workspace before
+  allocation; the default is 1,000,000 samples and 64 MiB. Allocation is fallible,
+  and checkpoint cancellation propagates during validation and per sample.
+  For chirps, the maximum instantaneous frequency over the entire returned
+  interval must be strictly below Nyquist; both increasing and decreasing
+  sweeps and their continuing tails participate in admission. This is a
+  source-frequency check, not a band-limit certificate or an antialias filter.
+  Other signal families retain their existing interpolation semantics and do
+  not acquire an inferred bandwidth guarantee. Nonfinite, reversed or
+  unrepresentable clocks and exhausted budgets return typed `SamplingError`s.
+  Empty buffers still validate clock and budget inputs, without evaluating the
+  source. G0/G1/G3 sampler tests cover independent tone samples, whole-interval
+  Nyquist refusal, dimensional values, clock limits, budget caps and cancellation.
 - `frame::FrameTree` — frames with `Fixed`, `Rotating`, and `Tilt`
   motions; poses are fs-ga MOTORS composed down the parent chain
   (`world_pose`), cycle/dangling-parent checked. Rotation about an
