@@ -3049,3 +3049,43 @@ independent bisection and spatial-potential Hessian refinement with acceleration
 and jerk, exact polynomial jets and C2 knot sides, constant-stress jerk
 radiation, rotation covariance and domain/cancellation refusal. Test execution
 and full workspace validation are separate from these specified regressions.
+
+## Recorded stress histories in transient quadrupole observation
+
+`curle3d::quadrupole::transient::history::PreparedQuadrupoleHistory` connects
+original finite, physical six-component stress records [N m] to the existing
+full transient pressure/vector-velocity propagator. It retains source positions
+and order, uses the original `QuadrupoleSampleClock` timestamp admission, and
+requires explicit first/last stress rates and the stress integral through the
+first sample. All six components use one clamped C2 cubic reconstruction;
+value, first/second derivatives and integral are evaluations of that same
+piecewise polynomial. The initial integral persists through every interval
+and query order, preserving the near-field velocity history.
+
+One common positive tridiagonal factor and a reused six-channel DD workspace
+prepare all sources in O(sources*samples) work. The original moments, scaled
+curvatures and cumulative DD integrals are retained under explicit source,
+sample and peak backing-buffer byte limits. Local coefficients are reconstructed
+in constant work; warm history and acoustic observations allocate nothing.
+Queries retain DD time through endpoint-anchored clock subtraction; the stated
+inclusive arrivals map to the original source endpoints without a timing
+tolerance. The original per-query strict-retardation admission remains.
+Prepared reciprocals remove division from warm interpolation. There is no
+finite-difference derivative in the observation loop or dense source solve.
+
+`prepare_observer` and `bind_observer` attach only matching physical source
+layouts. Binding intersects the history coverage of every direct and ideal
+reflected path. An uncovered source/receiver time, changed source order,
+incompatible echo-delay spread, malformed sample, budget overflow or
+cancellation returns no partial owner or field. Images query the same physical
+history at their own delays; pressure and vector velocity sum before p*u.
+
+The interpolation is offline and uses the complete supplied record. It does
+not certify source bandwidth, antialiasing, positivity, derivative error or
+turbulence-source validity, and does not invent prehistory, silence, periodic
+continuation or a post-record tail. Its source-clock and interpolation errors
+require independent refinement. The original homogeneous stationary lossless
+propagation scope remains; molecular transient propagation is not supplied.
+`tests/quadrupole_history.rs` specifies cubic reproduction with nonzero initial
+integrals, original-clock refinement, full reflected fields, three momentum
+equations, DD epoch translation and coverage/ownership/cancellation admission.

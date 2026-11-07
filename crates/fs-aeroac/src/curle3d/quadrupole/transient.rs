@@ -26,6 +26,8 @@ use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{dd::Dd, det};
 
 mod reflection;
+/// Finite physical stress records with consistent derivatives and integrals.
+pub mod history;
 /// Doppler-correct pressure of uniform and accelerating physical stress moments.
 pub mod moving;
 
