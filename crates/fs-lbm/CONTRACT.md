@@ -1,5 +1,36 @@
 # CONTRACT: fs-lbm
 
+## Kinetic storage across tetrahedral liquid projection
+
+Tetrahedral liquid ingress evaluates its kinetic change from the original P1
+consistent-mass integral and the receiving native cell masses/velocities. Each
+face-connected component retains one fixed reference velocity `U`, then reduces
+`delta K_rel + U dot delta P_rel + |U|² delta M/2` with double-double products.
+An unchanged common translation therefore cannot erase an unresolved strain
+or spin mode. The mass and momentum terms remain present: an actual native
+readback defect is not removed by changing the arithmetic reference frame.
+The original overlap, linear/angular momentum correction and physical model
+are unchanged; neither sign of remap energy becomes heat.
+
+The predicted velocity projection, initialized populations and subsequent
+thermal/rheology/buoyancy attachment are checked independently against the same
+source inventory. Component kinetic changes are kept until the shared sum of
+absolute mechanical errors is tested, so disconnected pieces cannot cancel
+their remap errors. The existing rounded source/target kinetic totals remain
+diagnostics; subtracting them need not reproduce the retained change.
+Native readback uses the original tracked interface mass or full-cell
+population mass, never density times a rounded/clamped fill fraction. The
+same mass supplies the post-attachment component enthalpy audit.
+
+The storage kernel uses fixed local arrays and one retained source/candidate
+inventory per component; prediction scratch is reused for native readback.
+Five executed production-leaf tests cover P1 variance beneath common motion,
+consistent-mass cross terms, actual mass/momentum defects, separate component
+errors and invalid inventories. Full native ingress/mass-owner regression
+sources are also present; their execution remains pending an admitted full
+dependency build. This is a projection-accounting extension, not a
+conservative kinetic remap, subcell energy model or physical heating law.
+
 ## Original spin impulses and retained immersed-body kinetic storage
 
 The D3Q19 moving single-body, assembly and finite/shared film-carrier paths

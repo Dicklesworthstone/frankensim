@@ -118,20 +118,34 @@ pub(super) fn correct(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn reports(
     components: Vec<Component>,
     actual: Vec<LiquidTransferMoments>,
+    source_kinetic: &[kinetic::Inventory],
+    target_kinetic: &[kinetic::Inventory],
     initial: &[MaterialFreeSurfaceInitialCell3],
     gravity: [f64; 3],
     limits: TetLiquidTransferLimits,
     cx: &Cx<'_>,
 ) -> Result<Vec<TetLiquidComponentTransfer>, TetLiquidTransferError> {
+    if components.len() != actual.len()
+        || components.len() != source_kinetic.len()
+        || components.len() != target_kinetic.len()
+    {
+        return Err(invalid("liquid component and kinetic inventories disagree"));
+    }
     let mut reports = Vec::with_capacity(components.len());
-    let (mut mass, mut momentum, mut angular, mut energy) = (0.0, 0.0, 0.0, 0.0);
-    for (component, target) in components.into_iter().zip(actual) {
+    let (mut mass, mut momentum, mut angular) = (0.0, 0.0, 0.0);
+    let mut energy = Dd::ZERO;
+    for ((component, target), (&before, &after)) in components.into_iter().zip(actual)
+        .zip(source_kinetic.iter().zip(target_kinetic))
+    {
         checkpoint(cx)?;
+        let kinetic = before.change_to(after)
+            .ok_or_else(|| invalid("component kinetic storage change is unrepresentable"))?;
         let (centroid_shift_m, kinetic_energy_change_j, gravitational_energy_change_j) =
-            check_projection(&component.source, &target, gravity, limits)?;
+            check_projection(&component.source, &target, kinetic, gravity, limits)?;
         mass += (target.mass_kg - component.source.mass_kg).abs();
         momentum += norm(sub(
             target.momentum_kg_m_s,
@@ -141,7 +155,7 @@ pub(super) fn reports(
             target.angular_momentum_kg_m2_s,
             component.source.angular_momentum_kg_m2_s,
         ));
-        energy += kinetic_energy_change_j.abs() + gravitational_energy_change_j.abs();
+        energy = energy + kinetic.abs() + Dd::from_f64(gravitational_energy_change_j.abs());
         reports.push(TetLiquidComponentTransfer {
             source_tetrahedra: component.source_tetrahedra,
             target_cells: component
@@ -158,13 +172,13 @@ pub(super) fn reports(
     }
     // These are ONE original work/error budget. Opposite discrepancies cannot
     // cancel between physically detached pieces, or each spend the full budget.
-    if ![mass, momentum, angular, energy]
+    if ![mass, momentum, angular, energy.hi, energy.lo]
         .into_iter()
         .all(f64::is_finite)
         || mass > limits.mass_tolerance_kg
         || momentum > limits.momentum_tolerance_kg_m_s
         || angular > limits.angular_momentum_tolerance_kg_m2_s
-        || energy > limits.maximum_projection_energy_change_j
+        || Dd::from_f64(limits.maximum_projection_energy_change_j).lt(energy)
     {
         return Err(invalid(
             "component transfer exceeds the shared absolute conservation/error budget",

@@ -27,11 +27,13 @@ use std::collections::BTreeMap;
 pub mod enthalpy;
 
 mod components;
+mod kinetic;
 mod momentum;
 pub use components::TetLiquidComponentTransfer;
 
 use fs_exec::Cx;
 use fs_la::factor::lu;
+use fs_math::dd::Dd;
 use fs_mesh::overlap::{OverlapError, tetrahedron_box_moments};
 
 use super::{
@@ -101,7 +103,9 @@ pub struct TetLiquidTransferReport {
     pub target: LiquidTransferMoments,
     /// Target minus source centroid [m].
     pub centroid_shift_m: [f64; 3],
-    /// Signed target minus source kinetic energy [J].
+    /// Signed target minus source kinetic energy [J], retained from the
+    /// original P1 mass form and actual native masses/velocities before the
+    /// absolute diagnostic energies are rounded. No conversion into heat.
     pub kinetic_energy_change_j: f64,
     /// Signed target minus source potential energy for uniform gravity [J].
     pub gravitational_energy_change_j: f64,
@@ -160,6 +164,8 @@ struct TransferredFields {
     strain_per_s: BTreeMap<[usize; 3], [f64; 6]>,
     source_j: f64,
     source_by_component_j: Vec<f64>,
+    /// Retained original P1 storage, also used after native thermal attachment.
+    source_kinetic: Vec<kinetic::Inventory>,
 }
 
 fn invalid(what: &'static str) -> TetLiquidTransferError {
@@ -207,6 +213,40 @@ fn finite_moments(m: &LiquidTransferMoments) -> bool {
         .iter()
         .flatten()
         .all(|v| v.is_finite())
+}
+
+fn native_cell_mass_kg(
+    flow: &MaterialFreeSurface3<'_>,
+    coordinates: [usize; 3],
+) -> Result<f64, TetLiquidTransferError> {
+    let location = crate::d3q19::freesurface3::FreeSurface3::transport_location(coordinates)
+        .ok_or_else(|| invalid("receiving liquid cell has no native mass location"))?;
+    let mass = flow.lattice.transport_cell_mass(location).map_err(MaterialLbmError::from)?
+        * flow.scaling.mass_unit_kg();
+    if !mass.is_finite() || mass <= 0.0 {
+        return Err(invalid("receiving liquid mass is unrepresentable"));
+    }
+    Ok(mass)
+}
+
+fn kinetic_change(
+    source: &[kinetic::Inventory],
+    target: &[kinetic::Inventory],
+    cx: &Cx<'_>,
+) -> Result<Dd, TetLiquidTransferError> {
+    if source.len() != target.len() {
+        return Err(invalid("liquid kinetic inventories have different components"));
+    }
+    let mut change = Dd::ZERO;
+    for (&before, &after) in source.iter().zip(target) {
+        checkpoint(cx)?;
+        change = change + before.change_to(after)
+            .ok_or_else(|| invalid("liquid kinetic storage change is unrepresentable"))?;
+    }
+    if !change.hi.is_finite() || !change.lo.is_finite() {
+        return Err(invalid("combined liquid kinetic storage change is unrepresentable"));
+    }
+    Ok(change)
 }
 
 fn symmetric_strain(gradient: [[f64; 3]; 3]) -> [f64; 6] {
@@ -312,6 +352,12 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         let mut original = LiquidTransferMoments::default();
         let mut thermal = TransferredFields::default();
         thermal.source_by_component_j.resize(components.len(), 0.0);
+        thermal.source_kinetic.reserve(components.len());
+        for component in &components {
+            checkpoint(cx)?;
+            let tet = source.tetrahedra[component.source_tetrahedra[0]];
+            thermal.source_kinetic.push(kinetic::Inventory::new(source.velocities_m_s[tet[0] as usize]));
+        }
         let mut overlap_tests = 0usize;
         for (tet_index, indices) in source.tetrahedra.iter().enumerate() {
             checkpoint(cx)?;
@@ -348,6 +394,7 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
             }
             integrate_source(&mut original, p, v, whole.volume * rho, grid_origin_m);
             integrate_source(&mut components[component].source, p, v, whole.volume * rho, grid_origin_m);
+            thermal.source_kinetic[component].add_tetrahedron(whole.volume * rho, v);
             let gradient = field_gradient(p, v)?;
             let strain = symmetric_strain(gradient);
             let h = source_h.map(|values| indices.map(|i| values[i as usize]));
@@ -460,8 +507,20 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
             component_for_cell.push(integral.component);
         }
         components::correct(&mut initial, &components, rho * cell_volume, dx, limits, cx)?;
-        let predicted = integrate_cells(&initial, rho * cell_volume, dx, cx)?;
-        check_projection(&original, &predicted, domain.gravity_m_s2, limits)?;
+        let mut predicted = LiquidTransferMoments::default();
+        let mut candidate_kinetic: Vec<_> = thermal.source_kinetic.iter()
+            .map(|inventory| inventory.empty_like()).collect();
+        for (cell, &component) in initial.iter().zip(&component_for_cell) {
+            checkpoint(cx)?;
+            let mass = rho * cell_volume * cell.fill_fraction;
+            accumulate_cell(&mut predicted, mass, centre(cell.coordinates, dx), cell.velocity_m_s);
+            candidate_kinetic[component].add_cell(mass, cell.velocity_m_s);
+        }
+        check_projection(
+            &original, &predicted,
+            kinetic_change(&thermal.source_kinetic, &candidate_kinetic, cx)?,
+            domain.gravity_m_s2, limits,
+        )?;
         let mut flow = self.free_surface3_from_cells_inner(domain, &initial, cx)?;
         if source_h.is_none() {
             let bulk_rate = self.bulk_relaxation_rate_at(self.material().material())?;
@@ -477,23 +536,29 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
         // actual T/rate viscosity, then repeats this native momentum readback.
         let mut actual = LiquidTransferMoments::default();
         let mut actual_components = vec![LiquidTransferMoments::default(); components.len()];
+        for inventory in &mut candidate_kinetic {
+            checkpoint(cx)?;
+            *inventory = inventory.empty_like();
+        }
         for (index, cell) in initial.iter().enumerate() {
             checkpoint(cx)?;
             let [x, y, z] = cell.coordinates;
             let sample = flow
                 .sample_at_si(x, y, z)?
                 .ok_or_else(|| invalid("native initializer lost an occupied cell"))?;
+            let mass = native_cell_mass_kg(&flow, cell.coordinates)?;
             accumulate_cell(
                 &mut actual,
-                sample.density_kg_m3 * sample.fill_fraction * cell_volume,
+                mass,
                 centre(cell.coordinates, dx),
                 sample.velocity_m_s,
             );
             accumulate_cell(
                 &mut actual_components[component_for_cell[index]],
-                sample.density_kg_m3 * sample.fill_fraction * cell_volume,
+                mass,
                 centre(cell.coordinates, dx), sample.velocity_m_s,
             );
+            candidate_kinetic[component_for_cell[index]].add_cell(mass, sample.velocity_m_s);
         }
         if (flow.ledger_mass_kg()? - actual.mass_kg).abs() > limits.mass_tolerance_kg {
             return Err(invalid(
@@ -501,9 +566,14 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
             ));
         }
         let (centroid_shift_m, kinetic_energy_change_j, gravitational_energy_change_j) =
-            check_projection(&original, &actual, domain.gravity_m_s2, limits)?;
+            check_projection(
+                &original, &actual,
+                kinetic_change(&thermal.source_kinetic, &candidate_kinetic, cx)?,
+                domain.gravity_m_s2, limits,
+            )?;
         let components = components::reports(
-            components, actual_components, &initial, domain.gravity_m_s2, limits, cx,
+            components, actual_components, &thermal.source_kinetic, &candidate_kinetic,
+            &initial, domain.gravity_m_s2, limits, cx,
         )?;
         checkpoint(cx)?;
         Ok((
@@ -681,6 +751,7 @@ fn correct_momenta(
 fn check_projection(
     source: &LiquidTransferMoments,
     target: &LiquidTransferMoments,
+    kinetic: Dd,
     gravity: [f64; 3],
     limits: TetLiquidTransferLimits,
 ) -> Result<([f64; 3], f64, f64), TetLiquidTransferError> {
@@ -701,22 +772,22 @@ fn check_projection(
         scale(target.first_mass_moment_kg_m, 1.0 / target.mass_kg),
         scale(source.first_mass_moment_kg_m, 1.0 / source.mass_kg),
     );
-    let kinetic = target.kinetic_energy_j - source.kinetic_energy_j;
     let potential = -dot(
         gravity,
         sub(target.first_mass_moment_kg_m, source.first_mass_moment_kg_m),
     );
     if !norm(shift).is_finite()
         || norm(shift) > limits.maximum_centroid_shift_m
-        || !kinetic.is_finite()
+        || !kinetic.hi.is_finite() || !kinetic.lo.is_finite()
         || !potential.is_finite()
-        || kinetic.abs() + potential.abs() > limits.maximum_projection_energy_change_j
+        || Dd::from_f64(limits.maximum_projection_energy_change_j)
+            .lt(kinetic.abs() + Dd::from_f64(potential.abs()))
     {
         return Err(invalid(
             "cell projection exceeds the centroid or mechanical-energy error bound; refine",
         ));
     }
-    Ok((shift, kinetic, potential))
+    Ok((shift, kinetic.to_f64(), potential))
 }
 
 #[cfg(test)]

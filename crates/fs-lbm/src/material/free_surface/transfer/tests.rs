@@ -138,6 +138,68 @@ fn close(a: f64, b: f64, tolerance: f64) {
 }
 
 #[test]
+fn g0_projection_budget_retains_p1_deformation_beside_bulk_translation() {
+    // A radial affine velocity about the centroid carries no intrinsic angular
+    // momentum. Replacing this tetrahedron by its mean cell velocity discards
+    // exactly 36 J of its original consistent-mass energy. A common velocity
+    // does not authorize that loss even when both absolute f64 K values agree.
+    let p = [[0.25; 3], [1.25, 0.25, 0.25], [0.25, 1.25, 0.25], [0.25, 0.25, 1.25]];
+    let translation = [2.0_f64.powi(40), 0.0, 0.0];
+    let v = p.map(|point| add(translation, scale(sub(point, [0.5; 3]), 4.0)));
+    let mut source = LiquidTransferMoments::default();
+    integrate_source(&mut source, p, v, 40.0, [0.0; 3]);
+    let mut target = LiquidTransferMoments::default();
+    accumulate_cell(&mut target, 40.0, [0.5; 3], translation);
+    assert_eq!(source.kinetic_energy_j, target.kinetic_energy_j);
+    assert_eq!(source.momentum_kg_m_s, target.momentum_kg_m_s);
+    assert_eq!(source.angular_momentum_kg_m2_s, target.angular_momentum_kg_m2_s);
+    let mut original = kinetic::Inventory::new(v[0]);
+    original.add_tetrahedron(40.0, v);
+    let mut actual = original.empty_like();
+    actual.add_cell(40.0, translation);
+    let change = original.change_to(actual).unwrap();
+    assert_eq!(change, Dd::from_f64(-36.0));
+    let mut bounds = limits();
+    bounds.maximum_projection_energy_change_j = 35.0;
+    assert!(check_projection(&source, &target, change, [0.0; 3], bounds).is_err());
+    bounds.maximum_projection_energy_change_j = 36.0;
+    assert_eq!(check_projection(&source, &target, change, [0.0; 3], bounds).unwrap().1, -36.0);
+}
+
+#[test]
+fn g1_native_ingress_refuses_unresolved_dilation_before_returning_a_flow() {
+    // A one-cell tetrahedron's centroid equals the receiving cell centre.
+    // Its tiny isotropic P1 dilation has zero net linear/angular impulse but
+    // positive consistent-mass storage which the mean cell cannot represent.
+    let material = liquid(6.0);
+    let dx = 0.001953125;
+    let edge = 0.0009765625;
+    let centroid = [0.0048828125; 3];
+    let lower = sub(centroid, [edge / 4.0; 3]);
+    let p = [lower, add(lower, [edge, 0.0, 0.0]),
+        add(lower, [0.0, edge, 0.0]), add(lower, [0.0, 0.0, edge])];
+    let rate = 2.0_f64.powi(-30);
+    let translation = [0.03125, 0.0, 0.0];
+    let v = p.map(|point| add(translation, scale(sub(point, centroid), rate)));
+    let mass = edge * edge * edge;
+    let lost = 9.0 * mass * edge * edge * rate * rate / 160.0;
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let scaling = plan_free_surface_from_material(&material, dx, dx, 0.04).unwrap();
+        let mut bounds = limits();
+        bounds.maximum_projection_energy_change_j = 0.5 * lost;
+        let result = scaling.free_surface3_from_tetrahedra(
+            domain(), [0.0; 3], TetrahedralLiquidState {
+                positions_m: &p, tetrahedra: &[[0, 1, 2, 3]], velocities_m_s: &v,
+            }, bounds, cx,
+        );
+        assert!(matches!(result, Err(TetLiquidTransferError::Invalid(
+            "cell projection exceeds the centroid or mechanical-energy error bound; refine"
+        ))));
+    });
+}
+
+#[test]
 fn spinning_translating_cube_preserves_analytic_moments_and_refines_projection_energy() {
     let source = liquid(1000.0);
     let (p, t, v) = cube([0.0; 3]);

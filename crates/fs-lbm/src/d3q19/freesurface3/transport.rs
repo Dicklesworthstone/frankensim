@@ -77,6 +77,27 @@ mod viscous_tests {
     use crate::d3q19::{W3, force_corrected_shear_rate3};
 
     #[test]
+    fn g0_located_liquid_mass_retains_interface_inventory_beyond_clamped_fill() {
+        let mut liquid = FreeSurface3::new(
+            8, 8, 8, 0.8, [0.0; 3], 0.0, ContactModel3::Neutral, |x, _, _| x < 4,
+        ).unwrap();
+        let location = FreeSurface3::transport_location([3, 3, 3]).unwrap();
+        let MassLocation3::Cell(key, lane) = location else { unreachable!() };
+        assert_eq!(liquid.tiles[&key].cells[lane], Cell3::Interface);
+        let density = liquid.sample_at(3, 3, 3).unwrap().density;
+        let retained = density.next_up();
+        liquid.tiles.get_mut(&key).unwrap().mass[lane] = retained;
+        let sample = liquid.sample_at(3, 3, 3).unwrap();
+        assert_eq!(sample.fill_fraction, 1.0);
+        assert!(sample.density * sample.fill_fraction < retained);
+        assert_eq!(liquid.transport_cell_mass(location).unwrap(), retained);
+        assert!(liquid.transport_cell_mass(MassLocation3::Carry).is_err());
+        assert!(liquid.transport_cell_mass(
+            FreeSurface3::transport_location([6, 3, 3]).unwrap(),
+        ).is_err());
+    }
+
+    #[test]
     fn g1_pure_shear_power_is_invariant_under_guo_force_reframing() {
         let rho = 1.0;
         let tau = 0.8;
@@ -102,6 +123,35 @@ mod viscous_tests {
 }
 
 impl FreeSurface3 {
+    /// Original located liquid inventory, without reconstructing it from the
+    /// rounded/clamped fill fraction. Full cells own population mass; interface
+    /// cells own their separately tracked mass. The unlocated carry refuses.
+    pub(crate) fn transport_cell_mass(
+        &self,
+        location: MassLocation3,
+    ) -> Result<f64, FreeSurfaceError3> {
+        let MassLocation3::Cell(key, lane) = location else {
+            return Err(FreeSurfaceError3::Transport("carry has no located liquid mass"));
+        };
+        let tile = self.tiles.get(&key).ok_or(FreeSurfaceError3::Transport(
+            "liquid mass requires an active cell",
+        ))?;
+        let mass = match tile.cells.get(lane) {
+            Some(Cell3::Fluid) => {
+                let slot = self.grid.slot_of(key).ok_or(FreeSurfaceError3::Transport(
+                    "liquid mass requires active populations",
+                ))?;
+                self.grid.populations(slot, lane).iter().sum::<f64>()
+            }
+            Some(Cell3::Interface) => tile.mass[lane],
+            _ => return Err(FreeSurfaceError3::Transport("liquid mass requires a wet cell")),
+        };
+        if !mass.is_finite() || mass <= 0.0 {
+            return Err(FreeSurfaceError3::Transport("invalid located liquid mass"));
+        }
+        Ok(mass)
+    }
+
     /// Read the tracked interface inventory and its population density without
     /// reconstructing mass from the rounded fill fraction or scanning the grid.
     pub(crate) fn transport_interface_mass(

@@ -346,7 +346,7 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
             law, caloric, controls, initial_h, buoyancy, binding, initial_tau.as_ref(), gate,
         )?;
         buoyancy::admit_receiver_moments(
-            thermal.flow(), &mut mechanical, self.cell_size_m(),
+            thermal.flow(), &mut mechanical, &transferred.source_kinetic, self.cell_size_m(),
             domain.gravity_m_s2, limits.mechanical, cx,
         )?;
         let target_enthalpy_j = thermal.total_enthalpy_j()?;
@@ -358,7 +358,6 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
         }
         let mut components = Vec::with_capacity(mechanical.components.len());
         let mut absolute_defect = 0.0;
-        let cell_volume = self.cell_size_m().powi(3);
         for (component, &source_enthalpy_j) in mechanical.components.iter()
             .zip(&transferred.source_by_component_j)
         {
@@ -366,12 +365,13 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
             let mut target_enthalpy_j = 0.0;
             for &[x, y, z] in &component.target_cells {
                 checkpoint(cx)?;
-                let cell = thermal.flow().sample_at_si(x, y, z)
+                thermal.flow().sample_at_si(x, y, z)
                     .map_err(TetLiquidTransferError::from)?
                     .ok_or_else(|| invalid("native receiver lost a component thermal cell"))?;
+                let mass = super::native_cell_mass_kg(thermal.flow(), [x, y, z])?;
                 let h = thermal.specific_enthalpy_at([x, y, z])
                     .ok_or_else(|| invalid("native component lost its extensive enthalpy"))?;
-                target_enthalpy_j += cell.density_kg_m3 * cell.fill_fraction * cell_volume * h;
+                target_enthalpy_j += mass * h;
             }
             let enthalpy_defect_j = target_enthalpy_j - source_enthalpy_j;
             absolute_defect += enthalpy_defect_j.abs();

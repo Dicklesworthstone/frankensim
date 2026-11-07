@@ -40,9 +40,11 @@ pub(super) fn admit_source_transport(
 /// any original buoyancy/rheology attachment.
 /// Reuse the same per-fragment projection/error budget, including its absolute
 /// sums, rather than trusting an earlier initializer's unforced report.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn admit_receiver_moments(
     flow: &MaterialFreeSurface3<'_>,
     report: &mut TetLiquidTransferReport,
+    source_kinetic: &[super::super::kinetic::Inventory],
     dx: f64,
     gravity: [f64; 3],
     limits: TetLiquidTransferLimits,
@@ -50,14 +52,19 @@ pub(super) fn admit_receiver_moments(
 ) -> Result<(), TetEnthalpyTransferError> {
     use super::super::{
         LiquidTransferMoments, accumulate_cell, centre, check_projection, components,
+        kinetic_change, native_cell_mass_kg,
     };
 
+    if source_kinetic.len() != report.components.len() {
+        return Err(invalid("constitutive attachment lost original kinetic components").into());
+    }
     let mut original = Vec::with_capacity(report.components.len());
     let mut actual = Vec::with_capacity(report.components.len());
+    let mut actual_kinetic: Vec<_> = source_kinetic.iter()
+        .map(|inventory| inventory.empty_like()).collect();
     let mut initial = Vec::with_capacity(report.wet_cells);
     let mut total = LiquidTransferMoments::default();
-    let cell_volume = dx * dx * dx;
-    for component in &report.components {
+    for (index, component) in report.components.iter().enumerate() {
         checkpoint(cx)?;
         let mut target = LiquidTransferMoments::default();
         let mut cell_indices = Vec::with_capacity(component.target_cells.len());
@@ -68,10 +75,11 @@ pub(super) fn admit_receiver_moments(
                 .sample_at_si(x, y, z)
                 .map_err(TetLiquidTransferError::from)?
                 .ok_or_else(|| invalid("initial constitutive attachment lost an original liquid cell"))?;
-            let mass = cell.density_kg_m3 * cell.fill_fraction * cell_volume;
+            let mass = native_cell_mass_kg(flow, coordinates)?;
             let position = centre(coordinates, dx);
             accumulate_cell(&mut target, mass, position, cell.velocity_m_s);
             accumulate_cell(&mut total, mass, position, cell.velocity_m_s);
+            actual_kinetic[index].add_cell(mass, cell.velocity_m_s);
             cell_indices.push(initial.len());
             initial.push(MaterialFreeSurfaceInitialCell3 {
                 coordinates,
@@ -96,8 +104,13 @@ pub(super) fn admit_receiver_moments(
         return Err(invalid("initial constitutive attachment changed the native mass ledger").into());
     }
     let (centroid_shift_m, kinetic_energy_change_j, gravitational_energy_change_j) =
-        check_projection(&report.source, &total, gravity, limits)?;
-    let components = components::reports(original, actual, &initial, gravity, limits, cx)?;
+        check_projection(
+            &report.source, &total, kinetic_change(source_kinetic, &actual_kinetic, cx)?,
+            gravity, limits,
+        )?;
+    let components = components::reports(
+        original, actual, source_kinetic, &actual_kinetic, &initial, gravity, limits, cx,
+    )?;
     checkpoint(cx)?;
     report.target = total;
     report.centroid_shift_m = centroid_shift_m;
