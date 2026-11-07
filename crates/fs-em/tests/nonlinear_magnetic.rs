@@ -678,3 +678,179 @@ fn late_cancellation_never_publishes_a_partial_field() {
         .unwrap();
     assert_eq!(reference.potential_wb_m(), again.potential_wb_m());
 }
+
+#[test]
+fn magnetic_virtual_work_uses_nonlinear_coenergy_and_actual_held_controls() {
+    let material = law(&curve(&[(0.0, 0.0), (1.0, 1.0), (4.0, 13.0)]));
+    let problem = PlanarNonlinearMagnetostatics::new(
+        square(0.3),
+        vec![IsotropicMagneticMaterial::Reversible(material); 4],
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
+    let mesh = problem.mesh();
+    let currents = [12.0; 4];
+    let field = problem
+        .solve(
+            &currents,
+            &boundary(0.0),
+            &[0.0; 5],
+            controls(),
+            &mut || false,
+        )
+        .unwrap();
+    assert_eq!(
+        field.impressed_current_density_a_m2(),
+        Some(currents.as_slice())
+    );
+    // The independent one-DOF solution has B=1.25, H=2, w=0.875 and
+    // w'=1.625. In-plane dilation at held integrated currents therefore does
+    // V*(2*w' - B*H)=0.3*(3.25-2.5)=0.225 J of mechanical work.
+    near(
+        field.virtual_work(mesh.vertices(), &mut || false).unwrap(),
+        0.225,
+    );
+    let rotation: Vec<_> = mesh.vertices().iter().map(|x| [-x[1], x[0]]).collect();
+    assert!(field.virtual_work(&rotation, &mut || false).unwrap().abs() < 1e-12);
+    assert_eq!(
+        field
+            .virtual_work(&[[7.0, -9.0]; 5], &mut || false)
+            .unwrap(),
+        0.0
+    );
+
+    let motion: Vec<_> = mesh
+        .vertices()
+        .iter()
+        .map(|&[x, y]| [0.17 * x + 0.13 * x * y, -0.09 * y + 0.07 * x * (1.0 - x)])
+        .collect();
+    // Both current-only and mixed current/held-flux controls. The reference
+    // re-equilibrates the ORIGINAL nonlinear field on each displaced mesh.
+    for background in [0.0, 1.0] {
+        let initial: Vec<_> = mesh
+            .vertices()
+            .iter()
+            .map(|x| background * (0.2 * x[0] + 0.1 * x[1]))
+            .collect();
+        let bc: Vec<_> = (0..4).map(|v| (v, initial[v])).collect();
+        let field = problem
+            .solve(&currents, &bc, &initial, controls(), &mut || false)
+            .unwrap();
+        let work = field.virtual_work(&motion, &mut || false).unwrap();
+        let epsilon = 1e-4;
+        let potentials: Vec<_> = [-epsilon, epsilon]
+            .into_iter()
+            .map(|step: f64| {
+                let positions = mesh
+                    .vertices()
+                    .iter()
+                    .zip(&motion)
+                    .map(|(x, u)| std::array::from_fn(|axis| step.mul_add(u[axis], x[axis])))
+                    .collect();
+                let moved = PlanarNonlinearMagnetostatics::new(
+                    TriComplex2::from_indexed_triangles(
+                        "moved nonlinear magnetic mesh",
+                        positions,
+                        mesh.faces().to_vec(),
+                        mesh.metric(),
+                    )
+                    .unwrap(),
+                    problem.materials().to_vec(),
+                    limits(),
+                    &mut || false,
+                )
+                .unwrap();
+                let moved_current: Vec<_> = (0..4)
+                    .map(|cell| {
+                        currents[cell] * mesh.face_measure(cell).unwrap()
+                            / moved.mesh().face_measure(cell).unwrap()
+                    })
+                    .collect();
+                let solved = moved
+                    .solve(&moved_current, &bc, &initial, controls(), &mut || false)
+                    .unwrap();
+                let pairing: f64 = moved
+                    .mesh()
+                    .faces()
+                    .iter()
+                    .enumerate()
+                    .map(|(cell, face)| {
+                        moved_current[cell]
+                            * moved.mesh().face_measure(cell).unwrap()
+                            * face
+                                .iter()
+                                .map(|&v| solved.potential_wb_m()[v as usize])
+                                .sum::<f64>()
+                            / 3.0
+                    })
+                    .sum();
+                solved.energy_j() - pairing
+            })
+            .collect();
+        let derivative = -(potentials[1] - potentials[0]) / (2.0 * epsilon);
+        assert!(
+            (work - derivative).abs() < 2e-7 * (1.0 + work.abs()),
+            "{work} != {derivative}"
+        );
+    }
+}
+
+#[test]
+fn nonlinear_virtual_work_rejects_induction_recovery_and_incomplete_geometry() {
+    use fs_em::planar::eddy::nonlinear::{NonlinearEddyControls, PlanarNonlinearEddy};
+
+    let problem = PlanarNonlinearMagnetostatics::new(
+        square(0.3),
+        vec![
+            IsotropicMagneticMaterial::Reversible(law(&curve(&[
+                (0.0, 0.0),
+                (1.0, 1.0),
+                (4.0, 13.0)
+            ])));
+            4
+        ],
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
+    let field = problem
+        .solve(
+            &[0.0; 4],
+            &boundary(0.0),
+            &[0.0; 5],
+            controls(),
+            &mut || false,
+        )
+        .unwrap();
+    assert!(field.virtual_work(&[], &mut || false).is_err());
+    assert!(matches!(
+        field.virtual_work(&[[0.0; 2]; 5], &mut || true),
+        Err(NonlinearMagneticError::Magnetic(MagneticError::Cancelled))
+    ));
+    let history = PlanarNonlinearEddy::new(
+        &field,
+        vec![],
+        &[0, 1, 2, 3],
+        &boundary(0.0),
+        0.0,
+        NonlinearEddyControls {
+            nonlinear: controls(),
+            energy_tolerance_j: 1e-9,
+            current_balance_tolerance_a: 1e-9,
+        },
+        &mut || false,
+    )
+    .unwrap();
+    let recovered = history.field(&mut || false).unwrap();
+    assert!(recovered.impressed_current_density_a_m2().is_none());
+    assert!(
+        recovered
+            .virtual_work(&[[0.0; 2]; 5], &mut || false)
+            .is_err()
+    );
+    assert_eq!(
+        field.virtual_work(&[[0.0; 2]; 5], &mut || false).unwrap(),
+        0.0
+    );
+}

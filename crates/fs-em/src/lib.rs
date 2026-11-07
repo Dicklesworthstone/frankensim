@@ -44,7 +44,9 @@
 //! [`force`] transfers a static field's closed exterior Maxwell-stress integral
 //! to the existing mechanical wrench owner, including admitted enclosed recoil
 //! magnets. Its contour remains in an induced-linear exterior medium; it does
-//! not evolve geometry or magnetic work.
+//! not evolve geometry. Static linear and reversible nonlinear planar fields
+//! also expose native virtual work at held integrated currents and boundary
+//! A_z, using the actual discrete magnetic potential and nonlinear coenergy.
 //! The dielectric field uses the same contour integral for electric force and
 //! torque. Native circuit electrode potentials can reconstruct its original
 //! spatial field and mechanical load without another field solve.

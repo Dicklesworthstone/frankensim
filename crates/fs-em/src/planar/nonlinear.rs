@@ -519,6 +519,7 @@ impl PlanarNonlinearMagnetostatics {
         poll(cancelled)?;
         Ok(PlanarNonlinearField {
             problem: self,
+            impressed_current_density_a_m2: None,
             potential_wb_m: potential,
             magnetic_flux_density_t: evaluation.b,
             magnetic_field_a_m: evaluation.h,
@@ -567,14 +568,17 @@ impl PlanarNonlinearMagnetostatics {
                 rhs[v as usize] = finite(rhs[v as usize] + load)?;
             }
         }
-        self.solve_loaded(
+        let mut field = self.solve_loaded(
             &rhs,
             boundary_potential_wb_m,
             initial_potential_wb_m,
             None,
             controls,
             cancelled,
-        )
+        )?;
+        field.impressed_current_density_a_m2 = Some(current_density_a_m2.to_vec());
+        poll(cancelled)?;
+        Ok(field)
     }
 
     pub(crate) fn solve_loaded(
@@ -602,6 +606,7 @@ impl PlanarNonlinearMagnetostatics {
         )?;
         Ok(PlanarNonlinearField {
             problem: self,
+            impressed_current_density_a_m2: None,
             potential_wb_m: potential,
             magnetic_flux_density_t: evaluation.b,
             magnetic_field_a_m: evaluation.h,
@@ -827,6 +832,9 @@ fn solve_variational<C: FnMut() -> bool, E: VariationalEvaluation>(
 /// Actual nonlinear field, bound to the source cards and geometry that produced it.
 pub struct PlanarNonlinearField<'a> {
     problem: &'a PlanarNonlinearMagnetostatics,
+    // Only the public static solve establishes these held source controls.
+    // Induction recovery and additional quadratic loads retain None.
+    impressed_current_density_a_m2: Option<Vec<f64>>,
     potential_wb_m: Vec<f64>,
     magnetic_flux_density_t: Vec<[f64; 2]>,
     magnetic_field_a_m: Vec<[f64; 2]>,
@@ -853,6 +861,12 @@ impl<'a> PlanarNonlinearField<'a> {
     /// Actual constitutive H [A/m], without averaging material interfaces.
     pub fn magnetic_field_a_m(&self) -> &[[f64; 2]] {
         &self.magnetic_field_a_m
+    }
+    /// Original static impressed J_z [A/m2], in triangle order. Absent for
+    /// induction recovery or other retained histories; those states cannot
+    /// establish the static source controls used by magnetic virtual work.
+    pub fn impressed_current_density_a_m2(&self) -> Option<&[f64]> {
+        self.impressed_current_density_a_m2.as_deref()
     }
     /// Source-integrated magnetic storage [J], including extrusion thickness.
     pub fn cell_energy_j(&self) -> &[f64] {

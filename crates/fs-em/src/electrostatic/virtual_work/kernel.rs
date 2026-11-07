@@ -5,38 +5,7 @@
 //! force is `(U_cell I - volume E tensor D) grad(N)` [N]. Physical source and
 //! isotropy admission belong to the accepted-field owners, not this kernel.
 
-pub(crate) fn shape_force<const D: usize>(
-    energy_j: f64,
-    volume_m3: f64,
-    electric_v_m: [f64; D],
-    displacement_c_m2: [f64; D],
-    gradient_per_m: [f64; D],
-) -> Option<[f64; D]> {
-    if !energy_j.is_finite()
-        || energy_j < 0.0
-        || !volume_m3.is_finite()
-        || volume_m3 <= 0.0
-        || electric_v_m
-            .iter()
-            .chain(&displacement_c_m2)
-            .chain(&gradient_per_m)
-            .any(|value| !value.is_finite())
-    {
-        return None;
-    }
-    let mut charge_density = 0.0;
-    for axis in 0..D {
-        charge_density = displacement_c_m2[axis].mul_add(gradient_per_m[axis], charge_density);
-    }
-    let charge = volume_m3 * charge_density;
-    if !charge.is_finite() {
-        return None;
-    }
-    let force = std::array::from_fn(|axis| {
-        (-charge).mul_add(electric_v_m[axis], energy_j * gradient_per_m[axis])
-    });
-    force.iter().all(|value| value.is_finite()).then_some(force)
-}
+pub(crate) use crate::force::shape::shape_force;
 
 #[cfg(test)]
 mod tests {

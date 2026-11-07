@@ -165,6 +165,14 @@ fn nonlinear_owner_retains_the_recoil_natural_load_and_actual_h_energy() {
             let reference = linear
                 .solve(&[j], &boundary, common::config(), &mut || false)
                 .unwrap();
+            // Recoil rotation and deformation need their own constitutive
+            // work convention; neither static owner silently infers it.
+            assert!(field.virtual_work(&[[0.0; 2]; 3], &mut || false).is_err());
+            assert!(
+                reference
+                    .virtual_work(&[[0.0; 2]; 3], &mut || false)
+                    .is_err()
+            );
             // Only the bottom edge is prescribed. The exact P1 equation is
             // B_x = signed Br + mu J/3, H_x = J/3. An interior curl(Br)
             // source alone misses this natural-boundary contribution entirely.

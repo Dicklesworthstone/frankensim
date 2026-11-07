@@ -1822,6 +1822,30 @@ refusals. These synthetic calculations do not validate an empirical material
 or device. The stress convention follows J. L. Kirtley, MIT 6.685, Class Notes 1,
 section 4.2: https://web.mit.edu/6.685/www/chapter1.pdf.
 
+`PlanarField::virtual_work` and `PlanarNonlinearField::virtual_work` also
+differentiate the original static discrete magnetic potential along a complete
+P1 vertex displacement. Each cell's integrated impressed current, original
+Dirichlet A_z values, material state and extrusion thickness remain fixed.
+The returned mechanical work is `-d(Pi)/ds`, with
+`Pi = sum(W_cell) - sum(J_z*volume*mean(A_z))`. A unit rotation tangent of a
+body, extended through the surrounding mesh, extracts its axial torque. At
+zero Dirichlet A_z the work is the fixed-current coenergy derivative; without
+impressed currents it is minus the fixed-flux energy derivative. Mixed controls
+retain the full stationary potential rather than substituting either shortcut.
+
+The native A_z pullback gives `W'_cell div(u) - volume H.(grad(u) B)`.
+Reversible nonlinear materials use their original `W'=B.H-W` and H, not a
+secant-linear replacement. The contraction shares the allocation-free
+geometric kernel with electric virtual work; local displacement differences
+annul rigid translation before compensated accumulation. Work costs linear
+time in original vertices/cells and requires no field re-solve. Recoil magnets,
+hysteresis and induction-recovered fields refuse because no static material
+motion/source convention is inferred. This is an instantaneous derivative,
+not finite-step electromechanical energy accounting or magnetostriction.
+Analytic scaling/rigid-motion tests and independently re-solved geometry
+perturbations exercise current-only, flux-only and mixed controls, nonlinear
+coenergy, nonzero rotor torque, cancellation and original-state retention.
+
 ## Distributed winding and circuit connection
 
 `winding::PlanarWindingBasis` admits signed trianglewise `J_z / terminal_current`

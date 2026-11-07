@@ -1,4 +1,4 @@
-//! Electromagnetic force and torque from computed exterior fields.
+//! Electromagnetic force, torque and work from original field solutions.
 //!
 //! Integrate T.n with T = B tensor H - (B.H) I/2 over a CLOSED contour in
 //! one homogeneous, current-free linear exterior medium. The integration
@@ -13,11 +13,18 @@
 //! and compensated reduction with its own D/E source admission. Striction,
 //! exterior-medium pressure response, moving geometry and end fields remain
 //! outside this planar model.
+//!
+//! [`PlanarField::virtual_work`] and the nonlinear planar field's counterpart
+//! differentiate the original magnetic potential along a complete displacement
+//! at held integrated currents and Dirichlet A_z. Their shape work uses actual
+//! constitutive coenergy and can extract torque without an exterior contour.
 
 use fs_ga::Wrench;
 
 pub(crate) mod contour;
 mod induction;
+pub(crate) mod shape;
+mod virtual_work;
 use contour::ContourError;
 
 use crate::{

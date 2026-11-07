@@ -4,6 +4,8 @@ mod common;
 
 #[path = "magnetic_force/induction.rs"]
 mod induction;
+#[path = "magnetic_force/virtual_work.rs"]
+mod virtual_work;
 
 use common::{config, limits, material, near};
 use fs_em::{
@@ -476,6 +478,14 @@ fn recovered_induction_history_is_not_silently_treated_as_a_static_field() {
     .unwrap();
     let recovered = induction.field(&mut || false).unwrap();
     assert!(recovered.impressed_current_density_a_m2().is_none());
+    assert!(
+        recovered
+            .virtual_work(
+                &vec![[0.0; 2]; problem.mesh().vertices().len()],
+                &mut || false
+            )
+            .is_err()
+    );
     assert!(
         recovered
             .maxwell_wrench(&enclosed, &frame(), [0.0; 3], force_limits(), &mut || false)
