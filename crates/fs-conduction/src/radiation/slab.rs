@@ -6,7 +6,9 @@
 //! Individual layers may instead declare different real indices, retaining
 //! every smooth Fresnel interface and all internal reflections. There is no
 //! scattering or coherent interference.
-//! Incident radiance is diffuse. Emergent hemispherical flux is resolved, but
+//! Thermal incident radiance is diffuse; `SlabBeamResponse` additionally
+//! resolves collimated, polarized illumination without angular averaging.
+//! Emergent hemispherical flux is resolved, but
 //! is generally NOT Lambertian; a scalar view-factor consumer must explicitly
 //! own its diffuse-port closure.
 //!
@@ -34,8 +36,10 @@ use super::radiation_error;
 use super::spectral::planck::{GL8, GL16};
 use crate::ConductionError;
 
+mod beam;
 mod layered;
 mod refraction;
+pub use beam::{SlabBeamExchange, SlabBeamResponse};
 
 /// Maximum physical layers in one prepared slab.
 pub const MAX_SLAB_LAYERS: usize = 64;

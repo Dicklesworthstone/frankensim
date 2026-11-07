@@ -22,7 +22,7 @@ fn prepared(depths: &[f64], indices: &[f64]) -> AbsorbingSlab {
 // Independent physical two-stream boundary equations at each ordinate. Dense
 // pivoted elimination retains both incoming directions of every layer; it does
 // not use the production prefix/suffix elimination or exchange coefficients.
-fn ray(
+pub(super) fn ray(
     depths: &[f64],
     indices: &[f64],
     p: f64,

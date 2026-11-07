@@ -93,6 +93,7 @@ pub(super) fn rule(
                     &r[..=n],
                     &e[..=n],
                     lower == 0.0,
+                    true,
                     0.5 * q,
                     output,
                     correction,
@@ -118,12 +119,13 @@ fn joined(r: f64, e: f64, t: f64, a: f64, back: f64, deficit: f64) -> (f64, f64,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn accumulate(
+pub(super) fn accumulate(
     t: &[f64],
     a: &[f64],
     r: &[f64],
     e: &[f64],
     exterior: bool,
+    thermal_exchange: bool,
     q: f64,
     output: &mut [f64],
     correction: &mut [f64],
@@ -200,6 +202,9 @@ fn accumulate(
                 field *= cross_left[i];
             }
         }
+    }
+    if !thermal_exchange {
+        return;
     }
     for i in 0..n {
         if a[i] == 0.0 {

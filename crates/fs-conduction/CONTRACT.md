@@ -5352,13 +5352,37 @@ Uniform indices reuse the original preparation path. G0/G1/G3 regressions compar
 independent dense two-direction boundary equations, lossless stacks, low-index
 gaps, weak trapped absorption, reversal, subdivision and equilibrium.
 
+`SlabBeamResponse::new` prepares collimated polarized illumination of the same
+ordered layer model without preparing diffuse angular coefficients.
+`AbsorbingSlab::beam_response` shares the existing stack and its sources.
+The admitted exterior cosine is in (0,1]; the supplied s fraction is incident
+power, with the remainder in p. Conserved Snell direction, independent positive
+Fresnel R/T and Beer factors feed the original prefix/suffix elimination. Beam
+preparation and application cost O(N); no thermal pair matrix, angular
+quadrature, iterative bounce truncation or additional optical solve is needed.
+Matched-index grazing cosines and small positive absorption/escape are retained.
+
+`exchange` accepts nonnegative front/back irradiation already projected onto
+physical slab area, in W/m². It applies no second cosine and returns directional
+reflected/transmitted power separately from layer heat and the signed arithmetic
+energy residual. Every layer's absorption comes from positive propagation loss,
+never subtraction from rounded unit reflection/transmission. Only finite complete
+results reach the heat output. `layer_net_fluxes_with_beam` adds that heating to
+the original diffuse/emitting heat balance after verifying the same ordered
+source-bearing layers; outgoing beam power stays directional. Opposing beams
+are mutually incoherent. The caller owns each source's gray/band scope and any
+angular/spectral ensemble weights; no diffuse-port redistribution is inferred.
+Focused regressions compare independent dense boundary equations, Beer and
+Brewster limits, directional integration against the original diffuse response,
+reversal/subdivision, thermal superposition, weak loss and transactional refusal.
+
 G0/G1/G3 tests compare transparent two-interface reflection, opaque n² exchange,
 independent polarized boundary-return ray sweeps, isothermal subdivision,
 reversal, and equilibrium. The index source must support the layer temperature
 intervals and declared gray/band scope. Real-index Fresnel boundaries assume
 negligible interfacial extinction: this is not a conductor model. There is no
 scattering, within-layer index gradient, rough interface, coherent interference or
-evanescent tunnelling. Incident radiance is diffuse; emergent hemispherical
+evanescent tunnelling. Diffuse thermal incident radiance has emergent hemispherical
 power is generally not Lambertian.
 A scalar view-factor consumer explicitly owns its exterior diffuse-port
 approximation. Gray inputs do not become spectral measurements. Consumers
