@@ -1,6 +1,7 @@
 //! Independent work/heat trajectories on the common source-bearing gas parcel.
 mod adaptive;
 mod history;
+mod schedule;
 
 use super::*;
 use crate::chemistry::IsochoricKineticsMethod;

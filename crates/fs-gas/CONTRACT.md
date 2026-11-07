@@ -8221,3 +8221,57 @@ translation, force-density work on displaced volumes, original-path identity,
 formation-datum invariance and late cancellation/retry. Those complete
 material integration tests were authored but not executed in this resource-
 limited session; the focused arithmetic checks do not replace them.
+
+## Physical-time thermal forcing during reacting compression
+
+`material::compression::thermal::schedule` adds immutable `HeatBathSchedule`
+and `ConductanceSchedule` programs to the prepared original material reactor.
+Bath temperature and total conductance vary linearly between prescribed physical
+time knots; a finite body's program changes conductance only. The first time is
+zero, subsequent times advance strictly, and the last knot supplies exact stroke
+duration. One zero-time knot is a no-op program. Admission bounds each borrowed
+immutable profile to 4097 knots, validates its physical values and polls
+cancellation. There is no callback-dependent forcing, extrapolation or inferred
+moving-area, convection or spatial wall law.
+
+Fixed and adaptive methods reuse the same native volume/reacting-thermal interval
+kernel, original calorics and physical accounts. Each interval freezes forcing
+at its own physical midpoint. Every forcing knot is an exact interval boundary,
+so full/two-half probes cannot miss an interior heating/cooling excursion. A
+varying program at fixed gas volume still enters the time comparison; an exactly
+constant program delegates to the original fixed or adaptive endpoint API.
+Fixed forcing knots split the requested uniform grid; the complete union is
+admitted against the original 4096-interval bound before chemical evolution.
+Adaptive accepted/evaluation caps remain global, including coarse and rejected
+probes. Exact forcing remainders may be shorter than the declared minimum step,
+but a failed comparison there cannot reduce below that minimum. Represented
+midpoint/quarter clocks must advance, and the terminal time and volume are exact.
+
+Finite-body programs bind the exact original initial conductance. The new
+`FiniteHeatBody::with_conductance` operation changes that boundary coefficient
+without reconstructing or changing original source, enthalpy/phase state, mass
+or held pressure. Each accepted body carries the exact endpoint conductance;
+midpoint values never escape as the terminal coefficient. Existing adaptive
+body-enthalpy error control remains active through latent plateaus and shifted
+energy datums. Gas heat, body enthalpy/internal energy, body outward pressure
+work and gas compression work retain their original distinct accounts. Native
+residuals remain direct compensated sums, with no extra reaction or latent heat.
+
+All physical proposals remain private through the complete program and final
+cancellation checkpoint. Budget, clock, source-domain, balance or cancellation
+refusal preserves both caller endpoints, including after accepted internal
+intervals or rejected probes. Bath entropy sums the native `-Q/Tbath` at each
+interval's own sampled temperature; it is not total heat divided by the final
+temperature. This approximates the varying-bath entropy integral and does not
+model the external energy required to prescribe the bath itself. The existing
+source-stage material-reconciliation and local-vs-global accuracy limitations
+remain unchanged. Temporal refinement, original chemical tolerances and the
+physical validity of the prescribed thermal program remain caller obligations.
+
+Focused regressions use independent coupled balances for simultaneous bath and
+conductance ramps during compression, expansion and rigid heating; fixed-step
+refinement; heat-only adaptive control at fixed volume; original variable gas
+Cv and finite-body latent inventory under changing conductance; shifted enthalpy
+datums and exact terminal coefficients; constant/no-op compatibility; exact
+forcing-knot and global work limits; unrepresentable clocks; late cancellation,
+source refusal and deterministic replay.

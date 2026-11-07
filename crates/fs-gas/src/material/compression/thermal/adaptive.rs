@@ -7,17 +7,17 @@
 //! exchanged heat and actual finite-body enthalpy; body temperature alone would
 //! miss latent storage. These comparisons do not certify a global time error.
 
+use super::super::adaptive::{
+    AdaptiveMaterialCompressionError, AdaptiveMaterialCompressionSolve, compare, error_root,
+    scaled_difference,
+};
+use super::super::{
+    CompressionInterval, CompressionTotals, MAX_COMPRESSION_SUBSTEPS, MaterialCompressionError,
+    accumulate, advance_interval_with, positive,
+};
 use super::{
     ClosedGasParcel, MaterialThermalCompressionBodyStep, MaterialThermalCompressionReactor,
     MaterialThermalCompressionStep, ThermalInterval,
-};
-use super::super::{
-    CompressionInterval, CompressionTotals, MAX_COMPRESSION_SUBSTEPS,
-    MaterialCompressionError, accumulate, advance_interval_with, positive,
-};
-use super::super::adaptive::{
-    AdaptiveMaterialCompressionError, AdaptiveMaterialCompressionSolve,
-    compare, error_root, scaled_difference,
 };
 use crate::chemistry::heat::{HeatBath, material::FiniteHeatBody};
 use crate::material::isochoric::MaterialIsochoricReactor;
@@ -47,8 +47,8 @@ pub struct AdaptiveMaterialThermalCompressionSolve {
     /// datums, carrier inventories or work/heat accumulated before the trial.
     pub relative_tolerance: f64,
     pub initial_step_s: f64,
-    /// The final exact remainder may be smaller; a failed comparison there
-    /// cannot request another reduction below this minimum.
+    /// An exact final or prescribed-forcing-knot remainder may be smaller; a
+    /// failed comparison there cannot reduce again below this minimum.
     pub minimum_step_s: f64,
     pub maximum_step_s: f64,
     /// Accepted full/fine comparisons, 1..=4096; each retains two intervals.
@@ -135,21 +135,33 @@ impl From<AdaptiveMaterialCompressionError> for AdaptiveMaterialThermalCompressi
             AdaptiveMaterialCompressionError::Invalid(message) => Self::Invalid(message),
             AdaptiveMaterialCompressionError::Physical(error) => Self::from(error),
             AdaptiveMaterialCompressionError::Cancelled => Self::Cancelled,
-            AdaptiveMaterialCompressionError::Accuracy { elapsed_time_s, step_s, error_ratios } => {
-                Self::Accuracy {
-                    elapsed_time_s,
-                    step_s,
-                    error_ratios: [error_ratios[0], error_ratios[1], error_ratios[2], 0.0, 0.0],
-                }
-            }
-            AdaptiveMaterialCompressionError::WorkLimit {
-                elapsed_time_s, accepted_intervals, rejected_intervals, evaluations,
-            } => Self::WorkLimit {
-                elapsed_time_s, accepted_intervals, rejected_intervals, evaluations,
+            AdaptiveMaterialCompressionError::Accuracy {
+                elapsed_time_s,
+                step_s,
+                error_ratios,
+            } => Self::Accuracy {
+                elapsed_time_s,
+                step_s,
+                error_ratios: [error_ratios[0], error_ratios[1], error_ratios[2], 0.0, 0.0],
             },
-            AdaptiveMaterialCompressionError::TimeResolution { elapsed_time_s, target_time_s } => {
-                Self::TimeResolution { elapsed_time_s, target_time_s }
-            }
+            AdaptiveMaterialCompressionError::WorkLimit {
+                elapsed_time_s,
+                accepted_intervals,
+                rejected_intervals,
+                evaluations,
+            } => Self::WorkLimit {
+                elapsed_time_s,
+                accepted_intervals,
+                rejected_intervals,
+                evaluations,
+            },
+            AdaptiveMaterialCompressionError::TimeResolution {
+                elapsed_time_s,
+                target_time_s,
+            } => Self::TimeResolution {
+                elapsed_time_s,
+                target_time_s,
+            },
         }
     }
 }
@@ -165,7 +177,9 @@ impl AdaptiveMaterialThermalCompressionSolve {
             self.initial_step_s,
             self.minimum_step_s,
             self.maximum_step_s,
-        ].into_iter().all(positive)
+        ]
+        .into_iter()
+        .all(positive)
             || !self.relative_tolerance.is_finite()
             || !(0.0..1.0).contains(&self.relative_tolerance)
             || self.minimum_step_s > self.initial_step_s
@@ -198,7 +212,13 @@ impl MaterialThermalCompressionReactor {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<AdaptiveMaterialThermalCompressionStep, Error> {
         let (candidate, step) = advance(
-            self, parcel, final_volume, duration, bath, controls, &mut cancelled,
+            self,
+            parcel,
+            final_volume,
+            duration,
+            bath,
+            controls,
+            &mut cancelled,
         )?;
         poll(&mut cancelled)?;
         *parcel = candidate;
@@ -221,7 +241,13 @@ impl MaterialThermalCompressionReactor {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<AdaptiveMaterialThermalCompressionBodyStep<'m>, Error> {
         let (candidate, step) = advance(
-            self, parcel, final_volume, duration, body, controls, &mut cancelled,
+            self,
+            parcel,
+            final_volume,
+            duration,
+            body,
+            controls,
+            &mut cancelled,
         )?;
         poll(&mut cancelled)?;
         *parcel = candidate;
@@ -231,7 +257,7 @@ impl MaterialThermalCompressionReactor {
 
 // The two thermal partners differ only in their existing native reaction call
 // and physical report. The controller and volume/chemistry kernel are shared.
-trait Partner: Copy {
+pub(super) trait Partner: Copy {
     type Physical: Copy;
 
     fn react<F: FnMut() -> bool>(
@@ -239,8 +265,20 @@ trait Partner: Copy {
         reactor: &mut MaterialIsochoricReactor,
         parcel: &mut ClosedGasParcel,
         duration: Time,
+        clock: IntervalTime,
         cancelled: &mut F,
     ) -> Result<(Self, ThermalInterval, [f64; 5]), MaterialCompressionError>;
+
+    /// Constant partners keep the original one-call fixed-volume route.
+    fn is_time_constant(self) -> bool {
+        true
+    }
+
+    /// The first prescribed forcing knot strictly after the accepted time.
+    /// Native constant partners have no interior time discontinuities.
+    fn next_boundary(self, _after_s: f64, duration_s: f64) -> f64 {
+        duration_s
+    }
 
     /// Original specific h and invariant mass, without an absolute H product.
     fn body_inventory(self) -> Option<[f64; 2]> {
@@ -248,6 +286,19 @@ trait Partner: Copy {
     }
 
     fn finish(self, gas: MaterialThermalCompressionStep, body: [f64; 5]) -> Self::Physical;
+}
+
+/// Actual physical endpoints of one original interval, also used for forcing.
+#[derive(Clone, Copy)]
+pub(super) struct IntervalTime {
+    pub(super) start_s: f64,
+    pub(super) end_s: f64,
+}
+
+impl IntervalTime {
+    pub(super) fn midpoint_s(self) -> f64 {
+        self.start_s + 0.5 * (self.end_s - self.start_s)
+    }
 }
 
 impl Partner for HeatBath {
@@ -258,6 +309,7 @@ impl Partner for HeatBath {
         reactor: &mut MaterialIsochoricReactor,
         parcel: &mut ClosedGasParcel,
         duration: Time,
+        _clock: IntervalTime,
         cancelled: &mut F,
     ) -> Result<(Self, ThermalInterval, [f64; 5]), MaterialCompressionError> {
         let step = reactor.advance_with_heat_bath(parcel, duration, self, cancelled)?;
@@ -278,6 +330,7 @@ impl<'m> Partner for FiniteHeatBody<'m> {
         reactor: &mut MaterialIsochoricReactor,
         parcel: &mut ClosedGasParcel,
         duration: Time,
+        _clock: IntervalTime,
         cancelled: &mut F,
     ) -> Result<(Self, ThermalInterval, [f64; 5]), MaterialCompressionError> {
         let step = reactor.advance_with_finite_body(parcel, duration, self, cancelled)?;
@@ -314,7 +367,7 @@ impl<'m> Partner for FiniteHeatBody<'m> {
 
 /// Accepted physical accounts. Rejected/coarse reductions never enter this sum.
 #[derive(Clone, Copy, Default)]
-struct Totals {
+pub(super) struct Totals {
     gas: CompressionTotals,
     // Heat, counterpart entropy, native gas-plus-counterpart production.
     thermal: [(f64, f64); 3],
@@ -323,21 +376,26 @@ struct Totals {
 }
 
 impl Totals {
-    fn interval<B: Partner, F: FnMut() -> bool>(
+    pub(super) fn interval<B: Partner, F: FnMut() -> bool>(
         &mut self,
         reactor: &mut MaterialIsochoricReactor,
         candidate: &mut ClosedGasParcel,
         partner: &mut B,
         interval: CompressionInterval,
+        clock: IntervalTime,
         volume: GasEntropySolve,
         cancelled: &mut F,
-    ) -> Result<(), Error> {
+    ) -> Result<(), MaterialCompressionError> {
         let Self { gas, thermal, body } = self;
         let entropy = advance_interval_with(
-            candidate, interval, volume, gas, cancelled,
+            candidate,
+            interval,
+            volume,
+            gas,
+            cancelled,
             |candidate, duration, cancelled| {
                 let (next, step, body_change) =
-                    partner.react(reactor, candidate, duration, cancelled)?;
+                    partner.react(reactor, candidate, duration, clock, cancelled)?;
                 for (total, value) in thermal.iter_mut().zip([
                     step.heat_input_j,
                     step.partner_entropy_change_j_k,
@@ -360,7 +418,10 @@ impl Totals {
 
     fn merge(&mut self, other: Self) -> Result<(), Error> {
         self.gas.merge(other.gas)?;
-        for (into, from) in self.thermal.iter_mut().zip(other.thermal)
+        for (into, from) in self
+            .thermal
+            .iter_mut()
+            .zip(other.thermal)
             .chain(self.body.iter_mut().zip(other.body))
         {
             accumulate(into, from.0);
@@ -369,16 +430,23 @@ impl Totals {
         Ok(())
     }
 
-    fn finish<B: Partner>(
+    pub(super) fn finish<B: Partner>(
         self,
         partner: B,
         initial_volume_m3: f64,
         final_volume_m3: f64,
         duration: Time,
-    ) -> Result<B::Physical, Error> {
-        let gas = self.gas.finish(initial_volume_m3, final_volume_m3, duration)?;
-        if self.thermal.iter().chain(&self.body).any(|value| !value.0.is_finite()) {
-            return Err(Error::Invalid(
+    ) -> Result<B::Physical, MaterialCompressionError> {
+        let gas = self
+            .gas
+            .finish(initial_volume_m3, final_volume_m3, duration)?;
+        if self
+            .thermal
+            .iter()
+            .chain(&self.body)
+            .any(|value| !value.0.is_finite())
+        {
+            return Err(MaterialCompressionError::Invalid(
                 "accumulated thermal/body work, heat or entropy is unrepresentable",
             ));
         }
@@ -404,7 +472,7 @@ impl Totals {
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn advance<B: Partner, F: FnMut() -> bool>(
+pub(super) fn advance<B: Partner, F: FnMut() -> bool>(
     reactor: &mut MaterialThermalCompressionReactor,
     parcel: &ClosedGasParcel,
     final_volume: Volume,
@@ -412,14 +480,22 @@ fn advance<B: Partner, F: FnMut() -> bool>(
     mut partner: B,
     controls: AdaptiveMaterialThermalCompressionSolve,
     cancelled: &mut F,
-) -> Result<(ClosedGasParcel, AdaptiveMaterialThermalCompressionStep<B::Physical>), Error> {
+) -> Result<
+    (
+        ClosedGasParcel,
+        AdaptiveMaterialThermalCompressionStep<B::Physical>,
+    ),
+    Error,
+> {
     poll(cancelled)?;
     controls.validate()?;
     let initial_volume = parcel.volume_m3();
     let final_volume_m3 = final_volume.value();
     let duration_s = duration.value();
     if !positive(final_volume_m3) || !duration_s.is_finite() || duration_s < 0.0 {
-        return Err(Error::Invalid("positive finite volume and nonnegative finite duration required"));
+        return Err(Error::Invalid(
+            "positive finite volume and nonnegative finite duration required",
+        ));
     }
     let moving = final_volume_m3 != initial_volume;
     let ratio = final_volume_m3 / initial_volume;
@@ -429,32 +505,43 @@ fn advance<B: Partner, F: FnMut() -> bool>(
         ));
     }
     let mut candidate = parcel.clone();
-    candidate.set_volume_isentropic(initial_volume, controls.volume, &mut *cancelled)
+    candidate
+        .set_volume_isentropic(initial_volume, controls.volume, &mut *cancelled)
         .map_err(MaterialCompressionError::from)?;
     let mut totals = Totals::default();
-    if !moving {
+    if !moving && partner.is_time_constant() {
         totals.interval(
-            &mut reactor.reactor, &mut candidate, &mut partner,
+            &mut reactor.reactor,
+            &mut candidate,
+            &mut partner,
             CompressionInterval {
                 duration_s,
                 midpoint_volume_m3: initial_volume,
                 final_volume_m3,
             },
-            controls.volume, cancelled,
+            IntervalTime {
+                start_s: 0.0,
+                end_s: duration_s,
+            },
+            controls.volume,
+            cancelled,
         )?;
         let physical = totals.finish(partner, initial_volume, final_volume_m3, duration)?;
-        return Ok((candidate, AdaptiveMaterialThermalCompressionStep {
-            physical,
-            accepted_intervals: usize::from(duration_s > 0.0),
-            rejected_intervals: 0,
-            evaluations: 1,
-            maximum_accepted_error_ratios: [0.0; 5],
-            minimum_accepted_step_s: duration_s,
-            maximum_accepted_step_s: duration_s,
-            suggested_step_s: controls.initial_step_s,
-            total_chemical_accepted_steps: totals.gas.chemical_accepted,
-            total_chemical_rejected_steps: totals.gas.chemical_rejected,
-        }));
+        return Ok((
+            candidate,
+            AdaptiveMaterialThermalCompressionStep {
+                physical,
+                accepted_intervals: usize::from(duration_s > 0.0),
+                rejected_intervals: 0,
+                evaluations: 1,
+                maximum_accepted_error_ratios: [0.0; 5],
+                minimum_accepted_step_s: duration_s,
+                maximum_accepted_step_s: duration_s,
+                suggested_step_s: controls.initial_step_s,
+                total_chemical_accepted_steps: totals.gas.chemical_accepted,
+                total_chemical_rejected_steps: totals.gas.chemical_rejected,
+            },
+        ));
     }
 
     // Bind canonical keys once, without cloning source cards or rebuilding
@@ -480,7 +567,9 @@ fn advance<B: Partner, F: FnMut() -> bool>(
     };
     let log_ratio = fs_math::det::ln(ratio);
     let volume_at = |time: f64| {
-        if time == duration_s { final_volume_m3 } else {
+        if time == duration_s {
+            final_volume_m3
+        } else {
             initial_volume * fs_math::det::exp(log_ratio * (time / duration_s))
         }
     };
@@ -491,7 +580,8 @@ fn advance<B: Partner, F: FnMut() -> bool>(
     let (mut minimum, mut maximum) = (f64::INFINITY, 0.0_f64);
     while elapsed < duration_s {
         poll(cancelled)?;
-        if accepted == controls.maximum_intervals || evaluations + 3 > controls.maximum_evaluations {
+        if accepted == controls.maximum_intervals || evaluations + 3 > controls.maximum_evaluations
+        {
             return Err(Error::WorkLimit {
                 elapsed_time_s: elapsed,
                 accepted_intervals: accepted,
@@ -499,15 +589,25 @@ fn advance<B: Partner, F: FnMut() -> bool>(
                 evaluations,
             });
         }
-        let end = if step >= duration_s - elapsed { duration_s } else { elapsed + step };
+        let boundary = partner.next_boundary(elapsed, duration_s);
+        let end = if step >= boundary - elapsed {
+            boundary
+        } else {
+            elapsed + step
+        };
         let span = end - elapsed;
         let middle = elapsed + 0.5 * span;
         let first_midpoint = elapsed + 0.5 * (middle - elapsed);
         let second_midpoint = middle + 0.5 * (end - middle);
-        if !(elapsed < first_midpoint && first_midpoint < middle
-            && middle < second_midpoint && second_midpoint < end)
+        if !(elapsed < first_midpoint
+            && first_midpoint < middle
+            && middle < second_midpoint
+            && second_midpoint < end)
         {
-            return Err(Error::TimeResolution { elapsed_time_s: elapsed, target_time_s: end });
+            return Err(Error::TimeResolution {
+                elapsed_time_s: elapsed,
+                target_time_s: end,
+            });
         }
         let endpoint = volume_at(end);
         let midpoint = volume_at(middle);
@@ -516,57 +616,103 @@ fn advance<B: Partner, F: FnMut() -> bool>(
         let mut coarse_totals = Totals::default();
         evaluations += 1;
         coarse_totals.interval(
-            &mut reactor.reactor, &mut coarse, &mut coarse_partner,
+            &mut reactor.reactor,
+            &mut coarse,
+            &mut coarse_partner,
             CompressionInterval {
                 duration_s: span,
                 midpoint_volume_m3: midpoint,
                 final_volume_m3: endpoint,
             },
-            controls.volume, cancelled,
+            IntervalTime {
+                start_s: elapsed,
+                end_s: end,
+            },
+            controls.volume,
+            cancelled,
         )?;
         let mut fine = candidate.clone();
         let mut fine_partner = partner;
         let mut fine_totals = Totals::default();
         evaluations += 1;
         fine_totals.interval(
-            &mut reactor.reactor, &mut fine, &mut fine_partner,
+            &mut reactor.reactor,
+            &mut fine,
+            &mut fine_partner,
             CompressionInterval {
                 duration_s: middle - elapsed,
                 midpoint_volume_m3: volume_at(first_midpoint),
                 final_volume_m3: midpoint,
             },
-            controls.volume, cancelled,
+            IntervalTime {
+                start_s: elapsed,
+                end_s: middle,
+            },
+            controls.volume,
+            cancelled,
         )?;
         evaluations += 1;
         fine_totals.interval(
-            &mut reactor.reactor, &mut fine, &mut fine_partner,
+            &mut reactor.reactor,
+            &mut fine,
+            &mut fine_partner,
             CompressionInterval {
                 duration_s: end - middle,
                 midpoint_volume_m3: volume_at(second_midpoint),
                 final_volume_m3: endpoint,
             },
-            controls.volume, cancelled,
+            IntervalTime {
+                start_s: middle,
+                end_s: end,
+            },
+            controls.volume,
+            cancelled,
         )?;
         // Validate every physical account before comparing or accepting a state.
-        coarse_totals.finish(coarse_partner, candidate.volume_m3(), endpoint, Time::new(span))?;
-        fine_totals.finish(fine_partner, candidate.volume_m3(), endpoint, Time::new(span))?;
+        coarse_totals.finish(
+            coarse_partner,
+            candidate.volume_m3(),
+            endpoint,
+            Time::new(span),
+        )?;
+        fine_totals.finish(
+            fine_partner,
+            candidate.volume_m3(),
+            endpoint,
+            Time::new(span),
+        )?;
         for (total, counts) in chemical.iter_mut().zip([
-            [coarse_totals.gas.chemical_accepted, fine_totals.gas.chemical_accepted],
-            [coarse_totals.gas.chemical_rejected, fine_totals.gas.chemical_rejected],
+            [
+                coarse_totals.gas.chemical_accepted,
+                fine_totals.gas.chemical_accepted,
+            ],
+            [
+                coarse_totals.gas.chemical_rejected,
+                fine_totals.gas.chemical_rejected,
+            ],
         ]) {
-            *total = counts[0].checked_add(counts[1]).and_then(|n| total.checked_add(n))
+            *total = counts[0]
+                .checked_add(counts[1])
+                .and_then(|n| total.checked_add(n))
                 .ok_or(Error::Invalid("total chemical work count overflow"))?;
         }
         let original = compare(
-            &species, [&candidate, &coarse, &fine],
+            &species,
+            [&candidate, &coarse, &fine],
             [coarse_totals.gas.work.0, fine_totals.gas.work.0],
-            comparison, cancelled,
+            comparison,
+            cancelled,
         )?;
         let errors = [
-            original[0], original[1], original[2],
+            original[0],
+            original[1],
+            original[2],
             scaled_difference(
-                0.0, coarse_totals.thermal[0].0, fine_totals.thermal[0].0,
-                controls.absolute_heat_tolerance_j, controls.relative_tolerance,
+                0.0,
+                coarse_totals.thermal[0].0,
+                fine_totals.thermal[0].0,
+                controls.absolute_heat_tolerance_j,
+                controls.relative_tolerance,
             )?,
             body_error(partner, coarse_partner, fine_partner, controls)?,
         ];
@@ -582,7 +728,9 @@ fn advance<B: Partner, F: FnMut() -> bool>(
             for i in 0..5 {
                 maxima[i] = maxima[i].max(errors[i]);
             }
-            let factor = if error == 0.0 { 2.0 } else {
+            let factor = if error == 0.0 {
+                2.0
+            } else {
                 (0.9 / error_root(error, kinetics.chemistry.method)).clamp(0.5, 2.0)
             };
             step = if span >= controls.maximum_step_s / factor {
@@ -592,28 +740,34 @@ fn advance<B: Partner, F: FnMut() -> bool>(
             };
         } else {
             rejected += 1;
-            let factor =
-                (0.8 / error_root(error, kinetics.chemistry.method)).clamp(0.1, 0.5);
+            let factor = (0.8 / error_root(error, kinetics.chemistry.method)).clamp(0.1, 0.5);
             let next = (span * factor).max(controls.minimum_step_s);
             if span <= controls.minimum_step_s || !positive(next) || next >= span {
-                return Err(Error::Accuracy { elapsed_time_s: elapsed, step_s: span, error_ratios: errors });
+                return Err(Error::Accuracy {
+                    elapsed_time_s: elapsed,
+                    step_s: span,
+                    error_ratios: errors,
+                });
             }
             step = next;
         }
     }
     let physical = totals.finish(partner, initial_volume, final_volume_m3, duration)?;
-    Ok((candidate, AdaptiveMaterialThermalCompressionStep {
-        physical,
-        accepted_intervals: accepted,
-        rejected_intervals: rejected,
-        evaluations,
-        maximum_accepted_error_ratios: maxima,
-        minimum_accepted_step_s: minimum,
-        maximum_accepted_step_s: maximum,
-        suggested_step_s: step,
-        total_chemical_accepted_steps: chemical[0],
-        total_chemical_rejected_steps: chemical[1],
-    }))
+    Ok((
+        candidate,
+        AdaptiveMaterialThermalCompressionStep {
+            physical,
+            accepted_intervals: accepted,
+            rejected_intervals: rejected,
+            evaluations,
+            maximum_accepted_error_ratios: maxima,
+            minimum_accepted_step_s: minimum,
+            maximum_accepted_step_s: maximum,
+            suggested_step_s: step,
+            total_chemical_accepted_steps: chemical[0],
+            total_chemical_rejected_steps: chemical[1],
+        },
+    ))
 }
 
 // Subtract represented specific enthalpies before multiplying by original mass.
@@ -627,21 +781,36 @@ fn body_error<B: Partner>(
     let Some([initial_h, mass]) = initial.body_inventory() else {
         return Ok(0.0);
     };
-    let [coarse_h, _] = coarse.body_inventory().ok_or(Error::Invalid("missing coarse body state"))?;
-    let [fine_h, _] = fine.body_inventory().ok_or(Error::Invalid("missing fine body state"))?;
+    let [coarse_h, _] = coarse
+        .body_inventory()
+        .ok_or(Error::Invalid("missing coarse body state"))?;
+    let [fine_h, _] = fine
+        .body_inventory()
+        .ok_or(Error::Invalid("missing fine body state"))?;
     let change = ((Dd::from_f64(coarse_h) - Dd::from_f64(initial_h)) * Dd::from_f64(mass))
-        .to_f64().abs().max(
-            ((Dd::from_f64(fine_h) - Dd::from_f64(initial_h)) * Dd::from_f64(mass)).to_f64().abs(),
+        .to_f64()
+        .abs()
+        .max(
+            ((Dd::from_f64(fine_h) - Dd::from_f64(initial_h)) * Dd::from_f64(mass))
+                .to_f64()
+                .abs(),
         );
     let difference = ((Dd::from_f64(fine_h) - Dd::from_f64(coarse_h)) * Dd::from_f64(mass))
-        .to_f64().abs();
+        .to_f64()
+        .abs();
     let scale = controls.absolute_body_enthalpy_tolerance_j + controls.relative_tolerance * change;
     if !positive(scale) || !difference.is_finite() {
-        return Err(Error::Invalid("body enthalpy comparison is unrepresentable"));
+        return Err(Error::Invalid(
+            "body enthalpy comparison is unrepresentable",
+        ));
     }
     Ok(difference / scale)
 }
 
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
-    if cancelled() { Err(Error::Cancelled) } else { Ok(()) }
+    if cancelled() {
+        Err(Error::Cancelled)
+    } else {
+        Ok(())
+    }
 }

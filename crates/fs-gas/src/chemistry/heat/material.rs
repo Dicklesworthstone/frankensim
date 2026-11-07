@@ -78,6 +78,25 @@ impl<'m> FiniteHeatBody<'m> {
         self.conductance
     }
 
+    /// Change the declared total conductance without changing physical storage.
+    ///
+    /// The original source, exact enthalpy/phase state, mass and held pressure
+    /// are retained bit for bit. This is a boundary-condition change, not heat,
+    /// work or a new caloric inversion. A time integrator must still resolve the
+    /// physical conductance history; this method advances no time.
+    pub fn with_conductance(
+        mut self,
+        conductance: ThermalConductance,
+    ) -> Result<Self, IsochoricKineticsError> {
+        if !conductance.value().is_finite() || conductance.value() < 0.0 {
+            return Err(IsochoricKineticsError::Invalid(
+                "finite nonnegative total thermal conductance required",
+            ));
+        }
+        self.conductance = conductance;
+        Ok(self)
+    }
+
     pub(super) fn sample(
         self,
         gas_heat_j: f64,

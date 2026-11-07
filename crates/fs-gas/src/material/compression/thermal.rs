@@ -6,8 +6,10 @@
 //! in their original owners. A finite body retains its original enthalpy chart,
 //! latent inventory, density and isobaric expansion work through every interval.
 //!
-//! Conductance is caller-supplied and constant over the stroke. It is a total
-//! conductance [W/K], not a conductivity or an inferred moving-wall area law.
+//! The endpoint methods hold caller-supplied conductance constant over a stroke.
+//! [`schedule`] additionally resolves prescribed time-varying bath temperature
+//! and conductance. Conductance is total [W/K], not a conductivity or an inferred
+//! moving-wall area law.
 //! These homogeneous states have no piston inertia, spatial wall gradients or
 //! gas phase change. Refine the prescribed substeps to assess splitting error;
 //! native chemistry tolerances apply separately to each rigid-stage call.
@@ -25,6 +27,8 @@ use fs_thermochem::kinetics::IdealGasKineticsV1;
 
 /// Adaptive gas, heat and finite-body enthalpy comparisons on the same interval kernel.
 pub mod adaptive;
+/// Physical-time bath and finite-body conductance programs on the same kernels.
+pub mod schedule;
 
 type Error = MaterialCompressionError;
 
