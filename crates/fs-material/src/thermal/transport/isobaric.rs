@@ -99,6 +99,16 @@ pub struct LinearHeatExchange {
     /// A direct positive moment retains weak exchange without subtracting
     /// nearly equal heat and exposure. Zero exposure has zero wall response.
     pub mean_reservoir_derivative: f64,
+    /// Signed reservoir-minus-outlet temperature [K], retained before rounding
+    /// the absolute outlet. This is d h_out / d X for exposure X [J/(kg K)]
+    /// with initial enthalpy, reservoir and original Cp fixed. A saturated
+    /// absolute outlet can still have a nonzero remaining driving difference.
+    pub remaining_temperature_difference_k: f64,
+    /// d T_mean / d ln(X) [K] at fixed initial state, reservoir and source.
+    /// Equal to T_out - T_mean, retained through positive relative-temperature
+    /// moments instead of subtracting rounded absolute temperatures. Positive
+    /// for heating, negative for cooling; zero at X = 0 or exact equilibrium.
+    pub mean_log_exposure_derivative_k: f64,
 }
 
 impl IsobaricHeatCapacityLaw {
@@ -414,6 +424,8 @@ pub(crate) fn source_linear_heat_exchange(
         inlet_enthalpy_loss: answer.inlet_energy_loss,
         reservoir_enthalpy_derivative_j_kg_k: answer.reservoir_energy_derivative,
         mean_reservoir_derivative: answer.mean_reservoir_derivative,
+        remaining_temperature_difference_k: answer.remaining_temperature_difference,
+        mean_log_exposure_derivative_k: answer.mean_log_exposure_derivative,
     })
 }
 

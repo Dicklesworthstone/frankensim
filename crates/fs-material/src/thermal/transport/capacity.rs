@@ -33,6 +33,8 @@ pub(super) struct CapacityExchange {
     pub inlet_energy_loss: f64,
     pub reservoir_energy_derivative: f64,
     pub mean_reservoir_derivative: f64,
+    pub remaining_temperature_difference: f64,
+    pub mean_log_exposure_derivative: f64,
 }
 
 /// Prepared search coordinates for repeated caloric queries from one fixed datum.
@@ -360,6 +362,8 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
                 inlet_energy_loss: loss,
                 reservoir_energy_derivative: response,
                 mean_reservoir_derivative: mean_response,
+                remaining_temperature_difference: reservoir - initial,
+                mean_log_exposure_derivative: 0.0,
             });
         }
         let heating = reservoir > initial;
@@ -379,6 +383,7 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
         let (mut inlet_energy_gain, mut inlet_energy_loss) = (1.0, 0.0);
         let mut reservoir_energy_derivative = 0.0;
         let (mut mean_response_numerator, mut response_correction) = (0.0, 0.0);
+        let (mut mean_exposure_response, mut exposure_response_correction) = (0.0, 0.0);
         for _ in 0..self.knots.len() - 1 {
             let end = if heating {
                 self.knots[index + 1].temperature().min(reservoir)
@@ -420,8 +425,18 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
             } else {
                 travel / segment.distance
             };
-            let (local_mean, response, mean_response) =
+            let (local_mean, response, mean_response, local_mean_gap) =
                 segment.exchange_moments(travel, local_exposure, heat, gain);
+            // X*dTmean/dX = Tout-Tmean. Accumulate its positive interval
+            // moment before rounding either absolute temperature. Moving the
+            // endpoint by `travel` also moves its gap from all earlier states.
+            // Normalize first so even very large finite exposures need no X*T.
+            compensated_add(
+                &mut mean_exposure_response,
+                &mut exposure_response_correction,
+                (cumulative / exposure) * travel
+                    + (local_exposure / exposure) * local_mean_gap,
+            );
             // X-B stays a positive integral even when B rounds to X. This
             // preserves a weak wall response of the stream's Robin mean.
             compensated_add(
@@ -434,8 +449,10 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
             inlet_energy_gain *= gain;
             if !reservoir_energy_derivative.is_finite()
                 || !mean_response_numerator.is_finite()
+                || !mean_exposure_response.is_finite()
                 || reservoir_energy_derivative < 0.0
                 || mean_response_numerator < 0.0
+                || mean_exposure_response < 0.0
             {
                 return Err(invalid("heat-exchange wall response is not representable"));
             }
@@ -477,6 +494,8 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
                     inlet_energy_loss,
                     reservoir_energy_derivative,
                     mean_reservoir_derivative: mean_response_numerator / exposure,
+                    remaining_temperature_difference: (reservoir - initial) * inlet_energy_gain,
+                    mean_log_exposure_derivative: direction * mean_exposure_response,
                 });
             }
             correction = (next - cumulative) - corrected;
@@ -755,10 +774,11 @@ impl ExchangeSegment {
         ))
     }
 
-    // The same positive moments give the stream mean and its wall response.
+    // The same positive moments give the stream mean, its wall response, and
+    // the endpoint-minus-mean gap needed by exposure/control derivatives.
     // B=dEout/dTw=Dout*integral C(T)/(Tw-T)^2 dT. For affine C,
     // B=C0*w0+C1*w1, w0=(1-z)*[-log(1-z)-z]/z and w1=z-w0.
-    fn exchange_moments(&self, travel: f64, exposure: f64, heat: f64, gain: f64) -> (f64, f64, f64) {
+    fn exchange_moments(&self, travel: f64, exposure: f64, heat: f64, gain: f64) -> (f64, f64, f64, f64) {
         let heat_per_exposure = heat / exposure;
         let z = travel / self.distance;
         let end_capacity = self.capacity(travel);
@@ -775,7 +795,10 @@ impl ExchangeSegment {
             } else {
                 travel * ((c0 * b0 + c1 * b1) / denominator)
             };
-            (mean, response, mean_response)
+            // Integral (1-y)*C(y)/(1-z*y), expressed with positive weights.
+            // Unlike travel-mean this also retains a sub-ulp absolute gap.
+            let mean_gap = travel * ((c0 * (a0 - b0) + c1 * b0) / denominator);
+            (mean, response, mean_response, mean_gap)
         } else {
             let w0 = if gain == 0.0 { 0.0 } else { gain * (-gain.ln() - z) / z };
             let response = self.initial_capacity * w0 + end_capacity * (z - w0);
@@ -787,7 +810,11 @@ impl ExchangeSegment {
                 let (c0, c1) = (self.initial_capacity / scale, end_capacity / scale);
                 travel * ((c0 * b0 + c1 * b1) / (c0 * a0 + c1 * a1))
             };
-            (mean, response, 1.0 - response / exposure)
+            // Here more than half the reservoir gap has been traversed, so
+            // this subtraction is well conditioned for positive affine Cp.
+            // The analytic gain survives even if travel rounds to distance.
+            let mean_gap = heat_per_exposure - self.distance * gain;
+            (mean, response, 1.0 - response / exposure, mean_gap)
         }
     }
 
@@ -915,6 +942,43 @@ mod tests {
                 let bound = 8.0 * f64::EPSILON * (1.0 + exposure / 1000.0) * expected;
                 assert!((answer.inlet_energy_gain - expected).abs() <= bound);
             }
+        }
+    }
+
+    #[test]
+    fn g1_exposure_response_keeps_weak_and_saturated_newton_cooling() {
+        let knots = [[200.0, 1000.0], [1000.0, 1000.0]];
+        let curve = CapacityCurve::new(&knots);
+        for (initial, reservoir) in [(300.0, 800.0), (800.0, 300.0)] {
+            let difference = reservoir - initial;
+            for ntu in [0.0_f64, 1e-12, 1e-5, 0.5, 2.0, 80.0, 1e18] {
+                let answer = curve.linear_heat_exchange(initial, reservoir, 1000.0 * ntu).unwrap();
+                let expected_remaining = difference * (-ntu).exp();
+                // Independent Newton-cooling mean; its weak series avoids
+                // cancellation in (1-exp(-ntu))/ntu-exp(-ntu).
+                let expected_mean_derivative = difference * if ntu < 1e-3 {
+                    ntu * (0.5 - ntu / 3.0 + ntu * ntu / 8.0 - ntu.powi(3) / 30.0)
+                } else {
+                    -(-ntu).exp_m1() / ntu - (-ntu).exp()
+                };
+                assert!((answer.remaining_temperature_difference - expected_remaining).abs()
+                    <= 32.0 * f64::EPSILON * expected_remaining.abs());
+                assert!((answer.mean_log_exposure_derivative - expected_mean_derivative).abs()
+                    <= 64.0 * f64::EPSILON * expected_mean_derivative.abs());
+                if ntu == 80.0 {
+                    assert_eq!(answer.temperature, reservoir);
+                    assert_ne!(answer.remaining_temperature_difference, 0.0);
+                }
+                if ntu == 1e18 {
+                    assert_eq!(answer.temperature, answer.mean_temperature);
+                    assert_ne!(answer.mean_log_exposure_derivative, 0.0);
+                }
+            }
+        }
+        for exposure in [0.0, 1e-9, 1000.0, 80_000.0] {
+            let answer = curve.linear_heat_exchange(400.0, 400.0, exposure).unwrap();
+            assert_eq!(answer.remaining_temperature_difference, 0.0);
+            assert_eq!(answer.mean_log_exposure_derivative, 0.0);
         }
     }
 
@@ -1076,9 +1140,8 @@ mod tests {
             let curve = CapacityCurve::new(&knots);
             for (initial, target, reservoir) in [(300.0, 500.0, 700.0), (550.0, 280.0, 180.0)] {
                 let exposure = affine_exchange(initial, target, reservoir, intercept, slope);
-                let actual = curve
-                    .temperature_after_linear_exchange(initial, reservoir, exposure)
-                    .unwrap();
+                let answer = curve.linear_heat_exchange(initial, reservoir, exposure).unwrap();
+                let actual = answer.temperature;
                 assert!(
                     (actual - target).abs() <= 4.0 * f64::EPSILON * target,
                     "{actual} != {target}"
@@ -1094,6 +1157,12 @@ mod tests {
                 let exact_heat =
                     (intercept + 0.5 * slope * (target + initial)) * (target - initial);
                 assert!((heat - exact_heat).abs() <= 16.0 * f64::EPSILON * exact_heat.abs());
+                let remaining = reservoir - target;
+                let mean_derivative = exact_heat / exposure - remaining;
+                assert!((answer.remaining_temperature_difference - remaining).abs()
+                    <= 16.0 * f64::EPSILON * remaining.abs());
+                assert!((answer.mean_log_exposure_derivative - mean_derivative).abs()
+                    <= 32.0 * f64::EPSILON * mean_derivative.abs());
             }
         }
     }
@@ -1153,6 +1222,21 @@ mod tests {
             assert!((answer.mean_reservoir_derivative - (1.0 - expected_response / exposure)).abs() < 3e-12);
             assert!((answer.inlet_energy_loss - (target - initial) / (reservoir - initial)).abs() < 3e-14);
             assert!((answer.inlet_energy_gain + answer.inlet_energy_loss - 1.0).abs() < 3e-14);
+            let exact_heat: f64 = cuts.windows(2).map(|pair| {
+                let middle = 0.5 * (pair[0] + pair[1]);
+                let capacity = if middle < 300.0 {
+                    800.0 + 2.0 * middle
+                } else if middle < 400.0 {
+                    200.0 + 4.0 * middle
+                } else {
+                    3400.0 - 4.0 * middle
+                };
+                capacity * (pair[1] - pair[0])
+            }).sum();
+            let remaining = reservoir - target;
+            let mean_derivative = exact_heat / exposure - remaining;
+            assert!((answer.remaining_temperature_difference - remaining).abs() < 2e-12);
+            assert!((answer.mean_log_exposure_derivative - mean_derivative).abs() < 2e-12);
         }
         // Exact source knots select the correct outgoing interval when cooling.
         let exposure = affine_exchange(400.0, 350.0, 200.0, 200.0, 4.0);

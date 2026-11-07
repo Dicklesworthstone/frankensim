@@ -10275,11 +10275,22 @@ Positive integral moments preserve weak exchange; exact equilibrium uses the
 local exponential derivative limit. The original bounded exchange inverse,
 signed heat, source identity, pressure and composition remain unchanged.
 
+The same result exposes `remaining_temperature_difference_k`, the signed
+reservoir-minus-outlet drive and derivative of outlet specific enthalpy with
+respect to exposure, and `mean_log_exposure_derivative_k`, the signed derivative
+of mean temperature with respect to log exposure. The latter equals outlet
+minus mean temperature and is zero at zero exposure or equilibrium. Positive
+interval moments retain it before absolute-temperature rounding, with no new
+source traversal, allocation or perturbed solve. The remaining drive retains
+the analytic attenuation even when the absolute outlet rounds to the reservoir.
+
 Focused regressions differentiate an independent piecewise caloric integral
 in heating and cooling across source knots, including exterior reservoirs,
-and check weak, zero, equilibrium and strong exchange limits. These native
-regressions are authored and syntax checked but unexecuted in this workspace;
-no runtime or experimental verification is claimed.
+and check weak, zero, equilibrium and strong exchange limits. Original affine
+caloric integrals and constant-Cp Newton cooling also check both exposure
+sensitivities, including NTU `1e-12`, saturated NTU `80`, and a finite mean
+response when both absolute outlet and mean round to the same temperature.
+These are numerical model checks, not experimental material validation.
 
 ## Integrated conductivity for volumetric and assembled storage
 
