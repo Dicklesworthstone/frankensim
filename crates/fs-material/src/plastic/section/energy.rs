@@ -24,6 +24,7 @@ use crate::plastic::hill::oriented::OrientedHill48;
 use crate::plastic::hill::source::ResolvedHill48;
 use crate::plastic::rate::{LinearOverstressJ2, PowerLawOverstressJ2, VoceOverstressJ2};
 use crate::plastic::tabulated::TabulatedJ2;
+use crate::plastic::tabulated::rate::TabulatedOverstressJ2;
 use crate::plastic::voce::VoceJ2;
 use crate::{MaterialError, SmallStrainLaw, Voigt};
 
@@ -84,6 +85,11 @@ macro_rules! native_energy {
 native_energy!(J2Plasticity, J2Plasticity::validate_committed_history);
 native_energy!(VoceJ2, VoceJ2::validate_committed_history);
 native_energy!(TabulatedJ2, TabulatedJ2::validate_committed_history);
+native_energy!(
+    TabulatedOverstressJ2,
+    |law, strain, state, _| law.validate_history(strain, state),
+    |law| Some(law.duration_s())
+);
 native_energy!(
     LinearOverstressJ2,
     |law, strain, state, _| law.backbone().validate_overstress_history(strain, state),

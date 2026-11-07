@@ -123,6 +123,52 @@ fn g1_scalar_consistency_crosses_every_segment_and_retains_a_yield_plateau() {
 }
 
 #[test]
+fn g1_last_measured_knot_survives_scalar_and_native_return_rounding() {
+    for kinematic in [0.0, 160.0] {
+        for measured in [
+            curve(),
+            TabulatedHardening::new(vec![
+                HardeningPoint {
+                    plastic_strain: 0.0,
+                    yield_stress_pa: 3.0,
+                },
+                HardeningPoint {
+                    plastic_strain: 0.04,
+                    yield_stress_pa: 3.0,
+                },
+            ])
+            .unwrap(),
+        ] {
+            let m = TabulatedJ2::new(law(kinematic).backbone().clone(), measured).unwrap();
+            let old = J2State {
+                plastic_strain: [0.0; 6],
+                alpha: 0.012,
+            };
+            m.validate_committed_history(&[0.0; 6], &old, TOL.yield_pa)
+                .unwrap();
+            let maximum = m.hardening().maximum_plastic_strain();
+            let delta = maximum - old.alpha;
+            let radius = m.hardening().yield_stress_pa(maximum).unwrap();
+            // A value assembled from the physical equation can round just
+            // above the separately assembled last-knot consistency value.
+            let total = ((radius + (1500.0 + kinematic) * delta) / 1500.0).next_up();
+            let strain = dev(total);
+            let response = m.response(&strain, &old).unwrap();
+            let step = m
+                .advance_with_energy(&[0.0; 6], &old, &strain, TOL)
+                .unwrap();
+            assert!(response.state.alpha <= maximum && step.state.alpha <= maximum);
+            near(response.state.alpha, maximum, 3e-16);
+            near(step.state.alpha, response.state.alpha, 3e-16);
+            near(step.energy.residual_j_m3, 0.0, 1e-13);
+            assert_eq!(m.update_state(&strain, &old), response.state);
+            assert!(m.response(&dev(total + 1e-6), &old).is_err());
+            assert_eq!(old.alpha, 0.012);
+        }
+    }
+}
+
+#[test]
 fn g1_native_tensor_return_follows_tabulated_flow_stress_without_a_fit() {
     let m = law(160.0);
     let virgin = m.initial_state();

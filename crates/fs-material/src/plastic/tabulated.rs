@@ -14,6 +14,8 @@
 
 /// Original material-card curves with explicit stress and plastic-strain meaning.
 pub mod source;
+/// Associative Perzyna flow over the same bounded measured hardening curve.
+pub mod rate;
 
 use super::energy::{EnergyError, EnergyIncrement, EnergyTolerances, StoredEnergy};
 use super::{J2Plasticity, J2State, Update};
@@ -323,7 +325,12 @@ impl TabulatedHardening {
             correction_pa * (self.points[index].plastic_strain - alpha)
                 + (self.points[index].yield_stress_pa - yield_old)
         };
-        if excess > required(last) {
+        let last_required = required(last);
+        // Independently assembled endpoint stresses can differ by a few ulps.
+        // Admit only that consistency roundoff; the solved increment below
+        // remains clipped to measured support, never extrapolated beyond it.
+        let endpoint_tolerance = 32.0 * f64::EPSILON * excess.max(last_required);
+        if excess > last_required && excess - last_required > endpoint_tolerance {
             return Err(TabulatedError::Domain {
                 plastic_strain: alpha + excess / correction_pa,
                 maximum: self.maximum_plastic_strain(),
@@ -351,9 +358,12 @@ impl TabulatedHardening {
         // The searched segment is a mathematical bracket. Enforce it against
         // final-addition roundoff so a final-knot return cannot leave the table.
         let upper = self.points[segment + 1].plastic_strain - alpha;
-        let delta = (crossed + (excess - spent) / modulus)
+        let mut delta = (crossed + (excess - spent) / modulus)
             .max(crossed)
             .min(upper);
+        if alpha + delta > self.points[segment + 1].plastic_strain {
+            delta = delta.next_down();
+        }
         if !modulus.is_finite() || !delta.is_finite() || delta <= 0.0 || alpha + delta == alpha {
             return Err(TabulatedError::Numerical(
                 "plastic consistency return is not representable",
@@ -507,7 +517,58 @@ impl TabulatedJ2 {
                 "hardening secant is not representable",
             ));
         }
+        let secant =
+            self.bounded_return_secant(trial.q_trial - shifted.yield_stress, state.alpha, secant)?;
         Ok((shifted, secant))
+    }
+
+    // The scalar root and the native secant-based return round independently.
+    // A last-knot root must remain inside measured support in EVERY native
+    // stress/state/energy evaluation, including a perfect-flow plateau. Correct
+    // only machine-scale consistency error by raising the return denominator;
+    // do not project history or evaluate an extrapolated material coefficient.
+    fn bounded_return_secant(
+        &self,
+        excess: f64,
+        alpha: f64,
+        secant: f64,
+    ) -> Result<f64, TabulatedError> {
+        let (_, mu) = self.backbone.elastic.lame();
+        let correction = 3.0 * mu + self.backbone.kinematic_hardening;
+        let denominator = correction + secant;
+        if !secant.is_finite() || secant < 0.0 || !denominator.is_finite() {
+            return Err(TabulatedError::Numerical(
+                "tabulated return modulus is not representable",
+            ));
+        }
+        let maximum = self.hardening.maximum_plastic_strain();
+        if excess <= 0.0 || alpha + excess / denominator <= maximum {
+            return Ok(secant);
+        }
+        let mut remaining = maximum - alpha;
+        if alpha + remaining > maximum {
+            remaining = remaining.next_down();
+        }
+        let residual = excess - denominator * remaining;
+        let tolerance = 32.0 * f64::EPSILON * excess.max(denominator * remaining);
+        if remaining <= 0.0 || !residual.is_finite() || residual.abs() > tolerance {
+            return Err(TabulatedError::Domain {
+                plastic_strain: alpha + excess / denominator,
+                maximum,
+            });
+        }
+        let mut bounded_denominator = (excess / remaining).next_up();
+        for _ in 0..3 {
+            let bounded_secant = (bounded_denominator - correction).max(secant);
+            let total = correction + bounded_secant;
+            if total.is_finite() && alpha + excess / total <= maximum {
+                return Ok(bounded_secant);
+            }
+            bounded_denominator = bounded_denominator.next_up();
+        }
+        Err(TabulatedError::Numerical(
+            "bounded native table return is not representable",
+        ))
     }
 
     fn returned(
