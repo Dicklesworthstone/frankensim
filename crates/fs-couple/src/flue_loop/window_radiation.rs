@@ -46,7 +46,12 @@
 //! the resonance whose removal costs least is dropped. Nothing is tuned to a
 //! note. A realization missing `R` by more than 5% anywhere from 20 Hz to
 //! 24 kHz is refused. The error from 24 kHz to the mechanics Nyquist is
-//! reported, as are the realized (bilinear) band error and the `kA` range.
+//! reported, as are the realized sampled band error and the `kA` range.
+//! [`WindowRadiationSampling`] explicitly selects the original bilinear
+//! midpoint realization or exact held-flow cell dynamics. Both return the
+//! mean pressure conjugate to the solved mouth flow. The exact choice retains
+//! physical decay of unresolved resistive poles; its sampled error is measured
+//! with that same mean-pressure transfer, not a bilinear frequency warp.
 //!
 //! The voice's series inertance becomes the window's computed mass less the
 //! cells' static mass, so the static mass from junction to far field stays
@@ -69,7 +74,8 @@ use fs_exec::CancelGate;
 use fs_material::gas::GasState;
 use fs_math::det;
 use fs_vfit::relaxation::{
-    MAX_PARALLEL_CELLS, ParallelCell, ParallelCellFrame, ParallelCellLoad, ParallelCellSpec,
+    ExactParallelCellLoad, MAX_PARALLEL_CELLS, ParallelCell, ParallelCellFrame,
+    ParallelCellLoad, ParallelCellSpec,
 };
 use std::collections::BTreeMap;
 
@@ -153,6 +159,17 @@ pub fn cut_up_piston(cells: &[OuterFaceCell], cut_up_m: f64) -> OuterFaceCell {
     }
 }
 
+/// The declared time representation of the continuous radiation cells.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowRadiationSampling {
+    /// Original midpoint recurrence and its bilinear frequency response.
+    #[default]
+    BilinearMidpoint,
+    /// Hold the solved mouth flow over the interval and integrate physical
+    /// cell decay, mean pressure and resistor heat exactly.
+    ExactHeldFlow,
+}
+
 /// The opening, its passive realization and how well it holds.
 #[derive(Clone, Copy, Debug)]
 pub struct WindowRadiationLoad {
@@ -162,6 +179,7 @@ pub struct WindowRadiationLoad {
     open_area_m2: f64,
     exterior: GasState,
     time_step_s: f64,
+    sampling: WindowRadiationSampling,
     static_mass: f64,
     static_mass_tail_share: f64,
     high_frequency_resistance: f64,
@@ -187,6 +205,28 @@ impl WindowRadiationLoad {
         flux: WindowFlux,
         exterior: GasState,
         time_step_s: f64,
+        gate: &CancelGate,
+    ) -> Result<Self, FlueError> {
+        Self::new_with_sampling(outer_radius_m, cells, flux, exterior, time_step_s,
+            WindowRadiationSampling::BilinearMidpoint, gate)
+    }
+
+    /// Fit the same continuous opening with an explicit time representation.
+    /// The continuous fit and static mass do not depend on this choice. The
+    /// reported discrete band error and the attached runtime use the selected
+    /// representation together. [`Self::new`] preserves the original midpoint
+    /// choice; exact held flow introduces no substeps or artificial damping.
+    ///
+    /// # Errors
+    /// Same physical fit refusals as [`Self::new`], or a selected sampled
+    /// transition/response that cannot be represented.
+    pub fn new_with_sampling(
+        outer_radius_m: f64,
+        cells: &[OuterFaceCell],
+        flux: WindowFlux,
+        exterior: GasState,
+        time_step_s: f64,
+        sampling: WindowRadiationSampling,
         gate: &CancelGate,
     ) -> Result<Self, FlueError> {
         exterior.validate_coherence().map_err(physics)?;
@@ -242,7 +282,15 @@ impl WindowRadiationLoad {
         let band_top = TAU * WINDOW_RADIATION_BAND_HZ[1];
         let fitted = fit(&samples, band_top, static_mass, high_frequency_resistance, a_eq, c)?;
         let load = ParallelCellSpec::new(&fitted).map_err(physics)?;
-        ParallelCellLoad::new(load, time_step_s).map_err(physics)?;
+        let exact = match sampling {
+            WindowRadiationSampling::BilinearMidpoint => {
+                ParallelCellLoad::new(load, time_step_s).map_err(physics)?;
+                None
+            }
+            WindowRadiationSampling::ExactHeldFlow => {
+                Some(ExactParallelCellLoad::new(load, time_step_s).map_err(physics)?)
+            }
+        };
 
         let realized = |omega: f64| realized_resistance(&load, omega);
         let warped = |omega: f64| 2.0 * det::tan(0.5 * omega * time_step_s) / time_step_s;
@@ -251,7 +299,10 @@ impl WindowRadiationLoad {
         for &(omega, r) in &samples {
             if omega <= band_top {
                 band_error = band_error.max((realized(omega) / r - 1.0).abs());
-                discrete_band_error = discrete_band_error.max((realized(warped(omega)) / r - 1.0).abs());
+                let sampled = if let Some(exact) = &exact {
+                    exact.sampled_impedance(omega / TAU).map_err(physics)?.re
+                } else { realized(warped(omega)) };
+                discrete_band_error = discrete_band_error.max((sampled / r - 1.0).abs());
             } else if omega <= nyquist {
                 tail_error = tail_error.max((realized(omega) / r - 1.0).abs());
                 tail_top = tail_top.max(omega);
@@ -269,6 +320,7 @@ impl WindowRadiationLoad {
             open_area_m2: opening.area,
             exterior,
             time_step_s,
+            sampling,
             static_mass,
             static_mass_tail_share,
             high_frequency_resistance,
@@ -298,12 +350,18 @@ impl WindowRadiationLoad {
         )
     }
 
-    /// The realized resistance at `frequency_hz`, continuous or as the
-    /// bilinear midpoint step realizes it [Pa s/m^3].
+    /// The realized resistance at `frequency_hz`, continuous or as the selected
+    /// sampling realizes the interval-mean pressure [Pa s/m^3]. Invalid exact
+    /// sampled queries (including frequencies beyond Nyquist) return NaN.
     #[must_use]
     pub fn realized_resistance(&self, frequency_hz: f64, discrete: bool) -> f64 {
         let mut omega = TAU * frequency_hz;
         if discrete {
+            if self.sampling == WindowRadiationSampling::ExactHeldFlow {
+                return ExactParallelCellLoad::new(self.load, self.time_step_s)
+                    .and_then(|load| load.sampled_impedance(frequency_hz))
+                    .map_or(f64::NAN, |impedance| impedance.re);
+            }
             omega = 2.0 * det::tan(0.5 * omega * self.time_step_s) / self.time_step_s;
         }
         realized_resistance(&self.load, omega)
@@ -312,6 +370,9 @@ impl WindowRadiationLoad {
     /// The passive cells.
     #[must_use]
     pub const fn load(&self) -> &ParallelCellSpec { &self.load }
+    /// Time representation shared by the runtime and discrete error report.
+    #[must_use]
+    pub const fn sampling(&self) -> WindowRadiationSampling { self.sampling }
     /// Which flux distribution was radiated.
     #[must_use]
     pub const fn flux(&self) -> WindowFlux { self.flux }
@@ -342,7 +403,7 @@ impl WindowRadiationLoad {
     /// Largest relative resistance error of the continuous realization, 20 Hz to 24 kHz.
     #[must_use]
     pub const fn band_error(&self) -> f64 { self.band_error }
-    /// The same for the bilinear midpoint step.
+    /// The same for the selected sampling's interval-mean pressure transfer.
     #[must_use]
     pub const fn discrete_band_error(&self) -> f64 { self.discrete_band_error }
     /// Largest relative resistance error from 24 kHz to [`Self::tail_top_hz`].
@@ -795,24 +856,45 @@ fn fit(
 }
 
 /// A port adapter only: memory, stepping and energy stay in fs-vfit.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct WindowRadiation {
     pub model: WindowRadiationLoad,
-    state: ParallelCellLoad,
+    state: WindowRadiationState,
+}
+
+// The exact variant shares immutable prepared transitions and clones only its
+// bounded histories. The midpoint variant retains its original inline state;
+// adding the exact choice does not add transition arrays to every voice.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug)]
+enum WindowRadiationState {
+    Midpoint(ParallelCellLoad),
+    Exact(ExactParallelCellLoad),
 }
 
 impl WindowRadiation {
     fn new(model: WindowRadiationLoad) -> Result<Self, FlueError> {
-        let state = ParallelCellLoad::new(model.load, model.time_step_s).map_err(physics)?;
+        let state = match model.sampling {
+            WindowRadiationSampling::BilinearMidpoint => WindowRadiationState::Midpoint(
+                ParallelCellLoad::new(model.load, model.time_step_s).map_err(physics)?),
+            WindowRadiationSampling::ExactHeldFlow => WindowRadiationState::Exact(
+                ExactParallelCellLoad::new(model.load, model.time_step_s).map_err(physics)?),
+        };
         Ok(Self { model, state })
     }
     /// Step-mean pressure = direct * CURRENT mouth flow + retained history.
-    pub fn affine_pressure(&self) -> (f64, f64) {
-        self.state.affine_pressure()
+    pub fn affine_pressure(&self) -> Result<(f64, f64), FlueError> {
+        match &self.state {
+            WindowRadiationState::Midpoint(state) => Ok(state.affine_pressure()),
+            WindowRadiationState::Exact(state) => state.affine_pressure().map_err(physics),
+        }
     }
     pub fn candidate(&self, flow: f64) -> Result<(Self, ParallelCellFrame), FlueError> {
-        let mut next = *self;
-        let frame = next.state.step(flow).map_err(physics)?;
+        let mut next = self.clone();
+        let frame = match &mut next.state {
+            WindowRadiationState::Midpoint(state) => state.step(flow),
+            WindowRadiationState::Exact(state) => state.step(flow),
+        }.map_err(physics)?;
         Ok((next, frame))
     }
 }
@@ -941,6 +1023,7 @@ mod tests {
         let load = WindowRadiationLoad::new(a, &piston(w / a, l), WindowFlux::CutUpPiston, gas,
             1.0 / 288_000.0, &CancelGate::new_clock_free())
             .expect("fit");
+        assert_eq!(load.sampling(), WindowRadiationSampling::BilinearMidpoint);
         let m0 = load.static_mass_pa_s2_m3();
         let expected = 62.104_999_595_372_97 * gas.density / 1.2;
         assert!((m0 / expected - 1.0).abs() < 1e-5, "M0 {m0} vs {expected}");
@@ -953,5 +1036,59 @@ mod tests {
             load.load().cells().len(), load.band_error(), load.discrete_band_error(),
             load.tail_error(), load.tail_top_hz(), load.static_mass_tail_share(), load.ka_band()
         );
+    }
+
+    #[test]
+    fn exact_window_sampling_reports_and_delivers_the_same_mean_pressure() {
+        let (a, w, l) = (0.0135, 0.012, 0.0046);
+        let gas = air();
+        let face = piston(w / a, l);
+        let dt = 1.0 / 96_000.0;
+        let load = WindowRadiationLoad::new_with_sampling(a, &face, WindowFlux::CutUpPiston, gas,
+            dt, WindowRadiationSampling::ExactHeldFlow, &CancelGate::new_clock_free()).unwrap();
+        assert_eq!(load.sampling(), WindowRadiationSampling::ExactHeldFlow);
+        assert!(load.band_error() <= MAX_WINDOW_RADIATION_ERROR);
+
+        // Recompute the reported sampled error against the physical opening,
+        // using the selected mean-pressure query on the original fit grid.
+        let a_eq = det::sqrt(load.open_area_m2() / PI);
+        let top = (TOP_KA * gas.sound_speed / a_eq.min(a)).max(PI / dt);
+        let bottom = TAU * WINDOW_RADIATION_BAND_HZ[0];
+        let ratio = det::ln(top / bottom) / (FIT_SAMPLES - 1) as f64;
+        let mut error = 0.0_f64;
+        for i in 0..FIT_SAMPLES {
+            let omega = bottom * det::exp(ratio * i as f64);
+            if omega <= TAU * WINDOW_RADIATION_BAND_HZ[1] {
+                let physical = load.exact_resistance(&face, omega / TAU).unwrap();
+                error = error.max((load.realized_resistance(omega / TAU, true) / physical - 1.0).abs());
+            }
+        }
+        assert!((error - load.discrete_band_error()).abs() < 2e-12);
+
+        // Exercise the actual mouth adapter, including candidate acceptance,
+        // at a resolved input frequency. Harmonic measurement uses mean pressure
+        // from each frame, not the capacitor endpoint's phase/attenuation.
+        let mut runtime = WindowRadiation::new(load).unwrap();
+        let (count, bin, warmup) = (1024, 97, 4096);
+        let angle = TAU * f64::from(bin) / f64::from(count);
+        let amplitude = 1e-6;
+        let mut measured = 0.0;
+        for n in 0..warmup + count {
+            let phase = angle * f64::from(n);
+            let flow = amplitude * det::cos(phase);
+            let (direct, history) = runtime.affine_pressure().unwrap();
+            let (next, frame) = runtime.candidate(flow).unwrap();
+            assert!((frame.pressure_pa - direct * flow - history).abs()
+                < 2e-12 * (frame.pressure_pa.abs() + (direct * flow).abs() + history.abs()).max(1.0));
+            assert!(frame.dissipated_energy_j >= 0.0);
+            let scale = frame.stored_energy_j + frame.dissipated_energy_j + frame.supplied_work_j.abs();
+            assert!(frame.balance_residual_j().abs() < 3e-11 * scale.max(f64::MIN_POSITIVE));
+            runtime = next;
+            if n >= warmup {
+                measured += 2.0 * frame.pressure_pa * det::cos(phase) / (f64::from(count) * amplitude);
+            }
+        }
+        let expected = load.realized_resistance(f64::from(bin) / (f64::from(count) * dt), true);
+        assert!((measured / expected - 1.0).abs() < 3e-10, "measured {measured}, reported {expected}");
     }
 }

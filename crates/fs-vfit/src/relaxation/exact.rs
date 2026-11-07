@@ -4,6 +4,7 @@ use super::{MAX_PARALLEL_CELLS, ParallelCellFrame, ParallelCellSpec};
 use crate::waveguide::WaveguideError;
 use fs_math::c64::C64;
 use fs_modal::time::{LinearForceTransition, ModalAcousticState};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug)]
 enum ExactCell {
@@ -34,19 +35,26 @@ enum ExactCell {
 /// `(1-R*dt/(2L))/(1+R*dt/(2L))` of implicit midpoint. This does not recover
 /// variation in the input between its declared held values.
 ///
-/// Preparation caches all transitions. Stepping uses bounded inline storage,
-/// allocates nothing, and evaluates no transcendental functions. This owner
+/// Preparation caches all transitions in one immutable kernel, shared by
+/// clones. Each clone retains its own bounded inline flow/pressure histories;
+/// trial copies do not copy transitions or allocate. Stepping allocates nothing
+/// and evaluates no transcendental functions. This owner
 /// is separate from [`super::ParallelCellLoad`] so existing bilinear fits keep
 /// their sampling convention and their smaller midpoint state.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ExactParallelCellLoad {
+    prepared: Arc<PreparedCells>,
+    flows: [f64; MAX_PARALLEL_CELLS],
+    pressures: [f64; MAX_PARALLEL_CELLS],
+}
+
+#[derive(Debug)]
+struct PreparedCells {
     spec: ParallelCellSpec,
     dt: f64,
     coefficients: [Option<ExactCell>; MAX_PARALLEL_CELLS],
     sqrt_inertances: [f64; MAX_PARALLEL_CELLS],
     sqrt_compliances: [f64; MAX_PARALLEL_CELLS],
-    flows: [f64; MAX_PARALLEL_CELLS],
-    pressures: [f64; MAX_PARALLEL_CELLS],
     direct: f64,
 }
 
@@ -61,14 +69,12 @@ impl ExactParallelCellLoad {
                 "an exact parallel-cell load requires a positive finite time step",
             ));
         }
-        let mut out = Self {
+        let mut out = PreparedCells {
             spec,
             dt,
             coefficients: [None; MAX_PARALLEL_CELLS],
             sqrt_inertances: [0.0; MAX_PARALLEL_CELLS],
             sqrt_compliances: [0.0; MAX_PARALLEL_CELLS],
-            flows: [0.0; MAX_PARALLEL_CELLS],
-            pressures: [0.0; MAX_PARALLEL_CELLS],
             direct: 0.0,
         };
         for (i, cell) in spec.cells().iter().enumerate() {
@@ -150,13 +156,17 @@ impl ExactParallelCellLoad {
                 "exact parallel-cell chain response is not representable",
             ));
         }
-        Ok(out)
+        Ok(Self {
+            prepared: Arc::new(out),
+            flows: [0.0; MAX_PARALLEL_CELLS],
+            pressures: [0.0; MAX_PARALLEL_CELLS],
+        })
     }
 
     /// Immutable continuous cell declaration, in the caller's order.
     #[must_use]
-    pub const fn spec(&self) -> &ParallelCellSpec {
-        &self.spec
+    pub fn spec(&self) -> &ParallelCellSpec {
+        &self.prepared.spec
     }
 
     /// Steady sinusoidal impedance from held flow to interval-mean pressure.
@@ -172,7 +182,8 @@ impl ExactParallelCellLoad {
     /// unrepresentable response. Construction does not impose a Nyquist guard
     /// on the internal poles; this query only bounds the input frequency.
     pub fn sampled_impedance(&self, frequency_hz: f64) -> Result<C64, WaveguideError> {
-        if !frequency_hz.is_finite() || frequency_hz < 0.0 || frequency_hz > 0.5 / self.dt {
+        let prepared = &self.prepared;
+        if !frequency_hz.is_finite() || frequency_hz < 0.0 || frequency_hz > 0.5 / prepared.dt {
             return Err(WaveguideError(
                 "exact parallel-cell frequency must lie between DC and Nyquist",
             ));
@@ -180,23 +191,24 @@ impl ExactParallelCellLoad {
         if frequency_hz == 0.0 {
             return Ok(C64::ZERO);
         }
-        let angle = core::f64::consts::TAU * (frequency_hz * self.dt);
+        let angle = core::f64::consts::TAU * (frequency_hz * prepared.dt);
         let half_sine = fs_math::det::sin(0.5 * angle);
         // z - 1 without subtracting nearly equal cosines near DC.
         let s = C64::new(-2.0 * half_sine * half_sine, fs_math::det::sin(angle));
         let mut impedance = C64::ZERO;
-        for (i, cell) in self.spec.cells().iter().enumerate() {
+        for (i, cell) in prepared.spec.cells().iter().enumerate() {
             impedance = impedance
-                + match self.coefficients[i] {
+                + match prepared.coefficients[i] {
                     Some(ExactCell::Rl {
                         decrement,
                         mean_pressure_gain,
                         ..
                     }) => (s / (s + C64::from_re(decrement))).scale(mean_pressure_gain),
                     Some(ExactCell::Rlc { transition, .. }) => {
-                        let omega = (1.0 / self.sqrt_inertances[i]) / self.sqrt_compliances[i];
+                        let omega =
+                            (1.0 / prepared.sqrt_inertances[i]) / prepared.sqrt_compliances[i];
                         let damping = (1.0 / cell.resistance_pa_s_m3) / cell.compliance_m3_pa;
-                        let probe_force = (1.0 / self.dt).min(1.0);
+                        let probe_force = (1.0 / prepared.dt).min(1.0);
                         let response = transition
                             .advance(ModalAcousticState::default(), probe_force, probe_force)
                             .map_err(|_| {
@@ -212,9 +224,9 @@ impl ExactParallelCellLoad {
                         // response B: omega*B may underflow even when c*B and
                         // the physical pressure response remain representable.
                         let impulse_response = response.velocity_m_sqrt_kg_per_s / probe_force;
-                        let direct =
-                            (mobility / self.sqrt_compliances[i]) / self.sqrt_compliances[i];
-                        let dq = (omega * self.dt) * (omega * mobility);
+                        let direct = (mobility / prepared.sqrt_compliances[i])
+                            / prepared.sqrt_compliances[i];
+                        let dq = (omega * prepared.dt) * (omega * mobility);
                         let b = omega * impulse_response;
                         let dv = dq + damping * impulse_response;
                         let determinant = dq * dv + b * b;
@@ -222,9 +234,9 @@ impl ExactParallelCellLoad {
                         // and keep its numerator in pressure units: multiplying
                         // tiny dimensionless decrements by L/dt afterwards can
                         // erase a representable resistance through underflow.
-                        let pressure_impulse = impulse_response / self.sqrt_compliances[i];
+                        let pressure_impulse = impulse_response / prepared.sqrt_compliances[i];
                         let pressure_determinant =
-                            direct * dv + pressure_impulse * (pressure_impulse / self.dt);
+                            direct * dv + pressure_impulse * (pressure_impulse / prepared.dt);
                         let numerator = s * (C64::from_re(pressure_determinant) + s.scale(direct));
                         let denominator = C64::from_re(determinant) + s.scale(dq + dv) + s * s;
                         if cell.resistance_pa_s_m3.is_infinite() {
@@ -250,13 +262,13 @@ impl ExactParallelCellLoad {
     /// Accepted inductor flows [m^3/s].
     #[must_use]
     pub fn inductor_flows_m3_s(&self) -> &[f64] {
-        &self.flows[..self.spec.count]
+        &self.flows[..self.prepared.spec.count]
     }
 
     /// Accepted endpoint pressures [Pa], including an RL cell's algebraic pressure.
     #[must_use]
     pub fn pressures_pa(&self) -> &[f64] {
-        &self.pressures[..self.spec.count]
+        &self.pressures[..self.prepared.spec.count]
     }
 
     fn energy(
@@ -265,9 +277,9 @@ impl ExactParallelCellLoad {
         pressures: &[f64; MAX_PARALLEL_CELLS],
     ) -> f64 {
         let mut energy = 0.0;
-        for i in 0..self.spec.count {
-            let inductive = self.sqrt_inertances[i] * flows[i];
-            let capacitive = self.sqrt_compliances[i] * pressures[i];
+        for i in 0..self.prepared.spec.count {
+            let inductive = self.prepared.sqrt_inertances[i] * flows[i];
+            let capacitive = self.prepared.sqrt_compliances[i] * pressures[i];
             energy += 0.5 * inductive * inductive + 0.5 * capacitive * capacitive;
         }
         energy
@@ -286,8 +298,14 @@ impl ExactParallelCellLoad {
     /// # Errors
     /// An accepted state has an unrepresentable mean-pressure response.
     pub fn affine_pressure(&self) -> Result<(f64, f64), WaveguideError> {
+        let prepared = &self.prepared;
         let mut history = 0.0;
-        for (i, coefficient) in self.coefficients.iter().enumerate().take(self.spec.count) {
+        for (i, coefficient) in prepared
+            .coefficients
+            .iter()
+            .enumerate()
+            .take(prepared.spec.count)
+        {
             history += match coefficient {
                 Some(ExactCell::Rl {
                     mean_pressure_gain, ..
@@ -316,7 +334,7 @@ impl ExactParallelCellLoad {
                 "exact parallel-cell history is not representable",
             ));
         }
-        Ok((self.direct, history))
+        Ok((prepared.direct, history))
     }
 
     /// Preview one interval at its constant solved flow, preserving all history.
@@ -324,6 +342,7 @@ impl ExactParallelCellLoad {
     /// # Errors
     /// Nonfinite flow or unrepresentable candidate state, pressure, energy or work.
     pub fn preview_step(&self, flow: f64) -> Result<ParallelCellFrame, WaveguideError> {
+        let prepared = &self.prepared;
         if !flow.is_finite() {
             return Err(WaveguideError(
                 "exact parallel-cell load requires a finite held flow",
@@ -331,8 +350,8 @@ impl ExactParallelCellLoad {
         }
         let (mut flows, mut pressures) = (self.flows, self.pressures);
         let (mut pressure, mut heat) = (0.0, 0.0);
-        for (i, cell) in self.spec.cells().iter().enumerate() {
-            match self.coefficients[i] {
+        for (i, cell) in prepared.spec.cells().iter().enumerate() {
+            match prepared.coefficients[i] {
                 Some(ExactCell::Rl {
                     retention,
                     decrement,
@@ -390,10 +409,10 @@ impl ExactParallelCellLoad {
             stored_energy_j: stored,
             storage_change_j: stored - self.stored_energy_j(),
             dissipated_energy_j: heat,
-            supplied_work_j: pressure * (flow * self.dt),
+            supplied_work_j: pressure * (flow * prepared.dt),
             flows,
             pressures,
-            count: self.spec.count,
+            count: prepared.spec.count,
         };
         if ![
             pressure,

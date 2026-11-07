@@ -46,7 +46,7 @@ use crate::bernoulli_aperture::radiation::environment::multiport::source::{
 };
 use crate::bernoulli_aperture::viscothermal::ViscothermalSectionSpec;
 use crate::flue_loop::network::{FlueNetworkSpec, FlueSourcePaths};
-use crate::flue_loop::window_radiation::{WindowFlux, WindowRadiationLoad, cut_up_piston};
+use crate::flue_loop::window_radiation::{WindowFlux, WindowRadiationLoad, WindowRadiationSampling, cut_up_piston};
 use crate::flue_loop::{FlueError, FlueGeometry, FlueVoice, JetNoiseSpec};
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 use crate::pcm_wav::baffled::gas::GasPropagation;
@@ -279,6 +279,9 @@ impl FlueFilePerformance {
     /// linear loss: it needs `window wall-cut` and `mouth_loss_rel` zero.
     /// `mouth_reaction window-cylinder-piston` radiates one uniform piston over
     /// that face's angle and the window's cut-up instead, as a bracket.
+    /// Either window reaction accepts a trailing `exact-held-flow` to retain
+    /// exact continuous cell decay and integrate interval-mean pressure/heat.
+    /// Omission (or `bilinear-midpoint`) preserves the original time sampling.
     /// Optional `jet_forcing_area open-strip` right after a `window embouchure`
     /// row takes the forced jet's transverse velocity over the open strip, ALONG
     /// by OPEN, instead of flue width by cut-up
@@ -607,11 +610,20 @@ impl FlueFilePerformance {
                 _ => return Err(bad(rows.line,
                     "mouth_reaction requires none, compact-baffled, window-cylinder or window-cylinder-piston")),
             };
+            let window_reaction = if let Some(flux) = selected.1 {
+                let sampling = match row.fields.next() {
+                    None | Some("bilinear-midpoint") => WindowRadiationSampling::BilinearMidpoint,
+                    Some("exact-held-flow") => WindowRadiationSampling::ExactHeldFlow,
+                    _ => return Err(bad(rows.line,
+                        "window radiation sampling requires bilinear-midpoint or exact-held-flow")),
+                };
+                Some((flux, sampling))
+            } else { None };
             row.end()?;
             if selected.0 && mouth_radiation.is_none() {
                 return Err(bad(rows.line, "mouth reaction requires an explicit mouth_radiation rectangle"));
             }
-            selected
+            (selected.0, window_reaction)
         } else { (false, None) };
         let window_row = window::read(&mut rows)?;
         let jet_forcing_row = window::read_jet_forcing_area(&mut rows, window_row)?;
@@ -710,7 +722,7 @@ impl FlueFilePerformance {
             _ => voice,
         };
         let voice = match (window_reaction, &window) {
-            (Some(flux), Some(record)) => {
+            (Some((flux, sampling)), Some(record)) => {
                 // The finest rung's outer face carries the flux distribution.
                 let face = &record.ladder.rungs[record.ladder.rungs.len() - 1].outer_cells;
                 let piston = [cut_up_piston(face, record.window.axial_length)];
@@ -718,9 +730,9 @@ impl FlueFilePerformance {
                     WindowFlux::WallWindow => face.as_slice(),
                     WindowFlux::CutUpPiston => &piston[..],
                 };
-                let load = WindowRadiationLoad::new(
+                let load = WindowRadiationLoad::new_with_sampling(
                     record.window.bore_radius + record.window.wall_thickness, cells, flux,
-                    exterior, voice.sample_period_s(), gate).map_err(FlueInputError::Physics)?;
+                    exterior, voice.sample_period_s(), sampling, gate).map_err(FlueInputError::Physics)?;
                 voice.with_window_radiation(load).map_err(FlueInputError::Physics)?
             }
             _ => voice,

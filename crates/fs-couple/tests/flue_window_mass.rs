@@ -268,6 +268,20 @@ fn window_cylinder_radiates_the_solved_outer_face_in_place_of_the_authored_loss(
 }
 
 #[test]
+fn exact_window_sampling_is_an_explicit_file_selection() {
+    use fs_couple::flue_loop::window_radiation::WindowRadiationSampling;
+    let source = with_window(&legacy(),
+        "mouth_reaction window-cylinder-piston exact-held-flow\nwindow wall-cut 8 cheeks parallel");
+    let file = parse(&source).unwrap();
+    let load = file.renderer().voice().window_radiation_load().unwrap();
+    assert_eq!(load.sampling(), WindowRadiationSampling::ExactHeldFlow);
+    assert!(load.discrete_band_error().is_finite());
+    assert!(load.realized_resistance(1000.0, true) > 0.0);
+    render(file);
+    assert!(parse(&source.replace("exact-held-flow", "unknown-sampling")).is_err());
+}
+
+#[test]
 fn parallel_cheeks_and_a_ramp_come_from_the_row() {
     let base = legacy();
     let file = parse(&with_window(

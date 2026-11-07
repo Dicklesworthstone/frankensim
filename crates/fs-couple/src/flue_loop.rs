@@ -1802,7 +1802,8 @@ impl FlueVoice {
             .map_or((0.0, 0.0), mouth_radiation::MouthRadiation::affine_pressure);
         // At most one of the two is attached; an absent one adds exact zeros.
         let (window_direct, window_history) = self.window_radiation.as_ref()
-            .map_or((0.0, 0.0), window_radiation::WindowRadiation::affine_pressure);
+            .map(window_radiation::WindowRadiation::affine_pressure)
+            .transpose()?.unwrap_or((0.0, 0.0));
         let (radiation_direct, radiation_history) =
             (radiation_direct + window_direct, radiation_history + window_history);
         // The opt-in breath noise is a pressure in series with the jet's source, the SAME value in every nonlinear trial
@@ -2745,6 +2746,25 @@ mod convection_tests {
         assert!(v.diagnostics()[0].radiation_loss_j > 0.0);
         assert_work(&v);
         assert!(v.with_window_radiation(load).is_err(), "attachment is cold and single");
+    }
+
+    #[test]
+    fn exact_window_radiation_closes_the_coupled_voice_ledger() {
+        use fs_bem::wall_window::OuterFaceCell;
+        use window_radiation::{WindowFlux, WindowRadiationLoad, WindowRadiationSampling};
+        let gas = gas(101_325.0);
+        let lossless = FlueGeometry { mouth_loss_rel: 0.0, ..geometry() };
+        let cells = [OuterFaceCell { theta: 0.0, arc: 0.010 / 0.0085,
+            axial: 0.0, length: 0.004, flux: 1.0 }];
+        let load = WindowRadiationLoad::new_with_sampling(0.0085, &cells, WindowFlux::CutUpPiston,
+            gas, 1.0 / 96_000.0, WindowRadiationSampling::ExactHeldFlow,
+            &CancelGate::new_clock_free()).unwrap();
+        let mut voice = voice_at(gas, lossless, 0.01, 96_000)
+            .with_window_mass(300.0, 0.0).unwrap().with_window_radiation(load).unwrap();
+        voice.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+        voice.step_block(&mut [0.0; 512]).unwrap();
+        assert!(voice.diagnostics()[0].radiation_loss_j > 0.0);
+        assert_work(&voice);
     }
 
     #[test]

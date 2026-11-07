@@ -39,7 +39,9 @@ independent nonnegative integral of `p^2/R`, not a work/storage subtraction.
 `affine_pressure` supplies that same-window relation for implicit flow solves;
 `preview_step` changes no state and failed `step` calls retain every history.
 Prepared transitions and storage scales are cached; accepted stepping allocates
-nothing and evaluates no transcendental functions.
+nothing and evaluates no transcendental functions. Clones share one immutable
+prepared kernel and retain independent bounded flow/pressure histories, so
+coupled trial copies neither rebuild nor copy the transition arrays.
 
 `sampled_impedance` reports the transfer from the held input sequence to that
 mean-pressure output, using `exp(+i*2*pi*f*n*dt)`. It has an exact DC zero and

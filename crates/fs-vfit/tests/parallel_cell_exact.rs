@@ -258,7 +258,7 @@ fn sampled_queries_keep_small_resistance_and_refuse_unresolved_lossless_poles() 
 fn failed_exact_trials_preserve_every_accepted_cell() {
     let mut runtime = load(&[cell(2.0, 0.1, 0.0), cell(0.5, 1.0, 1.0)], 0.1);
     runtime.step(0.7).unwrap();
-    let mut untouched = runtime;
+    let mut untouched = runtime.clone();
     assert!(runtime.step(f64::NAN).is_err());
     assert!(runtime.step(f64::MAX).is_err());
     assert_eq!(runtime.step(-0.1).unwrap(), untouched.step(-0.1).unwrap());

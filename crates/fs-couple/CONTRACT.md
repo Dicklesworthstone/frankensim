@@ -1,3 +1,22 @@
+## Exact held-flow window-radiation damping
+
+`WindowRadiationLoad::new_with_sampling` explicitly selects
+`WindowRadiationSampling::ExactHeldFlow` for the existing cylinder-window
+parallel RLC realization. The original constructor and omitted file selection
+retain `BilinearMidpoint`. File-driven voices accept
+`mouth_reaction window-cylinder exact-held-flow` or
+`mouth_reaction window-cylinder-piston exact-held-flow`.
+
+The continuous fit, static-mass subtraction and radiation geometry are unchanged.
+Exact cell histories follow their continuous dissipative poles under the solved
+held mouth flow. The implicit mouth equation uses continuous interval-mean
+pressure, and the radiation ledger uses independently integrated resistor heat.
+The reported sampled resistance and discrete band error use that same mean
+pressure transfer; they do not reuse the bilinear frequency warp. Preparation
+is shared immutably by candidate histories, with no per-sample allocation or
+transition rebuilding. This forcing declaration resolves no variations inside
+the held interval and adds no claim about unmodeled exterior geometry.
+
 ## Nonlinear electrostatic volume forces on native solids
 
 `electrostatic::spatial_nonlinear_coulomb_volume_load` transfers the accepted

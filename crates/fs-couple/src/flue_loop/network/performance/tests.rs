@@ -379,7 +379,8 @@ fn measured_exit_negative_current_feedback_keeps_the_jet_mouth_residual_increasi
         let delayed = RetardedVelocity { past_m_s: seed, current_weight: 1.0 };
         let boundary = v.line.mouth_boundary().unwrap();
         let (md, mh) = v.mouth_radiation.as_ref().map_or((0.0, 0.0), MouthRadiation::affine_pressure);
-        let (wd, wh) = v.window_radiation.as_ref().map_or((0.0, 0.0), WindowRadiation::affine_pressure);
+        let (wd, wh) = v.window_radiation.as_ref().map(WindowRadiation::affine_pressure)
+            .transpose().unwrap().unwrap_or((0.0, 0.0));
         let (direct_pa, history_pa) = (md+wd, mh+wh);
         let (l, r, zc) = (v.inertance, v.resistance+direct_pa, v.zc);
         let direct = boundary.direct_reflection;
