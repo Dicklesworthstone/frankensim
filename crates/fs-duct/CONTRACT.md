@@ -4306,3 +4306,62 @@ The original cylinder's plane-wave, homogeneous, inviscid and small-signal scope
 still applies. These are declared perturbation loads in an externally maintained
 mean flow; no steady supply model, nonuniform nozzle closure, causal broadband
 load realization, or experimental validation is inferred.
+
+### Finite-length isentropic mean-flow profiles
+
+`convected::profile::IsentropicMeanFlow` retains the original coherent
+`GasState` and complete `RadiusProfile`. This explicitly selected
+calorically-perfect closure holds the original gamma, gas constant and
+composition fixed; it is not a generic-fluid or variable-Cp EOS adapter.
+The state at x=0 and signed velocity determine constant steady mass flow,
+entropy and stagnation enthalpy. The subsonic area/Mach relation is resolved
+by bounded safeguarded Newton iteration, including negative through-flow.
+Compensated logarithms retain the finite gamma-to-one limit. Original gas
+source support, phase validity and the frozen-Cp approximation over the
+computed temperature/pressure range remain the caller's responsibility.
+
+Whole-profile radius bounds include every cubic span's Bernstein control
+hull. Choking and the conservative first transverse cut-on are checked
+before acoustic discretization; a coarse integration grid cannot skip an
+interior throat or bulge. The bounds may conservatively refuse geometry
+which tighter extrema admit and are not outward-rounded interval certificates.
+`MINIMUM_SUBSONIC_MARGIN = 64 sqrt(f64::EPSILON)` bounds `1-M²` away from the
+ill-conditioned sonic inversion; it is a numerical refusal, not an invented
+flow correction. The existing exact uniform cylinder's admission is unchanged.
+
+For peak phasors with `exp(-i omega t)`, linearized continuity and Bernoulli
+give `d[H',m']/dx = i omega/(c²-U²) [[-U,c²/(A rho)],[A rho,-U]] [H',m']`.
+The commuting scalar convective phase is separated from the existing
+fourth-order two-node Magnus exponential in scaled conjugate variables.
+`prepare` uses the declared `RiccatiSteps` on EACH original spline span,
+with the existing total-step cap and a cancellation poll before every panel.
+It retains both ends, every spline knot and every integration-panel boundary.
+This finite-length model retains shape/frequency effects omitted by compact
+area-jump laws. Sources: [Duran & Moreau (2013)](https://doi.org/10.1017/jfm.2013.118)
+and the zero-heat, zero-entropy specialization of equations 2.3–2.11 in
+[Yeddula et al. (2022)](https://doi.org/10.1017/jfm.2022.101), with their time
+convention reversed.
+
+The prepared 2x2 scattering matrix acts on physical sqrt(W) characteristics
+using EACH end's actual `c/(rho A)`. Pressure-wave excitation and original
+`FlowImpedance` loads are supported; the complete driven feedback matrix
+has an explicit infinity-norm condition ceiling and refuses undamped
+resonances. Coherent drives and retained-node fields reuse cached responses
+with constant work, no allocation, no integration and no material re-query.
+Pressure work, Myers energy, mass-flow/enthalpy flux, source work and passive
+load absorption are observed from physical fields. Source/load and interior
+flux residuals remain distinct; a small flux residual is not an integration
+error estimate. Callers must refine the integration axis for their actual
+frequency and geometry. Finite transfer arithmetic is checked, but arbitrary
+length/area contrast is not claimed to be uniformly well-conditioned.
+
+Eight regressions cover exact uniform-flow fields and driven-load parity;
+original stationary Webster parity; mass/entropy/stagnation-enthalpy closure;
+fourth-order convergence against independently integrated primitive-variable
+linearized Euler equations for both flow signs; physical work and coherent
+source interference; mirrored geometry with reversed flow; full-profile
+admission, source retention, caps, cancellation and malformed-input refusal;
+and undamped resonance refusal. This is a smooth slender, inviscid,
+quasi-one-dimensional acoustic model. Shocks, separation, entropy/composition
+or vorticity waves, wall/bulk loss, radiation, a mean supply system and
+three-dimensional or experimental qualification are not inferred.

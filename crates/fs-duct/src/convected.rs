@@ -40,6 +40,8 @@ use crate::{DuctError, Segment};
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_math::{c64::C64, det};
 
+/// Finite-length quasi-one-dimensional sound in a maintained isentropic flow.
+pub mod profile;
 /// Conjugate end loads, coherent driving and complete reflected fields.
 pub mod termination;
 

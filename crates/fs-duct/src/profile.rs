@@ -249,6 +249,32 @@ impl RadiusProfile {
             _ => None,
         }
     }
+    /// Conservative whole-profile radius bounds. Cubic spans use their
+    /// Bernstein control hull, including between-station extrema. This is an
+    /// algebraic enclosure, not an outward-rounded floating-point certificate.
+    pub(crate) fn radius_bounds_m(&self) -> [f64; 2] {
+        let (mut lo, mut hi) = (self.inlet_radius(), self.inlet_radius());
+        let mut include = |radius: f64| {
+            lo = lo.min(radius);
+            hi = hi.max(radius);
+        };
+        match &self.shape {
+            Shape::Spline { stations, second } => {
+                for i in 0..stations.len() - 1 {
+                    let h = stations[i + 1].0 - stations[i].0;
+                    let secant = (stations[i + 1].1 - stations[i].1) / h;
+                    let dl = secant - h * (2.0 * second[i] + second[i + 1]) / 6.0;
+                    let dr = secant + h * (second[i] + 2.0 * second[i + 1]) / 6.0;
+                    include(stations[i].1 + h * dl / 3.0);
+                    include(stations[i + 1].1 - h * dr / 3.0);
+                    include(stations[i + 1].1);
+                }
+            }
+            // These profiles are monotone, or constant, on their support.
+            _ => include(self.outlet_radius()),
+        }
+        [lo, hi]
+    }
     pub fn stations(&self) -> Option<&[(f64, f64)]> {
         match &self.shape {
             Shape::Spline { stations, .. } => Some(stations),
