@@ -136,9 +136,10 @@ pub struct NetworkFrame {
     /// Irreversible loss at interior series/shunt elements [J], counted once
     /// per element, not once per attached section. Excludes reversible storage.
     pub interior_loss_j: f64,
-    /// Signed work delivered to an explicitly attached MIMO terminal model [J].
-    /// Its rational states are not included in this network's stored energy,
-    /// and this exchange is not classified as irreversible dissipation.
+    /// Signed work delivered to an explicitly attached MIMO terminal model [J],
+    /// plus exterior * U * dt at terminals carrying an attached exterior pressure.
+    /// Their rational or exterior states are not included in this network's
+    /// stored energy, and this exchange is not classified as irreversible dissipation.
     pub coupled_terminal_work_j: f64,
     /// Incident minus departing energy at internal junctions [J]. Rounding
     /// diagnostic only: it is NOT treated as dissipation or used to repair storage.
@@ -173,6 +174,10 @@ pub struct WaveguideNetwork {
     accepted_steps: u64,
     mimo: Option<multiport::MimoTerminals>,
     mimo_arriving: Vec<f64>,
+    /// Known series exterior pressure per node [Pa]; empty unless attached.
+    exterior: Vec<f64>,
+    /// Ascending relaxation terminals admitted to carry an exterior pressure.
+    exterior_nodes: Vec<usize>,
 }
 
 fn buffer<T: Clone>(n: usize, value: T) -> Result<Vec<T>, WaveguideError> {
@@ -342,6 +347,7 @@ impl WaveguideNetwork {
             loads, load_candidate: buffer(nodes.len(), TerminalFrame::default())?,
             quadratic_losses: buffer(nodes.len(), None)?,
             accepted_steps: 0, mimo: None, mimo_arriving: Vec::new(),
+            exterior: Vec::new(), exterior_nodes: Vec::new(),
         })
     }
 
@@ -430,6 +436,71 @@ impl WaveguideNetwork {
         }
     }
 
+    /// Admit these relaxation terminals, once, to carry a known exterior
+    /// pressure in series with their loads (initially zero). The pressure is an
+    /// INPUT of each step, set between samples with
+    /// [`Self::set_terminal_exterior_pressure`]; it is never solved here, so
+    /// a coupling that feeds it (for example delayed mutual radiation) is
+    /// explicit and owns its own causality and passivity admission. The work
+    /// exterior * U * dt each step is reported in `coupled_terminal_work_j`,
+    /// so the network balance stays closed. Without this call every step is
+    /// the original arithmetic.
+    ///
+    /// # Errors
+    /// Already attached, an attached MIMO group, an empty, unsorted or
+    /// repeated list, or a node that is not a relaxation terminal. No mutation.
+    pub fn attach_terminal_exterior_pressures(&mut self, nodes: &[usize]) -> Result<(), WaveguideError> {
+        if !self.exterior_nodes.is_empty() {
+            return Err(WaveguideError("exterior terminal pressures are attached once"));
+        }
+        if self.mimo.is_some() {
+            return Err(WaveguideError("exterior terminal pressures cannot share a network with a MIMO terminal group"));
+        }
+        if nodes.is_empty() || nodes.windows(2).any(|w| w[0] >= w[1]) {
+            return Err(WaveguideError("exterior terminal nodes must be a nonempty ascending list"));
+        }
+        for &node in nodes {
+            let relaxation = matches!(self.nodes.get(node), Some(NetworkNode::Relaxation { .. }))
+                && matches!(self.loads.get(node), Some(Some(TerminalLoad::Relaxation(_))));
+            if !relaxation {
+                return Err(WaveguideError("exterior terminal pressure requires a relaxation terminal node"));
+            }
+        }
+        let mut admitted = buffer(nodes.len(), 0usize)?;
+        admitted.copy_from_slice(nodes);
+        let exterior = buffer(self.nodes.len(), 0.0)?;
+        self.exterior_nodes = admitted;
+        self.exterior = exterior;
+        Ok(())
+    }
+
+    /// Set the known exterior pressure [Pa] of an admitted terminal for the
+    /// NEXT preview/step. It stays until set again.
+    ///
+    /// # Errors
+    /// A node not admitted by `attach_terminal_exterior_pressures` or a
+    /// nonfinite pressure; no mutation.
+    pub fn set_terminal_exterior_pressure(&mut self, node: usize, pressure_pa: f64) -> Result<(), WaveguideError> {
+        if self.exterior_nodes.binary_search(&node).is_err() {
+            return Err(WaveguideError("exterior pressure requires an admitted relaxation terminal"));
+        }
+        if !pressure_pa.is_finite() {
+            return Err(WaveguideError("exterior terminal pressure must be finite"));
+        }
+        self.exterior[node] = pressure_pa;
+        Ok(())
+    }
+
+    /// Exterior pressure [Pa] the next step applies at an admitted terminal.
+    #[must_use]
+    pub fn terminal_exterior_pressure(&self, node: usize) -> Option<f64> {
+        self.exterior_nodes.binary_search(&node).ok().map(|_| self.exterior[node])
+    }
+
+    /// Terminals admitted to carry an exterior pressure, ascending.
+    #[must_use]
+    pub fn exterior_terminal_nodes(&self) -> &[usize] { &self.exterior_nodes }
+
     /// Prepare simultaneous scattering and prospective storage. Scratch may
     /// change; delay buffers, energy and accepted observations do not. No heap
     /// allocation occurs. A later step recomputes this preview before committing.
@@ -457,7 +528,7 @@ impl WaveguideNetwork {
         let mut load_stored = 0.0;
         let mut driven_work = 0.0;
         let mut next_driven = 0usize;
-        let coupled_terminal_work = self.preview_mimo()?;
+        let mut coupled_terminal_work = self.preview_mimo()?;
         for n in 0..self.nodes.len() {
             if self.mimo.as_ref().is_some_and(|m| m.index(n).is_some()) { continue; }
             if matches!(self.nodes[n], NetworkNode::Shunt { .. } | NetworkNode::ShuntAdmittance { .. } | NetworkNode::Series { .. }) {
@@ -480,8 +551,15 @@ impl WaveguideNetwork {
                 NetworkNode::Inlet | NetworkNode::Driven => prescribed + self.arriving(first),
                 NetworkNode::Impedance { .. } | NetworkNode::Relaxation { .. } => {
                     let a = self.arriving(first);
-                    let trial = self.loads[n].as_ref().expect("admitted reactive terminal")
-                        .preview_with_loss(a, self.quadratic_losses[n])?;
+                    let load = self.loads[n].as_ref().expect("admitted reactive terminal");
+                    let trial = if self.exterior_nodes.binary_search(&n).is_ok() {
+                        // Known series exterior pressure: its work leaves through
+                        // the coupled-terminal account, not this load's balance.
+                        let pe = self.exterior[n];
+                        let trial = load.preview_with_exterior(a, self.quadratic_losses[n], pe)?;
+                        coupled_terminal_work += pe * (trial.port().flow_m3_s * self.time_step_s);
+                        trial
+                    } else { load.preview_with_loss(a, self.quadratic_losses[n])? };
                     self.load_candidate[n] = trial;
                     load_stored += trial.port().stored_energy_j;
                     trial.port().pressure_pa
@@ -616,3 +694,5 @@ impl WaveguideNetwork {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod exterior_tests;

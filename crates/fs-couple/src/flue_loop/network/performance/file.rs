@@ -381,6 +381,16 @@ impl FlueFilePerformance {
     /// the microphone model of that opening is still the baffled monopole. The same word may end
     /// the `outlets PRIMARY ADDITIONAL` row, selecting it for the PRIMARY opening (a bare open
     /// end). Absent the word, the card produces exactly the same network as before.
+    /// Under `radiation compact-baffled`, an optional `outlet_mutual free-field` row
+    /// directly after the outlet rows adds the delayed free-field pressure each outlet's
+    /// volume flow radiates to every OTHER outlet, rho/(4 pi d) dq/dt(t - d/c), at the
+    /// declared plane centers (primary at the origin), entering each terminal solve as a
+    /// known series pressure (see [`crate::flue_loop::network::outlet_mutual`]). Its
+    /// cold admission refuses a pair closer than two samples of travel, a realized term
+    /// more than 5 % from the exact one in the receiver's band, or a Re Z with no
+    /// Cholesky factor on a 5 Hz grid to Nyquist. The mouth is not an outlet and gets
+    /// no mutual term; no body scattering or baffle image is modeled. Without the row,
+    /// nothing changes.
     /// `radiation mimo ARTIFACT MAX_STATES MAX_MEMORY_BYTES PASSIVITY_POINTS`
     /// instead loads one explicit reciprocal rational operator for all declared
     /// outlets, in their original order. The shared artifact decoder retains its
@@ -603,6 +613,19 @@ impl FlueFilePerformance {
         };
         let (outlet_node, additional_outlets, outlet_flanges) =
             duct.read_outlets(&mut rows, radiation_reaction)?;
+        // Optional `outlet_mutual free-field` after the outlet rows: delayed
+        // free-field mutual radiation between the compact outlets.
+        let outlet_mutual = if rows.next_is("outlet_mutual") {
+            let mut row = rows.row("outlet_mutual")?;
+            if row.fields.next() != Some("free-field") {
+                return Err(bad(rows.line, "outlet_mutual requires free-field"));
+            }
+            row.end()?;
+            if !radiation_reaction {
+                return Err(bad(rows.line, "outlet_mutual requires radiation compact-baffled"));
+            }
+            Some(rows.line)
+        } else { None };
         let aperture_size_m = read_mouth_aperture(&mut rows)?;
         let mouth_radiation = if rows.next_is("mouth_radiation") {
             let mut row = rows.row("mouth_radiation")?;
@@ -777,6 +800,28 @@ impl FlueFilePerformance {
         };
         let voice = if opening_losses.is_empty() { voice } else {
             voice.with_opening_losses(opening_losses, gate).map_err(FlueInputError::Physics)?
+        };
+        let voice = match outlet_mutual {
+            Some(line) => {
+                // The self loads' own exterior gas, one for every outlet.
+                let Some(first) = radiation_bindings.first().map(|b| *b.load()) else {
+                    return Err(bad(line, "outlet_mutual requires installed compact outlet loads"));
+                };
+                let (density, sound_speed) = (first.density_kg_m3(), first.sound_speed_m_s());
+                if radiation_bindings.iter().any(|b| b.load().density_kg_m3().to_bits() != density.to_bits()
+                    || b.load().sound_speed_m_s().to_bits() != sound_speed.to_bits())
+                {
+                    return Err(bad(line, "outlet_mutual needs one exterior gas for every outlet load"));
+                }
+                let mut outlets = vec![(outlet_node, [0.0; 2])];
+                outlets.extend(additional_outlets.iter().map(|outlet| (outlet.node, outlet.center_m)));
+                voice.with_outlet_mutual(&outlets, density, sound_speed, receiver.maximum_frequency_hz, gate)
+                    .map_err(|error| match error {
+                        FlueError::Invalid { what } => bad(line, what),
+                        other => FlueInputError::Physics(other),
+                    })?
+            }
+            None => voice,
         };
         let mut renderer = FlueOutletPerformance::with_multirate_radiation(voice, schedule,
             FlueOutletConfig { sample_rate_hz, samples, max_block, max_controls, max_compile_work,

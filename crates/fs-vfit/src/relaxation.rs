@@ -338,8 +338,40 @@ impl RelaxationImpedance {
     pub(crate) fn preview_with_loss(&self, incident: f64,
         loss: Option<crate::quadratic_loss::QuadraticLossSpec>)
         -> Result<RelaxationFrame, WaveguideError> {
+        self.preview_terminal(incident, loss, None)
+    }
+
+    /// The same simultaneous step with a KNOWN exterior pressure `exterior`
+    /// [Pa] in series with this load: port pressure = load pressure + exterior.
+    /// The exterior is an input of this step (for example a delayed mutual
+    /// radiation term computed from earlier flows), never solved here.
+    /// `supplied_work_j` stays the work into THIS load, (p - exterior) U dt,
+    /// so its own balance closes; the caller accounts exterior * U * dt.
+    pub(crate) fn preview_with_loss_exterior(&self, incident: f64,
+        loss: Option<crate::quadratic_loss::QuadraticLossSpec>, exterior: f64)
+        -> Result<RelaxationFrame, WaveguideError> {
+        if !exterior.is_finite() {
+            return Err(WaveguideError("exterior terminal pressure must be finite"));
+        }
+        self.preview_terminal(incident, loss, Some(exterior))
+    }
+
+    fn preview_terminal(&self, incident: f64,
+        loss: Option<crate::quadratic_loss::QuadraticLossSpec>, exterior: Option<f64>)
+        -> Result<RelaxationFrame, WaveguideError> {
         if self.spec.count == 0 && self.spec.compliance_count == 0 {
-            return Ok(RelaxationFrame { port: self.base.preview_with_loss(incident, loss)?, ..RelaxationFrame::default() });
+            let Some(pe) = exterior else {
+                return Ok(RelaxationFrame { port: self.base.preview_with_loss(incident, loss)?, ..RelaxationFrame::default() });
+            };
+            // 2a - Z U = p_load + pe: the base solves against a - pe/2, which
+            // already gives its own work (p - pe) U dt; restore the port waves.
+            let mut port = self.base.preview_with_loss(incident - 0.5 * pe, loss)?;
+            port.reflected_pressure_pa = incident - self.port_impedance * port.flow_m3_s;
+            port.pressure_pa = incident + port.reflected_pressure_pa;
+            if !port.reflected_pressure_pa.is_finite() || !port.pressure_pa.is_finite() {
+                return Err(WaveguideError("relaxation load observation left the finite set"));
+            }
+            return Ok(RelaxationFrame { port, ..RelaxationFrame::default() });
         }
         let mut effective_incident = incident;
         for i in 0..self.spec.count {
@@ -347,6 +379,10 @@ impl RelaxationImpedance {
         }
         for i in 0..self.spec.compliance_count {
             effective_incident -= (0.5 * self.pressure_retained[i]) * self.pressures[i];
+        }
+        if let Some(pe) = exterior {
+            // p = 2a - Z U = (load response) + pe, so the load solves against a - pe/2.
+            effective_incident -= 0.5 * pe;
         }
         let base = self.base.preview_with_loss(effective_incident, loss)?;
         let flow = base.flow_m3_s;
@@ -402,7 +438,11 @@ impl RelaxationImpedance {
             state: base.state, reflected_pressure_pa: reflected, pressure_pa: pressure,
             flow_m3_s: flow, stored_energy_j: stored,
             storage_change_j: stored - self.stored_energy_j(),
-            dissipated_energy_j: dissipated, supplied_work_j: pressure * (flow * self.dt),
+            dissipated_energy_j: dissipated,
+            supplied_work_j: match exterior {
+                None => pressure * (flow * self.dt),
+                Some(pe) => (pressure - pe) * (flow * self.dt),
+            },
         };
         if ![incident, effective_incident, reflected, pressure, relaxed_energy, stored,
             port.storage_change_j, dissipated, port.supplied_work_j, port.balance_residual_j()]

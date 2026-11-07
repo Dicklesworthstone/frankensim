@@ -73,6 +73,16 @@ impl TerminalLoad {
             Self::Admittance(_) => Err(WaveguideError("quadratic terminal loss requires a series impedance load")),
         }
     }
+    /// A relaxation terminal's step with a known series exterior pressure.
+    pub(super) fn preview_with_exterior(&self, wave: f64,
+        loss: Option<crate::quadratic_loss::QuadraticLossSpec>, exterior: f64)
+        -> Result<TerminalFrame, WaveguideError> {
+        match self {
+            Self::Relaxation(l) => l.preview_with_loss_exterior(wave, loss, exterior).map(TerminalFrame::Relaxation),
+            Self::Series(_) | Self::Admittance(_) =>
+                Err(WaveguideError("exterior terminal pressure requires a relaxation terminal load")),
+        }
+    }
     pub(super) fn accept_frame(&mut self, frame: TerminalFrame) {
         match (self, frame) {
             (Self::Series(l), TerminalFrame::Series(f)) => l.accept_frame(f),

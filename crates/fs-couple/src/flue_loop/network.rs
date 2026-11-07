@@ -105,6 +105,7 @@ pub struct FlueNetwork {
     boundary_drives: Vec<BoundaryDrive>,
     source_paths: Option<FlueSourcePaths>,
     opening_losses: Vec<crate::bernoulli_aperture::opening_loss::BoundOpeningLoss>,
+    outlet_mutual: Option<outlet_mutual::OutletMutual>,
 }
 
 pub(super) enum FlueResonator {
@@ -164,7 +165,7 @@ impl FlueNetwork {
         Ok(Self { source, wall_input, walls, graph, gases, represented, losses, physics,
             last: None, fractional, mimo_environment: None, boundaries: None,
             boundary_paths: Vec::new(), boundary_drives: Vec::new(), source_paths: None,
-            opening_losses: Vec::new() })
+            opening_losses: Vec::new(), outlet_mutual: None })
     }
     /// Original data before any loss-cell subdivision.
     #[must_use]
@@ -251,6 +252,9 @@ impl FlueNetwork {
     /// Source-bound mutual terminal operator actually installed in this network.
     #[must_use]
     pub const fn mimo_environment(&self) -> Option<&MimoEnvironment> { self.mimo_environment.as_ref() }
+    /// Attached delayed free-field mutual radiation between outlets, if any.
+    #[must_use]
+    pub const fn outlet_mutual(&self) -> Option<&outlet_mutual::OutletMutual> { self.outlet_mutual.as_ref() }
     /// Same-sample pressure, flow and signed work of the shared exterior model.
     #[must_use]
     pub fn mimo_port_frames(&self) -> Option<&[fs_vfit::waveguide::network::multiport::MimoPortFrame]> {
@@ -277,11 +281,14 @@ impl FlueResonator {
             Self::Tmm(line) => line.push(outgoing).map_err(FlueError::Line),
             Self::Dg(duct) => duct.push(mouth),
             Self::Network(n) => {
+                // Mutual exterior pressures come from accepted flows only (explicit).
+                if let Some(mutual) = &mut n.outlet_mutual { mutual.apply(&mut n.physics).map_err(wave)?; }
                 let frame = if let Some(boundaries) = &mut n.boundaries {
                     boundaries.step(&mut n.physics, outgoing, &n.boundary_drives)
                         .map_err(physical)?.network
                 } else { n.physics.step(outgoing).map_err(wave)? };
                 n.last = Some(frame);
+                if let Some(mutual) = &mut n.outlet_mutual { mutual.record_step(&n.physics); }
                 Ok(n.physics.incoming_pressure_pa())
             }
         }
@@ -416,6 +423,53 @@ impl FlueVoice {
         network.physics.install_mimo_terminals(terminal).map_err(wave)?;
         poll(gate)?;
         network.mimo_environment = Some(environment);
+        Ok(self)
+    }
+
+    /// Attach delayed free-field mutual radiation between these outlets
+    /// (terminal node and plane center [m], in the observed outlet order) of an
+    /// unadvanced physical bore whose outlets carry compact relaxation loads.
+    /// Each step, every outlet's terminal solve sees the pressure the OTHER
+    /// outlets' accepted past flows radiate to it ([`outlet_mutual`]); the
+    /// work it does is reported as coupled-terminal work. `density` and
+    /// `sound_speed` are the exterior gas of the self loads; `band_hz` is the
+    /// receiver's band. Admission (explicit delays, 5 % in band, a Cholesky
+    /// factor of Re Z on a 5 Hz grid to Nyquist) runs before any change.
+    ///
+    /// # Errors
+    /// An advanced or poisoned voice, no physical graph, an attached MIMO
+    /// exterior or earlier mutual term, an outlet without a relaxation load,
+    /// or an [`outlet_mutual::OutletMutual::admit`] refusal. No mutation.
+    pub fn with_outlet_mutual(mut self, outlets: &[(usize, [f64; 2])], density: f64, sound_speed: f64,
+        band_hz: f64, gate: &CancelGate,
+    ) -> Result<Self, FlueError> {
+        poll(gate)?;
+        if self.poisoned || self.samples != 0 {
+            return Err(invalid("outlet_mutual requires an unadvanced flue"));
+        }
+        let dt = self.dt;
+        let FlueResonator::Network(network) = &mut self.line else {
+            return Err(invalid("outlet_mutual requires an explicitly ported physical tube graph"));
+        };
+        if network.mimo_environment.is_some() || network.outlet_mutual.is_some() {
+            return Err(invalid("outlet_mutual cannot join a MIMO exterior or a second mutual term"));
+        }
+        let mut nodes = Vec::with_capacity(outlets.len());
+        let mut centers = Vec::with_capacity(outlets.len());
+        let mut loads = Vec::with_capacity(outlets.len());
+        for &(node, center) in outlets {
+            let Some(fs_vfit::waveguide::network::NetworkNode::Relaxation { load }) = network.graph.nodes.get(node).copied() else {
+                return Err(invalid("outlet_mutual outlets must carry compact relaxation loads (radiation compact-baffled)"));
+            };
+            nodes.push(node);
+            centers.push(center);
+            loads.push(load);
+        }
+        let mutual = outlet_mutual::OutletMutual::admit(&nodes, &centers, &loads, density, sound_speed, dt, band_hz, gate)?;
+        let mut ascending = nodes;
+        ascending.sort_unstable();
+        network.physics.attach_terminal_exterior_pressures(&ascending).map_err(wave)?;
+        network.outlet_mutual = Some(mutual);
         Ok(self)
     }
 
@@ -617,3 +671,5 @@ mod tests;
 
 /// Scheduled physical outlet-pressure output through the shared audio interface.
 pub mod performance;
+/// Delayed free-field mutual radiation between compact outlets.
+pub mod outlet_mutual;
