@@ -355,7 +355,7 @@ pub(in crate::moisture) fn capture_sdirk_load(
             "layered SDIRK load needs the admitted first-stage layout and clock",
         ));
     }
-    let (reference, profiles) = prepare_profiles(&state, reservoir, None, cx)?;
+    let (reference, _, profiles) = prepare_profiles(&state, reservoir, None, cx)?;
     let mut system = LayeredSystem::storage(&state, first_activity, reference, cx)?;
     paths(
         implicit_dt,
@@ -427,7 +427,7 @@ fn prepare_profiles(
     reservoir: [Option<f64>; 2],
     known: Option<&StageLoad>,
     cx: &Cx<'_>,
-) -> Result<(f64, Vec<KirchhoffMoistureDiffusivity>), MoistureError> {
+) -> Result<(f64, [f64; 2], Vec<KirchhoffMoistureDiffusivity>), MoistureError> {
     if reservoir
         .into_iter()
         .flatten()
@@ -474,7 +474,7 @@ fn prepare_profiles(
             ],
         )?);
     }
-    Ok((reference, profiles))
+    Ok((reference, span, profiles))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -511,7 +511,7 @@ fn advance_stage(
     debug_assert_eq!(state.activity.len(), state.original.len());
     debug_assert_eq!(state.activity.len(), state.dry_masses.len());
     debug_assert_eq!(state.activity.len(), state.layer_for_cell.len());
-    let (reference, profiles) = prepare_profiles(&state, reservoir, known, cx)?;
+    let (reference, span, profiles) = prepare_profiles(&state, reservoir, known, cx)?;
     // Exact uniform activity has a zero RHS even in an arbitrarily stiff solve.
     let mut assemble = |activity: &[f64]| -> Result<LayeredSystem, MoistureError> {
         let mut system = LayeredSystem::storage(&state, activity, reference, cx)?;

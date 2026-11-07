@@ -85,7 +85,7 @@ impl MoistureLayeredSlab {
         cx: &Cx<'_>,
     ) -> Result<kernel::StageLoad, MoistureError> {
         poll(cx)?;
-        if first.definition_identity != self.definition_identity {
+        if first.definition_identity() != self.definition_identity() {
             return Err(MoistureError::Invalid(
                 "layered SDIRK load must retain the original material and geometry",
             ));

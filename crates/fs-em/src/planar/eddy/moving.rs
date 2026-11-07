@@ -28,9 +28,7 @@ use super::{
 };
 use crate::planar::{MagneticError, gradients};
 use fs_rep_mesh::TriComplex2;
-use fs_solver::{
-    FgmresState, FlexiblePreconditioner, LinearOp, ResidualClaim, SolveReport, SolverRunProgress,
-};
+use fs_solver::{FgmresState, LinearOp, ResidualClaim, SolveReport, SolverRunProgress};
 use fs_sparse::Csr;
 use std::{
     cell::{Cell, RefCell},
@@ -301,16 +299,13 @@ impl MovingJacobi {
         Ok(Self(inverse))
     }
 }
-impl FlexiblePreconditioner for MovingJacobi {
-    fn apply(&self, _: usize, residual: &[f64], output: &mut [f64]) {
+// fs_solver's blanket impl makes every Precond a FlexiblePreconditioner that
+// ignores the logical iteration, so FGMRES and checked CG apply this one diagonal.
+impl fs_sparse::precond::Precond for MovingJacobi {
+    fn apply(&self, residual: &[f64], output: &mut [f64]) {
         for ((out, &value), &scale) in output.iter_mut().zip(residual).zip(&self.0) {
             *out = value * scale;
         }
-    }
-}
-impl fs_sparse::precond::Precond for MovingJacobi {
-    fn apply(&self, residual: &[f64], output: &mut [f64]) {
-        FlexiblePreconditioner::apply(self, 0, residual, output);
     }
 }
 

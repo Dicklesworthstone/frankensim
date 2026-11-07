@@ -36,7 +36,9 @@ use response::work;
 use fs_exec::Cx;
 use fs_feec::acoustics::helmholtz::AcousticFeError;
 use fs_feec::acoustics::helmholtz::heterogeneous::time::ResistiveBoundary;
-use fs_feec::acoustics::helmholtz::heterogeneous::{HeterogeneousHelmholtzFe, VelocityTrace};
+use fs_feec::acoustics::helmholtz::heterogeneous::{
+    HeterogeneousError, HeterogeneousHelmholtzFe, VelocityTrace,
+};
 use fs_math::c64::C64;
 use fs_modal::harmonic::{
     HarmonicResponse, HarmonicResponseControls, HarmonicResponseError, PreparedHarmonicResponse,
@@ -103,6 +105,18 @@ impl From<AcousticFeError> for StructuralInteriorError {
 impl From<HarmonicResponseError> for StructuralInteriorError {
     fn from(error: HarmonicResponseError) -> Self {
         Self::Harmonic(error)
+    }
+}
+
+// The interior's pressure samples refuse through the shared heterogeneous error;
+// keep its acoustic refusal and cancellation, as the response conversion does.
+impl From<HeterogeneousError> for StructuralInteriorError {
+    fn from(error: HeterogeneousError) -> Self {
+        match error {
+            HeterogeneousError::Acoustic(error) => Self::Interior(error),
+            HeterogeneousError::Cancelled => HarmonicResponseError::Cancelled.into(),
+            _ => Self::Invalid("heterogeneous interior refused a pressure sample"),
+        }
     }
 }
 

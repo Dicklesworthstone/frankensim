@@ -129,8 +129,14 @@ impl EnsembleRenderer {
             }
             voices.extend(part.context.voices);
         }
+        let mut pressure_sum = Vec::new();
+        if voices.len() > 1 {
+            pressure_sum.try_reserve_exact(config.max_block)
+                .map_err(|_| sizing("cannot reserve ensemble pressure mix"))?;
+            pressure_sum.resize(config.max_block, fs_math::dd::Dd::ZERO);
+        }
         let context = RenderContext {
-            voices, scratch, blocks_rendered: 0, samples_rendered: 0,
+            voices, scratch, pressure_sum, blocks_rendered: 0, samples_rendered: 0,
             controls_applied: Vec::new(), poisoned: false,
         };
         let renderer = ScheduledRenderer::new(context, events, config.max_events)?;

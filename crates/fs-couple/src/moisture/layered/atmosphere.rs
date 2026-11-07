@@ -22,6 +22,7 @@ use crate::moisture::atmosphere::pair::{
 use crate::moisture::reservoir::water_sum;
 use crate::moisture::surface::admit_environment;
 
+#[path = "atmosphere/sdirk.rs"]
 mod sdirk;
 pub use sdirk::{
     LayeredAtmosphereSdirk2Candidate, LayeredAtmosphereSdirk2Step,

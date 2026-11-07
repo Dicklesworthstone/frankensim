@@ -44,14 +44,14 @@ fn harmonic_cube_matches_exact_diffusion_phase_charge_heat_and_reactive_storage(
     for omega in [0.03, 3.0, 40.0, 400.0] {
         let response = state
             .solve_harmonic(
-                &vec![[phase * 4.0; 3]; 6],
+                &vec![[phase.scale(4.0); 3]; 6],
                 &[[0.0; 3]; 8],
                 omega,
                 harmonic_controls(),
                 &mut || false,
             )
             .unwrap();
-        let a = phase * k / C64::new(k, -omega * m);
+        let a = phase.scale(k) / C64::new(k, -omega * m);
         complex_near(response.potential_wb()[diagonal(&problem)], a, 2e-9);
         let square = a.re * a.re + a.im * a.im;
         let balance = response.balance();
@@ -96,13 +96,13 @@ fn harmonic_cube_matches_exact_diffusion_phase_charge_heat_and_reactive_storage(
             for vertex in 0..4 {
                 complex_near(
                     cell.potential_v[vertex] - cell.potential_v[0],
-                    C64::new(0.0, omega) * a * (q(tet[vertex]) - q(tet[0])),
+                    (C64::new(0.0, omega) * a).scale(q(tet[vertex]) - q(tet[0])),
                     2e-9,
                 );
                 for axis in 0..3 {
                     complex_near(
                         cell.current_density_a_m2[vertex][axis],
-                        cell.conductor_electric_field_v_m[vertex][axis] * 5.0,
+                        cell.conductor_electric_field_v_m[vertex][axis].scale(5.0),
                         2e-9,
                     );
                 }

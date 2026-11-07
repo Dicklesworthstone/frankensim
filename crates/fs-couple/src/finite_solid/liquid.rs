@@ -337,12 +337,12 @@ impl FiniteSolidBody<'_> {
                 "original solid/thermal and native liquid exceed their shared conservation or mechanical projection budgets",
             ));
         }
-        let receiver = receiver.with_time_origin(self.state.time_s)?;
+        let receiver = receiver.with_time_origin(self.state.t)?;
         check(cx, gate)?;
         Ok((
             receiver,
             FiniteSolidLiquidReleaseReport {
-                physical_time_s: self.state.time_s,
+                physical_time_s: self.state.t,
                 thermal_cells: cells_in_tet_order.to_vec(),
                 solid: original.moments,
                 reported_reference_mass_kg: self.reference_mass_kg,

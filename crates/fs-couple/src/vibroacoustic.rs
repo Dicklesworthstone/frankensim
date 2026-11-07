@@ -1971,6 +1971,7 @@ mod review_regressions {
             rho_c2: 1.0,
             medium_a: AcousticMedium { rho0: 1.0, c0: 1.0 },
             cavity_relaxation: None,
+            cavity_boundary: None,
             coupling,
             z_modal: None,
         }

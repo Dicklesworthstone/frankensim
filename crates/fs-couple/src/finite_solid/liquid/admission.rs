@@ -39,9 +39,9 @@ pub(super) fn preflight(
         || body.problem.nodes_m.len() > maximum_nodes
         || cells.len() != body.problem.tetrahedra.len()
         || thermal.cells().len() != cells.len()
-        || !body.state.time_s.is_finite()
-        || body.state.time_s < 0.0
-        || body.state.time_s.to_bits() != thermal.time_s().to_bits()
+        || !body.state.t.is_finite()
+        || body.state.t < 0.0
+        || body.state.t.to_bits() != thermal.time_s().to_bits()
         || ![
             controls.maximum_cauchy_stress_pa,
             controls.maximum_elastic_storage_j,
@@ -136,7 +136,7 @@ pub(super) fn source(
             ));
         }
         let phase = caloric.state_at_specific_enthalpy(cell.specific_h_j_kg)?;
-        if !phase.is_fully_liquid() {
+        if !matches!(phase.phase(), fs_material::phase::SolidLiquidPhase::Liquid) {
             return Err(invalid(
                 "native thermal cells must already be fully liquid; this handoff does not melt a solid",
             ));
