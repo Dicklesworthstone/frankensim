@@ -80,6 +80,13 @@ fn fit(normal: usize, components: &[Vec<f64>]) -> (Vec<f64>, Vec<f64>, Vec<f64>)
         || false,
     )
     .unwrap();
+    assert_eq!(group.coefficients().len(), rho.len());
+    assert_eq!(group.coefficient(rho.len()), None);
+    for (cell, coefficient) in group.coefficients().enumerate() {
+        assert_eq!(group.coefficient(cell), Some(coefficient));
+        assert!(coefficient >= 0.0);
+        assert_eq!(group.coefficient(cell), group.inner.coefficient(cell));
+    }
     (
         flow.viscosities().to_vec(),
         scalar.diffusivities().to_vec(),

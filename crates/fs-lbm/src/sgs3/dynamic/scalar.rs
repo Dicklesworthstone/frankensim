@@ -177,6 +177,19 @@ impl PeriodicDynamicScalar {
         &self.diffusivity
     }
 
+    /// Fitted nonnegative C_phi, independently of centered cell strain.
+    /// Conservative face consumers must combine it with their current face
+    /// strain and the flow's squared filter width. Valid only after successful
+    /// combined preparation; out-of-grid indices return None.
+    pub fn coefficient(&self, cell: usize) -> Option<f64> {
+        self.basis.get(cell).map(|value| value[0])
+    }
+
+    /// Allocation-free traversal of successfully fitted C_phi values.
+    pub fn coefficients(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
+        self.basis.iter().map(|value| value[0])
+    }
+
     pub(super) fn normalize(
         &mut self,
         scalar: &[f64],
@@ -248,9 +261,12 @@ impl PeriodicDynamicScalar {
         // Momentum deliberately skips all filtered scratch for uniform flow.
         // Scalar input has already been validated even on this exact-zero path.
         if scales.velocity == 0.0 || scalar_scale == 0.0 {
-            for (tile, values) in self.diffusivity.chunks_mut(64).enumerate() {
-                poll(cancelled, tile * 64)?;
-                values.fill(0.0);
+            for (cell, (diffusivity, basis)) in
+                self.diffusivity.iter_mut().zip(&mut self.basis).enumerate()
+            {
+                poll(cancelled, cell)?;
+                *diffusivity = 0.0;
+                basis[0] = 0.0;
             }
             poll(cancelled, 0)?;
             return Ok(DynamicScalarReport {
@@ -437,6 +453,9 @@ impl PeriodicDynamicScalar {
                 });
             }
             self.diffusivity[cell] = diffusivity;
+            // Contractions have consumed the vector basis. Keep C_phi in its
+            // first lane even when centered strain makes cell diffusion zero.
+            self.basis[cell][0] = coefficient;
             report.maximum_coefficient = report.maximum_coefficient.max(coefficient);
             report.maximum_diffusivity = report.maximum_diffusivity.max(diffusivity);
         }

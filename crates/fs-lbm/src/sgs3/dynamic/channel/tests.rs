@@ -300,6 +300,13 @@ fn channel_fit_has_independent_heat_and_respects_boosts_and_scalar_offsets() {
         )
         .unwrap();
     assert!(report.0.maximum_eddy_viscosity > 0.0 && report.1.maximum_diffusivity > 0.0);
+    assert_eq!(scalar.coefficients().len(), rho.len());
+    assert_eq!(scalar.coefficient(rho.len()), None);
+    for (cell, coefficient) in scalar.coefficients().enumerate() {
+        assert_eq!(scalar.coefficient(cell), Some(coefficient));
+        assert!(coefficient >= 0.0 && coefficient <= report.1.maximum_coefficient);
+        assert_eq!(scalar.coefficient(cell), scalar.inner.coefficient(cell));
+    }
     assert!(
         flow.viscosities()
             .iter()

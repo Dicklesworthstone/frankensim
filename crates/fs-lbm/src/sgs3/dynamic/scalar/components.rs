@@ -156,6 +156,17 @@ impl PeriodicDynamicComponents {
         self.scalar.diffusivities()
     }
 
+    /// Common fitted C_phi, independently of centered cell strain. Valid
+    /// after successful combined preparation; out-of-grid indices return None.
+    pub fn coefficient(&self, cell: usize) -> Option<f64> {
+        self.scalar.coefficient(cell)
+    }
+
+    /// Allocation-free common coefficients for native face-strain consumers.
+    pub fn coefficients(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
+        self.scalar.coefficients()
+    }
+
     pub(in super::super) fn shape(&self) -> [usize; 3] {
         self.scalar.shape
     }

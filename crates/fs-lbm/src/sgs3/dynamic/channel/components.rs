@@ -83,6 +83,17 @@ impl ChannelDynamicComponents {
     pub fn diffusivities(&self) -> &[f64] {
         self.inner.diffusivities()
     }
+
+    /// Plane-fitted common C_phi for a consuming face's own strain.
+    /// Valid after success; out-of-grid indices return None.
+    pub fn coefficient(&self, cell: usize) -> Option<f64> {
+        self.inner.coefficient(cell)
+    }
+
+    /// Allocation-free traversal of the successfully fitted coefficients.
+    pub fn coefficients(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
+        self.inner.coefficients()
+    }
 }
 
 impl ChannelDynamicSgs {

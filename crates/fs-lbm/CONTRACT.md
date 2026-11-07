@@ -14190,6 +14190,15 @@ compare the coefficients against the existing independent full-tensor Germano
 oracle and check that scalar preparation preserves them without extra storage.
 The coefficient remains an exploratory model estimate, not DNS validation.
 
+`PeriodicDynamicScalar`, `ChannelDynamicScalar` and their common-component
+wrappers likewise expose fitted `C_phi` through `coefficient` and
+`coefficients`. The completed scalar-basis scratch retains the coefficient
+without allocating another field or changing the reported cell diffusivity.
+This lets conservative face consumers apply their own resolved strain even
+when the adjacent centered cell strains vanish. Uniform-flow or uniform-scalar
+preparation clears the coefficient output, including when reusing a workspace.
+The existing successful-preparation, bounds and exploratory-use rules apply.
+
 ## Resolved inviscid vorticity production
 
 `FlowKinematics3::inviscid_vorticity_budget` retains the separate stretching

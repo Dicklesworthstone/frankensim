@@ -72,6 +72,56 @@ fn g1_one_component_matches_physical_reference_and_preserves_original_heat_and_f
 }
 
 #[test]
+fn g1_common_component_coefficients_match_scalar_fit_and_reset_without_more_storage() {
+    let (rho, u, heat) = cartesian_field(SHAPE);
+    let (mc, hc) = settings(DynamicAveraging::LocalBox);
+    let mut flow = PeriodicDynamicSgs::new_cartesian(SHAPE, SPACING, usize::MAX).unwrap();
+    let mut thermal = PeriodicDynamicScalar::new(SHAPE, usize::MAX).unwrap();
+    let mut group = PeriodicDynamicComponents::new(SHAPE, 3, usize::MAX).unwrap();
+    let bytes = group.workspace_bytes();
+    flow.prepare_with_scalar_and_components(
+        mc,
+        hc,
+        config(DynamicAveraging::LocalBox),
+        &rho,
+        &u,
+        &heat,
+        &mut thermal,
+        |component, cell| match component {
+            0 => heat[cell],
+            1 => -heat[cell],
+            _ => 1.0,
+        },
+        &mut group,
+        || false,
+    )
+    .unwrap();
+    assert!(group.coefficients().any(|value| value > 0.0));
+    assert_eq!(group.coefficients().len(), heat.len());
+    assert_eq!(group.coefficient(heat.len()), None);
+    for (cell, (actual, expected)) in group.coefficients().zip(thermal.coefficients()).enumerate() {
+        assert_eq!(group.coefficient(cell), Some(actual));
+        assert!((actual - expected).abs() < 2e-13);
+    }
+    flow.prepare_with_scalar_and_components(
+        mc,
+        hc,
+        config(DynamicAveraging::LocalBox),
+        &rho,
+        &u,
+        &heat,
+        &mut thermal,
+        |component, _| component as f64,
+        &mut group,
+        || false,
+    )
+    .unwrap();
+    assert!(group.coefficients().all(|value| value == 0.0));
+    assert!(group.diffusivities().iter().all(|value| *value == 0.0));
+    assert_eq!(group.workspace_bytes(), bytes);
+}
+
+#[test]
 fn g3_same_unit_component_basis_and_species_order_do_not_change_common_diffusion() {
     let (_, _, phi) = cartesian_field(SHAPE);
     let first: Vec<_> = phi.iter().map(|v| 0.25 + 0.03 * v).collect();

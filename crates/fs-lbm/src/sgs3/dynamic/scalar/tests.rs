@@ -189,6 +189,12 @@ fn g1_scalar_germano_matches_independent_physical_unit_reference() {
             for (a, b) in scalar.diffusivities().iter().zip(expected) {
                 assert!((a - b).abs() < 2e-13, "{averaging:?}: {a} != {b}");
             }
+            assert_eq!(scalar.coefficients().len(), u.len());
+            assert_eq!(scalar.coefficient(u.len()), None);
+            for (cell, (actual, raw)) in scalar.coefficients().zip(&coefficient).enumerate() {
+                assert_eq!(scalar.coefficient(cell), Some(actual));
+                assert!((actual - raw.max(0.0)).abs() < 2e-13);
+            }
             let minimum = coefficient.into_iter().fold(f64::INFINITY, f64::min);
             assert!((report.minimum_raw_coefficient - minimum).abs() < 2e-13);
             if averaging == DynamicAveraging::LocalBox {
@@ -224,6 +230,45 @@ fn cartesian_scalar_matches_independent_physical_unit_reference() {
             }
         }
     }
+}
+
+#[test]
+fn g1_global_scalar_coefficient_survives_a_centered_strain_null_without_more_storage() {
+    let n = 7;
+    let shape = [n; 3];
+    let (rho, mut u, phi) = field(n);
+    // Six equal neighboring velocities make every centered derivative at the
+    // origin exactly zero, although its direct face jumps remain resolved.
+    // The coefficient is fitted over the complete, otherwise varying field.
+    for axis in 0..3 {
+        for distance in [1, n - 1] {
+            let mut at = [0; 3];
+            at[axis] = distance;
+            u[index(shape, at)] = [0.0; 3];
+        }
+    }
+    let (mc, sc) = settings(DynamicAveraging::Domain);
+    let mut flow = PeriodicDynamicSgs::new(shape, 0.37, usize::MAX).unwrap();
+    let mut scalar = PeriodicDynamicScalar::new(shape, usize::MAX).unwrap();
+    let bytes = scalar.workspace_bytes();
+    let (_, report) = flow
+        .prepare_with_scalar(mc, sc, &rho, &u, &phi, &mut scalar, || false)
+        .unwrap();
+    let (expected, _) = reference(shape, [0.37; 3], &rho, &u, &phi, DynamicAveraging::Domain);
+    assert!(expected[0] > 0.0);
+    assert_eq!(scalar.diffusivities()[0], 0.0);
+    assert!((scalar.coefficient(0).unwrap() - expected[0]).abs() < 2e-13);
+    assert_eq!(scalar.coefficient(0), Some(report.maximum_coefficient));
+    assert!(
+        scalar
+            .coefficients()
+            .all(|value| value == report.maximum_coefficient)
+    );
+    assert_eq!(scalar.workspace_bytes(), bytes);
+    assert_eq!(
+        bytes,
+        PeriodicDynamicScalar::required_bytes(n * n * n).unwrap()
+    );
 }
 
 #[test]
@@ -517,6 +562,7 @@ fn g0_uniform_fields_clear_prior_diffusivity_and_still_validate_inputs() {
         flow.prepare_with_scalar(mc, sc, &rho, &u, &phi, &mut scalar, || false)
             .unwrap();
         assert!(scalar.diffusivities().iter().any(|&v| v > 0.0));
+        assert!(scalar.coefficients().any(|value| value > 0.0));
         let v = if constant_velocity {
             vec![[1.0, -2.0, 3.0]; len]
         } else {
@@ -532,6 +578,7 @@ fn g0_uniform_fields_clear_prior_diffusivity_and_still_validate_inputs() {
             .unwrap();
         assert_eq!(report.undetermined_cells, len);
         assert!(scalar.diffusivities().iter().all(|&v| v == 0.0));
+        assert!(scalar.coefficients().all(|value| value == 0.0));
     }
     phi[11] = f64::NAN;
     assert!(matches!(
