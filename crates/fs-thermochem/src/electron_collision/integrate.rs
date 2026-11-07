@@ -77,7 +77,10 @@ pub(super) fn moments(
         let (values, error) = loop {
             let mut values: [Sum; 3] = core::array::from_fn(|_| Sum::default());
             let mut errors: [Sum; 3] = core::array::from_fn(|_| Sum::default());
-            let mut segment = |lower: f64, upper: f64| -> Result<(), ElectronCollisionErrorV1> {
+            let mut segment = |lower: f64,
+                               upper: f64,
+                               cross_section: ShiftedCrossSection|
+             -> Result<(), ElectronCollisionErrorV1> {
                 let lower = lower.min(end);
                 let upper = upper.min(end);
                 if lower >= upper {
@@ -102,8 +105,24 @@ pub(super) fn moments(
                     } else {
                         lower + (panel + 1) as f64 * width
                     };
-                    let fine = gauss(source, thermal, threshold_ratio, a, b, &X16, &W16);
-                    let coarse = gauss(source, thermal, threshold_ratio, a, b, &X8, &W8);
+                    let fine = gauss(
+                        &cross_section,
+                        source.scale,
+                        thermal,
+                        threshold_ratio,
+                        [a, b],
+                        &X16,
+                        &W16,
+                    );
+                    let coarse = gauss(
+                        &cross_section,
+                        source.scale,
+                        thermal,
+                        threshold_ratio,
+                        [a, b],
+                        &X8,
+                        &W8,
+                    );
                     for i in 0..3 {
                         values[i].add(fine[i]);
                         errors[i].add((fine[i] - coarse[i]).abs());
@@ -112,7 +131,21 @@ pub(super) fn moments(
                 Ok(())
             };
             match &source.law {
-                CrossSectionLaw::Beb { .. } => segment(0.0, end)?,
+                CrossSectionLaw::Beb {
+                    binding_energy,
+                    orbital_kinetic_energy,
+                    occupation,
+                    dipole_constant,
+                } => segment(
+                    0.0,
+                    end,
+                    ShiftedCrossSection::Beb {
+                        binding: *binding_energy,
+                        orbital: *orbital_kinetic_energy,
+                        occupation: *occupation,
+                        dipole: *dipole_constant,
+                    },
+                )?,
                 CrossSectionLaw::Linear(points) => {
                     for pair in points.windows(2) {
                         let lower = (pair[0].energy.value() - source.threshold.value()) / thermal;
@@ -120,7 +153,16 @@ pub(super) fn moments(
                             break;
                         }
                         let upper = (pair[1].energy.value() - source.threshold.value()) / thermal;
-                        segment(lower, upper)?;
+                        segment(
+                            lower,
+                            upper,
+                            ShiftedCrossSection::Linear {
+                                offset: source.threshold.value() - pair[0].energy.value(),
+                                width: pair[1].energy.value() - pair[0].energy.value(),
+                                left: pair[0].cross_section.value(),
+                                right: pair[1].cross_section.value(),
+                            },
+                        )?;
                     }
                 }
             }
@@ -179,12 +221,55 @@ pub(super) fn moments(
     }
 }
 
+// The source segment is known before quadrature. Evaluate its local law in
+// E-threshold coordinates, avoiding a binary search at every table node and
+// preserving positive threshold excess below an ulp of the absolute energy.
+enum ShiftedCrossSection {
+    Linear {
+        offset: f64,
+        width: f64,
+        left: f64,
+        right: f64,
+    },
+    Beb {
+        binding: f64,
+        orbital: f64,
+        occupation: f64,
+        dipole: f64,
+    },
+}
+impl ShiftedCrossSection {
+    fn value(&self, excess: f64) -> f64 {
+        match *self {
+            Self::Linear {
+                offset,
+                width,
+                left,
+                right,
+            } => {
+                let fraction = ((offset + excess) / width).clamp(0.0, 1.0);
+                if left <= right {
+                    left + fraction * (right - left)
+                } else {
+                    right + (1.0 - fraction) * (left - right)
+                }
+            }
+            Self::Beb {
+                binding,
+                orbital,
+                occupation,
+                dipole,
+            } => nist::beb_value_above_threshold(excess, binding, orbital, occupation, dipole),
+        }
+    }
+}
+
 fn gauss<const N: usize>(
-    source: &ElectronCrossSectionV1,
+    cross_section: &ShiftedCrossSection,
+    scale: f64,
     thermal: f64,
     a: f64,
-    lower: f64,
-    upper: f64,
+    [lower, upper]: [f64; 2],
     nodes: &[f64; N],
     weights: &[f64; N],
 ) -> [f64; 3] {
@@ -194,10 +279,8 @@ fn gauss<const N: usize>(
     for (&node, &weight) in nodes.iter().zip(weights) {
         for sign in [-1.0, 1.0] {
             let y = midpoint + sign * half * node;
-            let energy =
-                (source.threshold.value() + thermal * y).min(source.maximum_energy.value());
             let x = (a + y) / (a + 1.0);
-            let weighted = weight * (source.value(energy) / source.scale) * exp(-y);
+            let weighted = weight * (cross_section.value(thermal * y) / scale) * exp(-y);
             let mut term = weighted;
             for value in &mut values {
                 term *= x;

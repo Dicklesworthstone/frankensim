@@ -2652,7 +2652,12 @@ These are different moments: a constant momentum cross section gives
 `(4/3) sigma <v>`. The latter is not the exact energy-dependent
 Lorentz-Boltzmann mobility. Analytic temperature derivatives use the same
 integral. Threshold shifting preserves finite log rates after direct
-underflow; unrepresentable direct coefficients are `None`. Positive Gauss
+underflow; unrepresentable direct coefficients are `None`. The shift is retained
+inside table interpolation and the BEB logarithm, so a positive threshold excess
+is not rounded away by reconstructing absolute electron energy. Each admitted
+table interval is reused without a new search at every quadrature node. Analytic
+linear-threshold moments and H/He BEB threshold asymptotics test the factored
+integral as well as its rate and temperature derivative. Positive Gauss
 rules estimate quadrature error for both required moments, while an explicit
 source envelope bounds the omitted tail. Exhausted work or unresolved tails
 refuse. Numerical estimates and conditional model-tail bounds do not certify

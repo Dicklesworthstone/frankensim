@@ -98,9 +98,22 @@ pub(super) fn beb_value(energy: f64, binding: f64, orbital: f64, occupation: f64
     if energy <= binding {
         return 0.0;
     }
-    let x = (energy - binding) / binding;
+    beb_value_above_threshold(energy - binding, binding, orbital, occupation, q)
+}
+
+// Maxwellian quadrature already knows E-B. Retain that excess rather than
+// reconstructing E, which can round back to B in the rare-event limit.
+pub(super) fn beb_value_above_threshold(
+    excess: f64,
+    binding: f64,
+    orbital: f64,
+    occupation: f64,
+    q: f64,
+) -> f64 {
+    let x = excess / binding;
     let t = 1.0 + x;
-    let log_t = crate::entropy::log_ratio(energy, binding);
+    // Kahan's log1p identity also retains x when 1+x rounds to exactly one.
+    let log_t = if t == 1.0 { x } else { ln(t) * (x / (t - 1.0)) };
     let inverse = 1.0 / t;
     let b_ev = binding / ELECTRONVOLT_J;
     let scale = 4.0

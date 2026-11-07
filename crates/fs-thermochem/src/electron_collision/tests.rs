@@ -320,3 +320,107 @@ fn every_table_knot_is_integrated_even_for_a_narrow_collision_band() {
         2e-6,
     );
 }
+
+#[test]
+fn linear_ionization_threshold_law_has_analytic_rate_and_temperature_derivative() {
+    let threshold = 13.6 * ELECTRONVOLT_J;
+    let accurate = MaxwellianRateControlsV1 {
+        relative_tolerance: 1e-12,
+        ..controls()
+    };
+    for a in [1.0, 8.0, 100.0, 1000.0, 1_180_591_620_717_411_303_424.0] {
+        let thermal = threshold / a;
+        let width = threshold.max(128.0 * thermal);
+        let cross = 1e-20;
+        let source = ElectronCrossSectionV1::tabulated(
+            id("H"),
+            ElectronCollisionKindV1::Ionization,
+            Provenance {
+                source: "analytic linear ionization-threshold fixture".into(),
+                license: "fixture".into(),
+                artifact: None,
+            },
+            vec![
+                ElectronCrossSectionPointV1 {
+                    energy: Energy::new(threshold),
+                    cross_section: Area::new(0.0),
+                },
+                ElectronCrossSectionPointV1 {
+                    energy: Energy::new(threshold + width),
+                    cross_section: Area::new(cross),
+                },
+            ],
+            Area::new(cross),
+        )
+        .unwrap();
+        let t = thermal / BOLTZMANN_J_PER_K;
+        let p = source
+            .evaluate_properties(
+                Temperature::new(t),
+                MaxwellianRateWeightingV1::Event,
+                accurate,
+                || false,
+            )
+            .unwrap();
+        // For sigma=C(E-B), integral E sigma exp(-E/theta) dE
+        // is C theta^2 (B+2theta) exp(-B/theta). The fixture's
+        // finite endpoint lies at least 128 thermal energies above B.
+        let expected_log = 0.5 * ln(8.0 / (core::f64::consts::PI * ELECTRON_MASS_KG))
+            + ln(cross / width)
+            + 0.5 * ln(thermal)
+            + ln(threshold + 2.0 * thermal)
+            - a;
+        near(p.log_coefficient_m3_s(), expected_log, 2e-13);
+        let expected_derivative = (a + 0.5 + 2.0 * thermal / (threshold + 2.0 * thermal)) / t;
+        near(
+            p.logarithmic_temperature_derivative_per_k(),
+            expected_derivative,
+            2e-12,
+        );
+        // Check the factored moment too: at extreme suppression the huge
+        // Boltzmann logarithm would otherwise hide errors in its prefactor.
+        let moments = integrate::moments(&source, thermal, a, 1, accurate, &mut || false).unwrap();
+        near(
+            moments.value[0],
+            (thermal / width) * ((a + 2.0) / (a + 1.0)),
+            2e-12,
+        );
+        if a > 1e20 {
+            assert_eq!(threshold + 1024.0 * thermal, threshold);
+            assert_eq!(p.coefficient_m3_s(), None);
+        }
+    }
+}
+
+#[test]
+fn beb_rare_event_moment_preserves_sub_ulp_excess_energy() {
+    for (source, u, q) in [
+        (nist::hydrogen(id("H")), 1.0, 0.5668),
+        (nist::helium(id("He")), 39.5100 / 24.5870, 0.8841),
+    ] {
+        let a = 1_180_591_620_717_411_303_424.0; // 2^70
+        let threshold = source.threshold().value();
+        let thermal = threshold / a;
+        assert_eq!(threshold + 1024.0 * thermal, threshold);
+        let moments =
+            integrate::moments(&source, thermal, a, 1, controls(), &mut || false).unwrap();
+        // NIST Eq. (1) has sigma/S = (2-Q)(E-B)/(2B(u+2))
+        // at threshold. The normalized envelope is Q/(2e)+2-Q;
+        // integral y exp(-y) dy=1. Higher terms are below binary64.
+        let expected = (thermal / threshold) * (2.0 - q)
+            / (2.0 * (u + 2.0) * (0.5 * q / core::f64::consts::E + 2.0 - q));
+        near(moments.value[0], expected, 2e-12);
+        near(moments.value[1], expected, 2e-12);
+        let p = source
+            .evaluate_properties(
+                Temperature::new(thermal / BOLTZMANN_J_PER_K),
+                MaxwellianRateWeightingV1::Event,
+                controls(),
+                || false,
+            )
+            .unwrap();
+        assert!(p.log_coefficient_m3_s().is_finite());
+        assert_eq!(p.coefficient_m3_s(), None);
+        assert!(p.logarithmic_temperature_derivative_per_k().is_finite());
+    }
+}
