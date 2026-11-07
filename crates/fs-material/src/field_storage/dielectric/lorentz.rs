@@ -29,9 +29,11 @@ use fs_qty::{
 
 pub mod oscillator;
 pub use oscillator::{
-    LorentzError, LorentzHarmonicTransfer, LorentzPole, LorentzState, LorentzStep,
-    PreparedLorentzHarmonic, PreparedLorentzStep,
+    LorentzError, LorentzHarmonicTransfer, LorentzMidpointPoleStep, LorentzPole, LorentzState,
+    LorentzStep, PreparedLorentzHarmonic, PreparedLorentzMidpoint, PreparedLorentzStep,
 };
+mod midpoint;
+pub use midpoint::{LorentzMidpointStep, PreparedLorentzMaterialMidpoint};
 
 impl From<LorentzError> for FieldStorageError {
     fn from(value: LorentzError) -> Self {

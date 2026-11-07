@@ -20742,3 +20742,40 @@ physical harmonic phase, all shear/cross terms, analytic and finite-difference
 tangents, source-domain admission, isotropic shear and extreme unrelated loss
 scales. Native compilation and execution remain unverified because the shared
 workspace is unavailable; no substitute runtime or dependency stub was used.
+
+### Passive midpoint coupling of inertial polarization
+
+`field_storage::dielectric::lorentz` now supplies source-owned midpoint
+condensation and recovery for original polarization/current vectors. The
+endpoint field coefficient is `epsilon_infinity + sum delta*(h*omega0)^2 /
+(1+h*gamma+(h*omega0)^2)`, with `h=dt/2`; the history retains both P0 and J0.
+Recovery keeps each original pole in its authored order and separately reports
+instantaneous-field, restoring and kinetic storage, actual endpoint increments,
+midpoint electric work, and nonnegative frictional heat. Heat is evaluated from
+the original midpoint current and is never a balance residual. Rounded P/J
+publication is reflected in the reported energy residual. One-, two- and
+three-dimensional states are supported; an empty bank is the original lossless
+instantaneous material. Invalid interval, vector shape, nonfinite input, and
+unrepresentable recovered quantities refuse without mutating the inputs.
+
+`PreparedLorentzMaterialMidpoint` caches one fixed interval's original pole
+coefficients and positive condensed permittivity for repeated spatial cells.
+Warm histories allocate nothing and neither histories nor recovery re-prepare
+the coefficients or query the material. Only the recovered bounded state vector
+allocates. The prepared cache does not clone or replace the complete source
+record; the field owner retains that record and its identity. Convenience methods
+reuse the same recovery kernel. Dimensional products retain binary exponents
+and use the existing quad-double math owner; no pole fit or second constitutive
+model is introduced. This is second-order passive implicit midpoint, not an
+exact propagator or an L-stable method. Timestep refinement must resolve
+resonance phase, damping and field variation. Spatial convergence, global
+source/boundary work admission, thermal parameter work and full-wave Maxwell
+regime validity remain with their existing owners.
+
+Twenty-one native tests of the actual oscillator implementation pass, including
+six new midpoint tests of the original equations/condensation, lossless phase
+and energy, damped passivity, continuous-solution convergence, representable
+extreme scales and refusal/replay. Three source-bank integration regressions
+are authored but unexecuted without the complete material dependency closure;
+they cover cached/convenience equality, original multipole work and energy,
+source retention, the empty bank, and refusals.

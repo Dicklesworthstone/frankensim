@@ -14,6 +14,10 @@ use fs_qty::{
 
 type Entry = (&'static str, QuantitySpec, f64);
 
+#[cfg(test)]
+#[path = "lorentz/midpoint.rs"]
+mod midpoint_tests;
+
 fn frequency(convention: FrequencyConvention) -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(
         QuantityKind::Frequency(convention),

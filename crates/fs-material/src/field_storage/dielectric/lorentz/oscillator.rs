@@ -18,6 +18,11 @@ mod harmonic;
 pub use harmonic::PreparedLorentzHarmonic;
 mod transfer;
 pub use transfer::LorentzHarmonicTransfer;
+mod midpoint;
+pub use midpoint::{LorentzMidpointPoleStep, PreparedLorentzMidpoint};
+pub(super) use midpoint::{
+    field_energy as midpoint_field_energy, field_increment as midpoint_field_increment,
+};
 
 /// Invalid physical data, an unresolved arithmetic range, or an actual pole.
 #[derive(Clone, Debug, PartialEq)]
