@@ -3462,3 +3462,28 @@ original per-body inventory. Static coefficients retain their existing fast
 path. Temperature continuation keeps the original selected claims, coordinate
 ownership and mechanical histories. This is held-condition quadrature requiring
 physical refinement, not an inferred wear-regime transition or debris model.
+
+## Implicit endpoint-pressure surface removal
+
+`SourcePlasticArchardWear::advance_wear_implicit` solves the original local
+Archard law at the worn endpoint pressure with held approach, maintained normal
+force or a fixed loading spring. Each residual reuses the original per-body
+hardness/coefficient quadrature, volume/profile consistency checks and native
+normal continuation from the exact accepted predecessor. No trial becomes the
+next trial's plastic history; no fabricated contact state supplies pressure.
+
+Only nonzero-slip cells are nonlinear unknowns. Pressure/cap coordinates use
+the semismooth residual `x - p_native(clamp(x,0,1))/H`, keeping quadrature inside
+the native pressure box while retaining the unprojected root equation. Original
+source-domain refusals remain explicit. Existing Newton--Krylov iteration and
+numerical Jacobian actions obey separate unknown, evaluation and iteration
+budgets. Physical pressure and per-body recession equations are independently
+gated at the returned endpoint, including a fresh original k(p, speed) query.
+Only the accepted quadrature's normal, plastic and parameter-work receipts count.
+
+This is first-order backward-Euler wear with prescribed actual slip and mean
+speed at held temperatures. It supplies no friction closure, debris/heat model,
+global path-error bound or uniqueness theorem for arbitrary empirical k(p).
+The explicit initial pressure guess and existing cumulative physical envelopes
+remain binding. G1/G3 tests use independent large-step scalar, maintained-load,
+finite-spring and nonlinear local-coefficient equations plus atomic refusals.

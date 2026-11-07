@@ -1,5 +1,8 @@
 //! Original k(p,v) and k(T,v) use actual irreversible motion, with no calibration claim.
 
+#[path = "coefficients/implicit.rs"]
+mod implicit;
+
 use super::*;
 use fs_contact::normal_patch::plastic_source::wear::coefficients::LocalWearAxes;
 use fs_qty::Temperature;

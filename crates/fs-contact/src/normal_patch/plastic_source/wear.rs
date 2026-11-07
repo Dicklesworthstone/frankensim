@@ -1,6 +1,6 @@
 //! Local Archard recession of a retained hardness-limited contact patch.
 //!
-//! One update integrates the *initial* equilibrated cell pressure against the
+//! Ordinary updates integrate the *initial* equilibrated cell pressure against the
 //! supplied unsigned local sliding distance, holding each sampled local k/H
 //! fixed over the step. Original k claims may follow actual cell pressure and
 //! irreversible mean sliding speed; separate body hardness stays independent.
@@ -8,11 +8,15 @@
 //! relative gap at held approach. Refine sliding increments when wear changes
 //! pressure appreciably. This bounded surface law does not transport debris or
 //! infer local sliding from macroscopic displacement, and it assigns no heat.
+//! The implicit adapter instead closes the same quadrature at endpoint pressure,
+//! retaining the original normal, inventory and parameter-work owners.
 
 /// Original local pressure/speed-dependent wear coefficients and query receipts.
 pub mod coefficients;
 /// Wear under an explicitly finite loading-device stiffness.
 pub mod drive;
+/// Implicit endpoint-pressure integration of the original local wear law.
+pub mod implicit;
 /// Adaptive integration of pressure-dependent local surface recession.
 pub mod integration;
 /// Prescribed-load wear without intermediate indentation histories.
@@ -152,7 +156,9 @@ pub struct SourcePlasticWearAdvance {
     pub wear: [WearAdvance; 2],
     /// Recession added to each original body at every original grid cell [m].
     pub recession_increment_m: [Vec<f64>; 2],
-    /// Initial-pressure quadrature `sum(p_old * unsigned_local_slip * area)` [N m].
+    /// Pressure quadrature `sum(p * unsigned_local_slip * area)` [N m]. Ordinary
+    /// advances use beginning pressure; the implicit adapter declares its
+    /// endpoint-pressure approximation and residuals in its enclosing receipt.
     /// This is a sliding measure and has no automatic heat interpretation.
     pub pressure_weighted_sliding_j: f64,
     /// Actual local wear-claim queries, present for a pressure/speed-dependent
@@ -487,10 +493,38 @@ impl SourcePlasticArchardWear {
         )
             -> Result<(FiniteGapPlasticContinuation, T), SourcePlasticWearError>,
     ) -> Result<(SourcePlasticWearAdvance, T), SourcePlasticWearError> {
+        self.advance_wear_at_pressure_with_recession(
+            before,
+            before.contact.contact_state().pressure_pa(),
+            local_unsigned_slip_m,
+            duration_s,
+            cx,
+            equilibrate,
+        )
+    }
+
+    // The pressure is a QUADRATURE input, never a manufactured accepted contact
+    // state. The implicit adapter gates it against the resulting native endpoint.
+    // Every geometry solve still receives the original accepted predecessor.
+    fn advance_wear_at_pressure_with_recession<T>(
+        &self,
+        before: &SourcePlasticWearState,
+        pressure: &[f64],
+        local_unsigned_slip_m: &[f64],
+        duration_s: Option<f64>,
+        cx: &Cx<'_>,
+        equilibrate: impl FnOnce(
+            &[f64],
+        )
+            -> Result<(FiniteGapPlasticContinuation, T), SourcePlasticWearError>,
+    ) -> Result<(SourcePlasticWearAdvance, T), SourcePlasticWearError> {
         self.admit(before)?;
         checkpoint(cx)?;
-        let pressure = before.contact.contact_state().pressure_pa();
-        if local_unsigned_slip_m.len() != pressure.len()
+        if pressure.len() != before.contact.contact_state().pressure_pa().len()
+            || pressure
+                .iter()
+                .any(|value| !value.is_finite() || *value < 0.0)
+            || local_unsigned_slip_m.len() != pressure.len()
             || local_unsigned_slip_m
                 .iter()
                 .any(|value| !value.is_finite() || *value < 0.0)
