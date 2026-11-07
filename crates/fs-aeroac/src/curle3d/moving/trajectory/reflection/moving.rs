@@ -497,8 +497,32 @@ impl<'a> PreparedReflectedMovingReceiverSource<'a> {
         ) -> Result<[f64; 3], AeroacError>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ReflectedCompactField, AeroacError> {
-        poll(cancelled)?;
         let mut sum = ReflectedFieldSum::default();
+        self.add_force_field(
+            receiver_time,
+            source_at,
+            force_history_at,
+            &mut sum,
+            cancelled,
+        )?;
+        sum.finish(receiver_time)
+    }
+
+    // Preserve every path's DD fields through an array's cross-source sum.
+    // A public single-source result has already rounded away that information.
+    pub(in crate::curle3d::moving::trajectory) fn add_force_field(
+        &self,
+        receiver_time: f64,
+        source_at: &mut impl FnMut(f64) -> Result<CompactSourceStrength, AeroacError>,
+        force_history_at: &mut impl FnMut(
+            usize,
+            &MovingCompactObserver,
+            f64,
+        ) -> Result<[f64; 3], AeroacError>,
+        sum: &mut ReflectedFieldSum,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), AeroacError> {
+        poll(cancelled)?;
         for path in 0..self.path_count() {
             let original = self
                 .path(path)?
@@ -531,8 +555,7 @@ impl<'a> PreparedReflectedMovingReceiverSource<'a> {
                 residual,
             );
         }
-        poll(cancelled)?;
-        sum.finish(receiver_time)
+        poll(cancelled)
     }
 }
 

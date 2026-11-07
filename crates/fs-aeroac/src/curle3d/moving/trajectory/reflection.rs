@@ -56,14 +56,14 @@ pub struct ReflectedCompactField {
 }
 
 #[derive(Default)]
-struct ReflectedFieldSum {
+pub(super) struct ReflectedFieldSum {
     pressure: Dd,
     velocity: [Dd; 3],
     maximum_time_residual_s: f64,
 }
 
 impl ReflectedFieldSum {
-    fn add(&mut self, pressure: Dd, velocity: [Dd; 3], residual: f64) {
+    pub(super) fn add(&mut self, pressure: Dd, velocity: [Dd; 3], residual: f64) {
         self.pressure = self.pressure + pressure;
         for (sum, value) in self.velocity.iter_mut().zip(velocity) {
             *sum = *sum + value;
@@ -71,7 +71,7 @@ impl ReflectedFieldSum {
         self.maximum_time_residual_s = self.maximum_time_residual_s.max(residual.abs());
     }
 
-    fn finish(self, receiver_time_s: f64) -> Result<ReflectedCompactField, AeroacError> {
+    pub(super) fn finish(self, receiver_time_s: f64) -> Result<ReflectedCompactField, AeroacError> {
         let pressure_pa = self.pressure.to_f64();
         let particle_velocity_m_s = self.velocity.map(Dd::to_f64);
         let instantaneous_intensity_w_m2 = self.velocity.map(|u| (self.pressure * u).to_f64());

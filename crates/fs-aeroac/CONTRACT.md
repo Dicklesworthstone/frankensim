@@ -2957,6 +2957,43 @@ conditions and nonzero pressure-node motion for an accelerating source.
 Missing or nonfinite image history, incomplete time coverage and cancellation
 refuse the complete result.
 
+### Coherent source arrays at moving microphones
+
+`trajectory::PreparedMovingSourceArray` observes the complete instantaneous
+Q/F field of independently moving original sources at one original microphone.
+The direct constructor borrows admitted moving pairs; the reflected constructor
+borrows complete orthogonal or pi/m image groups. Every pair must reference the
+same original receiver object, and reflected sources must share the same image
+owner. Matching coordinates at one event or equal path counts are insufficient.
+The common query window is the intersection of native source windows. Checked
+aggregate source, source-path and causal-root refinement budgets are admitted
+before field queries; native knot searches and history-callback work retain
+their original explicit bounds.
+
+Callbacks preserve input source order, exact image identity, each path's own
+retarded source clock, and its current virtual observer. Original pressure and
+Cartesian velocity contributions remain in DD across BOTH source and image
+sums, before one signed instantaneous `p*u`. Weak force fields therefore
+survive destructive cancellation of stronger volume fields even when separately
+rounded public source fields would lose them. Receiver motion supplies no
+amplitude multiplier. Construction and queries allocate no owner buffers,
+clone no trajectories, and neither interpolate nor advance source mechanics.
+Past forcing, continuous worldline clearance and integral accuracy remain with
+the history owner; a previous receiver position's force integral cannot be
+substituted. This is prescribed coherent propagation, without an inferred noise
+law, audio resampling or mean-flow energy-advection model.
+
+Four focused public tests compare three accelerating sources and a moving
+microphone, with direct and mixed ideal-wall paths, against independently
+root-solved Green-potential derivatives under refinement; retain a 2^-60 force
+signal after volume-source cancellation; enforce common receiver/boundary,
+coverage and aggregate work; and refuse late missing/nonfinite histories or
+cancellation with exact replay. Those four groups and the four prior reflected
+full-field groups pass in the focused native source build. The run uses the
+original moving/trajectory, interval, material-state and image algorithms, with
+unrelated database owners and unused root error variants omitted; it is not a
+full-crate or repository gate.
+
 ## Uniformly moving transient quadrupole pressure
 
 `MovingCompactObserver::prepare_uniform_quadrupole` evaluates the complete
