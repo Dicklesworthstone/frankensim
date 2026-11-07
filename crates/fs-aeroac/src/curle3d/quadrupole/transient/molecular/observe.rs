@@ -14,7 +14,7 @@ fn finite_source(source: &TransientQuadrupoleSource) -> bool {
         .all(|v| v.is_finite())
 }
 
-fn compatible_initial(source: &TransientQuadrupoleSource) -> bool {
+pub(super) fn compatible_initial(source: &TransientQuadrupoleSource) -> bool {
     finite_source(source)
         && source
             .stress_moment_n_m
@@ -30,6 +30,15 @@ pub(super) fn inputs(
     path: &Transfer,
     source: TransientQuadrupoleSource,
 ) -> Result<[[f64; 4]; 4], AeroacError> {
+    finish_inputs(stress_inputs(path, source)?)
+}
+
+// Keep the physical projection in DD until any other co-located source
+// mechanisms have joined the same radial symbols.
+pub(super) fn stress_inputs(
+    path: &Transfer,
+    source: TransientQuadrupoleSource,
+) -> Result<[[Dd; 4]; 4], AeroacError> {
     if !finite_source(&source) {
         return Err(nonfinite("molecular quadrupole source history"));
     }
@@ -52,8 +61,13 @@ pub(super) fn inputs(
             * v[2];
         rows[3][axis + 1] = acceleration.radial * n[axis] * v[3];
     }
+    rotate_velocity(path, &mut rows);
+    Ok(rows)
+}
+
+pub(super) fn rotate_velocity(path: &Transfer, rows: &mut [[Dd; 4]; 4]) {
     if let Some(inverse) = path.inverse_image {
-        for row in &mut rows {
+        for row in rows {
             let velocity = [row[1], row[2], row[3]];
             for axis in 0..3 {
                 row[axis + 1] = (0..3).fold(Dd::ZERO, |sum, virtual_axis| {
@@ -62,6 +76,9 @@ pub(super) fn inputs(
             }
         }
     }
+}
+
+pub(super) fn finish_inputs(rows: [[Dd; 4]; 4]) -> Result<[[f64; 4]; 4], AeroacError> {
     let rows = rows.map(|row| row.map(Dd::to_f64));
     if rows.iter().flatten().any(|v| !v.is_finite()) {
         return Err(nonfinite("molecular quadrupole projected source"));
@@ -86,7 +103,29 @@ impl PreparedMolecularQuadrupoleObserver {
     pub fn observe_initially_resting(
         &self,
         clock: QuadrupoleSampleClock,
-        mut source_at: impl FnMut(usize, Dd) -> Result<TransientQuadrupoleSource, AeroacError>,
+        source_at: impl FnMut(usize, Dd) -> Result<TransientQuadrupoleSource, AeroacError>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularQuadrupoleRecord, AeroacError> {
+        self.observe_projected(
+            clock,
+            source_at,
+            compatible_initial,
+            |_, path, source| inputs(path, source),
+            SCOPE,
+            cancelled,
+        )
+    }
+
+    // One history clock, causal delay, CQ/FFT contraction and final field sum
+    // for every source mechanism. The source adapter supplies only its original
+    // onset conditions and four physical radial projections.
+    pub(super) fn observe_projected<S>(
+        &self,
+        clock: QuadrupoleSampleClock,
+        mut source_at: impl FnMut(usize, Dd) -> Result<S, AeroacError>,
+        mut initially_resting: impl FnMut(&S) -> bool,
+        mut project: impl FnMut(usize, &Transfer, S) -> Result<[[f64; 4]; 4], AeroacError>,
+        scope: &'static str,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularQuadrupoleRecord, AeroacError> {
         poll(&mut cancelled)?;
@@ -99,9 +138,9 @@ impl PreparedMolecularQuadrupoleObserver {
         let epoch = Dd::from_f64(clock.epoch_s());
         for source in 0..self.geometry.source_count() {
             poll(&mut cancelled)?;
-            if !compatible_initial(&source_at(source, epoch)?) {
+            if !initially_resting(&source_at(source, epoch)?) {
                 return Err(invalid(
-                    "molecular history needs original zero initial stress, rate and integral",
+                    "molecular history has incompatible nonzero or nonfinite initial source data",
                 ));
             }
         }
@@ -137,7 +176,7 @@ impl PreparedMolecularQuadrupoleObserver {
                         "molecular path retardation is unresolved on the DD clock",
                     ));
                 }
-                *signal = inputs(path, source_at(source_index, epoch + retarded)?)?;
+                *signal = project(path_index, path, source_at(source_index, epoch + retarded)?)?;
                 if first_active == samples && signal.iter().flatten().any(|&v| v != 0.0) {
                     first_active = index;
                 }
@@ -216,7 +255,7 @@ impl PreparedMolecularQuadrupoleObserver {
                 pressure_pa,
                 particle_velocity_m_s,
                 instantaneous_intensity_w_m2,
-                scope: SCOPE,
+                scope,
             });
         }
         poll(&mut cancelled)?;

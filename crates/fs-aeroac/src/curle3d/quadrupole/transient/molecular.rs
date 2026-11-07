@@ -29,6 +29,8 @@ use fs_material::relaxation::RelaxationState;
 use fs_math::{c64::C64, dd::Dd, det};
 
 mod observe;
+/// Complete volume/force/stress composition using this same molecular cache.
+pub mod sources;
 
 const SCOPE: &str = "Initially resting prescribed stationary 3D stress sources in one frozen \
 homogeneous molecularly relaxing gas, including complete pressure/vector velocity and exact \

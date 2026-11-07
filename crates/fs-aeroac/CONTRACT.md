@@ -3168,3 +3168,46 @@ and cancellation, original recorded binding and no circular future wrap, and
 explicit onset, ownership, clock, budget and cancellation refusals. Selective
 formatter/diff checks and a separate developer numerical oracle check passed;
 native Rust execution was unavailable.
+
+## Causal molecular volume, force and stress composition
+
+`curle3d::molecular::PreparedMolecularSourceObserver` composes original physical
+volume injection Q [m^3/s], force ON the fluid F [N], and symmetric stress
+moments [N m] in the existing molecular transient cache. `TransientAcousticSource`
+reuses `CompactSourceStrength`, retains the original force impulse [N s], and
+carries the native stress value, rate, acceleration and integral. Source positions,
+order and every direct, ideal-wall or wedge delay remain those of the original
+path owner.
+
+For G=exp(-kappa*r)/(4*pi*r), volume and force satisfy
+`p=rho*s*Q*G-F.grad(G)` and `u=-Q*grad(G)+Hessian(G)*F/(rho*s)`, with
+kappa=s*sqrt(rho/K(s)) from the original reservoirs. Their F0/F1/F2 projections
+join stress's F0..F3 projections in DD before the shared filters. Physical
+pressure and all Cartesian velocity components, including transverse near
+fields, combine across mechanisms and paths before instantaneous p*u. Force
+receives no additional density factor. Empty-reservoir propagation recovers
+the native complete lossless sources.
+
+One original kernel bank, causal DD clock, contour and padded linear-convolution
+engine serve the whole assembly. Only six signed volume/force scales per path
+are added, charged to the same workspace-byte limit. FFT work bounds and
+cancellation remain shared; no additional material sampling or convolution
+bank is introduced. `stress_observer()` exposes the same cache for the existing
+stress-only and recorded-stress APIs without rebuilding.
+
+Calling initially-resting observation declares zero prehistory and unexcited
+exterior/material state. At the epoch, Q, F, force impulse, stress, stress rate
+and stress integral must vanish. Finite Qdot, Fdot and stress acceleration jumps
+are accepted without a smooth-start order claim. Original derivative/integral
+consistency and bandwidth remain caller-owned; later source/received tails are
+unspecified. The model remains stationary, homogeneous molecular bulk relaxation
+with inviscid momentum; classical shear/conduction losses, motion, finite-impedance
+scattering and reciprocal source loading are not supplied.
+
+Six G1/G3/G4 regression groups specify independent complete Green fields and
+harmonic signs, native lossless/source-cache recovery on a large original clock,
+full-field refinement against independent Bromwich inversion, ideal boundaries
+and cross-mechanism interference, contour/future-pulse causality, and onset,
+storage, clock and cancellation refusals. Selective formatting/diff checks,
+bounded independent source review and a separate numerical fixture calculation
+passed; native Rust execution remains unverified.
