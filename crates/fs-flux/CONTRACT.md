@@ -2194,6 +2194,32 @@ a sweep. There is no diffusion CFL restriction or global solve. Actual amount
 defects and free-energy increments are checked before publication, and signed
 admitted roundoff is reported without hiding it behind clipping.
 
+`diffuse_partitioned_surface_surfactant` extends the same exchange to per-face
+ideal references or Langmuir site capacities. The authored edge conductance
+`k` [mol/s] transports `k*(q_j-q_i)`, with `q=Gamma/Gamma_ref` for ideal dilute
+patches and `q=Gamma/Gamma_sat` for Langmuir patches. The conserved pair weights
+are the actual capacities `A*Gamma_ref` or `A*Gamma_sat`. Equilibrium therefore
+has equal chemical potential, including unequal physical concentrations across
+different patches. Ideal references must encode physical standard-state
+affinity differences on a common chemical-energy datum; independent arbitrary
+reference shifts would change the physical partition equilibrium. A conducting
+edge requires a common held thermal energy and constitutive family. Different
+clean tensions remain admissible because fixed-area clean energy is constant.
+
+Every pair remains an exact convex map of normalized concentration, so moles,
+nonnegativity, the normalized concentration hull and Langmuir packing are
+preserved without a CFL bound. The original per-face law is checked at each
+exchange to refuse negative tension or any unrepresentable constitutive state,
+and the existing original-energy and total-amount acceptance gates remain
+atomic. Conductance is explicit interface data; setting `k=Gamma_ref*g` for a
+uniform law recovers the original concentration-driven exchange. No geometry,
+thermal diffusion or adsorption law is inferred. Analytic unequal-affinity and
+stiff Langmuir pairs, an independent capacity-weighted graph spectrum,
+homogeneous recovery, extreme normalized concentrations and incompatible-law
+or cancelled-state rollback exercise this path. The partitioned operator acts
+on fixed stage areas; the composed mechanical wrapper below still accepts the
+common-law transport model.
+
 `advance_surfactant_diffusive` composes half diffusion on the initial areas,
 the original mechanical trial, and half diffusion on its solved final areas.
 It publishes trajectory and inventory together only after all stages pass.
