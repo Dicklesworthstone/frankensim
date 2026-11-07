@@ -18,6 +18,9 @@
 //! Resolve temporal relaxation and wave phase independently of the original
 //! surface/material quadrature and spatial pressure order.
 
+/// Complete-state exponential evolution with held physical source profiles.
+pub mod exact;
+
 use super::super::boundary_admittance::relaxation::midpoint_weights;
 use super::super::{BoundaryVelocitySource, SpatialRelaxingBoundary, VolumeVelocitySource};
 use super::mechanical::{balance, paired_work};

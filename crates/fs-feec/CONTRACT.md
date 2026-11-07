@@ -2428,8 +2428,9 @@ spatial heat/storage, harmonic/trapezoidal consistency, a separately specified
 three-state ODE refinement oracle, energy return from release-shared memories,
 zero-residue geometric support, source work, limits, ownership and cancellation.
 Midpoint is passive but requires a time-resolution axis for stiff poles and
-wave phase. This owner does not yet compose these memories with mechanical
-wall states or supply their complete-state exponential propagator.
+wave phase. The complete-state held-source exponential path is available in
+`time::relaxing::exact`, as specified below. These owners do not yet compose
+spatial relaxation memories with mechanical wall states.
 
 ### Analytic dispersive mechanical walls in full-pressure resonance queries
 
@@ -2470,3 +2471,46 @@ local-pole refusal, and retain signed wall slopes, coherent source derivatives
 and exact pressure-release zeros. Two focused FE adapter/survey regressions are
 authored; they are not claimed executed because the full `fs-feec` dependency
 build is unavailable in this environment. No broader IRP bead is closed.
+
+### Complete spatial causal-admittance exponential trajectories
+
+`time::relaxing::exact` prepares a held-input exponential trajectory for every
+original free pressure-potential/pressure coordinate and every geometric trace
+memory of the admitted `SpatialRelaxingBoundary` laws. Preparation retains
+the original consistent fluid mass, stiffness, instantaneous conductance and
+all spatial residue matrices. Each raw memory obeys `tau_j q_dot + q = p`;
+the coupled fluid equation contains the original `Cj q_j` reactions. No
+residue matrix is inverted, diagonalized, fitted or assumed positive definite.
+Zero residues and pressure-release-shared memory coordinates remain live.
+
+The complete physical storage includes `sum tau_j q_j^T Cj q_j/2`. Admission
+independently checks the full generator identity
+`H A + A^T H + 2(C0_heat + Cj_heat) = 0`. Additional coordinate scales serve
+only numerical conditioning; they do not invent physical storage in a residue
+null space. Original sparse matrices independently evaluate endpoint energy
+changes and the resulting acoustic, memory and total balances.
+
+One cached `PreparedQuadraticFlow` trajectory supplies endpoint states,
+instantaneous heat, relaxation heat, signed fluid-to-memory exchange, and
+integrated pressure observations for every held physical source profile.
+Linear velocity ports, prepared boundary sources and volume sources retain
+their original load vectors, units and distinct source-work subtotals. Heat
+is an independently integrated trajectory form, never an assigned energy
+deficit. Candidate states publish only after the physical balances pass.
+
+Preparation is a bounded dense operation over the complete state and held
+inputs. Every memory and augmented coordinate counts against the declared
+limits. Warm steps reuse cached endpoint and observation maps without material
+callbacks, surface assembly or factorization. Exponential accuracy controls
+remain separate from spatial/quadrature convergence and source hold accuracy.
+This path handles the stated linear, time-invariant laws; it does not imply
+nonlinear boundary physics, arbitrary frequency-law fitting or unbounded
+large-mesh dense scalability.
+
+Five focused tests cover an independently specified physical ODE and its
+integrated heat/work, interval-partition parity, spatial midpoint refinement,
+stiff zero-residue release-shared memories, coherent boundary/volume-source
+work and no resampling, and bounded admission, ownership and cancellation.
+These regressions are authored, not claimed executed: the native dependency
+build exhausted the shared execution environment, which subsequently became
+unavailable before the final formatting command could be confirmed.

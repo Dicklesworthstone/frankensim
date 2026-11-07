@@ -167,10 +167,10 @@ pub struct ExactMechanicalTimeStep<'p, 'm, 'f, 'c> {
     pub integrated_volume_source_pressure_pa_s: Vec<f64>,
 }
 
-struct MassMap {
-    scales: Vec<f64>,
-    normalized: Vec<f64>,
-    inverse: Vec<f64>,
+pub(in crate::acoustics::helmholtz::heterogeneous::time) struct MassMap {
+    pub(in crate::acoustics::helmholtz::heterogeneous::time) scales: Vec<f64>,
+    pub(in crate::acoustics::helmholtz::heterogeneous::time) normalized: Vec<f64>,
+    pub(in crate::acoustics::helmholtz::heterogeneous::time) inverse: Vec<f64>,
 }
 
 struct ExactWall {
@@ -237,7 +237,7 @@ fn admit_extent(
     Ok(())
 }
 
-fn diagonal_scales(
+pub(in crate::acoustics::helmholtz::heterogeneous::time) fn diagonal_scales(
     matrix: &Csr,
     dofs: &[usize],
     cancelled: &mut impl FnMut() -> bool,
@@ -265,7 +265,7 @@ fn diagonal_scales(
 impl MassMap {
     // Restrict the ORIGINAL consistent mass BEFORE inversion. An inverse
     // restricted afterward would give different physical inertia.
-    fn new(
+    pub(in crate::acoustics::helmholtz::heterogeneous::time) fn new(
         matrix: &Csr,
         dofs: &[usize],
         cancelled: &mut impl FnMut() -> bool,
@@ -327,7 +327,7 @@ impl MassMap {
     }
 
     // Original physical field from scaled canonical momentum.
-    fn physical_map(&self, inertia_scale: f64) -> Vec<f64> {
+    pub(in crate::acoustics::helmholtz::heterogeneous::time) fn physical_map(&self, inertia_scale: f64) -> Vec<f64> {
         let n = self.scales.len();
         (0..n * n)
             .map(|i| self.inverse[i] / inertia_scale / self.scales[i / n])
@@ -336,7 +336,7 @@ impl MassMap {
 }
 
 // Original physical form P^T W P, retaining all cross-coordinate terms.
-fn pullback(
+pub(in crate::acoustics::helmholtz::heterogeneous::time) fn pullback(
     matrix: &Csr,
     map: &[f64],
     scale: f64,
@@ -369,14 +369,14 @@ fn pullback(
     Ok(form)
 }
 
-fn put_block(target: &mut [f64], states: usize, offset: usize, block: &[f64], n: usize) {
+pub(in crate::acoustics::helmholtz::heterogeneous::time) fn put_block(target: &mut [f64], states: usize, offset: usize, block: &[f64], n: usize) {
     for row in 0..n {
         target[(offset + row) * states + offset..(offset + row) * states + offset + n]
             .copy_from_slice(&block[row * n..(row + 1) * n]);
     }
 }
 
-fn add_skew(matrix: &mut [f64], states: usize, row: usize, col: usize, value: f64) {
+pub(in crate::acoustics::helmholtz::heterogeneous::time) fn add_skew(matrix: &mut [f64], states: usize, row: usize, col: usize, value: f64) {
     matrix[row * states + col] += value;
     matrix[col * states + row] -= value;
 }
