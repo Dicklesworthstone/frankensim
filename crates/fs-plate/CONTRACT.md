@@ -1177,6 +1177,19 @@ and energy path; native execution of the new tests remains unverified.
 
 ## Harmonic local layer-strain observation
 
+Native strain interpolation, elastic director condensation and cached real/
+harmonic observations subtract one common nodal translation before weighted
+sums. Uniform travel therefore produces exactly zero strain; represented
+deformation and independent director bubbles survive unchanged. Full physical
+coordinates remain in the owning state and inertia is unchanged. This avoids
+amplifying roundoff in nominally zero basis-row sums into strain, stress or
+material loss. It does not remove rotations or turn this linear shell into a
+finite-rotation model. `rigid_translation_has_exactly_zero_native_and_cached_shell_strain`
+and `shell_strain_preserves_deformation_and_independent_bubbles_under_translation`
+cover constant/varying directors, real/complex fields and independent bubbles.
+Both fail on the original source and pass with translation removed; all ten
+existing strain/element tests also pass in the focused native test seam below.
+
 `shell::mitc::strain::PreparedElementStrain` observes the original MITC trial
 space with the same director interpolation, elastic bubble condensation and
 assumed transverse shear as stiffness and viscosity. It prepares a fixed 48x18

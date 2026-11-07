@@ -24,6 +24,118 @@ fn close(actual: f64, expected: f64) {
     );
 }
 
+fn translation_fixture(varying_directors: bool) -> (ShellMesh, NodalDirectors) {
+    let mesh = ShellMesh::new(
+        vec![[0.1, 0.2, -0.04], [0.9, 0.3, 0.04], [0.15, 0.8, -0.02]],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    let normal = mesh.facet(0).unwrap().frame[2];
+    let vectors = (0..3)
+        .map(|i| {
+            let mut n = normal;
+            if varying_directors {
+                n[0] += 0.02 * (i as f64 - 1.0);
+                n[1] += 0.01 * (i as f64 - 0.5);
+            }
+            let length = dot(n, n).sqrt();
+            n.map(|v| v / length)
+        })
+        .collect();
+    let directors = NodalDirectors::new(&mesh, vectors, 0.9).unwrap();
+    (mesh, directors)
+}
+
+#[test]
+fn rigid_translation_has_exactly_zero_native_and_cached_shell_strain() {
+    for varying in [false, true] {
+        let (mesh, directors) = translation_fixture(varying);
+        let section = section(5.0 / 6.0);
+        let original = element::PreparedStrainField::new(
+            &mesh,
+            &mesh.tris[0],
+            mesh.facet(0).unwrap(),
+            core::array::from_fn(|i| directors.vectors[i]),
+            &section,
+            &mut || false,
+        )
+        .unwrap();
+        let cached =
+            PreparedElementStrain::new(&mesh, 0, &directors, &section, &mut || false).unwrap();
+        for amplitude in [1.0, 1_048_576.0, 2.0_f64.powi(180)] {
+            let rigid = core::array::from_fn(|i| match i % 6 {
+                0 => amplitude,
+                1 => -2.0 * amplitude,
+                2 => 0.5 * amplitude,
+                _ => 0.0,
+            });
+            let native = original_controls(&original, &rigid, &mut || false).unwrap();
+            assert_eq!(native, [[0.0; 8]; 6], "native, varying={varying}");
+            assert_eq!(
+                cached.real_field(&rigid, &mut || false).unwrap().controls,
+                [[0.0; 8]; 6],
+                "cached, varying={varying}"
+            );
+            let harmonic = cached
+                .harmonic_field(&rigid, &rigid, &mut || false)
+                .unwrap();
+            assert_eq!(harmonic.real, [[0.0; 8]; 6]);
+            assert_eq!(harmonic.imaginary, [[0.0; 8]; 6]);
+        }
+    }
+}
+
+#[test]
+fn shell_strain_preserves_deformation_and_independent_bubbles_under_translation() {
+    let (mesh, directors) = translation_fixture(true);
+    let section = section(5.0 / 6.0);
+    let original = element::PreparedStrainField::new(
+        &mesh,
+        &mesh.tris[0],
+        mesh.facet(0).unwrap(),
+        core::array::from_fn(|i| directors.vectors[i]),
+        &section,
+        &mut || false,
+    )
+    .unwrap();
+    let cached = PreparedElementStrain::new(&mesh, 0, &directors, &section, &mut || false).unwrap();
+    // Dyadic nodal increments remain exactly representable after translation;
+    // no test tolerance can hide cancellation of a genuine deformation.
+    let q: [f64; 18] = core::array::from_fn(|i| ((7 * i % 23) as f64 - 11.0) / 4096.0);
+    let imaginary = q.map(|v| -0.5 * v);
+    let translate = |u: [f64; 18], shift: [f64; 3]| {
+        core::array::from_fn(|i| u[i] + if i % 6 < 3 { shift[i % 6] } else { 0.0 })
+    };
+    let translated = translate(q, [1_048_576.0, -2_097_152.0, 524_288.0]);
+    let translated_imaginary = translate(imaginary, [-524_288.0, 1_048_576.0, 262_144.0]);
+    let real = cached.real_field(&q, &mut || false).unwrap();
+    assert!(real.controls.iter().flatten().any(|v| v.abs() > 1e-4));
+    assert_eq!(
+        real.controls,
+        cached
+            .real_field(&translated, &mut || false)
+            .unwrap()
+            .controls
+    );
+    let harmonic = cached
+        .harmonic_field(&q, &imaginary, &mut || false)
+        .unwrap();
+    let shifted = cached
+        .harmonic_field(&translated, &translated_imaginary, &mut || false)
+        .unwrap();
+    assert_eq!(harmonic.real, shifted.real);
+    assert_eq!(harmonic.imaginary, shifted.imaginary);
+    for bubble in [[0.0; 2], [0.001, -0.002]] {
+        let field = |u: &[f64; 18]| {
+            let mut expanded = original.expand(u);
+            expanded[18] += bubble[0];
+            expanded[19] += bubble[1];
+            expanded_controls(&original, &expanded, &mut || false).unwrap()
+        };
+        assert_eq!(field(&q), field(&translated));
+    }
+}
+
 #[test]
 fn real_snapshot_strain_preserves_the_original_tensor_envelope_without_cycle_work() {
     let (mesh, directors) = flat();

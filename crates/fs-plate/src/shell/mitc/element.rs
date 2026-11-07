@@ -7,6 +7,20 @@ const N: usize = 20;
 type Matrix = [[f64; N]; N];
 pub(super) type Condensed = [[f64; 18]; 18];
 
+/// Differentiate relative translations, retaining every physical rotation.
+/// A constant displacement is an exact kinematic null, including on curved
+/// facets. Subtract it before any weighted sums so roundoff in a basis-row
+/// sum cannot turn rigid travel into material strain or director motion.
+pub(super) fn relative_translations(nodal: &[f64; 18]) -> [f64; 18] {
+    let mut relative = *nodal;
+    for node in relative.chunks_exact_mut(6) {
+        for component in 0..3 {
+            node[component] -= nodal[component];
+        }
+    }
+    relative
+}
+
 fn unit(v: [f64; 3]) -> [f64; 3] {
     let n = det::sqrt(dot(v, v));
     v.map(|x| x / n)
@@ -220,9 +234,10 @@ impl PreparedStrainField {
     pub(super) fn expand(&self, u_18: &[f64; 18]) -> [f64; N] {
         let mut q = [0.0; N];
         q[..18].copy_from_slice(u_18);
+        let relative = relative_translations(u_18);
         for j in 0..18 {
-            q[18] += self.bubble[0][j] * u_18[j];
-            q[19] += self.bubble[1][j] * u_18[j];
+            q[18] += self.bubble[0][j] * relative[j];
+            q[19] += self.bubble[1][j] * relative[j];
         }
         q
     }
@@ -349,14 +364,20 @@ impl PreparedStrainField {
         Ok(out)
     }
 
-    pub(super) fn eval(&self, q: &[f64; N], r: f64, s: f64)
-        -> ([f64; 3], [f64; 3], [f64; 2])
-    {
+    pub(super) fn eval(&self, q: &[f64; N], r: f64, s: f64) -> ([f64; 3], [f64; 3], [f64; 2]) {
+        // Keep the full coordinates (and independent director bubbles) in the
+        // owning state; only their strain evaluation removes rigid translation.
+        let mut relative = *q;
+        relative[..18].copy_from_slice(&relative_translations(
+            q[..18]
+                .try_into()
+                .expect("eighteen physical shell coordinates"),
+        ));
         let mut eps_m = [0.0; 3];
         let mut eps_b = [0.0; 3];
         let mut gamma = [0.0; 2];
         for c in 0..N {
-            let qc = q[c];
+            let qc = relative[c];
             if qc == 0.0 {
                 continue;
             }

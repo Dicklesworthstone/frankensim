@@ -140,6 +140,8 @@ impl PreparedElementStrain {
         if real.iter().chain(imaginary).any(|v| !v.is_finite()) {
             return Err(invalid("nonfinite physical harmonic element displacement"));
         }
+        let real = element::relative_translations(real);
+        let imaginary = element::relative_translations(imaginary);
         let mut field = HarmonicElementStrain {
             real: [[0.0; 8]; 6],
             imaginary: [[0.0; 8]; 6],
@@ -179,14 +181,12 @@ impl PreparedElementStrain {
         if displacement.iter().any(|v| !v.is_finite()) {
             return Err(invalid("nonfinite physical element displacement"));
         }
+        let relative = element::relative_translations(displacement);
         let mut controls = [[0.0; 8]; 6];
         for (control, values) in controls.iter_mut().enumerate() {
             poll(cancelled)?;
             for (component, value) in values.iter_mut().enumerate() {
-                for (coefficient, q) in self.observation[control][component]
-                    .iter()
-                    .zip(displacement)
-                {
+                for (coefficient, q) in self.observation[control][component].iter().zip(&relative) {
                     *value += coefficient * q;
                 }
                 if !value.is_finite() {
