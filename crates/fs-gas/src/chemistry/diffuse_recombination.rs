@@ -105,7 +105,8 @@ pub struct DiffuseRecombinationCellBalance {
     pub absorbed_power_w: f64,
     /// Photoelectron kinetic energy deposited after local threshold cost [W].
     pub photoelectron_power_w: f64,
-    /// (Absorptions - captures)/N_A [mol/s]; no state update is implied.
+    /// (Absorptions - captures)/N_A [mol/s]; self-recycling cancels before
+    /// rounding to retain small escape. No state update is implied.
     pub net_ionization_rate_mol_per_s: f64,
     /// Photoelectron heating minus captured-electron cooling [W].
     pub net_electron_power_w: f64,
@@ -119,6 +120,10 @@ pub struct DiffuseRecombinationCellBalance {
     pub energy_residual_w: f64,
     /// Chemical storage plus electron energy minus actual gas power [W].
     pub gas_energy_residual_w: f64,
+    /// Direct net reaction rate versus directional photon-flux divergence [s⁻¹].
+    pub net_photon_flux_residual_per_s: f64,
+    /// Direct net gas power versus directional power-flux divergence [W].
+    pub net_power_flux_residual_w: f64,
 }
 
 /// A source-retained frozen cell and its complete radiative rates.

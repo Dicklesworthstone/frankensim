@@ -81,6 +81,7 @@ fn g1_uniform_isotropic_slab_recovers_independent_thin_and_thick_escape() {
         (1.0, 0.390_308_032_802_239_9),
         (20.0, 0.024_999_999_995_495_445),
         (1e6, 5e-7),
+        (1e20, 5e-21),
     ] {
         let area = Area::new(SIGMA * NA * state.amounts()[0].value() / tau);
         let result = evaluate_diffuse_recombination(
@@ -120,7 +121,19 @@ fn g1_uniform_isotropic_slab_recovers_independent_thin_and_thick_escape() {
         assert_eq!(cell.nonlocal_absorbed_photons_per_s, 0.0);
         assert!(cell.net_ionization_rate_mol_per_s < 0.0);
         assert!(cell.net_gas_power_w < 0.0);
+        close(
+            -cell.net_ionization_rate_mol_per_s * NA,
+            b.escaped_photons_per_s,
+            3e-9,
+        );
+        close(
+            -cell.net_electron_power_w,
+            exact[2] * escaped_fraction,
+            3e-7,
+        );
         close(-cell.net_gas_power_w, b.escaped_power_w, 3e-9);
+        assert!(cell.net_photon_flux_residual_per_s.abs() < 3e-13 * b.escaped_photons_per_s);
+        assert!(cell.net_power_flux_residual_w.abs() < 3e-13 * b.escaped_power_w);
         assert!(b.photon_residual_per_s.abs() < 3e-14 * exact[0]);
         assert!(b.energy_residual_w.abs() < 3e-14 * exact[1]);
         assert!(cell.gas_energy_residual_w.abs() < 3e-14 * exact[1]);

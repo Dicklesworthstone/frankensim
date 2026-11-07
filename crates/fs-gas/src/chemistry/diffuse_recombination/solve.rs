@@ -6,7 +6,7 @@ use fs_thermochem::electron_collision::AVOGADRO_PER_MOL as NA;
 use fs_thermochem::kinetics::atomic_ionization::radiative_recombination::spectrum::RecombinationSpectrumV1;
 
 type Error = DiffuseRecombinationError;
-const CELL: usize = 7;
+const CELL: usize = 10;
 const FACE: usize = 4;
 
 // Positive halves of the standard Gauss-Legendre 8- and 16-point rules.
@@ -560,6 +560,15 @@ impl<'a> Prepared<'a> {
                     result[CELL * c + 4].add(external_absorbed);
                     result[CELL * c + 5].add(energy * absorbed);
                     result[CELL * c + 6].add(heat);
+                    // Self-reabsorption returns the source photon and its
+                    // captured electron energy to the same channel. Cancel
+                    // that internal traffic before rounding: subtracting two
+                    // integrated gross rates would erase physical escape in
+                    // an optically thick slab.
+                    let net = external_absorbed - local * escape;
+                    result[CELL * c + 7].add(net);
+                    result[CELL * c + 8].add((energy - self.cells[c].gap) * net);
+                    result[CELL * c + 9].add(energy * net);
                     let face = if right { c + 1 } else { c };
                     let slot = CELL * n + FACE * face + if right { 0 } else { 2 };
                     result[slot].add(outgoing);
@@ -587,6 +596,9 @@ impl<'a> Prepared<'a> {
                 output[CELL * c + 5] = total[1].to_f64();
                 output[CELL * c + 6] = total[1].to_f64();
             }
+            output[CELL * c + 7] = total[0].to_f64();
+            output[CELL * c + 8] = total[1].to_f64();
+            output[CELL * c + 9] = total[1].to_f64();
         }
         // Only sources on the corresponding side can cross each interface.
         for right in [true, false] {
@@ -611,7 +623,7 @@ impl<'a> Prepared<'a> {
 
     fn allowance(&self, index: usize, value: f64) -> f64 {
         let number = if index < CELL * self.cells.len() {
-            matches!(index % CELL, 0 | 3 | 4)
+            matches!(index % CELL, 0 | 3 | 4 | 7)
         } else {
             (index - CELL * self.cells.len()) % 2 == 0
         };
@@ -625,7 +637,8 @@ impl<'a> Prepared<'a> {
     fn errors(&self, scratch: &Scratch) -> Result<[f64; 3], Error> {
         let mut errors = [0.0_f64; 3];
         for (j, value) in scratch.values.iter().enumerate() {
-            if !nonnegative(value.value) {
+            let signed = j < CELL * self.cells.len() && j % CELL >= 7;
+            if !value.value.is_finite() || (!signed && value.value < 0.0) {
                 return Err(Error::Arithmetic("integrated radiation moment"));
             }
             let allowance = self.allowance(j, value.value);
@@ -689,13 +702,51 @@ impl<'a> Prepared<'a> {
             poll(cancelled)?;
             let v = &scratch.values[CELL * c..CELL * (c + 1)];
             let absorbed = Dd::from_f64(v[3].value) + Dd::from_f64(v[4].value);
-            let net_events = absorbed - Dd::from_f64(v[0].value);
-            let net_electron = Dd::from_f64(v[6].value) - Dd::from_f64(v[2].value);
+            let net_events = Dd::from_f64(v[7].value);
+            let net_electron = Dd::from_f64(v[8].value);
             let chemical = binding.gap * net_events.to_f64();
-            let net_gas = Dd::from_f64(v[5].value) - Dd::from_f64(v[1].value);
+            let net_gas = Dd::from_f64(v[9].value);
             let gas_residual = (Dd::from_f64(chemical) + net_electron - net_gas).to_f64();
             let left = interfaces[c];
             let right = interfaces[c + 1];
+            let net_photon_flux_residual = (net_events
+                - Dd::from_f64(left.right_photons_per_s)
+                - Dd::from_f64(right.left_photons_per_s)
+                + Dd::from_f64(right.right_photons_per_s)
+                + Dd::from_f64(left.left_photons_per_s))
+            .to_f64();
+            let net_power_flux_residual =
+                (net_gas - Dd::from_f64(left.right_power_w) - Dd::from_f64(right.left_power_w)
+                    + Dd::from_f64(right.right_power_w)
+                    + Dd::from_f64(left.left_power_w))
+                .to_f64();
+            // Scale only the roundoff allowance to the actual interface
+            // traffic. Enormous local self-recycling cannot hide a small,
+            // incorrectly lost net reaction or thermal source here.
+            let photon_roundoff = 128.0
+                * f64::EPSILON
+                * (left.right_photons_per_s
+                    + right.left_photons_per_s
+                    + right.right_photons_per_s
+                    + left.left_photons_per_s);
+            let power_roundoff = 128.0
+                * f64::EPSILON
+                * (left.right_power_w
+                    + right.left_power_w
+                    + right.right_power_w
+                    + left.left_power_w);
+            if !net_photon_flux_residual.is_finite()
+                || !net_power_flux_residual.is_finite()
+                || net_photon_flux_residual.abs()
+                    > self.allowance(CELL * c + 7, net_events.to_f64()) + photon_roundoff
+                || net_power_flux_residual.abs()
+                    > self.allowance(CELL * c + 9, net_gas.to_f64()) + power_roundoff
+            {
+                return Err(Error::Balance {
+                    photon_residual_per_s: net_photon_flux_residual,
+                    energy_residual_w: net_power_flux_residual,
+                });
+            }
             let photon_residual = (Dd::from_f64(v[0].value)
                 + Dd::from_f64(left.right_photons_per_s)
                 + Dd::from_f64(right.left_photons_per_s)
@@ -732,6 +783,8 @@ impl<'a> Prepared<'a> {
                 photon_residual_per_s: photon_residual,
                 energy_residual_w: energy_residual,
                 gas_energy_residual_w: gas_residual,
+                net_photon_flux_residual_per_s: net_photon_flux_residual,
+                net_power_flux_residual_w: net_power_flux_residual,
             };
             for (sum, value) in sums.iter_mut().zip([
                 v[0].value,

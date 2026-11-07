@@ -7837,3 +7837,22 @@ The new Rust sources were parsed/formatted with the pinned toolchain. Native
 compilation and these regression tests remain unexecuted because the shared
 workspace has no available compilation memory or disk; no passing result is
 claimed here.
+
+
+### Direct net radiation rates in opaque slabs
+
+The diffuse transfer owner integrates net reaction, electron-energy and gas-energy
+rates directly from nonlocal absorption minus locally escaping emission.
+Self-reabsorption cancels algebraically before rounding. Subtracting separately
+integrated gross emission and absorption can otherwise erase a finite escape
+loss in a strongly opaque slab. Gross source, absorption and directional
+interface accounts remain independently available and checked. Signed net
+moments participate in the same spectral, angular and conditional tail controls.
+The net rates also close against actual incoming minus outgoing interface
+throughput, with roundoff scaled to that traffic rather than gross self-recycling.
+
+The uniform-slab regression extends through optical depth 1e20 and compares net
+recombination, gas cooling and captured-electron cooling directly with the
+independent finite-escape result. This establishes numerical behavior of the
+declared frozen slab model; it does not add a dense-plasma or time-dependent
+radiation approximation.
