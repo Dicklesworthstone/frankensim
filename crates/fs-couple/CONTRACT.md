@@ -1229,6 +1229,22 @@ The caller accepts heat and motion together and resolves thermal events and
 time refinement explicitly. It does not add reciprocal thermoelastic feedback
 or a moving-mesh heat law.
 
+`SpatialSolidEnthalpy::advance_transient` completes that handoff as one candidate:
+it admits the caller's accepted nodal heat against the retained mechanical fields,
+solves the original heterogeneous conduction/radiation owner, resolves its actual
+thermal endpoint and continues native motion using exactly the same supplied
+timestep. It never reconstructs that duration by subtracting rounded clocks.
+All source-bound heat consumers share the original conductivity/inventory binding.
+
+`SpatialSolidTransientCandidate` returns the original `EnthalpyHeatStep`, timed
+source state, native `TetTransientCheckpoint3` and original mechanical work report
+together. The checkpoint retains the trajectory and existing shared matrices
+across caller-owned material lifetimes; rebinding its exact endpoint problem
+continues the accepted clock and step budget. A late structural or cancellation
+refusal publishes neither heat nor motion. Original radiative energy reports and
+mechanical work remain separate. Regressions cover exact-duration clock rounding,
+two-step continuation/replay and structural refusal after the heat solve.
+
 ## One scenario control transaction for fluid inlets and outlets
 
 `scenario_open_boundary::rebind_open_faces3` composes the existing velocity and

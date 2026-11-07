@@ -7,7 +7,7 @@ use fs_conduction::field::ScalarField;
 use fs_conduction::material::{CONDUCTIVITY_DIMS, LiquidMassFractionConductivity};
 use fs_conduction::mesh::ConductionMesh;
 use fs_conduction::transient::enthalpy::heterogeneous::{
-    HeterogeneousEnthalpyBackwardEuler, ReferenceEnthalpyMaterial,
+    EnthalpyRadiation, HeterogeneousEnthalpyBackwardEuler, ReferenceEnthalpyMaterial,
 };
 use fs_conduction::transient::enthalpy::{EnthalpyBudget, EnthalpyStepConfig};
 use fs_couple::solid_enthalpy::spatial::{
@@ -490,6 +490,308 @@ fn g4_spatial_inertial_handoff_rejects_stale_clock_fields_and_cancellation_atomi
         assert_eq!(accepted.state().time_s, 2.01);
         assert_eq!(run.state(), &original);
         assert_eq!(old, [200., 400., 0., 200.]);
+    });
+}
+
+#[test]
+fn g1_joint_spatial_step_keeps_exact_heat_duration_and_resumes_native_motion() {
+    with_cx(|cx| {
+        let (card, caloric) = fixture(2., 60., 1e-5, 10., 500., 45.);
+        let mesh = mesh();
+        let native = native(&mesh, caloric.curve(), 6., cx);
+        let context = point(300.);
+        let model = bind(&native, source(&card, caloric.curve(), &context), cx).unwrap();
+        let geometry = model.geometry(cx).unwrap();
+        let loads = geometry.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        let fixed: Vec<_> = (0..12).filter(|&d| d != 3).collect();
+        let boundary = boundary(&mesh);
+        let input = ScalarField::uniform("joint-step volumetric heating", 60_000.).unwrap();
+        let old = [200., 400., 0., 200.];
+        let dt = 0.01_f64;
+        let start_time = 2.0_f64;
+        assert_ne!(((start_time + dt) - start_time).to_bits(), dt.to_bits());
+        let start = model.resolve_at(&old, start_time, cx).unwrap();
+        let start_problem = start.problem(&fixed);
+        let mut displacement = [[0.; 3]; 4];
+        let mut velocity = [[0.; 3]; 4];
+        displacement[1][0] = 0.001;
+        velocity[1][0] = 0.02;
+        let run = loads
+            .begin_transient(
+                &start_problem,
+                Some(start.thermal_strains()),
+                start_time,
+                &displacement,
+                &velocity,
+                Default::default(),
+                cx,
+            )
+            .unwrap();
+        let original_motion = run.state().clone();
+        let first = model
+            .advance_transient(
+                &old,
+                dt,
+                &boundary,
+                None,
+                &input,
+                thermal_config(),
+                EnthalpyRadiation::None,
+                &run,
+                &loads,
+                cx,
+            )
+            .unwrap();
+        assert_eq!(first.mechanical.native.step_size_s.to_bits(), dt.to_bits());
+        assert_eq!(first.state.time_s(), Some(start_time + dt));
+        assert_eq!(first.motion.state().time_s, start_time + dt);
+        assert_eq!(first.motion.state().step, 1);
+        near(
+            first.thermal.conduction().stored_energy_change_j,
+            100.,
+            1e-8,
+        );
+        near(first.thermal.physical_energy_residual_j(), 0., 1e-8);
+        near(first.state.samples()[0].phase.temperature_k(), 330., 1e-9);
+        assert_eq!(run.state(), &original_motion);
+
+        let first_problem = first.state.problem(&fixed);
+        let restored = first.motion.bind(&first_problem, cx).unwrap();
+        // Compare with the original native owner given the ACTUAL heat duration,
+        // not a duration reconstructed by subtracting rounded endpoint clocks.
+        let (native_motion, native_work) = run
+            .advance_thermal_candidate(
+                &first_problem,
+                first.state.thermal_strains(),
+                &loads,
+                dt,
+                solid_config().mesh_frame,
+                0.1,
+                cx,
+            )
+            .unwrap();
+        assert_eq!(restored.state(), native_motion.state());
+        assert_eq!(first.mechanical, native_work);
+
+        let original_h = first.thermal.conduction().specific_enthalpy_j_kg.clone();
+        let second = model
+            .advance_transient(
+                &original_h,
+                dt,
+                &boundary,
+                None,
+                &input,
+                thermal_config(),
+                EnthalpyRadiation::None,
+                &restored,
+                &loads,
+                cx,
+            )
+            .unwrap();
+        let checkpoint = first.motion.clone();
+        let replay = checkpoint.bind(&first_problem, cx).unwrap();
+        let repeated = model
+            .advance_transient(
+                &original_h,
+                dt,
+                &boundary,
+                None,
+                &input,
+                thermal_config(),
+                EnthalpyRadiation::None,
+                &replay,
+                &loads,
+                cx,
+            )
+            .unwrap();
+        assert_eq!(second.motion.state(), repeated.motion.state());
+        assert_eq!(second.mechanical, repeated.mechanical);
+        assert_eq!(
+            second.thermal.conduction().specific_enthalpy_j_kg,
+            repeated.thermal.conduction().specific_enthalpy_j_kg
+        );
+        assert_eq!(second.motion.state().step, 2);
+        assert_eq!(second.motion.state().time_s, (start_time + dt) + dt);
+        assert_eq!(second.state.time_s(), Some(second.motion.state().time_s));
+        assert_eq!(second.mechanical.native.step_size_s.to_bits(), dt.to_bits());
+        near(
+            second.thermal.conduction().stored_energy_change_j,
+            100.,
+            1e-8,
+        );
+        near(second.state.samples()[0].phase.temperature_k(), 340., 1e-9);
+        assert_eq!(second.state.materials()[0].density_kg_m3, 6.);
+        assert_ne!(
+            first.state.materials()[0].material_state_identity,
+            second.state.materials()[0].material_state_identity
+        );
+        near(second.mechanical.physical_balance_error_j, 0., 1e-13);
+        assert_eq!(
+            first.thermal.conduction().specific_enthalpy_j_kg,
+            original_h
+        );
+        assert_eq!(restored.state(), first.motion.state());
+        assert_eq!(old, [200., 400., 0., 200.]);
+    });
+}
+
+#[test]
+fn g4_joint_spatial_heat_and_motion_refuse_without_publishing_either_history() {
+    with_cx(|cx| {
+        let (card, caloric) = fixture(2., 60., 1e-5, 10., 500., 45.);
+        let mesh = mesh();
+        let native = native(&mesh, caloric.curve(), 6., cx);
+        let context = point(300.);
+        let model = bind(&native, source(&card, caloric.curve(), &context), cx).unwrap();
+        let geometry = model.geometry(cx).unwrap();
+        let loads = geometry.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        let fixed: Vec<_> = (0..12).filter(|&d| d != 3).collect();
+        let old = [0.; 4];
+        let start = model.resolve_at(&old, 2., cx).unwrap();
+        let problem = start.problem(&fixed);
+        let zero = [[0.; 3]; 4];
+        let tiny = loads
+            .begin_transient(
+                &problem,
+                Some(start.thermal_strains()),
+                2.,
+                &zero,
+                &zero,
+                fs_solid::loads3::transient::TransientConfig3 {
+                    maximum_displacement_m: 1e-12,
+                    ..Default::default()
+                },
+                cx,
+            )
+            .unwrap();
+        let run = loads
+            .begin_transient(
+                &problem,
+                Some(start.thermal_strains()),
+                2.,
+                &zero,
+                &zero,
+                Default::default(),
+                cx,
+            )
+            .unwrap();
+        let original = run.state().clone();
+        let original_tiny = tiny.state().clone();
+        let boundary = boundary(&mesh);
+        let input = ScalarField::uniform("joint-step heating", 60_000.).unwrap();
+        // Heat is solved successfully before the native displacement gate fails.
+        let refused = model.advance_transient(
+            &old,
+            0.01,
+            &boundary,
+            None,
+            &input,
+            thermal_config(),
+            EnthalpyRadiation::None,
+            &tiny,
+            &loads,
+            cx,
+        );
+        assert!(matches!(
+            refused,
+            Err(SpatialSolidEnthalpyError::Solid(
+                fs_couple::solid_enthalpy::SolidEnthalpyError::Transient(
+                    fs_solid::loads3::transient::TransientError3::Invalid(
+                        "candidate exceeds displacement allowance"
+                    )
+                )
+            ))
+        ));
+        assert_eq!(tiny.state(), &original_tiny);
+        assert!(
+            model
+                .advance_transient(
+                    &[100.; 4],
+                    0.01,
+                    &boundary,
+                    None,
+                    &input,
+                    thermal_config(),
+                    EnthalpyRadiation::None,
+                    &run,
+                    &loads,
+                    cx,
+                )
+                .is_err()
+        );
+        assert!(
+            model
+                .advance_transient(
+                    &old,
+                    f64::MIN_POSITIVE,
+                    &boundary,
+                    None,
+                    &input,
+                    thermal_config(),
+                    EnthalpyRadiation::None,
+                    &run,
+                    &loads,
+                    cx,
+                )
+                .is_err()
+        );
+        let gate = CancelGate::new();
+        gate.request();
+        ArenaPool::new(ArenaConfig::default()).scope(|arena| {
+            let cancelled = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 3,
+                    kernel_id: 17,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            assert!(matches!(
+                model.advance_transient(
+                    &old,
+                    0.01,
+                    &boundary,
+                    None,
+                    &input,
+                    thermal_config(),
+                    EnthalpyRadiation::None,
+                    &run,
+                    &loads,
+                    &cancelled,
+                ),
+                Err(SpatialSolidEnthalpyError::Cancelled)
+            ));
+        });
+        assert_eq!(run.state(), &original);
+        assert_eq!(old, [0.; 4]);
+        let retry = model
+            .advance_transient(
+                &old,
+                0.01,
+                &boundary,
+                None,
+                &input,
+                thermal_config(),
+                EnthalpyRadiation::None,
+                &run,
+                &loads,
+                cx,
+            )
+            .unwrap();
+        assert!(retry.motion.state().displacement[0] > 1e-12);
+        assert_eq!(retry.motion.state().step, 1);
+        near(
+            retry.thermal.conduction().stored_energy_change_j,
+            100.,
+            1e-8,
+        );
+        near(retry.mechanical.physical_balance_error_j, 0., 1e-13);
+        assert_eq!(run.state(), &original);
+        assert_eq!(old, [0.; 4]);
     });
 }
 

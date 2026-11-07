@@ -49,6 +49,7 @@ use fs_solid::linear3::{
     TetAssemblyBudget, TetElasticError, TetElasticMaterial, TetLinearElasticProblem,
     TetMaterialField, TetThermalStrainField, TetThermalStrainState,
 };
+use fs_solid::loads3::transient::checkpoint::TetTransientCheckpoint3;
 use fs_solid::loads3::transient::thermal::ThermalTransientStep3;
 use fs_solid::loads3::transient::{TetTransientRun3, TransientError3};
 use fs_solid::loads3::{LoadError3, TetLoadCase3, TetLoadGeometry3};
@@ -532,6 +533,97 @@ impl<'a, 'm: 'a, 'c: 'a> SpatialSolidEnthalpy<'a, 'm, 'c> {
         })
     }
 
+    /// Solve native nodal heat and advance the original full inertial motion
+    /// over exactly the SAME supplied timestep. The start clock comes from
+    /// `run`; no endpoint time or independently refreshed material is supplied.
+    /// `old_specific_h` is the caller's complete accepted nodal heat history,
+    /// whose projected material and eigenstrain must match the accepted run.
+    ///
+    /// The explicit radiation selector uses the existing heat owner, including
+    /// `EnthalpyRadiation::None` for prescribed conduction boundaries alone.
+    /// Its original physical energy audit is returned without turning radiation
+    /// into another heat source. Mechanics keeps its independent signed material
+    /// work and damping accounts; this one-way, fixed-geometry partition does
+    /// not infer reciprocal thermoelastic heat or a coupled accuracy bound.
+    ///
+    /// The native checkpoint moves accepted motion buffers and shares its
+    /// existing matrices; no self-referential problem or second trajectory is
+    /// created. Bind that checkpoint to `candidate.state.problem(fixed_dofs)`
+    /// to continue. Heat, source state, motion and work are returned together
+    /// only after every solve, source, displacement, energy and cancellation
+    /// gate succeeds. A late refusal leaves both supplied histories unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_transient<'g, 'mesh>(
+        &self,
+        old_specific_h: &[f64],
+        dt_s: f64,
+        boundary: &ThermalBoundary,
+        interfaces: Option<&ThermalInterfaces>,
+        source: &ScalarField,
+        thermal_config: EnthalpyStepConfig,
+        radiation: EnthalpyRadiation<'_>,
+        run: &TetTransientRun3<'g, 'mesh, '_, '_>,
+        loads: &TetLoadCase3<'_, '_>,
+        cx: &Cx<'_>,
+    ) -> Result<SpatialSolidTransientCandidate<'_, 'g, 'mesh>, SpatialSolidEnthalpyError> {
+        poll(cx)?;
+        let start_s = run.state().time_s;
+        let end_s = start_s + dt_s;
+        if !dt_s.is_finite() || dt_s <= 0.0 || !end_s.is_finite() || end_s <= start_s {
+            return Err(SpatialSolidEnthalpyError::Invalid(
+                "coupled spatial step requires a finite positive duration and a distinct endpoint",
+            ));
+        }
+        let previous = self.resolve_at(old_specific_h, start_s, cx)?;
+        if !previous.matches_transient(run) {
+            return Err(SpatialSolidEnthalpyError::Invalid(
+                "accepted motion must consume the material and thermal strain of the supplied nodal heat history",
+            ));
+        }
+        // The source and every old corner have already been admitted above.
+        // Reuse the exact native heat owner without resolving them a second time.
+        let thermal = self.thermal.advance_with_radiation(
+            cx,
+            self.thermal_problem(boundary, source)?,
+            interfaces,
+            old_specific_h,
+            dt_s,
+            thermal_config,
+            radiation,
+        )?;
+        let state = self.resolve_at(&thermal.conduction().specific_enthalpy_j_kg, end_s, cx)?;
+        let (motion, mechanical) = {
+            let problem = state.problem(run.material_problem().fixed_dofs);
+            // Keep the exact heat duration. In general (start + dt) - start
+            // does not reproduce dt, even for an ordinary clock like 2.0 s.
+            let (motion, report) =
+                state.advance_transient_interval(&previous, run, &problem, loads, dt_s, cx)?;
+            (motion.into_checkpoint(cx)?, report)
+        };
+        poll(cx)?;
+        Ok(SpatialSolidTransientCandidate {
+            thermal,
+            state,
+            motion,
+            mechanical,
+        })
+    }
+
+    // All consumers share the original source-bound operator and inventory.
+    fn thermal_problem<'p>(
+        &'p self,
+        boundary: &'p ThermalBoundary,
+        source: &'p ScalarField,
+    ) -> Result<ConductionProblem<'p>, SpatialSolidEnthalpyError> {
+        Ok(ConductionProblem {
+            mesh: self.thermal.mesh(),
+            boundary,
+            material: self.conductivity.model_for(0)?,
+            element_materials: Some(&self.conductivity),
+            source,
+        })
+    }
+
     // Shared by the quasistatic and continuing-modal consumers. Neither can
     // substitute an independent conductivity or a second thermal inventory.
     #[allow(clippy::too_many_arguments)]
@@ -546,16 +638,9 @@ impl<'a, 'm: 'a, 'c: 'a> SpatialSolidEnthalpy<'a, 'm, 'c> {
         cx: &Cx<'_>,
     ) -> Result<EnthalpyStepSolution, SpatialSolidEnthalpyError> {
         self.resolve(old_specific_h, cx)?;
-        let problem = ConductionProblem {
-            mesh: self.thermal.mesh(),
-            boundary,
-            material: self.conductivity.model_for(0)?,
-            element_materials: Some(&self.conductivity),
-            source,
-        };
         Ok(self.thermal.advance(
             cx,
-            problem,
+            self.thermal_problem(boundary, source)?,
             interfaces,
             old_specific_h,
             dt_s,
@@ -576,16 +661,9 @@ impl<'a, 'm: 'a, 'c: 'a> SpatialSolidEnthalpy<'a, 'm, 'c> {
         cx: &Cx<'_>,
     ) -> Result<EnthalpyHeatStep, SpatialSolidEnthalpyError> {
         self.resolve(old_specific_h, cx)?;
-        let problem = ConductionProblem {
-            mesh: self.thermal.mesh(),
-            boundary,
-            material: self.conductivity.model_for(0)?,
-            element_materials: Some(&self.conductivity),
-            source,
-        };
         Ok(self.thermal.advance_with_radiation(
             cx,
-            problem,
+            self.thermal_problem(boundary, source)?,
             interfaces,
             old_specific_h,
             dt_s,
@@ -696,6 +774,28 @@ impl SpatialSolidState<'_> {
                 "inertial thermal loading requires explicitly timed spatial endpoints",
             ));
         };
+        self.advance_transient_interval(previous, run, problem, loads, end_s - start_s, cx)
+    }
+
+    // Shared checked handoff. The integrated consumer supplies the native heat
+    // duration directly; the manual endpoint API derives it from explicit times.
+    #[allow(clippy::too_many_arguments)]
+    fn advance_transient_interval<'g, 'm, 'p, 's>(
+        &self,
+        previous: &Self,
+        run: &TetTransientRun3<'g, 'm, '_, '_>,
+        problem: &'p TetLinearElasticProblem<'s>,
+        loads: &TetLoadCase3<'_, '_>,
+        dt_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<(TetTransientRun3<'g, 'm, 'p, 's>, ThermalTransientStep3), SpatialSolidEnthalpyError>
+    {
+        poll(cx)?;
+        let (Some(start_s), Some(end_s)) = (previous.time_s, self.time_s) else {
+            return Err(SpatialSolidEnthalpyError::Invalid(
+                "inertial thermal loading requires explicitly timed spatial endpoints",
+            ));
+        };
         if !previous.matches_transient(run)
             || !self.matches_problem(problem)
             || self.nodes_m != previous.nodes_m
@@ -726,9 +826,9 @@ impl SpatialSolidState<'_> {
                 ));
             }
         }
-        let dt_s = end_s - start_s;
         if !dt_s.is_finite()
             || dt_s <= 0.0
+            || end_s <= start_s
             || (run.state().time_s + dt_s).to_bits() != end_s.to_bits()
         {
             return Err(SpatialSolidEnthalpyError::Invalid(
@@ -789,4 +889,17 @@ pub struct SpatialSolidCandidate<'a, Thermal = EnthalpyStepSolution> {
     pub thermal: Thermal,
     pub state: SpatialSolidState<'a>,
     pub equilibrium: SolidEquilibrium,
+}
+
+/// Jointly accepted native heat, source state and continuing full motion.
+///
+/// The checkpoint retains the original numerical controls, step count, loads,
+/// thermal fields, reference mass and shared operators. Its existing `bind`
+/// method admits only this exact material problem and the original supports.
+/// Caloric storage and mechanical material work remain separate accounts.
+pub struct SpatialSolidTransientCandidate<'a, 'g, 'm> {
+    pub thermal: EnthalpyHeatStep,
+    pub state: SpatialSolidState<'a>,
+    pub motion: TetTransientCheckpoint3<'g, 'm>,
+    pub mechanical: ThermalTransientStep3,
 }
