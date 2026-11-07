@@ -20,7 +20,7 @@
 //! fs-ad/ASCENT integration successor.
 
 use crate::SolidError;
-use crate::linear::LinearProblem;
+use crate::linear::{Formulation, LinearProblem};
 use crate::mesh2::{quad_points, shapes_at};
 use fs_la::eigen::{LobpcgState, lobpcg_run};
 use fs_la::factor::cholesky;
@@ -54,12 +54,18 @@ pub fn reduced_pencil(problem: &LinearProblem<'_>) -> Result<ReducedPencil, Soli
     let (lambda, mu) = crate::linear::lame(problem.youngs, problem.poisson, problem.plane);
     let mesh = problem.mesh;
     let n = mesh.node_count();
-    // Fixed DOFs: every component on a Dirichlet patch.
+    // Buckling perturbations obey the same homogeneous essential constraints
+    // as the reference solve, including component-wise symmetry supports.
     let mut is_fixed = vec![false; 2 * n];
     for (patch, _) in &problem.dirichlet {
         for node in mesh.patch_nodes(*patch) {
             is_fixed[2 * node] = true;
             is_fixed[2 * node + 1] = true;
+        }
+    }
+    for (patch, component) in &problem.symmetry {
+        for node in mesh.patch_nodes(*patch) {
+            is_fixed[2 * node + component] = true;
         }
     }
     let mut dof_map: Vec<Option<usize>> = Vec::with_capacity(2 * n);
@@ -77,21 +83,39 @@ pub fn reduced_pencil(problem: &LinearProblem<'_>) -> Result<ReducedPencil, Soli
     for conn in &mesh.elems {
         let nn = conn.len();
         let (ke, _) = problem.element(conn, lambda, mu);
+        let pts = quad_points(nn);
+        // The B-bar equilibrium solve uses an element-average dilatation.
+        // Recover that same stress here: restoring the pointwise dilatation
+        // would multiply its unresolved oscillations by the bulk modulus and
+        // corrupt the geometric stiffness near incompressibility.
+        let mut mean_dilatation = 0.0;
+        if problem.formulation == Formulation::BBar {
+            let mut volume = 0.0;
+            for &(xi, eta, w) in &pts {
+                let (_, grads, det) = shapes_at(&mesh.nodes, conn, xi, eta);
+                let eps = reference_strain(conn, &grads, &u0);
+                mean_dilatation += w * det * (eps[0] + eps[1]);
+                volume += w * det;
+            }
+            mean_dilatation /= volume;
+        }
         // Geometric stiffness from the prebuckling stress state σ₀(u₀):
         // K_G[ai][bj] = δ_ij ∫ ∇N_aᵀ σ₀ ∇N_b.
         let mut ge = vec![vec![0.0f64; nn]; nn];
-        for &(xi, eta, w) in &quad_points(nn) {
+        for &(xi, eta, w) in &pts {
             let (_, grads, det) = shapes_at(&mesh.nodes, conn, xi, eta);
             let wq = w * det;
-            // Small-strain stress at this point from u₀.
-            let mut eps = [0.0f64; 3]; // [εxx, εyy, γxy]
-            for (a, &node) in conn.iter().enumerate() {
-                eps[0] += grads[a][0] * u0[node][0];
-                eps[1] += grads[a][1] * u0[node][1];
-                eps[2] += grads[a][1] * u0[node][0] + grads[a][0] * u0[node][1];
-            }
-            let sxx = (lambda + 2.0 * mu) * eps[0] + lambda * eps[1];
-            let syy = lambda * eps[0] + (lambda + 2.0 * mu) * eps[1];
+            let eps = reference_strain(conn, &grads, &u0);
+            let dilatation = match problem.formulation {
+                Formulation::Standard => eps[0] + eps[1],
+                Formulation::BBar => mean_dilatation,
+            };
+            // This split also avoids cancelling large Lamé terms when the
+            // resolved deformation is nearly isochoric.
+            let mean_stress = (lambda + mu) * dilatation;
+            let deviator = mu * (eps[0] - eps[1]);
+            let sxx = mean_stress + deviator;
+            let syy = mean_stress - deviator;
             let sxy = mu * eps[2];
             for a in 0..nn {
                 let ga = grads[a];
@@ -127,6 +151,19 @@ pub fn reduced_pencil(problem: &LinearProblem<'_>) -> Result<ReducedPencil, Soli
         }
     }
     Ok((kc.assemble(), gc.assemble(), dof_map, u0))
+}
+
+/// Small strain [εxx, εyy, γxy], removing rigid displacement before contraction.
+fn reference_strain(conn: &[usize], grads: &[[f64; 2]], u: &[[f64; 2]]) -> [f64; 3] {
+    let origin = u[conn[0]];
+    let mut eps = [0.0; 3];
+    for (a, &node) in conn.iter().enumerate().skip(1) {
+        let du = [u[node][0] - origin[0], u[node][1] - origin[1]];
+        eps[0] += grads[a][0] * du[0];
+        eps[1] += grads[a][1] * du[1];
+        eps[2] += grads[a][1] * du[0] + grads[a][0] * du[1];
+    }
+    eps
 }
 
 /// Solve the buckling pencil `(K + λ K_G) φ = 0` for the `nev` lowest

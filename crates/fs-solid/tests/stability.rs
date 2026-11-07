@@ -120,6 +120,151 @@ fn stab_001_euler_column_pencil() {
     );
 }
 
+#[test]
+fn buckling_pencil_preserves_component_symmetry_supports() {
+    let mesh = Mesh2::quads(2.0, 1.0, 2, 1);
+    let problem = LinearProblem {
+        mesh: &mesh,
+        youngs: 1000.0,
+        poisson: 0.25,
+        plane: PlaneKind::Stress,
+        formulation: Formulation::Standard,
+        body_force: None,
+        dirichlet: vec![],
+        traction: vec![(Patch::Right, &|_, _| [-1.0, 0.0])],
+        symmetry: vec![(Patch::Left, 0), (Patch::Bottom, 1)],
+    };
+    let (k, kg, map, _) = reduced_pencil(&problem).expect("symmetry-supported reference solve");
+    let mut free_count = 0;
+    for (node, &[x, y]) in mesh.nodes.iter().enumerate() {
+        for (component, constrained) in [x == 0.0, y == 0.0].into_iter().enumerate() {
+            if constrained {
+                assert_eq!(map[2 * node + component], None);
+            } else {
+                assert_eq!(map[2 * node + component], Some(free_count));
+                free_count += 1;
+            }
+        }
+    }
+    assert_eq!(k.nrows(), free_count);
+    assert_eq!(kg.nrows(), free_count);
+    fs_la::factor::cholesky(&k.to_dense(), k.nrows())
+        .expect("the pencil must not reintroduce constrained rigid modes");
+    let modes = buckling_loads(&k, &kg, &map, 1, 100).expect("supported pencil solves");
+    assert!(!modes.loads.is_empty());
+    for mode in &modes.modes {
+        let expanded = expand_mode(mode, &map);
+        for (patch, component) in &problem.symmetry {
+            for node in mesh.patch_nodes(*patch) {
+                assert_eq!(expanded[node][*component], 0.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn buckling_geometric_stiffness_uses_the_equilibrium_strain_formulation() {
+    // One rectangular Q1 element permits an independent physical-coordinate
+    // integration. Nonuniform traction produces a varying pointwise divergence;
+    // the B-bar solve must use its mean in the hydrostatic prestress.
+    let lx = 2.0;
+    let ly = 1.0;
+    let mesh = Mesh2::quads(lx, ly, 1, 1);
+    let conn = &mesh.elems[0];
+    let youngs = 120.0;
+    let poisson = 0.4999;
+    let mu = youngs / (2.0 * (1.0 + poisson));
+    for plane in [PlaneKind::Stress, PlaneKind::Strain] {
+        let lambda = match plane {
+            PlaneKind::Stress => youngs * poisson / ((1.0 + poisson) * (1.0 - poisson)),
+            PlaneKind::Strain => youngs * poisson / ((1.0 + poisson) * (1.0 - 2.0 * poisson)),
+        };
+        for formulation in [Formulation::Standard, Formulation::BBar] {
+            let problem = LinearProblem {
+                mesh: &mesh,
+                youngs,
+                poisson,
+                plane,
+                formulation,
+                body_force: None,
+                dirichlet: vec![(Patch::Left, &|_, _| [0.0, 0.0])],
+                traction: vec![(Patch::Right, &|_, y| [-2.0 - y, 0.25])],
+                symmetry: vec![],
+            };
+            let (_, kg, map, u) = reduced_pencil(&problem).expect("reference solve");
+            let gradients = |s: f64, t: f64| {
+                [
+                    [-(1.0 - t) / lx, -(1.0 - s) / ly],
+                    [(1.0 - t) / lx, -s / ly],
+                    [t / lx, s / ly],
+                    [-t / lx, (1.0 - s) / ly],
+                ]
+            };
+            let strain = |g: &[[f64; 2]; 4]| {
+                let mut eps = [0.0; 3];
+                for (a, &node) in conn.iter().enumerate() {
+                    eps[0] += g[a][0] * u[node][0];
+                    eps[1] += g[a][1] * u[node][1];
+                    eps[2] += g[a][0] * u[node][1] + g[a][1] * u[node][0];
+                }
+                eps
+            };
+            let center = strain(&gradients(0.5, 0.5));
+            let mean_divergence = center[0] + center[1];
+            let mut expected = vec![0.0; kg.nrows() * kg.nrows()];
+            let mut divergence_range = [f64::INFINITY, f64::NEG_INFINITY];
+            let offset = 0.5 / 3.0_f64.sqrt();
+            for s in [0.5 - offset, 0.5 + offset] {
+                for t in [0.5 - offset, 0.5 + offset] {
+                    let g = gradients(s, t);
+                    let eps = strain(&g);
+                    let divergence = eps[0] + eps[1];
+                    divergence_range[0] = divergence_range[0].min(divergence);
+                    divergence_range[1] = divergence_range[1].max(divergence);
+                    let trace = match formulation {
+                        Formulation::Standard => divergence,
+                        Formulation::BBar => mean_divergence,
+                    };
+                    let correction = 0.5 * (trace - divergence);
+                    let exx = eps[0] + correction;
+                    let eyy = eps[1] + correction;
+                    let stress = [
+                        (lambda + 2.0 * mu) * exx + lambda * eyy,
+                        lambda * exx + (lambda + 2.0 * mu) * eyy,
+                        mu * eps[2],
+                    ];
+                    for (a, &node_a) in conn.iter().enumerate() {
+                        for (b, &node_b) in conn.iter().enumerate() {
+                            let value = lx * ly / 4.0
+                                * (g[a][0] * stress[0] * g[b][0]
+                                    + g[a][1] * stress[1] * g[b][1]
+                                    + stress[2] * (g[a][0] * g[b][1] + g[a][1] * g[b][0]));
+                            for component in 0..2 {
+                                if let (Some(i), Some(j)) =
+                                    (map[2 * node_a + component], map[2 * node_b + component])
+                                {
+                                    expected[i * kg.nrows() + j] += value;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if formulation == Formulation::BBar {
+                assert!(divergence_range[1] - divergence_range[0] > 1e-4);
+            }
+            let actual = kg.to_dense();
+            let scale = expected.iter().map(|v| v.abs()).fold(0.0, f64::max);
+            for (actual, expected) in actual.iter().zip(&expected) {
+                assert!(
+                    (actual - expected).abs() < 5e-10 * scale,
+                    "{plane:?}/{formulation:?}: KG entry {actual} != {expected}"
+                );
+            }
+        }
+    }
+}
+
 // ------------------------------------------------------------------ stab-002
 
 /// The shallow von Mises truss: one DOF (crown drop w), closed-form
