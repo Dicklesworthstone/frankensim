@@ -10044,7 +10044,7 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
         }
     }
     if let Some(lens) = camera.sequential_lens() {
-        hasher.update(b"native-sequential-spectral-lens.v1");
+        hasher.update(b"native-sequential-spectral-lens.v2");
         update_continuity_f64(hasher, lens.reference_wavelength_nm());
         hasher.update(&(lens.surfaces().len() as u64).to_le_bytes());
         for surface in lens.surfaces() {

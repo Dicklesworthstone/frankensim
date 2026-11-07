@@ -36,7 +36,9 @@ pub use diffraction::{DispersiveThinLens, ThinLensElement};
 #[cfg(feature = "tracer")]
 mod sequential;
 #[cfg(feature = "tracer")]
-pub use sequential::{LensSurface, SequentialCameraRay, SequentialLens, SequentialLensRay};
+pub use sequential::{
+    LensSurface, SequentialCameraBeam, SequentialCameraRay, SequentialLens, SequentialLensRay,
+};
 
 const PI: f64 = core::f64::consts::PI;
 const LOOK_AT_SINE_MIN: f64 = 1.0e-10;

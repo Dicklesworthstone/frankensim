@@ -90,6 +90,9 @@ pub use thermal::AxialGasTemperatureField;
 pub mod analyzer;
 pub use analyzer::CameraAnalyzer;
 
+// Complete reciprocal lens state on the original surface and molecular paths.
+mod sequential;
+
 /// Physical camera and spectral pixel integration over these native paths.
 pub mod raster;
 
@@ -369,6 +372,9 @@ pub enum CameraRadianceError {
     InvalidSpectrum,
     InvalidPolarization,
     InvalidEnvironmentScale,
+    /// The authored sequential lens exits into index one; the original scene
+    /// must resolve that same phase index at the actual outgoing ray origin.
+    IncompatibleLensExterior,
     InvalidEmitter {
         object_id: u64,
     },

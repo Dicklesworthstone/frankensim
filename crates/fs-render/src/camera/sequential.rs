@@ -18,7 +18,7 @@ use crate::charts::Ray;
 use crate::dielectric::{DielectricGlass, refract};
 use crate::polarization::Stokes;
 use crate::polarization::dielectric::fresnel_dielectric_polarized;
-use crate::polarization::dielectric::transport::PolarizationFrame;
+use crate::polarization::dielectric::transport::{PolarizationFrame, physical_roundoff};
 use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
 use fs_math::det;
@@ -180,6 +180,54 @@ pub struct SequentialCameraRay {
     pub weight: f64,
 }
 
+/// A reciprocal detector response after transmission through the actual lens.
+///
+/// The frame points from sensor to scene. `power()` is the complete transported
+/// Stokes detector weight, including Fresnel polarization and bulk absorption;
+/// it is not an emitted physical source. Continue it through the reciprocal
+/// scene transport, then multiply the measurement by `geometry_weight()` once.
+/// Both lens exterior media are index one, so no endpoint n² factor is missing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SequentialCameraBeam {
+    origin: Point3,
+    frame: PolarizationFrame,
+    power: Stokes,
+    wavelength_nm: f64,
+    geometry_weight: f64,
+}
+
+impl SequentialCameraBeam {
+    pub const fn ray(&self) -> Ray {
+        Ray {
+            origin: self.origin,
+            dir: self.frame.direction(),
+        }
+    }
+    pub const fn frame(&self) -> PolarizationFrame {
+        self.frame
+    }
+    pub const fn power(&self) -> Stokes {
+        self.power
+    }
+    pub const fn wavelength_nm(&self) -> f64 {
+        self.wavelength_nm
+    }
+    /// Sensor/cap obliquity and projected-area sampling only. The same aperture
+    /// normalization as [`SequentialCameraRay::weight`] is used, but all lens
+    /// and analyzer transmission is already in [`Self::power`].
+    pub const fn geometry_weight(&self) -> f64 {
+        self.geometry_weight
+    }
+}
+
+struct TracedLensBeam {
+    ray: Ray,
+    frame: PolarizationFrame,
+    power: Stokes,
+    distance_m: f64,
+    optical_path_m: f64,
+}
+
 /// Immutable, bounded optical prescription; tracing performs no allocation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SequentialLens {
@@ -293,6 +341,24 @@ impl SequentialLens {
         ray: Ray,
         wavelength_nm: f64,
     ) -> Result<Option<SequentialLensRay>, CameraError> {
+        Ok(self
+            .trace_seeded_ray(cx, ray, wavelength_nm, None, Stokes::unpolarized(1.0))?
+            .map(|beam| SequentialLensRay {
+                ray: beam.ray,
+                transmittance: beam.power.i,
+                distance_m: beam.distance_m,
+                optical_path_m: beam.optical_path_m,
+            }))
+    }
+
+    fn trace_seeded_ray(
+        &self,
+        cx: &Cx<'_>,
+        ray: Ray,
+        wavelength_nm: f64,
+        reference_axis: Option<Vec3>,
+        mut power: Stokes,
+    ) -> Result<Option<TracedLensBeam>, CameraError> {
         cx.checkpoint()?;
         let (lo, hi) = self.wavelength_bounds_nm;
         if !wavelength_nm.is_finite()
@@ -324,14 +390,15 @@ impl SequentialLens {
             origin: ray.origin,
             dir: super::scaled_unit(ray.dir)?,
         };
-        let axis = if ray.dir.x.abs() < 0.9 {
-            Vec3::new(1.0, 0.0, 0.0)
-        } else {
-            Vec3::new(0.0, 1.0, 0.0)
-        };
+        let axis = reference_axis.unwrap_or_else(|| {
+            if ray.dir.x.abs() < 0.9 {
+                Vec3::new(1.0, 0.0, 0.0)
+            } else {
+                Vec3::new(0.0, 1.0, 0.0)
+            }
+        });
         let mut frame = PolarizationFrame::try_new(ray.dir, axis)
             .map_err(|_| CameraError::SequentialLensOutsideModel)?;
-        let mut power = Stokes::unpolarized(1.0);
         let (mut distance_m, mut optical_path_m) = (0.0, 0.0);
         for (i, surface) in self.surfaces().iter().enumerate() {
             cx.checkpoint()?;
@@ -393,9 +460,14 @@ impl SequentialLens {
             }
         }
         cx.checkpoint()?;
-        Ok(Some(SequentialLensRay {
+        // Bound only arithmetic drift in the physical cone, using the same
+        // primitive as native scene transport. The scalar intensity is retained.
+        let power = physical_roundoff(power, power.i)
+            .map_err(|_| CameraError::SequentialLensOutsideModel)?;
+        Ok(Some(TracedLensBeam {
             ray,
-            transmittance: power.i,
+            frame,
+            power,
             distance_m,
             optical_path_m,
         }))
@@ -439,6 +511,98 @@ impl PhysicalCamera {
         lens_sample: LensSample,
         wavelengths_nm: &[f64; N],
     ) -> Result<[Option<SequentialCameraRay>; N], CameraError> {
+        // Keep the scalar API's original zero-throughput behavior. Reciprocal
+        // scene continuation instead refuses an underflowed non-clipped beam.
+        Ok(self
+            .generate_sequential_beams(cx, x_tan, y_tan, lens_sample, wavelengths_nm, None)?
+            .map(|beam| {
+                beam.map(|beam| SequentialCameraRay {
+                    ray: beam.ray(),
+                    weight: beam.geometry_weight * beam.power.i,
+                })
+            }))
+    }
+
+    /// Generate wavelength-specific reciprocal beams for an intensity detector.
+    /// Retains lens-induced Q/U/V for subsequent polarizing scene interfaces.
+    /// Aperture/TIR misses are `None`, with their original zero sample mass;
+    /// finite optical attenuation that underflows to zero is an explicit error.
+    pub fn generate_sequential_spectral_beams_from_tangent_offsets<const N: usize>(
+        &self,
+        cx: &Cx<'_>,
+        x_tan: f64,
+        y_tan: f64,
+        lens_sample: LensSample,
+        wavelengths_nm: &[f64; N],
+    ) -> Result<[Option<SequentialCameraBeam>; N], CameraError> {
+        admit_reciprocal_beams(self.generate_sequential_beams(
+            cx,
+            x_tan,
+            y_tan,
+            lens_sample,
+            wavelengths_nm,
+            None,
+        )?)
+    }
+
+    /// Place a passive detector row at the physical sensor, before tracing the
+    /// lens. The row acts on arriving light along the negative sensor ray; its
+    /// Q axis is the supplied world axis projected perpendicular to that ray.
+    /// Require `0 < a0 <= 1` and `|(aQ,aU,aV)| <= min(a0,1-a0)`.
+    ///
+    /// Reciprocity launches `(a0,aQ,-aU,aV)` in the opposite-travel frame.
+    /// Lens basis rotations, s/p Fresnel response and Beer loss act on that
+    /// complete seed, preserving analyzer/lens/scene polarization correlation.
+    /// An isotropic row has no distinguished axis; a nonzero finite reference
+    /// is still required, but may be parallel to the ray in that case.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_sequential_spectral_beams_analyzed_from_tangent_offsets<const N: usize>(
+        &self,
+        cx: &Cx<'_>,
+        x_tan: f64,
+        y_tan: f64,
+        lens_sample: LensSample,
+        wavelengths_nm: &[f64; N],
+        reference_axis: Vec3,
+        detector_row: Stokes,
+    ) -> Result<[Option<SequentialCameraBeam>; N], CameraError> {
+        cx.checkpoint()?;
+        if ![
+            detector_row.i,
+            detector_row.q,
+            detector_row.u,
+            detector_row.v,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+            || detector_row.i <= 0.0
+            || detector_row.i > 1.0
+            || det::hypot(det::hypot(detector_row.q, detector_row.u), detector_row.v)
+                > detector_row.i.min(1.0 - detector_row.i)
+        {
+            return Err(CameraError::SequentialLensOutsideModel);
+        }
+        let axis = super::scaled_unit(reference_axis)
+            .map_err(|_| CameraError::SequentialLensOutsideModel)?;
+        admit_reciprocal_beams(self.generate_sequential_beams(
+            cx,
+            x_tan,
+            y_tan,
+            lens_sample,
+            wavelengths_nm,
+            Some((axis, detector_row)),
+        )?)
+    }
+
+    fn generate_sequential_beams<const N: usize>(
+        &self,
+        cx: &Cx<'_>,
+        x_tan: f64,
+        y_tan: f64,
+        lens_sample: LensSample,
+        wavelengths_nm: &[f64; N],
+        detector: Option<(Vec3, Stokes)>,
+    ) -> Result<[Option<SequentialCameraBeam>; N], CameraError> {
         cx.checkpoint()?;
         if N == 0 || !x_tan.is_finite() || !y_tan.is_finite() {
             return Err(CameraError::InvalidProjection);
@@ -463,40 +627,77 @@ impl PhysicalCamera {
         if !geometry.is_finite() || geometry < 0.0 {
             return Err(CameraError::SequentialLensOutsideModel);
         }
+        let (axis, power) = detector.map_or((None, Stokes::unpolarized(1.0)), |(axis, row)| {
+            let local_axis = if row.q == 0.0 && row.u == 0.0 && row.v == 0.0 {
+                None
+            } else {
+                Some(Vec3::new(
+                    axis.dot(self.right),
+                    axis.dot(self.up),
+                    axis.dot(self.forward),
+                ))
+            };
+            // (right, up, forward) has determinant -1: world and local
+            // right-handed polarization frames share h but reverse v. Thus
+            // H=diag(1,1,-1,-1) converts coordinates, independently of the
+            // reciprocal reversal A=diag(1,1,-1,1). The local seed is H*A*row.
+            (local_axis, Stokes { v: -row.v, ..row })
+        });
+        let to_world = |v: Vec3| {
+            Vec3::new(
+                self.right.x * v.x + self.up.x * v.y + self.forward.x * v.z,
+                self.right.y * v.x + self.up.y * v.y + self.forward.y * v.z,
+                self.right.z * v.x + self.up.z * v.y + self.forward.z * v.z,
+            )
+        };
         let mut result = [None; N];
         for (entry, &wavelength) in result.iter_mut().zip(wavelengths_nm) {
-            if let Some(traced) = lens.trace_ray(
+            if let Some(traced) = lens.trace_seeded_ray(
                 cx,
                 Ray {
                     origin: sensor,
                     dir: direction,
                 },
                 wavelength,
+                axis,
+                power,
             )? {
                 if geometry == 0.0 {
                     continue;
                 }
                 let p = traced.ray.origin;
-                let d = traced.ray.dir;
                 let origin = self
                     .eye
                     .offset(self.right.scale(p.x))
                     .offset(self.up.scale(p.y))
                     .offset(self.forward.scale(p.z));
-                let direction = Vec3::new(
-                    self.right.x * d.x + self.up.x * d.y + self.forward.x * d.z,
-                    self.right.y * d.x + self.up.y * d.y + self.forward.y * d.z,
-                    self.right.z * d.x + self.up.z * d.y + self.forward.z * d.z,
-                );
-                *entry = Some(SequentialCameraRay {
-                    ray: Ray {
-                        origin,
-                        dir: super::scaled_unit(direction)?,
+                let frame = PolarizationFrame::try_new(
+                    to_world(traced.ray.dir),
+                    to_world(traced.frame.horizontal()),
+                )
+                .map_err(|_| CameraError::SequentialLensOutsideModel)?;
+                *entry = Some(SequentialCameraBeam {
+                    origin,
+                    frame,
+                    power: Stokes {
+                        u: -traced.power.u,
+                        v: -traced.power.v,
+                        ..traced.power
                     },
-                    weight: geometry * traced.transmittance,
+                    wavelength_nm: wavelength,
+                    geometry_weight: geometry,
                 });
             }
         }
         Ok(result)
     }
+}
+
+fn admit_reciprocal_beams<const N: usize>(
+    beams: [Option<SequentialCameraBeam>; N],
+) -> Result<[Option<SequentialCameraBeam>; N], CameraError> {
+    if beams.iter().flatten().any(|beam| beam.power.i == 0.0) {
+        return Err(CameraError::SequentialLensOutsideModel);
+    }
+    Ok(beams)
 }

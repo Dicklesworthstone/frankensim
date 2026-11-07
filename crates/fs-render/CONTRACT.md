@@ -4123,8 +4123,27 @@ coatings, diffraction and autofocus. Its unweighted ray and optical-centre
 projection entry points refuse; a distorted lens has no single projective
 centre. Pose animation retains the authored prescription and fixed focus.
 The rear sampling aperture is not an entrance-pupil measurement, so no f-number
-is inferred. Polarized-scene analyzer and curved-raster attachment require
-their own weighted, potentially clipped camera-path interface.
+is inferred.
+
+`SequentialCameraBeam` retains one immutable wavelength, world ray/frame,
+complete reciprocal detector Stokes state, and a separate geometric weight.
+Identity and analyzed spectral generators share the original lens traversal.
+An authored passive analyzer is placed at the physical sensor before the
+lens. Reciprocal U reversal and the camera basis's separate U/V handedness
+conversion are both retained; no scalar intensity projection precedes scene
+interfaces. Surviving beams whose positive transmission underflows refuse,
+while aperture and TIR clipping remain explicit absent samples.
+
+`CurvedCameraScene::sample_sequential_ray` and its original-variate counterpart
+continue those complete beams through native curved refraction, scene Fresnel
+responses, Beer paths, polarized sources and thermal emission. The original
+scene must resolve index one at the actual front-surface launch point.
+With `volumes`, `CurvedRayleighCameraScene` retains the same lens state through
+native molecular Mueller scattering and uniform or heterogeneous free-flight
+tracking. These scene samples include lens/analyzer transmission but exclude
+the rear-cap geometric factor; callers apply that factor exactly once during
+pixel integration. Retained scene paths start at the lens exit. Lens-aware
+transient flight timing remains a separate integration.
 
 The motion path reconstructs only the supplied interpolation model. It does not
 invent mechanical bandwidth, unwrap rotations absent from keyframes, smooth a
