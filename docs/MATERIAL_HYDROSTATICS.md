@@ -143,3 +143,38 @@ source-only substitutions, heterogeneous torque, potential derivatives,
 endpoint feedback, heave refinement, long-run energy and failed transactions.
 Reference: R. Fitzpatrick, *Fluid Mechanics*, Hydrostatics, University of Texas,
 https://farside.ph.utexas.edu/teaching/336L/Fluidhtml/node27.html .
+
+## Hydrostatic initial state for resolved free-surface flow
+
+For simulations using the actual sparse D3Q19 flow owner,
+`MaterialFreeSurfaceScaling::free_surface3_hydrostatic` constructs a planar
+liquid column in balance with the material solver's density-dependent
+`rho * gravity` force. Select a supporting Cartesian wall, a number of complete
+wet layers, an explicit absolute gas-pressure reference, and a maximum
+dimensionless density excursion. At least one gas layer is required;
+capillarity and wall wetting must be absent. Existing permanent solid tiles
+remain stationary obstacles.
+
+The initializer uses the native collision and gas-link boundary equations.
+Writing `h = |g_lattice|/(2*cs^2)`, the wet layer nearest the surface has density
+`1/(1-h)`, and each deeper layer multiplies that density by `(1+h)/(1-h)`.
+This includes the surface population correction needed for discrete rest.
+The ordinary `step()` retains the declared gas pressure, so there is no
+artificial settling run or pressure callback to maintain this initial state.
+
+The profile is weakly compressible numerical hydrostatics, with mass
+`fill*rho_lattice*rho_source*dx^3`. The density perturbation is not a physical
+liquid equation of state. At fixed physical geometry and gravity, decreasing
+`dt/dx` reduces the pressure and buoyancy error relative to incompressible
+hydrostatics. Spatial refinement alone at fixed `dt/dx` does not eliminate that
+error. The existing fully submerged stationary-solid load owner measures
+pressure traction from actual reflected populations; this initializer does
+not add partially wetted or moving-solid traction.
+
+```
+cargo test -p fs-lbm --test material_free_surface3 planar_hydrostatics
+```
+
+These tests specify 64 native rest steps in all six gravity directions,
+pressure-datum and zero-gravity invariance, mass retention, and pressure,
+submerged force and torque convergence as compressibility decreases.

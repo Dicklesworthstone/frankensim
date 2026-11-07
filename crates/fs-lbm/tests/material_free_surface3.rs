@@ -38,6 +38,8 @@ mod gradient_sgs_wall;
 mod rigid_frame_forcing;
 #[path = "material_free_surface3/solid_loads.rs"]
 mod submerged_solid_loads;
+#[path = "material_free_surface3/hydrostatic.rs"]
+mod planar_hydrostatics;
 #[path = "material_free_surface3/refinement.rs"]
 mod dyadic_refinement;
 

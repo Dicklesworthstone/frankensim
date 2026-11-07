@@ -4,6 +4,8 @@ use super::*;
 use crate::d3q19::freesurface3::FreeSurfaceInitialCell3;
 use fs_exec::Cx;
 
+mod hydrostatic;
+
 /// One occupied cell of the same frozen pure liquid as the receiving solver.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialFreeSurfaceInitialCell3 {
@@ -57,6 +59,9 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
     /// pressure projection. The source properties stay frozen. The caller
     /// owns initial pressure/boundary compatibility and grid/time convergence;
     /// equilibrium population initialization is not exactly well-balanced.
+    /// For a planar column under the material's density-dependent gravity, use
+    /// [`Self::free_surface3_hydrostatic`] to balance the native collision and
+    /// free-surface reconstruction at rest.
     ///
     /// # Errors
     /// The ordinary initial-state and source gates apply. Missing reference,

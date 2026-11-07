@@ -32,3 +32,35 @@ the existing thermal integration case also exercises activated rates and rollbac
 ## Material-flow enthalpy reconstruction
 
 `MaterialFlowAdvection::with_reconstruction` attaches the original thermal owner's shared `LimitedEnthalpyReconstruction` to solved material face fluxes. Selected contiguous axial cells reconstruct total specific enthalpy, including a declared passive equal-density latent inventory; paired face transfers, source-law inversion, accepted history and the combined conduction/advection timestep restriction remain with `fs-thermal`. Unselected cells and external streams retain donor enthalpy. Empty plans retain the donor-cell arithmetic. This is an explicit first-order-in-time stationary-control-volume model; it does not infer multidimensional junction slopes, phase mobility, density-change flow, pressure work or moving interfaces. The `advection()` accessor exposes the underlying graph and actual transport audit; implicit clients must attach the same `reconstruction()` plan to their own native implicit transport owner.
+
+## Hydrostatic rest under material density-dependent gravity
+
+`MaterialFreeSurfaceScaling::free_surface3_hydrostatic` initializes a planar
+column using the original material-bound Guo force, collision, streaming and
+gas-pressure reconstruction. Gravity points toward one declared Cartesian
+supporting wall; zero gravity is also admitted. Complete liquid layers retain
+the original stationary solid tiles and at least one layer of gas. The caller
+supplies a positive absolute pressure reference and a density-excursion bound.
+Capillarity and wetting must be explicitly absent.
+
+For lattice acceleration magnitude `a`, set `h = a/(2*cs^2)`. The nearest wet
+layer has `rho = 1/(1-h)`; successive deeper layers multiply by
+`(1+h)/(1-h)`. This surface factor follows the native missing-gas-link rule.
+A continuum pressure profile evaluated at cell centers alone does not supply
+the same discrete rest state. Layer densities are computed once and reused
+while the original constructor owns liquid mass, sparse activation and the
+physical-zero-velocity Guo frame. Ordinary `step()` retains the same gas datum.
+
+This balances the weakly compressible numerical operator. It is not a liquid
+equation of state or an incompressible mass projection: native mass contains
+the retained density perturbation. Pressure and submerged traction approach
+their incompressible hydrostatic limits as `dt/dx` decreases with the physical
+configuration fixed; refining `dx` at fixed `dt/dx` does not remove that
+compressibility error. The constructor adds no moving-solid or partially
+wetted-body force closure.
+
+G1/G3/G4 regressions in `tests/material_free_surface3/hydrostatic.rs` exercise
+all six gravity directions, zero-gravity equality, pressure-datum invariance,
+actual reflected-link traction and torque with decreasing compressibility,
+mass retention and transactional refusal. The declared density, source-domain,
+geometry and cancellation bounds remain with the original owners.
