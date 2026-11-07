@@ -17,7 +17,7 @@
   "open strings tuned to equal temperament (A4 = 440 Hz) by a tension factor read from the assembled instrument's own pulse response, never from a recording"
  ],
  "physics_missing": [
-  "a radiating exterior: pressure on every page is the shell's volume and the cavity at 1 m through a compact receiver, with no directivity and no finite receiver",
+  "a radiating exterior: pressure on every page is the shell's volume and the cavity at 1 m through a compact receiver, with no directivity and no finite receiver. A directional receiver at the recording's microphone point (the one_way_observer row) was tried on G3 and refused before any sound: the shell's own triangles, which are its radiating skin, resolve six panels per wavelength only up to 2773 Hz, so a receiver that carries the whole page needs a finer CT shell mesh than the 6 mm one, and the CT data have none finer.",
   "enough sound for the plates' motion: between about 1250 and 2000 Hz the plates move about as much per newton as Bissinger's print, within 4 dB, but give 3 to 8 dB too little sound on a finite receiver and 10 to 13 dB on the compact receiver the pages use; his two sets reach the critical line at about 3.5 and 4.3 kHz, and ours doesn't by 4 kHz",
   "body modes above 5 kHz, and any mesh convergence: every page is on the 6 mm mesh's 134 modes",
   "air modes beyond the one cavity",
