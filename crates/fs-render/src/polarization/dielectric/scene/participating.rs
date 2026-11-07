@@ -128,6 +128,7 @@ impl<'a, 'scene, 'grid, 'data> RayleighScene<'a, 'scene, 'grid, 'data> {
                     volume_limit: collision && volume_events >= settings.max_volume_events,
                 })
             },
+            None,
         )?;
         cx.checkpoint()?;
         Ok(RayleighPath { path, volume_events, free_flight_draws })

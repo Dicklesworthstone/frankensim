@@ -28,8 +28,19 @@ pub const MAX_POLARIZED_SCENE_ITEMS: usize = 65_536;
 /// Maximum admitted surface-event budget for one synchronous path.
 pub const MAX_POLARIZED_PATH_EVENTS: u32 = 65_536;
 
+fn path_draw(seed: u64, path_id: u64, event: u32) -> [f64; 3] {
+    let block = philox4x32_10(
+        [path_id as u32, (path_id >> 32) as u32, event, 0x706f_6c31],
+        [seed as u32, (seed >> 32) as u32],
+    );
+    core::array::from_fn(|i| (f64::from(block[i]) + 0.5) / 4_294_967_296.0)
+}
+
 /// Curved paths through immutable gradient-index fields and native geometry.
 pub mod curved;
+
+mod mirror_exchange;
+pub use mirror_exchange::{MirrorInteraction, MirrorPathResult};
 
 mod coating_stacks;
 pub use coating_stacks::DielectricStackBinding;
@@ -280,13 +291,8 @@ impl<'a> PolarizedScene<'a> {
         &self, cx: &Cx<'_>, beam: PolarizedBeam, initial_medium: usize,
         settings: TraceSettings, seed: u64, path_id: u64,
     ) -> Result<PathResult, SceneError> {
-        self.trace_with_samples(cx, beam, initial_medium, settings, |event| {
-            let block = philox4x32_10(
-                [path_id as u32, (path_id >> 32) as u32, event, 0x706f_6c31],
-                [seed as u32, (seed >> 32) as u32],
-            );
-            core::array::from_fn(|i| (f64::from(block[i]) + 0.5) / 4_294_967_296.0)
-        })
+        self.trace_with_samples(cx, beam, initial_medium, settings,
+            |event| path_draw(seed, path_id, event))
     }
 
     /// Trace with externally supplied `[microfacet_u, microfacet_v, event]`
@@ -306,11 +312,12 @@ impl<'a> PolarizedScene<'a> {
         samples: impl FnMut(u32) -> [f64; 3],
     ) -> Result<PathResult, SceneError> {
         self.trace_segments(cx, beam, initial_medium, settings, samples,
-            |beam, _, distance| SegmentProgress::homogeneous(beam, distance))
+            |beam, _, distance| SegmentProgress::homogeneous(beam, distance), None)
     }
 
     // A monomorphized segment continuation shares ALL geometry, surface laws,
     // media transitions and receiver semantics with the surface-only API.
+    #[allow(clippy::too_many_arguments)]
     fn trace_segments(
         &self,
         cx: &Cx<'_>,
@@ -319,6 +326,7 @@ impl<'a> PolarizedScene<'a> {
         settings: TraceSettings,
         mut samples: impl FnMut(u32) -> [f64; 3],
         mut propagate: impl FnMut(PolarizedBeam, usize, f64) -> Result<SegmentProgress, SceneError>,
+        mut mirror_interactions: Option<&mut Vec<MirrorInteraction>>,
     ) -> Result<PathResult, SceneError> {
         cx.checkpoint()?;
         settings.validate()?;
@@ -445,7 +453,16 @@ impl<'a> PolarizedScene<'a> {
                         });
                     }
                     let normal = hit.hit.normal.ok_or(SceneError::InvalidHit)?;
-                    result.beam = result.beam.reflect_conductor(normal, &self.conductors[optics])?.beam;
+                    result.beam = if let Some(interactions) = mirror_interactions.as_mut() {
+                        let balance = result.beam.reflect_conductor_with_balance(
+                            normal, &self.conductors[optics],
+                        )?;
+                        let reflected = balance.reflection().beam;
+                        interactions.push(MirrorInteraction { hit, balance });
+                        reflected
+                    } else {
+                        result.beam.reflect_conductor(normal, &self.conductors[optics])?.beam
+                    };
                     // The beam remains in the same dielectric. Absorbed metal
                     // power is removed by the response, not a second roulette.
                     offset = settings.query_offset_m;
@@ -721,6 +738,73 @@ mod conductor_tests {
             wavelength, medium, Stokes::try_new(1.0,0.0,0.0,1.0).unwrap()).unwrap()
     }
     fn close(a: f64, b: f64) { assert!((a-b).abs() <= 2e-11*a.abs().max(b.abs()).max(1.0), "{a} != {b}"); }
+
+    #[test]
+    fn g1_mirror_exchange_uses_actual_attenuated_hit_without_changing_scene_path() {
+        with_cx(|cx| {
+            let geometry = geometry();
+            let media = [glass(0.1)];
+            let metals = [metal()];
+            let scene = PolarizedScene::try_new_with_conductors(
+                &geometry, &media, &metals, bindings(0),
+            ).unwrap();
+            let source = beam(media[0], 550.0);
+            let ordinary = scene.trace(cx, source, 0, settings(), 31, 7).unwrap();
+            let exchanged = scene.trace_with_mirror_balances(cx, source, 0, settings(), 31, 7).unwrap();
+            assert_eq!(exchanged.path, ordinary);
+            assert_eq!(exchanged.mirrors.len(), 1);
+            let mirror = &exchanged.mirrors[0];
+            assert_eq!(mirror.hit.object_id, 1);
+            let incident = fs_math::det::exp(-0.1);
+            let r = (0.8 * 0.8 + 9.0) / (1.2 * 1.2 + 9.0);
+            close(mirror.balance.absorbed_power_w(), incident * (1.0 - r));
+            close(mirror.balance.reflection().beam.power().i, incident * r);
+            close(mirror.balance.vacuum_force_n().unwrap().z * 299_792_458.0,
+                incident * (1.0 + r));
+            close(exchanged.path.beam().power().i, r * fs_math::det::exp(-0.3));
+        });
+    }
+
+    #[test]
+    fn g1_mirror_cavity_closes_heat_and_momentum_with_surviving_limited_power() {
+        with_cx(|cx| {
+            let geometry = geometry();
+            let media = [glass(0.0)];
+            let metals = [metal()];
+            let bindings = [1, 2].into_iter().map(|object_id| SurfaceBinding {
+                object_id,
+                interaction: Interaction::SmoothConductor { optics: 0, medium: 0 },
+            }).collect();
+            let scene = PolarizedScene::try_new_with_conductors(
+                &geometry, &media, &metals, bindings,
+            ).unwrap();
+            let mut limits = settings();
+            limits.max_surface_events = 3;
+            let source = beam(media[0], 550.0);
+            let report = scene.trace_with_mirror_balances(cx, source, 0, limits, 31, 7).unwrap();
+            assert_eq!(report.path, scene.trace(cx, source, 0, limits, 31, 7).unwrap());
+            assert_eq!(report.path.termination(), PathTermination::SurfaceLimit);
+            assert_eq!(report.mirrors.len(), 3);
+            let r = (0.8 * 0.8 + 9.0) / (1.2 * 1.2 + 9.0);
+            let mut incident = 1.0;
+            let mut heat = 0.0;
+            let mut force_z = 0.0;
+            for (i, mirror) in report.mirrors.iter().enumerate() {
+                assert_eq!(mirror.hit.object_id, if i % 2 == 0 { 1 } else { 2 });
+                close(mirror.balance.absorbed_power_w(), incident * (1.0 - r));
+                let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+                let force = mirror.balance.vacuum_force_n().unwrap();
+                close(force.z * 299_792_458.0, sign * incident * (1.0 + r));
+                heat += mirror.balance.absorbed_power_w();
+                force_z += force.z;
+                incident *= r;
+            }
+            close(report.path.beam().power().i, incident);
+            close(heat + report.path.beam().power().i, 1.0);
+            // The unresolved surviving beam travels opposite to the source.
+            close(force_z * 299_792_458.0, 1.0 + incident);
+        });
+    }
 
     #[test]
     fn g1_native_scene_mirror_detector_retains_phase_material_and_absorption() {

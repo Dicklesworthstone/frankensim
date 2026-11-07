@@ -31,7 +31,8 @@ pub mod mirrors {
     //! Smooth opaque reflection in the existing forward polarized beam path.
     //!
     //! Optical tables and coherent coatings belong to `crate::conductor`.
-    //! This adapter owns only ray frames, reflected direction and power weight.
+    //! This adapter owns ray frames, reflected direction and power weight,
+    //! with optional positive absorbed power and stationary radiation force.
     //! No transmitted metal ray, roughness, shading-normal correction, random
     //! branch decision or spatial deposition of absorbed power is inferred.
 
@@ -41,6 +42,9 @@ pub mod mirrors {
     use crate::dielectric::DielectricEvent;
     use crate::polarization::{Mueller, Stokes};
     use super::transport::{BeamError, BeamMedium, BeamSample, PolarizationFrame, PolarizedBeam};
+
+    mod exchange;
+    pub use exchange::ConductorBeamBalance;
 
     /// An optical-data or beam failure, never a dark sample substituted for an error.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,18 +87,7 @@ pub mod mirrors {
             if normal.dot(k) > 0.0 { normal = normal.scale(-1.0); }
             let cosine = (-normal.dot(k)).clamp(0.0, 1.0);
             if cosine == 0.0 { return Err(BeamError::InvalidFrame.into()); }
-            let eta = match self.medium() {
-                BeamMedium::Homogeneous(material) => {
-                    material.ior().eval(self.wavelength_nm()).map_err(BeamError::from)?
-                }
-                BeamMedium::GradientIndex(local) => {
-                    if local.position() != self.ray().origin
-                        || local.wavelength_nm() != self.wavelength_nm() {
-                        return Err(BeamError::MediumMismatch.into());
-                    }
-                    local.sample().phase_index()
-                }
-            };
+            let eta = phase_index(self)?;
             let matrix = optics.fresnel_mueller(self.wavelength_nm(), eta, cosine)?;
             let transverse = cross(k, normal);
             let s = if transverse.x == 0.0 && transverse.y == 0.0 && transverse.z == 0.0 {
@@ -112,6 +105,21 @@ pub mod mirrors {
                 self.ray().origin, frame, self.wavelength_nm(), self.medium(), power,
             )?;
             Ok(BeamSample { beam, event: DielectricEvent::Reflection, pdf: 1.0, delta: true })
+        }
+    }
+
+    fn phase_index(beam: PolarizedBeam) -> Result<f64, BeamError> {
+        match beam.medium() {
+            BeamMedium::Homogeneous(material) => {
+                material.ior().eval(beam.wavelength_nm()).map_err(BeamError::from)
+            }
+            BeamMedium::GradientIndex(local) => {
+                if local.position() != beam.ray().origin
+                    || local.wavelength_nm() != beam.wavelength_nm() {
+                    return Err(BeamError::MediumMismatch);
+                }
+                Ok(local.sample().phase_index())
+            }
         }
     }
 
