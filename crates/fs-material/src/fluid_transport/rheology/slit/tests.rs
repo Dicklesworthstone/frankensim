@@ -255,6 +255,228 @@ fn g1_combined_nonlinear_flow_and_heat_match_independent_momentum_quadrature() {
 }
 
 #[test]
+fn g1_prescribed_flow_resolves_newtonian_pumping_and_blocked_wall_motion() {
+    let source = law(
+        [3.0, 3.0, 0.6, 0.5, 1.0],
+        [0.0, 1e8],
+        ViscosityShiftMode::Vertical,
+    );
+    let film = LaminarCarreauSlit::new(source, 300.0, 0.07, 0.02, 0.5, 1e6).unwrap();
+    let (w, h, l, mu) = (film.width_m(), film.gap_m(), film.length_m(), 3.0);
+    let conductance = w * h.powi(3) / (12.0 * mu * l);
+    for walls in [[0.0, 0.0], [0.0, 1.0], [0.75, -0.25], [-2.0, -2.0]] {
+        let entrained = w * h * 0.5 * (walls[0] + walls[1]);
+        for target in [-0.001, 0.0, 0.001, entrained] {
+            let solved = film
+                .profile_at_flow_and_walls(target, walls, tight(), 1e-12, 1)
+                .unwrap();
+            let f = solved.profile().flow();
+            let pressure = (target - entrained) / conductance;
+            close(f.pressure_drop_pa, pressure, 2e-14);
+            assert_eq!(solved.requested_volumetric_flow_m3_s(), target);
+            assert!(solved.flow_residual_m3_s().abs() <= 1e-12 * (target - entrained).abs());
+            assert_eq!(solved.flow_iterations(), u32::from(target != entrained));
+            let relative = walls[1] - walls[0];
+            close(
+                f.dissipated_power_w,
+                conductance * pressure.powi(2) + mu * w * l * relative.powi(2) / h,
+                3e-14,
+            );
+        }
+    }
+
+    // At Q=0 a sliding upper wall still pumps against an adverse pressure
+    // gradient. The lower part of the gap flows backwards, and wall power
+    // supplies all of the positive viscous heating.
+    let blocked = film
+        .profile_at_flow_and_walls(0.0, [0.0, 1.0], tight(), 1e-12, 1)
+        .unwrap();
+    let p = blocked.profile();
+    close(p.flow().pressure_drop_pa, -6.0 * mu * l / h.powi(2), 2e-14);
+    close(p.flow().dissipated_power_w, 4.0 * mu * w * l / h, 2e-14);
+    close(p.flow().wall_power_w, p.flow().dissipated_power_w, 2e-14);
+    assert!(p.flow().pressure_power_w.abs() <= 1e-13 * p.flow().dissipated_power_w);
+    for z in [0.0, 0.25, 0.5, 0.75, 1.0] {
+        close(
+            p.sample(z * h).unwrap().axial_velocity_m_s,
+            z * (3.0 * z - 2.0),
+            2e-13,
+        );
+    }
+}
+
+#[test]
+fn g1_prescribed_nonlinear_flow_recovers_independent_pressure_and_heat() {
+    let film = slit();
+    for (pressure, walls) in [
+        (4000.0, [-0.2, 0.5]),
+        (-4000.0, [0.5, -0.2]),
+        (5000.0, [0.0, 0.0]),
+        (-3000.0, [0.75, 0.75]),
+    ] {
+        let (offset, pressure_flow, heat) = oracle(pressure, walls);
+        let target = pressure_flow + film.width_m() * film.gap_m() * 0.5 * (walls[0] + walls[1]);
+        let solved = film
+            .profile_at_flow_and_walls(target, walls, tight(), 2e-10, 96)
+            .unwrap();
+        let p = solved.profile();
+        close(p.flow().pressure_drop_pa, pressure, 5e-9);
+        close(p.stress_offset_pa(), offset, 5e-9);
+        close(p.flow().dissipated_power_w, heat, 8e-9);
+        assert!(solved.flow_residual_m3_s().abs() <= 2.1e-10 * pressure_flow.abs());
+        assert!((1..=96).contains(&solved.flow_iterations()));
+    }
+}
+
+#[test]
+fn g2_prescribed_flow_uses_the_combined_sliding_and_pressure_source_envelope() {
+    let film = LaminarCarreauSlit::new(*slit().law(), 300.0, 0.07, 0.02, 0.5, 100.0).unwrap();
+    let (w, h, l) = (film.width_m(), film.gap_m(), film.length_m());
+    let ceiling = film
+        .law()
+        .evaluate(300.0, 100.0)
+        .unwrap()
+        .dynamic_viscosity_pa_s()
+        * 100.0;
+    // Construct the exact source boundary using one wall at the rate ceiling.
+    // Both the mean wall speed and flux use the independent closed-form inverse.
+    let limit_s = 0.45 * ceiling;
+    let limit_c = ceiling - limit_s;
+    let relative = h * simpson(|t| inverse(limit_c + limit_s * (1.0 - 2.0 * t)), 1.0);
+    let walls = [-0.5 * relative, 0.5 * relative];
+    let limit_q = w
+        * h.powi(2)
+        * simpson(
+            |t| (0.5 - t) * inverse(limit_c + limit_s * (1.0 - 2.0 * t)),
+            1.0,
+        );
+    let pressure = 0.98 * 2.0 * l * limit_s / h;
+    let (_, target, heat) = oracle(pressure, walls);
+    let solved = film
+        .profile_at_flow_and_walls(target, walls, tight(), 2e-10, 96)
+        .unwrap();
+    close(solved.profile().flow().pressure_drop_pa, pressure, 6e-9);
+    close(solved.profile().flow().dissipated_power_w, heat, 8e-9);
+    assert!(
+        film.profile_at_flow_and_walls(1.1 * limit_q, walls, tight(), 2e-10, 96)
+            .is_err()
+    );
+
+    let constant = LaminarCarreauSlit::new(
+        law(
+            [3.0, 3.0, 0.6, 0.5, 1.0],
+            [0.0, 1e8],
+            ViscosityShiftMode::Vertical,
+        ),
+        300.0,
+        w,
+        h,
+        l,
+        100.0,
+    )
+    .unwrap();
+    let target = w * h.powi(2) * 20.0 / 6.0;
+    assert!(
+        constant
+            .profile_at_flow_and_walls(target, [0.0; 2], tight(), 1e-12, 1)
+            .is_ok()
+    );
+    // Pressure contributes 20 /s; sliding already consumes 90 /s at both
+    // walls. Their sum, unlike either input alone, exceeds the 100 /s ceiling.
+    assert!(
+        constant
+            .profile_at_flow_and_walls(target, [-0.9, 0.9], tight(), 1e-12, 1)
+            .is_err()
+    );
+}
+
+#[test]
+fn g2_prescribed_flow_residual_survives_large_common_wall_translation() {
+    let film = slit();
+    let speed = 1e10;
+    let walls = [speed - 0.25, speed + 0.5];
+    let entrained = film.width_m() * film.gap_m() * (speed + 0.125);
+    let (_, excess, _) = oracle(4000.0, [-0.375, 0.375]);
+    let target = entrained + excess;
+    // The API can only resolve excess present in the supplied f64 net flow.
+    // Once supplied, however, its much smaller residual must not be hidden by
+    // testing the tolerance against the large common translation.
+    let requested_excess = target - entrained;
+    let solved = film
+        .profile_at_flow_and_walls(target, walls, tight(), 2e-10, 96)
+        .unwrap();
+    let centred = film
+        .profile_at_flow_and_walls(requested_excess, [-0.375, 0.375], tight(), 2e-10, 96)
+        .unwrap();
+    assert_eq!(
+        solved.profile().flow().pressure_drop_pa,
+        centred.profile().flow().pressure_drop_pa
+    );
+    assert_eq!(
+        solved.profile().flow().dissipated_power_w,
+        centred.profile().flow().dissipated_power_w
+    );
+    assert_eq!(solved.flow_residual_m3_s(), centred.flow_residual_m3_s());
+    assert!(solved.flow_residual_m3_s().abs() <= 2e-10 * requested_excess.abs());
+}
+
+#[test]
+fn g4_prescribed_flow_budgets_and_late_cancellation_publish_no_partial_profile() {
+    let film = slit();
+    let original = film;
+    let target = 0.0003;
+    let walls = [-0.2, 0.5];
+    assert!(
+        film.profile_at_flow_and_walls(target, walls, tight(), 1e-10, 1)
+            .is_err()
+    );
+    for tolerance in [0.0, -1.0, 1.0, f64::NAN] {
+        assert!(
+            film.profile_at_flow_and_walls(target, walls, tight(), tolerance, 96)
+                .is_err()
+        );
+    }
+    for iterations in [0, 129] {
+        assert!(
+            film.profile_at_flow_and_walls(target, walls, tight(), 1e-10, iterations)
+                .is_err()
+        );
+    }
+    for invalid in [f64::NAN, f64::INFINITY] {
+        assert!(
+            film.profile_at_flow_and_walls(invalid, walls, tight(), 1e-10, 96)
+                .is_err()
+        );
+    }
+    let mut checks = 0;
+    let complete = film
+        .profile_at_flow_and_walls_with_check(target, walls, tight(), 1e-10, 96, || {
+            checks += 1;
+            Ok(())
+        })
+        .unwrap();
+    let mut retry_checks = 0;
+    let failure = state_error("injected prescribed-flow publication cancellation");
+    let refused =
+        film.profile_at_flow_and_walls_with_check(target, walls, tight(), 1e-10, 96, || {
+            retry_checks += 1;
+            if retry_checks == checks {
+                Err(failure.clone())
+            } else {
+                Ok(())
+            }
+        });
+    assert_eq!(refused.unwrap_err(), failure);
+    assert_eq!(retry_checks, checks);
+    assert_eq!(film, original);
+    assert_eq!(
+        film.profile_at_flow_and_walls(target, walls, tight(), 1e-10, 96)
+            .unwrap(),
+        complete
+    );
+}
+
+#[test]
 fn g1_pressure_and_sliding_are_not_separately_superposed() {
     let film = slit();
     let combined = film

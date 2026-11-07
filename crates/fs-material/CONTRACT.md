@@ -18314,6 +18314,23 @@ no per-query storage. Checked solve and sampling entry points poll between
 capped constitutive inverses and before publication; all refusals leave the
 immutable owner available for an identical retry.
 
+`LaminarCarreauSlit::profile_at_flow_and_walls` and its checked counterpart
+resolve the pressure required by a prescribed signed net volume flow and both
+wall velocities. Blocked flow can require adverse pressure and retain positive
+wall-powered heat. The inverse uses the same profile's analytic pressure
+conductance and a bounded physical stress bracket; the combined sliding and
+pressure wall states must remain inside the original source envelope. A
+constant-viscosity source uses the exact Couette--Poiseuille inverse. Pure wall
+entrainment needs exactly zero pressure. Flow residuals and their relative
+tolerance are evaluated after subtracting mean-wall entrainment, preserving
+small pressure-flow corrections under common translation. The accepted profile,
+requested flow, residual and trial count remain explicit; requested flow never
+replaces accepted flow in work or heat. At most one pure-Couette evaluation and
+the caller's capped number of nonzero-pressure trials occur, using scalar
+scratch and the existing bounded local checks. Analytical blockage, independent
+nonlinear pressure/heat, combined source ceilings, translation and late
+cancellation regressions cover this inverse.
+
 This is a source-owned planar passage, not a Reynolds graph, free-surface,
 cavitation, entrance-flow or thermal-time solver. Width must be sufficient for
 side walls to be neglected. The caller owns thin-gap/laminar validity, pressure

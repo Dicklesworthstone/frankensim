@@ -111,6 +111,34 @@ pub struct CarreauSlitProfile {
     half_pressure_stress_pa: f64,
 }
 
+/// Prescribed net flow and moving walls resolved through one accepted profile.
+/// Pressure, tractions and heat always belong to that profile; requested flow
+/// is never substituted into its physical work.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CarreauSlitFlowSolution {
+    profile: CarreauSlitProfile,
+    requested_volumetric_flow_m3_s: f64,
+    flow_residual_m3_s: f64,
+    flow_iterations: u32,
+}
+
+impl CarreauSlitFlowSolution {
+    pub const fn profile(&self) -> &CarreauSlitProfile {
+        &self.profile
+    }
+    pub const fn requested_volumetric_flow_m3_s(&self) -> f64 {
+        self.requested_volumetric_flow_m3_s
+    }
+    /// Accepted minus requested flow [m³/s], evaluated after subtracting common
+    /// wall entrainment so a large translation does not hide the residual.
+    pub const fn flow_residual_m3_s(&self) -> f64 {
+        self.flow_residual_m3_s
+    }
+    pub const fn flow_iterations(&self) -> u32 {
+        self.flow_iterations
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CarreauSlitSample {
     pub axial_velocity_m_s: f64,
@@ -191,6 +219,186 @@ impl LaminarCarreauSlit {
         controls: CarreauSlitControls,
     ) -> Result<CarreauSlitProfile, MaterialError> {
         self.profile_with_check(pressure_drop_pa, wall_velocities_m_s, controls, || Ok(()))
+    }
+
+    /// Resolve the signed pressure needed for prescribed net volume flow and
+    /// lower/upper wall velocities, including blockage or reversed pumping.
+    ///
+    /// Newton corrections use the accepted profile's positive pressure
+    /// conductance. A bracket in physical wall stress admits both wall states;
+    /// sliding and pressure cannot independently spend the same rate envelope.
+    /// Constant-viscosity laws take their exact Couette--Poiseuille branch.
+    /// All profiles retain the original coupled constitutive law and heat.
+    ///
+    /// `relative_flow_tolerance` gates the flow residual relative to the flow
+    /// in excess of wall entrainment AND the relative pressure correction.
+    /// No pressure is needed when that excess is exactly zero. Wall residuals
+    /// and quadrature estimates retain their independent `controls` budgets.
+    /// `maximum_flow_iterations` is in 1..=128 and bounds nonzero-pressure
+    /// trials, in addition to one allocation-free pure-Couette evaluation.
+    pub fn profile_at_flow_and_walls(
+        &self,
+        volumetric_flow_m3_s: f64,
+        wall_velocities_m_s: [f64; 2],
+        controls: CarreauSlitControls,
+        relative_flow_tolerance: f64,
+        maximum_flow_iterations: u32,
+    ) -> Result<CarreauSlitFlowSolution, MaterialError> {
+        self.profile_at_flow_and_walls_with_check(
+            volumetric_flow_m3_s,
+            wall_velocities_m_s,
+            controls,
+            relative_flow_tolerance,
+            maximum_flow_iterations,
+            || Ok(()),
+        )
+    }
+
+    /// Same inverse with caller-owned checks throughout every local profile,
+    /// source-span query and pressure correction, including before publication.
+    /// Unsupported forcing, exhausted work and cancellation publish no result.
+    pub fn profile_at_flow_and_walls_with_check(
+        &self,
+        volumetric_flow_m3_s: f64,
+        wall_velocities_m_s: [f64; 2],
+        controls: CarreauSlitControls,
+        relative_flow_tolerance: f64,
+        maximum_flow_iterations: u32,
+        mut check: impl FnMut() -> Result<(), MaterialError>,
+    ) -> Result<CarreauSlitFlowSolution, MaterialError> {
+        controls.admit()?;
+        if !volumetric_flow_m3_s.is_finite()
+            || !positive(relative_flow_tolerance)
+            || relative_flow_tolerance >= 1.0
+            || !(1..=128).contains(&maximum_flow_iterations)
+        {
+            return Err(parameters(
+                "invalid prescribed Carreau slit flow or inverse controls",
+            ));
+        }
+        let rest = self.profile_with_check(0.0, wall_velocities_m_s, controls, &mut check)?;
+        let excess = volumetric_flow_m3_s - rest.flow.entrained_flow_m3_s;
+        if !excess.is_finite() {
+            return Err(state_error(
+                "prescribed Carreau slit flow relative to wall entrainment is unrepresentable",
+            ));
+        }
+        let accepted = |profile: CarreauSlitProfile, flow_iterations| CarreauSlitFlowSolution {
+            flow_residual_m3_s: profile.flow.pressure_flow_m3_s - excess,
+            profile,
+            requested_volumetric_flow_m3_s: volumetric_flow_m3_s,
+            flow_iterations,
+        };
+        if excess == 0.0 {
+            check()?;
+            return Ok(accepted(rest, 0));
+        }
+        let target = excess.abs();
+        if self.prepared.constant() {
+            let pressure = product_ratio(&[target], &[rest.flow.pressure_conductance_m3_s_pa])?
+                .copysign(excess);
+            let profile =
+                self.profile_with_check(pressure, wall_velocities_m_s, controls, &mut check)?;
+            let difference = profile.flow.pressure_flow_m3_s - excess;
+            if (difference / target).abs() > relative_flow_tolerance
+                || (difference / profile.flow.pressure_flow_m3_s).abs() > relative_flow_tolerance
+            {
+                return Err(state_error(
+                    "Carreau slit exact flow inverse cannot resolve the requested tolerance",
+                ));
+            }
+            check()?;
+            return Ok(accepted(profile, 1));
+        }
+        let ceiling = self.prepared.ceiling.stress();
+        let uniform_stress = rest.offset_pa.abs();
+        let relative_rate = (wall_velocities_m_s[1] - wall_velocities_m_s[0]).abs() / self.gap_m;
+        if uniform_stress >= ceiling {
+            return Err(state_error(
+                "prescribed Carreau slit flow leaves no supported pressure-stress span",
+            ));
+        }
+        let mut low = 0.0;
+        let mut high = ceiling;
+        // This is only a Newton predictor. If its linear extrapolation is
+        // unrepresentable, the finite original stress ceiling still brackets
+        // every supported nonlinear solution.
+        let mut stress = product_ratio(
+            &[target, self.gap_m],
+            &[2.0, self.length_m, rest.flow.pressure_conductance_m3_s_pa],
+        )
+        .map_or(high, |value| value.min(high));
+        for iterations in 1..=maximum_flow_iterations {
+            check()?;
+            // Concavity of the admitted shear-thinning stress law makes the
+            // Couette offset an upper bound on the actual offset. Only trials
+            // beyond this inexpensive safe span need the full source-limit
+            // query. At the limiting offset, one wall reaches the ceiling.
+            let supported = if relative_rate == 0.0 || stress <= ceiling - uniform_stress {
+                true
+            } else if stress == ceiling {
+                false
+            } else {
+                let maximum = self
+                    .relative_rate(ceiling - stress, stress, controls.local, &mut check)?
+                    .0;
+                relative_rate <= maximum
+            };
+            let candidate = if supported {
+                let pressure =
+                    product_ratio(&[2.0, self.length_m, stress], &[self.gap_m])?.copysign(excess);
+                let profile =
+                    self.profile_with_check(pressure, wall_velocities_m_s, controls, &mut check)?;
+                let difference = profile.flow.pressure_flow_m3_s.abs() - target;
+                // Express the correction in the same bounded stress coordinate
+                // as the bracket; no finite-difference material calls are used.
+                let correction = if difference == 0.0 {
+                    0.0
+                } else {
+                    product_ratio(
+                        &[difference.abs(), self.gap_m],
+                        &[
+                            2.0,
+                            self.length_m,
+                            profile.flow.pressure_conductance_m3_s_pa,
+                        ],
+                    )?
+                    .copysign(difference)
+                };
+                if (difference / target).abs() <= relative_flow_tolerance
+                    && (correction / stress).abs() <= relative_flow_tolerance
+                {
+                    check()?;
+                    return Ok(accepted(profile, iterations));
+                }
+                if difference < 0.0 {
+                    if stress == ceiling {
+                        return Err(state_error(
+                            "prescribed flow exceeds the Carreau slit shear-rate envelope",
+                        ));
+                    }
+                    low = stress;
+                } else {
+                    high = stress;
+                }
+                Some(stress - correction)
+            } else {
+                high = stress;
+                None
+            };
+            let next = candidate
+                .filter(|value| value.is_finite() && *value > low && *value < high)
+                .unwrap_or_else(|| low + 0.5 * (high - low));
+            if next == stress || next <= low || next >= high {
+                return Err(state_error(
+                    "Carreau slit flow inverse cannot resolve the requested flow inside its stress envelope",
+                ));
+            }
+            stress = next;
+        }
+        Err(state_error(
+            "Carreau slit flow inverse exhausted its iteration budget",
+        ))
     }
 
     /// Same solve with bounded caller-owned checks between quadrature samples
