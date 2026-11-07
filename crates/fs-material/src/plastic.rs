@@ -17,6 +17,8 @@ pub mod reduction;
 pub mod section;
 /// Saturating isotropic hardening on the original native J2 history and flow.
 pub mod voce;
+/// Bounded measured yield curves with exact piecewise-linear hardening storage.
+pub mod tabulated;
 /// Independent Armstrong-Frederick/Chaboche backstresses with dynamic recovery.
 pub mod chaboche;
 /// Multiplicative finite-strain Hencky plasticity with a Kirchhoff J2 surface.

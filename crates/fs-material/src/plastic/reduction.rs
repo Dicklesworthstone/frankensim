@@ -8,6 +8,7 @@
 //! condenses the original algorithmic tangent after convergence.
 
 use super::energy::{EnergyError, EnergyIncrement, EnergyTolerances};
+use super::tabulated::{TabulatedError, TabulatedJ2};
 use super::voce::VoceJ2;
 use super::{J2Plasticity, J2State};
 use crate::fiber::Uniaxial;
@@ -283,6 +284,107 @@ impl Uniaxial for UniaxialVoce {
     fn card(&self) -> ModelCard {
         self.backbone.card()
     }
+}
+
+/// Exact free-sided axial restriction of a bounded tabulated J2 law. The
+/// original table supplies the return and endpoint slope with elastic
+/// correction `E`; Poisson contraction and lateral plastic flow are retained.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UniaxialTabulated {
+    backbone: TabulatedJ2,
+}
+
+impl UniaxialTabulated {
+    /// Admit the original table law on the exact axial J2 flow subspace.
+    pub fn new(backbone: TabulatedJ2) -> Result<Self, MaterialError> {
+        UniaxialJ2::new(backbone.backbone().clone())?;
+        Ok(Self { backbone })
+    }
+
+    /// Original bounded material law and its immutable hardening data.
+    pub const fn backbone(&self) -> &TabulatedJ2 {
+        &self.backbone
+    }
+
+    /// Checked candidate at frozen accepted history. A return past the final
+    /// tabulated plastic strain is refused, including under reversed loading.
+    pub fn response(
+        &self,
+        strain: f64,
+        state: &UniaxialJ2State,
+    ) -> Result<UniaxialJ2Response, TabulatedError> {
+        if !strain.is_finite() {
+            return Err(TabulatedError::State("axial strain must be finite"));
+        }
+        let linear = self.backbone.backbone();
+        let e = linear.elastic.youngs;
+        let trial = e * (strain - state.plastic_strain)
+            - linear.kinematic_hardening * state.plastic_strain;
+        let delta = self.backbone.plastic_increment(
+            trial.abs(), state.equivalent_plastic_strain, e,
+        )?;
+        let mut next = state.clone();
+        next.plastic_strain += trial.signum() * delta;
+        next.equivalent_plastic_strain += delta;
+        let tangent_pa = if delta == 0.0 {
+            e
+        } else {
+            let h = linear.kinematic_hardening
+                + self.backbone.isotropic_hardening_derivative_pa(next.equivalent_plastic_strain)?;
+            e * (h / (e + h))
+        };
+        let elastic = strain - next.plastic_strain;
+        let transverse = -linear.elastic.poisson * elastic - 0.5 * next.plastic_strain;
+        let tensor = [strain, transverse, transverse, 0.0, 0.0, 0.0];
+        linear.validate_overstress_history(&tensor, &next.tensor_history())
+            .map_err(|_| TabulatedError::State("axial return leaves the native J2 domain"))?;
+        Ok(UniaxialJ2Response {
+            strain: tensor,
+            stress_pa: e * elastic,
+            tangent_pa,
+            state: next,
+        })
+    }
+
+    /// Native tensor work accounting, including exact table hardening storage.
+    pub fn advance_with_energy(
+        &self,
+        old_strain: f64,
+        old_state: &UniaxialJ2State,
+        strain: f64,
+        tolerances: EnergyTolerances,
+    ) -> Result<EnergyIncrement, EnergyError> {
+        let transverse = -self.backbone.backbone().elastic.poisson
+            * (old_strain - old_state.plastic_strain)
+            - 0.5 * old_state.plastic_strain;
+        let old_tensor = [old_strain, transverse, transverse, 0.0, 0.0, 0.0];
+        let next = self.response(strain, old_state)
+            .map_err(|_| EnergyError::Invalid("axial tabulated return is outside its domain"))?;
+        self.backbone.advance_with_energy(
+            &old_tensor, &old_state.tensor_history(), &next.strain, tolerances,
+        )
+    }
+}
+
+impl Uniaxial for UniaxialTabulated {
+    type State = UniaxialJ2State;
+    fn initial_state(&self) -> Self::State {
+        UniaxialJ2State { plastic_strain: 0.0, equivalent_plastic_strain: 0.0 }
+    }
+    fn stress(&self, strain: f64, state: &Self::State) -> f64 {
+        self.response(strain, state).map_or(f64::NAN, |r| r.stress_pa)
+    }
+    fn tangent(&self, strain: f64, state: &Self::State) -> f64 {
+        self.response(strain, state).map_or(f64::NAN, |r| r.tangent_pa)
+    }
+    fn update_state(&self, strain: f64, state: &Self::State) -> Self::State {
+        self.response(strain, state).map_or(
+            UniaxialJ2State { plastic_strain: f64::NAN, equivalent_plastic_strain: f64::NAN },
+            |r| r.state,
+        )
+    }
+    fn admissibility(&self) -> MaterialAdmissibility { self.backbone.admissibility() }
+    fn card(&self) -> ModelCard { self.backbone.card() }
 }
 
 /// Numerical controls for the bounded plane-stress local solve. These are
