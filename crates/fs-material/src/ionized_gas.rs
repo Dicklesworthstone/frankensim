@@ -36,6 +36,7 @@ mod coulomb;
 mod harmonic;
 mod refresh;
 mod relaxation;
+mod sources;
 pub use harmonic::{
     IonizedGasHarmonic, IonizedGasHarmonicResponse, IonizedGasMagneticLimits,
     IonizedGasMagnetizedHarmonic, IonizedGasMagnetizedHarmonicResponse,
@@ -44,6 +45,7 @@ pub use refresh::IonizedGasRefreshError;
 pub use relaxation::{
     CarrierMomentumRelaxation, CarrierMomentumSource, ElectronNeutralMomentumContribution,
 };
+pub use sources::{IonizedGasMomentumSource, IonizedGasTransportBank};
 
 /// Effective momentum relaxation rate dimensions, reciprocal seconds.
 /// This is a collision rate, without an angular/cyclic-frequency conversion.
@@ -96,6 +98,24 @@ pub struct IonizedGasDcLimits {
     /// Actual drift speed must be below this fraction of `sqrt(kT/m_s)`
     /// for every carrier. Checked again on the electric field from the PDE.
     pub maximum_drift_thermal_ratio: f64,
+}
+impl IonizedGasDcLimits {
+    fn validate(self) -> Result<(), IonizedGasError> {
+        if [
+            self.maximum_charged_mole_fraction,
+            self.maximum_coulomb_coupling,
+            self.maximum_thermal_phase_space_density,
+            self.maximum_drift_thermal_ratio,
+        ]
+        .iter()
+        .any(|&x| !positive(x) || x >= 1.0)
+        {
+            return Err(IonizedGasError::Invalid(
+                "transport limits must lie strictly inside (0,1)",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// One canonical charge carrier at the accepted thermodynamic state.
@@ -297,16 +317,7 @@ impl IonizedGasConductivity {
     ) -> Result<Self, IonizedGasError> {
         let invalid = IonizedGasError::Invalid;
         poll(cancelled)?;
-        for x in [
-            limits.maximum_charged_mole_fraction,
-            limits.maximum_coulomb_coupling,
-            limits.maximum_thermal_phase_space_density,
-            limits.maximum_drift_thermal_ratio,
-        ] {
-            if !positive(x) || x >= 1.0 {
-                return Err(invalid("transport limits must lie strictly inside (0,1)"));
-            }
-        }
+        limits.validate()?;
         let chemistry = state.thermodynamics();
         if rates.len() > state.amounts().len() {
             return Err(invalid("more collision sources than original species"));

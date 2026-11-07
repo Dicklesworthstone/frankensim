@@ -19890,3 +19890,38 @@ fixtures compile against real dependencies, but the full material adapter tests
 remain unexecuted without the complete constellation dependency environment.
 This is a linear isotropic fixed-condition law, not measured qualification,
 free-carrier Drude dynamics, nonlinear saturation or a transient Maxwell solver.
+
+## Transport sources across ionization population boundaries
+
+`ionized_gas::IonizedGasTransportBank` retains momentum laws independently of
+the currently present carriers. Every charged species in the original
+thermodynamic bank has exactly one authored law. Kinetic electron drag retains
+one original momentum-transfer cross section for every neutral source row,
+including initially absent targets. Canonical carrier and neutral indices are
+prepared once; endpoint evaluation only integrates populated neutral targets.
+
+Material-backed laws retain their original complete resolved requirements and
+immutable cards. The same source-refresh helper used by `at_frozen_state` and
+`at_reacting_state` requeries actual Th, Te and pressure without replacing
+selected claims or widening a common-temperature schema. Neutral drag uses
+actual target densities and the weak-drift Maxwellian momentum moment. Optional
+Coulomb drag rebinds the original screening, cutoff and limits to the actual
+created carriers and reevaluates every charged pair.
+
+`evaluate` accepts population support changes at the original fixed volume and
+thermodynamic bank. An exactly neutral endpoint returns `None`; its modeled
+free-carrier current and heating vanish. Positive trace populations are never
+floored away: they produce the native `IonizedGasConductivity` or an explicit
+source/domain/representability refusal. The resulting owner feeds existing DC,
+Joule, harmonic and magnetized consumers. No positive PDE coefficient is
+fabricated for an insulating endpoint, and no neutral dielectric response is
+inferred. Species changes are prescribed by the caller's chemistry or transport
+owner; this constitutive query does not itself evolve or certify reactions.
+
+Four focused G0/G1/G3 regressions cover exact neutral-to-carrier-to-neutral
+transitions and trace carriers, independent constant-cross-section DC and
+Drude response, conserved H recombination that activates a new neutral target
+in an inert buffer, original Coulomb rebinding, incomplete/foreign/duplicate
+source refusal and atomic cancellation. These material integration tests remain
+unexecuted without the complete native dependency chain. Source/bank admission,
+format checks and static API review do not constitute that missing test pass.

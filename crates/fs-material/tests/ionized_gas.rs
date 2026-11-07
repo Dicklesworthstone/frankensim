@@ -15,6 +15,8 @@ mod harmonic;
 mod magnetized;
 #[path = "ionized_gas/refresh.rs"]
 mod refresh;
+#[path = "ionized_gas/sources.rs"]
+mod sources;
 
 #[test]
 fn g1_saha_populations_and_particle_masses_drive_current_without_neutral_transport() {

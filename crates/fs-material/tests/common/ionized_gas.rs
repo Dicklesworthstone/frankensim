@@ -42,7 +42,12 @@ pub const MH: f64 = 1.673_557_5e-27;
 pub fn id(name: &str) -> SpeciesId {
     SpeciesId::new(name).unwrap()
 }
-fn standard_state(name: &str, mass: f64, weight: f64, formation: f64) -> Nasa9StandardStateModelV1 {
+pub fn standard_state(
+    name: &str,
+    mass: f64,
+    weight: f64,
+    formation: f64,
+) -> Nasa9StandardStateModelV1 {
     // Sackur-Tetrode ideal translational partition function, with explicit
     // ground-state degeneracy and ionization reference energy; not a fitted gas.
     let h: f64 = 6.626_070_15e-34;

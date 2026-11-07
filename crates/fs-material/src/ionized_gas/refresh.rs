@@ -84,7 +84,7 @@ impl IonizedGasConductivity {
         frozen_populations: bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, IonizedGasRefreshError> {
-        use IonizedGasRefreshError::{Invalid, Material};
+        use IonizedGasRefreshError::Invalid;
         poll(&mut cancelled)?;
         if next.thermodynamics() != self.state().thermodynamics()
             || next.volume() != self.state().volume()
@@ -125,59 +125,13 @@ impl IonizedGasConductivity {
         for carrier in self.carriers() {
             poll(&mut cancelled)?;
             let rate = match carrier.relaxation().source() {
-                CarrierMomentumSource::Material { material, property } => {
+                CarrierMomentumSource::Material { material, .. } => {
                     let i = identities
                         .iter()
                         .position(|&hash| hash == material.card_identity())
                         .ok_or(Invalid("missing original immutable momentum card"))?;
                     used[i] = true;
-                    let t = material.state_coordinate("T").is_some();
-                    let th = material.state_coordinate("T_h").is_some();
-                    let te = material.state_coordinate("T_e").is_some();
-                    let mut query = material.query();
-                    let mut set = |axis, value| -> Result<(), IonizedGasRefreshError> {
-                        query = query.clone().with(axis, value).map_err(|_| {
-                            Invalid("refreshed momentum coordinate is inadmissible")
-                        })?;
-                        Ok(())
-                    };
-                    match (t, th, te) {
-                        (true, false, false) => {
-                            if next.heavy_temperature() != next.electron_temperature() {
-                                return Err(Invalid(
-                                    "common-temperature momentum source cannot admit unequal temperatures",
-                                ));
-                            }
-                            set("T", next.heavy_temperature().value())?;
-                        }
-                        (false, true, true) => {
-                            set("T_h", next.heavy_temperature().value())?;
-                            set("T_e", next.electron_temperature().value())?;
-                        }
-                        _ => {
-                            return Err(Invalid(
-                                "momentum refresh requires an unambiguous original temperature schema",
-                            ));
-                        }
-                    }
-                    set("p", next.pressure().value())?;
-                    let material = material
-                        .at_query_point(original_cards[i], &query)
-                        .map_err(Material)?;
-                    if t {
-                        CarrierMomentumRelaxation::new(
-                            carrier.species().clone(),
-                            material,
-                            property.clone(),
-                        )
-                    } else {
-                        CarrierMomentumRelaxation::new_two_temperature(
-                            carrier.species().clone(),
-                            material,
-                            property.clone(),
-                        )
-                    }
-                    .map_err(transport_error)?
+                    refresh_material_source(carrier.relaxation(), original_cards[i], next)?
                 }
                 CarrierMomentumSource::ElectronNeutral {
                     contributions,
@@ -244,14 +198,71 @@ impl IonizedGasConductivity {
     }
 }
 
-fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), IonizedGasRefreshError> {
+/// Requery one original material law, including all retained requirements.
+pub(super) fn refresh_material_source(
+    template: &CarrierMomentumRelaxation,
+    card: &MaterialCard,
+    next: &FrozenIonizedGasStateV1,
+) -> Result<CarrierMomentumRelaxation, IonizedGasRefreshError> {
+    use IonizedGasRefreshError::{Invalid, Material};
+    let CarrierMomentumSource::Material { material, property } = template.source() else {
+        return Err(Invalid("material momentum template required"));
+    };
+    if material.card_identity() != card.content_hash() {
+        return Err(Invalid("missing original immutable momentum card"));
+    }
+    let t = material.state_coordinate("T").is_some();
+    let th = material.state_coordinate("T_h").is_some();
+    let te = material.state_coordinate("T_e").is_some();
+    let mut query = material.query();
+    let mut set = |axis, value| -> Result<(), IonizedGasRefreshError> {
+        query = query
+            .clone()
+            .with(axis, value)
+            .map_err(|_| Invalid("refreshed momentum coordinate is inadmissible"))?;
+        Ok(())
+    };
+    match (t, th, te) {
+        (true, false, false) => {
+            if next.heavy_temperature() != next.electron_temperature() {
+                return Err(Invalid(
+                    "common-temperature momentum source cannot admit unequal temperatures",
+                ));
+            }
+            set("T", next.heavy_temperature().value())?;
+        }
+        (false, true, true) => {
+            set("T_h", next.heavy_temperature().value())?;
+            set("T_e", next.electron_temperature().value())?;
+        }
+        _ => {
+            return Err(Invalid(
+                "momentum refresh requires an unambiguous original temperature schema",
+            ));
+        }
+    }
+    set("p", next.pressure().value())?;
+    let material = material.at_query_point(card, &query).map_err(Material)?;
+    if t {
+        CarrierMomentumRelaxation::new(template.species().clone(), material, property.clone())
+    } else {
+        CarrierMomentumRelaxation::new_two_temperature(
+            template.species().clone(),
+            material,
+            property.clone(),
+        )
+    }
+    .map_err(transport_error)
+}
+
+pub(super) fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), IonizedGasRefreshError> {
     if cancelled() {
         Err(IonizedGasRefreshError::Cancelled)
     } else {
         Ok(())
     }
 }
-fn transport_error(error: IonizedGasError) -> IonizedGasRefreshError {
+pub(super) fn transport_error(error: IonizedGasError) -> IonizedGasRefreshError {
     match error {
         IonizedGasError::Cancelled => IonizedGasRefreshError::Cancelled,
         error => IonizedGasRefreshError::Transport(error),
