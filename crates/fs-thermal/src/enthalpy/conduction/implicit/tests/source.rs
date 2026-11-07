@@ -349,3 +349,335 @@ fn source_attachment_and_late_domain_refusal_leave_the_original_unchanged() {
     );
     near(thermal.temperature_k(CellId(1)).unwrap(), 400.0, 0.0);
 }
+
+fn triangular_power_schedule() -> source::HeatSourceSchedule {
+    source::HeatSourceSchedule::new(
+        [(0.0, 0.0), (0.25, 1.0), (1.0, 0.0), (1.5, 0.0)]
+            .into_iter()
+            .map(
+                |(time_s, power_multiplier)| source::HeatSourceScheduleKnot {
+                    time_s,
+                    power_multiplier,
+                },
+            )
+            .collect(),
+        4,
+        || Ok(()),
+    )
+    .unwrap()
+}
+
+#[test]
+fn scheduled_pulse_heats_two_conducting_bodies_with_original_stage_energy() {
+    let law = Law {
+        nonlinear_k: false,
+        plateau: false,
+    };
+    let (thermal, observer) = setup(&law, &[300.0, 300.0], None, vec![]);
+    let generation = feedback(&law, [20.0, 0.0, 0.0]);
+    let schedule = triangular_power_schedule();
+    let driven = source::ScheduledHeatSource::new(&generation, &schedule);
+    let sources: &[(CellId, &dyn ImplicitHeatSourceLaw)] = &[(CellId(0), &driven)];
+    let chain =
+        ImplicitConductionChain::new(&thermal, &observer, &[(MaterialId(0), &law)], || Ok(()))
+            .unwrap()
+            .with_heat_sources(&thermal, sources, || Ok(()))
+            .unwrap();
+    let graph = ImplicitConductionGraph::new(
+        &thermal,
+        &observer,
+        &[(MaterialId(0), &law)],
+        ImplicitConductionLinearControls::default(),
+        || Ok(()),
+    )
+    .unwrap()
+    .with_heat_sources(&thermal, sources, || Ok(()))
+    .unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let chain_result = chain
+        .advance_sdirk2_to(&thermal, 1.5, controls(2.0), &mut workspace, || Ok(()))
+        .unwrap();
+    let graph_result = graph
+        .advance_sdirk2_to(&thermal, 1.5, controls(2.0), &mut workspace, || Ok(()))
+        .unwrap();
+    for (next, report) in [chain_result, graph_result] {
+        // The two positive SDIRK weights exactly integrate each linear power
+        // segment. Its triangular area is 20 W * 1 s / 2 = 10 J, independent
+        // of the internal conductive transfer or the requested large step.
+        near(report.energy.external_heat_j, 10.0, 1e-9);
+        near(report.energy.stored_energy_change_j, 10.0, 1e-9);
+        near(report.energy.residual_j, 0.0, 1e-9);
+        assert_eq!(report.energy.substeps, 3); // .25, 1.0, then 1.5 seconds.
+        assert!(next.temperature_k(CellId(0)).unwrap() > 300.0);
+        assert!(next.temperature_k(CellId(1)).unwrap() > 300.0);
+        assert!(report.entropy.conduction_generation_j_k > 0.0);
+        assert!(report.entropy.has_unclassified_sources);
+        near(next.cells()[&CellId(0)].boundary.source_w, 0.0, 0.0);
+    }
+
+    // Independent modal solution: S' = P(t), D' = P(t) - 2D, where
+    // S = T0 + T1 - 600 and D = T0 - T1 for unit capacities and G = 1.
+    // Integrate each affine power segment analytically, including the coast.
+    let mut difference = 0.0;
+    for (duration, initial_power, slope) in [
+        (0.25, 0.0, 80.0),
+        (0.75, 20.0, -80.0 / 3.0),
+        (0.5, 0.0, 0.0),
+    ] {
+        let decay = (-2.0_f64 * duration).exp();
+        difference = difference * decay
+            + initial_power * (1.0 - decay) / 2.0
+            + slope * (duration / 2.0 - (1.0 - decay) / 4.0);
+    }
+    let expected = [305.0 + 0.5 * difference, 305.0 - 0.5 * difference];
+    let mut errors = Vec::new();
+    for dt in [0.125, 0.0625, 0.03125] {
+        let (next, report) = chain
+            .advance_sdirk2_to(&thermal, 1.5, controls(dt), &mut workspace, || Ok(()))
+            .unwrap();
+        errors.push((next.temperature_k(CellId(0)).unwrap() - expected[0]).abs());
+        near(report.energy.external_heat_j, 10.0, 1e-8);
+        near(report.energy.residual_j, 0.0, 1e-8);
+    }
+    assert!(errors[0] / errors[1] > 3.7, "{errors:?}");
+    assert!(errors[1] / errors[2] > 3.7, "{errors:?}");
+
+    let adaptive = adaptive::AdaptiveImplicitConductionControls {
+        step: controls(2.0),
+        initial_dt_s: 2.0,
+        enthalpy_absolute_tolerance_j_kg: 1e-5,
+        temperature_absolute_tolerance_k: 1e-5,
+        relative_tolerance: 0.0,
+        ..Default::default()
+    };
+    let (next, report) = chain
+        .advance_sdirk2_adaptive_to(&thermal, 1.5, adaptive, &mut workspace, || Ok(()))
+        .unwrap();
+    for (i, temperature) in expected.into_iter().enumerate() {
+        near(
+            next.temperature_k(CellId(i as u64)).unwrap(),
+            temperature,
+            1e-3,
+        );
+    }
+    near(report.solve.energy.external_heat_j, 10.0, 1e-8);
+    near(report.solve.energy.residual_j, 0.0, 1e-8);
+    assert!(report.maximum_accepted_normalized_error <= 1.0);
+    assert!(report.accuracy_rejections > 0);
+
+    // Backward Euler also uses physical endpoint time and the same exact knot
+    // cuts. Its coarse right-endpoint quadrature deliberately remains first
+    // order: 20*.25 + 0*.75 + 0*.5 = 5 J, with no invented pulse-energy credit.
+    let (_, report) = chain
+        .advance_to(&thermal, 1.5, controls(2.0), &mut workspace, || Ok(()))
+        .unwrap();
+    near(report.energy.external_heat_j, 5.0, 1e-9);
+    assert_eq!(report.energy.substeps, 3);
+    let (next, report) = chain
+        .advance_adaptive_to(&thermal, 1.5, adaptive, &mut workspace, || Ok(()))
+        .unwrap();
+    for (i, temperature) in expected.into_iter().enumerate() {
+        near(
+            next.temperature_k(CellId(i as u64)).unwrap(),
+            temperature,
+            0.02,
+        );
+    }
+    near(report.solve.energy.external_heat_j, 10.0, 0.02);
+    near(report.solve.energy.residual_j, 0.0, 1e-8);
+    // A late query outside the authored drive domain returns no partial run.
+    assert!(matches!(
+        chain.advance_sdirk2_to(&thermal, 2.0, controls(2.0), &mut workspace, || Ok(())),
+        Err(ImplicitConductionError::Thermal(
+            DepositionError::InvalidInput(
+                "heat-source query is outside the prescribed time domain",
+            )
+        ))
+    ));
+    near(thermal.time_s(), 0.0, 0.0);
+    near(thermal.temperature_k(CellId(1)).unwrap(), 300.0, 0.0);
+}
+
+#[test]
+fn scheduled_feedback_differentiates_the_actual_stage_without_freezing_power() {
+    let law = Law {
+        nonlinear_k: true,
+        plateau: false,
+    };
+    let (mut thermal, observer) = setup(&law, &[400.0, 350.0], Some(300.0), vec![]);
+    for (i, mass) in [1.5, 2.5].into_iter().enumerate() {
+        thermal.cells.get_mut(&CellId(i as u64)).unwrap().mass_kg = mass;
+    }
+    let generation = feedback(&law, [10.0, 0.2, 0.003]);
+    let schedule = triangular_power_schedule();
+    let driven = source::ScheduledHeatSource::new(&generation, &schedule);
+    let chain =
+        ImplicitConductionChain::new(&thermal, &observer, &[(MaterialId(0), &law)], || Ok(()))
+            .unwrap()
+            .with_heat_sources(&thermal, &[(CellId(0), &driven)], || Ok(()))
+            .unwrap();
+    let dt = 0.625; // Falling pulse: multiplier = 1/2, although initial power is off.
+    let step = BackwardEulerStep::new(&thermal, dt, || Ok(())).unwrap();
+    let energy = [-10.0, 3.0];
+    let mut report = empty_report();
+    let trial = chain
+        .evaluate(
+            &step,
+            &energy,
+            &BTreeMap::new(),
+            &[],
+            false,
+            controls(1.0),
+            &mut report,
+            &mut || Ok(()),
+        )
+        .unwrap();
+    let h = thermal.cells[&CellId(0)].specific_h_j_kg + energy[0] / 1.5;
+    let original = generation
+        .state_at_specific_enthalpy(h, &mut || Ok(()))
+        .unwrap();
+    let actual = trial.payload().heat_source_states[&CellId(0)];
+    near(actual.power_w, 0.5 * original.power_w, 1e-12);
+    near(
+        actual.power_enthalpy_derivative_w_kg_j,
+        0.5 * original.power_enthalpy_derivative_w_kg_j,
+        1e-12,
+    );
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    chain
+        .jacobian(
+            &thermal,
+            trial.payload(),
+            dt,
+            &mut workspace,
+            &mut || Ok(()),
+        )
+        .unwrap();
+    for column in 0..2 {
+        let mut plus = energy;
+        let mut minus = energy;
+        plus[column] += 1e-3;
+        minus[column] -= 1e-3;
+        let a = chain
+            .evaluate(
+                &step,
+                &plus,
+                &BTreeMap::new(),
+                &[],
+                false,
+                controls(1.0),
+                &mut report,
+                &mut || Ok(()),
+            )
+            .unwrap();
+        let b = chain
+            .evaluate(
+                &step,
+                &minus,
+                &BTreeMap::new(),
+                &[],
+                false,
+                controls(1.0),
+                &mut report,
+                &mut || Ok(()),
+            )
+            .unwrap();
+        for row in 0..2 {
+            let analytic = if row == column {
+                workspace.diagonal[row]
+            } else if row > column {
+                workspace.lower[column]
+            } else {
+                workspace.upper[row]
+            };
+            near(
+                analytic,
+                (a.residual_j()[row] - b.residual_j()[row]) / 0.002,
+                1e-8,
+            );
+        }
+    }
+}
+
+#[test]
+fn scheduled_sources_preserve_domains_and_refuse_ambiguous_power_histories() {
+    use source::{HeatSourceSchedule, HeatSourceScheduleKnot, ScheduledHeatSource};
+    let law = Law {
+        nonlinear_k: false,
+        plateau: false,
+    };
+    let generation = feedback(&law, [10.0, 0.2, 0.003]);
+    let schedule = triangular_power_schedule();
+    for (time, multiplier) in [
+        (0.0, 0.0),
+        (0.125, 0.5),
+        (0.25, 1.0),
+        (0.625, 0.5),
+        (1.0, 0.0),
+        (1.5, 0.0),
+    ] {
+        near(schedule.multiplier_at(time).unwrap(), multiplier, 1e-15);
+    }
+    assert_eq!(schedule.next_transition_time_s(0.0), Some(0.25));
+    assert_eq!(schedule.next_transition_time_s(0.25), Some(1.0));
+    assert_eq!(schedule.next_transition_time_s(1.0), Some(1.5));
+    assert_eq!(schedule.next_transition_time_s(1.5), None);
+    let driven = ScheduledHeatSource::new(&generation, &schedule);
+    let response = driven
+        .state_at_specific_enthalpy_and_time(350.0, 0.125, &mut || Ok(()))
+        .unwrap();
+    near(response.power_w, 13.75, 1e-14);
+    near(response.power_enthalpy_derivative_w_kg_j, 0.25, 1e-14);
+    assert!(
+        driven
+            .state_at_specific_enthalpy(350.0, &mut || Ok(()))
+            .is_err()
+    );
+    assert!(
+        driven
+            .state_at_specific_enthalpy_and_time(50.0, 1.25, &mut || Ok(()))
+            .is_err()
+    );
+    assert!(
+        driven
+            .state_at_specific_enthalpy_and_time(350.0, 0.125, &mut || Err(
+                DepositionError::Cancelled
+            ),)
+            .is_err()
+    );
+    assert!(schedule.multiplier_at(f64::NAN).is_err());
+    assert!(schedule.multiplier_at(-0.01).is_err());
+    assert!(schedule.multiplier_at(1.5_f64.next_up()).is_err());
+    assert_eq!(
+        generation
+            .state_at_specific_enthalpy(350.0, &mut || Ok(()))
+            .unwrap(),
+        generation
+            .state_at_specific_enthalpy_and_time(350.0, 0.625, &mut || Ok(()))
+            .unwrap(),
+    );
+    assert!(HeatSourceSchedule::new(vec![], 3, || Ok(())).is_err());
+    assert!(HeatSourceSchedule::new(schedule.knots().to_vec(), 2, || Ok(())).is_err());
+    for samples in [
+        [(0.0, 1.0), (0.0, 2.0)],
+        [(1.0, 1.0), (0.0, 2.0)],
+        [(0.0, -1.0), (1.0, 2.0)],
+        [(0.0, 1.0), (f64::INFINITY, 2.0)],
+        [(0.0, 1.0), (1.0, f64::NAN)],
+    ] {
+        assert!(
+            HeatSourceSchedule::new(
+                samples
+                    .into_iter()
+                    .map(|(time_s, power_multiplier)| HeatSourceScheduleKnot {
+                        time_s,
+                        power_multiplier,
+                    })
+                    .collect(),
+                2,
+                || Ok(()),
+            )
+            .is_err()
+        );
+    }
+}

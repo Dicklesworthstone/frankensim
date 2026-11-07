@@ -531,7 +531,7 @@ impl<'a> AdaptiveConductionStepper for ImplicitConductionChain<'a> {
     }
 
     fn next_transition_time_s(&self, after_s: f64) -> Option<f64> {
-        self.next_advection_transition_time_s(after_s)
+        self.next_forcing_transition_time_s(after_s)
     }
 
     fn admit(

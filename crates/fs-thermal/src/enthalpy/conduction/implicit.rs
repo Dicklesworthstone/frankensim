@@ -18,8 +18,9 @@
 //! `ImplicitConductionGraph` admits branched, cyclic and disconnected networks
 //! through the same nonlinear/time owner with a bounded sparse Krylov solve.
 //! The opt-in `advance_sdirk2_to` path shares this residual and Newton owner,
-//! with second-order L-stable quadrature for fixed networks and piecewise
-//! constant source and bath schedules, including native Robin coefficients.
+//! with second-order L-stable quadrature for fixed networks, piecewise constant
+//! source/bath events and continuous prescribed endpoint source histories,
+//! including native Robin coefficients.
 //! Selected planar layers may expand or contract at fixed mass and footprint.
 //! Their original density and specific-volume tangent update every native
 //! Fourier/contact/surface resistance and its Jacobian, including on latent
@@ -848,8 +849,9 @@ impl<'a> ImplicitConductionChain<'a> {
         let mut heat_source_states = BTreeMap::new();
         for (&id, law) in &self.heat_sources {
             checkpoint()?;
-            let state = law.state_at_specific_enthalpy(
+            let state = law.state_at_specific_enthalpy_and_time(
                 thermal.cells[&id].specific_h_j_kg,
+                thermal.time_s,
                 checkpoint,
             )?;
             state.admit()?;

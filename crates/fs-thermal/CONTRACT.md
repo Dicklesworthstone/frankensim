@@ -2424,7 +2424,7 @@ observed sources, so component accounts are parallel descriptions of the same
 energy, not additional credits. Generated-source and transfer entropy retain
 their original unclassified status; an opted-in advection entropy account keeps
 its own flow/mixing semantics. The adaptive step-doubling path does not accept
-observed source owners; autonomous endpoint laws below remain supported.
+observed source owners; original endpoint laws below remain supported.
 
 `ImplicitConductionChain::with_heat_sources` and the graph attachment admit
 immutable local `ImplicitHeatSourceLaw` objects bound to the original caloric
@@ -2447,6 +2447,31 @@ publish no candidate. Positive feedback still needs a physically admissible
 endpoint and bounded nonlinear convergence. Independent two-cell solutions,
 nonlinear Fourier/source finite differences, latent-energy feedback and
 second-order time refinement exercise these paths.
+
+
+Prescribed source histories use
+`ImplicitHeatSourceLaw::state_at_specific_enthalpy_and_time` at the actual
+native endpoint or SDIRK stage time. Its complete enthalpy tangent holds that
+time fixed; existing autonomous laws retain their original response.
+`HeatSourceSchedule` supplies bounded, continuous piecewise-linear nonnegative
+power multipliers, and `ScheduledHeatSource` applies the same multiplier to
+watts and the full source tangent. A schedule can be borrowed by several cells.
+Its at least two strictly ordered samples declare a closed time domain:
+out-of-range queries refuse, and constant tails must be authored explicitly.
+An off interval still admits the original caloric/source domain. The time-free
+query on a scheduled source refuses rather than inventing a physical time.
+
+All fixed and adaptive BE/SDIRK paths clip comparisons to the next source knot,
+alongside existing flow transitions and native events. Discontinuous powers
+remain owned by native boundary events or interval-mean observers. The source
+does not change storage, add heat credits, infer source entropy, or advance
+history. Two-body triangular-pulse regressions compare conduction with the
+independent modes `S'=P(t)`, `D'=P(t)-2D`, exact SDIRK pulse energy, nonlinear
+source/Fourier Jacobians and temporal refinement. Backward Euler retains its
+own first-order endpoint quadrature. The three focused production schedule
+leaf checks and Rust syntax parsing ran in this implementation session; the
+full native integration cases were added but not executed in this environment.
+
 
 G1/G3/G4 checks cover independent stiff chain/graph forced solutions, implicit
 Robin cooling with authored/start/interval sources, nonlinear halving of ramp

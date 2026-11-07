@@ -175,8 +175,11 @@ impl ImplicitConductionChain<'_> {
     /// Bound ambient htc and reservoir conductance declarations must stay fixed:
     /// their geometric/complete-law owners supply conductance instead. Reservoir
     /// presence/area and all prepared geometry/material bindings stay fixed.
-    /// Both stages integrate powers in the original energy residual;
-    /// source entropy retains its original unclassified at-cell convention.
+    /// Both stages integrate powers in the original energy residual. Attached
+    /// local source laws receive each stage's actual physical time and retain
+    /// their full enthalpy feedback; their declared continuous slope changes
+    /// cap every interval exactly. Source entropy retains its original
+    /// unclassified at-cell convention.
     /// Attached prescribed implicit advection remains active, including limited
     /// reconstruction on the graph path. Both stages transport their actual
     /// endpoint enthalpy with the original flow, continuity and caloric admission;
@@ -272,7 +275,12 @@ impl ImplicitConductionChain<'_> {
                 .schedule
                 .get(next.cursor)
                 .map_or(target_s, |event| event.time_s.min(target_s));
-            if let Some(transition) = self.next_advection_transition_time_s(start) {
+            if let Some(transition) = self.next_forcing_transition_time_s(start) {
+                if !transition.is_finite() || transition <= start {
+                    return Err(ImplicitConductionError::Invalid(
+                        "source transition must be finite and strictly future",
+                    ));
+                }
                 stop = stop.min(transition);
             }
             let remaining = finite(stop - start)?;

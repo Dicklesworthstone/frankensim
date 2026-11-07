@@ -154,7 +154,12 @@ impl ImplicitConductionChain<'_> {
                 .schedule
                 .get(next.cursor)
                 .map_or(target_s, |e| e.time_s.min(target_s));
-            if let Some(transition) = self.next_advection_transition_time_s(start) {
+            if let Some(transition) = self.next_forcing_transition_time_s(start) {
+                if !transition.is_finite() || transition <= start {
+                    return Err(ImplicitConductionError::Invalid(
+                        "source transition must be finite and strictly future",
+                    ).into());
+                }
                 stop = stop.min(transition);
             }
             if let Some(transition) = source
