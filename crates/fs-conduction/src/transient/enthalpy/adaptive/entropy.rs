@@ -11,6 +11,7 @@ use crate::transient::enthalpy::entropy::{
 };
 use fs_math::dd::Dd;
 use crate::transient::enthalpy::heterogeneous::EnthalpyRadiation;
+use crate::transient::enthalpy::sdirk::EnthalpySdirk2Input;
 
 /// Original adaptive work/heat report and the whole accepted entropy history.
 #[derive(Debug, Clone, PartialEq)]
@@ -19,7 +20,7 @@ pub struct AdaptiveEnthalpyEntropyReport {
     pub entropy: EnthalpyEntropyBalance,
 }
 
-/// Resumable entropy-admitted counterpart of the SAME adaptive BE controller.
+/// Resumable entropy-admitted counterpart of the SAME adaptive BE/SDIRK2 controller.
 ///
 /// The physical history is available read-only so an unaudited step cannot
 /// silently enter this account. Cloning retains controller state and compensated
@@ -78,6 +79,52 @@ impl<'s, 'm, 'c> AdaptiveEnthalpyEntropyState<'s, 'm, 'c> {
     #[must_use]
     pub const fn entropy_balance(&self) -> EnthalpyEntropyBalance {
         self.account.balance
+    }
+
+    /// Advance SDIRK2 with native stage entropy and whole-history admission.
+    ///
+    /// Uses the same three-field controller and native stages as the energy-only
+    /// `AdaptiveEnthalpyState::advance_to_sdirk2`. The coarse comparison remains
+    /// energy-only; both fine intervals use `advance_sdirk2_with_entropy`, with
+    /// their original stage temperatures, transport and reservoir quadrature.
+    /// Only an accepted fine pair enters the retained entropy sums.
+    ///
+    /// The original absolute J/K allowance applies to each fine interval and
+    /// once to the entire accepted window, without step-count inflation.
+    /// Original-to-final caloric and film entropy is measured once. Signed
+    /// temporal defects remain distinct from physical production.
+    /// Backward Euler and SDIRK2 may alternate between event calls without
+    /// resetting accepted enthalpy, heat or entropy. L-stability alone is not
+    /// an entropy theorem; native entropy refusals propagate transactionally.
+    pub fn advance_to_sdirk2(
+        &mut self,
+        cx: &Cx<'_>,
+        input: EnthalpySdirk2Input<'_>,
+        end_time_s: f64,
+        max_trials: usize,
+    ) -> Result<AdaptiveEnthalpyEntropyReport, EnthalpyEntropyError> {
+        self.advance_to_sdirk2_observed(
+            cx, input, end_time_s, max_trials, |_| ControlFlow::Continue(()),
+        )
+    }
+
+    /// Observe the authentic fine SDIRK2 stages after physical state, heat and
+    /// whole-window entropy are published together. Coarse or rejected stages
+    /// never reach the observer. Cancellation after publication retains the
+    /// complete accepted pair. Physical laws are fixed during this event call;
+    /// stage material/contact/radiation responses retain their actual states.
+    pub fn advance_to_sdirk2_observed(
+        &mut self,
+        cx: &Cx<'_>,
+        input: EnthalpySdirk2Input<'_>,
+        end_time_s: f64,
+        max_trials: usize,
+        observe: impl FnMut(EnthalpySdirk2AcceptedTrial<'_>) -> ControlFlow<()>,
+    ) -> Result<AdaptiveEnthalpyEntropyReport, EnthalpyEntropyError> {
+        let thermal = self.history.advance_sdirk2_accounted(
+            cx, input, end_time_s, max_trials, Some(&mut self.account), observe,
+        )?;
+        Ok(AdaptiveEnthalpyEntropyReport { thermal, entropy: self.account.balance })
     }
 
     /// Advance the original fixed-law spatial BE history to a declared event.
@@ -205,6 +252,10 @@ pub(super) struct EntropyAccount {
 }
 
 impl EntropyAccount {
+    pub(super) const fn tolerance_j_k(&self) -> f64 {
+        self.tolerance_j_k
+    }
+
     pub(super) fn extended(
         &self,
         storage: &EnthalpyBackwardEuler<'_, '_>,

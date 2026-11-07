@@ -1,6 +1,8 @@
 //! SDIRK2 steps through the existing enthalpy adaptive controller.
 
 use super::*;
+use super::entropy::EntropyAccount;
+use crate::transient::enthalpy::entropy::{EnthalpyEntropyError, admit_radiation};
 use crate::transient::enthalpy::sdirk::{EnthalpySdirk2Input, EnthalpySdirk2Step};
 
 /// Two accepted fine SDIRK2 steps with their authentic stages and heat integrals.
@@ -76,22 +78,51 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
         input: EnthalpySdirk2Input<'_>,
         end_time_s: f64,
         max_trials: usize,
-        mut observe: impl FnMut(EnthalpySdirk2AcceptedTrial<'_>) -> ControlFlow<()>,
+        observe: impl FnMut(EnthalpySdirk2AcceptedTrial<'_>) -> ControlFlow<()>,
     ) -> Result<AdaptiveEnthalpyReport, EnthalpyError> {
+        self.advance_sdirk2_accounted(cx, input, end_time_s, max_trials, None, observe)
+            .map_err(|error| match error {
+                EnthalpyEntropyError::Physical(error) => error,
+                _ => EnthalpyError::InvalidInput(
+                    "unexpected entropy gate on a physical-only trajectory",
+                ),
+            })
+    }
+
+    // Both public histories use the same native stages, estimator, heat and
+    // observer path. Entropy adds no work to the coarse comparison or Newton
+    // iterations; only the two fine steps enter a candidate physical account.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn advance_sdirk2_accounted(
+        &mut self,
+        cx: &Cx<'_>,
+        input: EnthalpySdirk2Input<'_>,
+        end_time_s: f64,
+        max_trials: usize,
+        entropy: Option<&mut EntropyAccount>,
+        mut observe: impl FnMut(EnthalpySdirk2AcceptedTrial<'_>) -> ControlFlow<()>,
+    ) -> Result<AdaptiveEnthalpyReport, EnthalpyEntropyError> {
         let storage = self.storage;
         let config = self.config.endpoint;
+        let tolerance = entropy.as_deref().map(EntropyAccount::tolerance_j_k);
+        if tolerance.is_some() {
+            admit_radiation(input.radiation)?;
+        }
         self.advance_native_with_account(
             cx,
             end_time_s,
             max_trials,
             AdaptiveOrder::Sdirk2,
-            |h, dt, _| {
-                Ok((
+            |h, dt, fine| match (fine, tolerance) {
+                (true, Some(tolerance)) => storage
+                    .advance_sdirk2_with_entropy(cx, [input; 2], h, dt, config, tolerance)
+                    .map(|(step, account)| (AdaptiveStep::Sdirk2(step), Some(account))),
+                _ => Ok((
                     AdaptiveStep::Sdirk2(storage.advance_sdirk2(cx, [input; 2], h, dt, config)?),
                     None,
-                ))
+                )),
             },
-            None,
+            entropy,
             |trial| {
                 let (AdaptiveStep::Sdirk2(first_half), AdaptiveStep::Sdirk2(second_half)) =
                     (trial.first_half, trial.second_half)
@@ -109,11 +140,5 @@ impl AdaptiveEnthalpyState<'_, '_, '_> {
                 })
             },
         )
-        .map_err(|error| match error {
-            super::super::entropy::EnthalpyEntropyError::Physical(error) => error,
-            _ => {
-                EnthalpyError::InvalidInput("unexpected entropy gate on a physical-only trajectory")
-            }
-        })
     }
 }

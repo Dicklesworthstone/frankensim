@@ -1,4 +1,6 @@
 //! G1/G3/G4: original adaptive fields and accepted-only thermodynamic history.
+mod sdirk;
+
 use super::*;
 use fs_conduction::transient::enthalpy::entropy::{EnthalpyEntropyBalance, EnthalpyEntropyError};
 
