@@ -2122,3 +2122,24 @@ solves primary flow, plastic consistency and the thermal first law, checks all
 three histories and retained receipts, and verifies proposal evaluation leaves
 accepted cells, solid solution and observer unchanged. Native Rust execution
 remains pending; the independent scalar reference is not a production test run.
+
+## Source-owned body temperatures in native solid friction and heat
+
+With `experimental-solid-contact-heat`,
+`friction_heat::solid::propose_solid_contact_heat_with_body_temperatures`
+maps each additional declared friction-source temperature axis to side A or B
+of its original finite thermal route. Every joint trial queries the actual
+endpoint caloric cell temperature while retaining the solved common interface
+temperature, native pressure/speed/distance history and original source claims.
+The one-result mechanical cache includes every queried interface/body
+temperature; body heating or cooling cannot reuse an older friction response.
+
+Missing, duplicate, foreign-node, primary-axis, nonthermal or undeclared
+temperature ownership refuses. The original entry remains available with no
+additional mappings. Fixed-footprint plane-strain mechanics, physical depth,
+deposited heat, exported work and the original energy gates retain their
+existing owners. No prescribed body heat split or interface storage is added.
+The extended native regression covers independent two-temperature friction,
+both side assignments, fixed-interface-temperature cache liveness and physical
+work/heat balance. Five exact-source admission checks passed; the full native
+regression awaits the pinned sibling dependencies and prescribed build runner.

@@ -1,8 +1,9 @@
 //! Native quasistatic solid contact and the original finite enthalpy network.
 //!
 //! Every thermal trial starts from the same accepted displacement and sliding
-//! history. Original interface claims see the solved common face temperature;
-//! native contact resolves the corresponding normal load, slip and friction.
+//! history. Original interface claims see the solved common face temperature
+//! and explicitly owned body temperatures; native contact resolves the
+//! corresponding normal load, slip and friction.
 //! Only a complete mechanical/material/thermal candidate leaves this owner.
 //!
 //! This is a fixed-footprint plane-strain reduction with an explicit physical
@@ -19,10 +20,7 @@ use super::network::{
     InterfaceHeatInput,
 };
 use super::{FrictionHeatRoute, FrictionHeatTolerances};
-use fs_contact::interface_binding::thermal_friction::FrictionQueryAxisKind;
 use fs_exec::CancelGate;
-use fs_qty::semantic::QuantityKind;
-use fs_qty::{QuantitySpec, Temperature};
 use fs_solid::SolidError;
 use fs_solid::contact::{ContactFrictionBinding, ContactSolution, ContactTrajectory};
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
@@ -34,7 +32,10 @@ use fs_thermal::enthalpy::{DepositionError, DepositionSimulation};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 
+mod temperature;
 mod work;
+
+pub use temperature::{SolidContactBodyTemperature, SolidContactThermalSide};
 
 /// Original link-keyed conductivities and other thermal sources.
 pub use super::hertz::multiple::{
@@ -130,7 +131,7 @@ struct Staged<'p, 'a, P> {
 }
 
 struct CachedMechanical<'p, 'a> {
-    temperatures_k: Vec<f64>,
+    queried_temperatures_k: Vec<f64>,
     trajectory: ContactTrajectory<'p, 'a>,
     solution: ContactSolution,
 }
@@ -141,7 +142,7 @@ struct CachedMechanical<'p, 'a> {
 /// refuses. Each thermal face is the declared nodal tributary patch. Where the
 /// source has a nominal-pressure axis, width * depth must equal that face area.
 /// The primary source temperature is the solved common face temperature.
-/// Additional temperature axes refuse until their body/side ownership is supplied.
+/// Additional temperature axes require [`propose_solid_contact_heat_with_body_temperatures`].
 /// Pressure, speed and accumulated distance retain their native mechanical owner.
 ///
 /// The callback supplies original endpoint conductivities and OTHER heat only,
@@ -149,7 +150,7 @@ struct CachedMechanical<'p, 'a> {
 /// complete candidate is accepted. Original mechanical iteration bounds remain
 /// in force; cancellation is checked between complete mechanical trials. Refine
 /// time for work/path accuracy and resolve changes to the fixed footprint first.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub fn propose_solid_contact_heat<'p, 'a, 't, P, E>(
     accepted: &ContactTrajectory<'p, 'a>,
     thermal: &DepositionSimulation<'t>,
@@ -158,6 +159,49 @@ pub fn propose_solid_contact_heat<'p, 'a, 't, P, E>(
     dt_s: f64,
     depth_m: f64,
     contacts: &[SolidContactHeatContact<'_>],
+    controls: SolidContactHeatControls,
+    energy_guess_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'t>, &[u64], &[f64]) -> Result<SolidContactHeatSource<P>, E>,
+    gate: &CancelGate,
+) -> Result<HeatedSolidContactCandidate<'p, 'a, 't, P>, SolidContactHeatError<E>> {
+    propose_solid_contact_heat_with_body_temperatures(
+        accepted,
+        thermal,
+        load,
+        surface_displacement,
+        dt_s,
+        depth_m,
+        contacts,
+        &[],
+        controls,
+        energy_guess_j,
+        resolve,
+        gate,
+    )
+}
+
+/// The same native contact/heat solve with explicitly owned body temperatures.
+///
+/// Every additional source temperature axis must be declared by the original
+/// friction law and mapped exactly once to side A or B of its original thermal
+/// route. Its value is the actual trial endpoint CELL temperature, distinct from
+/// the solved common interface temperature. No temperature is averaged, held at
+/// its initial query value, or assigned to an unrelated thermal cell. The caller
+/// retains ordered source/body material assignment and fixed-face geometry.
+///
+/// Pressure, speed and distance retain their original mechanical owners. The
+/// callback resolves only original conductivities and other heat, as in
+/// [`propose_solid_contact_heat`]. Source or balance refusal publishes nothing.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn propose_solid_contact_heat_with_body_temperatures<'p, 'a, 't, P, E>(
+    accepted: &ContactTrajectory<'p, 'a>,
+    thermal: &DepositionSimulation<'t>,
+    load: f64,
+    surface_displacement: &[[f64; 2]],
+    dt_s: f64,
+    depth_m: f64,
+    contacts: &[SolidContactHeatContact<'_>],
+    body_temperatures: &[SolidContactBodyTemperature<'_>],
     controls: SolidContactHeatControls,
     energy_guess_j: &[f64],
     resolve: impl Fn(&DepositionSimulation<'t>, &[u64], &[f64]) -> Result<SolidContactHeatSource<P>, E>,
@@ -238,34 +282,6 @@ pub fn propose_solid_contact_heat<'p, 'a, 't, P, E>(
         }
         work::partition(0.0, depth_m, contact.heat_fraction)
             .map_err(SolidContactHeatError::Invalid)?;
-        // A source may admit semantic temperatures as fixed external conditions
-        // without declaring a query axis. They still need a thermal owner here.
-        let primary_temperature = &contact.friction.law.axes().temperature;
-        let conditions = &contact.friction.conditions;
-        let extra_temperature = conditions.axes().keys().any(|axis| {
-            if axis == primary_temperature {
-                return false;
-            }
-            let quantity = conditions.axis_quantities().get(axis).copied();
-            quantity
-                .and_then(QuantitySpec::semantic_type)
-                .is_some_and(|q| q.kind() == QuantityKind::AbsoluteTemperature)
-                || (axis == "T"
-                    && (quantity.is_none()
-                        || quantity == Some(QuantitySpec::dimensional(Temperature::DIMS))))
-        });
-        if contact
-            .friction
-            .law
-            .query_axes()
-            .iter()
-            .any(|axis| axis.kind == FrictionQueryAxisKind::Temperature)
-            || extra_temperature
-        {
-            return Err(SolidContactHeatError::Invalid(
-                "additional source temperatures require explicit thermal ownership",
-            ));
-        }
         if let Some(width) = contact.friction.nominal_contact_width_m {
             let area = width * depth_m;
             let face = contact.route.contact_area_m2();
@@ -280,6 +296,8 @@ pub fn propose_solid_contact_heat<'p, 'a, 't, P, E>(
         }
         bindings[contact.node] = Some(contact.friction.clone());
     }
+    let body_temperatures =
+        temperature::admit(&ordered, body_temperatures).map_err(SolidContactHeatError::Invalid)?;
     let routes: Vec<_> = ordered.iter().map(|c| c.route).collect();
     let step = FrictionHeatNetworkStep::new(
         thermal,
@@ -291,7 +309,8 @@ pub fn propose_solid_contact_heat<'p, 'a, 't, P, E>(
     let trials = Cell::new(0usize);
     let mechanical_solves = Cell::new(0usize);
     // The accepted state, load, surface motion, bulk law, depth and source
-    // bindings are immutable in this call. Only interface T affects mechanics.
+    // bindings are immutable in this call. Every queried interface/body T is
+    // part of the cache key; other thermal changes only refresh transport.
     // Keep one O(nodes) result, never the mechanical Hessian or thermal payload.
     let cache = RefCell::new(None::<CachedMechanical<'p, 'a>>);
     let evaluate = |x: &[f64], entropy: bool| {
@@ -318,10 +337,15 @@ pub fn propose_solid_contact_heat<'p, 'a, 't, P, E>(
             .collect();
         let endpoint = |state: &DepositionSimulation<'t>, temperatures: &[f64]| {
             check()?;
+            let mut queried_temperatures = temperatures.to_vec();
+            for owned in &body_temperatures {
+                check()?;
+                queried_temperatures.push(state.temperature_k(owned.cell)?);
+            }
             let cached = cache
                 .borrow()
                 .as_ref()
-                .filter(|entry| entry.temperatures_k.as_slice() == temperatures)
+                .filter(|entry| entry.queried_temperatures_k == queried_temperatures)
                 .map(|entry| (entry.trajectory.clone(), entry.solution.clone()));
             let (trajectory, mechanical) = if let Some(cached) = cached {
                 cached
@@ -339,6 +363,20 @@ pub fn propose_solid_contact_heat<'p, 'a, 't, P, E>(
                             })
                         })?;
                 }
+                for (owned, &temperature) in
+                    body_temperatures.iter().zip(&queried_temperatures[count..])
+                {
+                    let binding = local[owned.node].as_mut().expect("validated bound node");
+                    binding.conditions = binding
+                        .conditions
+                        .clone()
+                        .with(owned.axis, temperature)
+                        .map_err(|error| {
+                        SolidContactHeatError::Mechanical(SolidError::InvalidInput {
+                            what: error.to_string(),
+                        })
+                    })?;
+                }
                 let mut trajectory = accepted.clone();
                 mechanical_solves.set(mechanical_solves.get() + 1);
                 let mechanical = trajectory
@@ -346,7 +384,7 @@ pub fn propose_solid_contact_heat<'p, 'a, 't, P, E>(
                     .map_err(SolidContactHeatError::Mechanical)?;
                 check()?;
                 *cache.borrow_mut() = Some(CachedMechanical {
-                    temperatures_k: temperatures.to_vec(),
+                    queried_temperatures_k: queried_temperatures,
                     trajectory: trajectory.clone(),
                     solution: mechanical.clone(),
                 });

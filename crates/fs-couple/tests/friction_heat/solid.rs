@@ -28,7 +28,11 @@ use fs_solver::NewtonKrylovConfig;
 use fs_tribo::InputAuthority;
 use std::cell::Cell;
 
-fn friction_source(extra_temperature: bool, declare_temperature: bool) -> SourceThermalCoulomb {
+fn friction_source(
+    extra_temperature: bool,
+    declare_temperature: bool,
+    two_body: bool,
+) -> SourceThermalCoulomb {
     let length = QuantitySpec::dimensional(Dims([1, 0, 0, 0, 0, 0]));
     let mut validity = ValidityDomain::unconstrained()
         .with("T", 299.0, 301.0)
@@ -56,15 +60,52 @@ fn friction_source(extra_temperature: bool, declare_temperature: bool) -> Source
             });
         }
     }
+    if two_body {
+        for (name, quantity) in [
+            (
+                "T_a",
+                QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::AbsoluteTemperature,
+                    ValueForm::Static,
+                )),
+            ),
+            ("T_b", QuantitySpec::dimensional(Temperature::DIMS)),
+        ] {
+            validity = validity.with_quantity(name, quantity, 299.0, 301.0);
+            point = point.with_quantity(name, quantity, 300.0).unwrap();
+            axes.push(FrictionQueryAxis {
+                name: name.into(),
+                kind: FrictionQueryAxisKind::Temperature,
+            });
+        }
+    }
     let mut claims = ClaimSet::new();
     claims
         .insert_claim(PropertyClaim {
             key: PropertyKey::new("mu", Dims::NONE),
-            value: PropertyValue::Curve {
-                abscissa: "T".into(),
-                abscissa_dims: Temperature::DIMS,
-                knots: vec![(299.0, 1.3), (301.0, 0.3)],
-                dims: Dims::NONE,
+            value: if two_body {
+                PropertyValue::Surface2D {
+                    axes: ["T_a".into(), "T_b".into()],
+                    axis_dims: [Temperature::DIMS; 2],
+                    samples: [
+                        [299.0, 299.0],
+                        [301.0, 299.0],
+                        [299.0, 301.0],
+                        [301.0, 301.0],
+                    ]
+                    .into_iter()
+                    .map(|p| (p, 0.8 - 0.2 * (p[0] - 300.0) + 0.1 * (p[1] - 300.0)))
+                    .collect(),
+                    triangles: vec![[0, 1, 2], [1, 3, 2]],
+                    dims: Dims::NONE,
+                }
+            } else {
+                PropertyValue::Curve {
+                    abscissa: "T".into(),
+                    abscissa_dims: Temperature::DIMS,
+                    knots: vec![(299.0, 1.3), (301.0, 0.3)],
+                    dims: Dims::NONE,
+                }
             },
             validity,
             uncertainty: UncertaintyModel::Unstated,
@@ -169,7 +210,7 @@ fn g1_g4_native_solid_heat_feedback_history_and_atomic_refusal() {
             .unwrap();
     let thermal = network(1, [1.0; 2], [1.0; 2], [1.0; 2], [0.0; 2], [0.0; 2]);
     let route = FrictionHeatRoute::from_link(&thermal, CONTACT, [1.0; 2]).unwrap();
-    let law = friction_source(false, false);
+    let law = friction_source(false, false, false);
     let contact = SolidContactHeatContact {
         node: 0,
         friction: ContactFrictionBinding {
@@ -318,7 +359,7 @@ fn g1_g4_native_solid_heat_feedback_history_and_atomic_refusal() {
     // Both declared evolving coordinates and otherwise legal static external
     // temperatures need a thermal body/side owner in this coupled entry.
     for declared in [true, false] {
-        let unmapped_temperature = friction_source(true, declared);
+        let unmapped_temperature = friction_source(true, declared, false);
         let mut other = contact.clone();
         other.friction.law = &unmapped_temperature;
         other.friction.conditions = unmapped_temperature.initial_source().query();
@@ -362,6 +403,141 @@ fn g1_g4_native_solid_heat_feedback_history_and_atomic_refusal() {
             "fixed heat footprint is not initially in contact"
         ))
     ));
+
+    // Independent body temperatures drive the source while the primary T
+    // remains the common interface value. Equal/opposite external powers make
+    // T_interface stay at 300 K when friction work is exported; changing only
+    // cell energies MUST still invalidate the mechanical cache.
+    let body_law = friction_source(false, false, true);
+    let mut body_contact = contact.clone();
+    body_contact.friction.law = &body_law;
+    body_contact.friction.conditions = body_law.initial_source().query();
+    let mappings = [
+        SolidContactBodyTemperature {
+            node: 0,
+            axis: "T_a",
+            side: SolidContactThermalSide::A,
+        },
+        SolidContactBodyTemperature {
+            node: 0,
+            axis: "T_b",
+            side: SolidContactThermalSide::B,
+        },
+    ];
+    for fraction in [0.0, 0.75] {
+        for swapped in [false, true] {
+            body_contact.heat_fraction = fraction;
+            let mut mapping = mappings;
+            if swapped {
+                mapping[0].side = SolidContactThermalSide::B;
+                mapping[1].side = SolidContactThermalSide::A;
+            }
+            let heated = propose_solid_contact_heat_with_body_temperatures(
+                &accepted,
+                &thermal,
+                1.0,
+                &displacement,
+                1.0,
+                depth,
+                &[body_contact.clone()],
+                &mapping,
+                controls,
+                &[0.0; 2],
+                |_, ids, _| {
+                    let mut source = input(ids);
+                    source.transport.sources_w =
+                        BTreeMap::from([(CellId(1), 0.2), (CellId(2), -0.2)]);
+                    Ok::<_, &'static str>(source)
+                },
+                &gate,
+            )
+            .unwrap();
+            // ta=(2*ti+0.2)/3, tb=(2*ti-0.2)/3, and
+            // mu=0.8-0.2*ta+0.1*tb. Interface work is 4*ti/3.
+            let a = fraction * depth * normal * 0.1;
+            let intercept = if swapped { 0.82 } else { 0.78 };
+            let ti = a * intercept / (4.0 / 3.0 + a * 0.2 / 3.0);
+            let body_rises = [(2.0 * ti + 0.2) / 3.0, (2.0 * ti - 0.2) / 3.0];
+            let mu = intercept - 0.2 * ti / 3.0;
+            let sample = heated.mechanical.friction_sources[0].as_ref().unwrap();
+            close(sample.coefficient, mu, 2e-10);
+            close(sample.source.query().axes()["T"], 300.0 + ti, 2e-9);
+            for (axis, side) in [
+                ("T_a", usize::from(swapped)),
+                ("T_b", usize::from(!swapped)),
+            ] {
+                close(
+                    sample.source.query().axes()[axis],
+                    300.0 + body_rises[side],
+                    2e-9,
+                );
+            }
+            for (id, rise) in [CellId(1), CellId(2)].into_iter().zip(body_rises) {
+                close(
+                    heated.thermal.temperature_k(id).unwrap(),
+                    300.0 + rise,
+                    2e-9,
+                );
+            }
+            let work = depth * normal * 0.1 * mu;
+            close(heated.mechanical.friction_work * depth, work, 2e-10);
+            close(heated.heat.dissipated_j, fraction * work, 2e-10);
+            close(
+                heated.exported_nonthermal_work_j,
+                (1.0 - fraction) * work,
+                2e-10,
+            );
+            close(
+                heated.port_energy_residual_j,
+                0.0,
+                controls.port_energy_tolerance_j,
+            );
+            close(heated.trajectory.sliding_distance()[0], 0.5, 1e-14);
+        }
+    }
+    // Incomplete, duplicate, unknown-node and primary-temperature mappings
+    // cannot freeze or redirect a source temperature, and mutate no owner.
+    for mapping in [
+        vec![mappings[0]],
+        vec![mappings[0], mappings[0], mappings[1]],
+        vec![
+            SolidContactBodyTemperature {
+                node: 1,
+                ..mappings[0]
+            },
+            mappings[1],
+        ],
+        vec![
+            SolidContactBodyTemperature {
+                axis: "T",
+                ..mappings[0]
+            },
+            mappings[1],
+        ],
+    ] {
+        assert!(matches!(
+            propose_solid_contact_heat_with_body_temperatures(
+                &accepted,
+                &thermal,
+                1.0,
+                &displacement,
+                1.0,
+                depth,
+                &[body_contact.clone()],
+                &mapping,
+                controls,
+                &[0.0; 2],
+                |_, ids, _| Ok::<_, &'static str>(input(ids)),
+                &gate,
+            ),
+            Err(SolidContactHeatError::Invalid(_))
+        ));
+    }
+    assert_eq!(accepted.time_s(), 0.0);
+    assert_eq!(accepted.sliding_distance(), &[0.4; 4]);
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(thermal.temperature_k(CellId(1)).unwrap(), 300.0);
+    assert_eq!(thermal.temperature_k(CellId(2)).unwrap(), 300.0);
 
     // Declaring all loss outside the thermal control volume still advances the
     // mechanical history, without silently converting that loss into heat.
