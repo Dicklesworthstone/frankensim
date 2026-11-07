@@ -273,6 +273,9 @@ export function mountLiveKit(root: HTMLElement): void {
   const strikerFile = el("input", { type: "file", required: "" });
   const solidTemperature = numberInput(293.15, 0.01, 10000);
   const temperatureAxis = el("input", { type: "text", value: "T", required: "" });
+  const primaryEnvironment = el("input", { type: "text", maxlength: "4096", placeholder: "axis=value axis=value" });
+  const secondaryEnvironment = el("input", { type: "text", maxlength: "4096", placeholder: "axis=value axis=value" });
+  const strikerEnvironment = el("input", { type: "text", maxlength: "4096", placeholder: "axis=value axis=value" });
   const strikerVolume = numberInput(9.054, 1e-6, 1e6);
   const tipRadius = numberInput(6, 1e-6, 1000);
   const impactLoss = numberInput(0.05, 0, 1000);
@@ -292,7 +295,7 @@ export function mountLiveKit(root: HTMLElement): void {
   const filmFrequencyAxis = el("input", { type: "text", value: "f", required: "" });
   const filmFields = el("fieldset", { disabled: "", hidden: "" },
     el("div", { class: "kit-atmosphere-grid" }, labelled("Frequency coordinate in head cards", filmFrequencyAxis)),
-    el("p", { class: "small muted" }, "Each head card must supply a loss_tangent_tensile curve over its own frequency band at the declared solid temperature. The drum model uses that curve across the band; no single query frequency is selected. Edge loss remains a stated unknown entered as 0. This selection applies to drum heads; cymbals and the hi-hat retain their existing native loss."));
+    el("p", { class: "small muted" }, "Each head card must supply a loss_tangent_tensile curve over its own frequency band at its declared solid conditions. The drum model uses that curve across the band; no single query frequency is selected. Edge loss remains a stated unknown entered as 0. This selection applies to drum heads; cymbals and the hi-hat retain their existing native loss."));
   lossMode.addEventListener("change", () => {
     lossFields.hidden = lossFields.disabled = lossMode.value !== "material";
     filmFields.hidden = filmFields.disabled = lossMode.value !== "film-curve";
@@ -302,9 +305,13 @@ export function mountLiveKit(root: HTMLElement): void {
       labelled("Primary surface card", surfaceFile), labelled("Secondary surface card · optional", secondaryFile),
       labelled("Striker card", strikerFile), labelled("Solid temperature · K", solidTemperature),
       labelled("Temperature coordinate in cards", temperatureAxis), labelled("Effective striker volume · cm³", strikerVolume),
+      labelled("Primary held conditions · optional", primaryEnvironment),
+      labelled("Secondary held conditions · optional", secondaryEnvironment),
+      labelled("Striker held conditions · optional", strikerEnvironment),
       labelled("Spherical tip radius · mm", tipRadius), labelled("Impact loss · s/m", impactLoss),
       labelled("Structural decay", lossMode)), lossFields, filmFields,
     el("p", { class: "small muted" }, "Import FrankenSim material-card pack files. Cards must supply density, Young's modulus and Poisson ratio at the declared solid temperature, with a typed absolute-temperature coordinate in kelvin when that coordinate is constrained. Primary applies to batter heads and upper cymbals; secondary applies to resonant heads and lower hi-hats, and defaults to primary."),
+    el("p", { class: "small muted" }, "Held conditions use the exact axis names and SI values in each card: for example, pressure=101325 moisture=0.08 only when those names and quantity meanings are declared by that card. Enter at most eight axis=value pairs per material. Each material keeps its own conditions, even when both surfaces use the same card. These conditions affect mass, stiffness, contact and selected loss together; gas pressure, humidity and composition remain independently declared above. A moisture fraction is not automatically relative humidity."),
     el("p", { class: "small muted" }, "The imported striker replaces every preset beater, including the kick. Its material and effective volume set its mass; both contact materials and tip radius set elastic contact stiffness. Structural decay uses the selection above. Supports, muffling, wire contacts and hi-hat rim friction retain their separate assumptions."),
     el("p", { class: "small muted" }, "Drum heads built from imported cards never fall back to the preset decay times, which were fitted to recordings. Select a sourced surface viscosity, a sourced head-film curve, or declare head film loss a stated unknown. The unknown declaration enters film and edge loss as 0 and omits the measured high-mode excess loss, so decay times above the first two modes are upper bounds. A head-film curve applies only to drum heads; cymbals and the hi-hat retain their existing native loss."));
   const materialStatus = el("p", { class: "small muted", role: "status" },
@@ -332,6 +339,9 @@ export function mountLiveKit(root: HTMLElement): void {
     const state = { temperatureAxis: temperatureAxis.value.trim(), temperatureK: solidTemperature.valueAsNumber,
       strikerVolumeM3: strikerVolume.valueAsNumber * 1e-6, strikerTipRadiusM: tipRadius.valueAsNumber * 1e-3,
       impactLossSM: impactLoss.valueAsNumber };
+    const conditions = { primary: primaryEnvironment.value.trim(), secondary: secondaryEnvironment.value.trim(),
+      striker: strikerEnvironment.value.trim() };
+    const heldEnvironment = Object.values(conditions).some(value => value.length > 0) ? conditions : undefined;
     if (!state.temperatureAxis || !Object.values(state).every(value => typeof value === "string" || Number.isFinite(value))) {
       throw new Error("Material state and striker geometry must be finite, with a named temperature coordinate.");
     }
@@ -357,7 +367,8 @@ export function mountLiveKit(root: HTMLElement): void {
         const [surfacePack, secondaryPack, strikerPack] = await Promise.all([
           primary.arrayBuffer(), secondary?.arrayBuffer(), striker.arrayBuffer(),
         ]);
-        return { ...state, ...(bendingLoss ? { bendingLoss } : {}), ...(filmLoss ? { filmLoss } : {}), surfacePack: new Uint8Array(surfacePack),
+        return { ...state, ...(heldEnvironment ? { heldEnvironment } : {}),
+          ...(bendingLoss ? { bendingLoss } : {}), ...(filmLoss ? { filmLoss } : {}), surfacePack: new Uint8Array(surfacePack),
           ...(secondaryPack ? { secondaryPack: new Uint8Array(secondaryPack) } : {}), strikerPack: new Uint8Array(strikerPack) };
       } };
   }

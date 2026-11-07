@@ -170,6 +170,10 @@ export interface KitMaterialOptions {
   strikerPack: Uint8Array;
   temperatureAxis: string;
   temperatureK: number;
+  /** Per-solid source coordinates, whitespace-separated AXIS=VALUE in the
+   * card's SI quantity convention. Each record is independent, including when
+   * the secondary reuses the primary card. Empty means no extra coordinates. */
+  heldEnvironment?: { primary: string; secondary: string; striker: string };
   /** Geometric effective volume: mass follows the striker material's density. */
   strikerVolumeM3: number;
   strikerTipRadiusM: number;
@@ -184,7 +188,7 @@ export interface KitMaterialOptions {
     secondaryAngleRad: number;
   };
   /** Drum-head loss, exclusive with bendingLoss. A curve reads each original
-   *  head card at temperatureK; its source band and coefficients stay in Rust.
+   *  head card at its complete held conditions; its band and coefficients stay in Rust.
    *  Cymbals and hi-hats retain their existing loss in either film mode. */
   filmLoss?: 'stated-unknown' | { model: 'generalized-maxwell'; frequencyAxis: string };
 }

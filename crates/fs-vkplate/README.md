@@ -363,6 +363,20 @@ Browser imports declare one finite positive absolute solid temperature in kelvin
 and the source's temperature-axis name. A source that constrains that coordinate
 must use the canonical typed absolute-temperature/static quantity. Native callers
 can provide a general query point, including additional declared state coordinates.
+The three **Held conditions** inputs additionally accept whitespace-separated
+`AXIS=VALUE` records independently for primary, secondary and striker materials.
+Names and SI values must match the original card's explicit static pressure,
+composition, moisture-basis or concentration semantics. Each record admits at
+most eight extra coordinates; an empty record supplies none. Reusing the primary
+card for the secondary does not copy its conditions. Solid conditions are never
+inferred from atmospheric pressure, relative humidity or gas composition.
+`KitMaterials::from_card_packs_with_held_environment` applies the shared material
+query policy to each original card. Elasticity, directional moduli, striker-tip
+contact and selected film/viscosity loss retain those complete queries. The
+browser's `withMaterialEnvironment` export (and `AndGasSources` variant) combines
+these conditions with every existing loss selection; an older binary refuses
+the input instead of dropping it. `with_card_bending_viscosity` resolves each
+surface's tensor at its retained query, including independent surface conditions.
 Missing, conflicting or out-of-domain properties refuse; imported files are
 bounded to 16 MiB in aggregate. These are new trajectories from rest, not an
 energy-conserving replacement of a ringing specimen.
@@ -553,8 +567,9 @@ two tensors, orientations, source-state identities and admitted angular-frequenc
 bands. Selecting this law removes the preset surface `s0` and `s1` entirely;
 explicit zero viscosity does not restore the old T60 decay.
 
-This is a fixed-temperature, broadband Kelvin–Voigt model. Coefficients must be
-constant or temperature-only source curves at that declared temperature, and
+This is a fixed-environment, broadband Kelvin–Voigt model. Coefficients may depend
+on the declared held temperature, pressure, moisture or composition; at that
+environment they must be constant in every coordinate the mechanical solver evolves, and
 the intersection of elastic and viscous source bands must cover DC through the
 **internal integration Nyquist frequency**, including any oversampling. Merely
 placing the query frequency inside a narrow source band does not admit a

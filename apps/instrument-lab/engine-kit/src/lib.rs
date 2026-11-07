@@ -35,6 +35,50 @@ fn film_loss_materials(surface_pack: &[u8], secondary_pack: &[u8], striker_pack:
         .and_then(|materials| materials.with_film_loss_curve(temperature_axis, frequency_axis, temperature_k))
 }
 
+/// Bounded ingress grammar only. The original card and shared material owner
+/// admit coordinate meanings, duplicates, value domains and source coverage.
+#[cfg(any(target_arch = "wasm32", test))]
+fn held_coordinates(record: &str, role: &str) -> Result<Vec<(String, f64)>, String> {
+    if record.len() > 4096 {
+        return Err(format!("{role} material environment must fit within 4096 bytes"));
+    }
+    record.split_whitespace().map(|field| {
+        let (axis, value) = field.split_once('=').ok_or_else(||
+            format!("{role} material environment: expected AXIS=VALUE, got {field:?}"))?;
+        let value = value.parse::<f64>().ok().filter(|value| value.is_finite()).ok_or_else(||
+            format!("{role} material environment: {axis:?} needs a finite numeric value"))?;
+        Ok((axis.into(), value))
+    }).collect()
+}
+
+/// All browser material routes share the native source/environment owner.
+/// Conditions belong to each solid card; they are independent of the gas record.
+#[cfg(any(target_arch = "wasm32", test))]
+fn environment_materials(surface_pack: &[u8], secondary_pack: &[u8], striker_pack: &[u8],
+    temperature_axis: &str, temperature_k: f64, striker_volume_m3: f64,
+    striker_tip_radius_m: f64, impact_loss_s_m: f64, environments: [&str; 3],
+    loss_model: &str, frequency_axis: &str, frequency_hz: f64, angles_rad: [f64; 2]) -> Result<KitMaterials, String> {
+    use fs_vkplate::materials::{temperature_frequency_point, temperature_point};
+    let point = match loss_model {
+        "kelvin-voigt-plane-stress" => temperature_frequency_point(
+            temperature_axis, temperature_k, frequency_axis, frequency_hz)?,
+        "preset" | "stated-unknown" | "generalized-maxwell" => temperature_point(temperature_axis, temperature_k)?,
+        _ => return Err(format!("unknown material loss selection {loss_model:?}")),
+    };
+    let primary = held_coordinates(environments[0], "primary")?;
+    let secondary = held_coordinates(environments[1], "secondary")?;
+    let striker = held_coordinates(environments[2], "striker")?;
+    let materials = KitMaterials::from_card_packs_with_held_environment(
+        surface_pack, secondary_pack, striker_pack, &point, [&primary, &secondary, &striker],
+        striker_volume_m3, striker_tip_radius_m, impact_loss_s_m)?;
+    match loss_model {
+        "kelvin-voigt-plane-stress" => materials.with_card_bending_viscosity(angles_rad),
+        "generalized-maxwell" => materials.with_film_loss_curve(temperature_axis, frequency_axis, temperature_k),
+        "stated-unknown" => materials.with_stated_unknown_film_loss(),
+        _ => Ok(materials),
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 mod wasm {
     use super::*;
@@ -207,6 +251,45 @@ mod wasm {
                 .map(|live| KitPiece { live, scale: grid_scale })
                 .map_err(|e| JsError::new(&e))
         }
+        /// Complete per-solid held environments, with any explicit native loss
+        /// selection. A distinct export makes an older binary refuse new inputs.
+        #[wasm_bindgen(js_name = withMaterialEnvironment)]
+        pub fn with_material_environment(piece: &str, grid_scale: f64, gas_record: &str,
+            surface_pack: &[u8], secondary_pack: &[u8], striker_pack: &[u8],
+            temperature_axis: &str, temperature_k: f64, striker_volume_m3: f64,
+            striker_tip_radius_m: f64, impact_loss_s_m: f64,
+            primary_environment: &str, secondary_environment: &str, striker_environment: &str,
+            loss_model: &str, frequency_axis: &str, frequency_hz: f64,
+            primary_angle_rad: f64, secondary_angle_rad: f64) -> Result<KitPiece, JsError> {
+            let materials = environment_materials(surface_pack, secondary_pack, striker_pack,
+                temperature_axis, temperature_k, striker_volume_m3, striker_tip_radius_m, impact_loss_s_m,
+                [primary_environment, secondary_environment, striker_environment], loss_model,
+                frequency_axis, frequency_hz, [primary_angle_rad, secondary_angle_rad])
+                .map_err(|e| JsError::new(&e))?;
+            Live::with_materials_record(piece, grid_scale, gas_record, materials)
+                .map(|live| KitPiece { live, scale: grid_scale })
+                .map_err(|e| JsError::new(&e))
+        }
+        /// The same solid source conditions with independently sourced gas cards.
+        #[wasm_bindgen(js_name = withMaterialEnvironmentAndGasSources)]
+        pub fn with_material_environment_and_gas_sources(piece: &str, grid_scale: f64, gas_record: &str,
+            surface_pack: &[u8], secondary_pack: &[u8], striker_pack: &[u8],
+            temperature_axis: &str, temperature_k: f64, striker_volume_m3: f64,
+            striker_tip_radius_m: f64, impact_loss_s_m: f64,
+            primary_environment: &str, secondary_environment: &str, striker_environment: &str,
+            loss_model: &str, frequency_axis: &str, frequency_hz: f64,
+            primary_angle_rad: f64, secondary_angle_rad: f64,
+            gas_bytes: &[u8], gas_lengths: &[u32], water_species: &str, phase: &str) -> Result<KitPiece, JsError> {
+            let materials = environment_materials(surface_pack, secondary_pack, striker_pack,
+                temperature_axis, temperature_k, striker_volume_m3, striker_tip_radius_m, impact_loss_s_m,
+                [primary_environment, secondary_environment, striker_environment], loss_model,
+                frequency_axis, frequency_hz, [primary_angle_rad, secondary_angle_rad])
+                .map_err(|e| JsError::new(&e))?;
+            Live::with_gas_source_packet(piece, grid_scale, gas_record, gas_bytes, gas_lengths,
+                water_species, phase, Some(materials))
+                .map(|live| KitPiece { live, scale: grid_scale })
+                .map_err(|e| JsError::new(&e))
+        }
         /// A second piece in exactly this one's state: it renders the same samples as this one would.
         /// Building a snare or a hi-hat is almost all its settle, so a copy is far cheaper than `new`.
         pub fn copy(&self) -> KitPiece {
@@ -335,5 +418,29 @@ mod tests {
         assert_eq!(head_loss_receipt("crash", Some(&film)), None);
         assert!(bind(296.15, "frequency").is_err(), "the source curve is valid only at its declared temperature");
         assert!(bind(293.15, "missing-axis").is_err());
+    }
+
+    #[test]
+    fn environment_ingress_retains_existing_loss_routes_and_refuses_unbound_conditions() {
+        let bind = |records, model, axis| environment_materials(
+            HEAD_FILM, &[], HEAD_FILM, "T", 293.15, 9e-6, 0.005, 0.05,
+            records, model, axis, 1000.0, [0.0; 2]);
+        let legacy = film_loss_materials(HEAD_FILM, &[], HEAD_FILM,
+            "T", 293.15, 9e-6, 0.005, 0.05, "frequency").unwrap();
+        assert_eq!(bind([""; 3], "generalized-maxwell", "frequency").unwrap(), legacy);
+        assert!(bind([""; 3], "stated-unknown", "").unwrap().film_loss_is_stated_unknown());
+        assert!(!bind([""; 3], "preset", "").unwrap().has_film_loss_curve());
+        assert!(bind([""; 3], "invented-model", "").unwrap_err().contains("unknown material loss"));
+        for (records, role) in [(["pressure=101325", "", ""], "primary"),
+            (["", "water=0.12", ""], "secondary"), (["", "", "alloy=0.25"], "striker")] {
+            let error = bind(records, "stated-unknown", "").unwrap_err();
+            assert!(error.contains(role) && error.contains("absent from the original source"), "{error}");
+        }
+        for record in ["pressure", "pressure=NaN", "pressure=inf", "pressure=", "pressure=1=2"] {
+            assert!(held_coordinates(record, "secondary").unwrap_err().contains("secondary material environment"));
+        }
+        assert!(held_coordinates(&"p".repeat(4097), "primary").is_err());
+        assert_eq!(held_coordinates(" pressure=1e5\nwater=0.12 ", "primary").unwrap(),
+            vec![("pressure".into(), 100_000.0), ("water".into(), 0.12)]);
     }
 }

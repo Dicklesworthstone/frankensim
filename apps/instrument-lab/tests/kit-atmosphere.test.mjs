@@ -15,6 +15,7 @@ async function run(gasRecord, { copies = true, slowFirst = false, refuseFine = f
   missingWithGas = false, refuseGas = false, scales = [3, 5], materials,
   missingWithMaterials = false, refuseMaterials = false,
   missingWithBendingLoss = false, refuseBendingLoss = false, gasSources,
+  missingWithEnvironment = false, refuseEnvironment = false,
   missingWithGasSources = false, refuseGasSources = false, missingWithStatedUnknown = false, refuseAt = [] } = {}) {
   const calls = [], messages = [], kept = [];
   let id = 0, active = 0, clock = 0, attached = 0, correctionCalls = 0;
@@ -83,6 +84,19 @@ async function run(gasRecord, { copies = true, slowFirst = false, refuseFine = f
       if (refuseFine && scale < 5) throw new Error('fine grid needs another mechanical clock');
       return piece(name, scale, record, { importedPacks: 3, bendingLoss: { model: 'kelvin-voigt-plane-stress' } });
     }
+    static withMaterialEnvironment(name, scale, record, ...inputs) {
+      calls.push(['environment', name, scale, record, ...inputs]);
+      if (refuseEnvironment) throw new Error('secondary material environment: source claims disagree on coordinate semantics');
+      if (refuseFine && scale < 5) throw new Error('fine grid needs another mechanical clock');
+      return piece(name, scale, record, { importedPacks: 3, environments: inputs.slice(8, 11), lossModel: inputs[11] });
+    }
+    static withMaterialEnvironmentAndGasSources(name, scale, record, ...inputs) {
+      calls.push(['source-environment', name, scale, record, ...inputs]);
+      if (refuseEnvironment) throw new Error('secondary material environment: source claims disagree on coordinate semantics');
+      if (refuseGasSources) throw new Error('canonical gas source domain refused');
+      if (refuseFine && scale < 5) throw new Error('fine grid needs another mechanical clock');
+      return piece(name, scale, record, { importedPacks: 3, environments: inputs.slice(8, 11), lossModel: inputs[11] });
+    }
   }
   if (missingWithGas) KitPiece.withGas = undefined;
   if (missingWithMaterials) KitPiece.withMaterials = undefined;
@@ -90,6 +104,10 @@ async function run(gasRecord, { copies = true, slowFirst = false, refuseFine = f
   if (missingWithStatedUnknown) {
     KitPiece.withMaterialsStatedUnknownFilmLoss = undefined;
     KitPiece.withMaterialsStatedUnknownFilmLossAndGasSources = undefined;
+  }
+  if (missingWithEnvironment) {
+    KitPiece.withMaterialEnvironment = undefined;
+    KitPiece.withMaterialEnvironmentAndGasSources = undefined;
   }
   if (missingWithGasSources) {
     KitPiece.withGasSources = undefined;
@@ -99,7 +117,7 @@ async function run(gasRecord, { copies = true, slowFirst = false, refuseFine = f
   const self = { postMessage(message) { messages.push(message); } };
   runInNewContext(source, { self, KitPiece, init: async () => {}, gasSourcePacket,
     createLane: () => { attached++; return { frame: 0 }; }, levelFix: () => { correctionCalls++; return 2; },
-    Float32Array, Uint8Array, Uint32Array, URL,
+    Float32Array, Uint8Array, Uint32Array, URL, TextEncoder,
     performance: { now() { clock += slowFirst && active === 1 ? 10 : 1; return clock; } },
     fetch: async () => ({ ok: true, clone() { return this; }, arrayBuffer: async () => new ArrayBuffer(0),
       json: async () => ({}) }),
@@ -119,6 +137,65 @@ const sourceInput = () => ({ phase: 'frozen', waterSpecies: null, components: [
   { speciesPack: new Uint8Array([99, 1, 2, 99]).subarray(1, 3), nasa9Pack: new Uint8Array([3]), transportPack: new Uint8Array([4, 5]) },
   { speciesPack: new Uint8Array([6]), nasa9Pack: new Uint8Array([7, 8]), transportPack: new Uint8Array([9]) },
 ] });
+
+test('each solid environment reaches every loss, gas, grid, retry and copy-fallback route', async () => {
+  const heldEnvironment = { primary: 'pressure=200000', secondary: 'water=0.12', striker: 'alloy_fraction=0.25' };
+  const bendingLoss = { model: 'kelvin-voigt-plane-stress', frequencyAxis: 'frequency',
+    frequencyHz: 1000, primaryAngleRad: 0.3, secondaryAngleRad: -0.7 };
+  for (const [loss, parameters] of [
+    [{}, ['preset', '', 0, 0, 0]],
+    [{ filmLoss: 'stated-unknown' }, ['stated-unknown', '', 0, 0, 0]],
+    [{ filmLoss: { model: 'generalized-maxwell', frequencyAxis: 'f' } }, ['generalized-maxwell', 'f', 0, 0, 0]],
+    [{ bendingLoss }, ['kelvin-voigt-plane-stress', 'frequency', 1000, 0.3, -0.7]],
+  ]) {
+    for (const gasSources of [undefined, sourceInput()]) {
+      const record = gasSources ? sourceRecord : '293.15 65000 0.5';
+      for (const options of [{}, { copies: false, slowFirst: true }, { refuseFine: true, scales: [2, 3] }]) {
+        const result = await run(record, { ...options, gasSources, materials: { ...materialInput, ...loss, heldEnvironment } });
+        assert.equal(result.messages.at(-1).type, 'ready');
+        assert.ok(result.calls.length >= 2);
+        for (const call of result.calls) {
+          assert.equal(call[0], gasSources ? 'source-environment' : 'environment');
+          assert.deepEqual(call.slice(3, 20), [record, materialInput.surfacePack, materialInput.secondaryPack,
+            materialInput.strikerPack, 'T', 293.15, 9e-6, 0.005, 0.05,
+            heldEnvironment.primary, heldEnvironment.secondary, heldEnvironment.striker, ...parameters]);
+          if (gasSources) {
+            assert.deepEqual([...call.at(-4)], [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+            assert.deepEqual([...call.at(-3)], [2, 1, 2, 1, 2, 1]);
+            assert.equal(call.at(-1), 'frozen');
+          }
+        }
+        assert.deepEqual([...result.messages.at(-1).info.materials.environments], Object.values(heldEnvironment));
+        assert.equal(result.messages.at(-1).info.materials.lossModel, parameters[0]);
+        assert.equal(result.correctionCalls, 0);
+      }
+    }
+  }
+});
+
+test('held solid conditions cannot be silently dropped by stale WASM, invalid input or a native refusal', async () => {
+  const heldEnvironment = { primary: 'pressure=200000', secondary: '', striker: '' };
+  for (const gasSources of [undefined, sourceInput()]) {
+    for (const options of [{ missingWithEnvironment: true }, { refuseEnvironment: true }]) {
+      const result = await run(gasSources ? sourceRecord : undefined,
+        { ...options, gasSources, materials: { ...materialInput, heldEnvironment, filmLoss: 'stated-unknown' } });
+      assert.equal(result.attached, 0);
+      assert.equal(result.messages.at(-1).type, 'error');
+      assert.match(result.messages.at(-1).message, /material-environment support|secondary material environment/);
+      assert.ok(result.calls.every(call => call[0].endsWith('environment')));
+    }
+  }
+  for (const invalid of [null, {}, { ...heldEnvironment, secondary: undefined },
+    { ...heldEnvironment, primary: 'p'.repeat(4097) }, { ...heldEnvironment, primary: 'é'.repeat(2049) }]) {
+    const result = await run(undefined, { materials: { ...materialInput, heldEnvironment: invalid } });
+    assert.equal(result.messages.at(-1).type, 'error');
+    assert.equal(result.calls.length, 0);
+  }
+  const both = await run(undefined, { materials: { ...materialInput, heldEnvironment,
+    filmLoss: 'stated-unknown', bendingLoss: { model: 'kelvin-voigt-plane-stress' } } });
+  assert.equal(both.messages.at(-1).type, 'error');
+  assert.equal(both.calls.length, 0);
+});
 
 test('canonical gas bytes compose with both solid routes through every grid, retry and copy fallback', async () => {
   const bendingLoss = { model: 'kelvin-voigt-plane-stress', frequencyAxis: 'frequency',

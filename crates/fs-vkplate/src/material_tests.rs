@@ -472,10 +472,17 @@ fn g1_g3_held_material_pressure_reaches_plate_operators_and_live_pressure() {
         Some(([1e6, 1e6, 4e5, 2e5, 0.0, 0.0], (0.0, 1e6), false)),
         &[], Some(QuantityKind::Pressure),
     );
-    let low = viscous_binding_at(&source, &held_environment_point(QuantityKind::Pressure, 100_000.0))
-        .unwrap();
-    let high = viscous_binding_at(&source, &held_environment_point(QuantityKind::Pressure, 200_000.0))
-        .unwrap();
+    let striker = pack("pressure ingress striker", 800.0, 12e9, Some(0.3)).to_bytes();
+    let point = materials::temperature_frequency_point("T", 293.15, "frequency", 1000.0).unwrap();
+    let bind = |pressure| {
+        let environment = [("material_environment".into(), pressure)];
+        KitMaterials::from_card_packs_with_held_environment(
+            &source.to_bytes(), &[], &striker, &point, [&environment, &environment, &[]],
+            9e-6, 0.005, 0.05,
+        ).unwrap().with_card_bending_viscosity([0.0; 2]).unwrap()
+    };
+    let low = bind(100_000.0);
+    let high = bind(200_000.0);
     assert_eq!(low.primary().resolved().card_identity(), high.primary().resolved().card_identity());
     assert_ne!(low.primary().resolved().identity(), high.primary().resolved().identity());
     let modulus = high.primary().resolved().property("young_modulus").unwrap();
@@ -511,6 +518,60 @@ fn g1_g3_held_material_pressure_reaches_plate_operators_and_live_pressure() {
     assert_ne!(first, second);
     assert!(original.ins.bodies[0].bending_loss_dissipated_j() > 0.0);
     assert!(changed.ins.bodies[0].bending_loss_dissipated_j() > 0.0);
+}
+
+#[test]
+fn g1_material_environment_ingress_preserves_independent_surface_and_striker_queries() {
+    let source = manufactured_pack(
+        "independent pressure sources", 1390.0, 4e9, Some(0.38),
+        Some(([1e6, 1e6, 4e5, 2e5, 0.0, 0.0], (0.0, 1e6), false)),
+        &[], Some(QuantityKind::Pressure),
+    ).to_bytes();
+    let point = materials::temperature_frequency_point("T", 293.15, "frequency", 1000.0).unwrap();
+    let primary = [("material_environment".into(), 100_000.0)];
+    let secondary = [("material_environment".into(), 200_000.0)];
+    let striker = [("material_environment".into(), 150_000.0)];
+    let materials = KitMaterials::from_card_packs_with_held_environment(
+        &source, &[], &source, &point, [&primary, &secondary, &striker], 9e-6, 0.005, 0.05,
+    ).unwrap().with_card_bending_viscosity([0.2, -0.1]).unwrap();
+    near(materials.primary().density_kg_m3(), 1390.0);
+    near(materials.secondary().density_kg_m3(), 1.25 * 1390.0);
+    near(materials.striker_mass_kg(), 1.125 * 1390.0 * 9e-6);
+    near(materials.primary().young_modulus_pa(), 4e9);
+    near(materials.secondary().young_modulus_pa(), 2e9);
+    near(materials.striker().young_modulus_pa(), 3e9);
+    let Law::Power { k, .. } = materials.impact_law();
+    let reduced_modulus = 1.0 / ((1.0 - 0.38 * 0.38) * (1.0 / 3e9 + 1.0 / 4e9));
+    near(k, (4.0 / 3.0) * reduced_modulus * 0.005_f64.sqrt());
+    for (elastic, (loss, _)) in [
+        (materials.primary(), materials.primary_bending_loss().unwrap()),
+        (materials.secondary(), materials.secondary_bending_loss().unwrap()),
+    ] {
+        assert_eq!(loss.source().query(), elastic.resolved().query());
+        assert_eq!(elastic.resolved().axis_quantities().get("material_environment"),
+            Some(&QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static))));
+    }
+    assert_eq!(materials.primary().resolved().card_identity(), materials.secondary().resolved().card_identity());
+    assert_ne!(materials.primary().resolved().identity(), materials.secondary().resolved().identity());
+
+    // Reusing a card does not fill a missing state from a different solid or gas.
+    let missing = KitMaterials::from_card_packs_with_held_environment(
+        &source, &[], &source, &point, [&primary, &[], &striker], 9e-6, 0.005, 0.05,
+    ).unwrap_err();
+    assert!(missing.contains("secondary material"), "{missing}");
+    for environment in [
+        vec![("T".into(), 300.0)], vec![("absent".into(), 1.0)],
+        vec![("material_environment".into(), 300_000.0)],
+        vec![("material_environment".into(), 100_000.0); 2],
+    ] {
+        assert!(KitMaterials::from_card_packs_with_held_environment(
+            &source, &[], &source, &point, [&environment, &secondary, &striker], 9e-6, 0.005, 0.05,
+        ).is_err());
+    }
+    let stress = manufactured_pack("unowned stress", 1390.0, 4e9, Some(0.38), None, &[], Some(QuantityKind::Stress)).to_bytes();
+    assert!(KitMaterials::from_card_packs_with_held_environment(
+        &stress, &[], &source, &point, [&primary, &secondary, &striker], 9e-6, 0.005, 0.05,
+    ).unwrap_err().contains("static pressure, composition, moisture or concentration"));
 }
 
 #[test]
@@ -1712,6 +1773,32 @@ fn film_environment_point(pressure: f64, water: f64) -> fs_matdb::QueryPoint {
             QuantityKind::Moisture(fs_qty::semantic::MoistureBasis::DryMass),
             ValueForm::Static,
         )), water).unwrap()
+}
+
+#[test]
+fn g1_material_environment_ingress_drives_distinct_pressure_and_moisture_film_laws() {
+    let pressure = film_environment_pack("pressure ingress", "pressure", QuantityKind::Pressure,
+        (100_000.0, 200_000.0)).to_bytes();
+    let moisture = film_environment_pack("moisture ingress", "water",
+        QuantityKind::Moisture(fs_qty::semantic::MoistureBasis::DryMass), (0.1, 0.2)).to_bytes();
+    let striker = pack("plain striker ingress", 800.0, 12e9, Some(0.3)).to_bytes();
+    let primary_environment = [("pressure".into(), 200_000.0)];
+    let secondary_environment = [("water".into(), 0.15)];
+    let materials = KitMaterials::from_card_packs_with_held_environment(
+        &pressure, &moisture, &striker, &materials::temperature_point("T", 293.15).unwrap(),
+        [&primary_environment, &secondary_environment, &[]], 9e-6, 0.005, 0.05,
+    ).unwrap().with_film_loss_curve("T", "frequency", 293.15).unwrap();
+    for hz in [20.0, 1000.0, 20000.0] {
+        near(materials.film_tan_delta(0, hz).unwrap().unwrap(), 0.04);
+        near(materials.film_tan_delta(1, hz).unwrap().unwrap(), 0.03);
+    }
+    assert_eq!(materials.primary().resolved().state_coordinate("water"), None);
+    assert_eq!(materials.secondary().resolved().state_coordinate("pressure"), None);
+    assert_eq!(materials.striker().resolved().query_point().len(), 1);
+    assert_eq!(materials.secondary().resolved().axis_quantities().get("water"),
+        Some(&QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Moisture(fs_qty::semantic::MoistureBasis::DryMass), ValueForm::Static,
+        ))));
 }
 
 #[test]

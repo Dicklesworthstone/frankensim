@@ -16,7 +16,7 @@ use fs_material::plane_stress_viscosity::{
 use fs_material::state_point::{
     IsotropicElasticStatePoint, MaterialPropertySelection, MaterialStatePointError,
     ResolvedMaterialStatePoint, ScalarAdmissibility, ScalarPropertyRequirement,
-    resolve_isotropic_elastic_state_point,
+    append_held_environment, resolve_isotropic_elastic_state_point,
     resolve_material_state_point,
 };
 use fs_qty::{
@@ -279,14 +279,6 @@ impl KitMaterials {
         frequency_hz: f64,
         angles_rad: [f64; 2],
     ) -> Result<Self, String> {
-        if frequency_axis.trim().is_empty()
-            || frequency_axis.len() > 128
-            || frequency_axis == axis
-            || !frequency_hz.is_finite()
-            || frequency_hz <= 0.0
-        {
-            return Err("bending viscosity requires a distinct source frequency axis and positive finite frequency [Hz]".into());
-        }
         let point = temperature_frequency_point(axis, temperature_k, frequency_axis, frequency_hz)?;
         let materials = Self::from_card_packs(
             primary,
@@ -297,6 +289,16 @@ impl KitMaterials {
             striker_tip_radius_m,
             impact_loss_s_m,
         )?;
+        materials.with_card_bending_viscosity(angles_rad)
+    }
+
+    /// Resolve each head's viscosity from its original card at that head's
+    /// complete elastic query. This preserves independent pressure, moisture
+    /// and composition coordinates rather than reconstructing temperature alone.
+    pub fn with_card_bending_viscosity(self, angles_rad: [f64; 2]) -> Result<Self, String> {
+        if self.packs.len() < 2 {
+            return Err("bending viscosity reads the head cards; these materials have none".into());
+        }
         let requirements = PLANE_STRESS_VISCOSITY_PROPERTIES
             .iter()
             .map(|name| {
@@ -308,10 +310,11 @@ impl KitMaterials {
                 .map_err(|e| e.to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let resolve = |pack: &NormalizedMaterialCardPack| -> Result<PlaneStressViscosity, String> {
+        let resolve = |head: usize| -> Result<PlaneStressViscosity, String> {
+            let elastic = [&self.primary, &self.secondary][head];
             let source = resolve_material_state_point(
-                pack.card(),
-                &point,
+                self.packs[head].card(),
+                &elastic.resolved().query(),
                 &requirements,
                 MaterialPropertySelection::SingleClaimOnly,
             )
@@ -323,9 +326,9 @@ impl KitMaterials {
             )
             .map_err(|e| e.to_string())
         };
-        let primary = resolve(&materials.packs[0])?;
-        let secondary = resolve(&materials.packs[1])?;
-        materials.with_bending_viscosity(primary, secondary, angles_rad)
+        let primary = resolve(0)?;
+        let secondary = resolve(1)?;
+        self.with_bending_viscosity(primary, secondary, angles_rad)
     }
 
     pub fn primary_bending_loss(&self) -> Option<(&PlaneStressViscosity, f64)> {
@@ -602,6 +605,27 @@ impl KitMaterials {
         striker_tip_radius_m: f64,
         impact_loss_s_m: f64,
     ) -> Result<Self, String> {
+        Self::from_card_packs_with_held_environment(
+            primary, secondary, striker, point, [&[]; 3],
+            striker_volume_m3, striker_tip_radius_m, impact_loss_s_m,
+        )
+    }
+
+    /// Import at a shared base query and independently declared held conditions
+    /// for the primary surface, secondary surface and striker, in that order.
+    /// Extra axes must carry an unambiguous supported environmental quantity on
+    /// their own source card; no atmospheric or moisture-basis conversion occurs.
+    /// An empty secondary pack reuses the primary card, not its state conditions.
+    pub fn from_card_packs_with_held_environment(
+        primary: &[u8],
+        secondary: &[u8],
+        striker: &[u8],
+        point: &QueryPoint,
+        environment: [&[(String, f64)]; 3],
+        striker_volume_m3: f64,
+        striker_tip_radius_m: f64,
+        impact_loss_s_m: f64,
+    ) -> Result<Self, String> {
         if primary
             .len()
             .saturating_add(secondary.len())
@@ -622,7 +646,13 @@ impl KitMaterials {
             load(secondary)?
         };
         let striker = load(striker)?;
-        let resolve = |pack: &NormalizedMaterialCardPack| {
+        let held = |pack: &NormalizedMaterialCardPack, index: usize, role: &str| {
+            append_held_environment(pack.card().claims(), point.clone(), environment[index])
+                .map_err(|e| format!("{role} material environment: {e}"))
+        };
+        let points = [held(&primary, 0, "primary")?, held(&secondary, 1, "secondary")?,
+            held(&striker, 2, "striker")?];
+        let resolve = |pack: &NormalizedMaterialCardPack, point: &QueryPoint| {
             resolve_isotropic_elastic_state_point(
                 pack.card(),
                 point,
@@ -631,15 +661,15 @@ impl KitMaterials {
             .map_err(|e| e.to_string())
         };
         let mut result = Self::try_new(
-            resolve(&primary)?,
-            resolve(&secondary)?,
-            resolve(&striker)?,
+            resolve(&primary, &points[0]).map_err(|e| format!("primary material: {e}"))?,
+            resolve(&secondary, &points[1]).map_err(|e| format!("secondary material: {e}"))?,
+            resolve(&striker, &points[2]).map_err(|e| format!("striker material: {e}"))?,
             striker_volume_m3,
             striker_tip_radius_m,
             impact_loss_s_m,
         )?;
         // Optional: a card without both directional claims states none.
-        let directional = |pack: &NormalizedMaterialCardPack| -> Option<(f64, f64)> {
+        let directional = |pack: &NormalizedMaterialCardPack, point: &QueryPoint| -> Option<(f64, f64)> {
             let requirements = IN_PLANE_MODULI
                 .iter()
                 .map(|name| {
@@ -663,7 +693,7 @@ impl KitMaterials {
                 resolved.property(IN_PLANE_MODULI[1])?.value_si(),
             ))
         };
-        result.in_plane_moduli = [directional(&primary), directional(&secondary)];
+        result.in_plane_moduli = [directional(&primary, &points[0]), directional(&secondary, &points[1])];
         // The tip constants change the contact law. A card carries all of them
         // or none; a partial set, or a claim present but unresolvable here
         // (out of its validity, say), refuses instead of leaving the tip
@@ -679,7 +709,7 @@ impl KitMaterials {
                 .map_err(|e| e.to_string())?;
                 match resolve_material_state_point(
                     striker.card(),
-                    point,
+                    &points[2],
                     &[requirement],
                     MaterialPropertySelection::SingleClaimOnly,
                 ) {
@@ -916,6 +946,14 @@ pub fn temperature_frequency_point(
     frequency_axis: &str,
     frequency_hz: f64,
 ) -> Result<QueryPoint, String> {
+    if frequency_axis.trim().is_empty()
+        || frequency_axis.len() > 128
+        || frequency_axis == axis
+        || !frequency_hz.is_finite()
+        || frequency_hz <= 0.0
+    {
+        return Err("bending viscosity requires a distinct source frequency axis and positive finite frequency [Hz]".into());
+    }
     temperature_point(axis, temperature_k)?
         .with_quantity(
             frequency_axis,

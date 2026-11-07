@@ -12,6 +12,7 @@
 //                    thermochemical record, plus water identity and phase policy
 //       materials    canonical primary/secondary/striker card-pack bytes and
 //                    declared temperature + spherical-impactor geometry/loss
+//                    + optional per-solid held source coordinates (AXIS=VALUE).
 //                    (KitMaterialOptions in mix.ts); no browser material laws.
 //                    Drum heads need bendingLoss, a generalized-Maxwell filmLoss curve,
 //                    or filmLoss 'stated-unknown' (entered as 0, with a receipt).
@@ -143,12 +144,27 @@ function buildPiece(name, scale, gasRecord, materials, gasSources) {
     }
     const inputs = [name, scale, gasRecord ?? '293.15 101325 0', surfacePack, secondaryPack,
       strikerPack, temperatureAxis, temperatureK, strikerVolumeM3, strikerTipRadiusM, impactLossSM];
+    const environment = materials.heldEnvironment;
+    if (environment !== undefined && (!environment || typeof environment !== 'object'
+        || !['primary', 'secondary', 'striker'].every(role => typeof environment[role] === 'string'
+          && new TextEncoder().encode(environment[role]).length <= 4096))) {
+      throw new Error('Declare primary, secondary and striker held environments as AXIS=VALUE records (at most 4096 bytes each); use an empty record for no extra conditions.');
+    }
+    const withEnvironment = (model, axis = '', frequency = 0, primaryAngle = 0, secondaryAngle = 0) => {
+      const constructor = gasSources ? 'withMaterialEnvironmentAndGasSources' : 'withMaterialEnvironment';
+      if (typeof KitPiece[constructor] !== 'function') {
+        throw new Error('This kit engine needs rebuilding with material-environment support; the selected solid conditions were not applied.');
+      }
+      return KitPiece[constructor](...inputs, environment.primary, environment.secondary, environment.striker,
+        model, axis, frequency, primaryAngle, secondaryAngle, ...(gasSources ?? []));
+    };
     if (materials.filmLoss !== undefined) {
       if (materials.bendingLoss !== undefined) {
         throw new Error('Select either a film-loss curve, stated-unknown film loss, or sourced bending loss; the selections are exclusive.');
       }
       const loss = materials.filmLoss;
       if (loss === 'stated-unknown') {
+        if (environment !== undefined) return withEnvironment('stated-unknown');
         const constructor = gasSources ? 'withMaterialsStatedUnknownFilmLossAndGasSources' : 'withMaterialsStatedUnknownFilmLoss';
         if (typeof KitPiece[constructor] !== 'function') {
           throw new Error('This kit engine needs rebuilding with the stated-unknown film-loss route; the declaration was not applied.');
@@ -159,6 +175,7 @@ function buildPiece(name, scale, gasRecord, materials, gasSources) {
           || typeof loss.frequencyAxis !== 'string' || !loss.frequencyAxis.trim()) {
         throw new Error('Declare generalized-Maxwell film loss with the head cards’ cyclic-frequency axis, or stated-unknown film loss.');
       }
+      if (environment !== undefined) return withEnvironment(loss.model, loss.frequencyAxis);
       const constructor = gasSources ? 'withMaterialFilmLossCurveAndGasSources' : 'withMaterialFilmLossCurve';
       if (typeof KitPiece[constructor] !== 'function') {
         throw new Error('This kit engine needs rebuilding with source film-loss curve support; the selected head loss was not applied.');
@@ -172,6 +189,8 @@ function buildPiece(name, scale, gasRecord, materials, gasSources) {
           || ![loss.frequencyHz, loss.primaryAngleRad, loss.secondaryAngleRad].every(Number.isFinite)) {
         throw new Error('Declare the source bending-loss model, frequency coordinate and both material orientations.');
       }
+      if (environment !== undefined) return withEnvironment(loss.model, loss.frequencyAxis,
+        loss.frequencyHz, loss.primaryAngleRad, loss.secondaryAngleRad);
       const constructor = gasSources ? 'withMaterialBendingLossAndGasSources' : 'withMaterialBendingLoss';
       if (typeof KitPiece[constructor] !== 'function') {
         throw new Error('This kit engine needs rebuilding with source bending-loss support; the selected viscosity was not applied.');
@@ -179,6 +198,7 @@ function buildPiece(name, scale, gasRecord, materials, gasSources) {
       return KitPiece[constructor](...inputs, loss.frequencyAxis, loss.frequencyHz,
         loss.primaryAngleRad, loss.secondaryAngleRad, ...(gasSources ?? []));
     }
+    if (environment !== undefined) return withEnvironment('preset');
     const constructor = gasSources ? 'withMaterialsAndGasSources' : 'withMaterials';
     if (typeof KitPiece[constructor] !== 'function') {
       throw new Error('This kit engine needs rebuilding with material-card support; the selected materials were not applied.');
