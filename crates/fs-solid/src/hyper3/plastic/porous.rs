@@ -16,6 +16,8 @@
 //! element is added here.
 
 pub mod dynamics;
+/// Retained thermal expansion, softening and reciprocal compaction heat.
+pub mod thermal;
 
 use std::sync::Arc;
 

@@ -1,5 +1,15 @@
 # fs-solid CONTRACT
 
+## Retained thermal porous compaction
+
+`hyper3::plastic::porous::thermal::FiniteThermalPorousTetSolid` carries the original pressure-sensitive plastic metric, accumulated flow, total deformation and temperature across native total-Lagrangian P1 tetrahedral equilibria. Each element retains its complete thermal family or original source binding. The old history is admitted at its accepted temperature before the endpoint-temperature return, so temperature-induced softening can cause further compaction under retained loads. The native total-Piola tangent includes thermal stretch.
+
+Original reference geometry and mass persist through thermal expansion and plastic volume change. Current density is explicitly `rho0 / det(F)`; plastic volume is separately available as `Jp`. Optional backward-Euler inertia reuses the original consistent P1 mass operator, including an explicitly supplied nodal density field. Numerical kinetic loss is admitted separately from physical caloric heat. Source densities are not inferred by the mechanical owner.
+
+The shared finite thermoplastic energy carrier separates yield heat, signed reversible caloric exchange, free/internal energy storage, coefficient storage, support/dead-load work, and signed endpoint work defects. The complete mechanical proposal is transactional; temperature/history, energy, late inertia and cancellation refusals leave the accepted owner unchanged. The `hyper_porous_thermal` regressions specify free thermal expansion, independently solved force-driven hot compaction and unloading, exact graded-inertia accounts, late rejection and retry.
+
+This is a dry associated porous law on a compressible displacement-only P1 solid. Its original volumetric-locking, constitutive calibration and time-discretization limits remain. Supplied temperatures belong to an external caloric owner; numerical work defects are never relabelled as physical heat.
+
 ## Thermal tensile onset with original-source fracture handoff
 
 `expansion::initiation::ThermalTensileElasticTetSolid` retains virgin elastic
