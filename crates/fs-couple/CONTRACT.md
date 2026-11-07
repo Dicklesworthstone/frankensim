@@ -5028,3 +5028,32 @@ invalid controls and late work refusal. An independent RK4 reference checked
 the physical fixture and its mesh refinement; Rust parsing and formatting
 passed. The new native coupling tests remain unexecuted because the complete
 dependency build is unavailable.
+
+### Sorption heat across unlike original material layers
+
+`FiniteMoistureAtmosphere::advance_layered_with_sorption_energy` and
+`advance_layered_radial_with_sorption_energy` now pair the original layered
+backward-Euler endpoints with one closed isothermal gas/body energy account.
+Each material supplies its own pinned differential isosteric heat law on the
+same original card and current transport context. The common cell-integration
+helper uses actual dry masses and loading-dependent source integrals for both
+homogeneous and heterogeneous bodies.
+
+Per-layer reports retain their source, water change and actual cell bound/binding
+energy increments. The original vapor caloric datum is shared and the native
+gas-energy change enters once. A transfer between unlike materials can therefore
+require nonzero thermostat duty even with sealed exteriors and no net gas water
+exchange. Internal interfaces create neither a new gas inventory nor a second
+heat debit.
+
+One aggregate source-segment cap and one final energy tolerance apply to the
+complete body. Unsupported heat-source endpoints, a late layer refusal, work
+exhaustion or cancellation publish neither transport nor energy. Temperature
+remains prescribed: this is the physical thermostat duty, not a spatial heat
+equation, a uniquely located per-cell heat source or thermal feedback.
+
+Five authored tests cover the exact sealed two-material binding-energy
+difference, finite-air uptake/desorption with loading-dependent heat, unequal
+spherical/cylindrical shells, partition equilibrium with zero integration work,
+and late source/budget/cancellation refusals. Rust formatting and independent
+analytical fixture calculations passed; native integration tests remain unrun.

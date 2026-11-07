@@ -12,6 +12,8 @@ use fs_material::state_point::{
 };
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
+#[path = "calorics/layered.rs"]
+mod layered;
 #[path = "calorics/radial.rs"]
 mod radial;
 

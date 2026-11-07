@@ -35,7 +35,12 @@ use fs_thermochem::{
     Nasa9EvaluationReceiptV1, ThermochemErrorV1, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R,
 };
 
+mod layered;
 mod radial;
+pub use layered::{
+    LayeredRadialSorptionEnergyCandidate, LayeredSorptionEnergyCandidate,
+    LayeredSorptionEnergyStep, SorptionLayerEnergy,
+};
 pub use radial::{RadialSdirk2SorptionEnergyCandidate, RadialSorptionEnergyCandidate};
 
 /// Additional source-integration work and independent closed-energy admission.
@@ -177,24 +182,15 @@ fn admit(
     Ok(())
 }
 
-fn finish<Field: ReservoirField<N>, Report, const N: usize>(
-    atmosphere: &FiniteMoistureAtmosphere,
-    before: &Field,
-    native: AtmosphereMoistureCandidate<Field, Report, N>,
-    law: &MoistureSorptionEnergy,
-    controls: SorptionEnergyControls,
-    cx: &Cx<'_>,
-) -> Result<SorptionEnergyCandidate<Field, Report, N>> {
-    let old = before.inventory();
-    let next = native.moisture().inventory();
-    if old.identity != next.identity
-        || old.moisture.len() != next.moisture.len()
-        || !old.same_dry_masses(&next)
-    {
-        return Err(invalid(
-            "native transport changed the original dry skeleton inventory",
-        ));
-    }
+/// One original vapor caloric datum, shared by every material in a closed gas.
+struct VaporDatum {
+    temperature_k: f64,
+    enthalpy_j_kg: f64,
+    rt_j_kg: f64,
+    receipt: Nasa9EvaluationReceiptV1,
+}
+
+fn vapor_datum(atmosphere: &FiniteMoistureAtmosphere) -> Result<VaporDatum> {
     let catalog = atmosphere.source_catalog();
     let water_id = catalog
         .water_species()
@@ -207,47 +203,96 @@ fn finish<Field: ReservoirField<N>, Report, const N: usize>(
         .ok_or_else(|| invalid("original vapor caloric source is absent"))?;
     let temperature_k = atmosphere.gas().state().state().temperature;
     let vapor = species.evaluate(Temperature::new(temperature_k))?;
-    let h = vapor.properties().h().value() / species.molar_mass().value();
-    let rt = R * temperature_k / species.molar_mass().value();
-    if !h.is_finite() || !positive(rt) {
+    let enthalpy_j_kg = vapor.properties().h().value() / species.molar_mass().value();
+    let rt_j_kg = R * temperature_k / species.molar_mass().value();
+    if !enthalpy_j_kg.is_finite() || !positive(rt_j_kg) {
         return Err(invalid("original vapor calorics are unrepresentable"));
     }
-    let mut cell_bound = Vec::with_capacity(old.moisture.len());
-    let mut cell_binding = Vec::with_capacity(old.moisture.len());
-    let mut bound_sum = Dd::ZERO;
-    let mut binding_sum = Dd::ZERO;
-    let mut segments = 0usize;
+    Ok(VaporDatum {
+        temperature_k,
+        enthalpy_j_kg,
+        rt_j_kg,
+        receipt: vapor.receipt().clone(),
+    })
+}
+
+/// Native cell integration without a second gas inventory or local heat-source
+/// assumption. Double-double sums survive grouping into unlike material layers.
+struct BoundStorage {
+    cell_bound: Vec<f64>,
+    cell_binding: Vec<f64>,
+    water: Dd,
+    bound: Dd,
+    binding: Dd,
+}
+
+fn integrate_storage(
+    old: MoistureField<'_>,
+    next: MoistureField<'_>,
+    law: &MoistureSorptionEnergy,
+    vapor: &VaporDatum,
+    segments: &mut usize,
+    controls: SorptionEnergyControls,
+    cx: &Cx<'_>,
+) -> Result<BoundStorage> {
+    if old.identity != next.identity
+        || old.moisture.len() != next.moisture.len()
+        || !old.same_dry_masses(&next)
+    {
+        return Err(invalid(
+            "native transport changed the original dry skeleton inventory",
+        ));
+    }
+    let mut storage = BoundStorage {
+        cell_bound: Vec::with_capacity(old.moisture.len()),
+        cell_binding: Vec::with_capacity(old.moisture.len()),
+        water: Dd::ZERO,
+        bound: Dd::ZERO,
+        binding: Dd::ZERO,
+    };
     for (i, (&a, &b)) in old.moisture.iter().zip(next.moisture).enumerate() {
         poll(cx)?;
-        segments = segments
+        *segments = segments
             .checked_add(law.integration_segments(a, b)?)
             .ok_or_else(|| invalid("source-segment work overflow"))?;
-        if segments > controls.maximum_source_segments {
+        if *segments > controls.maximum_source_segments {
             return Err(SorptionEnergyError::SourceBudget {
-                required: segments,
+                required: *segments,
                 maximum: controls.maximum_source_segments,
             });
         }
         let mass = Dd::from_f64(old.dry_mass_at(i));
         let dm = mass * Dd::from_f64(b - a);
         let release = mass * Dd::from_f64(law.integral(a, b)?);
-        let bound = Dd::from_f64(h) * dm - release;
-        let binding = Dd::from_f64(rt) * dm - release;
+        let bound = Dd::from_f64(vapor.enthalpy_j_kg) * dm - release;
+        let binding = Dd::from_f64(vapor.rt_j_kg) * dm - release;
         if !bound.to_f64().is_finite() || !binding.to_f64().is_finite() {
             return Err(invalid(
                 "local sorption storage increment is unrepresentable",
             ));
         }
-        cell_bound.push(bound.to_f64());
-        cell_binding.push(binding.to_f64());
-        bound_sum = bound_sum + bound;
-        binding_sum = binding_sum + binding;
+        storage.cell_bound.push(bound.to_f64());
+        storage.cell_binding.push(binding.to_f64());
+        storage.water = storage.water + dm;
+        storage.bound = storage.bound + bound;
+        storage.binding = storage.binding + binding;
     }
-    let gas_change = native.step().gas_internal_energy_change_j;
-    let heat = binding_sum.to_f64();
-    let residual = (Dd::from_f64(gas_change) + bound_sum - binding_sum).to_f64();
-    let power = heat / (next.time_s - old.time_s);
-    if !heat.is_finite() || !power.is_finite() || !bound_sum.to_f64().is_finite() {
+    Ok(storage)
+}
+
+/// Independent original-gas plus actual bound storage balance. Returns physical
+/// thermostat heat, its interval mean power and the residual on the same datum.
+fn close_energy(
+    bound: Dd,
+    binding: Dd,
+    gas_change: f64,
+    interval_s: [f64; 2],
+    controls: SorptionEnergyControls,
+) -> Result<(f64, f64, f64)> {
+    let heat = binding.to_f64();
+    let residual = (Dd::from_f64(gas_change) + bound - binding).to_f64();
+    let power = heat / (interval_s[1] - interval_s[0]);
+    if !heat.is_finite() || !power.is_finite() || !bound.to_f64().is_finite() {
         return Err(invalid(
             "integrated sorption storage or thermostat power is unrepresentable",
         ));
@@ -258,14 +303,39 @@ fn finish<Field: ReservoirField<N>, Report, const N: usize>(
             tolerance_j: controls.energy_balance_tolerance_j,
         });
     }
+    Ok((heat, power, residual))
+}
+
+fn finish<Field: ReservoirField<N>, Report, const N: usize>(
+    atmosphere: &FiniteMoistureAtmosphere,
+    before: &Field,
+    native: AtmosphereMoistureCandidate<Field, Report, N>,
+    law: &MoistureSorptionEnergy,
+    controls: SorptionEnergyControls,
+    cx: &Cx<'_>,
+) -> Result<SorptionEnergyCandidate<Field, Report, N>> {
+    let old = before.inventory();
+    let next = native.moisture().inventory();
+    let vapor = vapor_datum(atmosphere)?;
+    let mut segments = 0;
+    let storage = integrate_storage(old, next, law, &vapor, &mut segments, controls, cx)?;
+    let gas_change = native.step().gas_internal_energy_change_j;
+    let interval_s = [old.time_s, next.time_s];
+    let (heat, power, residual) = close_energy(
+        storage.bound,
+        storage.binding,
+        gas_change,
+        interval_s,
+        controls,
+    )?;
     let energy = SorptionEnergyStep {
-        interval_s: [old.time_s, next.time_s],
-        temperature_k,
+        interval_s,
+        temperature_k: vapor.temperature_k,
         sorption_energy_source: law.identity(),
-        vapor_calorics: vapor.receipt().clone(),
-        cell_bound_internal_energy_change_j: cell_bound,
-        cell_binding_energy_change_j: cell_binding,
-        bound_internal_energy_change_j: bound_sum.to_f64(),
+        vapor_calorics: vapor.receipt,
+        cell_bound_internal_energy_change_j: storage.cell_bound,
+        cell_binding_energy_change_j: storage.cell_binding,
+        bound_internal_energy_change_j: storage.bound.to_f64(),
         gas_internal_energy_change_j: gas_change,
         thermostat_heat_j: heat,
         mean_thermostat_power_w: power,
