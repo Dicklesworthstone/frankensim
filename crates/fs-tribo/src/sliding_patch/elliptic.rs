@@ -27,6 +27,9 @@ use super::{HertzSlidingPatch, HertzSlidingPatchParameters, HertzSlidingWrench, 
 use crate::tangential::elliptic::{EllipticCoulomb, from_principal, support, to_principal};
 use crate::{TangentialLaw, TriboError, nonnegative_finite, positive_finite};
 
+/// Original local directional laws sampled across the actual pressure footprint.
+pub mod resolved;
+
 const GAUSS: [(f64, f64); 4] = [
     (-0.861_136_311_594_052_6, 0.347_854_845_137_453_85),
     (-0.339_981_043_584_856_3, 0.652_145_154_862_546_1),
@@ -93,19 +96,10 @@ pub struct EllipticHertzSlidingPatch {
 
 impl EllipticHertzSlidingPatch {
     pub fn new(
-        mut parameters: EllipticHertzPatchParameters,
+        parameters: EllipticHertzPatchParameters,
         law: EllipticCoulomb,
     ) -> Result<Self, TriboError> {
-        nonnegative_finite(parameters.normal_force_n, "elliptic_hertz_normal_force_n")?;
-        for a in parameters.semi_axes_m {
-            positive_finite(a, "elliptic_hertz_semi_axis_m")?;
-        }
-        for x in parameters.footprint_axis {
-            finite(x, "elliptic_hertz_footprint_axis")?;
-        }
-        let norm = det::hypot(parameters.footprint_axis[0], parameters.footprint_axis[1]);
-        positive_finite(norm, "elliptic_hertz_footprint_axis_norm")?;
-        parameters.footprint_axis = parameters.footprint_axis.map(|x| x / norm);
+        let parameters = normalize_parameters(parameters)?;
         let mu = law.kinetic_coefficients();
         let capacities = mu.map(|x| x * parameters.normal_force_n);
         for x in capacities {
@@ -340,6 +334,22 @@ impl EllipticHertzSlidingPatch {
         };
         Ok((angle > 0.0 && angle < FRAC_PI_2).then_some(angle))
     }
+}
+
+fn normalize_parameters(
+    mut parameters: EllipticHertzPatchParameters,
+) -> Result<EllipticHertzPatchParameters, TriboError> {
+    nonnegative_finite(parameters.normal_force_n, "elliptic_hertz_normal_force_n")?;
+    for a in parameters.semi_axes_m {
+        positive_finite(a, "elliptic_hertz_semi_axis_m")?;
+    }
+    for x in parameters.footprint_axis {
+        finite(x, "elliptic_hertz_footprint_axis")?;
+    }
+    let norm = det::hypot(parameters.footprint_axis[0], parameters.footprint_axis[1]);
+    positive_finite(norm, "elliptic_hertz_footprint_axis_norm")?;
+    parameters.footprint_axis = parameters.footprint_axis.map(|x| x / norm);
+    Ok(parameters)
 }
 
 // Half-sum and half-difference of the ORIGINAL acting support at base +/- delta.

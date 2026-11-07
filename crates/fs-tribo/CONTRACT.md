@@ -2580,6 +2580,38 @@ unloading, reversal and separation, the actual-travel tangent, frictionless
 limits, and atomic refusals. No new normal, adhesive or friction law is selected
 by this source-neutral probe.
 
+## Local source laws on elliptical Hertz pressure
+
+`sliding_patch::elliptic::resolved::ResolvedEllipticHertzPatch` integrates a
+caller-resolved original `EllipticCoulomb` law at every actual rigid slip vector
+on the original normal footprint. The pressure geometry uses the same admission
+as the uniform-law owner. Each pressure node owns its associated directional
+support, centre moment and independently accumulated nonnegative friction heat;
+the resultant exposes generalized-power closure and a separate integrated-load
+residual. Pressure weights are never renormalized to conceal quadrature error.
+
+Signed rays through the zero-slip point remove the direction singularity. On
+each chord a sine substitution removes the Hertz rim square root; rays split at
+zero slip when it lies inside the footprint. The exterior rule uses inverse
+distance and finite local coordinates, without subtracting two remote positions.
+Four-point Gauss rules have explicit radial/angular panel counts and a preflight
+cap of 65,536 local law evaluations. The native integration uses fixed stack
+storage, polls cancellation before and after each resolver invocation, and
+returns no partial wrench. Source callbacks must stage their own side effects.
+
+This is prescribed instantaneous gross sliding, with independently supplied
+footprint and texture. It does not choose static reactions, evolve distributed
+memory, allocate heat or certify source validity. The original uniform-law
+analytic radial evaluator remains available when applicable. Both resolutions
+require convergence checks for sharp laws or nearly rank-one ellipses; small
+power/load residuals are not spatial error certificates.
+
+Six focused G1/G3/G4 groups exercise independently derived linear-speed Hertz
+second moments, the original uniform directional integral, convergence against
+the existing circular Stribeck owner, zero slip inside/outside/on the rim,
+arbitrary-frame covariance, and preflight budget/source/late-cancellation
+refusals. They extend the original nine elliptical-patch integration tests.
+
 ## Exact signed-gap timing for evolving-area Mindlin paths
 
 `HertzMindlinContact::{trial_coupled_gap_path,advance_coupled_gap_path}`

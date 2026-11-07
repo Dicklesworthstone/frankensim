@@ -8,6 +8,9 @@ use fs_tribo::tangential::elliptic::EllipticCoulomb;
 use fs_tribo::{TangentialLaw, TangentialSolveConfig, TangentialStepInput};
 use std::cell::Cell;
 
+#[path = "sliding_patch_elliptic/resolved.rs"]
+mod resolved;
+
 fn direction(angle: f64) -> [f64; 2] {
     [angle.cos(), angle.sin()]
 }
