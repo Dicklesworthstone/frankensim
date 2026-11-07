@@ -43,6 +43,8 @@
 //! Mechanical response is one way; elastic work does not feed solvent chemical
 //! potential, and no closed chemo-mechanical energy balance is claimed.
 
+mod field;
+mod layered;
 mod radial;
 mod shared;
 
@@ -52,6 +54,11 @@ pub use super::atmosphere::{
     CartesianMoistureParticipant, MoistureParticipant, SharedMoistureSolid,
 };
 pub use super::radial::atmosphere::RadialMoistureParticipant;
+pub use layered::{
+    LayeredMoistureParticipant, LayeredRadialMoistureParticipant,
+    LayeredRadialSolutionMoistureCandidate, LayeredSolutionMoistureCandidate,
+    SharedLayeredRadialSolutionMoistureCandidate, SharedLayeredSolutionMoistureCandidate,
+};
 pub use radial::{
     RadialSolutionMoistureCandidate, RadialSolutionSdirk2Candidate, RadialSolutionSdirk2Step,
     SharedRadialSolutionMoistureCandidate, SharedRadialSolutionSdirk2Candidate,

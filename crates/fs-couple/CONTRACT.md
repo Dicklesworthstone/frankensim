@@ -4726,3 +4726,31 @@ experimental validation.
 The source family changes no geometry domain: native frames remain small-strain
 and linear-geometry with fixed reference mass and stationary supports. Finite
 plastic pressure forming uses the separate existing finite-solid owner.
+
+### Finite solution reservoirs for original heterogeneous layers
+
+`FiniteMoistureSolution::advance_layered`, `advance_shared_layered`,
+`advance_layered_radial` and `advance_shared_layered_radial` now couple the
+original slab or cylindrical/spherical layer stacks to one finite solution.
+Each bounded solvent-volume trial advances the complete native layered body
+from its accepted state, including each source-backed sorption relation, actual
+dry mass, geometry, contact resistance and effective seal. No homogenized
+material or replacement field is introduced. A private participant interface
+shares the existing solution root and phase owner with homogeneous specimens;
+shared IDs, clocks, temperatures and cell limits retain their admission gates.
+
+Only the original exterior faces exchange with the finite bath. Their net
+water exchange closes against actual solvent mass, while internal interface
+transfers cancel between neighboring materials. Every candidate solution
+retains the original nonvolatile solute totals and native equilibrium or kinetic
+phase partition. Sealed bodies may redistribute water internally while the
+original kinetic phases evolve. Exposed unsupported pressure/composition source
+axes and zero-area radial-center exposure are refused.
+
+This is the existing isothermal vapor-equilibrium water-activity bridge, not a
+liquid-immersion, osmotic-traction or heat model. Native body steps and endpoint
+volume/kinetic phase coupling remain first order. Five authored regressions
+cover independent finite-bath balances, both curved geometries, opposing shared
+exchange, sealed internal diffusion with kinetic dissolution, and source/budget
+refusals. Rust parsing and formatting were checked; these new integration
+regressions have not been executed in the full dependency build.

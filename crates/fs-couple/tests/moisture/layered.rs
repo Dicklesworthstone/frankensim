@@ -15,6 +15,8 @@ mod atmosphere;
 mod radial;
 #[path = "layered/sdirk.rs"]
 mod sdirk;
+#[path = "layered/solution.rs"]
+mod solution;
 #[path = "layered/transfer.rs"]
 mod transfer;
 

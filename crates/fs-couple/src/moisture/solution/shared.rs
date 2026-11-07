@@ -1,5 +1,6 @@
 //! One finite solution root for any admitted collection of native specimens.
 
+use super::field::SolutionParticipant;
 use super::*;
 use crate::moisture::reservoir::water_sum;
 
@@ -159,34 +160,45 @@ impl FiniteMoistureSolution {
         controls: SolutionMoistureSolve,
         cx: &Cx<'_>,
     ) -> Result<SharedSolutionMoistureCandidate<F, F::Report>, SolutionMoistureError> {
+        self.advance_participants(participants, dt_s, maximum_total_cells, controls, cx)
+    }
+
+    pub(super) fn advance_participants<P: SolutionParticipant>(
+        &self,
+        participants: &[P],
+        dt_s: f64,
+        maximum_total_cells: usize,
+        controls: SolutionMoistureSolve,
+        cx: &Cx<'_>,
+    ) -> Result<SharedSolutionMoistureCandidate<P::Field, P::Report>, SolutionMoistureError> {
         poll(cx)?;
         admit_count(participants.len(), maximum_total_cells)?;
         let mut ordered: Vec<_> = participants.iter().collect();
-        ordered.sort_unstable_by_key(|body| body.id);
-        if ordered.windows(2).any(|pair| pair[0].id == pair[1].id) {
+        ordered.sort_unstable_by_key(|body| body.id());
+        if ordered.windows(2).any(|pair| pair[0].id() == pair[1].id()) {
             return Err(SolutionMoistureError::Invalid(
                 "shared-solution specimen IDs must be unique",
             ));
         }
-        let time_s = ordered[0].field.inventory().time_s;
+        let time_s = ordered[0].time_s();
         let temperature = self.solution().temperature_k();
         let mut cells = 0usize;
         for body in &ordered {
             poll(cx)?;
-            let inventory = body.field.inventory();
             cells = cells
-                .checked_add(inventory.moisture.len())
+                .checked_add(body.cells())
                 .filter(|count| *count <= maximum_total_cells)
                 .ok_or(SolutionMoistureError::Invalid(
                     "shared-solution total cell budget exhausted",
                 ))?;
-            if inventory.time_s.to_bits() != time_s.to_bits()
-                || inventory.temperature_kelvin().to_bits() != temperature.to_bits()
+            if body.time_s().to_bits() != time_s.to_bits()
+                || body.temperature_kelvin().to_bits() != temperature.to_bits()
             {
                 return Err(SolutionMoistureError::Invalid(
                     "shared solution specimens need the same accepted clock and solution temperature",
                 ));
             }
+            body.admit(cx)?;
         }
         let initial_volume = self.solution().solvent_volume_m3();
         let [mut lower, mut upper] = controls.solvent_volume_bracket_m3;
@@ -203,23 +215,16 @@ impl FiniteMoistureSolution {
                 "positive source-supported volume bracket containing the start, finite mass tolerance and bounded iterations required",
             ));
         }
-        let evaluate = |volume: f64| -> Result<Trial<F, F::Report>, SolutionMoistureError> {
+        let evaluate = |volume: f64| -> Result<Trial<P::Field, P::Report>, SolutionMoistureError> {
             poll(cx)?;
             let reservoir = self.at_endpoint_volume(volume, dt_s, || cx.checkpoint().is_err())?;
             let activity = reservoir.solution().water_activity()?;
             let mut solids = Vec::with_capacity(ordered.len());
             for body in &ordered {
                 poll(cx)?;
-                let (moisture, transport) = body.field.advance_activity(
-                    dt_s,
-                    body.faces,
-                    temperature,
-                    activity,
-                    body.transport,
-                    cx,
-                )?;
+                let (moisture, transport) = body.advance(dt_s, temperature, activity, cx)?;
                 solids.push(SharedMoistureSolid {
-                    id: body.id,
+                    id: body.id(),
                     moisture,
                     transport,
                 });
@@ -230,7 +235,7 @@ impl FiniteMoistureSolution {
                 ordered
                     .iter()
                     .zip(&solids)
-                    .map(|(body, next)| body.field.water_change_to(&next.moisture)),
+                    .map(|(body, next)| body.water_change(&next.moisture)),
             );
             let residual_kg =
                 (volume - initial_volume) * self.solvent_density_kg_m3 + water_to_solids_kg;
@@ -251,10 +256,7 @@ impl FiniteMoistureSolution {
         let start = evaluate(initial_volume)?;
         let accepted = if start.residual_kg.abs() <= controls.mass_tolerance_kg {
             start
-        } else if ordered
-            .iter()
-            .all(|body| body.faces.iter().all(Option::is_none))
-        {
+        } else if ordered.iter().all(|body| body.sealed()) {
             return Err(SolutionMoistureError::MassBalance {
                 residual_kg: start.residual_kg,
                 tolerance_kg: controls.mass_tolerance_kg,
@@ -427,20 +429,8 @@ impl FiniteMoistureSolution {
         let mut endpoints = Vec::with_capacity(ordered.len());
         for (body, next) in ordered.iter().zip(&accepted.solids) {
             poll(cx)?;
-            let old = body.field.inventory();
-            let end = next.moisture.inventory();
-            originals.push(water_sum(
-                old.moisture
-                    .iter()
-                    .enumerate()
-                    .map(|(i, m)| m * old.dry_mass_at(i)),
-            ));
-            endpoints.push(water_sum(
-                end.moisture
-                    .iter()
-                    .enumerate()
-                    .map(|(i, m)| m * end.dry_mass_at(i)),
-            ));
+            originals.push(body.water_mass_kg(None));
+            endpoints.push(body.water_mass_kg(Some(&next.moisture)));
         }
         let solid_water_kg = [
             water_sum(originals.iter().copied()),
