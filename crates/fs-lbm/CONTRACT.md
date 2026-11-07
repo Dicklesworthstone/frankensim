@@ -4051,6 +4051,64 @@ signs, cancelling heat/work, an evolving adiabatic Couette field and refused
 wall-law rollback. The independent steady temperature-profile qualification
 remains `couette_viscous_heating_profile`.
 
+**Spatial thermal walls (`NSF3_BIT_SEMANTICS_VERSION` 10).**
+`with_thermal_walls` / `set_thermal_walls` attach a sparse list of
+`NsfThermalWallFace { cell, axis, high, thermal }` overrides on the original
+impermeable FV faces. A face belongs to an adjacent fluid cell and either a
+solid neighbor or a non-periodic domain edge. Different hot/cold walls,
+localized heaters and ambient cooling can therefore drive the native coupled
+flow/total-energy equations. Unlisted faces retain `NsfSpec::wall`; an empty
+list preserves the original global wall arithmetic and trajectory. Periodic
+fluid neighbors, solid donor cells, duplicate/out-of-range faces and open
+reservoir/characteristic faces are refused. Opening a face already carrying a
+thermal override is also refused; ownership cannot be silently replaced.
+
+`NsfWallThermal` admits adiabatic, isothermal [K], prescribed inward heat flux
+[W/m²], and `Film { coefficient_w_m2_k, ambient_temperature_k }` conditions.
+Positive heat enters the gas independently of face orientation. Isothermal
+faces retain the original half-cell discretization and actual cell pressure:
+`q_in = k((T_cell+T_wall)/2, p_cell) (T_wall-T_cell)/(dx/2)`.
+The finite film solves this same molecular law together with
+`q_in = h (T_ambient-T_wall)`, so the half cell and ambient film are in series.
+It does not use conductivity at an assumed bulk/ambient mean. The native gas
+source supplies conductivity; no inferred wall transport or additional heat
+owner is introduced. Film coefficients must be finite and nonnegative; zero
+is insulating. Both prescribed and ambient temperatures must be in the
+declared run window, and native material-domain failures propagate.
+
+The film surface solve brackets the interface between the cell and ambient
+temperatures. Safeguarded secants, with every third iteration a bisection,
+have a hard 192-iteration budget after at most two endpoint queries. The
+wall-temperature fraction residual must be at most `32*f64::EPSILON`; failure
+returns `ThermalWallConvergence` without publication. A stable series
+conductance avoids large coefficient products and subtraction of nearly equal
+interface temperatures in the insulating/isothermal limits. This numerical
+surface tolerance is distinct from the optional coupled-flow endpoint controls.
+
+One sparse surface pass evaluates each local face flux once per original FV
+evaluation; divergence and the wall-heat account reuse that same value, with
+the original deterministic reduction order. There is no additional full-cell
+sweep or modeled SGS wall heat. Wall stress work remains a separate account,
+including at a face that is simultaneously heated/cooled and moving. Local
+molecular, Smagorinsky, WALE and Vreman flow paths retain their existing owners.
+The channel dynamic SGS filter still requires its original uniform scalar
+ghost-wall law, so heterogeneous overrides and that filter are mutually
+exclusive in both attachment orders.
+
+Changing the table at an accepted time preserves populations, temperature,
+force, energy, clocks and cumulative ledgers, and refreshes the current native
+FV history under the new wall data. The next original trapezoid therefore uses
+the new condition at both time levels, without an instantaneous energy impulse.
+`set_thermal_walls_cancellable` checks cancellation before/after admission and
+after the complete flux evaluation; any refusal restores controls and history.
+Characteristic interval copies retain the same sparse table. Focused tests in
+`nsf3::thermal_wall::tests` exercise six orientations and an interior solid,
+independent film series-resistance/interface algebra, heterogeneous heating
+and cooling with moving-wall work, original/default equivalence, refused and
+late-cancelled updates, characteristic trials and actual-pressure source refusal.
+These conditions prescribe external thermal data; they do not introduce solid
+heat storage, a turbulent wall function or a new natural-convection qualification.
+
 **Prescribed open faces (pexfp.138).**
 `set_open_face(axis, high, Some(NsfOpenState))` declares the density [kg/m³],
 Cartesian velocity [m/s] and temperature [K] of a uniform exterior ghost plane.

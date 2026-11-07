@@ -356,6 +356,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 "one non-periodic open axis needs >=4 cells and stationary transverse boundaries",
             ));
         }
+        if self.thermal_walls_on_domain_face(axis, false)
+            || self.thermal_walls_on_domain_face(axis, true)
+        {
+            return Err(NsfError::Input("remove local thermal wall data before opening that face"));
+        }
         for i in 0..self.n {
             let x = self.at(i)[axis];
             if (x < 2 || x >= self.spec.dims[axis] - 2) && self.solid[i] {

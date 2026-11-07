@@ -169,6 +169,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         config: NsfChannelDynamicThermalSgsConfig,
         maximum_workspace_bytes: usize,
     ) -> Result<Self, NsfError> {
+        if !self.thermal_walls.is_empty() {
+            return Err(NsfError::Input("channel dynamic SGS requires uniform global thermal walls"));
+        }
         config.validate()?;
         if self.sgs.is_some() || self.dynamic_sgs.is_some() {
             return Err(NsfError::Input(

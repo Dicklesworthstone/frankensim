@@ -115,6 +115,8 @@ mod body_force;
 mod hydrostatic;
 mod coupling;
 pub use coupling::{NsfCouplingComponent, NsfCouplingControl, NsfCouplingReport};
+mod thermal_wall;
+pub use thermal_wall::{NsfThermalWallFace, NsfWallThermal};
 /// Unpublished original NSF interval for reciprocal characteristic coupling.
 pub use characteristic_trial::NsfCharacteristicTrial;
 
@@ -144,7 +146,9 @@ pub const MAX_QUALIFIED_MACH: f64 = 0.2;
 /// native total-energy flux and fluid trajectories are unchanged.
 /// 9: optional residual-controlled endpoint coupling; the default three-pass
 /// trajectory and its arithmetic are unchanged.
-pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 9;
+/// 10: optional spatial wall temperatures, heat fluxes and finite-film cooling;
+/// the original global wall condition retains its arithmetic.
+pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 10;
 
 /// Refusals of the NSF grid. A failed step leaves the published state unchanged.
 #[derive(Clone, Debug, PartialEq)]
@@ -224,6 +228,12 @@ pub enum NsfError {
         control: NsfCouplingControl,
         report: NsfCouplingReport,
     },
+    /// The bounded molecular half-cell/ambient-film surface solve did not converge.
+    ThermalWallConvergence {
+        cell: usize,
+        axis: usize,
+        high: bool,
+    },
 }
 
 impl fmt::Display for NsfError {
@@ -233,7 +243,8 @@ impl fmt::Display for NsfError {
 }
 impl std::error::Error for NsfError {}
 
-/// Thermal condition of every wall face (solid cells and non-periodic domain faces).
+/// Default thermal condition of wall faces (solid cells and non-periodic domain faces).
+/// [`NsfGrid3::set_thermal_walls`] can override individual impermeable faces.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WallThermal {
     /// Zero heat flux.
@@ -272,7 +283,7 @@ pub struct NsfSpec<G = GasSpec, S = &'static str> {
     pub bulk_ratio_source: S,
     /// Cap on the number of cells (cap admitted, cap + 1 refused).
     pub maximum_cells: usize,
-    /// Thermal condition of every wall face.
+    /// Default thermal condition of every wall face; local overrides are optional.
     pub wall: WallThermal,
     /// Threads for the cell passes; the result is bitwise independent of this number.
     pub workers: usize,
@@ -345,6 +356,11 @@ impl NsfLaw {
     #[must_use]
     pub fn energy_unit_j(&self) -> f64 {
         self.rho_ref_kg_m3 * (self.dx_m / self.dt_s).powi(2) * self.dx_m.powi(3)
+    }
+    /// Heat-flux unit [W/m²] of one lattice face flux.
+    #[must_use]
+    pub fn heat_flux_unit_w_m2(&self) -> f64 {
+        self.energy_unit_j() / (self.dt_s * self.dx_m * self.dx_m)
     }
     fn table(&self, tab: &[f64], theta: f64) -> f64 {
         let t = self.kelvin_of_theta(theta);
@@ -663,6 +679,8 @@ pub struct NsfGrid3<L: Lattice3<27>> {
     law: NsfLaw,
     coupling_control: Option<NsfCouplingControl>,
     last_coupling_report: Option<NsfCouplingReport>,
+    /// Sparse, canonically ordered overrides of actual impermeable wall faces.
+    thermal_walls: Vec<NsfThermalWallFace>,
     /// Local source response only; empty for the bit-preserving GasSpec route.
     material: Vec<Option<NsfCellMaterial>>,
     sgs: Option<NsfSgsConfig>,
@@ -878,6 +896,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             law,
             coupling_control: None,
             last_coupling_report: None,
+            thermal_walls: Vec::new(),
             material,
             n,
             solid: solid_v,
@@ -1316,6 +1335,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             WallThermal::Adiabatic => None,
             WallThermal::Isothermal(t) => Some(self.law.theta_of_kelvin(t)),
         };
+        let local_wall_heat = self.thermal_wall_fluxes(rho, theta)?;
         let face = |i: usize, a: usize| -> Result<f64, NsfError> {
             let x = self.at(i);
             let Some(j) = self.fluid_at(x, a, 1) else {
@@ -1391,7 +1411,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     0.5 * (g[i][a] + gb) - (s as f64) * k * (b.theta - theta[i]),
                 ));
             }
-            let heat = match wall_theta {
+            let heat = if let Some(j) = self.local_thermal_wall_index(i, a, s) {
+                local_wall_heat[j]
+            } else { match wall_theta {
                 None => 0.0,
                 Some(tw) => {
                     // Same local pressure as the adjacent cell; only the wall
@@ -1407,7 +1429,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                         -kf * (theta[i] - tw) / 0.5
                     }
                 }
-            };
+            }};
             if !self.moving_walls || self.shifted(self.at(i), a, s).is_some() {
                 return Ok(WallEnergyFlux {
                     total: heat,
@@ -2265,6 +2287,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// Explicit incoming thermal controls contribute their location and values.
     /// Nonzero physical gravity and held body acceleration contribute their SI components.
     /// Explicit endpoint convergence controls also contribute; the default adds no bits.
+    /// Local thermal wall controls contribute their canonical faces and physical values.
     #[must_use]
     pub fn state_hash(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -2358,6 +2381,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             feed(control.velocity_relative_tolerance);
             feed(control.caloric_relative_tolerance);
             feed(control.energy_relative_tolerance);
+        }
+        for wall in &self.thermal_walls {
+            wall.feed_hash(&mut feed);
         }
         h
     }

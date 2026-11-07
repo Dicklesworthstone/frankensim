@@ -393,6 +393,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             spec: self.spec.clone(), law: self.law.clone(), material: self.material.clone(),
             coupling_control: self.coupling_control,
             last_coupling_report: self.last_coupling_report,
+            thermal_walls: self.thermal_walls.clone(),
             sgs: self.sgs, sgs_transport: self.sgs_transport.clone(),
             // The admitted characteristic topology excludes periodic dynamic SGS.
             dynamic_sgs: None,

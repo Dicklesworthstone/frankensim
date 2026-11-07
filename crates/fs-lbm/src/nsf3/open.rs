@@ -228,6 +228,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     "reservoir aperture tiles must avoid domain corners and characteristic collars",
                 ));
             }
+            if self.local_thermal_wall(self.index(x), source.axis, if source.high { 1 } else { -1 }).is_some() {
+                return Err(NsfError::Input("remove local thermal wall data before opening that aperture"));
+            }
             // The ghost extrapolation has no solid/open junction rule. Admit
             // the local two-layer fluid collar explicitly instead of allowing
             // a diagonal population to bypass an interior obstacle.
@@ -617,6 +620,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             ));
         }
         let plane = if high { self.spec.dims[axis] - 1 } else { 0 };
+        if state.is_some() && self.thermal_walls_on_domain_face(axis, high) {
+            return Err(NsfError::Input("remove local thermal wall data before opening that face"));
+        }
         if state.is_some()
             && self
                 .solid
