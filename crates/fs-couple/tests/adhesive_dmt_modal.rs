@@ -5,6 +5,8 @@ mod admission;
 mod common;
 #[path = "adhesive_dmt_modal/multiple.rs"]
 mod multiple;
+#[path = "adhesive_dmt_modal/mindlin.rs"]
+mod mindlin;
 #[path = "adhesive_dmt_modal/temperature.rs"]
 mod temperature;
 

@@ -18,6 +18,8 @@
 //! stiffness, JKR mixed-mode law, evolving contact frame or heat destination.
 
 pub mod multiple;
+/// Source-bound low-Tabor adhesion with retained partial-slip shear memory.
+pub mod mindlin;
 
 use super::{
     CoupledModalSystem, ModalCouplingError, dot, finite, invalid, limit, network_response, poll,

@@ -4349,3 +4349,34 @@ checks independent relaxed displacement limits and closes external work against
 kinetic energy, stored bond energy and independently integrated physical heat.
 A separate ordered-interface regression supplies the original source spectra and
 checks missing-mode, units, external-temperature and elapsed-time refusals.
+
+## Attached adhesive microslip on the complete native modal network
+
+`contact::adhesive_dmt::mindlin::AdhesiveDmtMindlinModalSystem` connects the
+original sourced low-Tabor DMT potential and changing-load Hertz--Mindlin
+history to actual native body motion. Two complete work columns retain all
+modes, connections and the full reciprocal normal/shear response. Each bounded
+normal probe reuses the allocation-free original shear recoil solve; a
+caller-declared attached indentation bracket closes normal compatibility.
+Only replay on the actual native endpoint creates the successor history.
+
+Normal adhesion storage, reversible tangential storage, physical microslip
+heat, native physical losses and numerical loss remain separate. Contact-sized
+force, coordinate, transpose-work and storage/heat gates pass independently of
+unrelated bulk storage. The full balance composes the original native increment
+account with the contact account, preserving small contact work beside a large
+preload. Receiver refusal, domain/solve refusal or cancellation publishes no
+body state, contact history, clock or last frame. The actual native network and
+history can be recovered without resetting either.
+
+The admitted model has nonnegative indentation endpoints, fixed source
+conditions and work columns, affine local paths and one proportional shear
+direction. The caller resolves loading reversals and supplies the root bracket;
+no uniqueness, contact detachment/reattachment, JKR microslip or automatically
+routed heat is inferred. Explicit step, travel, speed, force and evaluation
+budgets remain active. G1/G3/G4 regression definitions cover independently
+integrated Mindlin loading at zero/tensile net normal force, the analytical full
+two-mass/oblique-spring response including its passive third coordinate,
+loading/unloading and shear reversals, complete work, and atomic refusal/retry.
+Changed Rust parses with the pinned toolchain; these native integration
+regressions remain unexecuted in the full-storage workspace environment.
