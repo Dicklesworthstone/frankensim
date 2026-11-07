@@ -48,7 +48,7 @@ pub enum FrameKinematicsError {
     },
     /// An allocation or count cannot be represented/admitted.
     Storage(&'static str),
-    /// The clamped schedule has a corner or jump at the requested time.
+    /// The schedule has a corner or jump at the requested time.
     Nondifferentiable {
         /// Frame carrying the schedule.
         frame: FrameId,
@@ -223,13 +223,36 @@ impl<'a> PreparedSignal<'a> {
         time_s: f64,
         checkpoint: &mut impl FnMut() -> ControlFlow<()>,
     ) -> Result<(f64, f64, f64), FrameKinematicsError> {
-        let value = self
-            .source
-            .eval_prevalidated_with_checkpoint(time_s, &mut || poll(checkpoint))??
-            .value;
         let corner = || FrameKinematicsError::Nondifferentiable { frame, time_s };
+        // A chirp's pose and both derivatives share one phase evaluation. Its
+        // endpoint tones retain velocity outside the sweep; they are not
+        // clamped displacement tails. A changing sweep rate has no unique
+        // second derivative at the two joins.
+        let chirp_sample = if let TimeSignal::Chirp(chirp) = self.source {
+            poll(checkpoint)?;
+            if chirp.amplitude().value != 0.0
+                && chirp.frequency_start_hz() != chirp.frequency_end_hz()
+                && (time_s == chirp.t_start_s() || time_s == chirp.t_end_s())
+            {
+                return Err(corner());
+            }
+            Some(chirp.value_derivatives(time_s)?)
+        } else {
+            None
+        };
+        let value = if let Some((value, _, _)) = chirp_sample {
+            value
+        } else {
+            self.source
+                .eval_prevalidated_with_checkpoint(time_s, &mut || poll(checkpoint))??
+                .value
+        };
         let (rate, acceleration) = match self.source {
             TimeSignal::Constant(_) => (0.0, 0.0),
+            TimeSignal::Chirp(_) => {
+                let (_, rate, acceleration) = chirp_sample.expect("chirp phase evaluated once");
+                (rate, acceleration)
+            }
             TimeSignal::Ramp {
                 t_start,
                 t_end,

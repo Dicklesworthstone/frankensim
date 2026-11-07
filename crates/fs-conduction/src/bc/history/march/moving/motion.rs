@@ -23,8 +23,8 @@ pub struct ScanMotionLimit {
     /// ellipsoid half width, in (0, 1]. Applied even during zero-power travel.
     pub max_normalized_travel: f64,
     /// Total coefficients admitted across this source's three Chebyshev axes.
-    /// Zero permits only constant, ramp and tabulated paths. Lookup in a table
-    /// is logarithmic; coefficient work is linear and checkpointed.
+    /// Zero permits constant, ramp, tabulated and analytic chirp paths. Lookup
+    /// in a table is logarithmic; coefficient work is linear and checkpointed.
     pub max_chebyshev_coefficients: usize,
 }
 
@@ -43,9 +43,10 @@ impl MovingHeatSource {
     ///
     /// Position jumps belong to the interval after their knot; an interval
     /// ending there describes the pre-jump field. Linear pieces use their
-    /// actual slope. Smooth paths use every coefficient, not endpoint chords.
-    /// Outside a clamped path domain the speed is zero. The input end may
-    /// already be limited by source power or another participant's events.
+    /// actual slope. Polynomial paths use every coefficient, not endpoint chords.
+    /// Outside a clamped path domain the speed is zero. Chirps retain their
+    /// endpoint tones and use the analytic bound |amplitude|*2*pi*max(f).
+    /// The input end may already be limited by source power or other events.
     ///
     /// # Errors
     /// Invalid times/policy, coefficient-budget exhaustion, cancellation, or
@@ -101,6 +102,21 @@ fn axis_speed(cx: &Cx<'_>, signal: &TimeSignal, radius: f64, start: f64,
     let mut stop = |knot: f64| { if knot > start { *end = (*end).min(knot); } };
     match signal {
         TimeSignal::Constant(_) => Ok(0.0),
+        TimeSignal::Chirp(chirp) => {
+            if start < chirp.t_start_s() {
+                stop(chirp.t_start_s());
+            } else if start < chirp.t_end_s() {
+                stop(chirp.t_end_s());
+            }
+            let frequency = chirp.max_frequency_hz(start, *end)
+                .map_err(|_| invalid("chirp scan frequency is not representable"))?;
+            let amplitude = chirp.amplitude().value.abs();
+            if amplitude == 0.0 || frequency == 0.0 { return Ok(0.0); }
+            let speed = upper(upper(upper(amplitude)? / radius)?
+                * upper(core::f64::consts::TAU * upper(frequency)?)?)?;
+            if speed == 0.0 { return Err(invalid("nonzero chirp motion rate underflowed")); }
+            Ok(speed)
+        }
         TimeSignal::Ramp { t_start, t_end, from, to } => {
             if start < *t_start { stop(*t_start); return Ok(0.0); }
             if start >= *t_end { return Ok(0.0); }

@@ -42,6 +42,30 @@ fn payload(times: &[f64], values: &[[f64;3]], interp: TableInterpolation,
         values.iter().map(|v| v.map(|x| QtyAny::new(x,ACCELERATION_DIMS)).to_vec()).collect(),interp,outside).unwrap()).unwrap()
 }
 #[test]
+fn chirped_frame_and_pressure_sweep_knots_are_retained() {
+    with_cx(false, |cx| {
+        let chirp = |start, end, dims| TimeSignal::Chirp(
+            fs_scenario::signal::LinearChirp::new(start, end, 1.0, 4.0, 0.2,
+                QtyAny::new(0.0, dims), QtyAny::new(0.01, dims)).unwrap());
+        let mut frames = FrameTree::new();
+        frames.add(Frame {
+            id: FrameId(1), parent: WORLD, name: "chirped-drive".into(),
+            motion: FrameMotion::Translating {
+                direction: [1.0, 0.0, 0.0],
+                displacement: chirp(0.25, 0.75, Dims([1, 0, 0, 0, 0, 0])),
+            },
+        });
+        let pressure = chirp(0.1, 0.9, TRACTION_DIMS);
+        let surfaces = [SurfaceHistory3::Pressure { faces: &[0], value: &pressure }];
+        let history = TetLoadHistory3 {
+            surfaces: &surfaces, volume: VolumeHistory3::Fixed(VolumeLoad3::None),
+            nodal_forces_n: &[], frames: &frames,
+        };
+        let schedule = EventLoadHistory3::new(history, 16, cx).unwrap();
+        assert_eq!(schedule.knots_s(), &[0.1, 0.25, 0.75, 0.9]);
+    });
+}
+#[test]
 fn translating_frame_history_knots_are_retained_by_the_native_event_owner() {
     with_cx(false, |cx| {
         let mut frames = FrameTree::new();

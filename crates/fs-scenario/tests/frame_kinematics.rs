@@ -73,6 +73,80 @@ fn tilt_tree(angle: TimeSignal) -> FrameTree {
 }
 
 #[test]
+fn chirped_motion_uses_instantaneous_frequency_and_phase_acceleration() {
+    let phase_at_start = 0.2;
+    let offset = 0.1;
+    let amplitude = 0.03;
+    let signal = |dims| {
+        TimeSignal::Chirp(fs_scenario::signal::LinearChirp::new(
+            0.0, 1.0, 0.5, 1.5, phase_at_start,
+            QtyAny::new(offset, dims), QtyAny::new(amplitude, dims),
+        ).unwrap())
+    };
+    let tilt = tilt_tree(signal(Dims::NONE));
+    let mut translation = FrameTree::new();
+    translation.add(frame(1, WORLD, FrameMotion::Translating {
+        direction: [1.0, 0.0, 0.0], displacement: signal(LENGTH),
+    }));
+    let angular = tilt
+        .prepare_kinematics(FrameId(1), FrameKinematicsBudget::default(), &mut keep_going)
+        .unwrap();
+    let linear = translation
+        .prepare_kinematics(FrameId(1), FrameKinematicsBudget::default(), &mut keep_going)
+        .unwrap();
+    for time_s in [-0.25, 0.25, 0.75, 1.25] {
+        let (cycles, frequency, frequency_rate) = if time_s < 0.0 {
+            (0.5 * time_s, 0.5, 0.0)
+        } else if time_s > 1.0 {
+            (1.0 + 1.5 * (time_s - 1.0), 1.5, 0.0)
+        } else {
+            (0.5 * time_s + 0.5 * time_s * time_s, 0.5 + time_s, 1.0)
+        };
+        let phase = phase_at_start + core::f64::consts::TAU * cycles;
+        let omega = core::f64::consts::TAU * frequency;
+        let omega_rate = core::f64::consts::TAU * frequency_rate;
+        let (sine, cosine) = phase.sin_cos();
+        let value = offset + amplitude * cosine;
+        let rate = -amplitude * omega * sine;
+        let acceleration = -amplitude * (omega * omega * cosine + omega_rate * sine);
+        let rotation = angular.sample(time_s, &mut keep_going).unwrap();
+        near(rotation.angular_velocity_world(), Vec3::new(0.0, 0.0, rate), 3e-12);
+        near(rotation.angular_acceleration_world(), Vec3::new(0.0, 0.0, acceleration), 3e-12);
+        let position = linear.sample(time_s, &mut keep_going).unwrap();
+        near(position.origin_world(), Vec3::new(value, 0.0, 0.0), 3e-12);
+        near(position.origin_velocity_world(), Vec3::new(rate, 0.0, 0.0), 3e-12);
+        near(position.origin_acceleration_world(), Vec3::new(acceleration, 0.0, 0.0), 3e-12);
+    }
+}
+
+#[test]
+fn chirped_motion_refuses_sweep_corners_but_accepts_tone_and_zero_amplitude() {
+    for (frequency_end, amplitude) in [(0.5, 0.03), (1.5, 0.03), (1.5, 0.0)] {
+        let chirp = fs_scenario::signal::LinearChirp::new(
+            0.0, 1.0, 0.5, frequency_end, 0.2,
+            QtyAny::new(0.0, Dims::NONE), QtyAny::new(amplitude, Dims::NONE),
+        ).unwrap();
+        let tree = tilt_tree(TimeSignal::Chirp(chirp));
+        let prepared = tree
+            .prepare_kinematics(FrameId(1), FrameKinematicsBudget::default(), &mut keep_going)
+            .unwrap();
+        for time_s in [0.0, 1.0] {
+            let sample = prepared.sample(time_s, &mut keep_going);
+            if frequency_end == 0.5 || amplitude == 0.0 {
+                let phase = 0.2 + core::f64::consts::PI * time_s;
+                near(sample.unwrap().angular_acceleration_world(),
+                    Vec3::new(0.0, 0.0, -amplitude * core::f64::consts::PI.powi(2) * phase.cos()),
+                    3e-12);
+            } else {
+                assert!(matches!(sample,
+                    Err(FrameKinematicsError::Nondifferentiable { frame: FrameId(1), time_s: knot })
+                        if knot == time_s));
+            }
+        }
+    }
+}
+
+#[test]
 fn chebyshev_translation_and_tilt_expose_exact_second_derivatives() {
     let mut tree = FrameTree::new();
     tree.add(frame(

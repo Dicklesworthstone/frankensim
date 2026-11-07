@@ -28,7 +28,7 @@ impl MovingHeatSource {
     ///
     /// # Errors
     /// Nonfinite/reversed/unrepresentable intervals, negative authored powers,
-    /// insufficient value allowance, unsupported Chebyshev power, cancellation
+    /// insufficient value allowance, unsupported Chebyshev/chirp power, cancellation
     /// or nonfinite arithmetic. No source or physical trajectory is changed.
     pub fn integrate_absorbed_power(&self, cx: &Cx<'_>, start_s: f64,
         end_s: f64, max_values: usize) -> Result<AbsorbedHeat, ConductionError>
@@ -61,7 +61,7 @@ impl MovingHeatSource {
                     segment(&mut weights, i, start_s, end_s, times[i], times[i+1], *interp == Interp::Linear)?;
                 }
             }
-            TimeSignal::Chebfun(_) => unreachable!("power-value owner refuses polynomial controls"),
+            TimeSignal::Chebfun(_) | TimeSignal::Chirp(_) => unreachable!("power-value owner refuses analytic controls"),
         }
         let mut energy = 0.0;
         for (i, (&power, &weight)) in values.iter().zip(&weights).enumerate() {

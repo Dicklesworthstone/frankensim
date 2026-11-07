@@ -19,7 +19,7 @@ use crate::payload::{
 use crate::scenario::{
     Combination, ContactLaw, ContactModel, Environment, LoadCase, Scenario, Violation,
 };
-use crate::signal::{ChebProfile, Interp, TimeSignal};
+use crate::signal::{ChebProfile, Interp, LinearChirp, TimeSignal};
 use crate::{IrSourceSpan, ScenarioError};
 use fs_blake3::{ContentHash, hash_bytes};
 use fs_cheb::Cheb1;
@@ -645,6 +645,21 @@ fn w_signal(out: &mut impl IrTextSink, s: &TimeSignal) {
         }
         TimeSignal::Chebfun(p) => {
             w_profile(out, "chebfun", p);
+        }
+        TimeSignal::Chirp(chirp) => {
+            let _ = write!(
+                out,
+                "(chirp {} {} {} {} {} ",
+                canonical_float(chirp.t_start_s()),
+                canonical_float(chirp.t_end_s()),
+                canonical_float(chirp.frequency_start_hz()),
+                canonical_float(chirp.frequency_end_hz()),
+                canonical_float(chirp.phase_at_start_rad())
+            );
+            w_qty(out, &chirp.offset());
+            out.push(' ');
+            w_qty(out, &chirp.amplitude());
+            out.push(')');
         }
     }
 }
@@ -1918,6 +1933,25 @@ fn as_signal(sx: &Sx, wire: DimensionWire) -> Result<TimeSignal, ScenarioError> 
             })
         }
         "chebfun" => Ok(TimeSignal::Chebfun(as_profile(sx, "chebfun", wire)?)),
+        "chirp" => {
+            if rest.len() != 7 {
+                return Err(err_node(
+                    sx,
+                    "chirp needs t_start_s t_end_s frequency_start_hz frequency_end_hz phase_at_start_rad offset amplitude",
+                ));
+            }
+            let chirp = LinearChirp::new(
+                as_f64(&rest[0]).field("t_start_s")?,
+                as_f64(&rest[1]).field("t_end_s")?,
+                as_f64(&rest[2]).field("frequency_start_hz")?,
+                as_f64(&rest[3]).field("frequency_end_hz")?,
+                as_f64(&rest[4]).field("phase_at_start_rad")?,
+                as_qty(&rest[5], wire).field("offset")?,
+                as_qty(&rest[6], wire).field("amplitude")?,
+            )
+            .map_err(|error| err_node(sx, &error.to_string()))?;
+            Ok(TimeSignal::Chirp(chirp))
+        }
         other => {
             Err(err_node(head_node, &format!("unknown signal {other:?}")).prepend_path(".kind"))
         }

@@ -10,6 +10,17 @@ use fs_thermochem::{
     StandardStatePhaseV1, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K, required_nasa9_parameter_dims,
 };
 
+#[test]
+fn chirped_pressure_sweep_joins_are_breakpoints() {
+    let signal = TimeSignal::Chirp(fs_scenario::signal::LinearChirp::new(
+        1.0, 2.0, 2.0, 7.0, 0.0,
+        QtyAny::new(100_000.0, Pressure::DIMS), QtyAny::new(100.0, Pressure::DIMS),
+    ).unwrap());
+    assert_eq!(next_breakpoint(&signal, 0.0), Some(1.0));
+    assert_eq!(next_breakpoint(&signal, 1.0), Some(2.0));
+    assert_eq!(next_breakpoint(&signal, 2.0), None);
+}
+
 // Manufactured SI source: R=1 J/(kg K), Cp(T)=3.5+slope*T and
 // h(T)=3.5*T+slope*T^2/2. These are analytic fixtures, not material measurements.
 fn gas(slope: f64) -> FrozenGas {

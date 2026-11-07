@@ -1,5 +1,6 @@
 use fs_conduction::bc::history::march::moving::{MovingHeatBudget, MovingHeatSource};
 use fs_conduction::bc::history::march::moving::motion::velocity::MovingHeatPathBudget;
+use fs_conduction::bc::history::march::moving::motion::ScanMotionLimit;
 use fs_conduction::COMPONENT_POWER_DIMS;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_qty::{Dims, QtyAny};
@@ -22,6 +23,29 @@ fn source(path: [TimeSignal; 3]) -> MovingHeatSource {
         TimeSignal::Constant(QtyAny::new(0.0, COMPONENT_POWER_DIMS)), 0.0,
         MovingHeatBudget { max_vertices: 8, max_elements: 6, min_active_vertices: 1,
             power_relative_tolerance: 1e-11 }).unwrap()
+}
+
+#[test]
+fn chirped_motion_is_bounded_by_frequency_including_continuing_tails() {
+    let chirp = fs_scenario::signal::LinearChirp::new(0.0, 2.0, 1.0, 5.0, 0.0,
+        QtyAny::new(0.0, LENGTH), QtyAny::new(0.5, LENGTH)).unwrap();
+    let path = source([TimeSignal::Chirp(chirp.clone()), constant(0.0), constant(0.0)]);
+    let policy = ScanMotionLimit { max_normalized_travel: 0.1, max_chebyshev_coefficients: 0 };
+    with_cx(|_, cx| {
+        for (start, end) in [(-0.5, -0.25), (0.0, 0.25), (1.0, 1.25), (2.0, 2.25)] {
+            let limited = path.motion_limited_endpoint(cx, start, end, policy).unwrap();
+            let frequency = chirp.max_frequency_hz(start, end).unwrap();
+            let bound = 0.5 * core::f64::consts::TAU * frequency;
+            let allowed = policy.max_normalized_travel / bound;
+            assert!(limited > start && limited < end);
+            assert!((limited - start) * bound <= policy.max_normalized_travel);
+            assert!((limited - start) >= allowed * (1.0 - 1e-12));
+        }
+        // A smooth chirp cannot be represented by constant-velocity path
+        // segments or by treating frequency/phase as sampled center controls.
+        assert!(path.path_velocity_segments(cx, BUDGET).is_err());
+        assert!(path.schedule_control_count().is_err());
+    });
 }
 
 #[test]

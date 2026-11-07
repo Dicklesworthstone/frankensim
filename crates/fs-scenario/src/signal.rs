@@ -8,6 +8,10 @@ use fs_cheb::Cheb1;
 use fs_qty::{Dims, QtyAny};
 use std::fmt;
 
+#[path = "signal/chirp.rs"]
+mod chirp;
+pub use chirp::LinearChirp;
+
 /// Smooth histories have no finite breakpoint set. Net-flux admission uses
 /// this many equal panels (endpoints included) on each function's declared
 /// domain. This is a bounded deterministic screen, not a proof between points.
@@ -119,6 +123,11 @@ pub enum TimeSignal {
     },
     /// Spectrally-represented smooth history (chebfun function object).
     Chebfun(ChebProfile),
+    /// Continuous cosine excitation with an analytically integrated linear
+    /// frequency sweep. Equal endpoint frequencies produce a pure tone.
+    /// Outside the sweep, phase continues at the corresponding endpoint
+    /// frequency; the waveform is never clamped or restarted.
+    Chirp(LinearChirp),
 }
 
 impl TimeSignal {
@@ -129,6 +138,7 @@ impl TimeSignal {
             TimeSignal::Constant(q) => q.dims,
             TimeSignal::Ramp { from, .. } => from.dims,
             TimeSignal::Table { dims, .. } | TimeSignal::Chebfun(ChebProfile { dims, .. }) => *dims,
+            TimeSignal::Chirp(chirp) => chirp.offset().dims,
         }
     }
 
@@ -137,7 +147,7 @@ impl TimeSignal {
     /// admission plan.
     pub(crate) fn validation_dynamic_scalars(&self) -> Option<usize> {
         match self {
-            Self::Constant(_) | Self::Ramp { .. } => Some(0),
+            Self::Constant(_) | Self::Ramp { .. } | Self::Chirp(_) => Some(0),
             Self::Table { times, values, .. } => times.len().checked_add(values.len()),
             Self::Chebfun(profile) => Some(profile.cheb.coeffs().len()),
         }
@@ -147,7 +157,7 @@ impl TimeSignal {
     pub(crate) fn net_flux_validation_time_count(&self) -> usize {
         match self {
             Self::Constant(_) => 0,
-            Self::Ramp { .. } => 2,
+            Self::Ramp { .. } | Self::Chirp(_) => 2,
             Self::Table { times, .. } => times.len(),
             Self::Chebfun(_) => usize::try_from(SMOOTH_NET_FLUX_VALIDATION_PANELS + 1)
                 .expect("the fixed smooth checkpoint count fits usize"),
@@ -194,6 +204,15 @@ impl TimeSignal {
                     };
                     times.push(time);
                 }
+            }
+            TimeSignal::Chirp(chirp) => {
+                // Knots can refute balance, but cannot prove an oscillatory
+                // source balanced. The independent all-time proof refuses
+                // frequency histories even if these points alias.
+                checkpoint("net-flux checkpoint materialization")?;
+                times.push(chirp.t_start_s());
+                checkpoint("net-flux checkpoint materialization")?;
+                times.push(chirp.t_end_s());
             }
         }
         Ok(())
@@ -327,6 +346,7 @@ impl TimeSignal {
                 let (a, b) = profile.cheb.domain();
                 QtyAny::new(profile.cheb.eval(t.clamp(a, b)), profile.dims)
             }
+            TimeSignal::Chirp(chirp) => chirp.eval(t)?,
         };
         if !value.value.is_finite() {
             return Err(ScenarioError::Evaluate {
@@ -481,6 +501,9 @@ impl TimeSignal {
             TimeSignal::Chebfun(profile) => {
                 profile.check_with_checkpoint(context, out, checkpoint)?;
             }
+            // The immutable source is admitted by LinearChirp::new. Sampling
+            // and derivative evaluation retain their own clock/range checks.
+            TimeSignal::Chirp(_) => {}
         }
         Ok(())
     }

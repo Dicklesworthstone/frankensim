@@ -26,8 +26,9 @@ pub struct MovingHeatScheduleGradient {
 impl MovingHeatSource {
     /// Total scalar design coordinates: four signals' values plus three widths.
     /// Time knots and Chebyshev domain endpoints are intentionally not controls.
+    /// Chirps refuse: frequency, phase and amplitude need a separate control map.
     pub fn schedule_control_count(&self) -> Result<usize, ConductionError> {
-        self.signals().try_fold(3usize, |total, signal| total.checked_add(count(signal))
+        self.signals().try_fold(3usize, |total, signal| total.checked_add(count(signal)?)
             .ok_or_else(|| super::invalid("moving-source schedule control count overflows")))
     }
 
@@ -72,13 +73,15 @@ impl MovingHeatSource {
     }
 }
 
-fn count(signal: &TimeSignal) -> usize {
-    match signal {
+fn count(signal: &TimeSignal) -> Result<usize, ConductionError> {
+    Ok(match signal {
         TimeSignal::Constant(_) => 1,
+        TimeSignal::Chirp(_) => return Err(super::invalid(
+            "chirp schedule gradients require explicit frequency, phase and amplitude controls")),
         TimeSignal::Ramp { .. } => 2,
         TimeSignal::Table { values, .. } => values.len(),
         TimeSignal::Chebfun(profile) => profile.cheb.coeffs().len(),
-    }
+    })
 }
 
 // Derivative basis only: the primal is always evaluated by the original owner.
@@ -86,9 +89,10 @@ fn pull_signal(cx: &Cx<'_>, signal: &TimeSignal, time: f64, left: bool, seed: f6
     -> Result<Vec<f64>, ConductionError>
 {
     poll(cx, 0)?;
-    let mut out = zeros(count(signal))?;
+    let mut out = zeros(count(signal)?)?;
     match signal {
         TimeSignal::Constant(_) => out[0] = seed,
+        TimeSignal::Chirp(_) => unreachable!("chirp controls refused before allocation"),
         TimeSignal::Ramp { t_start, t_end, .. } => {
             if time <= *t_start { out[0] = seed; }
             else if time >= *t_end { out[1] = seed; }

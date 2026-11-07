@@ -123,6 +123,10 @@ fn limit(signal: &TimeSignal, start: f64, end: &mut f64) {
     let mut consider = |time: f64| { if time > start && time < *end { *end = time; } };
     match signal {
         TimeSignal::Constant(_) => {}
+        TimeSignal::Chirp(chirp) => {
+            consider(chirp.t_start_s());
+            consider(chirp.t_end_s());
+        }
         TimeSignal::Ramp { t_start, t_end, .. } => { consider(*t_start); consider(*t_end); }
         TimeSignal::Table { times, .. } => {
             if let Some(&time) = times.get(times.partition_point(|&t| t <= start)) { consider(time); }
@@ -206,6 +210,21 @@ pub(super) fn boundary_before(cx: &Cx<'_>, history: &ThermalBoundaryHistory<'_>,
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn chirp_sweep_joins_are_events_with_continuous_values() {
+        let signal = TimeSignal::Chirp(fs_scenario::signal::LinearChirp::new(
+            1.0, 2.0, 1.0, 4.0, 0.3,
+            QtyAny::new(300.0, TEMPERATURE_DIMS), QtyAny::new(10.0, TEMPERATURE_DIMS),
+        ).unwrap());
+        for (start, expected) in [(0.0, 1.0), (1.0, 2.0), (2.0, 3.0)] {
+            let mut end = 3.0;
+            limit(&signal, start, &mut end);
+            assert_eq!(end, expected);
+        }
+        for knot in [1.0, 2.0] {
+            assert_eq!(value_before(&signal, knot).unwrap(), signal.eval(knot).unwrap());
+        }
+    }
     #[test]
     fn g0_adjacent_knots_are_distinct_and_left_limits_do_not_shift_continuous_signals() {
         let a = 1.0_f64;

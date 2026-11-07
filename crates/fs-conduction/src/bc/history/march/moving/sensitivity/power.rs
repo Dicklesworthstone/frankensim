@@ -4,11 +4,12 @@ use fs_scenario::signal::TimeSignal;
 
 impl MovingHeatSource {
     /// Copy the original constant, ramp endpoints, or table power values [W].
-    /// Chebyshev coefficients are not pointwise nonnegative power controls and
-    /// are deliberately refused by this positivity-preserving parameterization.
+    /// Chebyshev coefficients and chirp parameters are not pointwise nonnegative
+    /// power controls and are refused by this positivity-preserving parameterization.
     pub fn absorbed_power_values(&self, max_values: usize) -> Result<Vec<f64>, ConductionError> {
         let count = match &self.absorbed_power_w {
             TimeSignal::Constant(_) => 1,
+            TimeSignal::Chirp(_) => return Err(invalid("power-value design does not treat chirp amplitude and phase as nonnegative sampled powers")),
             TimeSignal::Ramp { .. } => 2,
             TimeSignal::Table { values, .. } => values.len(),
             TimeSignal::Chebfun(_) => return Err(invalid("power-value design supports constant/ramp/table signals; polynomial coefficients need a separate positivity policy")),
@@ -20,7 +21,7 @@ impl MovingHeatSource {
             TimeSignal::Constant(value) => values.push(value.value),
             TimeSignal::Ramp { from, to, .. } => values.extend([from.value, to.value]),
             TimeSignal::Table { values: original, .. } => values.extend_from_slice(original),
-            TimeSignal::Chebfun(_) => unreachable!("rejected before allocation"),
+            TimeSignal::Chebfun(_) | TimeSignal::Chirp(_) => unreachable!("rejected before allocation"),
         }
         Ok(values)
     }
@@ -41,7 +42,7 @@ impl MovingHeatSource {
             TimeSignal::Constant(value) => value.value = values[0],
             TimeSignal::Ramp { from, to, .. } => { from.value = values[0]; to.value = values[1]; }
             TimeSignal::Table { values: out, .. } => out.copy_from_slice(values),
-            TimeSignal::Chebfun(_) => unreachable!("rejected before replacement"),
+            TimeSignal::Chebfun(_) | TimeSignal::Chirp(_) => unreachable!("rejected before replacement"),
         }
         Self::new(self.center_m.clone(), self.half_width_m, power, reference_time_s, self.budget)
     }

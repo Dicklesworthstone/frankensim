@@ -741,6 +741,9 @@ fn bc_flux_evaluation_work(bc: &BoundaryCondition) -> Result<u128, ValidationErr
         .ok_or(ValidationError::WorkPlanOverflow {
             phase: "Chebyshev flux evaluation work",
         }),
+        // Fixed-size DD phase formation and deterministic trigonometry; no
+        // work grows with the physical frequency or elapsed cycle count.
+        Some(BcValue::Signal(TimeSignal::Chirp(_))) => Ok(256),
         Some(BcValue::Signal(TimeSignal::Constant(_) | TimeSignal::Ramp { .. }))
         | Some(BcValue::Uniform(_) | BcValue::Profile(_) | BcValue::Typed(_))
         | None => Ok(4),

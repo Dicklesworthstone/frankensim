@@ -1,7 +1,9 @@
 //! All-finite-time proofs for declared, signed total mass flows.
 //!
-//! Signals clamp outside their own domains. The union of their knots therefore
-//! covers every nonconstant piece, without adding a second scenario clock.
+//! Ramp/table/Chebyshev signals clamp outside their own domains. The union of
+//! their knots covers every nonconstant piece. Native chirps continue to
+//! oscillate outside their sweep and are not certified by this finite-piece
+//! proof, even when a finite checkpoint screen happens to alias their cycles.
 //! Exact opposite histories use IEEE sign symmetry. Other linear/held histories
 //! use outward-rounded affine endpoint bounds and a conservative evaluation-
 //! roundoff envelope. A failed bound is Unknown, never evidence of balance.
@@ -110,7 +112,7 @@ impl FluxTerm<'_> {
                 }
                 bound = I::point(2.0) * b1 + I::point(0.5) * I::point(c0.abs()) + b2;
             }
-            TimeSignal::Constant(_) => return Ok(None),
+            TimeSignal::Constant(_) | TimeSignal::Chirp(_) => return Ok(None),
         }
         let bound = bound * I::point(self.factor.abs());
         Ok(finite(bound).then_some(bound))

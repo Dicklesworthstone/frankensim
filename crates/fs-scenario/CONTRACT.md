@@ -213,7 +213,27 @@ flagships.
   stable convex interpolation; the vessel tilt
   `(ramp 0deg 65deg 3s)`), `Table` (strictly increasing times + declared
   `Interp` contract: Linear/Hold, clamped ends), `Chebfun` (fs-cheb
-  function object). Every signal knows its `Dims`.
+  function object), and `Chirp(LinearChirp)`. Every signal knows its `Dims`.
+  `LinearChirp` authors `offset + amplitude*cos(phase)` with frequency in Hz,
+  a phase in radians at its original start time, and matching dimensions for
+  offset/amplitude. Frequency varies linearly over a finite declared interval;
+  before/after it, the endpoint tone continues without resetting phase or
+  clamping the waveform. Equal frequency endpoints give a continuous pure tone.
+  DD integrated-cycle arithmetic reduces whole cycles before conversion to
+  radians, retaining fractional cycles on long clocks. Evaluation has fixed
+  work and no allocation; unrepresentable phase/derivative/output arithmetic
+  refuses. These are numerical estimates, not interval enclosures.
+  Analytic first/second derivatives feed translating and tilting frames;
+  nonzero changing sweeps refuse second derivatives at their rate-change knots.
+  Solid, compressible-pressure and moving-heat event owners retain those knots.
+  Moving-heat travel limits use the full interval's maximum frequency, including
+  continuing tails; polynomial-only power and design-control paths refuse
+  unsupported chirps explicitly. Finite flux checkpoints cannot establish
+  all-time balance for a chirp, so the existing proof returns unavailable.
+  Canonical scenario IR carries the additive form
+  `(chirp t_start_s t_end_s frequency_start_hz frequency_end_hz phase_at_start_rad offset amplitude)`;
+  the final two values use ordinary dimensioned quantity forms and decoding
+  re-runs the immutable source constructor. Existing forms retain their bytes.
 - `frame::FrameTree` — frames with `Fixed`, `Rotating`, and `Tilt`
   motions; poses are fs-ga MOTORS composed down the parent chain
   (`world_pose`), cycle/dangling-parent checked. Rotation about an

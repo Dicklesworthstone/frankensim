@@ -34,6 +34,8 @@ impl MovingHeatSource {
                     .ok_or_else(|| invalid("heat-source center axis must be 0, 1 or 2"))?;
                 let result = match signal {
                     TimeSignal::Constant(q) => (value == 0).then_some(q.value),
+                    TimeSignal::Chirp(_) => return Err(invalid(
+                        "center-value editing does not treat chirp parameters as sampled positions")),
                     TimeSignal::Ramp { from, to, .. } => [from.value, to.value].get(value).copied(),
                     TimeSignal::Table { values, .. } => values.get(value).copied(),
                     TimeSignal::Chebfun(_) => return Err(invalid(
@@ -80,7 +82,7 @@ impl MovingHeatSource {
                         if value == 0 { from.value = replacement; } else { to.value = replacement; }
                     }
                     TimeSignal::Table { values, .. } => values[value] = replacement,
-                    TimeSignal::Chebfun(_) => unreachable!("polynomial edits refused before cloning"),
+                    TimeSignal::Chebfun(_) | TimeSignal::Chirp(_) => unreachable!("analytic parameter edits refused before cloning"),
                 },
             }
         }

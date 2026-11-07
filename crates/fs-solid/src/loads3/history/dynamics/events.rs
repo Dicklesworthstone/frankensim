@@ -423,6 +423,7 @@ impl Index<'_, '_> {
     fn signal(&mut self, signal: &TimeSignal) -> Result<(), TransientHistoryError3> {
         let (count, probe) = match signal {
             TimeSignal::Constant(_) => (1, 0.0),
+            TimeSignal::Chirp(chirp) => (7, chirp.t_start_s()),
             TimeSignal::Ramp { t_start, .. } => (4, *t_start),
             TimeSignal::Table { times, values, .. } => (times.len().checked_add(values.len())
                 .ok_or_else(|| invalid("event table size overflow"))?, times.first().copied().unwrap_or(0.0)),
@@ -432,6 +433,7 @@ impl Index<'_, '_> {
         signal.eval(probe).map_err(|e| LoadHistoryError3::Scenario(e.to_string()))?;
         match signal {
             TimeSignal::Constant(_) => {}
+            TimeSignal::Chirp(chirp) => self.knots.extend([chirp.t_start_s(), chirp.t_end_s()]),
             TimeSignal::Ramp { t_start, t_end, .. } => self.knots.extend([*t_start, *t_end]),
             TimeSignal::Table { times, .. } => {
                 for (i, &time) in times.iter().enumerate() {

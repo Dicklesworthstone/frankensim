@@ -342,6 +342,9 @@ fn value(
 fn next_breakpoint(signal: &TimeSignal, time_s: f64) -> Option<f64> {
     let next = match signal {
         TimeSignal::Constant(_) => None,
+        TimeSignal::Chirp(chirp) => [chirp.t_start_s(), chirp.t_end_s()]
+            .into_iter()
+            .find(|&knot| knot > time_s),
         TimeSignal::Ramp { t_start, t_end, .. } => {
             [*t_start, *t_end].into_iter().find(|time| *time > time_s)
         }
