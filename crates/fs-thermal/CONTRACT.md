@@ -2932,3 +2932,33 @@ Seven focused core regression groups are authored. Pinned formatter/parser and
 independent numerical/API review passed. A native Cargo test attempt stopped
 during dependency compilation with `No space left on device`; no luminescence
 tests executed in that attempt.
+
+## Spectral singlet/triplet photon recycling and pair annihilation
+
+`luminescence::transfer::recycling::SingletTripletRecyclingPlan` evolves two
+real excitation states per active cell with the existing positive reaction
+propagator. Spectral photon channels carry photon energies and directed
+escape, unresolved, and absorption fractions. An explicitly active receiver
+can create at most one singlet or triplet per absorbed photon; every positive
+branch must be energetically possible. Passive receivers introduce no state.
+Repeated returns, local crossing, reverse crossing, and continuous pump ages
+are integrated together without a bounce cutoff or invented leakage.
+
+The output separates source relaxation heat, receiver excess or passive heat,
+nonradiative heat, forward-crossing heat, and reverse-crossing bath withdrawal.
+Internal emitted and recycled traffic is reported but is excluded from the
+external energy scale. All thermal channels enter the external audit as one
+compensated net exchange, so balanced internal photon or bath cycles cannot
+inflate its error allowance. Authored fractions are validated, never repaired.
+The current numerical owner admits at most 64 states, hence 32 active
+singlet/triplet cells; passive absorption does not consume those states.
+
+`transfer::annihilation::TripletAnnihilation` supplies the isolated exact
+mean-population pair step. Its coefficient is a pair-event coefficient:
+events occur at `k * N_T² / V` and consume two triplets. Each event produces
+one singlet with the explicitly authored probability; the remaining energy
+becomes heat. A productive event requires `E_S <= 2 E_T`, irrespective of
+how small its probability is. Active volume is explicit, and population
+counts must not be confused with concentrations. This reduced law does not
+infer diffusion, spin statistics, density saturation, or a measured material
+coefficient. Numerical tests use manufactured parameters.

@@ -20,6 +20,14 @@ use fs_la::decay::reaction::{ReactionEdge, source::ReactionSourcePlan};
 use fs_la::decay::{DecayError, DecayLimits};
 use fs_math::eft::two_sum;
 
+/// Spectral photon-number recycling between coupled excitation stores.
+#[path = "luminescence_transfer/recycling.rs"]
+pub mod recycling;
+
+/// Exact dilute triplet-pair annihilation with explicit excitation and heat.
+#[path = "luminescence_transfer/annihilation.rs"]
+pub mod annihilation;
+
 /// Physical admission or a refusal from the existing positive evolution owner.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SingletTripletError {
@@ -29,6 +37,8 @@ pub enum SingletTripletError {
     Unrepresentable(&'static str),
     /// Authored ground-state channels do not balance the represented evolution.
     PopulationBalance { residual: f64, allowance: f64 },
+    /// External energy does not close without counting internal photon traffic.
+    EnergyBalance { residual_j: f64, allowance_j: f64 },
     /// Numerical admission, cancellation or resource limits were not satisfied.
     Evolution(DecayError),
 }
