@@ -41,8 +41,10 @@ struct Anchor {
 /// heating, extract the accepted parcel with [`Self::into_gas`], perform the
 /// original gas update, and explicitly bind it at accepted solid displacement
 /// with [`Self::try_new`]. Even an output at unchanged volume is not silently
-/// promoted to a new source reference. This type performs no heat exchange,
-/// gas momentum integration or coupled energy acceptance itself.
+/// promoted to a new source reference. An already admitted reference may use
+/// [`Self::with_gas_at_anchor`] for disposable heat probes at that same geometry.
+/// This type performs no heat exchange, gas momentum integration or coupled
+/// energy acceptance itself.
 #[derive(Clone, Debug)]
 pub struct CavityGasEpoch<G = ClosedGasParcel> {
     gas: G,
@@ -83,6 +85,42 @@ impl<G: AdiabaticCavityGas> CavityGasEpoch<G> {
                 positions_m,
                 volume_m3,
             }),
+            reference: true,
+        })
+    }
+
+
+    /// Explicitly bind another physical parcel at this same admitted anchor.
+    ///
+    /// Use this for source-owned heating probes at fixed accepted geometry.
+    /// The new parcel must have exactly the anchor volume and this epoch must
+    /// still be a reference, not an output from a mechanical evaluation. The
+    /// immutable geometry and exact cavity identity are shared without another
+    /// complete-mesh admission or compact-position copy.
+    ///
+    /// This operation does not infer heat, source continuity or inventory
+    /// transfer. The caller supplies the original physical gas owner's admitted
+    /// replacement and retains its heat/source accounting. A new geometry still
+    /// requires [`Self::try_new`].
+    ///
+    /// # Errors
+    /// An output-only epoch, a different represented volume, or cancellation.
+    /// Refusal leaves this admitted reference unchanged.
+    pub fn with_gas_at_anchor(
+        &self,
+        gas: G,
+        cx: &Cx<'_>,
+    ) -> Result<Self, HyperTetError> {
+        checkpoint(cx)?;
+        if !self.reference || gas.volume_m3().to_bits() != self.anchor.volume_m3.to_bits() {
+            return Err(invalid(
+                "same-anchor gas update requires a reference epoch and exact accepted volume",
+            ));
+        }
+        checkpoint(cx)?;
+        Ok(Self {
+            gas,
+            anchor: Arc::clone(&self.anchor),
             reference: true,
         })
     }

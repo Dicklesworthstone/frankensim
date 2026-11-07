@@ -12199,3 +12199,16 @@ became unavailable.
 The native linear-geometry, small-strain, stationary-support and fixed-reference
 mass limits remain in force. This supplies no finite cyclic-forming or
 experimental calibration claim.
+
+
+The admitted reference epoch additionally exposes `with_gas_at_anchor(gas, cx)`
+for bounded nonlinear heating probes at the same accepted geometry. It requires
+reference status and exact accepted-volume agreement, retains the same shared
+anchor/prepared-cavity identity, and performs no complete-mesh scan, compact
+geometry copy or thermodynamic reconstruction. Output-only epochs still refuse.
+The original gas owner supplies the physical replacement and its heat/source
+account; this operation infers neither heat nor inventory continuity. A changed
+accepted geometry still requires `try_new`. Focused existing epoch assertions
+cover heated same-anchor reuse, original-reference preservation, wrong-volume
+and output-only refusal, and cancellation. The host remains unavailable; this
+increment has source review but no new formatting or native-runtime claim.

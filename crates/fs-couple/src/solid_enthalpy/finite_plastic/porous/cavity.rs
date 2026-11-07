@@ -14,6 +14,9 @@
 //! gas transport and pore-fluid exchange are not inferred. The solid keeps its
 //! supplied reference thermal network, source inventory and optional inertia.
 
+/// Explicit gas-wall heat exchange with retained actual-volume gas epochs.
+pub mod heat;
+
 use super::{
     FiniteThermalPorousCandidate, FiniteThermalPorousSolid, FiniteThermoplasticConfig,
     FiniteThermoplasticControls, FiniteThermoplasticError, HyperTetSettings, MechanicalProposal,
@@ -86,8 +89,9 @@ impl MechanicalEnergy for FiniteThermalPorousCavitiesEnergy {
 }
 
 /// Atomic thermal, retained solid, original observer and sealed-gas endpoint.
-/// Reuse the original undeformed-volume cavity references for the next interval;
-/// accepted deformed gas endpoints are evidence, not replacement references.
+/// Reuse the original reference while following one isentrope. To begin a new
+/// physical heat state at a deformed cavity, explicitly bind a CavityGasEpoch;
+/// the heat module retains these physical gas/wall histories as one system.
 pub type FiniteThermalPorousCavitiesCandidate<'a, 't, O, G = ClosedGasParcel> =
     FiniteThermalPorousCandidate<
         'a,

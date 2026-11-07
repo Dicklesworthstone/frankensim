@@ -4783,3 +4783,88 @@ mass-weighted error with sealed exteriors, an inadmissible SDIRK stage followed
 by a bounded retry, work exhaustion after an accepted interval, and finite-air
 layer/gas accounts. Source and fixture review and Rust formatting passed; the
 new native integration tests remain unrun in the full dependency build.
+
+
+### Heat exchange through retained finite porous gas cavities
+
+`solid_enthalpy::finite_plastic::porous::cavity::heat::ThermalPorousGasSystem`
+retains original ideal-gas inventories, actual prepared closed cavities,
+finite thermal porous solid history and explicit fixed gas-wall conductances.
+This adds heat transfer to the native finite-geometry compression path. It
+does not replace the source calorics, material return map, pressure tangent,
+thermal cell network, optional inertia or retained plastic volume.
+
+Construction admits the exact original mesh, gas volume at accepted deformed
+geometry, independent nonoverlapping cavity faces, original structural cell
+identities and unique heat-link IDs. It bounds the system to 64 cavities and
+16,384 explicit links. Gas mass, source model and auxiliary conditions remain
+with the original parcel; cell mass and source caloric identity remain with the
+native thermal/solid binding. Conductance is supplied as a total W/K per link.
+There is no inferred moving area, source conductivity, convection correlation,
+pore-fluid transport or new gas equation of state.
+
+Each interval uses an explicitly first-order heat-before-motion split. A
+bounded Newton--Krylov solve determines one rigid heat increment per cavity.
+The original gas energy inversion proposes the heated state at the actual
+accepted volume. A native `CavityGasEpoch` binds that physical state to the
+already-admitted geometry; no fictitious expansion to undeformed volume or
+extrapolated thermodynamic state is constructed. Accepted compact anchors are
+prepared once and shared through `with_gas_at_anchor` across caloric probes.
+Every mechanical proposal still admits its actual trial geometry natively.
+
+The heated gas temperature is held during the original explicit wall
+substeps, while the existing finite thermal porous feedback closes caloric
+temperature, permanent compaction, pressure and optional inertia. Every outer
+probe starts from the same accepted solid, gas, thermal clock and independent
+observer clone. Native heat transport and all original observer source,
+conductance, reservoir, ambient, internal-transfer, interval, transition,
+event and timestep hooks remain active. Multiple links can share a cell; their
+combined nonnegative decay conductance enters the original mass/caloric-slope
+timestep restriction. Native event and thermal work budgets remain authoritative.
+
+Per-gas balances require rigid gas energy change plus integrated link heat
+into the solid to equal prescribed external gas heat. Gas rigid heating and
+native adiabatic energy increments are reported separately; their compensated
+sum is the actual gas energy change. Internal film heat is removed from native
+external solid heat exactly once. The complete first law is the native
+solid/gas/mechanical residual plus rigid gas heat plus represented film heat,
+minus prescribed external gas heat. Native plastic heat, gas pressure work,
+exterior work, support/dead loads, endpoint defects and numerical kinetic
+losses retain their original owners and are not reclassified as heat.
+
+The wall observer retains per-link original heat integrals and a separate
+integral of the represented cell source. It rejects vanished contributions
+and bounds the sum of absolute cell source-representation errors over actual
+accepted durations. The shared finite-plastic heat composer now also checks
+both observer-plus-material and authored-boundary-plus-composed additions.
+This closes a real conservation hole: rounding away a weak interface source
+beside a large material source could otherwise be misclassified as an external
+sink while aggregate balances passed. Compensated absolute errors cannot
+cancel between cells or substeps, and the existing feedback energy gate
+applies before every complete candidate can be published.
+
+The returned `CavityHeatCandidate` contains the new thermal state, retained
+gas/solid system, caller's original observer, complete native reports,
+per-gas and per-link heat accounts, nonlinear report and actual trial count.
+Gas/source refusal, late observer failure, insufficient trial work, native
+feedback failure or cancellation publishes none of these endpoints. The final
+physical evaluation consumes the same global trial budget as Newton and
+Jacobian probes; every gas, interface and combined energy gate must pass.
+
+Three focused integration regressions in
+`tests/finite_porous_enthalpy/cavity/heat.rs` specify an independent finite-gas
+and wall-capacity balance, shared-cell links on the actual native substep grid,
+heated variable-Cv compression over retained plastic/inertial intervals,
+source/work/late-observer rollback, and heat-induced motion of an actually
+free wall coordinate under native cavity and exterior pressure. Two focused
+shared-feedback arithmetic regressions retain IEEE rounding counterexamples
+for swallowed heat and noncancelling absolute discrepancies. Existing native
+epoch tests also exercise explicit constant-cost source replacement.
+
+The execution host was unavailable during implementation. Source/API and
+physical-account reviews, plus an independent scalar heat-balance calculation,
+were completed; no new formatting, compilation or native test pass is claimed.
+Energy closure is not a time-accuracy or material-calibration certificate.
+Refine the complete physical interval for simultaneous heat/motion accuracy.
+Gas remains well mixed and frozen in composition in this solid-wall owner;
+reacting thermal compression has its separate original gas reactor owner.

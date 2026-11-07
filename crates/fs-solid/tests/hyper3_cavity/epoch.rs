@@ -85,6 +85,19 @@ fn heated_deformed_epoch_starts_the_actual_isentrope_and_anchor_work() {
         let start = binding.evaluate(&anchor_u, cx).unwrap();
         assert_eq!(start.gas.gas(), epoch.gas());
         assert_eq!(start.potential_change_j, 0.0);
+        // Repeated physical heat probes retain one admitted immutable anchor.
+        let (hotter, extra_heat) = epoch.gas().at_temperature(520.0).unwrap();
+        assert!(extra_heat > 0.0);
+        let warmer = epoch.with_gas_at_anchor(hotter.clone(), cx).unwrap();
+        assert!(Arc::ptr_eq(warmer.cavity(), epoch.cavity()));
+        assert_eq!(warmer.anchor_volume_m3(), epoch.anchor_volume_m3());
+        assert_eq!(warmer.gas(), &hotter);
+        let warm_start = cavity.adiabatic_gas_load(
+            &anchor_u, &warmer, ambient, narrow, cx,
+        ).unwrap();
+        assert_eq!(warm_start.potential_change_j, 0.0);
+        assert_eq!(warm_start.gas.gas(), &hotter);
+        assert_eq!(epoch.gas(), &saved);
         let load = binding.evaluate(&target_u, cx).unwrap();
         let (volume, gradient) = tetra_volume_gradient(current_inner(&nodes, &target_u));
         let temperature = ideal_temperature(
@@ -149,7 +162,9 @@ fn epochs_require_explicit_geometry_rebinding_and_refuse_atomically() {
             assert!(cavity.adiabatic_gas_load(
                 &after_u, endpoint, 0.0, controls(), cx,
             ).is_err());
+            assert!(endpoint.with_gas_at_anchor(saved.clone(), cx).is_err());
         }
+        assert!(epoch.with_gas_at_anchor(after.gas.gas().clone(), cx).is_err());
         let impostor = Arc::new(cavity.as_ref().clone());
         assert!(impostor.adiabatic_gas_load(
             &after_u, &epoch, 0.0, controls(), cx,
@@ -186,6 +201,8 @@ fn epochs_require_explicit_geometry_rebinding_and_refuse_atomically() {
         ).is_err());
         assert_eq!(epoch.gas(), &saved);
         gate.request();
+        assert!(matches!(epoch.with_gas_at_anchor(gas.clone(), cx),
+            Err(HyperTetError::Cancelled)));
         assert!(matches!(CavityGasEpoch::try_new(
             Arc::clone(&cavity), &anchor_u, gas.clone(), cx,
         ), Err(HyperTetError::Cancelled)));

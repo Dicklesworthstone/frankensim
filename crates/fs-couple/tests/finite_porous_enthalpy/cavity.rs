@@ -1,5 +1,8 @@
 //! Source gas storage, thermal compaction and native transport share one endpoint.
 
+#[path = "cavity/heat.rs"]
+mod heat;
+
 use super::*;
 use fs_couple::iqn_ils::{IqnIlsConfig, driver::CouplingMethod};
 use fs_material::thermochemical_gas::energy::entropy::GasEntropySolve;

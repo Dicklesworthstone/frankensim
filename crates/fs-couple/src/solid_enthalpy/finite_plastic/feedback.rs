@@ -220,6 +220,39 @@ fn admit_heat<E>(heat_j: &[f64], cells: usize) -> Result<(), FiniteThermoplastic
     Ok(())
 }
 
+
+/// Compose two physical source contributions without losing either silently.
+/// The absolute rounding discrepancy remains separate from physical heat.
+fn compose_source_power<E>(
+    previous_w: f64,
+    added_w: f64,
+) -> Result<(f64, Dd), FiniteThermoplasticError<E>> {
+    let next_w = finite(previous_w + added_w)?;
+    if (previous_w != 0.0 && next_w == added_w)
+        || (added_w != 0.0 && next_w == previous_w)
+    {
+        return Err(FiniteThermoplasticError::Invalid(
+            "finite thermoplastic source addition loses a nonzero heat contribution",
+        ));
+    }
+    let exact = Dd::from_f64(previous_w) + Dd::from_f64(added_w);
+    let defect_w = finite((Dd::from_f64(next_w) - exact).to_f64())?.abs();
+    Ok((next_w, Dd::from_f64(defect_w)))
+}
+
+fn check_source_composition<E>(
+    defect_j: Dd,
+    maximum_j: f64,
+) -> Result<(), FiniteThermoplasticError<E>> {
+    let defect_j = finite(defect_j.to_f64())?;
+    if defect_j < 0.0 || defect_j > maximum_j {
+        return Err(FiniteThermoplasticError::Invalid(
+            "integrated finite thermoplastic source-composition defect exceeds the energy gate",
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(in crate::solid_enthalpy) fn advance<
     't,
@@ -334,11 +367,19 @@ pub(in crate::solid_enthalpy) fn advance_with_coupling<
                 .zip(&trial.heat_j)
                 .map(|(cell, q)| Ok((cell.id, finite(*q / duration_s)?)))
                 .collect::<Result<_, FiniteThermoplasticError<O::Error>>>()?,
+            source_composition_defect_w: Dd::ZERO,
+            source_composition_defect_j: Dd::ZERO,
         };
         let (next_thermal, heat, thermal_audit) =
             thermal.advance_observed(&heat, target_s, thermal_config, || {
                 cx.checkpoint().map_err(|_| DepositionError::Cancelled)
             })?;
+        // A rounded source loss can otherwise be absorbed into the derived
+        // external-heat account while both aggregate first-law residuals pass.
+        check_source_composition(
+            heat.source_composition_defect_j,
+            config.energy_tolerance_j,
+        )?;
         let final_h = binding.enthalpies(&next_thermal, false, cx)?;
         let final_temperatures = binding.temperatures(&final_h)?;
         let (actual, heat_defect_j) = if final_temperatures == trial_temperatures {
@@ -504,6 +545,8 @@ struct FiniteHeat<'b, 'm, 'cx, O, M> {
     inner: O,
     cx: &'b Cx<'cx>,
     watts: BTreeMap<CellId, f64>,
+    source_composition_defect_w: Dd,
+    source_composition_defect_j: Dd,
 }
 impl<O: Clone, M> Clone for FiniteHeat<'_, '_, '_, O, M> {
     fn clone(&self) -> Self {
@@ -512,6 +555,8 @@ impl<O: Clone, M> Clone for FiniteHeat<'_, '_, '_, O, M> {
             inner: self.inner.clone(),
             cx: self.cx,
             watts: self.watts.clone(),
+            source_composition_defect_w: self.source_composition_defect_w,
+            source_composition_defect_j: self.source_composition_defect_j,
         }
     }
 }
@@ -520,6 +565,8 @@ impl<O: DepositionObserver, M: CaloricMaterial> DepositionObserver
 {
     type Error = FiniteThermoplasticError<O::Error>;
     fn begin(&mut self) -> Result<(), Self::Error> {
+        self.source_composition_defect_w = Dd::ZERO;
+        self.source_composition_defect_j = Dd::ZERO;
         self.inner
             .begin()
             .map_err(FiniteThermoplasticError::Observer)
@@ -546,11 +593,24 @@ impl<O: DepositionObserver, M: CaloricMaterial> DepositionObserver
             .inner
             .sources(thermal, checkpoint)
             .map_err(FiniteThermoplasticError::Observer)?;
+        let mut defect_w = Dd::ZERO;
         for (&cell, &watts) in &self.watts {
             checkpoint()?;
             let rate = rates.entry(cell).or_insert(0.0);
-            *rate = finite(*rate + watts)?;
+            let (next, material_defect) = compose_source_power(*rate, watts)?;
+            // Native add_step_sources performs this exact second addition.
+            // Include its error after material heat, not a hypothetical sum
+            // that omits the outer observer's contribution.
+            let authored = thermal.cells().get(&cell)
+                .ok_or(FiniteThermoplasticError::Invalid(
+                    "finite thermoplastic source cell became inactive",
+                ))?.boundary.source_w;
+            let (_, boundary_defect) = compose_source_power(authored, next)?;
+            defect_w = defect_w + material_defect + boundary_defect;
+            *rate = next;
         }
+        finite::<O::Error>(defect_w.to_f64())?;
+        self.source_composition_defect_w = defect_w;
         Ok(rates)
     }
     fn step_sources(
@@ -632,6 +692,48 @@ impl<O: DepositionObserver, M: CaloricMaterial> DepositionObserver
         self.inner
             .step(start, duration, old, thermal, checkpoint)
             .map_err(FiniteThermoplasticError::Observer)?;
+        self.source_composition_defect_j = self.source_composition_defect_j
+            + self.source_composition_defect_w * Dd::from_f64(duration);
+        finite::<O::Error>(self.source_composition_defect_j.to_f64())?;
         self.binding.enthalpies(thermal, false, self.cx).map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod source_composition_tests {
+    use super::*;
+    use std::convert::Infallible;
+
+    #[test]
+    fn weak_interface_heat_cannot_disappear_beside_material_heat() {
+        let material_w = 2.0_f64.powi(54);
+        // A one-watt physical film is below half an ulp of this material rate.
+        // An aggregate audit can misclassify that lost heat as an external sink.
+        assert_eq!(material_w + 1.0, material_w);
+        for (before, added) in [(1.0, material_w), (material_w, 1.0), (-1.0, material_w)] {
+            assert!(compose_source_power::<Infallible>(before, added).is_err());
+        }
+        let (power, error) = compose_source_power::<Infallible>(7.0, -7.0).unwrap();
+        assert_eq!(power, 0.0);
+        assert_eq!(error.to_f64(), 0.0);
+    }
+
+    #[test]
+    fn opposite_rounding_errors_spend_the_absolute_actual_interval_budget() {
+        let large = 2.0_f64.powi(53);
+        // Round-to-even makes +3 round upward by 1 W and +5 downward by 1 W.
+        let (a, error_a) = compose_source_power::<Infallible>(large, 3.0).unwrap();
+        let (b, error_b) = compose_source_power::<Infallible>(large, 5.0).unwrap();
+        assert_eq!(a, large + 4.0);
+        assert_eq!(b, large + 4.0);
+        assert_eq!(error_a.to_f64(), 1.0);
+        assert_eq!(error_b.to_f64(), 1.0);
+        // These are the native accepted substep durations, not the proposed
+        // maximum dt. Opposite cell/source errors must not cancel.
+        let integrated = error_a * Dd::from_f64(0.125)
+            + error_b * Dd::from_f64(0.375);
+        assert_eq!(integrated.to_f64(), 0.5);
+        assert!(check_source_composition::<Infallible>(integrated, 0.25).is_err());
+        assert!(check_source_composition::<Infallible>(integrated, 0.5).is_ok());
     }
 }
