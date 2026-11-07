@@ -18,8 +18,10 @@
 //! Source-integrated elementwise thermal expansion enters the same projected
 //! weak form. Thermal equilibrium retains full nodal support reactions and
 //! integrates stress and stored energy from that same assumed-strain field.
-//! Temperature gradients within an element require a separately admitted
-//! pressure/eigenstrain projection and are not silently averaged here.
+//! Standard-strain thermal response also retains original stiffness-point
+//! eigenstrains and local elastic tensors without averaging. B-bar temperature
+//! gradients require a separately admitted pressure/eigenstrain projection;
+//! that formulation continues to require elementwise thermal input.
 //!
 //! The returned ordinary stiffness/mass pencil feeds the existing spectral
 //! and linear-dynamics owners. Thermal or dead-load equilibrium also feeds the

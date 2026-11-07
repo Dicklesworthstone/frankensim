@@ -1,4 +1,4 @@
-//! Source layer identity and actual pHS histories in tensile admission.
+//! Source layer identity, actual velocity and pHS histories in tensile admission.
 use super::*;
 
 #[derive(Clone, Debug)]
@@ -9,12 +9,38 @@ struct LayerArm {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct MemoryTensile {
-    pub(super) guard: Arc<StringTensileGuard>,
+pub(in crate::render::plate::impact::supported) struct LayerTensile {
+    pub(in crate::render::plate::impact::supported) guard: Arc<StringTensileGuard>,
     layers: Vec<Vec<LayerArm>>,
+    viscosity_pa_s: Vec<f64>,
 }
 
 impl SupportedStrings {
+    pub(in crate::render::plate::impact::supported) fn bind_viscous_tensile(mut self)
+        -> Result<Self, ImpactError>
+    {
+        let Some(sources) = &self.0.axial_viscosity_sources else {
+            return Err(invalid("viscous tensile binding needs its original layer sources"));
+        };
+        let mut bindings = self.0.axial_tensile.clone();
+        for (wire, source) in sources.iter().enumerate() {
+            let SupportedPotential::Longitudinal(p) = &self.0.potentials[wire] else { continue; };
+            if source.viscous_rigidity_n_s() == 0.0 { continue; }
+            if let Some(guard) = &p.tensile {
+                bindings[wire] = Some(LayerTensile::new(Arc::clone(guard), Some(source))?);
+            }
+        }
+        let data = Rc::make_mut(&mut self.0);
+        for (p, binding) in data.potentials.iter_mut().zip(&bindings) {
+            if binding.is_some() {
+                let SupportedPotential::Longitudinal(p) = p else { unreachable!() };
+                p.tensile = None;
+            }
+        }
+        data.axial_tensile = bindings;
+        Ok(self)
+    }
+
     // Only the material adapter knows which physical layer supplied an arm.
     // Public aggregate-EA arms retain their explicit refusal for selected
     // strengths; guessing equal or equilibrium load sharing is not admissible.
@@ -37,17 +63,19 @@ impl SupportedStrings {
             .enumerate()
             .map(|(wire, p)| {
                 let SupportedPotential::Longitudinal(p) = p else {
-                    return None;
+                    return Ok(None);
                 };
                 if !arms.iter().any(|arm| arm.string == wire) {
-                    return None;
+                    return Ok(self.0.axial_tensile[wire].clone());
                 }
-                p.tensile.as_ref().map(|guard| MemoryTensile {
-                    guard: Arc::clone(guard),
-                    layers: vec![Vec::new(); guard.capacity.section().layers().len()],
-                })
+                let guard = p.tensile.as_ref().or_else(||
+                    self.0.axial_tensile[wire].as_ref().map(|binding| &binding.guard));
+                guard.map(|guard| LayerTensile::new(
+                    Arc::clone(guard),
+                    self.0.axial_viscosity_sources.as_ref().map(|sources| &sources[wire]),
+                )).transpose()
             })
-            .collect();
+            .collect::<Result<_, ImpactError>>()?;
         let mut first_memory = 0;
         for (arm, &(layer, delta)) in arms.iter().zip(layers) {
             let Some(SupportedPotential::Longitudinal(p)) = self.0.potentials.get(arm.string)
@@ -111,33 +139,54 @@ impl SupportedStrings {
                 p.tensile = None;
             }
         }
+        // Raw aggregate arms cannot bypass an already selected viscous layer
+        // guard. Only this source path may temporarily remove that metadata
+        // while binding the original Maxwell mechanics, then restore it with
+        // the exact layer-to-memory projection above.
+        Rc::make_mut(&mut self.0).axial_tensile.fill(None);
         let mut result = self.with_longitudinal_relaxation(arms, initial, maximum_states)?;
-        Rc::make_mut(&mut result.0)
-            .axial_relaxation
-            .as_mut()
-            .ok_or_else(|| invalid("hereditary tensile binding lost its material owner"))?
-            .tensile = tensile;
+        Rc::make_mut(&mut result.0).axial_tensile = tensile;
         Ok(result)
     }
 
-    pub(in crate::render::plate::impact::supported) fn has_memory_tensile(
+    pub(in crate::render::plate::impact) fn has_state_tensile(
         &self,
         wire: usize,
     ) -> bool {
-        self.0
-            .axial_relaxation
-            .as_ref()
-            .and_then(|memory| memory.tensile.get(wire))
-            .is_some_and(Option::is_some)
+        self.0.axial_tensile.get(wire).is_some_and(Option::is_some)
+            || (self.0.axial_viscosity_n_s.as_ref().is_some_and(|loss|
+                loss.get(wire).is_some_and(|rigidity| *rigidity > 0.0))
+                && matches!(self.0.potentials.get(wire),
+                    Some(SupportedPotential::Longitudinal(p)) if p.tensile.is_some()))
     }
 }
 
-impl MemoryTensile {
+impl LayerTensile {
+    fn new(
+        guard: Arc<StringTensileGuard>,
+        viscosity: Option<&fs_material::section::axial::ConcentricAxialViscosity>,
+    ) -> Result<Self, ImpactError> {
+        let count = guard.capacity.section().layers().len();
+        let mut viscosity_pa_s = vec![0.0; count];
+        if let Some(source) = viscosity {
+            if source.elastic() != guard.capacity.section() {
+                return Err(invalid("viscous tensile stress needs the same original section and material query"));
+            }
+            for (eta, layer) in viscosity_pa_s.iter_mut().zip(source.elastic().layers()) {
+                *eta = layer.material.property(source.viscosity_property())
+                    .ok_or_else(|| invalid("tensile layer lost its selected axial viscosity"))?
+                    .value_si();
+            }
+        }
+        Ok(Self { guard, layers: vec![Vec::new(); count], viscosity_pa_s })
+    }
+
     pub(super) fn assess(
         &self,
         p: &LongitudinalPotential,
         local: &[f64],
         strain: &[f64],
+        strain_rate: &[f64],
         maximum_tension_n: f64,
         memory: &[f64],
     ) -> Result<StringTensileAssessment, ImpactError> {
@@ -149,13 +198,15 @@ impl MemoryTensile {
                     young,
                     p.tension / p.ea,
                     strain,
+                    self.viscosity_pa_s[layer],
+                    strain_rate,
                     &self.layers[layer],
                     memory,
                 )?;
                 let bending = young * bending_strain;
                 if bending_strain != 0.0 && bending == 0.0 {
                     return Err(invalid(
-                        "hereditary tensile bending stress is unrepresentable",
+                        "supported tensile bending stress is unrepresentable",
                     ));
                 }
                 Ok(axial + bending)
@@ -163,23 +214,28 @@ impl MemoryTensile {
     }
 }
 
-// Sum SIGNED equilibrium/arm coefficients before the continuous-span absolute
-// bound. Arm stresses can reinforce or cancel one another, and a layer's mean
-// stress can be compressive even while the complete string remains tensioned.
+// Sum SIGNED equilibrium/arm/dashpot coefficients before the continuous-span
+// absolute bound. All three can reinforce or cancel, and a layer's mean stress
+// can be compressive even while the complete string remains tensioned.
 fn layer_stress_bound(
     young: f64,
     prestress_strain: f64,
     strain: &[f64],
+    viscosity_pa_s: f64,
+    strain_rate: &[f64],
     arms: &[LayerArm],
     memory: &[f64],
 ) -> Result<f64, ImpactError> {
+    if strain_rate.len() != strain.len() {
+        return Err(invalid("tensile layer needs every original strain-rate channel"));
+    }
     let mut bound = 0.0;
     for (channel, &epsilon) in strain.iter().enumerate() {
         let elastic_strain = epsilon + if channel == 0 { prestress_strain } else { 0.0 };
         let mut coefficient = young * elastic_strain;
         if elastic_strain != 0.0 && coefficient == 0.0 {
             return Err(invalid(
-                "hereditary tensile elastic stress is unrepresentable",
+                "supported tensile elastic stress is unrepresentable",
             ));
         }
         for arm in arms {
@@ -194,8 +250,15 @@ fn layer_stress_bound(
             }
             coefficient += stress;
         }
+        let viscous = viscosity_pa_s * strain_rate[channel];
+        if !viscous.is_finite()
+            || (viscosity_pa_s > 0.0 && strain_rate[channel] != 0.0 && viscous == 0.0)
+        {
+            return Err(invalid("tensile layer viscous stress is unrepresentable"));
+        }
+        coefficient += viscous;
         if !coefficient.is_finite() {
-            return Err(invalid("hereditary tensile layer coefficient overflows"));
+            return Err(invalid("supported tensile layer coefficient overflows"));
         }
         bound += if channel == 0 {
             coefficient
@@ -204,7 +267,7 @@ fn layer_stress_bound(
         };
     }
     if !bound.is_finite() {
-        return Err(invalid("hereditary tensile layer envelope overflows"));
+        return Err(invalid("supported tensile layer envelope overflows"));
     }
     Ok(bound)
 }
@@ -230,15 +293,24 @@ mod tests {
         ];
         // E*epsilon_1 = 8, arm 1 = -2 and arm 2 = -6: exact cancellation.
         // The independent mean is 4*(prestrain 2 + epsilon 1) + 2 - 3 = 11.
-        let stress = layer_stress_bound(4.0, 2.0, &[1.0, 2.0], &arms,
+        let stress = layer_stress_bound(4.0, 2.0, &[1.0, 2.0], 0.0, &[0.0; 2], &arms,
             &[0.0, 3.0, 4.0 * root_two, 8.0]).unwrap();
         assert_eq!(stress, 11.0);
-        let reinforced = layer_stress_bound(4.0, 2.0, &[1.0, 2.0], &arms, &[0.0; 4]).unwrap();
+        let reinforced = layer_stress_bound(4.0, 2.0, &[1.0, 2.0], 0.0, &[0.0; 2], &arms, &[0.0; 4]).unwrap();
         assert_eq!(reinforced, 35.0);
         // Relaxed memories remove every dynamic arm without removing preload.
-        let relaxed = layer_stress_bound(4.0, 2.0, &[1.0, 2.0], &arms,
+        let relaxed = layer_stress_bound(4.0, 2.0, &[1.0, 2.0], 0.0, &[0.0; 2], &arms,
             &[root_two, 2.0, 2.0 * root_two, 4.0]).unwrap();
         assert_eq!(relaxed, 20.0);
-        assert!(layer_stress_bound(4.0, 2.0, &[1.0, 2.0], &arms, &[0.0; 3]).is_err());
+        assert!(layer_stress_bound(4.0, 2.0, &[1.0, 2.0], 0.0, &[0.0; 2], &arms, &[0.0; 3]).is_err());
+        // The same unrelaxed elastic + Maxwell harmonic is 18 Pa. A signed
+        // dashpot can cancel it exactly or reinforce it; |sigma_e|+|sigma_v|
+        // would incorrectly reject the cancellation. Its mean also stays signed.
+        let cancelled = layer_stress_bound(4.0, 2.0, &[1.0, 2.0], 3.0,
+            &[-1.0, -6.0], &arms, &[0.0; 4]).unwrap();
+        assert_eq!(cancelled, 14.0);
+        let viscous_reinforced = layer_stress_bound(4.0, 2.0, &[1.0, 2.0], 3.0,
+            &[1.0, 6.0], &arms, &[0.0; 4]).unwrap();
+        assert_eq!(viscous_reinforced, 56.0);
     }
 }

@@ -19,6 +19,11 @@ const STRENGTH: [&str; 9] = [
 ];
 const INTERACTION: [&str; 3] = ["f12", "f23", "f31"];
 
+fn rotated_frame() -> [[f64; 3]; 3] {
+    let axis = [1.0, 2.0, 3.0].map(|component| component / 14.0_f64.sqrt());
+    fs_material::tensor::rotation(axis, 0.7)
+}
+
 fn interaction_binding(
     source: &MaterialCard,
     temperature: f64,
@@ -26,7 +31,8 @@ fn interaction_binding(
 ) -> InteractionBinding {
     let point = QueryPoint::new().with("T", temperature).unwrap();
     let selection = MaterialPropertySelection::SingleClaimOnly;
-    let state = resolve_orthotropic_elastic_state_point(source, &point, selection, 0.01).unwrap();
+    let state =
+        resolve_orthotropic_elastic_state_point(source, &point, selection.clone(), 0.01).unwrap();
     let criterion =
         OrthotropicTsaiWu::resolve(source, &point, STRENGTH, INTERACTION, selection).unwrap();
     InteractionBinding::try_from_resolved_orthotropic_state(
@@ -42,7 +48,7 @@ fn interaction_binding(
 fn g1_g3_native_triaxial_tension_crosses_interaction_surface_in_rotated_material_axes() {
     with_cx(false, |cx| {
         let source = card(0);
-        for rotation in [IDENTITY, fs_material::tensor::rotation([1., 2., 3.], 0.7)] {
+        for rotation in [IDENTITY, rotated_frame()] {
             let tensile = binding(&source, 300., rotation);
             let interaction = interaction_binding(&source, 300., rotation);
             assert_eq!(tensile.material(), interaction.material());
@@ -92,7 +98,7 @@ fn g1_q1_local_temperature_and_orientation_remain_at_each_native_point() {
     with_cx(false, |cx| {
         let source = card(0);
         let cold = binding(&source, 300., IDENTITY);
-        let rotation = fs_material::tensor::rotation([1., 2., 3.], 0.7);
+        let rotation = rotated_frame();
         let hot = binding(&source, 500., rotation);
         let tensile: Vec<_> = (0..8)
             .map(|i| if i < 4 { cold.clone() } else { hot.clone() })

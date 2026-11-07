@@ -3,8 +3,36 @@
 //! strain increment. fs-phs supplies that same accepted coordinate velocity and
 //! owns the resulting positive loss, without a separate damping update.
 use super::*;
+use fs_material::section::axial::ConcentricAxialViscosity;
 
 impl SupportedStrings {
+    // Preserve the original section, query and selected layer viscosities in
+    // copied native bodies. Aggregate C_a alone cannot recover layer stress.
+    pub(crate) fn with_material_axial_viscosity(
+        self,
+        sources: &[ConcentricAxialViscosity],
+        finite_strain: bool,
+    ) -> Result<Self, ImpactError> {
+        if sources.len() != self.wire_count() || self.0.axial_relaxation.is_some() {
+            return Err(invalid("source axial viscosity must bind every wire before its memory owner"));
+        }
+        for (source, potential) in sources.iter().zip(&self.0.potentials) {
+            let SupportedPotential::Longitudinal(p) = potential else {
+                return Err(invalid("source axial viscosity needs its original longitudinal coordinates"));
+            };
+            let ea = source.elastic().axial_stiffness_n();
+            if (ea - p.ea).abs() > 32.0 * f64::EPSILON * ea
+                || p.tensile.as_ref().is_some_and(|guard| guard.capacity.section() != source.elastic())
+            {
+                return Err(invalid("axial viscous tensile stress must retain its original section and material query"));
+            }
+        }
+        let rigidities = sources.iter().map(ConcentricAxialViscosity::viscous_rigidity_n_s).collect();
+        let mut result = self.bind_axial_viscosity(rigidities, finite_strain)?;
+        Rc::make_mut(&mut result.0).axial_viscosity_sources = Some(sources.to_vec().into());
+        result.bind_viscous_tensile()
+    }
+
     /// Whether positive finite-strain resistance requires the nonlinear owner.
     /// An explicitly zero source keeps its receipt and the elastic solver path.
     pub fn has_finite_strain_axial_viscosity(&self) -> bool {
@@ -60,6 +88,43 @@ impl SupportedStrings {
 }
 
 impl LongitudinalPotential {
+    // The original kinetic normalization makes the odd state entries zdot.
+    // q and v have already crossed the SAME reciprocal support map; the chosen
+    // loss law decides whether geometric strain-rate terms are present.
+    pub(super) fn axial_strain_rate(
+        &self,
+        q: &[f64],
+        v: &[f64],
+        finite_strain: bool,
+        rate: &mut [f64],
+    ) -> Result<(), ImpactError> {
+        let count = self.count();
+        let bend = self.omegas.len();
+        let last = count - 1;
+        if q.len() != count || v.len() != count
+            || rate.len() != 1 + self.model.axial_modes().len()
+            || q.iter().chain(v).any(|x| !x.is_finite())
+        {
+            return Err(invalid("axial viscous tensile stress requires complete original coordinates and velocities"));
+        }
+        rate[0] = self.chord[2] * v[last];
+        if finite_strain {
+            let mean = self.model.strain_rate(&self.slopes(q), &self.slopes(v),
+                &v[bend..last], &mut rate[1..]).map_err(|e| ImpactError::Owner(e.to_string()))?;
+            rate[0] += mean;
+        } else {
+            for (rate, (&scale, &speed)) in rate[1..].iter_mut()
+                .zip(self.model.axial_slope_scales().iter().zip(&v[bend..last]))
+            {
+                *rate = scale * speed;
+            }
+        }
+        if rate.iter().any(|r| !r.is_finite()) {
+            return Err(invalid("axial viscous tensile strain rate is unrepresentable"));
+        }
+        Ok(())
+    }
+
     fn viscous_action(&self,q:&[f64],v:&[f64],direction:Option<(&[f64],&[f64])>,
         rigidity:f64,out:&mut[f64]) -> bool
     {

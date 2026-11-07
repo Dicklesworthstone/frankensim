@@ -19,6 +19,7 @@ use crate::render::plate::impact::supported::{SupportedStrings, TranslatingSuppo
 use crate::bowed_string::runtime::reciprocal::bank::{MaterialStringSource,
     polarization::TransverseDirection};
 use fs_exec::CancelGate;
+use fs_material::section::axial::ConcentricAxialViscosity;
 
 mod stationary;
 pub mod longitudinal;
@@ -81,7 +82,7 @@ impl SupportedMaterialStrings {
     pub fn in_comoving_gas(sources: Vec<NonlinearMaterialString>, support: TranslatingSupport,
         gate: &CancelGate) -> Result<Self, ImpactError>
     {
-        Self::build(sources, support, None, SupportGasFrame::CoMoving, None, gate)
+        Self::build(sources, support, None, SupportGasFrame::CoMoving, None, None, gate)
     }
 
     /// Source-defined strings with selected moving ends in a stationary gas.
@@ -111,12 +112,13 @@ impl SupportedMaterialStrings {
         -> Result<Self, ImpactError>
     {
         Self::build(sources, support, Some(&motion),
-            SupportGasFrame::StationaryModal { remainder_frequency_hz }, None, gate)
+            SupportGasFrame::StationaryModal { remainder_frequency_hz }, None, None, gate)
     }
 
     fn build(sources: Vec<NonlinearMaterialString>, support: TranslatingSupport,
         motion: Option<&[StringEndMotion]>, gas_frame: SupportGasFrame,
-        longitudinal:Option<&[MaterialLongitudinalSupport]>, gate: &CancelGate)
+        longitudinal:Option<&[MaterialLongitudinalSupport]>,
+        axial_loss:Option<(Vec<ConcentricAxialViscosity>,bool)>, gate: &CancelGate)
         -> Result<Self, ImpactError>
     {
         poll(gate)?;
@@ -194,6 +196,26 @@ impl SupportedMaterialStrings {
             motion.unwrap_or(&default_ends),&transverse,support)?};
         let capacities: Vec<_> = sources.iter().map(NonlinearMaterialString::tensile_capacity).collect();
         let supported = supported.with_tensile_capacities(&capacities)?;
+        // Complete the selected constitutive stress BEFORE initial admission.
+        // A real negative dashpot stress can relieve an elastic tensile peak;
+        // an intermediate elastic-only body must not reject that initial state.
+        let supported = if let Some((loss,finite_strain)) = &axial_loss {
+            if loss.len()!=sources.len() {
+                return Err(invalid("supported axial viscosity requires every original source"));
+            }
+            let upper=supported.clock_bounds().iter().copied().fold(0.0_f64,f64::max);
+            for (index,law) in loss.iter().enumerate() {
+                poll(gate)?;
+                for &omega in supported.axial_angular_frequencies(index)? {
+                    law.longitudinal_damping_ratio(omega).map_err(|e|ImpactError::Owner(e.to_string()))?;
+                }
+                let (lo,hi)=law.omega_band_rad_s();
+                if lo>0.0 || hi<upper {
+                    return Err(invalid("moving-support axial viscosity must cover DC through the complete small-signal spectral bound"));
+                }
+            }
+            supported.with_material_axial_viscosity(loss,*finite_strain)?
+        } else {supported};
         for (index,band) in bands.iter().enumerate() {
             if supported.axial_angular_frequencies(index)?.iter().any(|&omega|
                 band.is_some_and(|(lo,hi)|omega<lo || omega>hi)) {
@@ -216,7 +238,7 @@ impl SupportedMaterialStrings {
         if at != mode_count { return Err(invalid("supported material basis lost source coordinates")); }
         poll(gate)?;
         Ok(Self { sources, support, supported, bodies, torsion, mode_count, sample_rate_hz, gas_frame,
-            longitudinal:longitudinal.map(|a|a.to_vec()),axial_material_loss:None,axial_material_relaxation:None })
+            longitudinal:longitudinal.map(|a|a.to_vec()),axial_material_loss:axial_loss.map(|(loss,_)|loss),axial_material_relaxation:None })
     }
 
     /// Physical gas frame and the explicit unresolved-field approximation.

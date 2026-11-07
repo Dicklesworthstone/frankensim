@@ -74,6 +74,10 @@ impl SupportedMaterialStrings {
     /// `FiniteStrainKelvinVoigt` instead applies the complete retained strain
     /// rate, including both transverse planes and affine endpoint motion, in the
     /// SAME nonlinear solve. Evolving heat and axial fluid loss remain absent.
+    /// Selected tensile limits use each original layer's signed axial viscous
+    /// stress at the actual native kinetic velocity, with or without separately
+    /// selected Maxwell arms. Layer stresses combine before the spatial bound;
+    /// no aggregate force is substituted for the original layer load sharing.
     /// Missing, frequency-dependent or out-of-band source data refuses.
     pub fn in_stationary_gas_with_longitudinal_waves_and_loss(sources:Vec<NonlinearMaterialString>,
         support:TranslatingSupport, attachments:Vec<MaterialLongitudinalSupport>,
@@ -86,32 +90,17 @@ impl SupportedMaterialStrings {
             return Err(invalid("material axial support requires 1..=32 complete source attachments"));
         }
         let ends:Vec<_>=attachments.iter().map(|a|a.moving_end).collect();
-        let mut image=Self::build(sources,support,Some(&ends),SupportGasFrame::StationaryModal {remainder_frequency_hz},
-            Some(&attachments),gate)?;
-        if matches!(loss,LongitudinalMaterialLoss::Elastic) {return Ok(image);}
-        let upper=image.supported.clock_bounds().iter().copied().fold(0.0_f64,f64::max);
-        let mut laws=Vec::with_capacity(image.sources.len());
-        let mut rigidities=Vec::with_capacity(image.sources.len());
-        for (index,source) in image.sources.iter().enumerate() {
-            poll(gate)?;
-            let law=loss.bind(source.source())?
-                .ok_or_else(||invalid("selected axial material loss is missing its constitutive source"))?;
-            for &omega in image.supported.axial_angular_frequencies(index)? {
-                law.longitudinal_damping_ratio(omega).map_err(|e|ImpactError::Owner(e.to_string()))?;
+        let axial_loss=if matches!(loss,LongitudinalMaterialLoss::Elastic) {None} else {
+            let mut laws=Vec::with_capacity(sources.len());
+            for source in &sources {
+                poll(gate)?;
+                laws.push(loss.bind(source.source())?
+                    .ok_or_else(||invalid("selected axial material loss is missing its constitutive source"))?);
             }
-            let (lo,hi)=law.omega_band_rad_s();
-            if lo>0.0 || hi<upper {
-                return Err(invalid("moving-support axial viscosity must cover DC through the complete small-signal spectral bound"));
-            }
-            rigidities.push(law.viscous_rigidity_n_s());laws.push(law);
-        }
-        image.supported=if finite_strain {
-            image.supported.with_finite_strain_axial_viscosity(rigidities)?
-        } else {image.supported.with_axial_viscosity(rigidities)?};
-        image.bodies[0].potential=BodyPotential::SupportedStrings(image.supported.clone());
-        image.axial_material_loss=Some(laws);
-        poll(gate)?;
-        Ok(image)
+            Some((laws,finite_strain))
+        };
+        Self::build(sources,support,Some(&ends),SupportGasFrame::StationaryModal {remainder_frequency_hz},
+            Some(&attachments),axial_loss,gate)
     }
     /// Original material loss receipts, in source order. Elastic construction
     /// retains None; an explicit zero-viscosity source remains a retained law.

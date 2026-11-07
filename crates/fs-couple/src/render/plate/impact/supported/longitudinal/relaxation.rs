@@ -6,7 +6,7 @@ use super::*;
 use crate::render::plate::impact::relaxation::InitialMemory;
 use fs_phs::{MappedRelaxationBranch, RelaxationStrainMap};
 mod strength;
-use strength::MemoryTensile;
+pub(in crate::render::plate::impact::supported) use strength::LayerTensile;
 
 /// One positive relaxing axial rigidity from a physical layer and its time.
 /// Geometry and equilibrium EA remain in the original supported string.
@@ -26,7 +26,6 @@ pub(in crate::render::plate::impact) struct SupportedRelaxation {
     // (complete source omega ceiling, exact source step). This is retained on
     // copied bodies so generic impact composition cannot discard authority.
     source_domain: Option<(f64,f64)>,
-    tensile: Vec<Option<MemoryTensile>>,
 }
 
 impl SupportedStrings {
@@ -54,7 +53,7 @@ impl SupportedStrings {
             let Some(SupportedPotential::Longitudinal(p))=self.0.potentials.get(arm.string) else {
                 return Err(invalid("supported memory requires the original longitudinal strain image"));
             };
-            if p.tensile.is_some() {
+            if p.tensile.is_some() || self.has_state_tensile(arm.string) {
                 return Err(invalid("hereditary support tensile admission needs actual layer memory stresses"));
             }
             if !arm.axial_rigidity_n.is_finite() || arm.axial_rigidity_n<=0.0
@@ -83,7 +82,6 @@ impl SupportedStrings {
         }
         data.axial_relaxation=Some(SupportedRelaxation {
             arms,initial,states,stiffness_bound:bound,source_domain:None,
-            tensile:vec![None;data.wires.len()],
         });
         Ok(self)
     }
@@ -129,6 +127,27 @@ impl SupportedStrings {
     {
         self.assess_memory(offset,state,memory,None).map(|_|())
     }
+    // No invented zero-arm memory attachment: the existing mechanical gate
+    // supplies the complete original state when only velocity-dependent layer
+    // stress is selected. Actual Maxwell histories remain in their later gate.
+    pub(in crate::render::plate::impact::supported) fn admit_tensile_motion(
+        &self, offset:usize, state:&[f64],
+    ) -> Result<(),ImpactError> {
+        self.require_viscous_tensile_sources()?;
+        if self.0.axial_relaxation.as_ref().is_none_or(|config|config.states==0)
+            && self.0.axial_tensile.iter().any(Option::is_some) {
+            self.admit_memory(offset,state,&[])?;
+        }
+        Ok(())
+    }
+    fn require_viscous_tensile_sources(&self)->Result<(),ImpactError> {
+        if self.0.axial_viscosity_sources.is_none()
+            && self.0.axial_viscosity_n_s.as_ref().is_some_and(|loss|loss.iter().enumerate()
+                .any(|(wire,&rigidity)|rigidity>0.0 && self.has_state_tensile(wire))) {
+            return Err(invalid("tensile admission also needs actual layer axial viscous stresses"));
+        }
+        Ok(())
+    }
     pub(in crate::render::plate::impact) fn tensile_assessment_with_memory(&self,
         wire:usize,offset:usize,state:&[f64],memory:&[f64])
         ->Result<Option<StringTensileAssessment>,ImpactError>
@@ -139,20 +158,33 @@ impl SupportedStrings {
     fn assess_memory(&self,offset:usize,state:&[f64],memory:&[f64],query:Option<usize>)
         ->Result<Option<StringTensileAssessment>,ImpactError>
     {
-        let Some(config)=&self.0.axial_relaxation else {return Ok(None);};
-        if config.tensile.iter().enumerate().any(|(wire,binding)|binding.is_some()
-            && self.0.axial_viscosity_n_s.as_ref().is_some_and(|loss|loss[wire]>0.0)) {
-            return Err(invalid("hereditary tensile admission also needs actual layer axial viscous stresses"));
-        }
-        if memory.len()!=config.states || memory.iter().any(|v|!v.is_finite()) {
+        let config=self.0.axial_relaxation.as_ref();
+        self.require_viscous_tensile_sources()?;
+        let needs_viscous=self.0.axial_tensile.iter().enumerate().any(|(wire,binding)|binding.is_some()
+            && self.0.axial_viscosity_n_s.as_ref().is_some_and(|loss|loss[wire]>0.0));
+        if memory.len()!=config.map_or(0,|config|config.states) || memory.iter().any(|v|!v.is_finite()) {
             return Err(invalid("supported material history requires every finite original coordinate"));
         }
         let mut z=vec![0.0;self.mode_count()];
+        let mut velocity=[0.0;MAX_IMPACT_MODES];
         for (i,z) in z.iter_mut().enumerate() {
             *z=*state.get(2*(offset+i)).ok_or_else(||invalid("supported history state prefix is incomplete"))?;
+            if needs_viscous {
+                // H_kinetic = |zdot|^2/2 in the ORIGINAL support mass map.
+                velocity[i]=*state.get(2*(offset+i)+1)
+                    .ok_or_else(||invalid("supported viscous history velocity prefix is incomplete"))?;
+            }
         }
         let mut q=vec![0.0;self.support_coordinate()];
         if !self.relative(&z,&mut q) {return Err(invalid("supported history has invalid original coordinates"));}
+        let mut relative_velocity=[0.0;MAX_IMPACT_MODES];
+        if needs_viscous && !self.relative(&velocity[..self.mode_count()],
+            &mut relative_velocity[..self.support_coordinate()]) {
+            return Err(invalid("supported viscous history has invalid original velocities"));
+        }
+        // Every wire's storage span fits its mean + retained axial harmonics.
+        // One bounded scratch buffer avoids per-layer/per-wire rate allocation.
+        let mut strain_rates=[0.0;MAX_IMPACT_MODES];
         let mut strains=Vec::with_capacity(self.wire_count());let mut tensions=Vec::new();
         for (i,p) in self.0.potentials.iter().enumerate() {
             let SupportedPotential::Longitudinal(p)=p else {strains.push(vec![]);tensions.push(vec![]);continue;};
@@ -161,11 +193,23 @@ impl SupportedStrings {
             p.observe(&local[..count])?;
             let strain=p.strain(&local[..count])?;
             let mut epsilon=vec![strain.mean];epsilon.extend(strain.harmonics);
+            if self.0.axial_tensile[i].is_some()
+                && self.0.axial_viscosity_n_s.as_ref().is_some_and(|loss|loss[i]>0.0) {
+                let range=&self.0.storage_ranges[i];
+                if epsilon.len()>range.len() {
+                    return Err(invalid("supported viscous tensile channels exceed their original storage span"));
+                }
+                let mut speed=[0.0;MAX_IMPACT_MODES];
+                self.local_coordinates(i,&relative_velocity,
+                    velocity[self.support_coordinate()]*self.0.weight,&mut speed);
+                p.axial_strain_rate(&local[..count],&speed[..count],self.0.finite_strain_axial_viscosity,
+                    &mut strain_rates[range.start..range.start+epsilon.len()])?;
+            }
             let mut tension:Vec<_>=epsilon.iter().map(|v|p.ea*v).collect();tension[0]+=p.tension;
             strains.push(epsilon);tensions.push(tension);
         }
         let mut at=0;
-        for arm in &config.arms {
+        for arm in config.into_iter().flat_map(|config|&config.arms) {
             let SupportedPotential::Longitudinal(p)=&self.0.potentials[arm.string] else {unreachable!()};
             let epsilon=&strains[arm.string];let length=self.0.wires[arm.string].length_m();
             let mut history_bound=0.0;
@@ -178,12 +222,25 @@ impl SupportedStrings {
                 return Err(invalid("supported material memory exceeds its declared strain-history envelope"));
             }
         }
+        if let Some(rigidities)=&self.0.axial_viscosity_n_s {
+            for (wire,tension) in tensions.iter_mut().enumerate() {
+                if self.0.axial_tensile[wire].is_none() || rigidities[wire]==0.0 {continue;}
+                let start=self.0.storage_ranges[wire].start;
+                for (coefficient,&rate) in tension.iter_mut().zip(&strain_rates[start..]) {
+                    let viscous=rigidities[wire]*rate;
+                    if !viscous.is_finite() || (rate!=0.0 && viscous==0.0) {
+                        return Err(invalid("hereditary tensile viscous force is unrepresentable"));
+                    }
+                    *coefficient+=viscous;
+                }
+            }
+        }
         if tensions.iter().filter(|t|!t.is_empty()).any(|t|t.iter().any(|v|!v.is_finite())
             || t[0]-t[1..].iter().map(|v|v.abs()).sum::<f64>()<=0.0) {
             return Err(invalid("complete hereditary support stress loses local string tension"));
         }
         let mut result=None;
-        for (wire,binding) in config.tensile.iter().enumerate() {
+        for (wire,binding) in self.0.axial_tensile.iter().enumerate() {
             if query.is_some_and(|selected|selected!=wire) {continue;}
             if let Some(binding)=binding {
                 let SupportedPotential::Longitudinal(p)=&self.0.potentials[wire] else {unreachable!()};
@@ -191,7 +248,9 @@ impl SupportedStrings {
                 let count=self.local_coordinates(wire,&q,z[self.support_coordinate()]*self.0.weight,&mut local);
                 let tension=&tensions[wire];
                 let maximum=tension[0]+tension[1..].iter().map(|v|v.abs()).sum::<f64>();
-                let assessment=binding.assess(p,&local[..count],&strains[wire],maximum,memory)?;
+                let start=self.0.storage_ranges[wire].start;
+                let assessment=binding.assess(p,&local[..count],&strains[wire],
+                    &strain_rates[start..start+strains[wire].len()],maximum,memory)?;
                 if query.is_none() {binding.guard.admit_assessment(assessment)?;}
                 else {result=Some(assessment);}
             }

@@ -22,6 +22,7 @@ const RADIUS: f64 = 0.0003;
 const LENGTH: f64 = 0.5;
 const YOUNG: f64 = 200e9;
 
+#[path = "tensile/supported.rs"]
 mod supported;
 
 fn strength_material(

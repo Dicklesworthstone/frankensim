@@ -2449,8 +2449,8 @@ The existing common tensile kernel combines that continuous-span axial bound
 with each original layer's `E_i`, outer radius and selected static strength:
 `sigma_i <= E_i (T_max/EA + r_outer_i K)`. Curvature factors are cached from
 the actual transverse normalization, independently of solid axial inertia or
-sparse axial mode indices. The guard adds no successful-check allocation,
-new force, stiffness, energy, mode, clock or solver. Native initial admission
+sparse axial mode indices. In this elastic lane the guard adds no successful-check
+allocation, new force, stiffness, energy, mode, clock or solver. Native initial admission
 and accepted-step gates enforce it after the original kinetic pullback;
 generic copied bodies retain it and a failed trial publishes no partial state.
 
@@ -2458,13 +2458,14 @@ generic copied bodies retain it and a failed trial publishes no partial state.
 original support coordinates without enforcing their selected strength limit.
 `MaterialSupportRun::tensile_assessment` and
 `ImpactSystem::support_tensile_assessment(body, wire)` read accepted native
-state, including actual source-bound axial material histories when selected.
+state, including actual normalized kinetic velocities and source-bound axial
+material histories when selected.
 The diagnostic uses the original material-memory offsets even when other
 bodies or contact coordinates precede the supported strings. Displacement-only
-assessment refuses when the selected criterion needs hereditary histories.
-`StringTensileAssessment::tension_n` is the upper local tension bound: elastic
-in the original lane, and complete equilibrium-plus-Maxwell tension in the
-source-bound axial-memory lane.
+assessment refuses when the selected criterion needs velocity or hereditary
+history. `StringTensileAssessment::tension_n` is the upper local tension bound:
+elastic in the original lane, and complete equilibrium-plus-Maxwell-plus-selected
+axial-dashpot tension when those source laws are selected.
 
 `with_material_longitudinal_relaxation` retains every active arm's original
 layer index, modulus increment, physical area and normalized memory address.
@@ -2476,6 +2477,25 @@ preload `E_i * T0 / EA`; a branch contributes
 `c_i,a,0 = DeltaE_i,a * A_i * L` and nonzero cosine channels use half that
 value. Layer stresses can reinforce or cancel, and aggregate force divided
 by equilibrium EA is not substituted for their load sharing.
+
+Independently selected source axial viscosity contributes each original layer's
+signed `eta_i * epsilon_dot_j` before that same harmonic envelope, with or
+without Maxwell arms. Copied native bodies retain exact section, material-query
+and viscosity receipts; cold binding caches each layer's viscosity. Original
+normalized kinetic velocities cross the same reciprocal support-coordinate
+map as displacement. The selected linear or finite-strain law supplies its
+native strain rate, including the corresponding moving-end contributions.
+The guarded local total-tension bound includes the same dashpot contribution.
+No strain rate or layer stress is inferred from displacement increments or
+aggregate damping forces.
+
+The complete-loss source constructor binds viscosity before initial tensile
+admission, so a physically relieving signed dashpot stress is retained. The
+existing mechanical gate handles viscosity-only wires without creating any
+relaxation state; actual Maxwell histories continue through their original
+memory gate. A public empty-arm declaration remains a physical no-op and
+cannot suppress initial or accepted-step tensile admission. Raw aggregate
+viscosity without original layer authority still refuses for a selected guard.
 
 The same common tensile kernel adds each layer's elastic outer-fibre bending
 stress and compares the result with its selected static source limit. Guarded
@@ -2490,10 +2510,8 @@ The envelope can be conservative when axial and bending maxima occur at
 different positions. It remains a fixed-condition normal-stress estimate,
 with no viscous bending stress, shear failure, fracture evolution or guarantee
 between accepted temporal samples. Source bending-memory variants still
-require their actual bending-history stresses. Positive independently selected
-axial viscosity with a hereditary tensile criterion also refuses until its
-actual per-layer dashpot stresses are available; adding viscosity after memory
-cannot bypass that boundary.
+require their actual bending-history stresses. No rate-dependent strength
+calibration or additional failure law is inferred from the selected viscosity.
 
 G0/G1/G3 cases in `tests/material_string_nonlinear/tensile/supported.rs` and
 its `hereditary.rs` child specify independent sparse-wave and endpoint-extension
@@ -2502,7 +2520,11 @@ memory stresses, continuous-span containment, original body/history offsets,
 source mismatch refusals, and native/prepared rollback on an actual Maxwell
 tensile crossing that the elastic-only criterion would miss. The native memory
 strength unit regression specifies signed coefficient cancellation before the
-spatial bound. Native test execution remains a separate verification obligation.
+spatial bound. The `hereditary/viscous.rs` cases additionally cover signed
+viscous cancellation and reinforcement, both selected loss laws with and without
+Maxwell, initial relief, support velocity, preceding-body offsets, raw-source
+refusal, and native/prepared rollback on a rate-driven tensile crossing. They
+also verify that empty-arm attachment cannot remove the viscosity-only gate.
 
 
 ### Coupled sustained plastic/creep shell contact and finite interface heat

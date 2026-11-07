@@ -11013,3 +11013,22 @@ and source, budget, cancellation and late-refusal regressions. These synthetic
 implementation checks do not establish transferable component service life.
 The observer changes neither stiffness nor heat and adds no thermal/rate law,
 crack growth, remeshing or second constitutive owner.
+
+## Pointwise HEX8 thermal fields for native directional strength
+
+`Hex8ElasticProblem::solve_thermal_response` and its dead-nodal-force variant
+accept the original `QuadraticThermalStrainField` as well as existing uniform
+and elementwise thermal inputs. For Standard strain, the unchanged native
+isoparametric owner consumes each original stiffness-point eigenstrain and
+matching local material tensor directly. Thermal stresses, support reactions,
+energy and material/strength identities retain their actual point values;
+a zero mean cannot conceal a local directional tensile peak.
+
+This is a source-compatible public admission of the existing pointwise
+implementation. B-bar still requires its original elementwise thermal field;
+no within-element pressure/eigenstrain projection is invented. Mismatched
+quadrature counts and unsupported B-bar point fields retain explicit refusal.
+The native directional-strength tests cover Q1/Q2 zero-mean local peaks,
+per-point material/temperature binding, full Tsai-Wu interaction and these
+quadrature/formulation boundaries.
+

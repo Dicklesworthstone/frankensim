@@ -136,9 +136,10 @@ impl Memory {
 }
 impl ImpactSystem {
     /// Selected tensile envelope on an accepted supported wire. Explicit
-    /// source-bound axial memory uses its actual original pHS histories and
-    /// layer load sharing, including when other bodies or contact histories
-    /// precede the support. Bending remains the selected elastic curvature law;
+    /// source-bound axial viscosity and memory use actual normalized kinetic
+    /// velocity, original pHS histories and layer load sharing, including when
+    /// other bodies or contact histories precede the support. Bending remains
+    /// the selected elastic curvature law;
     /// viscous bending, torsional failure and fracture evolution are absent.
     /// A non-support body or an unselected criterion returns None.
     pub fn support_tensile_assessment(&self,body:usize,wire:usize)
@@ -153,6 +154,9 @@ impl ImpactSystem {
                     .ok_or_else(||invalid("supported tensile history prefix is incomplete"))?;
                 return support.tensile_assessment_with_memory(wire,*offset,&self.x,history);
             }
+        }
+        if support.has_state_tensile(wire) {
+            return support.tensile_assessment_with_memory(wire,*offset,&self.x,&[]);
         }
         let mut q=[0.0;super::MAX_IMPACT_MODES];
         for (i,value) in q[..support.mode_count()].iter_mut().enumerate() {

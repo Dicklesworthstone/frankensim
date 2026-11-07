@@ -42,8 +42,11 @@ impl SupportedMaterialStrings {
     /// Selected source tensile limits use every layer's signed equilibrium and
     /// actual memory stress before bounding the spatial maximum. The existing
     /// elastic bending envelope remains; no bending-history stress is inferred.
-    /// Positive independently selected axial viscosity with this criterion
-    /// refuses until its actual per-layer viscous stresses are also available.
+    /// Selected source axial viscosity contributes each original layer's signed
+    /// eta*epsilon_dot before that spatial bound, using the actual normalized
+    /// kinetic velocity and the selected linear or finite-strain loss law.
+    /// Copied bodies retain these sources; raw aggregate dashpot attachment
+    /// still refuses because C_a alone cannot determine each layer's stress.
     pub fn with_material_longitudinal_relaxation(mut self,
         selections:Vec<LongitudinalRelaxationSelection>, initial:InitialMemory,
         maximum_states:usize, gate:&CancelGate) -> Result<Self,ImpactError>

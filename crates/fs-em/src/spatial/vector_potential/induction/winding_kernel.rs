@@ -23,6 +23,7 @@ use crate::{
         ohmic,
     },
 };
+use fs_material::conductor::spatial::SpatialConductorMaterial;
 use fs_material::{
     conductor::ResolvedConductorState, field_storage::admit_source_temperature_refresh,
 };

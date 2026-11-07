@@ -151,6 +151,8 @@ struct Data {
     translation: Vec<f64>,
     damping: Vec<f64>,
     axial_viscosity_n_s: Option<Vec<f64>>,
+    axial_viscosity_sources: Option<std::sync::Arc<[fs_material::section::axial::ConcentricAxialViscosity]>>,
+    axial_tensile: Vec<Option<longitudinal::relaxation::LayerTensile>>,
     axial_relaxation: Option<longitudinal::relaxation::SupportedRelaxation>,
     finite_strain_axial_viscosity: bool,
     axial_endpoint_damping_n_s_m: f64,
@@ -202,8 +204,8 @@ impl SupportedStrings {
             return Err(invalid("one original tensile selection per supported wire"));
         }
         if capacities.iter().all(Option::is_none) { return Ok(self); }
-        if self.0.axial_relaxation.is_some() {
-            return Err(invalid("hereditary support tensile admission needs actual layer memory stresses"));
+        if self.0.axial_relaxation.is_some() || self.0.axial_tensile.iter().any(Option::is_some) {
+            return Err(invalid("state-dependent support tensile selection must retain its original layer stress owner"));
         }
         let data = Rc::make_mut(&mut self.0);
         for (index, capacity) in capacities.iter().copied().enumerate() {
@@ -420,7 +422,7 @@ impl SupportedStrings {
         bound=bound.max(support_row);
         if !bound.is_finite() {return Err(invalid("moving support linear clock bound overflow"));}
         let result=Self(Rc::new(Data {support,wires:wires.to_vec(),potentials,ranges,storage_ranges,axial_ranges,translation,damping,
-            axial_viscosity_n_s:None,axial_relaxation:None,finite_strain_axial_viscosity:false,axial_endpoint_damping_n_s_m:0.0,
+            axial_viscosity_n_s:None,axial_viscosity_sources:None,axial_tensile:vec![None;wires.len()],axial_relaxation:None,finite_strain_axial_viscosity:false,axial_endpoint_damping_n_s_m:0.0,
             end_motion,remainder_mass,absolute_drag:None,transverse:transverse_motion,weight,
             total_mass_kg:total_mass,clock_bounds:vec![det::sqrt(bound);count+1]}));
         // Check initial energy/motion representation before returning an adapter.
@@ -745,15 +747,15 @@ impl SupportedStrings {
     /// This diagnoses an overlimit trial without enforcing its tensile limit;
     /// the original finite, slope, strain and positive-tension domain still
     /// applies. It adds no viscous stress, fracture law or new time owner.
-    /// With a selected hereditary tensile criterion, displacement alone is
-    /// insufficient: use ImpactSystem::support_tensile_assessment to retain the
-    /// actual accepted material histories.
+    /// With selected axial viscosity or hereditary tensile stress, displacement
+    /// alone is insufficient: use ImpactSystem::support_tensile_assessment to
+    /// retain actual kinetic velocity and accepted material histories.
     pub fn tensile_assessment(&self,wire:usize,z:&[f64])
         ->Result<Option<StringTensileAssessment>,ImpactError>
     {
         let potential=self.0.potentials.get(wire).ok_or_else(||invalid("unknown supported wire"))?;
-        if self.has_memory_tensile(wire) {
-            return Err(invalid("hereditary supported tensile assessment requires actual material histories"));
+        if self.has_state_tensile(wire) {
+            return Err(invalid("supported tensile assessment requires actual velocities and material histories"));
         }
         let mut q=[0.0;MAX_IMPACT_MODES];
         if !self.relative(z,&mut q[..self.support_coordinate()]) {
@@ -802,6 +804,7 @@ impl SupportedStrings {
             result.wire_stretching_energy_j+=observation.stretching_energy_j;
         }
         if !result.wire_stretching_energy_j.is_finite() {return Err(invalid("supported wire energy overflow"));}
+        self.admit_tensile_motion(first,state)?;
         Ok(result)
     }
 }

@@ -4,8 +4,8 @@ use super::{
     Hex8ElasticProblem, Hex8PrestressedAssembly, Hex8ThermalResponse, isoparametric, tensor_rule,
 };
 use crate::linear3::{
-    TetElasticError, TetStaticSolveConfig, TetThermalLoad, TetThermalStrainField,
-    add_nodal_forces_to_thermal_load,
+    QuadraticThermalStrainField, TetElasticError, TetStaticSolveConfig, TetThermalLoad,
+    TetThermalStrainField, add_nodal_forces_to_thermal_load,
 };
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
@@ -65,20 +65,26 @@ impl Hex8ElasticProblem<'_> {
     /// B-bar observations use its assumed strain; compatible and assumed
     /// strains independently obey the supplied finite small-strain ceiling.
     ///
+    /// Standard strain accepts uniform, elementwise or original stiffness-point
+    /// thermal fields, including matching local elastic tensors. Point values
+    /// and material identities remain unaveraged in stress and energy recovery.
+    /// B-bar retains the shared owner's elementwise thermal-field requirement;
+    /// a pointwise pressure/eigenstrain projection is not inferred.
+    ///
     /// Every connected component must have its six rigid motions restrained.
     /// A fully fixed solid still returns its physical stress and reactions.
     /// This is frozen-reference linear equilibrium, without geometric
     /// prestress stiffness, changing temperature or finite-rotation kinematics.
-    pub fn solve_thermal_response(
+    pub fn solve_thermal_response<'t>(
         &self,
-        thermal_strains: TetThermalStrainField<'_>,
+        thermal_strains: impl Into<QuadraticThermalStrainField<'t>>,
         config: TetStaticSolveConfig,
         mesh_frame: ContentHash,
         maximum_absolute_mandel_strain: f64,
         cx: &Cx<'_>,
     ) -> Result<Hex8ThermalResponse, TetElasticError> {
         self.solve_thermal_response_impl(
-            thermal_strains,
+            thermal_strains.into(),
             None,
             config,
             mesh_frame,
@@ -90,9 +96,9 @@ impl Hex8ElasticProblem<'_> {
     /// The same thermal equilibrium with explicit full dead nodal forces.
     /// Returned force balance is internal minus applied force: support
     /// reactions on fixed DOFs and the actual residual on free DOFs.
-    pub fn solve_thermal_response_with_nodal_forces(
+    pub fn solve_thermal_response_with_nodal_forces<'t>(
         &self,
-        thermal_strains: TetThermalStrainField<'_>,
+        thermal_strains: impl Into<QuadraticThermalStrainField<'t>>,
         nodal_forces_n: &[(usize, f64)],
         config: TetStaticSolveConfig,
         mesh_frame: ContentHash,
@@ -100,7 +106,7 @@ impl Hex8ElasticProblem<'_> {
         cx: &Cx<'_>,
     ) -> Result<Hex8ThermalResponse, TetElasticError> {
         self.solve_thermal_response_impl(
-            thermal_strains,
+            thermal_strains.into(),
             Some(nodal_forces_n),
             config,
             mesh_frame,
@@ -175,7 +181,7 @@ impl Hex8ElasticProblem<'_> {
         cx: &Cx<'_>,
     ) -> Result<Hex8PrestressedAssembly, TetElasticError> {
         let response = self.solve_thermal_response_impl(
-            thermal_strains,
+            thermal_strains.into(),
             nodal_forces_n,
             config,
             mesh_frame,
@@ -199,7 +205,7 @@ impl Hex8ElasticProblem<'_> {
 
     fn solve_thermal_response_impl(
         &self,
-        thermal_strains: TetThermalStrainField<'_>,
+        thermal_strains: QuadraticThermalStrainField<'_>,
         nodal_forces_n: Option<&[(usize, f64)]>,
         config: TetStaticSolveConfig,
         mesh_frame: ContentHash,
@@ -214,7 +220,7 @@ impl Hex8ElasticProblem<'_> {
             self.nodes_m,
             self.hexahedra,
             self.materials,
-            thermal_strains.into(),
+            thermal_strains,
             nodal_forces_n,
             self.fixed_dofs,
             self.budget,

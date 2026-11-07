@@ -311,6 +311,26 @@ fn g1_q1_q2_directional_bending_peaks_survive_zero_mean() {
             )
             .unwrap();
         check_bending(&response, &binding, E[1] * 0.0002 / 3.0_f64.sqrt(), cx);
+        // Exposing exact Standard-strain samples must not invent an
+        // intra-element B-bar eigenstrain projection or accept another rule.
+        for (formulation, points_per_element) in
+            [(Formulation::BBar, 8), (Formulation::Standard, 7)]
+        {
+            let refused = Hex8ElasticProblem { formulation, ..p }.solve_thermal_response(
+                QuadraticThermalStrainField::AtQuadrature {
+                    states: &states,
+                    points_per_element,
+                },
+                TetStaticSolveConfig::default(),
+                FRAME,
+                0.01,
+                cx,
+            );
+            assert!(matches!(
+                refused,
+                Err(fs_solid::linear3::TetElasticError::InvalidThermalStrain { .. })
+            ));
+        }
         for family in hex_support::FAMILIES {
             let mesh = hex_support::mesh([1; 3], [1.; 3], family, cx);
             let fixed: Vec<_> = (0..mesh.nodes_m.len() * 3).collect();

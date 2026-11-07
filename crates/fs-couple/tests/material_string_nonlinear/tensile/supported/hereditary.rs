@@ -3,20 +3,25 @@ use super::*;
 use fs_couple::bowed_string::runtime::reciprocal::bank::nonlinear::longitudinal::relaxation::LongitudinalRelaxationSelection;
 use fs_couple::render::plate::impact::ImpactBody;
 use fs_material::section::relaxation::LayerRelaxationProperties;
+use fs_material::section::axial::YOUNG_VISCOSITY_PROPERTY;
 use fs_qty::Time;
+
+#[path = "hereditary/viscous.rs"]
+mod viscous;
 
 const CORE_E: f64 = 100e9;
 const SLEEVE_E: f64 = 2e9;
 const DELTA: f64 = 20e9;
 const CORE_R: f64 = 0.0002;
 
-fn material(young: f64, delta: f64, limit: f64) -> ResolvedMaterialStatePoint {
+fn material(young: f64, delta: f64, limit: f64, viscosity: f64) -> ResolvedMaterialStatePoint {
     let mut claims = ClaimSet::new();
     let mut requirements = Vec::new();
     for (name, dims, value) in [
         ("density", Density::DIMS, 7800.0),
         ("young_modulus", Pressure::DIMS, young),
         (ETA, DynViscosity::DIMS, 0.0),
+        (YOUNG_VISCOSITY_PROPERTY, DynViscosity::DIMS, viscosity),
         (LIMIT, Pressure::DIMS, limit),
         ("delta", Pressure::DIMS, delta),
         ("tau", Time::DIMS, 0.001),
@@ -75,11 +80,11 @@ fn source(cx: &Cx<'_>, gate: &CancelGate, limit: f64) -> NonlinearMaterialString
         vec![
             ConcentricMaterialLayer {
                 outer_radius_m: CORE_R,
-                material: material(CORE_E, 0.0, 1e12),
+                material: material(CORE_E, 0.0, 1e12, 0.0),
             },
             ConcentricMaterialLayer {
                 outer_radius_m: RADIUS,
-                material: material(SLEEVE_E, DELTA, limit),
+                material: material(SLEEVE_E, DELTA, limit, 0.0),
             },
         ],
     )
