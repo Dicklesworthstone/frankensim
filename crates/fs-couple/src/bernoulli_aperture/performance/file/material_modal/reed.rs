@@ -11,7 +11,9 @@
 //! c = 2 zeta sqrt(k m). Nothing is inferred that the row does not state: the reed-performance file's
 //! zero-means-derived mass and stiffness are refused here, HEIGHT must equal the `valve` REST_GAP, the
 //! contact is the file's own `contact` row (the lay of a lumped reed is the writer's to state), and no
-//! viscous slit is selected. An optional `contraction C_C` row directly after `reed` gives the jet's vena
+//! viscous slit is selected. An optional `staple_recovery C_P S_C_M2` row directly after `reed` gives the double reed's
+//! staple pressure recovery (the blade is driven by the drop across the opening, the bore input raised by C_P (1/2) rho
+//! (q / S_c)^2). An optional `contraction C_C` row after that gives the jet's vena
 //! contracta (the flow width becomes C_c times the physical width, `ModalAperture::set_jet_contraction`),
 //! as the reed-performance file's row of that name does; absent, nothing changes bit for bit. The row replaces `solid` or `loss`/`blades` and every plate record; it
 //! carries no mesh, section, material memory, traction, closure or force port.
@@ -20,6 +22,7 @@ use super::{PlateValveInputError, Reader, bad};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::modal::{ApertureMode, ModalAperture, ModalApertureSpec};
 use crate::bernoulli_aperture::paired::{BladePropagator, BladeState, PairedApertureLimits};
+use crate::bernoulli_aperture::viscous::StapleRecovery;
 use fs_dcontact::Obstacle;
 
 /// Longest source token, in bytes; the token names the sourcing rows, it is not prose.
@@ -35,6 +38,7 @@ pub struct ReedRecord {
     stiffness_n_m: f64,
     damping_ratio: f64,
     source: String,
+    staple: Option<(f64, f64)>,
     contraction: Option<f64>,
 }
 
@@ -62,6 +66,8 @@ impl ReedRecord {
     pub const fn damping_ratio(&self) -> f64 { self.damping_ratio }
     /// The token naming the description rows that sourced the six numbers.
     pub fn source(&self) -> &str { &self.source }
+    /// The staple's pressure recovery `(C_P, S_c [m^2])` from the optional `staple_recovery` row, if the card states one.
+    pub const fn staple_recovery(&self) -> Option<(f64, f64)> { self.staple }
     /// The jet's vena contracta C_c in (0, 1] from the optional `contraction` row, if the card states one.
     pub const fn contraction(&self) -> Option<f64> { self.contraction }
     /// Effective pressure area A = (k / P_c) H [m^2], associated as the live reed's own
@@ -98,6 +104,9 @@ impl ReedRecord {
             contact,
             propagator,
         )?;
+        if let Some((c_p, constriction_area_m2)) = self.staple {
+            valve.set_staple_recovery(StapleRecovery::new(c_p, constriction_area_m2)?)?;
+        }
         if let Some(coefficient) = self.contraction {
             valve.set_jet_contraction(coefficient)?;
         }
@@ -132,7 +141,21 @@ pub(super) fn read(rows: &mut Reader<'_>, rest_opening: f64) -> Result<ReedRecor
     if source.len() > MAX_SOURCE_TOKEN_BYTES || !source.bytes().all(|b| b.is_ascii_graphic()) {
         return Err(bad(line, "a typed reed needs a printable source token of at most 256 bytes"));
     }
-    // An optional `contraction C_C` row directly after the reed, as the reed-performance file places it: the jet's
+    // An optional `staple_recovery C_P S_C_M2` row directly after the reed, as the reed-performance file places it: the double
+    // reed's staple pressure recovery (Almeida, Vergez and Causse 2007 eqs. 14-17). Absent, no pressure is recovered.
+    let staple = if rows.lines.clone().next().and_then(|line|
+        line.split_ascii_whitespace().next()) == Some("staple_recovery")
+    {
+        let mut row = rows.row("staple_recovery")?;
+        let at = row.line;
+        let c_p = row.scalar()?;
+        let constriction_area_m2 = row.scalar()?;
+        row.finish()?;
+        StapleRecovery::new(c_p, constriction_area_m2).map_err(|_| bad(at,
+            "a typed reed's staple_recovery needs C_P in [0, 1] and a positive constriction area in m^2"))?;
+        Some((c_p, constriction_area_m2))
+    } else { None };
+    // An optional `contraction C_C` row after those, as the reed-performance file places it: the jet's
     // vena contracta. Absent, the flow width is the physical width bit for bit.
     let contraction = if rows.lines.clone().next().and_then(|line|
         line.split_ascii_whitespace().next()) == Some("contraction")
@@ -148,7 +171,7 @@ pub(super) fn read(rows: &mut Reader<'_>, rest_opening: f64) -> Result<ReedRecor
     } else { None };
     let record = ReedRecord {
         rest_opening_m, width_m, closing_pressure_pa, mass_kg, stiffness_n_m, damping_ratio,
-        source: source.to_string(), contraction,
+        source: source.to_string(), staple, contraction,
     };
     let area = record.pressure_area_m2();
     let damping = record.damping_n_s_m();

@@ -1251,7 +1251,8 @@ thing that changes.
 
 ```text
 reed HEIGHT WIDTH CLOSING_PA MASS STIFFNESS ZETA SOURCE_TOKEN
-contraction C_C                      (optional, directly after reed)
+staple_recovery C_P S_C_M2           (optional, directly after reed)
+contraction C_C                      (optional, after those)
 constriction_noise SEED DUCT_RADIUS_M   (optional, after those)
 ```
 
@@ -1279,6 +1280,14 @@ reed verbatim, with their status and source columns.
 Two opt-in rows carry the physics the reed-performance file's rows of the same names carry, with the same grammar
 and the same law; a card without them is bit for bit what it was:
 
+- `staple_recovery C_P S_C_M2`, C_P in [0, 1] and S_c > 0 [m^2]: the double reed's staple pressure recovery (Almeida,
+  Vergez and Causse 2007 eqs. 14-17, one measured reed's numbers on the oboe pages: C_P 0.8, S_c 4e-6 m^2). The blade is
+  driven by the drop `dpc` across the opening itself, not by the total mouth-to-bore drop, and the bore input is raised
+  by `R = C_P (1/2) rho (q / S_c)^2` of the forward flow `q`, so the bore sees `dpt = dpc - R`. The condensed solve
+  carries it exactly: `(1 - C_P r^2 / den) dpc + (Z / den) q = drive` with `r = S / S_c` (`den` is the swept-flow
+  denominator), the live junction at `den = 1`. The junction absorbs `dpt (jet + swept)`, the blade takes `dpc swept` of
+  it and the fluid dissipates the rest, so the work balance closes. `C_P = 0` is the original solve bit for bit.
+  Forward flow with `C_P (S / S_c)^2 >= 1` refuses at the step, as on the live page. Inviscid uniform slit only.
 - `contraction C_C`, C_c in (0, 1]: the reed jet's vena contracta. The continuous Bernoulli slit flow takes the
   width `C_c w` (`ModalAperture::set_jet_contraction`); pressure area, swept volume, contact and the mechanical
   limits keep the physical width and gap. `contraction 1` is the original flow bit for bit, and a card whose WIDTH
@@ -1290,7 +1299,7 @@ and the same law; a card without them is bit for bit what it was:
   mechanical sample (so no callback partition changes it), and is an extrapolation in size, speed and shape from
   dampers and plates in a 300 mm duct at 10 to 25 m/s. On a 0.87 mm duct it drives only 10 to 20 kHz.
 
-The sidecar reports the record as `typed_reed` with its model scope (and `jet_contraction` and
+The sidecar reports the record as `typed_reed` with its model scope (and `staple_recovery`, `jet_contraction` and
 `constriction_noise` when the card states them). Mesh, section, material memory, traction,
 closure and force ports do not exist for this source; DG spatial and nonlinear time refinement remain separate, and
 the reed is a lumped single-reed model, not a measured instrument.

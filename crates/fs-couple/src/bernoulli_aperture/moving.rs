@@ -54,6 +54,47 @@ pub(crate) fn fixed_opening_pressure_drop(
     Ok(pressure_partition(drive, a)?.0)
 }
 
+/// [`fixed_opening_pressure_drop`] with the staple's pressure recovery ([`StapleRecovery`]) on a condensed mechanical
+/// swept-flow compliance. Returns `(dpc, dpt)`: the drop `dpc` across the opening itself, which drives the blade, and the
+/// total mouth-to-bore drop `dpt = dpc - R` with `R = C_P (1/2) rho (q / S_c)^2` the recovered pressure of the forward
+/// flow `q`.
+///
+/// `impedance` is the condensed `Z / den` and `denominator` the `den = 1 + Z pm` of the caller, where `pm` is the pressure
+/// mobility (the blade's swept flow per pascal of `dpc`). The junction balance `den dpc + Z q - R = den drive` then reads
+/// `f' dpc + (Z / den) q = drive` with `f' = 1 - C_P r^2 / den` and `r = S / S_c` on forward flow (`f' = 1` on reversed
+/// flow), which is the live junction's `f s^2 + a s = d` at `den = 1`. The domain is the live one: it refuses where
+/// `C_P r^2 >= 1` ([`STAPLE_RECOVERY_DOMAIN`](super::viscous::STAPLE_RECOVERY_DOMAIN)).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fixed_opening_pressure_drop_with_recovery(
+    recovery: StapleRecovery, width: f64, opening: f64, rho: f64, impedance: f64, denominator: f64, drive: f64,
+) -> Result<(f64, f64), AcousticRealizeError> {
+    if ![width, opening, rho, impedance, denominator, drive].iter().all(|x| x.is_finite())
+        || width <= 0.0 || opening < 0.0 || rho <= 0.0 || impedance <= 0.0 || denominator < 1.0 {
+        return Err(invalid());
+    }
+    let unit_flow = fs_phs::bernoulli_volume_flow(width, opening, 1.0, rho);
+    let a = impedance * unit_flow;
+    if !a.is_finite() || a < 0.0 { return Err(invalid()); }
+    if a == 0.0 || drive == 0.0 {
+        // No flow, so no recovery: the whole condensed difference falls across the opening.
+        return Ok((drive, drive));
+    }
+    let factor = if drive > 0.0 {
+        1.0 - (1.0 - recovery.forward_factor(width * opening)?) / denominator
+    } else { 1.0 };
+    // sqrt(|dpc|) = s solves f' s^2 + a s = |drive|, scaled as `pressure_partition` does.
+    let b = 2.0 * det::sqrt(factor * drive.abs());
+    let scale = a.max(b);
+    let (an, bn) = (a / scale, b / scale);
+    let s = (2.0 * (drive.abs() / scale)) / (an + det::sqrt(an * an + bn * bn));
+    let sign = drive.signum();
+    let blade = sign * s * s;
+    let recovered = recovery.recovered_pressure_pa(rho, sign * unit_flow * s);
+    let total = blade - recovered;
+    if ![blade, total].iter().all(|v| v.is_finite()) { return Err(invalid()); }
+    Ok((blade, total))
+}
+
 /// Solve the fixed-opening characteristic junction algebraically.
 /// With d = Pmouth - 2 Pminus - Z Umoving and a = Z Ujet(1 Pa),
 /// sqrt(|dp|) solves s^2 + a s = |d|. Rationalization avoids cancellation
@@ -407,6 +448,85 @@ mod tests {
         assert!(junction(0.6, 1.5 * limit_opening).is_ok());
         for bad in [0.0, -0.5, 1.0 + 1e-9, 2.0, f64::NAN, f64::INFINITY] {
             assert!(junction(bad, 3e-4).is_err(), "c={bad}");
+        }
+    }
+
+    // The condensed recovery root at den = 1 is the live characteristic junction: the blade drop is its constriction drop
+    // and the outgoing wave is `no_drop - total`.
+    #[test]
+    fn condensed_recovery_drop_at_unit_denominator_is_the_live_junction() {
+        let recovery = StapleRecovery::new(0.8, S_C).unwrap();
+        let (width, rho) = (0.0056, 1.2);
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * (1e-9 + a.abs().max(b.abs()));
+        let mut forward = 0;
+        for opening in [5e-5, 1.5e-4, 3.57e-4, 6e-4] {
+            for zc in [3e5, 6e7, 5e9] {
+                for incoming in [-300.0, 0.0, 1000.0] {
+                    for mouth in [-4000.0, -50.0, 50.0, 800.0, 7400.0, 30000.0] {
+                        for moving in [-8e-5, 0.0, 6e-5] {
+                            let live = characteristic_junction_with_recovery(
+                                recovery, 1.0, width, opening, rho, zc, incoming, mouth, moving).unwrap();
+                            let drive = (mouth - incoming) - (incoming + zc * moving);
+                            let (blade, total) = fixed_opening_pressure_drop_with_recovery(
+                                recovery, width, opening, rho, zc, 1.0, drive).unwrap();
+                            assert!(close(blade, live.constriction_drop_pa), "{blade} vs {live:?}");
+                            assert!(close(total, live.constriction_drop_pa - live.recovered_pa), "{total} vs {live:?}");
+                            let outgoing = (mouth - incoming) - total;
+                            assert!((outgoing - live.outgoing_pa).abs()
+                                <= 1e-9 * (1.0 + (mouth - incoming).abs() + total.abs()), "{outgoing} vs {live:?}");
+                            if live.flow_m3_s > 0.0 { forward += 1; }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(forward > 100, "{forward}");
+    }
+
+    // Any denominator: the returned drops satisfy the condensed balance `f' dpc + (Z/den) q = drive` with the recovered
+    // pressure `R = dpc - dpt` of the forward flow, and `C_P = 0`, reversed flow and no flow recover nothing.
+    #[test]
+    fn condensed_recovery_drop_satisfies_its_balance_for_any_denominator() {
+        let (width, rho, z) = (0.0056, 1.2, 4e7);
+        for c_p in [0.0, 0.3, 0.8] {
+            let recovery = StapleRecovery::new(c_p, S_C).unwrap();
+            for denominator in [1.0, 1.7, 40.0] {
+                for opening in [0.0, 5e-5, 3.57e-4] {
+                    for drive in [-3000.0, -1.0, 0.0, 1e-3, 20.0, 7400.0] {
+                        let (blade, total) = fixed_opening_pressure_drop_with_recovery(
+                            recovery, width, opening, rho, z / denominator, denominator, drive).unwrap();
+                        let unit = fs_phs::bernoulli_volume_flow(width, opening, 1.0, rho);
+                        let flow = unit * blade.abs().sqrt() * blade.signum();
+                        let r = blade - total;
+                        let f = if drive > 0.0 {
+                            1.0 - (1.0 - recovery.forward_factor(width * opening).unwrap()) / denominator
+                        } else { 1.0 };
+                        let residual = f * blade + (z / denominator) * flow - drive;
+                        assert!(residual.abs() <= 1e-9 * (1.0 + drive.abs()), "c={c_p} den={denominator} h={opening} d={drive}: {residual}");
+                        assert!((r - recovery.recovered_pressure_pa(rho, flow)).abs() <= 1e-9 * (1.0 + blade.abs()));
+                        if c_p == 0.0 || drive <= 0.0 || opening == 0.0 { assert_eq!(total, blade); }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn condensed_recovery_drop_refuses_the_staple_domain_and_bad_inputs() {
+        let recovery = StapleRecovery::new(0.8, S_C).unwrap();
+        // C_P (S / S_c)^2 >= 1 on a forward drive is the live domain refusal, whatever the denominator.
+        let wide = S_C / 0.8_f64.sqrt() * 1.5;
+        for denominator in [1.0, 5.0] {
+            match fixed_opening_pressure_drop_with_recovery(recovery, wide, 1.0, 1.2, 1e6, denominator, 100.0) {
+                Err(AcousticRealizeError::Reed { what }) => assert_eq!(what, STAPLE_RECOVERY_DOMAIN),
+                other => panic!("expected the staple domain refusal, got {other:?}"),
+            }
+            assert!(fixed_opening_pressure_drop_with_recovery(recovery, wide, 1.0, 1.2, 1e6, denominator, -100.0).is_ok());
+        }
+        for (w, h, rho, z, den, d) in [(0.0, 1e-4, 1.2, 1e6, 1.0, 1.0), (0.005, -1e-4, 1.2, 1e6, 1.0, 1.0),
+            (0.005, 1e-4, 0.0, 1e6, 1.0, 1.0), (0.005, 1e-4, 1.2, 0.0, 1.0, 1.0), (0.005, 1e-4, 1.2, 1e6, 0.5, 1.0),
+            (0.005, 1e-4, 1.2, 1e6, 1.0, f64::NAN), (0.005, 1e-4, f64::INFINITY, 1e6, 1.0, 1.0)] {
+            assert!(fixed_opening_pressure_drop_with_recovery(recovery, w, h, rho, z, den, d).is_err());
         }
     }
 }

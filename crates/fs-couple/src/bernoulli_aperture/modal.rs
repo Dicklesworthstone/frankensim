@@ -123,6 +123,8 @@ pub struct ModalAperture {
     viscous_slit: Option<super::viscous::ViscousSlit>,
     // The reed jet's vena contracta C_c in (0, 1] (`set_jet_contraction`); `None` keeps the flow width bit for bit.
     jet_contraction: Option<f64>,
+    // The double reed's staple pressure recovery (`set_staple_recovery`); `None` keeps every drop bit for bit.
+    staple_recovery: Option<super::viscous::StapleRecovery>,
     viscosity: Option<viscosity::ApertureViscosity>,
     exact: Option<exact::ExactModes>,
     relaxation: Option<relaxation::ModalRelaxation>,
@@ -269,6 +271,7 @@ impl ModalAperture {
             material_gas: None,
             viscous_slit: None,
             jet_contraction: None,
+            staple_recovery: None,
             viscosity: None,
             exact,
             relaxation: None,
@@ -321,6 +324,11 @@ impl ModalAperture {
         if self.jet_contraction.is_some() {
             return Err(invalid(
                 "modal jet contraction is defined on the inviscid uniform slit only, not with a viscous slit",
+            ));
+        }
+        if self.staple_recovery.is_some() {
+            return Err(invalid(
+                "modal staple recovery is defined on the inviscid uniform slit only, not with a viscous slit",
             ));
         }
         law.evaluate(
@@ -384,6 +392,41 @@ impl ModalAperture {
         }
         self.jet_contraction = Some(coefficient);
         Ok(())
+    }
+
+    /// The double reed's staple pressure recovery (Almeida, Vergez and Causse 2007 eqs. 14-17), as the reed-bore voice's
+    /// `staple_recovery C_P S_C` row: the blade is driven by the drop `dpc` across the opening itself, not by the total
+    /// mouth-to-bore drop, and the bore input is raised by `R = C_P (1/2) rho (q / S_c)^2` of the forward flow `q`, so the
+    /// bore sees `dpt = dpc - R`. The condensed mechanical solve carries it exactly: `(1 - C_P r^2 / den) dpc + (Z / den) q =
+    /// drive` (`moving::fixed_opening_pressure_drop_with_recovery`), the live junction at `den = 1`. The jet area is the
+    /// contracted `C_c w h` when a contraction is selected, as on the live page. `C_P = 0` recovers nothing and is the
+    /// original solve bit for bit, and so is not calling this at all. Defined on the inviscid uniform slit only; selected
+    /// once, before the first accepted sample. Forward flow with `C_P (S / S_c)^2 >= 1` refuses at the step, by the
+    /// live `STAPLE_RECOVERY_DOMAIN`.
+    ///
+    /// # Errors
+    /// A second selection, an advanced aperture, or a viscous or spatial slit.
+    pub fn set_staple_recovery(
+        &mut self, recovery: super::viscous::StapleRecovery,
+    ) -> Result<(), AcousticRealizeError> {
+        if self.samples != 0 || self.staple_recovery.is_some() {
+            return Err(invalid(
+                "modal staple recovery is selected once, before the first accepted sample",
+            ));
+        }
+        if self.viscous_slit.is_some() || self.closure.is_some() || self.solid_closure.is_some() {
+            return Err(invalid(
+                "modal staple recovery is defined on the inviscid uniform slit only",
+            ));
+        }
+        self.staple_recovery = Some(recovery);
+        Ok(())
+    }
+
+    /// The selected staple pressure recovery, if any.
+    #[must_use]
+    pub const fn staple_recovery(&self) -> Option<super::viscous::StapleRecovery> {
+        self.staple_recovery
     }
 
     /// The selected vena contracta coefficient, if any.
@@ -686,6 +729,7 @@ impl ModalAperture {
                 self.spec.limits,
                 &self.obstacle,
                 self.viscous_slit,
+                self.staple_recovery,
             )?
         } else if let Some(c) = self.viscosity.as_ref().filter(|c| c.is_active()) {
             c.solve_free(&mut free[..n])?;
@@ -704,6 +748,7 @@ impl ModalAperture {
                 self.spec.limits,
                 &self.obstacle,
                 self.viscous_slit,
+                self.staple_recovery,
             )?
         } else {
             uniform::solve(
@@ -720,6 +765,7 @@ impl ModalAperture {
                 self.spec.limits,
                 &self.obstacle,
                 self.viscous_slit,
+                self.staple_recovery,
             )?
         };
         let mut next: Vec<_> = self
@@ -751,7 +797,7 @@ impl ModalAperture {
         };
         let endpoint = self.exact.as_ref().map(|exact| {
             let held: Vec<_> = (0..n)
-                .map(|i| external[i] - area[i] * trial.dp + contact.forces_n[i])
+                .map(|i| external[i] - area[i] * trial.blade_dp + contact.forces_n[i])
                 .collect();
             exact.endpoint(
                 &self.state,
@@ -778,20 +824,20 @@ impl ModalAperture {
         };
         let jet = match (self.viscous_slit, &self.closure) {
             (Some(law), Some(closure)) => closure.viscous_flow(
-                law, &middle[..n], self.spec.density_kg_m3, trial.dp)?.flow_m3_s,
+                law, &middle[..n], self.spec.density_kg_m3, trial.blade_dp)?.flow_m3_s,
             (Some(law), None) => {
                 law.evaluate(
                     self.spec.width_m,
                     opening,
                     self.spec.density_kg_m3,
-                    trial.dp,
+                    trial.blade_dp,
                 )?
                 .flow_m3_s
             }
             (None, _) => super::moving::volume_flow(
                 jet_width,
                 opening,
-                trial.dp,
+                trial.blade_dp,
                 self.spec.density_kg_m3,
             ),
         };
@@ -810,6 +856,12 @@ impl ModalAperture {
             drive.incoming_pressure_pa + load_pressure
         };
         let wave = (outgoing - drive.incoming_pressure_pa) / z;
+        // The junction absorbs (P - p_bore) Q = dpt (jet + swept); the blade takes dpb swept of it, so the fluid dissipates the
+        // rest. Without a staple dpt = dpb and this is dpt * jet, the original term.
+        let jet_dissipation = match self.staple_recovery {
+            Some(_) => trial.dp * jet + (trial.dp - trial.blade_dp) * swept,
+            None => trial.dp * jet,
+        };
         let mut viscous_force = [0.0; MAX_MODES];
         let viscous = if let Some(c) = self.viscosity.as_ref().filter(|c| c.is_active()) {
             c.force_and_power(&trial.velocity[..n], &mut viscous_force[..n])?
@@ -868,11 +920,11 @@ impl ModalAperture {
             storage_change_j: energy - self.stored_energy_j(),
             dissipated_energy_j: match &endpoint {
                 Some(exact) => {
-                    dt * (trial.dp * jet + contact.dissipated_power_w)
+                    dt * (jet_dissipation + contact.dissipated_power_w)
                         + exact.viscous_loss_j
                         + relaxation_loss
                 }
-                None => dt * (trial.dp * jet + viscous + contact.dissipated_power_w),
+                None => dt * (jet_dissipation + viscous + contact.dissipated_power_w),
             },
             pressure_work_j: dt * trial.dp * (wave - drive.body_flow_m3_s),
             mechanical_work_j: mechanical,
@@ -893,7 +945,7 @@ impl ModalAperture {
                     + m.stiffness_n_m * mean_displacement
                     + m.damping_n_s_m * trial.velocity[i]
                     + endpoint.as_ref().map_or(0.0, |e| e.relaxation_force_n[i])
-                    + area[i] * trial.dp
+                    + area[i] * trial.blade_dp
                     - contact.forces_n[i]
                     - external[i];
                 if self.viscosity.as_ref().is_some_and(|c| c.is_active()) {

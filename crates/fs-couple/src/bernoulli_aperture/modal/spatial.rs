@@ -44,6 +44,11 @@ impl ModalAperture {
                 "modal spatial closure requires one attachment before stepping",
             ));
         }
+        if self.jet_contraction.is_some() || self.staple_recovery.is_some() {
+            return Err(invalid(
+                "modal spatial closure takes its flow from the original surface: a jet contraction or staple recovery would be ignored",
+            ));
+        }
         let closure = ModalPlateClosure::from_plates(&self.material_plates, spec)?;
         closure.validate_state(&self.state)?;
         if let Some(law) = self.viscous_slit {
@@ -220,6 +225,7 @@ impl ModalAperture {
                 return Ok(uniform::UniformTrial {
                     velocity: trial.velocity,
                     dp: trial.dp,
+                    blade_dp: trial.dp,
                     residual: trial.norm(n),
                     scale: trial.scale[..n].iter().sum(),
                     evaluations: evaluations.get(),

@@ -41,8 +41,9 @@
 //! Or `reed HEIGHT WIDTH CLOSING_PA MASS STIFFNESS ZETA SOURCE_TOKEN` replaces `loss`/`blades` and every
 //! plate record with ONE typed, sourced lumped reed (the six numbers of a reed-performance `reed` row), so a
 //! DG bore plays the reed a modal-bore page plays. See `reed`; it has no mesh, material, closure or force
-//! port, requires `slit_length none` and HEIGHT equal to the `valve` REST_GAP. An optional `contraction C_C`
-//! row directly after it gives the reed jet's vena contracta, and an optional `constriction_noise SEED
+//! port, requires `slit_length none` and HEIGHT equal to the `valve` REST_GAP. An optional `staple_recovery C_P S_C_M2`
+//! row directly after it gives the double reed's staple pressure recovery, an optional `contraction C_C` row after
+//! that gives the reed jet's vena contracta, and an optional `constriction_noise SEED
 //! DUCT_RADIUS_M` row after those adds Oldham and Ukpoho's duct-constriction noise as a seeded series pressure.
 
 use super::{

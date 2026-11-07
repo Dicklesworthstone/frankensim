@@ -3,6 +3,7 @@
 //! their own projection: modes that hardly move the slit can still sweep fluid.
 use super::dynamic::ApertureDrive;
 use super::paired::PairedApertureLimits;
+use super::viscous::StapleRecovery;
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::unilateral_contact::distributed::ApertureContactStep;
 use fs_dcontact::Obstacle;
@@ -11,7 +12,10 @@ pub(super) const MAX_MODES: usize = 32;
 #[derive(Clone, Copy)]
 pub(super) struct UniformTrial {
     pub velocity: [f64; MAX_MODES],
+    /// The total mouth-to-bore drop: the bore sees it. It is also the blade's drive unless the staple recovers pressure.
     pub dp: f64,
+    /// The drop across the opening itself, which drives the blade and fixes the jet: `dp` unless a staple recovers pressure.
+    pub blade_dp: f64,
     pub residual: f64,
     pub scale: f64,
     pub evaluations: usize,
@@ -29,6 +33,7 @@ pub(super) fn solve(
     gap: f64, dt: f64, width: f64, rho: f64, z: f64, drive: ApertureDrive,
     limits: PairedApertureLimits, obstacle: &Obstacle,
     viscous_slit: Option<super::viscous::ViscousSlit>,
+    staple: Option<StapleRecovery>,
 ) -> Result<UniformTrial, AcousticRealizeError> {
     let n = free.len();
     if n == 0 || n > MAX_MODES || [mobility.len(), area.len(), gap_shape.len()]
@@ -42,7 +47,7 @@ pub(super) fn solve(
         contact_response[i] = mobility[i]*gap_shape[i];
     }
     solve_response(free, &pressure_response[..n], &contact_response[..n], area,
-        gap_shape, gap, dt, width, rho, z, drive, limits, obstacle, viscous_slit)
+        gap_shape, gap, dt, width, rho, z, drive, limits, obstacle, viscous_slit, staple)
 }
 
 /// Same scalar contact/flow solve with an already condensed FULL mechanical
@@ -65,6 +70,7 @@ pub(super) fn solve_response(
     limits: PairedApertureLimits,
     obstacle: &Obstacle,
     viscous_slit: Option<super::viscous::ViscousSlit>,
+    staple: Option<StapleRecovery>,
 ) -> Result<UniformTrial, AcousticRealizeError> {
     let n = free.len();
     if n == 0 || n > MAX_MODES
@@ -99,24 +105,34 @@ pub(super) fn solve_response(
         }
         let source = (drive.upstream_pressure_pa - 2.0*drive.incoming_pressure_pa - z*moving)/denominator;
         let opening = f64::midpoint(gap, next_gap).max(0.0);
-        let dp = match viscous_slit {
-            Some(law) => law.fixed_opening_pressure_drop(width, opening, rho, z/denominator, source)?,
-            None => super::moving::fixed_opening_pressure_drop(width, opening, rho, z/denominator, source)?,
+        // `blade_dp` drives the blade and sets the jet; `dp` is what the bore sees. They differ only by the staple's recovery.
+        let (blade_dp, dp) = match (viscous_slit, staple) {
+            (Some(law), _) => {
+                let dp = law.fixed_opening_pressure_drop(width, opening, rho, z/denominator, source)?;
+                (dp, dp)
+            }
+            (None, Some(recovery)) => super::moving::fixed_opening_pressure_drop_with_recovery(
+                recovery, width, opening, rho, z/denominator, denominator, source)?,
+            (None, None) => {
+                let dp = super::moving::fixed_opening_pressure_drop(width, opening, rho, z/denominator, source)?;
+                (dp, dp)
+            }
         };
         let mut residual = velocity;
         let mut scale = velocity.abs();
         for i in 0..n {
-            velocities[i] -= pressure_response[i]*dp;
+            velocities[i] -= pressure_response[i]*blade_dp;
             residual -= gap_shape[i]*velocities[i];
             scale += (gap_shape[i]*velocities[i]).abs() + (gap_shape[i]*free[i]).abs();
         }
-        if ![velocity, next_gap, dp, residual, scale].iter().all(|x| x.is_finite())
+        if ![velocity, next_gap, dp, blade_dp, residual, scale].iter().all(|x| x.is_finite())
             || velocities[..n].iter().any(|x| !x.is_finite()) {
             return Err(invalid("uniform aperture trial left the finite physical domain"));
         }
         Ok(UniformTrial {
             velocity: velocities,
             dp,
+            blade_dp,
             residual,
             scale,
             evaluations: evaluations.get(),

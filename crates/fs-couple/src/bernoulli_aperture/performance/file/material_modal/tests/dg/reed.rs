@@ -266,3 +266,115 @@ fn the_aperture_takes_a_contraction_once_inside_the_unit_interval_and_never_with
     }
     assert_eq!(bad.jet_contraction(), None);
 }
+
+// The live oboe pages' staple row: C_P 0.8 and S_c 4 mm^2, one measured reed's numbers (Almeida, Vergez and Causse 2007).
+const STAPLE: &str = "staple_recovery 0.8 0.000004";
+
+#[test]
+fn the_staple_row_recovers_nothing_at_zero_and_a_real_recovery_changes_the_render() {
+    let reference = bits(&render(super::build(&card(REED), 37)).0);
+    // C_P = 0 recovers nothing: the original solve, bit for bit.
+    assert_eq!(bits(&render(super::build(&with_row("staple_recovery 0 0.000004"), 37)).0), reference);
+    let recovered = render(super::build(&with_row(STAPLE), 37)).0;
+    assert!(recovered.iter().all(|p| p.is_finite()));
+    assert_ne!(bits(&recovered), reference);
+    let source = super::build(&with_row(STAPLE), 37);
+    assert_eq!(source.reed_record().unwrap().staple_recovery(), Some((0.8, 4e-6)));
+    assert!(valve(&source).staple_recovery().is_some());
+    assert!(super::build(&card(REED), 37).reed_record().unwrap().staple_recovery().is_none());
+    // Callback partition cannot change it.
+    for block in [1, 512] {
+        assert_eq!(bits(&render(super::build(&with_row(STAPLE), block)).0), bits(&recovered), "block {block}");
+    }
+}
+
+#[test]
+fn a_staple_row_is_refused_for_its_own_reason_and_only_directly_after_the_reed() {
+    let range = "a typed reed's staple_recovery needs C_P in [0, 1] and a positive constriction area in m^2";
+    for (row, expected) in [
+        ("staple_recovery -0.1 0.000004", range),
+        ("staple_recovery 1.0000001 0.000004", range),
+        ("staple_recovery 0.8 0", range),
+        ("staple_recovery 0.8 -0.000004", range),
+        ("staple_recovery 0.8", "missing field"),
+        ("staple_recovery", "missing field"),
+        ("staple_recovery 0.8 0.000004 1", "unexpected extra field"),
+        ("staple_recovery nan 0.000004", "physical scalars must be finite"),
+    ] {
+        assert_eq!(refused(&with_row(row)).1, expected, "{row}");
+    }
+    // Twice, or after the contraction, is not the grammar; the contraction and noise rows follow it.
+    let other = "unexpected record kind or order";
+    assert_eq!(refused(&with_row(&format!("{STAPLE}\n{STAPLE}"))).1, other);
+    assert_eq!(refused(&with_row(&format!("contraction 0.611\n{STAPLE}"))).1, other);
+    let all = with_row(&format!("{STAPLE}\ncontraction 0.611\nconstriction_noise 7 0.00087"));
+    let source = super::build(&all, 37);
+    assert_eq!(source.reed_record().unwrap().staple_recovery(), Some((0.8, 4e-6)));
+    assert_eq!(source.reed_record().unwrap().contraction(), Some(0.611));
+    assert_eq!(source.constriction_noise().unwrap().seed, 7);
+}
+
+#[test]
+fn the_aperture_takes_a_staple_recovery_once_never_with_a_viscous_slit_in_either_order() {
+    use crate::bernoulli_aperture::viscous::{StapleRecovery, ViscousSlit};
+    let source = super::build(&card(REED), 37);
+    let gas = *source.renderer().system().load().duct().inlet_gas();
+    let slit = ViscousSlit::from_gas(&gas, 0.001).unwrap();
+    let recovery = StapleRecovery::new(0.8, 4e-6).unwrap();
+    let mut viscous = valve(&source).clone();
+    viscous.set_viscous_slit(slit).unwrap();
+    assert!(viscous.set_staple_recovery(recovery).is_err());
+    let mut once = valve(&source).clone();
+    once.set_staple_recovery(recovery).unwrap();
+    assert!(once.set_staple_recovery(recovery).is_err());
+    assert!(once.set_viscous_slit(slit).is_err());
+    // A contraction and a staple compose, in either order.
+    once.set_jet_contraction(0.611).unwrap();
+    let mut other_order = valve(&source).clone();
+    other_order.set_jet_contraction(0.611).unwrap();
+    other_order.set_staple_recovery(recovery).unwrap();
+    assert_eq!((once.jet_contraction(), once.staple_recovery()), (Some(0.611), Some(recovery)));
+    assert_eq!((other_order.jet_contraction(), other_order.staple_recovery()), (Some(0.611), Some(recovery)));
+}
+
+#[test]
+fn the_staple_domain_refuses_at_the_step_not_silently() {
+    // C_P (S / S_c)^2 >= 1 on forward flow is the live domain refusal. A constriction of 0.5 mm^2 against the reed's
+    // 2 mm^2 rest area makes r = 4 and C_P r^2 = 12.8 at the very first forward step.
+    let text = with_row("staple_recovery 0.8 0.0000005")
+        .replace("audio 96000 96000 512 20", "audio 96000 96000 600 20")
+        .replace("events\t2\nevent\t0e0\t1e-3\tpressure-pa\t5e0\nevent\t4e-3\t1e-3\tpressure-pa\t0e0",
+            "events\t1\nevent\t0e0\t2e-3\tpressure-pa\t7.4e3");
+    let source = super::build(&text, 64);
+    let block = source.renderer().config().max_block;
+    let mut renderer = source.into_renderer();
+    let mut out = vec![0.0; 600];
+    // The callback is declared at 64 samples: hand it blocks of that size, as `render` does, and keep the first refusal.
+    let error = out
+        .chunks_mut(block)
+        .find_map(|chunk| renderer.block(chunk).err())
+        .expect("the staple domain must refuse a wide jet, not render it");
+    assert!(format!("{error:?}").contains("staple pressure recovery left its domain"), "{error:?}");
+}
+
+#[test]
+fn the_live_pages_three_rows_render_inside_the_bounds_with_closed_work_and_flow_balances() {
+    // The step refuses an unresolved work or flow balance, so a completed render has closed both at every sample.
+    let text = with_row(&format!("{STAPLE}\ncontraction 0.611\nconstriction_noise 7 0.00087"))
+        .replace("audio 96000 96000 512 20", "audio 96000 96000 2400 20")
+        .replace("events\t2\nevent\t0e0\t1e-3\tpressure-pa\t5e0\nevent\t4e-3\t1e-3\tpressure-pa\t0e0",
+            "events\t1\nevent\t0e0\t2e-2\tpressure-pa\t7.4e3");
+    assert!(text.contains("pressure-pa\t7.4e3"), "the gesture suffix was not replaced");
+    let (pressure, rendered) = render(super::build(&text, 64));
+    assert_eq!(pressure.len(), 2400);
+    assert!(pressure.iter().all(|p| p.is_finite()));
+    let frame = &rendered.last_frame().expect("an accepted frame").aperture;
+    let flows = frame.jet_flow_m3_s.abs() + frame.swept_flow_m3_s.abs() + frame.bore_flow_m3_s.abs();
+    assert!(frame.flow_residual_m3_s.abs() <= 1e-9 * flows.max(1e-30), "{frame:?}");
+    assert!(frame.dissipated_energy_j.is_finite());
+    let LoadedAperture::Modal(reed) = rendered.system().aperture() else {
+        panic!("a typed reed is a modal aperture");
+    };
+    let end = reed.modal_states()[0];
+    assert!(end.displacement_m != 0.0 && end.displacement_m.abs() < 1e-3, "{end:?}");
+}
