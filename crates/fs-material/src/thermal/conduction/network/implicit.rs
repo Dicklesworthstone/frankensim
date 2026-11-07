@@ -268,7 +268,8 @@ fn inward_temperature_slope(
     layer: &ResolvedConductionLayer<'_>,
     h: f64,
 ) -> Result<f64, DepositionError> {
-    let knots = layer.caloric_curve().knots();
+    let curve = layer.caloric_curve();
+    let knots = curve.knots();
     // Use the exact admitted left segment, including a stricter contact upper
     // bound at an interior caloric knot. No finite-difference tangent or change
     // to the actual constitutive state is introduced.
@@ -276,8 +277,23 @@ fn inward_temperature_slope(
         .partition_point(|k| k.specific_enthalpy_j_kg < h)
         .min(knots.len() - 1);
     let lo = hi.checked_sub(1).ok_or(DepositionError::MaterialDomain)?;
-    let slope = (knots[hi].temperature_k - knots[lo].temperature_k)
-        / (knots[hi].specific_enthalpy_j_kg - knots[lo].specific_enthalpy_j_kg);
+    let slope = if h == knots[hi].specific_enthalpy_j_kg {
+        // At a knot, take the original capacity from its admitted LEFT span.
+        // Its enthalpy chord is an average, not the source endpoint tangent.
+        match curve.sensible_heat_capacities_on_interval(lo) {
+            Some([_, capacity]) => capacity.recip(),
+            None => {
+                (knots[hi].temperature_k - knots[lo].temperature_k)
+                    / (knots[hi].specific_enthalpy_j_kg - knots[lo].specific_enthalpy_j_kg)
+            }
+        }
+    } else {
+        // A source/contact bound may fall inside an affine-Cp interval. Reuse
+        // its native analytic inverse derivative without replacing that law.
+        curve
+            .temperature_derivative_at_specific_enthalpy(h)
+            .map_err(|_| DepositionError::MaterialDomain)?
+    };
     if !slope.is_finite() || slope <= 0.0 {
         return Err(DepositionError::Arithmetic);
     }

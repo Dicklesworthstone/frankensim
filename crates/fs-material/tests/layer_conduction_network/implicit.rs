@@ -159,6 +159,98 @@ fn solid_source_endpoint_uses_its_admitted_left_caloric_derivative() {
     assert!(links[0].state_at_specific_enthalpies([40_000.0_f64.next_up(), 10_000.0], geometry,
         old.contact_patch(7).unwrap(), &mut || Ok(())).is_err());
 }
+
+fn affine_capacity_curve(card: &MaterialCard, cp: [f64; 2]) -> EquilibriumEnthalpyPhaseCurve {
+    use fs_material::phase::HeatCapacityKnot;
+    EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity_exact(
+        card.content_hash(),
+        SolidLiquidPhase::Solid,
+        0.0,
+        &[(200.0, cp[0]), (1000.0, cp[1])].map(|(temperature_k, specific_heat_capacity_j_kg_k)| {
+            HeatCapacityKnot {
+                temperature_k,
+                specific_heat_capacity_j_kg_k,
+                bulk_density_kg_m3: 1000.0,
+            }
+        }),
+    )
+    .unwrap()
+}
+
+#[test]
+fn source_endpoint_link_and_bath_tangents_retain_original_affine_heat_capacity() {
+    use fs_material::thermal::conduction::network::ImplicitLayerBoundary;
+    use fs_thermal::enthalpy::conduction::implicit::boundary::{
+        ImplicitBoundaryGeometry, ImplicitBoundaryLaw,
+    };
+
+    for cp in [[50.0, 150.0], [150.0, 50.0]] {
+        let card = source();
+        let caloric = affine_capacity_curve(&card, cp);
+        let context = QueryPoint::new().with("T", 300.0).unwrap();
+        let old = initial(&caloric);
+        // Independent integral of Cp(T)=cp[0]+(cp[1]-cp[0])*(T-200)/800.
+        let enthalpy = |t: f64| {
+            let delta = t - 200.0;
+            delta * (cp[0] + 0.5 * (cp[1] - cp[0]) * delta / 800.0)
+        };
+        // Exercise both a bound inside the original Cp interval and its exact
+        // upper knot. The enthalpy chord has Cp=100 in both source directions.
+        for upper in [900.0, 1000.0] {
+            let layer = ResolvedConductionLayer::new(
+                &caloric,
+                ThermalMaterialPoint {
+                    material: &card,
+                    context: &context,
+                    temperature_axis: "T",
+                    liquid_fraction_axis: None,
+                },
+                &PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS),
+                ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly),
+                SolidLiquidPhase::Solid,
+                [200.0, upper],
+                || Ok(()),
+            )
+            .unwrap();
+            let prepared =
+                PreparedLayerConduction::new(&old, vec![binding(&layer)], 1, || Ok(())).unwrap();
+            let link = prepared.implicit_link_laws(config()).next().unwrap();
+            let geometry = ConductiveLink {
+                link_id: 7,
+                half_distances_m: [0.02, 0.03],
+                contact_resistance_m2_k_w: 0.0,
+            };
+            let h = enthalpy(upper);
+            assert_eq!(layer.temperature_at_enthalpy(h).unwrap(), upper);
+            let sample = link
+                .state_at_specific_enthalpies(
+                    [h, enthalpy(300.0)],
+                    geometry,
+                    old.contact_patch(7).unwrap(),
+                    &mut || Ok(()),
+                )
+                .unwrap();
+            let capacity = cp[0] + (cp[1] - cp[0]) * (upper - 200.0) / 800.0;
+            // For the same material on both sides, Q=A/L*integral(k dT).
+            // Its exact hot-side derivative is A/L*k(T)/Cp(T), not k/Cp_mean.
+            let expected = 0.004 / 0.05 * (2.0 + 0.01 * upper) / capacity;
+            assert!((sample.power_enthalpy_derivatives_w_kg_j[0] - expected).abs() < 1e-11);
+
+            let face = ImplicitBoundaryGeometry {
+                area_m2: 0.004,
+                half_distance_m: 0.02,
+                surface_resistance_m2_k_w: 0.0,
+            };
+            let boundary = ImplicitLayerBoundary::new(&layer, face, config()).unwrap();
+            let sample = boundary
+                .state_at_specific_enthalpy(h, 300.0, face, &mut || Ok(()))
+                .unwrap();
+            let expected = 0.004 / 0.02 * (2.0 + 0.01 * upper) / capacity;
+            assert!((sample.power_enthalpy_derivative_w_kg_j - expected).abs() < 1e-11);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct AffineLayerContact<'a> {
     caloric: [&'a EquilibriumEnthalpyPhaseCurve; 2],
@@ -194,6 +286,69 @@ impl fs_thermal::enthalpy::conduction::implicit::contact::ImplicitContactLaw
             ),
             resistance_enthalpy_derivatives_m2_kg_k_w_j: self.derivatives,
         })
+    }
+}
+
+#[test]
+fn contact_bounds_inside_affine_heat_capacity_spans_keep_exact_bulk_tangents() {
+    for cp in [[50.0, 150.0], [150.0, 50.0]] {
+        let card = source();
+        let caloric = affine_capacity_curve(&card, cp);
+        let context = QueryPoint::new().with("T", 300.0).unwrap();
+        let layer = layer(&card, &caloric, &context);
+        let old = initial(&caloric);
+        let prepared =
+            PreparedLayerConduction::new(&old, vec![binding(&layer)], 1, || Ok(())).unwrap();
+        let upper = caloric
+            .specific_enthalpy_on_sensible_interval(0, 700.0)
+            .unwrap();
+        let cold = caloric
+            .specific_enthalpy_on_sensible_interval(0, 300.0)
+            .unwrap();
+        let contact = AffineLayerContact {
+            caloric: [&caloric; 2],
+            bounds: [[0.0, upper]; 2],
+            reference_h: [upper, cold],
+            resistance: 0.02,
+            derivatives: [2e-7, -1e-7],
+        };
+        let link = prepared
+            .implicit_link_laws(config())
+            .next()
+            .unwrap()
+            .with_contact(&contact)
+            .unwrap();
+        let geometry = ConductiveLink {
+            link_id: 7,
+            half_distances_m: [0.02, 0.03],
+            contact_resistance_m2_k_w: 0.0,
+        };
+        // A contact can truncate either endpoint inside the same original
+        // sensible interval. Check the full source/contact flux derivative
+        // from within that bound, including both signs of heat transfer.
+        for side in 0..2 {
+            let at = |h| {
+                let mut enthalpies = [cold; 2];
+                enthalpies[side] = h;
+                let sample = link
+                    .state_at_specific_enthalpies(
+                        enthalpies,
+                        geometry,
+                        old.contact_patch(7).unwrap(),
+                        &mut || Ok(()),
+                    )
+                    .unwrap();
+                let temperatures =
+                    enthalpies.map(|h| caloric.temperature_at_specific_enthalpy(h).unwrap());
+                (
+                    sample,
+                    sample.conductance_w_k * (temperatures[0] - temperatures[1]),
+                )
+            };
+            let (sample, power) = at(upper);
+            let inward = (3.0 * power - 4.0 * at(upper - 1.0).1 + at(upper - 2.0).1) / 2.0;
+            assert!((sample.power_enthalpy_derivatives_w_kg_j[side] - inward).abs() < 1e-8);
+        }
     }
 }
 
