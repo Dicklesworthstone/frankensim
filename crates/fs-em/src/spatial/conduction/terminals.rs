@@ -5,6 +5,7 @@
 //! bulk/contact heat again, without assuming a uniform injection density.
 
 use super::*;
+use crate::conduction::ConductionPowerSource;
 
 /// A linear terminal response bound to the original source and geometry.
 /// Material/contact refresh requires preparation on the replacement owner.
@@ -139,6 +140,55 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
         )?
         .field_at_current(
             current_a,
+            controls.current_tolerance_a,
+            controls.power_tolerance_w,
+            cancelled,
+        )
+    }
+
+    /// Deliver regulated power through the actual equipotential face pair.
+    /// One linear reference field determines the required voltage/current;
+    /// native material validity, both terminal reactions and bulk/contact heat
+    /// are checked again at that amplitude. Swap face sets to reverse polarity.
+    pub fn solve_power(
+        &self,
+        positive_faces: &[usize],
+        negative_faces: &[usize],
+        source: ConductionPowerSource,
+        controls: ConductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialConductionField> {
+        self.solve_power_with_reference_voltage(
+            positive_faces,
+            negative_faces,
+            source,
+            1.0,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Regulated power with a caller-selected, materially admitted reference
+    /// voltage. This numerical probe contributes no separate source work.
+    pub fn solve_power_with_reference_voltage(
+        &self,
+        positive_faces: &[usize],
+        negative_faces: &[usize],
+        source: ConductionPowerSource,
+        reference_voltage_v: f64,
+        controls: ConductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialConductionField> {
+        check(cancelled)?;
+        self.resistance_at_reference_voltage(
+            positive_faces,
+            negative_faces,
+            reference_voltage_v,
+            controls,
+            cancelled,
+        )?
+        .field_at_power(
+            source,
             controls.current_tolerance_a,
             controls.power_tolerance_w,
             cancelled,
@@ -331,6 +381,52 @@ impl<C: SpatialConductorMaterial> SpatialResistance<'_, C> {
             }
         }
         let power_residual_w = finite(field.power_w - power)?;
+        if current_residual_a.abs() > current_tolerance_a
+            || power_residual_w.abs() > power_tolerance_w
+        {
+            return Err(SpatialConductionError::Balance {
+                current_residual_a,
+                maximum_free_current_residual_a: field.maximum_free_current_residual_a,
+                power_residual_w,
+                hodge_power_residual_w: field.hodge_power_residual_w,
+            });
+        }
+        check(cancelled)?;
+        Ok(field)
+    }
+
+    /// Recover a constant-power operating point with finite voltage/current
+    /// compliance, without repeating the reference solve. Requested watts are
+    /// checked against native terminal work and integrated bulk/contact heat.
+    /// This response belongs to one fixed linear source/geometry snapshot;
+    /// rebuild it after changing material temperature, phase or geometry.
+    pub fn field_at_power(
+        &self,
+        source: ConductionPowerSource,
+        current_tolerance_a: f64,
+        power_tolerance_w: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialConductionField> {
+        check(cancelled)?;
+        let (voltage_v, current_a) = source
+            .operating_point(self.resistance_ohm)
+            .map_err(SpatialConductionError::Invalid)?;
+        let field =
+            self.field_at_voltage(voltage_v, current_tolerance_a, power_tolerance_w, cancelled)?;
+        let mut current_residual_a = 0.0_f64;
+        for (vertices, expected) in self.vertices.iter().zip([current_a, -current_a]) {
+            let defect = finite(terminal_current(&field, vertices, cancelled)? - expected)?;
+            if defect.abs() > current_residual_a.abs() {
+                current_residual_a = defect;
+            }
+        }
+        let heat_defect = finite(field.power_w - source.power_w)?;
+        let work_defect = finite(field.supplied_power_w - source.power_w)?;
+        let power_residual_w = if heat_defect.abs() > work_defect.abs() {
+            heat_defect
+        } else {
+            work_defect
+        };
         if current_residual_a.abs() > current_tolerance_a
             || power_residual_w.abs() > power_tolerance_w
         {

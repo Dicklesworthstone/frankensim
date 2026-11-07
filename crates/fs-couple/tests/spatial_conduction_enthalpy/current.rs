@@ -1,5 +1,7 @@
 //! A total-current electrode lets the local current redistribute with R(T).
 use super::*;
+use fs_couple::circuit_enthalpy::conduction::ConductionThermalError;
+use fs_em::conduction::ConductionPowerSource;
 use std::collections::BTreeSet;
 
 #[test]
@@ -194,6 +196,154 @@ fn terminal_current(
         .into_iter()
         .map(|vertex| field.nodal_boundary_current_a[vertex as usize].unwrap())
         .sum()
+}
+
+#[test]
+fn regulated_power_redistributes_between_temperature_dependent_parallel_bodies() {
+    // Independent endpoint balances for C=[1,2] J/K, G=1 W/K, dt=.5 s:
+    // dT=[10,3] K requires P=[27,5] W. Parallel R=[1/3,9/5] ohm
+    // gives exactly those local powers at V=3 V and total source P=32 W.
+    let alpha = 0.004;
+    let initial_rho = (1.0 / 3.0) / (1.0 + alpha * 10.0);
+    let (a, ca) = material(initial_rho, 1.0, alpha);
+    let (b, cb) = material(9.0 / 5.0, 2.0, 0.0);
+    let cards = [a, b];
+    let curves = [ca, cb];
+    let context = point(300.0);
+    let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+    let cells = bindings(&cards, &curves, &context, &key);
+    let thermal = initial(&curves, 999.0, None);
+    let conductors = cards.each_ref().map(|card| {
+        resolve_conductor_state_with_basis(
+            card,
+            &context,
+            MaterialPropertySelection::SingleClaimOnly,
+            ElectricalPropertyBasis::Resistivity,
+        )
+        .unwrap()
+    });
+    let (mut positions, mut tets) = slab(&[0.0, 0.5, 1.0]);
+    let (second_positions, second_tets) = slab(&[0.0, 0.5, 1.0]);
+    let offset = positions.len() as u32;
+    positions.extend(
+        second_positions
+            .into_iter()
+            .map(|[x, y, z]| [x, y + 1.0, z]),
+    );
+    tets.extend(second_tets.into_iter().map(|tet| tet.map(|v| v + offset)));
+    let problem = SpatialConduction::new(
+        positions,
+        tets,
+        (0..24).map(|i| conductors[i / 12].clone()).collect(),
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
+    let regions = (0..24)
+        .map(|tetrahedron| SpatialConductionRegion {
+            tetrahedron,
+            cell: cells[tetrahedron / 12].cell,
+        })
+        .collect::<Vec<_>>();
+    let network = SpatialConductionThermalNetwork {
+        cells: &cells,
+        links: &LINKS,
+        regions: &regions,
+        volume_tolerance_m3: 1e-12,
+    };
+    let [positive, negative] = electrodes(&problem, 1.0);
+    let source = ConductionPowerSource {
+        power_w: 32.0,
+        maximum_voltage_v: 3.1,
+        maximum_current_a: 12.0,
+    };
+    let cold_voltage = (source.power_w / (1.0 / initial_rho + 5.0 / 9.0)).sqrt();
+    assert!(cold_voltage < 2.97);
+    for (p, n, sign) in [(&positive, &negative, 1.0), (&negative, &positive, -1.0)] {
+        for reference_voltage_v in [0.25, 4.0] {
+            let next = network
+                .step_candidate(
+                    &thermal,
+                    0.5,
+                    &problem,
+                    SpatialConductionDrive::Power {
+                        positive_faces: p,
+                        negative_faces: n,
+                        source,
+                        reference_voltage_v,
+                    },
+                    limits(),
+                    field_controls(),
+                    config(),
+                    &[0.0; 2],
+                    || false,
+                )
+                .unwrap();
+            near(next.thermal().temperature_k(CellId(30)).unwrap(), 310.0);
+            near(next.thermal().temperature_k(CellId(10)).unwrap(), 303.0);
+            let report = next.report();
+            let field = &report.electrical.field;
+            let positive_vertex = problem.mesh().faces[p[0]][0] as usize;
+            let negative_vertex = problem.mesh().faces[n[0]][0] as usize;
+            near(
+                field.voltage_v[positive_vertex] - field.voltage_v[negative_vertex],
+                3.0,
+            );
+            near(
+                terminal_current(&problem, field, &positive),
+                sign * 32.0 / 3.0,
+            );
+            for i in 0..24 {
+                near(
+                    field.current_density_a_m2[i][0],
+                    -sign * if i < 12 { 9.0 } else { 5.0 / 3.0 },
+                );
+                near(
+                    field.cell_power_w[i],
+                    if i < 12 { 27.0 / 12.0 } else { 5.0 / 12.0 },
+                );
+            }
+            near(field.power_w, 32.0);
+            near(field.supplied_power_w, 32.0);
+            near(report.electrical.heat_j, 16.0);
+            near(report.electrical.supplied_work_j, 16.0);
+            near(report.deposited_joule_j, 16.0);
+            near(next.thermal().energy_j() - thermal.energy_j(), 16.0);
+            near(report.total_energy_residual_j, 0.0);
+        }
+    }
+    // Cold operation is within compliance, but the required hot endpoint is
+    // not. Refuse the step atomically rather than report 32 W while clipping V.
+    let saved_cells = thermal.cells().clone();
+    let saved_conductors = problem.conductors().to_vec();
+    let failed = network.step_candidate(
+        &thermal,
+        0.5,
+        &problem,
+        SpatialConductionDrive::Power {
+            positive_faces: &positive,
+            negative_faces: &negative,
+            source: ConductionPowerSource {
+                maximum_voltage_v: 2.97,
+                ..source
+            },
+            reference_voltage_v: 0.25,
+        },
+        limits(),
+        field_controls(),
+        config(),
+        &[0.0; 2],
+        || false,
+    );
+    assert!(matches!(
+        failed,
+        Err(CircuitEnthalpyError::Source(
+            ConductionThermalError::SpatialField(SpatialConductionError::Invalid(_))
+        ))
+    ));
+    assert_eq!(thermal.cells(), &saved_cells);
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(problem.conductors(), &saved_conductors);
 }
 
 #[test]

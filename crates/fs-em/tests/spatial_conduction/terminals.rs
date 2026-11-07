@@ -1,6 +1,7 @@
 //! G1/G3/G4: total-current electrodes against independently derived series,
 //! parallel and oriented-material solutions, including actual local heating.
 use super::*;
+use fs_em::conduction::ConductionPowerSource;
 
 pub(super) fn terminal_faces<C: SpatialConductorMaterial>(
     problem: &SpatialConduction<C>,
@@ -17,6 +18,106 @@ pub(super) fn terminal_faces<C: SpatialConductorMaterial>(
         }
     }
     faces
+}
+
+#[test]
+fn regulated_power_uses_native_tetrahedral_resistance_and_material_heat() {
+    let rho = [2.0, 5.0];
+    let sources = rho.map(|r| {
+        ResolvedConductorState::try_from_material_with_basis(
+            material(ElectricalPropertyBasis::Resistivity, &[r]),
+            ElectricalPropertyBasis::Resistivity,
+        )
+        .unwrap()
+    });
+    let (positions, tets) = slab(&[0.0, 1.0, 2.0]);
+    let problem = SpatialConduction::new(
+        positions,
+        tets,
+        (0..12).map(|i| sources[i / 6].clone()).collect(),
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
+    let faces = terminal_faces(&problem, 2.0);
+    let source = ConductionPowerSource {
+        power_w: 28.0,
+        maximum_voltage_v: 15.0,
+        maximum_current_a: 3.0,
+    };
+    // Independent series law: R=2+5=7 ohm, so 28 W requires 14 V, 2 A.
+    // The first material receives 8 W and the second 20 W.
+    for reference_voltage_v in [1.0, 0.3] {
+        let response = problem
+            .resistance_at_reference_voltage(
+                &faces[0],
+                &faces[1],
+                reference_voltage_v,
+                controls(),
+                &mut || false,
+            )
+            .unwrap();
+        let field = response
+            .field_at_power(source, 1e-10, 1e-9, &mut || false)
+            .unwrap();
+        near(field.power_w, 28.0);
+        near(field.supplied_power_w, 28.0);
+        assert!(field.linear.is_none());
+        for (vertex, position) in problem.positions_m().iter().enumerate() {
+            near(
+                field.voltage_v[vertex],
+                2.0 * (2.0 * position[0].min(1.0) + 5.0 * (position[0] - 1.0).max(0.0)),
+            );
+        }
+        for cell in 0..12 {
+            near(field.current_density_a_m2[cell][0], -2.0);
+            near(field.cell_power_w[cell], 4.0 * rho[cell / 6] / 6.0);
+        }
+        let zero = response
+            .field_at_power(
+                ConductionPowerSource {
+                    power_w: 0.0,
+                    ..source
+                },
+                1e-10,
+                1e-9,
+                &mut || false,
+            )
+            .unwrap();
+        near(zero.power_w, 0.0);
+        near(zero.supplied_power_w, 0.0);
+        for invalid in [
+            ConductionPowerSource {
+                maximum_voltage_v: 13.0,
+                ..source
+            },
+            ConductionPowerSource {
+                maximum_current_a: 1.9,
+                ..source
+            },
+            ConductionPowerSource {
+                power_w: -1.0,
+                ..source
+            },
+        ] {
+            assert!(matches!(
+                response.field_at_power(invalid, 1e-10, 1e-9, &mut || false),
+                Err(SpatialConductionError::Invalid(_))
+            ));
+        }
+        assert!(matches!(
+            response.field_at_power(source, 1e-10, 1e-9, &mut || true),
+            Err(SpatialConductionError::Cancelled)
+        ));
+    }
+    let reverse = problem
+        .solve_power(&faces[1], &faces[0], source, controls(), &mut || false)
+        .unwrap();
+    near(reverse.power_w, 28.0);
+    for cell in 0..12 {
+        near(reverse.current_density_a_m2[cell][0], 2.0);
+        near(reverse.cell_power_w[cell], 4.0 * rho[cell / 6] / 6.0);
+    }
 }
 
 #[test]

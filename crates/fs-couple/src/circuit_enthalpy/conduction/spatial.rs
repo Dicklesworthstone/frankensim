@@ -28,7 +28,7 @@ use super::{
 };
 use crate::circuit_enthalpy::CircuitThermalCoefficients;
 use fs_em::{
-    conduction::ConductionControls,
+    conduction::{ConductionControls, ConductionPowerSource},
     spatial::conduction::{
         SpatialConductanceControls, SpatialConduction, SpatialConductionBoundary,
         SpatialConductionContact, SpatialConductionContactResponse, SpatialConductionError,
@@ -73,6 +73,16 @@ pub enum SpatialConductionDrive<'a> {
         current_a: f64,
         reference_voltage_v: f64,
     },
+    /// Held watts delivered INTO the stationary Ohmic body. Each trial solves
+    /// the required voltage/current from its refreshed bulk/contact materials.
+    /// Finite compliance limits refuse unattainable power without publishing
+    /// either candidate. The reference voltage is a numerical probe only.
+    Power {
+        positive_faces: &'a [usize],
+        negative_faces: &'a [usize],
+        source: ConductionPowerSource,
+        reference_voltage_v: f64,
+    },
     /// Balanced signed amperes INTO every original equipotential electrode.
     /// Terminal zero fixes the voltage gauge; a zero-net-current electrode
     /// floats to its actual potential and may carry current between its faces.
@@ -113,9 +123,8 @@ impl<'a> SpatialConductionDrive<'a> {
         }
     }
 
-    // The ideal source fixes current, not the recovered reaction. Account its
-    // work independently from the Joule integral and native reaction work so
-    // the shared energy gate also detects a terminal-current mismatch.
+    // Account authored current/power independently from the Joule integral and
+    // native reactions so the shared energy gate detects source mismatches.
     fn supplied_power_w(
         self,
         mesh: &fs_rep_mesh::TetComplex,
@@ -142,6 +151,7 @@ impl<'a> SpatialConductionDrive<'a> {
         };
         let power = match self {
             Self::Boundary(_) => field.supplied_power_w,
+            Self::Power { source, .. } => source.power_w,
             Self::TotalCurrent {
                 positive_faces,
                 negative_faces,
@@ -607,9 +617,9 @@ impl SpatialConductionThermalNetwork<'_> {
                 if field_solves > remaining {
                     return Err(CircuitEnthalpyError::CircuitBudget);
                 }
-                // A total-current source changes its terminal voltage at every
-                // nonlinear trial. Solve on the refreshed native operator so
-                // bulk/contact I²R(T,f) feeds back into this same endpoint.
+                // Controlled current/power changes the terminal voltage at
+                // every thermal trial. Refresh the native bulk/contact field
+                // before computing the same endpoint's local Joule heat.
                 let field = match drive {
                     SpatialConductionDrive::Boundary(boundary) => {
                         next.solve(boundary, field_controls, &mut || (*cancel.borrow_mut())())
@@ -623,6 +633,19 @@ impl SpatialConductionThermalNetwork<'_> {
                         positive_faces,
                         negative_faces,
                         current_a,
+                        reference_voltage_v,
+                        field_controls,
+                        &mut || (*cancel.borrow_mut())(),
+                    ),
+                    SpatialConductionDrive::Power {
+                        positive_faces,
+                        negative_faces,
+                        source,
+                        reference_voltage_v,
+                    } => next.solve_power_with_reference_voltage(
+                        positive_faces,
+                        negative_faces,
+                        source,
                         reference_voltage_v,
                         field_controls,
                         &mut || (*cancel.borrow_mut())(),
