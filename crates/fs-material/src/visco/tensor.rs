@@ -25,6 +25,8 @@ use fs_math::det;
 
 pub mod lower;
 pub use lower::*;
+mod frequency;
+pub use frequency::TensorPronyFrequencyDerivative;
 
 /// Maximum number of Prony relaxation branches admitted by [`TensorProny`].
 pub const MAX_PRONY_BRANCHES: usize = 64;
@@ -634,17 +636,7 @@ impl TensorProny {
     /// Returns [`ViscoError::OutOfBand`] if `omega` is outside [`Self::band_rad_s`],
     /// or [`ViscoError::Parameters`] if `omega` or the response is non-finite.
     pub fn complex_modulus(&self, omega: f64) -> Result<(Mandel6, Mandel6), ViscoError> {
-        if !omega.is_finite() {
-            return Err(ViscoError::Parameters {
-                what: "angular frequency omega must be finite",
-            });
-        }
-        if omega < self.band_rad_s.0 || omega > self.band_rad_s.1 {
-            return Err(ViscoError::OutOfBand {
-                omega,
-                band: self.band_rad_s,
-            });
-        }
+        frequency::admit_frequency(self, omega)?;
         let mut storage = self.c_eq;
         let mut loss = [[0.0f64; 6]; 6];
         if let Some(kv) = &self.kv_pa_s {
@@ -656,22 +648,49 @@ impl TensorProny {
         }
         for branch in &self.branches {
             let wt = omega * branch.tau_s;
-            let (re_w, im_w) = if wt <= 1.0 {
-                let den = 1.0 + wt * wt;
-                ((wt * wt) / den, wt / den)
+            let exceptional = if wt == 0.0 && omega != 0.0 || !wt.is_finite() {
+                Some(
+                    super::prony_spectrum::PronySpectrumWeights::new(omega, branch.tau_s).ok_or(
+                        ViscoError::Parameters {
+                            what: "admitted finite frequency and positive branch time required",
+                        },
+                    )?,
+                )
             } else {
-                let u = 1.0 / wt;
-                let den = 1.0 + u * u;
-                (1.0 / den, u / den)
+                None
+            };
+            let inverse = 1.0 / wt;
+            let den = if wt <= 1.0 {
+                1.0 + wt * wt
+            } else {
+                1.0 + inverse * inverse
             };
             for i in 0..6 {
                 for j in 0..6 {
-                    storage[i][j] += re_w * branch.c_pa[i][j];
-                    loss[i][j] += im_w * branch.c_pa[i][j];
+                    let c = branch.c_pa[i][j];
+                    let [real, imaginary] = if let Some(weights) = &exceptional {
+                        weights.primal(c).ok_or(ViscoError::Parameters {
+                            what: "tensor complex modulus overflowed",
+                        })?
+                    } else if wt <= 1.0 {
+                        // Apply stiffness before the second small rate/time
+                        // factor, retaining a representable weak storage term.
+                        let imaginary = c * wt / den;
+                        [imaginary * wt, imaginary]
+                    } else {
+                        [c / den, (c * inverse) / den]
+                    };
+                    storage[i][j] += real;
+                    loss[i][j] += imaginary;
                 }
             }
         }
-        if storage.iter().flatten().chain(loss.iter().flatten()).any(|v| !v.is_finite()) {
+        if storage
+            .iter()
+            .flatten()
+            .chain(loss.iter().flatten())
+            .any(|v| !v.is_finite())
+        {
             return Err(ViscoError::Parameters {
                 what: "tensor complex modulus overflowed",
             });

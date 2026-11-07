@@ -38,6 +38,8 @@ use fs_ad::Real;
 use fs_ad::dual::gradient;
 use fs_math::det;
 
+mod prony_spectrum;
+
 /// Zener thermoelastic damping of solid circular sections (exact thermal-mode series).
 pub mod circular_ted;
 /// Through-thickness thermoelastic diffusion and its plane-stress bending tensor.
@@ -51,7 +53,7 @@ pub mod temperature;
 /// Passive full-tensor Prony (generalized Maxwell) viscoelastic law in Mandel coordinates.
 pub mod tensor;
 pub use modified_zener::ModifiedFractionalZener;
-pub use tensor::{Mandel6, PronyBranch, TensorProny, TensorPronyState};
+pub use tensor::{Mandel6, PronyBranch, TensorProny, TensorPronyFrequencyDerivative, TensorPronyState};
 
 /// Typed refusals of the viscoelastic layer. Display strings carry stable
 /// `FS-MAT-VISCO-*` codes.
@@ -382,6 +384,36 @@ pub struct GeneralizedMaxwell {
 }
 
 impl GeneralizedMaxwell {
+    /// Exact storage/loss frequency slopes [Pa s] of the authored branches.
+    /// Negative-frequency parity follows `modulus`; zero has the continuous
+    /// DC derivative. Branch magnitudes remain factored until physical scaling.
+    /// This is a constitutive tangent, not a fitted decay or finite difference.
+    pub fn modulus_frequency_derivative(&self, omega: f64) -> Result<(f64, f64), ViscoError> {
+        let invalid = || ViscoError::Parameters {
+            what: "finite Prony frequency and representable physical derivative required",
+        };
+        if !omega.is_finite() || !self.e_inf.is_finite() || self.e_inf <= 0.0 {
+            return Err(invalid());
+        }
+        let mut sums = [fs_math::dd::Dd::ZERO; 2];
+        for &(stiffness, tau) in &self.terms {
+            if !stiffness.is_finite() || stiffness < 0.0 {
+                return Err(invalid());
+            }
+            let weights =
+                prony_spectrum::PronySpectrumWeights::new(omega, tau).ok_or_else(invalid)?;
+            let values = weights.modulus_derivative(stiffness).ok_or_else(invalid)?;
+            for i in 0..2 {
+                sums[i] = sums[i] + fs_math::dd::Dd::from_f64(values[i]);
+            }
+        }
+        let values = sums.map(|value| value.to_f64());
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(invalid());
+        }
+        Ok((values[0], values[1]))
+    }
+
     /// Admission: positive equilibrium modulus, non-negative branch moduli,
     /// positive relaxation times.
     ///
