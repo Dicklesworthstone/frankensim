@@ -1,5 +1,8 @@
 //! Original cross-mass reactions and work for simultaneous supported Coulomb events.
 
+#[path = "frictional_impacts/elliptic.rs"]
+mod elliptic;
+
 use super::*;
 use fs_contact::frictional_multicontact::{FrictionalContactConfig, NormalVelocityLaw};
 use fs_solid::dynamics::frictional_impact::{

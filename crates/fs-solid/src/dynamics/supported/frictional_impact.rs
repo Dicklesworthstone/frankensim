@@ -1,4 +1,7 @@
-//! Simultaneous Coulomb impulses with original full-mass support reactions.
+//! Simultaneous frictional impulses with original full-mass support reactions.
+
+mod elliptic;
+pub use elliptic::{SupportedSolidEllipticImpactReport, SupportedSolidEllipticSourceError};
 
 use super::*;
 use crate::dynamics::frictional_impact::{
@@ -34,8 +37,11 @@ impl From<SupportedSolidError> for SupportedSolidFrictionalImpactError {
 /// determinacy qualification: local load and work partitions can depend on the
 /// chosen impulse representative even when the complete motion is determined.
 #[derive(Debug)]
-pub struct SupportedSolidFrictionalImpactReport {
-    pub contact: SolidFrictionalContactImpulseReport,
+pub struct SupportedSolidFrictionalImpactReport<
+    R = fs_contact::frictional_multicontact::FrictionalContactResult,
+    A = fs_contact::frictional_multicontact::FrictionalContactResiduals,
+> {
+    pub contact: SolidFrictionalContactImpulseReport<R, A>,
     pub impulse: SupportedSolidImpulse,
 }
 
@@ -76,16 +82,29 @@ impl SupportedSpectralSolid {
             |impulse, cx| self.momentum_response(impulse, cx),
             cx,
         )?;
-        let mut support_velocity = zeros(self.support_rows.len())?;
-        for (index, &row) in self.support_rows.iter().enumerate() {
-            if index % 256 == 0 {
-                poll(cx)?;
-            }
-            support_velocity[index] = self.velocity[row];
-        }
-        let trial = self.trial_momentum_impulse(
+        let (contact, trial) = self.trial_frictional_contact(proposal, contacts, controls, cx)?;
+        let impulse = self.accept_momentum_impulse(trial);
+        Ok(SupportedSolidFrictionalImpactReport { contact, impulse })
+    }
+
+    // Scalar and directional laws share every original support reaction,
+    // physical endpoint and work gate. Source owners can keep their history
+    // candidates private until this complete native candidate is admitted.
+    fn trial_frictional_contact<F: frictional_impact::ImpactFriction>(
+        &self,
+        proposal: frictional_impact::FrictionalImpulseProposal<F::Response>,
+        contacts: &[SolidFrictionalContact<'_, F>],
+        controls: SolidFrictionalImpactControls,
+        cx: &Cx<'_>,
+    ) -> core::result::Result<
+        (
+            SolidFrictionalContactImpulseReport<F::Response, F::Residuals>,
+            SupportedImpulseCandidate,
+        ),
+        SupportedSolidFrictionalImpactError,
+    > {
+        let trial = self.trial_fixed_support_momentum_impulse(
             &proposal.impulse_kg_m_s,
-            &support_velocity,
             controls.maximum_impulse_error_kg_m_s,
             cx,
         )?;
@@ -98,7 +117,6 @@ impl SupportedSpectralSolid {
             cx,
         )?;
         poll(cx)?;
-        let impulse = self.accept_momentum_impulse(trial);
-        Ok(SupportedSolidFrictionalImpactReport { contact, impulse })
+        Ok((contact, trial))
     }
 }

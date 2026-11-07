@@ -63,13 +63,13 @@ impl<E: std::error::Error + 'static> std::error::Error for SolidEllipticSourceEr
 
 type Result<T, E = SourceImpulseError> = core::result::Result<T, SolidEllipticSourceError<E>>;
 
-struct SourceProposal<'a, S> {
-    impulse: FrictionalImpulseProposal<EllipticFrictionalContactResult>,
-    contacts: Vec<SolidEllipticContact<'a>>,
-    candidates: Vec<(usize, S)>,
+pub(in crate::dynamics) struct SourceProposal<'a, S> {
+    pub(in crate::dynamics) impulse: FrictionalImpulseProposal<EllipticFrictionalContactResult>,
+    pub(in crate::dynamics) contacts: Vec<SolidEllipticContact<'a>>,
+    pub(in crate::dynamics) candidates: Vec<(usize, S)>,
 }
 
-fn prepare<'a, S, E>(
+pub(in crate::dynamics) fn prepare<'a, S, E>(
     velocity_mps: &[f64],
     contacts: &[SolidImpactGeometry<'a>],
     histories: &[S],
@@ -174,7 +174,7 @@ fn prepare<'a, S, E>(
     })
 }
 
-fn publish<S>(histories: &mut [S], candidates: &mut [(usize, S)]) {
+pub(in crate::dynamics) fn publish<S>(histories: &mut [S], candidates: &mut [(usize, S)]) {
     // Hold old histories until ALL swaps complete; a caller-owned destructor
     // cannot run between publishing individual accepted source states.
     for (index, next) in candidates {
@@ -182,7 +182,7 @@ fn publish<S>(histories: &mut [S], candidates: &mut [(usize, S)]) {
     }
 }
 
-fn admit_bindings(
+pub(in crate::dynamics) fn admit_bindings(
     contacts: &[SolidImpactGeometry<'_>],
     sources: &[SolidEllipticSourceBinding<'_>],
     cx: &Cx<'_>,
@@ -206,7 +206,7 @@ fn admit_bindings(
     Ok(())
 }
 
-fn sample(
+pub(in crate::dynamics) fn sample(
     binding: SolidEllipticSourceBinding<'_>,
     history: &SourceThermalEllipticState,
     query: &SolidImpactKinematics,

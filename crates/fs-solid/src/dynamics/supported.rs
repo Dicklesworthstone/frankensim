@@ -30,6 +30,7 @@ mod impact;
 mod impulse;
 mod sustained;
 pub use frictional_impact::{
+    SupportedSolidEllipticImpactReport, SupportedSolidEllipticSourceError,
     SupportedSolidFrictionalImpactError, SupportedSolidFrictionalImpactReport,
 };
 pub use impact::{SupportedSolidNormalImpactError, SupportedSolidNormalImpactReport};

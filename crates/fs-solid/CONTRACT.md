@@ -9791,9 +9791,56 @@ Four focused G1/G3/G4 regression definitions cover analytical sliding and
 sticking against moving supports, original cross-mass reaction and work,
 independent elastic continuation, common-boost work transformation, locked
 contact refusal, cancellation/budgets and a late original-energy refusal
-followed by an unchanged-state retry. Native execution remains outstanding.
+followed by an unchanged-state retry. These four regressions pass in the
+focused supported-dynamics native run described below.
 Geometry/event discovery, sustained friction and physical loss destinations
 remain separate owners.
+
+### Directional material impacts with prescribed supports
+
+`SupportedSpectralSolid::apply_elliptic_impacts` carries the original physical
+friction ellipse through the same complete supported momentum trial as the
+circular law. Both paths share native reaction, work and acceptance code.
+Contact covectors include all represented coordinates; actual support velocity
+enters incoming and outgoing slip, while incremental mobility is exactly zero
+on prescribed coordinates. The complete free-mass response retains every
+normal/shear and cross-contact block. Physical impulses return through the
+original transpose, and support reactions retain both `M_cf Delta-v_f` and
+direct contact loads `-J_c`. Contact work, opposing-surface work and support
+actuator work remain separate. The original physical endpoint ellipse,
+zero-axis forbidden traction, normal law, relative passivity and full native
+momentum/energy gates all precede publication. Equal principal coefficients
+retain the circular owner's exact arithmetic; a single zero coefficient gives
+true free slip without an artificial traction floor.
+
+`apply_elliptic_impacts_with` and `apply_sourced_elliptic_impacts` reuse the
+original complete-solid source transaction. Active sources are sampled in
+canonical contact-ID order at actual native incoming relative velocity;
+history slices retain original input order, and inactive sources are neither
+queried nor changed. The typed entry preserves both pinned principal claim
+sets, original source applicability/authority, explicit temperature/pressure
+and coefficient role. Accepted slip, accumulated distance, transported texture
+and last finite-step temperature survive the instantaneous coefficient refresh.
+Source histories need not implement `Clone`. They and the supported/free
+trajectories publish only after every original law and full-support work gate;
+source, cancellation, budget or late energy refusal leaves all accepted state
+available for retry. Callback-owned allocation/evaluation and external side
+effects retain the existing source entry's boundary.
+
+The new nested tests in `tests/solid_supported_dynamics/frictional_impacts/elliptic.rs`
+and its `source.rs` exercise the isotropic limit, oblique maximum-dissipation
+traction, exact free-axis slip and frame rotation, two simultaneous coupled
+stick/slide contacts, cross-mass and direct support reactions, independently
+computed source work, subsequent original elastic motion, physical source
+queries with transported material axes, and source/native refusal with retry.
+All 24 tests in the original supported-dynamics integration target passed in a
+focused native build, including these eight new cases and the existing normal,
+circular-friction, impulse and continuous-support regressions. The run compiles
+the original dynamics/source/constitutive modules and real `Cx`/`CancelGate`;
+it does not establish a full Cargo workspace or DSR gate. These are numerical
+model checks. The instantaneous entry does not infer
+contact discovery, pressure, duration, sliding travel, intrastep static/kinetic
+selection, a frictional heat partition or measured material calibration.
 
 
 ## Simultaneous reciprocal contact across complete native solid trajectories
