@@ -5188,6 +5188,15 @@ unchanged. Numerical solve regressions retain the same nonlinear path with a
 an immobile cell of approximately `1.7e20 m3` whose rounded global volume does
 not change.
 
+An already force-balanced static trial can be accepted when its final potential
+decrement is unresolved. This check uses only the actual free internal/external
+force norms, a lower bound on the native static normalization; supported
+reactions and a stale tangent cannot relax it. All source/domain admissions and
+the original tolerance remain required. The next outer iteration admits the
+current tangent and certifies the full equilibrium gate. This avoids a
+near-root line-search stall in weak cavity loading without changing the gas
+entropy controls or treating numerical energy noise as physical work.
+
 Backward-Euler globalization also consumes a direct increment of its original
 held-predictor quadratic potential. With `q=(u-u_old)/dt-v_old`, compensated
 polarization evaluates `Delta Psi=mean(q)^T M Delta q`, retaining small work
@@ -7318,6 +7327,26 @@ composition; this static composition adds no gas transport or physical time step
 Focused native regressions exercise original nonlinear calorics, direct volume
 and gas work, source refusal and a gas-filled hollow solid under ambient pressure
 and spatial gravity against independent equilibrium and gas-law balances.
+
+`solve_with_adiabatic_cavities` extends that same native solve to an ordered
+slice of independently sourced sealed chambers. Each retains its original mass,
+composition, calorics, entropy controls and exterior pressure. Current forces,
+geometric stiffness and independent acoustic factors contribute once; the
+solid carries mechanical interaction between chambers. Multiple-cavity force
+and potential reductions use compensated arithmetic. Every binding must match
+the exact solid reference chart, and overlapping canonical boundary faces
+refuse before gas evaluation, including duplicates made by independent geometry
+preparation. A refusal leaves every borrowed inventory unchanged.
+
+`HyperTetCavitiesSolution` returns the solid solution and the actual accepted
+gas loads in input order. Their volumes, thermodynamic states, potentials and
+tangents need no final entropy re-solve; only the final load-step states are
+retained for publication. Empty and single-cavity inputs preserve their original
+loading semantics. Native tests cover two mechanically connected hollow solids
+with distinct variable heat capacities, an independently specified finite
+compression with gravity and ambient pressure, and the second chamber's volume
+and temperature response when the first is heated. Source ordering, inventory,
+force balance, empty/single reductions and boundary ownership are checked.
 
 
 Preparation rejects duplicate, out-of-range, open, disconnected and outer-shell

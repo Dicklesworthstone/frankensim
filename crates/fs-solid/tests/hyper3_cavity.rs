@@ -13,6 +13,8 @@ use fs_solid::linear3::TetAssemblyBudget;
 mod gas_fixture;
 #[path = "hyper3_cavity/composed_loads.rs"]
 mod composed_loads;
+#[path = "hyper3_cavity/multiple.rs"]
+mod multiple;
 
 fn with_cx<R>(f: impl FnOnce(&CancelGate, &Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();

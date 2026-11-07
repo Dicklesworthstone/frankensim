@@ -248,6 +248,20 @@ pub struct HyperTetSolution {
     pub steps: Vec<HyperLoadStep>,
 }
 
+/// Joint equilibrium of the original solid and its ordered sealed gas stores.
+#[derive(Debug)]
+pub struct HyperTetCavitiesSolution {
+    /// Converged displacement, material potential and full support reactions.
+    pub solid: HyperTetSolution,
+    /// Accepted gas loads in the same order as the input cavity bindings.
+    ///
+    /// These are the actual source states used to admit the final equilibrium,
+    /// including each gas inventory, volume, pressure, potential and tangent.
+    /// Returning them does not repeat a thermodynamic solve. An empty input
+    /// produces an empty vector and the native non-cavity solid result.
+    pub cavities: Vec<pressure::cavity::TetCavityGasLoad>,
+}
+
 /// Structured refusal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HyperTetError {
@@ -1168,11 +1182,60 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         )>,
         cx: &Cx<'_>,
     ) -> Result<HyperTetSolution, HyperTetError> {
+        self.solve_with_adiabatic_cavities(std::slice::from_ref(&cavity), gravity, pressure, cx)
+            .map(|solution| solution.solid)
+    }
+
+    /// Equilibrate independent sealed gas cavities on one deforming solid.
+    ///
+    /// Each cavity retains its own mass, species, calorics, entropy controls and
+    /// exterior pressure. Their current forces, geometric stiffness and acoustic
+    /// rank-one terms add to the same native equilibrium; the solid transmits
+    /// mechanical coupling between chambers. Gas inventories never mix.
+    /// Conservative globalization sums their original caloric and volume-work
+    /// increments in compensated precision, alongside material, gravity and
+    /// optional boundary-pressure work. Accepted gas states are returned without
+    /// a final source re-evaluation, in the caller's fixed order.
+    ///
+    /// All cavities must bind this exact reference chart and distinct boundary
+    /// faces. This prevents counting one gas boundary twice; it does not add a
+    /// geometric self-intersection certificate to the original cavity admission.
+    /// Empty and single-cavity slices retain their native loading semantics.
+    ///
+    /// # Errors
+    /// A mismatched reference chart, overlapping cavity boundaries, invalid
+    /// source, domain exit, cancellation or native equilibrium refusal. All
+    /// borrowed gas inventories remain unchanged if any chamber refuses.
+    pub fn solve_with_adiabatic_cavities(
+        &self,
+        cavities: &[pressure::cavity::AdiabaticCavity<'_>],
+        gravity: Option<(
+            gravity::ReferenceGravityDensity<'_>,
+            gravity::StationaryGravity3<'_>,
+        )>,
+        pressure: Option<(
+            &pressure::ClosedTetPressureSurface,
+            pressure::TetPressure<'_>,
+        )>,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetCavitiesSolution, HyperTetError> {
         checkpoint(cx)?;
-        if !cavity.cavity.surface().matches_reference(self.nodes_m, self.tetrahedra) {
-            return Err(HyperTetError::InvalidInput {
-                what: "sealed cavity requires the exact solid reference chart".into(),
-            });
+        let mut occupied = std::collections::BTreeSet::new();
+        for (index, source) in cavities.iter().enumerate() {
+            checkpoint(cx)?;
+            if !source.cavity.surface().matches_reference(self.nodes_m, self.tetrahedra) {
+                return Err(HyperTetError::InvalidInput {
+                    what: format!("sealed cavity {index} requires the exact solid reference chart"),
+                });
+            }
+            for &face in source.cavity.solid_face_indices() {
+                checkpoint(cx)?;
+                if !occupied.insert(face) {
+                    return Err(HyperTetError::InvalidInput {
+                        what: format!("sealed cavity {index} repeats an already bound boundary face"),
+                    });
+                }
+            }
         }
         let pressure = if let Some((surface, applied)) = pressure {
             if !surface.matches_reference(self.nodes_m, self.tetrahedra) {
@@ -1184,8 +1247,8 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         } else {
             None
         };
-        self.solve_loaded_from_with_cavity(
-            None, None, pressure, gravity, None, Some(cavity), cx,
+        self.solve_loaded_from_with_cavities(
+            None, None, pressure, gravity, None, cavities, cx,
         )
     }
 
@@ -1340,9 +1403,9 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         } else {
             None
         };
-        self.solve_loaded_from_with_cavity(
-            None, None, pressure, Some((reference_density, source)), None, None, cx,
-        )
+        self.solve_loaded_from_with_cavities(
+            None, None, pressure, Some((reference_density, source)), None, &[], cx,
+        ).map(|solution| solution.solid)
     }
 
     fn solve_loaded(
@@ -1375,15 +1438,15 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
         cx: &Cx<'_>,
     ) -> Result<HyperTetSolution, HyperTetError> {
-        self.solve_loaded_from_with_cavity(
+        self.solve_loaded_from_with_cavities(
             initial_displacement, prepared_elements, pressure,
             gravity.map(|(density, field)| (density, gravity::StationaryGravity3::from_samples(field))),
-            inertia, None, cx,
-        )
+            inertia, &[], cx,
+        ).map(|solution| solution.solid)
     }
 
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // one native Newton owner
-    fn solve_loaded_from_with_cavity(
+    fn solve_loaded_from_with_cavities(
         &self,
         initial_displacement: Option<&[f64]>,
         prepared_elements: Option<&[Element]>,
@@ -1396,9 +1459,9 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
             gravity::StationaryGravity3<'_>,
         )>,
         inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
-        cavity: Option<pressure::cavity::equilibrium::AdiabaticCavity<'_>>,
+        cavities: &[pressure::cavity::AdiabaticCavity<'_>],
         cx: &Cx<'_>,
-    ) -> Result<HyperTetSolution, HyperTetError> {
+    ) -> Result<HyperTetCavitiesSolution, HyperTetError> {
         checkpoint(cx)?;
         self.validate_inputs()?;
         if inertia.is_some()
@@ -1406,7 +1469,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                 || self.settings.load_steps != 1
                 || pressure.is_some()
                 || gravity.is_some()
-                || cavity.is_some())
+                || !cavities.is_empty())
         {
             return Err(HyperTetError::InvalidInput {
                 what: "finite inertia requires one accepted endpoint and held dead loads".into(),
@@ -1466,6 +1529,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         }
         let nonsymmetric = matches!(pressure, Some((_, pressure::TetPressure::PerFace(_))));
         let mut scaled_faces = Vec::new();
+        let mut accepted_cavities = Vec::new();
         for step in 1..=self.settings.load_steps {
             let load = step as f64 / self.settings.load_steps as f64;
             let f_dead = self.external(elements, load);
@@ -1519,7 +1583,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
             // Its geometry admits the current volume together with the force;
             // interval pressure work is evaluated by that same owner below.
             let loaded = |displacement: &[f64], before: Option<&[f64]>| -> Result<
-                (Vec<f64>, f64, Option<Dd>, Option<pressure::cavity::TetCavityGasLoad>), HyperTetError,
+                (Vec<f64>, f64, Option<Dd>, Vec<pressure::cavity::TetCavityGasLoad>), HyperTetError,
             > {
                 let mut force = f_dead.clone();
                 let mut volume = 0.0;
@@ -1552,10 +1616,24 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                 }
                 // Keep the source evaluation and its sparse/rank-one tangent
                 // together: accepted trials need no second thermodynamic solve.
-                let cavity_load = cavity.map(|source| source.evaluate(displacement, cx)).transpose()?;
-                if let Some(current) = &cavity_load {
-                    for (total, &force) in force.iter_mut().zip(&current.force_n) {
-                        *total = load.mul_add(force, *total);
+                let mut cavity_loads = Vec::with_capacity(cavities.len());
+                let mut combined = (cavities.len() > 1)
+                    .then(|| force.iter().copied().map(Dd::from_f64).collect::<Vec<_>>());
+                for source in cavities {
+                    let current = source.evaluate(displacement, cx)?;
+                    for (index, (total, &value)) in force.iter_mut().zip(&current.force_n).enumerate() {
+                        if index % 256 == 0 { checkpoint(cx)?; }
+                        if let Some(sum) = &mut combined {
+                            sum[index] = sum[index] + Dd::from_f64(load) * Dd::from_f64(value);
+                        } else {
+                            *total = load.mul_add(value, *total);
+                        }
+                    }
+                    cavity_loads.push(current);
+                }
+                if let Some(sum) = combined {
+                    for (total, value) in force.iter_mut().zip(sum) {
+                        *total = value.to_f64();
                     }
                 }
                 if !volume.is_finite()
@@ -1567,9 +1645,9 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                             .into(),
                     });
                 }
-                Ok((force, gravity_potential, gravity_increment, cavity_load))
+                Ok((force, gravity_potential, gravity_increment, cavity_loads))
             };
-            let (mut f_ext, mut current_gravity_potential, _, mut current_cavity) = loaded(&u, None)?;
+            let (mut f_ext, mut current_gravity_potential, _, mut current_cavities) = loaded(&u, None)?;
             let target: Vec<(usize, f64)> = self
                 .prescribed_m
                 .iter()
@@ -1613,7 +1691,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                     None
                 };
                 if pressure_tangent.is_some() || gravity_tangent.is_some() || inertia.is_some()
-                    || current_cavity.is_some()
+                    || !current_cavities.is_empty()
                 {
                     let mut combined = Coo::new(dofs, dofs);
                     for row in 0..dofs {
@@ -1623,7 +1701,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                         for (matrix, sign) in std::iter::once((&full, 1.0))
                             .chain(pressure_tangent.iter().map(|matrix| (matrix, -1.0)))
                             .chain(gravity_tangent.iter().map(|matrix| (matrix, -load)))
-                            .chain(current_cavity.iter().map(|state| (state.force_tangent.geometric_part(), -load)))
+                            .chain(current_cavities.iter().map(|state| (state.force_tangent.geometric_part(), -load)))
                         {
                             let (columns, values) = matrix.row(row);
                             for (&column, &coefficient) in columns.iter().zip(values) {
@@ -1664,9 +1742,10 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                 } else {
                     static_force_scale(&full, &u, &state.internal, &f_ext, &free, cx)?
                 };
-                if let Some(current) = &current_cavity {
-                    let acoustic_scale = pressure::cavity::equilibrium::acoustic_force_scale(
-                        current.force_tangent.acoustic_rank_one_vector(), &u, &free, cx,
+                if !current_cavities.is_empty() {
+                    let acoustic_scale = pressure::cavity::equilibrium::acoustic_force_scale_many(
+                        current_cavities.iter().map(|current| current.force_tangent.acoustic_rank_one_vector()),
+                        &u, &free, cx,
                     )?;
                     scale = scale.max(load * acoustic_scale);
                 }
@@ -1711,7 +1790,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                     }
                 }
                 let kff = coo.assemble();
-                if let Some(current) = &current_cavity {
+                for current in &current_cavities {
                     let weights = current.force_tangent.acoustic_rank_one_vector();
                     let prescribed_projection = weights.iter().zip(&dp_full)
                         .fold(0.0, |sum, (&w, &dp)| w.mul_add(dp, sum));
@@ -1720,10 +1799,10 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                     }
                 }
                 let acoustic = pressure::cavity::equilibrium::AcousticFactors::from_full_vectors(
-                    current_cavity.iter().map(|current| current.force_tangent.acoustic_rank_one_vector()),
+                    current_cavities.iter().map(|current| current.force_tangent.acoustic_rank_one_vector()),
                     &free, load, cx,
                 )?;
-                let (direction, iterations, fallback) = if current_cavity.is_some() {
+                let (direction, iterations, fallback) = if !current_cavities.is_empty() {
                     let (direction, iterations) =
                         self.general_linear_solve_with_acoustic(&kff, &acoustic, &rhs, load, cx)?;
                     (direction, iterations, false)
@@ -1780,7 +1859,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                         } else {
                             0.0
                         };
-                        let (trial_ext, trial_gravity_potential, trial_gravity_increment, trial_cavity) =
+                        let (trial_ext, trial_gravity_potential, trial_gravity_increment, trial_cavities) =
                             match loaded(&trial, energy_globalization.then_some(u.as_slice())) {
                                 Ok(value) => value,
                                 Err(HyperTetError::Cancelled) => {
@@ -1833,24 +1912,22 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                                     Dd::from_f64(trial_gravity_potential)
                                         - Dd::from_f64(current_gravity_potential)
                                 });
-                            let cavity_change = if let Some(source) = cavity {
-                                match source.potential_increment(
-                                    current_cavity.as_ref().expect("bound cavity current load"),
-                                    trial_cavity.as_ref().expect("bound cavity trial load"),
-                                    cx,
-                                ) {
-                                    Ok(change) => Dd::from_f64(load) * change,
-                                    Err(HyperTetError::Cancelled) => {
-                                        return Err(HyperTetError::Cancelled);
-                                    }
-                                    Err(_) => {
-                                        alpha *= 0.5;
-                                        record.backtracks += 1;
-                                        continue;
-                                    }
+                            let cavity_interval = cavities.iter()
+                                .zip(current_cavities.iter().zip(&trial_cavities))
+                                .try_fold((Dd::ZERO, 0.0_f64), |(sum, scale), (source, (before, after))| {
+                                    source.potential_increment(before, after, cx)
+                                        .map(|change| (sum + change, scale.max(change.to_f64().abs())))
+                                });
+                            let (cavity_change, cavity_work_scale) = match cavity_interval {
+                                Ok((change, scale)) => (Dd::from_f64(load) * change, load * scale),
+                                Err(HyperTetError::Cancelled) => {
+                                    return Err(HyperTetError::Cancelled);
                                 }
-                            } else {
-                                Dd::ZERO
+                                Err(_) => {
+                                    alpha *= 0.5;
+                                    record.backtracks += 1;
+                                    continue;
+                                }
                             };
                             let change = (material_change + inertia_change - dead_work
                                 + Dd::from_f64(pressure_change) + gravity_change + cavity_change).to_f64();
@@ -1861,6 +1938,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                                     .max(pressure_change.abs())
                                     .max(gravity_change.to_f64().abs())
                                     .max(cavity_change.to_f64().abs())
+                                    .max(cavity_work_scale)
                                     .max((alpha * slope).abs());
                             // A legacy gravity callback may still have unresolved
                             // endpoint subtraction. Require actual residual
@@ -1898,33 +1976,38 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                             };
                             norm(&trial_residual) < target
                         };
-                        // Tiny-strain stored energies can lose the last Newton
-                        // decrement to constitutive cancellation. An already
-                        // converged momentum state needs no resolvable Armijo
-                        // decrement. Recompute the ORIGINAL true force gate at
-                        // this trial, with fully applied supports and native
-                        // inertia/load normalization; do not relax its tolerance.
-                        // The next outer iteration still certifies convergence.
+                        // A force-balanced trial needs no resolvable final
+                        // potential decrement. Static acceptance here uses ONLY
+                        // the actual free internal/external force scale, which
+                        // is a lower bound on the native static normalization;
+                        // neither a stale tangent nor supported reactions can
+                        // relax this gate. The next outer iteration still
+                        // admits the current tangent and certifies convergence.
                         if !acceptable
                             && !pending_any
                             && target.iter().all(|&(dof, value)| trial[dof] == value)
-                            && let Some(inertia) = inertia
                         {
                             let trial_residual: Vec<f64> = free
                                 .iter()
                                 .map(|&d| evaluated.internal[d] - trial_ext[d])
                                 .collect();
-                            let trial_scale = inertia
-                                .force_scale(
+                            let trial_scale = if let Some(inertia) = inertia {
+                                inertia.force_scale(
                                     &trial,
                                     &free,
                                     trial_material_free_norm,
                                     free_force_norm(&trial_ext, &free),
                                     cx,
-                                )
-                                .map_err(inertia_error)?;
-                            acceptable = norm(&trial_residual) / trial_scale
-                                <= self.settings.relative_tolerance;
+                                ).map_err(inertia_error)?
+                            } else {
+                                free_force_norm(&evaluated.internal, &free)
+                                    .max(free_force_norm(&trial_ext, &free))
+                            };
+                            let trial_norm = norm(&trial_residual);
+                            acceptable = trial_norm.is_finite() && trial_scale.is_finite()
+                                && (trial_norm == 0.0
+                                    || (trial_scale > 0.0 && trial_norm / trial_scale
+                                        <= self.settings.relative_tolerance));
                         }
                         if acceptable {
                             accepted = Some((
@@ -1932,7 +2015,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                                 evaluated,
                                 trial_ext,
                                 trial_gravity_potential,
-                                trial_cavity,
+                                trial_cavities,
                                 trial_material_free_norm,
                             ));
                             break;
@@ -1946,7 +2029,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                     evaluated,
                     trial_ext,
                     trial_gravity_potential,
-                    trial_cavity,
+                    trial_cavities,
                     trial_material_free_norm,
                 )) = accepted
                 else {
@@ -1959,7 +2042,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                 state = evaluated;
                 f_ext = trial_ext;
                 current_gravity_potential = trial_gravity_potential;
-                current_cavity = trial_cavity;
+                current_cavities = trial_cavities;
                 material_free_norm = trial_material_free_norm;
             }
             if !converged {
@@ -1967,6 +2050,9 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                     load_factor: load,
                     history: record.residual_history,
                 });
+            }
+            if step == self.settings.load_steps {
+                accepted_cavities = current_cavities;
             }
             steps.push(record);
         }
@@ -1990,9 +2076,20 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                 *total += current;
             }
         }
-        if let Some(source) = cavity {
-            for (total, current) in f_ext.iter_mut().zip(source.evaluate(&u, cx)?.force_n) {
-                *total += current;
+        if accepted_cavities.len() > 1 {
+            let mut sum: Vec<_> = f_ext.iter().copied().map(Dd::from_f64).collect();
+            for current in &accepted_cavities {
+                for (index, (total, &value)) in sum.iter_mut().zip(&current.force_n).enumerate() {
+                    if index % 256 == 0 { checkpoint(cx)?; }
+                    *total = *total + Dd::from_f64(value);
+                }
+            }
+            for (total, value) in f_ext.iter_mut().zip(sum) {
+                *total = value.to_f64();
+            }
+        } else if let Some(current) = accepted_cavities.first() {
+            for (total, &value) in f_ext.iter_mut().zip(&current.force_n) {
+                *total += value;
             }
         }
         let reactions_n: Vec<(usize, f64)> = self
@@ -2005,12 +2102,15 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                 what: "support reaction is not representable".into(),
             });
         }
-        Ok(HyperTetSolution {
-            displacement_m: u.as_chunks::<3>().0.to_vec(),
-            reactions_n,
-            strain_energy_j: state.energy,
-            min_det_f: state.min_det_f,
-            steps,
+        Ok(HyperTetCavitiesSolution {
+            solid: HyperTetSolution {
+                displacement_m: u.as_chunks::<3>().0.to_vec(),
+                reactions_n,
+                strain_energy_j: state.energy,
+                min_det_f: state.min_det_f,
+                steps,
+            },
+            cavities: accepted_cavities,
         })
     }
 
