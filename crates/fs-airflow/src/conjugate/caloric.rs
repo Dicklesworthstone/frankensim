@@ -9,7 +9,8 @@
 //! Mass flow, pressure, composition and h are prescribed. Only actual fluid
 //! temperatures require source support; a hotter or colder wall may lie outside
 //! it. This does not add pressure work, phase change, h(T), hydraulic feedback,
-//! mixing junctions or a gradient claim. The constant-Cp adjoint/transfer APIs
+//! mixing junctions or a coupled gradient claim. The fixed-wall inlet response
+//! differentiates this same source-caloric march. The constant-Cp adjoint/transfer APIs
 //! accept `AirPath`, never this distinct source-caloric path.
 
 use std::sync::Arc;
@@ -29,6 +30,19 @@ use super::{
 pub struct CaloricAirPath {
     geometry: AirPath,
     caloric: Arc<IsobaricHeatCapacityLaw>,
+}
+
+/// Analytic inlet response of the original source-caloric march with fixed
+/// wall temperatures, mass flow, segment conductances and material source.
+/// These derivatives do not include solid, hydraulic or composition feedback.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaloricInletResponse {
+    /// d h_out / d h_in, dimensionless and in [0,1]. Strong heat exchange can
+    /// underflow to zero; rounded equality with a wall does not itself zero it.
+    pub enthalpy_gain: f64,
+    /// d T_out / d T_in = enthalpy_gain * Cp(T_in) / Cp(T_out).
+    /// Unlike the enthalpy gain, this can exceed one for a decreasing Cp law.
+    pub temperature_gain: f64,
 }
 
 impl CaloricAirPath {
@@ -76,6 +90,46 @@ impl CaloricAirPath {
     /// Relative enthalpy increments retain small heat transfers independently
     /// of the source's enthalpy datum. A late source refusal returns no march.
     pub fn march(&self, wall_temperatures_k: &[f64]) -> Result<AirMarch, AirflowError> {
+        self.march_with_enthalpy_gain(wall_temperatures_k)
+            .map(|(march, _)| march)
+    }
+
+    /// March once and retain the analytic fixed-wall inlet response.
+    /// Each source segment uses d h_out/d h_in = (T_wall-T_out)/(T_wall-T_in)
+    /// before rounding absolute temperatures, with the analytic exponential
+    /// limit at equilibrium. Original affine Cp integration retains very small
+    /// gains even when an outlet rounds to its wall temperature. No numerical
+    /// differentiation, frozen Cp or extrapolated wall calorimetry is used.
+    pub fn march_with_inlet_response(
+        &self,
+        wall_temperatures_k: &[f64],
+    ) -> Result<(AirMarch, CaloricInletResponse), AirflowError> {
+        let (march, enthalpy_gain) = self.march_with_enthalpy_gain(wall_temperatures_k)?;
+        let inlet_cp = self
+            .caloric
+            .specific_heat_cp_j_kg_k(self.inlet_temperature_k())
+            .map_err(AirflowError::CaloricSource)?;
+        let outlet_cp = self
+            .caloric
+            .specific_heat_cp_j_kg_k(march.outlet_temperature_k)
+            .map_err(AirflowError::CaloricSource)?;
+        let temperature_gain = finite_coupling(
+            "source-caloric inlet temperature response",
+            (enthalpy_gain * inlet_cp) / outlet_cp,
+        )?;
+        Ok((
+            march,
+            CaloricInletResponse {
+                enthalpy_gain,
+                temperature_gain,
+            },
+        ))
+    }
+
+    fn march_with_enthalpy_gain(
+        &self,
+        wall_temperatures_k: &[f64],
+    ) -> Result<(AirMarch, f64), AirflowError> {
         if wall_temperatures_k.len() != self.segments().len() {
             return Err(AirflowError::SolidResponseArity {
                 expected: self.segments().len(),
@@ -86,6 +140,7 @@ impl CaloricAirPath {
         let mut states = Vec::with_capacity(self.segments().len());
         let mut total = 0.0;
         let mut correction = 0.0;
+        let mut enthalpy_gain = 1.0;
         for (segment, &wall) in self.segments().iter().zip(wall_temperatures_k) {
             finite_positive("caloric wall temperature", wall)?;
             let conductance = finite_positive(
@@ -106,6 +161,7 @@ impl CaloricAirPath {
                 .linear_heat_exchange(inlet, wall, exposure)
                 .map_err(AirflowError::CaloricSource)?;
             let outlet = exchange.temperature_k;
+            enthalpy_gain *= exchange.inlet_enthalpy_gain;
             // Retain the source integral on the relative temperature change.
             // Recovering heat from an already rounded absolute outlet amplifies
             // that rounding when a weak exchange forms its Robin reference.
@@ -155,11 +211,14 @@ impl CaloricAirPath {
             total = next;
             inlet = outlet;
         }
-        Ok(AirMarch {
-            segments: states,
-            outlet_temperature_k: inlet,
-            total_heat_rate_w: total,
-        })
+        Ok((
+            AirMarch {
+                segments: states,
+                outlet_temperature_k: inlet,
+                total_heat_rate_w: total,
+            },
+            enthalpy_gain,
+        ))
     }
 
     /// Solve the original solid/stream fixed point with source Cp(T), retaining

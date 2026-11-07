@@ -233,17 +233,179 @@ fn original_knots_refinement_and_caloric_datum_preserve_the_same_channel() {
         (650.0, 2200.0),
     ];
     for (inlet, wall) in [(290.0, 620.0), (610.0, 260.0)] {
-        let one = path(source(&knots, 300.0), inlet, 1)
-            .march(&[wall])
+        let (one, one_response) = path(source(&knots, 300.0), inlet, 1)
+            .march_with_inlet_response(&[wall])
             .unwrap();
         for count in [2, 9, 32] {
-            let split = path(source(&knots, 600.0), inlet, count)
-                .march(&vec![wall; count])
+            let (split, split_response) = path(source(&knots, 600.0), inlet, count)
+                .march_with_inlet_response(&vec![wall; count])
                 .unwrap();
             near(split.outlet_temperature_k, one.outlet_temperature_k, 2e-9);
             near(split.total_heat_rate_w, one.total_heat_rate_w, 2e-7);
+            near(
+                split_response.enthalpy_gain,
+                one_response.enthalpy_gain,
+                2e-12,
+            );
+            near(
+                split_response.temperature_gain,
+                one_response.temperature_gain,
+                2e-12,
+            );
         }
     }
+}
+
+#[test]
+fn analytic_inlet_response_recovers_constant_cp_in_heating_cooling_and_equilibrium() {
+    let cp = 1005.0;
+    let law = source(&[(250.0, cp), (650.0, cp)], 300.0);
+    let expected = (-40.0_f64 / (0.02 * cp)).exp();
+    for (inlet, wall) in [(300.0, 450.0), (450.0, 300.0), (300.0, 300.0)] {
+        for count in [1, 4] {
+            let original = path(law.clone(), inlet, count);
+            let walls = vec![wall; count];
+            let (march, response) = original.march_with_inlet_response(&walls).unwrap();
+            assert_eq!(march, original.march(&walls).unwrap());
+            near(response.enthalpy_gain, expected, 2e-14);
+            near(response.temperature_gain, expected, 2e-14);
+        }
+    }
+}
+
+#[test]
+fn affine_cp_inlet_response_matches_analytic_transfer_and_independent_differences() {
+    // An independently prescribed outlet gives the complete transfer exposure
+    // and its analytic endpoint derivatives, without reading the solver result.
+    let knots = [(250.0, 1300.0), (400.0, 1600.0), (650.0, 2100.0)];
+    for (inlet, wall, outlet) in [(300.0_f64, 500.0_f64, 425.0_f64), (550.0, 280.0, 370.0)] {
+        let exposure =
+            (800.0 + 2.0 * wall) * ((wall - inlet) / (wall - outlet)).ln() - 2.0 * (outlet - inlet);
+        let segments = vec![AirSegment::new("original source", 1.0, 0.02 * exposure).unwrap()];
+        let law = source(&knots, 300.0);
+        let original = CaloricAirPath::new(inlet, 0.02, law.clone(), segments.clone()).unwrap();
+        let (march, response) = original.march_with_inlet_response(&[wall]).unwrap();
+        let expected_enthalpy_gain = (wall - outlet) / (wall - inlet);
+        let expected_temperature_gain =
+            expected_enthalpy_gain * (800.0 + 2.0 * inlet) / (800.0 + 2.0 * outlet);
+        near(march.outlet_temperature_k, outlet, 2e-11);
+        near(response.enthalpy_gain, expected_enthalpy_gain, 2e-12);
+        near(response.temperature_gain, expected_temperature_gain, 2e-12);
+
+        let shift = 1e-3;
+        let outputs = [-shift, shift].map(|offset| {
+            CaloricAirPath::new(inlet + offset, 0.02, law.clone(), segments.clone())
+                .unwrap()
+                .march(&[wall])
+                .unwrap()
+                .outlet_temperature_k
+        });
+        near(
+            response.temperature_gain,
+            (outputs[1] - outputs[0]) / (2.0 * shift),
+            2e-8,
+        );
+        let output_heat = law
+            .specific_enthalpy_change_j_kg(outputs[0], outputs[1])
+            .unwrap();
+        let inlet_heat = law
+            .specific_enthalpy_change_j_kg(inlet - shift, inlet + shift)
+            .unwrap();
+        near(response.enthalpy_gain, output_heat / inlet_heat, 2e-8);
+
+        let changed_datum = CaloricAirPath::new(inlet, 0.02, source(&knots, 600.0), segments)
+            .unwrap()
+            .march_with_inlet_response(&[wall])
+            .unwrap();
+        assert_eq!((march, response), changed_datum);
+    }
+}
+
+#[test]
+fn inlet_response_retains_tiny_gain_when_absolute_outlet_rounds_to_wall() {
+    let law = source(&[(250.0, 1300.0), (650.0, 2100.0)], 300.0);
+    for (inlet, wall) in [(300.0, 500.0), (550.0, 280.0)] {
+        // Cp(T)=800+2T; selecting log attenuation 50 leaves an unrepresentable
+        // absolute temperature gap, but both derivatives remain representable.
+        let cp_wall = 800.0 + 2.0 * wall;
+        let exposure = cp_wall * 50.0 - 2.0 * (wall - inlet);
+        let original = CaloricAirPath::new(
+            inlet,
+            1.0,
+            law.clone(),
+            vec![AirSegment::new("strong exchange", 1.0, exposure).unwrap()],
+        )
+        .unwrap();
+        let (march, response) = original.march_with_inlet_response(&[wall]).unwrap();
+        assert_eq!(march.outlet_temperature_k, wall);
+        let expected = (-50.0_f64).exp();
+        near(response.enthalpy_gain, expected, 2e-12 * expected);
+        near(
+            response.temperature_gain,
+            expected * (800.0 + 2.0 * inlet) / cp_wall,
+            2e-12 * expected,
+        );
+        assert!(response.enthalpy_gain > 0.0);
+    }
+}
+
+#[test]
+fn inlet_response_preserves_equilibrium_limits_and_native_resolution_refusal() {
+    let inlet: f64 = 400.0;
+    let law = source(&[(250.0, 1300.0), (650.0, 2100.0)], 300.0);
+    let cp = law.specific_heat_cp_j_kg_k(inlet).unwrap();
+    for wall in [inlet.next_down(), inlet, inlet.next_up()] {
+        let original = CaloricAirPath::new(
+            inlet,
+            1.0,
+            law.clone(),
+            vec![AirSegment::new("near equilibrium", 1.0, cp).unwrap()],
+        )
+        .unwrap();
+        let (_, response) = original.march_with_inlet_response(&[wall]).unwrap();
+        near(response.enthalpy_gain, (-1.0_f64).exp(), 2e-14);
+        near(response.temperature_gain, (-1.0_f64).exp(), 2e-14);
+    }
+    let unresolved = CaloricAirPath::new(
+        inlet,
+        1.0,
+        law,
+        vec![AirSegment::new("unresolved", 1.0, cp * 1e-20).unwrap()],
+    )
+    .unwrap();
+    assert!(matches!(
+        unresolved.march(&[500.0]),
+        Err(AirflowError::CaloricSource(_))
+    ));
+    assert!(matches!(
+        unresolved.march_with_inlet_response(&[500.0]),
+        Err(AirflowError::CaloricSource(_))
+    ));
+}
+
+#[test]
+fn decreasing_cp_can_amplify_temperature_response_without_wall_extrapolation() {
+    // Cp(T)=6400-18T on the actual fluid interval. Its extrapolation to the
+    // hotter wall would be negative and must never be used as caloric data.
+    let (inlet, wall, outlet) = (300.0_f64, 1000.0_f64, 340.0_f64);
+    let law = source(&[(290.0, 1180.0), (350.0, 100.0)], inlet);
+    assert!(law.specific_heat_cp_j_kg_k(wall).is_err());
+    let exposure =
+        (6400.0 - 18.0 * wall) * ((wall - inlet) / (wall - outlet)).ln() + 18.0 * (outlet - inlet);
+    let original = CaloricAirPath::new(
+        inlet,
+        1.0,
+        law,
+        vec![AirSegment::new("external wall", 1.0, exposure).unwrap()],
+    )
+    .unwrap();
+    let (march, response) = original.march_with_inlet_response(&[wall]).unwrap();
+    let gain = (wall - outlet) / (wall - inlet);
+    near(march.outlet_temperature_k, outlet, 3e-11);
+    near(response.enthalpy_gain, gain, 2e-12);
+    near(response.temperature_gain, gain * 1000.0 / 280.0, 2e-11);
+    assert!(response.enthalpy_gain < 1.0);
+    assert!(response.temperature_gain > 1.0);
 }
 
 #[test]

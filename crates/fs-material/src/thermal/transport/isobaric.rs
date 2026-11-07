@@ -81,6 +81,11 @@ pub struct LinearHeatExchange {
     /// Computed directly for weak exchange, not by subtracting delta_h/X from
     /// the reservoir. At zero exchange this is the initial temperature.
     pub mean_temperature_k: f64,
+    /// Analytic d h_out / d h_in at fixed reservoir temperature, exposure and
+    /// original Cp source. Nonnegative and at most one; a sufficiently strong
+    /// exchange may underflow to zero. At equilibrium this is exp(-exposure/Cp),
+    /// including when the absolute outlet rounds to the reservoir temperature.
+    pub inlet_enthalpy_gain: f64,
 }
 
 impl IsobaricHeatCapacityLaw {
@@ -377,6 +382,7 @@ impl IsobaricHeatCapacityLaw {
             temperature_k: answer.temperature,
             specific_enthalpy_change_j_kg: answer.energy_change,
             mean_temperature_k: answer.mean_temperature,
+            inlet_enthalpy_gain: answer.inlet_energy_gain,
         })
     }
 }

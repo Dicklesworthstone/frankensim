@@ -29,6 +29,7 @@ pub(super) struct CapacityExchange {
     pub temperature: f64,
     pub energy_change: f64,
     pub mean_temperature: f64,
+    pub inlet_energy_gain: f64,
 }
 
 /// Prepared search coordinates for repeated caloric queries from one fixed datum.
@@ -334,6 +335,11 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
                 temperature: initial,
                 energy_change: 0.0,
                 mean_temperature: initial,
+                inlet_energy_gain: if exposure == 0.0 {
+                    1.0
+                } else {
+                    (-exposure / self.capacity(initial)?).exp()
+                },
             });
         }
         let heating = reservoir > initial;
@@ -350,6 +356,7 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
         let mut correction = 0.0;
         let (mut energy, mut energy_correction) = (0.0, 0.0);
         let (mut mean_travel, mut mean_correction) = (0.0, 0.0);
+        let mut inlet_energy_gain = 1.0;
         for _ in 0..self.knots.len() - 1 {
             let end = if heating {
                 self.knots[index + 1].temperature().min(reservoir)
@@ -386,6 +393,7 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
                 ));
             }
             let local_mean = segment.mean_travel(travel, local_exposure, heat);
+            inlet_energy_gain *= segment.inlet_energy_gain(travel, local_exposure)?;
             compensated_add(&mut energy, &mut energy_correction, heat);
             compensated_add(
                 &mut mean_travel,
@@ -420,6 +428,7 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
                     temperature,
                     energy_change: direction * energy,
                     mean_temperature,
+                    inlet_energy_gain,
                 });
             }
             correction = (next - cumulative) - corrected;
@@ -693,6 +702,43 @@ impl ExchangeSegment {
         let scale = self.initial_capacity.max(end_capacity);
         let (c0, c1) = (self.initial_capacity / scale, end_capacity / scale);
         travel * ((c0 * b0 + c1 * b1) / (c0 * a0 + c1 * a1))
+    }
+
+    // dE_out/dE_in=(Tw-Tout)/(Tw-Tin). The original affine law gives
+    // X=-C(Tw)*log(gain)-(C(Tw)-C(Tin))*travel/distance at rounded equilibrium.
+    fn inlet_energy_gain(&self, travel: f64, exposure: f64) -> Result<f64, ThermalTransportError> {
+        let gain = if self.initial_capacity == self.end_capacity {
+            (-exposure / self.initial_capacity).exp()
+        } else if travel < self.distance {
+            // A resolved relative gap avoids subtracting opposing caloric
+            // terms when a decreasing law has a very small reservoir Cp.
+            (self.distance - travel) / self.distance
+        } else if self.width == self.distance {
+            let capacity_change = self.end_capacity - self.initial_capacity;
+            let attenuation = if capacity_change < 0.0 {
+                // Keep Cp(Tw) when subtracting it directly from a much larger
+                // inlet capacity would erase it before the exposure cancels.
+                let (head, tail) = fs_math::eft::two_sum(exposure, -self.initial_capacity);
+                ((head + self.end_capacity) + tail) / self.end_capacity
+            } else {
+                exposure / self.end_capacity + capacity_change / self.end_capacity
+            };
+            let value = (-attenuation).exp();
+            // The omitted relative gap changes this exponent by approximately
+            // (Cp_in-Cp_wall)*gain/Cp_wall. It must be at rounding scale; an
+            // unresolved saturated temperature must not invent a unit response.
+            let gap_correction = (capacity_change.abs() * value) / self.end_capacity;
+            if value == 1.0 || gap_correction > 16.0 * f64::EPSILON * attenuation.max(1.0) {
+                return Err(invalid("saturated heat-exchange response is unresolved"));
+            }
+            value
+        } else {
+            return Err(invalid("heat-exchange response left its source interval"));
+        };
+        if !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
+            return Err(invalid("heat-exchange inlet response is not representable"));
+        }
+        Ok(gain)
     }
 }
 
