@@ -23,6 +23,8 @@ use super::{
     RotorTransientState, RotorTransientStep, finite, midpoint, pairing, poll, power_fraction,
 };
 
+pub mod voltage;
+
 /// Authored, reciprocal, zero-inductance motor and bidirectional bridge.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RotorCurrentDrive {
