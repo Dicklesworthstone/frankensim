@@ -177,6 +177,7 @@ fn evolve_shared<
     time: MoistureTimeControls,
     method: TimeMethod,
     observe: fn(&B) -> Result<[f64; 2], E>,
+    additional_error: impl Fn(&B, &B, &B) -> Result<f64, MoistureAdvanceError<E>>,
     mut propose: impl FnMut(
         &B,
         &[ReservoirParticipant<'_, F, N>],
@@ -261,7 +262,7 @@ fn evolve_shared<
             ))
         },
         |state| observe_fields::<B, F, E, N>(state, observe),
-        |_, _, _| Ok(0.0),
+        |old, coarse, fine| additional_error(&old.0, &coarse.0, &fine.0),
         cx,
     )?;
     let mut transports = Vec::new();
@@ -329,6 +330,7 @@ impl FiniteMoistureAtmosphere {
             time,
             TimeMethod::FirstOrder,
             observe_vapor,
+            |_, _, _| Ok(0.0),
             |air, fields, dt| {
                 air.advance_fields(fields, dt, maximum_total_cells, physical, cx)
                     .map(|c| c.into_parts())
@@ -370,6 +372,7 @@ impl FiniteMoistureAtmosphere {
             time,
             TimeMethod::FirstOrder,
             observe_vapor,
+            |_, _, _| Ok(0.0),
             |air, fields, dt| {
                 air.advance_fields(fields, dt, maximum_total_cells, physical, cx)
                     .map(|c| c.into_parts())
@@ -423,6 +426,7 @@ impl FiniteMoistureAtmosphere {
             time,
             TimeMethod::Sdirk2,
             observe_vapor,
+            |_, _, _| Ok(0.0),
             |air, fields, dt| {
                 let participants: Vec<_> = fields
                     .iter()
@@ -462,16 +466,21 @@ impl FiniteMoistureSolution {
     /// Complete simultaneous uptake/desorption through the original finite
     /// solution activity bridge, keeping every nonvolatile solute amount fixed.
     /// A zero net bath change never suppresses opposing specimen error estimates.
+    /// Optional `with_kinetic_phase_accuracy` resolves each actual dissolved and
+    /// crystal inventory even when their aggregate activity errors cancel.
     pub fn advance_shared_adaptive_to(
         &self,
         participants: &[MoistureParticipant<'_>],
         target_s: f64,
         maximum_total_cells: usize,
         physical: SolutionMoistureSolve,
-        time: MoistureTimeControls,
+        time: impl Into<SolutionMoistureTimeControls>,
         cx: &Cx<'_>,
     ) -> Result<SharedSolutionMoistureAdvanceCandidate, MoistureAdvanceError<SolutionMoistureError>>
     {
+        let accuracy = time.into();
+        accuracy.admit(self, cx)?;
+        let time = accuracy.transport;
         let fields = slabs(participants, maximum_total_cells, cx)?;
         evolve_shared(
             self,
@@ -482,6 +491,7 @@ impl FiniteMoistureSolution {
             time,
             TimeMethod::FirstOrder,
             observe_solution,
+            |old, coarse, fine| accuracy.phase_error(old, coarse, fine, cx),
             |bath, fields, dt| {
                 bath.advance_fields(fields, dt, maximum_total_cells, physical, cx)
                     .map(|c| c.into_parts())
@@ -499,12 +509,15 @@ impl FiniteMoistureSolution {
         target_s: f64,
         maximum_total_cells: usize,
         physical: SolutionMoistureSolve,
-        time: MoistureTimeControls,
+        time: impl Into<SolutionMoistureTimeControls>,
         cx: &Cx<'_>,
     ) -> Result<
         SharedCartesianSolutionMoistureAdvanceCandidate,
         MoistureAdvanceError<SolutionMoistureError>,
     > {
+        let accuracy = time.into();
+        accuracy.admit(self, cx)?;
+        let time = accuracy.transport;
         let fields = cartesians(participants, maximum_total_cells, cx)?;
         evolve_shared(
             self,
@@ -515,6 +528,7 @@ impl FiniteMoistureSolution {
             time,
             TimeMethod::FirstOrder,
             observe_solution,
+            |old, coarse, fine| accuracy.phase_error(old, coarse, fine, cx),
             |bath, fields, dt| {
                 bath.advance_fields(fields, dt, maximum_total_cells, physical, cx)
                     .map(|c| c.into_parts())
@@ -559,6 +573,7 @@ impl FiniteMoistureSolution {
             time,
             TimeMethod::Sdirk2,
             observe_solution,
+            |_, _, _| Ok(0.0),
             |bath, fields, dt| {
                 let participants: Vec<_> = fields
                     .iter()

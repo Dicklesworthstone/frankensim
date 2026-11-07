@@ -34,8 +34,9 @@ impl FiniteMoistureSolution {
     /// the original-to-final water and transport accounts.
     ///
     /// The original bounded retries and source/phase admission remain in use.
-    /// Kinetic phases retain their native first-order endpoint law: the error
-    /// estimator does not separately control each dissolved/crystalline amount.
+    /// Kinetic phases retain their native first-order endpoint law. Passing
+    /// `time.with_kinetic_phase_accuracy(...)` additionally controls each actual
+    /// dissolved/crystalline amount, including small remaining crystal stocks.
     /// Temperature and faces are held fixed, and the original equal-pressure
     /// vapor bridge does not imply liquid immersion. Any later failure discards
     /// both endpoints, including successful private prefixes. Local estimates
@@ -48,7 +49,7 @@ impl FiniteMoistureSolution {
         transport: MoistureStepConfig,
         nonlinear: MoistureNonlinearConfig,
         physical: SolutionMoistureSolve,
-        time: MoistureTimeControls,
+        time: impl Into<SolutionMoistureTimeControls>,
         cx: &Cx<'_>,
     ) -> Result<
         (
@@ -59,6 +60,9 @@ impl FiniteMoistureSolution {
         MoistureAdvanceError<SolutionMoistureError>,
     > {
         checkpoint(cx)?;
+        let accuracy = time.into();
+        accuracy.admit(self, cx)?;
+        let time = accuracy.transport;
         let initial = (self.clone(), moisture.clone());
         let ((reservoir, field), report) = evolve_fields_with_method(
             &initial,
@@ -73,7 +77,10 @@ impl FiniteMoistureSolution {
                 Ok(((bath, field), OneReport(step)))
             },
             solution_snapshot,
-            |old, coarse, fine| water_distance(&old.1, &coarse.1, &fine.1, time, cx),
+            |old, coarse, fine| {
+                Ok(water_distance(&old.1, &coarse.1, &fine.1, time, cx)?
+                    .max(accuracy.phase_error(&old.0, &coarse.0, &fine.0, cx)?))
+            },
             cx,
         )?;
         Ok((reservoir, field, report.summary.map_step(|step| step.0)))

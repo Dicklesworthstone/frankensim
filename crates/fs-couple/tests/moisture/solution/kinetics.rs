@@ -9,6 +9,9 @@ use fs_thermochem::solution::solubility::kinetics::{
     PrecipitationPolicyV1, SolubilityKineticStateV1, SolubilityKineticsV1,
 };
 
+#[path = "kinetics/adaptive.rs"]
+mod adaptive;
+
 fn kinetic_bath(
     volume: f64,
     dissolved: f64,

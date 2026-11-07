@@ -30,9 +30,11 @@
 //! the endpoint is a first-order approximation to simultaneous water/phase
 //! evolution; scalar water-balance convergence does not control its temporal
 //! error. Existing adaptive wrappers compare moisture, solvent mass and activity,
-//! without separate per-component phase tolerances. Refine the physical interval
-//! when phase composition needs tighter resolution. Sealed fields
-//! still permit phase evolution inside the reservoir, with no solvent exchange.
+//! and can additionally resolve every actual dissolved/crystalline amount with
+//! `MoistureTimeControls::with_kinetic_phase_accuracy`. Without those optional
+//! molar tolerances, phase-component errors are not separately controlled.
+//! Sealed fields still permit phase evolution inside the reservoir, with no
+//! solvent exchange.
 //!
 //! This is the equal-pressure, negligible-vapor-storage sorption limit. It does
 //! not turn a vapor surface coefficient into a liquid-immersion permeability,
@@ -279,8 +281,9 @@ impl FiniteMoistureSolution {
     /// creates no nuclei. Only actual dissolved particles affect water activity.
     ///
     /// This frozen endpoint-volume approximation is first order in time. The
-    /// existing adaptive wrappers control moisture, solvent mass and activity,
-    /// not each component's phase error independently. Temperature stays prescribed;
+    /// existing adaptive wrappers control moisture, solvent mass and activity.
+    /// Explicit kinetic phase accuracy controls additionally resolve each
+    /// component's dissolved/crystal stocks. Temperature stays prescribed;
     /// no phase heat, solute transport into specimens or crystal water is added.
     pub fn with_kinetic_solubility(
         solution: KineticSolubilitySolution,

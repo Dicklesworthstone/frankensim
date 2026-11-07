@@ -4964,3 +4964,33 @@ The thermal store does not implicitly re-resolve the rigid specimen's frozen den
 The circular modal mouth observer applies the original material gas law to each signed surface path. It shares the existing five-rung spatial quadrature and original gas filter/convolution owner; all rungs consume one material-work allowance, and convergence comparisons remove only differences in reported numerical padding. The final receiver keeps its actual source report and latency.
 
 Native brass `modal_baffle` and `observer_gas` compose using the authored exterior gas while retaining bore/lip dynamics and all mouth-mode flows. Scope remains a fixed circular aperture in an infinite rigid baffle. Focused regression definitions cover signed-mode pressure, original-owner parity, padding alignment, aggregate work limits, the actual three-mode brass render and callback partition equality. Native compilation and execution remain pending because the session executor is unavailable.
+
+### Per-component accuracy for finite-rate solution phases
+
+The backward-Euler finite-solution duration APIs now accept
+`SolutionMoistureTimeControls`. Existing `MoistureTimeControls` arguments
+retain their original behavior; `with_kinetic_phase_accuracy` explicitly adds
+a positive molar allowance and a change-relative allowance for each actual
+dissolved and crystalline stock. This applies to slab, Cartesian, radial and
+layered bodies, and the existing shared slab/Cartesian reservoir paths.
+
+The existing full-versus-two-half controller combines this component norm with
+its water/content/activity norms and applies the representable-half correction
+once. Both phase stocks are read directly from the original finite-rate owner;
+a small crystal tail is not reconstructed by subtracting two large amounts.
+Component sources/layout remain fixed, and bounded cancellation checks cover
+the phase comparison. Aggregate water activity or total component conservation
+cannot suppress a separately requested phase discrepancy.
+
+This changes temporal error control, not the native endpoint-volume kinetic
+law or its first-order accuracy. Only accepted fine histories contribute to
+the final candidate; the original complete-duration water and work gates remain.
+Explicit phase controls require an actual kinetic reservoir and are checked
+before proposals. Algebraic-phase SDIRK retains its existing kinetic refusal.
+
+Four authored regressions cover the coupled continuous water/phase trajectory,
+equivalent slab/Cartesian and shared paths, exact fixed-volume phase evolution,
+invalid controls and late work refusal. An independent RK4 reference checked
+the physical fixture and its mesh refinement; Rust parsing and formatting
+passed. The new native coupling tests remain unexecuted because the complete
+dependency build is unavailable.

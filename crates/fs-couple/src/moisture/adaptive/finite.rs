@@ -258,6 +258,8 @@ impl FiniteMoistureSolution {
     /// activity bridge. Nonvolatile solute amounts stay fixed; the same finite
     /// solvent inventory evolves along both fine half steps. Local errors check
     /// solvent mass even for pure solvent whose activity remains exactly one.
+    /// Pass `time.with_kinetic_phase_accuracy(...)` to additionally resolve each
+    /// actual dissolved/crystal stock on the original finite-rate phase owner.
     pub fn advance_adaptive_to(
         &self,
         moisture: &MoistureSlab,
@@ -265,7 +267,7 @@ impl FiniteMoistureSolution {
         faces: &[Option<DryBasisSorption>; 2],
         transport: MoistureStepConfig,
         physical: SolutionMoistureSolve,
-        time: MoistureTimeControls,
+        time: impl Into<SolutionMoistureTimeControls>,
         cx: &Cx<'_>,
     ) -> Result<
         (
@@ -276,8 +278,11 @@ impl FiniteMoistureSolution {
         MoistureAdvanceError<SolutionMoistureError>,
     > {
         checkpoint(cx)?;
+        let accuracy = time.into();
+        accuracy.admit(self, cx)?;
+        let time = accuracy.transport;
         let initial = (self.clone(), moisture.clone());
-        let ((reservoir, field), report) = evolve(
+        let ((reservoir, field), report) = evolve_with_error(
             &initial,
             target_s,
             time,
@@ -289,6 +294,7 @@ impl FiniteMoistureSolution {
                 Ok(((bath, field), step))
             },
             solution_snapshot::<MoistureSlab, 2>,
+            |old, coarse, fine| accuracy.phase_error(&old.0, &coarse.0, &fine.0, cx),
             cx,
         )?;
         Ok((reservoir, field, report))
@@ -305,7 +311,7 @@ impl FiniteMoistureSolution {
         transport: MoistureStepConfig,
         nonlinear: MoistureNonlinearConfig,
         physical: SolutionMoistureSolve,
-        time: MoistureTimeControls,
+        time: impl Into<SolutionMoistureTimeControls>,
         cx: &Cx<'_>,
     ) -> Result<
         (
@@ -316,8 +322,11 @@ impl FiniteMoistureSolution {
         MoistureAdvanceError<SolutionMoistureError>,
     > {
         checkpoint(cx)?;
+        let accuracy = time.into();
+        accuracy.admit(self, cx)?;
+        let time = accuracy.transport;
         let initial = (self.clone(), moisture.clone());
-        let ((reservoir, field), report) = evolve(
+        let ((reservoir, field), report) = evolve_with_error(
             &initial,
             target_s,
             time,
@@ -329,6 +338,7 @@ impl FiniteMoistureSolution {
                 Ok(((bath, field), step))
             },
             solution_snapshot::<MoistureCartesian, 6>,
+            |old, coarse, fine| accuracy.phase_error(&old.0, &coarse.0, &fine.0, cx),
             cx,
         )?;
         Ok((reservoir, field, report))

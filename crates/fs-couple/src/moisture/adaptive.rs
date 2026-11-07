@@ -17,6 +17,9 @@ mod layered;
 mod paired;
 mod radial;
 mod shared;
+mod solution_accuracy;
+
+pub use solution_accuracy::{KineticPhaseAccuracy, SolutionMoistureTimeControls};
 
 pub use layered::LayeredMoistureAdvanceReport;
 pub use paired::{AtmosphereMoistureAdvanceAccount, PairedAtmosphereMoistureAdvanceReport};
@@ -28,9 +31,7 @@ pub use shared::{
 };
 
 use super::binding::MoistureField;
-use super::cartesian::{
-    MoistureCartesian, MoistureCartesianReport, MoistureCartesianSdirk2Report,
-};
+use super::cartesian::{MoistureCartesian, MoistureCartesianReport, MoistureCartesianSdirk2Report};
 use super::reservoir::ReservoirField;
 use super::*;
 
@@ -587,6 +588,27 @@ fn evolve<S: Clone, R: WaterStep<N>, E: Retryable, const N: usize>(
     Ok((state, report.summary.map_step(|step| step.0)))
 }
 
+fn evolve_with_error<S: Clone, R: WaterStep<N>, E: Retryable, const N: usize>(
+    initial: &S,
+    target_s: f64,
+    controls: MoistureTimeControls,
+    mut propose: impl FnMut(&S, f64) -> Result<(S, R), E>,
+    snapshot: impl for<'a> Fn(&'a S) -> Result<Snapshot<'a>, E>,
+    additional_error: impl Fn(&S, &S, &S) -> Result<f64, MoistureAdvanceError<E>>,
+    cx: &Cx<'_>,
+) -> Result<(S, MoistureAdvanceReport<R, N>), MoistureAdvanceError<E>> {
+    let (state, report) = evolve_fields_with_error(
+        initial,
+        target_s,
+        controls,
+        |state, dt| propose(state, dt).map(|(state, step)| (state, OneReport(step))),
+        snapshot,
+        additional_error,
+        cx,
+    )?;
+    Ok((state, report.summary.map_step(|step| step.0)))
+}
+
 fn evolve_fields<S: Clone, R: ReportTransfers<N>, E: Retryable, const N: usize>(
     initial: &S,
     target_s: f64,
@@ -1056,7 +1078,10 @@ impl MoistureCartesian {
         time: MoistureTimeControls,
         cx: &Cx<'_>,
     ) -> Result<
-        (Self, MoistureAdvanceReport<MoistureCartesianSdirk2Report, 6>),
+        (
+            Self,
+            MoistureAdvanceReport<MoistureCartesianSdirk2Report, 6>,
+        ),
         MoistureAdvanceError<MoistureError>,
     > {
         let (state, report) = evolve_fields_with_method(

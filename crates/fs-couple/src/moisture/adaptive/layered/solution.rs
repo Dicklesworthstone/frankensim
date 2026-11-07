@@ -32,7 +32,8 @@ impl FiniteMoistureSolution {
     /// The shared bounded controller checks original-to-final bound/solvent
     /// water once against the fixed whole-duration tolerance. Source and phase
     /// admission stay native. Kinetic dissolution retains its first-order
-    /// endpoint-volume law; no per-component phase error is separately controlled.
+    /// endpoint-volume law; `time.with_kinetic_phase_accuracy(...)` additionally
+    /// controls every actual dissolved/crystal stock with an explicit molar scale.
     /// Geometry, temperature and exterior laws stay fixed, and the original
     /// equal-pressure vapor bridge does not imply liquid immersion. Any failure
     /// discards both endpoints, including successful private prefixes. These
@@ -45,7 +46,7 @@ impl FiniteMoistureSolution {
         transport: MoistureStepConfig,
         nonlinear: MoistureNonlinearConfig,
         physical: SolutionMoistureSolve,
-        time: MoistureTimeControls,
+        time: impl Into<SolutionMoistureTimeControls>,
         cx: &Cx<'_>,
     ) -> Result<
         (
@@ -56,6 +57,9 @@ impl FiniteMoistureSolution {
         MoistureAdvanceError<SolutionMoistureError>,
     > {
         checkpoint(cx)?;
+        let accuracy = time.into();
+        accuracy.admit(self, cx)?;
+        let time = accuracy.transport;
         let initial = (self.clone(), moisture.clone());
         let ((reservoir, field), report) = evolve_fields_with_method(
             &initial,
@@ -76,7 +80,7 @@ impl FiniteMoistureSolution {
                 Ok(snapshot)
             },
             |old, coarse, fine| {
-                water_distance(
+                let water = water_distance(
                     old.1
                         .layers()
                         .iter()
@@ -85,7 +89,8 @@ impl FiniteMoistureSolution {
                         .map(|((a, b), c)| (a.slab().field(), b.slab().field(), c.slab().field())),
                     time,
                     cx,
-                )
+                )?;
+                Ok(water.max(accuracy.phase_error(&old.0, &coarse.0, &fine.0, cx)?))
             },
             cx,
         )?;
@@ -116,7 +121,7 @@ impl FiniteMoistureSolution {
         transport: MoistureStepConfig,
         nonlinear: MoistureNonlinearConfig,
         physical: SolutionMoistureSolve,
-        time: MoistureTimeControls,
+        time: impl Into<SolutionMoistureTimeControls>,
         cx: &Cx<'_>,
     ) -> Result<
         (
@@ -127,6 +132,9 @@ impl FiniteMoistureSolution {
         MoistureAdvanceError<SolutionMoistureError>,
     > {
         checkpoint(cx)?;
+        let accuracy = time.into();
+        accuracy.admit(self, cx)?;
+        let time = accuracy.transport;
         let initial = (self.clone(), moisture.clone());
         let ((reservoir, field), report) = evolve_fields_with_method(
             &initial,
@@ -148,7 +156,10 @@ impl FiniteMoistureSolution {
                 snapshot.activity = Some(state.0.solution().water_activity()?);
                 Ok(snapshot)
             },
-            |old, coarse, fine| radial_water_distance(&old.1, &coarse.1, &fine.1, time, cx),
+            |old, coarse, fine| {
+                Ok(radial_water_distance(&old.1, &coarse.1, &fine.1, time, cx)?
+                    .max(accuracy.phase_error(&old.0, &coarse.0, &fine.0, cx)?))
+            },
             cx,
         )?;
         Ok((
