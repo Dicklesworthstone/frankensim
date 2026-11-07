@@ -96,8 +96,14 @@ impl CoupledModalSystem {
             maximum_poles, mechanical_bound: self.linear_frequency_upper_bound_rad_s,
             coupling_bound, pole_bound };
         let bound = binding.frequency_bound(binding.mechanical_bound)?;
-        if bound > core::f64::consts::PI/self.dt*self.config.nyquist_guard_fraction {
-            return Err(invalid("complete acoustic/mechanical frequency bound exceeds Nyquist admission"));
+        let admission = core::f64::consts::PI/self.dt*self.config.nyquist_guard_fraction;
+        if bound > admission {
+            // Both numbers are printed (rad/s); this is the refusal path only, so no admitted run changes.
+            return Err(ModalCouplingError::Budget {
+                what: "complete acoustic/mechanical frequency bound [rad/s] against the Nyquist admission",
+                value: bound,
+                limit: admission,
+            });
         }
         if self.prepared_budget.is_none() {
             self.admit_augmented_setup(self.relaxation_branches.len(), 2*model.poles.len())?;

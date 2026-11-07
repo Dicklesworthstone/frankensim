@@ -568,7 +568,8 @@ impl input::Spec {
             bank.with_geometric_stretching(slope, config, gate)?
         } else { bank };
         let bank = if let Some((resolution, config)) = &self.longitudinal_waves {
-            bank.with_longitudinal_waves_and_bearings(vec![resolution.clone(); self.strings.len()],
+            bank.with_longitudinal_waves_selected(
+                (0..self.strings.len()).map(|string| self.longitudinal_selected(string).then(|| resolution.clone())).collect(),
                 self.longitudinal_loss.clone(), axial_bearings, *config, gate)?
         } else { bank };
         let bank = if profile.as_ref().is_some_and(body::Profile::has_thermal_cavity) {

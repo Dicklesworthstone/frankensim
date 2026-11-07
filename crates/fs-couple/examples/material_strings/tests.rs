@@ -297,3 +297,6 @@ mod measured_loss;
 
 #[path = "tests/shear_layers.rs"]
 mod shear_layers;
+
+#[path = "tests/mixed_axial.rs"]
+mod mixed_axial;

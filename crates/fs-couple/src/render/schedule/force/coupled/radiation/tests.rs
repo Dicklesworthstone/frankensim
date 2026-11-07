@@ -212,8 +212,9 @@ fn tones(y: &[f64], dt: f64) -> [f64; 2] {
 fn a_load_past_the_complete_frequency_bound_refuses_on_either_owner() {
     for prepared in [false, true] {
         let error = ring(RATE, 288_000.0, 0.0, prepared).err().unwrap();
-        assert!(matches!(error, ModalCouplingError::Invalid { what }
-            if what == "complete acoustic/mechanical frequency bound exceeds Nyquist admission"), "{error:?}");
+        assert!(matches!(error, ModalCouplingError::Budget { what, value, limit }
+            if what.starts_with("complete acoustic/mechanical frequency bound") && value > limit), "{error:?}");
+        assert!(error.to_string().contains("exceeds"), "{error}");
     }
 }
 

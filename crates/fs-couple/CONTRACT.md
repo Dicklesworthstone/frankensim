@@ -3183,6 +3183,35 @@ compare layer energy, loss and parameter work with integrated physical strains.
 
 Two focused synthetic regressions define an independently reconstructed load/hold/unload/reload primary-creep membrane with nonzero expansion and thermal activation, late-refusal preservation, and incompatible caloric/history/card rejection. They are regression definitions, not executed results. The original fully solid, small-strain/rotation and fixed-geometry shell reduction remains bounded; measured material calibration, tertiary creep, damage, rupture and qualified service life remain separate work.
 
+## Per-string longitudinal selection
+
+`with_longitudinal_waves_selected` takes one `Option<LongitudinalStringResolution>`
+per original string. `Some` gives that string the axial coordinates of its
+resolution exactly as before; `None` leaves it transverse, with no axial
+oscillators, no axial-fluid memory and no axial bearing. The calls that take one
+resolution (`with_longitudinal_waves`, `..._and_loss`, `..._and_bearings`) are
+the every-string-`Some` case and build the same bank bit for bit; the existing
+bit-stable assertions are the regression. A selection that names no string
+refuses with `longitudinal waves need a selection on at least one original
+string`, and axial bearings refuse unless every original string is selected
+(`axial bearings need a longitudinal selection on every original string`).
+
+After the original string, body, cavity and transverse-gas coordinates the bank
+places the selected strings' axial components in string order, then their
+axial-fluid components. `StringBankLongitudinal::strings()` lists only the
+selected strings; `string(i)` returns the law of original string `i` when it is
+selected, and each `MaterialLongitudinalString` carries its `string_index`.
+The fluid, bearing and relaxation binders address strings by that index, not by
+position in the list.
+
+The `material_strings` example reaches `None` only through the trailing word
+`measured-strings-transverse` on the `longitudinal-waves` record, for
+`section measured` strings. A measured whole string supplies transverse mass and
+bending stiffness from its own source rows and no axial law, so it stays
+transverse and is named as such; the word is off by default, and a record
+without it refuses a measured string as before. The transverse-only strings'
+longitudinal waves are absent from the model, not approximated.
+
 ## Tensile envelopes with longitudinal waves and moving string ends
 
 `SupportedMaterialStrings::in_stationary_gas_with_longitudinal_waves` carries

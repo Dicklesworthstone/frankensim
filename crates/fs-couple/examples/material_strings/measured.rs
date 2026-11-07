@@ -26,7 +26,7 @@ pub(super) fn resolve(
         || wire.torsion_memory.is_some()
         || wire.tension_loss.is_some()
         || !matches!(&wire.bending_loss, input::BendingLoss::KelvinVoigt)
-        || spec.longitudinal_waves.is_some()
+        || (spec.longitudinal_waves.is_some() && !spec.longitudinal_measured_transverse)
         || spec.geometric_stretching.is_some()
     {
         return Err("measured whole strings supply transverse mass and bending stiffness, not torsion, thermal, axial, or intrinsic-loss laws from outside their own source rows".into());

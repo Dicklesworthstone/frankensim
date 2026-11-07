@@ -18,23 +18,26 @@ use crate::render::schedule::force::coupled::ModalColumnConnection;
 /// The native network owner subsequently admits the complete old+new link work.
 pub(super) fn admit(
     source: &MaterialStringBankSource,
-    resolutions: &[LongitudinalStringResolution],
+    selections: &[Option<LongitudinalStringResolution>],
     original_modes: usize,
     bearings: usize,
     gate: &CancelGate,
 ) -> Result<(), ImpactError> {
     let loading = source.cylinder_gas_loading();
-    if loading.is_some_and(|fluid| fluid.strings().len() != resolutions.len()) {
+    if loading.is_some_and(|fluid| fluid.strings().len() != selections.len()) {
         return Err(invalid(
             "axial gas loading lost its original material strings",
         ));
     }
     let mut count = original_modes;
     let mut links = bearings;
-    for (index, resolution) in resolutions.iter().enumerate() {
+    for (index, selection) in selections.iter().enumerate() {
         if gate.is_requested() {
             return Err(ImpactError::Cancelled);
         }
+        let Some(resolution) = selection else {
+            continue;
+        };
         resolution.validate()?;
         let modes = resolution.axial_modes.len();
         let memory = loading
@@ -102,7 +105,7 @@ pub(super) fn append(
     let Some(loading) = source.cylinder_gas_loading() else {
         return Ok(());
     };
-    if loading.strings().len() != strings.len() || additional.len() != strings.len() {
+    if loading.strings().len() != source.strings.len() || additional.len() != strings.len() {
         return Err(invalid(
             "axial gas must follow every original solid axial component",
         ));
@@ -111,8 +114,7 @@ pub(super) fn append(
     let axial_count: usize = additional.iter().map(|c| c.modes().len()).sum();
     let memory_count: usize = strings
         .iter()
-        .zip(loading.strings())
-        .map(|(law, fluid)| law.model.axial_modes().len() * fluid.flow().branches().len())
+        .map(|law| law.model.axial_modes().len() * loading.strings()[law.string_index].flow().branches().len())
         .sum();
     // All sums/products and this complete column size were admitted before
     // construction, against the original owner (at most 4096 coordinates).
@@ -125,10 +127,11 @@ pub(super) fn append(
     }
     let mut axial_offset = old_count;
     let mut fluid_offset = old_count + axial_count;
-    for (index, (law, loading)) in strings.iter().zip(loading.strings()).enumerate() {
+    for (index, law) in strings.iter().enumerate() {
         if gate.is_requested() {
             return Err(ImpactError::Cancelled);
         }
+        let loading = &loading.strings()[law.string_index];
         let component = original.len() + additional.len();
         if law.axial_fluid_component != Some(component)
             || law.axial_component != original.len() + index

@@ -84,6 +84,9 @@ impl StringBankLongitudinalRelaxation {
     {
         let axial = source.longitudinal_waves.as_ref()
             .ok_or_else(|| invalid("axial memory requires retained original longitudinal waves"))?;
+        if axial.strings.len() != source.strings.len() {
+            return Err(invalid("axial memory needs a longitudinal selection on every original string"));
+        }
         if selections.is_empty() || selections.len() > axial.strings.len()
             || !(1..=256).contains(&max_memory_states) {
             return Err(invalid("axial memory needs distinct source selections and 1..=256 history states"));

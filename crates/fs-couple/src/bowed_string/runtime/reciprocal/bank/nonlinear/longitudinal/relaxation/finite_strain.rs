@@ -129,7 +129,7 @@ mod tests {
                 transverse_modes:2,planes:2,slope_scales:(1..=2).map(|n|
                     (2.0_f64/(transverse*length)).sqrt()*n as f64*core::f64::consts::PI/length).collect(),
                 solid_linear_density_kg_m:solid,transverse_linear_density_kg_m:transverse,
-                axial_rigidity_n:ea,prestress_n:tension,axial_component:1,elastic_frequency_band_rad_s:None,
+                axial_rigidity_n:ea,prestress_n:tension,string_index:0,axial_component:1,elastic_frequency_band_rad_s:None,
                 axial_material_loss:None,finite_strain_viscosity:false,axial_fluid_component:None,
             }}
     }

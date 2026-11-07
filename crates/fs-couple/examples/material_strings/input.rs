@@ -324,6 +324,9 @@ pub struct Spec {
     pub geometric_stretching: Option<(f64, NonlinearModalConfig)>,
     pub stretching_memory: Option<stretching_relaxation::Input>,
     pub longitudinal_waves: Option<(LongitudinalStringResolution, NonlinearModalConfig)>,
+    /// The record's optional trailing word `measured-strings-transverse`: measured whole strings, which carry no
+    /// axial law, stay transverse (and are named on the page) instead of refusing the record. Absent by default.
+    pub longitudinal_measured_transverse: bool,
     pub longitudinal_loss: LongitudinalMaterialLoss,
     pub longitudinal_memory: Option<longitudinal_memory::Input>,
     pub axial_bearings: axial_bearings::Inputs,
@@ -746,6 +749,7 @@ impl Spec {
             }.validate()?;
             Some((slope, config))
         } else { None };
+        let mut longitudinal_measured_transverse = false;
         let longitudinal_waves = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("longitudinal-waves") {
             let mut row = r.row("longitudinal-waves")?;
@@ -758,10 +762,18 @@ impl Spec {
             let count = row.count(32)?;
             let mut axial_modes = Vec::with_capacity(count);
             for _ in 0..count { axial_modes.push(row.count(1024)?); }
+            if row.words.clone().next() == Some("measured-strings-transverse") {
+                row.word()?;
+                longitudinal_measured_transverse = true;
+            }
             row.end()?;
             let resolution = LongitudinalStringResolution { axial_modes, maximum_slope, maximum_strain };
             resolution.validate()?;
             config.validate()?;
+            if longitudinal_measured_transverse
+                && strings.iter().all(|wire| matches!(wire.section, WireSection::Measured { .. })) {
+                return Err("longitudinal-waves with measured-strings-transverse names no string: every string is a measured whole string".into());
+            }
             if geometric_stretching.is_some() {
                 return Err("longitudinal waves replace geometric stretching; select one strain law".into());
             }
@@ -1427,7 +1439,7 @@ impl Spec {
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
             gas, gas_record, cavity_gas_record, cavity_molecular, body, strings, material_states, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
             rotational_bridges, translational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, bow_residual_flexibility, geometric_stretching, stretching_memory,
-            longitudinal_waves, longitudinal_loss, longitudinal_memory, axial_bearings, bending_memory, body_radiation, body_damping, shell_bem_angular_refinement,
+            longitudinal_waves, longitudinal_measured_transverse, longitudinal_loss, longitudinal_memory, axial_bearings, bending_memory, body_radiation, body_damping, shell_bem_angular_refinement,
             plate_observer, shell_observer, shell_receiver_quadrature, one_way_observer, observer_molecular, cavity, friction, contact_thermal: false, dry_contact_thermal: false, material_body_thermal: false, retained_string_films: false, bow_ribbon, bow_compliance, bow_fibers,
             bow_station_motion, forces, schedule };
         spec.validate_material_states()?;
@@ -1477,6 +1489,15 @@ impl Spec {
 
     pub fn cavity_gas(&self) -> &GasState { self.cavity_gas_record().state() }
 
+    /// Whether original string `string` carries the axial law: every string, or with `measured-strings-transverse`
+    /// every string that is not a measured whole string.
+    pub fn longitudinal_selected(&self, string: usize) -> bool {
+        !(self.longitudinal_measured_transverse && matches!(self.strings[string].section, WireSection::Measured { .. }))
+    }
+    /// How many strings carry the axial law (all of them unless `measured-strings-transverse` is set).
+    pub fn longitudinal_selected_count(&self) -> usize {
+        (0..self.strings.len()).filter(|&string| self.longitudinal_selected(string)).count()
+    }
     pub fn validate_cavity_gas(&self) -> Result<()> {
         fs_couple::cavity_modal::validate_cavity_media(self.cavity_gas(), &self.gas)?;
         if let Some(molecular) = &self.cavity_molecular {
@@ -1673,7 +1694,7 @@ impl Spec {
             if self.geometric_stretching.is_some() {
                 return Err("longitudinal waves and geometric stretching cannot both supply strain energy".into());
             }
-            let axial = resolution.axial_modes.len().checked_mul(self.strings.len())
+            let axial = resolution.axial_modes.len().checked_mul(self.longitudinal_selected_count())
                 .ok_or("complete longitudinal mode count overflow")?;
             modes = modes.checked_add(axial).ok_or("complete longitudinal mode count overflow")?;
             // Beside the causal cylinder operator every axial mode has its own fluid branches, each one

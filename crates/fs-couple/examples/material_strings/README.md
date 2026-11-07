@@ -2503,6 +2503,31 @@ string. Both transverse planes contribute to the same material strain
 the strain energy, its gradient and its exact discrete gradient, which never
 divides by the step; no separate instrument solver is introduced.
 
+A card that mixes bonded wires with measured whole strings (`section measured`:
+a wound string whose measurements supply transverse line mass and bending
+stiffness, and no axial law) refuses this record with the measured-string
+refusal. Appending the word `measured-strings-transverse` keeps every measured
+string transverse and gives each bonded string the selection above:
+
+```text
+longitudinal-waves 0.2 0.01 64 100000 1e-11 1e-10 2 1 2 measured-strings-transverse
+```
+
+A transverse-only string has no axial oscillators, no axial strain coupling, no
+axial gas memory and no axial bearing; it keeps all of its transverse and
+bending modes. This names what is not modelled: the measured strings' own
+longitudinal waves are absent, not approximated. The word is off by default, so
+a record without it is unchanged, byte for byte, and still refuses a measured
+string with the same text. With the word and no bonded string the card refuses
+(`longitudinal-waves with measured-strings-transverse names no string: every
+string is a measured whole string`), so the word cannot turn the axial law off
+silently. Axial bearings still need a selection on every string and refuse
+otherwise. The bank orders the axial components of the selected strings by
+string, after the original string, body, cavity and transverse-gas coordinates.
+`StringBankLongitudinal::string(i)` returns string `i`'s law when it is
+selected, and each law carries its `string_index`. The two refusal texts above
+are pinned by `tests/mixed_axial.rs`.
+
 Solid material density and EA determine the longitudinal frequencies
 `omega_j = j*pi/L*sqrt(EA/mu_solid)`. Transverse motion retains its actual
 gas-loaded mass normalization. Swapping a homogeneous material or a bonded

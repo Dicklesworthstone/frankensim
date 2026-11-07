@@ -82,6 +82,8 @@ pub struct MaterialLongitudinalString {
     prestress_n: f64,
     axial_component: usize,
     axial_fluid_component: Option<usize>,
+    /// Original string this law belongs to (its position in the bank's declaration order).
+    string_index: usize,
     elastic_frequency_band_rad_s: Option<(f64, f64)>,
     axial_material_loss: Option<ConcentricAxialViscosity>,
     finite_strain_viscosity: bool,
@@ -112,6 +114,12 @@ impl MaterialLongitudinalString {
     /// These follow all original components and all new solid axial components.
     pub const fn axial_fluid_component(&self) -> Option<usize> {
         self.axial_fluid_component
+    }
+    /// Zero-based index of the original string this law belongs to. With a mixed selection
+    /// (`with_longitudinal_waves_selected`) it differs from the law's position in
+    /// `StringBankLongitudinal::strings()`, which lists only the selected strings.
+    pub const fn string_index(&self) -> usize {
+        self.string_index
     }
     /// Intersection of explicit elasticity/density frequency applicability.
     pub const fn elastic_frequency_band_rad_s(&self) -> Option<(f64, f64)> {
@@ -176,9 +184,14 @@ pub struct StringBankLongitudinal {
     material_relaxation: Option<relaxation::StringBankLongitudinalRelaxation>,
 }
 impl StringBankLongitudinal {
-    /// Original material-string declaration order.
+    /// The selected strings, in original material-string declaration order. Every string
+    /// when the bank was bound with `with_longitudinal_waves(_and_loss/_and_bearings)`.
     pub fn strings(&self) -> &[MaterialLongitudinalString] {
         &self.strings
+    }
+    /// The law of original string `string`, absent when that string was left transverse.
+    pub fn string(&self, string: usize) -> Option<&MaterialLongitudinalString> {
+        self.strings.iter().find(|law| law.string_index == string)
     }
     pub const fn config(&self) -> NonlinearModalConfig {
         self.config
@@ -528,8 +541,31 @@ impl ReciprocalStringBank {
     /// and nonlinear coordinate indices survive. No new propagator, output
     /// gain, endpoint mass approximation or inferred joint coefficient exists.
     pub fn with_longitudinal_waves_and_bearings(
-        mut self,
+        self,
         resolutions: Vec<LongitudinalStringResolution>,
+        loss: LongitudinalMaterialLoss,
+        bearings: Vec<MaterialAxialBearing>,
+        config: NonlinearModalConfig,
+        gate: &CancelGate,
+    ) -> Result<Self, ImpactError> {
+        self.with_longitudinal_waves_selected(
+            resolutions.into_iter().map(Some).collect(),
+            loss,
+            bearings,
+            config,
+            gate,
+        )
+    }
+
+    /// The same binding with an explicit choice per original string: `None` leaves that
+    /// string transverse (no axial coordinates and no axial gas memory; its source need
+    /// carry no axial law), `Some` binds it exactly as `with_longitudinal_waves_and_bearings`
+    /// does. At least one string must be selected, and axial bearings need every string
+    /// selected. With every string selected this is the unchanged all-string binding.
+    /// The caller names the strings left transverse; none is exempted silently.
+    pub fn with_longitudinal_waves_selected(
+        mut self,
+        selections: Vec<Option<LongitudinalStringResolution>>,
         loss: LongitudinalMaterialLoss,
         bearings: Vec<MaterialAxialBearing>,
         config: NonlinearModalConfig,
@@ -543,33 +579,49 @@ impl ReciprocalStringBank {
             .map_err(|e| ImpactError::Owner(e.to_string()))?;
         if self.system.samples_rendered() != 0
             || self.system.has_nonlinear_potentials()
-            || resolutions.len() != self.cards.len()
+            || selections.len() != self.cards.len()
         {
             return Err(invalid(
                 "longitudinal waves require one cold selection per original string before nonlinear binding",
             ));
         }
+        let selected = selections.iter().flatten().count();
+        if selected == 0 {
+            return Err(invalid(
+                "longitudinal waves need a selection on at least one original string",
+            ));
+        }
+        if selected != selections.len() && !bearings.is_empty() {
+            return Err(invalid(
+                "axial bearings need a longitudinal selection on every original string",
+            ));
+        }
         fluid::admit(
             &self.source,
-            &resolutions,
+            &selections,
             self.system.mode_count(),
             bearings.len(),
             gate,
         )?;
-        let mut strings = Vec::with_capacity(resolutions.len());
-        let mut components = Vec::with_capacity(resolutions.len());
-        let mut bindings = Vec::with_capacity(resolutions.len());
-        for (index, ((member, card), resolution)) in self
+        let mut strings = Vec::with_capacity(selected);
+        let mut components = Vec::with_capacity(selected);
+        let mut bindings = Vec::with_capacity(selected);
+        for (index, ((member, card), selection)) in self
             .source
             .strings
             .iter()
             .zip(&self.cards)
-            .zip(resolutions)
+            .zip(selections)
             .enumerate()
         {
             if gate.is_requested() {
                 return Err(ImpactError::Cancelled);
             }
+            let Some(resolution) = selection else {
+                continue;
+            };
+            // Position among the selected strings; equal to `index` when every string is selected.
+            let position = strings.len();
             resolution.validate()?;
             let mut band = None;
             let solid_mass = member.source.longitudinal_material(&mut band)?;
@@ -653,11 +705,12 @@ impl ReciprocalStringBank {
                 transverse_linear_density_kg_m: card.linear_density_kg_m,
                 axial_rigidity_n: ea,
                 prestress_n: card.tension_n,
-                axial_component: self.system.components().len() + index,
+                axial_component: self.system.components().len() + position,
                 axial_fluid_component: self
                     .source
                     .cylinder_gas_loading()
-                    .map(|_| self.system.components().len() + self.source.strings.len() + index),
+                    .map(|_| self.system.components().len() + selected + position),
+                string_index: index,
                 elastic_frequency_band_rad_s: band,
                 axial_material_loss,
                 finite_strain_viscosity: loss.finite_strain(),
@@ -767,7 +820,7 @@ fn observe(
     let law = source
         .longitudinal_waves
         .as_ref()
-        .and_then(|bank| bank.strings.get(string))
+        .and_then(|bank| bank.string(string))
         .ok_or_else(|| invalid("string has no bound longitudinal-wave law"))?;
     let q: Vec<_> = components[string].states()[..law.transverse_count()]
         .iter()
@@ -803,6 +856,7 @@ mod tests {
             transverse_linear_density_kg_m: transverse,
             axial_rigidity_n: ea,
             prestress_n: tension,
+            string_index: 0,
             axial_component: 1,
             elastic_frequency_band_rad_s: None,
             axial_material_loss: None,

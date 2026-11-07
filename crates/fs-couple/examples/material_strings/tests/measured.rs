@@ -39,7 +39,7 @@ fn properties() -> MeasuredStringProperties {
         bending_stiffness: "bending_stiffness_dominant".into(),
     }
 }
-fn measured_pack(mass_factor: f64) -> NormalizedPack {
+pub(super) fn measured_pack(mass_factor: f64) -> NormalizedPack {
     let mut claims = ClaimSet::new();
     let artifact = fs_blake3::ContentHash([91; 32]);
     let provenance = Provenance {
