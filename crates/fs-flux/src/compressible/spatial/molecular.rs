@@ -369,6 +369,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         dt,
                         false,
                         None,
+                        None, // Gravity belongs to the native advective interval, not diffusion.
                         &mut cancelled,
                     )?;
                     evolve::capture_boundaries(
@@ -419,6 +420,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         &mut self.work.candidate,
                         dt,
                         true,
+                        None,
                         None,
                         &mut cancelled,
                     )?;

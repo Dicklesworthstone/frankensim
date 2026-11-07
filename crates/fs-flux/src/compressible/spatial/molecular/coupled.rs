@@ -399,6 +399,14 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             &mut cancelled,
         )?;
         trial.reservoirs = flow.reservoirs.try_clone(&mut cancelled)?;
+        if let Some(balance) = &flow.hydrostatic {
+            trial.bind_hydrostatic_reference(
+                balance.axis,
+                balance.reference,
+                balance.quadrature,
+                &mut cancelled,
+            )?;
+        }
         let faces = flow.boundary_impulses.len();
         let result = Self {
             accepted: flow,
@@ -989,6 +997,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             &self.accepted.gas,
             &self.accepted.grid,
             &self.accepted.states,
+            self.accepted.hydrostatic.as_ref(),
             &mut cancelled,
         )?;
         for q in &self.accepted.states {

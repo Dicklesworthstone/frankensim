@@ -212,9 +212,11 @@ impl Reservoirs {
         gas: &FrozenGas,
         grid: &CartesianGrid,
         states: &[State],
+        hydrostatic: Option<&hydrostatic::HydrostaticBalance>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, Error> {
-        self.accepted().maximum_rate(gas, grid, states, cancelled)
+        self.accepted()
+            .maximum_rate(gas, grid, states, hydrostatic, cancelled)
     }
 }
 
@@ -249,6 +251,7 @@ impl<'a> View<'a> {
         gas: &FrozenGas,
         grid: &CartesianGrid,
         states: &[State],
+        hydrostatic: Option<&hydrostatic::HydrostaticBalance>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, Error> {
         let mut rate = self
@@ -280,19 +283,58 @@ impl<'a> View<'a> {
                 c[axis] = if sign < 0.0 { 0 } else { grid.shape[axis] - 1 };
                 c[a] = face % grid.shape[a];
                 c[b] = face / grid.shape[a];
-                let q = states[grid.index(c)];
-                let flux = gas.pressure_outlet_spatial_flux(
-                    q.normal(axis),
-                    sign,
-                    outlet.pressure_pa,
-                    &mut *cancelled,
-                )?;
+                let cell = grid.index(c);
+                let q = states[cell];
+                let (flux, shear) = if let Some(balance) = hydrostatic {
+                    let p = balance.primitive(gas, grid, cell, q, cancelled)?;
+                    let variables = balance.variables(grid, cell, p)?;
+                    let reference = balance.trace(grid, cell, axis, sign);
+                    let mut density = reference[0] * variables[0];
+                    let mut pressure = reference[4] * variables[4];
+                    let temperature = (pressure / density) / gas.gas_constant();
+                    if !positive(density)
+                        || !positive(pressure)
+                        || temperature < gas.domain().minimum_temperature
+                        || temperature > gas.domain().maximum_temperature
+                        || !temperature.is_finite()
+                    {
+                        density = p.density;
+                        pressure = p.pressure;
+                    }
+                    // The initial CFL/refusal must use the same physical face
+                    // as the residual, not a stratified cell-average pressure.
+                    let trace = SpatialPrimitive {
+                        density,
+                        normal_velocity: p.velocity[axis],
+                        transverse_velocity: [p.velocity[a], p.velocity[b]],
+                        pressure,
+                    };
+                    (
+                        gas.pressure_outlet_spatial_flux_from_primitive(
+                            trace,
+                            sign,
+                            outlet.pressure_pa,
+                            &mut *cancelled,
+                        )?,
+                        trace.transverse_velocity,
+                    )
+                } else {
+                    (
+                        gas.pressure_outlet_spatial_flux(
+                            q.normal(axis),
+                            sign,
+                            outlet.pressure_pa,
+                            &mut *cancelled,
+                        )?,
+                        [q.momentum[a] / q.density, q.momentum[b] / q.density],
+                    )
+                };
                 // The normal wave bound also bounds the face sound speed.
                 // Include unchanged transverse advection so a pressure wave
                 // bounds the entire unsplit interval before any split stage.
                 let local = flux.signal_speed / grid.spacing[axis]
-                    + ((q.momentum[a] / q.density).abs() + flux.signal_speed) / grid.spacing[a]
-                    + ((q.momentum[b] / q.density).abs() + flux.signal_speed) / grid.spacing[b];
+                    + (shear[0].abs() + flux.signal_speed) / grid.spacing[a]
+                    + (shear[1].abs() + flux.signal_speed) / grid.spacing[b];
                 rate = rate.max(local);
             }
         }

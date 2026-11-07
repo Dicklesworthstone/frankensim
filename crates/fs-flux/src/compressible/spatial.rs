@@ -19,6 +19,8 @@ pub use reservoir::{PressureOutletBoundary, ReservoirBoundary, ReservoirFaceStat
 /// Conservative body impulse and mechanical work on the original time owner.
 pub mod forcing;
 pub use forcing::{BodyForce3d, ForceChange3d, ForceControl3d, ForcingWorkspace3d};
+/// Source-integrated stratified pressure balance and conservative gravity work.
+pub mod hydrostatic;
 /// Coherent physical Mann velocity traces on original reservoir faces.
 #[cfg(feature = "experimental-mann-inflow")]
 pub mod mann_inflow;
@@ -401,7 +403,8 @@ pub struct StepReport {
     pub after: Totals,
     /// Net inward transfer integrated with the same two RK stages.
     pub boundary_change: Totals,
-    /// Body impulse and mechanical work over both source half steps.
+    /// Body impulse and mechanical work, including retained hydrostatic gravity
+    /// over both SSP stages and any additional prescribed source half steps.
     pub source_change: ForceChange3d,
     /// after - before - boundary_change - source_change in coherent SI units.
     pub conservation_residual: Totals,
@@ -430,6 +433,7 @@ pub struct Euler3d {
     last_step: Option<StepReport>,
     boundary_impulses: Vec<BoundaryImpulse>,
     work: Workspace,
+    hydrostatic: Option<hydrostatic::HydrostaticBalance>,
 }
 impl Euler3d {
     /// Admit original gas thermodynamics and cell averages on a fixed box.
@@ -505,6 +509,7 @@ impl Euler3d {
             states,
             time: 0.0,
             last_step: None,
+            hydrostatic: None,
             boundary_impulses: allocated(grid.boundary_len(), Totals::default())?,
             work: Workspace {
                 primitive,
@@ -586,7 +591,9 @@ impl Euler3d {
     /// the original accepted field. Source work preserves internal energy.
     /// Uniform acceleration and prescribed force density have distinct units.
     /// The caller supplies bounded reusable scratch and a physical Mach cap.
-    /// Gravity does not imply a hydrostatic well-balanced discretization.
+    /// These loads are additional to any retained hydrostatic gravity; do not
+    /// supply that gravity a second time. The source split alone does not
+    /// preserve a hydrostatic equilibrium.
     #[allow(clippy::too_many_arguments)]
     pub fn step_with_forcing(
         &mut self,
@@ -684,14 +691,24 @@ impl Euler3d {
                 &self.gas,
                 &self.grid,
                 &self.states,
+                self.hydrostatic.as_ref(),
                 &mut cancelled,
             )?
         } else {
-            self.reservoirs
-                .maximum_rate(&self.gas, &self.grid, &self.states, &mut cancelled)?
+            self.reservoirs.maximum_rate(
+                &self.gas,
+                &self.grid,
+                &self.states,
+                self.hydrostatic.as_ref(),
+                &mut cancelled,
+            )?
         };
-        for (p, q) in self.work.primitive.iter_mut().zip(&self.states) {
-            *p = q.primitive(&self.gas, &mut cancelled)?;
+        for (cell, (p, q)) in self.work.primitive.iter_mut().zip(&self.states).enumerate() {
+            *p = if let Some(balance) = &self.hydrostatic {
+                balance.primitive(&self.gas, &self.grid, cell, *q, &mut cancelled)?
+            } else {
+                q.primitive(&self.gas, &mut cancelled)?
+            };
             if let Some((_, controls, _)) = &forcing {
                 controls.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
             }
@@ -735,6 +752,7 @@ impl Euler3d {
                     reconstruction,
                     profiles.as_deref_mut(),
                     self.time,
+                    self.hydrostatic.as_ref(),
                     &mut cancelled,
                 ),
                 None => {
@@ -752,9 +770,9 @@ impl Euler3d {
                             controls.cfl,
                             reconstruction,
                             None,
+                            self.hydrostatic.as_ref(),
                             &mut cancelled,
                         )
-                        .map(|stats| (stats, ForceChange3d::default()))
                     } else {
                         evolve::attempt(
                             &self.gas,
@@ -767,9 +785,9 @@ impl Euler3d {
                             controls.cfl,
                             reconstruction,
                             None,
+                            self.hydrostatic.as_ref(),
                             &mut cancelled,
                         )
-                        .map(|stats| (stats, ForceChange3d::default()))
                     }
                 }
             };

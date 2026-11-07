@@ -2471,6 +2471,35 @@ and cancellation without state publication. Molecular tests distinguish a
 resting viscous isentrope without heat conduction from the physically evolving
 temperature gradient that nonzero Fourier conduction would introduce.
 
+### Hydrostatic pressure balance in the original volumetric owner
+
+`compressible::spatial::Euler3d::new_hydrostatic_atmosphere` extends the same
+source-owned isothermal, isentropic and prescribed thermal-lapse references
+to any Cartesian axis. `bind_hydrostatic_reference` admits an authored initial
+disturbance without changing its conserved averages. The gravity axis requires
+at least two cells and physical ends; both transverse directions retain their
+native boundary conditions. Preparation integrates only one axial profile;
+stepping adds no profile integration or allocation.
+
+Both native reconstruction orders use relative density and pressure with all
+three physical velocities. The momentum residual removes the actual reference
+Riemann traction before differencing, then adds the density-perturbation force.
+Gravity work uses the shared continuity flux. Closed inviscid evolution thus
+conserves gas plus midpoint potential energy, including variable source heat
+capacity. `StepReport::source_change` includes gravity impulse and work, and
+pressure-only outlets admit the reconstructed physical face rather than the
+stratified volume average. Additional forcing composes with gravity; molecular
+coupling retains the reference through accepted/trial swaps without adding
+gravity during the separate diffusion substeps.
+
+Native regressions cover all three axes, both gravity signs and reconstruction
+orders, independently integrated mass, exact resting states, three-dimensional
+disturbances, transverse momentum, pressure outlets at both physical ends,
+combined gas/potential conservation, additional forcing, molecular trial reuse
+and transactional cancellation/refusal. This bounded constant-gravity method
+does not claim arbitrary or rotating equilibria, mixture well balancing or
+suppression of physical heat flow through a nonisothermal atmosphere.
+
 ### Source-owned molecular transport in the same Cartesian gas
 
 `compressible::molecular::MolecularTransport2d` binds the original

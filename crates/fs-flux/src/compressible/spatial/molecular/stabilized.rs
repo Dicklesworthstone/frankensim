@@ -324,6 +324,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             dt * scheme.first_weight(),
             false,
             None,
+            None, // Do not apply advective gravity again in the diffusion split.
             cancelled,
         )?;
         evolve::capture_boundaries(

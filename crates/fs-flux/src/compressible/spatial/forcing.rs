@@ -78,6 +78,7 @@ pub(super) fn attempt(
     reconstruction: Reconstruction,
     profiles: Option<&mut reservoir::TimedSource<'_>>,
     time: f64,
+    hydrostatic: Option<&hydrostatic::HydrostaticBalance>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(StageStats, ForceChange3d), Error> {
     for (cell, (source, target)) in states.iter().zip(&mut forcing_work.original).enumerate() {
@@ -97,7 +98,7 @@ pub(super) fn attempt(
         cancelled,
     )?;
     // Original primitive recovery admits every kicked cell and every RK state.
-    let mut stats = match profiles {
+    let (mut stats, gravity) = match profiles {
         Some(source) => evolve::attempt_with_reservoir_profiles(
             gas,
             grid,
@@ -111,6 +112,7 @@ pub(super) fn attempt(
             cfl,
             reconstruction,
             Some(controls),
+            hydrostatic,
             cancelled,
         )?,
         None => evolve::attempt(
@@ -124,6 +126,7 @@ pub(super) fn attempt(
             cfl,
             reconstruction,
             Some(controls),
+            hydrostatic,
             cancelled,
         )?,
     };
@@ -140,8 +143,10 @@ pub(super) fn attempt(
     check_cfl::<Error>(endpoint_rate * dt, cfl)?;
     stats.rate = stats.rate.max(endpoint_rate);
     let source = ForceChange3d {
-        impulse: std::array::from_fn(|axis| first.impulse[axis] + second.impulse[axis]),
-        work: first.work + second.work,
+        impulse: std::array::from_fn(|axis| {
+            first.impulse[axis] + gravity.impulse[axis] + second.impulse[axis]
+        }),
+        work: first.work + gravity.work + second.work,
     };
     if !source
         .impulse

@@ -12,8 +12,9 @@ pub(super) fn attempt(
     cfl: f64,
     reconstruction: Reconstruction,
     force_controls: Option<forcing::ForceControl3d>,
+    hydrostatic: Option<&hydrostatic::HydrostaticBalance>,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<StageStats, Error> {
+) -> Result<(StageStats, ForceChange3d), Error> {
     let first = rk_stage(
         gas,
         grid,
@@ -26,6 +27,7 @@ pub(super) fn attempt(
         false,
         reconstruction,
         force_controls,
+        hydrostatic,
         cancelled,
     )?;
     let second = rk_stage(
@@ -40,6 +42,7 @@ pub(super) fn attempt(
         true,
         reconstruction,
         force_controls,
+        hydrostatic,
         cancelled,
     )?;
     Ok(combine(first, second))
@@ -62,11 +65,12 @@ pub(super) fn attempt_with_reservoir_profiles(
     cfl: f64,
     reconstruction: Reconstruction,
     force_controls: Option<forcing::ForceControl3d>,
+    hydrostatic: Option<&hydrostatic::HydrostaticBalance>,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<StageStats, Error> {
+) -> Result<(StageStats, ForceChange3d), Error> {
     let first_rate = reservoirs
         .staged()
-        .maximum_rate(gas, grid, states, cancelled)?;
+        .maximum_rate(gas, grid, states, hydrostatic, cancelled)?;
     check_cfl::<Error>(first_rate * dt, cfl)?;
     let first = rk_stage(
         gas,
@@ -80,15 +84,17 @@ pub(super) fn attempt_with_reservoir_profiles(
         false,
         reconstruction,
         force_controls,
+        hydrostatic,
         cancelled,
     )?;
     source.stage(&mut reservoirs.profiles, gas, grid, time + dt, cancelled)?;
     // The actual endpoint trace can be much faster or hotter than the start.
     // Its full unsplit exterior bound and the resulting native face-wave bound
     // must both admit this same dt, including the final SSP residual.
-    let second_rate = reservoirs
-        .staged()
-        .maximum_rate(gas, grid, &work.stage, cancelled)?;
+    let second_rate =
+        reservoirs
+            .staged()
+            .maximum_rate(gas, grid, &work.stage, hydrostatic, cancelled)?;
     check_cfl::<Error>(second_rate * dt, cfl)?;
     let second = rk_stage(
         gas,
@@ -102,19 +108,29 @@ pub(super) fn attempt_with_reservoir_profiles(
         true,
         reconstruction,
         force_controls,
+        hydrostatic,
         cancelled,
     )?;
-    let mut stats = combine(first, second);
+    let (mut stats, change) = combine(first, second);
     stats.rate = stats.rate.max(first_rate).max(second_rate);
-    Ok(stats)
+    Ok((stats, change))
 }
 
-fn combine(first: StageStats, second: StageStats) -> StageStats {
-    StageStats {
-        rate: first.rate.max(second.rate),
-        fallback: first.fallback + second.fallback,
-        limited: first.limited + second.limited,
-    }
+fn combine(
+    (first, a): (StageStats, ForceChange3d),
+    (second, b): (StageStats, ForceChange3d),
+) -> (StageStats, ForceChange3d) {
+    (
+        StageStats {
+            rate: first.rate.max(second.rate),
+            fallback: first.fallback + second.fallback,
+            limited: first.limited + second.limited,
+        },
+        ForceChange3d {
+            impulse: std::array::from_fn(|axis| a.impulse[axis] + b.impulse[axis]),
+            work: a.work + b.work,
+        },
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -130,8 +146,9 @@ fn rk_stage(
     final_stage: bool,
     reconstruction: Reconstruction,
     force_controls: Option<forcing::ForceControl3d>,
+    hydrostatic: Option<&hydrostatic::HydrostaticBalance>,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<StageStats, Error> {
+) -> Result<(StageStats, ForceChange3d), Error> {
     let input = if final_stage { &work.stage[..] } else { states };
     let stats = spatial(
         gas,
@@ -144,10 +161,11 @@ fn rk_stage(
         &mut work.flux,
         reconstruction,
         force_controls,
+        hydrostatic,
         cancelled,
     )?;
     check_cfl::<Error>(stats.rate * dt, cfl)?;
-    if final_stage {
+    let change = if final_stage {
         update(
             gas,
             grid,
@@ -158,8 +176,9 @@ fn rk_stage(
             dt,
             true,
             force_controls,
+            hydrostatic,
             cancelled,
-        )?;
+        )?
     } else {
         update(
             gas,
@@ -171,9 +190,10 @@ fn rk_stage(
             dt,
             false,
             force_controls,
+            hydrostatic,
             cancelled,
-        )?;
-    }
+        )?
+    };
     capture_boundaries(
         grid,
         &work.flux,
@@ -182,7 +202,7 @@ fn rk_stage(
         final_stage,
         cancelled,
     )?;
-    Ok(stats)
+    Ok((stats, change))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -197,34 +217,65 @@ fn spatial(
     fluxes: &mut [Vec<SpatialFaceFlux>; 3],
     reconstruction: Reconstruction,
     force_controls: Option<forcing::ForceControl3d>,
+    hydrostatic: Option<&hydrostatic::HydrostaticBalance>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StageStats, Error> {
     let mut stats = StageStats::default();
-    for (p, q) in primitive.iter_mut().zip(states) {
-        *p = q.primitive(gas, &mut *cancelled)?;
+    for (cell, (p, q)) in primitive.iter_mut().zip(states).enumerate() {
+        *p = if let Some(balance) = hydrostatic {
+            balance.primitive(gas, grid, cell, *q, cancelled)?
+        } else {
+            q.primitive(gas, &mut *cancelled)?
+        };
         if let Some(controls) = force_controls {
             controls.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
         }
     }
+    let variables = |cell: usize| {
+        if let Some(balance) = hydrostatic {
+            balance
+                .variables(grid, cell, primitive[cell])
+                .expect("relative coordinates admitted while decoding")
+        } else {
+            primitive[cell].array()
+        }
+    };
+    let admissible = |p: [f64; 5]| {
+        let temperature = p[4] / (gas.gas_constant() * p[0]);
+        p.into_iter().all(f64::is_finite)
+            && positive(p[0])
+            && positive(p[4])
+            && temperature >= gas.domain().minimum_temperature
+            && temperature <= gas.domain().maximum_temperature
+    };
+    let trace = |cell: usize, axis: usize, sign: f64, slope: &[f64]| {
+        let center = variables(cell);
+        if let Some(balance) = hydrostatic {
+            let reference = balance.trace(grid, cell, axis, sign);
+            let scale = [reference[0], 1.0, 1.0, 1.0, reference[4]];
+            let baseline = std::array::from_fn(|d| scale[d] * center[d]);
+            if !admissible(baseline) {
+                // A far-from-reference state can leave the caloric domain
+                // even with zero slope. Retain its admitted physical cell;
+                // never clip conservative energy or pressure to a floor.
+                primitive[cell].array()
+            } else {
+                std::array::from_fn(|d| scale[d] * (center[d] + sign * slope[d]))
+            }
+        } else {
+            std::array::from_fn(|d| center[d] + sign * slope[d])
+        }
+    };
     stats.limited = cartesian::slopes::<Error>(
         grid,
         boundaries,
         5,
         [1, 2, 3],
         reconstruction,
-        |k, d| primitive[k].array()[d],
+        |k, d| variables(k)[d],
         |_, _, _, _| Ok(0),
         slopes.as_flattened_mut().as_flattened_mut(),
-        |k, _, sign, slope| {
-            let center = primitive[k].array();
-            let p: [f64; 5] = std::array::from_fn(|d| center[d] + sign * slope[d]);
-            let temperature = p[4] / (gas.gas_constant() * p[0]);
-            p.into_iter().all(f64::is_finite)
-                && positive(p[0])
-                && positive(p[4])
-                && temperature >= gas.domain().minimum_temperature
-                && temperature <= gas.domain().maximum_temperature
-        },
+        |k, axis, sign, slope| admissible(trace(k, axis, sign, slope)),
         cancelled,
     )?;
     // Every axis uses a contiguous, x-fast face lattice. Internal neighbours
@@ -238,8 +289,7 @@ fn spatial(
             return Ok(());
         }
         let reconstruct = |k: usize, sign: f64| -> SpatialPrimitive {
-            let center = primitive[k].array();
-            let p: [f64; 5] = std::array::from_fn(|d| center[d] + sign * slopes[k][axis][d]);
+            let p = trace(k, axis, sign, &slopes[k][axis]);
             SpatialPrimitive {
                 density: p[0],
                 normal_velocity: p[axis + 1],
@@ -247,7 +297,9 @@ fn spatial(
                 pressure: p[4],
             }
         };
-        let first_order = reconstruction == Reconstruction::FirstOrder;
+        // First order is constant relative to the atmosphere, not in absolute
+        // pressure/density; all physical boundaries see that same face trace.
+        let first_order = reconstruction == Reconstruction::FirstOrder && hydrostatic.is_none();
         let f = match face.kind {
             cartesian::FaceKind::Interior { left, right } => {
                 if first_order {
@@ -384,8 +436,11 @@ pub(super) fn update(
     dt: f64,
     final_stage: bool,
     force_controls: Option<forcing::ForceControl3d>,
+    hydrostatic: Option<&hydrostatic::HydrostaticBalance>,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(), Error> {
+) -> Result<ForceChange3d, Error> {
+    let mut sum = [0.0; 2];
+    let mut correction = [0.0; 2];
     cartesian::update::<5, Error, _>(
         grid,
         5,
@@ -393,18 +448,55 @@ pub(super) fn update(
         final_stage,
         |k, d| original[k].array()[d],
         |k, d| stage[k].array()[d],
-        |axis, face, d| flux_array(fluxes[axis][face], axis)[d],
+        |axis, face, d| {
+            let value = flux_array(fluxes[axis][face], axis)[d];
+            if let Some(balance) = hydrostatic.filter(|b| b.axis == axis && d == axis + 1) {
+                // Cancel the physical equilibrium traction before time scaling.
+                value - balance.traction(grid, face)
+            } else {
+                value
+            }
+        },
         cancelled,
         |k, row, cancelled| {
-            let q = State::from_array(row.try_into().expect("five conserved components"));
-            let primitive = q.primitive(gas, &mut *cancelled)?;
+            let mut q = State::from_array(row.try_into().expect("five conserved components"));
+            if let Some(balance) = hydrostatic {
+                let [perturbation, force, power] = balance.sources(grid, k, stage[k], fluxes);
+                let scale = if final_stage { 0.5 * dt } else { dt };
+                q.momentum[balance.axis] += scale * perturbation;
+                q.energy += scale * power;
+                // Both SSP residuals contribute half an interval to the
+                // extensive source account, independent of stage storage.
+                for (d, rate) in [force, power].into_iter().enumerate() {
+                    let y = (0.5 * dt * grid.cell_volume()) * rate - correction[d];
+                    let next = sum[d] + y;
+                    correction[d] = (next - sum[d]) - y;
+                    sum[d] = next;
+                }
+            }
+            let primitive = if let Some(balance) = hydrostatic {
+                balance.primitive(gas, grid, k, q, cancelled)?
+            } else {
+                q.primitive(gas, &mut *cancelled)?
+            };
             if let Some(controls) = force_controls {
                 controls.admit_velocity::<Error>(primitive.velocity, primitive.sound_speed)?;
             }
             output[k] = q;
             Ok(())
         },
-    )
+    )?;
+    if !sum.into_iter().all(f64::is_finite) {
+        return Err(Error::Invalid(
+            "unrepresentable extensive gravitational source",
+        ));
+    }
+    let mut change = ForceChange3d::default();
+    if let Some(balance) = hydrostatic {
+        change.impulse[balance.axis] = sum[0];
+        change.work = sum[1];
+    }
+    Ok(change)
 }
 
 pub(super) fn capture_boundaries(
