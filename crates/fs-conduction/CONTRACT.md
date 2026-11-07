@@ -3128,10 +3128,9 @@ None. Everything here is `[S]` solid work on the default path.
 - `tests/duty.rs` — duty-cycle drivers (`f85xj.5.12`): the analytic per-segment
   energy integral; declared interpolation across constant and ramp segments;
   the past-the-window REFUSAL (with the refusal required to say why);
-  Crank-Nicolson with aligned steps delivering the declared energy EXACTLY;
-  backward Euler showing a real first-order residual that halves with the
-  step; the deliberate counter-case where a SYMMETRIC cycle cancels that error
-  to zero, pinned so a zero residual is never read as proof of exactness; a
+  Crank-Nicolson and backward Euler delivering the declared ramp and dwell
+  energy across aligned and unaligned boundaries; insulated-body calorimetry
+  for a pulse missed by endpoint samples; mismatched full-load watts refusing; a
   ragged window refusing; constant load integrating exactly under either
   scheme; the sampled peak lagging the burst (thermal mass doing its job);
   step-quantized time-above-limit monotone in the limit; and refusals,
@@ -3374,22 +3373,27 @@ authority.
   holding the last value — extending a finished schedule invents load history
   nobody declared. A window that is not a whole number of steps refuses for
   the same reason: a step straddling the end injects undeclared load.
-- THE WINDOWED ENERGY AUDIT IS EXACT ONLY UNDER A STATED CONDITION. The theta
-  method's load weighting `θ s^{n+1} + (1−θ) s^n` is the TRAPEZOID rule at
-  `theta = 0.5`, which reproduces a piecewise-linear profile exactly when no
-  step straddles a segment boundary — so Crank-Nicolson with aligned steps
-  delivers the declared cycle energy to floating point, and
-  `WindowedEnergyAudit::steps_aligned` reports whether that condition held. At
-  `theta = 1` it is the right-endpoint rule and the residual is real. The
-  audit reports declared, delivered, and residual WITHOUT normalizing one to
-  the other: the gap is the integration error the caller chose.
-- A ZERO ENERGY RESIDUAL IS NOT EVIDENCE THAT THE INTEGRATION IS EXACT. On a
-  cycle whose ramps mirror each other, backward Euler over-integrates the
-  rising ramp by exactly what it under-integrates the falling one, so the
-  windowed residual vanishes while every individual step is still first-order
-  wrong. Symmetric duty cycles are an extremely common shape, so this
-  cancellation is likely rather than exotic. `tests/duty.rs` pins both sides
-  of it deliberately.
+- PRESCRIBED DUTY POWER IS INTEGRATED ANALYTICALLY OVER EVERY STEP.
+  `DutyCycle::energy_scale_between` integrates each crossed constant or linear
+  segment, including discontinuities and pulses shorter than a timestep. The
+  resulting heat enters the thermal increment directly; theta still controls
+  the discretization of heat transport, without changing input joules. The
+  local integral avoids subtracting large cumulative energies, uses bounded
+  segment lookup, and requires no per-step allocation or matrix rebuild.
+  Unrepresentable intervals refuse instead of silently losing a pulse.
+- THE SOURCE AUDIT IS TIED TO THE ASSEMBLED LOAD. The supplied full-load watts
+  must agree with the spatial integral of the volumetric source (relative
+  tolerance `1e-10` plus `256 * EPSILON` times its absolute nodal load sum).
+  Declared energy uses the authored segment durations and declared watts;
+  delivery uses the interval integrals and assembled watts. Neither is
+  normalized to the other. The audit covers prescribed volumetric input,
+  including heat at constrained nodes; boundary heat remains separate.
+- EXACT INPUT ENERGY DOES NOT MAKE THE TEMPERATURE HISTORY EXACT.
+  `WindowedEnergyAudit::steps_aligned` describes whether the solver resolved
+  schedule boundaries, not whether prescribed source energy is conserved.
+  Coarse implicit steps can smear a short burst's temperature response even
+  when every joule is retained. `tests/duty.rs` verifies ramp, dwell and
+  sub-step pulse energy with insulated-body calorimetry and boundary heat.
 - CYCLE SUMMARY QUANTITIES ARE STEP-SAMPLED. `CycleSummary::peak_temperature_k`
   is the maximum over recorded STEP ENDS; the true continuous peak can fall
   between steps and is not resolved. `time_above_limit_s` is counted in whole
@@ -4056,32 +4060,21 @@ wrong problem.
 Fraction-weighted scenario cycles are refused: a transient march needs absolute
 time, and dimensionless fractions carry none.
 
-### The lowered schedule is DISCONTINUOUS, and that reverses an exactness claim
+### The lowered schedule preserves discontinuous switching and dwell energy
 
 A scenario duty cycle declares dwells AT points, not transitions BETWEEN them,
 so it lowers to piecewise-CONSTANT segments. No implicit smoothing: a step load
 is real and common, and rounding it off changes the peak.
 
-The consequence must be stated because it reverses a property this crate
-otherwise advertises. The theta load weighting is the trapezoid rule at
-`theta = 0.5`, which is exact for a piecewise-LINEAR schedule when no step
-straddles a boundary — but a jump is not piecewise-linear. Across a boundary
-where the scale jumps by `ds`, the endpoint weighting misses exactly
-`(ds / 2) * dt` scale-seconds, first order in the step and independent of where
-the jump sits.
+The source integral splits at every dwell boundary, including those inside a
+thermal timestep. Each dwell contributes its duration times its power, for
+both backward Euler and Crank-Nicolson transport. No invented ramp is needed
+to recover the authored input energy. Tests cover aligned and unaligned
+switches and compare a ramped profile with the same total energy.
 
-So a scenario-declared cycle does NOT deliver its declared energy exactly, and
-`WindowedEnergyAudit::residual_j` reports that gap rather than zero. The
-existing exactness result was demonstrated on a CONTINUOUS fixture (constant ->
-ramp -> constant -> ramp) and does not carry across the seam.
-
-The residual is analytic, not numerical noise, and the tests pin it as such:
-one asserts it equals the predicted `(ds / 2) * dt * base_power` to 1e-6 rather
-than merely being small, and another asserts that halving the step halves it
-EXACTLY, which is what makes it a step-resolution artifact of representing a
-discontinuity rather than a defect in the lowering. A third shows the remedy —
-declaring the transition as a ramp restores exact balance at the same total
-energy — so the limitation comes with its own escape.
+This fixes the endpoint-quadrature deficit previously reported at switching
+boundaries. It does not resolve a burst's continuous temperature peak inside a
+coarse step: callers still choose timestep resolution for thermal dynamics.
 
 ### No-claim boundaries (E17 seam)
 

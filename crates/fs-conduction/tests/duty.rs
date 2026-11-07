@@ -1,4 +1,4 @@
-//! Duty-cycle drivers: the windowed energy audit, its exactness condition,
+//! Duty-cycle drivers: exact prescribed source energy across ramps and jumps,
 //! the tiling refusal, and cycle summary quantities (bead
 //! `frankensim-extreal-program-f85xj.5.12`).
 
@@ -105,6 +105,35 @@ fn the_schedule_interpolates_as_declared() {
 }
 
 #[test]
+fn interval_energy_splits_at_switches_and_ramp_endpoints() {
+    let cycle = DutyCycle::new(vec![
+        DutySegment::constant(3.0, 0.25).expect("idle"),
+        DutySegment::ramp(2.0, 0.0, 2.0).expect("ramp"),
+        DutySegment::constant(5.0, 0.5).expect("hold"),
+    ])
+    .expect("cycle");
+    // [2,3]: 0.25; [3,5]: area 2; [5,7]: area 1.
+    assert_eq!(
+        cycle.energy_scale_between(2.0, 7.0).expect("interval"),
+        3.25
+    );
+    assert_eq!(
+        cycle.energy_scale_between(3.5, 4.5).expect("ramp slice"),
+        1.0
+    );
+    assert_eq!(cycle.energy_scale_between(3.0, 3.0).expect("empty"), 0.0);
+    assert_eq!(cycle.energy_scale_between(10.0, 10.0).expect("end"), 0.0);
+    assert_eq!(
+        cycle.energy_scale_between(0.0, 10.0).expect("whole cycle"),
+        cycle.energy_scale_seconds()
+    );
+    assert!(cycle.energy_scale_between(4.0, 3.0).is_err());
+    assert!(cycle.energy_scale_between(-1.0, 3.0).is_err());
+    assert!(cycle.energy_scale_between(9.0, 11.0).is_err());
+    assert!(cycle.energy_scale_between(f64::NAN, 3.0).is_err());
+}
+
+#[test]
 fn a_time_past_the_window_refuses_instead_of_holding() {
     // Holding the last value is the tempting default and it is wrong: it
     // invents load history that nobody declared.
@@ -139,6 +168,14 @@ fn segment_and_cycle_admission_refuse_degenerate_declarations() {
     );
     assert!(DutySegment::ramp(1.0, 0.0, f64::NAN).is_err(), "non-finite");
     assert!(DutyCycle::new(Vec::new()).is_err(), "empty cycle");
+    assert!(
+        DutyCycle::new(vec![
+            DutySegment::constant(1.0e20, 0.0).expect("long idle"),
+            DutySegment::constant(1.0, 1.0).expect("pulse"),
+        ])
+        .is_err(),
+        "a duration lost to the accumulated time must not erase a pulse"
+    );
     assert!(
         DutySegment::constant(1.0, 0.0).is_ok(),
         "an off state is legal"
@@ -182,10 +219,7 @@ fn march(
 
 #[test]
 fn crank_nicolson_with_aligned_steps_delivers_the_declared_energy_exactly() {
-    // The theta method's load weighting at theta = 0.5 IS the trapezoid rule,
-    // and trapezoid is exact for a piecewise-linear profile when no step
-    // straddles a segment boundary. So this is an identity, not a tolerance:
-    // if it ever drifts, the weighting or the schedule sampling is wrong.
+    // The declared segment integrals and delivered interval integrals agree.
     let cycle = mixed_cycle();
     let dt = 250.0; // 4000 / 250 = 16 steps, every boundary on a step
     assert!(cycle.steps_align(dt, 1e-9), "the fixture must be aligned");
@@ -302,9 +336,8 @@ fn prescribed_boundary_heat_survives_a_varying_power_schedule() {
             )
             .expect("heated boundary march")
         });
-        // A linear ramp's theta quadrature differs from its exact integral by
-        // (theta - 1/2)*dt*(s_end - s_start), independently of the mesh.
-        let volume_heat_j = 4.0 * (3000.0 + (theta - 0.5) * dt_s);
+        // Prescribed ramp energy is independent of the transport integrator.
+        let volume_heat_j = 4.0 * 3000.0;
         let boundary_heat_j = 12.0 * 6000.0;
         let change: Vec<_> = solution.temperature.iter().map(|t| t - T_COLD).collect();
         let mut nodal_energy = vec![0.0; mesh.vertex_count()];
@@ -357,7 +390,7 @@ fn a_millikelvin_scheduled_pulse_is_resolved_against_its_temperature_rise() {
             )
             .expect("weak scheduled pulse")
         });
-        let expected_rise = source_density * (3000.0 + (theta - 0.5) * dt_s) / RHO_CP;
+        let expected_rise = source_density * 3000.0 / RHO_CP;
         for (vertex, &temperature) in solution.temperature.iter().enumerate() {
             let error = (temperature - T_COLD - expected_rise).abs();
             assert!(
@@ -368,8 +401,8 @@ fn a_millikelvin_scheduled_pulse_is_resolved_against_its_temperature_rise() {
     }
 }
 
-/// A cycle whose ramps do NOT mirror each other, so first-order integration
-/// error cannot cancel between them.
+/// An asymmetric ramp catches source-quadrature errors that cancel in a
+/// symmetric up/down cycle.
 fn asymmetric_cycle() -> DutyCycle {
     DutyCycle::new(vec![
         DutySegment::ramp(1000.0, 0.0, 1.0).expect("ramp up"),
@@ -379,62 +412,99 @@ fn asymmetric_cycle() -> DutyCycle {
 }
 
 #[test]
-fn backward_euler_leaves_a_real_first_order_residual() {
-    // The audit must not hide the scheme's own integration error. Backward
-    // Euler is the right-endpoint rule, so on a ramp it is genuinely off —
-    // and halving the step must halve the gap.
+fn backward_euler_delivers_the_declared_ramp_energy_at_every_step_size() {
     let cycle = asymmetric_cycle();
-    let residual_at = |dt: f64| {
+    for dt in [500.0, 250.0, 800.0] {
         let config = TransientConfig::backward_euler(dt, linear_config()).expect("config");
-        march(&cycle, &config, f64::INFINITY)
-            .energy
-            .residual_j()
-            .abs()
-    };
-    let coarse = residual_at(500.0);
-    let fine = residual_at(250.0);
-    assert!(
-        coarse > 1.0,
-        "backward Euler on a ramp must show a real residual, got {coarse} J"
-    );
-    let ratio = coarse / fine;
-    assert!(
-        (1.6..2.4).contains(&ratio),
-        "halving the step should roughly halve the first-order residual, ratio {ratio}"
-    );
+        let energy = march(&cycle, &config, f64::INFINITY).energy;
+        assert!(energy.residual_j().abs() < 1e-6, "dt={dt}: {energy:?}");
+    }
 }
 
 #[test]
-fn a_symmetric_cycle_hides_the_first_order_error_by_cancellation() {
-    // Found while writing the test above, and worth pinning: on a cycle whose
-    // ramps mirror each other, backward Euler's right-endpoint rule
-    // OVER-integrates the rising ramp by exactly what it UNDER-integrates the
-    // falling one, so the windowed residual is zero even though the scheme is
-    // first order and every individual step is wrong.
-    //
-    // The consequence matters for anyone reading an audit: a zero energy
-    // residual is NOT evidence that the integration is exact. It is evidence
-    // that the errors summed to zero over this particular window, which a
-    // symmetric duty cycle — an extremely common shape — arranges for free.
-    let symmetric = mixed_cycle();
-    let config = TransientConfig::backward_euler(500.0, linear_config()).expect("config");
-    let residual = march(&symmetric, &config, f64::INFINITY)
-        .energy
-        .residual_j();
-    assert!(
-        residual.abs() < 1e-6,
-        "the symmetric fixture is expected to cancel, got {residual} J"
-    );
+fn a_pulse_between_sample_times_heats_an_insulated_body_by_its_actual_joules() {
+    let mesh = unit_mesh(2);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .adiabatic_remainder()
+        .finish()
+        .expect("insulated boundary");
+    let source = ScalarField::uniform("full-load source", FULL_LOAD_DENSITY).expect("source");
+    let initial = vec![T_COLD; mesh.vertex_count()];
+    let cycle = DutyCycle::new(vec![
+        DutySegment::constant(2.0, 0.0).expect("idle"),
+        DutySegment::ramp(1.0, 0.0, 2.0).expect("ramp"),
+        DutySegment::constant(0.25, 4.0).expect("burst"),
+        DutySegment::constant(6.75, 0.0).expect("off"),
+    ])
+    .expect("cycle");
+    // One scale-second in the ramp plus one in the short burst. In an
+    // insulated homogeneous body, calorimetry gives ΔT = Q/(rho Cp V).
+    let expected_j = 2.0 * FULL_LOAD_DENSITY;
+    let expected_k = T_COLD + expected_j / RHO_CP;
+    for theta in [1.0, 0.75, 0.5] {
+        for dt in [10.0, 2.0] {
+            let config = TransientConfig::new(theta, dt, linear_config()).expect("config");
+            let solution = with_cx(|cx| {
+                march_duty_cycle(
+                    cx,
+                    TransientProblem {
+                        mesh: &mesh,
+                        boundary: &boundary,
+                        material: &material(),
+                        source: &source,
+                        capacity: capacity(),
+                    },
+                    &config,
+                    &cycle,
+                    FULL_LOAD_DENSITY,
+                    &initial,
+                    f64::INFINITY,
+                )
+                .expect("pulse march")
+            });
+            assert!(!solution.energy.steps_aligned());
+            assert!((solution.energy.delivered_j() - expected_j).abs() < 1e-6);
+            for &temperature in &solution.temperature {
+                assert!(
+                    (temperature - expected_k).abs() < 1e-9,
+                    "theta={theta}, dt={dt}: {temperature} K instead of {expected_k} K"
+                );
+            }
+        }
+    }
+}
 
-    // Same scheme, same step, asymmetric profile: the error is exposed.
-    let exposed = march(&asymmetric_cycle(), &config, f64::INFINITY)
-        .energy
-        .residual_j()
-        .abs();
-    assert!(
-        exposed > 1.0,
-        "the asymmetric fixture must expose what the symmetric one hides, got {exposed} J"
-    );
+#[test]
+fn the_energy_audit_refuses_watts_unrelated_to_the_assembled_source() {
+    let mesh = unit_mesh(2);
+    let boundary = cold_wall(&mesh);
+    let source = ScalarField::uniform("full-load source", FULL_LOAD_DENSITY).expect("source");
+    let initial = vec![T_COLD; mesh.vertex_count()];
+    let cycle =
+        DutyCycle::new(vec![DutySegment::constant(10.0, 1.0).expect("hold")]).expect("cycle");
+    let config = TransientConfig::backward_euler(10.0, linear_config()).expect("config");
+    for declared_w in [0.0, 0.5 * FULL_LOAD_DENSITY, 2.0 * FULL_LOAD_DENSITY] {
+        let error = with_cx(|cx| {
+            march_duty_cycle(
+                cx,
+                TransientProblem {
+                    mesh: &mesh,
+                    boundary: &boundary,
+                    material: &material(),
+                    source: &source,
+                    capacity: capacity(),
+                },
+                &config,
+                &cycle,
+                declared_w,
+                &initial,
+                f64::INFINITY,
+            )
+            .expect_err("the audit cannot relabel the actual source power")
+        });
+        assert!(matches!(error, ConductionError::ScenarioRow { what, .. }
+            if what.contains("assembled full-load source")));
+    }
 }
 
 #[test]
@@ -858,21 +928,8 @@ fn the_lowered_cycle_agrees_with_the_same_schedule_written_by_hand() {
     assert_eq!(lowered.cycle, by_hand);
 }
 
-/// A scenario-declared cycle CANNOT deliver its declared energy exactly, and
-/// the gap is analytic rather than numerical noise.
-///
-/// This REVERSES the exactness property `mixed_cycle` demonstrates, and the
-/// reason is structural rather than incidental: `mixed_cycle` is CONTINUOUS
-/// (constant -> ramp -> constant -> ramp), while a scenario duty cycle
-/// declares dwells AT points with no transitions between them, so it lowers to
-/// a schedule with a JUMP. The theta weighting is the trapezoid rule at
-/// theta = 0.5, exact for piecewise-LINEAR profiles — and a jump is not one.
-///
-/// Across a boundary where the scale jumps by `ds`, the endpoint weighting
-/// misses exactly `(ds / 2) * dt` scale-seconds. Here `ds = 0.75` and
-/// `dt = 250`, so the shortfall is `93.75` scale-seconds.
 #[test]
-fn the_discontinuity_a_scenario_cycle_introduces_costs_exactly_the_analytic_jump_error() {
+fn scenario_dwells_deliver_their_authored_energy_without_smoothing_the_jump() {
     let lowered = lower_envelope_duty_cycle(&scenario_cycle(), "total-power", FULL_LOAD_DENSITY)
         .expect("lowers");
 
@@ -880,50 +937,35 @@ fn the_discontinuity_a_scenario_cycle_introduces_costs_exactly_the_analytic_jump
     let config = TransientConfig::crank_nicolson(dt, linear_config()).expect("config");
     let solution = march(&lowered.cycle, &config, f64::INFINITY);
 
-    let jump = 1.0 - 0.25;
-    let predicted = -(jump / 2.0) * dt * FULL_LOAD_DENSITY;
+    let expected_j = (3000.0 * 0.25 + 1000.0) * FULL_LOAD_DENSITY;
     assert!(
-        (solution.energy.residual_j() - predicted).abs() < 1e-6,
-        "the residual must equal the analytic jump error {predicted} J, not merely be small: \
-         got {}",
-        solution.energy.residual_j()
-    );
-    assert!(
-        solution.energy.residual_j() < 0.0,
-        "the endpoint weighting UNDER-delivers across a rising jump, because the step containing \
-         the jump is charged the pre-jump scale at its left end"
+        (solution.energy.delivered_j() - expected_j).abs() < 1e-6,
+        "the full dwell energy must enter the march: {:?}",
+        solution.energy
     );
 }
 
 #[test]
-fn the_jump_error_is_first_order_in_the_step_so_it_is_resolution_not_a_lowering_bug() {
+fn scenario_dwell_energy_is_preserved_when_a_step_crosses_the_switch() {
     let lowered = lower_envelope_duty_cycle(&scenario_cycle(), "total-power", FULL_LOAD_DENSITY)
         .expect("lowers");
 
-    let coarse = march(
-        &lowered.cycle,
-        &TransientConfig::crank_nicolson(250.0, linear_config()).expect("config"),
-        f64::INFINITY,
-    );
-    let fine = march(
-        &lowered.cycle,
-        &TransientConfig::crank_nicolson(125.0, linear_config()).expect("config"),
-        f64::INFINITY,
-    );
-
-    let ratio = coarse.energy.residual_j() / fine.energy.residual_j();
-    assert!(
-        (ratio - 2.0).abs() < 1e-9,
-        "halving the step must halve the gap exactly, which is what makes it a resolution \
-         artifact rather than a defect in the lowering: ratio {ratio}"
-    );
+    for theta in [1.0, 0.5] {
+        let config = TransientConfig::new(theta, 800.0, linear_config()).expect("config");
+        let energy = march(&lowered.cycle, &config, f64::INFINITY).energy;
+        assert!(!energy.steps_aligned());
+        assert!(
+            energy.residual_j().abs() < 1e-6,
+            "theta={theta}: {energy:?}"
+        );
+    }
 }
 
 #[test]
-fn declaring_the_transition_restores_exactness() {
-    // The remedy available to a caller who needs an exact windowed balance: a
-    // ramp is continuous, so the trapezoid rule integrates it exactly. Same
-    // window and same total energy as the stepped cycle, zero residual.
+fn an_explicit_transition_preserves_its_own_authored_energy() {
+    // This physically different profile has the same window and total energy
+    // as the stepped cycle. Both deliver that energy without changing either
+    // declaration's transition shape.
     let ramped = DutyCycle::new(vec![
         DutySegment::constant(2875.0, 0.25).expect("idle"),
         DutySegment::ramp(250.0, 0.25, 1.0).expect("transition"),

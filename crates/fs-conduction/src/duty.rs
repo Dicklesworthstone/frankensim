@@ -27,25 +27,21 @@
 //! to say afterwards, and silently extending it invents load history that
 //! nobody declared.
 //!
-//! # The windowed energy audit, and when it is exact
+//! # Prescribed power delivers its declared energy
 //!
-//! The theta method injects, over one step, the load weighted
-//! `θ s^{n+1} + (1−θ) s^n`. Summed over the window that is a quadrature of
-//! `∫ s dt`:
+//! Each step integrates `∫ s dt` analytically, splitting the integral at every
+//! crossed segment boundary. The resulting heat drives the thermal increment
+//! directly. This preserves the energy of ramps, discontinuous switching and
+//! pulses shorter than a step for every admitted theta, without smoothing the
+//! load or changing the conduction matrix. Theta still controls the implicit
+//! discretization of heat transport; it does not alter prescribed input work.
 //!
-//! - at `theta = 0.5` it is exactly the TRAPEZOID rule, which is EXACT for a
-//!   piecewise-linear profile whenever step boundaries fall on segment
-//!   boundaries. So Crank-Nicolson with aligned steps delivers exactly the
-//!   declared cycle energy, to floating point.
-//! - at `theta = 1` it is the right-endpoint rule, first order, and the
-//!   residual is real rather than roundoff.
-//!
-//! [`WindowedEnergyAudit`] reports declared and delivered energy and the
-//! residual between them; it does not silently normalize one to the other,
-//! because the gap is exactly the integration error the caller chose by
-//! picking a scheme and a step.
+//! [`WindowedEnergyAudit`] compares the authored schedule and full-load power
+//! with the integrated source actually assembled into the march. The supplied
+//! full-load watts must agree with that source. Exact source energy does not
+//! imply an exact temperature history: thermal response and sampled peaks
+//! still require a sufficiently resolved timestep.
 
-use crate::{ConductionError, ConductionProblem};
 use crate::assemble::{
     DofMap, assemble_operator, assemble_operator_with_element_materials, assemble_source_load,
     reduce_matrix_and_lift,
@@ -56,6 +52,7 @@ use crate::transient::{
     HeatCapacity, TransientConfig, TransientProblem, admit_linear_models,
     validate_material_temperature,
 };
+use crate::{ConductionError, ConductionProblem};
 use fs_exec::Cx;
 use fs_qty::Dims;
 use fs_scenario::envelope::{AxisPoint, DutyWeighting, EnvelopeDutyCycle};
@@ -199,8 +196,8 @@ impl DutyCycle {
     /// Admit a cycle from contiguous segments.
     ///
     /// # Errors
-    /// An empty or oversized segment list, or a non-finite accumulated
-    /// window.
+    /// An empty or oversized segment list, or a non-finite or unresolvable
+    /// accumulated window.
     pub fn new(segments: Vec<DutySegment>) -> Result<Self, ConductionError> {
         if segments.is_empty() {
             return Err(duty_error(
@@ -221,13 +218,14 @@ impl DutyCycle {
         let mut accumulated = 0.0f64;
         boundaries_s.push(0.0);
         for segment in &segments {
-            accumulated += segment.duration_s;
-            if !accumulated.is_finite() {
+            let next = accumulated + segment.duration_s;
+            if !next.is_finite() || next <= accumulated {
                 return Err(duty_error(
                     "duty cycle window",
-                    "accumulated duration left the finite range".to_string(),
+                    "a segment duration cannot advance the finite accumulated time".to_string(),
                 ));
             }
+            accumulated = next;
             boundaries_s.push(accumulated);
         }
         Ok(Self {
@@ -262,6 +260,14 @@ impl DutyCycle {
     /// hold its last value: a schedule that ends is a statement that the
     /// model has nothing to say afterwards.
     pub fn scale_at(&self, time_s: f64) -> Result<f64, ConductionError> {
+        let clamped = self.admit_time(time_s)?;
+        // At a jump, the point value retains the previous segment's endpoint.
+        // Interval energy is independent of that measure-zero convention.
+        let index = self.boundaries_s[1..].partition_point(|&end| end < clamped);
+        Ok(self.segments[index].scale_at_offset(clamped - self.boundaries_s[index]))
+    }
+
+    fn admit_time(&self, time_s: f64) -> Result<f64, ConductionError> {
         if !time_s.is_finite() || time_s < 0.0 {
             return Err(duty_error(
                 "duty cycle time",
@@ -277,33 +283,60 @@ impl DutyCycle {
                 ),
             ));
         }
-        let clamped = time_s.min(self.window_s);
-        for (index, segment) in self.segments.iter().enumerate() {
-            let end = self.boundaries_s[index + 1];
-            if clamped <= end || index + 1 == self.segments.len() {
-                return Ok(segment.scale_at_offset(clamped - self.boundaries_s[index]));
-            }
+        Ok(time_s.min(self.window_s))
+    }
+
+    /// Exact `∫ scale dt` over an interval inside the declared window.
+    ///
+    /// Integrates each intersected constant or linear segment analytically,
+    /// including jumps inside the interval. Local integrals avoid subtracting
+    /// nearly equal cumulative energies when a short pulse follows a long run.
+    /// Work is logarithmic in the segment count plus the number crossed; no
+    /// per-interval allocation or timestep refinement is required.
+    ///
+    /// # Errors
+    /// An invalid or reversed time interval, or an unrepresentable integral.
+    pub fn energy_scale_between(&self, start_s: f64, end_s: f64) -> Result<f64, ConductionError> {
+        if end_s < start_s {
+            return Err(duty_error(
+                "duty cycle interval",
+                format!("end {end_s} s precedes start {start_s} s"),
+            ));
         }
-        unreachable!("boundaries cover the window")
+        let start = self.admit_time(start_s)?;
+        let end = self.admit_time(end_s)?;
+        if start == end {
+            return Ok(0.0);
+        }
+        let first = self.boundaries_s[1..].partition_point(|&boundary| boundary <= start);
+        let last = self.boundaries_s[1..].partition_point(|&boundary| boundary < end);
+        let integral = compensated_sum((first..=last).map(|index| {
+            let left = start.max(self.boundaries_s[index]);
+            let right = end.min(self.boundaries_s[index + 1]);
+            let segment = self.segments[index];
+            let offset = self.boundaries_s[index];
+            let mean = f64::midpoint(
+                segment.scale_at_offset(left - offset),
+                segment.scale_at_offset(right - offset),
+            );
+            mean * (right - left)
+        }));
+        crate::require_finite("duty-cycle integrated scale", integral)
     }
 
     /// Exact `∫ scale dt` over the whole declared window.
     ///
-    /// Analytic per segment, so it is the reference the quadrature in
-    /// [`WindowedEnergyAudit`] is judged against rather than another
-    /// approximation of the same integral.
+    /// Analytic per authored segment. [`WindowedEnergyAudit`] compares it with
+    /// the interval integrals actually supplied to the thermal march.
     #[must_use]
     pub fn energy_scale_seconds(&self) -> f64 {
-        self.segments
-            .iter()
-            .fold(0.0f64, |acc, segment| acc + segment.energy_scale())
+        compensated_sum(self.segments.iter().map(|segment| segment.energy_scale()))
     }
 
     /// Whether every boundary falls on a multiple of `dt`, within tolerance.
     ///
-    /// Alignment is what makes the Crank-Nicolson energy audit exact: the
-    /// trapezoid rule reproduces a piecewise-linear profile only when no step
-    /// straddles a breakpoint.
+    /// Alignment describes temporal resolution of transitions. Source energy
+    /// is integrated exactly whether or not boundaries align with steps.
     #[must_use]
     pub fn steps_align(&self, dt_s: f64, tolerance: f64) -> bool {
         self.boundaries_s.iter().all(|boundary| {
@@ -337,9 +370,9 @@ impl WindowedEnergyAudit {
 
     /// Signed `delivered − declared`, J.
     ///
-    /// NOT normalized away: the gap is the integration error the caller chose
-    /// by picking a scheme and a step, and reporting it is how that choice
-    /// stays visible.
+    /// Uses independently accumulated delivered source energy; it is not set
+    /// to zero or normalized to the declaration. This is an input-energy
+    /// comparison, not a bound on temperature-history discretization error.
     #[must_use]
     pub fn residual_j(self) -> f64 {
         self.delivered_j - self.declared_j
@@ -432,16 +465,16 @@ pub struct DutyCycleSolution {
 ///
 /// `problem.source` is the FULL-LOAD volumetric source — typically the field
 /// [`crate::power::PowerMap::volumetric_source`] produced — and the cycle
-/// scales it. `base_power_w` is that map's total delivered power, used only
-/// to convert the schedule's dimensionless integral into joules for the
-/// audit.
+/// scales it. `base_power_w` is that map's total delivered power and must
+/// agree with the spatial integral of the assembled source. The audit uses
+/// the declared watts for its reference and assembled watts for delivery.
 ///
 /// The march covers exactly `ceil(window / dt)` steps and the window must be
 /// an exact multiple of the step, so no step straddles the end.
 ///
 /// # Errors
 /// [`ConductionError::ScenarioRow`] for a window that is not a whole number
-/// of steps or a non-finite base power, [`ConductionError::Config`] for a
+/// of steps or an invalid/mismatched base power, [`ConductionError::Config`] for a
 /// temperature-dependent conductivity, [`ConductionError::FieldLength`] for a
 /// mismatched initial vector, [`ConductionError::LinearSolveFailed`] on a
 /// non-converging step, and [`ConductionError::Cancelled`] at a step
@@ -513,9 +546,10 @@ pub fn march_duty_cycle_with_element_materials(
 /// existing primary-enthalpy history owner.
 ///
 /// Only the full-load volumetric source follows the schedule. Authored Robin
-/// and Neumann heat, the theta rule, and the source-energy audit keep their
-/// original meanings. Capacity, the spatial operator and its preconditioner
-/// are prepared once and reused for every interval.
+/// and Neumann heat retain their authored values. The theta rule applies to
+/// heat transport, while prescribed source energy is integrated analytically.
+/// Capacity, the spatial operator and its preconditioner are prepared once and
+/// reused for every interval.
 ///
 /// # Errors
 /// Capacity/assignment admission and source-domain refusals, plus every refusal
@@ -565,6 +599,11 @@ pub fn march_duty_cycle_with_capacity(
     let dofs = DofMap::new(boundary, n)?;
     let capacitance = storage.capacitance();
     let source_load = assemble_source_load(cx, mesh, source)?;
+    let source_power_w = admit_source_power(&source_load, base_power_w)?;
+    let declared_j = crate::require_finite(
+        "duty-cycle declared energy",
+        cycle.energy_scale_seconds() * base_power_w,
+    )?;
     // Keep the authored boundary load separate from the scheduled volumetric
     // power. In particular, zero duty must not switch a Robin bath to 0 K or
     // remove a Neumann heat flux. Assemble each load directly so a weak source
@@ -596,6 +635,7 @@ pub fn march_duty_cycle_with_capacity(
     let mut peak_time = 0.0f64;
     let mut steps_above = 0usize;
     let mut delivered_scale_seconds = 0.0f64;
+    let mut delivered_correction = 0.0f64;
 
     let mut scratch_k = vec![0.0f64; n];
     let mut rhs = vec![0.0f64; dofs.n()];
@@ -609,21 +649,21 @@ pub fn march_duty_cycle_with_capacity(
         let t_old = dt * (step as f64);
         #[allow(clippy::cast_precision_loss)]
         let t_new = dt * ((step + 1) as f64);
-        let scale_old = cycle.scale_at(t_old)?;
-        let scale_new = cycle.scale_at(t_new)?;
-        // The theta method's own load weighting: at theta = 0.5 this is the
-        // trapezoid rule, which is exact for a piecewise-linear profile when
-        // no step straddles a segment boundary.
-        let weight = theta.mul_add(scale_new, (1.0 - theta) * scale_old);
-        delivered_scale_seconds += weight * dt;
+        let source_scale_seconds = cycle.energy_scale_between(t_old, t_new)?;
+        let (sum, correction) =
+            fs_math::eft::two_sum(delivered_scale_seconds, source_scale_seconds);
+        delivered_scale_seconds = sum;
+        delivered_correction += correction;
 
         // Solve for the heat-driven temperature increment, with zero change
         // at the already lifted Dirichlet vertices. Relative convergence is
         // measured against this heat pulse, not the absolute background.
         system.operator.spmv(&temperature, &mut scratch_k);
         for (slot, &vertex) in dofs.free().iter().enumerate() {
-            let value =
-                dt * weight.mul_add(source_load[vertex], system.load[vertex] - scratch_k[vertex]);
+            let value = source_scale_seconds.mul_add(
+                source_load[vertex],
+                dt * (system.load[vertex] - scratch_k[vertex]),
+            );
             if !value.is_finite() {
                 return Err(ConductionError::NonFinite {
                     field: "duty-cycle right-hand side",
@@ -672,8 +712,11 @@ pub fn march_duty_cycle_with_capacity(
     })?;
 
     let energy = WindowedEnergyAudit {
-        declared_j: cycle.energy_scale_seconds() * base_power_w,
-        delivered_j: delivered_scale_seconds * base_power_w,
+        declared_j,
+        delivered_j: crate::require_finite(
+            "duty-cycle delivered energy",
+            (delivered_scale_seconds + delivered_correction) * source_power_w,
+        )?,
         window_s: cycle.window_s(),
         aligned: cycle.steps_align(dt, 1.0e-9),
     };
@@ -693,6 +736,37 @@ pub fn march_duty_cycle_with_capacity(
         energy,
         summary,
     })
+}
+
+fn compensated_sum(values: impl Iterator<Item = f64>) -> f64 {
+    let (mut sum, mut correction) = (0.0, 0.0);
+    for value in values {
+        let (next, error) = fs_math::eft::two_sum(sum, value);
+        sum = next;
+        correction += error;
+    }
+    sum + correction
+}
+
+fn admit_source_power(source_load: &[f64], declared_w: f64) -> Result<f64, ConductionError> {
+    let assembled_w = crate::require_finite(
+        "duty-cycle assembled power",
+        compensated_sum(source_load.iter().copied()),
+    )?;
+    let magnitude_w = crate::require_finite(
+        "duty-cycle source power magnitude",
+        compensated_sum(source_load.iter().map(|value| value.abs())),
+    )?;
+    let tolerance_w = 1.0e-10 * declared_w + 256.0 * f64::EPSILON * magnitude_w;
+    if (assembled_w - declared_w).abs() > tolerance_w {
+        return Err(duty_error(
+            "base power",
+            format!(
+                "declares {declared_w} W but the assembled full-load source integrates to {assembled_w} W; the energy audit must describe the heat actually supplied"
+            ),
+        ));
+    }
+    Ok(assembled_w)
 }
 
 /// Refuse a window that is not a whole number of steps.
@@ -796,27 +870,17 @@ pub struct LoweredDutyCycle {
 /// other axis takes more than one value across the cycle, and records the
 /// held values when it does not.
 ///
-/// # The lowered schedule is DISCONTINUOUS, and that costs exactness
+/// # The lowered schedule preserves discontinuous switching
 ///
 /// A scenario duty cycle declares dwells AT points, not transitions BETWEEN
 /// them, so it lowers to piecewise-CONSTANT segments — no implicit smoothing,
 /// because a step load is real and rounding it off changes the peak.
 ///
-/// The consequence is worth stating plainly, because it reverses a property
-/// this module otherwise has. The theta load weighting is the trapezoid rule
-/// at `theta = 0.5`, which is exact for a piecewise-LINEAR schedule with no
-/// step straddling a boundary — but a jump is not piecewise-linear. Across a
-/// segment boundary where the scale jumps by `ds`, the weighting misses
-/// exactly `(ds / 2) * dt` scale-seconds, first order in the step and
-/// independent of where the jump sits.
-///
-/// So a scenario-declared cycle does NOT deliver its declared energy exactly,
-/// and [`WindowedEnergyAudit::residual_j`] will report that gap rather than
-/// zero. The residual is analytic, not numerical noise: it is a step-resolution
-/// artifact of representing a discontinuity, it halves when the step halves,
-/// and it is the honest price of refusing to smooth a declared step. Callers
-/// who need an exact windowed balance must declare the transitions — a ramp is
-/// continuous, and the trapezoid rule integrates it exactly.
+/// Each dwell contributes its exact duration times power to the source
+/// integral, including when a transition falls inside a thermal timestep.
+/// Callers need not invent ramps to recover the declared input energy.
+/// Timestep refinement remains necessary to resolve the temperature response
+/// and its peaks; preserving joules alone does not resolve a short burst.
 ///
 /// # Errors
 /// [`ConductionError::ScenarioRow`] when the cycle declares dimensionless

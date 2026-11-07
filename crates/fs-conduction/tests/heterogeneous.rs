@@ -2743,7 +2743,7 @@ fn assigned_one_material_duty_matches_the_uniform_march() {
             &assigned,
             &transient_linear(),
             &cycle,
-            1.0,
+            2.0e3,
             &initial,
             1.0e9,
         )
@@ -2761,7 +2761,7 @@ fn assigned_one_material_duty_matches_the_uniform_march() {
             },
             &transient_linear(),
             &cycle,
-            1.0,
+            2.0e3,
             &initial,
             1.0e9,
         )
@@ -2818,7 +2818,7 @@ fn assigned_two_layer_duty_relaxes_to_the_series_interface() {
             &assigned,
             &transient_linear(),
             &cycle,
-            1.0,
+            0.0,
             &initial,
             1.0e9,
         )
@@ -2878,7 +2878,7 @@ fn assigned_duty_refuses_k_of_t() {
             &assigned,
             &transient_linear(),
             &cycle,
-            1.0,
+            0.0,
             &initial,
             1.0e9,
         )

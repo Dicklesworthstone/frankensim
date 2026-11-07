@@ -59,7 +59,7 @@ fn g1_two_material_ramp_heating_retains_each_caloric_mass_and_diffusion_rate() {
 
         // Independent P1 mode [0,1,-1,0] on the unit right tetrahedron:
         // eigenvalue 4*k/(rho*Cp). Uniform heating affects only the mean.
-        let scale_seconds = 0.375 + (theta - 0.5) * 0.25;
+        let scale_seconds = 0.375;
         let mut stored_j = 0.0;
         for (element, (volumetric, conductivity)) in [(20.0, 2.0), (60.0, 4.0)]
             .into_iter()
