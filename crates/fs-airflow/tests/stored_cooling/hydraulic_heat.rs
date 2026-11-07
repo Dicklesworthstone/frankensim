@@ -256,3 +256,51 @@ fn selected_hydraulic_model_keeps_joint_storage_transaction_and_work_gates() {
         assert_eq!(state.solid_specific_enthalpy_j_kg(), old_solid.as_slice());
     });
 }
+
+#[test]
+fn electrical_pump_losses_enter_joint_native_storage_without_duplicate_hydraulic_heat() {
+    use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::pressure::parallel::pump::power::{
+        PumpDriveCurve, PumpLossRouting, PumpPowerPoint,
+    };
+    use fs_qty::Power;
+    fixture(1.0, |cx, _, ordinary, _, state, mesh, material| {
+        let resistance = high_resistance();
+        let original = ordinary.branches()[0];
+        let heated = ParallelLiquidNetwork::try_new(cx, &[ParallelLiquidBranch {
+            resistances: &resistance,
+            pressure_budget: PressureDrivenBudget {
+                maximum_neglected_hydraulic_power_w: 0.0,
+                ..original.pressure_budget
+            },
+            ..original
+        }]).unwrap().with_hydraulic_dissipation();
+        let drive = PumpDriveCurve::try_new([0.0, 2e-6].map(|q| PumpPowerPoint {
+            flow: VolumetricFlowRate::new(q),
+            shaft_input: Power::new(50.0),
+            electrical_input: Power::new(70.0),
+        }).to_vec(), (990.0, 1010.0), (1e-6, 3e-6),
+            PumpLossRouting { pump_to_reservoir: 1.0, drive_to_reservoir: 1.0 },
+            SourceProvenance::new("synthetic immersed pump/drive storage test", "joint-drive-test"),
+        ).unwrap();
+        let pump = high_head_pump().with_drive_curve(drive);
+        let source = ScalarField::uniform("no body heater", 0.0).unwrap();
+        let result = heated.advance_stored_solid_with_pump(cx, state, 1.0, 0.0,
+            &[300.0], &pump, StoredSolidProblem {
+                mesh, material, source: &source, element_materials: None, interfaces: None,
+            }, heated_controls(), |_, rows| boundary(mesh, rows)).unwrap();
+        let liquid = &result.liquid;
+        let solid = &liquid.circuit.state.solid.state;
+        assert!((liquid.deposited_hydraulic_energy_j - 20.0).abs() < 1e-6);
+        assert!((liquid.drive_heat_j - 50.0).abs() < 1e-6);
+        // Both accepted histories receive exactly the electrical input. Pump
+        // loss enters the reservoir; only the real wall transfer enters solid.
+        assert!((solid.stored_energy_change_j + liquid.stored_enthalpy_change_j - 70.0).abs() < 2e-6);
+        assert!(solid.stored_energy_change_j > 0.0);
+        assert_eq!(liquid.external_heat_j, 0.0);
+        assert_eq!(result.solid_external_heat_j, 0.0);
+        assert!(result.interface_energy_residual_j.abs() <= heated_controls().joint_energy_tolerance_j);
+        assert!(result.combined_energy_residual_j.abs() <= heated_controls().joint_energy_tolerance_j);
+        assert_eq!(state.reservoir().state(), liquid.final_state);
+        assert_eq!(state.solid_specific_enthalpy_j_kg(), solid.specific_enthalpy_j_kg.as_slice());
+    });
+}

@@ -4485,3 +4485,35 @@ modest-property-variation assumption remain active. The ordinary
 geometry and heated length. Regressions cover subdivision, source identity,
 piston/body and fixed-volume energy, latent heat, and mixed heat-network
 exchange.
+
+## Pump drive input and coolant heating
+
+Fixed-speed liquid cooling pumps may bind an independently sourced `PumpDriveCurve`
+through `PumpHeadCurve::with_drive_curve`. Input samples specify pump-inlet flow,
+shaft power and electrical power at the head curve's same fixed speed, with
+explicit inlet-density and kinematic-viscosity support. Bounded piecewise-linear
+interpolation admits only actual trials satisfying
+`electrical >= shaft >= rho_in * g * H(Q_in) * Q_in`. This check is also applied
+between head samples, where hydraulic output is quadratic in flow. Nonzero
+shutoff consumption is retained; no constant efficiency, affinity scaling or
+unprovided motor data is inferred.
+
+`PumpLossRouting` separately declares the fraction of pump loss
+`shaft - hydraulic` and drive loss `electrical - shaft` delivered to the
+well-mixed finite reservoir. The complementary fractions leave to the explicitly
+unmodelled surroundings. The operating point reports all input powers, both
+losses and both heat destinations. The finite-reservoir implicit solve includes
+this heat at every current material/flow trial, so heating changes coolant
+enthalpy, viscosity and the next pump operating point. Its report retains
+`drive_heat_j` separately from user-supplied external heat and branch return heat.
+Do not include this same heat again in the external-heat argument.
+
+The spatial stored-solid/reservoir driver includes drive heat in its joint
+energy balance. Hydraulic output still belongs to the original network's
+hydraulic-dissipation or explicit omission model and is never added twice.
+All existing source, work, energy and rollback gates apply. This is an
+endpoint-held quasi-steady equipment model with declared heat routing, not a
+rotor/inverter transient, cavitation model or automatic map extrapolation.
+Focused pump, reservoir and stored-cooling tests exercise input conservation,
+shutoff consumption, interior-curve infeasibility, thermal feedback, jointly
+stored energy and transactional refusal.

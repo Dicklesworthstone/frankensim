@@ -9,10 +9,16 @@
 //! stability, cavitation, efficiency or pump-viscosity-correction certificate.
 //! The caller must supply a curve applicable to the declared inlet viscosity
 //! range; changing viscosity beyond that range refuses. No affinity scaling or
-//! motor heat is invented. Head data are not material properties.
+//! motor heat is invented. Optional, separately sourced drive curves supply
+//! shaft/electrical power and declared reservoir heat. Head data are not
+//! material properties.
 
 /// Joint pump operating point and common-solid thermal feedback.
 pub mod solid;
+/// Equipment input power and explicit pump/motor waste-heat destinations.
+pub mod power;
+
+use power::{PumpDriveCurve, PumpPowerState};
 
 use fs_exec::Cx;
 use fs_material::liquid::ResolvedLiquidState;
@@ -38,6 +44,7 @@ pub struct PumpHeadCurve {
     gravity_m_per_s2: f64,
     kinematic_viscosity_domain_m2_s: (f64, f64),
     source: SourceProvenance,
+    drive: Option<PumpDriveCurve>,
 }
 impl PumpHeadCurve {
     /// Admit 2..=1024 increasing flows, nonincreasing nonnegative heads, positive
@@ -59,8 +66,18 @@ impl PumpHeadCurve {
         {
             return Err(PumpOperatingError::Invalid("invalid pump curve, gravity, source or viscosity domain"));
         }
-        Ok(Self { points, gravity_m_per_s2, kinematic_viscosity_domain_m2_s, source })
+        Ok(Self { points, gravity_m_per_s2, kinematic_viscosity_domain_m2_s, source, drive: None })
     }
+    /// Bind independently authored shaft/electrical input data at the SAME
+    /// fixed speed. Every evaluation must lie in both curves' fluid/flow domains.
+    /// Reservoir loss routing is consumed only by finite-reservoir drivers.
+    #[must_use]
+    pub fn with_drive_curve(mut self, drive: PumpDriveCurve) -> Self {
+        self.drive = Some(drive);
+        self
+    }
+    /// Optional original drive data and explicit thermal destinations.
+    pub fn drive_curve(&self) -> Option<&PumpDriveCurve> { self.drive.as_ref() }
     /// Original samples, including both admitted endpoint flows.
     pub fn points(&self) -> &[PumpHeadPoint] { &self.points }
     /// Original equipment-data citation; not a material receipt.
@@ -83,7 +100,8 @@ impl PumpHeadCurve {
         Ok((density, viscosity))
     }
     /// Evaluate head and hydraulic power at the actual inlet material and flow.
-    /// Shaft/electrical power and efficiency are deliberately not inferred.
+    /// Shaft/electrical input is evaluated only when a drive curve is bound.
+    /// Head alone never implies efficiency or an electrical input.
     pub fn evaluate(
         &self, inlet: &ResolvedLiquidState, flow: VolumetricFlowRate,
     ) -> Result<PumpSupplyState, PumpOperatingError> {
@@ -110,9 +128,12 @@ impl PumpHeadCurve {
         if !pressure.is_finite() || !power.is_finite()
             || (head > 0.0 && pressure <= 0.0) || (pressure > 0.0 && q > 0.0 && power <= 0.0)
         { return Err(PumpOperatingError::Invalid("pump pressure or hydraulic power is unrepresentable")); }
+        let drive_power = self.drive.as_ref().map(|drive| {
+            drive.evaluate(flow, density, viscosity, power)
+        }).transpose()?;
         Ok(PumpSupplyState { inlet_volume_flow_m3_s: q, inlet_density_kg_m3: density,
             inlet_kinematic_viscosity_m2_s: viscosity, head_m: head,
-            available_pressure_pa: pressure, hydraulic_power_w: power })
+            available_pressure_pa: pressure, hydraulic_power_w: power, drive_power })
     }
 }
 
@@ -131,6 +152,9 @@ pub struct PumpSupplyState {
     pub available_pressure_pa: f64,
     /// Pressure times supply volume flow, W; not shaft/electrical power.
     pub hydraulic_power_w: f64,
+    /// Original drive input and waste heat at this same actual operating point.
+    /// Absent data stay absent; the head-only model supplies no power estimate.
+    pub drive_power: Option<PumpPowerState>,
 }
 
 /// Pressure bracket and absolute/relative residual budget for pump/network matching.

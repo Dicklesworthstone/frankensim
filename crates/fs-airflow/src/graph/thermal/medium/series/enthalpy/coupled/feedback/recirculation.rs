@@ -12,6 +12,9 @@
 //! dissipation follows the network's explicit deposited/omitted model. Omitted
 //! losses remain bounded in both watts and step joules; deposited loss enters
 //! the actual returning enthalpy, never a second pump-heat source.
+//! An optional original drive curve supplies pump/motor waste heat explicitly
+//! routed into this reservoir. It is re-evaluated at each trial inlet/flow and
+//! never includes the hydraulic output already owned by the circuit.
 
 /// Closed-loop buoyant circulation through the same finite-inventory balance.
 pub mod gravity;
@@ -115,7 +118,10 @@ pub struct RecirculatingLiquidStep<T> {
     pub returned_heat_j: f64,
     /// Caller-supplied reservoir heat over this step, counted once, J.
     pub external_heat_j: f64,
-    /// Stored change minus return heat minus external heat, J.
+    /// Pump and motor losses explicitly routed into this reservoir, J. Zero
+    /// for head-only equipment; hydraulic dissipation is excluded from this term.
+    pub drive_heat_j: f64,
+    /// Stored change minus return heat, external heat and drive heat, J.
     pub energy_residual_j: f64,
     /// Reported hydraulic energy omitted from the caloric balance, J.
     pub neglected_hydraulic_energy_j: f64,
@@ -192,6 +198,8 @@ impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'car
     /// circuit. Each trial changes the COMMON supply temperature, recomputing
     /// inlet density, pump applicability, flow split, transport and outlet mix.
     /// `external_heat_j` is a separate signed step input to the reservoir only.
+    /// A bound pump drive curve additionally supplies its explicitly routed
+    /// losses; do not include those losses in `external_heat_j` a second time.
     /// Work is shared across every inlet, pressure and branch trial in the step.
     /// The reservoir changes only on success; the returned circuit was evaluated
     /// at exactly the committed reservoir temperature, not an unevaluated guess.
@@ -280,6 +288,7 @@ trait ReservoirCircuit {
     fn exchange(&self, inlet: EquilibriumPhaseState) -> ReservoirExchange;
     fn flow_evaluations(&self) -> usize;
     fn solid_solves(&self) -> usize;
+    fn drive_heat_rate_w(&self) -> f64 { 0.0 }
 }
 fn parallel_exchange(fluid: &ParallelLiquidSolution<'_>, inlet: EquilibriumPhaseState) -> ReservoirExchange {
     ReservoirExchange {
@@ -294,6 +303,9 @@ impl ReservoirCircuit for PumpOperatingPoint<'_, ParallelLiquidSolution<'_>> {
     fn exchange(&self, inlet: EquilibriumPhaseState) -> ReservoirExchange { parallel_exchange(&self.state, inlet) }
     fn flow_evaluations(&self) -> usize { self.total_flow_evaluations }
     fn solid_solves(&self) -> usize { self.total_solid_solves }
+    fn drive_heat_rate_w(&self) -> f64 {
+        self.supply.drive_power.map_or(0.0, |power| power.reservoir_heat_w)
+    }
 }
 
 fn integrate<T: ReservoirCircuit>(
@@ -315,8 +327,9 @@ fn integrate<T: ReservoirCircuit>(
         let returned = duration * exchange.net_heat_rate_w;
         let neglected = duration * exchange.neglected_hydraulic_power_w;
         let deposited = duration * exchange.deposited_hydraulic_power_w;
-        let residual = (stored - returned) - external;
-        if [stored, returned, neglected, deposited, residual].iter().any(|v| !v.is_finite())
+        let drive_heat = duration * circuit.drive_heat_rate_w();
+        let residual = ((stored - returned) - external) - drive_heat;
+        if [stored, returned, neglected, deposited, drive_heat, residual].iter().any(|v| !v.is_finite())
             || neglected > controls.maximum_neglected_hydraulic_energy_j
             || !exchange.inlet_matches
         { return Err(RecirculationError::Invalid("inconsistent inlet or unrepresentable/excessive step energy")); }
@@ -328,7 +341,7 @@ fn integrate<T: ReservoirCircuit>(
         Ok(RecirculatingLiquidStep { circuit, initial: reservoir.state, final_state,
             start_time_s: reservoir.time_s, end_time_s: end,
             stored_enthalpy_change_j: stored, returned_heat_j: returned, external_heat_j: external,
-            energy_residual_j: residual, neglected_hydraulic_energy_j: neglected,
+            drive_heat_j: drive_heat, energy_residual_j: residual, neglected_hydraulic_energy_j: neglected,
             deposited_hydraulic_energy_j: deposited,
             inlet_evaluations: calls, total_flow_evaluations: total_flow, total_solid_solves: total_solid })
     };
@@ -381,6 +394,9 @@ impl<R> ReservoirCircuit for PumpOperatingPoint<'_, CoupledParallelLiquidSolutio
     fn exchange(&self, inlet: EquilibriumPhaseState) -> ReservoirExchange { parallel_exchange(&self.state.fluid, inlet) }
     fn flow_evaluations(&self) -> usize { self.total_flow_evaluations }
     fn solid_solves(&self) -> usize { self.total_solid_solves }
+    fn drive_heat_rate_w(&self) -> f64 {
+        self.supply.drive_power.map_or(0.0, |power| power.reservoir_heat_w)
+    }
 }
 
 impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'card, H> {
@@ -398,7 +414,8 @@ impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'car
     /// this adapter does not invent or certify its storage discretization.
     /// Flow work and actual solid calls are capped across ALL inlet trials, not
     /// reset for each pressure solve. Hydraulic heat follows the network model;
-    /// no additional pump-inefficiency heat is inferred.
+    /// pump/motor waste heat requires a separately bound drive curve and explicit
+    /// reservoir routing. Its power is recomputed at every inlet/flow trial.
     pub fn advance_reservoir_with_pump_coupled_iqn<'s, R, F>(
         &self, cx: &Cx<'_>, reservoir: &mut LiquidReservoir<'a>, end_time_s: f64,
         external_heat_j: f64, initial_walls_k: &[f64], pump: &'s PumpHeadCurve,

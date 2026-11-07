@@ -270,3 +270,79 @@ fn regional_power_failure_cancellation_and_shared_solid_budget_roll_back_invento
         assert_eq!(tank,original);
     });
 }
+
+use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::pressure::parallel::pump::power::{
+    PumpDriveCurve, PumpLossRouting, PumpPowerPoint,
+};
+use fs_qty::Power;
+
+fn powered_pump(routing: PumpLossRouting) -> PumpHeadCurve {
+    let drive = PumpDriveCurve::try_new([0.0, 4e-5].map(|q| PumpPowerPoint {
+        flow: VolumetricFlowRate::new(q), shaft_input: Power::new(2.0),
+        electrical_input: Power::new(3.0),
+    }).to_vec(), (900.0, 1100.0), (1e-7, 1e-4), routing,
+        fs_airflow::SourceProvenance::new("synthetic submerged fixed-speed pump", "reservoir-drive-test")).unwrap();
+    pump().with_drive_curve(drive)
+}
+
+#[test]
+fn immersed_pump_and_motor_heat_inventory_without_double_counting_hydraulic_work() {
+    with_network(FIXED, |cx, original| {
+        let branches: Vec<_> = original.branches().iter().map(|b| ParallelLiquidBranch {
+            pressure_budget: PressureDrivenBudget {
+                maximum_neglected_hydraulic_power_w: 0.0, ..b.pressure_budget
+            }, ..*b
+        }).collect();
+        let network = ParallelLiquidNetwork::try_new(cx, &branches).unwrap().with_hydraulic_dissipation();
+        let mut controls = coupling();
+        controls.network.work.maximum_neglected_hydraulic_power_w = 0.0;
+        let step = ReservoirStepControls { maximum_neglected_hydraulic_energy_j: 0.0, ..step() };
+        let curve = powered_pump(PumpLossRouting { pump_to_reservoir: 1.0, drive_to_reservoir: 1.0 });
+        let mut tank = network.reservoir(cx, 0.1, Temperature::new(300.0), 0.0).unwrap();
+        let initial = tank.clone();
+        let result = network.advance_reservoir_with_pump_coupled_iqn(cx, &mut tank, 10.0, 0.0,
+            &[300.0; 2], &curve, &controls, step, |_, rows| Ok(body(rows, [0.0; 2]))).unwrap();
+        // Adiabatic zero-power walls: the entire 3 W electrical input becomes
+        // stored coolant heat. Hydraulic work must enter exactly ONCE.
+        assert!((result.stored_enthalpy_change_j-30.0).abs() < 2e-6);
+        assert!((tank.state().temperature_k()-300.15).abs() < 1e-7);
+        assert!(result.deposited_hydraulic_energy_j > 0.0);
+        assert!((result.returned_heat_j-result.deposited_hydraulic_energy_j).abs() < 1e-6);
+        assert!((result.drive_heat_j+result.deposited_hydraulic_energy_j-30.0).abs() < 1e-6);
+        assert_eq!(result.neglected_hydraulic_energy_j, 0.0);
+        assert!(result.energy_residual_j.abs() <= 1e-6);
+
+        // The same equipment cooled entirely outside the reservoir consumes
+        // the same electrical power; only hydraulic work heats the inventory.
+        let exterior = powered_pump(PumpLossRouting { pump_to_reservoir: 0.0, drive_to_reservoir: 0.0 });
+        let mut outside = initial;
+        let cool = network.advance_reservoir_with_pump_coupled_iqn(cx, &mut outside, 10.0, 0.0,
+            &[300.0; 2], &exterior, &controls, step, |_, rows| Ok(body(rows, [0.0; 2]))).unwrap();
+        assert_eq!(cool.drive_heat_j, 0.0);
+        assert!((cool.stored_enthalpy_change_j-cool.deposited_hydraulic_energy_j).abs() < 1e-6);
+        assert!(tank.state().temperature_k() > outside.state().temperature_k()+0.1);
+    });
+}
+
+#[test]
+fn drive_loss_changes_fixed_wall_feedback_and_refusals_preserve_reservoir() {
+    with_network(VARIABLE, |cx, network| {
+        let powered = powered_pump(PumpLossRouting { pump_to_reservoir: 1.0, drive_to_reservoir: 1.0 });
+        let mut tank = network.reservoir(cx, 0.1, Temperature::new(300.0), 0.0).unwrap();
+        let mut unpowered = tank.clone();
+        let baseline = pump();
+        let cold = network.advance_reservoir_with_pump(cx, &mut unpowered, 10.0, 0.0, &[300.0; 2],
+            &baseline, local(), work(), operating(), step()).unwrap();
+        let hot = network.advance_reservoir_with_pump(cx, &mut tank, 10.0, 0.0, &[300.0; 2],
+            &powered, local(), work(), operating(), step()).unwrap();
+        assert!(tank.state().temperature_k() > unpowered.state().temperature_k());
+        assert!(hot.circuit.state.total_mass_flow_kg_per_s > cold.circuit.state.total_mass_flow_kg_per_s);
+        assert!((hot.stored_enthalpy_change_j-hot.returned_heat_j-hot.drive_heat_j).abs() < 1e-6);
+        let original = tank.clone();
+        assert!(network.advance_reservoir_with_pump(cx, &mut tank, 20.0, 0.0, &[300.0; 2],
+            &powered, local(), work(), operating(), ReservoirStepControls {
+                temperature_bracket_k: (290.0, 291.0), ..step()
+            }).is_err());
+        assert_eq!(tank, original);
+    });
+}

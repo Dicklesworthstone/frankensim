@@ -273,3 +273,68 @@ fn signed_cooling_and_opposing_heat_defects_keep_original_regional_gates() {
         assert!(original.unwrap_err().to_string().contains("original test solid refusal"));
     });
 }
+
+use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::pressure::parallel::pump::power::{
+    PumpDriveCurve, PumpLossRouting, PumpPowerPoint,
+};
+use fs_qty::Power;
+
+fn drive(shaft_w: f64, electrical_w: f64) -> PumpDriveCurve {
+    PumpDriveCurve::try_new([0.0, 1e-5].map(|q| PumpPowerPoint {
+        flow: VolumetricFlowRate::new(q), shaft_input: Power::new(shaft_w),
+        electrical_input: Power::new(electrical_w),
+    }).to_vec(), (990.0, 1010.0), (1e-6, 4e-6),
+        PumpLossRouting { pump_to_reservoir: 0.25, drive_to_reservoir: 0.75 },
+        SourceProvenance::new("synthetic fixed-speed input powers", "pump-drive-test")).unwrap()
+}
+
+#[test]
+fn pump_drive_conserves_input_and_preserves_shutoff_losses() {
+    with_network(FIXED, |cx, network| {
+        let curve = pump(false).with_drive_curve(drive(0.001, 0.002));
+        let result = network.solve_with_pump(cx, &[300.0; 2], &curve, local(), work(), root()).unwrap();
+        let power = result.supply.drive_power.unwrap();
+        close(result.supply.hydraulic_power_w, 0.00025, 1e-10);
+        close(power.pump_loss_w, 0.00075, 1e-10);
+        close(power.drive_loss_w, 0.001, 1e-12);
+        close(power.reservoir_heat_w, 0.25*0.00075+0.75*0.001, 1e-10);
+        close(power.electrical_input_w, result.supply.hydraulic_power_w
+            +power.reservoir_heat_w+power.surroundings_heat_w, 1e-12);
+        let shutoff = curve.evaluate(&result.state.inlet_material, VolumetricFlowRate::new(0.0)).unwrap();
+        assert_eq!(shutoff.hydraulic_power_w, 0.0);
+        let idle = shutoff.drive_power.unwrap();
+        assert_eq!(idle.shaft_input_w, 0.001);
+        assert_eq!(idle.electrical_input_w, 0.002);
+        close(idle.reservoir_heat_w+idle.surroundings_heat_w, 0.002, 1e-12);
+    });
+}
+
+#[test]
+fn power_curves_refuse_impossible_interior_output_and_unsupported_material() {
+    with_network(FIXED, |cx, network| {
+        let head = pump(false);
+        let state = network.solve_with_pump(cx, &[300.0; 2], &head, local(), work(), root()).unwrap();
+        let curve = head.with_drive_curve(drive(0.0001, 0.0002));
+        // Both head endpoints have zero hydraulic output, but between them
+        // rho*g*H(Q)*Q exceeds the authored shaft input. Do not clip the loss.
+        for q in [0.0, 1e-5] {
+            assert!(curve.evaluate(&state.state.inlet_material, VolumetricFlowRate::new(q)).is_ok());
+        }
+        assert!(curve.evaluate(&state.state.inlet_material, VolumetricFlowRate::new(5e-6)).is_err());
+        assert!(network.solve_with_pump(cx, &[300.0; 2], &curve, local(), work(), root()).is_err());
+    });
+    with_network(FIXED, |cx, network| {
+        let nominal = drive(1.0, 2.0);
+        let unsupported = PumpDriveCurve::try_new(nominal.points().to_vec(),
+            (900.0, 950.0), nominal.viscosity_domain_m2_s(), nominal.routing(),
+            nominal.source().clone()).unwrap();
+        let curve = pump(false).with_drive_curve(unsupported);
+        assert!(matches!(network.solve_with_pump(cx, &[300.0; 2], &curve,
+            local(), work(), root()), Err(PumpOperatingError::OutsideCurve { .. })));
+    });
+    assert!(PumpDriveCurve::try_new(vec![
+        PumpPowerPoint { flow: VolumetricFlowRate::new(0.0), shaft_input: Power::new(2.0), electrical_input: Power::new(1.0) },
+        PumpPowerPoint { flow: VolumetricFlowRate::new(1e-5), shaft_input: Power::new(1.0), electrical_input: Power::new(2.0) },
+    ], (990.0, 1010.0), (1e-6, 4e-6), PumpLossRouting { pump_to_reservoir: 1.0, drive_to_reservoir: 1.0 },
+        SourceProvenance::new("test", "invalid")).is_err());
+}
