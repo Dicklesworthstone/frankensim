@@ -71,6 +71,10 @@ pub enum VectorDielectricHysteresisError {
     Material(FieldStorageError),
     Invalid(&'static str),
     Cancelled,
+    DisplacementRange {
+        observed_c_m2: f64,
+        maximum_c_m2: f64,
+    },
     BranchNonconvergence {
         branch: usize,
         iterations: usize,
@@ -101,9 +105,6 @@ fn electric_reason(reason: &'static str) -> &'static str {
             "vector incremental permittivity is not representably SPD"
         }
         "finite vector flux density required" => "finite vector electric displacement required",
-        "vector flux requires a field outside the original model domain" => {
-            "electric displacement requires a field outside the original model domain"
-        }
         "retained vector inverse missed its physical flux residual" => {
             "retained vector inverse missed its physical electric-displacement residual"
         }
@@ -126,6 +127,13 @@ impl From<VectorHysteresisError> for VectorDielectricHysteresisError {
             VectorHysteresisError::Material(error) => error.into(),
             VectorHysteresisError::Invalid(reason) => Self::Invalid(electric_reason(reason)),
             VectorHysteresisError::Cancelled => Self::Cancelled,
+            VectorHysteresisError::FluxRange {
+                observed_t,
+                maximum_t,
+            } => Self::DisplacementRange {
+                observed_c_m2: observed_t,
+                maximum_c_m2: maximum_t,
+            },
             VectorHysteresisError::BranchNonconvergence { branch, iterations } => {
                 Self::BranchNonconvergence { branch, iterations }
             }

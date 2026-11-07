@@ -493,6 +493,42 @@ rung. It does not add eddy currents, mechanical motion, thermal feedback,
 anisotropic fits, path-independent coenergy, or experimental material authority.
 Continuous-path claims require reversal/rotation resolution and refinement.
 
+`planar::nonlinear::hysteretic::path` resolves one explicitly authored affine
+current-density/exterior-potential segment through the SAME native field and
+return-map owners. Starting impressed current is supplied explicitly and checked
+against the retained constitutive effort on free coordinates, without solving
+away an inconsistent initial state. Exterior differences are interpolated using
+the original deterministic reference for each connected component. Every native
+solve installs the authored target component gauge; accepted potentials are
+never shifted afterward independently of their retained curl and memory.
+
+A full increment is compared with two sequential halves. Only the two-half
+history is retained, without extrapolated or averaged polarization. Independent
+indicators control branch polarization, L1 per-cell physical pinning-heat error,
+and the maximum of supplied-work defect and stable native numerical remainder.
+Absolute allowances are weighted by interval fraction; relative allowances use
+local changes. Compensated accumulation retains accepted cell heat, storage,
+numerical loss, current work and boundary work, with an independent final local
+and assembled energy gate. Numerical loss remains excluded from physical heat.
+
+The complete segment has explicit field-solve and Newton-update caps including
+failed and discarded comparisons; native per-solve Krylov, backtracking and
+material caps remain unchanged. A typed flux-range refusal or bounded nonlinear
+failure subdivides the loading interval: an invalid coarse boundary lift need
+not prevent reaching a physically admissible endpoint. Failed Newton work still
+counts against the complete-path cap, and depth exhaustion preserves its native
+cause. Invalid input, cancellation and other source/constitutive refusals remain
+failures. The bounded stack holds interval descriptors, not a history tree, and
+reuses a rejected first half only from its identical starting memory.
+Any refusal or cancellation leaves the complete accepted field unchanged.
+`tests/hysteretic_magnetic/path.rs` covers analytical linear work, exact saturated
+loop heat and minor-loop memory, an independently uniform vector-history
+reference, disconnected gauges, valid continuation near the source limit after
+a coarse failure, strict budgets and late-cancellation replay.
+Indicators are empirical, not certified global bounds or event detection.
+Waveform turns and source events require separate authored segments. This static
+continuation does not integrate time, eddy currents or thermal chronology.
+
 Verification status for this addition: source/energy review and the available
 format/diff checks completed; native regression execution remains pending.
 The execution environment ran out of shared storage and then disconnected

@@ -45,8 +45,20 @@ pub enum VectorHysteresisError {
     Material(FieldStorageError),
     Invalid(&'static str),
     Cancelled,
-    BranchNonconvergence { branch: usize, iterations: usize },
-    FluxNonconvergence { iterations: usize, residual_t: f64 },
+    /// Requested |B| exceeds even saturated polarization plus the supported
+    /// background field. A loading continuation may retry a smaller increment.
+    FluxRange {
+        observed_t: f64,
+        maximum_t: f64,
+    },
+    BranchNonconvergence {
+        branch: usize,
+        iterations: usize,
+    },
+    FluxNonconvergence {
+        iterations: usize,
+        residual_t: f64,
+    },
 }
 impl From<FieldStorageError> for VectorHysteresisError {
     fn from(value: FieldStorageError) -> Self {
@@ -725,9 +737,10 @@ impl VectorHysteresis {
                 .map(|b| b.saturation_polarization_t)
                 .sum::<f64>();
         if magnitude > maximum {
-            return Err(invalid(
-                "vector flux requires a field outside the original model domain",
-            ));
+            return Err(VectorHysteresisError::FluxRange {
+                observed_t: magnitude,
+                maximum_t: maximum,
+            });
         }
         let target = finite(
             controls

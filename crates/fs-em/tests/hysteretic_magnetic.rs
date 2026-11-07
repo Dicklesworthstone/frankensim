@@ -3,6 +3,9 @@
 
 #![cfg(feature = "magnetic-hysteresis")]
 
+#[path = "hysteretic_magnetic/path.rs"]
+mod path;
+
 use fs_em::planar::{
     PlanarMagnetostatics,
     nonlinear::{

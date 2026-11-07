@@ -600,9 +600,9 @@ impl<'m, C: SpatialConductorMaterial> SpatialHystereticInduction<'m, C> {
                     error,
                     SpatialHystereticInductionError::Material(
                         VectorHysteresisError::FluxNonconvergence { .. }
+                            | VectorHysteresisError::FluxRange { .. }
                     ) | SpatialHystereticInductionError::Material(VectorHysteresisError::Invalid(
-                        "vector flux requires a field outside the original model domain"
-                            | "vector magnetic field exceeds its original magnitude domain"
+                        "vector magnetic field exceeds its original magnitude domain"
                     ))
                 )
             },

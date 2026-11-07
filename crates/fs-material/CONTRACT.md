@@ -7607,6 +7607,10 @@ numerical term is not heat; endpoint work is not an exact arbitrary rotating
 path integral. Resolve direction changes and refine the history. Original
 source/field/flux domains, constitutive and work residuals, bounded iterations
 and cancellation gate acceptance without modifying the previous state.
+An imposed B above the supported background-plus-saturation envelope returns
+typed `FluxRange` with observed and maximum magnitudes [T], allowing a loading
+owner to distinguish a retryable numerical boundary lift from invalid inputs.
+The dielectric facade preserves this diagnosis as `DisplacementRange` [C/m²].
 
 Eight physical tests cover the scalar state/heat limit, independent spherical
 minimization, rotation covariance including tangents, an analytic rotating-loop

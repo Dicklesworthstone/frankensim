@@ -17,6 +17,9 @@
 //! variational solve. No anisotropic fit, measured-material qualification or
 //! path-independent coenergy claim is implied.
 
+/// Bounded continuation of an authored quasistatic magnetic loading segment.
+pub mod path;
+
 use super::{
     MagneticError, NonlinearMagneticControls, NonlinearMagneticError, NonlinearMagneticReport,
     PlanarMagnetostatics, PositiveQuadratic, VariationalEvaluation, finite, gradients, poll,
