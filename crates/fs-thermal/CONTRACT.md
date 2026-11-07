@@ -747,6 +747,34 @@ Six focused tests cover seed-free growth, finite-vapor inventory and energy,
 extinction/regrowth, inactive boundaries, independent caloric reference shifts,
 invalid charts/inventories, cancellation and bounded nonlinear work.
 
+### Thermally resistive supported deposits
+
+`sublimation::coating::resistance` stores the existing deposit and nonvolatile
+substrate at separate temperatures in their original caloric charts.
+`heat_resistive_surface` distributes independently supplied heat at fixed
+positive masses. `advance_resistive_surface_with_heat` additionally grows or
+sublimes the deposit using the original molecular, gas-film and finite-vapor
+laws at the deposit temperature. Explicit conductance gives
+`q = dt*G*(T_substrate,1 - T_deposit,1)`, positive toward the deposit. The
+balances are `M_s*dh_s = Q_s-q` and `m_d0*dh_d + dm*L = Q_d+q`.
+The interface heat cancels globally; carried vapor enthalpy includes latent
+heat once. A finite nonisothermal gas owner can use the heat-only kernel with
+its accepted remaining deposit mass and original stream-energy correction.
+
+Total conservation eliminates substrate enthalpy, leaving one allocation-free
+bounded scalar solve. Both local balances and represented total storage are
+admitted. Stiff contacts are polished against actual stored/transported heat,
+not a large predictor heat; an unrepresentable temperature jump refuses.
+Insulated or zero-duration exchange preserves an unheated support exactly.
+Original chart refusals, one shared evaluation allowance and cancellation
+remain transactional. Bare inputs and complete coating extinction explicitly
+require an interface transition; no seed or common-temperature birth is
+invented. Conductance and exposed area are caller-owned and frozen over the
+step. This two-node, first-order model does not resolve through-layer profiles,
+porosity, geometry growth or contact evolution. Independent two-body algebra,
+exponential time refinement, nonlinear calorics, latent/finite-vapor balances
+and vapor-pressure feedback test the numerical and conservation claims.
+
 ### Supported deposits sharing one finite vapor inventory
 
 `sublimation::coating::chamber::advance_supported_chamber` joins bare or coated

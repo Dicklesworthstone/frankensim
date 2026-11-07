@@ -6,15 +6,18 @@
 //! No nucleation barrier, contact-angle law or arbitrary numerical seed is
 //! supplied. A zero inventory on an undersaturated surface cannot evaporate.
 //!
-//! This is an isothermal-through-thickness surface approximation. It is useful
-//! for thin deposits with negligible internal resistance, not a resolved frost
-//! layer. Temperature gradients, changes of exposed area, porosity, mixed phases
-//! and thermal contact resistance need their own spatial model. The prescribed
-//! or finite vapor reservoir has the same thermostatted semantics as the
-//! original surface operator.
+//! The common-temperature operators below assume an isothermal thin deposit
+//! with negligible internal resistance. [`resistance`] separately stores the
+//! coating and substrate at distinct temperatures with an explicit finite
+//! conductance. Resolved gradients, changes of exposed area, porosity and mixed
+//! phases still need their own spatial model. The prescribed or finite vapor
+//! reservoir has the same thermostatted semantics as the original operator.
 
 /// Several supported deposits competing for one finite vapor inventory.
 pub mod chamber;
+
+/// Separate coating/substrate temperatures with finite thermal conductance.
+pub mod resistance;
 
 use super::{
     Endpoint, SolidSurfaceState, SolverConfig, SublimationError, SublimationLaw, SurfaceKinetics,
