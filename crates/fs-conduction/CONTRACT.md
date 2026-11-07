@@ -1156,6 +1156,29 @@ and phase-controlled trajectories against an independent exponential solution.
 These source laws also feed the existing material enclosure reflection and
 original-source adjoint owners; spectral or directional emissivity is not added.
 
+### Original material emissivity on native finite-body surfaces
+
+`MaterialGraySurfaceLaw` exposes the same pinned `MaterialEmissivitySource`
+through `fs-thermal`'s existing `ImplicitGraySurfaceLaw`. Native gray ambient
+boundaries and two-finite-body radiative links can therefore use original scalar,
+temperature, phase-fraction and joint source-surface claims. Every trial queries
+the actual bulk enthalpy and retains the analytic chain rule, including changing
+emissivity on an isothermal latent plateau. No second interpolation or caloric
+chart is created. The native conductivity leg and thermal store must retain the
+same original caloric object; matching card contents alone are insufficient.
+
+Construction checks fixed caloric-source conditions, pins the emissivity claim
+and verifies both endpoints of explicitly declared finite enthalpy bounds. Each
+runtime sample still checks complete source support. `evaluate` returns the
+original phase, emissivity and resolved material receipts with the native value
+and tangent; `reference_emissivity` is only the preparation snapshot. The source
+owner's original emissivity range `(0,1]` remains unchanged. Convection is zero,
+leaving nonradiative gap or boundary exchange to its separately declared owner.
+This is an explicit diffuse-gray bulk-state closure: a total hemispherical
+measurement does not itself establish spectral or directional independence.
+The existing finite-face owner alone computes heat, massless surface balance,
+enthalpy derivatives and entropy exchange.
+
 ## Coupled primary-enthalpy contact Newton
 
 `TemperatureContacts::advance_enthalpy_newton` closes source-backed R(T)

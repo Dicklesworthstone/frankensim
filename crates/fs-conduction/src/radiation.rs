@@ -76,7 +76,7 @@ pub use pointwise_enclosure::{
     PointwiseEnclosureReport, PointwiseEnclosureTolerance,
 };
 pub use pointwise::{
-    MaterialAmbientRadiationPatch, MaterialPointwiseAmbientRadiation, MaterialRadiationNodeState,
+    MaterialAmbientRadiationPatch, MaterialGraySurfaceLaw, MaterialPointwiseAmbientRadiation, MaterialRadiationNodeState,
     PointwiseAmbientRadiation, PointwiseRadiationAssembly, PointwiseRadiationParameterGradient,
     PointwiseRadiationPatchReport,
     PointwiseRadiationReport,

@@ -19,6 +19,9 @@ pub mod adjoint;
 pub use source::MaterialRadiationSmoothnessError;
 use source::{DerivativeMode, MaterialEmissivitySource};
 
+mod native;
+pub use native::MaterialGraySurfaceLaw;
+
 /// One homogeneous material trace and its independently declared black bath.
 /// Different material charts require different named traces. Other conditions
 /// such as pressure and finish remain on the original material binding.

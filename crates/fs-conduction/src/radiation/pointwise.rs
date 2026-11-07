@@ -16,7 +16,7 @@ use fs_exec::Cx;
 
 /// Original-material emissivity refreshed from the nodal enthalpy state.
 pub mod material;
-pub use material::{MaterialAmbientRadiationPatch, MaterialPointwiseAmbientRadiation,
+pub use material::{MaterialAmbientRadiationPatch, MaterialGraySurfaceLaw, MaterialPointwiseAmbientRadiation,
     MaterialRadiationNodeState};
 
 use super::{

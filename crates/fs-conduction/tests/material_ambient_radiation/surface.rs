@@ -30,7 +30,7 @@ fn surface_card(reverse: bool, samples: Vec<([f64; 2], f64)>, triangles: Vec<[u3
         process: "joint thermal source".into(), revision: 0 }, claims, Vec::new()).unwrap()
 }
 
-fn rectangle(reverse: bool) -> MaterialCard {
+pub(super) fn rectangle(reverse: bool) -> MaterialCard {
     surface_card(reverse, COORDINATES.into_iter().zip(VALUES).collect(), TRIANGLES.to_vec())
 }
 
