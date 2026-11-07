@@ -458,6 +458,81 @@ fn g3_exact_shutdown_ties_and_sub_ulp_events_keep_their_true_order_and_rng_draws
 }
 
 #[test]
+fn g4_neutron_production_is_refused_before_events_without_capture_relabeling() {
+    let groups = Arc::new(
+        NeutronGroups::new(
+            "manufactured-neutron-production-grid".into(),
+            vec![0.0, 1.0],
+        )
+        .unwrap(),
+    );
+    let table = Arc::new(
+        CrossSectionTable::new(
+            CrossSectionData {
+                data_id: "manufactured-temperature-neutron-production".into(),
+                nuclide: identity(1),
+                reaction: NeutronReaction::TwoNeutronProduction,
+                groups: Arc::clone(&groups),
+                temperatures_k: vec![300.0, 900.0],
+                cross_sections_m2: vec![vec![1.0], vec![3.0]],
+            },
+            CrossSectionLimits::default(),
+        )
+        .unwrap(),
+    );
+    for rate in [
+        BurnupRate::NeutronProduction {
+            cross_sections_m2: vec![2.0],
+        },
+        BurnupRate::TabulatedNeutronProduction {
+            cross_sections: table,
+        },
+    ] {
+        let model = assemble(
+            &[0.0, 0.0],
+            vec![BurnupReaction {
+                data_id: "manufactured-neutron-production".into(),
+                parent: 1,
+                rate,
+                products: vec![BurnupProduct {
+                    nuclide: 0,
+                    yield_per_event: 1.0,
+                }],
+                energy_per_event: energy(1.0),
+            }],
+            Arc::clone(&groups),
+        );
+        // Both inputs are valid positive-rate original reaction models, with a
+        // retained A-1 residual and a temperature-interpolated table where used.
+        assert_eq!(
+            model
+                .rate_constants(&flux(&model, vec![1.0]), 600.0, limits(), || Ok(()))
+                .unwrap(),
+            [2.0]
+        );
+        for initial_flux in [0.0, 1.0] {
+            // Refusal happens while preparing the schedule, before a state or
+            // random stream can exist, including an initially closed beam.
+            assert_eq!(
+                StochasticActivationSchedule::new(
+                    Arc::clone(&model),
+                    flux(&model, vec![initial_flux]),
+                    600.0,
+                    vec![],
+                    limits(),
+                    0,
+                    || Ok(()),
+                )
+                .unwrap_err(),
+                BurnupError::Invalid(
+                    "stochastic activation does not support neutron-producing reaction accounts"
+                )
+            );
+        }
+    }
+}
+
+#[test]
 fn g4_noninteger_physics_admission_and_trial_refusals_publish_no_partial_history() {
     for kind in 0..5 {
         let mut reaction = capture(0, 1, vec![1.0], 1.0);

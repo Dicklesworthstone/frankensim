@@ -24,6 +24,8 @@ pub struct StochasticActivationChange {
 /// Every channel has exactly one retained product per actual event. Expected
 /// fractional or multiple-product yields and all fission channels are refused;
 /// their mean yields do not define a joint stochastic product distribution.
+/// Neutron-producing channels are also refused because this event owner has no
+/// distinct neutron-production event and energy accounts. They are not capture.
 /// The original integer population is consequently conserved by every event.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StochasticActivationSchedule {
@@ -71,6 +73,12 @@ impl StochasticActivationSchedule {
                     add(&mut branches[reaction.parent], *branch_fraction)?;
                 }
                 BurnupRate::Capture { .. } | BurnupRate::TabulatedCapture { .. } => {}
+                BurnupRate::NeutronProduction { .. }
+                | BurnupRate::TabulatedNeutronProduction { .. } => {
+                    return Err(BurnupError::Invalid(
+                        "stochastic activation does not support neutron-producing reaction accounts",
+                    ));
+                }
                 BurnupRate::Fission { .. } | BurnupRate::TabulatedFission { .. } => {
                     return Err(BurnupError::Invalid(
                         "stochastic fission requires explicit joint product outcomes",

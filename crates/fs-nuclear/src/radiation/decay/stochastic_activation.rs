@@ -16,6 +16,8 @@ impl BurnupDecayRadiation {
     /// Capture remains a separate prompt-energy account. Its outward radiation
     /// is not assigned a daughter-decay spectrum. No random stream is consumed,
     /// no trajectory is evolved again, and no photon multiplicity is sampled.
+    /// Neutron-producing events are refused because this stochastic report does
+    /// not represent their distinct event and prompt-energy accounts.
     pub fn from_stochastic_activation_step(
         &self,
         model: &Arc<BurnupModel>,
@@ -70,6 +72,14 @@ impl BurnupDecayRadiation {
                 }
                 BurnupRate::Capture { .. } | BurnupRate::TabulatedCapture { .. } => {
                     captures += count;
+                }
+                BurnupRate::NeutronProduction { .. }
+                | BurnupRate::TabulatedNeutronProduction { .. } => {
+                    if count != 0 {
+                        return Err(invalid(
+                            "stochastic activation report cannot contain neutron-producing events",
+                        ));
+                    }
                 }
                 BurnupRate::Fission { .. } | BurnupRate::TabulatedFission { .. } => {
                     if count != 0 {
