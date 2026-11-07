@@ -9,12 +9,18 @@
 //! <https://doi.org/10.3389/facou.2024.1414356>.
 //!
 //! This averages the original extended-reaction solutions, including their
-//! internal refraction. It is not a locally reacting impedance fit or a
+//! internal refraction. Absorption is the positive local viscous/thermal work,
+//! not a difference of nearly equal incident and outgoing powers. Each layer's
+//! work can be retained for heating under the same incoherent angular measure.
+//! It is not a locally reacting impedance fit or a
 //! reverberation-room/finite-panel prediction. Polar resolution is explicit;
 //! refinement is required near resonances and critical refraction. No
 //! quadrature error bound or experimentally validated diffuse field is implied.
 
-use super::{RigidBackedLayers, TransmittingLayers};
+use super::{
+    LayerAbsorbedPower, LayerAbsorption, LayerAbsorptionBudget, LayerAbsorptionError, MAX_LAYERS,
+    RigidBackedLayers, TransmittingLayers,
+};
 use crate::MaterialError;
 use fs_math::dd::Dd;
 
@@ -72,6 +78,24 @@ pub struct AngularPower {
     pub evaluated_directions: usize,
 }
 
+/// Independent reflected/transmitted powers and physical heat in every layer.
+/// Layer fractions are normalized by the TOTAL incident angular power, not by
+/// an individual direction's power. Viscous and thermal mechanisms are those
+/// of the original equivalent fluid; they do not assign heat to separate pore
+/// fluid/frame temperatures or evolve a thermal state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AngularLayerAbsorption {
+    pub power: AngularPower,
+    layers: [LayerAbsorbedPower; MAX_LAYERS],
+    layer_count: usize,
+}
+impl AngularLayerAbsorption {
+    /// Original exposed-to-rear order, including zero-thickness/lossless rows.
+    pub fn layers(&self) -> &[LayerAbsorbedPower] {
+        &self.layers[..self.layer_count]
+    }
+}
+
 /// Original material failure, explicit input/work refusal, or cancellation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AngularPowerError {
@@ -82,6 +106,15 @@ pub enum AngularPowerError {
 impl From<MaterialError> for AngularPowerError {
     fn from(error: MaterialError) -> Self {
         Self::Material(error)
+    }
+}
+impl From<LayerAbsorptionError> for AngularPowerError {
+    fn from(error: LayerAbsorptionError) -> Self {
+        match error {
+            LayerAbsorptionError::Material(error) => Self::Material(error),
+            LayerAbsorptionError::Invalid(what) => Self::Invalid(what),
+            LayerAbsorptionError::Cancelled => Self::Cancelled,
+        }
     }
 }
 impl core::fmt::Display for AngularPowerError {
@@ -116,16 +149,24 @@ fn admit_samples(samples: usize, budget: AngularPowerBudget) -> Result<(), Angul
 // One allocation-free summation owner serves both terminations and both
 // angular measures. For diffuse quadrature the weights are dimensionless;
 // otherwise they are the caller's already projected normal powers [W].
-fn integrate(
+fn integrate<C: FnMut() -> bool>(
     samples: impl ExactSizeIterator<Item = IncidentPower>,
     budget: AngularPowerBudget,
+    layer_count: usize,
+    layer_budget: LayerAbsorptionBudget,
     declared_power_w: Option<f64>,
-    cancelled: &mut impl FnMut() -> bool,
-    mut response: impl FnMut(f64) -> Result<[f64; 3], MaterialError>,
-) -> Result<AngularPower, AngularPowerError> {
+    cancelled: &mut C,
+    mut response: impl FnMut(f64, &mut C) -> Result<LayerAbsorption, LayerAbsorptionError>,
+) -> Result<AngularLayerAbsorption, AngularPowerError> {
     poll(cancelled)?;
     admit_samples(samples.len(), budget)?;
-    let mut sums = [Dd::ZERO; 4];
+    if layer_budget.max_layers > MAX_LAYERS || layer_count > layer_budget.max_layers {
+        return Err(AngularPowerError::Invalid(
+            "angular absorption layer work budget exceeded",
+        ));
+    }
+    let mut sums = [Dd::ZERO; 3];
+    let mut layer_sums = [[Dd::ZERO; 2]; MAX_LAYERS];
     let mut evaluated = 0;
     for sample in samples {
         poll(cancelled)?;
@@ -142,9 +183,12 @@ fn integrate(
         if sample.power_w == 0.0 {
             continue;
         }
-        let fractions = response(sample.cosine)?;
+        let value = response(sample.cosine, cancelled)?;
         sums[0] = sums[0] + Dd::from_f64(sample.power_w);
-        for (sum, fraction) in sums[1..].iter_mut().zip(fractions) {
+        for (sum, fraction) in sums[1..]
+            .iter_mut()
+            .zip([value.reflected_fraction, value.transmitted_fraction])
+        {
             let power = sample.power_w * fraction;
             if !power.is_finite() {
                 return Err(AngularPowerError::Invalid(
@@ -153,9 +197,26 @@ fn integrate(
             }
             *sum = *sum + Dd::from_f64(power);
         }
+        for (sum, layer) in layer_sums[..layer_count].iter_mut().zip(value.layers()) {
+            for (mechanism, fraction) in sum.iter_mut().zip([
+                layer.viscous_absorbed_fraction,
+                layer.thermal_absorbed_fraction,
+            ]) {
+                let power = sample.power_w * fraction;
+                if !power.is_finite() {
+                    return Err(AngularPowerError::Invalid(
+                        "angular layer absorption is unrepresentable",
+                    ));
+                }
+                *mechanism = *mechanism + Dd::from_f64(power);
+            }
+        }
         evaluated += 1;
     }
-    let weights = sums.map(Dd::to_f64);
+    let absorbed = layer_sums[..layer_count]
+        .iter()
+        .fold(Dd::ZERO, |total, row| total + row[0] + row[1]);
+    let weights = [sums[0], sums[1], sums[2], absorbed].map(Dd::to_f64);
     if !weights.into_iter().all(f64::is_finite) || weights[0] <= 0.0 {
         return Err(AngularPowerError::Invalid(
             "angular power needs a positive representable total incident weight",
@@ -186,27 +247,53 @@ fn integrate(
             "integrated angular power is unrepresentable",
         ));
     }
+    let mut layers = [LayerAbsorbedPower::default(); MAX_LAYERS];
+    for (row, sum) in layers[..layer_count].iter_mut().zip(layer_sums) {
+        let viscous = sum[0].to_f64() / weights[0];
+        let thermal = sum[1].to_f64() / weights[0];
+        let power = if let Some(incident) = declared_power_w {
+            incident * (viscous + thermal)
+        } else {
+            (sum[0] + sum[1]).to_f64()
+        };
+        if !power.is_finite() {
+            return Err(AngularPowerError::Invalid(
+                "integrated angular layer power is unrepresentable",
+            ));
+        }
+        *row = LayerAbsorbedPower {
+            viscous_absorbed_fraction: viscous,
+            thermal_absorbed_fraction: thermal,
+            absorbed_power_w: power,
+        };
+    }
     poll(cancelled)?;
-    Ok(AngularPower {
-        incident_power_w: powers[0],
-        reflected_power_w: powers[1],
-        transmitted_power_w: powers[2],
-        absorbed_power_w: powers[3],
-        reflected_fraction: fractions[0],
-        transmitted_fraction: fractions[1],
-        absorbed_fraction: fractions[2],
-        balance_residual_w: residual,
-        evaluated_directions: evaluated,
+    Ok(AngularLayerAbsorption {
+        power: AngularPower {
+            incident_power_w: powers[0],
+            reflected_power_w: powers[1],
+            transmitted_power_w: powers[2],
+            absorbed_power_w: powers[3],
+            reflected_fraction: fractions[0],
+            transmitted_fraction: fractions[1],
+            absorbed_fraction: fractions[2],
+            balance_residual_w: residual,
+            evaluated_directions: evaluated,
+        },
+        layers,
+        layer_count,
     })
 }
 
-fn diffuse(
+fn diffuse<C: FnMut() -> bool>(
     incident_power_w: f64,
     incidence: DiffuseIncidence,
     budget: AngularPowerBudget,
-    cancelled: &mut impl FnMut() -> bool,
-    response: impl FnMut(f64) -> Result<[f64; 3], MaterialError>,
-) -> Result<AngularPower, AngularPowerError> {
+    layer_count: usize,
+    layer_budget: LayerAbsorptionBudget,
+    cancelled: &mut C,
+    response: impl FnMut(f64, &mut C) -> Result<LayerAbsorption, LayerAbsorptionError>,
+) -> Result<AngularLayerAbsorption, AngularPowerError> {
     poll(cancelled)?;
     admit_samples(incidence.polar_samples, budget)?;
     if !incident_power_w.is_finite()
@@ -232,6 +319,8 @@ fn diffuse(
             }
         }),
         budget,
+        layer_count,
+        layer_budget,
         Some(incident_power_w),
         cancelled,
         response,
@@ -247,22 +336,17 @@ impl RigidBackedLayers<'_> {
         &self,
         samples: &[IncidentPower],
         budget: AngularPowerBudget,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<AngularPower, AngularPowerError> {
-        integrate(
-            samples.iter().copied(),
+        self.angular_layer_absorption(
+            samples,
             budget,
-            None,
-            &mut cancelled,
-            |cosine| {
-                let value = self.reflection(cosine)?;
-                Ok([
-                    value.pressure_reflection.norm_sq(),
-                    0.0,
-                    value.absorbed_fraction,
-                ])
+            LayerAbsorptionBudget {
+                max_layers: self.layer_count(),
             },
+            cancelled,
         )
+        .map(|report| report.power)
     }
 
     /// Integrate isotropic intensity over the explicitly declared hemisphere
@@ -274,21 +358,61 @@ impl RigidBackedLayers<'_> {
         incident_power_w: f64,
         incidence: DiffuseIncidence,
         budget: AngularPowerBudget,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<AngularPower, AngularPowerError> {
+        self.diffuse_layer_absorption(
+            incident_power_w,
+            incidence,
+            budget,
+            LayerAbsorptionBudget {
+                max_layers: self.layer_count(),
+            },
+            cancelled,
+        )
+        .map(|report| report.power)
+    }
+
+    /// Integrate physical viscous/thermal work separately in every original
+    /// layer. Uses one bounded propagation and one analytic loss pass per
+    /// nonzero direction, with fixed storage and cancellation in both passes.
+    /// Zero-power directions count against the budget but add no heat.
+    pub fn angular_layer_absorption(
+        &self,
+        samples: &[IncidentPower],
+        budget: AngularPowerBudget,
+        layer_budget: LayerAbsorptionBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<AngularLayerAbsorption, AngularPowerError> {
+        integrate(
+            samples.iter().copied(),
+            budget,
+            self.layer_count(),
+            layer_budget,
+            None,
+            &mut cancelled,
+            |cosine, cancelled| self.layer_absorption(cosine, 1.0, layer_budget, cancelled),
+        )
+    }
+
+    /// The same cosine-projected diffuse measure as [`Self::diffuse_power`],
+    /// retaining each layer's positive work instead of inferring it from R/T.
+    /// Zero incident watts retain the angularly averaged loss coefficients.
+    pub fn diffuse_layer_absorption(
+        &self,
+        incident_power_w: f64,
+        incidence: DiffuseIncidence,
+        budget: AngularPowerBudget,
+        layer_budget: LayerAbsorptionBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<AngularLayerAbsorption, AngularPowerError> {
         diffuse(
             incident_power_w,
             incidence,
             budget,
+            self.layer_count(),
+            layer_budget,
             &mut cancelled,
-            |cosine| {
-                let value = self.reflection(cosine)?;
-                Ok([
-                    value.pressure_reflection.norm_sq(),
-                    0.0,
-                    value.absorbed_fraction,
-                ])
-            },
+            |cosine, cancelled| self.layer_absorption(cosine, 1.0, layer_budget, cancelled),
         )
     }
 }
@@ -301,22 +425,17 @@ impl TransmittingLayers<'_> {
         &self,
         samples: &[IncidentPower],
         budget: AngularPowerBudget,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<AngularPower, AngularPowerError> {
-        integrate(
-            samples.iter().copied(),
+        self.angular_layer_absorption(
+            samples,
             budget,
-            None,
-            &mut cancelled,
-            |cosine| {
-                let value = self.scattering(cosine)?;
-                Ok([
-                    value.reflected_fraction,
-                    value.transmitted_fraction,
-                    value.absorbed_fraction,
-                ])
+            LayerAbsorptionBudget {
+                max_layers: self.prepared_layers().layer_count(),
             },
+            cancelled,
         )
+        .map(|report| report.power)
     }
 
     /// The same positive diffuse incident-power quadrature as the rigid owner,
@@ -328,21 +447,62 @@ impl TransmittingLayers<'_> {
         incident_power_w: f64,
         incidence: DiffuseIncidence,
         budget: AngularPowerBudget,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<AngularPower, AngularPowerError> {
+        self.diffuse_layer_absorption(
+            incident_power_w,
+            incidence,
+            budget,
+            LayerAbsorptionBudget {
+                max_layers: self.prepared_layers().layer_count(),
+            },
+            cancelled,
+        )
+        .map(|report| report.power)
+    }
+
+    /// Independent reflected/transmitted power and positive viscous/thermal
+    /// heat per layer for authored incoherent directions. The original fluid
+    /// snapshots are reused; no material query or allocation occurs per angle.
+    /// The two native per-layer passes retain bounded cancellation latency.
+    pub fn angular_layer_absorption(
+        &self,
+        samples: &[IncidentPower],
+        budget: AngularPowerBudget,
+        layer_budget: LayerAbsorptionBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<AngularLayerAbsorption, AngularPowerError> {
+        integrate(
+            samples.iter().copied(),
+            budget,
+            self.prepared_layers().layer_count(),
+            layer_budget,
+            None,
+            &mut cancelled,
+            |cosine, cancelled| self.layer_absorption(cosine, 1.0, layer_budget, cancelled),
+        )
+    }
+
+    /// Resolve each layer's heat under isotropic intensity in the declared
+    /// cone. Absorption below the precision of the boundary-power difference
+    /// survives through the original analytic local-loss integrals. This adds
+    /// no finite-panel, frame-motion, or transient thermal approximation.
+    pub fn diffuse_layer_absorption(
+        &self,
+        incident_power_w: f64,
+        incidence: DiffuseIncidence,
+        budget: AngularPowerBudget,
+        layer_budget: LayerAbsorptionBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<AngularLayerAbsorption, AngularPowerError> {
         diffuse(
             incident_power_w,
             incidence,
             budget,
+            self.prepared_layers().layer_count(),
+            layer_budget,
             &mut cancelled,
-            |cosine| {
-                let value = self.scattering(cosine)?;
-                Ok([
-                    value.reflected_fraction,
-                    value.transmitted_fraction,
-                    value.absorbed_fraction,
-                ])
-            },
+            |cosine, cancelled| self.layer_absorption(cosine, 1.0, layer_budget, cancelled),
         )
     }
 }

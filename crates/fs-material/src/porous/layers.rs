@@ -42,8 +42,8 @@ pub use elastic::{
 /// Incoherent incident-power weighting of the original angular responses.
 pub mod angular;
 pub use angular::{
-    AngularPower, AngularPowerBudget, AngularPowerError, DiffuseIncidence, IncidentPower,
-    MAX_ANGULAR_POWER_SAMPLES,
+    AngularLayerAbsorption, AngularPower, AngularPowerBudget, AngularPowerError, DiffuseIncidence,
+    IncidentPower, MAX_ANGULAR_POWER_SAMPLES,
 };
 /// Coherent incident beams and their refracted exterior pressure/velocity fields.
 pub mod angular_spectrum;
