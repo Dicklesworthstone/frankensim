@@ -8222,6 +8222,24 @@ formation-datum invariance and late cancellation/retry. Those complete
 material integration tests were authored but not executed in this resource-
 limited session; the focused arithmetic checks do not replace them.
 
+### Pressure-driven real-gas piston inertia
+
+With `material,experimental-euler`, `RealGasEuler1d::step_with_piston` couples a
+fixed left wall and a finite-mass right piston through the original
+NASA/Peng--Robinson ALE stages. Each midpoint-speed trial uses the pressure
+impulse and pressure work from the selected numerical or physical wall law;
+independent impulse and combined gas-plus-piston energy checks retain external
+force work and exterior-pressure work. `step_with_suspended_piston` adds a
+stationary linear spring and viscous damper, using actual midpoint displacement
+and velocity while retaining spring storage and nonnegative damping loss
+without injecting that loss as gas heat. Cells, cached thermodynamics, mesh,
+clock and piston velocity publish together after complete source and mechanical
+admission. This requires constant area, two impermeable ends, frozen composition
+and the declared homogeneous stable real-gas branch. The bounded engineering
+coupling does not compose wall heat, chemistry, distributed forcing, phase
+change or additional moving masses, and does not establish a general FSI
+stability or entropy theorem.
+
 ## Physical-time thermal forcing during reacting compression
 
 `material::compression::thermal::schedule` adds immutable `HeatBathSchedule`

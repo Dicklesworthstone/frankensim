@@ -286,7 +286,7 @@ impl RealGasEuler1d {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn attempt(
+pub(super) fn attempt(
     gas: &RealGas,
     states: &[Conserved],
     primitive: &[Primitive],

@@ -126,6 +126,9 @@ pub enum PistonError {
     Gas(GasError),
     /// Original evolving-mixture refusal, retaining its species/source cause.
     MixtureGas(crate::multicomponent::Error),
+    /// Original NASA/Peng--Robinson source or moving-field refusal.
+    #[cfg(feature = "material")]
+    RealGas(Box<super::nonideal::RealGasFlowError>),
     /// Caller cancellation, propagated before any retry or publication.
     Cancelled,
     /// No impulse-residual sign change in the authored midpoint-speed bracket.
@@ -179,6 +182,16 @@ impl From<crate::multicomponent::Error> for PistonError {
             Self::Cancelled
         } else {
             Self::MixtureGas(error)
+        }
+    }
+}
+
+#[cfg(feature = "material")]
+impl From<super::nonideal::RealGasFlowError> for PistonError {
+    fn from(error: super::nonideal::RealGasFlowError) -> Self {
+        match error {
+            super::nonideal::RealGasFlowError::Cancelled => Self::Cancelled,
+            other => Self::RealGas(Box::new(other)),
         }
     }
 }

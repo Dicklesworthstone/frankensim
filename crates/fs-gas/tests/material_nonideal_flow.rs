@@ -26,6 +26,8 @@ mod forcing;
 mod moving;
 #[path = "material_nonideal_flow/nozzle.rs"]
 mod nozzle;
+#[path = "material_nonideal_flow/piston.rs"]
+mod piston;
 #[path = "material_nonideal_flow/reconstruction.rs"]
 mod reconstruction;
 #[path = "material_nonideal_flow/thermal.rs"]

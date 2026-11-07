@@ -12,6 +12,7 @@ use fs_qty::{Length, Time};
 
 mod forcing;
 mod moving;
+mod piston;
 mod reconstruction;
 
 /// One end of a stationary quasi-one-dimensional real-gas passage.
