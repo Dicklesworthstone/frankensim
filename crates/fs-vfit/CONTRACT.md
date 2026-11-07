@@ -24,6 +24,34 @@ to parallel biquad sections and discrete state-space.
 - Passivity is impedance-form positive realness `Re H(i*omega) >= 0`
   with `d >= 0`, `e >= 0`.
 
+## Exact held-flow acoustic cells
+
+`relaxation::ExactParallelCellLoad` advances the same declared parallel RLC
+cells as `ParallelCellLoad`, with the series flow explicitly held constant over
+each interval. RL histories decay as `exp(-R*dt/L)`; RLC histories use the shared
+`fs-modal` exact oscillator transition across underdamped, critical, overdamped
+and lossless regimes. The original midpoint owner and its bilinear sampling
+remain unchanged.
+
+The port output is the continuous interval-mean pressure. Supplied work is
+`U * p_mean * dt`, storage is `sum (L*i^2 + C*p^2)/2`, and resistor heat is an
+independent nonnegative integral of `p^2/R`, not a work/storage subtraction.
+`affine_pressure` supplies that same-window relation for implicit flow solves;
+`preview_step` changes no state and failed `step` calls retain every history.
+Prepared transitions and storage scales are cached; accepted stepping allocates
+nothing and evaluates no transcendental functions.
+
+`sampled_impedance` reports the transfer from the held input sequence to that
+mean-pressure output, using `exp(+i*2*pi*f*n*dt)`. It has an exact DC zero and
+accepts frequencies through Nyquist; unresolved lossless poles or unrepresentable
+queries refuse. It is neither a bilinear warp nor the endpoint-pressure transfer.
+Exactness refers to the declared held forcing and continuous linear cell model;
+it does not recover variation within a held interval or certify floating-point
+enclosures. Seven focused native regressions compare analytic endpoints and
+independently integrated heat, stiff relaxation, subdivision, static/lossless
+limits, measured sampled impedance, representable weak resistance, lossless
+pole refusal and transactional refusal.
+
 ## Public types and semantics
 
 - `model::RationalModel` — pole-residue terms + direct `d` + improper

@@ -25,6 +25,14 @@
 //! cells with C > 0. Each cell's storage is (L i^2 + C v^2)/2 and its loss is
 //! v^2/R. The midpoint rule closes every cell's work exactly. Its own
 //! sixteen-cell budget leaves the eight-branch load above unchanged in size.
+//! [`ExactParallelCellLoad`] is the corresponding exact held-flow owner. Its
+//! pressure is the continuous interval mean and its resistor heat is integrated
+//! along the continuous trajectory, so unresolved dissipative poles relax
+//! without the alternating tails of the midpoint rule. The forcing convention
+//! is explicit; existing midpoint/bilinear consumers retain their owner.
+
+mod exact;
+pub use exact::ExactParallelCellLoad;
 
 use crate::impedance::{ImpedanceFrame, SeriesImpedance, SeriesImpedanceSpec};
 use crate::waveguide::WaveguideError;
@@ -471,8 +479,9 @@ impl ParallelCellFrame {
     /// End-of-step inductor flows [m^3/s], in cell order.
     #[must_use]
     pub fn inductor_flows_m3_s(&self) -> &[f64] { &self.flows[..self.count] }
-    /// End-of-step cell pressures [Pa]: the capacitor's, or for C = 0 the
-    /// step mean, in cell order.
+    /// End-of-step cell pressures [Pa], in cell order. For C = 0 the midpoint
+    /// owner reports the step mean; the exact held-flow owner reports the
+    /// endpoint's algebraic resistor pressure.
     #[must_use]
     pub fn pressures_pa(&self) -> &[f64] { &self.pressures[..self.count] }
 }
