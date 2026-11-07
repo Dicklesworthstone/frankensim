@@ -59,8 +59,8 @@ pub struct ShellCoatingFilmSource<'a> {
     pub source: &'a ResolvedShellCoating,
 }
 
-/// Whole-film amplitude envelope for supplied peak complex body motion, or
-/// absolute spatial envelope for an explicitly observed real snapshot.
+/// Whole-film cycle envelope for supplied peak complex body motion, optionally
+/// about an explicit static offset, or spatial envelope of a real snapshot.
 #[derive(Clone, Debug)]
 pub struct ShellCoatingFilmStrain<'a> {
     pub component_index: Option<usize>,
@@ -74,7 +74,8 @@ pub struct ShellCoatingFilmStrain<'a> {
     /// applied to strain. This is the original equivalent-single-layer MITC
     /// assumed shear, not a recovered 3D interlaminar stress/strain field.
     pub frobenius_upper_bound: f64,
-    /// Component amplitude envelopes [xx, yy, zz, xy, yz, zx] in facet axes.
+    /// Absolute component envelopes [xx, yy, zz, xy, yz, zx] in facet axes,
+    /// including the static offset when explicitly supplied.
     /// These separately maximized values need not occur at a common phase/site.
     pub component_amplitudes: [f64; 6],
     /// Original triangle owning the ruling Bernstein control bound. A control
@@ -87,7 +88,8 @@ pub struct ShellCoatingFilmStrain<'a> {
     /// means this sufficient bound cannot establish envelope compliance; it
     /// does not establish actual overstrain, damage or failure.
     pub limit_ratio: f64,
-    /// Sufficient nonnegative common multiplier of the complete complex motion.
+    /// Sufficient nonnegative common multiplier of the complete supplied
+    /// motion, including the static offset in a biased harmonic query.
     /// `None` means the response is exactly zero, with no finite strain cap.
     pub sufficient_amplitude_scale: Option<f64>,
 }
@@ -96,9 +98,12 @@ pub struct ShellCoatingFilmStrain<'a> {
 pub struct ShellCoatingStrainReport<'a> {
     pub films: Vec<ShellCoatingFilmStrain<'a>>,
     /// Every whole-film bound lies within its authored small-strain envelope.
-    /// No unmodeled preload, cure strain or other static strain is included.
+    /// Explicitly supplied static offsets participate in biased harmonic
+    /// queries. No omitted preload, cure strain or thermal eigenstrain is added.
     pub within_authored_envelope: bool,
     /// Minimum sufficient scale over all films, preserving every modal phase.
+    /// For an offset harmonic query this scales BOTH the static offset and the
+    /// oscillation; it is not a harmonic-only gain about a fixed preload.
     /// `None` means there are no films or every observed film strain is zero.
     pub sufficient_common_amplitude_scale: Option<f64>,
 }
@@ -157,8 +162,15 @@ pub(crate) struct OwnedShellCoatingStrain {
     modes: usize,
     films: usize,
     assembly: bool,
-    snapshot: bool,
+    allowance: ObservationAllowance,
     completed_evaluations: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ObservationAllowance {
+    Snapshot,
+    Harmonic,
+    OffsetHarmonic,
 }
 
 #[derive(Clone, Copy)]
@@ -237,7 +249,7 @@ impl<'a> CoatingStrainSource<'a> {
         budget: ShellCoatingStrainBudget,
         gate: &CancelGate,
     ) -> Result<OwnedShellCoatingStrain, AcousticRealizeError> {
-        prepare(self, budget, true, gate)
+        prepare(self, budget, ObservationAllowance::Snapshot, gate)
     }
 }
 
@@ -253,7 +265,23 @@ impl MaterialShellImage {
         let source = CoatingStrainSource::Shell(self);
         Ok(PreparedShellCoatingStrain {
             source,
-            plan: prepare(source, budget, false, gate)?,
+            plan: prepare(source, budget, ObservationAllowance::Harmonic, gate)?,
+        })
+    }
+
+    /// Prepare whole-film strain over harmonic cycles about a supplied static
+    /// modal displacement. The extra real field and phase solve are included
+    /// in the admitted work/storage. This observes the existing linear basis;
+    /// it does not compute a new prestressed equilibrium or tangent basis.
+    pub fn prepare_coating_strain_with_offset(
+        &self,
+        budget: ShellCoatingStrainBudget,
+        gate: &CancelGate,
+    ) -> Result<PreparedShellCoatingStrain<'_>, AcousticRealizeError> {
+        let source = CoatingStrainSource::Shell(self);
+        Ok(PreparedShellCoatingStrain {
+            source,
+            plan: prepare(source, budget, ObservationAllowance::OffsetHarmonic, gate)?,
         })
     }
 }
@@ -268,7 +296,21 @@ impl MaterialShellAssemblyImage {
         let source = CoatingStrainSource::Assembly(self);
         Ok(PreparedShellCoatingStrain {
             source,
-            plan: prepare(source, budget, false, gate)?,
+            plan: prepare(source, budget, ObservationAllowance::Harmonic, gate)?,
+        })
+    }
+
+    /// Observe static offset plus coherent harmonic motion across every
+    /// component in the SAME original assembled modal coordinates.
+    pub fn prepare_coating_strain_with_offset(
+        &self,
+        budget: ShellCoatingStrainBudget,
+        gate: &CancelGate,
+    ) -> Result<PreparedShellCoatingStrain<'_>, AcousticRealizeError> {
+        let source = CoatingStrainSource::Assembly(self);
+        Ok(PreparedShellCoatingStrain {
+            source,
+            plan: prepare(source, budget, ObservationAllowance::OffsetHarmonic, gate)?,
         })
     }
 }
@@ -302,7 +344,7 @@ fn strain_owner(error: fs_plate::PlateError) -> AcousticRealizeError {
 fn prepare(
     source: CoatingStrainSource<'_>,
     budget: ShellCoatingStrainBudget,
-    snapshot: bool,
+    allowance: ObservationAllowance,
     gate: &CancelGate,
 ) -> Result<OwnedShellCoatingStrain, AcousticRealizeError> {
     poll(gate)?;
@@ -312,6 +354,8 @@ fn prepare(
         ));
     }
     let modes = source.part(0).modes.len();
+    let snapshot = allowance == ObservationAllowance::Snapshot;
+    let offset = allowance == ObservationAllowance::OffsetHarmonic;
     let mut films = 0usize;
     let mut resources = ShellCoatingStrainResources {
         retained_bytes: if snapshot {
@@ -326,9 +370,14 @@ fn prepare(
                 size_of::<ShellCoatingStrainReport<'_>>()
                     + HarmonicElementStrain::RETAINED_BYTES
                     + 36 * size_of::<f64>()
+                    + if offset {
+                        RealElementStrain::RETAINED_BYTES + 18 * size_of::<f64>()
+                    } else {
+                        0
+                    }
             },
         preparation_work: 1,
-        per_evaluation_work: if snapshot { modes } else { 2 * modes },
+        per_evaluation_work: if snapshot { modes } else if offset { 3 * modes } else { 2 * modes },
         total_work: 0,
         evaluations: budget.evaluations,
         coated_elements: 0,
@@ -382,6 +431,8 @@ fn prepare(
                 pairs,
                 if snapshot {
                     PreparedElementStrain::REAL_LAYER_BOUND_WORK + 32
+                } else if offset {
+                    PreparedElementStrain::BIASED_LAYER_BOUND_WORK + 32
                 } else {
                     PreparedElementStrain::LAYER_BOUND_WORK + 32
                 },
@@ -412,6 +463,9 @@ fn prepare(
                 elements,
                 if snapshot {
                     36 * modes + PreparedElementStrain::REAL_FIELD_WORK + count
+                } else if offset {
+                    108 * modes + PreparedElementStrain::HARMONIC_FIELD_WORK
+                        + PreparedElementStrain::REAL_FIELD_WORK + count
                 } else {
                     72 * modes + PreparedElementStrain::HARMONIC_FIELD_WORK + count
                 },
@@ -499,7 +553,7 @@ fn prepare(
         modes,
         films,
         assembly: matches!(source, CoatingStrainSource::Assembly(_)),
-        snapshot,
+        allowance,
         completed_evaluations: 0,
     })
 }
@@ -532,6 +586,32 @@ impl<'a> PreparedShellCoatingStrain<'a> {
         let summary =
             self.plan
                 .evaluate(self.source, Motion::Harmonic(displacement_m_sqrt_kg), gate)?;
+        Ok(self.report(summary))
+    }
+
+    /// Observe `offset + Re(amplitude * exp(i omega t))` over a complete cycle.
+    /// Both inputs use the unchanged original body coordinates [m sqrt(kg)].
+    /// Components and modes retain their relative phases before tensor norms
+    /// are formed, including interaction with the supplied static strain.
+    ///
+    /// Requires preparation with `prepare_coating_strain_with_offset`. Errors
+    /// leave the successful-query allowance intact. Reported sufficient scales
+    /// multiply the complete motion, INCLUDING the offset; they do not describe
+    /// the allowable harmonic gain when a physical preload is held fixed.
+    pub fn evaluate_with_static_offset(
+        &mut self,
+        offset_m_sqrt_kg: &[f64],
+        amplitude_m_sqrt_kg: &[C64],
+        gate: &CancelGate,
+    ) -> Result<ShellCoatingStrainReport<'a>, AcousticRealizeError> {
+        let summary = self.plan.evaluate(
+            self.source,
+            Motion::OffsetHarmonic {
+                offset: offset_m_sqrt_kg,
+                amplitude: amplitude_m_sqrt_kg,
+            },
+            gate,
+        )?;
         Ok(self.report(summary))
     }
 
@@ -583,6 +663,10 @@ impl<'a> PreparedShellCoatingStrain<'a> {
 enum Motion<'a> {
     Harmonic(&'a [C64]),
     Snapshot(&'a [f64]),
+    OffsetHarmonic {
+        offset: &'a [f64],
+        amplitude: &'a [C64],
+    },
 }
 
 impl Motion<'_> {
@@ -592,6 +676,11 @@ impl Motion<'_> {
                 q.len() == modes && q.iter().all(|z| z.re.is_finite() && z.im.is_finite())
             }
             Self::Snapshot(q) => q.len() == modes && q.iter().all(|x| x.is_finite()),
+            Self::OffsetHarmonic { offset, amplitude } => {
+                offset.len() == modes && offset.iter().all(|x| x.is_finite())
+                    && amplitude.len() == modes
+                    && amplitude.iter().all(|z| z.re.is_finite() && z.im.is_finite())
+            }
         }
     }
 }
@@ -636,9 +725,14 @@ impl OwnedShellCoatingStrain {
                 "coating strain observation exhausted its planned evaluations",
             ));
         }
-        if !motion.valid(self.modes) || (self.snapshot && matches!(motion, Motion::Harmonic(_))) {
+        if !motion.valid(self.modes)
+            || (self.allowance == ObservationAllowance::Snapshot
+                && !matches!(motion, Motion::Snapshot(_)))
+            || (matches!(motion, Motion::OffsetHarmonic { .. })
+                && self.allowance != ObservationAllowance::OffsetHarmonic)
+        {
             return Err(invalid(
-                "coating strain requires admitted finite displacement on every original body mode",
+                "coating strain requires admitted finite motion and its complete prepared query allowance",
             ));
         }
         if source.len() != self.parts.len()
@@ -712,6 +806,28 @@ impl OwnedShellCoatingStrain {
                                 field.isotropic_layer_bound(faces, nu, &mut || gate.is_requested())
                             },
                         )?;
+                    }
+                    Motion::OffsetHarmonic { offset, amplitude } => {
+                        let mut mean = [0.0; 18];
+                        let mut real = [0.0; 18];
+                        let mut imaginary = [0.0; 18];
+                        for ((mode, bias), amplitude) in source_part.modes.iter().zip(offset).zip(amplitude) {
+                            for (local_node, &node) in element.nodes.iter().enumerate() {
+                                for dof in 0..6 {
+                                    let shape = mode[6 * node + dof];
+                                    mean[6 * local_node + dof] += shape * bias;
+                                    real[6 * local_node + dof] += shape * amplitude.re;
+                                    imaginary[6 * local_node + dof] += shape * amplitude.im;
+                                }
+                            }
+                        }
+                        let mean = element.field.real_field(&mean, &mut || gate.is_requested())
+                            .map_err(strain_owner)?;
+                        let field = element.field.harmonic_field(&real, &imaginary, &mut || gate.is_requested())
+                            .map_err(strain_owner)?;
+                        observe_element(element, &part.film_regions, films, values, |faces, nu| {
+                            field.isotropic_layer_bound_with_offset(&mean, faces, nu, &mut || gate.is_requested())
+                        })?;
                     }
                 }
             }

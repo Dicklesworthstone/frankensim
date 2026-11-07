@@ -2958,3 +2958,27 @@ body-temperature-dependent friction/impulse/caloric solution, zero conversion,
 source path, fixed-patch refusal and late source rollback. Isolated execution of
 the production work-account function with metadata fixtures validates its heat,
 export and remainder partition, not the complete native multiphysics solve.
+
+## Coating strain about a supplied static modal offset
+
+`MaterialShellImage::prepare_coating_strain_with_offset` and the corresponding
+assembly-image method admit `PreparedShellCoatingStrain::evaluate_with_static_offset`.
+The supplied real modal offset and coherent complex modal amplitude use the same
+original source-bound mode basis, facet geometry and coating sections. Each
+reported film bound covers the full physical layer, complete triangle and
+complete harmonic cycle about that offset; independently acceptable offset and
+oscillation are not assumed acceptable when combined.
+
+Preparation admits the extra real field, modal accumulation, storage and bounded
+static-plus-harmonic maximization work before observation. A successful query
+retains complete film coverage; invalid input, unsupported preparation and
+cancellation do not consume the successful-query allowance. The reported
+sufficient amplitude scale multiplies both supplied fields together. It is not
+an oscillation-only allowance at fixed preload. The observer does not infer
+thermal/cure eigenstrain or solve nonlinear prestress equilibrium.
+
+Three integration regressions cover combined-limit crossing, phase invariance,
+native snapshot containment and transactional admission/refusal. Their complete
+source-material/modal fixture remains unexecuted in the available dependency
+environment. The underlying native shell bound passed five focused numerical
+tests, including complete-domain containment, degeneracies and extreme scaling.

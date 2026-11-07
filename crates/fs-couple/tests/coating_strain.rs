@@ -271,3 +271,180 @@ fn snapshot_refusals_keep_the_query_allowance_and_over_envelope_motion_is_report
     assert!(zero.films.iter().all(|film| film.limit_ratio == 0.0));
     assert!(observer.evaluate_snapshot(&[0.0; 3], &gate).is_err());
 }
+
+#[test]
+fn static_bias_and_vibration_can_exceed_a_limit_that_each_passes_separately() {
+    let gate = CancelGate::new_clock_free();
+    let image = image(&gate);
+    let mut observer = image
+        .prepare_coating_strain_with_offset(budget(6), &gate)
+        .unwrap();
+    let seed = [1e-6, -0.3e-6, 0.4e-6];
+    let reference = observer.evaluate_snapshot(&seed, &gate).unwrap();
+    let largest = reference
+        .films
+        .iter()
+        .map(|f| f.limit_ratio)
+        .fold(0.0_f64, f64::max);
+    assert!(largest > 0.0);
+    let offset = seed.map(|x| 0.6 * x / largest);
+    let amplitude = seed.map(|x| C64 {
+        re: 0.5 * x / largest,
+        im: 0.0,
+    });
+    let static_only = observer.evaluate_snapshot(&offset, &gate).unwrap();
+    let vibration_only = observer.evaluate(&amplitude, &gate).unwrap();
+    assert!(static_only.within_authored_envelope);
+    assert!(vibration_only.within_authored_envelope);
+    let combined = observer
+        .evaluate_with_static_offset(&offset, &amplitude, &gate)
+        .unwrap();
+    assert!(!combined.within_authored_envelope);
+    let shifted_phase = amplitude.map(|z| C64 { re: 0.0, im: z.re });
+    let rotated = observer
+        .evaluate_with_static_offset(&offset, &shifted_phase, &gate)
+        .unwrap();
+    let zero_offset = observer
+        .evaluate_with_static_offset(&[0.0; 3], &amplitude, &gate)
+        .unwrap();
+    for (((bound, original), rotated), zero) in combined
+        .films
+        .iter()
+        .zip(&reference.films)
+        .zip(&rotated.films)
+        .zip(&zero_offset.films)
+    {
+        near(bound.limit_ratio, 1.1 * original.limit_ratio / largest);
+        near(bound.frobenius_upper_bound, rotated.frobenius_upper_bound);
+        near(zero.limit_ratio, 0.5 * original.limit_ratio / largest);
+        assert_eq!(bound.covered_elements, 18);
+        assert!(std::ptr::eq(bound.source, original.source));
+    }
+    near(
+        combined.sufficient_common_amplitude_scale.unwrap(),
+        1.0 / 1.1,
+    );
+    assert_eq!(observer.completed_evaluations(), 6);
+}
+
+#[test]
+fn biased_cycle_encloses_actual_coating_snapshots_without_losing_modal_phase() {
+    let gate = CancelGate::new_clock_free();
+    let image = image(&gate);
+    let mut observer = image
+        .prepare_coating_strain_with_offset(budget(25), &gate)
+        .unwrap();
+    let offset = [0.7e-6, -0.8e-6, 0.2e-6];
+    let amplitude = [
+        C64 {
+            re: 1.2e-6,
+            im: -0.5e-6,
+        },
+        C64 {
+            re: -0.3e-6,
+            im: 0.9e-6,
+        },
+        C64 {
+            re: 0.8e-6,
+            im: 0.1e-6,
+        },
+    ];
+    let whole = observer
+        .evaluate_with_static_offset(&offset, &amplitude, &gate)
+        .unwrap();
+    for phase in 0..24 {
+        let (sin, cos) = (core::f64::consts::TAU * phase as f64 / 24.0).sin_cos();
+        let motion: [f64; 3] =
+            core::array::from_fn(|i| offset[i] + cos * amplitude[i].re - sin * amplitude[i].im);
+        let snapshot = observer.evaluate_snapshot(&motion, &gate).unwrap();
+        for (actual, cap) in snapshot.films.iter().zip(&whole.films) {
+            assert!(actual.frobenius_upper_bound <= cap.frobenius_upper_bound * (1.0 + 1e-11));
+            for (value, bound) in actual
+                .component_amplitudes
+                .iter()
+                .zip(cap.component_amplitudes)
+            {
+                assert!(*value <= bound * (1.0 + 1e-11));
+            }
+        }
+    }
+    assert_eq!(observer.completed_evaluations(), 25);
+}
+
+#[test]
+fn biased_queries_admit_their_extra_work_and_refuse_transactionally() {
+    let gate = CancelGate::new_clock_free();
+    let image = image(&gate);
+    let mut ordinary = image.prepare_coating_strain(budget(1), &gate).unwrap();
+    assert!(
+        ordinary
+            .evaluate_with_static_offset(&[0.0; 3], &[C64::ZERO; 3], &gate)
+            .is_err()
+    );
+    assert_eq!(ordinary.completed_evaluations(), 0);
+    let resources = *image
+        .prepare_coating_strain_with_offset(budget(1), &gate)
+        .unwrap()
+        .resources();
+    assert!(resources.evaluation_bytes > ordinary.resources().evaluation_bytes);
+    assert!(resources.per_evaluation_work > ordinary.resources().per_evaluation_work);
+    let exact = ShellCoatingStrainBudget {
+        maximum_bytes: resources.retained_bytes + resources.evaluation_bytes,
+        maximum_work: resources.total_work,
+        evaluations: 1,
+    };
+    for short in [
+        ShellCoatingStrainBudget {
+            maximum_bytes: exact.maximum_bytes - 1,
+            ..exact
+        },
+        ShellCoatingStrainBudget {
+            maximum_work: exact.maximum_work - 1,
+            ..exact
+        },
+    ] {
+        assert!(
+            image
+                .prepare_coating_strain_with_offset(short, &gate)
+                .is_err()
+        );
+    }
+    let mut observer = image
+        .prepare_coating_strain_with_offset(exact, &gate)
+        .unwrap();
+    assert!(
+        observer
+            .evaluate_with_static_offset(&[0.0; 2], &[C64::ZERO; 3], &gate)
+            .is_err()
+    );
+    assert!(
+        observer
+            .evaluate_with_static_offset(&[f64::NAN; 3], &[C64::ZERO; 3], &gate)
+            .is_err()
+    );
+    assert!(
+        observer
+            .evaluate_with_static_offset(
+                &[0.0; 3],
+                &[C64 {
+                    re: 0.0,
+                    im: f64::INFINITY
+                }; 3],
+                &gate
+            )
+            .is_err()
+    );
+    let stopped = CancelGate::new_clock_free();
+    stopped.request();
+    assert!(matches!(
+        observer.evaluate_with_static_offset(&[0.0; 3], &[C64::ZERO; 3], &stopped),
+        Err(AcousticRealizeError::Cancelled)
+    ));
+    assert_eq!(observer.completed_evaluations(), 0);
+    let report = observer
+        .evaluate_with_static_offset(&[0.0; 3], &[C64::ZERO; 3], &gate)
+        .unwrap();
+    assert!(report.within_authored_envelope);
+    assert!(report.films.iter().all(|f| f.frobenius_upper_bound == 0.0));
+    assert_eq!(observer.completed_evaluations(), 1);
+}
