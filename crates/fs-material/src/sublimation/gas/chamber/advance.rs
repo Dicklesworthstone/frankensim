@@ -84,6 +84,8 @@ pub struct GasSurfaceHistory {
     pub incoming_mass_kg: f64,
     pub transferred_mass_kg: f64,
     pub energy_into_gas_j: f64,
+    /// External condensed-body heat on accepted half steps only.
+    pub supplied_heat_j: f64,
     /// Signed reflected heat INCLUDED in energy_into_gas_j, never an addend.
     /// This sums only accepted half steps and is zero for the specular API.
     pub reflected_heat_into_gas_j: f64,
@@ -106,14 +108,16 @@ pub struct GasChamberAdvanceAudit {
     pub maximum_accepted_error_ratio: f64,
     pub surfaces: Vec<GasSurfaceHistory>,
     pub energy_into_gas_j: f64,
+    /// External heat supplied to condensed bodies, distinct from gas exchange.
+    pub supplied_heat_j: f64,
     /// Signed reflected heat INCLUDED in the complete stream energy above.
     pub reflected_heat_into_gas_j: f64,
     /// Sum of original-reference storage increments on accepted half steps.
     /// Rounded diagnostic totals need not reproduce the small residuals below.
     pub solid_energy_change_j: f64,
     pub gas_energy_change_j: f64,
-    /// Telescoping caloric defects, with conserved species datums canceled
-    /// inside each accepted physical interval before accumulation.
+    /// Telescoping caloric defects after supplied heat is accounted for, with
+    /// species datums canceled inside each accepted physical interval.
     pub energy_residual_j: f64,
     pub gas_stream_energy_residual_j: f64,
     pub solid_stream_energy_residual_j: f64,
@@ -161,6 +165,7 @@ struct SurfaceSums {
     incoming: Sum,
     transferred: Sum,
     energy: Sum,
+    supplied: Sum,
     stored: Sum,
     residual: Sum,
     reflected: Sum,
@@ -175,6 +180,7 @@ impl SurfaceSums {
         self.incoming.add(row.incoming_mass_kg)?;
         self.transferred.add(row.transferred_mass_kg)?;
         self.energy.add(row.energy_into_gas_j)?;
+        self.supplied.add(row.supplied_heat_j)?;
         self.stored.add(row.solid_energy_change_j)?;
         self.residual.add(row.energy_residual_j)?;
         if let Some(reflection) = reflection { self.reflected.add(reflection.heat_into_gas_j)?; }
@@ -464,6 +470,7 @@ pub(in crate::sublimation::gas) fn advance_history_observed<'catalog, Extra, C: 
         }
     };
     let mut solid_energy = Sum::default();
+    let mut supplied_heat = Sum::default();
     let mut solid_stream_residual = Sum::default();
     let mut solid_mass = Sum::default();
     let mut stream_energy = Sum::default();
@@ -475,6 +482,7 @@ pub(in crate::sublimation::gas) fn advance_history_observed<'catalog, Extra, C: 
         let start = original.solid;
         let end = final_row.solid;
         solid_energy.add(sum.stored.value)?;
+        supplied_heat.add(sum.supplied.value)?;
         solid_stream_residual.add(sum.residual.value)?;
         solid_mass.add(end.mass_kg - start.mass_kg)?;
         stream_energy.add(sum.energy.value)?;
@@ -483,6 +491,7 @@ pub(in crate::sublimation::gas) fn advance_history_observed<'catalog, Extra, C: 
         histories.push(GasSurfaceHistory {
             id: original.id, outgoing_mass_kg: sum.outgoing.value, incoming_mass_kg: sum.incoming.value,
             transferred_mass_kg: sum.transferred.value, energy_into_gas_j: sum.energy.value,
+            supplied_heat_j: sum.supplied.value,
             reflected_heat_into_gas_j: sum.reflected.value, recession_m: sum.recession.value,
             surface_temperature_k: [sum.initial_temperature.unwrap_or(final_row.surface_temperature_k[0]), final_row.surface_temperature_k[1]],
         });
@@ -520,6 +529,7 @@ pub(in crate::sublimation::gas) fn advance_history_observed<'catalog, Extra, C: 
         elapsed_s: elapsed, trials, rejected_trials: rejected, accepted_intervals: accepted,
         kernel_evaluations: evaluations, maximum_accepted_error_ratio: maximum_error, surfaces: histories,
         energy_into_gas_j: stream_energy.value, reflected_heat_into_gas_j: reflected_energy.value,
+        supplied_heat_j: supplied_heat.value,
         solid_energy_change_j: solid_energy.value, gas_energy_change_j: gas_energy,
         energy_residual_j: energy_residual, gas_stream_energy_residual_j: gas_stream_residual,
         solid_stream_energy_residual_j: solid_stream_residual, mass_residual_kg: mass_residual,
@@ -533,3 +543,4 @@ mod tests;
 #[cfg(test)]
 #[path = "advance/accommodation_tests.rs"]
 mod accommodation_tests;
+

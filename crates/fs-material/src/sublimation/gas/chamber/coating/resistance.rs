@@ -16,13 +16,16 @@
 
 /// Accuracy-controlled histories carrying both condensed temperatures and one gas.
 pub mod advance;
+/// Explicit heat/power inputs with the original conservative history owner.
+pub mod driven;
 /// Mass-derived exposed area and material conductivity in that same adaptive history.
 pub mod growing;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use fs_thermal::sublimation::coating::resistance::{
-    ResistiveHeatStep, ResistiveSurfaceState, heat_resistive_surface,
+    ResistiveHeatStep, ResistiveInterfaceLaw, ResistiveSurfaceState, heat_resistive_surface,
+    heat_resistive_surface_with_interface,
 };
 
 pub use super::GasSupportedChamberSolve;
@@ -55,6 +58,20 @@ pub struct GasResistiveSurface<'a> {
     pub deposit_temperature: &'a dyn Fn(f64) -> Result<f64, SublimationError>,
 }
 
+/// Explicit heat delivered during one interval and an optional original contact law.
+///
+/// Positive heat enters the named condensed body; negative heat removes energy.
+/// These are externally supplied joules, never a second molecular/latent source.
+/// `interface: None` retains the surface's authored scalar conductance. A supplied
+/// passive law replaces that conductance and is evaluated at both endpoint
+/// temperatures inside the original bounded caloric solve.
+#[derive(Clone, Copy, Default)]
+pub struct GasResistiveDrive<'a> {
+    pub substrate_heat_j: f64,
+    pub deposit_heat_j: f64,
+    pub interface: Option<&'a dyn ResistiveInterfaceLaw>,
+}
+
 impl ChamberSurfaceOwner for GasResistiveSurface<'_> {
     fn id(&self) -> u64 {
         self.id
@@ -80,6 +97,9 @@ pub struct GasResistiveSurfaceStep {
     pub substrate_temperature_k: [f64; 2],
     /// Positive from substrate to deposit; internal, never added to gas heat.
     pub interface_heat_j: f64,
+    /// External sources, kept separate even when equal/opposite or net zero.
+    pub supplied_substrate_heat_j: f64,
+    pub supplied_deposit_heat_j: f64,
     pub substrate_energy_change_j: f64,
     /// Includes actual deposit storage and the fixed gas-datum conversion.
     pub deposit_energy_change_j: f64,
@@ -143,12 +163,13 @@ fn snapshot(
     duration_s: f64,
     controls: GasSupportedChamberSolve,
     admit_births: bool,
+    drive: GasResistiveDrive<'_>,
 ) -> Result<SurfaceSnapshot, GasSurfaceError> {
     let state = surface.state;
     if !positive(state.substrate_mass_kg)
         || !state.substrate_specific_enthalpy_j_kg.is_finite()
         || !(positive(state.deposit.mass_kg) || (admit_births && state.deposit.mass_kg == 0.0))
-        || !nonnegative(surface.conductance_w_k)
+        || (drive.interface.is_none() && !nonnegative(surface.conductance_w_k))
     {
         return Err(invalid(
             "resistive deposition requires positive existing support/film masses and finite conductance",
@@ -187,9 +208,13 @@ fn snapshot(
         duration_s,
         controls.chamber.surface,
     )?;
-    // A gas/deposit equilibrium is not stationary if internal support heat will
-    // change the deposit. Keep the original gross inventory ceiling in that case.
-    snapshot.stationary_equilibrium &= surface.conductance_w_k == 0.0 || support_t == deposit_t;
+    // A gas/deposit equilibrium is not stationary if support contact or EITHER
+    // external source can change its state. Equal/opposite sources cannot
+    // cancel this admission check merely because their combined heat is zero.
+    let contact_stationary =
+        support_t == deposit_t || (drive.interface.is_none() && surface.conductance_w_k == 0.0);
+    snapshot.stationary_equilibrium &=
+        contact_stationary && drive.substrate_heat_j == 0.0 && drive.deposit_heat_j == 0.0;
     Ok(snapshot)
 }
 
@@ -197,6 +222,8 @@ struct Storage {
     heat: ResistiveHeatStep,
     initial_substrate_temperature_k: f64,
     deposit_energy_change_j: f64,
+    supplied_substrate_heat_j: f64,
+    supplied_deposit_heat_j: f64,
 }
 
 fn prepare(
@@ -206,6 +233,7 @@ fn prepare(
     duration_s: f64,
     controls: GasSupportedChamberSolve,
     reflected_heat_into_gas_j: f64,
+    drive: GasResistiveDrive<'_>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(PreparedSurface, Storage), GasSurfaceError> {
     let energy = molecular_stream_energy(snapshot, reflected_heat_into_gas_j)?;
@@ -228,7 +256,7 @@ fn prepare(
     }
     // First account for transferred material at its original deposit enthalpy.
     // Remaining energy heats the ACTUAL final film mass; the independent support
-    // receives only equal/opposite interface heat. Formation references cancel
+    // retains its supplied heat and equal/opposite contact. Formation references cancel
     // before this sensible/latent increment, exactly as in the isothermal owner.
     let heat_j = condensed_thermal_target(
         snapshot,
@@ -236,30 +264,57 @@ fn prepare(
         energy.difference_j_kg,
         reflected_heat_into_gas_j,
     );
-    let heat = heat_resistive_surface(
-        surface.law,
-        ResistiveSurfaceState {
-            deposit: SolidSurfaceState {
-                mass_kg: next_mass,
-                ..surface.state.deposit
-            },
-            ..surface.state
+    // Retain the error-free sum's low part in the physical residual. An
+    // externally supplied heat must not disappear into a larger molecular
+    // heat target while the reported source account still claims it arrived.
+    let (deposit_heat_j, input_roundoff_j) = fs_math::eft::two_sum(heat_j, drive.deposit_heat_j);
+    if !deposit_heat_j.is_finite() || !input_roundoff_j.is_finite() {
+        return Err(invalid(
+            "combined molecular and supplied coating heat is unrepresentable",
+        ));
+    }
+    let thermal_state = ResistiveSurfaceState {
+        deposit: SolidSurfaceState {
+            mass_kg: next_mass,
+            ..surface.state.deposit
         },
-        duration_s,
-        surface.conductance_w_k,
-        0.0,
-        heat_j,
-        controls.storage,
-        surface.substrate_temperature,
-        surface.deposit_temperature,
-        || {
-            if cancelled() {
-                Err(SublimationError::Cancelled)
-            } else {
-                Ok(())
-            }
-        },
-    )?;
+        ..surface.state
+    };
+    let checkpoint = || {
+        if cancelled() {
+            Err(SublimationError::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
+    let mut heat = match drive.interface {
+        Some(interface) => heat_resistive_surface_with_interface(
+            surface.law,
+            thermal_state,
+            duration_s,
+            interface,
+            drive.substrate_heat_j,
+            deposit_heat_j,
+            controls.storage,
+            surface.substrate_temperature,
+            surface.deposit_temperature,
+            checkpoint,
+        ),
+        None => heat_resistive_surface(
+            surface.law,
+            thermal_state,
+            duration_s,
+            surface.conductance_w_k,
+            drive.substrate_heat_j,
+            deposit_heat_j,
+            controls.storage,
+            surface.substrate_temperature,
+            surface.deposit_temperature,
+            checkpoint,
+        ),
+    }?;
+    heat.deposit_energy_residual_j -= input_roundoff_j;
+    heat.energy_residual_j -= input_roundoff_j;
     let temperature = heat.deposit_temperature_k;
     let deposit_h = heat.state.deposit.specific_enthalpy_j_kg;
     let phase = phase_at(surface.law, temperature, snapshot.gas.molar_mass)?;
@@ -313,6 +368,7 @@ fn prepare(
             energy_into_gas_j: energy.energy_into_gas_j,
             phase_relative_energy_into_gas_j: energy.phase_relative_energy_into_gas_j,
             relative_energy_into_gas_j: energy.relative_energy_into_gas_j,
+            supplied_heat_j: drive.substrate_heat_j + drive.deposit_heat_j,
             solid_energy_change_j,
             energy_residual_j: heat.energy_residual_j,
             recession_m,
@@ -321,6 +377,8 @@ fn prepare(
             heat,
             initial_substrate_temperature_k,
             deposit_energy_change_j,
+            supplied_substrate_heat_j: drive.substrate_heat_j,
+            supplied_deposit_heat_j: drive.deposit_heat_j,
         },
     ))
 }
@@ -346,6 +404,7 @@ pub fn advance_resistive_chamber<'catalog>(
     advance(
         surfaces,
         accommodation,
+        None,
         None,
         gas,
         catalog,
@@ -377,6 +436,41 @@ pub fn advance_resistive_chamber_with_films<'catalog>(
         surfaces,
         accommodation,
         Some(films),
+        None,
+        gas,
+        catalog,
+        duration_s,
+        controls,
+        false,
+        cancelled,
+    )
+}
+
+/// Advance one interval with explicit external heating/cooling and contact laws.
+///
+/// Missing drive IDs retain zero supplied heat and the surface's scalar
+/// conductance. Each heat is an interval amount in joules; zero duration may
+/// apply a heat impulse but cannot transfer phase mass or contact heat. Both
+/// external heat inputs are exposed separately in surface reports, and their
+/// total in every joint source-aware energy receipt. The gas receives only its
+/// original molecular/reflected energy transaction. Positive films are required.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_resistive_chamber_driven<'catalog>(
+    surfaces: &[GasResistiveSurface<'_>],
+    accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
+    films: Option<&BTreeMap<u64, f64>>,
+    drives: &BTreeMap<u64, GasResistiveDrive<'_>>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    duration_s: f64,
+    controls: GasSupportedChamberSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<GasResistiveChamberCandidate<'catalog>, GasSurfaceError> {
+    advance(
+        surfaces,
+        accommodation,
+        films,
+        Some(drives),
         gas,
         catalog,
         duration_s,
@@ -424,6 +518,7 @@ pub fn advance_resistive_chamber_with_births<'catalog>(
         surfaces,
         accommodation,
         films,
+        None,
         gas,
         catalog,
         duration_s,
@@ -438,6 +533,7 @@ fn advance<'catalog>(
     surfaces: &[GasResistiveSurface<'_>],
     accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
     films: Option<&BTreeMap<u64, f64>>,
+    drives: Option<&BTreeMap<u64, GasResistiveDrive<'_>>>,
     gas: &ClosedGasParcel,
     catalog: &'catalog ThermochemicalGasModel,
     duration_s: f64,
@@ -451,21 +547,41 @@ fn advance<'catalog>(
             "resistive surface roster exceeds its declared work bound",
         ));
     }
-    if let Some(films) = films {
-        if films.len() > surfaces.len() {
-            return Err(invalid("too many resistive gas-film coefficients"));
+    if films.is_some() || drives.is_some() {
+        if films.is_some_and(|map| map.len() > surfaces.len())
+            || drives.is_some_and(|map| map.len() > surfaces.len())
+        {
+            return Err(invalid(
+                "too many resistive gas-film coefficients or drive bindings",
+            ));
         }
         let mut ids = BTreeSet::new();
         for surface in surfaces {
             poll(&mut cancelled)?;
             ids.insert(surface.id);
         }
-        for (id, value) in films {
-            poll(&mut cancelled)?;
-            if !ids.contains(id) || !nonnegative(*value) {
-                return Err(invalid(
-                    "gas-film coefficient references an unknown resistive surface or is invalid",
-                ));
+        if let Some(films) = films {
+            for (id, value) in films {
+                poll(&mut cancelled)?;
+                if !ids.contains(id) || !nonnegative(*value) {
+                    return Err(invalid(
+                        "gas-film coefficient references an unknown resistive surface or is invalid",
+                    ));
+                }
+            }
+        }
+        if let Some(drives) = drives {
+            for (id, drive) in drives {
+                poll(&mut cancelled)?;
+                if !ids.contains(id)
+                    || !drive.substrate_heat_j.is_finite()
+                    || !drive.deposit_heat_j.is_finite()
+                    || !(drive.substrate_heat_j + drive.deposit_heat_j).is_finite()
+                {
+                    return Err(invalid(
+                        "external heat references an unknown resistive surface or is unrepresentable",
+                    ));
+                }
             }
         }
     }
@@ -487,11 +603,25 @@ fn advance<'catalog>(
                 duration_s,
                 controls,
                 admit_births,
+                drives
+                    .and_then(|map| map.get(&surface.id))
+                    .copied()
+                    .unwrap_or_default(),
             )
         },
         |surface, snapshot, reflected, cancelled| {
             let (prepared, retained) = prepare(
-                surface, snapshot, catalog, duration_s, controls, reflected, cancelled,
+                surface,
+                snapshot,
+                catalog,
+                duration_s,
+                controls,
+                reflected,
+                drives
+                    .and_then(|map| map.get(&surface.id))
+                    .copied()
+                    .unwrap_or_default(),
+                cancelled,
             )?;
             storage.push(retained);
             Ok(prepared)
@@ -519,6 +649,8 @@ fn advance<'catalog>(
                 heat.substrate_temperature_k,
             ],
             interface_heat_j: heat.interface_heat_j,
+            supplied_substrate_heat_j: stored.supplied_substrate_heat_j,
+            supplied_deposit_heat_j: stored.supplied_deposit_heat_j,
             substrate_energy_change_j: heat.substrate_energy_change_j,
             deposit_energy_change_j: stored.deposit_energy_change_j,
             substrate_energy_residual_j: heat.substrate_energy_residual_j,

@@ -183,7 +183,36 @@ curved outer area against direct mass/volume formulas while inner contact area
 stays fixed, and preserve original conductivity-domain errors, density/volume
 admission and transactional cancellation.
 
+### Explicit heating and cooling of finite-gas, two-temperature deposits
 
+The resistive chamber accepts separate prescribed support and deposit heat through
+`GasResistiveDrive` and `advance_resistive_chamber_driven`. Positive joules heat
+the named condensed body and negative joules cool it. These sources enter the
+original two-body caloric solve, alongside the existing molecular energy target;
+they never enter the gas molecular stream or add another latent source. Every
+surface and chamber receipt exposes supplied heat. The two external body inputs
+remain separate in thermal receipts, even for an equal/opposite pair. Energy
+defects mean condensed storage plus gas storage minus supplied heat, with
+original caloric/formation datums cancelled before arithmetic. A retained
+error-free addition remainder prevents an unrepresentable small deposit source
+from silently vanishing into a larger molecular target.
+
+An optional borrowed `ResistiveInterfaceLaw` replaces the authored scalar
+contact inside that same endpoint solve. Gas-film mass transfer remains an
+independent input. Zero duration permits an explicitly prescribed energy impulse
+but no mass transfer or contact heat. Positive coating inventories remain
+required by the ordinary driven entry point. Either nonzero external source
+disables the stationary-chamber inventory shortcut, regardless of their sum.
+
+`advance_resistive_chamber_adaptive_driven` takes `GasResistivePower` in watts.
+Every actual full or half trial receives its own `P * dt`; rejected intervals
+cannot contribute supplied heat. One reused drive map and the existing adaptive
+controller carry both original caloric states and the finite gas. Both source
+integrals enter the physical error norm, and the accepted whole-window source
+for each body is checked independently against `P * duration`. Unknown IDs,
+nonfinite/unrepresentable work, exhausted work, source failures and cancellation
+publish no candidate. This is prescribed-power evolution, not an imposed
+temperature thermostat, feedback controller or unbounded gas reservoir.
 
 ## Source-bound finite membrane entropy and thermal stress
 

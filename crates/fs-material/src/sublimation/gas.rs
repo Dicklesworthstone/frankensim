@@ -312,6 +312,8 @@ struct PreparedSurface {
     energy_into_gas_j: f64,
     phase_relative_energy_into_gas_j: f64,
     relative_energy_into_gas_j: f64,
+    /// External heat supplied to condensed storage, excluding molecular/reflected heat.
+    supplied_heat_j: f64,
     solid_energy_change_j: f64,
     energy_residual_j: f64,
     recession_m: f64,
@@ -786,6 +788,7 @@ fn prepare_surface_with_boundary(
         energy_into_gas_j: energy.energy_into_gas_j,
         phase_relative_energy_into_gas_j: energy.phase_relative_energy_into_gas_j,
         relative_energy_into_gas_j: energy.relative_energy_into_gas_j,
+        supplied_heat_j: 0.0,
         solid_energy_change_j,
         energy_residual_j,
         recession_m,
@@ -939,3 +942,4 @@ fn finish_surface<'catalog>(
 
 #[cfg(test)]
 mod tests;
+

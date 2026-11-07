@@ -309,6 +309,7 @@ fn prepare(
             energy_into_gas_j: energy.energy_into_gas_j,
             phase_relative_energy_into_gas_j: energy.phase_relative_energy_into_gas_j,
             relative_energy_into_gas_j: energy.relative_energy_into_gas_j,
+            supplied_heat_j: 0.0,
             solid_energy_change_j,
             energy_residual_j,
             recession_m,
@@ -464,3 +465,4 @@ fn advance_supported_chamber_impl<'catalog>(
 
 #[cfg(test)]
 mod tests;
+

@@ -4,7 +4,7 @@
 //! Only the conservative fine history is accepted. The support and deposit keep
 //! separate caloric coordinates; deposited mass is never scaled by support mass.
 //! Their enthalpy increments, both temperatures, every gas species, original-law
-//! gas sensible energy and integrated interface heat participate in the norm.
+//! gas sensible energy, interface heat and both supplied heats participate in the norm.
 //!
 //! This is local first-order temporal error control, not a global error bound or
 //! a morphology/nucleation model. Both condensed inventories must start positive.
@@ -35,7 +35,7 @@ pub struct GasResistiveAdvanceSolve {
     /// Applied separately to the original support/deposit caloric charts [J/kg].
     /// Relative scales use changes from the current state, not datum magnitudes.
     pub absolute_specific_enthalpy_tolerance_j_kg: f64,
-    /// Applied to gas sensible energy and accepted interface-heat integrals [J].
+    /// Applied to gas sensible energy, interface and both supplied-heat integrals [J].
     pub absolute_heat_tolerance_j: f64,
     pub relative_tolerance: f64,
     pub minimum_dt_s: f64,
@@ -94,6 +94,9 @@ pub struct GasResistiveThermalHistory {
     pub substrate_temperature_k: [f64; 2],
     /// Positive support -> deposit; internal to the combined chamber balance.
     pub interface_heat_j: f64,
+    /// Accepted external source heat; independent body inputs never cancel here.
+    pub supplied_substrate_heat_j: f64,
+    pub supplied_deposit_heat_j: f64,
     pub substrate_energy_change_j: f64,
     /// Includes the existing deposit-to-gas enthalpy datum conversion.
     pub deposit_energy_change_j: f64,
@@ -309,6 +312,26 @@ fn compare(
             controls.absolute_heat_tolerance_j,
             controls.relative_tolerance,
         )?);
+        for (coarse_heat, first_heat, second_heat) in [
+            (
+                a.supplied_substrate_heat_j,
+                half.supplied_substrate_heat_j,
+                b.supplied_substrate_heat_j,
+            ),
+            (
+                a.supplied_deposit_heat_j,
+                half.supplied_deposit_heat_j,
+                b.supplied_deposit_heat_j,
+            ),
+        ] {
+            maximum = maximum.max(change_ratio(
+                coarse_heat,
+                finite(first_heat + second_heat)?,
+                0.0,
+                controls.absolute_heat_tolerance_j,
+                controls.relative_tolerance,
+            )?);
+        }
     }
     for species in fine.catalog().thermodynamics().components() {
         poll(cancelled)?;
@@ -349,6 +372,9 @@ struct SurfaceTotals {
     support_stored: Total,
     deposit_stored: Total,
     interface: Total,
+    supplied: Total,
+    support_supplied: Total,
+    deposit_supplied: Total,
     support_residual: Total,
     deposit_residual: Total,
     initial_support_temperature: Option<f64>,
@@ -372,6 +398,9 @@ impl SurfaceTotals {
         self.support_stored.add(row.substrate_energy_change_j)?;
         self.deposit_stored.add(row.deposit_energy_change_j)?;
         self.interface.add(row.interface_heat_j)?;
+        self.supplied.add(exchange.supplied_heat_j)?;
+        self.support_supplied.add(row.supplied_substrate_heat_j)?;
+        self.deposit_supplied.add(row.supplied_deposit_heat_j)?;
         self.support_residual.add(row.substrate_energy_residual_j)?;
         self.deposit_residual.add(row.deposit_energy_residual_j)
     }
@@ -403,6 +432,7 @@ pub fn advance_resistive_chamber_adaptive<'catalog>(
             super::advance(
                 rows,
                 accommodation,
+                None,
                 None,
                 gas,
                 catalog,
@@ -442,6 +472,7 @@ pub fn advance_resistive_chamber_adaptive_with_films<'catalog>(
                 rows,
                 accommodation,
                 Some(films),
+                None,
                 gas,
                 catalog,
                 dt,
@@ -656,6 +687,7 @@ pub(super) fn advance_with<'catalog, C: FnMut() -> bool>(
         }
     };
     let mut solid_energy = Total::default();
+    let mut supplied_heat = Total::default();
     let mut solid_residual = Total::default();
     let mut solid_mass = Total::default();
     let mut stream_energy = Total::default();
@@ -688,6 +720,7 @@ pub(super) fn advance_with<'catalog, C: FnMut() -> bool>(
             }
         }
         solid_energy.add(sum.stored.value()?)?;
+        supplied_heat.add(sum.supplied.value()?)?;
         solid_residual.add(sum.residual.value()?)?;
         solid_mass.add(mass_change)?;
         stream_energy.add(sum.stream.value()?)?;
@@ -703,6 +736,7 @@ pub(super) fn advance_with<'catalog, C: FnMut() -> bool>(
             incoming_mass_kg: sum.incoming.value()?,
             transferred_mass_kg: transferred,
             energy_into_gas_j: sum.stream.value()?,
+            supplied_heat_j: sum.supplied.value()?,
             reflected_heat_into_gas_j: sum.reflected.value()?,
             recession_m: sum.recession.value()?,
             surface_temperature_k: [
@@ -719,6 +753,8 @@ pub(super) fn advance_with<'catalog, C: FnMut() -> bool>(
                 end.substrate_temperature_k[1],
             ],
             interface_heat_j: sum.interface.value()?,
+            supplied_substrate_heat_j: sum.support_supplied.value()?,
+            supplied_deposit_heat_j: sum.deposit_supplied.value()?,
             substrate_energy_change_j: sum.support_stored.value()?,
             deposit_energy_change_j: sum.deposit_stored.value()?,
             substrate_energy_residual_j: sum.support_residual.value()?,
@@ -771,6 +807,7 @@ pub(super) fn advance_with<'catalog, C: FnMut() -> bool>(
                 maximum_accepted_error_ratio: maximum_error,
                 surfaces: histories,
                 energy_into_gas_j: stream_energy.value()?,
+                supplied_heat_j: supplied_heat.value()?,
                 reflected_heat_into_gas_j: reflected_energy.value()?,
                 solid_energy_change_j: solid_energy.value()?,
                 gas_energy_change_j: gas_energy.value()?,

@@ -82,13 +82,16 @@ pub struct GasChamberSurfaceStep {
     pub outgoing_specific_energy_j_kg: f64,
     pub incoming_specific_energy_j_kg: Option<f64>,
     pub energy_into_gas_j: f64,
+    /// External heat supplied to condensed storage, excluding molecular and
+    /// reflected gas heat. Zero on the ordinary closed-chamber paths.
+    pub supplied_heat_j: f64,
     /// Original-datum report: intended transferred-mass reference energy plus
     /// actual represented caloric storage. Inventory rounding is independently
     /// bounded. On the mixed path this includes the complete condensed body;
     /// the supported path includes both nonvolatile substrate and deposit.
     pub solid_energy_change_j: f64,
-    /// Solid storage change plus its allocated stream energy, with conserved
-    /// formation references canceled before evaluation. The actual gas storage
+    /// Solid storage change plus its allocated stream energy minus supplied
+    /// heat, with formation references canceled before evaluation. Actual gas storage
     /// residual is accounted for only in the joint chamber report.
     pub energy_residual_j: f64,
     /// Phase-transfer retreat only; mixed-path fusion is reported separately.
@@ -106,6 +109,7 @@ impl GasChamberSurfaceStep {
             outgoing_specific_energy_j_kg: surface.outgoing_specific_energy_j_kg,
             incoming_specific_energy_j_kg: surface.incoming_specific_energy_j_kg,
             energy_into_gas_j: surface.energy_into_gas_j,
+            supplied_heat_j: surface.supplied_heat_j,
             solid_energy_change_j: surface.solid_energy_change_j,
             energy_residual_j: surface.energy_residual_j,
             recession_m: surface.recession_m,
@@ -134,10 +138,14 @@ pub struct GasChamberStep {
     pub incoming_mass_kg: f64,
     pub transferred_mass_kg: f64,
     pub energy_into_gas_j: f64,
+    /// External heat delivered to all condensed bodies; never added to the gas
+    /// molecular stream. Storage plus gas energy balances this supplied heat.
+    pub supplied_heat_j: f64,
     pub solid_energy_change_j: f64,
     pub gas_energy_change_j: f64,
-    /// Sum of actual local thermal balance defects after conserved formation
-    /// terms cancel; subtracting the displayed absolute reports may lose heat.
+    /// Sum of actual local thermal balance defects, including supplied heat,
+    /// after conserved formation terms cancel. Subtracting displayed absolute
+    /// reports may lose heat; the residual uses original source-relative balances.
     pub energy_residual_j: f64,
     pub mass_residual_kg: f64,
     pub gas_temperature_k: [f64; 2],
@@ -474,6 +482,7 @@ fn advance_chamber_with_owner<'catalog, S: ChamberSurfaceOwner, C: FnMut() -> bo
     }
     let mut outputs = Vec::with_capacity(snapshots.len());
     let mut solid_energy = Total::default();
+    let mut supplied_heat = Total::default();
     let mut solid_residual = Total::default();
     let mut solid_mass_change = Total::default();
     for (surface, snapshot) in snapshots {
@@ -506,6 +515,7 @@ fn advance_chamber_with_owner<'catalog, S: ChamberSurfaceOwner, C: FnMut() -> bo
         account.solid_mass_change.add(dm)?;
         solid_mass_change.add(dm)?;
         solid_energy.add(prepared.solid_energy_change_j)?;
+        supplied_heat.add(prepared.supplied_heat_j)?;
         solid_residual.add(prepared.energy_residual_j)?;
         account.phase_relative_energy.add(prepared.phase_relative_energy_into_gas_j)?;
         let difference = snapshot.partial_enthalpy_change_j_kg
@@ -608,6 +618,7 @@ fn advance_chamber_with_owner<'catalog, S: ChamberSurfaceOwner, C: FnMut() -> bo
             incoming_mass_kg: total_incoming.value()?,
             transferred_mass_kg: total_transferred.value()?,
             energy_into_gas_j: total_energy.value()?,
+            supplied_heat_j: supplied_heat.value()?,
             solid_energy_change_j,
             gas_energy_change_j,
             energy_residual_j,
@@ -624,3 +635,4 @@ mod tests;
 #[cfg(test)]
 #[path = "chamber/accommodation_tests.rs"]
 mod accommodation_tests;
+

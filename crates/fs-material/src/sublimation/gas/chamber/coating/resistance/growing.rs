@@ -250,6 +250,7 @@ pub fn advance_growing_resistive_chamber<'catalog>(
                 &rebound,
                 accommodation,
                 films,
+                None,
                 gas,
                 catalog,
                 dt,
