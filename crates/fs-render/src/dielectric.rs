@@ -685,6 +685,10 @@ impl SpectralAbsorption {
 
     /// Evaluate intensity absorption [1/m] within the declared source band.
     pub fn extinction_per_m(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
+        self.interpolate(wavelength_nm)
+    }
+
+    fn interpolate(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
         let (minimum, maximum) = self.wavelength_bounds_nm();
         if !wavelength_nm.is_finite() || !(minimum..=maximum).contains(&wavelength_nm) {
             return Err(DielectricError::InvalidWavelength);
@@ -705,6 +709,60 @@ impl SpectralAbsorption {
     }
 }
 
+/// Original piecewise-linear imaginary refractive index on its source band.
+///
+/// The dimensionless index is interpolated before evaluating intensity
+/// absorption as `alpha = 4*pi*k/lambda_vacuum`. Interpolating converted alpha
+/// knots would replace this source law with a different absorption spectrum.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpectralExtinctionIndex {
+    samples: SpectralAbsorption,
+}
+
+impl SpectralExtinctionIndex {
+    /// Original `(vacuum_wavelength_nm, dimensionless_k)` source knots.
+    #[must_use]
+    pub fn knots(&self) -> &[(f64, f64)] {
+        self.samples.knots()
+    }
+
+    /// Inclusive vacuum-wavelength support in nm, without extrapolation.
+    #[must_use]
+    pub const fn wavelength_bounds_nm(&self) -> (f64, f64) {
+        self.samples.wavelength_bounds_nm()
+    }
+
+    /// Evaluate the original dimensionless imaginary-index interpolation.
+    pub fn extinction_index(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
+        self.samples.interpolate(wavelength_nm)
+    }
+
+    /// Evaluate bulk intensity absorption [1/m] at the requested wavelength.
+    pub fn extinction_per_m(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
+        intensity_absorption_from_index(wavelength_nm, self.extinction_index(wavelength_nm)?)
+    }
+}
+
+fn intensity_absorption_from_index(wavelength_nm: f64, k: f64) -> Result<f64, DielectricError> {
+    if k == 0.0 {
+        return Ok(0.0);
+    }
+    let scale = (4.0 * PI) / (wavelength_nm * 1.0e-9);
+    let absorption = if scale.is_finite() {
+        k * scale
+    } else {
+        // A representable ratio can survive the metre conversion or scale
+        // overflowing at extremely short positive vacuum wavelengths.
+        (k / wavelength_nm) * (4.0 * PI * 1.0e9)
+    };
+    // A positive source loss must not silently become a clear material when
+    // its intensity coefficient lies outside binary64's representable range.
+    if !absorption.is_finite() || absorption == 0.0 {
+        return Err(DielectricError::InvalidAbsorption);
+    }
+    Ok(absorption)
+}
+
 /// Canonical source parameters retained by Beer-Lambert absorption.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BeerLambertParameters {
@@ -720,6 +778,11 @@ pub enum BeerLambertParameters {
         /// Wavelength knots and their nonnegative absorption coefficients.
         spectrum: SpectralAbsorption,
     },
+    /// Original imaginary-index spectrum, converted after interpolation.
+    ExtinctionIndex {
+        /// Wavelength knots and their nonnegative dimensionless indices.
+        spectrum: SpectralExtinctionIndex,
+    },
     /// A bounded lifted spectrum defining transmittance at one path length.
     ReferenceRgb {
         /// Declared linear-RGB reference transmittance.
@@ -734,6 +797,7 @@ enum AbsorptionModel {
     Clear,
     Constant(f64),
     Spectral(SpectralAbsorption),
+    ExtinctionIndex(SpectralExtinctionIndex),
     ReferenceRgb {
         spectrum: LiftedSpectrum,
         linear_rgb: [f64; 3],
@@ -795,13 +859,12 @@ impl BeerLambertAbsorption {
 
     /// Convert dimensionless imaginary-index samples to intensity absorption.
     ///
-    /// At every supplied vacuum wavelength, alpha = 4*pi*k/lambda_m.
-    /// The resulting alpha knots are interpolated linearly, exactly as in
-    /// [Self::try_from_spectral_extinction]; this does not fit or reconstruct
-    /// a continuous complex-index law between the supplied samples. Interface
-    /// optics retain the separate real phase index and weakly absorbing
-    /// dielectric approximation; strongly absorbing conductors use their
-    /// complex-index Fresnel owner.
+    /// The original dimensionless k knots are retained and interpolated
+    /// linearly. At the requested vacuum wavelength, alpha = 4*pi*k/lambda_m;
+    /// converting before interpolation would change that constitutive law.
+    /// Interface optics retain the separate real phase index and weakly
+    /// absorbing dielectric approximation; strongly absorbing conductors use
+    /// their complex-index Fresnel owner. No causal spectral fit is inferred.
     pub fn try_from_spectral_extinction_index(
         knots: &[(f64, f64)],
     ) -> Result<Self, DielectricError> {
@@ -811,34 +874,24 @@ impl BeerLambertAbsorption {
     /// Convert dimensionless imaginary-index knots on their original band.
     ///
     /// As for [`Self::try_from_spectral_extinction_index`], this uses vacuum
-    /// wavelength and intensity attenuation, `alpha = 4*pi*k/lambda_m`, at
-    /// each knot. Alpha then interpolates linearly inside the original band;
-    /// real-index interfaces still require the weak-absorption approximation.
+    /// wavelength and intensity attenuation, `alpha = 4*pi*k/lambda_m`, after
+    /// interpolating the original k knots. No alpha retabulation or support
+    /// extension occurs. Real-index interfaces still require the
+    /// weak-absorption approximation.
     pub fn try_from_spectral_extinction_index_in_band(
         knots: &[(f64, f64)],
     ) -> Result<Self, DielectricError> {
         Self::from_extinction_index(SpectralAbsorption::try_new_in_band(knots)?)
     }
 
-    fn from_extinction_index(mut spectrum: SpectralAbsorption) -> Result<Self, DielectricError> {
-        for (wavelength_nm, coefficient) in &mut spectrum.knots[..spectrum.count] {
-            if *coefficient == 0.0 {
-                continue;
-            }
-            let scale = (4.0 * PI) / (*wavelength_nm * 1.0e-9);
-            *coefficient = if scale.is_finite() {
-                *coefficient * scale
-            } else {
-                // A representable ratio can survive the metre conversion or
-                // scale overflowing at extremely short positive wavelengths.
-                (*coefficient / *wavelength_nm) * (4.0 * PI * 1.0e9)
-            };
-            if !coefficient.is_finite() {
-                return Err(DielectricError::InvalidAbsorption);
-            }
+    fn from_extinction_index(samples: SpectralAbsorption) -> Result<Self, DielectricError> {
+        // On each segment (a + b*lambda)/lambda is monotone. Endpoint
+        // admission therefore bounds the whole exact absorption law.
+        for &(wavelength_nm, k) in samples.knots() {
+            intensity_absorption_from_index(wavelength_nm, k)?;
         }
         Ok(Self {
-            model: AbsorptionModel::Spectral(spectrum),
+            model: AbsorptionModel::ExtinctionIndex(SpectralExtinctionIndex { samples }),
         })
     }
 
@@ -883,6 +936,7 @@ impl BeerLambertAbsorption {
         match &self.model {
             AbsorptionModel::Clear | AbsorptionModel::Constant(_) => None,
             AbsorptionModel::Spectral(spectrum) => Some(spectrum.wavelength_bounds_nm()),
+            AbsorptionModel::ExtinctionIndex(spectrum) => Some(spectrum.wavelength_bounds_nm()),
             AbsorptionModel::ReferenceRgb { .. } => Some((LAMBDA_MIN, LAMBDA_MAX)),
         }
     }
@@ -898,6 +952,7 @@ impl BeerLambertAbsorption {
             AbsorptionModel::Clear => 0.0,
             AbsorptionModel::Constant(extinction) => *extinction,
             AbsorptionModel::Spectral(spectrum) => spectrum.extinction_per_m(wavelength_nm)?,
+            AbsorptionModel::ExtinctionIndex(spectrum) => spectrum.extinction_per_m(wavelength_nm)?,
             AbsorptionModel::ReferenceRgb {
                 spectrum,
                 distance_m,
@@ -950,6 +1005,9 @@ impl BeerLambertAbsorption {
                 BeerLambertParameters::Constant { extinction_per_m }
             }
             AbsorptionModel::Spectral(spectrum) => BeerLambertParameters::Spectral { spectrum },
+            AbsorptionModel::ExtinctionIndex(spectrum) => {
+                BeerLambertParameters::ExtinctionIndex { spectrum }
+            }
             AbsorptionModel::ReferenceRgb {
                 linear_rgb,
                 distance_m,

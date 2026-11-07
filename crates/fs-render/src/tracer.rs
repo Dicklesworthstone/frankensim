@@ -1163,6 +1163,14 @@ impl Material {
                             update_material_scalar(&mut hasher, extinction_per_m);
                         }
                     }
+                    BeerLambertParameters::ExtinctionIndex { spectrum } => {
+                        hasher.update(&[4]);
+                        hasher.update(&(spectrum.knots().len() as u64).to_le_bytes());
+                        for &(wavelength_nm, k) in spectrum.knots() {
+                            update_material_scalar(&mut hasher, wavelength_nm);
+                            update_material_scalar(&mut hasher, k);
+                        }
+                    }
                 }
                 hasher.update(&[match glass.provenance() {
                     GlassProvenance::Custom => 0,

@@ -61,22 +61,151 @@ fn infrared_bulk_retains_original_knots_and_physical_path_scaling() {
 
 #[test]
 fn infrared_extinction_index_uses_vacuum_wavelength_and_intensity_decay() {
-    let absorption = BeerLambertAbsorption::try_from_spectral_extinction_index_in_band(&[
+    let knots = [
         (8000.0, 1.0e-6),
         (10_000.0, 2.0e-6),
         (14_000.0, 1.0e-6),
-    ])
-    .unwrap();
+    ];
+    let absorption =
+        BeerLambertAbsorption::try_from_spectral_extinction_index_in_band(&knots).unwrap();
+    let BeerLambertParameters::ExtinctionIndex { spectrum } = absorption.parameters() else {
+        panic!("the original imaginary-index source must be retained");
+    };
+    assert_eq!(spectrum.knots(), knots);
+    close(spectrum.extinction_index(9000.0).unwrap(), 1.5e-6);
     // E(z) decays as exp(-2*pi*k*z/lambda_vac); intensity decays twice as fast.
     close(absorption.extinction_per_m(10_000.0).unwrap(), 0.8 * PI);
     close(
         absorption.transmittance(10_000.0, 0.25).unwrap(),
         (-0.2 * PI).exp(),
     );
-    // The retained law interpolates alpha, not k. This distinction matters
-    // between knots; no continuous complex-index fit has been introduced.
-    close(absorption.extinction_per_m(9000.0).unwrap(), 0.65 * PI);
+    // The original k(9000 nm) is 1.5e-6. Retabulating alpha would incorrectly
+    // return 0.65*pi instead of the source law's (2/3)*pi.
+    close(absorption.extinction_per_m(9000.0).unwrap(), (2.0 / 3.0) * PI);
     assert_eq!(absorption.wavelength_bounds_nm(), Some((8000.0, 14_000.0)));
+}
+
+#[test]
+fn constant_imaginary_index_retains_inverse_wavelength_opacity_and_path_composition() {
+    let absorption = BeerLambertAbsorption::try_from_spectral_extinction_index_in_band(&[
+        (400.0, 1.0e-6),
+        (800.0, 1.0e-6),
+    ])
+    .unwrap();
+    for wavelength in [400.0, 450.0, 600.0, 799.0, 800.0] {
+        let alpha = (4.0 * PI * 1.0e3) / wavelength;
+        close(absorption.extinction_per_m(wavelength).unwrap(), alpha);
+        close(
+            absorption.transmittance(wavelength, 0.025).unwrap(),
+            (-alpha * 0.025).exp(),
+        );
+        close(
+            absorption.absorbed_fraction(wavelength, 0.025).unwrap(),
+            -(-alpha * 0.025).exp_m1(),
+        );
+        close(
+            absorption.transmittance(wavelength, 0.025).unwrap(),
+            absorption.transmittance(wavelength, 0.01).unwrap()
+                * absorption.transmittance(wavelength, 0.015).unwrap(),
+        );
+    }
+    // At 600 nm an interpolated-alpha substitute overstates opacity by 12.5%.
+    let alpha_table = BeerLambertAbsorption::try_from_spectral_extinction_in_band(&[
+        (400.0, 10.0 * PI),
+        (800.0, 5.0 * PI),
+    ])
+    .unwrap();
+    close(
+        alpha_table.extinction_per_m(600.0).unwrap()
+            / absorption.extinction_per_m(600.0).unwrap(),
+        1.125,
+    );
+    let material = |law| crate::tracer::Material::Dielectric {
+        glass: DielectricGlass::new(
+            CauchyIor::try_constant(1.5).unwrap(),
+            law,
+            GlassProvenance::Custom,
+        ),
+        surface: DielectricSurface::SMOOTH,
+    };
+    assert_ne!(
+        material(absorption).content_identity(),
+        material(alpha_table).content_identity(),
+    );
+}
+
+#[test]
+fn imaginary_index_source_refinement_keeps_the_same_constitutive_law() {
+    // k = 1e-6 + lambda_nm * 1e-9, so alpha = 4*pi*(1000/lambda_nm + 1).
+    let endpoints = [(400.0, 1.4e-6), (800.0, 1.8e-6)];
+    let coarse =
+        BeerLambertAbsorption::try_from_spectral_extinction_index_in_band(&endpoints).unwrap();
+    let refined = BeerLambertAbsorption::try_from_spectral_extinction_index_in_band(&[
+        endpoints[0],
+        (550.0, 1.55e-6),
+        (600.0, 1.6e-6),
+        endpoints[1],
+    ])
+    .unwrap();
+    for wavelength in [400.0, 479.0, 550.0, 600.0, 623.0, 800.0] {
+        let expected = 4.0 * PI * (1000.0 / wavelength + 1.0);
+        close(coarse.extinction_per_m(wavelength).unwrap(), expected);
+        close(refined.extinction_per_m(wavelength).unwrap(), expected);
+        close(
+            coarse.transmittance(wavelength, 0.02).unwrap(),
+            refined.transmittance(wavelength, 0.02).unwrap(),
+        );
+    }
+}
+
+#[test]
+fn extinction_index_clear_and_thin_limits_retain_the_declared_source_band() {
+    let clear = BeerLambertAbsorption::try_from_spectral_extinction_index_in_band(&[
+        (400.0, -0.0),
+        (800.0, 0.0),
+    ])
+    .unwrap();
+    assert_ne!(clear.parameters(), BeerLambertParameters::Clear);
+    let weak = BeerLambertAbsorption::try_from_spectral_extinction_index_in_band(&[
+        (400.0, 1.0e-28),
+        (800.0, 1.0e-28),
+    ])
+    .unwrap();
+    for wavelength in [400.0, 600.0, 800.0] {
+        assert_eq!(clear.extinction_per_m(wavelength).unwrap().to_bits(), 0);
+        assert_eq!(clear.transmittance(wavelength, 1.0), Ok(1.0));
+        assert_eq!(clear.absorbed_fraction(wavelength, 1.0), Ok(0.0));
+        assert_eq!(weak.transmittance(wavelength, 1.0), Ok(1.0));
+        close(
+            weak.absorbed_fraction(wavelength, 1.0).unwrap(),
+            (4.0 * PI * 1.0e-19) / wavelength,
+        );
+    }
+    for absorption in [clear, weak] {
+        for wavelength in [0.0, 399.0, 801.0, f64::INFINITY, f64::NAN] {
+            assert_eq!(
+                absorption.transmittance(wavelength, 0.0),
+                Err(DielectricError::InvalidWavelength),
+            );
+        }
+    }
+}
+
+#[test]
+fn positive_extinction_index_cannot_underflow_into_a_clear_material() {
+    let wavelengths = [1.0e100, 2.0e100];
+    let positive = wavelengths.map(|wavelength| (wavelength, f64::from_bits(1)));
+    assert_eq!(
+        BeerLambertAbsorption::try_from_spectral_extinction_index_in_band(&positive),
+        Err(DielectricError::InvalidAbsorption),
+    );
+    // An explicitly zero source remains exactly transparent on the same band.
+    let clear = BeerLambertAbsorption::try_from_spectral_extinction_index_in_band(
+        &wavelengths.map(|wavelength| (wavelength, 0.0)),
+    )
+    .unwrap();
+    assert_eq!(clear.extinction_per_m(1.5e100), Ok(0.0));
+    assert_eq!(clear.absorbed_fraction(1.5e100, 1.0), Ok(0.0));
 }
 
 #[test]
