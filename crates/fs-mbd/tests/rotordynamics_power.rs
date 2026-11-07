@@ -1,5 +1,7 @@
 //! Finite mechanical power acts through the original full rotor dynamics.
-use fs_mbd::rotordynamics::transient::{RotorPowerControl, RotorPowerError, RotorTransientState};
+use fs_mbd::rotordynamics::transient::{
+    RotorPeakPowerControl, RotorPowerControl, RotorPowerError, RotorTransientState,
+};
 use fs_mbd::rotordynamics::{RotorBearingModel, RotorError};
 use std::cell::Cell;
 
@@ -22,6 +24,225 @@ fn state(velocity: f64) -> RotorTransientState {
     RotorTransientState {
         displacement: vec![0.0],
         velocity: vec![velocity],
+    }
+}
+
+fn peak_limits(motoring: f64, regeneration: f64) -> RotorPeakPowerControl {
+    RotorPeakPowerControl {
+        maximum_motoring_power_w: motoring,
+        maximum_regenerative_power_w: regeneration,
+        absolute_power_tolerance_w: 1e-11,
+    }
+}
+
+#[test]
+fn peak_power_limits_stall_acceleration_instead_of_only_its_average() {
+    let model = RotorBearingModel::new(1, &[2.0], &[0.0], &[0.0], &[0.0], || false).unwrap();
+    let stepper = model
+        .at_speed(0.0, || false)
+        .unwrap()
+        .midpoint_stepper(0.25, 1e-12, || false)
+        .unwrap();
+    let input = state(0.0);
+    let peak = stepper
+        .step_peak_power_limited(&input, &[8.0], peak_limits(2.0, 0.0), || false)
+        .unwrap();
+    // Torque=4, I=2, dt=1/4: endpoint power=2 W, mean power=1 W.
+    near(peak.average.effort_fraction, 0.5, 1e-15);
+    near(peak.initial_input_power_w, 0.0, 0.0);
+    near(peak.final_input_power_w, 2.0, 1e-14);
+    near(peak.average.average_input_power_w, 1.0, 1e-14);
+    near(peak.average.motion.kinetic_energy_change_j, 0.25, 1e-14);
+    assert_eq!(
+        peak.average.motion,
+        stepper.step(&input, &[4.0], || false).unwrap()
+    );
+    let full = stepper
+        .step_peak_power_limited(&input, &[8.0], peak_limits(8.0, 0.0), || false)
+        .unwrap();
+    assert_eq!(full.average.effort_fraction, 1.0);
+    assert_eq!(
+        full.average.motion,
+        stepper.step(&input, &[8.0], || false).unwrap()
+    );
+}
+
+#[test]
+fn zero_net_reversal_cannot_hide_positive_and_negative_power_peaks() {
+    let model = RotorBearingModel::new(1, &[1.0], &[0.0], &[0.0], &[0.0], || false).unwrap();
+    let stepper = model
+        .at_speed(0.0, || false)
+        .unwrap()
+        .midpoint_stepper(1.0, 1e-12, || false)
+        .unwrap();
+    let input = state(-1.0);
+    let average = stepper
+        .step_power_limited(&input, &[2.0], limits(0.0, 0.0), || false)
+        .unwrap();
+    assert_eq!(average.effort_fraction, 1.0);
+    assert_eq!(average.motion.input_work_j, 0.0);
+    let peak = stepper
+        .step_peak_power_limited(&input, &[2.0], peak_limits(0.0, 0.0), || false)
+        .unwrap();
+    assert_eq!(peak.average.effort_fraction, 0.0);
+    assert_eq!(peak.average.motion.state_after, input);
+
+    // Starting regeneration limits alpha before final motoring is considered.
+    let peak = stepper
+        .step_peak_power_limited(&input, &[4.0], peak_limits(0.25, 2.0), || false)
+        .unwrap();
+    let fraction = (1.0 + 2.0_f64.sqrt()) / 8.0;
+    near(peak.average.effort_fraction, fraction, 2e-15);
+    near(peak.initial_input_power_w, -4.0 * fraction, 1e-14);
+    near(peak.final_input_power_w, 0.25, 1e-14);
+    // Every affine-time power lies between the independently computed ends.
+    for sample in 0..=20 {
+        let t = f64::from(sample) / 20.0;
+        let velocity = -1.0 + t * (peak.average.motion.state_after.velocity[0] + 1.0);
+        let power = 4.0 * fraction * velocity;
+        assert!((-2.0 - 1e-12..=0.25 + 1e-12).contains(&power));
+    }
+    let limited_regeneration = stepper
+        .step_peak_power_limited(&input, &[4.0], peak_limits(100.0, 0.5), || false)
+        .unwrap();
+    near(limited_regeneration.average.effort_fraction, 0.125, 1e-15);
+    near(limited_regeneration.initial_input_power_w, -0.5, 1e-15);
+    near(limited_regeneration.final_input_power_w, -0.25, 1e-15);
+}
+
+#[test]
+fn peak_power_retains_largest_disconnected_active_bearing_fraction() {
+    let model = RotorBearingModel::new(1, &[1.0], &[-6.0], &[4.0], &[0.0], || false).unwrap();
+    let stepper = model
+        .at_speed(0.0, || false)
+        .unwrap()
+        .midpoint_stepper(1.0, 1e-12, || false)
+        .unwrap();
+    let input = RotorTransientState {
+        displacement: vec![0.75],
+        velocity: vec![0.0],
+    };
+    // The full original equation gives v1=3-4*alpha. Therefore endpoint power
+    // is 12*alpha-16*alpha². Its largest allowed root is beyond the forbidden
+    // motoring interval, so a monotone search from zero would be wrong.
+    let peak = stepper
+        .step_peak_power_limited(&input, &[4.0], peak_limits(0.01, 0.25), || false)
+        .unwrap();
+    near(
+        peak.average.effort_fraction,
+        (12.0 + 160.0_f64.sqrt()) / 32.0,
+        2e-15,
+    );
+    near(peak.initial_input_power_w, 0.0, 0.0);
+    near(peak.final_input_power_w, -0.25, 3e-14);
+    near(peak.average.motion.work_energy_residual_j, 0.0, 2e-13);
+    let intermediate = stepper.step(&input, &[2.0], || false).unwrap();
+    assert!(2.0 * intermediate.state_after.velocity[0] > 0.01);
+}
+
+#[test]
+fn peak_power_is_scale_invariant_and_preserves_tiny_stall_effort() {
+    for scale in [1e-180, 1.0, 1e180] {
+        let model =
+            RotorBearingModel::new(1, &[2.0 * scale], &[0.0], &[0.0], &[0.0], || false).unwrap();
+        let stepper = model
+            .at_speed(0.0, || false)
+            .unwrap()
+            .midpoint_stepper(0.25, 1e-12, || false)
+            .unwrap();
+        let peak = stepper
+            .step_peak_power_limited(
+                &state(0.0),
+                &[8.0 * scale],
+                RotorPeakPowerControl {
+                    maximum_motoring_power_w: 2.0 * scale,
+                    maximum_regenerative_power_w: 1e300,
+                    absolute_power_tolerance_w: scale * 1e-12,
+                },
+                || false,
+            )
+            .unwrap();
+        near(peak.average.effort_fraction, 0.5, 3e-15);
+        near(peak.final_input_power_w / scale, 2.0, 3e-14);
+        near(peak.average.motion.state_after.velocity[0], 0.5, 3e-14);
+    }
+    let model = RotorBearingModel::new(1, &[2.0], &[0.0], &[0.0], &[0.0], || false).unwrap();
+    let stepper = model
+        .at_speed(0.0, || false)
+        .unwrap()
+        .midpoint_stepper(0.25, 1e-12, || false)
+        .unwrap();
+    let peak = stepper
+        .step_peak_power_limited(
+            &state(0.0),
+            &[8e150],
+            RotorPeakPowerControl {
+                maximum_motoring_power_w: 8e-300,
+                maximum_regenerative_power_w: 0.0,
+                absolute_power_tolerance_w: 1e-311,
+            },
+            || false,
+        )
+        .unwrap();
+    near(peak.average.effort_fraction / 1e-300, 1.0, 2e-14);
+    near(peak.final_input_power_w / 8e-300, 1.0, 2e-14);
+}
+
+#[test]
+fn peak_power_refusal_and_cancellation_publish_no_motion() {
+    let model = RotorBearingModel::new(1, &[1.3], &[0.07], &[2.1], &[0.0], || false).unwrap();
+    let stepper = model
+        .at_speed(0.0, || false)
+        .unwrap()
+        .midpoint_stepper(0.3, 1e-12, || false)
+        .unwrap();
+    let input = state(0.37);
+    let saved = input.clone();
+    let control = peak_limits(0.43, 0.2);
+    let calls = Cell::new(0);
+    let accepted = stepper
+        .step_peak_power_limited(&input, &[9.0], control, || {
+            calls.set(calls.get() + 1);
+            false
+        })
+        .unwrap();
+    for stop in 1..=calls.get() {
+        let count = Cell::new(0);
+        assert_eq!(
+            stepper.step_peak_power_limited(&input, &[9.0], control, || {
+                count.set(count.get() + 1);
+                count.get() == stop
+            }),
+            Err(RotorPowerError::Dynamics(RotorError::Cancelled))
+        );
+        assert_eq!(input, saved);
+    }
+    assert_eq!(
+        stepper
+            .step_peak_power_limited(&input, &[9.0], control, || false)
+            .unwrap(),
+        accepted
+    );
+    for invalid in [f64::NAN, f64::INFINITY, -1.0] {
+        for bad in [
+            RotorPeakPowerControl {
+                maximum_motoring_power_w: invalid,
+                ..control
+            },
+            RotorPeakPowerControl {
+                maximum_regenerative_power_w: invalid,
+                ..control
+            },
+            RotorPeakPowerControl {
+                absolute_power_tolerance_w: invalid,
+                ..control
+            },
+        ] {
+            assert!(matches!(
+                stepper.step_peak_power_limited(&input, &[9.0], bad, || false),
+                Err(RotorPowerError::Invalid(_))
+            ));
+        }
     }
 }
 
@@ -182,6 +403,9 @@ fn full_inertia_gyro_and_cross_coupled_bearings_keep_original_power_and_units() 
     let a: f64 = (0..2).map(|i| 0.5 * force[i] * influence[i]).sum();
     let b: f64 = (0..2).map(|i| force[i] * (v[i] + 0.5 * free[i])).sum();
     let expected_fraction = 2.0 / (b + (b * b + 4.0 * a).sqrt());
+    let end_a: f64 = (0..2).map(|i| force[i] * influence[i]).sum();
+    let end_b: f64 = (0..2).map(|i| force[i] * (v[i] + free[i])).sum();
+    let peak_fraction = 2.0 / (end_b + (end_b * end_b + 4.0 * end_a).sqrt());
 
     for scales in [[1.0, 1.0], [1e-6, 1e6]] {
         let map_matrix = |matrix: [f64; 4]| -> [f64; 4] {
@@ -213,6 +437,17 @@ fn full_inertia_gyro_and_cross_coupled_bearings_keep_original_power_and_units() 
         near(result.average_input_power_w, 1.0, 2e-13);
         near(result.motion.gyroscopic_work_j, 0.0, 1e-14);
         near(result.motion.work_energy_residual_j, 0.0, 1e-13);
+        let peak = stepper
+            .step_peak_power_limited(&input, &command, peak_limits(1.0, 0.75), || false)
+            .unwrap();
+        near(peak.average.effort_fraction, peak_fraction, 2e-14);
+        near(peak.final_input_power_w, 1.0, 2e-13);
+        near(
+            peak.initial_input_power_w,
+            peak_fraction * (force[0] * v[0] + force[1] * v[1]),
+            2e-13,
+        );
+        near(peak.average.motion.work_energy_residual_j, 0.0, 1e-13);
         for i in 0..2 {
             let delta = free[i] + expected_fraction * influence[i];
             near(
@@ -223,6 +458,11 @@ fn full_inertia_gyro_and_cross_coupled_bearings_keep_original_power_and_units() 
             near(
                 result.motion.state_after.displacement[i] / scales[i],
                 q[i] + h * (v[i] + 0.5 * delta),
+                2e-14,
+            );
+            near(
+                peak.average.motion.state_after.velocity[i] / scales[i],
+                v[i] + free[i] + peak_fraction * influence[i],
                 2e-14,
             );
         }

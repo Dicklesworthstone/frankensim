@@ -79,6 +79,34 @@ pub struct RotorPowerStep {
     pub average_input_power_w: f64,
 }
 
+/// Mechanical power limits throughout the accepted linear-velocity segment.
+///
+/// Unlike [`RotorPowerControl`], both ends of the segment must satisfy these
+/// limits separately. They constrain the total commanded effort pattern, not
+/// individual coordinates. The interpolation is the midpoint method's local
+/// reconstruction; physical peaks between resolved steps require refinement.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RotorPeakPowerControl {
+    /// Maximum nonnegative instantaneous mechanical input [W].
+    pub maximum_motoring_power_w: f64,
+    /// Maximum nonnegative magnitude of instantaneous recovered power [W].
+    pub maximum_regenerative_power_w: f64,
+    /// Absolute allowance for endpoint power excess and native work residual
+    /// per second [W]. Zero requests exact represented closure.
+    pub absolute_power_tolerance_w: f64,
+}
+
+/// Accepted peak-limited actuation with independently evaluated endpoint power.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RotorPeakPowerStep {
+    /// Original accepted motion, effort fraction and signed net average power.
+    pub average: RotorPowerStep,
+    /// Applied effort paired with the original velocity [W].
+    pub initial_input_power_w: f64,
+    /// Applied effort paired with the returned velocity [W].
+    pub final_input_power_w: f64,
+}
+
 /// A failed power-controlled step publishes no motion or source debit.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RotorPowerError {
@@ -95,6 +123,19 @@ pub enum RotorPowerError {
         /// Signed native kinetic/operator/source work residual per second [W].
         work_residual_w: f64,
         /// Caller-authored absolute admission allowance [W].
+        tolerance_w: f64,
+    },
+    /// Rounded accepted motion violates a peak power or work allowance.
+    PeakPowerBalance {
+        /// Applied effort paired with the initial velocity [W].
+        initial_input_power_w: f64,
+        /// Applied effort paired with the accepted final velocity [W].
+        final_input_power_w: f64,
+        /// Largest nonnegative violation of either signed endpoint limit [W].
+        limit_excess_w: f64,
+        /// Signed native work/energy residual per second [W].
+        work_residual_w: f64,
+        /// Caller-authored absolute allowance [W].
         tolerance_w: f64,
     },
 }
@@ -413,6 +454,121 @@ impl RotorMidpoint<'_> {
             motion,
             effort_fraction,
             average_input_power_w,
+        })
+    }
+
+    /// Curtail a held effort to satisfy both signed endpoint power limits.
+    ///
+    /// Source power is affine in time along the accepted linear velocity
+    /// reconstruction, so its extrema occur at the endpoints even through a
+    /// reversal. Initial power is linear in effort fraction and gives a single
+    /// interval `[0, cap]`. Final power is quadratic in that fraction. The same
+    /// stable two-root solve as [`Self::step_power_limited`] selects its largest
+    /// feasible point INSIDE that interval, including active bearing models.
+    /// Thus zero net work cannot conceal motoring or regenerative power spikes.
+    /// Finite torque at rest is retained without dividing by shaft speed.
+    ///
+    /// This adds no nonlinear iteration, new factorization or heap workspace:
+    /// two cached response solves and one accepted native step remain O(n²).
+    /// Independent endpoint pairings and the native work residual are checked
+    /// before return. This does not resolve peaks of the underlying continuous
+    /// solution beyond the time interpolation, electrical efficiency, finite
+    /// energy storage, per-actuator allocation, or changing shaft spin.
+    ///
+    /// # Errors
+    /// Invalid limits or response, native refusal, failed peak/work admission,
+    /// or cancellation. Borrowed state and command remain unchanged.
+    pub fn step_peak_power_limited(
+        &self,
+        state: &RotorTransientState,
+        commanded_force: &[f64],
+        control: RotorPeakPowerControl,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<RotorPeakPowerStep, RotorPowerError> {
+        poll(&mut cancelled)?;
+        self.admit_state(state)?;
+        self.admit_vector(commanded_force)?;
+        if [
+            control.maximum_motoring_power_w,
+            control.maximum_regenerative_power_w,
+            control.absolute_power_tolerance_w,
+        ]
+        .iter()
+        .any(|x| !x.is_finite() || *x < 0.0)
+        {
+            return Err(RotorPowerError::Invalid(
+                "finite nonnegative peak power limits and absolute allowance required",
+            ));
+        }
+        let n = self.model.n;
+        let zero = [0.0; MAX_ROTOR_DOFS];
+        let free_increment = self.velocity_increment(state, &zero[..n], &mut cancelled)?;
+        let mut force_increment = [0.0; MAX_ROTOR_DOFS];
+        for i in 0..n {
+            force_increment[i] = ((self.duration_seconds * commanded_force[i])
+                / self.mass_scale[i])
+                / self.step_row_scale[i];
+        }
+        self.solve_velocity_increment(&mut force_increment[..n], &mut cancelled)?;
+
+        let mut initial = Dd::ZERO;
+        let mut quadratic = Dd::ZERO;
+        let mut linear = Dd::ZERO;
+        for i in 0..n {
+            let force = Dd::from_f64(commanded_force[i]);
+            initial = initial + force * Dd::from_f64(state.velocity[i]);
+            quadratic = quadratic + force * Dd::from_f64(force_increment[i]);
+            linear = linear
+                + force * (Dd::from_f64(state.velocity[i]) + Dd::from_f64(free_increment[i]));
+        }
+        for value in [initial, quadratic, linear] {
+            finite(value.hi)?;
+            finite(value.lo)?;
+        }
+        let limits = RotorPowerControl {
+            maximum_motoring_power_w: control.maximum_motoring_power_w,
+            maximum_regenerative_power_w: control.maximum_regenerative_power_w,
+            absolute_power_tolerance_w: control.absolute_power_tolerance_w,
+        };
+        let cap = power_fraction(Dd::ZERO, initial, limits)?;
+        let cap_dd = Dd::from_f64(cap);
+        let fraction = cap * power_fraction(quadratic * cap_dd * cap_dd, linear * cap_dd, limits)?;
+        let mut applied = [0.0; MAX_ROTOR_DOFS];
+        for i in 0..n {
+            applied[i] = fraction * commanded_force[i];
+        }
+        let motion = self.step(state, &applied[..n], &mut cancelled)?;
+        let initial_input_power_w = pairing(&applied[..n], &state.velocity)?;
+        let final_input_power_w = pairing(&applied[..n], &motion.state_after.velocity)?;
+        let average_input_power_w = finite(motion.input_work_j / self.duration_seconds)?;
+        let work_residual_w = finite(motion.work_energy_residual_j / self.duration_seconds)?;
+        let limit_excess_w = [initial_input_power_w, final_input_power_w]
+            .into_iter()
+            .map(|power| {
+                (power - control.maximum_motoring_power_w)
+                    .max(-power - control.maximum_regenerative_power_w)
+            })
+            .fold(0.0, f64::max);
+        if limit_excess_w > control.absolute_power_tolerance_w
+            || work_residual_w.abs() > control.absolute_power_tolerance_w
+        {
+            return Err(RotorPowerError::PeakPowerBalance {
+                initial_input_power_w,
+                final_input_power_w,
+                limit_excess_w,
+                work_residual_w,
+                tolerance_w: control.absolute_power_tolerance_w,
+            });
+        }
+        poll(&mut cancelled)?;
+        Ok(RotorPeakPowerStep {
+            average: RotorPowerStep {
+                motion,
+                effort_fraction: fraction,
+                average_input_power_w,
+            },
+            initial_input_power_w,
+            final_input_power_w,
         })
     }
 

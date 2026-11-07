@@ -7735,6 +7735,30 @@ regressions in a source-selected native build using the original numerical
 owners. Unrelated rigid-disk/periodic module exports were omitted from that
 build; whole-crate Cargo/DSR verification is not claimed.
 
+### Peak actuator power during acceleration and reversal
+
+`RotorMidpoint::step_peak_power_limited` separately constrains both signed
+endpoint powers through `RotorPeakPowerControl`. Under held effort and the
+midpoint method's linear velocity reconstruction, power is affine in time;
+these two endpoint limits therefore admit every reconstructed intermediate
+power, including a reversal whose net work is zero. The ordinary average-power
+API retains its original semantics.
+
+Initial power first bounds the effort fraction to one interval. Final power
+is an original-response quadratic on that interval; the stable existing
+two-root solver chooses the largest feasible fraction, even when active
+bearings create disconnected feasible sets. Native full M/G/C/K, finite stall
+torque, cached factors and O(n²) stepping are retained. Actual endpoint powers
+are evaluated independently after the accepted native step, with signed
+source work and the original work residual; refusal publishes no motion.
+
+The peak guarantee concerns the declared time interpolation, not unresolved
+extrema of the exact continuous trajectory. Time refinement, source storage,
+electrical efficiency and thermal losses remain separate physical owners.
+Focused regressions cover stall acceleration, zero-net-work reversal,
+regenerative limits, active bearings, original tensor/gyroscopic coupling,
+coordinate congruence, extreme power scales and atomic cancellation.
+
 ## Moving articulated trajectories with coupled dry friction
 
 `rigid_rattle::distance::graph::joint_friction::relaxation::trajectory::advance_joint_friction_trajectory` advances actual native poses and momenta by composing the original constrained graph half steps with the continuous coupled-friction phase. Geometry and the complete native constrained mobility are rebuilt at every moved midpoint. The original flow travel remains a path-work measure; it is never applied as a second pose drift.
