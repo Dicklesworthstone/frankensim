@@ -35,7 +35,7 @@ impl WallLinks {
                 if let Some(layer) = layer {
                     if layer.has_integrated_profile() {
                         return Err(WallExchangeError::Invalid(
-                            "integrated wall profiles require local finite caloric contacts",
+                            "integrated wall link profiles require a two-layer endpoint law",
                         ));
                     }
                     let wall = &group(link.walls[side]).accepted.storage;

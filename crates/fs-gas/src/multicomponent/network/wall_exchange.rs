@@ -12,7 +12,8 @@
 //! An optional original-source transport binding refreshes developed
 //! branch drag and conductance from each cell's current mixture at every half.
 //! A material wall-conduction binding composes the solid's k(T) and actual
-//! resistance geometry with that same film and finite-wall heat transaction.
+//! resistance geometry with that same film and finite-wall or reservoir heat
+//! transaction, without changing the original thermal energy owner.
 
 use super::MixtureNetwork1d;
 use crate::multicomponent::wall_exchange::{
@@ -604,24 +605,31 @@ impl<'law> NetworkWallOperator<'law> {
     ) -> Result<crate::multicomponent::wall_exchange::WallUpdate, WallExchangeError> {
         #[cfg(feature = "material")]
         if self.implicit_conduction(index) {
-            let source = self.caloric[index]
-                .as_ref()
-                .ok_or(WallExchangeError::Invalid(
-                    "implicit conductivity lost its caloric source",
-                ))?;
             // The heat law sees BOTH original endpoint temperatures; a source-
             // integrated profile also resolves its material face inside the film.
             let gas_sensitivity_bound_w_per_k = self.endpoint_conductance_bound(index, contact)?;
             let mut resolve = |candidate, temperatures, checkpoint: &mut dyn FnMut() -> bool| {
                 self.endpoint_conductance(index, candidate, temperatures, duration, controls, checkpoint)
             };
+            let conduction = crate::multicomponent::wall_exchange::WallEndpointConduction {
+                gas_sensitivity_bound_w_per_k,
+                resolve: &mut resolve,
+            };
+            if matches!(contact.thermal, WallThermal::Reservoir { .. }) {
+                return crate::multicomponent::wall_exchange::
+                    exchange_cell_with_reservoir_conduction(
+                        &self.gas, state, volume, duration, contact, conduction, controls, cancelled,
+                    );
+            }
+            let source = self.caloric[index]
+                .as_ref()
+                .ok_or(WallExchangeError::Invalid(
+                    "implicit conductivity lost its caloric source",
+                ))?;
             return crate::multicomponent::wall_exchange::
                 exchange_cell_with_heat_storage_and_conductance(
                     &self.gas, state, volume, duration, contact, source,
-                    Some(crate::multicomponent::wall_exchange::WallEndpointConduction {
-                        gas_sensitivity_bound_w_per_k,
-                        resolve: &mut resolve,
-                    }), controls, cancelled,
+                    Some(conduction), controls, cancelled,
                 );
         }
         #[cfg(feature = "material")]

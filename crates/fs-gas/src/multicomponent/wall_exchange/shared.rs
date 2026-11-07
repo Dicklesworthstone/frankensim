@@ -319,15 +319,21 @@ impl Group<'_> {
             let state = self.initial[i];
             let conductance = port.conductance_w_per_k;
             #[cfg(feature = "material")]
-            let conductance = match &self.conduction {
-                Some(binding) => binding.conductance(
+            let profile = self
+                .conduction
+                .as_ref()
+                .and_then(|binding| binding.profile(i));
+            #[cfg(feature = "material")]
+            let conductance = match (&self.conduction, profile) {
+                (_, Some(_)) => conductance,
+                (Some(binding), None) => binding.conductance(
                     i,
                     conductance,
                     wall.thermal,
                     self.accepted.storage.heat_storage.as_ref(),
                     work,
                 )?,
-                None => conductance,
+                (None, None) => conductance,
             };
             let caloric = MeteredGas {
                 original: gas(port.gas, wall.temperature),
@@ -336,26 +342,105 @@ impl Group<'_> {
             work.contacts.set(work.contacts.get().checked_add(1).ok_or(
                 WallExchangeError::Invalid("shared wall contact count overflow"),
             )?);
-            let update = exchange_caloric(
-                &caloric,
-                state[0],
-                state[1],
-                self.volumes[i],
-                duration,
-                WallContact {
-                    drag: WallDrag::None,
-                    thermal: WallThermal::Reservoir {
-                        temperature_k: wall.temperature,
-                        conductance_w_per_k: conductance,
-                    },
+            let contact = WallContact {
+                drag: WallDrag::None,
+                thermal: WallThermal::Reservoir {
+                    temperature_k: wall.temperature,
+                    conductance_w_per_k: conductance,
                 },
-                control,
-                &mut *cancelled,
-            )?;
+            };
+            #[cfg(feature = "material")]
+            let mut profile_endpoint = None;
+            #[cfg(feature = "material")]
+            let profile_update = if let Some(layer) = profile {
+                let mut resolve =
+                    |_: WallContact,
+                     temperatures: [f64; 2],
+                     checkpoint: &mut dyn FnMut() -> bool| {
+                        work.charge()?;
+                        let response = layer.profile_response(
+                            temperatures,
+                            port.conductance_w_per_k,
+                            duration,
+                            control,
+                            checkpoint,
+                        )?;
+                        profile_endpoint =
+                            Some((temperatures[1], response.temperature_derivative_w_per_k));
+                        Ok(response)
+                    };
+                Some(exchange_caloric_with_reservoir_conduction(
+                    &caloric,
+                    state[0],
+                    state[1],
+                    self.volumes[i],
+                    duration,
+                    contact,
+                    WallEndpointConduction {
+                        gas_sensitivity_bound_w_per_k: layer
+                            .profile_gas_sensitivity_bound(port.conductance_w_per_k),
+                        resolve: &mut resolve,
+                    },
+                    control,
+                    &mut *cancelled,
+                )?)
+            } else {
+                None
+            };
+            #[cfg(not(feature = "material"))]
+            let profile_update: Option<WallUpdate> = None;
+            let update = match profile_update {
+                Some(update) => update,
+                None => exchange_caloric(
+                    &caloric,
+                    state[0],
+                    state[1],
+                    self.volumes[i],
+                    duration,
+                    contact,
+                    control,
+                    &mut *cancelled,
+                )?,
+            };
             self.energies[i] = update.energy;
             self.heat[i] = update.report.heat_to_gas_j;
             self.residuals[i] = update.report.thermal_residual_j;
-            let tangent = if wall_slope.is_some() {
+            #[cfg(feature = "material")]
+            let profile_tangent = if profile.is_some() {
+                // Reuse the final original response, whose gas temperature was
+                // refined against the actual represented heat in the port owner.
+                // A secant G is not the derivative of nonlinear solid conduction.
+                Some(match profile_endpoint {
+                    Some((temperature, Some(partials))) if wall_slope.is_some() => {
+                        let capacity = caloric.caloric(temperature)?.1 * self.volumes[i];
+                        let integrated_gas = -duration.value() * partials[1];
+                        if !positive(capacity) || !nonnegative(integrated_gas) {
+                            return Err(WallExchangeError::Invalid("shared profile tangent"));
+                        }
+                        let effective_time = if integrated_gas <= capacity {
+                            duration.value() / (1.0 + integrated_gas / capacity)
+                        } else {
+                            let ratio = capacity / integrated_gas;
+                            (capacity / -partials[1]) / (1.0 + ratio)
+                        };
+                        let tangent = effective_time * partials[0];
+                        if !nonnegative(tangent)
+                            || (duration.value() > 0.0 && partials[0] > 0.0 && tangent == 0.0)
+                        {
+                            return Err(WallExchangeError::Invalid("shared profile tangent"));
+                        }
+                        tangent
+                    }
+                    _ => 0.0,
+                })
+            } else {
+                None
+            };
+            #[cfg(not(feature = "material"))]
+            let profile_tangent: Option<f64> = None;
+            let tangent = if let Some(tangent) = profile_tangent {
+                tangent
+            } else if wall_slope.is_some() {
                 let endpoint = caloric.primitive(state[0], update.energy, cancelled)?;
                 let capacity = caloric.caloric(endpoint.temperature)?.1 * self.volumes[i];
                 let integrated = conductance * duration.value();
@@ -417,17 +502,41 @@ impl Group<'_> {
                     work,
                 };
                 let primitive = original.primitive(state[0], state[1], cancelled)?;
-                let t = refine_caloric_temperature(
-                    &original,
-                    primitive.temperature,
-                    state[1] - 0.5 * state[0] * primitive.velocity,
-                    self.volumes[i],
-                    port.conductance_w_per_k * duration.value(),
-                    wall_initial,
-                    0.0,
-                    control,
-                    cancelled,
-                )?;
+                #[cfg(feature = "material")]
+                let profile_bound = self
+                    .conduction
+                    .as_ref()
+                    .and_then(|binding| binding.profile(i))
+                    .and_then(|layer| {
+                        layer.profile_gas_sensitivity_bound(port.conductance_w_per_k)
+                    });
+                #[cfg(not(feature = "material"))]
+                let profile_bound: Option<f64> = None;
+                let target = state[1] - 0.5 * state[0] * primitive.velocity;
+                let t = if let Some(bound) = profile_bound {
+                    refine_caloric_temperature_with_allowance(
+                        &original,
+                        primitive.temperature,
+                        target,
+                        self.volumes[i],
+                        bound * duration.value(),
+                        control.tolerance(0.0),
+                        control,
+                        cancelled,
+                    )?
+                } else {
+                    refine_caloric_temperature(
+                        &original,
+                        primitive.temperature,
+                        target,
+                        self.volumes[i],
+                        port.conductance_w_per_k * duration.value(),
+                        wall_initial,
+                        0.0,
+                        control,
+                        cancelled,
+                    )?
+                };
                 minimum = minimum.min(t);
                 maximum = maximum.max(t);
             }
@@ -483,17 +592,54 @@ impl Group<'_> {
                     "shared wall supported heat interval",
                 ));
             }
+            let (solve_control, contractions) = (control, 0);
+            #[cfg(feature = "material")]
+            let (solve_control, contractions) = if self
+                .conduction
+                .as_ref()
+                .is_some_and(|binding| binding.integrated)
+            {
+                // The passive storage hull can contain unused trial wall/face
+                // pairs outside original support. Keep a supported opposite-sign
+                // endpoint, never a projected temperature or unsupported root.
+                let far = if initial.0 > 0.0 { low } else { high };
+                let (supported, count) = super::caloric::supported_profile_heat_bracket(
+                    0.0,
+                    far,
+                    control,
+                    &mut |change, checkpoint| {
+                        self.evaluate(gas, change, duration, control, work, checkpoint)
+                    },
+                    cancelled,
+                )?;
+                if initial.0 > 0.0 {
+                    low = supported;
+                    high = 0.0;
+                } else {
+                    low = 0.0;
+                    high = supported;
+                }
+                (
+                    WallControl {
+                        maximum_iterations: control.maximum_iterations - count,
+                        ..control
+                    },
+                    count,
+                )
+            } else {
+                (solve_control, contractions)
+            };
             let result = solve_scalar(
                 low,
                 high,
                 0.0,
-                control,
+                solve_control,
                 |change, checkpoint| {
                     self.evaluate(gas, change, duration, control, work, checkpoint)
                 },
                 cancelled,
             )?;
-            iterations = result.1;
+            iterations = result.1 + contractions;
             self.evaluate(gas, result.0, duration, control, work, cancelled)?;
             accepted_change = result.0;
         }

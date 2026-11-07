@@ -820,7 +820,7 @@ refuse energy-coordinate walls. Inspectors distinguish the two source forms.
 
 `MaterialWallConduction::with_integrated_profile()` instead prepares the exact
 original piecewise-affine conductivity line once and shares it across clones.
-At every proposed finite gas/wall endpoint, the existing `fs-material`
+At every proposed gas/wall endpoint, the existing `fs-material`
 Kirchhoff/film owner solves the material-face temperature and
 `P = C * integral(T_face..T_wall, k(T) dT) = G_film * (T_face - T_gas)`.
 The gas and wall retain their original caloric laws and exactly one heat debit.
@@ -835,9 +835,25 @@ face temperature or hides an unsupported physical root. The nested flux residual
 is included in the final heat budget. Geometry preparation adds no per-query
 allocation.
 
-This opt-in currently supports local branch/plenum finite material contacts.
-Shared gas ports and wall links explicitly refuse it. Phase-dependent k(T,phi)
-also refuses: one lumped wall h cannot provide a spatial phase field. Selecting
+This opt-in supports local branch/plenum finite material contacts, prescribed
+local reservoir contacts, and gas ports sharing one finite material inventory.
+A prescribed reservoir retains its temperature and records the actual supplied
+heat as external energy, with zero wall storage. Shared ports solve their gas
+endpoint equations against one trial wall state and debit the retained wall
+only by the compensated sum of accepted heats. The shared Newton derivative
+uses the original power partials and each gas's original heat capacity, never
+the nonlinear profile's secant conductance. Every source query remains in the
+existing shared work budget; authored gas films are never overwritten.
+
+At a trial shared-wall temperature, the artificial pair with the initial gas
+temperature may have an unsupported face despite a supported physical root.
+The inner gas solve starts at the original gas-domain temperature nearest the
+wall, then searches for a supported opposite-sign endpoint. Both inner gas
+and outer wall searches retain original source refusals and bounded work.
+Later wall-link stages re-admit actual final gas-facing material profiles
+without applying a second heat transfer. Wall links themselves still refuse
+this opt-in until a two-layer endpoint law is supplied. Phase-dependent
+k(T,phi) also refuses: one lumped wall h cannot provide a spatial phase field. Selecting
 `InitialState` after opting in refuses at binding rather than silently replacing
 the integrated law with a point sample. Source-domain or cancellation refusal
 preserves the accepted network and all original wall inventories.

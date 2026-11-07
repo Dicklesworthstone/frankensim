@@ -28,11 +28,12 @@ pub(crate) use gas::{WallGasCaloric, WallGasState};
 /// Original thermal laws in finite gas-wall storage, including latent plateaus.
 mod caloric;
 pub(crate) use caloric::exchange_caloric_with_heat_storage;
+pub use caloric::{MaterialWallCaloric, WallCaloricConstraint, exchange_cell_with_heat_storage};
 #[cfg(feature = "material")]
 pub(crate) use caloric::{
-    WallEndpointConduction, WallHeatResponse, exchange_cell_with_heat_storage_and_conductance,
+    WallEndpointConduction, WallHeatResponse, exchange_caloric_with_reservoir_conduction,
+    exchange_cell_with_heat_storage_and_conductance, exchange_cell_with_reservoir_conduction,
 };
-pub use caloric::{MaterialWallCaloric, WallCaloricConstraint, exchange_cell_with_heat_storage};
 
 /// Axial drag at a stationary or prescribed axially sliding radial wall.
 ///

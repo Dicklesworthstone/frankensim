@@ -325,6 +325,27 @@ impl SharedWalls<'_> {
             #[cfg(feature = "material")]
             for group in &self.groups {
                 group.admit_conduction_endpoint(group.candidate, true, &work, cancelled)?;
+                let original = |location, temperature| {
+                    let density = match location {
+                        SharedWallGas::Plenum(p) => plenums[p].density,
+                        SharedWallGas::Branch { branch, cell } => {
+                            branches[branch].work.candidate[cell].density
+                        }
+                    };
+                    FrozenCaloric {
+                        gas,
+                        density,
+                        hint: Some(temperature),
+                    }
+                };
+                group.admit_integrated_profile_endpoints(
+                    &original,
+                    group.candidate,
+                    duration,
+                    control,
+                    &work,
+                    cancelled,
+                )?;
             }
             #[cfg(feature = "material")]
             links.admit_conduction_endpoints(|i| &self.groups[i], &work, cancelled)?;

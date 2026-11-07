@@ -8,6 +8,12 @@ use std::sync::Arc;
 
 mod thermal_law;
 use thermal_law::EnergyStorage;
+#[cfg(feature = "material")]
+mod reservoir;
+#[cfg(feature = "material")]
+pub(crate) use reservoir::{
+    exchange_caloric_with_reservoir_conduction, exchange_cell_with_reservoir_conduction,
+};
 
 /// Required physical interpretation of the source capacity. No Cp-to-Cv
 /// conversion or unrepresented pressure/deformation work is inferred.
@@ -396,6 +402,23 @@ pub(crate) struct WallHeatResponse {
     pub(crate) flux_error_w: f64,
 }
 
+impl WallHeatResponse {
+    fn validate(&self) -> Result<(), WallExchangeError> {
+        if !nonnegative(self.conductance_w_per_k)
+            || !self.power_to_gas_w.is_finite()
+            || !nonnegative(self.flux_error_w)
+            || self
+                .temperature_derivative_w_per_k
+                .is_some_and(|d| !nonnegative(d[0]) || !nonnegative(-d[1]))
+        {
+            return Err(WallExchangeError::Invalid(
+                "material wall endpoint heat law",
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub(crate) struct WallEndpointConduction<'a> {
     // Some: the heat law depends on both temperatures; refine gas against this
     // global slope bound before querying it. None: the original wall-only k law
@@ -488,17 +511,7 @@ pub(crate) fn exchange_caloric_with_heat_storage(
                 flux_error_w: 0.0,
             },
         };
-        if !nonnegative(response.conductance_w_per_k)
-            || !response.power_to_gas_w.is_finite()
-            || !nonnegative(response.flux_error_w)
-            || response
-                .temperature_derivative_w_per_k
-                .is_some_and(|d| !nonnegative(d[0]) || !nonnegative(-d[1]))
-        {
-            return Err(WallExchangeError::Invalid(
-                "material wall endpoint heat law",
-            ));
-        }
+        response.validate()?;
         Ok(response)
     };
     // Reuse the original radial loss and gas sensible-heating owner exactly.
@@ -524,13 +537,26 @@ pub(crate) fn exchange_caloric_with_heat_storage(
         let target = energy - 0.5 * update.momentum * state.velocity;
         state.temperature = if gas_sensitivity_bound.is_some() {
             refine_caloric_temperature_with_allowance(
-                gas, state.temperature, target, volume_m3, precision_integrated,
-                control.tolerance(heat_scale), control, cancelled,
+                gas,
+                state.temperature,
+                target,
+                volume_m3,
+                precision_integrated,
+                control.tolerance(heat_scale),
+                control,
+                cancelled,
             )?
         } else {
             refine_caloric_temperature(
-                gas, state.temperature, target, volume_m3, precision_integrated,
-                wall_temperature, heat_scale, control, cancelled,
+                gas,
+                state.temperature,
+                target,
+                volume_m3,
+                precision_integrated,
+                wall_temperature,
+                heat_scale,
+                control,
+                cancelled,
             )?
         };
         Ok::<_, WallExchangeError>(state)
@@ -620,7 +646,8 @@ pub(crate) fn exchange_caloric_with_heat_storage(
         // Positive k(T) makes the original integrated material/film power
         // decrease along passive exchange. Include constitutive and gas-inverse
         // error in its initial-flux bound; point-sampled k has no such guarantee.
-        initial_flux.abs() + duration.value() * initial_response.flux_error_w
+        initial_flux.abs()
+            + duration.value() * initial_response.flux_error_w
             + control.tolerance(initial_flux.abs())
     } else if state_dependent {
         f64::INFINITY
@@ -700,10 +727,13 @@ pub(crate) fn exchange_caloric_with_heat_storage(
         };
     let bracket_iterations = if gas_sensitivity_bound.is_some() {
         let far = if initial_flux > 0.0 { high } else { low };
-        let (supported, iterations) = supported_profile_heat_bracket(
-            far, solve_control, &mut equation, &mut cancelled,
-        )?;
-        if initial_flux > 0.0 { high = supported; } else { low = supported; }
+        let (supported, iterations) =
+            supported_profile_heat_bracket(0.0, far, solve_control, &mut equation, &mut cancelled)?;
+        if initial_flux > 0.0 {
+            high = supported;
+        } else {
+            low = supported;
+        }
         solve_control.maximum_iterations -= iterations;
         iterations
     } else {
@@ -760,38 +790,44 @@ pub(crate) fn exchange_caloric_with_heat_storage(
 /// bounds need not support the material FACE, even when the physical heat root
 /// does. Search between the last supported wrong-sign point and the unsupported
 /// endpoint; never clip a material temperature, invent k, or accept a wrong sign.
-fn supported_profile_heat_bracket(
+pub(super) fn supported_profile_heat_bracket(
+    anchor: f64,
     far: f64,
     control: WallControl,
     equation: &mut impl FnMut(
-        f64, &mut dyn FnMut() -> bool,
+        f64,
+        &mut dyn FnMut() -> bool,
     ) -> Result<(f64, Option<f64>, f64), WallExchangeError>,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<(f64, usize), WallExchangeError> {
-    let direction = far.signum();
-    let mut supported = 0.0;
-    let mut unsupported = far.abs();
+    let direction = (far - anchor).signum();
+    let mut supported = anchor;
+    let mut unsupported = far;
     let mut trial = unsupported;
     let mut domain_error = None;
     for contractions in 0..control.maximum_iterations {
-        if cancelled() { return Err(WallExchangeError::Cancelled); }
-        match equation(direction * trial, cancelled) {
+        if cancelled() {
+            return Err(WallExchangeError::Cancelled);
+        }
+        match equation(trial, cancelled) {
             Ok((residual, _, scale)) => {
                 if direction * residual >= -control.tolerance(scale) || domain_error.is_none() {
-                    return Ok((direction * trial, contractions));
+                    return Ok((trial, contractions));
                 }
                 supported = trial;
             }
-            Err(error @ WallExchangeError::Thermal(
-                fs_thermal::enthalpy::DepositionError::MaterialDomain,
-            )) => {
+            Err(
+                error @ WallExchangeError::Thermal(
+                    fs_thermal::enthalpy::DepositionError::MaterialDomain,
+                ),
+            ) => {
                 domain_error = Some(error);
                 unsupported = trial;
             }
             Err(error) => return Err(error),
         }
-        let next = supported + 0.5 * (unsupported - supported);
-        if next <= supported || next >= unsupported {
+        let next = 0.5 * supported + 0.5 * unsupported;
+        if next <= supported.min(unsupported) || next >= supported.max(unsupported) {
             return Err(domain_error.unwrap_or(WallExchangeError::TemperatureIterations));
         }
         trial = next;

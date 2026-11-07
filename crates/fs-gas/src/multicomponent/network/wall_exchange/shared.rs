@@ -1,7 +1,7 @@
 //! Shared finite inventories on the existing mixture-network transaction.
 
-use super::*;
 use super::shared_recoil::SharedBranchSupports;
+use super::*;
 use crate::multicomponent::wall_exchange::WallCaloricConstraint;
 use crate::multicomponent::wall_exchange::shared::{Group, Work, mixture};
 pub use crate::multicomponent::wall_exchange::shared::{
@@ -501,6 +501,26 @@ impl SharedWalls<'_> {
                 group.storage.admit_conduction_endpoint(
                     group.storage.candidate,
                     true,
+                    &self.work,
+                    cancelled,
+                )?;
+                let original = |location, _temperature| {
+                    let densities = match location {
+                        SharedWallGas::Plenum(p) => network.plenums[p].state().partial_densities,
+                        SharedWallGas::Branch { branch, cell } => {
+                            network.branches[branch]
+                                .cell(cell)
+                                .expect("bound original cell")
+                                .partial_densities
+                        }
+                    };
+                    mixture(network.gas(), densities)
+                };
+                group.storage.admit_integrated_profile_endpoints(
+                    &original,
+                    group.storage.candidate,
+                    duration,
+                    controls,
                     &self.work,
                     cancelled,
                 )?;

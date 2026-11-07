@@ -267,6 +267,8 @@ impl NetworkWallOperator<'_> {
     /// exactly once by that same exchange owner. Bind before evolution; source,
     /// geometry and topology refusals publish no gas or wall state. Phase-aware
     /// layers require their identical original caloric chart to be bound first.
+    /// An integrated profile at a prescribed-temperature reservoir needs no
+    /// caloric binding: its heat belongs to the original external reservoir.
     pub fn with_material_conduction(
         mut self,
         branches: Vec<Vec<Option<MaterialWallConduction>>>,
@@ -301,8 +303,11 @@ impl NetworkWallOperator<'_> {
         for (index, layer) in branches.into_iter().flatten().chain(plenums).enumerate() {
             poll(&mut cancelled)?;
             if let Some(layer) = layer {
+                let prescribed_profile = layer.has_integrated_profile()
+                    && matches!(self.contacts[index].thermal, WallThermal::Reservoir { .. });
                 if layer.evaluation == WallConductionEvaluation::ImplicitEndpoint
                     && self.caloric[index].is_none()
+                    && !prescribed_profile
                 {
                     return Err(WallExchangeError::Invalid(
                         "implicit wall conductivity requires original caloric storage",
@@ -400,7 +405,7 @@ impl NetworkWallOperator<'_> {
         index: usize,
         contact: WallContact,
     ) -> Result<Option<f64>, WallExchangeError> {
-        let film = finite_film(contact)?;
+        let film = endpoint_film(contact)?;
         Ok(self.conduction.as_ref().and_then(|all| all[index].as_ref())
             .and_then(|binding| binding.layer.integrated_profile.as_ref())
             .map(|profile| profile.gas_conductance_bound(film)))
@@ -420,11 +425,11 @@ impl NetworkWallOperator<'_> {
             .and_then(|binding| binding.layer.integrated_profile.as_ref())
         {
             return profile.evaluate(
-                temperatures_k, finite_film(contact)?, duration, control, cancelled,
+                temperatures_k, endpoint_film(contact)?, duration, control, cancelled,
             );
         }
         let contact = self.conduction_contact(index, contact)?;
-        let conductance = finite_film(contact)?;
+        let conductance = endpoint_film(contact)?;
         Ok(WallHeatResponse {
             conductance_w_per_k: conductance,
             power_to_gas_w: conductance * (temperatures_k[0] - temperatures_k[1]),
@@ -445,12 +450,13 @@ impl NetworkWallOperator<'_> {
     }
 }
 
-fn finite_film(contact: WallContact) -> Result<f64, WallExchangeError> {
+fn endpoint_film(contact: WallContact) -> Result<f64, WallExchangeError> {
     match contact.thermal {
         WallThermal::Lumped { conductance_w_per_k, .. }
-        | WallThermal::Caloric { conductance_w_per_k, .. } => Ok(conductance_w_per_k),
+        | WallThermal::Caloric { conductance_w_per_k, .. }
+        | WallThermal::Reservoir { conductance_w_per_k, .. } => Ok(conductance_w_per_k),
         _ => Err(WallExchangeError::Invalid(
-            "implicit conductivity requires finite caloric storage",
+            "implicit conductivity requires a thermal contact",
         )),
     }
 }

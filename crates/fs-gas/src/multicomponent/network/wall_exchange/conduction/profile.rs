@@ -1,4 +1,4 @@
-//! Source-integrated solid profiles on the original finite gas/wall transaction.
+//! Source-integrated solid profiles on the original gas/wall transactions.
 
 use super::*;
 use fs_material::thermal::conduction::{ConductivityCurve, LayerConductionConfig};
@@ -17,9 +17,11 @@ impl MaterialWallConduction {
     /// Both retained wall and gas temperatures are the proposed implicit endpoint.
     /// Preparation is shared across clones; no curve is rebuilt during evolution.
     ///
-    /// This opt-in requires the existing finite material caloric binding and
-    /// `ImplicitEndpoint` evaluation. It currently applies to local branch and
-    /// plenum contacts; shared gas ports and wall links explicitly refuse it.
+    /// This opt-in requires `ImplicitEndpoint` evaluation. Finite local and
+    /// shared walls retain their original material caloric binding; a prescribed
+    /// local reservoir supplies external heat without a stored wall inventory.
+    /// Branch, plenum and shared gas ports use the same solid/film endpoint law.
+    /// Wall-to-wall links require a two-layer law and still refuse this opt-in.
     /// A phase-dependent k(T,phi) cannot be integrated from a lumped wall's one h:
     /// its missing spatial phase profile is not inferred. No storage is added,
     /// and quasi-steady conduction does not resolve transient internal diffusion.
@@ -66,6 +68,28 @@ impl MaterialWallConduction {
     /// Whether the original k(T) is integrated through the solid profile.
     pub fn has_integrated_profile(&self) -> bool {
         self.integrated_profile.is_some()
+    }
+
+    pub(crate) fn profile_gas_sensitivity_bound(&self, film: f64) -> Option<f64> {
+        self.integrated_profile
+            .as_ref()
+            .map(|profile| profile.gas_conductance_bound(film))
+    }
+
+    pub(crate) fn profile_response(
+        &self,
+        temperatures_k: [f64; 2],
+        film: f64,
+        duration: fs_qty::Time,
+        control: WallControl,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<WallHeatResponse, WallExchangeError> {
+        self.integrated_profile
+            .as_ref()
+            .ok_or(WallExchangeError::Invalid(
+                "integrated wall profile missing",
+            ))?
+            .evaluate(temperatures_k, film, duration, control, cancelled)
     }
 }
 

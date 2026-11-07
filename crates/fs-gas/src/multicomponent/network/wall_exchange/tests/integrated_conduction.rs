@@ -205,7 +205,7 @@ fn integrated_profile_cannot_silently_become_lagged_or_infer_a_spatial_phase_sta
 }
 
 #[test]
-fn integrated_profile_refuses_shared_paths_until_their_full_endpoint_law_is_supported() {
+fn integrated_profile_refuses_wall_links_without_a_two_layer_endpoint_law() {
     let g = gas(1, false, 0.0);
     let n = network(&g, &[0.0], true);
     let (transport, caloric) = source([0.0, 1.0], [1.0, 0.0], [1.0, 10.0]);
@@ -242,12 +242,9 @@ fn integrated_profile_refuses_shared_paths_until_their_full_endpoint_law_is_supp
         )
         .unwrap()
     };
-    assert!(matches!(
-        build().with_shared_wall_conduction(vec![vec![Some(layer.clone())], vec![None]], || false,),
-        Err(WallExchangeError::Invalid(
-            "integrated wall profiles require local finite caloric contacts"
-        ))
-    ));
+    build()
+        .with_shared_wall_conduction(vec![vec![Some(layer.clone())], vec![None]], || false)
+        .unwrap();
     assert!(matches!(
         build()
             .with_shared_wall_links(
@@ -260,7 +257,7 @@ fn integrated_profile_refuses_shared_paths_until_their_full_endpoint_law_is_supp
             .unwrap()
             .with_shared_wall_link_conduction(vec![[Some(layer), None]], || false,),
         Err(WallExchangeError::Invalid(
-            "integrated wall profiles require local finite caloric contacts"
+            "integrated wall link profiles require a two-layer endpoint law"
         ))
     ));
 }

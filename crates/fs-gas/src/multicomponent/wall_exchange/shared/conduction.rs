@@ -8,7 +8,9 @@ use crate::multicomponent::network::wall_exchange::{
 pub(super) struct SharedConduction {
     layers: Vec<Option<MaterialWallConduction>>,
     initial_conductance: Vec<f64>,
+    // Only point-sampled state-dependent conductivity lacks an exact tangent.
     pub(super) implicit: bool,
+    pub(super) integrated: bool,
 }
 
 impl Group<'_> {
@@ -24,20 +26,17 @@ impl Group<'_> {
         }
         let caloric = self.accepted.storage.heat_storage.as_ref();
         let mut implicit = false;
+        let mut integrated = false;
         for layer in layers.iter().flatten() {
             poll(cancelled)?;
-            if layer.has_integrated_profile() {
-                return Err(WallExchangeError::Invalid(
-                    "integrated wall profiles require local finite caloric contacts",
-                ));
-            }
+            integrated |= layer.has_integrated_profile();
             if layer.evaluation() == WallConductionEvaluation::ImplicitEndpoint {
                 if caloric.is_none() {
                     return Err(WallExchangeError::Invalid(
                         "implicit shared wall conductivity requires original caloric storage",
                     ));
                 }
-                implicit = true;
+                implicit |= !layer.has_integrated_profile();
             }
             // This retains source identity and the phase chart's original h
             // coordinate. The storage's own film remains exactly zero.
@@ -49,6 +48,7 @@ impl Group<'_> {
                 layers,
                 initial_conductance,
                 implicit,
+                integrated,
             });
         }
         poll(cancelled)?;
@@ -57,6 +57,60 @@ impl Group<'_> {
 
     pub(crate) fn conduction_layers(&self) -> Option<&[Option<MaterialWallConduction>]> {
         self.conduction.as_ref().map(|c| c.layers.as_slice())
+    }
+
+    /// A later wall link may move the retained wall beyond the supported FACE
+    /// of an earlier gas-port solve. Admit the complete final profile against the
+    /// unchanged original gas energies, without applying another heat transfer.
+    pub(crate) fn admit_integrated_profile_endpoints<G: WallGasCaloric>(
+        &self,
+        gas: &impl Fn(SharedWallGas, f64) -> G,
+        thermal: WallThermal,
+        duration: Time,
+        control: WallControl,
+        work: &Work,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), WallExchangeError> {
+        let Some(binding) = &self.conduction else {
+            return Ok(());
+        };
+        if !binding.integrated {
+            return Ok(());
+        }
+        let wall = self.after_state(thermal, 0.0, work)?;
+        for (i, port) in self.accepted.ports.iter().enumerate() {
+            let Some(layer) = binding.profile(i) else {
+                continue;
+            };
+            poll(cancelled)?;
+            let original = MeteredGas {
+                original: gas(port.gas, wall.temperature),
+                work,
+            };
+            let state = original.primitive(self.initial[i][0], self.energies[i], cancelled)?;
+            let bound = layer
+                .profile_gas_sensitivity_bound(port.conductance_w_per_k)
+                .expect("selected integrated profile");
+            let temperature = refine_caloric_temperature_with_allowance(
+                &original,
+                state.temperature,
+                self.energies[i] - 0.5 * self.initial[i][0] * state.velocity,
+                self.volumes[i],
+                bound * duration.value(),
+                control.tolerance(self.heat[i].abs()),
+                control,
+                cancelled,
+            )?;
+            work.charge()?;
+            layer.profile_response(
+                [wall.temperature, temperature],
+                port.conductance_w_per_k,
+                duration,
+                control,
+                cancelled,
+            )?;
+        }
+        Ok(())
     }
 
     /// Lagged coefficients still require a supported final material state.
@@ -84,6 +138,12 @@ impl Group<'_> {
 }
 
 impl SharedConduction {
+    pub(super) fn profile(&self, index: usize) -> Option<&MaterialWallConduction> {
+        self.layers[index]
+            .as_ref()
+            .filter(|layer| layer.has_integrated_profile())
+    }
+
     pub(super) fn prepare(
         &mut self,
         thermal: WallThermal,

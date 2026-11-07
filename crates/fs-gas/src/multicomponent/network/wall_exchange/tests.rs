@@ -385,6 +385,10 @@ mod conduction;
 #[cfg(feature = "material")]
 mod integrated_conduction;
 #[cfg(feature = "material")]
+mod integrated_reservoir_conduction;
+#[cfg(feature = "material")]
+mod integrated_shared_conduction;
+#[cfg(feature = "material")]
 mod phase_conduction;
 mod thermal_law;
 mod shared;
