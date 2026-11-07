@@ -49,6 +49,13 @@ mod frame;
 mod impulse;
 mod transport;
 
+/// Uniform thermal dilation on an admitted planar native liquid slab.
+pub mod volume;
+pub use volume::{
+    FreeSurfaceDensityAgreement, FreeSurfaceSlabVolumeControls,
+    FreeSurfaceSlabVolumeReport, FreeSurfaceSlabVolumeStep,
+};
+
 /// Conservative condensation/evaporation ingress on existing native interfaces.
 pub mod mass_exchange;
 pub use mass_exchange::{
@@ -166,6 +173,9 @@ pub struct FreeSurfaceEnthalpyReport {
     pub transport_iterations: usize,
     /// Count of native nonzero mass routes, including conversion redistribution.
     pub mass_routes: usize,
+    /// Explicit reference-density arithmetic allowance, when carried by an
+    /// accepted thermal-volume bridge. None preserves the original binding.
+    pub density_agreement: Option<FreeSurfaceDensityAgreement>,
     /// Actual native motion on an imposed-B core, separately observed from
     /// the electrical solver's sampled Lorentz work. No kinetic defect is heat.
     #[cfg(feature = "enthalpy-coupling")]
@@ -340,6 +350,7 @@ pub struct MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     controls: FreeSurfaceEnthalpyControls,
     time_origin_s: f64,
     accepted_steps: u64,
+    density_accuracy_kg_m3: Option<f64>,
     h: BTreeMap<MassLocation3, f64>,
     states: BTreeMap<MassLocation3, ResolvedLiquidState>,
     phase_conduction: Option<LiquidMassFractionConductivity>,
@@ -362,6 +373,7 @@ type SurfaceTensionResolver<'a> = dyn FnMut(
 ) -> Result<BTreeMap<(u64, usize), f64>, Error> + 'a;
 
 struct ResolvedFlowMaterials {
+    density_defect_kg_m3: f64,
     states: BTreeMap<MassLocation3, ResolvedLiquidState>,
     tau: BTreeMap<(u64, usize), f64>,
     bulk_relaxations: Option<BTreeMap<(u64, usize), f64>>,
@@ -437,6 +449,31 @@ impl<'s> MaterialFreeSurface3<'s> {
         initial_tau: Option<&BTreeMap<[usize; 3], f64>>,
         gate: &CancelGate,
     ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
+        self.with_enthalpy_model_seeded_density(
+            law, caloric, controls, initial_h, buoyancy, rheology,
+            thermocapillary, initial_tau, None, gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_enthalpy_model_seeded_density<'m>(
+        self,
+        law: &'m LiquidTemperatureLaw<'m>,
+        caloric: &'m EquilibriumEnthalpyPhaseCurve,
+        controls: FreeSurfaceEnthalpyControls,
+        initial_h: impl Fn([usize; 3]) -> f64,
+        buoyancy: Option<crate::material::transport::boussinesq::BoussinesqConfig<3>>,
+        rheology: Option<rheology::RheologyBinding>,
+        thermocapillary: Option<thermocapillary::ThermocapillarySurface>,
+        initial_tau: Option<&BTreeMap<[usize; 3], f64>>,
+        density_accuracy_kg_m3: Option<f64>,
+        gate: &CancelGate,
+    ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
+        if density_accuracy_kg_m3.is_some_and(|value| !value.is_finite() || value < 0.0)
+            || (density_accuracy_kg_m3.is_some() && (buoyancy.is_some() || rheology.is_some()))
+        {
+            return Err(Error::Invalid("invalid fixed-reference density accuracy binding"));
+        }
         poll(gate)?;
         if controls.max_cells == 0
             || controls.max_cells > 262_144
@@ -554,6 +591,7 @@ impl<'s> MaterialFreeSurface3<'s> {
             controls,
             time_origin_s: 0.0,
             accepted_steps: 0,
+            density_accuracy_kg_m3,
             h,
             states: BTreeMap::new(),
             phase_conduction: None,
@@ -1150,6 +1188,13 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             absolute_transport_residual_j_kg: outcome.absolute_residual_j_kg,
             transport_iterations: outcome.iterations,
             mass_routes: trace.routes.len(),
+            density_agreement: self.density_accuracy_kg_m3.map(|maximum_allowed_kg_m3| {
+                FreeSurfaceDensityAgreement {
+                    maximum_allowed_kg_m3,
+                    maximum_defect_kg_m3: resolved.density_defect_kg_m3
+                        .max(endpoint.density_defect_kg_m3),
+                }
+            }),
             #[cfg(feature = "enthalpy-coupling")]
             magnetic_motion,
         };
@@ -1198,7 +1243,11 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         masses: &BTreeMap<MassLocation3, f64>,
         gate: &CancelGate,
     ) -> Result<ResolvedFlowMaterials, Error> {
+        if self.density_accuracy_kg_m3.is_some() && (self.buoyancy.is_some() || self.rheology.is_some()) {
+            return Err(Error::Invalid("reference-density accuracy binding cannot bypass another density owner"));
+        }
         let mut states = BTreeMap::new();
+        let mut density_defect_kg_m3 = 0.0_f64;
         let mut tau = BTreeMap::new();
         let mut forces = self.buoyancy.map(|_| BTreeMap::new());
         let rho = self.flow.scaling.material().density_kg_m3();
@@ -1227,8 +1276,16 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
                 rheology.insert(location, sample.sample);
                 (sample.material, sample.sample.collision_tau)
             } else {
-                let (state, transport) =
-                    resolve_liquid(self.law, self.caloric, specific, rho, self.buoyancy)?;
+                let (state, transport) = match self.density_accuracy_kg_m3 {
+                    None => resolve_liquid(self.law, self.caloric, specific, rho, self.buoyancy)?,
+                    Some(maximum) => {
+                        let (state, transport, defect) = volume::resolve_density_agreement(
+                            self.law, self.caloric, specific, rho, maximum,
+                        )?;
+                        density_defect_kg_m3 = density_defect_kg_m3.max(defect);
+                        (state, transport)
+                    }
+                };
                 let (plan, _) = plan_momentum_scaling(
                     transport.kinematic_viscosity_m2_s(),
                     self.flow.scaling.cell_size_m(),
@@ -1251,6 +1308,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             states.iter().map(|(&location, material)| (location, material.material())), gate,
         )?;
         Ok(ResolvedFlowMaterials {
+            density_defect_kg_m3,
             states,
             tau,
             bulk_relaxations,

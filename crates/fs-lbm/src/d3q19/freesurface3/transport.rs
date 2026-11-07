@@ -478,3 +478,47 @@ mod inflow_tests {
         });
     }
 }
+
+impl FreeSurface3 {
+    /// Admit the exact mechanical basis of the uniform thermal slab bridge.
+    /// No stored pressure, velocity, non-equilibrium stress, force, wall history
+    /// or surface law may disappear when its changed physical mass unit enters
+    /// the original native constructor.
+    pub(crate) fn admit_quiescent_volume_slab(
+        &self, gate: &CancelGate,
+    ) -> Result<ConversionRedistribution3, FreeSurfaceError3> {
+        check_cancel(gate)?;
+        if !self.solid.is_empty() || self.planar_piston.is_some() || self.geometry_epoch != 0
+            || self.carry != 0.0 || self.sigma != 0.0 || self.local_sigma.is_some()
+            || self.local_bulk_relaxation.is_some() || self.planar_contact.is_some()
+            || self.planar_contact_field.is_some() || !matches!(self.contact, ContactModel3::Neutral)
+            || !matches!(self.collision_model(), crate::d3q19::CollisionModel3::Bgk { .. })
+            || self.body_acceleration != Some(BodyAccelerationField3::Uniform([0.0; 3]))
+            || self.material_gravity != Some([0.0; 3]) || self.reference_force() != [0.0; 3]
+        {
+            return Err(FreeSurfaceError3::Transport(
+                "thermal slab bridge requires stationary neutral walls, zero acceleration/capillarity and ordinary BGK",
+            ));
+        }
+        let mut equilibrium = equilibrium3(1.0, [0.0; 3]);
+        forcing::preserve_density(&mut equilibrium, 1.0)?;
+        for (&key, tile) in &self.tiles {
+            check_cancel(gate)?;
+            let slot = self.grid.slot_of(key).expect("active");
+            for lane in 0..TILE_CELLS {
+                if tile.cells[lane] == Cell3::Gas || (tile.cells[lane] == Cell3::Interface && tile.mass[lane] == 0.0) {
+                    continue;
+                }
+                if self.grid.populations(slot, lane) != equilibrium
+                    || self.force_at_lane(key, lane) != [0.0; 3]
+                    || (tile.cells[lane] == Cell3::Interface && tile.mass[lane] != 1.0)
+                {
+                    return Err(FreeSurfaceError3::Transport(
+                        "thermal slab bridge cannot discard native pressure, velocity, stress or partial fill",
+                    ));
+                }
+            }
+        }
+        Ok(self.redistribution)
+    }
+}

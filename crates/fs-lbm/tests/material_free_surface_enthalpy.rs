@@ -31,6 +31,9 @@ mod buoyancy;
 #[path = "material_free_surface_enthalpy/volume.rs"]
 mod volume;
 
+#[path = "material_free_surface_enthalpy/slab_volume.rs"]
+mod slab_volume;
+
 #[path = "material_free_surface_enthalpy/frame.rs"]
 mod frame;
 
