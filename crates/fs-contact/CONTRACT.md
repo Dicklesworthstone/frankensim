@@ -3546,9 +3546,10 @@ remaining homogeneous elastic depth after actual wear. Source, arithmetic,
 geometry or cancellation refusal publishes no partial history or inventory.
 
 Prepared continuous source profiles avoid source queries during stepping.
-External conditions and elasticity are fixed; this owner supplies no layered
-kernel, coating fracture, annealing, debris, friction closure or implicit wear
-integration. Physical slip refinement is required as hardness/pressure change.
+External conditions and elasticity stay fixed within each wear interval;
+the temperature continuation below updates them between accepted intervals.
+This owner supplies no layered kernel, coating fracture, annealing, debris,
+friction closure or implicit wear integration. Physical slip refinement is required as hardness/pressure change.
 Synthetic G1/G3 checks cover independent graded-hardness wear integrals and
 first-order refinement, separate local denominators, both native work accounts,
 constant-profile equivalence in Dense/MatrixFree/FFT lanes and exact no-op
@@ -3623,6 +3624,35 @@ Numerical regressions cover graded-cap feedback and plastic-work convergence,
 maintained-force exact-profile integration, finite-spring relaxation with coarse
 support recovery, hardness-only refinement, and atomic late refusal. They do not
 constitute empirical material validation.
+
+## Temperature-dependent hardness through the exposed depth
+
+`SourceDepthHardnessWear::refresh_at_temperatures` and its `_at_load` /
+`_with_drive` continuations re-query the original ordered material/interface
+sources at independently prescribed body and interface temperatures. Each
+original H(T, depth) profile is re-prepared over its full declared support, then
+evaluated at that body's retained local material recession. Contact caps use
+the softer exposed body; independently sourced E(T), nu(T) and k_A(T), k_B(T)
+update through their original owners. Unchanged modulus shares the native prepared
+compliance kernel; changed modulus uses its original constructor and rounding.
+
+All three native boundaries re-equilibrate the actual accepted state. Heating
+can add permanent indentation; cooling cannot heal it or restore removed
+material. Both body inventories and recession fields remain unchanged by the
+temperature update. Original signed parameter work, elastic storage, normal
+work and irreversible indentation stay in the native continuation receipt.
+Force control requires the predecessor and successor to support the requested
+force; spring control retains the original finite-spring storage account.
+
+Immutable cards, claims, tests and all other typed coordinates remain pinned.
+A same-temperature call still verifies the original cards and preserves source
+identity. Source/support, boundary, footprint, arithmetic or cancellation
+failure returns no partial successor. Temperatures are supplied by the caller's
+thermal owner: this endpoint operation does not create heat, conduction,
+thermal expansion or annealing kinetics, or certify an intermediate thermal
+path. Synthetic regressions check independently softened exposed profiles,
+future exact-depth wear, independent body/interface temperatures, cooling,
+no-op identity, force/spring compliance and work, and late atomic refusals.
 
 ## Accepted bulk-history hardness on surface cells
 

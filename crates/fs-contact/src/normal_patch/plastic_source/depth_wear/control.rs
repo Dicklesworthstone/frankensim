@@ -224,7 +224,7 @@ impl SourceDepthHardnessWear {
         })
     }
 
-    fn admit_control_bounds(
+    pub(super) fn admit_control_bounds(
         &self,
         controls: FiniteGapPlasticLoadControls,
         cx: &Cx<'_>,

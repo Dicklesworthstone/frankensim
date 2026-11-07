@@ -14,8 +14,8 @@
 //! Refine physical slip increments when pressure changes appreciably: exact
 //! depth integration alone does not integrate pressure/cap feedback. No layered
 //! elastic kernel, coating failure, debris transport, hardness-to-yield
-//! conversion, or annealing is inferred. Elasticity and external conditions
-//! remain homogeneous and fixed.
+//! conversion, or annealing is inferred. Elasticity remains homogeneous; explicit
+//! temperature continuations refresh original sources between wear intervals.
 
 use std::sync::Arc;
 
@@ -43,6 +43,8 @@ use crate::normal_patch::{
 
 mod control;
 pub mod integration;
+/// Prescribed independent body/interface temperatures with retained wear.
+pub mod temperature;
 pub use control::{
     DepthHardnessNormalDriveAdvance, DepthHardnessNormalLoadAdvance, DepthHardnessWearDriveAdvance,
     DepthHardnessWearLoadAdvance,
@@ -173,71 +175,14 @@ impl SourceDepthHardnessWear {
         cx: &Cx<'_>,
     ) -> Result<Self, DepthHardnessWearError> {
         checkpoint(cx)?;
-        validate_fixed_normal(&normal)?;
-        validate_envelope(envelope)?;
-        let original = normal.interface_state();
-        if coefficients.card_identity() != original.card_identity()
-            || coefficients.surface_materials() != original.surface_materials()
-            || coefficients.query_point() != original.query_point()
-            || coefficients.axis_quantities() != original.axis_quantities()
-        {
-            return Err(invalid(
-                "wear coefficients must retain the original ordered interface and fixed query",
-            ));
-        }
-        let bulk = [
-            normal.elastic().surface_a_state().resolved(),
-            normal.elastic().surface_b_state().resolved(),
-        ];
-        let mut k = [0.0; 2];
-        let mut selected = [0; 2];
-        for side in 0..2 {
-            let h = hardness[side].reference_source().resolved();
-            if h.card_identity() != bulk[side].card_identity()
-                || h.material() != bulk[side].material()
-                || !h
-                    .query_point()
-                    .iter()
-                    .filter(|(name, _)| name.as_str() != EXPOSED_MATERIAL_DEPTH_AXIS)
-                    .eq(bulk[side].query_point().iter())
-                || !h
-                    .axis_quantities()
-                    .iter()
-                    .filter(|(name, _)| name.as_str() != EXPOSED_MATERIAL_DEPTH_AXIS)
-                    .eq(bulk[side].axis_quantities().iter())
-                || bulk[side]
-                    .properties()
-                    .iter()
-                    .any(|property| !property.is_static_at_fixed_external_conditions())
-            {
-                return Err(invalid(
-                    "depth hardness must retain each original ordered material and fixed environment",
-                ));
-            }
-            let coefficient = coefficients
-                .property_by_key(&coefficient_keys[side])
-                .ok_or_else(|| invalid("missing exact original wear coefficient"))?;
-            if coefficient_keys[side].quantity() != QuantitySpec::dimensional(Dims::NONE)
-                || !coefficient.value_si().is_finite()
-                || coefficient.value_si() < 0.0
-                || !coefficient.is_static_at_fixed_external_conditions()
-                || !maximum_recession_m[side].is_finite()
-                || maximum_recession_m[side] < 0.0
-                || maximum_recession_m[side] > hardness[side].maximum_depth_m()
-            {
-                return Err(invalid(
-                    "fixed nonnegative k and bounded original per-body depth support required",
-                ));
-            }
-            k[side] = coefficient.value_si();
-            selected[side] = coefficients
-                .properties()
-                .iter()
-                .position(|value| value == coefficient)
-                .ok_or_else(|| {
-                    invalid("wear coefficient must be retained by its original bundle")
-                })?;
-        }
+        let (k, selected) = admit_depth_sources(
+            &normal,
+            &coefficients,
+            &coefficient_keys,
+            &hardness,
+            envelope,
+            maximum_recession_m,
+        )?;
         let count = undeformed_gap_m.len();
         let cap = hardness[0]
             .hardness_pa_at(0.0)?
@@ -255,26 +200,15 @@ impl SourceDepthHardnessWear {
             linear_solver,
             cx,
         )?;
-        let mut hash = DomainHasher::new("org.frankensim.fs-contact.source-depth-hardness-wear.v1");
-        hash.update(normal.identity().as_bytes());
-        hash.update(coefficients.identity().as_bytes());
-        hash.update(model.identity().as_bytes());
-        for side in 0..2 {
-            hash.update(&(selected[side] as u64).to_le_bytes());
-            hash.update(hardness[side].identity().as_bytes());
-        }
-        for value in [
-            envelope.maximum_approach_m,
-            envelope.maximum_plastic_depth_m,
-            envelope.half_space_depth_m[0],
-            envelope.half_space_depth_m[1],
-            envelope.maximum_patch_to_depth[0],
-            envelope.maximum_patch_to_depth[1],
-            maximum_recession_m[0],
-            maximum_recession_m[1],
-        ] {
-            hash.update(&value.to_bits().to_le_bytes());
-        }
+        let identity = depth_source_identity(
+            &normal,
+            &coefficients,
+            &hardness,
+            &selected,
+            &model,
+            envelope,
+            maximum_recession_m,
+        );
         let contact = model.initial_state();
         let source = Self {
             sources: Arc::new(Sources {
@@ -285,7 +219,7 @@ impl SourceDepthHardnessWear {
                 hardness,
                 envelope,
                 maximum_recession_m,
-                identity: hash.finalize(),
+                identity,
             }),
             model,
             contact,
@@ -621,6 +555,113 @@ impl SourceDepthHardnessWear {
         }
         checkpoint(cx)
     }
+}
+
+// One source admission for initial binding and prescribed-temperature refresh.
+fn admit_depth_sources(
+    normal: &BoundNormalInterfaceState,
+    coefficients: &ResolvedInterfaceStatePoint,
+    coefficient_keys: &[PropertyKey; 2],
+    hardness: &[ResolvedDepthHardness; 2],
+    envelope: PlasticContactEnvelope,
+    maximum_recession_m: [f64; 2],
+) -> Result<([f64; 2], [usize; 2]), DepthHardnessWearError> {
+    validate_fixed_normal(normal)?;
+    validate_envelope(envelope)?;
+    let original = normal.interface_state();
+    if coefficients.card_identity() != original.card_identity()
+        || coefficients.surface_materials() != original.surface_materials()
+        || coefficients.query_point() != original.query_point()
+        || coefficients.axis_quantities() != original.axis_quantities()
+    {
+        return Err(invalid(
+            "wear coefficients must retain the original ordered interface and fixed query",
+        ));
+    }
+    let bulk = [
+        normal.elastic().surface_a_state().resolved(),
+        normal.elastic().surface_b_state().resolved(),
+    ];
+    let mut k = [0.0; 2];
+    let mut selected = [0; 2];
+    for side in 0..2 {
+        let h = hardness[side].reference_source().resolved();
+        if h.card_identity() != bulk[side].card_identity()
+            || h.material() != bulk[side].material()
+            || !h
+                .query_point()
+                .iter()
+                .filter(|(name, _)| name.as_str() != EXPOSED_MATERIAL_DEPTH_AXIS)
+                .eq(bulk[side].query_point().iter())
+            || !h
+                .axis_quantities()
+                .iter()
+                .filter(|(name, _)| name.as_str() != EXPOSED_MATERIAL_DEPTH_AXIS)
+                .eq(bulk[side].axis_quantities().iter())
+            || bulk[side]
+                .properties()
+                .iter()
+                .any(|property| !property.is_static_at_fixed_external_conditions())
+        {
+            return Err(invalid(
+                "depth hardness must retain each original ordered material and fixed environment",
+            ));
+        }
+        let coefficient = coefficients
+            .property_by_key(&coefficient_keys[side])
+            .ok_or_else(|| invalid("missing exact original wear coefficient"))?;
+        if coefficient_keys[side].quantity() != QuantitySpec::dimensional(Dims::NONE)
+            || !coefficient.value_si().is_finite()
+            || coefficient.value_si() < 0.0
+            || !coefficient.is_static_at_fixed_external_conditions()
+            || !maximum_recession_m[side].is_finite()
+            || maximum_recession_m[side] < 0.0
+            || maximum_recession_m[side] > hardness[side].maximum_depth_m()
+        {
+            return Err(invalid(
+                "fixed nonnegative k and bounded original per-body depth support required",
+            ));
+        }
+        k[side] = coefficient.value_si();
+        selected[side] = coefficients
+            .properties()
+            .iter()
+            .position(|value| value == coefficient)
+            .ok_or_else(|| invalid("wear coefficient must be retained by its original bundle"))?;
+    }
+    Ok((k, selected))
+}
+
+fn depth_source_identity(
+    normal: &BoundNormalInterfaceState,
+    coefficients: &ResolvedInterfaceStatePoint,
+    hardness: &[ResolvedDepthHardness; 2],
+    selected: &[usize; 2],
+    model: &FiniteGapPlasticModel,
+    envelope: PlasticContactEnvelope,
+    maximum_recession_m: [f64; 2],
+) -> ContentHash {
+    let mut hash = DomainHasher::new("org.frankensim.fs-contact.source-depth-hardness-wear.v1");
+    hash.update(normal.identity().as_bytes());
+    hash.update(coefficients.identity().as_bytes());
+    hash.update(model.identity().as_bytes());
+    for side in 0..2 {
+        hash.update(&(selected[side] as u64).to_le_bytes());
+        hash.update(hardness[side].identity().as_bytes());
+    }
+    for value in [
+        envelope.maximum_approach_m,
+        envelope.maximum_plastic_depth_m,
+        envelope.half_space_depth_m[0],
+        envelope.half_space_depth_m[1],
+        envelope.maximum_patch_to_depth[0],
+        envelope.maximum_patch_to_depth[1],
+        maximum_recession_m[0],
+        maximum_recession_m[1],
+    ] {
+        hash.update(&value.to_bits().to_le_bytes());
+    }
+    hash.finalize()
 }
 
 fn invalid(reason: &'static str) -> DepthHardnessWearError {

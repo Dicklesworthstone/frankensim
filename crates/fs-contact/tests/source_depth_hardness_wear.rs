@@ -10,6 +10,9 @@ mod control;
 #[path = "source_depth_hardness_wear/integration.rs"]
 mod integration;
 
+#[path = "source_depth_hardness_wear/temperature.rs"]
+mod temperature;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::hash_domain;
 use fs_contact::interface_binding::{
