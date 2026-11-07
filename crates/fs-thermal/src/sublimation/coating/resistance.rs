@@ -11,6 +11,9 @@
 //! The vapor reservoir retains the original thermostatted semantics. A finite
 //! nonisothermal gas owner can use the heat-only kernel after its mass transfer.
 
+/// Mass-owned coating dimensions and through-layer/contact thermal conductance.
+pub mod geometry;
+
 use super::super::{
     Endpoint, SolidSurfaceState, SolverConfig, SublimationError, SublimationLaw, SurfaceKinetics,
     SurfaceStep, VaporReservoir, finish_surface_step, finite, nonnegative, positive, properties,

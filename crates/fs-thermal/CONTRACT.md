@@ -777,6 +777,45 @@ porosity, geometry growth or contact evolution. Independent two-body algebra,
 exponential time refinement, nonlinear calorics, latent/finite-vapor balances
 and vapor-pressure feedback test the numerical and conservation claims.
 
+### Mass-owned thermal resistance of a growing supported coating
+
+`sublimation::coating::resistance::geometry::ConductiveCoatingGeometry`
+joins the original constant-density `RetreatGeometry` to a full-thickness
+thermal circuit. Planar, spherical and cylindrical constructors retain a
+fixed support; cylinder end caps remain inert. The original geometry owns
+the actual deposit mass, shell thickness, exposed outer area, recession and
+occupied volume. The support contact area is retained separately, so a
+growing curved outer surface cannot silently change the area to which an
+authored contact resistance is referred.
+
+For frozen positive conductivity `k`, the layer resistances are
+`t/(k*A)`, `t/(4*pi*k*ri*ro)` and `ln(1+t/ri)/(2*pi*k*L)`.
+The caller's nonnegative areal contact resistance is divided by the inner
+area and added in series; the reciprocal is the conductance consumed by
+the original separate-temperature kernel. Spherical resistance uses the
+original factored thickness. Cylindrical resistance compensates the
+rounding of `1+t/ri` around the shared deterministic logarithm. A positive
+film therefore retains resistance even when its thickness is below one ULP
+of the substrate radius. Each query is allocation-free with bounded scalar
+work; no hardware-speed claim is made.
+
+G0/G1/G3 tests in `resistance/geometry_tests.rs` compare independent planar
+and thick-shell Fourier solutions, thin-shell limits, radial subdivision,
+and the original two-body caloric solve. Two original phase transactions
+verify that actual deposited mass increases the next interval's thickness
+and resistance while mass and energy remain with the existing phase owner.
+Density mismatch, bare/extinct films, invalid transport properties and
+unrepresentable circuits refuse instead of being clipped.
+
+These are quasi-steady full-thickness Fourier resistances feeding a
+two-node transient approximation. They do not resolve the deposit's spatial
+temperature profile, infer porosity or densification, add thermal expansion,
+or supply nucleation, extinction transitions or gas-volume work. Conductivity
+and contact resistance are explicit original-law inputs; an interval owner
+must refresh them and the mass-owned geometry on each accepted/probed step.
+The analytical radial reductions follow MIT Unified Thermodynamics §16.5:
+https://web.mit.edu/16.unified/www/FALL/thermodynamics/notes/node119.html.
+
 ### Supported deposits sharing one finite vapor inventory
 
 `sublimation::coating::chamber::advance_supported_chamber` joins bare or coated
