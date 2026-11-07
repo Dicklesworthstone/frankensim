@@ -20384,3 +20384,26 @@ full anisotropic stress/energy, original ramp-history convergence, transverse
 stress constraints, source/domain refusal and extreme relaxation scales. Their
 integration execution remains pending because the original runtime dependency
 build is blocked by this environment's memory limit.
+
+## Viscoelastic solid acoustic absorption
+
+`elastic::acoustic::viscoelastic::ViscoelasticSlab` evaluates normal-incidence
+solid absorption from borrowed original bulk and shear Maxwell laws. The
+causal longitudinal modulus `M*=K*+4G*/3` supplies complex propagation and both
+physical boundary conditions. Coherent incident pressures on either face
+produce independent outgoing powers and positive spatial bulk/shear
+strain-work integrals.
+
+Inward-decaying fields, a factored round-trip determinant, and logarithmic
+even/odd wave integrals retain opaque layers and weak thin-layer heating
+without subtracting nearly equal boundary powers. Preparation bounds the
+combined branch count; queries allocate nothing, retain source identity and
+frequency support, enforce a conservative all-depth strain ceiling, and poll
+cancellation before publication.
+
+Focused numerical regressions cover independent boundary equations and
+constitutive dissipation, lossless and opaque limits, thin standing waves,
+coherent subdivision and source/support refusal. The model is frozen,
+linear, isotropic, planar and normal-incidence. It does not infer measured
+authority, oblique P/S coupling, poroelastic frame motion, finite-aperture
+scattering or thermal evolution.

@@ -23,6 +23,9 @@ pub mod sourced;
 /// Coherent P/SV/SH reflection at a perfectly bonded isotropic interface.
 pub mod interface;
 
+/// Intrinsic absorption and coherent normal incidence on a causal solid slab.
+pub mod viscoelastic;
+
 mod constitutive;
 pub use constitutive::ElasticStrainResponse;
 
