@@ -1293,32 +1293,18 @@ fn acceleration_kernels_with_holes(
         for slot in &mut s0_ir[n / 2 + 1..] {
             *slot = 0.0;
         }
-        let fft_os = Fft::new(2 * n);
-        let mut s22_buf = vec![FftC64::new(0.0, 0.0); 2 * n];
-        let mut scratch_os = vec![FftC64::new(0.0, 0.0); 2 * n];
-        let s0_direct = s0_ir[0].clamp(-0.999, 0.999);
-        s0_ir[0] = s0_direct;
-        for (dst, &src) in s22_buf[1..=n / 2].iter_mut().zip(&s0_ir[1..=n / 2]) {
-            *dst = FftC64::new(src, 0.0);
-        }
-        fft_os.forward(&mut s22_buf, &mut scratch_os);
-        let max_tail_mag = s22_buf
-            .iter()
-            .map(|c| det::hypot(c.re, c.im))
-            .fold(0.0_f64, f64::max);
-        let max_allowed = (1.0 - 1.0e-3) - s0_direct.abs();
-        if max_tail_mag > max_allowed && max_tail_mag > 0.0 {
-            let damp = max_allowed / max_tail_mag;
-            for slot in &mut s0_ir[1..=n / 2] {
-                *slot *= damp;
-            }
-        }
+        // Bound the complete reflected wave, including phase interference
+        // between its direct and delayed terms. A triangle bound treats that
+        // interference as gain and unnecessarily damps physical bore memory.
+        orifice_ports::enforce_passive_single(&mut s0_ir, n, orifice_ports::PassivityRule::Exact);
         let r2 = z0_port * port_resistance_scale;
         let s22_ir = if (port_resistance_scale - 1.0).abs() <= f64::EPSILON {
             s0_ir
         } else {
             let mu = (z0_port - r2) / (z0_port + r2);
-            s22_buf.fill(FftC64::new(0.0, 0.0));
+            let fft_os = Fft::new(2 * n);
+            let mut s22_buf = vec![FftC64::new(0.0, 0.0); 2 * n];
+            let mut scratch_os = vec![FftC64::new(0.0, 0.0); 2 * n];
             for (dst, &src) in s22_buf.iter_mut().zip(&s0_ir) {
                 *dst = FftC64::new(src, 0.0);
             }

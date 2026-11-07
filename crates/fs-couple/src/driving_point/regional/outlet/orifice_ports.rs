@@ -21,8 +21,8 @@
 //! `U + A Phi(U) = u_th` has one solution because `A` is positive in the `R`-weighted inner product whenever the
 //! weighted direct matrix has norm below one (the realization enforces it). It is found by a damped Newton
 //! iteration on the `N`-vector (`N <= 3`). `N = 1` reduces to the closed form of [`RegisterHoleShuntLine`]; the
-//! voice keeps that struct for `N = 1` so a card without the row (or with `open_hole_orifice 1`) runs the
-//! unchanged code and keeps its bytes.
+//! voice keeps that struct for `N = 1` so a card without the row and one with `open_hole_orifice 1` use
+//! the same scalar solve. Both realizations retain phase when bounding reflected-wave gain.
 //!
 //! The returned reed perturbation is `sum_i s12_i * Delta p_i`. Radiated hole sound still comes from the linear
 //! network, as for the first-hole shunt.
@@ -569,8 +569,8 @@ impl RegionalDuct {
         self.realize_orifice_ports_with(sample_rate_hz, n, wall, ports, PassivityRule::Exact)
     }
 
-    /// As [`Self::realize_orifice_ports`] with the passivity rule named (the tests compare the legacy rule with
-    /// the first-hole line, which uses it).
+    /// As [`Self::realize_orifice_ports`] with the passivity rule named (the tests compare the
+    /// phase-aware rule with the former triangle bound).
     pub(crate) fn realize_orifice_ports_with(
         &self,
         sample_rate_hz: u32,
@@ -681,15 +681,20 @@ pub(crate) enum PassivityRule {
     /// Clamp the direct matrix to norm `0.999`, then scale the whole tail by the largest factor for which the
     /// realized matrix `D + lambda T(w)` has power-wave norm at most `1 - 1e-3` at every bin of the 2n grid.
     Exact,
-    /// The first-hole line's rule for its one kernel, carried over to the matrix: scale the tail so that
+    /// The former first-hole rule, retained as a comparison oracle: scale the tail so that
     /// `|D| + max_w |T(w)| <= 1 - 1e-3`. That sum ignores the phase between `D` and `T`, so it damps more than
-    /// passivity needs once there are several ports (0.9675 for three here, 0.9989 for one).
+    /// passivity needs even for a single port. It is not the production admission rule.
     Triangle,
 }
 
 /// Direct taps and tail of the `S_ij` kernels bounded in the power-wave norm by `rule`. Returns the tail factor
 /// applied (`1.0` when none was needed).
 fn enforce_passive_matrix(ir: &mut [Vec<f64>], r_ref: &[f64], m: usize, n: usize, rule: PassivityRule) -> f64 {
+    if m == 1 {
+        // A single port's reference cancels from its power-wave norm. Avoid
+        // allocating one maximum-sized port matrix per frequency for this case.
+        return enforce_passive_single(&mut ir[0], n, rule);
+    }
     let half = n / 2;
     let mut d = [[C64::ZERO; NP]; NP];
     for i in 0..m {
@@ -758,16 +763,7 @@ fn enforce_passive_matrix(ir: &mut [Vec<f64>], r_ref: &[f64], m: usize, n: usize
                     top.max(weighted_spectral_norm(&s, r_ref, m))
                 })
             };
-            if worst(1.0) <= limit {
-                1.0
-            } else {
-                let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
-                for _ in 0..14 {
-                    let mid = 0.5 * (lo + hi);
-                    if worst(mid) <= limit { lo = mid } else { hi = mid }
-                }
-                lo
-            }
+            passive_tail_factor(worst, limit)
         }
     };
     if factor < 1.0 {
@@ -778,6 +774,59 @@ fn enforce_passive_matrix(ir: &mut [Vec<f64>], r_ref: &[f64], m: usize, n: usize
         }
     }
     factor
+}
+
+/// Scalar specialization of the same sampled reflected-wave norm admission.
+/// The existing direct-tap margin, 2n frequency grid and tail-factor resolution
+/// are unchanged. This is a sampled realization check, not a continuous-band
+/// passivity certificate or a new physical loss law.
+pub(super) fn enforce_passive_single(ir: &mut [f64], n: usize, rule: PassivityRule) -> f64 {
+    let limit = 1.0 - 1.0e-3;
+    let direct = ir[0].clamp(-limit, limit);
+    ir[0] = direct;
+    let fft = Fft::new(2 * n);
+    let mut tail = vec![FftC64::new(0.0, 0.0); 2 * n];
+    let mut scratch = vec![FftC64::new(0.0, 0.0); 2 * n];
+    for (dst, &src) in tail[1..=n / 2].iter_mut().zip(&ir[1..=n / 2]) {
+        *dst = FftC64::new(src, 0.0);
+    }
+    fft.forward(&mut tail, &mut scratch);
+    let factor = match rule {
+        PassivityRule::Triangle => {
+            let largest = tail.iter().map(|t| det::hypot(t.re, t.im)).fold(0.0_f64, f64::max);
+            let allowed = limit - direct.abs();
+            if largest > allowed && largest > 0.0 { allowed / largest } else { 1.0 }
+        }
+        PassivityRule::Exact => passive_tail_factor(
+            |lambda| {
+                tail.iter()
+                    .map(|t| det::hypot(direct + lambda * t.re, lambda * t.im))
+                    .fold(0.0_f64, f64::max)
+            },
+            limit,
+        ),
+    };
+    if factor < 1.0 {
+        for tap in &mut ir[1..=n / 2] {
+            *tap *= factor;
+        }
+    }
+    factor
+}
+
+// The admitted direct operator already lies in the norm ball. Convexity of
+// ||D + lambda T|| makes the feasible factors an interval starting at zero.
+// Keep the original 2^-14 bisection resolution for scalar and matrix paths.
+fn passive_tail_factor(worst: impl Fn(f64) -> f64, limit: f64) -> f64 {
+    if worst(1.0) <= limit {
+        return 1.0;
+    }
+    let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+    for _ in 0..14 {
+        let mid = 0.5 * (lo + hi);
+        if worst(mid) <= limit { lo = mid } else { hi = mid }
+    }
+    lo
 }
 
 #[cfg(test)]

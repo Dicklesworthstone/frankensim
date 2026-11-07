@@ -128,6 +128,52 @@ fn zero_loss_leaves_the_linear_flow_untouched() {
 }
 
 #[test]
+fn passive_reflection_keeps_phase_cancelling_memory() {
+    // G1: H(z)=0.5+0.5*z^-1-0.3*z^-2 is strictly contractive at EVERY
+    // frequency. With x=cos(theta), |H|^2=0.89+0.2*x-0.6*x^2, whose
+    // maximum is 68/75 at x=1/6. Its passive delayed reflection must survive
+    // unchanged, even though |D|+max|T|=1.3 fails the old triangle test.
+    let n = 64;
+    for sign in [-1.0, 1.0] {
+        let mut original = vec![0.0; n];
+        original[..3].copy_from_slice(&[sign * 0.5, sign * 0.5, -sign * 0.3]);
+        let mut exact = original.clone();
+        assert_eq!(enforce_passive_single(&mut exact, n, PassivityRule::Exact), 1.0);
+        assert_eq!(exact, original, "passive physical reflection was damped");
+
+        let mut triangle = original.clone();
+        let legacy_factor = enforce_passive_single(&mut triangle, n, PassivityRule::Triangle);
+        assert!((legacy_factor - (0.999 - 0.5) / 0.8).abs() < 1.0e-13);
+        assert!(legacy_factor < 0.624, "regression must exercise substantial artificial loss");
+
+        // A resolved impulse returns the original delayed waves, not just a
+        // matching steady-state gain. The same power-wave kernel owns runtime.
+        let mut port = FirScatteringPort::new(1.0 / f64::from(RATE), exact).unwrap();
+        for (sample, expected) in original.iter().enumerate() {
+            let actual = port.push(if sample == 0 { 1.0 } else { 0.0 }).unwrap();
+            assert!((actual - expected).abs() < 1.0e-13);
+        }
+    }
+}
+
+#[test]
+fn active_reflection_retains_the_existing_gain_limit() {
+    // G1: all coefficients have one sign, so the exact worst frequency is DC.
+    // The largest admissible tail factor is (0.999-0.5)/(0.6+0.2). Unlike the
+    // passive phase-cancelling case, this source really does need attenuation.
+    let n = 64;
+    let mut ir = vec![0.0; n];
+    ir[..3].copy_from_slice(&[0.5, 0.6, 0.2]);
+    let factor = enforce_passive_single(&mut ir, n, PassivityRule::Exact);
+    let expected = (0.999 - 0.5) / 0.8;
+    assert!(factor <= expected && expected - factor < 1.0 / 16_384.0);
+    assert_eq!(ir[0], 0.5);
+    assert_eq!(ir[1], 0.6 * factor);
+    assert_eq!(ir[2], 0.2 * factor);
+    assert!(ir.iter().map(|v| v.abs()).sum::<f64>() <= 0.999);
+}
+
+#[test]
 fn the_dispatch_keeps_the_first_hole_line_for_one_port_and_for_a_single_open_hole() {
     let walls = WALLS;
     for (duct, label) in [(three_hole_duct(1), "N=1"), (one_hole_duct(3), "one open hole, N=3")] {
@@ -162,8 +208,8 @@ fn one_realized_port_follows_the_first_hole_line_through_a_strongly_nonlinear_dr
     let duct = three_hole_duct(1);
     let walls = WALLS;
     let mut line = duct.register_hole_shunt_line(RATE, 1024, walls).unwrap().unwrap();
-    // The first-hole line uses the triangle rule, so the equivalence is exact only under that rule.
-    let kernels = duct.realize_orifice_ports_with(RATE, 1024, walls, 1, PassivityRule::Triangle).unwrap();
+    // The first-hole and multiport owners now use the same phase-aware norm.
+    let kernels = duct.realize_orifice_ports(RATE, 1024, walls, 1).unwrap();
     let mut ports = RegisterHoleOrificePorts::from_realized(&kernels, 1.0 / f64::from(RATE)).unwrap();
     line.prime(0.0).unwrap();
     ports.prime(0.0).unwrap();

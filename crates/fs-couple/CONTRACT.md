@@ -2229,14 +2229,19 @@ block such as a sealed hole without series length sitting on its node; every oth
 inverse of the one-port network impedance for N = 1. The reed receives the sum of the N `s12` kernels applied to the
 accepted drops; radiated hole sound still comes from the linear network, as for the first-hole shunt.
 
-An absent row or `N = 1` runs the unchanged first-hole shunt, bit for bit (`RegisterHoleShunt::Single`), and an N above
-the number of open holes uses all of them. For N >= 2 the realized matrix is made passive by bounding the matrix
-itself: the direct matrix is clamped to power-wave norm 0.999 and the whole tail scaled by the largest factor (found by
-bisection, 2^-14 resolution) for which `max_w || D + lambda T(w) ||` stays at most 0.999 on the 2n grid. The
-first-hole line's own rule, `|D| + max_w |T(w)| <= 0.999`, ignores the phase between `D` and `T`: it costs 0.1 % of the
-tail for one port but 0.4 % for two and 3.3 % for three on the test bore; with it the coupled flows departed from the TMM
-chain by up to 15 % at 100 Hz on a 4096 grid, with the bisected rule by at most 3.4 %. That legacy rule is kept (`PassivityRule::Triangle`) only so the N = 1 equivalence
-test is exact; N = 1 in the card never reaches it. The row takes a constant-medium run or a `gas_field continuous`
+An absent row and `N = 1` use the same first-hole shunt, bit for bit (`RegisterHoleShunt::Single`), and an N above
+the number of open holes uses all of them. Both the scalar and matrix realizations bound the complete reflected
+wave: the direct operator is clamped to power-wave norm 0.999 and the whole tail scaled by the largest factor (found by
+bisection, 2^-14 resolution) for which `max_w || D + lambda T(w) ||` stays at most 0.999 on the 2n grid. This is a
+sampled realization check, not a continuous-band passivity certificate or a physical material-loss law. The former
+first-hole rule, `|D| + max_w |T(w)| <= 0.999`, ignored phase interference and could damp an already passive
+reflection. For example `H(z)=0.5+0.5*z^-1-0.3*z^-2` has exact maximum gain `sqrt(68/75)<0.999`, but that rule retained
+only 0.62375 of its delayed terms. The phase-aware rule keeps this impulse response unchanged and still limits a
+truly active positive-tap response. The scalar specialization shares the matrix path's factor search and stores
+only scalar complex spectra; it never allocates a maximum-sized port matrix at each frequency. The old rule remains
+`PassivityRule::Triangle` for regression comparisons only. The existing nonlinear single-vs-one-port test now uses
+the phase-aware rule on both sides. This changes the single-hole numerical realization while preserving the same
+physical TMM, orifice law, explicit loss parameters and scalar runtime. The row takes a constant-medium run or a `gas_field continuous`
 binding (`GasFieldDuct::response_with_wall_holes_and_ports`: each orifice reads its own local gas, K and numerical
 reference included). A molecular bore, a midpoint `gas_field` (N > 1) and a segment-gas duct with several regions
 refuse by name. On a continuous field with `open_hole_interaction` there is ONE approximation, stated on the page too:
