@@ -8,6 +8,9 @@
 use super::super::stress::{admit_normal, finite_vector, stress_from_dyad, symmetric};
 use super::*;
 
+mod moments;
+pub use moments::AngularSpectrumExposureApertureWrench;
+
 /// Area/shutter-averaged Maxwell stress, field energy density and energy flux.
 ///
 /// The original observed half-space supplies positive lossless nondispersive

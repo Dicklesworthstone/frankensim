@@ -31,7 +31,7 @@ pub use polarization::{
     AngularSpectrumExposureApertureProjection,
     AngularSpectrumExposureApertureProjectionReading,
 };
-pub use stress::AngularSpectrumExposureApertureStress;
+pub use stress::{AngularSpectrumExposureApertureStress, AngularSpectrumExposureApertureWrench};
 
 /// Additional bounds for a joint aperture/shutter observation.
 ///

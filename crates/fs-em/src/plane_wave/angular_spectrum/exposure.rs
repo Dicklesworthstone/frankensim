@@ -37,6 +37,7 @@ pub use aperture::{
     AngularSpectrumExposureApertureMoments,
     AngularSpectrumExposureApertureProjection, AngularSpectrumExposureApertureProjectionReading,
     AngularSpectrumExposureApertureReading, AngularSpectrumExposureApertureStress,
+    AngularSpectrumExposureApertureWrench,
     PreparedAngularSpectrumApertureEnergyControl,
 };
 

@@ -5451,6 +5451,60 @@ two-face node observation but remain unrun without the constellation checkouts.
 Native material/source declarations are signature-only links; this does not
 establish full material admission, Maxwell assembly or spatial convergence.
 
+### Finite-aperture traction moments and angular-momentum transport
+
+`AngularSpectrumExposure{,Ensemble}::measure_aperture_wrench` and its
+two-face `measure_illumination_aperture_wrench` counterpart integrate the
+original Maxwell traction and its first spatial moments over the declared
+rectangle and shutter. `AngularSpectrumExposureApertureWrench` reports
+`integral(T*ez)dA` [N] and
+`integral((r-centre) cross (T*ez))dA` [N m]. The positive-z normal is
+explicit. `traction_moment_about_nm` translates the origin using an authored
+centre-to-origin displacement and DD force/moment contraction before rounding.
+A displaced fringe contributes its actual lever arm; multiplying mean traction
+by the rectangle centre cannot replace this observation.
+
+The observer reuses the original lossless nondispersive half-space admission,
+two-face modal reconstruction, spatial wavevectors, positive-time phasors and
+normalized shutter. Deterministic means and real factors retain carrier sums
+and differences; proper-complex factors retain their original difference law.
+Independent factors contribute moments separately. Both longitudinal fields
+and coherent incoming/outgoing cross terms enter before traction is formed.
+
+Centered first-moment kernels integrate `xi*sin(k*xi)` analytically. A DD
+small-width series preserves the derivative near a uniform phase, and split
+large-phase divisions avoid squaring an unrepresentable argument. Actual
+carrier-plus-envelope wavevectors remain in DD. Separate start/half-width
+rotations preserve a tiny aperture phase at a distant coordinate.
+No spatial sampling, numerical phase derivative, modal-pair matrix or new
+FFT is introduced. The original stress-only query keeps its existing cost.
+This query performs thirty scalar field products per admitted mode/frequency
+pair and retains normal plus first-moment x/y axis caches. Its work remains
+`N^2 * sum(F_bank^2)`; original reconstruction bounds and the additional
+first-moment caches/headers are charged before allocation. Banks stream one at
+a time, cancellation is polled through preparation and contraction, and invalid
+budgets, unrepresentable moments or derived units return errors.
+
+This is a surface transport observation, not a net mechanical body torque.
+A complete angular-momentum balance still requires the entire closed surface,
+the field-angular-momentum rate and the applicable material law. Arbitrary
+finite patches have side walls. The original periodic source continuation,
+material restrictions and Maxwell model remain unchanged.
+
+Six new native tests execute this exact production module with the original
+aperture/stress kernels and real harmonic-window/math owners; all six existing
+aperture-stress regressions also pass. They check an analytic coherent fringe
+with nonzero moment despite zero individual-mode moments, independently
+integrated two-dimensional mixed-polarization fields under uniform/triangular
+shutters, proper versus independent real quadratures, patch additivity and
+origin translation, narrow-width derivative and remote-coordinate phase
+survival, and work/storage,
+cancellation/replay and overflow boundaries. Public original-field tests also compare integrated traction, split-patch
+moments about a common origin and a two-face standing node; those tests remain
+unrun without the constellation checkouts. Cold source/material declarations
+in the focused native build are signature-only links; these results do not claim a
+full workspace build or public Maxwell/material assembly validation.
+
 ### Coherent source control through finite optical apertures and shutters
 
 `PreparedAngularSpectrumApertureEnergyControl` borrows one fixed original

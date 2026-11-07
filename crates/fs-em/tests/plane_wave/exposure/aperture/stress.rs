@@ -102,6 +102,31 @@ fn finite_stress_patches_partition_the_original_continuous_cell_tensor() {
                 original_flux.normal_power_w,
                 3e-11,
             );
+            let wrench = ensemble
+                .measure_aperture_wrench(side, 0.19, whole, window, aperture_limits(), || false)
+                .unwrap();
+            let mut force = [0.0; 3];
+            let mut moment = [0.0; 3];
+            for patch in [left, right] {
+                let part = ensemble
+                    .measure_aperture_wrench(side, 0.19, patch, window, aperture_limits(), || false)
+                    .unwrap();
+                let offset = [
+                    width / 2.0 - patch.origin_m()[0] - patch.extent_m()[0] / 2.0,
+                    0.0,
+                    0.0,
+                ];
+                let translated = part.traction_moment_about_nm(offset).unwrap();
+                for i in 0..3 {
+                    force[i] += part.integrated_traction_n()[i];
+                    moment[i] += translated[i];
+                }
+            }
+            for i in 0..3 {
+                near(wrench.integrated_traction_n()[i], total[i][2], 3e-11);
+                near(wrench.integrated_traction_n()[i], force[i], 3e-11);
+                near(wrench.centered_traction_moment_nm()[i], moment[i], 3e-11);
+            }
         }
     }
 }
@@ -141,6 +166,32 @@ fn original_two_face_standing_node_has_stress_without_energy_transport() {
     near(result.mean_field_energy_density_j_m3(), 1.0, 3e-13);
     near(result.normal_power_w().unwrap(), 0.0, 3e-13);
     near(result.mean_maxwell_stress_pa()[2][2], -1.0, 3e-13);
+    let wrench = bank
+        .measure_illumination_aperture_wrench(
+            Face::TotalLeft,
+            0.0,
+            area,
+            window,
+            aperture_limits(),
+            || false,
+        )
+        .unwrap();
+    let traction = result.integrated_traction_n([0.0, 0.0, 1.0]).unwrap();
+    for i in 0..3 {
+        near(wrench.integrated_traction_n()[i], traction[i], 3e-13);
+        near(wrench.centered_traction_moment_nm()[i], 0.0, 3e-13);
+    }
+    assert!(
+        bank.measure_illumination_aperture_wrench(
+            Face::TotalLeft,
+            0.0,
+            area,
+            window,
+            aperture_limits(),
+            || true,
+        )
+        .is_err()
+    );
     assert!(
         bank.measure_illumination_aperture_stress(
             Face::TotalLeft,
