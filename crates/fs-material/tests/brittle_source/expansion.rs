@@ -400,3 +400,12 @@ mod dynamics;
 
 #[path = "expansion/initiation.rs"]
 mod initiation;
+
+#[path = "expansion/rate.rs"]
+mod rate;
+
+#[path = "expansion/rate_source.rs"]
+mod rate_source;
+
+#[path = "expansion/rate_restrained.rs"]
+mod rate_restrained;

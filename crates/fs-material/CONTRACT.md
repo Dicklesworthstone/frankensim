@@ -1,5 +1,30 @@
 # fs-material — CONTRACT
 
+## Timed thermal strain in original tensile fracture
+
+`brittle::source::expansion::rate` composes original integrated thermal expansion
+with the native physical fracture-plane viscosity. Endpoint and path-mean force
+adapters subtract free strain before the original timed material update; the
+native mechanical history, derivatives and irreversible fracture remain the
+same. Total path-mean stress supplies both total-displacement work and the signed
+eigenstrain port. Their sum includes intrinsic fracture and separately reported
+bond-viscous loss. Coefficient work remains a preceding held-history operation.
+
+Explicit source selection retains all original fracture, Pa s/m viscosity,
+instantaneous alpha(T), and optional density receipts. Thermal successors retain
+the same reference, claims, geometry and jump-rate bound. Actual temperature
+rate can be converted with current sourced alpha. The affine free-strain rate
+of a declared interval is a distinct quantity, particularly for varying alpha;
+neither is guessed from endpoint temperatures. Actual endpoint stress accepts
+the declared free-strain rate separately from total deformation rate.
+
+`transfer_temperature_over_time` supplies an explicitly restrained total-strain
+experiment. It reuses the original coefficient transfer and timed path, keeping
+eigenstrain work, recoverable storage, intrinsic fracture and viscous dissipation
+separate through cooling, reheating and complete failure. Untimed evolution
+still refuses surviving viscous bonds. These are prescribed source trajectories,
+not a caloric heat/entropy model or a second-order temperature integration claim.
+
 ## Physical rate response of original bulk fracture bonds
 
 `brittle::rate` projects the original timed cohesive law through the existing
@@ -18,7 +43,8 @@ resolve from the same card and external conditions with explicit interface
 units and a declared rate bound. Coefficient-temperature continuation retains
 that selection, original claims and intrinsic history. Bulk Pa s coefficients,
 rate-conditioned frozen values and elastic-only initiation of a viscous history
-refuse. Thermal eigenstrain still requires its own timed coupled extension.
+refuse. Thermal eigenstrain uses the explicit total-strain timed adapters in
+`brittle::source::expansion::rate`.
 
 Coefficients are not inferred by dividing bulk damping by band width. Intrinsic
 Gc excludes the additional viscous loss, and arbitrary-width objectivity of

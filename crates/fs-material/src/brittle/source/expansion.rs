@@ -21,6 +21,8 @@
 
 /// Same-source reference density and native path-mean thermal force response.
 pub mod dynamics;
+/// Explicit timed fracture-plane viscosity on the original thermal strain path.
+pub mod rate;
 
 use super::{
     BrittleSourceError, ResolvedBrittleCrackBand, brittle_crack_band_requirements, coefficient,
@@ -32,7 +34,7 @@ use crate::brittle::{
 use crate::state_point::{
     INVERSE_TEMPERATURE_DIMS, IntegratedIsotropicThermalExpansion,
     LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, MaterialPropertySelection,
-    MaterialStatePointError, ScalarAdmissibility, ScalarPropertyRequirement,
+    MaterialStatePointError, ResolvedMaterialStatePoint, ScalarAdmissibility, ScalarPropertyRequirement,
     integrate_isotropic_thermal_expansion, resolve_material_state_point,
 };
 use crate::{MaterialAdmissibility, SmallStrainLaw, Tangent6, Voigt};
@@ -93,6 +95,28 @@ fn resolve_with_requirements(
     settings: BrittleCrackBandSettings,
     requirements: &[ScalarPropertyRequirement],
 ) -> Result<ResolvedThermalBrittle, BrittleSourceError> {
+    resolve_with_reference(
+        card,
+        reference_query,
+        current_query,
+        selection,
+        requirements,
+        |material| ResolvedBrittleCrackBand::try_from_material(material, settings),
+    )
+}
+
+/// One source/reference integration path for explicitly selected intrinsic or
+/// viscous fracture laws. The constructor consumes the complete resolved
+/// bundle; merely including a viscosity claim never selects a rate mechanism.
+fn resolve_with_reference(
+    card: &MaterialCard,
+    reference_query: &QueryPoint,
+    current_query: &QueryPoint,
+    selection: MaterialPropertySelection,
+    requirements: &[ScalarPropertyRequirement],
+    prepare_reference: impl FnOnce(ResolvedMaterialStatePoint)
+        -> Result<ResolvedBrittleCrackBand, BrittleSourceError>,
+) -> Result<ResolvedThermalBrittle, BrittleSourceError> {
     if reference_query.axis_quantities() != current_query.axis_quantities() {
         return Err(BrittleSourceError::Invalid(
             "thermal expansion must retain the reference coordinate conventions",
@@ -121,7 +145,7 @@ fn resolve_with_requirements(
             selected,
         )]),
     )?;
-    let reference = ResolvedBrittleCrackBand::try_from_material(material, settings)?;
+    let reference = prepare_reference(material)?;
     let temperature =
         expansion
             .current()
@@ -353,11 +377,6 @@ impl ResolvedThermalBrittle {
     }
 
     fn check_binding(&self) -> Result<(), BrittleSourceError> {
-        if self.band.law().viscosity().is_some() {
-            return Err(BrittleSourceError::Invalid(
-                "brittle thermal eigenstrain needs a timed coupled rate law before using bond viscosity",
-            ));
-        }
         let material = self.band.material();
         let current = self.expansion.current().resolved();
         coefficient(
