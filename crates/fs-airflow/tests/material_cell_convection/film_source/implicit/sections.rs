@@ -1,7 +1,8 @@
 //! Finite physical sections -> sourced tangents -> the native surface/history.
 use super::*;
 use fs_airflow::graph::thermal::medium::convection::{
-    evaluate_flat_plate_section_from_material, evaluate_turbulent_tube_section_from_material,
+    evaluate_flat_plate_section_from_material, evaluate_laminar_tube_section_from_material,
+    evaluate_turbulent_tube_section_from_material,
     implicit::LiquidExteriorConvectionError,
 };
 
@@ -189,7 +190,8 @@ fn g1_tube_sections_retain_entrance_geometry_bulk_source_and_zero_wall_tangent()
 // neither the production section evaluator nor its tangent enters this oracle.
 fn section_reference(body_temperature: f64, law: SourceCellConvectionLaw) -> (f64, [f64; 2]) {
     let powers = |surface: f64| {
-        let offset = if matches!(law, SourceCellConvectionLaw::ForcedTubeSection { .. }) {
+        let offset = if matches!(law, SourceCellConvectionLaw::ForcedTubeSection { .. }
+            | SourceCellConvectionLaw::ForcedLaminarTubeSection { .. }) {
             0.0
         } else { 0.5 * (surface + 300.0) - 300.0 };
         let (rho, cp, k, mu) = (
@@ -219,6 +221,15 @@ fn section_reference(body_temperature: f64, law: SourceCellConvectionLaw) -> (f6
                     / (1.0 + 12.7 * (friction / 8.0).sqrt() * (pr.powf(2.0 / 3.0) - 1.0));
                 let (a, b) = ((start.value() / 0.1).cbrt(), (end.value() / 0.1).cbrt());
                 developed * (1.0 + 1.0 / (a * a + a * b + b * b))
+            }
+            SourceCellConvectionLaw::ForcedLaminarTubeSection { speed_m_s, start, end } => {
+                let peclet = rho * speed_m_s * 0.1 * cp / k;
+                let cumulative = |x: f64| {
+                    if x == 0.0 { return 0.0; }
+                    let gz = peclet / (x / 0.1);
+                    x * (3.66 + 0.0668 * gz / (1.0 + 0.04 * gz.powf(2.0 / 3.0)))
+                };
+                (cumulative(end.value()) - cumulative(start.value())) / (end.value() - start.value())
             }
             _ => unreachable!("finite-section oracle only"),
         };
@@ -258,4 +269,68 @@ fn g3_tube_section_closes_native_surface_and_backward_euler_heat_and_entropy() {
     let mut config = settings(law);
     config.property_temperature = ConvectionPropertyTemperature::Reservoir;
     source_surface_energy_with(config, |t| section_reference(t, law));
+}
+
+#[test]
+fn g1_laminar_sections_retain_original_bulk_source_and_exact_heat_tangent() {
+    let body = curve();
+    let card = liquid_card(0.3, 0.01, 320.0);
+    let liquid = liquid_law(&card);
+    for start in [0.0, 1.0, 2.0 * (1.0 - 1e-12)] {
+        let mut config = settings(SourceCellConvectionLaw::ForcedLaminarTubeSection {
+            speed_m_s: 0.01, start: Length::new(start), end: Length::new(2.0),
+        });
+        assert!(ImplicitLiquidConvection::try_new(
+            &body, [-20000.0, 20000.0], &liquid, config,
+        ).is_err(), "Hausen bulk properties must not silently become film properties");
+        config.property_temperature = ConvectionPropertyTemperature::Reservoir;
+        let convection = ImplicitLiquidConvection::try_new(
+            &body, [-20000.0, 20000.0], &liquid, config,
+        ).unwrap();
+        for surface in [290.0, 300.0, 310.0] {
+            let actual = convection.evaluate(surface, 300.0).unwrap();
+            let original = liquid.at_temperature(Temperature::new(300.0)).unwrap();
+            let expected = evaluate_laminar_tube_section_from_material(
+                &original, 0.01, Length::new(0.1), Length::new(start), Length::new(2.0),
+            ).unwrap();
+            near(actual.coefficient.value.value(), expected.coefficient().value.value(), 1e-9);
+            assert_eq!(actual.property_temperature_k, 300.0);
+            assert_eq!(actual.coefficient_surface_derivative_w_m2_k2, 0.0);
+            assert_eq!(actual.nusselt.groups(), expected.section().downstream().groups());
+            let details = actual.tube_section.as_ref().unwrap();
+            assert_eq!(details.start.value(), start);
+            assert_eq!(details.end.value(), 2.0);
+            assert_eq!(details.upstream.is_some(), start > 0.0);
+            assert_eq!(actual.coefficient.model.discrepancy_rel.is_infinite(), start > 0.0);
+            near(details.nusselt, expected.section().nusselt(), 1e-12);
+            check_derivative(&convection, surface, 300.0);
+            let flux = convection.flux_state_at_surface(0.0, surface, 300.0).unwrap();
+            near(flux.convection_temperature_tangent_w_m2_k, actual.coefficient.value.value(), 1e-10);
+        }
+    }
+}
+
+#[test]
+fn g3_laminar_section_closes_native_conducting_surface_energy_and_entropy() {
+    let law = SourceCellConvectionLaw::ForcedLaminarTubeSection {
+        speed_m_s: 0.01, start: Length::new(1.0), end: Length::new(2.0),
+    };
+    let mut config = settings(law);
+    config.property_temperature = ConvectionPropertyTemperature::Reservoir;
+    source_surface_energy_with(config, |t| section_reference(t, law));
+}
+
+#[test]
+fn g0_pointwise_exterior_refuses_unverifiable_four_wall_rectangular_geometry() {
+    let body = curve();
+    let card = liquid_card(0.0, 0.0, 320.0);
+    let liquid = liquid_law(&card);
+    let mut config = settings(SourceCellConvectionLaw::ForcedRectangularDuctSection {
+        speed_m_s: 0.01, aspect_ratio: 0.5,
+        start: Length::new(1.0), end: Length::new(2.0),
+    });
+    config.property_temperature = ConvectionPropertyTemperature::Reservoir;
+    assert!(matches!(ImplicitLiquidConvection::try_new(
+        &body, [-20000.0, 20000.0], &liquid, config,
+    ), Err(LiquidExteriorConvectionError::Invalid(_))));
 }

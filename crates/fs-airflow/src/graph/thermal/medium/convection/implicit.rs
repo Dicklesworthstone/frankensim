@@ -13,7 +13,8 @@ use super::deposition::{
 };
 use super::*;
 use fs_convection::developing::{
-    FlatPlateSectionError, evaluate_flat_plate_section, evaluate_turbulent_circular_duct_section,
+    FlatPlateSectionError, evaluate_circular_duct_section, evaluate_flat_plate_section,
+    evaluate_turbulent_circular_duct_section,
 };
 use fs_matdb::PropertyLineSlice;
 use fs_material::liquid::VOLUMETRIC_EXPANSION_PROPERTY;
@@ -127,7 +128,7 @@ pub struct LiquidExteriorConvectionResponse {
     /// Actual plate-strip geometry, upstream mean and strip-average Nu.
     pub plate_section: Option<PlateSectionDetails>,
     /// Actual circular-tube geometry, upstream mean and section-average Nu.
-    pub tube_section: Option<TurbulentTubeSectionDetails>,
+    pub tube_section: Option<TubeSectionDetails>,
     pub coefficient: Evidence<HeatTransferCoefficient>,
     pub coefficient_surface_derivative_w_m2_k2: f64,
 }
@@ -151,8 +152,9 @@ pub struct LiquidExteriorConvectionResponse {
 /// components and analytic partials remain with the original correlation.
 /// Finite plate strips retain the physical leading edge, both original means
 /// and the section coefficient's own Re/Pr partials. Film derivatives act on
-/// that coefficient, including its conductivity. Tube sections retain bulk
-/// properties with the original K=1 approximation and zero surface derivative.
+/// that coefficient, including its conductivity. Circular sections retain bulk
+/// properties (K=1 for turbulent flow) and zero surface derivative. Rectangular
+/// four-wall sections require a finite area owner and are not pointwise laws.
 ///
 /// A genuine source kink or unavailable active correlation partial refuses.
 /// Source interval endpoints use their inward derivative. At equal sphere/bath
@@ -209,6 +211,11 @@ impl<'a, 'm> ImplicitLiquidConvection<'a, 'm> {
         }
         if let SourceCellConvectionLaw::AidingVerticalPlate { settings } = settings.law {
             settings.validate()?;
+        }
+        if matches!(settings.law, SourceCellConvectionLaw::ForcedRectangularDuctSection { .. }) {
+            return Err(Invalid(
+                "rectangular developing convection requires a whole four-wall area owner; a pointwise exterior law cannot admit that geometry",
+            ));
         }
         settings
             .law
@@ -396,6 +403,32 @@ impl<'a, 'm> ImplicitLiquidConvection<'a, 'm> {
                 coefficient_surface_derivative_w_m2_k2: 0.0,
             });
         }
+        if let SourceCellConvectionLaw::ForcedLaminarTubeSection {
+            speed_m_s, start, end,
+        } = self.settings.law {
+            let re = state.reynolds(speed_m_s, length.value())?;
+            let section = evaluate_circular_duct_section(
+                re, state.prandtl(), start.value() / length.value(), end.value() / length.value(),
+            )?;
+            let coefficient = section.heat_transfer_coefficient(
+                ThermalConductivity::new(k), length,
+            )?;
+            let (_, _, upstream, nusselt, section_nusselt) = section.into_parts();
+            // Bulk-held Hausen has no wall-property correction. Its actual
+            // section coefficient therefore has exactly zero wall derivative.
+            return Ok(LiquidExteriorConvectionResponse {
+                property_temperature_k,
+                transport: state,
+                surface_dynamic_viscosity_pa_s: None,
+                nusselt,
+                plate_section: None,
+                tube_section: Some(TubeSectionDetails {
+                    diameter: length, start, end, upstream, nusselt: section_nusselt,
+                }),
+                coefficient,
+                coefficient_surface_derivative_w_m2_k2: 0.0,
+            });
+        }
         let mut wall_viscosity = None;
         let mut varying_wall_viscosity = false;
         let (nusselt, dnu) = match self.settings.law {
@@ -534,8 +567,12 @@ impl<'a, 'm> ImplicitLiquidConvection<'a, 'm> {
                 (nu, finite(derivative)?)
             }
             SourceCellConvectionLaw::ForcedPlateSection { .. }
-            | SourceCellConvectionLaw::ForcedTubeSection { .. } => {
+            | SourceCellConvectionLaw::ForcedTubeSection { .. }
+            | SourceCellConvectionLaw::ForcedLaminarTubeSection { .. } => {
                 unreachable!("finite sections return their own coefficient above")
+            }
+            SourceCellConvectionLaw::ForcedRectangularDuctSection { .. } => {
+                unreachable!("pointwise rectangular geometry is refused at construction")
             }
         };
         // Moving source properties can have a zero aggregate group derivative

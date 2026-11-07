@@ -56,6 +56,24 @@ pub enum SourceCellConvectionLaw {
         start: Length,
         end: Length,
     },
+    /// Hausen laminar circular-tube interval from one physical heated entrance.
+    /// Characteristic length is diameter. Resolve the SAME finite fluid at its
+    /// actual bulk temperature each trial; no surface correction is appended.
+    ForcedLaminarTubeSection {
+        speed_m_s: f64,
+        start: Length,
+        end: Length,
+    },
+    /// Developing laminar rectangular channel with four isothermal walls.
+    /// Characteristic length is hydraulic diameter; active area must cover the
+    /// whole perimeter of this interval. The original table still admits only
+    /// its sourced aspect ratio and Pr, using actual bulk transport properties.
+    ForcedRectangularDuctSection {
+        speed_m_s: f64,
+        aspect_ratio: f64,
+        start: Length,
+        end: Length,
+    },
     /// Isolated isothermal sphere with Whitaker's original bulk/surface
     /// property convention. Select `Reservoir` for the primary state; the
     /// SAME resolver is additionally queried at the actual wall temperature.
@@ -100,6 +118,14 @@ impl SourceCellConvectionLaw {
             CellConvectionLaw::ForcedTubeSection { speed_m_s, start, end }
                 .admit_area(0.0, length)?;
         }
+        if let Self::ForcedLaminarTubeSection { speed_m_s, start, end } = self {
+            CellConvectionLaw::ForcedLaminarTubeSection { speed_m_s, start, end }
+                .admit_area(0.0, length)?;
+        }
+        if let Self::ForcedRectangularDuctSection { speed_m_s, aspect_ratio, start, end } = self {
+            CellConvectionLaw::ForcedRectangularDuctSection { speed_m_s, aspect_ratio, start, end }
+                .admit_area(0.0, length)?;
+        }
         if let Self::Forced {
             correlation: CorrelationId::SiederTateTurbulent | CorrelationId::GnielinskiDeveloping,
             settings, ..
@@ -128,11 +154,13 @@ impl SourceCellConvectionLaw {
             ));
         }
         if matches!(self, Self::Forced { correlation: CorrelationId::GnielinskiDeveloping, .. }
-            | Self::ForcedTubeSection { .. })
+            | Self::ForcedTubeSection { .. }
+            | Self::ForcedLaminarTubeSection { .. }
+            | Self::ForcedRectangularDuctSection { .. })
             && convention != ConvectionPropertyTemperature::Reservoir
         {
             return Err(ConvectionSourceError::Invalid(
-                "developing turbulent tube convection requires bulk properties with its explicit K=1 approximation",
+                "developing tube and rectangular-duct sections require actual bulk properties with their original held-property approximation",
             ));
         }
         if matches!(
@@ -196,6 +224,12 @@ impl SourceCellConvectionLaw {
             }
             Self::ForcedTubeSection { speed_m_s, start, end } => {
                 CellConvectionLaw::ForcedTubeSection { speed_m_s, start, end }
+            }
+            Self::ForcedLaminarTubeSection { speed_m_s, start, end } => {
+                CellConvectionLaw::ForcedLaminarTubeSection { speed_m_s, start, end }
+            }
+            Self::ForcedRectangularDuctSection { speed_m_s, aspect_ratio, start, end } => {
+                CellConvectionLaw::ForcedRectangularDuctSection { speed_m_s, aspect_ratio, start, end }
             }
             Self::ForcedSphere { speed_m_s } => CellConvectionLaw::ForcedSphere {
                 speed_m_s,

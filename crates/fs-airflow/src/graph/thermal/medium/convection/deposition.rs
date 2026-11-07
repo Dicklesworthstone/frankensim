@@ -66,6 +66,24 @@ pub enum CellConvectionLaw {
         start: Length,
         end: Length,
     },
+    /// Hausen laminar circular-tube interval measured from the physical heated
+    /// entrance. Characteristic length is diameter; the original bulk source
+    /// supplies Re, Pr and k. No turbulent fallback or entrance reset is used.
+    ForcedLaminarTubeSection {
+        speed_m_s: f64,
+        start: Length,
+        end: Length,
+    },
+    /// Laminar rectangular-duct interval with four isothermal walls. Length is
+    /// hydraulic diameter and aspect ratio is the smaller/larger side. Active
+    /// area must equal the whole wetted perimeter times the interval length;
+    /// the original table does not support independently heated wall patches.
+    ForcedRectangularDuctSection {
+        speed_m_s: f64,
+        aspect_ratio: f64,
+        start: Length,
+        end: Length,
+    },
     /// Whitaker's isolated isothermal sphere. The primary material supplies
     /// BULK transport; this second fluid state supplies only wall viscosity.
     /// Both states must retain one fluid, pressure, composition and source.
@@ -126,7 +144,9 @@ impl CellConvectionLaw {
                 ));
             }
         }
-        if let Self::ForcedTubeSection { speed_m_s, start, end } = self {
+        if let Self::ForcedTubeSection { speed_m_s, start, end }
+            | Self::ForcedLaminarTubeSection { speed_m_s, start, end } = self
+        {
             let wetted_area = core::f64::consts::PI * length.value() * (end.value() - start.value());
             if !speed_m_s.is_finite() || speed_m_s <= 0.0
                 || !length.value().is_finite() || length.value() <= 0.0
@@ -138,6 +158,25 @@ impl CellConvectionLaw {
             {
                 return Err(ConvectionSourceError::Invalid(
                     "tube sections require positive speed and diameter, finite 0 <= start < end and area within the actual wetted interval",
+                ));
+            }
+        }
+        if let Self::ForcedRectangularDuctSection { speed_m_s, aspect_ratio, start, end } = self {
+            let wetted_area = length.value() * (1.0 + aspect_ratio)
+                * ((1.0 + aspect_ratio) / aspect_ratio) * (end.value() - start.value());
+            if !speed_m_s.is_finite() || speed_m_s <= 0.0
+                || !length.value().is_finite() || length.value() <= 0.0
+                || !aspect_ratio.is_finite() || !(0.0 < aspect_ratio && aspect_ratio <= 1.0)
+                || !start.value().is_finite() || start.value() < 0.0
+                || !end.value().is_finite() || end.value() <= start.value()
+                || (start.value() > 0.0 && start.value() / length.value() == 0.0)
+                || !wetted_area.is_finite() || wetted_area <= 0.0
+                || !area_m2.is_finite() || area_m2 < 0.0
+                || (area_m2 > 0.0
+                    && (area_m2 - wetted_area).abs() > 64.0 * f64::EPSILON * wetted_area)
+            {
+                return Err(ConvectionSourceError::Invalid(
+                    "rectangular sections require positive speed and hydraulic diameter, finite 0 <= start < end, aspect ratio in (0,1], and the full four-wall wetted area",
                 ));
             }
         }
@@ -195,8 +234,10 @@ pub struct CellConvectionEvaluation {
     /// discrepancy in `coefficient`, as required by the shared section owner.
     pub section: Option<PlateSectionDetails>,
     /// Physical tube interval, whose Nu uses diameter rather than axial length.
-    /// This is present only for a developing turbulent tube section.
-    pub tube_section: Option<TurbulentTubeSectionDetails>,
+    /// Present for explicitly selected laminar or turbulent circular sections.
+    pub tube_section: Option<TubeSectionDetails>,
+    /// Actual rectangular geometry and the section's perimeter-average Nu.
+    pub rectangular_section: Option<RectangularDuctSectionDetails>,
 }
 
 impl CellConvectionEvaluation {
@@ -204,8 +245,11 @@ impl CellConvectionEvaluation {
     /// otherwise the original whole-geometry correlation result.
     pub fn effective_nusselt(&self) -> f64 {
         self.tube_section.as_ref().map_or_else(
-            || self.section.as_ref().map_or(self.nusselt.evidence().value,
-                |section| section.nusselt),
+            || self.rectangular_section.as_ref().map_or_else(
+                || self.section.as_ref().map_or(self.nusselt.evidence().value,
+                    |section| section.nusselt),
+                |section| section.nusselt,
+            ),
             |section| section.nusselt,
         )
     }
@@ -431,6 +475,7 @@ pub(crate) fn evaluate_convection_state(
             let (_, nusselt, coefficient, section) = evaluated.into_parts();
             return Ok(Some(CellConvectionEvaluation {
                 nusselt, coefficient, section: Some(section), tube_section: None,
+                rectangular_section: None,
             }));
         }
         CellConvectionLaw::ForcedTubeSection { speed_m_s, start, end } => {
@@ -440,6 +485,27 @@ pub(crate) fn evaluate_convection_state(
             let (_, nusselt, coefficient, section) = evaluated.into_parts();
             return Ok(Some(CellConvectionEvaluation {
                 nusselt, coefficient, section: None, tube_section: Some(section),
+                rectangular_section: None,
+            }));
+        }
+        CellConvectionLaw::ForcedLaminarTubeSection { speed_m_s, start, end } => {
+            let evaluated = evaluate_laminar_tube_section_from_material(
+                transport, speed_m_s, length, start, end,
+            )?;
+            let (_, nusselt, coefficient, section) = evaluated.into_parts();
+            return Ok(Some(CellConvectionEvaluation {
+                nusselt, coefficient, section: None, tube_section: Some(section),
+                rectangular_section: None,
+            }));
+        }
+        CellConvectionLaw::ForcedRectangularDuctSection { speed_m_s, aspect_ratio, start, end } => {
+            let evaluated = evaluate_rectangular_duct_section_from_material(
+                transport, speed_m_s, length, aspect_ratio, start, end,
+            )?;
+            let (_, nusselt, coefficient, section) = evaluated.into_parts();
+            return Ok(Some(CellConvectionEvaluation {
+                nusselt, coefficient, section: None, tube_section: None,
+                rectangular_section: Some(section),
             }));
         }
         CellConvectionLaw::ForcedSphere { speed_m_s, surface_transport } => {
@@ -447,14 +513,14 @@ pub(crate) fn evaluate_convection_state(
                 transport, &surface_transport, speed_m_s, length,
             )?;
             let (_, nusselt, coefficient) = result.into_parts();
-            return Ok(Some(CellConvectionEvaluation { nusselt, coefficient, section: None, tube_section: None }));
+            return Ok(Some(CellConvectionEvaluation { nusselt, coefficient, section: None, tube_section: None, rectangular_section: None }));
         }
         CellConvectionLaw::ForcedTube { speed_m_s, length_over_diameter, surface_transport } => {
             let result = evaluate_tube_from_material(
                 transport, &surface_transport, speed_m_s, length, length_over_diameter,
             )?;
             let (_, nusselt, coefficient) = result.into_parts();
-            return Ok(Some(CellConvectionEvaluation { nusselt, coefficient, section: None, tube_section: None }));
+            return Ok(Some(CellConvectionEvaluation { nusselt, coefficient, section: None, tube_section: None, rectangular_section: None }));
         }
         CellConvectionLaw::VerticalPlate { gravity_m_s2, expansion_per_k } => {
             natural(NaturalConvectionGeometry::VerticalPlate, gravity_m_s2, expansion_per_k)
@@ -474,6 +540,6 @@ pub(crate) fn evaluate_convection_state(
     }?;
     Ok(result.map(|value| {
         let (_, nusselt, coefficient) = value.into_parts();
-        CellConvectionEvaluation { nusselt, coefficient, section: None, tube_section: None }
+        CellConvectionEvaluation { nusselt, coefficient, section: None, tube_section: None, rectangular_section: None }
     }))
 }

@@ -13,6 +13,8 @@ mod sphere;
 mod tube;
 #[path = "links/plate_sections.rs"]
 mod plate_sections;
+#[path = "links/laminar_sections.rs"]
+mod laminar_sections;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::links::*;
 use fs_matdb::SelectionPolicy;
 use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase};

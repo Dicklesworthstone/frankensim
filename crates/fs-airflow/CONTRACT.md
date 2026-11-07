@@ -4659,6 +4659,40 @@ exercise independent formula/table subdivision, source and geometry refusal,
 piston heat in both directions and through melting, and both shapes on the
 fixed-volume body/gas energy residual with external heat budgets.
 
+The finite-cell adapters admit explicit `ForcedLaminarTubeSection` and
+`ForcedRectangularDuctSection` laws on both `CellConvectionLaw` and
+`SourceCellConvectionLaw`. Reservoir boundaries, reciprocal solid/coolant links
+and the existing complete heat/circuit owner share the same material evaluation.
+Each source-backed residual resolves the original fluid at its actual bulk
+temperature; neither law samples film temperature or applies a wall-viscosity
+correction. Both positive endpoint domains and the physical entrance remain
+mandatory. A laminar query outside the original source regime refuses instead
+of switching to a turbulent card. Fully developed inlet velocity is still
+required by Hausen; the rectangular card retains its simultaneously developing
+assumption and exact aspect ratio/Pr support.
+
+Circular exposure cannot exceed pi D (end-start). Every active rectangular
+binding must own the complete four-wall wetted area, within roundoff; partial
+wall heating and accidental use of one face's area refuse. Native contact area
+and exposed area remain authoritative. `CellConvectionEvaluation` retains
+`tube_section` or `rectangular_section` geometry and the original cumulative
+mean; `effective_nusselt()` returns the actual section coefficient. Positive
+starts retain unbounded local model discrepancy. Native finite-cell storage,
+reciprocal conductance, external heat accounting and trial acceptance are
+unchanged. Regression tests close both caloric stores against independent
+Hausen and rectangular table-intercept calculations, including reversed link
+endpoint ordering and explicit source/area refusal.
+
+`ImplicitLiquidConvection` also admits bulk-held Hausen circular sections on
+the existing conducting surface and backward-Euler owner. Because every source
+coordinate is independent of surface temperature, its coefficient has exactly
+zero surface-temperature derivative; its heat tangent remains h, including at
+thermal equilibrium. The native half-cell resistance, radiation, source caloric
+curve and entropy ledger still participate in the same solve. The pointwise
+exterior interface explicitly refuses rectangular four-wall sections because
+it cannot validate their integrated wetted geometry. No empirical local law,
+surface store or replacement heat integrator is introduced.
+
 ## Pump drive input and coolant heating
 
 Fixed-speed liquid cooling pumps may bind an independently sourced `PumpDriveCurve`
