@@ -4293,6 +4293,18 @@ homogenization, the P2 milestone.
   its work `P_a : Fdot` is booked as an external power input, never as stored
   energy. Activation is a performance control that no law input, card or pack
   sets here.
+- `WoolFelt::response` evaluates engineering compression strain with a finite,
+  inclusive `eps_densify` validity bound and returns stress, the consistent
+  tangent and proposed compaction history together. It readmits public
+  parameters and verifies the retained maximum against this law's power-law
+  envelope, including during unloading and tensile-gap opening. A trial beyond
+  densification, nonfinite input, or inconsistent prior excursion refuses;
+  the law does not extend its domain by clipping strain or resetting history.
+  The infallible `Uniaxial` stress/tangent methods return NaN on refusal and
+  its state update preserves the input. The analytic `envelope` remains
+  available without history/domain admission. `wool_felt_strain.rs` checks
+  inclusive bounds, transactional refusal, residual-gap reloading, consistent
+  derivatives and the analytic dissipated-work/conservative-cycle limits.
 - `Uniaxial` trait + the RC flagship pair: `MenegottoPintoSteel`
   (R0/a1/a2 curvature degradation, Bauschinger via branch-state
   asymptote intersection) and `ManderConcrete` (confined envelope

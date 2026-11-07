@@ -529,13 +529,24 @@ pub struct WoolFeltState {
     pub sig_max: f64,
 }
 
+/// A checked felt trial and its proposed, uncommitted compaction history.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WoolFeltResponse {
+    /// Compressive stress in Pa.
+    pub stress_pa: f64,
+    /// Consistent derivative with respect to engineering compression strain.
+    pub tangent_pa: f64,
+    /// History to commit only after the surrounding solve accepts this trial.
+    pub state: WoolFeltState,
+}
+
 impl WoolFelt {
     /// Construct with admission checks.
     ///
     /// # Errors
     /// [`MaterialError::Parameters`] unless `f_ref > 0`, `eps_ref > 0`,
     /// `p > 1`, `q ≥ p`, `0 < crush_fraction < 1` (or `c = 0, q = p`), and
-    /// `eps_densify > eps_ref` — the parameter region where the
+    /// finite `eps_densify > eps_ref` — the parameter region where the
     /// dissipation proof above holds strictly.
     pub fn new(
         f_ref: f64,
@@ -555,10 +566,11 @@ impl WoolFelt {
                 || (crush_fraction == 0.0
                     && q.partial_cmp(&p) == Some(core::cmp::Ordering::Equal)))
             && crush_fraction < 1.0
+            && eps_densify.is_finite()
             && eps_densify > eps_ref)
         {
             return Err(MaterialError::Parameters {
-                what: "wool felt needs f_ref>0, eps_ref>0, p>1, q>=p, 0<crush<1 or crush=0 with q=p, densify>ref"
+                what: "wool felt needs f_ref>0, eps_ref>0, p>1, q>=p, 0<crush<1 or crush=0 with q=p, finite densify>ref"
                     .to_string(),
             });
         }
@@ -572,7 +584,8 @@ impl WoolFelt {
         })
     }
 
-    /// Virgin envelope `(σ, dσ/dε)` at compressive strain `ε ≥ 0`.
+    /// Analytic virgin envelope `(σ, dσ/dε)` at compressive strain `ε ≥ 0`.
+    /// Use [`Self::response`] to admit the parameters, history and strain domain.
     #[must_use]
     pub fn envelope(&self, strain: f64) -> (f64, f64) {
         if strain <= 0.0 {
@@ -580,14 +593,122 @@ impl WoolFelt {
         }
         let x = strain / self.eps_ref;
         let sig = self.f_ref * det::pow(x, self.p);
-        let dsig = self.f_ref * self.p * det::pow(x, self.p - 1.0) / self.eps_ref;
-        (sig, dsig)
+        (sig, self.envelope_tangent(strain, sig))
+    }
+
+    fn envelope_tangent(&self, strain: f64, stress: f64) -> f64 {
+        if strain <= 0.0 {
+            return 0.0;
+        }
+        // dσ/dε = p σ/ε saves a power evaluation in the ordinary force path.
+        // If stress underflows, its derivative can still be representable;
+        // retain the direct derivative for those very small strains.
+        let tangent = self.p * (stress / strain);
+        if stress.is_normal() && tangent > 0.0 {
+            tangent
+        } else {
+            self.f_ref * self.p * det::pow(strain / self.eps_ref, self.p - 1.0)
+                / self.eps_ref
+        }
     }
 
     /// Residual (crush) strain for a committed state.
     #[must_use]
     pub fn eps_residual(&self, state: &WoolFeltState) -> f64 {
         self.crush_fraction * state.eps_max
+    }
+
+    /// Evaluate a trial without changing the committed compaction history.
+    ///
+    /// `eps_densify` is an inclusive validity bound. Beyond it the power law
+    /// supplies neither densification hardening nor a physically valid force.
+    /// Public parameters and retained history are readmitted even for an open
+    /// tensile gap, so unloading cannot hide an unsupported prior excursion.
+    /// The retained maximum must belong to this law's original envelope.
+    pub fn response(
+        &self,
+        strain: f64,
+        state: &WoolFeltState,
+    ) -> Result<WoolFeltResponse, MaterialError> {
+        Self::new(
+            self.f_ref,
+            self.eps_ref,
+            self.p,
+            self.q,
+            self.crush_fraction,
+            self.eps_densify,
+        )?;
+        let invalid = |what: &str| MaterialError::State {
+            what: format!("wool felt: {what}"),
+        };
+        if !strain.is_finite() || strain > self.eps_densify {
+            return Err(invalid(
+                "trial strain must be finite and at or below eps_densify",
+            ));
+        }
+        if !(state.eps_max.is_finite()
+            && (0.0..=self.eps_densify).contains(&state.eps_max)
+            && state.sig_max.is_finite()
+            && state.sig_max >= 0.0)
+        {
+            return Err(invalid("committed maximum strain/stress is inadmissible"));
+        }
+        // Only the stored stress is needed for history admission; avoid a
+        // second power evaluation for its unused envelope tangent.
+        let expected_max = if state.eps_max == 0.0 {
+            0.0
+        } else {
+            self.f_ref * det::pow(state.eps_max / self.eps_ref, self.p)
+        };
+        let history_scale = expected_max.abs().max(state.sig_max);
+        if !expected_max.is_finite()
+            || (state.sig_max - expected_max).abs() > 64.0 * f64::EPSILON * history_scale
+        {
+            return Err(invalid(
+                "committed maximum does not belong to the original envelope",
+            ));
+        }
+        let (stress_pa, tangent_pa) = if strain == state.eps_max {
+            // A repeated peak already evaluated this envelope for admission.
+            (expected_max, self.envelope_tangent(strain, expected_max))
+        } else if strain > state.eps_max {
+            self.envelope(strain)
+        } else {
+            let eps_r = self.eps_residual(state);
+            if strain <= eps_r {
+                (0.0, 0.0)
+            } else {
+                let span = state.eps_max - eps_r;
+                let x = (strain - eps_r) / span;
+                let stress = state.sig_max * det::pow(x, self.q);
+                let tangent = self.q * (stress / (strain - eps_r));
+                let tangent = if stress.is_normal() && tangent > 0.0 {
+                    tangent
+                } else {
+                    state.sig_max * self.q * det::pow(x, self.q - 1.0) / span
+                };
+                (stress, tangent)
+            }
+        };
+        if !(stress_pa.is_finite()
+            && stress_pa >= 0.0
+            && tangent_pa.is_finite()
+            && tangent_pa >= 0.0)
+        {
+            return Err(invalid("stress or tangent is unrepresentable"));
+        }
+        Ok(WoolFeltResponse {
+            stress_pa,
+            tangent_pa,
+            state: if strain > state.eps_max {
+                WoolFeltState {
+                    eps_max: strain,
+                    sig_max: stress_pa,
+                }
+            } else {
+                state.clone()
+            },
+        })
     }
 }
 
@@ -599,40 +720,18 @@ impl Uniaxial for WoolFelt {
     }
 
     fn stress(&self, strain: f64, state: &WoolFeltState) -> f64 {
-        if strain >= state.eps_max {
-            return self.envelope(strain).0;
-        }
-        let eps_r = self.eps_residual(state);
-        if strain <= eps_r {
-            return 0.0;
-        }
-        let x = (strain - eps_r) / (state.eps_max - eps_r);
-        state.sig_max * det::pow(x, self.q)
+        self.response(strain, state)
+            .map_or(f64::NAN, |response| response.stress_pa)
     }
 
     fn tangent(&self, strain: f64, state: &WoolFeltState) -> f64 {
-        if strain >= state.eps_max {
-            return self.envelope(strain).1;
-        }
-        let eps_r = self.eps_residual(state);
-        if strain <= eps_r {
-            return 0.0;
-        }
-        let span = state.eps_max - eps_r;
-        let x = (strain - eps_r) / span;
-        state.sig_max * self.q * det::pow(x, self.q - 1.0) / span
+        self.response(strain, state)
+            .map_or(f64::NAN, |response| response.tangent_pa)
     }
 
     fn update_state(&self, strain: f64, state: &WoolFeltState) -> WoolFeltState {
-        if strain > state.eps_max {
-            let (sig, _) = self.envelope(strain);
-            WoolFeltState {
-                eps_max: strain,
-                sig_max: sig,
-            }
-        } else {
-            state.clone()
-        }
+        self.response(strain, state)
+            .map_or_else(|_| state.clone(), |response| response.state)
     }
 
     fn admissibility(&self) -> MaterialAdmissibility {
