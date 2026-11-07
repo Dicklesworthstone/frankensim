@@ -8,7 +8,7 @@ use fs_modal::{
 use fs_plate::PlateSection;
 use fs_plate::shell::{CstDktMass, ShellSupport, assemble_shell_sections_with_mass};
 
-fn fixture(mass: CstDktMass) -> (ShellMesh, ShellModel, Vec<ModePair>, Vec<ShellViscosity>) {
+pub(super) fn fixture(mass: CstDktMass) -> (ShellMesh, ShellModel, Vec<ModePair>, Vec<ShellViscosity>) {
     let mesh = ShellMesh::new(
         vec![
             [0.0, 0.0, 0.0],

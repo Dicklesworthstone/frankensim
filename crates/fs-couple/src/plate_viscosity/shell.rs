@@ -13,6 +13,12 @@ use fs_plate::shell::viscosity::{
 };
 use fs_plate::shell::{ShellMesh, ShellModel};
 
+/// Source-bound homogeneous plane-stress viscosity on original shell facets.
+pub mod material;
+
+/// Causal membrane/bending storage and loss on the same original shell basis.
+pub mod relaxation;
+
 impl ModalPlateViscosity {
     /// Project physical CST membrane and DKT bending viscosity on the caller's
     /// unchanged reduced shell basis, including membrane/bending coupling.
@@ -92,43 +98,7 @@ impl ModalPlateViscosity {
                 "shell viscosity exceeds its declared projection work",
             ));
         }
-        for mode in modes {
-            for chunk in mode.chunks(256) {
-                poll(gate)?;
-                if chunk.iter().any(|value| !value.is_finite()) {
-                    return Err(invalid("shell viscosity requires finite modal vectors"));
-                }
-            }
-        }
-        let mut mass_mode = vec![0.0; model.free];
-        for (i, mode) in modes.iter().enumerate() {
-            poll(gate)?;
-            model.m.spmv(mode, &mut mass_mode);
-            for (j, other) in modes.iter().enumerate() {
-                let mut sum = 0.0;
-                let mut correction = 0.0;
-                for (chunk, weighted) in other.chunks(256).zip(mass_mode.chunks(256)) {
-                    poll(gate)?;
-                    for (&value, &mass_value) in chunk.iter().zip(weighted) {
-                        let term = value * mass_value;
-                        let next = sum + term;
-                        correction += if sum.abs() >= term.abs() {
-                            (sum - next) + term
-                        } else {
-                            (term - next) + sum
-                        };
-                        sum = next;
-                    }
-                }
-                let gram = sum + correction;
-                let expected = if i == j { 1.0 } else { 0.0 };
-                if !gram.is_finite() || (gram - expected).abs() > 1e-8 {
-                    return Err(invalid(
-                        "shell viscosity basis is not orthonormal in the original mass",
-                    ));
-                }
-            }
-        }
+        validate_mass_basis(model, modes, gate)?;
         let matrix = project_viscosity(
             mesh,
             viscosities,
@@ -149,6 +119,54 @@ impl ModalPlateViscosity {
         })?;
         Self::factor(matrix, n, limits.reference_resistance_n_s_m, gate)
     }
+}
+
+// The original sparse mass (including consistent director/translation terms)
+// is the common unit admission for viscous rates and hereditary stiffness.
+// Shape/work checks belong to each caller, before this complete contraction.
+fn validate_mass_basis(
+    model: &ShellModel,
+    modes: &[Vec<f64>],
+    gate: &CancelGate,
+) -> Result<(), AcousticRealizeError> {
+    for mode in modes {
+        for chunk in mode.chunks(256) {
+            poll(gate)?;
+            if chunk.iter().any(|value| !value.is_finite()) {
+                return Err(invalid("shell viscosity requires finite modal vectors"));
+            }
+        }
+    }
+    let mut mass_mode = vec![0.0; model.free];
+    for (i, mode) in modes.iter().enumerate() {
+        poll(gate)?;
+        model.m.spmv(mode, &mut mass_mode);
+        for (j, other) in modes.iter().enumerate() {
+            let mut sum = 0.0;
+            let mut correction = 0.0;
+            for (chunk, weighted) in other.chunks(256).zip(mass_mode.chunks(256)) {
+                poll(gate)?;
+                for (&value, &mass_value) in chunk.iter().zip(weighted) {
+                    let term = value * mass_value;
+                    let next = sum + term;
+                    correction += if sum.abs() >= term.abs() {
+                        (sum - next) + term
+                    } else {
+                        (term - next) + sum
+                    };
+                    sum = next;
+                }
+            }
+            let gram = sum + correction;
+            let expected = if i == j { 1.0 } else { 0.0 };
+            if !gram.is_finite() || (gram - expected).abs() > 1e-8 {
+                return Err(invalid(
+                    "shell viscosity basis is not orthonormal in the original mass",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

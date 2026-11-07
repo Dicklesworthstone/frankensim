@@ -2170,6 +2170,31 @@ exercise lumped and consistent inertia, basis permutations, zero loss and
 refusals; and compare coupled decay with an independently refined RK4 solution
 of the original full modal equation while checking physical heat closure.
 
+### Source-bound homogeneous shell viscosity
+
+`plate_viscosity::shell::material::ShellMaterialViscosity` retains an immutable
+`PlaneStressViscosity`, its original source state and plane, physical thickness
+and orientation in the original facet. The existing material tensor owner
+rotates the complete engineering-shear law and integrates homogeneous
+resultants A = h V and D = h³ V / 12; B remains exactly zero. The preparation
+refuses unrepresentable resultants and does not alter stiffness or inertia.
+Material records are shared through `Arc` when multiple facets use one source.
+
+`ModalShellMaterialViscosity::project` checks every retained eigenpair's
+frequency against the intersection of all facet source bands, including zero
+loss sources, then uses the original mass-normalized full CST/DKT projection.
+The result retains facet sources, frequencies and full modal channels for the
+existing physical-loss runtime. Cancellation and work refusal publish no
+partial image. The source query point alone never establishes applicability;
+bare mesh/model identity, homogeneous thickness correspondence, measured source
+authority and modal completeness remain caller obligations. This adapter does
+not infer layered, three-dimensional or hereditary material laws.
+
+Focused tests compare rotated engineering-strain power independently, verify
+linear/cubic thickness scaling, retain original records through modal
+projection, and reject unsupported actual frequencies even for exact zero
+viscosity. These are synthetic constitutive checks, not a material calibration.
+
 ## Material tensile admission on nonlinear acoustic strings
 
 `NonlinearMaterialString::with_tensile_limit` explicitly binds one named static
@@ -3268,3 +3293,42 @@ foreign caloric rejection, bounded temperature/strain support, complete
 nonvirgin state retention after refusal, and successful retry. Their independent
 scalar energy identities and Rust syntax were checked; native regression
 execution remains unverified in the resource-constrained session.
+
+## CST/DKT hereditary material memory on the original modal basis
+
+`plate_viscosity::shell::relaxation::ModalShellRelaxation` projects per-facet
+passive excess A/B/D stiffness spectra through the original CST/DKT strain
+owner. Its modes must be orthonormal in the original sparse mass, including
+consistent director/translation terms; the instantaneous-viscosity mass
+check is shared unchanged. The equilibrium pencil and retained coordinates
+remain fixed. Source applicability, matching mesh/basis identity and the
+interpretation of supplied tensors as excess above relaxed stiffness remain
+explicit caller obligations.
+
+Exactly equal relaxation times aggregate before the shared compensated PSD
+factor sees each original dimensional modal Gram matrix. Different times,
+resolved weak directions and all modal cross terms remain present. Each
+resulting row c [1/s] carries the existing Maxwell storage `(c.q-z)^2/2`
+and irreversible power `(c.q-z)^2/tau`; numerical drilling acquires no
+constitutive state. Spatial work, complete factorization, branch embedding
+and material-state counts have explicit checked budgets. No dense projection
+or factorization occurs during playback.
+
+`branches` embeds these rows into existing fs-phs interleaved mechanical
+coordinates. `attach_to` composes them through the original
+`CoupledModalSystem::with_additional_material_relaxation`: relaxed history
+sets new z=c.q, unrelaxed history sets new z=0, and earlier material histories
+remain unchanged. The target component must have zero intrinsic modal
+damping; separately selected viscous, support, glue and radiation channels
+can coexist. Existing cold-construction, instantaneous-frequency, energy and
+augmented-state admissions remain binding. The existing exact propagator and
+independent material-loss integral are the only time and heat owners.
+
+Three focused native tests pass: full spatial/modal/channel storage for both
+mass models and every retained time, branch embedding/refusal/zero cases,
+and actual fs-phs exact propagation against independent Maxwell equations
+with separately integrated heat and input work. Both initial histories pass
+the 16/32/64-subdivision RK4 convergence checks and energy closure without
+tolerance changes. The additional full coupled-attachment regression covers
+component offsets, prior histories, initialization, loss counting and cold
+binding; it is authored but unexecuted in the available dependency closure.
