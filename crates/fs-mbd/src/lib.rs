@@ -64,6 +64,9 @@ use kinetic_energy::MomentumWork;
 mod verlet;
 pub use verlet::VerletStage;
 
+mod work;
+pub use work::StepWorkDiagnostics;
+
 use core::fmt;
 use fs_math::dd::Dd;
 
@@ -1757,6 +1760,9 @@ pub struct StepReceipt {
     pub diagnostics_before: DynamicsDiagnostics,
     /// Diagnostics after the step.
     pub diagnostics_after: DynamicsDiagnostics,
+    /// Signed applied work, conservative gravity transfer, actual storage
+    /// changes and the remaining numerical energy defect for this step.
+    pub work: StepWorkDiagnostics,
 }
 
 /// Result of advancing a sequence of complete fixed steps.
@@ -1958,12 +1964,30 @@ impl RigidBodyIntegrator {
             angular_momentum_after,
         )?;
         let diagnostics_after = self.diagnostics(state_after, properties)?;
+        let torque_work = work::angular_torque_work(
+            properties,
+            verlet::lifted(state.angular_momentum_body),
+            verlet::lifted(angular_momentum_after),
+            wrench.torque_body,
+            duration_seconds,
+            1.0,
+        );
+        let work = work::finish(
+            state,
+            state_after,
+            properties,
+            self.gravity,
+            wrench.force_world,
+            wrench.force_world,
+            torque_work,
+        )?;
         Ok(StepReceipt {
             duration_seconds,
             state_before: state,
             state_after,
             diagnostics_before,
             diagnostics_after,
+            work,
         })
     }
 
@@ -2100,12 +2124,30 @@ impl RigidBodyIntegrator {
             angular_momentum_after,
         )?;
         let diagnostics_after = self.diagnostics(state_after, properties)?;
+        let torque_work = work::angular_torque_work(
+            properties,
+            verlet::lifted(state.angular_momentum_body),
+            angular_momentum_kicked,
+            wrench.torque_body,
+            duration_seconds,
+            1.0,
+        );
+        let work = work::finish(
+            state,
+            state_after,
+            properties,
+            self.gravity,
+            wrench.force_world,
+            wrench.force_world,
+            torque_work,
+        )?;
         Ok(StepReceipt {
             duration_seconds,
             state_before: state,
             state_after,
             diagnostics_before,
             diagnostics_after,
+            work,
         })
     }
 

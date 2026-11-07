@@ -30,6 +30,30 @@ impl MomentumWork {
         self.trailing = self.trailing + Dd::from_f64(mean.lo) * Dd::from_f64(delta.lo);
     }
 
+    /// Keep a duration or quadrature weight until both conjugate factors are
+    /// available. Scaling a tiny impulse/force first can erase finite work;
+    /// scaling a large one first can overflow a finite contraction.
+    pub(super) fn add_scaled_product(&mut self, mean: Dd, delta: Dd, scale: f64) {
+        let (mean, delta) = Self::scaled_pair(mean, delta, scale);
+        self.add_product(mean, delta);
+    }
+
+    fn scaled_pair(mean: Dd, delta: Dd, scale: f64) -> (Dd, Dd) {
+        if scale == 1.0 || mean == Dd::ZERO || delta == Dd::ZERO {
+            return (mean, delta);
+        }
+        let scale = Dd::from_f64(scale);
+        let scaled_delta = delta * scale;
+        if scaled_delta.hi.is_finite()
+            && scaled_delta.lo.is_finite()
+            && scaled_delta.hi.abs() >= f64::MIN_POSITIVE
+        {
+            (mean, scaled_delta)
+        } else {
+            (mean * scale, delta)
+        }
+    }
+
     pub(super) fn merge(&mut self, other: Self) {
         self.leading = self.leading + other.leading;
         self.cross = self.cross + other.cross;
@@ -61,8 +85,30 @@ impl MomentumWork {
             midpoint(before[0], after[0]).map(|value| value / Dd::from_f64(mass)),
             difference(before[0], after[0]),
         );
-        let mut mean = midpoint(before[1], after[1]);
-        let mut delta = difference(before[1], after[1]);
+        self.add_angular_work(
+            principal_moments,
+            principal_to_body,
+            midpoint(before[1], after[1]),
+            difference(before[1], after[1]),
+            1.0,
+            1.0,
+        );
+    }
+
+    /// Pair an angular load with its conjugate mean angular velocity.
+    /// Both vectors use the same material frame; the fixed principal-frame
+    /// pullback retains products of inertia without rounding a velocity first.
+    /// Impulse/storage callers pass unit duration and weight. Torque callers
+    /// retain those factors until the angular-velocity pairing is available.
+    pub(super) fn add_angular_work(
+        &mut self,
+        principal_moments: [f64; 3],
+        principal_to_body: [f64; 4],
+        mut mean: [Dd; 3],
+        mut delta: [Dd; 3],
+        duration: f64,
+        weight: f64,
+    ) {
         if principal_to_body != [1.0, 0.0, 0.0, 0.0]
             && !(principal_moments[0] == principal_moments[1]
                 && principal_moments[1] == principal_moments[2])
@@ -87,10 +133,11 @@ impl MomentumWork {
             mean = principal(mean);
             delta = principal(delta);
         }
-        self.add_compensated(
-            core::array::from_fn(|i| mean[i] / Dd::from_f64(principal_moments[i])),
-            delta,
-        );
+        for i in 0..3 {
+            let rate = mean[i] / Dd::from_f64(principal_moments[i]);
+            let (rate, impulse) = Self::scaled_pair(rate, delta[i], duration);
+            self.add_scaled_product(rate, impulse, weight);
+        }
     }
 
     pub(super) fn total(self) -> Dd {
@@ -284,8 +331,12 @@ mod tests {
         let tensor = [mass, 0.0, 0.0, 0.0, mass, 0.0, 0.0, 0.0, mass];
         let mut energy = MomentumWork::default();
         accumulate_spatial_change(
-            &mut energy, mass, [0.0; 3], tensor,
-            [0.0, 0.0, 0.0, old, 0.0, 0.0], tensor,
+            &mut energy,
+            mass,
+            [0.0; 3],
+            tensor,
+            [0.0, 0.0, 0.0, old, 0.0, 0.0],
+            tensor,
             [0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
         );
         let mut work = MomentumWork::default();
@@ -295,7 +346,10 @@ mod tests {
         );
         assert_eq!(energy.total().to_f64(), work.total().to_f64());
         assert_eq!(energy.difference(work).to_f64(), -0.5);
-        assert_eq!((energy.total() - Dd::from_f64(0.5 * mass)).to_f64(), -0.5 * old);
+        assert_eq!(
+            (energy.total() - Dd::from_f64(0.5 * mass)).to_f64(),
+            -0.5 * old
+        );
         assert_eq!((work.total() - Dd::from_f64(0.5 * mass)).to_f64(), 0.5);
     }
 
@@ -329,7 +383,9 @@ mod tests {
         for old in [boost - 8.0, boost + 1.0] {
             let mut body = MomentumWork::default();
             body.add_fixed_inertia(
-                1.0, [1.0, 1.4, 1.8], IDENTITY,
+                1.0,
+                [1.0, 1.4, 1.8],
+                IDENTITY,
                 [[old, 0.0, 0.0], [0.0; 3]],
                 [[boost - 3.5, 0.0, 0.0], [0.0; 3]],
             );
@@ -339,7 +395,10 @@ mod tests {
         assert_eq!(rounded, -20.5);
         assert_eq!(combined.total().to_f64(), -20.25);
         // Actual endpoint storage, independently known Newton-plastic loss.
-        assert_eq!((combined.total() + Dd::from_f64(9.0 * 9.0 / 4.0)).to_f64(), 0.0);
+        assert_eq!(
+            (combined.total() + Dd::from_f64(9.0 * 9.0 / 4.0)).to_f64(),
+            0.0
+        );
     }
 
     #[test]
@@ -347,7 +406,9 @@ mod tests {
         let boost = 2.0_f64.powi(48);
         let mut storage = MomentumWork::default();
         storage.add_fixed_inertia(
-            1.0, [1.0, 1.4, 1.8], IDENTITY,
+            1.0,
+            [1.0, 1.4, 1.8],
+            IDENTITY,
             [[boost - 8.0, 0.0, 0.0], [0.0; 3]],
             [[boost - 3.5, 0.0, 0.0], [0.0; 3]],
         );
@@ -359,7 +420,10 @@ mod tests {
         // An erroneous independent source remains an actual balance defect;
         // the kernel never infers the work from the desired physical loss.
         source.add_product(Dd::from_f64(0.25), Dd::from_f64(1.0));
-        assert_eq!((storage.difference(source) + Dd::from_f64(loss)).to_f64(), -0.25);
+        assert_eq!(
+            (storage.difference(source) + Dd::from_f64(loss)).to_f64(),
+            -0.25
+        );
     }
 
     #[test]

@@ -28,6 +28,8 @@ pub struct VerletStage {
     // rounding; transporting a discarded kick tail afterward is insufficient.
     angular_momentum_drifted: [Dd; 3],
     force_before_world: Vec3,
+    applied_force_before_world: Vec3,
+    torque_work_before: super::MomentumWork,
     weight_world: Vec3,
     duration_seconds: f64,
 }
@@ -98,6 +100,14 @@ impl RigidBodyIntegrator {
             wrench_before.torque_body,
             duration_seconds,
         );
+        let torque_work_before = super::work::angular_torque_work(
+            properties,
+            lifted(state.angular_momentum_body),
+            angular_kicked,
+            wrench_before.torque_body,
+            duration_seconds,
+            0.5,
+        );
         let (orientation_after, angular_momentum_drifted) = free_rotation_step_compensated_order(
             state.pose.orientation,
             angular_kicked,
@@ -127,6 +137,8 @@ impl RigidBodyIntegrator {
             linear_momentum_mid,
             angular_momentum_drifted,
             force_before_world,
+            applied_force_before_world: wrench_before.force_world,
+            torque_work_before,
             weight_world,
             duration_seconds,
         })
@@ -172,26 +184,43 @@ impl VerletStage {
             }),
             "verlet.linear_momentum_after",
         )?;
-        let angular_momentum_after = rounded(
-            add_half_impulse(
-                self.angular_momentum_drifted,
-                wrench_after.torque_body,
-                self.duration_seconds,
-            ),
-            "verlet.angular_momentum_after",
-        )?;
+        let angular_after = add_half_impulse(
+            self.angular_momentum_drifted,
+            wrench_after.torque_body,
+            self.duration_seconds,
+        );
+        let angular_momentum_after = rounded(angular_after, "verlet.angular_momentum_after")?;
         let state_after = RigidBodyState::new(
             self.drifted.pose,
             linear_momentum_after,
             angular_momentum_after,
         )?;
         let diagnostics_after = self.integrator.diagnostics(state_after, self.properties)?;
+        let mut torque_work = self.torque_work_before;
+        torque_work.merge(super::work::angular_torque_work(
+            self.properties,
+            self.angular_momentum_drifted,
+            angular_after,
+            wrench_after.torque_body,
+            self.duration_seconds,
+            0.5,
+        ));
+        let work = super::work::finish(
+            self.state_before,
+            state_after,
+            self.properties,
+            self.integrator.gravity,
+            self.applied_force_before_world,
+            wrench_after.force_world,
+            torque_work,
+        )?;
         Ok(StepReceipt {
             duration_seconds: self.duration_seconds,
             state_before: self.state_before,
             state_after,
             diagnostics_before: self.diagnostics_before,
             diagnostics_after,
+            work,
         })
     }
 }
