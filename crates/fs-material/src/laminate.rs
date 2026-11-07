@@ -35,6 +35,8 @@ use fs_math::c64::C64;
 pub mod thermal;
 /// Sourced material-axis strength assessment of the original layer faces.
 pub mod strength;
+/// Full harmonic membrane/bending/shear work in an explicitly fixed source profile.
+pub mod harmonic;
 
 mod shear;
 pub use shear::recovery::{LaminateShearRecovery, LayerShearResponse};

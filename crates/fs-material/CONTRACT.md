@@ -20779,3 +20779,48 @@ extreme scales and refusal/replay. Three source-bank integration regressions
 are authored but unexecuted without the complete material dependency closure;
 they cover cached/convenience equality, original multipole work and energy,
 source retention, the empty bank, and refusals.
+
+## Complete harmonic laminate work in an explicit physical shear trial
+
+`laminate::harmonic::HarmonicLaminate` binds immutable actual full Elastic/Prony
+layers to a separately supplied original `LaminateShearRecovery`. Layer geometry,
+reference faces and material angles must agree; actual I0/I1/I2 and source
+receipts remain with the actual stack. No Prony surrogate, new shear correction
+or reference profile is manufactured. Reduced-only actual layers refuse.
+
+The prepared section integrates all 8x8 membrane/bending/transverse-shear terms,
+including anisotropic cross blocks and signed offset coupling, using each
+source's complete five-component normal-stress-only reduction. Original cached
+shear Bernstein controls and their original material rotation supply one fixed
+physical trial field. Positive three-point thickness Gauss integrates its
+degree-four energy exactly in real arithmetic. Existing binary-factored work
+contractions own accumulation; operators retain complete engineering work
+coordinates and exp(-i omega t) physical phase. The final two resultants are
+generalized forces conjugate to the declared shear trial coordinates:
+`Qs = integral(P_s^T tau_actual dz)`. Outside the reference equilibrated source,
+these need not equal the unweighted actual shear-force integral; consumers must
+retain the declared trial work map. Prepared exact frequency slopes
+reuse original normal constraints, branch times and Kelvin loss with the
+declared geometry/profile held fixed.
+
+Allocation-free resultant/recovery observations preserve every original
+six-component strain ceiling. Three Bernstein controls per layer provide a
+conservative complete-thickness and whole-cycle admission, including shear peaks
+hidden by the exterior faces. Caller budgets bound retained source/frequency
+payload and branch-dependent work; cancellation returns no partial result.
+The original profile accessor also exposes material-axis Bernstein controls,
+using the existing recovery's cached physical rotation.
+
+This is a fixed-profile Galerkin section. Only the reference elastic source owns
+its two-probe traction equilibration. General actual anisotropy or frequency
+dispersion may produce different exterior/interface tractions, which remain
+visible rather than being discarded. Frequency-dependent warping, native
+enriched MITC assembly, its original physical mass/gauge coupling, time
+integration and thermal evolution remain separate work.
+
+Six authored native regressions compare original elastic A/B/D/H, actual density
+moments, independent five-point full-tensor stress integration, retained cross
+work, phase, source rotations, exact frequency slopes, interior strain admission,
+source incompatibility, budgets and cancellation. These tests have not been
+compiled or executed because the workspace is unavailable; source review and
+exact remote blob readback do not substitute for native execution.

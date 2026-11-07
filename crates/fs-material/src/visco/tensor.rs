@@ -26,6 +26,7 @@ use fs_math::det;
 pub mod lower;
 pub use lower::*;
 mod frequency;
+pub(crate) use frequency::HarmonicWorkSum;
 pub use frequency::{
     NormalStressHarmonic, PlaneStressHarmonic, TensorPronyFrequencyDerivative, TensorPronyHarmonic,
     TensorPronyHarmonicBranch, TensorPronyHarmonicPoint,

@@ -143,6 +143,28 @@ impl LaminateShearRecovery {
             .ok_or(invalid("shear recovery layer out of range"))
     }
 
+    /// The SAME quadratic strain controls in the original ply's material
+    /// axes [gamma_13,gamma_23], still driven by section [gamma_xz,gamma_yz].
+    /// This uses the original recovery's cached physical rotation, so a
+    /// harmonic full-tensor consumer cannot select a second shear convention.
+    pub fn material_strain_bernstein_controls(
+        &self,
+        layer: usize,
+    ) -> Result<[[f64; 4]; 3], LaminateError> {
+        let profile = self.profiles.get(layer)
+            .ok_or(invalid("shear recovery layer out of range"))?;
+        let controls = profile.strain_bernstein.map(|map| [
+            profile.cos * map[0] + profile.sin * map[2],
+            profile.cos * map[1] + profile.sin * map[3],
+            -profile.sin * map[0] + profile.cos * map[2],
+            -profile.sin * map[1] + profile.cos * map[3],
+        ]);
+        if controls.iter().flatten().any(|x| !x.is_finite()) {
+            return Err(invalid("original material shear controls are unrepresentable"));
+        }
+        Ok(controls)
+    }
+
     /// Recover one ply point from the actual section resultants [Qx,Qy] [N/m].
     /// `fraction` ranges inclusively from that ply's bottom (0) to top (1).
     /// At a bonded interface both plies have the same stress to roundoff,

@@ -7,6 +7,7 @@ use fs_math::dd::Dd;
 mod plane_stress;
 mod normal_stress;
 pub use normal_stress::NormalStressHarmonic;
+pub(crate) use plane_stress::projection::Sum as HarmonicWorkSum;
 mod strain;
 pub use plane_stress::PlaneStressHarmonic;
 mod response;
