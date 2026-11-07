@@ -2258,6 +2258,22 @@ homogeneous recovery, extreme normalized concentrations and incompatible-law
 or cancelled-state rollback exercise this path. The partitioned operator acts
 on fixed stage areas.
 
+`surfactant::diffusion::adaptive` adds mixed absolute/relative concentration
+error control for both homogeneous and partitioned held-surface transport. One
+full palindromic sweep is compared with two half sweeps using the second-order
+fine-path error estimate. Only the unextrapolated fine trajectory is accepted:
+the original pair maps retain chemical partition equilibrium, nonnegativity,
+packing, amount and free-energy admission. A whole-duration account checks
+original-to-final amount and energy again without accumulating tolerances.
+Trial and pair-exchange budgets charge coarse and rejected work, while physical
+reports include accepted work only. A minimum-step, source, work, cancellation
+or physical refusal preserves the entire caller inventory, including after
+successful private prefixes. The suggested next step is bounded by the original
+controls. The estimate concerns local splitting error, not global or spatial
+accuracy. Independent three-face spectra, stiff fast/slow Langmuir modes,
+concentration-scaling invariance, equilibrium and late rollback are tested in
+`surfactant/diffusion/adaptive/tests.rs`.
+
 `advance_surfactant_diffusive` composes half diffusion on the initial areas,
 the original mechanical trial, and half diffusion on its solved final areas.
 It publishes trajectory and inventory together only after all stages pass.

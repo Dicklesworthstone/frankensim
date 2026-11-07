@@ -29,6 +29,9 @@ use super::super::Sum;
 use super::{SurfactantError, SurfactantFace, SurfactantLaw};
 use fs_math::det;
 
+/// Adaptive local temporal accuracy for held surface transport.
+pub mod adaptive;
+
 /// One symmetric diffusion connection, supplied once in a fixed canonical order.
 /// Repeated pairs represent additive parallel conductances, not duplicate removal.
 #[derive(Clone, Copy, Debug, PartialEq)]
