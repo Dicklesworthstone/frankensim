@@ -1,6 +1,7 @@
 //! Exact environment-tail admission for original homogeneous density grids.
 //! The native camera path keeps stochastic flights; explicit source rays use
-//! deterministic scattering survival. The two estimators share angular MIS.
+//! deterministic scattering and true-absorption survival. The two estimators
+//! share angular MIS; camera flights never receive a second scattering weight.
 
 use super::*;
 use crate::charts::Ray;
@@ -38,6 +39,9 @@ impl CurvedRayleighScene<'_, '_, '_> {
         if !matches!(host, SceneMedium::Homogeneous(_)) {
             return Ok(None);
         }
+        if self.absorbing_grid(medium).is_some() {
+            self.validate_absorption_host(medium, wavelength_nm)?;
+        }
         let Some(law) = self.media.get(medium) else {
             return Ok(Some(Tail::Vacuum));
         };
@@ -68,6 +72,8 @@ impl CurvedRayleighScene<'_, '_, '_> {
 
     /// None denotes an unsupported active field, never unit survival.
     /// Native finite grids use exact original density cells and face ownership.
+    /// An explicitly bound absorbing grid contributes its own exact finite
+    /// depth, never thermal source power on this environment-only connection.
     pub(crate) fn environment_scattering_survival(
         &self,
         cx: &Cx<'_>,
@@ -77,7 +83,7 @@ impl CurvedRayleighScene<'_, '_, '_> {
         max_cells: u32,
     ) -> Result<Option<EnvironmentScatteringSurvival>, CurvedSceneError> {
         cx.checkpoint()?;
-        let result = match self.environment_tail(medium, wavelength_nm)? {
+        let mut result = match self.environment_tail(medium, wavelength_nm)? {
             None => return Ok(None),
             Some(Tail::Vacuum) => EnvironmentScatteringSurvival {
                 log_survival: 0.0,
@@ -94,6 +100,21 @@ impl CurvedRayleighScene<'_, '_, '_> {
                 EnvironmentScatteringSurvival { log_survival: -depth, cell_visits }
             }
         };
+        if result.log_survival != f64::NEG_INFINITY {
+            let remaining = max_cells.checked_sub(result.cell_visits)
+                .ok_or_else(|| volume_error(VolumeTransportError::Budget))?;
+            if let Some(absorption) = self.absorption_segment::<false>(
+                cx, medium, wavelength_nm, ray, f64::INFINITY,
+                u64::from(remaining).min(self.max_absorption_cells),
+            )? {
+                result.log_survival -= absorption.optical_depth[0];
+                if !result.log_survival.is_finite() {
+                    return Err(volume_error(VolumeTransportError::Unrepresentable));
+                }
+                result.cell_visits = result.cell_visits.checked_add(absorption.cell_visits)
+                    .ok_or_else(|| volume_error(VolumeTransportError::Budget))?;
+            }
+        }
         cx.checkpoint()?;
         Ok(Some(result))
     }

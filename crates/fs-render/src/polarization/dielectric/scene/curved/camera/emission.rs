@@ -139,7 +139,10 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
         path: &CurvedPathResult,
         terminal: bool,
     ) -> Result<(), CameraRadianceError> {
-        if !self.camera.spatial_volume_emitters.is_empty() {
+        // Both native spatial-field LTE and finite absorption-cell LTE feed
+        // this reduced-radiance counter, already weighted by the actual full
+        // reciprocal Mueller prefix. Consume each increment exactly once.
+        if path.reduced_volume_emission != self.spatial_emission {
             let increment =
                 finite_nonnegative(path.reduced_volume_emission - self.spatial_emission)?;
             if increment != 0.0 {

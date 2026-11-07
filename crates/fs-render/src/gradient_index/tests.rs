@@ -622,7 +622,7 @@ fn g1_positive_curved_optical_integrals_refine_nonmonotone_trials() {
         },
     )
     .unwrap();
-    let expected_depth = 139.0 / 157.5;
+    let expected_depth: f64 = 139.0 / 157.5;
     let temperature = 420.0;
     let wavelength_nm = 11000.0;
     let (thermal_path, emission) = thermal::propagate_emission_to_boundary_with_control(

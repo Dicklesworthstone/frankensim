@@ -468,7 +468,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
                     }
                 };
                 let irradiance = weighted_irradiance(bundle, normal, settings.area_lights.connection.projection,
-                    radiance_value, cosine, sample.pdf_area_per_m2(), tracked.log_scattering_survival(),
+                    radiance_value, cosine, sample.pdf_area_per_m2(), tracked.log_source_survival(),
                     tracked.ratio_tracking_zero())
                     .map_err(|error| AreaLightCameraError::Source { binding: index, error })?;
                 if irradiance == 0.0 || factor == 0.0 || weights.light_weight() == 0.0 { continue; }

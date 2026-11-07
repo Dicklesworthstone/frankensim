@@ -408,7 +408,7 @@ impl<'g, 'a, 'c, 's, 'm, 'o, 'l>
                     connection: Some(FixtureConnection {
                         original: *survival.connection(),
                         work: ConnectionWork::default(),
-                        log_scattering_survival: survival.log_scattering_survival(),
+                        log_scattering_survival: survival.log_source_survival(),
                         ratio_tracking_zero: survival.ratio_tracking_zero(),
                     }),
                 };

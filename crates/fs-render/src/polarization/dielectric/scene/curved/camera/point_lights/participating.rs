@@ -429,7 +429,7 @@ impl<F: FnMut(u32, u32) -> f64> FixtureConnector
                 source_candidates: result.tracking_candidates(),
                 ..ConnectionWork::default()
             },
-            log_scattering_survival: result.log_scattering_survival(),
+            log_scattering_survival: result.log_source_survival(),
             ratio_tracking_zero: result.ratio_tracking_zero(),
         })
     }

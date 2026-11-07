@@ -139,6 +139,7 @@ pub struct CurvedPathResult {
     // Passive source accumulated with the original reciprocal Mueller prefix.
     // Ordinary forward and isothermal-only paths retain exact zero here.
     reduced_volume_emission: f64,
+    absorption_cell_visits: u64,
     surface_events: u32,
     termination: PathTermination,
     last_contact: Option<CurvedContact>,
@@ -164,8 +165,16 @@ impl CurvedPathResult {
     pub const fn group_optical_path_length_m(&self) -> Option<f64> {
         self.group_optical_path_length_m
     }
+    /// True absorption along the represented path, including any exact finite
+    /// grid column on a proved escape tail. The unbounded clear distance after
+    /// that column is not added to the finite geometric/optical path lengths.
     pub const fn optical_depth(&self) -> f64 {
         self.optical_depth
+    }
+    /// Original finite absorption-grid cells visited, including a proved
+    /// escape tail. Scattering candidates retain their separate counter.
+    pub const fn absorption_cell_visits(&self) -> u64 {
+        self.absorption_cell_visits
     }
     pub const fn surface_events(&self) -> u32 {
         self.surface_events
@@ -557,6 +566,7 @@ impl<'a> CurvedPolarizedScene<'a> {
             0,
             |_, _, _| Ok(None),
             |_, _, _, _| Err(CurvedSceneError::NumericalRange),
+            |_, _, _| Ok(()),
         )
         .map(|(path, _)| path)
     }
@@ -596,6 +606,7 @@ impl<'a> CurvedPolarizedScene<'a> {
             max_volume_events,
             flight,
             scatter,
+            |_, _, _| Ok(()),
         )
     }
 
@@ -621,6 +632,11 @@ impl<'a> CurvedPolarizedScene<'a> {
             [f64; 2],
             f64,
         ) -> Result<Option<PolarizedBeam>, CurvedSceneError>,
+        mut transport_segment: impl FnMut(
+            &mut CurvedPathResult,
+            Ray,
+            f64,
+        ) -> Result<(), CurvedSceneError>,
     ) -> Result<(CurvedPathResult, u32), CurvedSceneError> {
         cx.checkpoint()?;
         if settings.max_surface_events == 0
@@ -648,6 +664,7 @@ impl<'a> CurvedPolarizedScene<'a> {
             group_optical_path_length_m: Some(0.0),
             optical_depth: 0.0,
             reduced_volume_emission: 0.0,
+            absorption_cell_visits: 0,
             surface_events: 0,
             termination: PathTermination::SurfaceLimit,
             last_contact: None,
@@ -675,6 +692,8 @@ impl<'a> CurvedPolarizedScene<'a> {
                     settings.event.surface_tolerance_m,
                 )?
             {
+                let ray = result.beam.ray();
+                transport_segment(&mut result, ray, f64::INFINITY)?;
                 result.termination = PathTermination::Escaped;
                 break;
             }
@@ -729,15 +748,7 @@ impl<'a> CurvedPolarizedScene<'a> {
                 // Use the full original Mueller intensity BEFORE this segment
                 // applies Beer. The integral already includes its own true-
                 // absorption survival; free-flight sampling supplies scattering.
-                let power = result.beam.power().i;
-                let direct = power * source_integral;
-                let emitted = if direct.is_finite() && direct > 0.0 { direct } else {
-                    fs_math::det::exp(fs_math::det::ln(power) + fs_math::det::ln(source_integral))
-                };
-                if !emitted.is_finite() || emitted <= 0.0 {
-                    return Err(CurvedSceneError::NumericalRange);
-                }
-                result.reduced_volume_emission = checked_add(result.reduced_volume_emission, emitted)?;
+                accumulate_reduced_emission(&mut result, source_integral)?;
             }
             remaining_steps = remaining_steps
                 .checked_sub(propagation.accepted_steps)
@@ -767,6 +778,7 @@ impl<'a> CurvedPolarizedScene<'a> {
             result.max_contact_resolution_m = result
                 .max_contact_resolution_m
                 .max(segment.contact_resolution_m);
+            transport_segment(&mut result, ray, propagation.distance_m)?;
             if collision_due {
                 match segment.termination {
                     BoundaryTermination::DistanceLimit => {
@@ -821,6 +833,8 @@ impl<'a> CurvedPolarizedScene<'a> {
                         result.beam.ray(),
                         settings.event.surface_tolerance_m,
                     )? {
+                    let ray = result.beam.ray();
+                    transport_segment(&mut result, ray, f64::INFINITY)?;
                     PathTermination::Escaped
                 } else {
                     PathTermination::DistanceLimit
@@ -1075,6 +1089,27 @@ impl<'a> CurvedPolarizedScene<'a> {
             | SceneMedium::Differentiable { identity, .. } => Some(identity),
         }
     }
+}
+
+fn accumulate_reduced_emission(
+    result: &mut CurvedPathResult,
+    source_integral: f64,
+) -> Result<(), CurvedSceneError> {
+    if source_integral == 0.0 || result.beam.power().i == 0.0 {
+        return Ok(());
+    }
+    let power = result.beam.power().i;
+    let direct = power * source_integral;
+    let emitted = if direct.is_finite() && direct > 0.0 {
+        direct
+    } else {
+        fs_math::det::exp(fs_math::det::ln(power) + fs_math::det::ln(source_integral))
+    };
+    if !emitted.is_finite() || emitted <= 0.0 {
+        return Err(CurvedSceneError::NumericalRange);
+    }
+    result.reduced_volume_emission = checked_add(result.reduced_volume_emission, emitted)?;
+    Ok(())
 }
 
 fn checked_add(a: f64, b: f64) -> Result<f64, CurvedSceneError> {

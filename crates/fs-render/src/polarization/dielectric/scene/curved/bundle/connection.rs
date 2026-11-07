@@ -664,7 +664,7 @@ impl CurvedPolarizedScene<'_> {
                         })
                     },
                     |_, _| Ok(None),
-                    |_, _, _, _, _| Ok(()),
+                    |_, _, _, _, _, _| Ok(()),
                 )?,
                 None,
             ),
@@ -688,7 +688,7 @@ impl CurvedPolarizedScene<'_> {
                         Ok(event)
                     },
                     |_, _| Ok(None),
-                    |_, _, _, _, _| Ok(()),
+                    |_, _, _, _, _, _| Ok(()),
                 )?;
                 (path, Some((events.len(), consumed)))
             }

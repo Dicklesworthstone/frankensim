@@ -9818,10 +9818,12 @@ never multiplied into the camera endpoint a second time.
 The source leg retains the original native first-boundary visibility query.
 Surface receivers carry their real departure witness; volume receivers start
 at their actual collision point without a fictitious surface or offset. Any
-intervening interface blocks this direct technique. Only homogeneous,
-nonabsorbing geometric source segments with a proven clear infinite geometric
-tail participate. True absorption, refractive images and curved angular maps
-retain their existing camera paths.
+intervening interface blocks this direct technique. Only homogeneous geometric source
+segments with a proven clear infinite geometric tail participate. The host
+remains nonabsorbing; explicitly bound native finite absorption grids contribute
+their original true-absorption column in index-one hosts as specified below.
+Refractive images, absorbing infinite hosts and curved angular maps retain their
+existing camera paths.
 
 Both techniques use a deterministic complementary angular partition from the
 same environment and BSDF/phase solid-angle PDFs. Source survival multiplies
@@ -9982,8 +9984,9 @@ does not change physical scene radiance or imply a sensor QE/electronics model.
 Six native regression groups cover analytic polarization beats, analyzer agreement,
 shutter depolarization, covariance identity, frame rotation, finite-pixel chromatic
 integration and energy, weak-axis retention, independent time-quadrature
-convergence, and work/cancellation/range admission. Their execution is tracked
-separately from the completed pinned-rustfmt and source review.
+convergence, and work/cancellation/range admission. All six groups passed in the native `coherent_diffraction`
+target with `photometry`; all 31 tests in that target also passed, including
+the prior monochromatic coherency and original detector/pixel regressions.
 
 ### Direct-beam absorption through native latent enthalpy states
 
@@ -10015,3 +10018,79 @@ parity. Public integration regressions additionally cover analytic latent
 heating, downstream shielding, nonlinear pulses, events/restart and native
 time refinement. Geometry, density and beam area remain prescribed; hysteresis,
 phase mixing, carrier storage and material saturation are not inferred.
+
+## Native finite absorption and constituent LTE on polarized participating paths
+
+With `volumes`, `CurvedRayleighScene::with_absorbing_grids` borrows one optional
+original `AbsorbingGrid` per native scene medium. The existing grid retains its
+finite support, density cells, absorption spectrum/palette, constituent source
+law, temperature state and content identity. No density, spectrum or source
+table is copied, fitted or inferred. A nonempty binding table must match the
+original medium table. Bound hosts must be homogeneous and, at each actual
+transported wavelength, index-one and clear; unsupported source wavelengths
+and GRIN carriers refuse. Scalar absorption preserves polarization and does
+not imply dichroism, birefringence or aligned-particle extinction.
+
+The original curved walk supplies each segment's actual start ray and accepted
+physical arc length. In a bound homogeneous host, the original finite-cell
+traversal integrates true absorption and optional constituent LTE on that
+straight segment. Every Stokes component receives the same scalar attenuation;
+the native endpoint, frame, medium, scattering response and proposal are
+retained. An original geometric escape proof also integrates the remaining
+finite grid column, including a grid beyond the finite geometry integration
+distance. The clear unbounded distance after its support is not added to the
+reported finite geometric/optical lengths. Positive finite optical-depth
+overflow and unrepresentable nonzero attenuated components refuse; they never
+become an exact extinction marker.
+
+Reciprocal camera paths accumulate the grid's original unpolarized LTE source
+against the actual arriving full Mueller intensity before applying that
+segment's absorption. The existing reduced-volume source accumulator applies
+the camera-index conversion once. Original scattering flights already supply
+their own survival probability, including null candidates and native finite
+support exit; no scattering Beer factor or extra albedo is applied to camera
+segments or to their local thermal source. Forward source-power paths evaluate
+no Planck source. A medium bound to a finite absorption grid cannot also bind
+an isothermal or spatial camera temperature emitter, which would otherwise
+reinterpret the same absorption under a second source law.
+
+Environment source connections add the exact finite absorption depth to the
+original deterministic scattering log survival. The shared angular MIS
+partition is unchanged, and camera endpoint weights receive no second source
+extinction factor. Explicit environment NEE contains environment radiance
+only; local thermal emission remains in the original camera accumulator.
+Native point/area source connections reuse their same-branch bundle replay,
+whose observer now retains the exact segment-start ray. Scalar finite
+absorption remains separate from geometry, interface coherency and receiving
+Jacobian; `log_source_survival` combines it with the original scattering
+estimate for all participating point/area consumers. The existing
+`log_scattering_survival` accessor retains its original meaning, and a separate
+absorption accessor retains finite deep columns even when their isolated
+exponential underflows. Only the original ratio-tracking exact zero or the
+declared positive uniform infinite scattering tail supplies negative infinity.
+
+The finite-grid adapter exposes actual absorption-cell visits and a cumulative
+per-path/per-source-replay cap, bounded again by each grid's original segment
+cap. Environment queries count both scattering and absorption cell traversals
+against their existing cumulative source-cell allowance. Original cancellation,
+geometry, integration, free-flight and collision budgets remain binding. No
+per-ray heap workspace or additional random stream is introduced.
+
+Seven native regression groups cover full-Stokes finite segments and escape
+tails, temperature ordering and analyzer throughput across a null flight,
+the original real Rayleigh Mueller collision, carrier/domain/work/source
+conflicts, deterministic source replay with separate absorption/scattering,
+retained finite depth 800, and polarized environment NEE with complementary
+camera MIS. Their execution status must be recorded from the coordinated
+native build; pinned rustfmt parsing alone is not native test execution.
+
+The shared observed grid integral retains compensated finite optical depth and
+actual native cell work without changing the original public transport arithmetic.
+It reuses the original palette and thermal source cache. A logarithmic fallback
+combines a bright local source with its foreground survival when that intermediate
+weight underflows; a nonzero unrepresentable contribution refuses explicitly.
+Four focused observed-column groups cover ordered thermal radiance, opaque finite
+log columns, source-range recovery, native/cumulative cell budgets and cancellation.
+Original constituent-source coverage also checks the observed transfer against the
+same retained source palette. Native execution uses the required `tracer,volumes`
+features; unrelated photometry-only unit-test compilation failures are separate.

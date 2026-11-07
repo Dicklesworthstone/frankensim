@@ -13,6 +13,8 @@ use crate::volumes::VolumeGrid;
 use crate::volumes::transport::scattering::{MassScatteringSpectrum, PhaseFunction};
 use crate::volumes::transport::scattering::mie::{MieBudget, MieSphere};
 
+mod absorbing;
+
 fn participating_settings() -> ParticipatingEnvironmentCameraSettings {
     ParticipatingEnvironmentCameraSettings {
         environment: settings(),

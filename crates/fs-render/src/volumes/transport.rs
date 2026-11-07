@@ -23,11 +23,11 @@ pub(crate) use cells::{grid_forward_interval, grid_scattering_optical_depth};
 pub mod deposition;
 /// Physical emitting-cell direction proposals and their solid-angle density.
 pub mod emission;
-/// Nonthermal isotropic cell powers observed as physical line/bin radiance.
-pub mod luminescence;
 /// Outward bounds on direct transport through the retained physical cells.
 #[cfg(feature = "photometry")]
 pub mod enclosure;
+/// Nonthermal isotropic cell powers observed as physical line/bin radiance.
+pub mod luminescence;
 mod mixture;
 pub use mixture::{MAX_OPTICAL_MIXTURE_COMPONENTS, OpticalMixtureBudget};
 mod palette;
@@ -214,6 +214,16 @@ pub struct SegmentTransport<const N: usize> {
     pub transmittance: [f64; N],
     /// Foreground local-equilibrium emission, W/(m² sr nm).
     pub emission_w_m2_sr_nm: [f64; N],
+}
+
+/// The same native cell integral with finite log attenuation and actual work.
+/// Keeping depth separately lets a polarized connection combine attenuation
+/// with its source radiance before either quantity is rounded to zero.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct GridSegmentTransport<const N: usize> {
+    pub transport: SegmentTransport<N>,
+    pub optical_depth: [f64; N],
+    pub cell_visits: u32,
 }
 
 /// Immutable, borrowed accepted density/temperature snapshot.
@@ -618,6 +628,52 @@ impl<'a> AbsorbingGrid<'a> {
         distance: f64,
         wavelengths: &[f64; N],
     ) -> Result<SegmentTransport<N>, VolumeTransportError> {
+        Ok(self
+            .integrate_detail::<N, EMIT, false>(
+                cx,
+                origin,
+                direction,
+                distance,
+                wavelengths,
+                self.max_steps,
+            )?
+            .transport)
+    }
+
+    /// Observe the original finite absorption/emission column under a remaining
+    /// caller budget. No spectrum, cell map or thermal source is resampled.
+    /// `EMIT=false` never evaluates a source temperature or Planck spectrum.
+    /// A miss, zero distance or admitted vacuum consumes no cell visits.
+    /// Positive finite-column underflow/overflow refuses; exp(-depth) itself
+    /// may underflow because the separately retained depth is authoritative.
+    pub(crate) fn transport_observed<const N: usize, const EMIT: bool>(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        direction: Vec3,
+        distance: f64,
+        wavelengths: &[f64; N],
+        max_cells: u32,
+    ) -> Result<GridSegmentTransport<N>, VolumeTransportError> {
+        self.integrate_detail::<N, EMIT, true>(
+            cx,
+            origin,
+            direction,
+            distance,
+            wavelengths,
+            max_cells.min(self.max_steps),
+        )
+    }
+
+    fn integrate_detail<const N: usize, const EMIT: bool, const OBSERVED: bool>(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        direction: Vec3,
+        distance: f64,
+        wavelengths: &[f64; N],
+        max_cells: u32,
+    ) -> Result<GridSegmentTransport<N>, VolumeTransportError> {
         checkpoint(cx)?;
         cells::validate_ray(origin, direction, distance)?;
         let mut kappa = [0.0; N];
@@ -628,19 +684,32 @@ impl<'a> AbsorbingGrid<'a> {
             transmittance: [1.0; N],
             emission_w_m2_sr_nm: [0.0; N],
         };
+        let mut optical_depth = [0.0; N];
+        let mut depth_correction = [0.0; N];
+        let mut cell_visits = 0;
         if self.vacuum || distance == 0.0 {
-            return Ok(result);
+            return Ok(GridSegmentTransport {
+                transport: result,
+                optical_depth,
+                cell_visits,
+            });
         }
         let Some(mut ray) =
-            cells::CellRay::clip(&self.grid, origin, direction, distance, self.max_steps)?
+            cells::CellRay::clip(&self.grid, origin, direction, distance, max_cells)?
         else {
-            return Ok(result);
+            return Ok(GridSegmentTransport {
+                transport: result,
+                optical_depth,
+                cell_visits,
+            });
         };
-        let mut optical_depth = [0.0; N];
         let mut source_cache = [(f64::NAN, 0.0); N];
         let emit = EMIT && self.has_thermal_emission();
         let mut previous_model = None;
         while let Some(segment) = ray.next(cx)? {
+            if OBSERVED {
+                cell_visits += 1; // CellRay has already charged this bounded u32 visit.
+            }
             let length = segment.length_m;
             let cell = segment.cell;
             let density = self.grid.data[cell];
@@ -660,29 +729,80 @@ impl<'a> AbsorbingGrid<'a> {
                         continue;
                     }
                     let tau = positive_product(density, kappa[lane], length);
+                    if OBSERVED && (!tau.is_finite() || tau <= 0.0) {
+                        return Err(VolumeTransportError::Unrepresentable);
+                    }
                     if emit {
-                        let weight = det::exp(-optical_depth[lane]) * -det::expm1(-tau);
-                        if weight > 0.0
+                        let prefix = if OBSERVED {
+                            optical_depth[lane] + depth_correction[lane]
+                        } else {
+                            optical_depth[lane]
+                        };
+                        let weight = det::exp(-prefix) * -det::expm1(-tau);
+                        if (OBSERVED || weight > 0.0)
                             && let Some(source) = self.source_radiance_at_cell(
                                 cell,
                                 wavelengths[lane],
                                 &mut source_cache[lane],
                             )?
                         {
-                            result.emission_w_m2_sr_nm[lane] += weight * source;
+                            let direct = weight * source;
+                            // A bright original source can remain representable
+                            // after its separately evaluated survival underflows.
+                            // Keep ordinary products unchanged and rescue only
+                            // the observed path before losing that source power.
+                            let contribution = if OBSERVED && source > 0.0 && direct == 0.0 {
+                                let value =
+                                    det::exp(det::ln(source) + det::ln(-det::expm1(-tau)) - prefix);
+                                if value == 0.0 {
+                                    return Err(VolumeTransportError::Unrepresentable);
+                                }
+                                value
+                            } else {
+                                direct
+                            };
+                            result.emission_w_m2_sr_nm[lane] += contribution;
                             if !result.emission_w_m2_sr_nm[lane].is_finite() {
                                 return Err(VolumeTransportError::Unrepresentable);
                             }
                         }
                     }
-                    optical_depth[lane] += tau;
+                    if OBSERVED {
+                        let previous = optical_depth[lane];
+                        let next = previous + tau;
+                        if !next.is_finite() {
+                            return Err(VolumeTransportError::Unrepresentable);
+                        }
+                        depth_correction[lane] += if previous >= tau {
+                            (previous - next) + tau
+                        } else {
+                            (tau - next) + previous
+                        };
+                        optical_depth[lane] = next;
+                    } else {
+                        // Preserve the original public transport arithmetic.
+                        optical_depth[lane] += tau;
+                    }
                 }
             }
         }
         for lane in 0..N {
+            if OBSERVED {
+                optical_depth[lane] += depth_correction[lane];
+                if !optical_depth[lane].is_finite() {
+                    return Err(VolumeTransportError::Unrepresentable);
+                }
+            }
             result.transmittance[lane] = det::exp(-optical_depth[lane]);
         }
-        Ok(result)
+        if OBSERVED {
+            checkpoint(cx)?;
+        }
+        Ok(GridSegmentTransport {
+            transport: result,
+            optical_depth,
+            cell_visits,
+        })
     }
 }
 

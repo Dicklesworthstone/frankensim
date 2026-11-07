@@ -14,6 +14,11 @@
 //! multiplies the packet. Source power receives no radiance/index-squared
 //! factor. A volume collision may redirect a ray toward a previously missed
 //! detector; an active scattering medium cannot use a straight escape proof.
+//! Optional original `AbsorbingGrid` bindings supply finite true absorption and
+//! constituent LTE in index-one clear homogeneous hosts. Their native cells
+//! integrate each actual sampled segment and proved escape tail; all four
+//! Stokes components retain the same scalar attenuation. Reciprocal camera
+//! emission uses the original thermal palette and the arriving Mueller prefix.
 //!
 //! Heterogeneous laws use majorant thinning on that same curved arc, never grid
 //! chords. A local spectral law can vary both scattering rate and molecular
@@ -28,7 +33,7 @@ use super::{
     CurvedVolumeFlight, MAX_POLARIZED_PATH_EVENTS, PolarizedBeam, SceneError, SceneMedium,
 };
 use crate::volumes::VolumeGrid;
-use crate::volumes::transport::VolumeTransportError;
+use crate::volumes::transport::{AbsorbingGrid, VolumeTransportError};
 use crate::volumes::transport::scattering::polarized::{
     PolarizedPhaseSample, PolarizedScatteringError,
 };
@@ -40,9 +45,10 @@ use fs_geom::Point3;
 use fs_math::det;
 use fs_rand::philox::philox4x32_10;
 
-/// Scattering survival along a solved native source-to-receiver branch.
+/// Scattering and finite-cell absorption along a solved native source branch.
 pub mod transmittance;
 
+mod absorbing;
 mod environment;
 pub(crate) use environment::EnvironmentScatteringSurvival;
 
@@ -466,6 +472,8 @@ pub struct CurvedRayleighScene<'a, 'scene, 'optics> {
     scene: &'a CurvedPolarizedScene<'scene>,
     media: CurvedRayleighBindings<'a, 'optics>,
     radiance_brushing: bool,
+    absorption_grids: &'a [Option<&'a AbsorbingGrid<'optics>>],
+    max_absorption_cells: u64,
 }
 impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
     pub fn try_new(
@@ -481,6 +489,8 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
             scene,
             media: CurvedRayleighBindings::Density(media),
             radiance_brushing: false,
+            absorption_grids: &[],
+            max_absorption_cells: 0,
         })
     }
 
@@ -518,6 +528,8 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
             scene,
             media: CurvedRayleighBindings::Fields(media),
             radiance_brushing: false,
+            absorption_grids: &[],
+            max_absorption_cells: 0,
         })
     }
 
@@ -532,6 +544,8 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
             scene: self.scene,
             media: self.media,
             radiance_brushing: true,
+            absorption_grids: self.absorption_grids,
+            max_absorption_cells: self.max_absorption_cells,
         }
     }
 
@@ -1034,6 +1048,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
                     },
                 )
             },
+            |path, ray, distance| self.transport_absorbing_segment(cx, path, ray, distance),
         )?;
         cx.checkpoint()?;
         Ok(CurvedRayleighPath {

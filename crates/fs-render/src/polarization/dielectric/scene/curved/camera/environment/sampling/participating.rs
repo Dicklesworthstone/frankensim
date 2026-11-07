@@ -2,8 +2,8 @@
 //!
 //! Accepted molecular and retained Mie collisions use their original spectral
 //! phase response and angular PDF. Null candidates keep the previous continuous
-//! anchor. The original grid cell traversal integrates source-leg scattering
-//! survival exactly; its declared finite support also admits camera escape.
+//! anchor. Original grid cell traversals integrate source-leg scattering and
+//! separately bound true absorption exactly; their finite support admits escape.
 //! Arbitrary active fields and GRIN tails keep the original camera estimator.
 //!
 //! MIS uses the same deterministic angular partition on both techniques.

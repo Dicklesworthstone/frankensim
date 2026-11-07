@@ -20,7 +20,10 @@
 //! References and endpoint radiometry are those of [`super::CurvedCameraScene`]; the molecular
 //! matrix is owned by [`crate::volumes::transport::scattering::polarized`].
 //! Only its admitted molecular phase laws are supported. Optional isothermal
-//! LTE media use the same true-absorption legs as the surface camera. No scalar
+//! LTE media use the same true-absorption legs as the surface camera. Optional
+//! finite absorption grids retain their own cell/constituent temperature law,
+//! transported once along the actual native flights and finite escape tails.
+//! No scalar
 //! particle-to-Mueller inference or moving field is added.
 //!
 //! Original volume, distance, integration and geometry budgets remain binding.
@@ -79,6 +82,20 @@ impl<'a, 's, 'm, 'o> CurvedRayleighCameraScene<'a, 's, 'm, 'o> {
             return Err(CameraRadianceError::Scene(
                 SceneError::InvalidBindings.into(),
             ));
+        }
+        for medium in 0..camera.source_scene().media.len() {
+            if medium % 1024 == 0 {
+                cx.checkpoint()?;
+            }
+            if scattering.absorbing_grid(medium).is_some()
+                && (camera.volume_emitters.get(medium).is_some_and(Option::is_some)
+                    || camera.spatial_volume_emitters.get(medium).is_some_and(Option::is_some))
+            {
+                // The original grid already owns absorption and its optional
+                // constituent temperatures. A second medium source would use
+                // that same optical depth with an unrelated temperature law.
+                return Err(CameraRadianceError::Scene(SceneError::InvalidBindings.into()));
+            }
         }
         Ok(Self { camera, scattering })
     }

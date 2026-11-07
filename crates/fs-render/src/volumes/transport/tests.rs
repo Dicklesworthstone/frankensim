@@ -563,3 +563,213 @@ fn g1_broadband_scattering_separates_heat_and_refuses_missing_optical_support() 
         }
     });
 }
+
+#[test]
+fn g1_observed_cell_transport_retains_depth_work_and_ordered_thermal_radiance() {
+    with_cx(|cx, _| {
+        let density = [1.0, 2.0, 1.0];
+        let temperature = [1200.0, 1700.0, 900.0];
+        let medium = AbsorbingGrid::try_new(
+            cx,
+            VolumeGrid::new([3, 1, 1], &density, [0.0; 3], [1.0; 3]),
+            MassAbsorptionSpectrum::table(&[(380.0, 0.25), (780.0, 0.5)]).unwrap(),
+            Some(&temperature),
+            budget(),
+        )
+        .unwrap();
+        let wavelengths = [380.0, 780.0];
+        for (x, sign, cells) in [(-1.0, 1.0, [0, 1, 2]), (4.0, -1.0, [2, 1, 0])] {
+            let origin = Point3::new(x, 0.5, 0.5);
+            let direction = Vec3::new(sign, 0.0, 0.0);
+            let result = medium
+                .transport_observed::<2, true>(
+                    cx,
+                    origin,
+                    direction,
+                    f64::INFINITY,
+                    &wavelengths,
+                    3,
+                )
+                .unwrap();
+            let original = medium
+                .transport(cx, origin, direction, f64::INFINITY, &wavelengths)
+                .unwrap();
+            assert_eq!(result.transport, original);
+            assert_eq!(result.cell_visits, 3);
+            assert_eq!(result.optical_depth, [1.0, 2.0]);
+            let shadow = medium
+                .transport_observed::<2, false>(
+                    cx,
+                    origin,
+                    direction,
+                    f64::INFINITY,
+                    &wavelengths,
+                    3,
+                )
+                .unwrap();
+            assert_eq!(shadow.optical_depth, result.optical_depth);
+            assert_eq!(
+                shadow.transport.transmittance,
+                result.transport.transmittance
+            );
+            assert_eq!(shadow.transport.emission_w_m2_sr_nm, [0.0; 2]);
+            for lane in 0..2 {
+                let kappa = [0.25, 0.5][lane];
+                let mut prefix = 1.0;
+                let mut expected = 0.0;
+                for cell in cells {
+                    let tau = density[cell] * kappa;
+                    let source =
+                        planck_radiance_w_m2_sr_nm(temperature[cell], wavelengths[lane]).unwrap();
+                    expected += prefix * -(-tau).exp_m1() * source;
+                    prefix *= (-tau).exp();
+                }
+                close(result.transport.emission_w_m2_sr_nm[lane], expected);
+            }
+        }
+    });
+}
+
+#[test]
+fn g4_observed_cells_respect_native_and_remaining_budgets_and_cancellation() {
+    with_cx(|cx, gate| {
+        let density = [1.0; 2];
+        let medium = AbsorbingGrid::try_new(
+            cx,
+            VolumeGrid::new([2, 1, 1], &density, [0.0; 3], [1.0; 3]),
+            MassAbsorptionSpectrum::constant(1.0).unwrap(),
+            None,
+            AbsorbingGridBudget {
+                max_grid_cells: 2,
+                max_steps_per_segment: 1,
+            },
+        )
+        .unwrap();
+        let origin = Point3::new(-1.0, 0.5, 0.5);
+        let direction = Vec3::new(1.0, 0.0, 0.0);
+        for cap in [0, 1, 2, u32::MAX] {
+            assert_eq!(
+                medium.transport_observed::<1, false>(
+                    cx,
+                    origin,
+                    direction,
+                    f64::INFINITY,
+                    &[550.0],
+                    cap,
+                ),
+                Err(VolumeTransportError::Budget)
+            );
+        }
+        let short = medium
+            .transport_observed::<1, false>(cx, origin, direction, 1.5, &[550.0], 1)
+            .unwrap();
+        assert_eq!(short.cell_visits, 1);
+        assert_eq!(short.optical_depth, [0.5]);
+        for (point, distance) in [(Point3::new(-1.0, 2.0, 0.5), f64::INFINITY), (origin, 0.0)] {
+            let miss = medium
+                .transport_observed::<1, true>(cx, point, direction, distance, &[550.0], 0)
+                .unwrap();
+            assert_eq!(miss.cell_visits, 0);
+            assert_eq!(miss.optical_depth, [0.0]);
+            assert_eq!(miss.transport.transmittance, [1.0]);
+        }
+        gate.request();
+        assert_eq!(
+            medium.transport_observed::<1, false>(cx, origin, direction, 0.0, &[550.0], 0,),
+            Err(VolumeTransportError::Cancelled)
+        );
+    });
+}
+
+#[test]
+fn g0_observed_finite_columns_keep_log_survival_and_refuse_range_loss() {
+    with_cx(|cx, _| {
+        let direction = Vec3::new(1.0, 0.0, 0.0);
+        let origin = Point3::new(-1.0, 0.5, 0.5);
+        for (density, coefficient, expected) in [
+            (1.0, 1000.0, Some(1000.0)),
+            (1e300, 1e300, None),
+            (1e-300, 1e-300, None),
+        ] {
+            let values = [density];
+            let medium = AbsorbingGrid::try_new(
+                cx,
+                VolumeGrid::new([1; 3], &values, [0.0; 3], [1.0; 3]),
+                MassAbsorptionSpectrum::constant(coefficient).unwrap(),
+                None,
+                budget(),
+            )
+            .unwrap();
+            let result = medium.transport_observed::<1, false>(
+                cx,
+                origin,
+                direction,
+                f64::INFINITY,
+                &[550.0],
+                1,
+            );
+            if let Some(depth) = expected {
+                let result = result.unwrap();
+                assert_eq!(result.optical_depth, [depth]);
+                assert_eq!(result.transport.transmittance, [0.0]);
+                assert_eq!(result.cell_visits, 1);
+            } else {
+                assert_eq!(result, Err(VolumeTransportError::Unrepresentable));
+            }
+        }
+    });
+}
+
+#[test]
+fn g0_observed_bright_thermal_source_survives_underflowed_foreground_weight() {
+    with_cx(|cx, _| {
+        let temperatures = [1.0, 1e8];
+        let wavelength = 550.0;
+        let source = planck_radiance_w_m2_sr_nm(temperatures[1], wavelength).unwrap();
+        assert_eq!(
+            planck_radiance_w_m2_sr_nm(temperatures[0], wavelength).unwrap(),
+            0.0
+        );
+        let origin = Point3::new(-1.0, 0.5, 0.5);
+        let direction = Vec3::new(1.0, 0.0, 0.0);
+        for foreground_depth in [750.0, 1000.0] {
+            let density = [foreground_depth, 1.0];
+            let medium = AbsorbingGrid::try_new(
+                cx,
+                VolumeGrid::new([2, 1, 1], &density, [0.0; 3], [1.0; 3]),
+                MassAbsorptionSpectrum::constant(1.0).unwrap(),
+                Some(&temperatures),
+                budget(),
+            )
+            .unwrap();
+            assert_eq!((-foreground_depth).exp(), 0.0);
+            // The original public path retains its arithmetic and rounding.
+            assert_eq!(
+                medium
+                    .transport(cx, origin, direction, f64::INFINITY, &[wavelength])
+                    .unwrap()
+                    .emission_w_m2_sr_nm,
+                [0.0]
+            );
+            let result = medium.transport_observed::<1, true>(
+                cx,
+                origin,
+                direction,
+                f64::INFINITY,
+                &[wavelength],
+                2,
+            );
+            let expected = (source.ln() + (-(-1.0_f64).exp_m1()).ln() - foreground_depth).exp();
+            if expected > 0.0 {
+                let result = result.unwrap();
+                let actual = result.transport.emission_w_m2_sr_nm[0];
+                assert!(actual > 0.0);
+                assert!((actual - expected).abs() <= 8.0 * f64::from_bits(1));
+                assert_eq!(result.optical_depth, [foreground_depth + 1.0]);
+                assert_eq!(result.cell_visits, 2);
+            } else {
+                assert_eq!(result, Err(VolumeTransportError::Unrepresentable));
+            }
+        }
+    });
+}

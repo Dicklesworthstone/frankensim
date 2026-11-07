@@ -611,7 +611,7 @@ impl<'s, 'm, 'e> CurvedAreaEmitter<'s, 'm, 'e> {
             seeds, images.max_trace_evaluations,
             catalog.geometric_catalog().images().iter().zip(catalog.images())
                 .map(|(geometric, image)| (geometric.first_seed(), image.connection(),
-                    image.log_scattering_survival(), image.ratio_tracking_zero())),
+                    image.log_source_survival(), image.ratio_tracking_zero())),
             AreaIrradianceSample { traces: catalog.trace_evaluations(),
                 fields: catalog.field_evaluations(), geometry: catalog.query_work(),
                 source_draws: catalog.free_flight_draws(),

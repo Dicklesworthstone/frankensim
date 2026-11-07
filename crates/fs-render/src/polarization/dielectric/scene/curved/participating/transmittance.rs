@@ -2,8 +2,9 @@
 //!
 //! The original deterministic solver owns geometry, Fresnel power, true Beer
 //! absorption and the receiving-area Jacobian. One additional native bundle
-//! walk replays its solved launch while independently measuring ONLY survival
-//! against scattering. Uniform rates integrate their actual segment arc exactly;
+//! walk replays its solved launch while independently measuring survival
+//! against scattering and explicitly bound native finite absorption cells.
+//! Uniform scattering rates integrate their actual segment arc exactly;
 //! bounded heterogeneous fields use Poisson majorant ratio tracking. No density
 //! smoothness is inferred and no scattering rate is disguised as absorption.
 //!
@@ -84,7 +85,7 @@ impl core::fmt::Display for CurvedTransmittanceError {
 }
 impl core::error::Error for CurvedTransmittanceError {}
 
-/// Original solved connection and separate source-leg scattering survival.
+/// Original solved connection and separate source-leg scattering/absorption.
 /// The log preserves very small positive weights. Negative infinity occurs
 /// ONLY for an exact ratio-tracking zero; it is not an underflow convention.
 /// Work includes every deterministic shooting trial and the tracked replay.
@@ -92,6 +93,8 @@ impl core::error::Error for CurvedTransmittanceError {}
 pub struct CurvedTransmittanceConnection {
     connection: BundleConnection,
     log_scattering_survival: f64,
+    log_absorption_survival: f64,
+    absorption_cell_visits: u64,
     ratio_tracking_zero: bool,
     free_flight_draws: u32,
     tracking_candidates: u32,
@@ -106,6 +109,19 @@ impl CurvedTransmittanceConnection {
     }
     pub const fn log_scattering_survival(&self) -> f64 {
         self.log_scattering_survival
+    }
+    /// Additional true absorption from original finite cells. The solved
+    /// bundle already contains its native host absorption, if any.
+    pub const fn log_absorption_survival(&self) -> f64 {
+        self.log_absorption_survival
+    }
+    /// Combined extra source survival. Only the original ratio-tracking exact
+    /// zero may produce negative infinity; finite absorption overflow refuses.
+    pub const fn log_source_survival(&self) -> f64 {
+        self.log_scattering_survival + self.log_absorption_survival
+    }
+    pub const fn absorption_cell_visits(&self) -> u64 {
+        self.absorption_cell_visits
     }
     pub const fn ratio_tracking_zero(&self) -> bool {
         self.ratio_tracking_zero
@@ -257,6 +273,12 @@ impl CurvedRayleighScene<'_, '_, '_> {
             if index % 1024 == 0 {
                 cx.checkpoint()?;
             }
+            if self.absorbing_grid(index).is_some() {
+                // Query its wavelength/carrier only if the actual connected
+                // branch visits this medium. Even a vacuum binding retains
+                // explicit source-domain admission through the replay.
+                return Ok(false);
+            }
             let known_clear = match self.media.get(index) {
                 None => true,
                 Some(CurvedRayleighBinding::Density(law)) => {
@@ -292,6 +314,8 @@ impl CurvedRayleighScene<'_, '_, '_> {
         let mut output = CurvedTransmittanceConnection {
             connection,
             log_scattering_survival: 0.0,
+            log_absorption_survival: 0.0,
+            absorption_cell_visits: 0,
             ratio_tracking_zero: false,
             free_flight_draws: 0,
             tracking_candidates: 0,
@@ -349,9 +373,24 @@ impl CurvedRayleighScene<'_, '_, '_> {
                     }
                 }
             },
-            |medium, wavelength, distance, position, candidate| {
+            |medium, wavelength, ray, distance, position, candidate| {
                 let mut state = state.borrow_mut();
-                match state.observe(medium, wavelength, distance, position, candidate) {
+                let observed: Result<(), CurvedTransmittanceError> = (|| {
+                    let remaining = self.max_absorption_cells
+                        .checked_sub(state.absorption_cells)
+                        .ok_or(VolumeTransportError::Budget)?;
+                    if let Some(segment) = self.absorption_segment::<false>(
+                        cx, medium, wavelength, ray, distance, remaining,
+                    ).map_err(CurvedBundleSceneError::from)? {
+                        state.absorption_cells += u64::from(segment.cell_visits);
+                        state.log_absorption_survival -= segment.optical_depth[0];
+                        if !state.log_absorption_survival.is_finite() {
+                            return Err(VolumeTransportError::Unrepresentable.into());
+                        }
+                    }
+                    state.observe(medium, wavelength, distance, position, candidate)
+                })();
+                match observed {
                     Ok(()) => Ok(()),
                     Err(error) => {
                         state.error = Some(error);
@@ -387,6 +426,11 @@ impl CurvedRayleighScene<'_, '_, '_> {
                 other => CurvedTransmittanceError::Connection(other),
             })?;
         output.log_scattering_survival = state.log_survival;
+        output.log_absorption_survival = state.log_absorption_survival;
+        output.absorption_cell_visits = state.absorption_cells;
+        if !state.ratio_zero && !output.log_source_survival().is_finite() {
+            return Err(VolumeTransportError::Unrepresentable.into());
+        }
         output.ratio_tracking_zero = state.ratio_zero;
         output.free_flight_draws = state.draws;
         output.tracking_candidates = state.candidates;
@@ -428,6 +472,8 @@ struct Tracking<'a, 'optics, S> {
     samples: S,
     cached: Option<(usize, f64, TrackingRate<'optics>)>,
     log_survival: f64,
+    log_absorption_survival: f64,
+    absorption_cells: u64,
     ratio_zero: bool,
     draws: u32,
     candidates: u32,
@@ -446,6 +492,8 @@ impl<'a, 'optics, S: FnMut(u32) -> f64> Tracking<'a, 'optics, S> {
             samples,
             cached: None,
             log_survival: 0.0,
+            log_absorption_survival: 0.0,
+            absorption_cells: 0,
             ratio_zero: false,
             draws: 0,
             candidates: 0,

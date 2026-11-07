@@ -137,10 +137,23 @@ fn g1_two_temperature_slab_retains_each_original_spectral_source() {
                 &wavelengths,
             )
             .unwrap();
+        let observed = medium
+            .transport_observed::<3, true>(
+                cx,
+                Point3::new(0.5, 0.5, -1.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                f64::INFINITY,
+                &wavelengths,
+                1,
+            )
+            .unwrap();
+        assert_eq!(observed.transport, result);
+        assert_eq!(observed.cell_visits, 1);
         for (lane, &wavelength) in wavelengths.iter().enumerate() {
             let first = 0.25 * (0.4 + 0.002 * (wavelength - 380.0));
             let second = 0.75 * (2.0 - 0.004 * (wavelength - 380.0));
             let absorption = first + second;
+            close(observed.optical_depth[lane], 0.6 * absorption);
             let emitted = first * planck(900.0, wavelength) + second * planck(1800.0, wavelength);
             let transmission = (-0.6 * absorption).exp();
             close(

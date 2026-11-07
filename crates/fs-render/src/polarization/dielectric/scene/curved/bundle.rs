@@ -448,14 +448,14 @@ impl CurvedPolarizedScene<'_> {
             receiver,
             branches,
             |_, _| Ok(None),
-            |_, _, _, _, _| Ok(()),
+            |_, _, _, _, _, _| Ok(()),
         )
     }
 
     // Optional source-survival candidates share this exact augmented boundary
     // walk. The callbacks cannot replace geometry, interfaces, or derivatives.
-    // A segment observation receives incident medium, wavelength, actual arc
-    // length, native endpoint, and whether the endpoint is a tracking candidate.
+    // A segment observation receives incident medium, wavelength, original
+    // start ray, actual arc length, native endpoint, and candidate membership.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn trace_bundle_with_receiver_flights(
         &self,
@@ -473,6 +473,7 @@ impl CurvedPolarizedScene<'_> {
         observe_segment: impl FnMut(
             usize,
             f64,
+            Ray,
             f64,
             Point3,
             bool,
@@ -513,6 +514,7 @@ impl CurvedPolarizedScene<'_> {
         mut observe_segment: impl FnMut(
             usize,
             f64,
+            Ray,
             f64,
             Point3,
             bool,
@@ -709,6 +711,7 @@ impl CurvedPolarizedScene<'_> {
                 }) if medium == result.medium => Some((position_m, normal)),
                 _ => None,
             };
+            let segment_ray = result.bundle.propagation().propagation().ray;
             let propagation = {
                 let mut endpoint_oracle = TargetSectionOracle {
                     native: &mut oracle,
@@ -769,6 +772,7 @@ impl CurvedPolarizedScene<'_> {
                         observe_segment(
                             result.medium,
                             wavelength,
+                            segment_ray,
                             segment.segment.distance_m,
                             endpoint,
                             true,
@@ -790,6 +794,7 @@ impl CurvedPolarizedScene<'_> {
             observe_segment(
                 result.medium,
                 wavelength,
+                segment_ray,
                 segment.segment.distance_m,
                 endpoint,
                 false,
