@@ -21032,3 +21032,19 @@ nonproportional flow/tangent/energy, zero-rate and absent-branch reductions, and
 refusal. Rust parsing/formatting passed; native compilation and tests remain
 unverified. This is linear static recovery, not nonlinear recovery, isotropic
 annealing, recrystallization, finite kinematic plasticity or empirical calibration.
+
+## Depth-resolved viscoelastic acoustic absorption
+
+`DrivenViscoelasticLayers::absorption_between` integrates the original positive
+bulk/shear strain work over a physical depth interval without adding a material
+interface or subtracting cumulative heats. Stable even/odd restriction preserves
+weak thin standing waves; independently scaled inward waves and logarithmic
+attenuation preserve deep opaque heat. Full intervals retain the original
+whole-layer arithmetic, zero-width intervals yield zero, and invalid depths
+or cancellation refuse. Each query takes constant work and allocates nothing.
+
+Four native regressions compare independent constitutive quadrature, arbitrary
+partition closure, thin standing waves and square-underflow opaque tails.
+The query retains the source identity and the original conservative whole-layer
+strain bound. It does not itself advance a thermal history or infer changes to
+the frozen acoustic material laws.

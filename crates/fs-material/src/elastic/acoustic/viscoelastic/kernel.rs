@@ -429,6 +429,94 @@ impl Slab {
         })
     }
 
+    /// Positive original strain-work integral on a physical depth interval.
+    /// Restriction changes wave coordinates only; no new interface is inserted.
+    pub(crate) fn interval_heat(
+        &self,
+        inward: [C64; 2],
+        parity: [C64; 2],
+        depths: [f64; 2],
+        area: f64,
+    ) -> Result<[f64; 2]> {
+        let [start, end] = depths;
+        if !start.is_finite()
+            || !end.is_finite()
+            || start < 0.0
+            || end < start
+            || end > self.length
+            || !area.is_finite()
+            || area <= 0.0
+        {
+            return Err(
+                "viscoelastic heat interval needs ordered admitted depths and positive area",
+            );
+        }
+        if start == end {
+            return Ok([0.0; 2]);
+        }
+        if start == 0.0 && end == self.length {
+            return self.heat(integral_log(parity, self.log_gram), area);
+        }
+        let back = self.length - end;
+        let difference = (start - back).abs();
+        let (local, log_scale) = if self.k.abs() * difference < 0.1 {
+            // Keep the ORIGINAL accurately prepared A+B and A-B when the
+            // restriction has almost equal propagation on its two sides.
+            // A common phase cancels from |p|^2. Keep its attenuation in log
+            // form so a small field times a large area can remain representable.
+            let missing = missing_propagation(self.k, difference)?;
+            let even = C64::ONE - missing.scale(0.5);
+            let odd = missing.scale(if start <= back { 0.5 } else { -0.5 });
+            (
+                [
+                    parity[0] * even + parity[1] * odd,
+                    parity[1] * even + parity[0] * odd,
+                ],
+                self.k.im * start.min(back),
+            )
+        } else {
+            // A far opaque restriction must NOT recover a tiny forward wave
+            // by subtracting (A+B) and (A-B). Scale each bounded inward wave
+            // by its own logarithmic amplitude first, then combine them.
+            let magnitudes = inward.map(C64::abs);
+            let logs = [
+                det::ln(magnitudes[0]) + self.k.im * start,
+                det::ln(magnitudes[1]) + self.k.im * back,
+            ];
+            let dominant = usize::from(logs[1] > logs[0]);
+            let scale = logs[dominant];
+            if scale == f64::NEG_INFINITY {
+                return Ok([0.0; 2]);
+            }
+            let distances = [start, back];
+            let mut waves = [C64::ZERO; 2];
+            for i in 0..2 {
+                if magnitudes[i] == 0.0 {
+                    continue;
+                }
+                let relative = det::exp(logs[i] - scale);
+                if relative == 0.0 {
+                    continue;
+                }
+                let phase = self.k.re * (distances[i] - distances[dominant]);
+                if !phase.is_finite() {
+                    return Err("viscoelastic interval phase is unrepresentable");
+                }
+                let (sine, cosine) = det::sin_cos(phase);
+                waves[i] =
+                    divided(inward[i], magnitudes[i]) * C64::new(cosine, -sine).scale(relative);
+            }
+            ([waves[0] + waves[1], waves[0] - waves[1]], scale)
+        };
+        if local.iter().any(|v| !finite(*v) || !v.abs().is_finite()) {
+            return Err("viscoelastic restricted wave is unrepresentable");
+        }
+        self.heat(
+            integral_log(local, wave_gram_logs(self.k, end - start)?) + 2.0 * log_scale,
+            area,
+        )
+    }
+
     pub(crate) fn field(&self, inward: [C64; 2], parity: [C64; 2], depth: f64) -> Result<Field> {
         if !depth.is_finite() || depth < 0.0 || depth > self.length || self.length == 0.0 {
             return Err(
@@ -469,3 +557,7 @@ impl Slab {
 #[cfg(test)]
 #[path = "kernel/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "kernel/interval_tests.rs"]
+mod interval_tests;

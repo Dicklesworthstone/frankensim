@@ -283,6 +283,39 @@ impl DrivenViscoelasticLayers<'_, '_> {
             maximum_absolute_strain_bound: local.strain_bound,
         })
     }
+
+    /// Positive bulk/shear heat over one physical depth interval [m].
+    ///
+    /// The exact pressure Gram integral is restricted inside the SAME original
+    /// layer; this inserts no interface and uses no difference of cumulative
+    /// heats. The full [0, thickness] interval retains the whole-layer result.
+    /// A zero-width interval has zero heat. The returned strain bound still
+    /// conservatively covers the entire physical layer.
+    pub fn absorption_between(
+        &self,
+        index: usize,
+        depths_m: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ViscoelasticLayerAbsorption, ViscoelasticSlabError> {
+        poll(cancelled)?;
+        let local = self
+            .stack
+            .wave
+            .layer_drive(index, self.input, self.area_m2)
+            .map_err(error)?;
+        let wave = self.stack.wave.layer(index).expect("validated solid layer");
+        let heat = wave
+            .interval_heat(local.inward, local.parity, depths_m, self.area_m2)
+            .map_err(ViscoelasticSlabError::Invalid)?;
+        poll(cancelled)?;
+        Ok(ViscoelasticLayerAbsorption {
+            source_identity: self.stack.layers[index].source.source_identity,
+            bulk_absorbed_power_w: heat[0],
+            shear_absorbed_power_w: heat[1],
+            maximum_absolute_strain_bound: local.strain_bound,
+        })
+    }
+
     /// Local depth is measured from this physical layer's left face, including
     /// both faces. Zero-thickness layers have no interior and refuse a query.
     /// Interface traction/velocity agree; constitutive strain and heat may jump.
