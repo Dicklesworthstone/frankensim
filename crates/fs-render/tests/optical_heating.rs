@@ -9,6 +9,9 @@ mod luminescence_absorption;
 #[path = "optical_heating/luminescence_transient.rs"]
 mod luminescence_transient;
 
+#[path = "optical_heating/phosphorescence.rs"]
+mod phosphorescence;
+
 #[path = "optical_heating/scattering.rs"]
 mod scattering;
 

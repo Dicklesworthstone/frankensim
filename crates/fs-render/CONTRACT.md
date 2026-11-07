@@ -3038,6 +3038,52 @@ regressions cover analytic pumping and afterglow, photon/heat/storage closure,
 prompt limits, quenching, temporal partition/restart, implicit retry replacement,
 shared thermal receivers, source-domain refusal and transactional cancellation.
 
+### Singlet/triplet phosphorescence on the same thermal clock
+
+`LuminescentOpticalHeating::with_singlet_triplet` explicitly binds a
+`phosphorescence::SingletTripletSource` to the existing singlet pump owner.
+The two emitting states retain independent intrinsic lifetimes, photon yields,
+quenching laws and normalized photon spectra. Their common discrete wavelength
+grid can contain zero-weight nodes in either spectrum; only populated spectral
+nodes must lie below that state's excitation energy. Neither yield is applied
+twice: radiative, dark and intersystem-crossing transitions compete in the
+existing L3 `fs_thermal::luminescence::transfer::SingletTripletDecay` model.
+
+Absorbed pump photons populate the singlet. Forward crossing transfers actual
+populations to the separate triplet store and releases the authored energy gap
+as heat. Explicit Arrhenius reverse crossing removes that gap from the native
+thermal bath and permits delayed singlet emission. Both stores continue to
+evolve in dark intervals. Each state's radiative release is converted through
+its own photon fractions and photon energies, so the observed spectrum can
+change during the afterglow without an invented temperature or RGB fade.
+
+The source exposes separate accepted `[singlet, triplet]` joules and reports
+downhill crossing heat and uphill bath absorption separately. Native external
+heat includes the former and subtracts the latter. Absorbed pump energy equals
+total stored excitation plus escaped/unresolved light plus net native heat,
+within the supplied absolute local and global joule allowances. Passive
+emission-band absorption uses the existing directed transport operator. Resonant
+photon recycling and singlet/triplet coupling cannot currently be combined;
+either binding order refuses rather than silently imposing equal-energy scalar
+recycling on two different states.
+
+Fixed-rate intervals use the existing bounded positive matrix-exponential
+owner, with a prepared plan shared across clones and reused for unchanged
+rates and duration. Rates freeze at each native start temperature; changing
+thermal feedback still requires timestep refinement. Pulse boundaries, retry
+replacement, cancellation and final acceptance remain owned by the original
+thermal observer. `emission_source_identity()` binds both source identities,
+spectra, state energies, intrinsic decay/quenching and crossing laws.
+
+G1/G3/G4 regressions in `tests/optical_heating/phosphorescence.rs` compare
+population/energy transfer with independent Bateman solutions, observe dark
+afterglow through the existing radiance grid, exercise reverse-crossing bath
+exchange and thermal quenching, and check partition/restart, retry and refusal.
+This is a dilute molecular singlet/triplet mechanism with explicitly supplied
+rates. It does not claim finite ground-state depletion, triplet annihilation,
+trap-mediated persistent phosphors, coherent spin dynamics, oxygen transport,
+measured material constants or an automatically enforced detailed-balance law.
+
 ### Temperature-dependent optical heating
 
 `volumes::heating::feedback::TemperatureOpticalHeating` retains source-bound

@@ -6,8 +6,10 @@
 //! Radiative decay produces the original photon-weighted spectrum; dark decay
 //! and final vibrational relaxation heat the same native cell exactly once.
 //!
-//! This is a linear, unsaturated emitting-state model, not a spin-transition,
-//! trap distribution, bleaching or stimulated-emission model. The fast path
+//! The default is a linear, unsaturated emitting-state model. Explicit
+//! [`phosphorescence`] adds a separate triplet, intersystem crossing, distinct
+//! emission spectra and the forward/reverse crossing heat. Neither path infers
+//! a trap distribution, saturation, bleaching or stimulated emission. The fast path
 //! requires transparent emission-band escape. An explicitly supplied directed
 //! transport operator also supports passive secondary absorption and elastic
 //! multiple scattering in an open, index-one medium. Unresolved photons remain
@@ -17,9 +19,12 @@
 //! source support; a long lifetime alone does not establish phosphorescence.
 
 pub mod absorption;
+pub mod phosphorescence;
 pub use absorption::{AbsorbingLuminescenceEnvironment, LuminescenceAbsorptionTolerance};
+pub use phosphorescence::{SingletTripletLimits, SingletTripletSource};
 mod recycling;
 pub use fs_thermal::luminescence::recycling::RecyclingLimits;
+use phosphorescence::SingletTripletFeedback;
 use recycling::ResonantFeedback;
 
 use super::feedback::OpticalFeedbackError;
@@ -51,7 +56,7 @@ pub struct LuminescenceSource<const M: usize> {
 impl<const M: usize> LuminescenceSource<M> {
     /// `excitation_wavelength_nm` explicitly defines stored energy per excited
     /// emitter as hc/lambda. It must be at or beyond the entire pump band and
-    /// no longer than the shortest emission wavelength. No level energy is
+    /// no longer than the shortest positive-weight emission wavelength. No level energy is
     /// inferred from a color, temperature, material name or spectral centroid.
     pub fn try_new(
         fluorescence: FluorescenceSource<M>,
@@ -60,7 +65,11 @@ impl<const M: usize> LuminescenceSource<M> {
     ) -> Result<Self, OpticalHeatingError> {
         if !excitation_wavelength_nm.is_finite()
             || excitation_wavelength_nm < fluorescence.excitation_bounds_nm().1
-            || excitation_wavelength_nm > fluorescence.wavelengths_nm()[0]
+            || fluorescence
+                .wavelengths_nm()
+                .iter()
+                .zip(fluorescence.photon_fractions())
+                .any(|(&wavelength, &weight)| weight > 0.0 && excitation_wavelength_nm > wavelength)
         {
             return Err(invalid(
                 "stored excitation must lie energetically between pump and every emission node",
@@ -140,6 +149,10 @@ pub struct LuminescenceEnergy<const M: usize> {
     pub prompt_heat_j: f64,
     /// Stored excitation released by nonradiative transitions, joules.
     pub nonradiative_heat_j: f64,
+    /// Heat supplied by downhill singlet-to-triplet intersystem crossing.
+    pub crossing_heat_j: f64,
+    /// Heat drawn from the thermal bath by uphill triplet-to-singlet crossing.
+    pub reverse_crossing_heat_absorbed_j: f64,
     /// Radiative-transition energy remaining after emitted photon energy, joules.
     pub relaxation_heat_j: f64,
     /// Emitted radiation absorbed by explicitly passive receivers, joules.
@@ -147,7 +160,8 @@ pub struct LuminescenceEnergy<const M: usize> {
     /// Emitted radiation returned to resonant excitation stores, joules.
     /// This internal circulation is neither extra pump input nor heat.
     pub recycled_excitation_j: f64,
-    /// Current nonthermal emitting-state store, joules.
+    /// Current total nonthermal excitation store, including both spin states
+    /// when singlet/triplet coupling is explicitly bound, joules.
     pub stored_excitation_j: f64,
     /// Absorbed pump minus escape, unresolved light, all heat and excitation.
     pub residual_j: f64,
@@ -163,6 +177,7 @@ struct Cell<const N: usize> {
     prompt_heat_w: [f64; N],
     absorbed_w: [f64; N],
     stored_j: f64,
+    state_stored_j: [f64; 2],
 }
 
 #[derive(Clone, Debug)]
@@ -177,6 +192,8 @@ struct Accounts<const N: usize, const M: usize> {
     unresolved: [CheckedSum; M],
     prompt: CheckedSum,
     dark: CheckedSum,
+    crossing: CheckedSum,
+    reverse_crossing: CheckedSum,
     relaxation: CheckedSum,
     secondary: CheckedSum,
     recycled: CheckedSum,
@@ -196,6 +213,8 @@ impl<const N: usize, const M: usize> Default for Accounts<N, M> {
             unresolved: [CheckedSum::default(); M],
             prompt: CheckedSum::default(),
             dark: CheckedSum::default(),
+            crossing: CheckedSum::default(),
+            reverse_crossing: CheckedSum::default(),
             relaxation: CheckedSum::default(),
             secondary: CheckedSum::default(),
             recycled: CheckedSum::default(),
@@ -210,6 +229,7 @@ struct Pending<const N: usize, const M: usize> {
     duration_s: f64,
     end_s: f64,
     stored_j: Vec<f64>,
+    state_stored_j: Vec<[f64; 2]>,
     mean_cell_emission_w: Vec<(usize, [f64; M])>,
     accounts: Accounts<N, M>,
 }
@@ -227,6 +247,7 @@ pub struct LuminescentOpticalHeating<const N: usize, const M: usize> {
     cells: Vec<Cell<N>>,
     emission_transport: Option<AbsorbingLuminescenceEnvironment<M>>,
     recycling: Option<ResonantFeedback>,
+    singlet_triplet: Option<SingletTripletFeedback<M>>,
     schedule: Option<SpectralPowerSchedule<N>>,
     time_s: f64,
     energy_tolerance_j: f64,
@@ -414,6 +435,7 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
                 prompt_heat_w,
                 absorbed_w: deposited.absorbed_power_w,
                 stored_j: 0.0,
+                state_stored_j: [0.0; 2],
             });
         }
         let cell_emission_w: Vec<_> = cells.iter().map(|c| (c.grid_cell, [0.0; M])).collect();
@@ -426,6 +448,7 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
             cells,
             emission_transport,
             recycling: None,
+            singlet_triplet: None,
             schedule: None,
             time_s: thermal.time_s(),
             energy_tolerance_j,
@@ -517,6 +540,15 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
             .map(|c| c.stored_j)
     }
 
+    /// Accepted separate `[singlet, triplet]` nonthermal stores, joules.
+    /// The original scalar model uses only the first entry.
+    pub fn state_stored_energy_j(&self, grid_cell: usize) -> Option<[f64; 2]> {
+        self.cells
+            .iter()
+            .find(|c| c.grid_cell == grid_cell)
+            .map(|c| c.state_stored_j)
+    }
+
     fn check_state(
         &self,
         thermal: &DepositionSimulation<'_>,
@@ -534,6 +566,12 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
             }
             self.source
                 .decay_at_temperature(thermal.temperature_k(cell.thermal_cell)?)?;
+            if let Some(coupling) = &self.singlet_triplet {
+                coupling.model_at_temperature(
+                    &self.source,
+                    thermal.temperature_k(cell.thermal_cell)?,
+                )?;
+            }
         }
         if let Some(environment) = &self.emission_transport {
             environment.check_state(thermal, checkpoint)?;
@@ -631,6 +669,7 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
         }
         let mut sources = BTreeMap::<CellId, CheckedSum>::new();
         let mut stored_j = Vec::with_capacity(self.cells.len());
+        let mut state_stored_j = Vec::with_capacity(self.cells.len());
         let mut mean_cell_emission_w = Vec::with_capacity(self.cells.len());
         let recycled = match &mut self.recycling {
             Some(feedback) => Some(feedback.advance(
@@ -653,8 +692,26 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
                 prompt.add(finite(cell.prompt_heat_w[lane] * factor * duration_s)?)?;
                 absorbed.add(finite(cell.absorbed_w[lane] * factor * duration_s)?)?;
             }
-            let step = match &recycled {
-                Some(step) => ExcitationStep {
+            let coupled = match &mut self.singlet_triplet {
+                Some(coupling) => Some(coupling.advance(
+                    &self.source,
+                    cell.state_stored_j,
+                    pump.value()?,
+                    duration_s,
+                    thermal.temperature_k(cell.thermal_cell)?,
+                    checkpoint,
+                )?),
+                None => None,
+            };
+            let step = match (&coupled, &recycled) {
+                (Some(step), _) => ExcitationStep {
+                    stored_energy_j: step.stored_energy_j,
+                    pumped_energy_j: finite(pump.value()? * duration_s)?,
+                    radiative_decay_energy_j: 0.0,
+                    nonradiative_heat_j: step.nonradiative_heat_j,
+                    residual_j: 0.0,
+                },
+                (None, Some(step)) => ExcitationStep {
                     stored_energy_j: step.stored_energy_j[index],
                     pumped_energy_j: step.pumped_energy_j[index],
                     radiative_decay_energy_j: step.emitted_energy_j[index],
@@ -663,18 +720,32 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
                     // independently retained incoming recycled photon energy.
                     residual_j: 0.0,
                 },
-                None => self
+                (None, None) => self
                     .source
                     .decay_at_temperature(thermal.temperature_k(cell.thermal_cell)?)?
                     .advance(cell.stored_j, pump.value()?, duration_s)
                     .map_err(|_| invalid("luminescence reservoir advance refused"))?,
             };
             let prompt = prompt.value()?;
-            let (emitted, relaxation) = partition(&self.source, step.radiative_decay_energy_j)?;
+            let (emitted, relaxation, crossing, reverse_crossing) = match &coupled {
+                Some(step) => (
+                    step.emitted_energy_j,
+                    step.relaxation_heat_j,
+                    step.crossing_heat_j,
+                    step.reverse_crossing_heat_absorbed_j,
+                ),
+                None => {
+                    let (emitted, relaxation) =
+                        partition(&self.source, step.radiative_decay_energy_j)?;
+                    (emitted, relaxation, 0.0, 0.0)
+                }
+            };
             let mut heat = CheckedSum::default();
             heat.add(prompt)?;
             heat.add(step.nonradiative_heat_j)?;
             heat.add(relaxation)?;
+            heat.add(crossing)?;
+            heat.add(-reverse_crossing)?;
             let heat = heat.value()?;
             sources
                 .entry(cell.thermal_cell)
@@ -724,8 +795,17 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
             accounts.roundoff.add(balance.value()?.abs())?;
             accounts.prompt.add(prompt)?;
             accounts.dark.add(step.nonradiative_heat_j)?;
+            accounts.crossing.add(crossing)?;
+            accounts.reverse_crossing.add(reverse_crossing)?;
             accounts.relaxation.add(relaxation)?;
             stored_j.push(step.stored_energy_j);
+            state_stored_j.push(
+                coupled
+                    .as_ref()
+                    .map_or([step.stored_energy_j, 0.0], |step| {
+                        step.state_stored_energy_j
+                    }),
+            );
             mean_cell_emission_w.push((cell.grid_cell, mean));
         }
         if let Some(step) = &recycled {
@@ -762,6 +842,7 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
             duration_s,
             end_s,
             stored_j,
+            state_stored_j,
             mean_cell_emission_w,
             accounts,
         });
@@ -796,14 +877,27 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
         }
         let mut stored = CheckedSum::default();
         let mut cell_emission_w = Vec::with_capacity(self.cells.len());
-        for (cell, &energy) in self.cells.iter().zip(&pending.stored_j) {
+        for ((cell, &energy), &state_energy) in self
+            .cells
+            .iter()
+            .zip(&pending.stored_j)
+            .zip(&pending.state_stored_j)
+        {
             checkpoint()?;
             stored.add(energy)?;
-            let decay = self
-                .source
-                .decay_at_temperature(thermal.temperature_k(cell.thermal_cell)?)?;
-            let radiative_power = rate_power(energy, decay.quantum_yield(), decay.lifetime_s())?;
-            cell_emission_w.push((cell.grid_cell, partition(&self.source, radiative_power)?.0));
+            let temperature = thermal.temperature_k(cell.thermal_cell)?;
+            let emission = match &self.singlet_triplet {
+                Some(coupling) => {
+                    coupling.emission_power_w(&self.source, state_energy, temperature)?
+                }
+                None => {
+                    let decay = self.source.decay_at_temperature(temperature)?;
+                    let radiative_power =
+                        rate_power(energy, decay.quantum_yield(), decay.lifetime_s())?;
+                    partition(&self.source, radiative_power)?.0
+                }
+            };
+            cell_emission_w.push((cell.grid_cell, emission));
         }
         let (pump_energy, energy) = pending.accounts.report(stored.value()?)?;
         if energy.residual_j.abs() > self.energy_tolerance_j {
@@ -816,8 +910,14 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
             .pending
             .take()
             .expect("validated prepared luminescence interval");
-        for (cell, energy) in self.cells.iter_mut().zip(pending.stored_j) {
+        for ((cell, energy), states) in self
+            .cells
+            .iter_mut()
+            .zip(pending.stored_j)
+            .zip(pending.state_stored_j)
+        {
             cell.stored_j = energy;
+            cell.state_stored_j = states;
         }
         self.accounts = pending.accounts;
         self.pump_energy = pump_energy;
@@ -841,6 +941,8 @@ impl<const N: usize, const M: usize> Accounts<N, M> {
             unresolved_radiation_j: [0.0; M],
             prompt_heat_j: self.prompt.value()?,
             nonradiative_heat_j: self.dark.value()?,
+            crossing_heat_j: self.crossing.value()?,
+            reverse_crossing_heat_absorbed_j: self.reverse_crossing.value()?,
             relaxation_heat_j: self.relaxation.value()?,
             secondary_absorption_heat_j: self.secondary.value()?,
             recycled_excitation_j: self.recycled.value()?,
@@ -852,6 +954,8 @@ impl<const N: usize, const M: usize> Accounts<N, M> {
         for value in [
             energy.prompt_heat_j,
             energy.nonradiative_heat_j,
+            energy.crossing_heat_j,
+            -energy.reverse_crossing_heat_absorbed_j,
             energy.relaxation_heat_j,
             energy.secondary_absorption_heat_j,
         ] {
@@ -895,6 +999,9 @@ fn partition<const M: usize>(
     let mut emitted = [0.0; M];
     let mut relaxation = CheckedSum::default();
     for (bin, value) in emitted.iter_mut().enumerate() {
+        if source.fluorescence.photon_fractions()[bin] == 0.0 {
+            continue;
+        }
         let weight = finite(released * source.fluorescence.photon_fractions()[bin])?;
         let wavelength = source.fluorescence.wavelengths_nm()[bin];
         *value = ratio_power(weight, source.excitation_wavelength_nm, wavelength)?;

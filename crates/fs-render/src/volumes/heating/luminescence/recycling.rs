@@ -67,6 +67,7 @@ impl<const N: usize> LuminescentOpticalHeating<N, 1> {
         if self.pending.is_some()
             || self.energy.duration_s != 0.0
             || self.recycling.is_some()
+            || self.singlet_triplet.is_some()
             || wavelength != self.source.excitation_wavelength_nm()
             || !(lo..=hi).contains(&wavelength)
         {
@@ -103,6 +104,7 @@ impl<const N: usize> LuminescentOpticalHeating<N, 1> {
                     prompt_heat_w: [0.0; N],
                     absorbed_w: [0.0; N],
                     stored_j: 0.0,
+                    state_stored_j: [0.0; 2],
                 });
             }
         }
