@@ -261,3 +261,65 @@ fn mixed_d3q27_controls_keep_the_native_step_and_collision_envelope() {
         assert_eq!(restricted.completed_steps(), 0);
     });
 }
+
+#[test]
+fn mixed_profile_refusal_keeps_both_controls_at_the_same_time() {
+    let material = fluid();
+    let scaling = plan_scaling_from_material(&material, 0.02, 0.001, 1.0).unwrap();
+    let inlet = velocity([0.0, 0.0, 0.4]);
+    let dormant = pressure(0.0);
+    let frames = FrameTree::new();
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let mut flow = generic_grid(cx, scaling.flow().tau, 0.2);
+        flow.set_pressure_profile(Face3::ZMax, &gate, |point| {
+            Ok(1.002 + 0.0001 * point[0] as f64)
+        }).unwrap();
+        let profile = flow.pressure_profile(Face3::ZMax).unwrap().to_vec();
+        let before = flow.boundaries();
+        let populations = flow.populations().to_vec();
+        let force = flow.force_density();
+        assert!(matches!(
+            lattice3::rebind_open_faces3(
+                &mut flow, controls(&inlet, &dormant), &frames, 0.5, &scaling, &gate,
+            ),
+            Err(lattice3::Error::Scenario(ScenarioBoundaryError::Pressure(_)))
+        ));
+        assert_eq!(flow.boundaries(), before);
+        assert_eq!(flow.populations(), populations);
+        assert_eq!(flow.completed_steps(), 0);
+        assert_eq!(flow.force_density(), force);
+        assert_eq!(flow.pressure_profile(Face3::ZMax).unwrap(), profile);
+
+        let samples = lattice3::rebind_open_faces3(
+            &mut flow,
+            [None, None, None, None, Some(ScenarioBoundary3::Velocity(&inlet)), None],
+            &frames, 0.5, &scaling, &gate,
+        ).unwrap();
+        assert!(samples[5].is_none());
+        assert_eq!(flow.pressure_profile(Face3::ZMax).unwrap(), profile);
+        flow.step_serial(cx, None, [0.0; 3]).unwrap();
+        for y in 0..4 {
+            for x in 0..4 {
+                near(flow.macroscopic(y * 4 + x).unwrap().1[2], 0.02);
+                near(
+                    flow.macroscopic((4 * 4 + y) * 4 + x).unwrap().0,
+                    1.002 + 0.0001 * x as f64,
+                );
+            }
+        }
+
+        flow.clear_pressure_profile(Face3::ZMax);
+        let samples = lattice3::rebind_open_faces3(
+            &mut flow, controls(&inlet, &dormant), &frames, 1.0, &scaling, &gate,
+        ).unwrap();
+        assert!(matches!(samples[5], Some(BoundarySample3::Pressure(_))));
+        flow.step_serial(cx, None, [0.0; 3]).unwrap();
+        assert_eq!(flow.completed_steps(), 2);
+        for y in 0..4 {
+            for x in 0..4 {
+                near(flow.macroscopic((4 * 4 + y) * 4 + x).unwrap().0, 1.0);
+            }
+        }
+    });
+}

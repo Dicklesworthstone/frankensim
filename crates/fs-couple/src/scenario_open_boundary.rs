@@ -202,7 +202,7 @@ pub mod lattice3 {
             scaling,
             gate,
             |_| false,
-            |_| false,
+            |face| grid.pressure_profile(face).is_some(),
         )
         .map_err(Error::Scenario)?;
         grid.rebind_open_boundaries(prepared.targets, gate)

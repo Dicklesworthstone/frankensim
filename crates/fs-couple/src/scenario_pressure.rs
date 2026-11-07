@@ -287,6 +287,9 @@ pub mod lattice3 {
     /// Prepare every selected pressure history, then publish once through the
     /// original generic owner. Its collision, force correction, face-kind
     /// restrictions, reservoir accounting and physical time stay authoritative.
+    /// A selected spatial pressure profile refuses even when the sampled
+    /// density equals its dormant uniform target. Unselected profiles remain
+    /// authoritative and unchanged, as on the specialized D3Q19 owner.
     /// No equilibrium reconstruction or pressure mapping is duplicated here.
     pub fn rebind_pressure_faces3<L, F, const Q: usize>(
         grid: &mut OpenBoundaryGrid3<L, Q>,
@@ -301,7 +304,8 @@ pub mod lattice3 {
         F: FluidTransport + ?Sized,
     {
         let prepared = prepare_pressure_faces3(
-            grid.boundaries(), boundaries, frames, time_s, scaling, gate, |_| false,
+            grid.boundaries(), boundaries, frames, time_s, scaling, gate,
+            |face| grid.pressure_profile(face).is_some(),
         ).map_err(Error::Scenario)?;
         grid.rebind_open_boundaries(prepared.targets, gate).map_err(Error::Boundary)?;
         Ok(prepared.samples)

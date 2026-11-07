@@ -381,6 +381,60 @@ fn check_generic<L: EquilibriumLattice3<Q>, const Q: usize>(collision: L::Collis
         assert_eq!(flow.populations(), populations);
         assert_eq!(flow.completed_steps(), 1);
         assert_eq!(flow.force_density(), force);
+
+        // This is the outlet's already-held uniform target. A native rebind
+        // alone accepts it, even though the spatial profile still wins.
+        let dormant = uniform(-80.0);
+        flow.set_pressure_profile(Face3::ZMax, &gate, |point| {
+            Ok(1.002 + 0.0001 * point[0] as f64)
+        }).unwrap();
+        let profile = flow.pressure_profile(Face3::ZMax).unwrap().to_vec();
+        assert!(matches!(
+            lattice3::rebind_pressure_faces3(
+                &mut flow,
+                [None, None, None, None, Some(gauge(&changed)), Some(gauge(&dormant))],
+                &frames, 1.0, &scaling, &gate,
+            ),
+            Err(lattice3::Error::Scenario(ScenarioPressureError::Boundary(_)))
+        ));
+        assert_eq!(flow.boundaries(), before);
+        assert_eq!(flow.populations(), populations);
+        assert_eq!(flow.completed_steps(), 1);
+        assert_eq!(flow.force_density(), force);
+        assert_eq!(flow.pressure_profile(Face3::ZMax).unwrap(), profile);
+
+        // An unselected profile remains a valid physical boundary while the
+        // other face advances its scenario history.
+        let samples = lattice3::rebind_pressure_faces3(
+            &mut flow, [None, None, None, None, Some(gauge(&changed)), None],
+            &frames, 1.0, &scaling, &gate,
+        ).unwrap();
+        assert!(samples[5].is_none());
+        assert_eq!(flow.pressure_profile(Face3::ZMax).unwrap(), profile);
+        flow.step_serial(cx, None, [0.0; 3]).unwrap();
+        for y in 0..4 {
+            for x in 0..4 {
+                near(flow.macroscopic(y * 4 + x).unwrap().0, density(60.0));
+                near(
+                    flow.macroscopic((4 * 4 + y) * 4 + x).unwrap().0,
+                    1.002 + 0.0001 * x as f64,
+                );
+            }
+        }
+
+        // Explicitly relinquishing the profile makes the uniform scenario
+        // authoritative on the actual next native step.
+        flow.clear_pressure_profile(Face3::ZMax);
+        lattice3::rebind_pressure_face3(
+            &mut flow, Face3::ZMax, gauge(&dormant), &frames, 1.5, &scaling, &gate,
+        ).unwrap();
+        flow.step_serial(cx, None, [0.0; 3]).unwrap();
+        assert_eq!(flow.completed_steps(), 3);
+        for y in 0..4 {
+            for x in 0..4 {
+                near(flow.macroscopic((4 * 4 + y) * 4 + x).unwrap().0, density(-80.0));
+            }
+        }
     });
 }
 

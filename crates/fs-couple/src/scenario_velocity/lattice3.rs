@@ -70,9 +70,9 @@ where
 ///
 /// One native rebind follows complete preparation. The native owner then checks
 /// boundary kinds and both grid/collision speed envelopes before publication.
-/// It has no spatial profiles; the specialized owner's profile precedence rule
-/// remains in the shared preparation path for that owner. Invalid input or
-/// cancellation retains every target, population, completed step and force.
+/// It has no velocity profiles; existing pressure profiles on unselected faces
+/// retain their native ownership. Invalid input or cancellation retains every
+/// target, population, completed step and force.
 ///
 /// No equilibrium, collision, geometry or scale is inferred or replaced. The
 /// following native step consumes the held targets and reports its own measured
