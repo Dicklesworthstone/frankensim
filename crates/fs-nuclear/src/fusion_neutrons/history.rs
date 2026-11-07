@@ -329,6 +329,9 @@ pub struct NeutronKineticHistoryStep {
     pub final_kinetic_energy_j: f64,
     pub injected_neutrons: f64,
     pub injected_kinetic_energy_j: f64,
+    /// Signed prompt Q per original material cell over this request [J].
+    pub cell_nuclear_reaction_energy_j: Vec<f64>,
+    pub nuclear_reaction_energy_j: f64,
     pub cell_released: Vec<EnergyChannels>,
     pub released: EnergyChannels,
     pub fusion_number_residual: f64,
@@ -382,6 +385,7 @@ impl NeutronKineticState {
         let mut energy_defect = Accumulator::new(0.0);
         let mut count_defect = Accumulator::new(0.0);
         let mut cells = vec![[Accumulator::new(0.0); 3]; self.model().diffusion().cell_count()];
+        let mut nuclear_cells = vec![Accumulator::new(0.0); cells.len()];
         while time < end.value() {
             checkpoint()?;
             if substeps >= budget.maximum_substeps {
@@ -419,6 +423,12 @@ impl NeutronKineticState {
             )?;
             number_residual.add(nr)?;
             energy_residual.add(er)?;
+            for (target, value) in nuclear_cells
+                .iter_mut()
+                .zip(&report.cell_nuclear_reaction_energy_j)
+            {
+                energy_defect.add(target.add(*value)?.abs())?;
+            }
             for (target, released) in cells.iter_mut().zip(report.cell_released) {
                 for (sum, value) in target.iter_mut().zip([
                     released.deposited_j,
@@ -453,6 +463,12 @@ impl NeutronKineticState {
         }
         energy_defect.add(export_defect(injected_energy))?;
         count_defect.add(export_defect(injected_number))?;
+        let mut nuclear_total = Accumulator::new(0.0);
+        for &cell in &nuclear_cells {
+            energy_defect.add(export_defect(cell))?;
+            energy_defect.add(nuclear_total.add(cell.value())?.abs())?;
+        }
+        energy_defect.add(export_defect(nuclear_total))?;
         let released = crate::channel_values(totals);
         let final_energy = candidate.kinetic_energy_j()?;
         let residual = checked(crate::sum(&[
@@ -462,6 +478,7 @@ impl NeutronKineticState {
             released.radiation_j,
             released.escaped_j,
             -injected_energy.value(),
+            -nuclear_total.value(),
         ]))?;
         energy_defect.add(residual.abs())?;
         if energy_defect.value() > budget.transport.energy_tolerance_j
@@ -480,6 +497,11 @@ impl NeutronKineticState {
                 final_kinetic_energy_j: final_energy,
                 injected_neutrons: injected_number.value(),
                 injected_kinetic_energy_j: injected_energy.value(),
+                cell_nuclear_reaction_energy_j: nuclear_cells
+                    .into_iter()
+                    .map(Accumulator::value)
+                    .collect(),
+                nuclear_reaction_energy_j: nuclear_total.value(),
                 cell_released,
                 released,
                 fusion_number_residual: number_residual.value(),

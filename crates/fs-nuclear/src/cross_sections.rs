@@ -21,6 +21,12 @@ use crate::{Accumulator, FissionError, finite, nonnegative, positive};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NeutronReaction {
     Fission,
+    /// Nonfission (n,2n), ENDF MT16; two emitted neutrons and a residual.
+    TwoNeutronProduction,
+    /// Nonfission (n,3n), ENDF MT17; three emitted neutrons and a residual.
+    ThreeNeutronProduction,
+    /// Nonfission (n,4n), ENDF MT37; four emitted neutrons and a residual.
+    FourNeutronProduction,
     /// Radiative neutron capture, ENDF MT102.
     Capture,
     /// Nonfission (n,p) absorption without neutron-producing breakup, MT103.
@@ -44,13 +50,32 @@ impl NeutronReaction {
     #[must_use]
     pub const fn is_nonfission_absorption(self) -> bool {
         match self {
-            Self::Fission => false,
+            Self::Fission
+            | Self::TwoNeutronProduction
+            | Self::ThreeNeutronProduction
+            | Self::FourNeutronProduction => false,
             Self::Capture
             | Self::ProtonProduction
             | Self::DeuteronProduction
             | Self::TritonProduction
             | Self::Helium3Production
             | Self::AlphaProduction => true,
+        }
+    }
+
+    /// Fixed emitted multiplicity of an admitted exclusive nonfission channel.
+    /// This describes the reaction identity; it supplies neither an outgoing
+    /// energy spectrum nor a neutron source. Coupled transport must independently
+    /// declare its group yields and check their sum against this multiplicity.
+    /// Total-production tallies and neutron-producing secondary breakup are not
+    /// represented by these LR=0 channels.
+    #[must_use]
+    pub const fn emitted_neutrons_per_event(self) -> Option<u32> {
+        match self {
+            Self::TwoNeutronProduction => Some(2),
+            Self::ThreeNeutronProduction => Some(3),
+            Self::FourNeutronProduction => Some(4),
+            _ => None,
         }
     }
 }

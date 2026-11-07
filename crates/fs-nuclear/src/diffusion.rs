@@ -2,8 +2,9 @@
 //!
 //! State entries are extensive expected neutron and precursor counts. In cell
 //! `c`, group flux is `phi[c,g] = v[g] N[c,g] / V[c]`. A reaction removes a
-//! neutron at rate `Sigma[c,g] v[g]`; explicit fission multiplicities produce
-//! prompt neutrons and precursor families. An interface carries the net current
+//! neutron at rate `Sigma[c,g] v[g]`; explicit nonfission yields produce secondary
+//! neutrons, while fission produces prompt neutrons and precursor families.
+//! An interface carries the net current
 //! `K[g] (phi[a,g] - phi[b,g])`, implemented as two conservative positive
 //! transfers. `K` has units m², for example `A / (d_a/D_a + d_b/D_b)` for a
 //! planar face with diffusion coefficients D [m] and centre-to-face lengths d.
@@ -62,6 +63,16 @@ pub enum DiffusionReactionKind {
     Capture,
     Scatter {
         outgoing_group: usize,
+    },
+    /// Nonfission reactions such as (n,2n) or (n,n' charged products).
+    /// The incident neutron is removed once; all emitted neutrons, including
+    /// an outgoing scattered neutron, are represented by these explicit yields.
+    /// Residual nuclei and prompt Q belong to separately bound material/energy
+    /// owners. No multiplicity, spectrum or fission identity is inferred.
+    NeutronProduction {
+        /// Expected emitted neutrons per event in each output group. These are
+        /// multiplicities, not normalized probabilities; at least one is positive.
+        neutron_yields: Vec<f64>,
     },
     Fission {
         /// Prompt neutrons per fission in each output group.
@@ -260,6 +271,17 @@ impl DiffusionModel {
                         return Err(DiffusionError::Invalid("invalid scattering destination"));
                     }
                 }
+                DiffusionReactionKind::NeutronProduction { neutron_yields } => {
+                    coefficients = add_coefficients(coefficients, neutron_yields.len(), limits)?;
+                    if neutron_yields.len() != groups
+                        || !neutron_yields.iter().copied().all(nonnegative)
+                        || !positive(sum(neutron_yields))
+                    {
+                        return Err(DiffusionError::Invalid(
+                            "nonfission production requires explicit nonnegative neutron yields with a positive total",
+                        ));
+                    }
+                }
                 DiffusionReactionKind::Fission {
                     prompt_yields,
                     delayed_yields,
@@ -386,6 +408,18 @@ impl DiffusionModel {
                     1.0,
                     limits,
                 )?,
+                DiffusionReactionKind::NeutronProduction { neutron_yields } => {
+                    for (group, &yield_) in neutron_yields.iter().enumerate() {
+                        push_edge(
+                            &mut edges,
+                            source,
+                            reaction.cell * groups + group,
+                            fraction,
+                            yield_,
+                            limits,
+                        )?;
+                    }
+                }
                 DiffusionReactionKind::Fission {
                     prompt_yields,
                     delayed_yields,
@@ -777,6 +811,14 @@ impl DiffusionState {
                     accounts.total(SCATTERS, count)?;
                     accounts.produce(reaction.cell * groups + outgoing_group, count, 1.0)?;
                 }
+                DiffusionReactionKind::NeutronProduction { neutron_yields } => {
+                    accounts.total(NEUTRON_PRODUCTIONS, count)?;
+                    for (group, &yield_) in neutron_yields.iter().enumerate() {
+                        let born =
+                            accounts.produce(reaction.cell * groups + group, count, yield_)?;
+                        accounts.total(SECONDARIES, born)?;
+                    }
+                }
                 DiffusionReactionKind::Fission {
                     prompt_yields,
                     delayed_yields,
@@ -922,8 +964,10 @@ impl DiffusionState {
         for (kind, sign) in [
             (FISSIONS, 1.0),
             (CAPTURES, 1.0),
+            (NEUTRON_PRODUCTIONS, 1.0),
             (LEAKED, 1.0),
             (PROMPT, -1.0),
+            (SECONDARIES, -1.0),
             (DELAYED, -1.0),
             (SOURCE_NEUTRONS, -1.0),
         ] {
@@ -1019,6 +1063,8 @@ impl DiffusionState {
                 fissions: accounts.totals[FISSIONS].value(),
                 captures: accounts.totals[CAPTURES].value(),
                 scatters: accounts.totals[SCATTERS].value(),
+                neutron_producing_reactions: accounts.totals[NEUTRON_PRODUCTIONS].value(),
+                secondary_neutrons: accounts.totals[SECONDARIES].value(),
                 prompt_neutrons: accounts.totals[PROMPT].value(),
                 delayed_precursors_produced: accounts.totals[PRECURSORS].value(),
                 precursor_decays: accounts.totals[DECAYS].value(),
@@ -1073,6 +1119,12 @@ pub struct DiffusionStep {
     pub fissions: f64,
     pub captures: f64,
     pub scatters: f64,
+    /// Nonfission neutron-producing events; each consumes one incident neutron.
+    pub neutron_producing_reactions: f64,
+    /// All neutrons born in nonfission production, including an outgoing neutron
+    /// in a one-neutron inelastic reaction. Not the net neutron gain.
+    pub secondary_neutrons: f64,
+    /// Neutrons born promptly in fission, excluding nonfission secondaries.
     pub prompt_neutrons: f64,
     pub delayed_precursors_produced: f64,
     pub precursor_decays: f64,
@@ -1123,11 +1175,13 @@ const LEAKED: usize = 7;
 const SOURCE_NEUTRONS: usize = 8;
 const SOURCE_PRECURSORS: usize = 9;
 const ESCAPED_PRECURSORS: usize = 10;
+const NEUTRON_PRODUCTIONS: usize = 11;
+const SECONDARIES: usize = 12;
 
 struct Accounts {
     incoming: Vec<Accumulator>,
     outgoing: Vec<Accumulator>,
-    totals: [Accumulator; 11],
+    totals: [Accumulator; 13],
     error: Accumulator,
 }
 
@@ -1136,7 +1190,7 @@ impl Accounts {
         Ok(Self {
             incoming: filled(nodes, Accumulator::new(0.0))?,
             outgoing: filled(nodes, Accumulator::new(0.0))?,
-            totals: [Accumulator::new(0.0); 11],
+            totals: [Accumulator::new(0.0); 13],
             error: Accumulator::new(0.0),
         })
     }

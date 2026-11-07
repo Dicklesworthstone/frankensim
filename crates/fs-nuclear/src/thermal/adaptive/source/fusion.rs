@@ -112,6 +112,15 @@ impl AdaptiveNuclearHeatSource for NeutronKineticCellSource {
         }
         let mut metric = Comparison::new(tolerances, checkpoint);
         common_steps::<Self>(&mut metric, coarse, first, second)?;
+        let cell = coarse.cell_index();
+        metric.energy(
+            0.0,
+            coarse.spatial().cell_nuclear_reaction_energy_j[cell],
+            finite(
+                first.spatial().cell_nuclear_reaction_energy_j[cell]
+                    + second.spatial().cell_nuclear_reaction_energy_j[cell],
+            )?,
+        )?;
         if coarse.cell_index() == 0 {
             diffusion::neutron_steps(
                 &mut metric,
@@ -212,6 +221,14 @@ impl AdaptiveNuclearHeatSource for FusionNeutronActivationCellSource {
             a.kinetic.cell_released[cell],
             b.kinetic.cell_released[cell],
             c.kinetic.cell_released[cell],
+        )?;
+        metric.energy(
+            0.0,
+            a.kinetic.cell_nuclear_reaction_energy_j[cell],
+            finite(
+                b.kinetic.cell_nuclear_reaction_energy_j[cell]
+                    + c.kinetic.cell_nuclear_reaction_energy_j[cell],
+            )?,
         )?;
         energy_steps(
             &mut metric,

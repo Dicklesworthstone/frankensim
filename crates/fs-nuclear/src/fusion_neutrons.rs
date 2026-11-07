@@ -1,14 +1,16 @@
-//! Fusion-neutron energy on the existing nonmultiplying multigroup operator.
+//! Fusion-neutron energy on the existing multigroup reaction operator.
 //!
 //! The original diffusion owner advances neutron populations, continuous births,
 //! reaction counts and face histories. This companion attaches an explicitly
 //! authored representative energy to each group. Downscattering removes the
-//! group-energy difference; capture removes the incident kinetic energy. Each
-//! reaction explicitly partitions that removal between local heat and outgoing
-//! radiation. Leakage retains its outgoing neutron energy. The kinetic owner
-//! infers no nuclear Q or activation; [`activation`] composes explicitly authored
-//! reaction energy and finite products on the original coupled history.
-//! Multiplication and photon transport are not supplied here.
+//! group-energy difference; capture removes the incident kinetic energy.
+//! Nonfission neutron production retains its distinct authored multiplicities.
+//! Optional signed prompt Q and threshold declarations give the energy available
+//! to heat/radiation as incident energy + Q - outgoing neutron energy. Nuclear
+//! conversion is retained separately, including endothermic consumption; leakage
+//! retains its outgoing neutron energy. [`activation`] binds finite target and
+//! product inventories to the same accepted history. No Q, threshold, secondary
+//! spectrum, stopping law or photon transport is inferred.
 //!
 //! A fusion interval retains separate D-T and D-D-neutron counts and energies.
 //! `FusionNeutronSource::project_interval_mean` explicitly replaces each channel
@@ -39,6 +41,18 @@ use crate::{Accumulator, EnergyChannels, FissionError, nonnegative, positive, su
 /// Finite target activation and reaction energy on the same neutron history.
 pub mod activation;
 
+/// Authored prompt nuclear mass-energy conversion for one neutron reaction.
+///
+/// Positive Q releases rest energy; negative Q consumes incident kinetic energy.
+/// Q excludes the incoming neutron, outgoing neutron kinetic energy and later
+/// product decays. The laboratory threshold is an independent physical input:
+/// `-Q` alone does not include target recoil or determine a reaction threshold.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NeutronReactionEnergy {
+    pub nuclear_q_j: f64,
+    pub threshold_j: f64,
+}
+
 /// Immutable energy interpretation of an original neutron-diffusion model.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NeutronKineticModel {
@@ -46,6 +60,8 @@ pub struct NeutronKineticModel {
     diffusion: Arc<DiffusionModel>,
     energies_j: Vec<f64>,
     local_heat_fractions: Vec<f64>,
+    reaction_energies: Vec<NeutronReactionEnergy>,
+    available_energy_j: Vec<f64>,
 }
 
 impl NeutronKineticModel {
@@ -64,9 +80,56 @@ impl NeutronKineticModel {
         energies_j: Vec<f64>,
         local_heat_fractions: Vec<f64>,
     ) -> Result<Self, NeutronKineticError> {
+        for reaction in diffusion.reactions() {
+            match reaction.kind {
+                DiffusionReactionKind::Capture | DiffusionReactionKind::Scatter { .. } => {}
+                _ => {
+                    return Err(NeutronKineticError::Invalid(
+                        "neutron production requires explicit reaction energies and thresholds",
+                    ));
+                }
+            }
+        }
+        let reaction_energies = vec![NeutronReactionEnergy::default(); diffusion.reactions().len()];
+        let model = Self::new_with_reaction_energies(
+            data_id,
+            diffusion,
+            energies_j,
+            local_heat_fractions,
+            reaction_energies,
+        )?;
+        if model.diffusion.reactions().iter().any(|reaction| {
+            matches!(reaction.kind, DiffusionReactionKind::Scatter { outgoing_group }
+                if model.energies_j[outgoing_group] > model.energies_j[reaction.incident_group])
+        }) {
+            return Err(NeutronKineticError::Invalid(
+                "legacy kinetic-only scattering must not increase group energy",
+            ));
+        }
+        Ok(model)
+    }
+
+    /// Admit explicit nonfission neutron production and prompt nuclear energy.
+    ///
+    /// Every original reaction supplies signed Q, a nonnegative laboratory
+    /// threshold, and an independent local heat fraction. Secondary yields are
+    /// the original diffusion declaration and are never normalized. Each active
+    /// reaction must lie above threshold and satisfy E_in + Q >= sum(yield E_out).
+    /// Zero cross sections may cover below-threshold groups; composition- or
+    /// temperature-driven rebinding must still pass these checks before use.
+    /// These are representative-energy checks, not within-group kinematics;
+    /// source data must be consistently collapsed and thresholds resolved.
+    pub fn new_with_reaction_energies(
+        data_id: String,
+        diffusion: Arc<DiffusionModel>,
+        energies_j: Vec<f64>,
+        local_heat_fractions: Vec<f64>,
+        reaction_energies: Vec<NeutronReactionEnergy>,
+    ) -> Result<Self, NeutronKineticError> {
         if data_id.trim().is_empty()
             || energies_j.len() != diffusion.groups().len()
             || local_heat_fractions.len() != diffusion.reactions().len()
+            || reaction_energies.len() != diffusion.reactions().len()
             || !diffusion.delayed_groups().is_empty()
         {
             return Err(NeutronKineticError::Invalid(
@@ -85,29 +148,51 @@ impl NeutronKineticModel {
                 ));
             }
         }
-        for (reaction, &fraction) in diffusion.reactions().iter().zip(&local_heat_fractions) {
-            if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+        let mut available_energy_j = Vec::with_capacity(diffusion.reactions().len());
+        for ((reaction, &fraction), energy) in diffusion
+            .reactions()
+            .iter()
+            .zip(&local_heat_fractions)
+            .zip(&reaction_energies)
+        {
+            if !fraction.is_finite()
+                || !(0.0..=1.0).contains(&fraction)
+                || !energy.nuclear_q_j.is_finite()
+                || !nonnegative(energy.threshold_j)
+                || energy.threshold_j < (-energy.nuclear_q_j).max(0.0)
+            {
                 return Err(NeutronKineticError::Invalid(
-                    "reaction heat fractions must lie in [0,1]",
+                    "finite signed Q, threshold at least max(0,-Q), and heat fraction in [0,1] required",
                 ));
             }
-            match reaction.kind {
-                DiffusionReactionKind::Capture => {}
-                DiffusionReactionKind::Scatter { outgoing_group }
-                    if energies_j[outgoing_group] <= energies_j[reaction.incident_group] => {}
-                _ => {
+            let outgoing = match &reaction.kind {
+                DiffusionReactionKind::Capture => 0.0,
+                DiffusionReactionKind::Scatter { outgoing_group } => energies_j[*outgoing_group],
+                DiffusionReactionKind::NeutronProduction { neutron_yields } => {
+                    weighted_sum(neutron_yields, &energies_j)?
+                }
+                DiffusionReactionKind::Fission { .. } => {
                     return Err(NeutronKineticError::Invalid(
-                        "kinetic transport requires nonmultiplying capture/downscatter; no upscatter or fission",
+                        "fusion neutron-energy owner excludes fission and delayed neutron production",
                     ));
                 }
-            }
+            };
+            available_energy_j.push(checked(sum(&[
+                energies_j[reaction.incident_group],
+                energy.nuclear_q_j,
+                -outgoing,
+            ]))?);
         }
-        Ok(Self {
+        let model = Self {
             data_id,
             diffusion,
             energies_j,
             local_heat_fractions,
-        })
+            reaction_energies,
+            available_energy_j,
+        };
+        model.admit_active_reactions(&model.diffusion)?;
+        Ok(model)
     }
 
     /// Original declaration of group energies and reaction energy partition.
@@ -125,6 +210,31 @@ impl NeutronKineticModel {
     /// Local heat fractions in original reaction order.
     pub fn local_heat_fractions(&self) -> &[f64] {
         &self.local_heat_fractions
+    }
+
+    /// Signed prompt Q and threshold in the unchanged reaction ordering.
+    pub fn reaction_energies(&self) -> &[NeutronReactionEnergy] {
+        &self.reaction_energies
+    }
+
+    fn admit_active_reactions(&self, current: &DiffusionModel) -> Result<(), NeutronKineticError> {
+        if current.reactions().len() != self.reaction_energies.len() {
+            return Err(NeutronKineticError::Invalid(
+                "changed reaction energy layout",
+            ));
+        }
+        for (index, reaction) in current.reactions().iter().enumerate() {
+            if reaction.macroscopic_cross_section_m_inv > 0.0
+                && (self.energies_j[reaction.incident_group]
+                    < self.reaction_energies[index].threshold_j
+                    || !nonnegative(self.available_energy_j[index]))
+            {
+                return Err(NeutronKineticError::Invalid(
+                    "active neutron reaction violates its threshold or outgoing energy budget",
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -274,6 +384,7 @@ pub struct NeutronKineticState {
     model: Arc<NeutronKineticModel>,
     neutrons: DiffusionState,
     released: Vec<[Accumulator; 3]>,
+    nuclear_reaction_energy: Vec<Accumulator>,
 }
 
 /// The same interval's particle, energy, and per-material-cell heat histories.
@@ -285,13 +396,19 @@ pub struct NeutronKineticStep {
     pub cell_released: Vec<EnergyChannels>,
     /// Aggregated disjoint exports [J]. Only deposited_j is local heat.
     pub released: EnergyChannels,
+    /// Signed prompt nuclear conversion by cell [J]. Negative values are energy
+    /// consumed into nuclear rest mass, not negative deposited heat. This Q is
+    /// already included in `cell_released` after outgoing neutron kinetic energy.
+    pub cell_nuclear_reaction_energy_j: Vec<f64>,
+    /// Sum of signed prompt nuclear conversion on this neutron history [J].
+    pub nuclear_reaction_energy_j: f64,
     /// Initial stored neutron kinetic energy [J].
     pub initial_kinetic_energy_j: f64,
     /// Final stored neutron kinetic energy [J].
     pub final_kinetic_energy_j: f64,
     /// Actual integrated energy brought by external neutron injection [J].
     pub injected_kinetic_energy_j: f64,
-    /// Final - initial + heat + radiation + leakage - injected kinetic energy [J].
+    /// Final - initial + exports - injected kinetic energy - prompt nuclear Q [J].
     pub energy_balance_residual_j: f64,
     /// Sum of absolute per-cell energy/account defects [J].
     pub energy_roundoff_j: f64,
@@ -311,10 +428,12 @@ impl NeutronKineticState {
     ) -> Result<Self, NeutronKineticError> {
         let neutrons = DiffusionState::new(Arc::clone(&model.diffusion), neutron_counts, vec![])?;
         let released = vec![[Accumulator::new(0.0); 3]; model.diffusion.cell_count()];
+        let nuclear_reaction_energy = vec![Accumulator::new(0.0); model.diffusion.cell_count()];
         let state = Self {
             model,
             neutrons,
             released,
+            nuclear_reaction_energy,
         };
         state.kinetic_energy_j()?;
         Ok(state)
@@ -343,6 +462,15 @@ impl NeutronKineticState {
     /// Allocation-free lifetime exports for one original spatial cell.
     pub fn cell_released(&self, cell: usize) -> Option<EnergyChannels> {
         self.released.get(cell).copied().map(crate::channel_values)
+    }
+
+    /// Signed prompt nuclear conversion in one cell since this owner was bound.
+    /// This separate account must not be added to the already combined heat.
+    pub fn cell_nuclear_reaction_energy_j(&self, cell: usize) -> Option<f64> {
+        self.nuclear_reaction_energy
+            .get(cell)
+            .copied()
+            .map(Accumulator::value)
     }
 
     /// Native continuous source integration with explicit constant group rates.
@@ -381,6 +509,7 @@ impl NeutronKineticState {
         energy_tolerance_j: f64,
         mut checkpoint: impl FnMut() -> Result<(), FissionError>,
     ) -> Result<(Self, NeutronKineticStep), NeutronKineticError> {
+        self.model.admit_active_reactions(neutrons.model())?;
         let groups = self.model.energies_j.len();
         let cells = self.model.diffusion.cell_count();
         let mut cell_exports = vec![[Accumulator::new(0.0); 3]; cells];
@@ -389,6 +518,8 @@ impl NeutronKineticState {
         let mut injected = Accumulator::new(0.0);
         let mut initial_energy = Accumulator::new(0.0);
         let mut final_energy = Accumulator::new(0.0);
+        let mut cell_nuclear = vec![Accumulator::new(0.0); cells];
+        let mut nuclear_total = Accumulator::new(0.0);
         for (node, &energy) in self
             .model
             .energies_j
@@ -410,22 +541,21 @@ impl NeutronKineticState {
         }
         for (index, reaction) in self.model.diffusion.reactions().iter().enumerate() {
             checkpoint()?;
-            let incident = self.model.energies_j[reaction.incident_group];
-            let removed = match reaction.kind {
-                DiffusionReactionKind::Capture => incident,
-                DiffusionReactionKind::Scatter { outgoing_group } => {
-                    incident - self.model.energies_j[outgoing_group]
-                }
-                DiffusionReactionKind::Fission { .. } => {
-                    unreachable!("admitted nonmultiplying model")
-                }
-            };
-            let energy = checked(diffusion.reaction_counts[index] * removed)?;
+            let count = diffusion.reaction_counts[index];
+            let available = self.model.available_energy_j[index];
+            let q = self.model.reaction_energies[index].nuclear_q_j;
+            let nuclear = checked(count * q)?;
+            let energy = checked(count * available)?;
             let heat = checked(energy * self.model.local_heat_fractions[index])?;
             let radiation = checked(energy - heat)?;
+            defect.add(count.mul_add(q, -nuclear).abs())?;
+            defect.add(count.mul_add(available, -energy).abs())?;
+            defect.add(cell_nuclear[reaction.cell].add(nuclear)?.abs())?;
+            defect.add(nuclear_total.add(nuclear)?.abs())?;
             defect.add(cell_exports[reaction.cell][0].add(heat)?.abs())?;
             defect.add(cell_exports[reaction.cell][1].add(radiation)?.abs())?;
             defect.add(cell_balance[reaction.cell].add(energy)?.abs())?;
+            defect.add(cell_balance[reaction.cell].add(-nuclear)?.abs())?;
         }
         for (face, boundary) in self.model.diffusion.leakage().iter().enumerate() {
             checkpoint()?;
@@ -449,11 +579,17 @@ impl NeutronKineticState {
             }
         }
         let mut released = self.released.clone();
+        let mut nuclear_reaction_energy = self.nuclear_reaction_energy.clone();
         let mut totals = [Accumulator::new(0.0); 3];
         let mut cell_released = Vec::with_capacity(cells);
         for cell in 0..cells {
             checkpoint()?;
             defect.add(cell_balance[cell].value().abs())?;
+            defect.add(
+                nuclear_reaction_energy[cell]
+                    .add(cell_nuclear[cell].value())?
+                    .abs(),
+            )?;
             for channel in 0..3 {
                 let energy = cell_exports[cell][channel].value();
                 defect.add(released[cell][channel].add(energy)?.abs())?;
@@ -469,6 +605,7 @@ impl NeutronKineticState {
             exports.radiation_j,
             exports.escaped_j,
             -injected.value(),
+            -nuclear_total.value(),
         ]))?;
         defect.add(energy_balance_residual_j.abs())?;
         if defect.value() > energy_tolerance_j {
@@ -480,6 +617,11 @@ impl NeutronKineticState {
             diffusion,
             cell_released,
             released: exports,
+            cell_nuclear_reaction_energy_j: cell_nuclear
+                .into_iter()
+                .map(Accumulator::value)
+                .collect(),
+            nuclear_reaction_energy_j: nuclear_total.value(),
             initial_kinetic_energy_j: initial_energy.value(),
             final_kinetic_energy_j: final_energy.value(),
             injected_kinetic_energy_j: injected.value(),
@@ -495,6 +637,7 @@ impl NeutronKineticState {
                 model: Arc::clone(&self.model),
                 neutrons,
                 released,
+                nuclear_reaction_energy,
             },
             step,
         ))

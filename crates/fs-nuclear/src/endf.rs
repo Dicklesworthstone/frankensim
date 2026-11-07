@@ -1,8 +1,9 @@
 //! Bounded import of processed neutron ENDF-6/PENDF MF3 reaction curves.
 //!
-//! This deliberately narrow reader accepts total fission (MT18), radiative
-//! capture (MT102), and charged-particle absorption (MT103–107), retaining their
-//! distinct reaction identities. MF1/MT451 identification, a positive processed
+//! This deliberately narrow reader accepts total fission (MT18), nonfission
+//! neutron production (MT16, 17, 37), radiative capture (MT102), and charged-particle
+//! absorption (MT103–107), retaining their distinct reaction identities.
+//! MF1/MT451 identification, a positive processed
 //! target temperature, and LRP=0 or 2 are required. LRP=1 is rejected: those MF3 values are resonance
 //! backgrounds, not complete reconstructed cross sections. Natural-element
 //! evaluations, unprocessed zero-temperature data and interpolation laws other
@@ -15,8 +16,11 @@
 //! resonances, self-shield, infer a spectrum or certify data. The separate
 //! [`doppler`] owner can heat an explicitly admitted free-gas processed curve
 //! before either native group-collapse operation.
-//! All admitted MF3 sections require LR=0: secondary breakup and its neutron
-//! production cannot be represented as simple absorption. MT103–107 do not
+//! All admitted MF3 sections require LR=0: secondary breakup is a distinct
+//! unrepresented channel. MT16/17/37 retain their exclusive neutron multiplicity;
+//! outgoing spectra, residual products, thresholds and energy routing must be
+//! supplied separately to transport. These tables cannot be used as absorption.
+//! MT103–107 do not
 //! supply product identities/yields, charged-particle stopping, a total breeding
 //! tally, or signed endothermic energy exchange. Their Q values stay metadata.
 //! Format: ENDF-102 (2023), §§0.4.3.2, 0.5–0.6, 1.1 and 3.2–3.3,
@@ -509,6 +513,9 @@ fn convex(lower: f64, upper: f64, lower_weight: f64, upper_weight: f64) -> Resul
 
 fn reaction_mt(reaction: NeutronReaction) -> i32 {
     match reaction {
+        NeutronReaction::TwoNeutronProduction => 16,
+        NeutronReaction::ThreeNeutronProduction => 17,
+        NeutronReaction::FourNeutronProduction => 37,
         NeutronReaction::Fission => 18,
         NeutronReaction::Capture => 102,
         NeutronReaction::ProtonProduction => 103,

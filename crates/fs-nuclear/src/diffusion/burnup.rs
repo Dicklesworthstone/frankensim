@@ -20,7 +20,7 @@ use super::{
     DiffusionBudget, DiffusionError, DiffusionReactionKind, DiffusionState, DiffusionStep,
 };
 use crate::burnup::{BurnupBudget, BurnupError, BurnupInventory, BurnupRate, BurnupStep};
-use crate::{Accumulator, FissionError, nonnegative, positive};
+use crate::{Accumulator, FissionError, nonnegative, positive, sum};
 
 mod transport;
 pub use transport::DiffusionBurnupTransportStep;
@@ -245,10 +245,32 @@ impl DiffusionBurnupState {
                     DiffusionReactionKind::Capture,
                     BurnupRate::Capture { .. } | BurnupRate::TabulatedCapture { .. }
                 ) | (
+                    DiffusionReactionKind::NeutronProduction { .. },
+                    BurnupRate::NeutronProduction { .. }
+                        | BurnupRate::TabulatedNeutronProduction { .. }
+                ) | (
                     DiffusionReactionKind::Fission { .. },
                     BurnupRate::Fission { .. } | BurnupRate::TabulatedFission { .. }
                 )
             );
+            if let (
+                DiffusionReactionKind::NeutronProduction { neutron_yields },
+                BurnupRate::TabulatedNeutronProduction { cross_sections },
+            ) = (&neutron.kind, &nuclear.rate)
+            {
+                let expected = cross_sections
+                    .reaction()
+                    .emitted_neutrons_per_event()
+                    .ok_or(DiffusionBurnupError::Invalid(
+                        "neutron-production table must retain a supported multiplicity identity",
+                    ))?;
+                let expected = f64::from(expected);
+                if (sum(neutron_yields) - expected).abs() > 64.0 * f64::EPSILON * expected {
+                    return Err(DiffusionBurnupError::Invalid(
+                        "authored outgoing yields disagree with the neutron-production table identity",
+                    ));
+                }
+            }
             if !same_kind
                 || !used.insert(binding.diffusion_reaction)
                 || !coverage.insert((
@@ -258,7 +280,7 @@ impl DiffusionBurnupState {
                 ))
             {
                 return Err(DiffusionBurnupError::Invalid(
-                    "distinct matching fission/capture channel bindings required",
+                    "distinct matching fission, capture or nonfission neutron-production bindings required",
                 ));
             }
         }
@@ -364,11 +386,13 @@ impl DiffusionBurnupState {
             let nuclear = &inventories[neutron.cell].model().reactions()[binding.burnup_reaction];
             let sigma = match &nuclear.rate {
                 BurnupRate::Fission { cross_sections_m2 }
-                | BurnupRate::Capture { cross_sections_m2 } => {
+                | BurnupRate::Capture { cross_sections_m2 }
+                | BurnupRate::NeutronProduction { cross_sections_m2 } => {
                     cross_sections_m2[neutron.incident_group]
                 }
                 BurnupRate::TabulatedFission { cross_sections }
-                | BurnupRate::TabulatedCapture { cross_sections } => cross_sections
+                | BurnupRate::TabulatedCapture { cross_sections }
+                | BurnupRate::TabulatedNeutronProduction { cross_sections } => cross_sections
                     .cross_section_at_group(temperatures_k[neutron.cell], neutron.incident_group)?,
                 BurnupRate::Decay { .. } => {
                     return Err(DiffusionBurnupError::Invalid(

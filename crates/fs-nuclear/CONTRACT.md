@@ -1,5 +1,73 @@
 # fs-nuclear contract
 
+## Nonfission secondary neutrons, signed prompt Q and finite targets
+
+`DiffusionReactionKind::NeutronProduction` consumes one incident neutron and
+emits an explicit expected multiplicity in each outgoing group. The original
+positive reaction propagator advances those secondary particles and their
+same-interval reactions; no fission identity, extra branch probability or
+normalized spectrum is substituted. `neutron_producing_reactions` counts the
+events and `secondary_neutrons` counts all emitted neutrons, including the
+outgoing neutron in a one-neutron inelastic channel. Fissions, captures and
+prompt fission neutrons retain their separate meanings.
+
+`BurnupRate::NeutronProduction` and `TabulatedNeutronProduction` remove a
+finite parent on the same original depletion operator. Supplied residual and
+charged-product yields remain explicit. The processed ENDF importer retains
+distinct MT16, MT17 and MT37 identities for (n,2n), (n,3n) and (n,4n); these
+tables cannot enter the absorption/irradiation constructors. Spatial binding
+requires a production reaction on both sides and checks that the authored
+outgoing neutron yields sum to the table's declared 2/3/4 multiplicity. It
+never fills a spectrum, infers products or turns those events into captures.
+Fixed background targets remain possible through unbound diffusion reactions.
+
+`NeutronKineticModel::new_with_reaction_energies` admits an explicit signed
+prompt Q and laboratory threshold per reaction. The event energy available
+for local heat and outgoing radiation is
+`E_incident + Q - sum(neutron_yield[g] * E_outgoing[g])`. The separately
+supplied local heat fraction partitions that available energy. Negative Q
+therefore consumes incident kinetic energy into nuclear rest mass; it is not
+negative material heat or an omitted energy loss. Signed Q is retained in
+per-cell, interval and lifetime accounts and enters the independent energy
+residual. The original constructor retains its zero-Q capture/downscatter
+admission and does not silently enable neutron production.
+
+An active reaction must satisfy its representative-energy threshold and have
+nonnegative available energy. Q and threshold are separate physical inputs:
+`-Q` alone does not supply recoil-dependent laboratory threshold kinematics.
+Zero-cross-section placeholders permit below-threshold groups, but active
+temperature/composition rebinding rechecks the original threshold and outgoing
+energy budget before publication. These checks require consistently collapsed
+source data; they do not resolve an intra-group threshold or emission spectrum.
+
+Finite activation uses the same accepted neutron/burnup history. A bound
+reaction with Q in the neutron energy model, and every neutron-producing
+reaction, must have zero prompt `BurnupReaction::energy_per_event`; competing
+prompt-energy ownership refuses. Subsequent product decays retain their own
+actual event energies. `nuclear_generated_energy_j` is the signed net of prompt
+neutron Q and inventory releases. `nuclear_released` remains the original
+inventory export, while neutron-associated exports already include prompt Q;
+adding Q again to material heat would double count it. The conservative
+neutron/material coupling-defect weight includes absolute signed Q.
+
+Accepted source histories, shutdown/restart and existing material-heat adapters
+retain these accounts. Adaptive source comparison includes each cell's signed
+prompt Q separately from combined heat, so compensating changes cannot hide
+temporal error. Cancellation, work/domain refusal and failed count/energy audits
+publish no partial physical state. The numerical kernels, dense node/work
+limits and original mean-flux/mean-target coupling approximation are unchanged.
+
+The event distinction follows [NNDC ENDF reaction definitions](https://www.nndc.bnl.gov/endf/help.html);
+the energy balance follows [OpenMC's energy-deposition methods](https://docs.openmc.org/en/stable/methods/energy_deposition.html).
+Focused manufactured tests cover triangular secondary-neutron kinetics with
+positive/negative Q, accepted fusion history and source-off release, finite
+Be-9 to two He-4 products against an independent nonlinear solution, material
+heating, wrong identities/multiplicities/thresholds and late cancellation.
+Cross sections, effective speeds, residual yields, Q, thresholds and deposition
+fractions remain authored. Angular transport, charged-particle stopping, fission
+energy transport, evaluated blanket validation and a total tritium breeding
+ratio are not supplied by this extension.
+
 ## Time-resolved fusion forcing across material cells
 
 `fusion_neutrons::history::FusionNeutronHistory` retains the original L1
@@ -74,10 +142,12 @@ continue. Complete distinct cell binding, shared accepted clock, original
 reference volumes, cancellation and atomic material/source publication remain
 mandatory. Only the local deposited channel becomes material heat.
 
-`NeutronKineticState` alone is a bounded nonmultiplying kinetic-energy model
-with fixed authored group data. It supplies no nuclear capture Q,
+The original zero-Q `NeutronKineticModel::new` is a bounded nonmultiplying
+kinetic-energy interpretation with fixed authored group data. Explicit
+nonfission production, signed Q and thresholds use the constructor described
+above; none is inferred. `NeutronKineticState` alone supplies no finite
 activation/depletion, changes of material mass/composition, temperature feedback
-to cross sections, upscatter, fission, delayed-neutron production or photon transport. Effective
+to cross sections, fission, delayed-neutron production or photon transport. Effective
 speeds/cross sections and representative energies must have compatible physical
 averaging. The original diffusion approximation does not resolve angular or
 near-void streaming; see the primary
@@ -102,7 +172,7 @@ blanket data; IF97 supplies the receiver's original caloric response.
 target depletion and radioactive products with incident neutron kinetic
 accounting. The original `DiffusionBurnupState` advances the neutron field and
 inventories once; kinetic accounting consumes that same accepted neutron report.
-Capture coefficients bound to the original inventories may evolve with target
+Reaction coefficients bound to the original inventories may evolve with target
 populations and authored temperature-dependent microscopic tables. Original
 group identity, effective speeds, geometry, reaction order, fixed backgrounds,
 face transfer and leakage remain unchanged.
@@ -1458,11 +1528,12 @@ invariant, and verify joint rollback on a final-temperature domain exit. The
 combined native nuclear lane passed 133 tests when this increment was prepared.
 These are manufactured verification problems, not evaluated-data validation.
 
-## Processed ENDF/PENDF fission and absorption data
+## Processed ENDF/PENDF fission, absorption and secondary-neutron data
 
 `endf::PointwiseCrossSection::parse` reads caller-supplied text and selects an
 explicit MAT, isotope/isomer, total-fission (MT18), radiative-capture (MT102),
-or charged-particle absorption (MT103–107) reaction and exact positive processed
+charged-particle absorption (MT103–107), or nonfission neutron production
+(MT16, MT17, MT37) reaction and exact positive processed
 temperature. MF1/MT451 supplies ENDF-6
 incident-neutron identity, library/version/release/revision and temperature;
 selected MF3 identity must agree. LRP=0 or 2 is required. LRP=1 MF3 resonance
@@ -1490,9 +1561,11 @@ The channel assignments follow the
 [NNDC ENDF reaction definitions](https://www.nndc.bnl.gov/endf/help.html)
 and ENDF-102 §0.4.3.2.
 
-All imported MF3 channels still require LR=0. Breakup, neutron multiplication,
-charged-particle stopping and signed endothermic energy exchange are outside
-this absorption model. MT105 identifies one triton-producing reaction; it does
+All imported MF3 channels still require LR=0; additional unrepresented breakup
+is refused. Nonfission neutron-production tables use their distinct rate and
+binding pathway described above. MF3 supplies no secondary spectrum, product
+yield, threshold closure or deposited-energy model. MT105 identifies one
+triton-producing reaction; it does
 not imply a total breeding ratio. G1/G3 tests use manufactured processed tables
 for all five channels, independent analytic depletion, and Li-6(n,t)He-4 with
 explicit tritium/helium products, neutron/charge/baryon accounting, source-off

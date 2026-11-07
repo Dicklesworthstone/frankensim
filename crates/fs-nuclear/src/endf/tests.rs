@@ -3,6 +3,7 @@
 use super::*;
 
 mod absorption;
+mod neutron_production;
 
 fn selection(temperature_k: f64, reaction: NeutronReaction) -> EndfSelection {
     EndfSelection {
@@ -538,6 +539,13 @@ fn imported_fission_and_capture_tables_drive_competing_burnup_events() {
                 | NeutronReaction::AlphaProduction => BurnupRate::TabulatedCapture {
                     cross_sections: table,
                 },
+                NeutronReaction::TwoNeutronProduction
+                | NeutronReaction::ThreeNeutronProduction
+                | NeutronReaction::FourNeutronProduction => {
+                    BurnupRate::TabulatedNeutronProduction {
+                        cross_sections: table,
+                    }
+                }
             },
             products: vec![BurnupProduct {
                 nuclide: product,

@@ -76,6 +76,12 @@ pub enum BurnupRate {
     Capture {
         cross_sections_m2: Vec<f64>,
     },
+    /// Nonfission parent removal with outgoing neutrons. These coefficients
+    /// evolve the finite target and explicit nuclide products under the supplied
+    /// flux; outgoing neutron group yields belong to the coupled transport owner.
+    NeutronProduction {
+        cross_sections_m2: Vec<f64>,
+    },
     /// An identified processed fission table, evaluated at the actual interval T.
     /// Partial-channel tables are required when different channels have distinct yields.
     TabulatedFission {
@@ -87,6 +93,12 @@ pub enum BurnupRate {
     /// are authored separately; no secondary neutrons or negative-Q exchange
     /// are supplied by this parent-removal law. `captures` counts all such events.
     TabulatedCapture {
+        cross_sections: Arc<CrossSectionTable>,
+    },
+    /// An exclusive processed (n,2n), (n,3n) or (n,4n) table. Its fixed emitted
+    /// multiplicity remains identified, but no neutron spectrum is inferred.
+    /// This channel is distinct from absorption and fission in every event account.
+    TabulatedNeutronProduction {
         cross_sections: Arc<CrossSectionTable>,
     },
 }
@@ -231,7 +243,8 @@ impl BurnupModel {
                     add(&mut branches[reaction.parent], *branch_fraction)?;
                 }
                 BurnupRate::Fission { cross_sections_m2 }
-                | BurnupRate::Capture { cross_sections_m2 } => {
+                | BurnupRate::Capture { cross_sections_m2 }
+                | BurnupRate::NeutronProduction { cross_sections_m2 } => {
                     if cross_sections_m2.len() != model.data.groups.len()
                         || !cross_sections_m2.iter().copied().all(nonnegative)
                     {
@@ -245,6 +258,22 @@ impl BurnupModel {
                 }
                 BurnupRate::TabulatedCapture { cross_sections } => {
                     model.admit_table(cross_sections, reaction.parent, NeutronReaction::Capture)?;
+                }
+                BurnupRate::TabulatedNeutronProduction { cross_sections } => {
+                    if cross_sections
+                        .reaction()
+                        .emitted_neutrons_per_event()
+                        .is_none()
+                    {
+                        return Err(BurnupError::Invalid(
+                            "neutron production requires an exclusive neutron-producing table",
+                        ));
+                    }
+                    model.admit_table(
+                        cross_sections,
+                        reaction.parent,
+                        cross_sections.reaction(),
+                    )?;
                 }
             }
             let mut products = BTreeSet::new();
@@ -401,7 +430,8 @@ impl BurnupModel {
                     *branch_fraction,
                 )?,
                 BurnupRate::Fission { cross_sections_m2 }
-                | BurnupRate::Capture { cross_sections_m2 } => {
+                | BurnupRate::Capture { cross_sections_m2 }
+                | BurnupRate::NeutronProduction { cross_sections_m2 } => {
                     let mut rate = Accumulator::new(0.0);
                     for (&cross_section, &flux) in cross_sections_m2.iter().zip(flux.values_m2_s())
                     {
@@ -411,12 +441,14 @@ impl BurnupModel {
                     checked(rate.value())?
                 }
                 BurnupRate::TabulatedFission { cross_sections }
-                | BurnupRate::TabulatedCapture { cross_sections } => cross_sections.rate_constant(
-                    flux,
-                    temperature_k,
-                    limits.max_neutron_groups,
-                    &mut checkpoint,
-                )?,
+                | BurnupRate::TabulatedCapture { cross_sections }
+                | BurnupRate::TabulatedNeutronProduction { cross_sections } => cross_sections
+                    .rate_constant(
+                        flux,
+                        temperature_k,
+                        limits.max_neutron_groups,
+                        &mut checkpoint,
+                    )?,
             };
             rates.push(rate);
         }
@@ -780,8 +812,8 @@ impl BurnupInventory {
         let n = self.populations.len();
         let mut incoming = vec![Accumulator::new(0.0); n];
         let mut outgoing = vec![Accumulator::new(0.0); n];
-        let mut counts = [Accumulator::new(0.0); 3];
-        let mut generated = [Accumulator::new(0.0); 3];
+        let mut counts = [Accumulator::new(0.0); 4];
+        let mut generated = [Accumulator::new(0.0); 4];
         let mut channels = [Accumulator::new(0.0); 3];
         let mut nuclei_error = Accumulator::new(input_roundoff_nuclei);
         let mut energy_error = Accumulator::new(0.0);
@@ -808,6 +840,8 @@ impl BurnupInventory {
                 BurnupRate::Fission { .. } | BurnupRate::TabulatedFission { .. } => 0,
                 BurnupRate::Capture { .. } | BurnupRate::TabulatedCapture { .. } => 1,
                 BurnupRate::Decay { .. } => 2,
+                BurnupRate::NeutronProduction { .. }
+                | BurnupRate::TabulatedNeutronProduction { .. } => 3,
             };
             let error = add(&mut counts[kind], count)?.abs();
             add(&mut nuclei_error, error)?;
@@ -904,10 +938,12 @@ impl BurnupInventory {
                 fissions: counts[0].value(),
                 captures: counts[1].value(),
                 decays: counts[2].value(),
+                neutron_producing_reactions: counts[3].value(),
                 released,
                 fission_energy_j: generated[0].value(),
                 capture_energy_j: generated[1].value(),
                 decay_energy_j: generated[2].value(),
+                neutron_production_energy_j: generated[3].value(),
                 generated_energy_j,
                 energy_residual_j,
                 energy_roundoff_j,
@@ -954,10 +990,17 @@ pub struct BurnupStep {
     pub fissions: f64,
     pub captures: f64,
     pub decays: f64,
+    /// Nonfission parent-removal events with outgoing neutrons, not the number
+    /// of emitted neutrons. Their explicit yields belong to neutron transport.
+    pub neutron_producing_reactions: f64,
     pub released: EnergyChannels,
     pub fission_energy_j: f64,
     pub capture_energy_j: f64,
     pub decay_energy_j: f64,
+    /// Separately authored energy released by neutron-producing events [J].
+    /// Signed prompt Q and incident/outgoing kinetic energy, when assigned to a
+    /// coupled neutron-energy owner, must be excluded from this channel.
+    pub neutron_production_energy_j: f64,
     /// Sum of energy released by actual events, not eventual energy of unreacted
     /// products. Product inventories, not an extra fit, own future decay heat.
     pub generated_energy_j: f64,

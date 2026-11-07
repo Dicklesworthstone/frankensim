@@ -3,15 +3,17 @@
 //! The original spatial burnup owner advances neutron populations, target
 //! depletion, activation products and their radioactive decay together. Kinetic
 //! accounting consumes that SAME accepted neutron step; there is no second
-//! neutron solve. Capture/downscatter kinetic losses and explicitly authored
-//! nuclear reaction/decay energy remain separate before their heat is combined.
+//! neutron solve. Neutron kinetic transfers, explicit signed prompt Q and
+//! separately authored inventory decay energy retain independent accounts.
 //!
 //! Every `BurnupReaction::energy_per_event` supplied here must exclude incident
-//! neutron kinetic energy. Capture entries also exclude subsequent product decay
-//! energy; the product's actual decay events release that energy later. No ENDF
+//! neutron kinetic energy. A reaction with Q in the neutron energy model must
+//! have zero prompt energy in burnup, as must every neutron-producing reaction;
+//! double ownership refuses. Capture entries also exclude subsequent product
+//! decay energy; the product's actual decay events release that energy later. No ENDF
 //! Q, product yield, charged-particle stopping or gamma deposition is inferred.
 //! Unbound neutron reactions remain explicitly fixed background interactions;
-//! their kinetic losses create no tracked activation or additional nuclear Q.
+//! their energy declaration creates no tracked activation or target depletion.
 //!
 //! The original spatial owner's interval-mean neutron flux and target population
 //! approximation remains in force. Reaction-count convergence does not resolve
@@ -49,7 +51,7 @@ pub struct FusionNeutronActivationState {
     // shared model and arrays are exactly the accepted spatial checkpoint.
     kinetic: NeutronKineticState,
     bound_reactions: Arc<[bool]>,
-    maximum_capture_energy_j: Arc<[f64]>,
+    maximum_reaction_energy_j: Arc<[f64]>,
     nuclear_released: Vec<[Accumulator; 3]>,
     released: Vec<[Accumulator; 3]>,
 }
@@ -59,21 +61,23 @@ pub struct FusionNeutronActivationState {
 pub struct FusionNeutronActivationStep {
     /// Original finite-target/product report, including reaction-count defects.
     pub spatial: DiffusionBurnupStep,
-    /// Incident kinetic-energy accounting of exactly `spatial.neutrons`.
+    /// Incident/outgoing kinetic energy and signed prompt Q of exactly
+    /// `spatial.neutrons`.
     /// Its neutron report is a retained copy, not another neutron solve.
     pub kinetic: NeutronKineticStep,
-    /// Sum of the original per-cell burnup energy channels [J]. Includes only
-    /// actual authored capture and decay events, excluding incident kinetic energy.
+    /// Sum of the original per-cell burnup energy channels [J]. Excludes both
+    /// incident kinetic energy and prompt Q already owned by `kinetic`.
     pub nuclear_released: EnergyChannels,
-    /// Sum of actual nuclear-event energy generated in this interval [J]. Future
-    /// decay energy of products still present in the inventories is not included.
+    /// Net signed nuclear conversion: original inventory event releases plus
+    /// `kinetic.nuclear_reaction_energy_j` [J]. Endothermic reactions may make
+    /// this negative. Future product-decay energy is not included.
     pub nuclear_generated_energy_j: f64,
-    /// Kinetic plus nuclear exports in original diffusion-cell order [J].
+    /// Neutron-associated plus inventory exports in diffusion-cell order [J].
     pub cell_released: Vec<EnergyChannels>,
     /// Disjoint combined exports [J]. Only deposited_j is local material heat.
     pub released: EnergyChannels,
-    /// Conservative energy weighting of native capture-count inconsistencies:
-    /// each cell's count defect times its largest authored capture-event energy.
+    /// Conservative energy weighting of native neutron/material count defects:
+    /// each cell's defect times its largest absolute event-energy coefficient.
     pub reaction_energy_defect_j: f64,
     /// Final neutron energy - initial + all exports - injected kinetic energy
     /// - generated nuclear-event energy [J].
@@ -84,7 +88,7 @@ pub struct FusionNeutronActivationStep {
 
 impl FusionNeutronActivationState {
     /// Bind an existing finite-material checkpoint to its original energy model.
-    /// Only capture coefficients bound to the original burnup reactions may
+    /// Only reaction coefficients bound to the original burnup reactions may
     /// differ from the original diffusion model. Group identity, effective
     /// speeds, geometry, reaction order/kinds, fixed backgrounds, links and
     /// leakage must match exactly. No input history is reset or replayed.
@@ -110,8 +114,9 @@ impl FusionNeutronActivationState {
             spatial.neutrons().model(),
             &bound_reactions,
         )?;
+        model.admit_active_reactions(spatial.neutrons().model())?;
         let cells = spatial.inventories().len();
-        let maximum_capture_energy_j = spatial
+        let mut maximum_reaction_energy_j = spatial
             .inventories()
             .iter()
             .map(|inventory| {
@@ -119,28 +124,43 @@ impl FusionNeutronActivationState {
                     .model()
                     .reactions()
                     .iter()
-                    .filter(|reaction| {
-                        matches!(
-                            reaction.rate,
-                            BurnupRate::Capture { .. } | BurnupRate::TabulatedCapture { .. }
-                        )
-                    })
+                    .filter(|reaction| !matches!(reaction.rate, BurnupRate::Decay { .. }))
                     .map(|reaction| reaction.energy_per_event.total_j())
                     .fold(0.0_f64, f64::max)
             })
-            .collect::<Vec<_>>()
-            .into();
+            .collect::<Vec<_>>();
+        for binding in spatial.bindings() {
+            let neutron = &model.diffusion().reactions()[binding.diffusion_reaction];
+            let nuclear =
+                &spatial.inventories()[neutron.cell].model().reactions()[binding.burnup_reaction];
+            let q = model.reaction_energies()[binding.diffusion_reaction].nuclear_q_j;
+            let inventory_q = nuclear.energy_per_event.total_j();
+            if (q != 0.0
+                || matches!(
+                    neutron.kind,
+                    crate::diffusion::DiffusionReactionKind::NeutronProduction { .. }
+                ))
+                && inventory_q != 0.0
+            {
+                return Err(FusionNeutronActivationError::Invalid(
+                    "prompt Q in neutron production or the neutron energy model requires zero burnup event energy",
+                ));
+            }
+            maximum_reaction_energy_j[neutron.cell] =
+                maximum_reaction_energy_j[neutron.cell].max(checked(q.abs() + inventory_q)?);
+        }
         let kinetic = NeutronKineticState {
             model,
             neutrons: spatial.neutrons().clone(),
             released: vec![[Accumulator::new(0.0); 3]; cells],
+            nuclear_reaction_energy: vec![Accumulator::new(0.0); cells],
         };
         kinetic.kinetic_energy_j()?;
         Ok(Self {
             spatial,
             kinetic,
             bound_reactions: bound_reactions.into(),
-            maximum_capture_energy_j,
+            maximum_reaction_energy_j: maximum_reaction_energy_j.into(),
             nuclear_released: vec![[Accumulator::new(0.0); 3]; cells],
             released: vec![[Accumulator::new(0.0); 3]; cells],
         })
@@ -171,17 +191,23 @@ impl FusionNeutronActivationState {
         self.kinetic.kinetic_energy_j()
     }
 
-    /// Kinetic exports for one original cell since this adapter was bound.
+    /// Neutron-associated exports, including prompt Q, since binding.
     pub fn cell_kinetic_released(&self, cell: usize) -> Option<EnergyChannels> {
         self.kinetic.cell_released(cell)
     }
 
-    /// Nuclear-event exports for one original cell since this adapter was bound.
+    /// Original inventory-event exports for one cell since binding. Prompt Q
+    /// owned by the neutron model is already in the neutron-associated exports.
     pub fn cell_nuclear_released(&self, cell: usize) -> Option<EnergyChannels> {
         self.nuclear_released
             .get(cell)
             .copied()
             .map(crate::channel_values)
+    }
+
+    /// Separate signed prompt Q owned by the original neutron energy model.
+    pub fn cell_prompt_nuclear_energy_j(&self, cell: usize) -> Option<f64> {
+        self.kinetic.cell_nuclear_reaction_energy_j(cell)
     }
 
     /// Combined exports for one original cell since this adapter was bound.
@@ -202,7 +228,7 @@ impl FusionNeutronActivationState {
     /// coupled neutron/nuclide owner. There is no implicit target supply. Zero
     /// rates continue absorption and product decay after fusion switches off.
     /// Temperatures belong to the original inventory models and are frozen over
-    /// this interval, including evaluation of their processed capture tables.
+    /// this interval, including evaluation of their processed reaction tables.
     pub fn trial_with_rates(
         &self,
         duration_s: f64,
@@ -250,7 +276,7 @@ impl FusionNeutronActivationState {
             &mut checkpoint,
         )?;
         let mut defect = Accumulator::new(kinetic_step.energy_roundoff_j);
-        let mut generated = Accumulator::new(0.0);
+        let mut generated = Accumulator::new(kinetic_step.nuclear_reaction_energy_j);
         let mut reaction_defect = Accumulator::new(0.0);
         let mut nuclear_totals = [Accumulator::new(0.0); 3];
         let mut totals = [Accumulator::new(0.0); 3];
@@ -262,7 +288,7 @@ impl FusionNeutronActivationState {
             defect.add(nuclear.energy_roundoff_j)?;
             defect.add(generated.add(nuclear.generated_energy_j)?.abs())?;
             let count_defect = spatial_step.reaction_defect_by_cell[cell];
-            let event_energy = self.maximum_capture_energy_j[cell];
+            let event_energy = self.maximum_reaction_energy_j[cell];
             let coupling = checked(count_defect * event_energy)?;
             reaction_defect.add(coupling)?;
             defect.add(count_defect.mul_add(event_energy, -coupling).abs())?;
@@ -327,7 +353,7 @@ impl FusionNeutronActivationState {
                 spatial,
                 kinetic,
                 bound_reactions: Arc::clone(&self.bound_reactions),
-                maximum_capture_energy_j: Arc::clone(&self.maximum_capture_energy_j),
+                maximum_reaction_energy_j: Arc::clone(&self.maximum_reaction_energy_j),
                 nuclear_released,
                 released,
             },

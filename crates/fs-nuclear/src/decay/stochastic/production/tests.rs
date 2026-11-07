@@ -132,7 +132,7 @@ fn g1_stable_supply_has_poisson_counts_variance_and_independent_nuclides() {
         let report = state.advance_to(2.0, budget(), || Ok(())).unwrap();
         assert_eq!(report.produced_nuclei, state.inventory.populations());
         assert_eq!(report.produced_nuclei, state.cumulative_produced_nuclei());
-        assert_eq!(report.births, report.produced_nuclei.iter().sum());
+        assert_eq!(report.births, report.produced_nuclei.iter().sum::<u64>());
         assert_eq!(report.decay.events, 0);
         assert_eq!(report.decay.released, EnergyChannels::default());
         for ((sum, square), &count) in sums

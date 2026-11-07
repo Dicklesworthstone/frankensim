@@ -7,6 +7,7 @@ use crate::diffusion::{
 };
 use crate::fusion_neutrons::{
     FusionNeutronSource, NeutronKineticBudget, NeutronKineticModel, NeutronKineticState,
+    NeutronReactionEnergy,
 };
 use fs_qty::{Amount, Energy, Time};
 use fs_thermochem::fusion::neutrons::FusionNeutronEmissionV1;
@@ -149,6 +150,76 @@ fn one_cell(source_w: f64) -> DepositionSimulation<'static> {
         &[(MaterialId(1), &HOT)],
         vec![],
     )
+}
+
+#[test]
+fn g1_secondary_neutron_heat_uses_available_energy_after_endothermic_q() {
+    let mut data = capture_state().model().diffusion().data().clone();
+    data.groups = Arc::new(
+        NeutronGroups::new(
+            "manufactured-secondary-material-grid".into(),
+            vec![0.0, 2.0, 8.0],
+        )
+        .unwrap(),
+    );
+    data.speeds_m_s = vec![1.0; 2];
+    data.reactions[0].incident_group = 1;
+    data.reactions[0].kind = DiffusionReactionKind::NeutronProduction {
+        neutron_yields: vec![2.0, 0.0],
+    };
+    let model = Arc::new(
+        NeutronKineticModel::new_with_reaction_energies(
+            "manufactured-secondary-material-energy".into(),
+            Arc::new(DiffusionModel::new(data, DiffusionLimits::default()).unwrap()),
+            vec![1.0, 4.0],
+            vec![0.75],
+            vec![NeutronReactionEnergy {
+                nuclear_q_j: -1.0,
+                threshold_j: 2.0,
+            }],
+        )
+        .unwrap(),
+    );
+    let state = Arc::new(NeutronKineticState::new(model, vec![0.0; 2]).unwrap());
+    let initial = one_cell(0.0);
+    let source = pulse(&state, 0.0, 0.5, 20.0);
+    let heating = bound(&initial, Arc::clone(&state), source);
+    let (warm, accepted, _) = heating
+        .advance_to(&initial, 1.0, controls(0.1), || Ok(()))
+        .unwrap();
+    let after = accepted.source(CellId(20)).unwrap().state();
+    let high_at_off = 40.0 / 0.7 * -(-0.7_f64 * 0.5).exp_m1();
+    let high = high_at_off * (-0.7_f64 * 0.5).exp();
+    let events = 20.0 - high;
+    // E_in=4, two outgoing E=1 neutrons, Q=-1: only 1 J/event
+    // remains for charged recoil/radiation, of which 75% is local heat.
+    close(after.neutrons().neutron_counts()[1], high, 1e-9);
+    close(after.neutrons().neutron_counts()[0], 2.0 * events, 1e-9);
+    close(
+        after.cell_nuclear_reaction_energy_j(0).unwrap(),
+        -events,
+        1e-9,
+    );
+    close(warm.energy_j() - initial.energy_j(), 0.75 * events, 1e-8);
+    close(
+        warm.temperature_k(CellId(20)).unwrap(),
+        300.0 + 0.75 * events / 8.0,
+        1e-9,
+    );
+    let released = accepted.cumulative_released().unwrap();
+    close(released.radiation_j, 0.25 * events, 1e-9);
+    close(
+        after.kinetic_energy_j().unwrap() + released.total_j(),
+        80.0 - events,
+        1e-8,
+    );
+    assert_eq!(accepted.audit().captures, 0.0);
+    assert_eq!(accepted.audit().fissions, 0.0);
+    let last = accepted.last_step(CellId(20)).unwrap().spatial();
+    assert!(last.diffusion.neutron_producing_reactions > 0.0);
+    assert_eq!(last.diffusion.injected_neutrons, 0.0);
+    assert!(last.nuclear_reaction_energy_j < 0.0);
+    assert_eq!(initial.time_s(), 0.0);
 }
 fn two_cells() -> DepositionSimulation<'static> {
     thermal(
