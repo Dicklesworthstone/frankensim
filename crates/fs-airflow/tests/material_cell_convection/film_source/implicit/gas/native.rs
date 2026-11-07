@@ -279,3 +279,15 @@ fn original_thermochemical_calorics_drive_the_same_implicit_wall_and_bath_accoun
     assert!(variable_temperature > 300.0);
     assert_eq!(variable_cp.reference(), &saved);
 }
+
+#[test]
+fn original_pressure_temperature_surfaces_drive_native_wall_storage_and_bath_accounts() {
+    let low = super::surface::law(65536.0, false);
+    let high = super::surface::law(131072.0, false);
+    let saved = high.reference().clone();
+    let low_temperature = advance(&low);
+    let high_temperature = advance(&high);
+    assert!(high_temperature < low_temperature - 1e-4);
+    assert!(high_temperature > 300.0);
+    assert_eq!(high.reference(), &saved);
+}

@@ -971,7 +971,11 @@ Analytic source tangents come from the original native Sutherland, USSA/Eucken,
 named Wilke/WMS and supported thermochemical gas models, including actual
 NASA heat-capacity slopes and composition-dependent mixing denominator
 derivatives. The thermochemical path differentiates its selected original
-transport claims; unsupported derivative forms and genuine source kinks refuse.
+transport claims, including original temperature/pressure surfaces at fixed
+pressure. Active film/wall adapters retain prepared source geometry once;
+pressure edges and inward thermal endpoints keep their supported derivatives.
+Actual trial queries preserve original source selection and validity, while
+unsupported derivative forms, holes and genuine source kinks refuse.
 No source fits or production finite differences are introduced. Bulk-held
 circular developing laws retain exactly zero wall-property derivatives and do
 not require an active transport tangent. Each bulk,

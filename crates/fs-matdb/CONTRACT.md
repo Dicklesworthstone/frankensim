@@ -43,6 +43,18 @@ and unsupported wedges remain boundaries. This query neither extends source
 support nor changes the one-sided contract of `evaluate`; complete physical
 applicability and source selection still belong to the consumer.
 
+`PreparedSurfaceResponse::inward_axis_derivative` admits the derivative along
+one held-context source slice, including its original inward endpoints. The
+caller supplies which negative/positive directions its claim validity permits;
+only actually supported directions contribute. Incident projected slopes must
+agree within 128 eps relative rounding tolerance, matching the gas curve
+derivative policy; the first contributing original cell supplies the result
+without averaging. Genuine corners, point-only intersections, isolated samples
+and holes refuse. This leaves `gradient_for_axes`' strict classical contract
+unchanged and does not certify two-sided or interval support. No displaced
+point queries or cells are introduced. Gas convection uses this seam at fixed
+source pressure, including pressure edges and thermal validity endpoints.
+
 `PreparedSurfaceResponse::sample_basis` returns at most three original sample
 indices and ordinate weights at the canonical exact sample or containing cell.
 It shares the value evaluator's robust barycentric weights, preserves source

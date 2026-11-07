@@ -5108,12 +5108,27 @@ replacement transport fit or experimental accuracy claim is introduced.
 At a validity endpoint the tangent belongs only to the admitted branch.
 Thermochemical Cp derivatives come from the original NASA-9 region owner,
 weighted by the retained mole fractions and converted with the same mixture
-molar mass. Pure transport tangents differentiate the actual selected constant
-or linear-temperature claims; constants require explicit nonzero thermal
+molar mass. Pure transport tangents differentiate the actual selected constant,
+linear-temperature or triangulated temperature/pressure claims; constants require explicit nonzero thermal
 validity. Source-domain endpoints use their inward derivatives. Interior curve
 corners and NASA-9 Cp jumps/corners refuse unless adjacent values/slopes agree
 to rounding tolerance. Tabulated-only points and unsupported source forms
 retain their value admission without gaining derivative support.
+
+Original `Surface2D` transport holds pressure exactly fixed and accepts either
+source axis order. The source owner's exact cell predicates admit the local
+thermal slice and its inward endpoints, including pressure-boundary states;
+claim validity clips the permitted directions. All contributing thermal slopes
+must agree to relative rounding tolerance. Genuine corners, holes and isolated
+samples refuse without promoting value-only or tabulated data. Neither a
+pressure derivative nor an unowned changing coordinate is inferred.
+`IsobaricGasLaw::prepare_transport_temperature_tangent` returns a borrowed
+`PreparedIsobaricGasTransport` retaining the actual selected surface geometry
+and gradients for repeated evaluations. Each value still comes from the same
+complete gas/source query, and the selected claim identity is checked against
+the retained preparation. Scalar/curve and engineering paths need no cache
+allocation. The convenience tangent API prepares surfaces on demand; iterative
+consumers retain the view to avoid repeated geometry validation and copying.
 
 The already evaluated native Wilke mixture supplies its analytic viscosity and
 interaction-denominator derivatives. WMS conductivity differentiates its own

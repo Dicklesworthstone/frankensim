@@ -1,7 +1,9 @@
 //! Original isobaric gas properties on a native conducting exterior surface.
 
 use super::*;
-use fs_material::gas_species::input::temperature::IsobaricGasLaw;
+use fs_material::gas_species::input::temperature::{
+    IsobaricGasLaw, IsobaricGasTransportTangent, PreparedIsobaricGasTransport,
+};
 
 /// Gas convection on `IntegratedCaloricGrayBoundary`, including the actual
 /// temperature drop across the body's original half-cell/coating resistance.
@@ -17,6 +19,8 @@ use fs_material::gas_species::input::temperature::IsobaricGasLaw;
 /// sources supply analytic transport tangents. Thermochemical NASA calorics,
 /// selected transport claims and Wilke/WMS denominator derivatives stay with
 /// their source owners; unsupported derivatives and genuine source kinks refuse.
+/// Original temperature/pressure surfaces prepare their cell geometry once and
+/// retain fixed-pressure, inward thermal tangents at admitted source endpoints.
 /// Bulk-held laws without a wall-viscosity correction retain exactly zero
 /// wall-property derivatives and need no active transport tangent.
 ///
@@ -29,6 +33,7 @@ pub struct ImplicitGasConvection<'a, 'g> {
     caloric: &'a dyn ThermalLaw,
     energy_bounds_j_kg: [f64; 2],
     gas: &'g IsobaricGasLaw,
+    transport: Option<PreparedIsobaricGasTransport<'g>>,
     settings: ExteriorConvectionSettings,
 }
 
@@ -45,20 +50,25 @@ impl<'a, 'g> ImplicitGasConvection<'a, 'g> {
         evaluator::admit(caloric, energy_bounds_j_kg, settings)?;
         let [lower, upper] = settings.fluid_temperature_bounds_k;
         gas.admit_caloric_interval(Temperature::new(lower), Temperature::new(upper))?;
-        if settings.property_temperature == ConvectionPropertyTemperature::FilmMean
+        let transport = if settings.property_temperature == ConvectionPropertyTemperature::FilmMean
             || settings.law.needs_surface_viscosity()
         {
             // Ask the original source for analytic derivatives, including at
             // the admitted interval endpoints. No secant or fitted transport
             // model stands in for an unavailable thermochemical tangent.
+            let transport = gas.prepare_transport_temperature_tangent()?;
             for temperature in [lower, upper] {
-                gas.transport_temperature_tangent(Temperature::new(temperature))?;
+                transport.evaluate(Temperature::new(temperature))?;
             }
-        }
+            Some(transport)
+        } else {
+            None
+        };
         Ok(Self {
             caloric,
             energy_bounds_j_kg,
             gas,
+            transport,
             settings,
         })
     }
@@ -88,6 +98,17 @@ impl<'a, 'g> ImplicitGasConvection<'a, 'g> {
         }
         Ok(())
     }
+
+    fn transport_tangent(
+        &self,
+        temperature: Temperature,
+    ) -> Result<IsobaricGasTransportTangent, ExteriorConvectionError> {
+        Ok(if let Some(prepared) = &self.transport {
+            prepared.evaluate(temperature)?
+        } else {
+            self.gas.transport_temperature_tangent(temperature)?
+        })
+    }
 }
 
 impl evaluator::ExteriorFluid for ImplicitGasConvection<'_, '_> {
@@ -109,7 +130,7 @@ impl evaluator::ExteriorFluid for ImplicitGasConvection<'_, '_> {
         self.admit_temperature(temperature)?;
         let temperature = Temperature::new(temperature);
         if derivatives {
-            let sample = self.gas.transport_temperature_tangent(temperature)?;
+            let sample = self.transport_tangent(temperature)?;
             Ok(TransportSample {
                 state: sample.gas.transport_state()?,
                 derivatives: [
@@ -132,9 +153,7 @@ impl evaluator::ExteriorFluid for ImplicitGasConvection<'_, '_> {
         temperature: f64,
     ) -> Result<(f64, f64, bool), ExteriorConvectionError> {
         self.admit_temperature(temperature)?;
-        let sample = self
-            .gas
-            .transport_temperature_tangent(Temperature::new(temperature))?;
+        let sample = self.transport_tangent(Temperature::new(temperature))?;
         let slope = sample.dynamic_viscosity_derivative_pa_s_k;
         Ok((sample.gas.state().dynamic_viscosity, slope, slope != 0.0))
     }

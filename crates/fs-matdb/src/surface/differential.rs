@@ -212,6 +212,52 @@ impl PreparedSurfaceResponse {
         }
         answer.ok_or_else(|| unsupported("surface point has no contributing derivative cell"))
     }
+
+    /// Derivative along one original coordinate, including an inward source
+    /// endpoint, with the other coordinate held exactly fixed.
+    ///
+    /// `allowed_directions` lists the negative and positive directions admitted
+    /// by the caller's original claim validity. Geometry may further restrict
+    /// either direction. At least one must have source-cell support, and every
+    /// incident cell traversed in an allowed direction must agree on the
+    /// projected derivative to 128 eps relative rounding tolerance. The first
+    /// contributing original cell supplies the result; no slope is averaged.
+    /// A genuine interior corner therefore refuses.
+    /// This does not certify a two-sided neighbourhood; use `gradient_for_axes`
+    /// for that requirement. No perturbed coordinate or missing cell is added.
+    pub fn inward_axis_derivative(
+        &self,
+        point: [f64; 2],
+        axis: usize,
+        allowed_directions: [bool; 2],
+    ) -> Result<f64, MatDbError> {
+        if axis >= 2 || !allowed_directions.iter().any(|&side| side) {
+            return Err(unsupported("surface derivative needs an admitted coordinate direction"));
+        }
+        self.evaluate(point)?;
+        let mut answer: Option<f64> = None;
+        for (&triangle, gradient) in self.triangles.iter().zip(&self.gradients) {
+            let positions = vertices(&self.samples, triangle);
+            if !contains(positions, point) {
+                continue;
+            }
+            let directions = slice_directions(positions, point, axis);
+            if !(0..2).any(|side| directions[side] && allowed_directions[side]) {
+                continue;
+            }
+            let derivative = gradient[axis];
+            if let Some(previous) = answer {
+                if (previous - derivative).abs()
+                    > 128.0 * f64::EPSILON * previous.abs().max(derivative.abs())
+                {
+                    return Err(unsupported("surface has unequal incident gradients in the varying coordinate"));
+                }
+            } else {
+                answer = Some(derivative);
+            }
+        }
+        answer.ok_or_else(|| unsupported("surface point has no inward fixed-coordinate support"))
+    }
 }
 
 fn on_edge(a: [f64; 2], b: [f64; 2], point: [f64; 2]) -> bool {

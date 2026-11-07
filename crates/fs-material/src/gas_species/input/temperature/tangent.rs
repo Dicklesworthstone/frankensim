@@ -5,7 +5,9 @@
 //! gas evaluator. NASA-9 source gases retain their actual selected transport
 //! claims and shared Wilke owner. This adds no source or accuracy authority.
 
+mod prepared;
 mod thermochemical;
+pub use prepared::PreparedIsobaricGasTransport;
 
 use super::{GasRecord, GasSpec, GasState, IsobaricGasLaw, MaterialError, Source, Temperature};
 use crate::fluid_transport::FluidTransport;
@@ -42,15 +44,26 @@ impl IsobaricGasLaw {
     /// most six species; it does not clone/query a material database.
     ///
     /// Thermochemical gases differentiate original NASA-9 Cp and selected
-    /// constant or linear-temperature transport claims. Their original Wilke
+    /// constant, linear-temperature or triangulated temperature/pressure
+    /// transport claims. Their original Wilke
     /// evaluation supplies viscosity and WMS denominator derivatives. No source
     /// is reselected, numerically perturbed or replaced by an engineering fit.
     /// At a domain endpoint this is the inward derivative; interior source
     /// jumps/corners and discrete-only transport refuse. Unsupported derivative
     /// forms do not change value-only [`Self::at_temperature`] admission.
+    /// For repeated surface queries, [`Self::prepare_transport_temperature_tangent`]
+    /// retains the original geometry instead of preparing it at every call.
     pub fn transport_temperature_tangent(
         &self,
         temperature: Temperature,
+    ) -> Result<IsobaricGasTransportTangent, MaterialError> {
+        self.transport_temperature_tangent_with(temperature, None)
+    }
+
+    fn transport_temperature_tangent_with(
+        &self,
+        temperature: Temperature,
+        prepared: Option<&thermochemical::PreparedTransport>,
     ) -> Result<IsobaricGasTransportTangent, MaterialError> {
         let gas = self.at_temperature(temperature)?;
         gas.transport_state()?;
@@ -101,7 +114,7 @@ impl IsobaricGasLaw {
                         "thermochemical derivative lost its original snapshot",
                     ));
                 };
-                thermochemical::derivatives(model, snapshot)?
+                thermochemical::derivatives(model, snapshot, prepared)?
             }
         };
         let density = -gas.state().density / t;

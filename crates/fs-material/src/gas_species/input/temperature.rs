@@ -7,7 +7,7 @@
 //! unspecified reservoir. Every endpoint retains the original phase admission.
 
 mod tangent;
-pub use tangent::IsobaricGasTransportTangent;
+pub use tangent::{IsobaricGasTransportTangent, PreparedIsobaricGasTransport};
 
 use super::{GasInputError, GasRecord};
 use crate::MaterialError;

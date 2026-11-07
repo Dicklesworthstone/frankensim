@@ -14,6 +14,8 @@ use fs_thermochem::{
     Composition, CompositionBasis, SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R,
 };
 
+mod surface;
+
 fn curve(knots: &[(f64, f64)], dims: Dims) -> PropertyValue {
     PropertyValue::Curve {
         abscissa: "temperature".into(),
