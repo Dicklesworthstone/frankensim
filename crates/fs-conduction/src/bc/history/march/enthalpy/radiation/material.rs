@@ -43,6 +43,88 @@ pub struct MaterialRadiationRegionHistory<'a> {
     pub ambient_temperature: TimeSignal,
 }
 
+/// Original pinned material traces and their independent black reservoirs.
+/// Shared by the native BE and SDIRK histories; no spatial/radiation law is copied.
+pub(crate) struct MaterialAmbientHistoryBinding<'c> {
+    patches: Vec<MaterialRadiationRegionHistory<'c>>,
+    reference_emissivities: Vec<SurfaceEmissivity>,
+}
+
+impl<'c> MaterialAmbientHistoryBinding<'c> {
+    pub(crate) fn new(
+        cx: &Cx<'_>, run: &EnthalpyHistoryRun<'_, '_, 'c>,
+        patches: Vec<MaterialRadiationRegionHistory<'c>>,
+    ) -> Result<Self, HeterogeneousEnthalpyError> {
+        poll(cx, 0).map_err(conduction)?;
+        if run.accepted_steps() != 0 {
+            return Err(invalid("material radiation must be attached before the first enthalpy step"));
+        }
+        let mut reference_emissivities = Vec::with_capacity(patches.len());
+        for (index, patch) in patches.iter().enumerate() {
+            poll(cx, index).map_err(conduction)?;
+            let (emissivity, _) = SurfaceEmissivity::from_condition(
+                &patch.region, patch.material, patch.selection.clone(),
+            ).map_err(conduction)?;
+            reference_emissivities.push(emissivity);
+        }
+        let prepared = Self { patches, reference_emissivities };
+        let boundary = run.problem.boundary.at(cx, run.time_s())
+            .map_err(conduction)?;
+        let patches = prepared.sample(cx, run.time_s(), false).map_err(conduction)?;
+        let radiation = MaterialPointwiseAmbientRadiation::new(
+            cx, run.problem.boundary.mesh(), &boundary, &patches,
+        ).map_err(conduction)?;
+        if !radiation.matches_curves(cx, |vertex| run.storage.phase_curve_at(vertex)
+            .expect("admitted history vertex has an original caloric chart"))
+            .map_err(conduction)?
+        {
+            return Err(invalid("material radiation history requires the exact storage caloric objects"));
+        }
+        radiation.load_and_report(cx, &run.specific_h, &run.temperature)
+            .map_err(conduction)?;
+        poll(cx, prepared.patches.len()).map_err(conduction)?;
+        Ok(prepared)
+    }
+
+    pub(crate) fn patches(&self) -> &[MaterialRadiationRegionHistory<'c>] {
+        &self.patches
+    }
+
+    pub(crate) fn sample(&self, cx: &Cx<'_>, time_s: f64, before: bool)
+        -> Result<Vec<MaterialAmbientRadiationPatch<'_>>, ConductionError>
+    {
+        let mut sampled = Vec::with_capacity(self.patches.len());
+        for (index, (patch, reference)) in self.patches.iter()
+            .zip(&self.reference_emissivities).enumerate()
+        {
+            poll(cx, index)?;
+            let value = if before {
+                events::value_before(&patch.ambient_temperature, time_s)?
+            } else {
+                patch.ambient_temperature.eval(time_s).map_err(|error|
+                    ConductionError::Radiation { surface: patch.region.clone(),
+                        what: format!("radiative reservoir history: {error}"),
+                        fix: "supply a valid absolute-temperature history".into() })?
+            };
+            if value.dims != TEMPERATURE_DIMS {
+                return Err(ConductionError::Dimensions {
+                    context: format!("material radiative reservoir on {:?}", patch.region),
+                    expected: TEMPERATURE_DIMS.0, found: value.dims.0,
+                });
+            }
+            sampled.push(MaterialAmbientRadiationPatch {
+                region: &patch.region, ambient_temperature_k: value.value,
+                curve: patch.curve, material: patch.material,
+                selection: MaterialPropertySelection::PinnedByProperty(vec![(
+                    SURFACE_EMISSIVITY_PROPERTY.into(), reference.receipt().selected,
+                )]),
+            });
+        }
+        Ok(sampled)
+    }
+
+}
+
 /// Persistent h/T/f trajectory with material pointwise ambient radiation.
 ///
 /// The original material declarations and selected source claims remain attached
@@ -51,8 +133,7 @@ pub struct MaterialRadiationRegionHistory<'a> {
 /// heat. The reservoir has view factor one, with no enclosure or spectral model.
 pub struct MaterialRadiativeEnthalpyHistoryRun<'h, 'm, 'c> {
     run: EnthalpyHistoryRun<'h, 'm, 'c>,
-    patches: Vec<MaterialRadiationRegionHistory<'c>>,
-    reference_emissivities: Vec<SurfaceEmissivity>,
+    radiation: MaterialAmbientHistoryBinding<'c>,
 }
 
 impl<'h, 'm, 'c> MaterialRadiativeEnthalpyHistoryRun<'h, 'm, 'c> {
@@ -70,35 +151,16 @@ impl<'h, 'm, 'c> MaterialRadiativeEnthalpyHistoryRun<'h, 'm, 'c> {
         cx: &Cx<'_>, run: EnthalpyHistoryRun<'h, 'm, 'c>,
         patches: Vec<MaterialRadiationRegionHistory<'c>>,
     ) -> Result<Self, HeterogeneousEnthalpyError> {
-        poll(cx, 0).map_err(conduction)?;
-        if run.accepted_steps() != 0 {
-            return Err(invalid("material radiation must be attached before the first enthalpy step"));
-        }
-        let mut reference_emissivities = Vec::with_capacity(patches.len());
-        for (index, patch) in patches.iter().enumerate() {
-            poll(cx, index).map_err(conduction)?;
-            let (emissivity, _) = SurfaceEmissivity::from_condition(
-                &patch.region, patch.material, patch.selection.clone(),
-            ).map_err(conduction)?;
-            reference_emissivities.push(emissivity);
-        }
-        let prepared = Self { run, patches, reference_emissivities };
-        let boundary = prepared.run.problem.boundary.at(cx, prepared.run.time_s())
-            .map_err(conduction)?;
-        let patches = prepared.sample(cx, prepared.run.time_s(), false).map_err(conduction)?;
-        let radiation = MaterialPointwiseAmbientRadiation::new(
-            cx, prepared.run.problem.boundary.mesh(), &boundary, &patches,
-        ).map_err(conduction)?;
-        if !radiation.matches_curves(cx, |vertex| prepared.run.storage.phase_curve_at(vertex)
-            .expect("admitted history vertex has an original caloric chart"))
-            .map_err(conduction)?
-        {
-            return Err(invalid("material radiation history requires the exact storage caloric objects"));
-        }
-        radiation.load_and_report(cx, &prepared.run.specific_h, &prepared.run.temperature)
-            .map_err(conduction)?;
-        poll(cx, prepared.patches.len()).map_err(conduction)?;
-        Ok(prepared)
+        let radiation = MaterialAmbientHistoryBinding::new(cx, &run, patches)?;
+        Ok(Self { run, radiation })
+    }
+
+    /// Continue with native second-order stages while retaining the original
+    /// pinned emissivity sources, independent baths, h/T/f, clock and budget.
+    /// This may consume an already advanced BE trajectory without resetting it.
+    #[must_use]
+    pub fn into_sdirk2(self) -> super::super::sdirk::Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'c> {
+        super::super::sdirk::Sdirk2EnthalpyHistoryRun::from_material_ambient(self.run, self.radiation)
     }
 
     /// Accepted enthalpy, temperature, liquid fractions, material state and time.
@@ -107,13 +169,13 @@ impl<'h, 'm, 'c> MaterialRadiativeEnthalpyHistoryRun<'h, 'm, 'c> {
 
     /// Original immutable material bindings, selections and reservoir schedules.
     #[must_use]
-    pub fn patches(&self) -> &[MaterialRadiationRegionHistory<'c>] { &self.patches }
+    pub fn patches(&self) -> &[MaterialRadiationRegionHistory<'c>] { &self.radiation.patches }
 
     /// Preparation-time answers and pinned claims, in patch order. Actual nodal
     /// emissivities remain in each accepted step's pointwise radiation report.
     #[must_use]
     pub fn reference_emissivities(&self) -> &[SurfaceEmissivity] {
-        &self.reference_emissivities
+        &self.radiation.reference_emissivities
     }
 
     /// Extend the lifetime endpoint allowance without dropping material sources.
@@ -159,7 +221,7 @@ impl<'h, 'm, 'c> MaterialRadiativeEnthalpyHistoryRun<'h, 'm, 'c> {
         }
         let start_time_s = self.run.time_s();
         let end_time_s = events::next_endpoint(cx, self.run.problem.boundary,
-            &self.run.problem.source, self.patches.iter().map(|p| &p.ambient_temperature),
+            &self.run.problem.source, self.radiation.patches.iter().map(|p| &p.ambient_temperature),
             start_time_s, target_s, max_step_s).map_err(conduction)?;
         let report = self.solve_before(cx, &self.run.specific_h, start_time_s, end_time_s, config)?;
         self.run.publish(cx, end_time_s, &report)?;
@@ -189,7 +251,7 @@ impl<'h, 'm, 'c> MaterialRadiativeEnthalpyHistoryRun<'h, 'm, 'c> {
         let cap = admit_proposal(cx, self.run.accepted_steps(), self.run.max_steps(),
             proposed_step_s, adaptive).map_err(conduction)?;
         let end = events::next_endpoint(cx, self.run.problem.boundary, &self.run.problem.source,
-            self.patches.iter().map(|p| &p.ambient_temperature), start, target_s, cap)
+            self.radiation.patches.iter().map(|p| &p.ambient_temperature), start, target_s, cap)
             .map_err(conduction)?;
         let selected = select_step(cx, start, end, adaptive, conduction, |middle, end| {
             let coarse = self.solve_before(cx, &self.run.specific_h, start, end, step)?;
@@ -201,39 +263,6 @@ impl<'h, 'm, 'c> MaterialRadiativeEnthalpyHistoryRun<'h, 'm, 'c> {
         self.run.publish(cx, selected.end_time_s, &selected.second_half)?;
         self.run.accepted_steps += 1; // The other reserved half step, without partial publication.
         Ok(selected)
-    }
-
-    fn sample(&self, cx: &Cx<'_>, time_s: f64, before: bool)
-        -> Result<Vec<MaterialAmbientRadiationPatch<'_>>, ConductionError>
-    {
-        let mut sampled = Vec::with_capacity(self.patches.len());
-        for (index, (patch, reference)) in self.patches.iter()
-            .zip(&self.reference_emissivities).enumerate()
-        {
-            poll(cx, index)?;
-            let value = if before {
-                events::value_before(&patch.ambient_temperature, time_s)?
-            } else {
-                patch.ambient_temperature.eval(time_s).map_err(|error|
-                    ConductionError::Radiation { surface: patch.region.clone(),
-                        what: format!("radiative reservoir history: {error}"),
-                        fix: "supply a valid absolute-temperature history".into() })?
-            };
-            if value.dims != TEMPERATURE_DIMS {
-                return Err(ConductionError::Dimensions {
-                    context: format!("material radiative reservoir on {:?}", patch.region),
-                    expected: TEMPERATURE_DIMS.0, found: value.dims.0,
-                });
-            }
-            sampled.push(MaterialAmbientRadiationPatch {
-                region: &patch.region, ambient_temperature_k: value.value,
-                curve: patch.curve, material: patch.material,
-                selection: MaterialPropertySelection::PinnedByProperty(vec![(
-                    SURFACE_EMISSIVITY_PROPERTY.into(), reference.receipt().selected,
-                )]),
-            });
-        }
-        Ok(sampled)
     }
 
     fn solve_before(&self, cx: &Cx<'_>, old: &[f64], from: f64, to: f64,
@@ -250,7 +279,7 @@ impl<'h, 'm, 'c> MaterialRadiativeEnthalpyHistoryRun<'h, 'm, 'c> {
         source: &ScalarField, dt_s: f64, time_s: f64, before: bool, config: EnthalpyStepConfig)
         -> Result<EnthalpyStepSolution, HeterogeneousEnthalpyError>
     {
-        let patches = self.sample(cx, time_s, before).map_err(conduction)?;
+        let patches = self.radiation.sample(cx, time_s, before).map_err(conduction)?;
         let mesh = self.run.problem.boundary.mesh();
         let radiation = MaterialPointwiseAmbientRadiation::new(cx, mesh, boundary, &patches)
             .map_err(conduction)?;

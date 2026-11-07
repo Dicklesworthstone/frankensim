@@ -1,6 +1,8 @@
 //! Independent two-body balance with latent contact and spatial gray reflection.
 #[path = "enclosure/sdirk.rs"]
 mod sdirk;
+#[path = "enclosure/ambient_sdirk.rs"]
+mod ambient_sdirk;
 use super::*;
 use fs_conduction::radiation::OpenDiffuseEnclosure;
 use fs_evidence::ValidityDomain;

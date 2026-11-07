@@ -1,4 +1,6 @@
 //! Closed-form latent endpoints distinguish scheduled source feedback from snapshots.
+#[path = "material/sdirk.rs"]
+mod sdirk;
 use super::*;
 use fs_conduction::bc::history::march::enthalpy::adaptive::PhaseErrorTolerance;
 use fs_conduction::bc::history::march::enthalpy::radiation::material::{

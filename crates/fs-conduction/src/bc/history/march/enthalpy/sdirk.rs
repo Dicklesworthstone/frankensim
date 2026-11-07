@@ -13,6 +13,7 @@ use super::adaptive::{
 };
 use crate::transient::enthalpy::entropy::EnthalpyEntropyBalance;
 use super::radiation::enclosure::MaterialEnclosureHistoryBinding;
+use super::radiation::material::{MaterialAmbientHistoryBinding, MaterialRadiationRegionHistory};
 use super::super::events::{self, HistoryEventStep,
     adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep, admit_proposal, select_step_with_recovery}};
 use crate::interface::temperature::TemperatureContacts;
@@ -21,28 +22,73 @@ use crate::transient::enthalpy::heterogeneous::EnthalpyRadiation;
 use crate::transient::enthalpy::sdirk::{
     EnthalpySdirk2Input, EnthalpySdirk2Stage, EnthalpySdirk2Step, SDIRK2_GAMMA,
 };
-use crate::{MaterialEnclosureRadiationPatch, MaterialPointwiseEnclosureRadiation};
+use crate::{MaterialEnclosureRadiationPatch, MaterialPointwiseAmbientRadiation,
+    MaterialPointwiseEnclosureRadiation};
 use fs_exec::Cx;
 use fs_scenario::signal::TimeSignal;
 
 /// Persistent SDIRK2 evolution of an already admitted physical history.
 ///
 /// Construct with `into_sdirk2` on an original `EnthalpyHistoryRun`, coupled
-/// Newton `ContactEnthalpyHistoryRun`, or `MaterialEnclosureEnthalpyHistoryRun`.
+/// Newton `ContactEnthalpyHistoryRun`, `MaterialRadiativeEnthalpyHistoryRun`,
+/// or `MaterialEnclosureEnthalpyHistoryRun`.
 /// Conversion preserves accepted fields, time, source declarations and budget.
 /// Only the stiffly accurate second stage is published. Internal stages do not
 /// consume accepted-step slots or appear as independently accepted timesteps.
 pub struct Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
     run: EnthalpyHistoryRun<'h, 'm, 'c>,
     contacts: Option<(TemperatureContacts<'m, 'i>, ContactEnthalpyNewtonConfig)>,
-    radiation: Option<MaterialEnclosureHistoryBinding<'h, 'c>>,
+    radiation: Option<MaterialRadiationHistory<'h, 'c>>,
+}
+
+enum MaterialRadiationHistory<'h, 'c> {
+    Ambient(MaterialAmbientHistoryBinding<'c>),
+    Enclosure(MaterialEnclosureHistoryBinding<'h, 'c>),
 }
 
 impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
     pub(super) fn from_parts(run: EnthalpyHistoryRun<'h, 'm, 'c>,
         contacts: Option<(TemperatureContacts<'m, 'i>, ContactEnthalpyNewtonConfig)>,
         radiation: Option<MaterialEnclosureHistoryBinding<'h, 'c>>) -> Self
-    { Self { run, contacts, radiation } }
+    { Self { run, contacts, radiation: radiation.map(MaterialRadiationHistory::Enclosure) } }
+
+    pub(super) fn from_material_ambient(
+        run: EnthalpyHistoryRun<'h, 'm, 'c>, radiation: MaterialAmbientHistoryBinding<'c>,
+    ) -> Self {
+        Self { run, contacts: None, radiation: Some(MaterialRadiationHistory::Ambient(radiation)) }
+    }
+
+    /// Attach independent material black reservoirs to an unadvanced original
+    /// history, including a retained native phase-aware contact history.
+    ///
+    /// Every stage evaluates emissivity from its own original h/T/f and samples
+    /// each bath at that stage's actual time. Bath knots join source/boundary
+    /// events. Radiation is counted once, separately from internal contact,
+    /// source heat and convection; existing Newton/energy/entropy gates apply.
+    ///
+    /// # Errors
+    /// Advanced history, another radiation owner, invalid source/bath/trace,
+    /// nonidentical caloric charts, or cancellation. No physical step is taken.
+    pub fn with_material_ambient(
+        mut self, cx: &Cx<'_>, patches: Vec<MaterialRadiationRegionHistory<'c>>,
+    ) -> Result<Self, HeterogeneousEnthalpyError> {
+        poll(cx, 0).map_err(conduction)?;
+        if self.radiation.is_some() {
+            return Err(invalid("SDIRK2 history requires exclusive ambient or enclosure radiation ownership"));
+        }
+        let radiation = MaterialAmbientHistoryBinding::new(cx, &self.run, patches)?;
+        self.radiation = Some(MaterialRadiationHistory::Ambient(radiation));
+        Ok(self)
+    }
+
+    /// Original material declarations and per-surface black-reservoir histories.
+    #[must_use]
+    pub fn material_ambient_patches(&self) -> Option<&[MaterialRadiationRegionHistory<'c>]> {
+        match &self.radiation {
+            Some(MaterialRadiationHistory::Ambient(binding)) => Some(binding.patches()),
+            _ => None,
+        }
+    }
 
     /// Read-only accepted physical state; it cannot advance without its sources.
     #[must_use]
@@ -57,13 +103,19 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
     /// Pinned material enclosure sources in their original surface order.
     #[must_use]
     pub fn material_enclosure_patches(&self) -> Option<&[MaterialEnclosureRadiationPatch<'c>]> {
-        self.radiation.as_ref().map(MaterialEnclosureHistoryBinding::patches)
+        match &self.radiation {
+            Some(MaterialRadiationHistory::Enclosure(binding)) => Some(binding.patches()),
+            _ => None,
+        }
     }
 
     /// Sole external black reservoir; absent for a closed or missing enclosure.
     #[must_use]
     pub fn material_enclosure_ambient_temperature(&self) -> Option<&TimeSignal> {
-        self.radiation.as_ref().and_then(MaterialEnclosureHistoryBinding::ambient_temperature)
+        match &self.radiation {
+            Some(MaterialRadiationHistory::Enclosure(binding)) => binding.ambient_temperature(),
+            _ => None,
+        }
     }
 
     /// Extend the original physical-interval budget without resetting history.
@@ -84,7 +136,7 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         Ok(solved)
     }
 
-    /// End at the next source, boundary or open-bath knot. The final stage uses
+    /// End at the next source, boundary or radiative-bath knot. The final stage uses
     /// the exact interval-end left limit, preserving short held heat pulses.
     pub fn advance_event_step(&mut self, cx: &Cx<'_>, target_s: f64,
         max_step_s: f64, config: EnthalpyStepConfig)
@@ -199,9 +251,11 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
     fn next_endpoint(&self, cx: &Cx<'_>, target: f64, cap: f64)
         -> Result<f64, HeterogeneousEnthalpyError>
     {
+        let reservoirs = self.material_enclosure_ambient_temperature().into_iter()
+            .chain(self.material_ambient_patches().into_iter().flatten()
+                .map(|patch| &patch.ambient_temperature));
         events::next_endpoint(cx, self.run.problem.boundary, &self.run.problem.source,
-            self.material_enclosure_ambient_temperature().into_iter(), self.run.time_s,
-            target, cap).map_err(conduction)
+            reservoirs, self.run.time_s, target, cap).map_err(conduction)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -254,7 +308,18 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         match &self.radiation {
             None => Ok(solve(
                 [inputs(EnthalpyRadiation::None), endpoint(EnthalpyRadiation::None)], dt)),
-            Some(binding) => {
+            Some(MaterialRadiationHistory::Ambient(binding)) => {
+                let first_patches = binding.sample(cx, stage_time, false).map_err(conduction)?;
+                let second_patches = binding.sample(cx, to, before).map_err(conduction)?;
+                let first = MaterialPointwiseAmbientRadiation::new(
+                    cx, history.mesh(), &first_boundary, &first_patches).map_err(conduction)?;
+                let second = MaterialPointwiseAmbientRadiation::new(
+                    cx, history.mesh(), &second_boundary, &second_patches).map_err(conduction)?;
+                Ok(solve(
+                    [inputs(EnthalpyRadiation::MaterialAmbient(&first)),
+                     endpoint(EnthalpyRadiation::MaterialAmbient(&second))], dt))
+            }
+            Some(MaterialRadiationHistory::Enclosure(binding)) => {
                 let first_base = binding.sample(cx, history.mesh(), &first_boundary, stage_time, false)?;
                 let second_base = binding.sample(cx, history.mesh(), &second_boundary, to, before)?;
                 let first = MaterialPointwiseEnclosureRadiation::new(cx, &first_base, binding.patches()).map_err(conduction)?;

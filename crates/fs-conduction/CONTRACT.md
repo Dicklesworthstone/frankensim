@@ -4888,16 +4888,16 @@ exact SDIRK stability function, valid real stages with an out-of-domain
 algebraic carry, enthalpy datum shifts, cancellation/refusal/replay, and changing
 prescribed baths with independently integrated source and reservoir heat.
 
-## Scheduled second-order enthalpy with contact and material reflection
+## Scheduled second-order enthalpy with contact and material radiation
 
 `into_sdirk2` converts an existing `EnthalpyHistoryRun`, Newton
-`ContactEnthalpyHistoryRun`, or `MaterialEnclosureEnthalpyHistoryRun` into
-`Sdirk2EnthalpyHistoryRun` without resetting its accepted h/T/f, clock, reference
+`ContactEnthalpyHistoryRun`, `MaterialRadiativeEnthalpyHistoryRun`, or
+`MaterialEnclosureEnthalpyHistoryRun` into `Sdirk2EnthalpyHistoryRun` without resetting its accepted h/T/f, clock, reference
 mass, source conductivity, pinned contact/emissivity claims or lifetime budget.
 Each interval samples the original boundary/source/bath schedules at both
 SDIRK2 tableau times. The original spatial stage kernel closes source k,
-phase-dependent contact and local material reflection at their actual stage
-states. Only the stiffly accurate endpoint publishes; stages are not separate
+phase-dependent contact and local material ambient emission or reflection
+at their actual stage states. Only the stiffly accurate endpoint publishes; stages are not separate
 accepted intervals and their carry is never a physical heat source.
 
 Direct advancement uses right-continuous stage samples. Event advancement
@@ -5579,3 +5579,33 @@ equilibrium/corner admission, native chain units and independent three-phase
 finite differences. They passed syntax and bounded arithmetic/API review;
 native compilation and execution remained unverified in the resource-exhausted
 implementation environment.
+
+## Scheduled material ambient radiation in native SDIRK2 enthalpy
+
+`MaterialRadiativeEnthalpyHistoryRun::into_sdirk2` retains the accepted h/T/f
+fields, physical clock, step budget, original chart objects, pinned emissivity
+claims and every independently scheduled black reservoir. An unadvanced native
+or material-contact SDIRK history may attach those same bindings through
+`with_material_ambient`. Ambient and reflected-enclosure radiation have
+exclusive ownership; attaching a second radiation owner refuses.
+
+Both stages sample each reservoir at its actual physical stage time. Original
+pointwise material emissivity and its enthalpy/phase feedback are evaluated by
+the existing radiation residual and tangent, including latent plateaus.
+Source, boundary and all bath knots share the existing event clipping; the
+event endpoint uses the original left-limit semantics. Only the stiffly accurate
+endpoint, or the admitted adaptive fine pair, becomes accepted history.
+
+Native contact, source and convection accounts remain distinct from radiation.
+The existing stage energy, physical Newton, source-domain, cancellation and
+adaptive h/T/phase gates are unchanged. Entropy uses the native stage-weighted
+material ambient radiation account and original-to-final caloric storage; no
+new photon, spectral or participating-medium model is inferred.
+
+Five focused regressions cover retained advanced history and source claims,
+independent bath event timing and entropy, ramp-driven adaptive phase rejection,
+second-stage/cancellation/identity refusals, and spatial material contact with
+independent radiating faces and baths. Their scalar and eight-coordinate
+references derive stage heat and entropy independently. All six Rust files
+passed the pinned parser; native compilation and test execution remained
+unavailable in this resource-exhausted session.
