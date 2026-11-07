@@ -664,6 +664,15 @@ Finite entropy must satisfy the endpoint Clausius bounds within the declared
 entropy, energy and roundoff allowance; external reservoir entropy remains a
 separate account. Source/branch/work failure and cancellation publish no endpoint.
 
+`equilibrium_at_temperature` exposes that same bounded branch continuation as
+a caloric query for native spatial heat storage. It retains the original feed,
+phase count, support, predictor, inner candidate controls and unregularized Cp.
+Its actual source H/S increments must agree with the temperature direction and
+satisfy the same finite Clausius bounds. Querying a temperature does not infer
+an external heat source, a globally stable Gibbs envelope or a latent interval.
+Material thermal consumers retain the original pure-source capacity minimum
+and analytic redistribution response rather than sampling another caloric law.
+
 ### Conserved mixing and relaxation into local liquid phase branches
 
 `solution::multicomponent::caloric::equilibrium::transactions` extends the SAME

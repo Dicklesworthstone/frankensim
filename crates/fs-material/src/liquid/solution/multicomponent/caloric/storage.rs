@@ -76,35 +76,12 @@ impl MulticomponentLiquidCaloricLaw<'_, '_> {
             .model()
             .enthalpy_change_j(cold.caloric_state(), hot.caloric_state())?
             / mass_kg;
-        let mut minimum_capacity = 0.0;
-        let [lower, upper] = controls.temperature_bracket.map(|t| t.value());
-        for ((&amount, source), pure) in component_moles
-            .iter()
-            .zip(self.sources())
-            .zip(self.model().heat_capacities())
-        {
-            poll(&mut cancelled)?;
-            if amount == 0.0 {
-                continue;
-            }
-            let mut minimum = f64::INFINITY;
-            for segment in source.source_line().knots.windows(2) {
-                if segment[1].0 < lower || segment[0].0 > upper {
-                    continue;
-                }
-                for (temperature, _) in segment {
-                    // Evaluate the original molar owner at its exact knots,
-                    // retaining its mass-to-molar rounding and source units.
-                    let cp = pure
-                        .heat_capacity_at(Temperature::new(*temperature))
-                        .map_err(super::MulticomponentCaloricErrorV1::from)?
-                        .value();
-                    minimum = minimum.min(cp);
-                }
-            }
-            let contribution = (amount * minimum).next_down().max(0.0);
-            minimum_capacity = (minimum_capacity + contribution).next_down();
-        }
+        let minimum_capacity = minimum_heat_capacity_j_per_k(
+            &self.owner,
+            component_moles,
+            controls.temperature_bracket,
+            &mut cancelled,
+        )?;
         let maximum_slope = (mass_kg / minimum_capacity).next_up();
         if !positive(span) || !positive(minimum_capacity) || !positive(maximum_slope) {
             return Err(MulticomponentLiquidCaloricError::Invalid(
@@ -127,6 +104,51 @@ impl MulticomponentLiquidCaloricLaw<'_, '_> {
             stream: None,
         })
     }
+}
+
+// The same original pure-source lower bound serves frozen and resolved
+// equilibrium storage. With the original A+B/T potential, equilibrium
+// redistribution adds nonnegative Cp on the admitted unshifted local branch.
+pub(super) fn minimum_heat_capacity_j_per_k(
+    owner: &SourceOwner,
+    component_moles: &[f64],
+    bracket: [Temperature; 2],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64> {
+    let mut minimum_capacity = 0.0;
+    let [lower, upper] = bracket.map(|t| t.value());
+    for ((&amount, source), pure) in component_moles
+        .iter()
+        .zip(&owner.sources)
+        .zip(owner.model.heat_capacities())
+    {
+        poll(cancelled)?;
+        if amount == 0.0 {
+            continue;
+        }
+        let mut minimum = f64::INFINITY;
+        for segment in source.source_line().knots.windows(2) {
+            if segment[1].0 < lower || segment[0].0 > upper {
+                continue;
+            }
+            for (temperature, _) in segment {
+                // Retain the original molar conversion at exact source knots.
+                let cp = pure
+                    .heat_capacity_at(Temperature::new(*temperature))
+                    .map_err(super::MulticomponentCaloricErrorV1::from)?
+                    .value();
+                minimum = minimum.min(cp);
+            }
+        }
+        let contribution = (amount * minimum).next_down().max(0.0);
+        minimum_capacity = (minimum_capacity + contribution).next_down();
+    }
+    if !positive(minimum_capacity) {
+        return Err(MulticomponentLiquidCaloricError::Invalid(
+            "unrepresentable original pure-source heat-capacity bound",
+        ));
+    }
+    Ok(minimum_capacity)
 }
 
 impl MulticomponentLiquidThermalStorage {

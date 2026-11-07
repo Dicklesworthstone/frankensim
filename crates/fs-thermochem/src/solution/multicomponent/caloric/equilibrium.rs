@@ -297,6 +297,65 @@ impl MulticomponentLiquidCaloricModelV1 {
         })
     }
 
+    /// Continue the original accepted phase branch to a prescribed temperature.
+    /// The same predictor, species conservation, unregularized response and
+    /// whole-call phase-solve budget used by finite heating remain in force.
+    /// Both temperatures must belong to the offered thermal bracket.
+    ///
+    /// This supplies a caloric query, not a prescribed heat transaction. The
+    /// actual H/S increments must satisfy the positive-Cp branch's endpoint
+    /// Clausius bounds. A disappearing phase or unresolved branch refuses;
+    /// discovery cannot silently replace the original branch.
+    pub fn equilibrium_at_temperature(
+        &self,
+        initial: &MulticomponentEquilibriumCaloricStateV1,
+        target: Temperature,
+        controls: MulticomponentEquilibriumCaloricSolveV1,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MulticomponentEquilibriumCaloricStateV1> {
+        poll(&mut cancelled)?;
+        self.admit_equilibrium_caloric(initial)?;
+        let [lo, hi] = self.admit_equilibrium_solve(0.0, controls)?;
+        if !target.value().is_finite()
+            || !(lo..=hi).contains(&target.value())
+            || !(lo..=hi).contains(&initial.temperature().value())
+        {
+            return Err(MulticomponentEquilibriumCaloricErrorV1::Invalid(
+                "branch query temperatures outside the offered thermal bracket",
+            ));
+        }
+        let admitted = self.equilibrium_caloric_state(
+            initial.candidate.clone(),
+            controls.response,
+            &mut cancelled,
+        )?;
+        let mut completed = 0;
+        let final_state = self.continue_equilibrium_temperature(
+            admitted,
+            target,
+            controls,
+            &mut completed,
+            &mut cancelled,
+        )?;
+        let heat = self.equilibrium_caloric_change(initial, &final_state, false, &mut cancelled)?;
+        let entropy =
+            self.equilibrium_caloric_change(initial, &final_state, true, &mut cancelled)?;
+        let delta_t = target.value() - initial.temperature().value();
+        if delta_t != 0.0
+            && (heat == 0.0
+                || heat.signum() != delta_t.signum()
+                || entropy == 0.0
+                || entropy.signum() != delta_t.signum())
+        {
+            return Err(MulticomponentEquilibriumCaloricErrorV1::Unrepresentable(
+                "temperature query does not resolve positive heat and entropy response",
+            ));
+        }
+        admit_clausius_change(initial, &final_state, heat, entropy, controls.thermal)?;
+        poll(&mut cancelled)?;
+        Ok(final_state)
+    }
+
     /// Add signed heat while continuing the original accepted phase count and
     /// support. Each local predictor preserves every species column, then the
     /// original equilibrium solver corrects it. Every corrected point requires
@@ -361,43 +420,13 @@ impl MulticomponentLiquidCaloricModelV1 {
                 "nonzero heat does not resolve the positive local temperature/entropy response",
             ));
         }
-        let endpoint_entropy = [
-            checked(
-                root.sample.change_j / initial.temperature().value(),
-                "initial Clausius bound",
-            )?,
-            checked(
-                root.sample.change_j / root.sample.state.temperature().value(),
-                "final Clausius bound",
-            )?,
-        ];
-        let bounds_j_per_k = [
-            endpoint_entropy[0].min(endpoint_entropy[1]),
-            endpoint_entropy[0].max(endpoint_entropy[1]),
-        ];
-        let scale = entropy_change_j_per_k
-            .abs()
-            .max(bounds_j_per_k[0].abs())
-            .max(bounds_j_per_k[1].abs());
-        let tolerance_j_per_k = checked(
-            thermal.entropy_tolerance_j_per_k
-                + thermal.energy_tolerance_j
-                    / initial
-                        .temperature()
-                        .value()
-                        .min(root.sample.state.temperature().value())
-                + (64.0 * f64::EPSILON) * scale,
-            "finite Clausius allowance",
+        admit_clausius_change(
+            initial,
+            &root.sample.state,
+            root.sample.change_j,
+            entropy_change_j_per_k,
+            thermal,
         )?;
-        if bounds_j_per_k[0] - entropy_change_j_per_k > tolerance_j_per_k
-            || entropy_change_j_per_k - bounds_j_per_k[1] > tolerance_j_per_k
-        {
-            return Err(MulticomponentEquilibriumCaloricErrorV1::ClausiusBounds {
-                entropy_change_j_per_k,
-                bounds_j_per_k,
-                tolerance_j_per_k,
-            });
-        }
         poll(&mut cancelled)?;
         Ok(MulticomponentEquilibriumCaloricBalanceV1 {
             final_state: root.sample.state,
@@ -692,6 +721,53 @@ impl MulticomponentLiquidCaloricModelV1 {
         poll(cancelled)?;
         Ok(state)
     }
+}
+
+fn admit_clausius_change(
+    initial: &MulticomponentEquilibriumCaloricStateV1,
+    final_state: &MulticomponentEquilibriumCaloricStateV1,
+    enthalpy_change_j: f64,
+    entropy_change_j_per_k: f64,
+    controls: MulticomponentCaloricSolveV1,
+) -> Result<()> {
+    let endpoint_entropy = [
+        checked(
+            enthalpy_change_j / initial.temperature().value(),
+            "initial Clausius bound",
+        )?,
+        checked(
+            enthalpy_change_j / final_state.temperature().value(),
+            "final Clausius bound",
+        )?,
+    ];
+    let bounds_j_per_k = [
+        endpoint_entropy[0].min(endpoint_entropy[1]),
+        endpoint_entropy[0].max(endpoint_entropy[1]),
+    ];
+    let scale = entropy_change_j_per_k
+        .abs()
+        .max(bounds_j_per_k[0].abs())
+        .max(bounds_j_per_k[1].abs());
+    let tolerance_j_per_k = checked(
+        controls.entropy_tolerance_j_per_k
+            + controls.energy_tolerance_j
+                / initial
+                    .temperature()
+                    .value()
+                    .min(final_state.temperature().value())
+            + (64.0 * f64::EPSILON) * scale,
+        "finite Clausius allowance",
+    )?;
+    if bounds_j_per_k[0] - entropy_change_j_per_k > tolerance_j_per_k
+        || entropy_change_j_per_k - bounds_j_per_k[1] > tolerance_j_per_k
+    {
+        return Err(MulticomponentEquilibriumCaloricErrorV1::ClausiusBounds {
+            entropy_change_j_per_k,
+            bounds_j_per_k,
+            tolerance_j_per_k,
+        });
+    }
+    Ok(())
 }
 
 fn predicted_seed(

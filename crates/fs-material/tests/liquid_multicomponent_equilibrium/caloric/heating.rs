@@ -6,6 +6,8 @@ use fs_thermochem::solution::multicomponent::caloric::equilibrium::Multicomponen
 
 #[path = "discovery.rs"]
 mod discovery;
+#[path = "storage.rs"]
+mod storage;
 #[path = "transactions.rs"]
 mod transactions;
 

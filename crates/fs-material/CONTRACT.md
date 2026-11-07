@@ -18411,6 +18411,39 @@ check actual composition-dependent material refresh and conserved mass, and
 reject a final phase leaving its original source chart, foreign caloric
 references and last-poll cancellation atomically.
 
+### Spatial heat transport with multicomponent liquid phase redistribution
+
+`MulticomponentLiquidCaloricLaw::equilibrium_thermal_storage` prepares one
+resolved local equilibrium branch on the existing native `ThermalLaw` owner.
+Total composition, pressure and reference geometry stay fixed while actual
+phase amounts and compositions respond to heat. The original pure Cp/CpT
+integrals, phase mixing storage, continuation and safeguarded enthalpy inverse
+retain the full redistribution heat capacity and entropy. No sampled chart or
+independent apparent Cp replaces those sources. Closed storage uses the cold
+endpoint as its enthalpy datum; numerical heat increments cancel original
+reference offsets before arithmetic. The original downward-rounded pure-Cp
+minimum bounds dT/dh on the admitted stable local branch.
+
+Both endpoint phase bundles resolve through their original material sources.
+Preparation uses two separately bounded continuations and later queries retain
+the original per-query phase-solve limit. The complete temperature interval
+must admit the same phase count and support; disappearing or singular phases
+refuse. This preserves the native continuous storage contract and does not
+promote finite phase discovery into a global Gibbs or branch-identity proof.
+Phase appearance and genuine first-order latent intervals need their own
+coexistence relation; they are not smoothed into this branch.
+
+`MulticomponentLiquidEquilibriumConductionLaw` binds this exact storage to an
+explicitly declared bulk `ConductivityCurve`. Individual phase conductivities
+do not determine morphology or interphase resistance and are never averaged
+implicitly. One caloric inverse supplies T and dT/dh=mass/Cp; dk/dh uses the
+same temperature and original conductivity derivative. All original knots and
+domain refusals remain. Native G1 integration compares a two-cell nonlinear
+heat exchange against independent common-tangent, enthalpy and entropy
+calculations while phase inventories redistribute across Cp/conductivity knots;
+it also checks the analytic tangent, conservation and cancellation. No
+phase-selective mass flow or separate interphase temperature is inferred.
+
 ### Source-bound conserved phase relaxation and mixing
 
 `MulticomponentLiquidCaloricLaw::relax_homogeneous` and `mix_equilibrium` extend

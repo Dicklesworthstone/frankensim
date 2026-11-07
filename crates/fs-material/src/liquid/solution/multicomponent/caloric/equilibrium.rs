@@ -9,6 +9,8 @@
 
 /// Original-source endpoints from bounded phase-count discovery.
 pub mod discovery;
+/// Original local phase redistribution on the native thermal timeline.
+pub mod storage;
 /// Original-source homogeneous relaxation and unequal-temperature phase mixing.
 pub mod transactions;
 
