@@ -45,6 +45,27 @@ flux and assembled Jacobians. Those native consumer tests were not executed in
 this change because the real asupersync dependency build was killed by the
 environment's memory limit.
 
+## Original caloric extrema in lumped radiative feedback
+
+The shared implicit-step bound for `solve_lumped_enthalpy` and prescribed
+spectral heating uses the original minimum Cp on each sensible interval to
+bound `dT/dh`. Affine source Cp retains its endpoint extrema even when the
+public caloric chart has only two boundaries. Their average h/T chord is not
+a bound on the inverse caloric derivative. Authored sensible laws keep their
+constant capacity, and sharp latent plateaus contribute zero temperature slope.
+
+The existing source-emissivity feedback bound, Biot admission, native enthalpy
+balance, step/work budgets and cancellation remain the owners. The bound
+requires one allocation-free pass over the original intervals; it adds no
+source sampling, capacity regularization or thermal solver. It is sufficient
+for the existing monotone implicit balance, not a temporal-accuracy certificate.
+The focused regression defines a variable-Cp three-root counterexample, checks
+the physically reachable equilibrium branch and exact storage/heat balance
+through native and spectral heating, compares coarse and subdivided charts,
+and compares time refinement with an independent temperature-coordinate ODE.
+The new regression is source/syntax checked but unexecuted in the current
+workspace; no native runtime or full-workspace verdict is claimed here.
+
 ## Source-surface contact with evolving material radiation
 
 `TemperatureContacts::advance_enthalpy_with_material_ambient_radiation` and

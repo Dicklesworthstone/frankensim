@@ -1846,6 +1846,158 @@ fn g1_spectral_heating_shares_feedback_admission_and_exact_source_energy() {
 }
 
 #[test]
+fn g1_original_cp_extrema_keep_native_and_spectral_heating_on_the_physical_branch() {
+    use fs_conduction::lumped::interference::enthalpy::{
+        LumpedEnthalpyPowerBinding, LumpedEnthalpySpectrumControls,
+        solve_lumped_enthalpy_spectrum_cancellable,
+    };
+    use fs_fft::harmonic_window::{
+        HarmonicProductInput, HarmonicProductLaw, HarmonicProductSpectrumLimits,
+        PreparedHarmonicProductSpectrum,
+    };
+    use fs_material::phase::HeatCapacityKnot;
+    use fs_math::dd::Dd;
+
+    let (original, transport) = radiative_feedback_fixture(&[
+        (300.0, 0.9), (320.0, 0.9), (330.0, 0.01), (1200.0, 0.01),
+    ]);
+    let knots = [
+        HeatCapacityKnot {
+            temperature_k: 300.0, specific_heat_capacity_j_kg_k: 1.0,
+            bulk_density_kg_m3: 1000.0,
+        },
+        HeatCapacityKnot {
+            temperature_k: 1200.0, specific_heat_capacity_j_kg_k: 901.0,
+            bulk_density_kg_m3: 1000.0,
+        },
+    ];
+    let exact = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity_exact(
+        original.material_card_identity(), SolidLiquidPhase::Solid, 0.0, &knots,
+    ).unwrap();
+    let subdivided = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+        original.material_card_identity(), SolidLiquidPhase::Solid, 0.0, &knots, 100.0,
+    ).unwrap();
+    assert_eq!(exact.knots().len(), 2);
+    assert!(subdivided.knots().len() > 2);
+
+    // Independently authored Cp(T)=1+(T-300) and h(T)=theta+theta^2/2.
+    // Their public two-boundary chord has Cp=451, concealing the actual minimum
+    // Cp=1. Using the chord admits the full 10 s step, whose balance has three
+    // roots. The high root is above an equilibrium the physical ODE cannot cross.
+    let h = |t: f64| { let theta = t - 300.0; theta + 0.5 * theta * theta };
+    let sigma = 5.670_374_419e-8;
+    let power = |t: f64| {
+        let epsilon = if t <= 320.0 { 0.9 } else if t < 330.0 {
+            0.9 - 0.089 * (t - 320.0)
+        } else { 0.01 };
+        100.0 - epsilon * sigma * (t.powi(4) - 300.0_f64.powi(4))
+    };
+    let residual = |t: f64| h(t) - h(310.0) - 10.0 * power(t);
+    for (left, right) in [(315.0, 316.0), (325.0, 330.0), (344.0, 350.0)] {
+        assert!(residual(left) * residual(right) < 0.0);
+    }
+    let feedback = sigma * 0.089 * (330.0_f64.powi(4) - 300.0_f64.powi(4));
+    assert!(0.5 * 451.0 / feedback > 10.0);
+    let step_limit = 0.5 / feedback;
+    let equilibrium = (100.0 / (0.9 * sigma) + 300.0_f64.powi(4)).sqrt().sqrt();
+    let config = LumpedEnthalpyMarchConfig {
+        initial_specific_enthalpy_j_kg: h(310.0), internal_power_w: 100.0,
+        duration_s: 10.0, maximum_step_s: 10.0, maximum_steps: 3000,
+        ..radiative_feedback_config()
+    };
+    let body = radiative_feedback_body(&exact, transport.clone());
+    let native = with_cx(|cx| {
+        solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(), config).unwrap()
+    });
+    let mut heat = 0.0;
+    for pair in native.samples().windows(2) {
+        let dt = pair[1].time_s - pair[0].time_s;
+        let before = pair[0].phase_state.temperature_k();
+        let after = pair[1].phase_state.temperature_k();
+        assert!(dt > 0.0 && dt <= step_limit * (1.0 + 1e-12));
+        assert!(after >= before && after < equilibrium);
+        assert!((pair[1].phase_state.specific_enthalpy_j_kg() - h(after)).abs() < 1e-9);
+        assert!((h(after) - h(before) - dt * power(after)).abs() < 2e-9);
+        heat += dt * power(after);
+    }
+    let endpoint = native.samples().last().unwrap();
+    assert_eq!(endpoint.time_s, 10.0);
+    assert!((h(endpoint.phase_state.temperature_k()) - h(310.0) - heat).abs() < 1e-6);
+
+    // Changing only the public boundary subdivisions must not change the
+    // capacity extremum, admitted step, or original nonlinear trajectory.
+    let subdivided_body = radiative_feedback_body(&subdivided, transport);
+    let subdivided_run = with_cx(|cx| {
+        solve_lumped_enthalpy(cx, &subdivided_body, BiotGate::corpus_default(), config).unwrap()
+    });
+    assert_eq!(subdivided_run.samples().len(), native.samples().len());
+    for (a, b) in native.samples().iter().zip(subdivided_run.samples()) {
+        assert_eq!(a.time_s, b.time_s);
+        assert!((a.phase_state.temperature_k() - b.phase_state.temperature_k()).abs() < 1e-8);
+    }
+
+    // A separate temperature-coordinate RK4 reference uses Cp(T) directly,
+    // without consulting either production caloric inverse or its root solver.
+    let reference = |steps: usize| {
+        let dt = 10.0 / steps as f64;
+        let rate = |t| power(t) / (1.0 + t - 300.0);
+        let mut t = 310.0;
+        for _ in 0..steps {
+            let a = rate(t);
+            let b = rate(t + 0.5 * dt * a);
+            let c = rate(t + 0.5 * dt * b);
+            let d = rate(t + dt * c);
+            t += dt * (a + 2.0 * b + 2.0 * c + d) / 6.0;
+        }
+        t
+    };
+    let truth = reference(1024);
+    assert!((truth - reference(512)).abs() < 1e-10);
+    let fine = with_cx(|cx| {
+        solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(),
+            LumpedEnthalpyMarchConfig { maximum_step_s: 0.005, ..config }).unwrap()
+    });
+    let coarse_error = (endpoint.phase_state.temperature_k() - truth).abs();
+    let fine_error = (fine.samples().last().unwrap().phase_state.temperature_k() - truth).abs();
+    assert!(coarse_error < 0.003 && fine_error < coarse_error / 4.0);
+
+    let spectrum = PreparedHarmonicProductSpectrum::new(
+        vec![HarmonicProductInput {
+            left_frequency_hz: 0.0, right_frequency_hz: 0.0,
+            left_amplitude: [Dd::from_f64(100.0), Dd::ZERO],
+            right_amplitude: [Dd::ONE, Dd::ZERO], law: HarmonicProductLaw::Real,
+        }],
+        HarmonicProductSpectrumLimits {
+            maximum_products: 1, maximum_generated_terms: 2, maximum_workspace_bytes: 64 * 1024,
+        },
+    ).unwrap();
+    let spectral = solve_lumped_enthalpy_spectrum_cancellable(
+        LumpedEnthalpyPowerBinding {
+            body: &body, spectrum: &spectrum, input_unit: "W", watts_per_spectrum_unit: 1.0,
+            source_clock: "original Cp feedback regression",
+        },
+        BiotGate::corpus_default(),
+        LumpedEnthalpyMarchConfig { internal_power_w: 0.0, ..config },
+        LumpedEnthalpySpectrumControls {
+            start_s: 0.0, minimum_step_s: 1e-9, source_ripple_tolerance_j: 0.0,
+            maximum_step_energy_residual_j: 1e-9, maximum_attempts: 2000,
+            maximum_spectral_work: 1_000_000, maximum_output_samples: 1001,
+            maximum_workspace_bytes: 8 * 1024 * 1024,
+        },
+        || false,
+    ).unwrap();
+    assert!(spectral.admitted_maximum_step_s() <= step_limit * (1.0 + 1e-12));
+    let last = spectral.samples().last().unwrap();
+    assert_eq!(last.elapsed_s_dd().to_f64(), 10.0);
+    assert!((last.phase_state().temperature_k() - endpoint.phase_state.temperature_k()).abs() < 1e-7);
+    let energy = spectral.energy();
+    assert!((energy.source_input_j_dd().to_f64() - 1000.0).abs() < 1e-10);
+    assert!((energy.stored_energy_change_j_dd().to_f64()
+        - (h(last.phase_state().temperature_k()) - h(310.0))).abs() < 1e-8);
+    assert!(energy.residual_j_dd().to_f64().abs() < 1e-6);
+}
+
+#[test]
 fn g1_discrete_gradient_contact_closes_original_caloric_entropy() {
     use fs_conduction::lumped::{
         LumpedContactStepConfig, solve_lumped_contact_step,

@@ -1361,6 +1361,9 @@ fn validate_enthalpy_config(
 /// original linear emissivity segment, epsilon' is constant and Tr^4-T^4
 /// decreases with T, so its relevant endpoint supplies an upper bound.
 /// Multiplication by the chart's maximum dT/dh then bounds positive P'(h).
+/// On a source Cp(T) interval this is the reciprocal of its minimum ORIGINAL
+/// Cp, not the reciprocal mean capacity described by its h/T boundary chord.
+/// Isothermal latent intervals have exactly zero temperature slope.
 /// Taking dt <= mass/(2*bound) leaves R'(h) >= mass/2 in exact arithmetic.
 ///
 /// This is a sufficient source-law admission, not an optimal step, a thermal
@@ -1433,9 +1436,10 @@ fn monotone_enthalpy_step_limit_s(
         if temperature_change == 0.0 {
             continue;
         }
-        let slope = (temperature_change
-            / (pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg))
-            .next_up();
+        let minimum_capacity = body.phase_curve
+            .sensible_heat_capacity_bounds_j_kg_k(index)
+            .map_err(|error| lumped_error(&body.name, error.to_string()))?[0];
+        let slope = (1.0 / minimum_capacity).next_up();
         if !slope.is_finite() || slope <= 0.0 {
             return Err(invalid());
         }
