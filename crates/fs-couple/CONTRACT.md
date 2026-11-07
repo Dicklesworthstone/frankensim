@@ -3266,6 +3266,23 @@ eigenmode, nonlinear dry-front balance and finite surface flux define the focuse
 verification in `tests/moisture/radial.rs`; they are not measured validation or
 a continuum-error certificate for an arbitrary mesh or time step.
 
+### Prescribed temperature histories in radial diffusion
+
+`MoistureRadial::at_prescribed_temperature` re-evaluates the original pinned
+multiaxis diffusivity at every occupied shell content while retaining each
+shell's dry mass, water, geometry, accepted time and original density/reference
+identity. A supported enclosing temperature/moisture box cannot override the
+actual source triangulation. Degenerate dry fronts retain the original
+Kirchhoff path, and an unsupported cell or cancellation refuses the whole event.
+
+Radial backward Euler, SDIRK2 and finite-atmosphere admission consume the current
+transport temperature. Source-qualified sorption and finite surface laws must
+match that temperature; the cold density datum does not silently drive a warmed
+boundary. Finite solutions already consume the same current inventory context.
+Transport intervals must end at externally prescribed temperature events.
+This path supplies no heat balance, thermal expansion or temperature evolution;
+the native mechanical owner still refuses an unqualified thermal strain.
+
 ### Source-partitioned coatings and curved material layers
 
 `moisture::radial::layered::{MoistureRadialLayer, MoistureLayeredRadial}` joins

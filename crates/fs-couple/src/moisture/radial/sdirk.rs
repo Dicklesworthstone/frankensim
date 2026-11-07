@@ -47,7 +47,7 @@ impl MoistureRadial {
                 "radial SDIRK needs two representable forward stage times",
             ));
         }
-        let temperature = self.reference.query().axes()["temperature"];
+        let temperature = self.temperature_kelvin();
         let boundaries = [
             faces[0].resolve(temperature)?,
             faces[1].resolve(temperature)?,

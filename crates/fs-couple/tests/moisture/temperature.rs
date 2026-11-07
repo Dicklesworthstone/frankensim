@@ -6,6 +6,9 @@ use fs_couple::moisture::cartesian::{MoistureCartesian, MoistureCartesianGeometr
 use fs_material::state_point::integrate_orthotropic_hygroscopic_expansion;
 use fs_qty::Temperature;
 
+#[path = "temperature/radial.rs"]
+mod radial;
+
 const COLD: f64 = 293.15;
 const HOT: f64 = 313.15;
 

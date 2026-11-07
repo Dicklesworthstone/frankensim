@@ -20,6 +20,7 @@ pub mod atmosphere;
 /// Source-partitioned diffusion through concentric coatings and material layers.
 pub mod layered;
 mod sdirk;
+mod temperature;
 
 /// Physical area and storage measure for a radial reduction.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -264,7 +265,9 @@ impl MoistureRadial {
         &self.card
     }
 
-    pub(super) const fn transport_context(&self) -> &ResolvedMaterialStatePoint {
+    /// Originally pinned diffusivity source in the current prescribed environment.
+    /// The dry-density and stress-free reference remain available in `reference`.
+    pub const fn transport_context(&self) -> &ResolvedMaterialStatePoint {
         &self.transport
     }
 
@@ -321,7 +324,7 @@ impl MoistureRadial {
         cx: &Cx<'_>,
     ) -> Result<(Self, MoistureStepReport), MoistureError> {
         poll(cx)?;
-        let temperature = self.reference.query().axes()["temperature"];
+        let temperature = self.temperature_kelvin();
         let boundaries = [
             faces[0].resolve(temperature)?,
             faces[1].resolve(temperature)?,

@@ -77,7 +77,7 @@ fn admit(
     temperature: f64,
     exposed: [bool; 2],
 ) -> Result<(), AtmosphereMoistureError> {
-    if moisture.reference().query().axes()["temperature"].to_bits() != temperature.to_bits() {
+    if moisture.temperature_kelvin().to_bits() != temperature.to_bits() {
         return Err(AtmosphereMoistureError::Invalid(
             "radial specimen and finite atmospheres need the same prescribed temperature",
         ));
