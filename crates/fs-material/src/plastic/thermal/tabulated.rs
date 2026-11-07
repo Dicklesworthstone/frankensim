@@ -10,6 +10,9 @@
 //! material-point feedback, spatial solids and layered sections retain the same
 //! old history and physical interval throughout their coupled trials.
 
+/// Owned physical intervals for exact free-sided thermal fiber response.
+pub mod axial;
+
 use super::expansion::ThermalHistoryContribution;
 use super::family::{ThermoplasticFamilyError, ThermoplasticFamilyIncrement, ThermoplasticStep};
 use super::*;

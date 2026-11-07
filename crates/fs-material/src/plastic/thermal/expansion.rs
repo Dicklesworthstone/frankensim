@@ -21,9 +21,11 @@
 //! in the original native mechanical account and is never converted to heat.
 
 use super::*;
-use crate::tensor::{contract, trace};
 use crate::{MaterialAdmissibility, Tangent6};
 use fs_evidence::ModelCard;
+
+mod prepared;
+pub(crate) use prepared::PreparedThermoplasticEnergy;
 
 /// Native J2 law evaluated at the actual temperature, with its sourced
 /// stress-free strain offset. It uses the original return map and tangent.
@@ -158,20 +160,7 @@ impl ThermoplasticSource<'_> {
     ) -> Result<Voigt, FeedbackError<E>> {
         let expansion =
             self.expansion_strain_between(self.reference_temperature_k, temperature_k)?;
-        let result = core::array::from_fn(|i| strain[i] - if i < 3 { expansion } else { 0.0 });
-        let limit = self.source.law().elastic.strain_limit;
-        for value in [strain, &result] {
-            let norm_squared = contract(value, value);
-            if value.iter().any(|v| !v.is_finite())
-                || !norm_squared.is_finite()
-                || norm_squared > limit * limit
-            {
-                return Err(FeedbackError::Invalid(
-                    "total or thermally offset strain exceeds the small-strain bound",
-                ));
-            }
-        }
-        Ok(result)
+        prepared::mechanical_strain(strain, expansion, self.source.law().elastic.strain_limit)
     }
 
     /// Resolve the actual caloric state into the same native spatial law,
@@ -316,27 +305,40 @@ impl ThermoplasticSource<'_> {
         history: ThermalHistoryContribution,
         tolerances: EnergyTolerances,
     ) -> Result<ThermoplasticIncrement, FeedbackError<E>> {
-        let old_mechanical = self.mechanical_strain_at(old_temperature_k, old_strain)?;
-        let voce = self.voce_law(source)?;
-        let old_elastic = core::array::from_fn(|i| old_mechanical[i] - old_state.plastic_strain[i]);
+        self.prepare_energy_at_temperatures(
+            old_temperature_k, temperature_k, source, history.variable_storage,
+        )?.finish(old_strain, old_state, strain, mechanical, history, tolerances)
+    }
+
+    /// Resolve interval coefficients once before repeated constitutive trials.
+    /// The resulting owner contains no borrowed card, caloric chart or history;
+    /// all strain-dependent arithmetic remains in the original shared account.
+    pub(crate) fn prepare_energy_at_temperatures<E>(
+        &self,
+        old_temperature_k: f64,
+        temperature_k: f64,
+        source: &ResolvedJ2Plasticity,
+        history_variable_storage: bool,
+    ) -> Result<PreparedThermoplasticEnergy, FeedbackError<E>> {
+        let old_expansion_strain =
+            self.expansion_strain_between(self.reference_temperature_k, old_temperature_k)?;
+        let expansion_strain =
+            self.expansion_strain_between(self.reference_temperature_k, temperature_k)?;
+        let delta_expansion_strain =
+            self.expansion_strain_between(old_temperature_k, temperature_k)?;
         let variable_moduli = self.youngs_temperature_slope_pa_k != 0.0
             || self.hardening_temperature_slope_pa_k != 0.0
             || self.kinematic_hardening_temperature_slope_pa_k != 0.0;
         let saturation_slope = self.voce.map_or(0.0,
             |selection| selection.saturation_temperature_slope_pa_k);
         let variable_storage = variable_moduli || saturation_slope != 0.0
-            || history.variable_storage;
+            || history_variable_storage;
         let old_source = if variable_storage || !self.expansion_knots.is_empty() {
             Some(self.resolve_temperature(old_temperature_k)?)
         } else {
             None
         };
-        // Recover OLD elastic stress at its actual temperature. Refreshing the
-        // source must not return-map the committed plastic history a second time.
         let old_law = old_source.as_ref().unwrap_or(source);
-        let old_stress = old_law.law().elastic.stress(&old_elastic, &());
-        let delta_strain = core::array::from_fn(|i| strain[i] - old_strain[i]);
-        let mechanical_work_j_m3 = finite(contract(&mechanical.stress_pa, &delta_strain))?;
         let (old_alpha, new_alpha) = if self.expansion_knots.is_empty() {
             (self.expansion_per_k, self.expansion_per_k)
         } else {
@@ -348,126 +350,33 @@ impl ThermoplasticSource<'_> {
             };
             (coefficient(old_law), coefficient(source))
         };
-        let mut old_entropy = product(old_alpha, trace(&old_stress))?;
-        let mut new_entropy = product(new_alpha, trace(&mechanical.stress_pa))?;
-        let mut coefficient_storage_change_j_m3 = if variable_moduli {
-            let youngs = source.law().elastic.youngs;
-            // Fixed nu makes C(T)=E(T)*C_unit. Native initial/final elastic
-            // energies therefore give the exact tensor contraction with C'.
-            let elastic_derivative = self.youngs_temperature_slope_pa_k / youngs;
-            let old_p_squared = product(old_state.alpha, old_state.alpha)?;
-            let new_p_squared = product(mechanical.state.alpha, mechanical.state.alpha)?;
-            old_entropy = finite(
-                old_entropy
-                    - product(elastic_derivative, mechanical.energy.initial.elastic_j_m3)?
-                    - product(0.5 * self.hardening_temperature_slope_pa_k, old_p_squared)?,
-            )?;
-            new_entropy = finite(
-                new_entropy
-                    - product(
-                        elastic_derivative,
-                        mechanical.energy.final_state.elastic_j_m3,
-                    )?
-                    - product(0.5 * self.hardening_temperature_slope_pa_k, new_p_squared)?,
-            )?;
-            // Use actual pinned endpoint coefficients. The correction changes
-            // native frozen-coefficient delta(psi) into true endpoint delta(psi).
-            let mut coefficient = finite(
-                product(
-                    (youngs - old_law.law().elastic.youngs) / youngs,
-                    mechanical.energy.initial.elastic_j_m3,
-                )? + product(
-                    0.5 * (source.law().hardening - old_law.law().hardening),
-                    old_p_squared,
-                )?,
-            )?;
-            if self.kinematic_hardening_temperature_slope_pa_k != 0.0 {
-                // Differentiate the original energetic Prager storage in its
-                // native tensor convention. Use plastic strain directly:
-                // dividing storage/backstress by H_k would be singular when a
-                // physically admitted source reaches zero hardening.
-                let old_plastic = crate::tensor::deviator(&old_state.plastic_strain);
-                let new_plastic = crate::tensor::deviator(&mechanical.state.plastic_strain);
-                let old_shape = finite(contract(&old_plastic, &old_plastic) / 3.0)?;
-                let new_shape = finite(contract(&new_plastic, &new_plastic) / 3.0)?;
-                old_entropy = finite(
-                    old_entropy - product(self.kinematic_hardening_temperature_slope_pa_k, old_shape)?,
-                )?;
-                new_entropy = finite(
-                    new_entropy - product(self.kinematic_hardening_temperature_slope_pa_k, new_shape)?,
-                )?;
-                coefficient = finite(
-                    coefficient
-                        + product(
-                            source.law().kinematic_hardening - old_law.law().kinematic_hardening,
-                            old_shape,
-                        )?,
-                )?;
-            }
-            coefficient
+        let old_saturation_pa = if saturation_slope != 0.0 {
+            use crate::plastic::voce::source::VOCE_SATURATION_INCREMENT_PROPERTY;
+            old_law.material()
+                .property(VOCE_SATURATION_INCREMENT_PROPERTY)
+                .expect("the original pinned bundle retains Voce Q").value_si()
         } else {
             0.0
         };
-        if saturation_slope != 0.0 {
-            use crate::plastic::voce::source::VOCE_SATURATION_INCREMENT_PROPERTY;
-            let law = voce.as_ref().expect("selected thermal saturation has a native law");
-            // These derivatives are evaluated at fixed plastic strain/history.
-            // The unit-Q shape is stable and remains defined when Q(T1)=0.
-            let old_shape = finite(law.saturation_storage_per_pa(old_state.alpha))?;
-            let new_shape = finite(law.saturation_storage_per_pa(mechanical.state.alpha))?;
-            old_entropy = finite(old_entropy - product(saturation_slope, old_shape)?)?;
-            new_entropy = finite(new_entropy - product(saturation_slope, new_shape)?)?;
-            let old_saturation = old_law.material()
-                .property(VOCE_SATURATION_INCREMENT_PROPERTY)
-                .expect("the original pinned bundle retains Voce Q").value_si();
-            coefficient_storage_change_j_m3 = finite(coefficient_storage_change_j_m3
-                + product(law.saturation_pa() - old_saturation, old_shape)?)?;
-        }
-        if history.variable_storage {
-            old_entropy = finite(old_entropy + history.old_entropy_j_m3_k)?;
-            new_entropy = finite(new_entropy + history.new_entropy_j_m3_k)?;
-            coefficient_storage_change_j_m3 = finite(coefficient_storage_change_j_m3
-                + history.coefficient_storage_change_j_m3)?;
-        }
-        let thermoelastic_storage_change_j_m3 = finite(
-            product(temperature_k, new_entropy)? - product(old_temperature_k, old_entropy)?,
-        )?;
-        let reversible_heat_j_m3 = if self.expansion_knots.is_empty() && !variable_storage {
-            // Keep the original constant-coefficient reduction and arithmetic.
-            product(-old_temperature_k, finite(new_entropy - old_entropy)?)?
-        } else {
-            // Integrate THIS interval, avoiding cancellation of two large
-            // primitives relative to the original stress-free temperature.
-            let delta_expansion =
-                self.expansion_strain_between(old_temperature_k, temperature_k)?;
-            finite(
-                product(trace(&mechanical.stress_pa), delta_expansion)?
-                    - coefficient_storage_change_j_m3
-                    - thermoelastic_storage_change_j_m3,
-            )?
-        };
-        let stored_change_j_m3 =
-            finite(mechanical.energy.stored_change_j_m3() + coefficient_storage_change_j_m3)?;
-        let residual = finite(
-            mechanical_work_j_m3
-                - stored_change_j_m3
-                - thermoelastic_storage_change_j_m3
-                - mechanical.energy.physical_dissipation_j_m3
-                - reversible_heat_j_m3
-                - mechanical.energy.numerical_dissipation_j_m3,
-        )?;
-        if residual.abs() > tolerances.energy_j_m3 {
-            return Err(FeedbackError::Mechanical(EnergyError::EnergyResidual {
-                residual_j_m3: residual,
-                tolerance_j_m3: tolerances.energy_j_m3,
-            }));
-        }
-        Ok(ThermoplasticIncrement {
-            mechanical,
-            coefficient_storage_change_j_m3,
-            mechanical_work_j_m3,
-            reversible_heat_j_m3,
-            thermoelastic_storage_change_j_m3,
+        Ok(PreparedThermoplasticEnergy {
+            old_temperature_k,
+            temperature_k,
+            old_expansion_strain,
+            expansion_strain,
+            delta_expansion_strain,
+            old_expansion_per_k: old_alpha,
+            expansion_per_k: new_alpha,
+            variable_expansion: !self.expansion_knots.is_empty(),
+            old_law: old_law.law().clone(),
+            law: source.law().clone(),
+            youngs_temperature_slope_pa_k: self.youngs_temperature_slope_pa_k,
+            hardening_temperature_slope_pa_k: self.hardening_temperature_slope_pa_k,
+            kinematic_hardening_temperature_slope_pa_k:
+                self.kinematic_hardening_temperature_slope_pa_k,
+            voce: self.voce_law(source)?,
+            saturation_temperature_slope_pa_k: saturation_slope,
+            old_saturation_pa,
+            history_variable_storage,
         })
     }
 

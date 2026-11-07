@@ -2,6 +2,9 @@
 //! These manufactured coefficients are not an experimental alloy calibration.
 #![deny(unsafe_code)]
 
+#[path = "plastic_thermal_tabulated/axial.rs"]
+mod axial;
+
 use core::convert::Infallible;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
