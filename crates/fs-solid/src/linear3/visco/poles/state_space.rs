@@ -205,6 +205,41 @@ impl PreparedStateSpaceLoad {
         Ok(())
     }
 
+    pub(super) fn observe_frequency_derivative(
+        &self,
+        prepared: &PreparedViscoPoles<'_>,
+        rate: C64,
+        vector_derivative: &[C64],
+        primal: &super::ViscoJointHarmonicStateSpaceLoad,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<super::ViscoJointHarmonicLoadDerivative, ViscoPoleError> {
+        let (m, k, p) = (self.coordinates, self.states, self.ports);
+        let state = &vector_derivative[prepared.body_dimension()..];
+        let ds = C64::new(0.0, -1.0);
+        let mut displacement = vec![C64::ZERO; p];
+        let mut flow = vec![C64::ZERO; p];
+        let mut effort = vec![C64::ZERO; p];
+        for a in 0..p {
+            poll(cancelled)?;
+            displacement[a] = (0..m).fold(C64::ZERO, |sum, i| {
+                sum + vector_derivative[i].scale(self.force_map[i * p + a])
+            });
+            flow[a] = rate * displacement[a] + ds * primal.displacement[a];
+        }
+        for a in 0..p {
+            poll(cancelled)?;
+            effort[a] = (0..k).fold(C64::ZERO, |sum, j| sum + state[j].scale(self.c[a * k + j]));
+            for b in 0..p {
+                effort[a] = effort[a]
+                    + flow[b].scale(self.d[a * p + b])
+                    + (rate * flow[b] + ds * primal.flow[b]).scale(self.e[a * p + b]);
+            }
+        }
+        super::ViscoJointHarmonicLoadDerivative::from_parts(
+            state.to_vec(), displacement, flow, effort, &primal.flow, &primal.effort, cancelled,
+        )
+    }
+
     pub(super) fn observe(
         &self,
         prepared: &PreparedViscoPoles<'_>,

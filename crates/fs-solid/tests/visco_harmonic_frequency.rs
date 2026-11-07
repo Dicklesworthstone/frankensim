@@ -193,6 +193,19 @@ fn anisotropic_cross_terms_and_consistent_mass_retain_the_complete_frequency_dir
         .with_kelvin_viscosity_mandel(outer([1.0, 0.0, 0.0, -1.0, 0.0, 0.0], 0.6))
         .unwrap();
         let source = solid(law, &[3, 6], cx);
+        let original = source
+            .prepare_resonance_poles(
+                ViscoPoleBudget {
+                    maximum_coordinates: 16,
+                    maximum_payload_bytes: 1 << 20,
+                    maximum_assembly_work: 1_000_000,
+                    maximum_evaluations: 16,
+                    reference_rate_per_s: 2.0,
+                    physical_residual_tolerance: 2e-11,
+                },
+                cx,
+            )
+            .unwrap();
         let s = core::f64::consts::FRAC_1_SQRT_2;
         // Analytic V*B^T*C*B, including the Mandel sqrt(2) shear factors.
         let mass = [1.0, 0.5, 0.5, 1.0];
@@ -232,10 +245,47 @@ fn anisotropic_cross_terms_and_consistent_mass_retain_the_complete_frequency_dir
             let result = prepared
                 .solve(&force, Some(&df), None, tangent(), cx)
                 .unwrap();
+            let joint = original
+                .harmonic_factor(
+                    w,
+                    ViscoJointHarmonicBudget {
+                        maximum_coordinates: 16,
+                        maximum_payload_bytes: 1 << 20,
+                        maximum_work: 10_000_000,
+                    },
+                    cx,
+                )
+                .unwrap()
+                .solve_with_frequency_derivative(
+                    &force,
+                    Some(&df),
+                    ViscoJointHarmonicFrequencyBudget {
+                        maximum_additional_payload_bytes: 1 << 20,
+                        maximum_work: 10_000_000,
+                    },
+                    cx,
+                )
+                .unwrap();
+            // The uncondensed branch-strain equations must reproduce the same
+            // independently manufactured anisotropic physical frequency slope.
+            let st = C64::new(0.0, -0.3 * w);
+            let one_st = C64::ONE + st;
+            let alpha = st / one_st;
+            let dalpha = C64::new(0.0, -0.3) / (one_st * one_st);
+            let strain = [q[0], C64::ZERO, C64::ZERO, q[1].scale(s), C64::ZERO, C64::ZERO];
+            let dstrain = [dq[0], C64::ZERO, C64::ZERO, dq[1].scale(s), C64::ZERO, C64::ZERO];
+            assert_eq!(joint.physical_vector_derivative.len(), 8);
+            for i in 0..6 {
+                near(joint.response.physical_vector[2 + i], alpha * strain[i]);
+                near(joint.physical_vector_derivative[2 + i], alpha * dstrain[i] + dalpha * strain[i]);
+            }
             let mut heat_slope = 0.0;
             for i in 0..2 {
                 near(result.response.displacement_m[i], q[i]);
                 near(result.displacement_derivative[i], dq[i]);
+                near(joint.response.displacement_m[i], q[i]);
+                near(joint.displacement_derivative[i], dq[i]);
+                near(joint.velocity_derivative[i], result.velocity_derivative[i]);
                 for j in 0..2 {
                     let at = 2 * i + j;
                     heat_slope += 0.5 * (loss[at] + w * dloss[at]) * inner(q[i], q[j])

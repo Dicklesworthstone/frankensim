@@ -4,6 +4,12 @@ use fs_exec::Cx;
 use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_with_cancel};
 use fs_math::c64::C64;
 
+mod frequency;
+pub use frequency::{
+    ViscoJointHarmonicFrequencyBudget, ViscoJointHarmonicFrequencyResponse,
+    ViscoJointHarmonicLoadDerivative,
+};
+
 /// Additional resources for one reusable factor and one complete response.
 /// The original prepared source/load caches retain their own admitted budgets.
 #[derive(Clone, Copy, Debug)]
@@ -208,6 +214,15 @@ impl ViscoJointHarmonicFactor<'_, '_> {
         force_n: &[C64],
         cx: &Cx<'_>,
     ) -> Result<ViscoJointHarmonicResponse, ViscoJointHarmonicError> {
+        self.solve_with_evaluations(force_n, &mut 0, cx)
+    }
+
+    fn solve_with_evaluations(
+        &self,
+        force_n: &[C64],
+        evaluations: &mut usize,
+        cx: &Cx<'_>,
+    ) -> Result<ViscoJointHarmonicResponse, ViscoJointHarmonicError> {
         let model = self.model;
         let (n, m) = (model.dimension, model.free_dofs().len());
         let mut cancelled = || cx.checkpoint().is_err();
@@ -226,10 +241,9 @@ impl ViscoJointHarmonicFactor<'_, '_> {
         for (i, x) in state.iter_mut().enumerate() {
             *x = x.scale(model.column_scales[i]);
         }
-        let mut evaluations = 0;
         let mut accepted = None;
         for attempt in 0..4 {
-            model.argument(s, &mut evaluations, &mut cancelled)?;
+            model.argument(s, evaluations, &mut cancelled)?;
             let (residual, mut correction) =
                 self.original_residual(s, &state, force_n, &mut cancelled)?;
             if residual

@@ -290,6 +290,46 @@ impl PreparedDynamicLoad {
         Ok(())
     }
 
+    pub(super) fn observe_frequency_derivative(
+        &self,
+        prepared: &PreparedViscoPoles<'_>,
+        rate: C64,
+        vector_derivative: &[C64],
+        primal: &super::ViscoJointHarmonicLoad,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<super::ViscoJointHarmonicLoadDerivative, ViscoPoleError> {
+        let (m, k, p) = (self.coordinates, self.states, self.ports);
+        let state = &vector_derivative[prepared.body_dimension()..];
+        let mut gradient = vec![C64::ZERO; k];
+        for i in 0..k {
+            poll(cancelled)?;
+            gradient[i] = if i < self.differential_states {
+                (0..k).fold(C64::ZERO, |sum, j| sum + state[j].scale(self.q[i * k + j]))
+            } else {
+                // Original algebraic effort reaction, with no fictitious
+                // storage or inertia in either the primal or its tangent.
+                state[i]
+            };
+        }
+        let ds = C64::new(0.0, -1.0);
+        let mut displacement = vec![C64::ZERO; p];
+        let mut flow = vec![C64::ZERO; p];
+        let mut effort = vec![C64::ZERO; p];
+        for a in 0..p {
+            poll(cancelled)?;
+            displacement[a] = (0..m).fold(C64::ZERO, |sum, i| {
+                sum + vector_derivative[i].scale(self.force_map[i * p + a])
+            });
+            flow[a] = rate * displacement[a] + ds * primal.displacement[a];
+            effort[a] = (0..k).fold(C64::ZERO, |sum, i| {
+                sum + gradient[i].scale(self.g[i * p + a])
+            });
+        }
+        super::ViscoJointHarmonicLoadDerivative::from_parts(
+            state.to_vec(), displacement, flow, effort, &primal.flow, &primal.effort, cancelled,
+        )
+    }
+
     pub(super) fn observe(
         &self,
         prepared: &PreparedViscoPoles<'_>,

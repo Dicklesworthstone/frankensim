@@ -171,6 +171,37 @@ fn g1_original_oscillator_and_derivative_inertance_cross_bare_resonances() {
             let effort = dx + (s * velocity).scale(0.4);
             let factor = image.harmonic_factor(omega, response_budget(), cx).unwrap();
             let r = factor.solve(&[force], cx).unwrap();
+            let frequency = factor
+                .solve_with_frequency_derivative(
+                    &[force], None,
+                    ViscoJointHarmonicFrequencyBudget {
+                        maximum_additional_payload_bytes: 1 << 20,
+                        maximum_work: 10_000_000,
+                    },
+                    cx,
+                )
+                .unwrap();
+            let ds = C64::new(0.0, -1.0);
+            let dbare = (s * ds).scale(2.0);
+            let ddenominator = (s * ds).scale(2.8) * bare
+                + (C64::from_re(2.5) + (s * s).scale(1.4)) * dbare
+                + dbare;
+            let du = (force * dbare - u * ddenominator) / denominator;
+            let dx_dw = (ds * force - x * ddenominator) / denominator;
+            let ddx_dw = ds * x + s * dx_dw;
+            let dv = ds * u + s * du;
+            let deffort = ddx_dw + (ds * velocity + s * dv).scale(0.4);
+            near(frequency.displacement_derivative[0], du, force.abs());
+            near(frequency.velocity_derivative[0], dv, force.abs());
+            let slope = frequency.state_space_load.as_ref().unwrap();
+            near(slope.state_derivative[0], dx_dw, force.abs());
+            near(slope.state_derivative[1], ddx_dw, force.abs());
+            assert_eq!(slope.state_derivative[2], C64::ZERO);
+            near(slope.flow_derivative[0], dv, force.abs());
+            near(slope.effort_derivative[0], deffort, force.abs());
+            assert!(frequency.dynamic_load_derivative_residual <= 2e-11);
+            assert_eq!(frequency.response.average_total_storage_j, None);
+            assert_eq!(frequency.response.total_power_balance_residual_w, None);
             let load = r.state_space_load.as_ref().unwrap();
             near(r.displacement_m[0], u, force.abs());
             near(load.state[0], x, force.abs());
@@ -263,11 +294,28 @@ fn g3_full_mutual_direct_and_derivative_terms_keep_signed_work_and_original_mate
             let u = force / denominator;
             let v = s * u;
             let q = st * u / (C64::ONE + st);
-            let r = image
-                .harmonic_factor(omega, response_budget(), cx)
-                .unwrap()
-                .solve(&[force], cx)
+            let factor = image.harmonic_factor(omega, response_budget(), cx).unwrap();
+            let r = factor.solve(&[force], cx).unwrap();
+            let frequency = factor
+                .solve_with_frequency_derivative(
+                    &[force], None,
+                    ViscoJointHarmonicFrequencyBudget {
+                        maximum_additional_payload_bytes: 1 << 20,
+                        maximum_work: 10_000_000,
+                    },
+                    cx,
+                )
                 .unwrap();
+            let ds = C64::new(0.0, -1.0);
+            let one_st = C64::ONE + st;
+            let ddenominator = ds * (s.scale(2.0 * 1.3625) + C64::from_re(0.45))
+                + ds.scale(6.5 * 0.25) / (one_st * one_st);
+            let du = (C64::ZERO - u * ddenominator) / denominator;
+            let dv = ds * u + s * du;
+            near(frequency.displacement_derivative[0], du, force.abs());
+            near(frequency.velocity_derivative[0], dv, force.abs());
+            let slope = frequency.state_space_load.as_ref().unwrap();
+            assert!(slope.state_derivative.is_empty());
             let l = r.state_space_load.as_ref().unwrap();
             assert!(l.state.is_empty());
             near(r.displacement_m[0], u, force.abs());
@@ -276,12 +324,17 @@ fn g3_full_mutual_direct_and_derivative_terms_keep_signed_work_and_original_mate
                 assert_eq!(*strain, C64::ZERO);
             }
             let flow = [v, v.scale(-0.25)];
+            let dflow = [dv, dv.scale(-0.25)];
             for port in 0..2 {
                 let mut expected = C64::ZERO;
+                let mut dexpected = C64::ZERO;
                 for other in 0..2 {
                     expected = expected
                         + flow[other].scale(load.d[2 * port + other])
                         + (s * flow[other]).scale(load.e[2 * port + other]);
+                    dexpected = dexpected
+                        + dflow[other].scale(load.d[2 * port + other])
+                        + (ds * flow[other] + s * dflow[other]).scale(load.e[2 * port + other]);
                 }
                 near(l.flow[port], flow[port], force.abs());
                 near(l.effort[port], expected, force.abs());
@@ -290,10 +343,22 @@ fn g3_full_mutual_direct_and_derivative_terms_keep_signed_work_and_original_mate
                     0.5 * (flow[port].conj() * expected).re,
                     1e-25,
                 );
+                near(slope.flow_derivative[port], dflow[port], force.abs());
+                near(slope.effort_derivative[port], dexpected, force.abs());
+                close(
+                    slope.average_absorbed_port_power_derivative[port],
+                    0.5 * ((dflow[port].conj() * expected).re + (flow[port].conj() * dexpected).re),
+                    force.norm_sq(),
+                );
             }
             assert!(l.average_absorbed_port_power_w[0] > 0.0);
             assert!(l.average_absorbed_port_power_w[1] < 0.0);
             close(l.average_absorbed_power_w, 0.5 * 0.25 * v.norm_sq(), 1e-25);
+            close(
+                slope.average_absorbed_power_derivative,
+                0.25 * (v.conj() * dv).re,
+                force.norm_sq(),
+            );
             close(
                 r.average_material_heat_w,
                 0.5 * (0.2 * v.norm_sq() + (6.5 / 0.25) * q.norm_sq()),

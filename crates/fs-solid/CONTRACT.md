@@ -11687,3 +11687,68 @@ datum, unchanged inventories, source order, empty-list parity and late kinetic
 refusal/retry. Sources were parsed/formatted and the independent shell force,
 mass and kinetic formulas were checked algebraically. Native Cargo compilation
 and regression execution remain unverified under the shared resource blocker.
+
+## Complete hereditary harmonic frequency tangents and driven linewidths
+
+`ViscoJointHarmonicFactor::solve_with_frequency_derivative` differentiates the
+original retained polynomial `P(s)=P0+s*P1+s²*P2` at `s=-i*omega`. Its additional
+right-hand side is `f_omega+i*P1*x+2*omega*P2*x`; the existing complex LU solves
+it and up to three corrections. Every original displacement, Mandel Maxwell
+strain, independent load state and algebraic reaction remains present. Material
+relaxation and Kelvin viscosity are differentiated through their original
+equations. No effective damping is frozen, no neighbouring solves approximate
+the slope, and no extra matrix is factored or inverted.
+
+The response includes original state, displacement and physical velocity slopes,
+with `v_omega=-i*(u+omega*u_omega)`. Original K/C/M, pHS, descriptor and continuous
+state-space load owners differentiate their own displacement, flow and effort,
+including derivative inertance and zero-storage constraint reactions. Signed
+per-port and total absorbed-work slopes retain both product-rule terms. They
+remain exchange rates; no boundary heat or storage is inferred for an
+unqualified state-space realization. Primal energy accounts remain independently
+computed by their existing owners; this API does not publish energy derivatives.
+The existing harmonic owner's binary-normalized DD contraction retains reactive
+and mutual cancellation before rounding work. The total is contracted from the
+original products independently of the rounded per-port outputs. Every requested
+per-port value and the total must be representable; either can explicitly refuse.
+
+The complete original tangent equations are checked in mechanical, memory and
+load families with coefficient-scaled residuals. Every original algebraic
+constraint and each unqualified state-space row also passes its own gate. The
+primal and tangent share the preparation's operator-evaluation limit. The new
+`ViscoJointHarmonicFrequencyBudget` admits an additional `384*n+256*p` numerical
+bytes and `1024*(n*n+n*p+p*p)+512*(n+p)` work before solving. Here `n` includes
+all retained states and `p` all load ports; factor and primal-response resources
+remain separately admitted. The extra storage is linear in coordinates, and
+each tangent solve/audit is quadratic; this does not claim sparse large-model
+performance. Polling and refusal leave source histories and the factor unchanged.
+
+All original material and load bands still apply at each sampled frequency.
+The full-cycle source strain check admits the primal physical response; the
+tangent is not interpreted as another strain cycle. Geometry, supports,
+material coefficients, boundary realization and attachment map are fixed.
+An optional authored complex force slope is retained. This provides a local
+frequency derivative, not neighbouring source-domain admission or a forward
+error certificate near an ill-conditioned joint resonance.
+
+`displacement_transfer` and `velocity_transfer` return the existing
+`HarmonicTransferSample`. The shared `fs-modal::harmonic::resonance` owner remains
+the only peak/notch and half-power refinement algorithm. Complex or dispersive
+receivers use its existing complex projection functions on the exposed original
+values and slopes. A bare attachment pole can be a regular joint response and
+an exact forced-response notch; this path needs no singular standalone impedance.
+An actual joint singularity still refuses. Searches must isolate the desired
+continuous extremum/crossings and preserve the same physical source and receiver;
+the measured response linewidth is not an inferred modal damping ratio.
+
+Focused regressions extend `visco_joint_harmonic`, `visco_harmonic_frequency`,
+`visco_descriptor_loads` and `visco_state_space_loads`. Their independent oracles
+cover anisotropic tensor cross terms and original memory slopes, complex force
+variation, mutual attachment work, a bare-load antiresonance, original constraint
+reactions, a dark state and direct boundary inertance. A rational hereditary
+oscillator with a physical K/C/M load exercises the existing peak and half-power
+owner against independent stationary/half-level polynomials and agrees with the
+separate `ViscoHarmonicFrequencyOperator` at its peak and both edges. Resource,
+shared-evaluation, strain-domain and cancellation refusals preserve factor reuse.
+These native tests remain unexecuted under the real dependency build's resource
+blocker; scoped syntax and whitespace checks do not replace their execution.

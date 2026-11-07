@@ -181,6 +181,40 @@ impl PreparedPortLoad {
         Ok(())
     }
 
+    pub(super) fn observe_frequency_derivative(
+        &self,
+        rate: C64,
+        motion_derivative: &[C64],
+        primal: &super::ViscoJointHarmonicLoad,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<super::ViscoJointHarmonicLoadDerivative, ViscoPoleError> {
+        let (n, p) = (self.coordinates, self.ports);
+        let ds = C64::new(0.0, -1.0);
+        let mut displacement = vec![C64::ZERO; p];
+        let mut flow = vec![C64::ZERO; p];
+        for a in 0..p {
+            poll(cancelled)?;
+            displacement[a] = (0..n).fold(C64::ZERO, |sum, i| {
+                sum + motion_derivative[i].scale(self.force_map[i * p + a])
+            });
+            flow[a] = rate * displacement[a] + ds * primal.displacement[a];
+        }
+        let mut effort = vec![C64::ZERO; p];
+        for a in 0..p {
+            poll(cancelled)?;
+            for b in 0..p {
+                effort[a] = effort[a]
+                    + displacement[b].scale(self.coefficients[0][a * p + b])
+                    + flow[b].scale(self.coefficients[1][a * p + b])
+                    + (rate * flow[b] + ds * primal.flow[b])
+                        .scale(self.coefficients[2][a * p + b]);
+            }
+        }
+        super::ViscoJointHarmonicLoadDerivative::from_parts(
+            Vec::new(), displacement, flow, effort, &primal.flow, &primal.effort, cancelled,
+        )
+    }
+
     pub(super) fn observe(
         &self,
         rate: C64,

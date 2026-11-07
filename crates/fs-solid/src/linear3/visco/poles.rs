@@ -32,7 +32,9 @@ pub use state_space::{ViscoPoleStateSpaceLoad, ViscoPoleStateSpaceResponse};
 mod response;
 pub use response::{
     ViscoJointHarmonicBudget, ViscoJointHarmonicError, ViscoJointHarmonicFactor,
-    ViscoJointHarmonicLoad, ViscoJointHarmonicResponse, ViscoJointHarmonicStateSpaceLoad,
+    ViscoJointHarmonicFrequencyBudget, ViscoJointHarmonicFrequencyResponse,
+    ViscoJointHarmonicLoad, ViscoJointHarmonicLoadDerivative, ViscoJointHarmonicResponse,
+    ViscoJointHarmonicStateSpaceLoad,
 };
 
 /// Source-owned preparation and callback resources, separate from fs-la's

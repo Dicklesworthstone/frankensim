@@ -68,7 +68,9 @@ pub use harmonic::{
 mod poles;
 pub use poles::{
     PreparedViscoPoles, ViscoJointHarmonicBudget, ViscoJointHarmonicError,
-    ViscoJointHarmonicFactor, ViscoJointHarmonicLoad, ViscoJointHarmonicResponse,
+    ViscoJointHarmonicFactor, ViscoJointHarmonicFrequencyBudget,
+    ViscoJointHarmonicFrequencyResponse, ViscoJointHarmonicLoad,
+    ViscoJointHarmonicLoadDerivative, ViscoJointHarmonicResponse,
     ViscoJointHarmonicStateSpaceLoad, ViscoMemorySite, ViscoPole, ViscoPoleBudget,
     ViscoPoleDescriptorLoad, ViscoPoleDynamicBudget, ViscoPoleDynamicLoad,
     ViscoPoleDynamicResponse, ViscoPoleError, ViscoPolePortBudget, ViscoPolePortLoad,

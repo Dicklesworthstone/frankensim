@@ -187,6 +187,35 @@ fn constrained_inertance_retains_original_reaction_in_forced_response_and_finite
                 let reaction = (s.scale(mass) + C64::from_re(drag)) * flow;
                 let factor = image.harmonic_factor(omega, response_budget(), cx).unwrap();
                 let r = factor.solve(&[force], cx).unwrap();
+                let frequency = factor
+                    .solve_with_frequency_derivative(
+                        &[force], None,
+                        ViscoJointHarmonicFrequencyBudget {
+                            maximum_additional_payload_bytes: 1 << 20,
+                            maximum_work: 10_000_000,
+                        },
+                        cx,
+                    )
+                    .unwrap();
+                let ds = C64::new(0.0, -1.0);
+                let a = C64::from_re(2.5) + (s * s).scale(total_mass) + s.scale(total_drag);
+                let da = ds * (s.scale(2.0 * total_mass) + C64::from_re(total_drag));
+                let du = (C64::ZERO - da * u) / a;
+                let dflow = (ds * u + s * du).scale(b);
+                let dreaction = ds.scale(mass) * flow
+                    + (s.scale(mass) + C64::from_re(drag)) * dflow;
+                near(frequency.displacement_derivative[0], du, force.abs());
+                assert!(frequency.dynamic_load_derivative_residual <= 2e-11);
+                let slope = frequency.dynamic_load.as_ref().unwrap();
+                near(slope.state_derivative[0], dflow.scale(mass), force.abs());
+                near(slope.state_derivative[1], dreaction, force.abs());
+                near(slope.flow_derivative[0], dflow, force.abs());
+                near(slope.effort_derivative[0], dreaction, force.abs());
+                close(
+                    slope.average_absorbed_power_derivative,
+                    drag * (flow.conj() * dflow).re,
+                    force.norm_sq(),
+                );
                 let account = r.dynamic_load.as_ref().unwrap();
                 near(r.displacement_m[0], u, force.abs());
                 near(account.state[0], momentum, force.abs());
