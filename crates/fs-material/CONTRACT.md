@@ -9383,6 +9383,24 @@ geometry, source-domain and late-cancellation refusal with exact replay. These
 are numerical model checks on synthetic source cards, not measured-material
 validation.
 
+## Original reservoir response of source caloric exchange
+
+`IsobaricHeatCapacityLaw::linear_heat_exchange` retains analytic derivatives
+with respect to the initial enthalpy and reservoir temperature through every
+original affine Cp interval. Its stable inlet attenuation, final-enthalpy wall
+derivative and mean-temperature wall derivative do not differentiate a frozen
+Cp or require material data at the reservoir temperature. The latter may lie
+outside source support while all actual material temperatures remain supported.
+Positive integral moments preserve weak exchange; exact equilibrium uses the
+local exponential derivative limit. The original bounded exchange inverse,
+signed heat, source identity, pressure and composition remain unchanged.
+
+Focused regressions differentiate an independent piecewise caloric integral
+in heating and cooling across source knots, including exterior reservoirs,
+and check weak, zero, equilibrium and strong exchange limits. These native
+regressions are authored and syntax checked but unexecuted in this workspace;
+no runtime or experimental verification is claimed.
+
 ## Integrated conductivity for volumetric and assembled storage
 
 `CaloricConductionLayer::from_fixed_volume` retains an original

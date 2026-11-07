@@ -30,6 +30,9 @@ pub(super) struct CapacityExchange {
     pub energy_change: f64,
     pub mean_temperature: f64,
     pub inlet_energy_gain: f64,
+    pub inlet_energy_loss: f64,
+    pub reservoir_energy_derivative: f64,
+    pub mean_reservoir_derivative: f64,
 }
 
 /// Prepared search coordinates for repeated caloric queries from one fixed datum.
@@ -331,15 +334,32 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
             ));
         }
         if exposure == 0.0 || initial == reservoir {
+            let capacity = self.capacity(initial)?;
+            let attenuation = exposure / capacity;
+            let loss = -(-attenuation).exp_m1();
+            let response = if attenuation == 0.0 {
+                exposure
+            } else if attenuation <= 0.5 {
+                exposure * (loss / attenuation)
+            } else {
+                capacity * loss
+            };
+            let mean_response = if exposure == 0.0 {
+                0.0
+            } else if loss <= 0.5 {
+                let [a0, a1, _, _] = exchange_moment_weights(loss);
+                loss * a1 / (a0 + a1)
+            } else {
+                1.0 - response / exposure
+            };
             return Ok(CapacityExchange {
                 temperature: initial,
                 energy_change: 0.0,
                 mean_temperature: initial,
-                inlet_energy_gain: if exposure == 0.0 {
-                    1.0
-                } else {
-                    (-exposure / self.capacity(initial)?).exp()
-                },
+                inlet_energy_gain: (-attenuation).exp(),
+                inlet_energy_loss: loss,
+                reservoir_energy_derivative: response,
+                mean_reservoir_derivative: mean_response,
             });
         }
         let heating = reservoir > initial;
@@ -356,7 +376,9 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
         let mut correction = 0.0;
         let (mut energy, mut energy_correction) = (0.0, 0.0);
         let (mut mean_travel, mut mean_correction) = (0.0, 0.0);
-        let mut inlet_energy_gain = 1.0;
+        let (mut inlet_energy_gain, mut inlet_energy_loss) = (1.0, 0.0);
+        let mut reservoir_energy_derivative = 0.0;
+        let (mut mean_response_numerator, mut response_correction) = (0.0, 0.0);
         for _ in 0..self.knots.len() - 1 {
             let end = if heating {
                 self.knots[index + 1].temperature().min(reservoir)
@@ -392,8 +414,31 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
                     "heat-exchange energy or exposure is not representable",
                 ));
             }
-            let local_mean = segment.mean_travel(travel, local_exposure, heat);
-            inlet_energy_gain *= segment.inlet_energy_gain(travel, local_exposure)?;
+            let gain = segment.inlet_energy_gain(travel, local_exposure)?;
+            let loss = if segment.initial_capacity == segment.end_capacity {
+                -(-local_exposure / segment.initial_capacity).exp_m1()
+            } else {
+                travel / segment.distance
+            };
+            let (local_mean, response, mean_response) =
+                segment.exchange_moments(travel, local_exposure, heat, gain);
+            // X-B stays a positive integral even when B rounds to X. This
+            // preserves a weak wall response of the stream's Robin mean.
+            compensated_add(
+                &mut mean_response_numerator,
+                &mut response_correction,
+                loss * reservoir_energy_derivative + local_exposure * mean_response,
+            );
+            reservoir_energy_derivative = gain.mul_add(reservoir_energy_derivative, response);
+            inlet_energy_loss = gain.mul_add(inlet_energy_loss, loss);
+            inlet_energy_gain *= gain;
+            if !reservoir_energy_derivative.is_finite()
+                || !mean_response_numerator.is_finite()
+                || reservoir_energy_derivative < 0.0
+                || mean_response_numerator < 0.0
+            {
+                return Err(invalid("heat-exchange wall response is not representable"));
+            }
             compensated_add(&mut energy, &mut energy_correction, heat);
             compensated_add(
                 &mut mean_travel,
@@ -429,6 +474,9 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
                     energy_change: direction * energy,
                     mean_temperature,
                     inlet_energy_gain,
+                    inlet_energy_loss,
+                    reservoir_energy_derivative,
+                    mean_reservoir_derivative: mean_response_numerator / exposure,
                 });
             }
             correction = (next - cumulative) - corrected;
@@ -691,17 +739,40 @@ impl ExchangeSegment {
         ))
     }
 
-    fn mean_travel(&self, travel: f64, exposure: f64, heat: f64) -> f64 {
+    // The same positive moments give the stream mean and its wall response.
+    // B=dEout/dTw=Dout*integral C(T)/(Tw-T)^2 dT. For affine C,
+    // B=C0*w0+C1*w1, w0=(1-z)*[-log(1-z)-z]/z and w1=z-w0.
+    fn exchange_moments(&self, travel: f64, exposure: f64, heat: f64, gain: f64) -> (f64, f64, f64) {
         let heat_per_exposure = heat / exposure;
-        if heat_per_exposure <= 0.75 * self.distance {
-            // Well-conditioned for strong exchange, including rounded equilibrium.
-            return self.distance - heat_per_exposure;
-        }
-        let [a0, a1, b0, b1] = exchange_moment_weights(travel / self.distance);
+        let z = travel / self.distance;
         let end_capacity = self.capacity(travel);
-        let scale = self.initial_capacity.max(end_capacity);
-        let (c0, c1) = (self.initial_capacity / scale, end_capacity / scale);
-        travel * ((c0 * b0 + c1 * b1) / (c0 * a0 + c1 * a1))
+        if z <= 0.5 {
+            let [a0, a1, b0, b1] = exchange_moment_weights(z);
+            let scale = self.initial_capacity.max(end_capacity);
+            let (c0, c1) = (self.initial_capacity / scale, end_capacity / scale);
+            let denominator = c0 * a0 + c1 * a1;
+            let w0 = gain * a1;
+            let response = exposure * ((c0 * w0 + c1 * (1.0 - w0)) / denominator);
+            let mean_response = z * ((2.0 * c0 * b0 + c1 * (b1 - b0)) / denominator);
+            let mean = if heat_per_exposure <= 0.75 * self.distance {
+                self.distance - heat_per_exposure
+            } else {
+                travel * ((c0 * b0 + c1 * b1) / denominator)
+            };
+            (mean, response, mean_response)
+        } else {
+            let w0 = if gain == 0.0 { 0.0 } else { gain * (-gain.ln() - z) / z };
+            let response = self.initial_capacity * w0 + end_capacity * (z - w0);
+            let mean = if heat_per_exposure <= 0.75 * self.distance {
+                self.distance - heat_per_exposure
+            } else {
+                let [a0, a1, b0, b1] = exchange_moment_weights(z);
+                let scale = self.initial_capacity.max(end_capacity);
+                let (c0, c1) = (self.initial_capacity / scale, end_capacity / scale);
+                travel * ((c0 * b0 + c1 * b1) / (c0 * a0 + c1 * a1))
+            };
+            (mean, response, 1.0 - response / exposure)
+        }
     }
 
     // dE_out/dE_in=(Tw-Tout)/(Tw-Tin). The original affine law gives
@@ -984,13 +1055,32 @@ mod tests {
                     affine_exchange(pair[0], pair[1], reservoir, intercept, slope)
                 })
                 .sum();
-            let actual = curve
-                .temperature_after_linear_exchange(initial, reservoir, exposure)
-                .unwrap();
+            // Independent derivative of the original integral at fixed X.
+            // The reservoir is outside the source support in both directions.
+            let integral: f64 = cuts.windows(2).map(|pair| {
+                let middle = 0.5 * (pair[0] + pair[1]);
+                let (intercept, slope) = if middle < 300.0 {
+                    (800.0, 2.0)
+                } else if middle < 400.0 {
+                    (200.0, 4.0)
+                } else {
+                    (3400.0, -4.0)
+                };
+                let (a, b) = (reservoir - pair[0], reservoir - pair[1]);
+                (intercept + slope * reservoir) * (1.0 / b - 1.0 / a)
+                    + slope * (b / a).ln()
+            }).sum();
+            let expected_response = (reservoir - target) * integral;
+            let answer = curve.linear_heat_exchange(initial, reservoir, exposure).unwrap();
+            let actual = answer.temperature;
             assert!(
                 (actual - target).abs() <= 8.0 * f64::EPSILON * target,
                 "{actual} != {target}"
             );
+            assert!((answer.reservoir_energy_derivative - expected_response).abs() < 3e-9);
+            assert!((answer.mean_reservoir_derivative - (1.0 - expected_response / exposure)).abs() < 3e-12);
+            assert!((answer.inlet_energy_loss - (target - initial) / (reservoir - initial)).abs() < 3e-14);
+            assert!((answer.inlet_energy_gain + answer.inlet_energy_loss - 1.0).abs() < 3e-14);
         }
         // Exact source knots select the correct outgoing interval when cooling.
         let exposure = affine_exchange(400.0, 350.0, 200.0, 200.0, 4.0);
@@ -1002,6 +1092,39 @@ mod tests {
                 .abs()
                 < 1e-12
         );
+    }
+
+    #[test]
+    fn g1_reservoir_response_retains_weak_exchange_and_equilibrium_limits() {
+        let knots = [[200.0, 1200.0], [800.0, 2400.0]]; // C(T)=800+2T.
+        let curve = CapacityCurve::new(&knots);
+        let (temperature, capacity) = (400.0, 1600.0);
+        for attenuation in [0.0_f64, 1e-12, 1e-5, 1.0, 50.0] {
+            let exposure = capacity * attenuation;
+            let answer = curve.linear_heat_exchange(temperature, temperature, exposure).unwrap();
+            let expected_loss = -(-attenuation).exp_m1();
+            let expected_mean = if attenuation < 1e-3 {
+                attenuation * (0.5 - attenuation / 6.0 + attenuation * attenuation / 24.0)
+            } else {
+                1.0 - expected_loss / attenuation
+            };
+            assert_eq!(answer.temperature, temperature);
+            assert_eq!(answer.energy_change, 0.0);
+            assert_eq!(answer.inlet_energy_loss, expected_loss);
+            assert!((answer.reservoir_energy_derivative - capacity * expected_loss).abs()
+                <= 8.0 * f64::EPSILON * (capacity * expected_loss));
+            assert!((answer.mean_reservoir_derivative - expected_mean).abs()
+                <= 8.0 * f64::EPSILON * expected_mean);
+        }
+        // The tiny derivative of the Robin mean is retained directly, even
+        // when forming 1-B/X would lose its significant digits.
+        for reservoir in [300.0, 500.0] {
+            let exposure = capacity * 1e-12;
+            let answer = curve.linear_heat_exchange(temperature, reservoir, exposure).unwrap();
+            assert!((answer.reservoir_energy_derivative / exposure - 1.0).abs() < 2e-12);
+            assert!((answer.mean_reservoir_derivative / 5e-13 - 1.0).abs() < 2e-11);
+            assert!(answer.inlet_energy_loss > 0.0);
+        }
     }
 
     #[test]

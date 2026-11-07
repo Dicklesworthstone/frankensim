@@ -69,6 +69,8 @@ pub struct IsobaricHeatCapacityLaw {
 }
 
 /// One source-exact passive exchange with a fixed-temperature reservoir.
+/// At a material-support endpoint, derivatives are admitted-side tangents;
+/// they do not authorize perturbations beyond the original caloric source.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LinearHeatExchange {
     /// Final absolute material temperature [K], rounded only after inversion.
@@ -86,6 +88,17 @@ pub struct LinearHeatExchange {
     /// exchange may underflow to zero. At equilibrium this is exp(-exposure/Cp),
     /// including when the absolute outlet rounds to the reservoir temperature.
     pub inlet_enthalpy_gain: f64,
+    /// Stable complement of `inlet_enthalpy_gain`. Retained independently so
+    /// the derivative of transferred heat survives very weak exchange.
+    pub inlet_enthalpy_loss: f64,
+    /// d h_out / d T_reservoir [J/(kg K)], with initial state, exposure and
+    /// source fixed. Integrates original Cp along the actual fluid path; the
+    /// reservoir itself need not lie inside material temperature support.
+    pub reservoir_enthalpy_derivative_j_kg_k: f64,
+    /// d T_mean / d T_reservoir, with initial state and exposure fixed.
+    /// A direct positive moment retains weak exchange without subtracting
+    /// nearly equal heat and exposure. Zero exposure has zero wall response.
+    pub mean_reservoir_derivative: f64,
 }
 
 impl IsobaricHeatCapacityLaw {
@@ -383,6 +396,9 @@ impl IsobaricHeatCapacityLaw {
             specific_enthalpy_change_j_kg: answer.energy_change,
             mean_temperature_k: answer.mean_temperature,
             inlet_enthalpy_gain: answer.inlet_energy_gain,
+            inlet_enthalpy_loss: answer.inlet_energy_loss,
+            reservoir_enthalpy_derivative_j_kg_k: answer.reservoir_energy_derivative,
+            mean_reservoir_derivative: answer.mean_reservoir_derivative,
         })
     }
 }
