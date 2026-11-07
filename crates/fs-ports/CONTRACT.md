@@ -40,3 +40,28 @@ it does not claim a physical point force or measured modal mass. The signed
 volume projection, when present, is retained separately. `ModuleWindowAudit`
 distinguishes a real report, no accepted step, and a named unavailable physical
 account. Observation errors are visible through `last_window_transfer_error`.
+
+## Moving control-surface streams
+
+`StreamPort::try_from_uniform_surface` evaluates the original source state on
+an oriented uniform face or quadrature point. With material velocity u and cut
+velocity w, mass uses `rho*A*(u-w).n`, momentum uses
+`mdot*u+A*(p*n-tau*n)`, and the existing enthalpy chart includes
+`mdot*(h+|u|²/2+gz)+p*A*w.n-A*(tau*n).u`. The swept pressure term is
+separate from deviatoric work and is present at zero-mass moving walls.
+Constituents and entropy use the same signed relative mass flow. Reusing the
+retained chart refuses replacement of its geometry-derived mass or momentum
+rates.
+
+`SurfaceTransport` exposes relative/swept volume flow, advective and stress
+momentum, material-side stress power, work on the moving cut, and angular flux
+about an explicit origin. Open-stream convection is not silently interpreted
+as a body force; slipping-wall work is not inferred heat. Source EOS/stress
+validity, heat and species diffusion, spatial quadrature, mesh/GCL advancement
+and finite-body evolution remain with their original owners.
+
+G0/G3 native tests cover impermeable-wall impulse/work, Galilean boosts,
+uniform-flow geometric conservation, off-origin angular flux and rigid-motion
+power, orientation reversal, stationary-chart parity and invalid/rebound
+inputs. These are local transport identities, not a whole-system stability
+or physical-validation claim.

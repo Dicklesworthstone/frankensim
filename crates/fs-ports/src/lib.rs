@@ -8,6 +8,8 @@
 #![warn(missing_docs)]
 
 pub mod adoption;
+/// Conservative material streams through stationary or moving control surfaces.
+pub mod surface;
 pub use adoption::{
     JunctionLaw, JunctionSchema, MAX_JUNCTION_PORTS, ModuleWindowAudit, PortCoordinateChart,
     PortedModule,
@@ -1210,6 +1212,9 @@ impl DeviatoricStressWork {
 /// Its signed boundary contribution is
 /// `mass_flow * (h + |velocity|^2 / 2 + g z) + deviatoric_work`, plus an
 /// explicit chemical term only when a partition proof says `h` excludes it.
+/// For a moving cut, [`StreamPort::try_from_uniform_surface`] also retains
+/// `p * A * normal.dot(surface_velocity)`. Enthalpy contains pressure work
+/// carried by relative mass flow, but not the pressure work of the swept cut.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MovingStreamEnthalpyChart {
     binding: StreamChartBinding,
@@ -1217,10 +1222,12 @@ pub struct MovingStreamEnthalpyChart {
     kinematics: StreamKinematics,
     deviatoric_work: DeviatoricStressWork,
     chemical_energy: ChemicalEnergyAccounting,
+    surface_transport: Option<surface::SurfaceTransport>,
 }
 
 impl MovingStreamEnthalpyChart {
-    /// Admit a canonical enthalpy chart.
+    /// Admit a canonical enthalpy chart on a stationary control surface.
+    /// Use [`StreamPort::try_from_uniform_surface`] when the surface moves.
     ///
     /// # Errors
     ///
@@ -1242,16 +1249,23 @@ impl MovingStreamEnthalpyChart {
             kinematics,
             deviatoric_work,
             chemical_energy,
+            surface_transport: None,
         })
     }
 
     fn energy_rate(&self, mass_flow: MassFlowRate) -> Power {
-        Power::new(
+        let stationary_chart = Power::new(
             mass_flow.value()
                 * (self.specific_enthalpy.value() + self.kinematics.specific_transport_energy())
                 + self.deviatoric_work.power_rate.value()
                 + self.chemical_energy.explicit_power_rate.value(),
-        )
+        );
+        match &self.surface_transport {
+            Some(surface) => {
+                Power::new(stationary_chart.value() + surface.pressure_motion_work().value())
+            }
+            None => stationary_chart,
+        }
     }
 }
 
@@ -1735,6 +1749,11 @@ impl StreamPort {
         for (index, component) in momentum_flow.into_iter().enumerate() {
             ensure_finite_stream_value("momentum_flow", Some(index), component.value())?;
         }
+        if let StreamEnergyChart::MovingStreamEnthalpy(chart) = &energy_chart {
+            if let Some(surface) = &chart.surface_transport {
+                surface.require_rates(mass_flow, momentum_flow)?;
+            }
+        }
         ensure_finite_stream_value("energy_flow", None, energy_flow.value())?;
         ensure_finite_stream_value("entropy_flow", None, entropy_flow.value())?;
 
@@ -1835,6 +1854,17 @@ impl StreamPort {
     #[must_use]
     pub fn energy_chart(&self) -> &StreamEnergyChart {
         &self.energy_chart
+    }
+
+    /// Original geometry, stress reaction and moving-cut work, when this port
+    /// was constructed by [`Self::try_from_uniform_surface`]. Authored rates
+    /// alone do not establish these physical quantities.
+    #[must_use]
+    pub fn surface_transport(&self) -> Option<&surface::SurfaceTransport> {
+        match &self.energy_chart {
+            StreamEnergyChart::MovingStreamEnthalpy(chart) => chart.surface_transport.as_ref(),
+            _ => None,
+        }
     }
 
     /// Fixed bundled conservation roles in canonical enum order.
@@ -5517,6 +5547,18 @@ pub enum CoupleError {
     },
     /// A pressure-work crosswalk used zero or negative density.
     NonPositiveStreamDensity,
+    /// Invalid control-surface geometry or source constituent concentration.
+    InvalidStreamSurface {
+        /// Localized physical or arithmetic refusal.
+        what: &'static str,
+    },
+    /// Authored rates attempted to replace the original geometry-derived flux.
+    StreamSurfaceFlowMismatch {
+        /// Mass or vector momentum flow.
+        field: &'static str,
+        /// Component index for momentum, absent for mass.
+        index: Option<usize>,
+    },
     /// Chemical energy was owned by both the state potential and a separate
     /// species-potential contribution.
     DoubleCountedChemicalEnergy,
