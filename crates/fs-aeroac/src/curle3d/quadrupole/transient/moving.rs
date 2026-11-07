@@ -24,10 +24,11 @@
 //! the first knot uses the right limit. Such knots need not be C3 or bandlimited.
 //!
 //! The medium is homogeneous, quiescent and lossless. No finite-cell quadrature,
-//! initial particle-velocity field, reflections, absorption or feedback is
-//! inferred. A moving receiver
-//! may sample the Eulerian field at its actual position; its observed clock
-//! rate changes, but the pressure amplitude receives no receiver multiplier.
+//! initial particle-velocity field, absorption or feedback is inferred.
+//! Original fixed/moving receiver and ideal-image owners below retain their
+//! admitted causal roots and image parity. A moving receiver samples the
+//! Eulerian field at its actual position; its observed clock rate changes,
+//! but the pressure amplitude receives no receiver multiplier.
 
 use super::TransientQuadrupoleSource;
 use crate::AeroacError;
@@ -37,6 +38,8 @@ use crate::curle3d::moving::{
 };
 use crate::curle3d::statistics::{invalid, nonfinite};
 use fs_math::dd::Dd;
+
+mod paths;
 
 /// Retarded geometry and constant-work pressure coefficients for one source.
 ///
@@ -241,6 +244,13 @@ impl PreparedMovingQuadrupoleSample {
     /// is deliberately not reconstructed as p/Z. Fixed-order DD reduction
     /// retains cancellation between tensor components and radial orders.
     pub fn pressure_pa(&self, source: TransientQuadrupoleSource) -> Result<f64, AeroacError> {
+        self.pressure_dd(source).map(Dd::to_f64)
+    }
+
+    /// Retain the original compensated pressure through coherent source/image
+    /// sums. Round only after the complete receiver event has been assembled.
+    /// Source units, finite checks and pressure coefficients match `pressure_pa`.
+    pub fn pressure_dd(&self, source: TransientQuadrupoleSource) -> Result<Dd, AeroacError> {
         let values = [
             source.stress_moment_n_m,
             source.stress_rate_n_m_s,
@@ -255,8 +265,7 @@ impl PreparedMovingQuadrupoleSample {
                 pressure = pressure + Dd::from_f64(coefficient) * Dd::from_f64(value);
             }
         }
-        let pressure = pressure.to_f64();
-        if !pressure.is_finite() {
+        if !pressure.to_f64().is_finite() {
             return Err(invalid("moving quadrupole pressure is unrepresentable"));
         }
         Ok(pressure)

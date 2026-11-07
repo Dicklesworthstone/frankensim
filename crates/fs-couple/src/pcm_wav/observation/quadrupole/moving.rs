@@ -8,20 +8,20 @@
 //! must cover Doppler shift AND geometric amplitude modulation. Render at an
 //! adequate rate and use the existing `DecimatedRenderer` for downsampling.
 //!
-//! Scope: uniform or original admitted quintic source translations, a fixed
-//! omnidirectional receiver, and homogeneous quiescent lossless propagation.
-//! Analytic trajectory jerk supplies the accelerating radiation coefficients.
-//! C2 knots can have jerk jumps: the original clock-rate bound does not certify
-//! the bandwidth of that geometric modulation. This pressure-only
-//! adapter does not infer particle velocity, directivity from p/Z, reflected
-//! moving paths, compactness, or the validity of a turbulence source model.
+//! Scope: uniform or original admitted quintic source translations, fixed or
+//! moving microphones, and complete native ideal-plane/wedge image groups in
+//! the original homogeneous lossless fluid frame. Analytic trajectory jerk
+//! supplies accelerating radiation coefficients. C2 knots can have jerk jumps:
+//! the original clock-rate bound does not certify that geometric bandwidth.
+//! This pressure-only adapter does not infer particle velocity, directivity
+//! from p/Z, compactness, or the validity of a turbulence source model.
 
 use super::{QuadrupolePressureBudget, check_cancel, sizing};
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::pcm_wav::observation::moving::{MovingPressureConfig, clock_time};
 use crate::render::RenderError;
 use fs_aeroac::AeroacError;
-use fs_aeroac::curle3d::moving::{MovingCompactObserver, UniformSourceMotion};
+use fs_aeroac::curle3d::moving::UniformSourceMotion;
 use fs_aeroac::curle3d::quadrupole::transient::TransientQuadrupoleSource;
 use fs_math::dd::Dd;
 
@@ -54,13 +54,14 @@ pub struct MovingQuadrupoleSourceWindow<M = UniformSourceMotion> {
 /// allocates nothing, and publishes output/cursor only after the whole block
 /// succeeds. Failed reads or cancellation leave both unchanged.
 pub struct MovingQuadrupoleRenderer<'a, F, M: QuadrupoleMotion = UniformSourceMotion> {
-    observer: MovingCompactObserver,
+    observer: M::Observer,
     sources: &'a [MovingQuadrupoleSourceWindow<M>],
     source_at: F,
     config: MovingPressureConfig,
     scratch: Vec<f64>,
     completed: u64,
     maximum_retarded_iterations: u64,
+    source_path_count: usize,
 }
 
 impl<'a, F, M: QuadrupoleMotion> MovingQuadrupoleRenderer<'a, F, M>
@@ -69,7 +70,7 @@ where
 {
     /// Admit all clocks/history/geometry/bandwidth and finite lifetime budgets.
     pub fn new(
-        observer: MovingCompactObserver,
+        observer: M::Observer,
         sources: &'a [MovingQuadrupoleSourceWindow<M>],
         source_at: F,
         config: MovingPressureConfig,
@@ -96,9 +97,24 @@ where
                 "moving quadrupole requires finite clocks, bandwidth and capacities",
             ));
         }
-        let work = (sources.len() as u64)
-            .checked_mul(config.samples)
-            .ok_or_else(|| sizing("moving quadrupole source/sample work overflows"))?;
+        // Admit the complete source/image work before any retarded query.
+        let mut source_path_count = 0usize;
+        for source in sources {
+            check_cancel(cancelled)?;
+            let paths = source.motion.path_count();
+            if paths == 0 {
+                return Err(sizing(
+                    "moving quadrupole needs its complete propagation paths",
+                ));
+            }
+            source_path_count = source_path_count
+                .checked_add(paths)
+                .ok_or_else(|| sizing("moving quadrupole path count overflows"))?;
+        }
+        let work = u64::try_from(source_path_count)
+            .ok()
+            .and_then(|paths| paths.checked_mul(config.samples))
+            .ok_or_else(|| sizing("moving quadrupole path/sample work overflows"))?;
         let bytes = config
             .max_block
             .checked_mul(core::mem::size_of::<f64>())
@@ -125,8 +141,14 @@ where
                 .admit_clock(first_time, last_time, config.maximum_time_residual_s)?;
             iterations_per_sample = iterations_per_sample
                 .checked_add(
-                    u64::try_from(source.motion.maximum_root_iterations())
-                        .map_err(|_| sizing("moving quadrupole root limit exceeds u64"))?,
+                    u64::try_from(
+                        source
+                            .motion
+                            .maximum_root_iterations()
+                            .checked_mul(source.motion.path_count())
+                            .ok_or_else(|| sizing("moving quadrupole image root work overflows"))?,
+                    )
+                    .map_err(|_| sizing("moving quadrupole root limit exceeds u64"))?,
                 )
                 .ok_or_else(|| sizing("moving quadrupole root work overflows"))?;
             let [start, end] = source.source_time_interval_s;
@@ -152,16 +174,39 @@ where
                 config.maximum_time_residual_s,
                 cancelled,
             )?;
-            if first.source_time_s() < start
-                || last.source_time_s() > end
-                || first.source_time_s() > last.source_time_s()
-            {
-                return Err(sizing(
-                    "moving quadrupole retarded clock exceeds declared source support",
-                ));
+            for path in 0..source.motion.path_count() {
+                let (path_first, path_last) = if path == 0 {
+                    (first, last)
+                } else {
+                    (
+                        source.motion.prepare_quadrupole_path_at(
+                            path,
+                            &observer,
+                            first_time,
+                            config.maximum_time_residual_s,
+                            cancelled,
+                        )?,
+                        source.motion.prepare_quadrupole_path_at(
+                            path,
+                            &observer,
+                            last_time,
+                            config.maximum_time_residual_s,
+                            cancelled,
+                        )?,
+                    )
+                };
+                if path_first.source_time_s() < start
+                    || path_last.source_time_s() > end
+                    || path_first.source_time_s() > path_last.source_time_s()
+                {
+                    return Err(sizing(
+                        "moving quadrupole image clock exceeds declared source support",
+                    ));
+                }
             }
-            // Each original motion owner admits continuous clearance and
-            // bounds d tau/d t over this whole finite receiver window.
+            // One original owner admits continuous clearance and bounds
+            // d tau/d t for the COMPLETE image group and receiver motion.
+            // Its direct endpoints identify the common physical output window.
             let maximum_rate = source.motion.admit_window(
                 &observer,
                 first.propagation(),
@@ -193,7 +238,23 @@ where
             scratch,
             completed: 0,
             maximum_retarded_iterations,
+            source_path_count,
         })
+    }
+
+    /// Original physical source count, before image expansion.
+    pub fn source_count(&self) -> usize {
+        self.sources.len()
+    }
+
+    /// Complete physical source/image paths per receiver event.
+    pub const fn source_path_count(&self) -> usize {
+        self.source_path_count
+    }
+
+    /// The original receiver owner shared by every source.
+    pub const fn observer(&self) -> &M::Observer {
+        &self.observer
     }
 
     pub const fn samples_rendered(&self) -> u64 {
@@ -260,28 +321,32 @@ where
             let mut sum = Dd::ZERO;
             for (index, source) in self.sources.iter().enumerate() {
                 check_cancel(cancelled)?;
-                let prepared = source.motion.prepare_quadrupole_at(
-                    &self.observer,
-                    time,
-                    self.config.maximum_time_residual_s,
-                    cancelled,
-                )?;
-                let source_time = prepared.source_time_s();
-                // Keep source readers inside the original finite support even
-                // if rounded retarded roots sit just outside an endpoint.
-                if source_time < source.source_time_interval_s[0]
-                    || source_time > source.source_time_interval_s[1]
-                {
-                    return Err(sizing(
-                        "moving quadrupole source query exceeds declared support",
-                    ));
+                for path in 0..source.motion.path_count() {
+                    check_cancel(cancelled)?;
+                    let prepared = source.motion.prepare_quadrupole_path_at(
+                        path,
+                        &self.observer,
+                        time,
+                        self.config.maximum_time_residual_s,
+                        cancelled,
+                    )?;
+                    let source_time = prepared.source_time_s();
+                    // Every image reads the same PHYSICAL source at its own
+                    // emission time. Never extrapolate or reset its history.
+                    if source_time < source.source_time_interval_s[0]
+                        || source_time > source.source_time_interval_s[1]
+                    {
+                        return Err(sizing(
+                            "moving quadrupole source query exceeds declared support",
+                        ));
+                    }
+                    let strength =
+                        (self.source_at)(index, source_time).map_err(RenderError::Acoustic)?;
+                    sum = sum
+                        + prepared
+                            .pressure_dd(strength)
+                            .map_err(RenderError::Acoustic)?;
                 }
-                let strength =
-                    (self.source_at)(index, source_time).map_err(RenderError::Acoustic)?;
-                let pressure = prepared
-                    .pressure_pa(strength)
-                    .map_err(RenderError::Acoustic)?;
-                sum = sum + Dd::from_f64(pressure);
             }
             let pressure = sum.to_f64();
             if !pressure.is_finite() {

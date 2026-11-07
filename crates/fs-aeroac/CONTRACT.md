@@ -3074,10 +3074,38 @@ one-sided convention and does not assert a unique classical Hessian there.
 
 The represented polynomial, source history and their convergence remain
 caller-owned. A bound on retarded source-clock rate does not certify bandwidth
-of geometric modulation or of a jerk jump. This is still prescribed compact
-stress in a homogeneous quiescent lossless medium; moving quadrupole velocity
-fields, finite-cell quadrature, reflections, flow and source feedback are not
-supplied. Preparation and evaluation allocate nothing.
+of geometric modulation or of a jerk jump. This is prescribed compact stress
+in the original homogeneous lossless fluid rest frame; moving quadrupole
+velocity fields, finite-cell quadrature, material absorption and source
+feedback are not supplied. Preparation and evaluation allocate nothing.
+
+The same pressure owner now prepares original moving microphones through
+`PreparedMovingReceiverSource::prepare_quadrupole_receiver` and every ideal
+image through `PreparedReflectedSourceTrajectory::prepare_quadrupole_path`
+and `PreparedReflectedMovingReceiverSource::prepare_quadrupole_path`. These
+reuse the native causal roots, complete wall/wedge groups, source and receiver
+frames, clearance admission and root caps. Independent source paths share
+the SAME analytic quintic-jerk evaluator and one-sided C2-knot convention.
+
+At each fixed arrival event the spatial Green-potential Hessian uses source
+velocity, acceleration and jerk only. Microphone motion sets its observation
+position and retarded clock rate; it adds neither a pressure multiplier nor
+receiver-acceleration terms to that Hessian. Each image reads the original
+six-entry Q/Qdot/Qddot at its own source time. Evaluating at the inverse-image
+receiver implements the full rank-two transformation, equivalent to image
+stress `s H Q H^T`, with pressure character s applied once. Trace, physical
+shear entries and nonsymmetric wedge rotations are retained. The optional
+clock-rate query takes physical receiver velocity in the common fluid frame;
+its ray is pulled back without pressure parity.
+
+`PreparedMovingQuadrupoleSample::pressure_dd` retains tensor/radial
+contraction through later source/image sums; `pressure_pa` rounds that same
+result. This is a pressure capability, not a moving quadrupole particle-velocity
+or flux reconstruction. The five G1/G3/G4 cross-crate regressions in
+`fs-couple/tests/moving_reflected_quadrupole.rs` exercise independently
+bisected image-source spatial Hessians under accelerating source/microphone
+motion, six-image rigid/release wedges, weak coherent shear residuals,
+complete image support/work/Doppler admission and transactional source reads.
 
 G1/G3 `tests/accelerating_quadrupole.rs` checks stationary/uniform recovery,
 independent bisection and spatial-potential Hessian refinement with acceleration

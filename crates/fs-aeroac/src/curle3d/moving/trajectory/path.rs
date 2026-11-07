@@ -244,6 +244,19 @@ impl PreparedKinematicTrajectory {
         self.segment_at(time_s)?.evaluate(time_s, true)
     }
 
+    /// Position and its first THREE derivatives from the original quintic.
+    ///
+    /// Jerk [m/s³] differentiates the retained acceleration controls, with no
+    /// differencing or second interpolation. Internal C2 knots use the left
+    /// segment; the first knot uses the right segment. This does not assert
+    /// C3 continuity or a bandwidth bound for geometric amplitude modulation.
+    pub fn kinematics_with_jerk_at(
+        &self,
+        time_s: f64,
+    ) -> Result<(SourceKinematics, [f64; 3]), AeroacError> {
+        self.segment_at(time_s)?.evaluate_with_jerk(time_s)
+    }
+
     /// Observe the same represented motion in its original laboratory frame.
     /// Quiescent trajectories return their original interpolant directly.
     pub fn laboratory_kinematics_at(&self, time_s: f64) -> Result<SourceKinematics, AeroacError> {

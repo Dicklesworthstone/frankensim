@@ -2400,12 +2400,43 @@ a declaration does not establish source interpolation or spectral accuracy.
 Callbacks allocate nothing, preserve global integer sample clocks, use DD
 source summation and publish output/cursor only after complete success.
 Out-of-support queries, failed reads and cancellation preserve accepted state.
-Scope includes uniform and admitted quintic source translations, a fixed
-omnidirectional receiver and homogeneous quiescent lossless propagation on the original moving operator's
-f64 clock domain. No source evolution, interpolation, particle velocity or
-directional/reflected moving field is inferred.
+Scope includes uniform and admitted quintic source translations, fixed or
+moving microphones and the native complete ideal-plane/wedge image groups,
+in the original homogeneous lossless fluid frame and f64 clock domain.
+No source evolution, interpolation, moving quadrupole particle velocity,
+directional microphone law or turbulence-model validation is inferred.
 `tests/moving_quadrupole_pcm.rs` covers history/bandwidth/clearance refusal,
 coherent cancellation, block invariance, atomic failure and native WAV parity.
+
+`QuadrupoleMotion` retains each existing `CompactMotion::Observer` rather
+than substituting a fixed microphone. The native direct and reflected owners
+supply every path's original spatial Green Hessian, with source acceleration
+and analytic jerk. Receiver motion affects the observation point and admitted
+clock rate; it does not become source-clock stress derivatives. Readers keep
+the physical source index and fixed medium-frame tensor, queried separately
+at every image's own retarded time. Native inverse-image geometry and parity
+apply the full rank-two reflection once. The raw DD tensor contraction is
+summed over all physical sources and images before output rounding.
+
+Admission counts complete source/image paths before retarded queries, charges
+path-times-sample work, and includes each path in the lifetime root cap.
+Every direct and reflected arrival must fit the declared source support.
+The original whole-window Doppler bound covers the complete image group and
+independently admitted source/receiver velocities. No callback is queried
+during admission. `source_count` and `source_path_count` distinguish the
+physical inventory and propagation work; `observer` retains original identity.
+Per-event work is O(total paths) times the existing bounded root solve, with
+one reusable block buffer and no extra trajectory/image bank.
+
+Five G1/G3/G4 `tests/moving_reflected_quadrupole.rs` regressions cover moving
+microphones with independently differentiated image-source potentials,
+fixed/moving rigid and release wedges, preserved trace/shear and weak
+destructive-interference residuals, full image support/work/Doppler admission,
+and late image-read failure/cancellation with chunk-invariant retry.
+All five, ten prior native moving/accelerating quadrupole tests and four
+prior renderer tests passed focused native builds of the actual source
+modules and original math/material/interval owners. The previous WAV-end-to-end
+test and full Cargo/DSR workspace gates were not executed in that focused lane.
 
 ## Weak directional modal damping
 

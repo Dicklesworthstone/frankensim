@@ -204,14 +204,19 @@ impl PreparedSourceTrajectory {
     pub fn source_time_interval_s(&self) -> [f64; 2] {
         [
             self.segments[0].polynomial.first.source_time_s,
-            self.segments[self.segments.len() - 1].polynomial.last.source_time_s,
+            self.segments[self.segments.len() - 1]
+                .polynomial
+                .last
+                .source_time_s,
         ]
     }
     /// Rounded arrivals of the first and last retained events [s], inclusive.
     pub fn receiver_time_interval_s(&self) -> [f64; 2] {
         [
             self.segments[0].polynomial.first_arrival,
-            self.segments[self.segments.len() - 1].polynomial.last_arrival,
+            self.segments[self.segments.len() - 1]
+                .polynomial
+                .last_arrival,
         ]
     }
     /// Continuous source Mach bound retained from the accepted velocity hulls.
@@ -257,7 +262,11 @@ impl PreparedSourceTrajectory {
         }
         // Rounded coverage endpoints can leave no provable causal span at
         // zero tolerance. Preserve the already admitted whole-domain bound.
-        Ok(if maximum > 0.0 { maximum } else { self.maximum_source_time_rate })
+        Ok(if maximum > 0.0 {
+            maximum
+        } else {
+            self.maximum_source_time_rate
+        })
     }
 
     /// Per-query interior refinement cap retained from construction.
@@ -278,10 +287,13 @@ impl PreparedSourceTrajectory {
         if !source_time.is_finite() || source_time < first || source_time > last {
             return Err(invalid("source knot query is outside retained trajectory"));
         }
-        let index = self.segments.partition_point(
-            |segment| segment.polynomial.last.source_time_s <= source_time,
-        );
-        Ok(self.segments.get(index).map(|segment| segment.polynomial.last.source_time_s))
+        let index = self
+            .segments
+            .partition_point(|segment| segment.polynomial.last.source_time_s <= source_time);
+        Ok(self
+            .segments
+            .get(index)
+            .map(|segment| segment.polynomial.last.source_time_s))
     }
 
     /// Read the same C2 position polynomial and its first two derivatives.
@@ -318,24 +330,9 @@ impl PreparedSourceTrajectory {
         let index = self
             .segments
             .partition_point(|segment| segment.polynomial.last.source_time_s < source_time);
-        let segment = &self.segments[index].polynomial;
-        let state = segment.evaluate(source_time, true)?;
-        let u = (Dd::from_f64(source_time) - Dd::from_f64(segment.first.source_time_s))
-            / segment.duration;
-        let controls: [[Dd; 3]; 3] = core::array::from_fn(|i| {
-            core::array::from_fn(|axis| {
-                segment.acceleration[i + 1][axis] - segment.acceleration[i][axis]
-            })
-        });
-        // Differentiate the original degree-three Bernstein acceleration.
-        // Scaling after evaluation needs three DD divisions and no new
-        // retained controls in trajectories that never request jerk.
-        let jerk = evaluate_controls(controls, u)
-            .map(|value| ((value / segment.duration) * Dd::from_f64(3.0)).to_f64());
-        if jerk.iter().any(|v| !v.is_finite()) {
-            return Err(invalid("quintic source jerk is unrepresentable"));
-        }
-        Ok((state, jerk))
+        self.segments[index]
+            .polynomial
+            .evaluate_with_jerk(source_time)
     }
 
     /// Invert the monotone arrival map and prepare the original pressure law.
@@ -618,10 +615,10 @@ impl QuinticSegment {
         // Queries return accepted knot velocities verbatim. Enclose those
         // exact values as well as the differentiated interior polynomial.
         for axis in 0..3 {
-            bounds.velocity[0][axis] = bounds.velocity[0][axis]
-                .hull(Interval::point(first.kinematics.velocity_m_s[axis]));
-            bounds.velocity[4][axis] = bounds.velocity[4][axis]
-                .hull(Interval::point(last.kinematics.velocity_m_s[axis]));
+            bounds.velocity[0][axis] =
+                bounds.velocity[0][axis].hull(Interval::point(first.kinematics.velocity_m_s[axis]));
+            bounds.velocity[4][axis] =
+                bounds.velocity[4][axis].hull(Interval::point(last.kinematics.velocity_m_s[axis]));
         }
         if position
             .iter()
@@ -648,6 +645,29 @@ impl QuinticSegment {
             bounds,
             stationary,
         ))
+    }
+
+    // One derivative owner for both fixed-observer and independent source paths.
+    // Knot-side selection remains with the original trajectory segment lookup.
+    fn evaluate_with_jerk(
+        &self,
+        source_time: f64,
+    ) -> Result<(SourceKinematics, [f64; 3]), AeroacError> {
+        let state = self.evaluate(source_time, true)?;
+        let u =
+            (Dd::from_f64(source_time) - Dd::from_f64(self.first.source_time_s)) / self.duration;
+        let controls: [[Dd; 3]; 3] = core::array::from_fn(|i| {
+            core::array::from_fn(|axis| self.acceleration[i + 1][axis] - self.acceleration[i][axis])
+        });
+        // Differentiate the original degree-three Bernstein acceleration.
+        // Scaling after evaluation needs three DD divisions and no new
+        // retained controls in trajectories that never request jerk.
+        let jerk = evaluate_controls(controls, u)
+            .map(|value| ((value / self.duration) * Dd::from_f64(3.0)).to_f64());
+        if jerk.iter().any(|v| !v.is_finite()) {
+            return Err(invalid("quintic source jerk is unrepresentable"));
+        }
+        Ok((state, jerk))
     }
 
     fn evaluate(&self, time: f64, acceleration: bool) -> Result<SourceKinematics, AeroacError> {

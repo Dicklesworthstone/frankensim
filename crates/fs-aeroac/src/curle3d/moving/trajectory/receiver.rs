@@ -521,7 +521,14 @@ impl<'a> PreparedMovingReceiverSource<'a> {
             .map_or(Ok(state), |image| image.kinematics(state))
     }
 
-    pub(super) fn observer_at(&self, time: f64) -> Result<MovingCompactObserver, AeroacError> {
+    /// Original receiver position at one admitted arrival event, with this
+    /// source's fluid state and geometric limits. It is the physical receiver
+    /// for a public direct pair; retained internal images use their original
+    /// virtual receiver. No new root, source history or trajectory is prepared.
+    pub(in crate::curle3d) fn observer_at(
+        &self,
+        time: f64,
+    ) -> Result<MovingCompactObserver, AeroacError> {
         let [first, last] = self.config.receiver_time_interval_s;
         if !time.is_finite() || time < first || time > last {
             return Err(invalid("image microphone time exceeds its admitted window"));
