@@ -182,3 +182,52 @@ fn g3_retarded_spectral_history_keeps_original_identity_and_full_sensor_band_adm
         Err(ThermalDopplerError::SourceBand)
     ));
 }
+
+#[test]
+fn g1_piecewise_motion_samples_accumulated_proper_history_and_original_qe() {
+    use crate::spectral::doppler::retarded::VacuumTrajectoryKnot;
+
+    let knots = [(0.0, 0.0), (2.0, 1.2), (4.0, 1.2)].map(|(time, x)| VacuumTrajectoryKnot {
+        coordinate_time_s: dd(time),
+        position_m: [x * C, 0.0, 0.0],
+    });
+    let motion = PiecewiseVacuumWorldline::try_new(&knots, dd(10.0), 2).unwrap();
+    let observation = VacuumReception::try_new(dd(4.8), [3.0 * C, 0.0, 0.0], [0.0; 3]).unwrap();
+    let mut calls = 0;
+    let event = RetardedThermalSurface::observe_piecewise(&motion, observation, 1e-6, |proper| {
+        calls += 1;
+        close(proper.to_f64(), 12.6);
+        Ok(ThermalEmissionState {
+            surface: gray(1000.0 + 100.0 * proper.to_f64()).into(),
+            outward_normal: [1.0, 0.0, 0.0],
+        })
+    })
+    .unwrap();
+    assert_eq!(calls, 1);
+    close(event.observed().source().temperature_k(), 2260.0);
+    assert_eq!(event.ray().proper_time_rate(), 1.0);
+    let sensor = QuantumEfficiencySensor::try_new(vec![(500.0, [0.5]), (700.0, [0.5])]).unwrap();
+    let sample = event.with_sensor(&sensor).unwrap().sample(0.5).unwrap();
+    let original = gray(2260.0).radiance_w_m2_sr_nm(600.0).unwrap();
+    close(sample.spectral_radiance_w_m2_sr_nm, original);
+    close(
+        sample.electron_rate_per_m2_sr[0],
+        original * 100.0 * 600e-9 / (6.626_070_15e-34 * C),
+    );
+
+    let expired = VacuumReception::try_new(dd(7.0), [3.0 * C, 0.0, 0.0], [0.0; 3]).unwrap();
+    let result = RetardedThermalSurface::observe_piecewise(&motion, expired, 1e-6, |_| {
+        calls += 1;
+        Ok(ThermalEmissionState {
+            surface: gray(2260.0).into(),
+            outward_normal: [1.0, 0.0, 0.0],
+        })
+    });
+    assert_eq!(
+        result,
+        Err(RetardedThermalError::Geometry(
+            RetardedVacuumError::OutsideHistory
+        ))
+    );
+    assert_eq!(calls, 1);
+}

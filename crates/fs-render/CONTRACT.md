@@ -9382,8 +9382,29 @@ derivatives along a moving receiver, DD epoch limits, velocities one SI float
 below c, source-history admission, proper-time thermal state selection,
 aberrated emitting sides and the original QE rate path. This route supplies
 neither scene visibility/surface intersection nor apparent projected areas,
-finite-source geometry, accelerated source motion, moving dielectric transport,
+finite-source geometry, smooth accelerated-worldline integration, moving dielectric transport,
 gravitational shifts, polarization or a second debit to thermal storage.
+
+`PiecewiseVacuumWorldline` adds a finite continuous history from authored
+world-coordinate time/position knots. Each inertial interval derives its SI
+velocity in DD, checks strict subluminality, and accumulates its own
+`dt * sqrt(1-v²/c²)` proper-clock increment. The source's initial proper epoch
+is kept separate until observation, and lost prefix/epoch increments remain
+subject to the original clock-resolution tolerance. Preparation has an explicit
+segment cap and fallible allocation; observation allocates nothing and locates
+the causal segment with O(log N) monotone knot-residual queries before reusing
+the original analytic null-ray and Lorentz owners. There is no time stepping,
+constant-gamma substitution over the full history, or extrapolation.
+
+At an exact interior knot, the outgoing interval supplies the right-hand
+velocity and Doppler derivative; the final endpoint uses the incoming interval.
+These velocity jumps are idealized impulses, not resolved acceleration. Smooth
+motion requires caller-controlled trajectory refinement. `RetardedThermalSurface::observe_piecewise`
+resolves the complete event before its single source-history query, then uses
+the unchanged thermal spectrum, emitting hemisphere and receiver QE path.
+G1/G3 controls cover changing gamma, reversal, knot semantics, finite support,
+uniform subdivision, DD clock limits and proper-history-to-electron-rate
+integration. The existing geometry, visibility and material no-claims remain.
 
 
 ## Coupled resonant photon recycling on the native excitation timeline

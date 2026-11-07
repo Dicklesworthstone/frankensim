@@ -14,8 +14,9 @@
 //!
 //! This local type uses the direction and endpoint velocities at the actual
 //! emission and reception events. [`retarded`] constructs those events for an
-//! admitted uniform source worldline. No moving-medium index, gravitational
-//! shift, scattering recoil or polarization is inferred.
+//! admitted uniform or finite piecewise-inertial source worldline. No smooth
+//! acceleration, moving-medium index, gravitational shift, scattering recoil
+//! or polarization is inferred.
 
 use fs_math::{dd::Dd, det};
 
@@ -187,17 +188,27 @@ struct FrameVelocity {
 
 impl FrameVelocity {
     fn try_new(velocity_m_s: [f64; 3]) -> Result<Self, DopplerError> {
-        if velocity_m_s.iter().any(|x| !x.is_finite()) {
+        Self::from_dd_velocity(velocity_m_s.map(Dd::from_f64))
+    }
+
+    /// Keep a trajectory's displacement/time quotient in the same precision
+    /// as its geometry. Rounding that velocity separately would change its
+    /// proper clock, especially near the null-speed boundary.
+    fn from_dd_velocity(velocity_m_s: [Dd; 3]) -> Result<Self, DopplerError> {
+        if velocity_m_s
+            .iter()
+            .any(|x| !x.hi.is_finite() || !x.lo.is_finite())
+        {
             return Err(DopplerError::InvalidVelocity);
         }
-        if velocity_m_s == [0.0; 3] {
+        if velocity_m_s == [Dd::ZERO; 3] {
             return Ok(Self {
                 beta: [Dd::ZERO; 3],
                 inverse_gamma: Dd::ONE,
             });
         }
         let c = Dd::from_f64(VACUUM_LIGHT_SPEED_M_S);
-        let beta = velocity_m_s.map(|x| Dd::from_f64(x) / c);
+        let beta = velocity_m_s.map(|x| x / c);
         let speed_squared = dd_dot(beta, beta);
         if !speed_squared.hi.is_finite() || !speed_squared.lt(Dd::ONE) {
             return Err(DopplerError::InvalidVelocity);

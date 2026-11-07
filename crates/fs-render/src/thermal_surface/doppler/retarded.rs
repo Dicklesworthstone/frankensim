@@ -13,7 +13,8 @@ use super::{
 use crate::spectral::{
     detector::QuantumEfficiencySensor,
     doppler::retarded::{
-        RetardedVacuumError, RetardedVacuumRay, UniformVacuumWorldline, VacuumReception,
+        PiecewiseVacuumWorldline, RetardedVacuumError, RetardedVacuumRay, UniformVacuumWorldline,
+        VacuumReception,
     },
 };
 use crate::thermal_surface::{DiffuseThermalSurface, ThermalSurfaceError};
@@ -63,6 +64,28 @@ impl<'source> RetardedThermalSurface<'source> {
         let ray = motion
             .observe(receiver, max_residual_m)
             .map_err(RetardedThermalError::Geometry)?;
+        Self::observe_ray(ray, at_proper_time)
+    }
+
+    /// Observe a finite nonuniform source history on its accumulated proper
+    /// clock. The causal segment is selected before the single source query;
+    /// velocity jumps use the trajectory's documented right-hand convention.
+    pub fn observe_piecewise(
+        motion: &PiecewiseVacuumWorldline,
+        receiver: VacuumReception,
+        max_residual_m: f64,
+        at_proper_time: impl FnOnce(Dd) -> Result<ThermalEmissionState<'source>, ThermalSurfaceError>,
+    ) -> Result<Self, RetardedThermalError> {
+        let ray = motion
+            .observe(receiver, max_residual_m)
+            .map_err(RetardedThermalError::Geometry)?;
+        Self::observe_ray(ray, at_proper_time)
+    }
+
+    fn observe_ray(
+        ray: RetardedVacuumRay,
+        at_proper_time: impl FnOnce(Dd) -> Result<ThermalEmissionState<'source>, ThermalSurfaceError>,
+    ) -> Result<Self, RetardedThermalError> {
         let source =
             at_proper_time(ray.emission_proper_time_s()).map_err(RetardedThermalError::Source)?;
         let emission_cosine = cosine(source.outward_normal, ray.doppler().source_direction())?;

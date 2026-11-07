@@ -1,4 +1,4 @@
-//! Uniform material worldlines intersected with a receiver's past light cone.
+//! Inertial material worldlines intersected with a receiver's past light cone.
 //!
 //! Positions, coordinate clocks and velocities share one inertial world frame.
 //! The source clock is proper time along its material worldline; it is not the
@@ -8,19 +8,30 @@
 //! used in, for example, Fitzpatrick's relativistic moving-source derivation:
 //! <https://farside.ph.utexas.edu/teaching/jk1/Electromagnetism/node150.html>.
 //!
-//! The source is one material point in uniform translation. This is not a
-//! surface/visibility intersection, apparent-area map, accelerated worldline,
+//! The uniform owner describes one material point. [`trajectory`] composes
+//! finite nonuniform histories from continuous inertial segments with their
+//! accumulated proper clocks. Neither owner supplies a surface/visibility
+//! intersection, apparent-area map, smooth accelerated-worldline integration,
 //! dielectric path or curved-spacetime solver. Its numerical residual is an
 //! admission check, not an interval certificate for uncertain input geometry.
 
 use super::{DopplerError, FrameVelocity, VACUUM_LIGHT_SPEED_M_S, VacuumDoppler, dd_dot, unit};
 use fs_math::dd::Dd;
 
+/// Finite nonuniform motion represented by continuous inertial segments.
+pub mod trajectory;
+pub use trajectory::{PiecewiseVacuumWorldline, VacuumTrajectoryKnot};
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RetardedVacuumError {
     InvalidClock,
     InvalidPosition,
     InvalidHistory,
+    /// At least two finite, strictly time-ordered position knots are required.
+    InvalidTrajectory,
+    /// The authored trajectory exceeds its explicit segment-storage cap.
+    TrajectoryBudget,
+    AllocationRefused,
     InvalidTolerance,
     /// The sole light-cone intersection has zero flight time and no ray.
     Coincident,
@@ -81,8 +92,8 @@ impl VacuumReception {
 pub struct UniformVacuumWorldline {
     reference_coordinate_time_s: Dd,
     reference_proper_time_s: Dd,
-    reference_position_m: [f64; 3],
-    velocity_m_s: [f64; 3],
+    reference_position_m: [Dd; 3],
+    velocity_m_s: [Dd; 3],
     proper_history_s: [Dd; 2],
     frame: FrameVelocity,
 }
@@ -103,8 +114,8 @@ impl UniformVacuumWorldline {
         Ok(Self {
             reference_coordinate_time_s: clock(reference_coordinate_time_s)?,
             reference_proper_time_s: clock(reference_proper_time_s)?,
-            reference_position_m,
-            velocity_m_s,
+            reference_position_m: reference_position_m.map(Dd::from_f64),
+            velocity_m_s: velocity_m_s.map(Dd::from_f64),
             proper_history_s,
             frame: FrameVelocity::try_new(velocity_m_s)?,
         })
@@ -137,8 +148,8 @@ impl UniformVacuumWorldline {
         }
         let offset = checked(receiver.coordinate_time_s - self.reference_coordinate_time_s)?;
         let q = finite_vector(core::array::from_fn(|i| {
-            (Dd::from_f64(receiver.position_m[i]) - Dd::from_f64(self.reference_position_m[i]))
-                - Dd::from_f64(self.velocity_m_s[i]) * offset
+            (Dd::from_f64(receiver.position_m[i]) - self.reference_position_m[i])
+                - self.velocity_m_s[i] * offset
         }))?;
         let scale = q.iter().fold(0.0_f64, |a, x| a.max(x.hi.abs()));
         if scale == 0.0 {
@@ -158,6 +169,17 @@ impl UniformVacuumWorldline {
         let c = Dd::from_f64(VACUUM_LIGHT_SPEED_M_S);
         let emission_time_s = checked(receiver.coordinate_time_s - checked(length)? / c)?;
 
+        self.observe_emission(receiver, emission_time_s, max_residual_m)
+    }
+
+    /// Common publication checks for an analytic root or an exact knot event.
+    fn observe_emission(
+        &self,
+        receiver: VacuumReception,
+        emission_time_s: Dd,
+        max_residual_m: f64,
+    ) -> Result<RetardedVacuumRay, RetardedVacuumError> {
+        let c = Dd::from_f64(VACUUM_LIGHT_SPEED_M_S);
         // Reconstruct every dependent quantity from the represented event,
         // not from an unpublishable intermediate difference of large clocks.
         let source_offset = checked(emission_time_s - self.reference_coordinate_time_s)?;
@@ -179,14 +201,16 @@ impl UniformVacuumWorldline {
             return Err(RetardedVacuumError::OutsideHistory);
         }
         let emission_position_m = finite_vector(core::array::from_fn(|i| {
-            Dd::from_f64(self.reference_position_m[i])
-                + Dd::from_f64(self.velocity_m_s[i]) * source_offset
+            self.reference_position_m[i] + self.velocity_m_s[i] * source_offset
         }))?;
         let displacement = finite_vector(core::array::from_fn(|i| {
             Dd::from_f64(receiver.position_m[i]) - emission_position_m[i]
         }))?;
         let range = norm(displacement)?;
         let flight_time_s = checked(receiver.coordinate_time_s - emission_time_s)?;
+        if flight_time_s == Dd::ZERO && range == Dd::ZERO {
+            return Err(RetardedVacuumError::Coincident);
+        }
         if !Dd::ZERO.lt(flight_time_s) || !Dd::ZERO.lt(range) {
             return Err(RetardedVacuumError::NumericalRange);
         }
