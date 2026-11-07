@@ -1,6 +1,6 @@
 //! Deterministic offline stereo spatialization for Euler-disc modal stems.
 //!
-//! V1 renders one or more point-like mono sources relative to a listener.  It
+//! Renders one or more point-like mono sources relative to a listener. It
 //! applies sampled propagation delay, inverse-distance attenuation, a frozen
 //! equal-power pan law, listener-microphone directivity, and an optional bounded
 //! stereo room impulse response.  Inputs may be generic mono samples or one
@@ -9,8 +9,10 @@
 //!
 //! This is a parameterized production sound transform, not calibrated
 //! acoustics.  It does not claim BEM, HRTF, head shadowing, diffraction,
-//! occlusion, Doppler reconstruction, radiated pressure, absolute SPL, or a
-//! measured room response.  `PhysicallyParameterized` identifies parameter
+//! occlusion, radiated pressure, absolute SPL, or a measured room response.
+//! The opt-in `RetardedSinc` delay policy reconstructs the Doppler source clock
+//! for admitted subsonic tracks; the two deposition policies do not.
+//! `PhysicallyParameterized` identifies parameter
 //! provenance; it does not promote any of those no-claims.
 
 use core::fmt;
@@ -21,8 +23,10 @@ use fs_math::det;
 
 use crate::{audio_artifact::StereoSample, modal_synthesis::ModalStemFrame};
 
+mod retarded;
+
 /// Version of the geometry, delay, pan, directivity, and convolution semantics.
-pub const SPATIAL_AUDIO_ALGORITHM_VERSION: u32 = 1;
+pub const SPATIAL_AUDIO_ALGORITHM_VERSION: u32 = 2;
 /// Maximum frames between execution-scope cancellation polls.
 pub const SPATIAL_AUDIO_CANCELLATION_POLL_FRAMES: usize = 256;
 /// Hard source-count ceiling above caller-controlled budgets.
@@ -78,7 +82,7 @@ impl SpatialAudioAuthority {
 }
 
 /// Sampled propagation-delay policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SpatialDelayPolicy {
     /// Place each input sample at `input_index + ceil(distance * fs / c)`.
     ///
@@ -90,6 +94,25 @@ pub enum SpatialDelayPolicy {
     /// Both deposits are at or after the emission sample.  This is a causal
     /// sampled linear interpolator, not a band-limited fractional-delay filter.
     LinearFloorCeil,
+    /// Sample the dry source at its causal emission time on the receiver clock.
+    ///
+    /// Source and receiver positions are piecewise linear on the physical sample
+    /// clock and must remain strictly subsonic in the declared resting medium.
+    /// Listener axes are read at reception. A normalized 32-tap Lanczos kernel
+    /// interpolates within the declared emission interval; samples outside that
+    /// interval and incomplete endpoint stencils use explicit zeros. No
+    /// sample-density or Doppler amplitude multiplier is introduced.
+    /// This is a finite-kernel approximation, not an ideal antialias filter or
+    /// the moving-boundary acoustic pressure law.
+    RetardedSinc {
+        /// Declared dry-source bandwidth [Hz], at most one quarter of the sample
+        /// rate. This sampling margin keeps the finite kernel in its tested band.
+        /// The producer must establish this band; it is not inferred from samples.
+        source_bandwidth_hz: f64,
+        /// Declared received bandwidth [Hz], strictly below output Nyquist.
+        /// Must cover admitted Doppler expansion and geometric modulation.
+        receiver_bandwidth_hz: f64,
+    },
 }
 
 impl SpatialDelayPolicy {
@@ -97,7 +120,12 @@ impl SpatialDelayPolicy {
         match self {
             Self::IntegerCeiling => 1,
             Self::LinearFloorCeil => 2,
+            Self::RetardedSinc { .. } => 3,
         }
+    }
+
+    const fn is_retarded(self) -> bool {
+        matches!(self, Self::RetardedSinc { .. })
     }
 }
 
@@ -264,7 +292,11 @@ pub struct ListenerPose {
 pub enum ListenerPoseTrack<'a> {
     /// One listener pose used for the whole transaction.
     Static(ListenerPose),
-    /// One listener pose at every source-emission frame.
+    /// One listener pose at every physical sample time.
+    ///
+    /// Deposition policies read emission-time poses and require the source
+    /// frame count. `RetardedSinc` reads reception-time poses; include enough
+    /// poses to receive the final source sample, even when publication is clamped.
     PerFrame(&'a [ListenerPose]),
 }
 
@@ -461,7 +493,7 @@ impl StereoRoomImpulseResponse {
 pub struct SpatialAudioRenderInput<'a> {
     /// Ordered point sources. Source order is part of input identity and sum order.
     pub sources: &'a [SpatialAudioSource<'a>],
-    /// Listener pose at every emission frame.
+    /// Listener poses on the physical sample clock; see [`ListenerPoseTrack`].
     pub listener: ListenerPoseTrack<'a>,
     /// Optional exact stereo room response.
     pub room_ir: Option<&'a StereoRoomImpulseResponse>,
@@ -484,7 +516,7 @@ pub struct SpatialAudioDiagnostics {
     pub maximum_distance_m: f64,
     /// Largest sampled propagation delay encountered [frames].
     pub maximum_delay_frames: f64,
-    /// Source-frame count whose distance attenuation used the minimum clamp.
+    /// Evaluated source/receiver pairs whose attenuation used the minimum clamp.
     pub minimum_distance_clamp_count: u64,
     /// Largest absolute final sample.
     pub sample_peak_fs: f64,
@@ -732,7 +764,7 @@ fn spatialize_with_checkpoint(
     checkpoint_fn: &mut impl FnMut() -> Result<(), SpatialAudioError>,
 ) -> Result<SpatialAudioOutput, SpatialAudioError> {
     checkpoint_fn()?;
-    let preflight = preflight(spatializer, input, checkpoint_fn)?;
+    let mut preflight = preflight(spatializer, input, checkpoint_fn)?;
     let direct_len = usize::try_from(preflight.direct_output_frames)
         .map_err(|_| invalid("addressable direct output frame count"))?;
     let final_len = usize::try_from(preflight.final_output_frames)
@@ -744,43 +776,53 @@ fn spatialize_with_checkpoint(
         .map_err(|_| SpatialAudioError::AllocationFailed("direct accumulators"))?;
     direct.resize(direct_len, StereoAccumulator::ZERO);
 
-    for (source_index, source) in input.sources.iter().copied().enumerate() {
-        for frame in 0..preflight.frame_count {
-            if frame % SPATIAL_AUDIO_CANCELLATION_POLL_FRAMES == 0 {
-                checkpoint_fn()?;
+    if spatializer.config.delay_policy.is_retarded() {
+        retarded::render(
+            spatializer.config,
+            input,
+            &mut direct,
+            &mut preflight,
+            checkpoint_fn,
+        )?;
+    } else {
+        for (source_index, source) in input.sources.iter().copied().enumerate() {
+            for frame in 0..preflight.frame_count {
+                if frame % SPATIAL_AUDIO_CANCELLATION_POLL_FRAMES == 0 {
+                    checkpoint_fn()?;
+                }
+                let sample = source.signal.sample(frame);
+                let source_position = source.positions.position(frame);
+                let listener = input.listener.pose(frame);
+                let geometry = geometry(
+                    source_position,
+                    listener,
+                    spatializer.config.minimum_distance_m,
+                    spatializer.config.speed_of_sound_m_per_s,
+                    spatializer.config.sample_rate_hz,
+                    spatializer.config.microphone_directivity,
+                    frame,
+                )?;
+                let left = sample
+                    * source.gain_linear
+                    * geometry.attenuation_gain
+                    * geometry.microphone_gain
+                    * det::sqrt((1.0 - geometry.pan) * 0.5);
+                let right = sample
+                    * source.gain_linear
+                    * geometry.attenuation_gain
+                    * geometry.microphone_gain
+                    * det::sqrt((1.0 + geometry.pan) * 0.5);
+                deposit(
+                    &mut direct,
+                    frame,
+                    geometry.delay_frames,
+                    left,
+                    right,
+                    spatializer.config.delay_policy,
+                    spatializer.config.output_horizon,
+                    source_index,
+                )?;
             }
-            let sample = source.signal.sample(frame);
-            let source_position = source.positions.position(frame);
-            let listener = input.listener.pose(frame);
-            let geometry = geometry(
-                source_position,
-                listener,
-                spatializer.config.minimum_distance_m,
-                spatializer.config.speed_of_sound_m_per_s,
-                spatializer.config.sample_rate_hz,
-                spatializer.config.microphone_directivity,
-                frame,
-            )?;
-            let left = sample
-                * source.gain_linear
-                * geometry.attenuation_gain
-                * geometry.microphone_gain
-                * det::sqrt((1.0 - geometry.pan) * 0.5);
-            let right = sample
-                * source.gain_linear
-                * geometry.attenuation_gain
-                * geometry.microphone_gain
-                * det::sqrt((1.0 + geometry.pan) * 0.5);
-            deposit(
-                &mut direct,
-                frame,
-                geometry.delay_frames,
-                left,
-                right,
-                spatializer.config.delay_policy,
-                spatializer.config.output_horizon,
-                source_index,
-            )?;
         }
     }
     checkpoint_fn()?;
@@ -969,7 +1011,14 @@ fn preflight(
     if frame_count == 0 {
         return Err(invalid("nonempty spatial source signals"));
     }
-    if !input.listener.validate_len(frame_count) {
+    let retarded = spatializer.config.delay_policy.is_retarded();
+    let listener_frames = match input.listener {
+        ListenerPoseTrack::Static(_) => frame_count,
+        ListenerPoseTrack::PerFrame(poses) => poses.len(),
+    };
+    if (retarded && listener_frames < frame_count)
+        || (!retarded && !input.listener.validate_len(frame_count))
+    {
         let actual = match input.listener {
             ListenerPoseTrack::Static(_) => frame_count,
             ListenerPoseTrack::PerFrame(poses) => poses.len(),
@@ -1042,6 +1091,12 @@ fn preflight(
         hasher.update(&[source.authority.tag()]);
         hash_f64(&mut hasher, source.gain_linear);
         source.signal.hash_header(&mut hasher);
+        if retarded {
+            hasher.update(&[match source.positions {
+                SourcePositionTrack::Static(_) => 1,
+                SourcePositionTrack::PerFrame(_) => 2,
+            }]);
+        }
         for frame in 0..frame_count {
             if frame % SPATIAL_AUDIO_CANCELLATION_POLL_FRAMES == 0 {
                 checkpoint_fn()?;
@@ -1056,6 +1111,9 @@ fn preflight(
             validate_listener(listener, frame)?;
             if source_index == 0 {
                 hash_listener(&mut hasher, listener);
+            }
+            if retarded {
+                continue;
             }
             let geometry = geometry(
                 source_position,
@@ -1078,6 +1136,28 @@ fn preflight(
             maximum_arrival_offset = maximum_arrival_offset.max(arrival_offset);
         }
     }
+    if retarded {
+        // The finite receiver tail is part of the actual physical input, not a
+        // held endpoint. Charge its work before traversing and identity-bind it.
+        check_limit(
+            "receiver pose frames",
+            listener_frames as u64,
+            spatializer.config.budget.maximum_total_input_frames,
+        )?;
+        hasher.update(&(listener_frames as u64).to_le_bytes());
+        hasher.update(&[match input.listener {
+            ListenerPoseTrack::Static(_) => 1,
+            ListenerPoseTrack::PerFrame(_) => 2,
+        }]);
+        for frame in frame_count..listener_frames {
+            if frame % SPATIAL_AUDIO_CANCELLATION_POLL_FRAMES == 0 {
+                checkpoint_fn()?;
+            }
+            let listener = input.listener.pose(frame);
+            validate_listener(listener, frame)?;
+            hash_listener(&mut hasher, listener);
+        }
+    }
     if let Some(room_ir) = input.room_ir {
         authority = authority.combine(room_ir.authority);
         hasher.update(&[1]);
@@ -1088,9 +1168,13 @@ fn preflight(
     checkpoint_fn()?;
     let input_identity = hasher.finalize();
 
-    let natural_direct_output_frames = (frame_count as u64)
-        .checked_add(maximum_arrival_offset)
-        .ok_or_else(|| invalid("direct output frame count"))?;
+    let natural_direct_output_frames = if retarded {
+        retarded::admit(spatializer.config, input, frame_count, checkpoint_fn)?
+    } else {
+        (frame_count as u64)
+            .checked_add(maximum_arrival_offset)
+            .ok_or_else(|| invalid("direct output frame count"))?
+    };
     let room_tail = input
         .room_ir
         .map_or(0_u64, |room_ir| room_ir.len() as u64 - 1);
@@ -1106,9 +1190,7 @@ fn preflight(
             (horizon, horizon)
         }
     };
-    let discarded_tail_frames = natural_final_output_frames
-        .checked_sub(final_output_frames)
-        .ok_or_else(|| invalid("discarded tail frame count"))?;
+    let discarded_tail_frames = natural_final_output_frames.saturating_sub(final_output_frames);
     check_limit(
         "output frames",
         final_output_frames,
@@ -1125,6 +1207,15 @@ fn preflight(
         direct_output_frames,
         final_output_frames,
         input.room_ir.map_or(0, StereoRoomImpulseResponse::len),
+        if retarded {
+            (input.sources.len() as u64)
+                .checked_mul(direct_output_frames)
+                .and_then(|n| n.checked_mul(96))
+                .and_then(|n| n.checked_add(listener_frames as u64))
+                .ok_or_else(|| invalid("retarded reconstruction work"))?
+        } else {
+            0
+        },
         spatializer.config.budget,
     )?;
     checkpoint_fn()?;
@@ -1218,6 +1309,9 @@ fn delay_tail_offset(
                 floor + 1.0
             }
         }
+        SpatialDelayPolicy::RetardedSinc { .. } => {
+            return Err(invalid("retarded delays use receiver-clock reconstruction"));
+        }
     };
     if !offset.is_finite() || offset < 0.0 || offset > u64::MAX as f64 {
         return Err(invalid("sampled delay offset"));
@@ -1295,6 +1389,9 @@ fn deposit(
                 };
                 upper_accumulator.add(left * fraction, right * fraction);
             }
+        }
+        SpatialDelayPolicy::RetardedSinc { .. } => {
+            return Err(invalid("retarded signals cannot be deposited"));
         }
     }
     let _ = source_index;
@@ -1403,6 +1500,24 @@ fn validate_config(config: SpatialAudioConfig) -> Result<(), SpatialAudioError> 
     }
     if !config.minimum_distance_m.is_finite() || config.minimum_distance_m <= 0.0 {
         return Err(invalid("positive finite minimum distance [m]"));
+    }
+    if let SpatialDelayPolicy::RetardedSinc {
+        source_bandwidth_hz,
+        receiver_bandwidth_hz,
+    } = config.delay_policy
+    {
+        let nyquist = 0.5 * f64::from(config.sample_rate_hz);
+        if !source_bandwidth_hz.is_finite()
+            || source_bandwidth_hz < 0.0
+            || source_bandwidth_hz > 0.5 * nyquist
+            || !receiver_bandwidth_hz.is_finite()
+            || receiver_bandwidth_hz < 0.0
+            || receiver_bandwidth_hz >= nyquist
+        {
+            return Err(invalid(
+                "retarded source band at most fs/4 and receiver band below Nyquist",
+            ));
+        }
     }
     if let MicrophoneDirectivity::Cardioid { rear_floor_gain } = config.microphone_directivity
         && (!rear_floor_gain.is_finite() || !(0.0..=1.0).contains(&rear_floor_gain))
@@ -1526,6 +1641,7 @@ fn validate_work_budget(
     direct_frames: u64,
     final_frames: u64,
     ir_taps: usize,
+    additional_work: u64,
     budget: SpatialAudioBudget,
 ) -> Result<(), SpatialAudioError> {
     let preflight_and_render = total_input_frames
@@ -1549,6 +1665,7 @@ fn validate_work_budget(
     let requested = preflight_and_render
         .checked_add(sample_finalize_and_hash)
         .and_then(|value| value.checked_add(convolution))
+        .and_then(|value| value.checked_add(additional_work))
         .ok_or_else(|| invalid("aggregate spatial-audio work"))?;
     check_limit("work units", requested, budget.maximum_work_units)
 }
@@ -1560,6 +1677,14 @@ fn config_identity(config: SpatialAudioConfig) -> ContentHash {
     hash_f64(&mut hasher, config.speed_of_sound_m_per_s);
     hash_f64(&mut hasher, config.minimum_distance_m);
     hasher.update(&[config.delay_policy.tag()]);
+    if let SpatialDelayPolicy::RetardedSinc {
+        source_bandwidth_hz,
+        receiver_bandwidth_hz,
+    } = config.delay_policy
+    {
+        hash_f64(&mut hasher, source_bandwidth_hz);
+        hash_f64(&mut hasher, receiver_bandwidth_hz);
+    }
     hasher.update(&[config.output_horizon.tag()]);
     config.microphone_directivity.hash_into(&mut hasher);
     hasher.update(&[config.authority.tag()]);
@@ -2199,6 +2324,245 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn retarded_config() -> SpatialAudioConfig {
+        let mut result = config(
+            8_192,
+            256.0,
+            SpatialDelayPolicy::RetardedSinc {
+                source_bandwidth_hz: 256.0,
+                receiver_bandwidth_hz: 1_024.0,
+            },
+        );
+        // Keep distance gain exactly one for the analytical clock/amplitude
+        // checks; those tests are about reconstruction, not source radiation.
+        result.minimum_distance_m = 1_024.0;
+        result
+    }
+
+    /// G1/G3: the exact longitudinal two-motion law is the independent oracle.
+    #[test]
+    fn retarded_source_and_listener_motion_preserve_pitch_and_sample_amplitude() {
+        let count = 2_048;
+        let fs = 8_192.0;
+        let c = 256.0;
+        let frequency = 128.0;
+        let separation = 64.0;
+        let signal: Vec<f64> = (0..count)
+            .map(|i| (core::f64::consts::TAU * frequency * i as f64 / fs).sin())
+            .collect();
+        for (source_velocity, receiver_velocity) in
+            [(64.0, -32.0), (-64.0, 32.0), (192.0, 192.0), (0.0, -32.0)]
+        {
+            let positions: Vec<[f64; 3]> = (0..count)
+                .map(|i| [0.0, 0.0, source_velocity * i as f64 / fs])
+                .collect();
+            let listeners: Vec<ListenerPose> = (0..16_384)
+                .map(|i| listener_at([0.0, 0.0, separation + receiver_velocity * i as f64 / fs]))
+                .collect();
+            let output = render_single(
+                retarded_config(),
+                &signal,
+                SourcePositionTrack::PerFrame(&positions),
+                ListenerPoseTrack::PerFrame(&listeners),
+                None,
+            )
+            .unwrap();
+            let mut checked = 0;
+            for (frame, sample) in output.samples().iter().enumerate() {
+                let reception = frame as f64 / fs;
+                let emission = (reception * (1.0 - receiver_velocity / c) - separation / c)
+                    / (1.0 - source_velocity / c);
+                if emission * fs < 32.0 || emission * fs > (count - 33) as f64 {
+                    continue;
+                }
+                let expected =
+                    (core::f64::consts::TAU * frequency * emission).sin() * det::sqrt(0.5);
+                assert!(
+                    (sample.left_fs - expected).abs() < 1.0e-4,
+                    "vs={source_velocity}, vr={receiver_velocity}, frame={frame}, got={}, expected={expected}",
+                    sample.left_fs
+                );
+                assert_eq!(sample.left_fs.to_bits(), sample.right_fs.to_bits());
+                checked += 1;
+            }
+            assert!(checked > 1_000, "complete causal test window");
+        }
+    }
+
+    #[test]
+    fn retarded_static_integer_delay_is_exact_and_tail_remains_explicit() {
+        let samples: Vec<f64> = (0..128).map(|i| (f64::from(i) * 0.1).sin()).collect();
+        let cfg = retarded_config();
+        // c/fs = 1/32 m per frame, so this is an exact 16-frame delay.
+        let positions = SourcePositionTrack::Static([0.0, 0.0, 0.5]);
+        let listener = ListenerPoseTrack::Static(listener_at([0.0; 3]));
+        let output = render_single(cfg, &samples, positions, listener, None).unwrap();
+        assert_eq!(output.samples().len(), samples.len() + 16);
+        for (i, value) in samples.iter().copied().enumerate() {
+            assert_eq!(
+                output.samples()[i + 16].left_fs.to_bits(),
+                (value * det::sqrt(0.5)).to_bits()
+            );
+        }
+        let clamped = render_single(
+            SpatialAudioConfig {
+                output_horizon: SpatialOutputHorizon::ClampToInputFrames,
+                ..cfg
+            },
+            &samples,
+            positions,
+            listener,
+            None,
+        )
+        .unwrap();
+        assert_eq!(clamped.samples(), &output.samples()[..samples.len()]);
+        assert_eq!(clamped.diagnostics().discarded_tail_frames, 16);
+        assert_ne!(clamped.config_identity(), output.config_identity());
+    }
+
+    #[test]
+    fn retarded_microphone_axes_are_read_at_reception_and_room_ir_keeps_its_clock() {
+        let signal = [1.0; 64];
+        let listeners: Vec<ListenerPose> = (0..128)
+            .map(|i| {
+                let mut pose = listener_at([0.0; 3]);
+                if i >= 32 {
+                    pose.forward_unit = [0.0, 0.0, -1.0];
+                }
+                pose
+            })
+            .collect();
+        let mut cfg = retarded_config();
+        cfg.microphone_directivity = MicrophoneDirectivity::Cardioid {
+            rear_floor_gain: 0.0,
+        };
+        let positions = SourcePositionTrack::Static([0.0, 0.0, 0.5]);
+        let listener = ListenerPoseTrack::PerFrame(&listeners);
+        let dry = render_single(cfg, &signal, positions, listener, None).unwrap();
+        assert!(dry.samples()[31].left_fs > 0.7);
+        assert_eq!(dry.samples()[32].left_fs, 0.0);
+        with_cx(false, |cx| {
+            let room = StereoRoomImpulseResponse::try_new(
+                8_192,
+                vec![1.0, 0.25],
+                vec![1.0, -0.25],
+                SpatialAudioAuthority::Artistic,
+                cx,
+            )
+            .unwrap();
+            let wet = render_single(cfg, &signal, positions, listener, Some(&room)).unwrap();
+            assert_eq!(wet.samples()[32].left_fs, 0.25 * dry.samples()[31].left_fs);
+            assert_eq!(
+                wet.samples()[32].right_fs,
+                -0.25 * dry.samples()[31].right_fs
+            );
+            assert_eq!(wet.samples().len(), dry.samples().len() + 1);
+        });
+    }
+
+    #[test]
+    fn retarded_admission_refuses_aliasing_sonic_motion_and_missing_receiver_tail() {
+        let signal = [0.0; 64];
+        let positions: Vec<[f64; 3]> = (0..64)
+            .map(|i| [0.0, 0.0, f64::from(i) * 0.03125])
+            .collect();
+        let listener = ListenerPoseTrack::Static(listener_at([0.0, 0.0, 64.0]));
+        assert!(
+            render_single(
+                retarded_config(),
+                &signal,
+                SourcePositionTrack::PerFrame(&positions),
+                listener,
+                None
+            )
+            .is_err()
+        );
+        let approaching: Vec<[f64; 3]> = positions.iter().map(|p| p.map(|v| 0.75 * v)).collect();
+        let narrow = SpatialAudioConfig {
+            delay_policy: SpatialDelayPolicy::RetardedSinc {
+                source_bandwidth_hz: 1_800.0,
+                receiver_bandwidth_hz: 3_500.0,
+            },
+            ..retarded_config()
+        };
+        assert!(
+            render_single(
+                narrow,
+                &signal,
+                SourcePositionTrack::PerFrame(&approaching),
+                listener,
+                None
+            )
+            .is_err()
+        );
+        let short = [listener_at([0.0, 0.0, 1.0]); 64];
+        assert!(
+            render_single(
+                retarded_config(),
+                &signal,
+                SourcePositionTrack::Static([0.0; 3]),
+                ListenerPoseTrack::PerFrame(&short),
+                None
+            )
+            .is_err()
+        );
+        with_cx(false, |cx| {
+            let unsupported_band = SpatialAudioConfig {
+                delay_policy: SpatialDelayPolicy::RetardedSinc {
+                    source_bandwidth_hz: 3_000.0,
+                    receiver_bandwidth_hz: 3_500.0,
+                },
+                ..retarded_config()
+            };
+            assert!(OfflineSpatializer::try_new(unsupported_band, cx).is_err());
+        });
+    }
+
+    #[test]
+    fn retarded_work_budget_cancellation_and_replay_use_the_original_transaction() {
+        let signal = [0.25; 128];
+        let source = SpatialAudioSource {
+            source_identity: identity("retarded source"),
+            signal: SpatialMonoSignal::Samples(&signal),
+            positions: SourcePositionTrack::Static([0.0, 0.0, 0.5]),
+            gain_linear: 1.0,
+            authority: SpatialAudioAuthority::PhysicallyParameterized,
+        };
+        let input = SpatialAudioRenderInput {
+            sources: &[source],
+            listener: ListenerPoseTrack::Static(listener_at([0.0; 3])),
+            room_ir: None,
+        };
+        with_cx(false, |cx| {
+            let spatializer = OfflineSpatializer::try_new(retarded_config(), cx).unwrap();
+            let expected = spatializer.spatialize(input, cx).unwrap();
+            let mut calls = 0;
+            assert!(matches!(
+                spatialize_with_checkpoint(spatializer, input, &mut || {
+                    calls += 1;
+                    if calls == 8 {
+                        Err(SpatialAudioError::Cancelled)
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(SpatialAudioError::Cancelled)
+            ));
+            assert_eq!(spatializer.spatialize(input, cx).unwrap(), expected);
+            let mut limited = retarded_config();
+            limited.budget.maximum_work_units = 2_000;
+            assert!(matches!(
+                OfflineSpatializer::try_new(limited, cx)
+                    .unwrap()
+                    .spatialize(input, cx),
+                Err(SpatialAudioError::ResourceLimit {
+                    resource: "work units",
+                    ..
+                })
+            ));
+        });
     }
 
     #[test]

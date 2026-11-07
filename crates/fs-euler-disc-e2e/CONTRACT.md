@@ -1442,28 +1442,59 @@ artifact is a model-derived modal drive, not calibrated pressure, radiated
 acoustic energy, absolute SPL, room response, structural/acoustic coupling, or
 physical validation.
 
-`spatial_audio` v1 is the deterministic offline stereo transform between dry
+`spatial_audio` v2 is the deterministic offline stereo transform between dry
 modal/source frames and `audio_artifact`. It accepts an ordered, bounded set of
 identified mono point sources. A source may borrow generic mono samples or one
 disc/glass/base field directly from `ModalStemFrame`, so the cinematic path does
 not copy three full-rate stem arrays. Every source declares a finite
 nonnegative linear gain, static or one-per-frame world position `[m]`, and
 `PhysicallyParameterized` or `Artistic` parameter provenance. Listener input is
-likewise static or one pose per emission frame, with finite position `[m]` and
-unit, mutually orthogonal forward/right axes. All sources, per-frame tracks,
-and the listener have one exact nonzero common frame horizon; mismatches refuse.
+likewise static or sampled on the physical clock, with finite position `[m]`
+and unit, mutually orthogonal forward/right axes. All sources and their
+position tracks share one nonzero frame horizon. The deposition policies
+require the same listener horizon; retarded reconstruction additionally admits
+the supplied receiver tail needed to observe the final source sample.
 
 Propagation uses the declared sample rate and positive finite speed of sound.
 For distance `d`, the frozen attenuation law is
 `d_min / max(d,d_min)` with positive finite `d_min`; it cannot boost above one.
-At exact source/listener coincidence, v1 freezes zero delay, centred pan,
+At exact source/listener coincidence, the observer uses zero delay, centred pan,
 front-axis microphone gain, and clamped unit attenuation rather than inventing
 a direction or dividing by zero. `IntegerCeiling` places an arrival at
 `n + ceil(d fs/c)` and therefore never advances it; `LinearFloorCeil` splits it
 between the adjacent sampled arrival frames. The latter is a causal sampled
-linear interpolator, not a band-limited fractional-delay filter. Source and
-listener poses are evaluated at emission time. V1 does not reconstruct a
-retarded listener pose or Doppler shift.
+linear interpolator, not a band-limited fractional-delay filter. Those two
+policies evaluate source and listener poses at emission time and do not
+reconstruct the Doppler source clock.
+
+The opt-in `RetardedSinc` policy instead gathers the dry signal at the causal
+source time satisfying `t = tau + |x_receiver(t) - x_source(tau)|/c`, using the
+listener's position and microphone axes at reception. Both prescribed tracks
+are piecewise linear and continuously subsonic in the declared resting medium.
+A monotone source-span cursor and a rationalized analytical quadratic inverse
+avoid a fresh global search at every output frame; a bounded local bisection
+fallback handles rounded roots. No sample-density, additional pitch, or Doppler
+amplitude multiplier is applied. Complete source/receiver speed envelopes admit
+the declared received band, including common translation, before publication.
+They constrain the Doppler clock rate; arbitrary geometric/amplitude modulation
+remains part of the producer's explicit receiver-band declaration.
+
+A normalized 32-tap Lanczos kernel reconstructs source samples. Source bandwidth
+must be at most `fs/4`, and receiver bandwidth strictly below Nyquist. G1 tests
+sample 129 frequencies and 33 fractional phases against independent complex
+exponentials with a 0.1% response-error threshold over that admitted source band;
+this is a sampled numerical envelope, not a continuum filter certificate.
+The signal is zero outside its declared emission interval, and incomplete
+endpoint stencils use zero dry samples. A moving listener must supply its actual
+history through the final arrival even if output publication is clamped; no
+held receiver tail or source prehistory is synthesized. G1/G3/G4 regressions
+cover approach/recession, common translation, unchanged sample amplitude,
+reception-time directivity, static delay, room response, bandwidth/speed/history
+refusals, budgets, cancellation and replay. `CinematicFixtureConfig` exposes
+the policy to the existing production fixture; its legacy default does not
+invent a source-band declaration. This dry-stem transform does not claim
+moving-boundary/FW-H pressure, exact Doppler radiation amplitude, supersonic
+propagation, experimental calibration, or an ideal antialias filter.
 
 The stereo law is fixed equal-power panning:
 `L=sqrt((1-p)/2)`, `R=sqrt((1+p)/2)`, where `p` is the source direction dotted
@@ -1483,8 +1514,8 @@ or beyond that exclusive boundary. This choice is bound into configuration
 identity. Diagnostics retain both the published count and the complete natural
 final count plus discarded-tail count, so a clamped prefix cannot be relabelled
 as an untruncated result. Each call is a fresh offline transaction: cuts/reset
-are expressed by starting a new call, and v1 never carries a delay line or room
-tail implicitly across calls.
+are expressed by starting a new call, and the renderer never carries a delay
+line or room tail implicitly across calls.
 
 An optional stereo room impulse response owns equal-length finite left/right
 taps at an exact sample rate and derives its identity from rate, authority, and

@@ -1376,6 +1376,10 @@ pub struct CinematicFixtureConfig {
     pub retain_full_aov_exr: bool,
     /// Whether mechanics-derived dry stems use the bounded spatial-audio path.
     pub spatialize_audio: bool,
+    /// Dry-stem delay/reconstruction policy. `RetardedSinc` requires explicit
+    /// producer-established source and receiver bandwidths; no modal-frequency
+    /// cutoff is silently substituted for the complete signal bandwidth.
+    pub spatial_delay_policy: SpatialDelayPolicy,
     /// Fixed listening-master calibration [digital full scale / Pa]. This is a
     /// presentation mapping only; it never changes the physical pressure field.
     pub listening_gain_fs_per_pa: f64,
@@ -1445,6 +1449,7 @@ impl Default for CinematicFixtureConfig {
             denoise_previews: true,
             retain_full_aov_exr: true,
             spatialize_audio: true,
+            spatial_delay_policy: SpatialDelayPolicy::LinearFloorCeil,
             terminal_chirp: None,
             listening_gain_fs_per_pa: PressureListeningMasterPolicy::CRITIQUE
                 .digital_gain_fs_per_pa,
@@ -8475,6 +8480,7 @@ fn build_audio(
                 trajectory,
                 &stems,
                 sound.receipt().configuration_identity,
+                config.spatial_delay_policy,
                 cx,
             )
         })
@@ -9351,6 +9357,7 @@ fn spatialize_fixture_audio(
     trajectory: &EulerRenderTrajectoryArtifact,
     stems: &[crate::ModalStemFrame],
     sound_configuration_identity: ContentHash,
+    delay_policy: SpatialDelayPolicy,
     cx: &Cx<'_>,
 ) -> Result<SpatialAudioOutput, CinematicFixtureError> {
     let (disc_positions, glass_positions) = fixture_audio_positions(trajectory, stems.len(), cx)?;
@@ -9360,7 +9367,7 @@ fn spatialize_fixture_audio(
             sample_rate_hz: SOUND_MASTER_SAMPLE_RATE_HZ,
             speed_of_sound_m_per_s: 343.0,
             minimum_distance_m: CRITIQUE_SPATIAL_REFERENCE_DISTANCE_M,
-            delay_policy: SpatialDelayPolicy::LinearFloorCeil,
+            delay_policy,
             output_horizon: SpatialOutputHorizon::ClampToInputFrames,
             microphone_directivity: MicrophoneDirectivity::Cardioid {
                 rear_floor_gain: 0.15,
