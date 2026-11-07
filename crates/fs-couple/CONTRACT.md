@@ -3659,3 +3659,30 @@ their independent load, storage, physical heat, numerical loss and outflow
 oracles while allowing the actual opposing grid to subdivide each pressure
 region. These synthetic constitutive tests establish no measured material
 calibration or whole-system convergence claim.
+
+## Frequency sensitivity of an original forced periodic response
+
+`PreparedPhsPortSidebands::forced_frequency_tangent` factors at zero carrier;
+`FactoredPhsPortSidebands::forced_frequency_tangent` reuses that retained factor.
+For fixed physical source parameters and authored input phasors, it solves
+`(omega*d/dtheta - Df) z = -omega*x_theta` over every original state, including
+explicit memory, with both signed Fourier indices. The physical output is
+`G^T Hxx(x_base) z`, independently observed with the existing refinement gates.
+The result reports `z = omega*dX/domega` and the corresponding output derivative,
+retaining original physical units; division by the base frequency gives the
+derivative per rad/s. Phase is held fixed, not physical time.
+
+Original base balance, tangent sampling, retained/omitted equations, source
+admission, cancellation and numerical budgets remain active. Autonomous sources,
+nonzero carriers and omitted active base harmonics refuse. No second Jacobian,
+finite-difference frequency solve, reduced resonance fit or fold regularization
+is introduced. Delayed/dispersive forcing needs its original state realization;
+fixed authored phasors do not supply that missing frequency dependence.
+
+Four integration regressions specify analytic mass/inertia/Maxwell-memory
+response through multiple harmonics; an original nonlinear storage response
+compared with independently re-solved harmonic-balance orbits; source/resolution
+and cancellation refusals; and an autonomous-clock refusal. They are authored
+but unexecuted without the complete constellation dependency closure. Targeted
+formatting and API review passed; neither full integration nor continuum,
+branch-selection, Floquet or forward-error qualification is inferred.

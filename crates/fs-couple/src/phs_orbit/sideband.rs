@@ -31,9 +31,9 @@ pub use prepared::{
     AdaptivePhsPortSidebandResponse, FactoredPhsPortSidebands, PhsBaseStabilityControls,
     PhsBaseStabilityError, PhsBaseStabilityLevel, PhsBaseStabilityReport, PhsBaseTransientControls,
     PhsBaseTransientError, PhsBaseTransientLevel, PhsBaseTransientReport,
-    PhsPortAdaptiveResonanceRequest, PhsPortResonanceRefinementCheck, PhsPortResonanceRequest,
-    PhsPortResonanceResponse, PhsPortSidebandCarrierDerivativeResponse, PhsPortSidebandSource,
-    PreparedPhsPortSidebands, solve_forced_feedback_port_sideband_response,
+    PhsForcedFrequencyTangent, PhsPortAdaptiveResonanceRequest, PhsPortResonanceRefinementCheck,
+    PhsPortResonanceRequest, PhsPortResonanceResponse, PhsPortSidebandCarrierDerivativeResponse,
+    PhsPortSidebandSource, PreparedPhsPortSidebands, solve_forced_feedback_port_sideband_response,
     solve_forced_feedback_port_sideband_response_analytic,
 };
 
