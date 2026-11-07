@@ -5184,3 +5184,35 @@ rebonding or a heat destination. Refine the physical timestep for trajectory
 convergence. G2 regressions in `tests/cohesive_modal/relaxation.rs` exercise
 original two-body motion, independent normal/shear memory, complete cross-axis
 response, energy/momentum and rejection/replay.
+
+### Native second-order heterogeneous diffusion against finite solutions
+
+`advance_layered_sdirk2`, `advance_shared_layered_sdirk2`,
+`advance_layered_radial_sdirk2` and `advance_shared_layered_radial_sdirk2`
+now solve the actual finite solution and original material layers at both SDIRK
+stages. The first stage uses the existing native shared BE/root. Its converged
+physical face loads are captured once without another nonlinear solve. The
+second root starts from the ORIGINAL bath and body storage with those retained
+weighted loads; its own activity drives the final native faces.
+
+Both native geometries share the existing profile preparation, nonlinear
+storage and stage solver. Each material retains its original sorption/source,
+dry mass, contact resistance and exact slab or curved path. One private stage
+participant supplies complete heterogeneous bodies to the original solution
+root. Intermediate body copies are released after load capture while retaining
+their stage diagnostics. Internal transfers have one adjacent-material debit
+and credit; only exterior exchange debits finite solvent.
+
+The endpoint report contains both RK-weighted contributions once. Diagnostic
+first-stage water is not an additional debit, and root work includes both
+solves. Canonical shared IDs and original source, clock, cell, phase and water
+gates remain. Algebraic phase partitioning is native; kinetic crystal evolution
+is refused because its endpoint-volume owner has no corresponding second-order
+stage equations. Geometry and temperature remain held, and smooth-branch local
+order does not certify behavior across a phase event.
+
+Five authored regressions cover independent finite-bath stage equations and
+weighted faces, second-order continuous-reference refinement for all geometries,
+shared opposing exchange, algebraic crystal buffering, and late stage/source/
+budget refusals. Rust formatting and independent reference calculations passed;
+the new native integration tests remain unrun.

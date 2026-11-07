@@ -26,6 +26,9 @@ use fs_thermochem::{
 };
 use std::sync::Arc;
 
+#[path = "solution/sdirk.rs"]
+mod sdirk;
+
 const RHO: [f64; 2] = [300.0, 900.0];
 const SLOPE: [f64; 2] = [0.2, 0.4];
 const DIFFUSION: [f64; 2] = [0.001, 0.0005];

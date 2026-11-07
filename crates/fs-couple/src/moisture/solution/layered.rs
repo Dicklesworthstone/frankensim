@@ -21,6 +21,13 @@ use crate::moisture::{
 pub use crate::moisture::layered::atmosphere::LayeredMoistureParticipant;
 pub use crate::moisture::radial::layered::atmosphere::LayeredRadialMoistureParticipant;
 
+mod sdirk;
+pub use sdirk::{
+    LayeredRadialSolutionSdirk2Candidate, LayeredSolutionSdirk2Candidate,
+    LayeredSolutionSdirk2Step, SharedLayeredRadialSolutionSdirk2Candidate,
+    SharedLayeredSolutionSdirk2Candidate,
+};
+
 /// One original layered slab and the finite solution endpoint.
 pub type LayeredSolutionMoistureCandidate =
     SolutionMoistureCandidate<MoistureLayeredSlab, MoistureLayeredReport>;
@@ -177,10 +184,10 @@ impl SolutionParticipant for LayeredRadialMoistureParticipant<'_> {
     }
 }
 
-fn single<Field>(
-    candidate: SharedSolutionMoistureCandidate<Field, MoistureLayeredReport>,
+fn single<Field, Report>(
+    candidate: SharedSolutionMoistureCandidate<Field, Report>,
     cx: &Cx<'_>,
-) -> Result<SolutionMoistureCandidate<Field, MoistureLayeredReport>, SolutionMoistureError> {
+) -> Result<SolutionMoistureCandidate<Field, Report>, SolutionMoistureError> {
     let (reservoir, mut solids, shared) = candidate.into_parts();
     let solid = solids
         .pop()

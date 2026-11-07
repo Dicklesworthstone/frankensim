@@ -103,7 +103,7 @@ pub(in crate::moisture) struct LayeredCandidate {
 /// Physical first-stage face transfers, already weighted for stage two.
 /// Nonlinear storage is never replaced by an activity increment or a frozen
 /// capacity. Each internal face has exactly one debit and one credit.
-struct StageLoad {
+pub(in crate::moisture) struct StageLoad {
     water: Vec<f64>,
     boundary: [f64; 2],
     interfaces: Vec<([usize; 2], f64)>,
@@ -273,19 +273,7 @@ pub(in crate::moisture) fn sdirk2(
 ) -> Result<(LayeredCandidate, MoistureLayeredReport), MoistureError> {
     poll(cx)?;
     let gamma = crate::moisture::sdirk::GAMMA;
-    let implicit_dt = gamma * dt;
-    let first_time = state.time_s + implicit_dt;
-    let end = state.time_s + dt;
-    if !positive(dt)
-        || !positive(implicit_dt)
-        || !end.is_finite()
-        || first_time <= state.time_s
-        || first_time >= end
-    {
-        return Err(MoistureError::Invalid(
-            "layered SDIRK needs two representable forward stage times",
-        ));
-    }
+    let implicit_dt = sdirk_interval(state.time_s, dt)?;
     let mut first = advance_stage(
         state,
         implicit_dt,
@@ -320,16 +308,96 @@ pub(in crate::moisture) fn sdirk2(
     Ok((next, first.report))
 }
 
+/// Shared representability gate for both fixed and finite-reservoir stages.
+pub(in crate::moisture) fn sdirk_interval(time_s: f64, dt: f64) -> Result<f64, MoistureError> {
+    let implicit_dt = crate::moisture::sdirk::GAMMA * dt;
+    let first_time = time_s + implicit_dt;
+    let end = time_s + dt;
+    if !positive(dt)
+        || !positive(implicit_dt)
+        || !end.is_finite()
+        || first_time <= time_s
+        || first_time >= end
+    {
+        return Err(MoistureError::Invalid(
+            "layered SDIRK needs two representable forward stage times",
+        ));
+    }
+    Ok(implicit_dt)
+}
+
+/// Reassemble only the already accepted first-stage physical faces, once after
+/// the finite reservoir root has converged. No extra nonlinear solve is run,
+/// and no activity/storage difference is substituted for a physical face rate.
 #[allow(clippy::too_many_arguments)]
-fn advance_stage(
+pub(in crate::moisture) fn capture_sdirk_load(
+    state: LayeredStorage<'_>,
+    dt: f64,
+    first_activity: &[f64],
+    first_time_s: f64,
+    reservoir: [Option<f64>; 2],
+    paths: impl FnOnce(
+        f64,
+        &[KirchhoffMoistureDiffusivity],
+        &[f64],
+        f64,
+        &mut LayeredSystem,
+        &Cx<'_>,
+    ) -> Result<(), MoistureError>,
+    cx: &Cx<'_>,
+) -> Result<StageLoad, MoistureError> {
+    poll(cx)?;
+    let implicit_dt = sdirk_interval(state.time_s, dt)?;
+    if first_activity.len() != state.activity.len()
+        || first_time_s.to_bits() != (state.time_s + implicit_dt).to_bits()
+    {
+        return Err(MoistureError::Invalid(
+            "layered SDIRK load needs the admitted first-stage layout and clock",
+        ));
+    }
+    let (reference, profiles) = prepare_profiles(&state, reservoir, None, cx)?;
+    let mut system = LayeredSystem::storage(&state, first_activity, reference, cx)?;
+    paths(
+        implicit_dt,
+        &profiles,
+        first_activity,
+        reference,
+        &mut system,
+        cx,
+    )?;
+    system.validate()?;
+    let boundary = std::array::from_fn(|side| {
+        let cell = if side == 0 {
+            0
+        } else {
+            first_activity.len() - 1
+        };
+        reservoir[side].map_or(0.0, |a| system.boundary[side] * (a - first_activity[cell]))
+    });
+    let gamma = crate::moisture::sdirk::GAMMA;
+    StageLoad::capture(
+        &state,
+        &system,
+        first_activity,
+        reservoir,
+        boundary,
+        (1.0 - gamma) / gamma,
+        cx,
+    )
+}
+
+/// Final native stage from ORIGINAL storage with the retained physical load.
+/// The finite-reservoir owner is free to supply a different endpoint activity.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::moisture) fn finish_sdirk(
     state: LayeredStorage<'_>,
     dt: f64,
     reservoir: [Option<f64>; 2],
     step: MoistureStepConfig,
     controls: MoistureNonlinearConfig,
-    known: Option<&StageLoad>,
-    capture_weight: Option<f64>,
+    known: &StageLoad,
     mut paths: impl FnMut(
+        f64,
         &[KirchhoffMoistureDiffusivity],
         &[f64],
         f64,
@@ -338,22 +406,28 @@ fn advance_stage(
     ) -> Result<(), MoistureError>,
     cx: &Cx<'_>,
 ) -> Result<LayeredCandidate, MoistureError> {
-    poll(cx)?;
-    controls.validate()?;
-    let end = state.time_s + dt;
-    if !positive(dt)
-        || !end.is_finite()
-        || end <= state.time_s
-        || !positive(step.water_balance_tolerance_kg)
-        || !positive(step.maximum_content_increment)
-    {
-        return Err(MoistureError::Invalid(
-            "representable forward layered interval and positive limits required",
-        ));
-    }
-    debug_assert_eq!(state.activity.len(), state.original.len());
-    debug_assert_eq!(state.activity.len(), state.dry_masses.len());
-    debug_assert_eq!(state.activity.len(), state.layer_for_cell.len());
+    let implicit_dt = sdirk_interval(state.time_s, dt)?;
+    advance_stage(
+        state,
+        dt,
+        reservoir,
+        step,
+        controls,
+        Some(known),
+        None,
+        |profiles, activity, reference, system, cx| {
+            paths(implicit_dt, profiles, activity, reference, system, cx)
+        },
+        cx,
+    )
+}
+
+fn prepare_profiles(
+    state: &LayeredStorage<'_>,
+    reservoir: [Option<f64>; 2],
+    known: Option<&StageLoad>,
+    cx: &Cx<'_>,
+) -> Result<(f64, Vec<KirchhoffMoistureDiffusivity>), MoistureError> {
     if reservoir
         .into_iter()
         .flatten()
@@ -400,6 +474,44 @@ fn advance_stage(
             ],
         )?);
     }
+    Ok((reference, profiles))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_stage(
+    state: LayeredStorage<'_>,
+    dt: f64,
+    reservoir: [Option<f64>; 2],
+    step: MoistureStepConfig,
+    controls: MoistureNonlinearConfig,
+    known: Option<&StageLoad>,
+    capture_weight: Option<f64>,
+    mut paths: impl FnMut(
+        &[KirchhoffMoistureDiffusivity],
+        &[f64],
+        f64,
+        &mut LayeredSystem,
+        &Cx<'_>,
+    ) -> Result<(), MoistureError>,
+    cx: &Cx<'_>,
+) -> Result<LayeredCandidate, MoistureError> {
+    poll(cx)?;
+    controls.validate()?;
+    let end = state.time_s + dt;
+    if !positive(dt)
+        || !end.is_finite()
+        || end <= state.time_s
+        || !positive(step.water_balance_tolerance_kg)
+        || !positive(step.maximum_content_increment)
+    {
+        return Err(MoistureError::Invalid(
+            "representable forward layered interval and positive limits required",
+        ));
+    }
+    debug_assert_eq!(state.activity.len(), state.original.len());
+    debug_assert_eq!(state.activity.len(), state.dry_masses.len());
+    debug_assert_eq!(state.activity.len(), state.layer_for_cell.len());
+    let (reference, profiles) = prepare_profiles(&state, reservoir, known, cx)?;
     // Exact uniform activity has a zero RHS even in an arbitrarily stiff solve.
     let mut assemble = |activity: &[f64]| -> Result<LayeredSystem, MoistureError> {
         let mut system = LayeredSystem::storage(&state, activity, reference, cx)?;

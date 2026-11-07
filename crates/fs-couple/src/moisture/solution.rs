@@ -58,8 +58,10 @@ pub use super::atmosphere::{
 pub use super::radial::atmosphere::RadialMoistureParticipant;
 pub use layered::{
     LayeredMoistureParticipant, LayeredRadialMoistureParticipant,
-    LayeredRadialSolutionMoistureCandidate, LayeredSolutionMoistureCandidate,
-    SharedLayeredRadialSolutionMoistureCandidate, SharedLayeredSolutionMoistureCandidate,
+    LayeredRadialSolutionMoistureCandidate, LayeredRadialSolutionSdirk2Candidate,
+    LayeredSolutionMoistureCandidate, LayeredSolutionSdirk2Candidate, LayeredSolutionSdirk2Step,
+    SharedLayeredRadialSolutionMoistureCandidate, SharedLayeredRadialSolutionSdirk2Candidate,
+    SharedLayeredSolutionMoistureCandidate, SharedLayeredSolutionSdirk2Candidate,
 };
 pub use radial::{
     RadialSolutionMoistureCandidate, RadialSolutionSdirk2Candidate, RadialSolutionSdirk2Step,
