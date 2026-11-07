@@ -207,7 +207,8 @@ fn advected_material_preserves_dynamic_surface_reservoir_heat_and_entropy() {
     let observer = MaterialFlowAdvection {
         material: &source, transport: source, domain: &domain, field: &field, input: binding,
         advected: Advected::new(Trace { conduction, pending_g: None, steps: Vec::new(),
-            cancel_after: None }, flows, 8).unwrap().with_boundaries(boundaries, 8).unwrap(),
+            cancel_after: None }, flows, 8).unwrap().with_boundaries(boundaries, 8).unwrap()
+            .with_optional_reconstruction(None).unwrap(),
     };
     let (next, accepted, energy, entropy) = old
         .advance_observed_with_entropy(&observer, 1.0, controls, || Ok(())).unwrap();
@@ -245,7 +246,8 @@ fn advected_material_preserves_dynamic_surface_reservoir_heat_and_entropy() {
     cancelled.advected = Advected::new(Trace {
         cancel_after: Some(2), ..observer.advection().inner().clone()
     }, observer.advection().flows().to_vec(), 8).unwrap()
-        .with_boundaries(observer.advection().boundaries().to_vec(), 8).unwrap();
+        .with_boundaries(observer.advection().boundaries().to_vec(), 8).unwrap()
+        .with_optional_reconstruction(None).unwrap();
     assert!(matches!(old.advance_observed_with_entropy(&cancelled, 1.0, controls, || Ok(())),
         Err(DepositionError::Cancelled)));
     assert!(cancelled.advection().inner().steps.is_empty());

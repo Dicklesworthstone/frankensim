@@ -30,6 +30,12 @@ fn curve(rho: f64, latent: f64) -> EquilibriumEnthalpyPhaseCurve {
 fn config() -> StepConfig { StepConfig { max_dt_s: 0.125, energy_tolerance_j: 1e-9 } }
 
 fn initial<'a>(domain: &VoxelDomain, rho: f64, law: &'a dyn ThermalLaw) -> DepositionSimulation<'a> {
+    initial_profile(domain, rho, law, |_| 0.0)
+}
+
+fn initial_profile<'a>(domain: &VoxelDomain, rho: f64, law: &'a dyn ThermalLaw,
+    enthalpy: impl Fn(usize) -> f64) -> DepositionSimulation<'a>
+{
     let events = (0..domain.cell_count()).map(|c| {
         let [x, y, z] = domain.coords(c);
         let centre = domain.center(x, y, z);
@@ -40,7 +46,7 @@ fn initial<'a>(domain: &VoxelDomain, rho: f64, law: &'a dyn ThermalLaw) -> Depos
         end[0] += 0.5 * widths[0];
         TimedEvent { time_s: 0.0, event: Event::Birth(DepositedCell {
             id: CellId(c as u64), segment_id: c as u64, body_id: 1,
-            material_id: MAT, mass_kg: rho * domain.volume(c), specific_h_j_kg: 0.0,
+            material_id: MAT, mass_kg: rho * domain.volume(c), specific_h_j_kg: enthalpy(c),
             geometry: CellGeometry { start_m: start, end_m: end,
                 volume_m3: domain.volume(c), surface_area_m2: 6.0 },
             boundary: Boundary { ambient_k: 300.0, htc_w_m2_k: 0.0,
@@ -52,6 +58,9 @@ fn initial<'a>(domain: &VoxelDomain, rho: f64, law: &'a dyn ThermalLaw) -> Depos
         max_events: domain.cell_count(), max_substeps: 10000,
     }).unwrap().advance_to(0.0, config(), || Ok(())).unwrap().0
 }
+
+#[path = "flow_enthalpy/reconstruction.rs"]
+mod reconstruction;
 
 fn input<'a>(ids: &'a [Option<CellId>], law: &'a dyn ThermalLaw) -> FlowEnthalpyInput<'a> {
     FlowEnthalpyInput { cell_ids: ids, material_id: MAT, caloric: law,

@@ -28,3 +28,7 @@ Per-length molecular loss remains diagnostic, without claiming a resolved line
 measure, a global surface-energy balance or heat deposition. G1/G3 unit cases
 check independent forward kinetics, low-speed friction and constant-model limits;
 the existing thermal integration case also exercises activated rates and rollback.
+
+## Material-flow enthalpy reconstruction
+
+`MaterialFlowAdvection::with_reconstruction` attaches the original thermal owner's shared `LimitedEnthalpyReconstruction` to solved material face fluxes. Selected contiguous axial cells reconstruct total specific enthalpy, including a declared passive equal-density latent inventory; paired face transfers, source-law inversion, accepted history and the combined conduction/advection timestep restriction remain with `fs-thermal`. Unselected cells and external streams retain donor enthalpy. Empty plans retain the donor-cell arithmetic. This is an explicit first-order-in-time stationary-control-volume model; it does not infer multidimensional junction slopes, phase mobility, density-change flow, pressure work or moving interfaces. The `advection()` accessor exposes the underlying graph and actual transport audit; implicit clients must attach the same `reconstruction()` plan to their own native implicit transport owner.

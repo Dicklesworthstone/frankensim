@@ -12,12 +12,16 @@ pub mod liquid;
 pub mod feedback;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use fs_conduction::transient::deposition::{
     CellId, DepositionError, DepositionObserver, DepositionSimulation, Event,
     HeatTransfer, MaterialId, ThermalLaw,
 };
-use fs_conduction::transient::deposition::advection::{Advected, MassBoundary, MassFlow};
+use fs_conduction::transient::deposition::advection::{
+    Advected, MassBoundary, MassFlow, ReconstructedAdvected,
+    reconstruction::LimitedEnthalpyReconstruction,
+};
 use fs_exec::CancelGate;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 
@@ -59,7 +63,7 @@ pub struct MaterialFlowAdvection<'a, F: FluidTransport + ?Sized, O> {
     domain: &'a VoxelDomain,
     field: &'a FlowField,
     input: FlowEnthalpyInput<'a>,
-    advected: Advected<O>,
+    advected: ReconstructedAdvected<O>,
 }
 
 impl<F: FluidTransport + ?Sized, O: Clone> Clone for MaterialFlowAdvection<'_, F, O> {
@@ -82,8 +86,41 @@ impl<'a, F: FluidTransport + ?Sized, O> MaterialFlowAdvection<'a, F, O> {
     #[must_use]
     pub const fn field(&self) -> &'a FlowField { self.field }
     /// Existing mass/enthalpy graph, actual transport audit and inner history.
+    /// When reconstruction is selected, implicit clients must attach the same
+    /// [`Self::reconstruction`] plan to their native implicit transport owner.
     #[must_use]
-    pub const fn advection(&self) -> &Advected<O> { &self.advected }
+    pub fn advection(&self) -> &Advected<O> { self.advected.advection() }
+    /// Selected original thermal reconstruction; absent on the donor-cell path.
+    #[must_use]
+    pub fn reconstruction(&self) -> Option<&LimitedEnthalpyReconstruction> {
+        self.advected.reconstruction()
+    }
+
+    /// Reconstruct enthalpy on selected axial cells using the original thermal
+    /// owner's minmod traces, including sensible and latent heat. This reduces
+    /// spatial diffusion without replacing the source law with a temperature
+    /// transport equation or changing the solved face mass fluxes.
+    ///
+    /// The plan must use the same thermal cells and actual contiguous
+    /// centreline geometry. Each selected centre needs only its two authored
+    /// neighbors; multidimensional junctions and external-stream gradients
+    /// refuse rather than infer an unsupported slope. Unselected cells and
+    /// inlet/outlet boundaries retain donor enthalpy. The original explicit
+    /// timeline combines conduction with the stricter reconstructed transport
+    /// timestep bound, and applies one paired energy transfer at every face.
+    /// Time integration remains first order and requires timestep refinement.
+    ///
+    /// Plans are shared by candidate clones. Empty plans retain the exact
+    /// original donor-cell arithmetic. Geometry, mass, original caloric-law
+    /// identity and stationary momentum admission still apply at every epoch.
+    pub fn with_reconstruction(
+        mut self,
+        reconstruction: impl Into<Arc<LimitedEnthalpyReconstruction>>,
+    ) -> Result<Self, DepositionError> {
+        self.advected = self.advected.into_advection().with_reconstruction(reconstruction)?;
+        Ok(self)
+    }
+
     /// Return the accepted inner physical history without cloning it.
     pub fn into_inner(self) -> O { self.advected.into_inner() }
 
@@ -136,7 +173,8 @@ impl<F: FluidTransport + ?Sized> MaterialChtFlow<'_, F> {
             &mut check,
         )?;
         let advected = Advected::new(inner, flows, input.max_connections)?
-            .with_boundaries(boundaries, input.max_connections)?;
+            .with_boundaries(boundaries, input.max_connections)?
+            .with_optional_reconstruction(None)?;
         check()?;
         Ok(MaterialFlowAdvection {
             material: self.material(), transport: *self.transport(), domain: self.domain(),
