@@ -2,6 +2,9 @@
 #[path = "elliptic/motion.rs"]
 mod motion;
 
+#[path = "elliptic/hertz.rs"]
+mod hertz;
+
 use super::*;
 use fs_contact::interface_binding::thermal_friction::elliptic::EllipticFrictionMode;
 use fs_contact::interface_binding::thermal_friction::elliptic::SourceThermalEllipticCoulomb;

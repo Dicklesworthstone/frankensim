@@ -3777,3 +3777,48 @@ fracture law are outside this transfer.
 The vector regressions specify dimensional Mindlin fields and quarter-disk
 moments, rigid and general affine work, complete-grid resultants, one-ULP edge
 rings, tangential rotation, zero-shear and finite-gap limits, and atomic refusal.
+
+## Source-owned orthotropic sliding on actual Hertz footprints
+
+`SourceThermalEllipticCoulomb::evaluate_hertz_patch` composes the original
+`SourcePointContact` with the native `EllipticHertzSlidingPatch`. Both owners
+must retain the same complete ordered interface and input authority. The normal
+owner supplies the actual Hertz force, two semiaxes and original normal receipt;
+its area-equivalent reporting radius never substitutes for an elliptical axis.
+The footprint direction is supplied by geometry independently of the current
+objectively transported material texture. Normal model identity, selected
+friction claims, uncertainty and usage receipts survive the composition.
+
+The primary friction temperature must equal the original normal interface
+temperature. Explicit additional A/B temperature-axis roles read the two actual
+bulk source states, including unequal temperatures. The full query schema is
+checked before replacing placeholders. Nominal source pressure remains an
+explicit supplied coordinate, distinct from normal peak or average pressure.
+Both original static/kinetic principal pairs refresh atomically. Native retained
+slip, texture and last finite-step temperature are unchanged; the instantaneous
+patch law uses the current texture, while the candidate history keeps its own
+original source/frame identity.
+
+For pure translation, declared speed axes use the actual slip norm and accepted
+path coordinates remain fixed. A speed-dependent source with nonzero spin
+refuses because one centre speed cannot represent the distributed local slip.
+Speed-independent sources retain the native joint translation/spin integral,
+analytic radial reduction and bounded cancellable angular quadrature. Zero
+indentation returns no footprint and exactly zero wrench; it does not assign a
+fallback radius or bypass source/control admission.
+
+This is a uniform-condition instantaneous gross-slip response, not a force or
+velocity trajectory solve. It does not evolve distributed path memory, resolve
+spatial temperature variation, select static capture, or allocate heat. The
+native normal loss and tangential physical power remain separate. The normal
+sample's work remains its original instantaneous-power-times-duration quantity,
+not an integrated normal path. The caller accepts the candidate sources only
+with its complete mechanical/thermal step.
+
+Six focused native G1/G3/G4 integration groups pass: both-surface thermal
+coefficient changes and original mixed wrench, independent rank-one Hertz spin
+moment and indentation scaling, exact actual-speed translation, transported
+texture/footprint covariance, unloaded admission, and transactional source,
+geometry, schema and late-cancellation refusals. Existing numerical/source
+owners are compiled directly in the focused harness; this is not full-workspace
+or measured-material qualification.

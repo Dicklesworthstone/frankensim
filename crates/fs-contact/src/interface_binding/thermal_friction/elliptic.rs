@@ -22,6 +22,9 @@ pub use impulse::SourceFrictionConditions;
 /// Accept an admitted finite motion into original source and native slip history.
 pub mod history;
 
+/// Original normal-patch geometry and sourced directional sliding/spin wrench.
+pub mod hertz;
+
 use fs_tribo::tangential::elliptic::{
     EllipticCoulomb, EllipticCoulombState, SymmetricTangentialCompliance,
 };
