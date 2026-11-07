@@ -341,7 +341,7 @@ fn source_dependency_refusals_and_budgets_leave_the_prepared_factor_reusable() {
     // This test isolates the derivative contract on an already prepared source
     // column; it does not test or replace the constant-loss matrix-function owner.
     system.connections[0].constant_loss_reference_omega_rad_s = Some(1800.0);
-    system.harmonic_damping_columns[0] = Some(vec![0.7]);
+    system.harmonic_damping_columns = vec![Some(vec![0.7])];
     let load = loaded(false, false);
     let source = system
         .prepare_resonance_poles_with_load(&load, &COLUMN, preparation(1800.0), &gate)
