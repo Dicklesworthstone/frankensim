@@ -164,7 +164,11 @@ impl PreparedMolecularQuadrupoleObserver {
                             if index.is_multiple_of(256) {
                                 poll(&mut cancelled)?;
                             }
-                            output[index] = output[index] + input[index] * kernel[index];
+                            let (a, b, acc) = (input[index], kernel[index], output[index]);
+                            output[index] = FftComplex::new(
+                                acc.re + a.re.mul_add(b.re, -(a.im * b.im)),
+                                acc.im + a.re.mul_add(b.im, a.im * b.re),
+                            );
                         }
                     }
                     poll(&mut cancelled)?;
