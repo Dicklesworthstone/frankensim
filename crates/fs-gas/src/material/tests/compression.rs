@@ -7,6 +7,7 @@ use crate::material::compression::{
 use fs_material::thermochemical_gas::energy::entropy::GasEntropySolve;
 
 mod adaptive;
+mod history;
 mod thermal;
 
 // The parent fixture deliberately uses reversible chemistry. Compression's

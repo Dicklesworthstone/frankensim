@@ -20,6 +20,8 @@ use fs_thermochem::kinetics::IdealGasKineticsV1;
 
 /// Automatic bounded time refinement using the same physical interval owner.
 pub mod adaptive;
+/// Prescribed reacting volume histories with turns, dwells and global work bounds.
+pub mod history;
 /// Simultaneous source-owned heat exchange during a prescribed volume stroke.
 pub mod thermal;
 

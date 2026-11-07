@@ -7767,3 +7767,73 @@ Focused verification covers independent isotropic slab escape from optical
 depth 1e-6 through 1e6, two-slab nonlocal angular integrals and reflection, an
 independently integrated cold/hot spectral-opacity case, uniform-slab subdivision
 invariance, and original support/work/cancellation/darkness behavior.
+
+## Prescribed reacting compression and expansion histories
+
+`fs_gas::material::compression::history` adds
+`advance_closed_parcel_compression_history` for a sealed reacting parcel driven by
+explicit elapsed-time/physical-volume knots. The first knot binds time zero and
+the exact current parcel volume. All volumes must be finite and positive, times
+must increase strictly, and adjacent volume ratios must be representable.
+Admission permits 2–4097 knots and checks every knot before evolution.
+
+Volume is log-linear on each positive-duration segment. Equal adjacent volumes
+are physical-time dwells through the original rigid reactor. Turns and dwells
+remain explicit; returning to the initial volume does **not** collapse a history
+to fixed-volume chemistry. Every segment retains the preceding accepted
+candidate's actual species inventory, material query axes, mass and original
+thermochemical/transport sources. There is no species reseeding, source
+reconstruction from a catalog approximation, or second kinetics solver.
+
+The typed solve mode delegates to the existing owners:
+
+- Fixed mode uses the declared original substep count on each moving segment and
+  one original reactor interval per dwell. Its separate whole-history substep
+  allowance is in 1–4096 and is never replenished at a knot.
+- Adaptive mode retains the original temperature, original-species inventory and
+  interval-work comparisons. Its maximum accepted intervals and maximum native
+  evaluations apply to the **entire history**, including coarse and rejected
+  probes. Each dwell costs one interval/evaluation. A known dwell may consume a
+  final allowance of one or two evaluations despite the original adaptive
+  control admission minimum of three; moving comparisons still require all
+  three evaluations before starting. The preceding native step suggestion seeds
+  the next segment within the unchanged native step bounds and survives dwells.
+  No comparison crosses a prescribed rate discontinuity.
+
+The report chronologically compensates the original accepted work, internal
+energy change, independently accumulated reconciliation residual and stage
+entropy. It separately counts all native probes/chemical work and retained
+physical intervals, so coarse and rejected trajectories do not enter physical
+balances. The reported end time is the exact final knot; a compensated sum of
+segment-reported durations minus that knot exposes floating-point subtraction
+rounding between absolute times. This diagnostic is not a time-integration error
+certificate. Native adaptive accuracy/work/time errors carry the global history
+clock and consumed prefix counts; source failures retain their enclosing segment
+bounds without inventing an unreported partial native clock.
+
+The complete caller parcel is published only after every segment, aggregate
+balance validation and final cancellation checkpoint succeed. Invalid later
+knots, exhausted global allowances, native accuracy/domain failures and late
+cancellation leave the complete original parcel and source receipts intact.
+
+Focused manufactured regressions cover an exothermic compress–dwell–expand
+cycle against the independent solution
+`dT/dt = a*T + Q/(3R)*4*exp(-4t)`, with second-order fixed-step refinement and
+net cycle work. An equal-caloric `2A -> A+B` mechanism independently checks
+`N_A(t) = 1 / (1/N_A(0) + 4*integral(dt/V))`: species remain sensitive to
+pressure history even when final volume and temperature return to their initial
+values. Other checks exercise exact global budgets including the last
+single-evaluation dwell, translated failure clocks, independent binary-duration
+roundoff, source identity, and rollback after an accepted prefix.
+
+This is a prescribed homogeneous sealed-parcel history, not a piston-motion or
+compressible-flow solver. It adds no heat exchange, rate calibration,
+extrapolation or empirical combustion claim. The original source-domain,
+chemical-conservation, material-energy, stage-entropy and local adaptive error
+limitations remain in force; accumulated local comparisons are not a global
+accuracy or total-entropy certificate.
+
+The new Rust sources were parsed/formatted with the pinned toolchain. Native
+compilation and these regression tests remain unexecuted because the shared
+workspace has no available compilation memory or disk; no passing result is
+claimed here.
