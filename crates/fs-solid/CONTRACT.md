@@ -8463,6 +8463,56 @@ and prints deformation, energy, work, sampled J, weak volume and interval
 pressure with explicit SI controls. These bounded tests do not establish a
 mesh-independent inf-sup constant or the remaining long-horizon/render contract.
 
+## Continuous harmonic loads on complete structural coordinates
+
+`ExactHarmonicSolid::prepare` and `prepare_viscous`
+retain the same validated complete consistent
+mass, stiffness, optional symmetric PSD physical viscosity, initial displacement
+and initial velocity as the held/affine owner. The existing
+`fs-phs::linear_exact::PreparedExactTones` supplies continuous prescribed forcing,
+complete coupled propagation and independently integrated work/viscous loss.
+There is no second exponential solver, modal truncation, fitted damping,
+mass lumping or frequency retuning. Exact undamped resonance keeps its growing
+transient instead of substituting a singular steady-state phasor response.
+
+`ExactHarmonicSolid::advance` takes cosine/sine coefficients in N in free-coordinate-major,
+caller-tone order. Frequency entries are angular frequencies in rad/s and may
+include explicit DC, noncommensurate tones and coherent repeated frequencies.
+Each pair describes `Fc*cos(omega*tau)+Fs*sin(omega*tau)` from that interval's
+local start. `advance_force_phase` uses cached rotations to continue a
+source after acceptance; it does not mutate the physical state or source phase.
+Changing a next-interval pair is an explicit finite force jump, not an impulse.
+Checkpoints must keep the caller's source coefficients with the accepted state.
+
+Work and dissipation retain every cross-frequency term and initial transient;
+they are not sums of cycle-averaged isolated-tone powers. The original `M/K`
+stored/kinetic energy, interval work balance and compensated cumulative accounts
+remain the publication gate. Invalid data, cancellation,
+native refusal or energy refusal publishes no state or accounting change.
+The separate harmonic type cannot be passed to held-force contact replay. Source
+validation and physical state acceptance are shared without retaining an unused
+held-force exponential. The original `ExactLinearSolid` remains `Send + Sync`;
+the generic tone service's erased storage is retained only by `ExactHarmonicSolid`.
+
+For N free coordinates and K supplied frequency slots, admission bounds the
+native motion dimension `2*N+2*N*K+1` and independent power dimension
+`4*N+2*N*K` by the existing 256-coordinate dense cap. The shared tone owner's
+numerical-payload bound is reserved twice to cover its caches and the original
+physical matrices, inverse mass and adapter state. Existing controls bound bytes,
+native multiplication work and accepted intervals. Repeated frequencies may
+share native source columns after this conservative caller-count admission.
+Warm steps reuse all exponentials, work/heat factors and phase rotations; only
+O(N) output vectors are allocated. Cancellation is checked before and after the
+bounded native step, not inside every dense contraction.
+
+Supports remain homogeneous and stationary. There is no missing constrained-row
+reaction reconstruction, moving-support model, hereditary constitutive-law
+replacement, sparse-scale performance claim or continuum accuracy claim.
+Focused regressions in `tests/solid_linear_harmonic_dynamics.rs` cover analytic
+resonant growth, a full mutual-mass/nonproportional-damping periodic response,
+independently integrated transient beating work/heat, interval subdivision,
+coherent duplicate cancellation, DC/rigid motion and transactional refusals.
+
 ## Exact complete-coordinate linear solid motion
 
 `dynamics::ExactLinearSolid` advances every free coordinate of an admitted

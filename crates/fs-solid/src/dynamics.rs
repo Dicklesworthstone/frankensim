@@ -1,4 +1,4 @@
-//! Exact held or piecewise-affine force motion of the complete solid pencil.
+//! Exact held, piecewise-affine or harmonic force motion of the complete solid pencil.
 //!
 //! Every free coordinate in the original P1, TET10 or HEX assembly is retained.
 //! The shared `fs-phs` quadratic-flow owner prepares one exponential for a fixed
@@ -46,6 +46,9 @@ pub mod sustained;
 
 mod impulse;
 pub use impulse::{LinearSolidImpulseError, LinearSolidImpulseReport};
+mod harmonic;
+pub use harmonic::ExactHarmonicSolid;
+use harmonic::SolidFlow;
 
 /// Explicit complete-state capacity and numerical allowances. No defaults.
 #[derive(Clone, Copy, Debug)]
@@ -129,10 +132,10 @@ pub struct ExactLinearSolidStep {
 /// Retained complete-coordinate motion at one explicitly fixed positive clock.
 /// Preparation is dense and bounded; this owner does not claim a scalable
 /// sparse exponential. Exactness concerns the admitted spatial pencil and the
-/// explicitly held or affine source, not finite-element continuum accuracy or
+/// explicitly held, affine or harmonic source, not finite-element continuum accuracy or
 /// the approximation of another force history by those intervals.
-pub struct ExactLinearSolid {
-    flow: PreparedQuadraticFlow,
+pub struct ExactLinearSolid<F = PreparedQuadraticFlow> {
+    flow: F,
     stiffness: Vec<f64>,
     mass: Vec<f64>,
     // The same admitted inverse already used by the prepared source map.
@@ -172,9 +175,11 @@ impl ExactLinearSolid {
             initial_velocity_mps,
             None,
             None,
+            None,
             controls,
             cx,
         )
+        .and_then(|source| source.change_flow(SolidFlow::into_polynomial))
     }
 
     /// Prepare exact linearly interpolated forces on the same complete pencil.
@@ -200,9 +205,11 @@ impl ExactLinearSolid {
             initial_velocity_mps,
             Some(force_scale_n),
             None,
+            None,
             controls,
             cx,
         )
+        .and_then(|source| source.change_flow(SolidFlow::into_polynomial))
     }
 
     /// Exact held-force motion with an explicitly supplied memoryless viscosity
@@ -227,9 +234,11 @@ impl ExactLinearSolid {
             initial_velocity_mps,
             None,
             Some(damping_ns_m),
+            None,
             controls,
             cx,
         )
+        .and_then(|source| source.change_flow(SolidFlow::into_polynomial))
     }
 
     /// Same physical viscosity with exactly affine force histories. Work and
@@ -253,9 +262,11 @@ impl ExactLinearSolid {
             initial_velocity_mps,
             Some(force_scale_n),
             Some(damping_ns_m),
+            None,
             controls,
             cx,
         )
+        .and_then(|source| source.change_flow(SolidFlow::into_polynomial))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -266,9 +277,10 @@ impl ExactLinearSolid {
         initial_velocity_mps: &[f64],
         affine_force_scale_n: Option<f64>,
         damping_ns_m: Option<&Csr>,
+        angular_frequencies_rad_s: Option<&[f64]>,
         controls: ExactLinearSolidControls,
         cx: &Cx<'_>,
-    ) -> Result<Self, ExactLinearSolidError> {
+    ) -> Result<ExactLinearSolid<SolidFlow>, ExactLinearSolidError> {
         poll(cx)?;
         let n = assembly.free_dofs.len();
         if n == 0
@@ -293,6 +305,13 @@ impl ExactLinearSolid {
                     || !(1.0 / scale).is_finite()
                     || !(1.0 / dt_s).is_finite()
             })
+            || angular_frequencies_rad_s.is_some_and(|frequencies| {
+                affine_force_scale_n.is_some()
+                    || frequencies.is_empty()
+                    || frequencies.iter().any(|omega| {
+                        !omega.is_finite() || *omega < 0.0 || !(omega * dt_s).is_finite()
+                    })
+            })
         {
             return Err(invalid(
                 "complete finite initial state, sorted free map, positive clock and valid controls required",
@@ -304,10 +323,16 @@ impl ExactLinearSolid {
                 maximum: controls.maximum_free_dofs,
             });
         }
-        let d = n
-            .checked_mul(if affine_force_scale_n.is_some() { 4 } else { 3 })
-            .and_then(|v| v.checked_add(1))
-            .ok_or_else(|| invalid("complete exponential dimension overflow"))?;
+        let harmonic_shape = angular_frequencies_rad_s
+            .map(|frequencies| harmonic::preparation_shape(n, frequencies.len()))
+            .transpose()?;
+        let d = if let Some((dimension, _)) = harmonic_shape {
+            dimension
+        } else {
+            n.checked_mul(if affine_force_scale_n.is_some() { 4 } else { 3 })
+                .and_then(|v| v.checked_add(1))
+                .ok_or_else(|| invalid("complete exponential dimension overflow"))?
+        };
         if d > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM {
             return Err(ExactLinearSolidError::Budget {
                 required: d,
@@ -319,20 +344,23 @@ impl ExactLinearSolid {
         // form needs another 2*d² native doubles. Reserve the same amount again
         // for the physical pencil, source map, inverse, eigen work and state.
         // Cholesky above its panel size also packs the native GEMM panels.
-        let bytes = d
-            .checked_mul(d)
-            .and_then(|v| {
-                v.checked_mul(
-                    (if affine_force_scale_n.is_some() {
-                        80
-                    } else {
-                        48
-                    } + if damping_ns_m.is_some() { 4 } else { 0 })
-                        * 8,
-                )
-            })
-            .and_then(|v| v.checked_add(if n > 32 { 2 * 1024 * 1024 } else { 0 }))
-            .ok_or_else(|| invalid("complete exponential byte overflow"))?;
+        let bytes = if let Some((_, bytes)) = harmonic_shape {
+            bytes
+        } else {
+            d.checked_mul(d)
+                .and_then(|v| {
+                    v.checked_mul(
+                        (if affine_force_scale_n.is_some() {
+                            80
+                        } else {
+                            48
+                        } + if damping_ns_m.is_some() { 4 } else { 0 })
+                            * 8,
+                    )
+                })
+                .and_then(|v| v.checked_add(if n > 32 { 2 * 1024 * 1024 } else { 0 }))
+                .ok_or_else(|| invalid("complete exponential byte overflow"))?
+        };
         if bytes > controls.maximum_preparation_bytes {
             return Err(ExactLinearSolidError::Budget {
                 required: bytes,
@@ -453,73 +481,75 @@ impl ExactLinearSolid {
         )?;
         // Frequency matching is unused: exact propagation has no Nyquist
         // retuning/band switch. All state coordinates, including zero-K, remain.
-        let split = split_quadratic(
-            &system,
-            LinearSplitBudget {
-                max_modes: state_dim,
-                max_omega_dt: 3.0,
-            },
-        )?;
+        let split_budget = LinearSplitBudget {
+            max_modes: state_dim,
+            max_omega_dt: 3.0,
+        };
         poll(cx)?;
         let flow_budget = DenseExponentialBudget {
             max_dimension: d,
             max_dense_bytes: bytes / 2,
             max_multiply_terms: controls.maximum_exponential_multiply_terms,
         };
-        let flow = if let Some(force_scale_n) = affine_force_scale_n {
-            let extended = 3 * n;
-            let mut generator = vec![0.0; extended * extended];
-            let mut source = vec![0.0; extended * n];
-            let mut work = vec![0.0; extended * extended];
-            for a in 0..n {
-                poll(cx)?;
-                generator[a * extended + n + a] = 1.0;
-                // The held input is Delta f [N], not a potentially very large
-                // slope. Only its cold source map divides by the fixed clock.
-                source[(2 * n + a) * n + a] = 1.0 / dt_s;
-                work[(n + a) * extended + 2 * n + a] = 0.5;
-                work[(2 * n + a) * extended + n + a] = 0.5;
-                for b in 0..n {
-                    generator[(n + a) * extended + b] = -(0..n).fold(0.0, |s, k| {
-                        inverse[a * n + k].mul_add(stiffness[k * n + b], s)
-                    });
-                    generator[(n + a) * extended + 2 * n + b] = inverse[a * n + b];
-                    if damping.is_some() {
-                        generator[(n + a) * extended + n + b] = -inverse_damping[a * n + b];
+        let flow = if let Some(frequencies) = angular_frequencies_rad_s {
+            SolidFlow::prepare_harmonic(system, frequencies, dt_s, split_budget, flow_budget, cx)?
+        } else {
+            let split = split_quadratic(&system, split_budget)?;
+            SolidFlow::Polynomial(if let Some(force_scale_n) = affine_force_scale_n {
+                let extended = 3 * n;
+                let mut generator = vec![0.0; extended * extended];
+                let mut source = vec![0.0; extended * n];
+                let mut work = vec![0.0; extended * extended];
+                for a in 0..n {
+                    poll(cx)?;
+                    generator[a * extended + n + a] = 1.0;
+                    // The held input is Delta f [N], not a potentially very large
+                    // slope. Only its cold source map divides by the fixed clock.
+                    source[(2 * n + a) * n + a] = 1.0 / dt_s;
+                    work[(n + a) * extended + 2 * n + a] = 0.5;
+                    work[(2 * n + a) * extended + n + a] = 0.5;
+                    for b in 0..n {
+                        generator[(n + a) * extended + b] = -(0..n).fold(0.0, |s, k| {
+                            inverse[a * n + k].mul_add(stiffness[k * n + b], s)
+                        });
+                        generator[(n + a) * extended + 2 * n + b] = inverse[a * n + b];
+                        if damping.is_some() {
+                            generator[(n + a) * extended + n + b] = -inverse_damping[a * n + b];
+                        }
                     }
                 }
-            }
-            let mut observations = vec![work];
-            if let Some(damping) = &damping {
-                observations.push(viscous_form(damping, n, extended));
-            }
-            PreparedQuadraticFlow::new_extended_input_controlled(
-                &system,
-                &split,
-                &generator,
-                &vec![1.0 / force_scale_n; n],
-                &source,
-                dt_s,
-                &observations,
-                &[],
-                flow_budget,
-                || cx.checkpoint().is_err(),
-            )?
-        } else {
-            let observations: Vec<_> = damping
-                .as_ref()
-                .map(|c| viscous_form(c, n, state_dim))
-                .into_iter()
-                .collect();
-            PreparedQuadraticFlow::new_controlled(
-                &system,
-                &split,
-                dt_s,
-                &observations,
-                &[],
-                flow_budget,
-                || cx.checkpoint().is_err(),
-            )?
+                let mut observations = vec![work];
+                if let Some(damping) = &damping {
+                    observations.push(viscous_form(damping, n, extended));
+                }
+                PreparedQuadraticFlow::new_extended_input_controlled(
+                    &system,
+                    &split,
+                    &generator,
+                    &vec![1.0 / force_scale_n; n],
+                    &source,
+                    dt_s,
+                    &observations,
+                    &[],
+                    flow_budget,
+                    || cx.checkpoint().is_err(),
+                )?
+            } else {
+                let observations: Vec<_> = damping
+                    .as_ref()
+                    .map(|c| viscous_form(c, n, state_dim))
+                    .into_iter()
+                    .collect();
+                PreparedQuadraticFlow::new_controlled(
+                    &system,
+                    &split,
+                    dt_s,
+                    &observations,
+                    &[],
+                    flow_budget,
+                    || cx.checkpoint().is_err(),
+                )?
+            })
         };
         let mut state = Vec::with_capacity(state_dim);
         state.extend_from_slice(initial_displacement_m);
@@ -529,7 +559,7 @@ impl ExactLinearSolid {
             return Err(invalid("invalid initial physical energy"));
         }
         poll(cx)?;
-        Ok(Self {
+        Ok(ExactLinearSolid {
             flow,
             stiffness,
             mass,
@@ -548,7 +578,9 @@ impl ExactLinearSolid {
             dissipation_correction_j: 0.0,
         })
     }
+}
 
+impl<F> ExactLinearSolid<F> {
     pub fn free_dofs(&self) -> &[usize] {
         &self.free_dofs
     }
@@ -582,7 +614,9 @@ impl ExactLinearSolid {
     pub fn cumulative_work_j(&self) -> f64 {
         self.cumulative_work_j
     }
+}
 
+impl ExactLinearSolid {
     /// One complete exact held-force interval. Every force is in N, in the
     /// source free-DOF order. Cancellation/refusal leaves all accepted fields.
     pub fn advance(
@@ -702,7 +736,9 @@ impl ExactLinearSolid {
         candidate.truncate(2 * n);
         self.accept(candidate, supplied_work_j, dissipated_j, step, time_s, cx)
     }
+}
 
+impl<F> ExactLinearSolid<F> {
     fn next_interval(&self) -> Result<(u64, f64), ExactLinearSolidError> {
         let step = self
             .steps
@@ -805,6 +841,33 @@ impl ExactLinearSolid {
             time_s,
             mean_velocity_mps,
             energy,
+        })
+    }
+
+    // Changing the prepared-source owner moves the same admitted physical
+    // state and accounts without constructing another factor or exponential.
+    // The ordinary public type retains its purely numerical Send + Sync flow.
+    fn change_flow<G>(
+        self,
+        change: impl FnOnce(F) -> Result<G, ExactLinearSolidError>,
+    ) -> Result<ExactLinearSolid<G>, ExactLinearSolidError> {
+        Ok(ExactLinearSolid {
+            flow: change(self.flow)?,
+            stiffness: self.stiffness,
+            mass: self.mass,
+            inverse_mass: self.inverse_mass,
+            free_dofs: self.free_dofs,
+            state: self.state,
+            dt_s: self.dt_s,
+            controls: self.controls,
+            steps: self.steps,
+            initial_energy_j: self.initial_energy_j,
+            cumulative_work_j: self.cumulative_work_j,
+            work_correction_j: self.work_correction_j,
+            affine_force_scale_n: self.affine_force_scale_n,
+            viscous: self.viscous,
+            cumulative_dissipated_j: self.cumulative_dissipated_j,
+            dissipation_correction_j: self.dissipation_correction_j,
         })
     }
 }
