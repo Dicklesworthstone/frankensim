@@ -8052,3 +8052,50 @@ of gross self-recycling accounts, verify first-carrier energy and transactional
 refusal, and prove that the collision subflow excludes both photon processes.
 The original simultaneous reaction/thermal and finite-beam regressions remain
 the compatibility checks for the shared kernel.
+
+
+## Thermal feedback in shared-electron charge-stage networks
+
+`chemistry::ionization_network::advance_ionization_network_with_thermal`
+extends the original canonical multielement charge-stage owner with evolving
+electron and heavy temperatures, original neutral/Coulomb energy exchange,
+and separately held electron/heavy powers. It consumes the existing
+`CollisionalRadiativeThermal` inputs and prepared thermal/caloric kernel; it
+does not fit a replacement collision law or call nested adaptive solvers.
+
+Symmetric thermal half-steps surround each complete canonical reaction sweep.
+Consequently heat exchange and external work act once per parcel interval,
+independent of the number of active charge stages. Every thermal stage refreshes
+the complete current population vector, including charge-squared screening and
+energy exchange from multiply charged ions. Every reactive edge uses the
+current shared electron temperature and heavy temperature. One full/two-half
+controller includes both temperatures, all species and reaction accounts, and
+the signed neutral/Coulomb transfer integrals. Original source quadrature,
+caloric iteration and complete step budgets remain explicit.
+
+All populated or reachable neutral targets must have an original collision
+source before evolution begins when exchange is selected. The shared Coulomb
+law retains its original bank/volume and weak-coupling/classical validity
+checks at changing populations and temperatures. Heavy calorics integrate the
+original models, including variable-Cv spectators; equal admitted monatomic
+heat capacities across each reactive ladder preserve this original caloric
+reference. Actual endpoint heavy-count roundoff is included in the energy
+check. Independent electron/chemical and heavy balances close against their
+own held work and equal/opposite exchange, and the total closes against
+absorbed/emitted radiation plus both external works.
+
+The fixed-heavy entry remains available. The thermal entry requires at least
+one admitted atomic source to bind the electron caloric convention. A nonzero
+held electron power refuses an initially absent electron pool; with zero such
+power, photoionization can create the first carriers without a seed. Sources,
+controls and original state are retained, and failure publishes no partial
+endpoint. Volume and maintained local illumination are fixed, emitted photons
+escape, and no diffuse multichannel radiation, transport, electrical-field
+solve, molecules, excited levels or dense-plasma correction is inferred.
+
+Focused G1/G3/G4 tests compare a simultaneous independent H/He/He++ chemical
+and two-pool energy ODE with neutral and finite-mass Coulomb exchange, verify
+second-order refinement and conserved formation-reference shifts, and exercise
+neutral birth, missing-source/work/domain refusals and cancellation. Cross
+sections are manufactured test sources; these checks do not validate an
+empirical multielement plasma model or certify global temporal error.

@@ -3,7 +3,9 @@
 //! Every admitted edge is an original `A^q + e <-> A^(q+1) + 2e`
 //! impact/three-body source and its reciprocal photoionization/radiative
 //! capture source. All edges share one population vector and one Maxwellian
-//! electron temperature. The heavy temperature and volume remain fixed.
+//! electron temperature. Volume remains fixed. The basic entry fixes heavy
+//! temperature; the explicit thermal entry evolves both pools through original
+//! neutral/Coulomb collision sources and independently held pool powers.
 //! Spectators retain their original populations. No independent-electron
 //! approximation, LTE projection, population floor or artificial seed is used.
 //!
@@ -14,14 +16,19 @@
 //! accounts. Source bindings and work buffers prepare once. There are no
 //! nested public solves or per-trial species allocations. This is a split
 //! second-order integrator, not an unconditionally stiff or global-error claim.
+//! Thermal half-steps surround each complete reaction sweep, so exchange and
+//! held work apply once per parcel interval, independent of the number of edges.
 //!
 //! The supplied photon field is an externally maintained local intensity,
 //! common to all absorbers. It is not a finite photon inventory. Emitted
 //! recombination photons escape; photoelectron energy thermalizes immediately.
 //! Excited levels, molecular reactions, charge exchange, continuum lowering,
-//! diffuse radiation, heavy-pool evolution and electrical work are not inferred.
+//! diffuse radiation and electrical fields are not inferred. Supplied electrical
+//! or other external pool powers must already contain their intended work once.
 
-use super::collisional_radiative::{CollisionalRadiativeError, CollisionalRadiativeSolve};
+use super::collisional_radiative::{
+    CollisionalRadiativeError, CollisionalRadiativeSolve, CollisionalRadiativeThermal,
+};
 use fs_math::det::{exp, ln};
 use fs_qty::{Temperature, Time};
 use fs_thermochem::electron_collision::AVOGADRO_PER_MOL as NA;
@@ -103,9 +110,23 @@ pub struct IonizationNetworkBalance {
     pub chemical_storage_change_j: f64,
     /// Actual shared electron sensible-energy change [J].
     pub electron_sensible_energy_change_j: f64,
-    /// Heavy translational roundoff residual at the fixed heavy temperature [J].
+    /// Original heavy-source sensible change, including population roundoff [J].
     pub heavy_sensible_energy_change_j: f64,
-    /// Actual gas change plus emitted minus absorbed radiation [J].
+    /// Independently held external electron-pool power integrated once [J].
+    pub electron_deposited_energy_j: f64,
+    /// Independently held external heavy-pool power integrated once [J].
+    pub heavy_deposited_energy_j: f64,
+    /// Signed total elastic transfer from electrons to heavy particles [J].
+    pub electron_to_heavy_energy_j: f64,
+    /// Portion of that signed transfer through original neutral sources [J].
+    pub electron_to_heavy_neutral_energy_j: f64,
+    /// Portion of that signed transfer through the original Coulomb law [J].
+    pub electron_to_heavy_coulomb_energy_j: f64,
+    /// Electron/chemical storage plus radiation/exchange minus electron work [J].
+    pub electron_energy_residual_j: f64,
+    /// Actual heavy-source change minus heavy work and collisional transfer [J].
+    pub heavy_energy_residual_j: f64,
+    /// Actual gas change plus emitted minus absorbed radiation and pool work [J].
     pub energy_residual_j: f64,
     /// Largest actual species change minus integrated stoichiometric change [mol].
     pub maximum_stoichiometric_residual_mol: f64,
@@ -125,6 +146,9 @@ pub struct IonizationNetworkBalance {
     pub rejected_steps: usize,
     /// Actual edge rate queries, including rejected work.
     pub rate_evaluations: usize,
+    /// Actual neutral/Coulomb thermal stages, including rejected work.
+    /// Each stage retains the source quadrature and caloric work bounds.
+    pub thermal_evaluations: usize,
 }
 
 /// Complete source-retained reacting endpoint on the original thermodynamic bank.
@@ -134,6 +158,7 @@ pub struct IonizationNetworkResult {
     state: FrozenIonizedGasStateV1,
     sources: Vec<AtomicRadiativeRecombinationV1>,
     photons: Vec<PhotonNumberFluxV1>,
+    thermal: Option<CollisionalRadiativeThermal>,
     channels: Vec<IonizationChannelBalance>,
     balance: IonizationNetworkBalance,
     controls: IonizationNetworkSolve,
@@ -157,6 +182,10 @@ impl IonizationNetworkResult {
     }
     pub fn photon_field(&self) -> &[PhotonNumberFluxV1] {
         &self.photons
+    }
+    /// Original optional collision laws, held powers and heavy source support.
+    pub const fn thermal_inputs(&self) -> Option<&CollisionalRadiativeThermal> {
+        self.thermal.as_ref()
     }
     pub const fn balance(&self) -> IonizationNetworkBalance {
         self.balance
@@ -183,6 +212,55 @@ pub fn advance_ionization_network(
     photons: &[PhotonNumberFluxV1],
     duration: Time,
     controls: IonizationNetworkSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<IonizationNetworkResult, IonizationNetworkError> {
+    advance(
+        initial, sources, photons, None, duration, controls, cancelled,
+    )
+}
+
+/// Evolve atomic ladders, their shared electrons, and the heavy thermal pool.
+///
+/// This entry uses the same original collision and heavy-caloric kernel as the
+/// single-channel owner. Every populated or creatable neutral requires its
+/// source when exchange is selected; the optional Coulomb law binds the exact
+/// initial bank, populations and volume, then refreshes at trial states. Atomic
+/// levels have the admitted constant monatomic heat capacity, while original
+/// spectator calorics may vary with temperature. No chemistry heat is added
+/// twice. One shared adaptive comparison includes both temperatures, all channel
+/// accounts and each signed exchange account.
+///
+/// At least one atomic source is required to establish the Maxwellian electron
+/// caloric convention. Nonzero held electron power requires initial electrons;
+/// with zero such power, photons may create them from exact absence. Volume and
+/// the external local photon field remain fixed and emitted radiation escapes.
+pub fn advance_ionization_network_with_thermal(
+    initial: &FrozenIonizedGasStateV1,
+    sources: &[AtomicRadiativeRecombinationV1],
+    photons: &[PhotonNumberFluxV1],
+    thermal: &CollisionalRadiativeThermal,
+    duration: Time,
+    controls: IonizationNetworkSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<IonizationNetworkResult, IonizationNetworkError> {
+    advance(
+        initial,
+        sources,
+        photons,
+        Some(thermal),
+        duration,
+        controls,
+        cancelled,
+    )
+}
+
+fn advance(
+    initial: &FrozenIonizedGasStateV1,
+    sources: &[AtomicRadiativeRecombinationV1],
+    photons: &[PhotonNumberFluxV1],
+    thermal: Option<&CollisionalRadiativeThermal>,
+    duration: Time,
+    controls: IonizationNetworkSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<IonizationNetworkResult, IonizationNetworkError> {
     controls.validate()?;
@@ -203,7 +281,7 @@ pub fn advance_ionization_network(
             ));
         }
     }
-    let problem = Problem::new(initial, sources, photons, controls, &mut cancelled)?;
+    let problem = Problem::new(initial, sources, photons, thermal, controls, &mut cancelled)?;
     let mut point = problem.initial_point();
     let mut full = Point::new(point.amounts.len(), point.events.len());
     let mut fine = Point::new(point.amounts.len(), point.events.len());
@@ -260,13 +338,15 @@ pub fn advance_ionization_network(
             Err(error) => return Err(error),
         }
     }
-    let (state, channels) = problem.publish(&point, &mut balance, &mut cancelled)?;
+    let (state, channels) =
+        problem.publish(&point, duration.value(), &mut balance, &mut cancelled)?;
     poll(&mut cancelled)?;
     Ok(IonizationNetworkResult {
         initial: initial.clone(),
         state,
         sources: problem.sources().map(Clone::clone).collect(),
         photons: photons.to_vec(),
+        thermal: thermal.cloned(),
         channels,
         balance,
         controls,

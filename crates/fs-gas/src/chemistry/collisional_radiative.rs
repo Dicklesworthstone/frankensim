@@ -44,7 +44,7 @@ use fs_thermochem::kinetics::{KineticsErrorV1, admit_caloric_interval};
 
 pub(in crate::chemistry) mod solve;
 use solve::Problem;
-mod thermal;
+pub(in crate::chemistry) mod thermal;
 pub use thermal::CollisionalRadiativeThermal;
 
 /// Electron source support and separate temporal, energy and moment allowances.

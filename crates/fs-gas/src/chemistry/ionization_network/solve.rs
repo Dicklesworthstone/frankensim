@@ -1,4 +1,5 @@
 use super::*;
+use crate::chemistry::collisional_radiative::thermal::PreparedThermal;
 use fs_math::det::expm1;
 use fs_qty::Amount;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
@@ -34,6 +35,9 @@ pub(super) struct Point {
     pub amounts: Vec<f64>,
     pub events: Vec<Events>,
     te: f64,
+    th: f64,
+    // Total, neutral and Coulomb electron-to-heavy transfers [J].
+    exchange: [Sum; 3],
 }
 impl Point {
     pub fn new(species: usize, channels: usize) -> Self {
@@ -41,12 +45,16 @@ impl Point {
             amounts: vec![0.0; species],
             events: vec![Events::default(); channels],
             te: 0.0,
+            th: 0.0,
+            exchange: [Sum::default(); 3],
         }
     }
     pub fn copy_from(&mut self, source: &Self) {
         self.amounts.copy_from_slice(&source.amounts);
         self.events.copy_from_slice(&source.events);
         self.te = source.te;
+        self.th = source.th;
+        self.exchange = source.exchange;
     }
 }
 
@@ -64,15 +72,30 @@ pub(super) struct Problem<'a> {
     ladders: Vec<Vec<usize>>,
     level_energies: [f64; MAX_EQUILIBRIUM_SPECIES_V1],
     controls: IonizationNetworkSolve,
+    thermal: Option<PreparedThermal<'a>>,
 }
 impl<'a> Problem<'a> {
     pub fn new(
         initial: &'a FrozenIonizedGasStateV1,
         sources: &'a [AtomicRadiativeRecombinationV1],
         photons: &[PhotonNumberFluxV1],
+        thermal: Option<&'a CollisionalRadiativeThermal>,
         controls: IonizationNetworkSolve,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, IonizationNetworkError> {
+        if let Some(inputs) = thermal {
+            inputs.validate()?;
+            if sources.is_empty() {
+                return Err(IonizationNetworkError::Invalid(
+                    "thermal network requires an admitted atomic electron source",
+                ));
+            }
+            if !(inputs.minimum_heavy_temperature_k..=inputs.maximum_heavy_temperature_k)
+                .contains(&initial.heavy_temperature().value())
+            {
+                return Err(IonizationNetworkError::OutsideDomain);
+            }
+        }
         let electron = initial.electron_index();
         if initial.relative_charge_residual() > controls.local.relative_charge_tolerance {
             return Err(IonizationNetworkError::Invalid(
@@ -86,6 +109,7 @@ impl<'a> Problem<'a> {
             ladders: Vec::new(),
             level_energies: [0.0; MAX_EQUILIBRIUM_SPECIES_V1],
             controls,
+            thermal: None,
         };
         if !sources.is_empty() {
             result.admit_temperature(initial.electron_temperature().value())?;
@@ -182,8 +206,18 @@ impl<'a> Problem<'a> {
                     Temperature::new(controls.local.minimum_electron_temperature_k),
                     Temperature::new(controls.local.maximum_electron_temperature_k),
                 )
-            } else if incoming[index].is_some() || outgoing[index].is_some() {
-                (initial.heavy_temperature(), initial.heavy_temperature())
+            } else if incoming[index].is_some()
+                || outgoing[index].is_some()
+                || (thermal.is_some() && initial.amounts()[index].value() > 0.0)
+            {
+                if let Some(inputs) = thermal {
+                    (
+                        Temperature::new(inputs.minimum_heavy_temperature_k),
+                        Temperature::new(inputs.maximum_heavy_temperature_k),
+                    )
+                } else {
+                    (initial.heavy_temperature(), initial.heavy_temperature())
+                }
             } else {
                 continue;
             };
@@ -193,6 +227,21 @@ impl<'a> Problem<'a> {
                     error => IonizationNetworkError::Admission(error),
                 },
             )?;
+        }
+        if let Some(inputs) = thermal {
+            let neutral_roots: Vec<_> = result
+                .edges
+                .iter()
+                .filter(|edge| initial.thermodynamics().charge_vector().get(edge.lower) == Some(0))
+                .map(|edge| edge.lower)
+                .collect();
+            result.thermal = Some(PreparedThermal::new_with_created_neutrals(
+                initial,
+                inputs,
+                &neutral_roots,
+                controls.local,
+                cancelled,
+            )?);
         }
         Ok(result)
     }
@@ -206,15 +255,24 @@ impl<'a> Problem<'a> {
             amounts: self.initial.amounts().iter().map(|n| n.value()).collect(),
             events: vec![Events::default(); self.edges.len()],
             te: self.initial.electron_temperature().value(),
+            th: self.initial.heavy_temperature().value(),
+            exchange: [Sum::default(); 3],
         }
     }
 
     pub fn inactive(&self, point: &Point) -> bool {
-        self.edges.is_empty()
+        let no_reactions = self.edges.is_empty()
             || (self.electron.is_none_or(|i| point.amounts[i] == 0.0)
                 && self.edges.iter().all(|edge| {
                     point.amounts[edge.lower] == 0.0 || edge.photon.rate_per_neutral_per_s == 0.0
-                }))
+                }));
+        no_reactions
+            && self.thermal.as_ref().is_none_or(|thermal| {
+                thermal.powers() == [0.0; 2]
+                    && (!thermal.has_exchange()
+                        || point.th == point.te
+                        || self.electron.is_none_or(|i| point.amounts[i] == 0.0))
+            })
     }
 
     pub fn compose(
@@ -224,6 +282,7 @@ impl<'a> Problem<'a> {
         balance: &mut IonizationNetworkBalance,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), IonizationNetworkError> {
+        self.thermal_step(point, 0.5 * dt, balance, cancelled)?;
         let last = self.edges.len() - 1;
         for index in 0..last {
             self.midpoint(index, point, 0.5 * dt, balance, cancelled)?;
@@ -232,7 +291,92 @@ impl<'a> Problem<'a> {
         for index in (0..last).rev() {
             self.midpoint(index, point, 0.5 * dt, balance, cancelled)?;
         }
+        self.thermal_step(point, 0.5 * dt, balance, cancelled)?;
         Ok(())
+    }
+
+    /// Second-order exponential-midpoint relaxation on fixed populations. This
+    /// surrounds the complete chemical sweep, not each edge: the heavy pool,
+    /// shared electron pool and external powers are each represented once.
+    fn thermal_step(
+        &self,
+        point: &mut Point,
+        dt: f64,
+        balance: &mut IonizationNetworkBalance,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), IonizationNetworkError> {
+        let Some(thermal) = &self.thermal else {
+            return Ok(());
+        };
+        poll(cancelled)?;
+        let mut amounts = [Amount::new(0.0); MAX_EQUILIBRIUM_SPECIES_V1];
+        for (target, &value) in amounts.iter_mut().zip(&point.amounts) {
+            *target = Amount::new(value);
+        }
+        let amounts = &amounts[..point.amounts.len()];
+        let electron = point.amounts[self.electron.expect("admitted thermal electron")];
+        let stage = thermal.stage(amounts, point.th, point.te, cancelled)?;
+        balance.thermal_evaluations += 1;
+        if stage.inactive() {
+            return Ok(());
+        }
+        let predicted = thermal.advance(
+            stage,
+            [point.th, point.te],
+            electron,
+            stage.heavy_energy,
+            0.0,
+            0.0,
+            0.5 * dt,
+            cancelled,
+        )?;
+        let middle_te =
+            self.thermal_electron_temperature(point.te, electron, predicted.electron_energy)?;
+        let middle = thermal.stage(amounts, predicted.heavy_temperature, middle_te, cancelled)?;
+        balance.thermal_evaluations += 1;
+        let next = thermal.advance(
+            middle,
+            [point.th, point.te],
+            electron,
+            stage.heavy_energy,
+            0.0,
+            0.0,
+            dt,
+            cancelled,
+        )?;
+        point.te = self.thermal_electron_temperature(point.te, electron, next.electron_energy)?;
+        point.th = next.heavy_temperature;
+        for (sum, increment) in point.exchange.iter_mut().zip([
+            next.exchange,
+            next.neutral_exchange,
+            next.coulomb_exchange,
+        ]) {
+            sum.add(increment);
+            if !sum.value.is_finite() {
+                return Err(IonizationNetworkError::Arithmetic(
+                    "network thermal transfer",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn thermal_electron_temperature(
+        &self,
+        before: f64,
+        amount: f64,
+        increment: f64,
+    ) -> Result<f64, IonizationNetworkError> {
+        let after = if amount == 0.0 {
+            if increment != 0.0 {
+                return Err(IonizationNetworkError::OutsideDomain);
+            }
+            before
+        } else {
+            before + increment / (CV * amount)
+        };
+        self.admit_temperature(after)?;
+        Ok(after)
     }
 
     fn midpoint(
@@ -251,6 +395,7 @@ impl<'a> Problem<'a> {
             upper: point.amounts[edge.upper],
             electron: point.amounts[electron],
             te: point.te,
+            th: point.th,
         };
         if pair.lower == 0.0 && pair.upper == 0.0 {
             return Ok(());
@@ -297,7 +442,7 @@ impl<'a> Problem<'a> {
             .source()
             .channel()
             .evaluate(
-                self.initial.heavy_temperature(),
+                Temperature::new(pair.th),
                 Temperature::new(te),
                 [
                     pair.lower / volume,
@@ -445,6 +590,7 @@ impl<'a> Problem<'a> {
                 upper,
                 electron,
                 te,
+                th: pair.th,
             },
             [extent, photo, collisional, capture, absorbed, captured],
         ))
@@ -472,6 +618,22 @@ impl<'a> Problem<'a> {
         let mut error = (coarse.te - fine.te).abs()
             / (controls.temperature_tolerance_k
                 + controls.relative_tolerance * coarse.te.max(fine.te));
+        error = error.max(
+            (coarse.th - fine.th).abs()
+                / (controls.temperature_tolerance_k
+                    + controls.relative_tolerance * coarse.th.max(fine.th)),
+        );
+        // Exchange accuracy follows actual sensible pool scales, never large
+        // formation offsets or a cumulative transfer that can change sign.
+        let electron = self.electron.map_or(0.0, |i| start.amounts[i]);
+        let thermal_scale =
+            (CV * electron * start.te).min(self.initial.heavy_heat_capacity_j_k() * start.th);
+        for slot in 0..3 {
+            error = error.max(
+                (coarse.exchange[slot].value - fine.exchange[slot].value).abs()
+                    / (controls.energy_tolerance_j + controls.relative_tolerance * thermal_scale),
+            );
+        }
         for ((initial, full), next) in start.amounts.iter().zip(&coarse.amounts).zip(&fine.amounts)
         {
             error = error.max(
@@ -510,6 +672,7 @@ impl<'a> Problem<'a> {
     pub fn publish(
         &self,
         point: &Point,
+        duration: f64,
         balance: &mut IonizationNetworkBalance,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(FrozenIonizedGasStateV1, Vec<IonizationChannelBalance>), IonizationNetworkError>
@@ -587,11 +750,41 @@ impl<'a> Problem<'a> {
             CV * (before * (point.te - self.initial.electron_temperature().value())
                 + (point.amounts[index] - before) * point.te)
         });
-        let heavy = CV * self.initial.heavy_temperature().value() * heavy_count.value;
+        let heavy = self.thermal.as_ref().map_or(Ok(0.0), |thermal| {
+            thermal
+                .calorics(point.th, cancelled)
+                .map(|(energy, _)| energy)
+        })? + CV * point.th * heavy_count.value;
+        let [heavy_work, electron_work] = self
+            .thermal
+            .as_ref()
+            .map_or([0.0; 2], PreparedThermal::powers)
+            .map(|power| power * duration);
+        let [exchange, neutral_exchange, coulomb_exchange] = point.exchange.map(|s| s.value);
         let [photo, capture, absorbed, emitted] = totals.map(|sum| sum.value);
         let mut residual = Sum::default();
-        for value in [sensible, chemical.value, heavy, emitted, -absorbed] {
+        for value in [
+            sensible,
+            chemical.value,
+            heavy,
+            emitted,
+            -absorbed,
+            -electron_work,
+            -heavy_work,
+        ] {
             residual.add(value);
+        }
+        let heavy_residual = (heavy - heavy_work) - exchange;
+        let mut electron_residual = Sum::default();
+        for value in [
+            sensible,
+            chemical.value,
+            emitted,
+            -absorbed,
+            -electron_work,
+            exchange,
+        ] {
+            electron_residual.add(value);
         }
         if [photo, capture, absorbed, emitted]
             .iter()
@@ -599,6 +792,8 @@ impl<'a> Problem<'a> {
             || !nonnegative(NA * photo)
             || !nonnegative(NA * capture)
             || !residual.value.is_finite()
+            || !heavy_residual.is_finite()
+            || !electron_residual.value.is_finite()
         {
             return Err(IonizationNetworkError::Arithmetic(
                 "network photon/gas energy",
@@ -609,9 +804,21 @@ impl<'a> Problem<'a> {
                 residual_j: residual.value,
             });
         }
+        for residual in [
+            heavy_residual,
+            electron_residual.value,
+            (neutral_exchange + coulomb_exchange) - exchange,
+        ] {
+            if residual.abs() > self.controls.local.energy_tolerance_j {
+                return Err(IonizationNetworkError::EnergyBalance {
+                    residual_j: residual,
+                });
+            }
+        }
         let amounts: Vec<_> = point.amounts.iter().map(|&n| Amount::new(n)).collect();
         let state = if amounts == self.initial.amounts()
             && point.te == self.initial.electron_temperature().value()
+            && point.th == self.initial.heavy_temperature().value()
         {
             self.initial.clone()
         } else {
@@ -619,7 +826,7 @@ impl<'a> Problem<'a> {
                 self.initial.thermodynamics(),
                 &amounts,
                 self.initial.volume(),
-                self.initial.heavy_temperature(),
+                Temperature::new(point.th),
                 Temperature::new(point.te),
                 self.controls.local.relative_charge_tolerance,
                 &mut *cancelled,
@@ -636,6 +843,13 @@ impl<'a> Problem<'a> {
         balance.chemical_storage_change_j = chemical.value;
         balance.electron_sensible_energy_change_j = sensible;
         balance.heavy_sensible_energy_change_j = heavy;
+        balance.electron_deposited_energy_j = electron_work;
+        balance.heavy_deposited_energy_j = heavy_work;
+        balance.electron_to_heavy_energy_j = exchange;
+        balance.electron_to_heavy_neutral_energy_j = neutral_exchange;
+        balance.electron_to_heavy_coulomb_energy_j = coulomb_exchange;
+        balance.electron_energy_residual_j = electron_residual.value;
+        balance.heavy_energy_residual_j = heavy_residual;
         balance.energy_residual_j = residual.value;
         balance.relative_charge_residual = state.relative_charge_residual();
         Ok((state, channels))
@@ -648,6 +862,7 @@ struct Pair {
     upper: f64,
     electron: f64,
     te: f64,
+    th: f64,
 }
 #[derive(Clone, Copy)]
 struct Rates {

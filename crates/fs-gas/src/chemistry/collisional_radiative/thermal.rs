@@ -46,7 +46,7 @@ impl CollisionalRadiativeThermal {
             maximum_iterations: 96,
         }
     }
-    pub(super) fn validate(&self) -> Result<(), CollisionalRadiativeError> {
+    pub(in crate::chemistry) fn validate(&self) -> Result<(), CollisionalRadiativeError> {
         if !self.electron_power.value().is_finite()
             || !self.heavy_power.value().is_finite()
             || !positive(self.minimum_heavy_temperature_k)
@@ -63,7 +63,7 @@ impl CollisionalRadiativeThermal {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct ThermalStage {
+pub(in crate::chemistry) struct ThermalStage {
     pub conductance: ExchangeConductance,
     pub capacities: [f64; 2],
     pub temperatures: [f64; 2],
@@ -77,7 +77,7 @@ impl ThermalStage {
     }
 }
 
-pub(super) struct ThermalAdvance {
+pub(in crate::chemistry) struct ThermalAdvance {
     pub electron_energy: f64,
     pub heavy_temperature: f64,
     pub heavy_increment: f64,
@@ -86,7 +86,7 @@ pub(super) struct ThermalAdvance {
     pub coulomb_exchange: f64,
 }
 
-pub(super) struct PreparedThermal<'a> {
+pub(in crate::chemistry) struct PreparedThermal<'a> {
     initial: &'a FrozenIonizedGasStateV1,
     inputs: &'a CollisionalRadiativeThermal,
     controls: CollisionalRadiativeSolve,
@@ -98,6 +98,19 @@ impl<'a> PreparedThermal<'a> {
         initial: &'a FrozenIonizedGasStateV1,
         inputs: &'a CollisionalRadiativeThermal,
         created_neutral: usize,
+        controls: CollisionalRadiativeSolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, CollisionalRadiativeError> {
+        Self::new_with_created_neutrals(initial, inputs, &[created_neutral], controls, cancelled)
+    }
+
+    /// Prepare the same thermal law for all neutral roots that a network may
+    /// populate. Their collision sources must exist before the first reaction,
+    /// including when there are initially no electrons or no neutral targets.
+    pub fn new_with_created_neutrals(
+        initial: &'a FrozenIonizedGasStateV1,
+        inputs: &'a CollisionalRadiativeThermal,
+        created_neutrals: &[usize],
         controls: CollisionalRadiativeSolve,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, CollisionalRadiativeError> {
@@ -114,15 +127,20 @@ impl<'a> PreparedThermal<'a> {
             .collisions
             .as_ref()
             .map(|sources| {
-                let prepared =
-                    PreparedExchange::new(initial, sources, created_neutral, &mut *cancelled)
-                        .map_err(thermal_error)?;
+                let prepared = PreparedExchange::new(
+                    initial,
+                    sources,
+                    created_neutrals.first().copied().unwrap_or(usize::MAX),
+                    &mut *cancelled,
+                )
+                .map_err(thermal_error)?;
                 // Photoionization can create electrons from exact absence. Require
                 // all neutral sources before that happens, including a neutral
                 // that later recombination can create from an initially ionized gas.
                 for (index, model) in initial.thermodynamics().models().iter().enumerate() {
                     if initial.thermodynamics().charge_vector().get(index) == Some(0)
-                        && (initial.amounts()[index].value() > 0.0 || index == created_neutral)
+                        && (initial.amounts()[index].value() > 0.0
+                            || created_neutrals.contains(&index))
                         && !sources
                             .momentum_sources
                             .iter()
@@ -159,6 +177,10 @@ impl<'a> PreparedThermal<'a> {
             self.inputs.heavy_power.value(),
             self.inputs.electron_power.value(),
         ]
+    }
+
+    pub const fn has_exchange(&self) -> bool {
+        self.exchange.is_some()
     }
 
     pub fn calorics(
@@ -366,7 +388,9 @@ fn relaxation(dose: f64) -> (f64, f64) {
     (depleted, forcing)
 }
 
-pub(super) fn thermal_error(error: ElectronHeavyEnergyError) -> CollisionalRadiativeError {
+pub(in crate::chemistry) fn thermal_error(
+    error: ElectronHeavyEnergyError,
+) -> CollisionalRadiativeError {
     match error {
         ElectronHeavyEnergyError::Cancelled => CollisionalRadiativeError::Cancelled,
         ElectronHeavyEnergyError::OutsideDomain => CollisionalRadiativeError::OutsideDomain,

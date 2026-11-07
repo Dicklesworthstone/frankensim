@@ -16,6 +16,8 @@ use fs_thermochem::kinetics::atomic_ionization::radiative_recombination::AtomicR
 use fs_thermochem::kinetics::atomic_ionization::{AtomicIonizationV1, AtomicStatisticalWeightsV1};
 use fs_thermochem::{ChargeVector, ElementId, ElementalMatrix, ReactionId};
 
+mod thermal;
+
 const CV: f64 = 1.5 * R;
 const ALPHA_MASS: f64 = 6.644_657_335_7e-27;
 // NIST ASD 5.12 H I, He I and He II ionization energies; these level gaps
