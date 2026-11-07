@@ -59,6 +59,73 @@ fn mis_weights_sum_to_one() {
 }
 
 #[test]
+fn g0_mis_preserves_power_across_density_scales_and_sample_counts() {
+    // Common changes of measure cannot change a strategy's relative mass.
+    // Include subnormal densities, underflowing squares, overflowing squares,
+    // and count products that exceed binary64 despite finite input pdfs.
+    for scale in [f64::from_bits(16), 1e-300, 1e-170, 1.0, 1e170, 1e300] {
+        let (pf, pg) = (2.0 * scale, 5.0 * scale);
+        for (heuristic, expected) in [
+            (balance_heuristic as fn(u32, f64, u32, f64) -> f64, 6.0 / 41.0),
+            (power_heuristic, 36.0 / 1261.0),
+        ] {
+            let forward = heuristic(3, pf, 7, pg);
+            let reverse = heuristic(7, pg, 3, pf);
+            assert!((forward - expected).abs() < 4e-16, "scale={scale}: {forward}");
+            assert!((forward + reverse - 1.0).abs() < 4e-16);
+        }
+    }
+    for heuristic in [balance_heuristic, power_heuristic] {
+        assert_eq!(heuristic(u32::MAX, f64::MAX, u32::MAX, f64::MAX), 0.5);
+        assert_eq!(heuristic(1, f64::MAX, 1, f64::MAX), 0.5);
+        assert_eq!(heuristic(1, f64::from_bits(1), 1, f64::from_bits(1)), 0.5);
+    }
+    // A small strategy can still have a representable weight. In particular,
+    // neither its pdf nor its squared mass may be dropped before normalization.
+    let weak_balance = balance_heuristic(u32::MAX, 1e-20, 2, 1e308);
+    let expected = (f64::from(u32::MAX) * 1e-20 / 1e308) * 0.5;
+    assert!(weak_balance > 0.0);
+    assert!((weak_balance - expected).abs() <= f64::from_bits(1));
+    assert!((power_heuristic(1, 1e-200, 1, 1e-100) / 1e-200 - 1.0).abs() < 1e-14);
+}
+
+#[test]
+fn g0_mis_inactive_proposals_and_invalid_densities_are_explicit() {
+    for heuristic in [balance_heuristic, power_heuristic] {
+        assert_eq!(heuristic(1, 0.0, 1, 0.0), 0.0);
+        assert_eq!(heuristic(0, f64::NAN, 0, f64::INFINITY), 0.0);
+        assert_eq!(heuristic(0, f64::NAN, 1, 1e-300), 0.0);
+        assert_eq!(heuristic(1, 1e-300, 0, f64::INFINITY), 1.0);
+        for invalid in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(heuristic(1, invalid, 1, 1.0).is_nan());
+            assert!(heuristic(1, 1.0, 1, invalid).is_nan());
+        }
+    }
+}
+
+#[test]
+fn g3_mis_constant_radiance_integral_is_invariant_to_change_of_measure() {
+    // Integrate f(x)=1/width on [0,width] with uniform and linearly weighted
+    // proposals. This independent unit-power oracle exercises both MIS legs;
+    // neither a very sharp nor a very diffuse proposal may erase the energy.
+    for heuristic in [balance_heuristic, power_heuristic] {
+        for width in [1e-200, 1.0, 1e200] {
+            let uniform_pdf = 1.0 / width;
+            let mut estimate = 0.0;
+            let count = 4096;
+            for i in 1..=count {
+                let uniform = radical_inverse(2, i);
+                let linear = radical_inverse(3, i).sqrt();
+                estimate += heuristic(1, uniform_pdf, 1, 2.0 * uniform / width);
+                estimate += heuristic(1, 2.0 * linear / width, 1, uniform_pdf) / (2.0 * linear);
+            }
+            estimate /= count as f64;
+            assert!((estimate - 1.0).abs() < 1e-3, "width={width}: {estimate}");
+        }
+    }
+}
+
+#[test]
 fn mis_integration_is_unbiased() {
     // ∫₀¹ x dx = 1/2, combining uniform + linear-importance strategies.
     let est = mis_integrate_unit(|x| x, 2048);

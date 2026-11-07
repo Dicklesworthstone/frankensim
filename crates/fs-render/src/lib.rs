@@ -149,20 +149,73 @@ impl Lambertian {
 
 /// The MIS BALANCE-heuristic weight for strategy `f` given sample counts and the
 /// two strategies' pdfs at the sample.
+///
+/// Active densities must be finite and nonnegative; invalid inputs return NaN.
+/// A zero sample count disables that strategy, regardless of its unused pdf.
+/// Two zero masses return zero. Finite densities retain their relative weight
+/// even when their count-weighted sum would overflow.
 #[must_use]
 pub fn balance_heuristic(nf: u32, pf: f64, ng: u32, pg: f64) -> f64 {
-    let (a, b) = (f64::from(nf) * pf, f64::from(ng) * pg);
+    let (a, b) = mis_masses(nf, pf, ng, pg);
     let denom = a + b;
-    if denom <= 0.0 { 0.0 } else { a / denom }
+    if denom == 0.0 {
+        0.0
+    } else if denom.is_finite() {
+        a / denom
+    } else if a >= b {
+        1.0 / (1.0 + b / a)
+    } else {
+        let ratio = a / b;
+        ratio / (1.0 + ratio)
+    }
 }
 
 /// The MIS POWER-heuristic weight (β = 2) for strategy `f`.
+///
+/// Input and zero-mass semantics match [`balance_heuristic`]. Densities are
+/// compared before squaring when their squares would overflow or underflow:
+/// narrow specular proposals and weak connection densities must not turn a
+/// valid reflection into NaN or lose both complementary MIS contributions.
 #[must_use]
 pub fn power_heuristic(nf: u32, pf: f64, ng: u32, pg: f64) -> f64 {
-    let (a, b) = (f64::from(nf) * pf, f64::from(ng) * pg);
+    let (a, b) = mis_masses(nf, pf, ng, pg);
     let (a2, b2) = (a * a, b * b);
     let denom = a2 + b2;
-    if denom <= 0.0 { 0.0 } else { a2 / denom }
+    if denom.is_normal() && (a2.is_normal() || a == 0.0) && (b2.is_normal() || b == 0.0) {
+        // Preserve the original arithmetic on the ordinary rendering path.
+        a2 / denom
+    } else if a == 0.0 && b == 0.0 {
+        0.0
+    } else if a >= b {
+        let ratio = b / a;
+        1.0 / (1.0 + ratio * ratio)
+    } else {
+        let ratio = a / b;
+        let square = ratio * ratio;
+        square / (1.0 + square)
+    }
+}
+
+// The two heuristics depend only on relative n*p. Rescale by an exact power
+// of two only if a count product overflows. Since counts are u32, 2^-32 leaves
+// room for every admitted count, without logs or per-path allocation. Scaling
+// by max(pdf) instead could erase a small pdf before its large count rescues a
+// representable balance weight.
+fn mis_masses(nf: u32, pf: f64, ng: u32, pg: f64) -> (f64, f64) {
+    if (nf != 0 && (!pf.is_finite() || pf < 0.0))
+        || (ng != 0 && (!pg.is_finite() || pg < 0.0))
+    {
+        return (f64::NAN, f64::NAN);
+    }
+    let pf = if nf == 0 { 0.0 } else { pf };
+    let pg = if ng == 0 { 0.0 } else { pg };
+    let (a, b) = (f64::from(nf) * pf, f64::from(ng) * pg);
+    if a.is_finite() && b.is_finite() {
+        (a, b)
+    } else {
+        const COUNT_SCALE: f64 = 1.0 / 4_294_967_296.0;
+        ((pf * COUNT_SCALE) * f64::from(nf), (pg * COUNT_SCALE) * f64::from(ng))
+    }
 }
 
 /// The MIS WEIGHT-SUM audit: the two balance-heuristic weights at a sample must

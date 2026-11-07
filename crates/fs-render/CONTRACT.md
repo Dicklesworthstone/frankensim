@@ -24,7 +24,14 @@ differentiable lift). Pure Rust throughout.
   without assigning a temperature or an emission source. See the calibrated
   diffuse-material contract below for table admission and accuracy limits.
 - `balance_heuristic` / `power_heuristic` — MIS weights; `mis_weight_sum(pf,
-  pg)` — the weight-sum audit (nominally `1`).
+  pg)` — the weight-sum audit (nominally `1`). Finite nonnegative active
+  densities retain complementary weights even when count products, sums or
+  squares overflow, or squares underflow. Ordinary-range arithmetic is
+  unchanged. Zero counts disable their unused density, two zero masses return
+  zero, and invalid active densities return NaN. G0/G3 tests in `tests/render.rs`
+  check count-weighted analytic ratios, subnormal and extreme density scales,
+  and a unit-power integral under a common change of measure. These scalar
+  weights do not replace the caller's geometric PDF/Jacobian validation.
 - `mis_integrate_unit(f, n)` — an unbiased MIS estimate of `∫₀¹ f` combining
   uniform + linear-importance strategies.
 - `hero_wavelengths(hero, count, min, max)` /
