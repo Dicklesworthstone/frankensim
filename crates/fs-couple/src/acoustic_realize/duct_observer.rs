@@ -1,14 +1,15 @@
 //! A physical duct microphone on the ordinary material-assembly entry point.
 //!
-//! The moving-reed junction, regional TMM terminal transfer or native spatial
-//! ODE terminal flow, retarded Rayleigh receiver and causal atmosphere filter
+//! The moving-reed junction or prescribed volume-flow source, regional TMM
+//! terminal transfer or native spatial ODE terminal flow, retarded Rayleigh
+//! receiver and causal atmosphere filter
 //! keep their original owners. Interior bore pressure and the compact jet proxy
 //! are not microphone signals. Observation never rebuilds or retunes the reed,
 //! its geometry, or either medium.
 
 use super::{
-    AcousticRealizeError, BoreRealization, BoreRealizationReceipt, RealizeOptions,
-    RealizedAssembly, gas_state, physics_duct, realize_reed_on_duct_with_receiver, sample_count,
+    AcousticRealizeError, BoreRealization, BoreRealizationReceipt, DuctExcitation, RealizeOptions,
+    RealizedAssembly, gas_state, physics_duct, realize_duct_with_receiver, sample_count,
     selected_observer_law, wall_pin,
 };
 use crate::air_path::{GasAbsorptionModel, ObserverFilter, ObserverFilterReceipt};
@@ -21,12 +22,17 @@ use fs_duct::{Termination, WallModel};
 use fs_material::gas::GasState;
 use fs_scenario::{AcousticAssembly, WaveguideEnd};
 
-/// Explicit regional materials and exterior receiver for one reed-driven bore.
+/// Explicit regional materials and exterior receiver for one driven bore.
 ///
 /// This bounded image admits a cylinder/cone chain with its existing local wall
 /// law and flanged termination. The physical lumped route also admits native
 /// tone holes with uniform gas, the same exterior and rigid walls. Strings,
-/// separate body/plate/cavity members and other excitation retain their refusals.
+/// separate body/plate/cavity members retain their refusals. Exactly one reed
+/// or prescribed volume-flow pulse supplies the inlet. Prescribed flow requires
+/// the explicit lumped ladder: the original exact driver holds each source
+/// sample over its native interval, retains the conjugate pressure/flow work,
+/// and observes the same accepted bell and side-mouth states as a reed. The
+/// source is an ideal imposed flow, not a finite pressure or energy reservoir.
 /// The explicit lumped ladder uses the original compression-volume/volume-flow
 /// frustum owner, including for a single widening cone, with regional interior
 /// gases, an independent pressure-matched exterior and either the original
@@ -254,12 +260,11 @@ pub(super) fn realize(
         || assembly.cavity.is_some()
         || assembly.pluck.is_some()
         || assembly.bow.is_some()
-        || assembly.blow.is_some()
         || !assembly.obstacles.is_empty()
         || assembly.contact_texture.is_some()
     {
         return Err(invalid(
-            "physical duct observation requires only the reed and bore; other coupled members or excitations need their own physical receiver",
+            "physical duct observation requires only a driven bore; other coupled members need their own physical receiver",
         ));
     }
     let is_lumped = matches!(options.bore, BoreRealization::LumpedLadder { .. });
@@ -272,9 +277,19 @@ pub(super) fn realize(
         .duct
         .as_ref()
         .ok_or_else(|| invalid("physical duct observation requires a duct"))?;
-    let reed = assembly
-        .reed
-        .ok_or_else(|| invalid("physical duct observation requires a reed excitation"))?;
+    let excitation = match (assembly.reed, assembly.blow) {
+        (Some(reed), None) => DuctExcitation::Reed(reed),
+        (None, Some(blow)) if is_lumped => DuctExcitation::PrescribedFlow(blow),
+        (None, Some(_)) => return Err(invalid(
+            "physical prescribed-flow observation requires the explicit lumped ladder",
+        )),
+        (Some(_), Some(_)) => return Err(invalid(
+            "physical duct observation requires exactly one reed or prescribed volume-flow source",
+        )),
+        (None, None) => return Err(invalid(
+            "physical duct observation requires a reed or prescribed volume-flow source",
+        )),
+    };
     let has_holes = !duct.tone_holes.is_empty();
     if has_holes && !is_lumped {
         return Err(invalid(
@@ -434,9 +449,9 @@ pub(super) fn realize(
                 atmosphere,
             });
         }
-        let (pressure_pa, bore_receipt) = realize_reed_on_duct_with_receiver(
+        let (pressure_pa, bore_receipt) = realize_duct_with_receiver(
             duct,
-            reed,
+            excitation,
             &mut PlateBank::default(),
             &interior,
             range_m,
@@ -463,6 +478,11 @@ pub(super) fn realize(
             }),
         });
     }
+    let DuctExcitation::Reed(reed) = excitation else {
+        return Err(invalid(
+            "physical prescribed-flow observation requires the explicit lumped ladder",
+        ));
+    };
     let authored_wall = wall_pin(duct.wall);
     let wall = match binding.material_wall {
         Some(MaterialWallLayout::Uniform(material)) => WallModel::Law(material),

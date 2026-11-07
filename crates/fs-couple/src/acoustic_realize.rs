@@ -316,9 +316,10 @@ pub enum BoreRealizationReceipt {
 /// Non-IR realization options (`scenario.ir` remains frozen per `schema-policy.json`).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct RealizeOptions<'a> {
-    /// Bore discretization choice for reed/duct realizations. Nondefault
-    /// requests refuse on joined string/duct and prescribed-flow paths whose
-    /// propagators do not implement this selector.
+    /// Bore discretization choice for reed/duct realizations. A prescribed
+    /// volume-flow source can select the same lumped ladder with `baffled_duct`.
+    /// Other nondefault requests refuse on joined string/duct and legacy
+    /// prescribed-flow paths whose propagators do not implement this selector.
     pub bore: BoreRealization,
     /// Explicit, coherently resolved gas shared by ordinary excitation,
     /// propagation, loading and pressure observation. `None` resolves the
@@ -340,7 +341,10 @@ pub struct RealizeOptions<'a> {
     /// evaluated for another gas, or a state supplied with another law, refuses
     /// instead of being ignored.
     pub observer_relaxation: Option<&'a fs_material::relaxation::RelaxationState>,
-    /// Physical mouth microphones for a reed-driven duct with a flanged outlet.
+    /// Physical mouth microphones for a reed-driven or prescribed-flow duct
+    /// with a flanged outlet. A prescribed flow requires an explicit lumped
+    /// ladder and excludes a simultaneous reed; its held input and external
+    /// pressure/flow work remain owned by the original exact ODE driver.
     /// Its regional gas, exterior load and causal observation share the existing
     /// owners. A lumped ladder admits and advances the same original regional
     /// gas/material-wall frustum model, including for a single cone, and exports
@@ -5011,15 +5015,21 @@ fn realize_reed_on_duct(
     n: usize,
     bore: BoreRealization,
 ) -> Result<(Vec<f64>, BoreRealizationReceipt), AcousticRealizeError> {
-    realize_reed_on_duct_with_receiver(
-        duct, reed, plates, gas, listener_m, sample_rate_hz, n, bore, None,
+    realize_duct_with_receiver(
+        duct, DuctExcitation::Reed(reed), plates, gas, listener_m, sample_rate_hz, n, bore, None,
     )
 }
 
+#[derive(Clone, Copy)]
+enum DuctExcitation {
+    Reed(BeatingReed),
+    PrescribedFlow(VolumeVelocityPulse),
+}
+
 #[allow(clippy::too_many_arguments)]
-fn realize_reed_on_duct_with_receiver(
+fn realize_duct_with_receiver(
     duct: &ViscothermalDuct,
-    reed: BeatingReed,
+    excitation: DuctExcitation,
     plates: &mut PlateBank,
     gas: &GasState,
     listener_m: f64,
@@ -5032,6 +5042,18 @@ fn realize_reed_on_duct_with_receiver(
         Option<&crate::driving_point::regional::material_wall::MaterialWallLayout>,
     )>,
 ) -> Result<(Vec<f64>, BoreRealizationReceipt), AcousticRealizeError> {
+    if let DuctExcitation::PrescribedFlow(blow) = excitation {
+        if !(blow.peak_m3_s.is_finite() && blow.duration_s > 0.0 && blow.duration_s.is_finite()) {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "blow pulse must have finite peak and positive duration",
+            });
+        }
+        if receiver.is_none() || !matches!(bore, BoreRealization::LumpedLadder { .. }) {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "physical prescribed-flow observation requires the explicit lumped ladder and its original terminal flow",
+            });
+        }
+    }
     // The resolved inlet is the source medium even when downstream cells and
     // the exterior differ. No averaged bore gas enters Bernoulli or reed work.
     let inlet = receiver.as_ref().map(|(_, regional, _)| *regional.inlet_gas());
@@ -5050,6 +5072,11 @@ fn realize_reed_on_duct_with_receiver(
                     what: "characteristic-line physical observation requires its original terminal transfer",
                 });
             }
+            let DuctExcitation::Reed(reed) = excitation else {
+                return Err(AcousticRealizeError::InvalidDescription {
+                    what: "characteristic-line source requires a reed",
+                });
+            };
             let (samples, receipt) = crate::reed_bore::realize_reed_bore_with_ladder(
                 &physics,
                 gas,
@@ -5115,7 +5142,7 @@ fn realize_reed_on_duct_with_receiver(
             // exact regional chain; the source then consumes it unchanged.
             let receiver = receiver
                 .map(|(receiver, regional, material_wall)| {
-                    reed_ode::PreparedReedOutlet::new(
+                    reed_ode::PreparedDuctOutlet::new(
                         &sections, duct_outlet(duct.termination), &taps,
                         regional, duct.wall, material_wall, receiver,
                     )
@@ -5141,19 +5168,34 @@ fn realize_reed_on_duct_with_receiver(
                     max_pitch_error_cents,
                 });
             }
-            let samples = reed_ode::realize_reed_ode_with_receiver(
-                &sections,
-                duct_outlet(duct.termination),
-                &taps,
-                reed,
-                plates,
-                gas,
-                listener_m,
-                sample_rate_hz,
-                n,
-                duct.wall,
-                receiver,
-            )?;
+            let samples = match excitation {
+                DuctExcitation::Reed(reed) => reed_ode::realize_reed_ode_with_receiver(
+                    &sections,
+                    duct_outlet(duct.termination),
+                    &taps,
+                    reed,
+                    plates,
+                    gas,
+                    listener_m,
+                    sample_rate_hz,
+                    n,
+                    duct.wall,
+                    receiver,
+                ),
+                DuctExcitation::PrescribedFlow(blow) => realize_blown_ode_with_receiver(
+                    &sections,
+                    duct_outlet(duct.termination),
+                    &taps,
+                    blow,
+                    plates,
+                    gas,
+                    listener_m,
+                    sample_rate_hz,
+                    n,
+                    duct.wall,
+                    receiver,
+                ),
+            }?;
             Ok((
                 samples,
                 BoreRealizationReceipt::LumpedLadder {
@@ -5383,7 +5425,7 @@ fn lumped_ladder_pitch_error_cents(
     duct: &ViscothermalDuct,
     termination: Termination,
     gas: &GasState,
-    prepared: Option<&reed_ode::PreparedReedOutlet<'_>>,
+    prepared: Option<&reed_ode::PreparedDuctOutlet<'_>>,
 ) -> Result<f64, AcousticRealizeError> {
     let (ladder, line) =
         lumped_ladder_resonances(physics, sections, taps, duct, termination, gas, prepared)?;
@@ -5405,7 +5447,7 @@ fn lumped_ladder_resonances(
     duct: &ViscothermalDuct,
     termination: Termination,
     gas: &GasState,
-    prepared: Option<&reed_ode::PreparedReedOutlet<'_>>,
+    prepared: Option<&reed_ode::PreparedDuctOutlet<'_>>,
 ) -> Result<(Option<f64>, f64), AcousticRealizeError> {
     let length: f64 = physics.segments.iter().map(Segment::axial_length).sum();
     let quarter = match prepared {
@@ -5612,8 +5654,38 @@ fn realize_blown_ode(
     n: usize,
     wall: Option<LocallyReactingWall>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
+    realize_blown_ode_with_receiver(
+        sections, outlet, taps, blow, plates, gas, listener_m, sample_rate_hz, n, wall, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn realize_blown_ode_with_receiver(
+    sections: &[AcousticSection],
+    outlet: ChainOutlet,
+    taps: &[AcousticTap],
+    blow: VolumeVelocityPulse,
+    plates: &mut PlateBank,
+    gas: &GasState,
+    listener_m: f64,
+    sample_rate_hz: u32,
+    n: usize,
+    wall: Option<LocallyReactingWall>,
+    receiver: Option<reed_ode::PreparedDuctOutlet<'_>>,
+) -> Result<Vec<f64>, AcousticRealizeError> {
+    if receiver.is_some() && !plates.is_empty() {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "physical ODE outlet observation requires separate receivers for plates",
+        });
+    }
     let inlets = if plates.is_empty() { 1 } else { 2 };
-    let line = ode_bore_chain(sections, outlet, inlets, taps, gas, wall)?;
+    let (line, mut receiver) = match receiver {
+        Some(receiver) => {
+            let (line, receiver) = receiver.into_parts();
+            (line, Some(receiver))
+        }
+        None => (ode_bore_chain(sections, outlet, inlets, taps, gas, wall)?, None),
+    };
     let dt = 1.0 / f64::from(sample_rate_hz);
     let (sys, mut x, observation) = compose_plate_chain(plates, line, 1, gas, sample_rate_hz)?;
     let linear = prepare_render_linear(&sys)?;
@@ -5659,8 +5731,14 @@ fn realize_blown_ode(
             Flow::Nonlinear(owner) => owner.step_into(&x, &input, &mut next, &mut average_output),
         }
         .map_err(render_phs_error)?;
-        let p = average_output[source]
-            + plate_chain_radiation(observation.as_ref(), &next, &x, gas, listener_m, dt)?;
+        // Physical observation consumes the same accepted native terminal
+        // state as the reed path. The inlet mean pressure still belongs to
+        // the exact source-work account; it is not added to the microphone.
+        let p = match receiver.as_mut() {
+            Some(receiver) => receiver.pressure(&next)?,
+            None => average_output[source]
+                + plate_chain_radiation(observation.as_ref(), &next, &x, gas, listener_m, dt)?,
+        };
         if !p.is_finite() {
             return Err(AcousticRealizeError::InvalidDescription {
                 what: "blown ODE pressure left the finite set",
@@ -6309,7 +6387,7 @@ mod lumped_ladder_resonance_tests {
                 crate::air_path::GasAbsorptionModel::Lossless, &exterior, None, 1.0, 16_000,
             ).unwrap(),
         );
-        let prepared = reed_ode::PreparedReedOutlet::new(
+        let prepared = reed_ode::PreparedDuctOutlet::new(
             &sections, duct_outlet(duct.termination), &taps,
             crate::driving_point::regional::RegionalDuct::new(&physics, &[interior])
                 .unwrap().with_exterior_gas(exterior).unwrap(), None, None, &mut microphone,
@@ -6397,7 +6475,7 @@ mod lumped_ladder_resonance_tests {
                 crate::air_path::GasAbsorptionModel::Lossless, &exterior, None, 1.0, 16_000,
             ).unwrap(),
         );
-        let prepared = reed_ode::PreparedReedOutlet::new(
+        let prepared = reed_ode::PreparedDuctOutlet::new(
             &sections, duct_outlet(duct.termination), &taps, regional, None, None, &mut microphone,
         ).unwrap();
         let (_, admitted) = lumped_ladder_resonances(

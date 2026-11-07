@@ -27,7 +27,7 @@ pub(super) fn realize_nonlinear(
     listener_m: f64,
     dt: f64,
     n: usize,
-    mut receiver: Option<&mut ReedOutletObserver<'_>>,
+    mut receiver: Option<&mut DuctOutletObserver<'_>>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
     let budget = fs_phs::linear_exact::LinearSplitBudget {
         max_modes: system.state_dim(),

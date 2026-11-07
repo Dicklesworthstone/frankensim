@@ -38,22 +38,32 @@ pub(super) fn realize_reed_ode(
     )
 }
 
-struct ReedOutletObserver<'a> {
+pub(super) struct DuctOutletObserver<'a> {
     flow: fs_phs::acoustic_outlet::AcousticOutletFlow,
     openings: Vec<fs_phs::acoustic_outlet::AcousticTapFlow>,
     receiver: &'a mut duct_observer::SpatialDuctReceivers,
 }
 
+impl DuctOutletObserver<'_> {
+    pub(super) fn pressure(&mut self, state: &[f64]) -> Result<f64, AcousticRealizeError> {
+        self.receiver.observe(&self.flow, &self.openings, state)
+    }
+}
+
 // Admit the same physical frustum that will produce the outlet history. The
 // passive gate borrows this original chain; rendering then takes ownership.
 // No second assembly or legacy spherical image can enter between those steps.
-pub(super) struct PreparedReedOutlet<'a> {
+pub(super) struct PreparedDuctOutlet<'a> {
     pub(super) line: fs_phs::PortHamiltonian,
     pub(super) reference: crate::driving_point::regional::RegionalDuct,
-    observer: ReedOutletObserver<'a>,
+    observer: DuctOutletObserver<'a>,
 }
 
-impl<'a> PreparedReedOutlet<'a> {
+impl<'a> PreparedDuctOutlet<'a> {
+    pub(super) fn into_parts(self) -> (fs_phs::PortHamiltonian, DuctOutletObserver<'a>) {
+        (self.line, self.observer)
+    }
+
     pub(super) fn new(
         sections: &[AcousticSection],
         outlet: ChainOutlet,
@@ -167,7 +177,7 @@ impl<'a> PreparedReedOutlet<'a> {
         Ok(Self {
             line,
             reference,
-            observer: ReedOutletObserver {
+            observer: DuctOutletObserver {
                 flow,
                 openings,
                 receiver,
@@ -191,7 +201,7 @@ pub(super) fn realize_reed_ode_with_receiver(
     sample_rate_hz: u32,
     n: usize,
     wall: Option<LocallyReactingWall>,
-    receiver: Option<PreparedReedOutlet<'_>>,
+    receiver: Option<PreparedDuctOutlet<'_>>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
     if !crate::reed_bore::reed_parameters_valid(reed) {
         return Err(AcousticRealizeError::InvalidDescription {
@@ -262,7 +272,7 @@ pub(super) fn realize_reed_ode_with_receiver(
 
 #[allow(clippy::too_many_arguments)]
 fn observe_pressure(
-    receiver: Option<&mut ReedOutletObserver<'_>>,
+    receiver: Option<&mut DuctOutletObserver<'_>>,
     source_pressure_pa: f64,
     observation: Option<&PlateBankObservation>,
     next_state: &[f64],
@@ -272,9 +282,7 @@ fn observe_pressure(
     dt: f64,
 ) -> Result<f64, AcousticRealizeError> {
     if let Some(receiver) = receiver {
-        return receiver
-            .receiver
-            .observe(&receiver.flow, &receiver.openings, next_state);
+        return receiver.pressure(next_state);
     }
     Ok(source_pressure_pa
         + plate_chain_radiation(observation, next_state, state, gas, listener_m, dt)?)
@@ -312,7 +320,7 @@ fn realize_massive(
     listener_m: f64,
     dt: f64,
     n: usize,
-    mut receiver: Option<&mut ReedOutletObserver<'_>>,
+    mut receiver: Option<&mut DuctOutletObserver<'_>>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
     let budget = fs_phs::linear_exact::LinearSplitBudget {
         max_modes: system.state_dim(),
@@ -396,7 +404,7 @@ fn realize_quasistatic(
     listener_m: f64,
     dt: f64,
     n: usize,
-    mut receiver: Option<&mut ReedOutletObserver<'_>>,
+    mut receiver: Option<&mut DuctOutletObserver<'_>>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
     let budget = fs_phs::linear_exact::LinearSplitBudget {
         max_modes: system.state_dim(),

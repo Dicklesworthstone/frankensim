@@ -8,11 +8,11 @@ use fs_couple::bernoulli_aperture::wall::material::{
     AxialConstraint, LocalMaterialWall, WallMaterialLoss, WallRelaxation,
 };
 use fs_couple::driving_point::regional::material_wall::MaterialWallLayout;
-use fs_couple::pcm_wav::baffled::CircularOutletReceiver;
+use fs_couple::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
 use fs_material::gas::{GasSpec, GasState};
 use fs_scenario::{
     AcousticAssembly, AmbientGas, BeatingReed, CylinderSegment, Listener, ToneHole,
-    ViscothermalDuct, WaveguideEnd,
+    ViscothermalDuct, VolumeVelocityPulse, WaveguideEnd,
 };
 
 const RATE: u32 = 16_000;
@@ -216,6 +216,210 @@ fn input_with_side_mouths(mass_kg: f64) -> AcousticAssembly {
         },
     ];
     assembly
+}
+
+fn prescribe_flow(assembly: &mut AcousticAssembly) {
+    assembly.reed = None;
+    assembly.blow = Some(VolumeVelocityPulse {
+        peak_m3_s: 1e-6,
+        duration_s: 0.001,
+    });
+}
+
+#[test]
+fn prescribed_flow_observes_native_terminal_flow_and_preserves_its_source_work() {
+    use fs_phs::acoustic_outlet::{
+        AcousticSectionMedium, acoustic_chain_with_regional_outlet_flow,
+    };
+    use fs_phs::linear_exact::{LinearSplitBudget, PreparedExactZoh};
+    use fs_phs::{AcousticSection, ChainOutlet, MouthFlange, ViscothermalPin};
+
+    let gas = gas(101_325.0);
+    let mut assembly = input(0.0);
+    prescribe_flow(&mut assembly);
+    let pulse = assembly.blow.unwrap();
+    let rendered = realize_assembly_with_options(&assembly, &options(gas, 16)).unwrap();
+
+    // Independently drive the original physical chain and microphone. Four
+    // staggered cells use their existing half-cell alignment; the observer
+    // must read the native terminal row, never the conjugate inlet pressure.
+    let (line, outlet) = acoustic_chain_with_regional_outlet_flow(
+        &[AcousticSection {
+            length: 0.3 * (4.0 / 4.5),
+            radius: 0.004,
+            outlet_radius: 0.004,
+            cells: 4,
+        }],
+        &[AcousticSectionMedium {
+            density: gas.density,
+            sound_speed: gas.sound_speed,
+            viscothermal: Some(ViscothermalPin {
+                dynamic_viscosity: gas.dynamic_viscosity,
+                gamma: gas.gamma,
+                prandtl: gas.prandtl,
+                foster_branches: 3,
+            }),
+        }],
+        gas.density,
+        gas.sound_speed,
+        ChainOutlet::Radiating(MouthFlange::Flanged),
+        1,
+        None,
+    )
+    .unwrap();
+    let dt = 1.0 / f64::from(RATE);
+    let states = line.state_dim();
+    let mut driver = PreparedExactZoh::new_owned(
+        line,
+        dt,
+        LinearSplitBudget {
+            max_modes: states,
+            max_omega_dt: core::f64::consts::PI,
+        },
+    )
+    .unwrap();
+    let mut microphone = BaffledPressure::circular_outlet(
+        0.004,
+        RATE,
+        receiver(gas, 16, 0.004),
+        RayleighMedium { density: gas.density, sound_speed: gas.sound_speed },
+    )
+    .unwrap();
+    let mut state = vec![0.0; states];
+    let mut next = state.clone();
+    let mut average_pressure = [0.0];
+    let mut source_work = 0.0;
+    let mut expected = Vec::new();
+    for i in 0..rendered.pressure_pa.len() {
+        let t = i as f64 * dt;
+        let flow = if t < pulse.duration_s {
+            pulse.peak_m3_s * fs_math::det::sin(core::f64::consts::PI * t / pulse.duration_s)
+        } else {
+            0.0
+        };
+        let record = driver.step_into(&state, &[flow], &mut next, &mut average_pressure).unwrap();
+        let work = dt * flow * average_pressure[0];
+        let scale = work.abs().max(record.supplied.abs()).max(f64::MIN_POSITIVE);
+        assert!((record.supplied - work).abs() <= 1e-12 * scale);
+        source_work += work;
+        expected.push(microphone.step(&[outlet.volume_flow_m3_s(&next).unwrap()]).unwrap());
+        core::mem::swap(&mut state, &mut next);
+    }
+    assert!(source_work > 0.0);
+    assert_eq!(rendered.pressure_pa, expected);
+    assert!(rendered.pressure_pa[..15].iter().all(|p| *p == 0.0));
+    assert!(rendered.pressure_pa.iter().any(|p| *p != 0.0));
+    assert_eq!(rendered.duct_observer.unwrap().axial_delay_samples, 0);
+}
+
+#[test]
+fn prescribed_flow_reaches_regional_material_walls_and_each_native_side_mouth() {
+    let exterior = gas(101_325.0);
+    let regions = [
+        exterior,
+        GasState::try_new(&GasSpec::dry_air_ussa1976(), 310.0, exterior.pressure).unwrap(),
+    ];
+    let walls = MaterialWallLayout::Segments(vec![
+        sourced_wall(Some(0.0002), [1.0, 8000.0]),
+        sourced_wall(Some(0.002), [1.0, 8000.0]),
+    ]);
+    let changed = MaterialWallLayout::Segments(vec![
+        sourced_wall(Some(0.0002), [1.0, 8000.0]),
+        sourced_wall(Some(0.01), [1.0, 8000.0]),
+    ]);
+    let mut assembly = input(0.0);
+    prescribe_flow(&mut assembly);
+    assembly.duct.as_mut().unwrap().segments = vec![
+        CylinderSegment::cylinder(0.004, 0.12),
+        CylinderSegment::taper(0.004, 0.005, 0.18),
+    ];
+    let render = |walls| {
+        realize_assembly_with_options(&assembly, &RealizeOptions {
+            bore: BoreRealization::lumped_ladder_with_tolerance(6, 500.0),
+            observer_absorption: Some(GasAbsorptionModel::Lossless),
+            baffled_duct: Some(BaffledDuctObserver {
+                segment_gases: Some(&regions),
+                exterior_gas: Some(exterior),
+                material_wall: Some(walls),
+                receiver: receiver(exterior, 16, 0.005),
+            }),
+            ..RealizeOptions::default()
+        }).unwrap()
+    };
+    let original = render(&walls);
+    let changed = render(&changed);
+    let receipt = original.duct_observer.as_ref().unwrap();
+    assert_eq!(receipt.segment_gases, regions.to_vec());
+    assert_eq!(receipt.material_wall.as_ref(), Some(&walls));
+    let amplitude = original.pressure_pa.iter().map(|p| p.abs()).fold(0.0_f64, f64::max);
+    let difference = original.pressure_pa.iter().zip(&changed.pressure_pa)
+        .map(|(a, b)| (a - b).abs()).fold(0.0_f64, f64::max);
+    assert!(amplitude > 0.0 && difference > 1e-8 * amplitude);
+    assert!(original.pressure_pa[..15].iter().all(|p| *p == 0.0));
+
+    let mut mouths = input_with_side_mouths(0.0);
+    prescribe_flow(&mut mouths);
+    let mut settings = options(exterior, 16);
+    settings.bore = BoreRealization::lumped_ladder_with_tolerance(6, 500.0);
+    let open = realize_assembly_with_options(&mouths, &settings).unwrap();
+    let openings = &open.duct_observer.as_ref().unwrap().openings;
+    assert_eq!(openings.len(), 2);
+    for (opening, radius) in openings.iter().zip([0.0004, 0.00125]) {
+        assert_eq!(opening.effective_radius_m, radius);
+    }
+    for mouth in &mut mouths.duct.as_mut().unwrap().tone_holes {
+        mouth.open_fraction = 0.0;
+    }
+    let closed = realize_assembly_with_options(&mouths, &settings).unwrap();
+    assert!(closed.duct_observer.unwrap().openings.is_empty());
+    assert_ne!(open.pressure_pa, closed.pressure_pa);
+    assert!(open.pressure_pa.iter().all(|p| p.is_finite()));
+}
+
+#[test]
+fn prescribed_flow_refuses_ambiguous_sources_and_preserves_original_admission() {
+    let gas = gas(101_325.0);
+    let mut assembly = input(0.0);
+    let reed = assembly.reed;
+    prescribe_flow(&mut assembly);
+    let settings = options(gas, 16);
+    let refusal = |input: &AcousticAssembly, settings: &RealizeOptions<'_>, expected: &str| {
+        match realize_assembly_with_options(input, settings).unwrap_err() {
+            AcousticRealizeError::InvalidDescription { what } => assert!(what.contains(expected)),
+            other => panic!("unexpected source refusal: {other:?}"),
+        }
+    };
+    assembly.reed = reed;
+    refusal(&assembly, &settings, "exactly one");
+    assembly.reed = None;
+    refusal(&assembly, &RealizeOptions { bore: BoreRealization::default(), ..settings },
+        "explicit lumped ladder");
+    let pulse = assembly.blow.unwrap();
+    for bad in [
+        VolumeVelocityPulse { peak_m3_s: f64::NAN, ..pulse },
+        VolumeVelocityPulse { duration_s: 0.0, ..pulse },
+        VolumeVelocityPulse { duration_s: f64::INFINITY, ..pulse },
+    ] {
+        assembly.blow = Some(bad);
+        refusal(&assembly, &settings, "finite peak and positive duration");
+    }
+    assembly.blow = None;
+    refusal(&assembly, &settings, "requires a reed or prescribed");
+    assembly.blow = Some(pulse);
+    let narrow = MaterialWallLayout::Uniform(sourced_wall(Some(0.001), [1.0, 50.0]));
+    let sourced = RealizeOptions {
+        baffled_duct: Some(BaffledDuctObserver {
+            material_wall: Some(&narrow),
+            ..settings.baffled_duct.unwrap()
+        }),
+        ..settings
+    };
+    match realize_assembly_with_options(&assembly, &sourced).unwrap_err() {
+        AcousticRealizeError::Duct(fs_duct::DuctError::BadParameter { what }) => {
+            assert_eq!(what, "material wall frequency lies outside its declared source band");
+        }
+        other => panic!("source wall refusal was replaced: {other:?}"),
+    }
 }
 
 #[test]
