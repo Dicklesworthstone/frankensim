@@ -8,6 +8,8 @@
 //! A possible crossing is located with bounded bisection. Positive-definiteness
 //! tests screen ordinary elastic points without allocation; unresolved points
 //! and the final plane use the existing `fs_la` symmetric eigensolver.
+//! [`TensileInitiator::activation_at`] instead observes one supplied strain under
+//! its current coefficients, without inferring a path, crossing time or seed.
 //!
 //! Repeated principal tension has no unique physical crack direction. An
 //! explicitly supplied material-direction hint is projected into that principal
@@ -27,6 +29,9 @@
 //! fixed and the ORIGINAL mixed-mode law owns all subsequent evolution. Caller
 //! owners must resolve reversals/non-affine paths and apply the detector only to
 //! material that has remained elastic, never reset an existing damaged history.
+
+mod activation;
+pub use activation::TensileActivation;
 
 use super::{
     BrittleCrackBand, BrittleError, BrittleState, finite, finite_tangent, finite_voigt, normalize,
@@ -237,47 +242,7 @@ impl<'a> TensileInitiator<'a> {
         if (spectral.values[2] - self.strength_pa).abs() > 2.0 * tolerance {
             return Err(TensileInitiationError::UnresolvedSpectrum);
         }
-        let mut first = 2;
-        while first > 0 && spectral.values[2] - spectral.values[first - 1] <= tolerance {
-            first -= 1;
-        }
-        let multiplicity = 3 - first;
-        let mut normal = if multiplicity == 1 {
-            core::array::from_fn(|i| spectral.vectors[i][2])
-        } else {
-            let hint = hint.ok_or(TensileInitiationError::AmbiguousPlane { multiplicity })?;
-            let mut projected = [0.0; 3];
-            for j in first..3 {
-                let coefficient = (0..3)
-                    .map(|i| spectral.vectors[i][j] * hint[i])
-                    .sum::<f64>();
-                for i in 0..3 {
-                    projected[i] += coefficient * spectral.vectors[i][j];
-                }
-            }
-            if projected.iter().fold(0.0_f64, |a, b| a.max(b.abs())) <= 128.0 * f64::EPSILON {
-                return Err(TensileInitiationError::DirectionOutsidePrincipalSpace);
-            }
-            normalize(projected)?
-        };
-        normal = normalize(normal)?;
-        // Fix only the sign, which does not change the physical plane. A hint
-        // can carry orientation; otherwise use a deterministic largest entry.
-        let sign = match hint {
-            Some(hint) => (0..3).map(|i| normal[i] * hint[i]).sum::<f64>(),
-            None => {
-                let mut index = 0;
-                for i in 1..3 {
-                    if normal[i].abs() > normal[index].abs() {
-                        index = i;
-                    }
-                }
-                normal[index]
-            }
-        };
-        if sign < 0.0 {
-            normal = normal.map(|x| -x);
-        }
+        let (normal, multiplicity) = principal_plane(&spectral, tolerance, hint)?;
         poll(cancelled)?;
         Ok(Some(TensileOnset {
             elastic: self.elastic,
@@ -481,6 +446,58 @@ struct Spectrum {
     vectors: [[f64; 3]; 3],
     residual_pa: f64,
 }
+
+// One objective plane-selection rule for a located affine crossing or an
+// explicitly observed loaded endpoint. The optional hint is already normalized.
+fn principal_plane(
+    spectral: &Spectrum,
+    tolerance: f64,
+    hint: Option<[f64; 3]>,
+) -> Result<([f64; 3], usize), TensileInitiationError> {
+    let mut first = 2;
+    while first > 0 && spectral.values[2] - spectral.values[first - 1] <= tolerance {
+        first -= 1;
+    }
+    let multiplicity = 3 - first;
+    let mut normal = if multiplicity == 1 {
+        core::array::from_fn(|i| spectral.vectors[i][2])
+    } else {
+        let hint = hint.ok_or(TensileInitiationError::AmbiguousPlane { multiplicity })?;
+        let mut projected = [0.0; 3];
+        for j in first..3 {
+            let coefficient = (0..3)
+                .map(|i| spectral.vectors[i][j] * hint[i])
+                .sum::<f64>();
+            for i in 0..3 {
+                projected[i] += coefficient * spectral.vectors[i][j];
+            }
+        }
+        if projected.iter().fold(0.0_f64, |a, b| a.max(b.abs())) <= 128.0 * f64::EPSILON {
+            return Err(TensileInitiationError::DirectionOutsidePrincipalSpace);
+        }
+        normalize(projected)?
+    };
+    normal = normalize(normal)?;
+    // Fix only the sign, which does not change the physical plane. A hint
+    // can carry orientation; otherwise use a deterministic largest entry.
+    let sign = match hint {
+        Some(hint) => (0..3).map(|i| normal[i] * hint[i]).sum::<f64>(),
+        None => {
+            let mut index = 0;
+            for i in 1..3 {
+                if normal[i].abs() > normal[index].abs() {
+                    index = i;
+                }
+            }
+            normal[index]
+        }
+    };
+    if sign < 0.0 {
+        normal = normal.map(|x| -x);
+    }
+    Ok((normal, multiplicity))
+}
+
 fn spectrum<C: FnMut() -> bool>(
     stress: &Voigt,
     tolerance: f64,

@@ -442,6 +442,35 @@ The generic native model card therefore carries an unbounded empirical
 discrepancy band until a caller supplies separate calibration evidence.
 
 
+## Tensile activation at changed-coefficient endpoints
+
+`TensileInitiator::activation_at` and `activation_at_controlled` observe
+the declared Rankine criterion at one explicitly supplied elastic strain.
+Thermal consumers pass held MECHANICAL strain under the new coefficients.
+The result retains actual strain/stress, original elastic owner and strength,
+principal plane/stresses, multiplicity and spectral residual. It carries no
+strain fraction, onset time, bisection receipt or history-seeding operation.
+The existing affine `between` detector still refuses an activated start.
+
+Ordinary subcritical observations use the original allocation-free guarded
+threshold screen; loaded or unresolved observations use one native 3x3
+spectrum. Both APIs share the same objective principal-plane selection.
+Repeated principal tension still requires a physical direction hint, and
+conflicting screen/spectrum decisions refuse.
+
+`ResolvedTensileActivation` preserves the complete evaluated source bundle.
+Its `resolve_band` prepares only the observed plane and receiving width,
+retaining every coefficient, control and additional receipt. The consuming
+solid must preserve the OLD accepted source/state, admit conservative handoff,
+and replay coefficient transfer through the original fracture owner. No
+unseen temperature path, current damaged history or experimental calibration
+is inferred. Four native regression definitions cover fixed-strain weakening,
+threshold equality, rotation/scaling, physical hints, source continuity,
+geometry preparation, cancellation and unchanged affine-path refusal.
+Focused formatting and source/API/physics review completed; native build and
+test execution remain unavailable without the required runners and pinned
+constellation checkouts.
+
 ## Tensile crack-plane initiation and elastic handoff
 
 `brittle::initiation::TensileInitiator` detects a maximum-principal-stress

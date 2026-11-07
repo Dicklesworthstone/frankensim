@@ -5,11 +5,16 @@
 //! elastic affine strain path. Resolving that plane for receiving geometry
 //! retains the complete original source bundle, every coefficient and the
 //! original strain/work bounds; no new card query or parameter fit occurs.
+//! Endpoint activation retains the same source for an explicitly evaluated
+//! loaded strain; that observation supplies neither an event time nor a seed.
 //!
 //! This initializer never accepts an existing damaged history. After handoff,
 //! callers replay the actual increment through the receiving native law. Its
 //! virtual preload represents existing elastic storage, not additional work.
 //! The native tensile-only criterion and fixed-plane fracture limitations apply.
+
+mod activation;
+pub use activation::ResolvedTensileActivation;
 
 use super::{BrittleSourceError, ResolvedBrittleCrackBand};
 use crate::Voigt;
@@ -148,13 +153,7 @@ impl<'a> ResolvedTensileOnset<'a> {
         &self,
         band_width_m: f64,
     ) -> Result<ResolvedBrittleCrackBand, ResolvedTensileInitiationError> {
-        let mut settings = self.source.law().settings();
-        settings.normal = self.native.normal();
-        settings.band_width_m = band_width_m;
-        Ok(ResolvedBrittleCrackBand::try_from_material(
-            self.source.material().clone(),
-            settings,
-        )?)
+        resolve_plane_band(self.source, self.native.normal(), band_width_m)
     }
 
     /// Seed the exact receiving source/law at the original elastic path start.
@@ -182,4 +181,18 @@ impl<'a> ResolvedTensileOnset<'a> {
         }
         Ok(self.native.seed(receiving.law())?)
     }
+}
+
+fn resolve_plane_band(
+    source: &ResolvedBrittleCrackBand,
+    normal: [f64; 3],
+    band_width_m: f64,
+) -> Result<ResolvedBrittleCrackBand, ResolvedTensileInitiationError> {
+    let mut settings = source.law().settings();
+    settings.normal = normal;
+    settings.band_width_m = band_width_m;
+    Ok(ResolvedBrittleCrackBand::try_from_material(
+        source.material().clone(),
+        settings,
+    )?)
 }

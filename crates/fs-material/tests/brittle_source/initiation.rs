@@ -5,6 +5,9 @@ use fs_material::brittle::initiation::{TensileInitiationError, TensileInitiation
 use fs_material::brittle::source::initiation::ResolvedTensileInitiationError;
 use fs_material::tensor::contract;
 
+#[path = "initiation/activation.rs"]
+mod activation;
+
 const E: f64 = 1e9;
 const NU: f64 = 0.2;
 const FT: f64 = 1e6;

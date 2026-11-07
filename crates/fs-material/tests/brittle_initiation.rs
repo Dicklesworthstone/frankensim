@@ -9,6 +9,9 @@ use fs_material::elastic::IsotropicElastic;
 use fs_material::tensor::{contract, rotate, rotation};
 use fs_material::{SmallStrainLaw, Voigt};
 
+#[path = "brittle_initiation/activation.rs"]
+mod activation;
+
 const E: f64 = 3e9;
 const NU: f64 = 0.25;
 const FT: f64 = 3e6;
