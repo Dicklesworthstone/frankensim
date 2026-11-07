@@ -99,6 +99,14 @@ pub struct CrossSectionTable {
     groups: Arc<NeutronGroups>,
     temperatures_k: Arc<[f64]>,
     values_m2: Arc<[f64]>,
+    component: Option<TemperatureComponent>,
+}
+
+/// One temperature basis function and one incident group of a shared table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TemperatureComponent {
+    temperature: usize,
+    group: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -178,7 +186,45 @@ impl CrossSectionTable {
             groups: data.groups,
             temperatures_k: data.temperatures_k.into(),
             values_m2: values.into(),
+            component: None,
         })
+    }
+
+    /// Select one temperature-knot/group contribution to this original table.
+    ///
+    /// At the selected knot and group this view has the original coefficient;
+    /// at every other knot or group it is zero. The original interpolation and
+    /// temperature domain are retained, so summing all such nonnegative views
+    /// recovers the original table up to arithmetic. Distinct product yields or
+    /// event energies can therefore accompany each contribution without losing
+    /// the temperature interpolation of their production/energy rates.
+    ///
+    /// The complete coefficient payload and grid remain shared: creating K*G
+    /// components retains O(K*G) numerical values, not O(K^2*G^2). Evaluation of
+    /// a component's flux hazard visits only its one incident group. A component
+    /// cannot itself be decomposed; doing so could silently restore masked data.
+    pub fn temperature_component(
+        &self,
+        data_id: String,
+        temperature_index: usize,
+        neutron_group: usize,
+    ) -> Result<Self, FissionError> {
+        if data_id.trim().is_empty()
+            || self.component.is_some()
+            || temperature_index >= self.temperatures_k.len()
+            || neutron_group >= self.groups.len()
+        {
+            return Err(FissionError::InvalidInput(
+                "identified temperature component of an original table with valid knot/group required",
+            ));
+        }
+        let mut component = self.clone();
+        component.data_id = data_id.into();
+        component.component = Some(TemperatureComponent {
+            temperature: temperature_index,
+            group: neutron_group,
+        });
+        Ok(component)
     }
 
     #[must_use]
@@ -239,7 +285,8 @@ impl CrossSectionTable {
 
     /// Per-parent reaction hazard [1/s] for one absolute spectrum. Full named
     /// grid equality and temperature applicability are mandatory even at zero
-    /// flux. Work is O(log(temperatures) + groups), with a poll for each group.
+    /// flux. Work is O(log(temperatures) + groups), with a poll for each group;
+    /// a temperature component visits only its selected group.
     /// Rounded microscopic interpolation and products define the returned
     /// coefficient; this is not a data-uncertainty or forward-error enclosure.
     pub fn rate_constant(
@@ -260,14 +307,17 @@ impl CrossSectionTable {
         }
         let bracket = self.bracket(temperature_k)?;
         let mut rate = Accumulator::new(0.0);
-        for (group, &flux) in flux.values_m2_s().iter().enumerate() {
+        let (start, end) = self
+            .component
+            .map_or((0, self.groups.len()), |part| (part.group, part.group + 1));
+        for (offset, &flux) in flux.values_m2_s()[start..end].iter().enumerate() {
             checkpoint()?;
             // A zero-flux group has exactly zero hazard; it cannot amplify an
             // otherwise unrepresentable microscopic interpolation contribution.
             if flux == 0.0 {
                 continue;
             }
-            let cross_section = self.evaluate(bracket, group)?;
+            let cross_section = self.evaluate(bracket, start + offset)?;
             let product = finite(cross_section * flux)?;
             if cross_section > 0.0 && product == 0.0 {
                 return Err(FissionError::Arithmetic);
@@ -300,16 +350,18 @@ impl CrossSectionTable {
     }
 
     fn evaluate(&self, bracket: Bracket, group: usize) -> Result<f64, FissionError> {
-        let groups = self.groups.len();
+        if self.component.is_some_and(|part| part.group != group) {
+            return Ok(0.0);
+        }
         match bracket {
-            Bracket::Knot(row) => Ok(self.values_m2[row * groups + group]),
+            Bracket::Knot(row) => Ok(self.knot_value(row, group)),
             Bracket::Interior {
                 lower,
                 upper_weight,
                 lower_weight,
             } => {
-                let a = self.values_m2[lower * groups + group];
-                let b = self.values_m2[(lower + 1) * groups + group];
+                let a = self.knot_value(lower, group);
+                let b = self.knot_value(lower + 1, group);
                 if a == b {
                     return Ok(a);
                 }
@@ -332,6 +384,14 @@ impl CrossSectionTable {
                 }
                 Ok(result)
             }
+        }
+    }
+
+    fn knot_value(&self, row: usize, group: usize) -> f64 {
+        if self.component.is_some_and(|part| part.temperature != row) {
+            0.0
+        } else {
+            self.values_m2[row * self.groups.len() + group]
         }
     }
 }

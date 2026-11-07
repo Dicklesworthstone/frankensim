@@ -2557,3 +2557,40 @@ responses for their declared geometry, material and within-group spectrum.
 Composition can change the mixture across those groups; changing material or
 geometry still requires an applicable response. This does not infer attenuation,
 solve radiation transport, compute dose or automatically update response data.
+
+## Evaluated fission products across material temperatures
+
+`CrossSectionTable::temperature_component` exposes one knot/group contribution
+of an existing processed table. It retains that coefficient at its own knot and
+zero at all other knots/groups, with the original linear-Kelvin interpolation
+and temperature domain. All components share the original temperature and
+coefficient arrays: a K-by-G table retains K*G numerical coefficients even when
+all K*G components are used. Each component's flux hazard visits only its one
+incident group. Nested decomposition, invalid indices, extrapolation and
+unrepresentable positive coefficients refuse through the original owner.
+
+`endf::fission_yields::temperature::append_temperature_series_to_burnup` builds
+these partial `TabulatedFission` channels from identified processed-temperature
+condensations. Each channel retains its knot's independent product yields and
+prompt energy. Consequently the summed rates interpolate sigma, sigma*Y and
+sigma*Q together; conditional yields and energy-per-event means are not
+independently interpolated. Subsequent daughter decay retains its original
+inventory, transport and thermal ownership.
+
+The original MF8 evaluation, processed isotope/library revision, named group
+grid and complete incident spectrum must agree across strictly increasing
+knots. Full source content is retained and checked, with shared-array fast
+paths. The explicit burnup temperature domain must lie inside the supplied
+range; a single knot remains valid only at that exact temperature. Zero-reaction
+knots remain interpolation anchors. Group flux amplitudes may change later,
+but within-group spectral feedback and temperature-grid accuracy are not
+inferred. All original reactions are preserved. The existing per-knot product,
+export and duplicate-fission admission is reused, with global reaction/product
+limits over the complete series and one shared cross-section payload budget.
+
+Thirteen cross-section tests and thirteen evaluated-product tests passed in the
+pinned native build of the actual nuclear core. The new cases cover partition
+closure, independent production/energy moments, shared storage, one-group hazard
+work, positive numerical range, zero anchors, incompatible source content,
+aggregate limits and cancellation. This is numerical/assembly evidence for
+manufactured sources, not empirical isotope validation or a workspace Cargo gate.

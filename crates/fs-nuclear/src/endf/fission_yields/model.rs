@@ -52,6 +52,7 @@ pub struct FissionYieldCollapse {
     weighted: ReactionWeightedCollapse,
     source_cross_section: PointwiseCrossSection,
     source_spectrum: FluxSpectrum,
+    source_evaluation: FissionYieldEvaluation,
 }
 
 impl FissionYieldEvaluation {
@@ -165,11 +166,19 @@ impl FissionYieldEvaluation {
             weighted,
             source_cross_section: cross_section.clone(),
             source_spectrum: spectrum.clone(),
+            source_evaluation: self.clone(),
         })
     }
 }
 
 impl FissionYieldCollapse {
+    /// Original evaluated product laws, sharing their immutable source arrays.
+    /// Temperature-series assembly must retain this source, not just its label.
+    #[must_use]
+    pub fn source_evaluation(&self) -> &FissionYieldEvaluation {
+        &self.source_evaluation
+    }
+
     /// Original pointwise reaction, shared so subsequent energy/data assembly
     /// can verify full source correspondence rather than relying on labels.
     #[must_use]

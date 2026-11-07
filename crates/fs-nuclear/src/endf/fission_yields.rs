@@ -25,6 +25,9 @@ use crate::{FissionError, nonnegative, positive};
 /// Reaction-weighted condensation and disjoint-group assembly into burnup.
 pub mod model;
 
+/// Temperature-dependent removal, product production and prompt event energy.
+pub mod temperature;
+
 /// Both the selected MAT and the full parent identity must match the source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EndfFissionYieldSelection {
