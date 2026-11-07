@@ -4,6 +4,8 @@ use super::{Mandel6, TensorProny, ViscoError};
 use crate::visco::prony_spectrum::PronySpectrumWeights;
 use fs_math::dd::Dd;
 
+mod plane_stress;
+
 /// Physical tensor derivatives with respect to angular frequency [rad/s].
 #[derive(Clone, Debug, PartialEq)]
 pub struct TensorPronyFrequencyDerivative {
@@ -30,6 +32,16 @@ pub(super) fn admit_frequency(law: &TensorProny, omega: f64) -> Result<(), Visco
         });
     }
     Ok(())
+}
+
+// A modulus-only consumer must not request a potentially unrepresentable
+// effective-viscosity slope. Both queries share the exact branch aggregation.
+pub(super) fn modulus_frequency_derivative(
+    law: &TensorProny,
+    omega: f64,
+) -> Result<(Mandel6, Mandel6), ViscoError> {
+    let [storage, loss] = derivative_tensors(law, omega, PronySpectrumWeights::modulus_derivative)?;
+    Ok((storage, loss))
 }
 
 fn derivative_tensors<const N: usize>(

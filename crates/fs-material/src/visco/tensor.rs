@@ -784,6 +784,17 @@ impl TensorProny {
         plane: MaterialPlane,
         omega: f64,
     ) -> Result<([f64; 9], [f64; 9]), ViscoError> {
+        let (storage, loss, _) = self.plane_stress_complex_with_constraint(plane, omega)?;
+        Ok((storage, loss))
+    }
+
+    // Retain the admitted transverse-strain map for the exact frequency
+    // derivative without repeating the constitutive evaluation or small solve.
+    fn plane_stress_complex_with_constraint(
+        &self,
+        plane: MaterialPlane,
+        omega: f64,
+    ) -> Result<([f64; 9], [f64; 9], [[C64; 3]; 3]), ViscoError> {
         let (storage, loss) = self.complex_modulus(omega)?;
         let (in_idx, out_idx) = match plane {
             MaterialPlane::Axes12 => ([0usize, 1, 3], [2usize, 4, 5]),
@@ -849,7 +860,7 @@ impl TensorProny {
                 im_out[3 * i + j] = q_im_3[i][j];
             }
         }
-        Ok((re_out, im_out))
+        Ok((re_out, im_out, solved))
     }
 
     /// Initialize a relaxed zero-strain constitutive state and ledger.
