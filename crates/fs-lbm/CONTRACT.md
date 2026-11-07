@@ -5825,21 +5825,38 @@ heat-balance regression. Physical marches use explicitly declared compact
 junction heat capacity; no capacity is inferred from a resistor. The analytic film is the declared stationary
 scalar Robin law, not a resolved fluid boundary layer.
 
-The existing steady and transient Picard/Krylov owner evaluates these
-coefficients from the previous pass and warm-starts the next solve until the
-largest temperature change is below 1e-10 of the span. This update only proposes
-acceptance. The original assembly and physical accounting are then evaluated
-at the unchanged candidate with its own conductivity, nonlinear half cells,
-contact and compact links. No extra Krylov solve or time advance occurs.
-The actual row-scaled residual and every free cell/junction's heat closure must
-meet `EnergyConfig::tolerance`; each heat residual uses its own throughput and
-an explicit local product-roundoff allowance. Opposing defects cannot cancel
-through the global ledger. Storage retains the original previous-time state.
-If the local heat gate needs more accuracy, the next counted linear solve uses
-a tighter tolerance; the requested physical endpoint allowance stays fixed.
-The same 200-pass bound refuses an unresolved endpoint. Returned conductivity,
-wall links, junction branches and reservoir heat describe the accepted field;
-the iteration report sums the actual native conductivity Krylov work.
+The steady and transient Picard/Krylov owner proposes a full temperature update
+from the previous pass. With authored k(T) and native minmod convection, one
+outer iteration owns both laws: an upwind seed supplies the initial field, then
+each proposal freezes conductivity and reconstruction together for one solve.
+No nested undamped reconstruction loop can bypass the conductivity safeguard;
+constant-Cp-only solves retain their existing reconstruction owner.
+A bounded residual line search evaluates the original
+assembly and physical accounting on that update segment, rebuilding conductivity,
+nonlinear boundary half cells, material/contact/compact links and native limited
+convection from each trial's own full temperature field. Prescribed reservoirs,
+held flow, source/contact/radiation outer owners and the original previous-time
+storage state stay fixed. Each probe performs no Krylov solve or time advance.
+The merit is the maximum of the actual row-scaled residual and every free
+cell/junction's local heat residual; each heat residual uses its own throughput
+and explicit product-roundoff allowance. Opposing defects cannot cancel globally.
+A full step is retained when it decreases that merit; otherwise at most forty
+halved steps seek sufficient decrease. A small step alone never permits return:
+both residuals must meet the original `EnergyConfig::tolerance`. Stagnating inner
+solves may receive a tighter algebraic tolerance, with the configured Krylov
+budget unchanged. The existing 200-pass bound refuses unresolved endpoints.
+Returned conductivity, wall links, junction branches and reservoir heat are
+evaluated at the accepted field; the iteration report sums actual Krylov work.
+
+The production step-selector's direct Rust tests reproduce and resolve the
+undamped two-cycle of a sharp positive conductivity transition using an
+independent Fourier integral, and check bounded no-descent/error propagation.
+Native regression definitions in `tests/conjugate/nonlinear_contact.rs` add the
+350.5 K steady/implicit storage endpoint, graded composite contact in both
+directions on all axes, and heterogeneous-fluid face Peclet numbers. These
+integration definitions still require a complete native dependency build.
+The Peclet diagnostic uses the same two-half-cell face conductance as the
+energy equation, including graded widths and molecular/eddy conductivity.
 `tests/conjugate/nonlinear_contact.rs` also refuses steady and transient fields
 whose opposing local heat errors cancel globally and pass a loose linear gate.
 G1/G3 regressions in `tests/conjugate.rs` check the source-free analytic

@@ -32,6 +32,7 @@ use crate::d3q19::Face3;
 mod material_field;
 mod enthalpy_field;
 mod constant_cp;
+mod nonlinear;
 pub use enthalpy_field::{AdvectiveEnthalpyField, AffineSpecificEnthalpy};
 mod face_contact;
 pub use face_contact::FaceContactResistance;
@@ -814,13 +815,12 @@ pub(crate) struct PseudoStep<'a> {
 }
 
 /// The energy solve, iterated to a consistent temperature field when a solid
-/// declares a temperature-dependent conductivity. Each Picard pass evaluates
-/// the integrated bulk laws and their material/contact interface conditions,
-/// until the largest temperature change is below 1e-10 of its span. That
-/// update only proposes convergence: the unchanged candidate must also pass
-/// the original operator and independent local heat balances with k(T)
-/// re-evaluated at its own temperatures.
-#[allow(clippy::too_many_arguments)] // physics inputs + step state
+/// declares a temperature-dependent conductivity. Each Picard solve proposes
+/// an update; a bounded line search evaluates the original bulk, boundary and
+/// contact laws at the trial temperatures and requires residual decrease.
+/// Acceptance requires both the original operator and independent local heat
+/// balances at the unchanged candidate, never just a small update.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // one nonlinear physics solve
 pub(crate) fn solve_energy_inner(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
@@ -876,23 +876,57 @@ pub(crate) fn solve_energy_inner(
             }
         }
     };
-    let mut solution = solve_energy_once(
+    // Authored k(T) and limited convection share ONE nonlinear owner. Seed
+    // without a reconstruction using upwind, then freeze both laws once per
+    // outer proposal. A nested limited-convection solve would refresh k(T)
+    // without this line search and could cycle before a proposal is returned.
+    let seed_config = EnergyConfig {
+        scheme: if config.scheme == ConvectionScheme::EnthalpyMinmod {
+            ConvectionScheme::Upwind
+        } else {
+            config.scheme
+        },
+        ..*config
+    };
+    let seed = solve_energy_field_once(
         domain,
         fluid,
         solids,
         flow,
         setup,
-        config,
+        &seed_config,
         step,
         Some((&start, None)),
+        None,
+        None,
+        false,
         gate,
     )?;
-    let mut iterations = solution.report.iterations;
-    let mut endpoint_residual = f64::INFINITY;
+    let mut iterations = seed.report.iterations;
+    // A probe uses the same admitted assembly, reconstructed convection and
+    // local heat accounting as an endpoint check, but returns BOTH residuals
+    // even when the candidate is not converged. No Krylov work, source query
+    // commit or physical time advance occurs inside a probe.
+    let evaluate = |temperature: &[f64]| -> Result<(EnergySolution, f64), ChtError> {
+        let mut residual = 0.0;
+        let evaluated = solve_energy_field_kernel(
+            domain, fluid, solids, flow, setup, config, step,
+            Some((&scales(temperature), Some(temperature))),
+            None, None, true, Some(&mut residual), gate,
+        )?;
+        Ok((evaluated, residual))
+    };
+    let (mut solution, mut endpoint_residual) = evaluate(&seed.temperature)?;
+    drop(seed);
     let mut linear_config = *config;
+    let mut trial = Vec::new();
     for _ in 0..200 {
         super::poll(gate)?;
-        let next = solve_energy_once(
+        if endpoint_residual <= config.tolerance {
+            solution.report.iterations = iterations;
+            return Ok(solution);
+        }
+        let next = solve_energy_field_once(
             domain,
             fluid,
             solids,
@@ -901,50 +935,46 @@ pub(crate) fn solve_energy_inner(
             &linear_config,
             step,
             Some((&scales(&solution.temperature), Some(&solution.temperature))),
+            None,
+            None,
+            false,
             gate,
         )?;
-        let (lo, hi) = next
-            .temperature
-            .iter()
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), t| {
-                (lo.min(*t), hi.max(*t))
-            });
-        let change = next
-            .temperature
-            .iter()
-            .zip(&solution.temperature)
-            .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
         iterations = iterations.saturating_add(next.report.iterations);
-        solution = next;
-        if change <= 1e-10 * (hi - lo).max(1e-12) {
-            // Reuse the original sparse assembly and physical accounting at
-            // the UNCHANGED candidate. This evaluation performs no Krylov
-            // solve and retains the original old-time storage state.
-            match solve_energy_field(
-                domain, fluid, solids, flow, setup, config, step,
-                Some((&scales(&solution.temperature), Some(&solution.temperature))),
-                None, None, true, gate,
-            ) {
-                Ok(mut accepted) => {
-                    accepted.report.iterations = iterations;
-                    return Ok(accepted);
+        if next.temperature != solution.temperature {
+            trial.resize(solution.temperature.len(), 0.0);
+            let accepted = nonlinear::backtrack(endpoint_residual, config.tolerance, |fraction| {
+                super::poll(gate)?;
+                for (c, ((value, old), proposed)) in trial.iter_mut()
+                    .zip(&solution.temperature).zip(&next.temperature).enumerate()
+                {
+                    if c.is_multiple_of(4096) { super::poll(gate)?; }
+                    // Keep the full proposal's bits. Subsequent trials remain
+                    // on its segment from the original accepted iterate.
+                    *value = if fraction == 1.0 { *proposed } else {
+                        fraction.mul_add(proposed - old, *old)
+                    };
                 }
-                Err(ChtError::SolverNotConverged {
-                    system: "energy conductivity endpoint" | "energy conductivity heat",
-                    relative_residual,
-                    ..
-                }) => {
-                    endpoint_residual = relative_residual;
-                    // A small global algebraic residual can mask a local
-                    // heat error, especially with a large Kelvin offset.
-                    // Give the next counted solve more numerical headroom;
-                    // the requested endpoint tolerance is never widened.
-                    let tighter = 0.1 * linear_config.tolerance;
-                    if tighter > 0.0 { linear_config.tolerance = tighter; }
-                }
-                Err(error) => return Err(error),
+                evaluate(&trial)
+            })?;
+            if let Some((accepted, residual)) = accepted {
+                solution = accepted;
+                endpoint_residual = residual;
+                continue;
             }
         }
+        // A loose inner solve can return the unchanged warm start while a
+        // local heat defect remains. Tighten only its algebraic tolerance;
+        // the original physical gate and Krylov budget are never widened.
+        let tighter = 0.1 * linear_config.tolerance;
+        if tighter == 0.0 { break; }
+        linear_config.tolerance = tighter;
+    }
+    // The final funded update may have reached the physical endpoint.
+    if endpoint_residual <= config.tolerance {
+        super::poll(gate)?;
+        solution.report.iterations = iterations;
+        return Ok(solution);
     }
     Err(ChtError::SolverNotConverged {
         system: "energy conductivity",
@@ -1016,6 +1046,32 @@ fn solve_energy_field_once(
     evaluate_only: bool,
     gate: &CancelGate,
 ) -> Result<EnergySolution, ChtError> {
+    solve_energy_field_kernel(
+        domain, fluid, solids, flow, setup, config, step, nonlinear,
+        molecular_conductivity, enthalpy, evaluate_only, None, gate,
+    )
+}
+
+/// The original assembly and accounting, optionally retaining the maximum of
+/// algebraic and local physical residuals for a nonlinear line-search probe.
+/// Probe mode changes no input validation, flux law, source or storage epoch.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn solve_energy_field_kernel(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    solids: &[SolidMaterial],
+    flow: &FlowField,
+    setup: &ThermalSetup,
+    config: &EnergyConfig,
+    step: Option<&PseudoStep<'_>>,
+    nonlinear: Option<(&[f64], Option<&[f64]>)>,
+    molecular_conductivity: Option<&[[f64; 3]]>,
+    enthalpy: Option<AdvectiveEnthalpyField<'_>>,
+    evaluate_only: bool,
+    residual_probe: Option<&mut f64>,
+    gate: &CancelGate,
+) -> Result<EnergySolution, ChtError> {
+    debug_assert!(residual_probe.is_none() || evaluate_only);
     fluid.validate()?;
     if let Some(field) = enthalpy { field.validate(domain, flow, setup, config, gate)?; }
     for solid in solids {
@@ -1360,10 +1416,10 @@ fn solve_energy_field_once(
             if let Some((n, a)) = term.off {
                 coo.push(c, n, -a);
                 if domain.is_fluid(c) && domain.is_fluid(n) {
-                    // A k / (centre distance).
+                    // Use the same two half-cell resistances as the flux,
+                    // including graded widths and heterogeneous fluid k.
                     let axis = f / 2;
-                    let d = domain.face_area(c, axis) * ctx.k[c][axis]
-                        / (0.5 * (domain.widths(c)[axis] + domain.widths(n)[axis]));
+                    let d = ctx.diffusive_conductance(c, n, axis);
                     let q = flow.outward(domain, c, f);
                     let rho_c = ctx.enthalpy.map_or(ctx.rho_c, |field| {
                         ctx.density * field.cells[if q >= 0.0 { c } else { n }]
@@ -1452,7 +1508,9 @@ fn solve_energy_field_once(
     let outcome = if evaluate_only {
         let (residual, scale) = residual_norms(&a, &b, &temperature);
         let relative_residual = if scale > 0.0 { residual / scale } else { residual };
-        if !relative_residual.is_finite() || relative_residual > config.tolerance {
+        if !relative_residual.is_finite()
+            || (residual_probe.is_none() && relative_residual > config.tolerance)
+        {
             return Err(ChtError::SolverNotConverged {
                 system: "energy conductivity endpoint", iterations: 0,
                 relative_residual, tolerance: config.tolerance,
@@ -1605,7 +1663,9 @@ fn solve_energy_field_once(
                 heat_residual_ratio(residual, throughput, arithmetic, compact.links[j].len())?,
             );
         }
-        if local_heat_residual > config.tolerance {
+        if let Some(probe) = residual_probe {
+            *probe = outcome.relative_residual.max(local_heat_residual);
+        } else if local_heat_residual > config.tolerance {
             return Err(ChtError::SolverNotConverged {
                 system: "energy conductivity heat", iterations: 0,
                 relative_residual: local_heat_residual, tolerance: config.tolerance,

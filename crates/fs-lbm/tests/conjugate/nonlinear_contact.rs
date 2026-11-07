@@ -312,3 +312,155 @@ fn nonlinear_material_contact_transient_matches_independent_endpoint_and_storage
     assert_eq!(record.boundary_outflow_j, 0.0);
     assert!(record.closure_j.abs() < 1e-7);
 }
+
+
+// A sharp but strictly positive phase-region conductivity. The independent
+// integral below is measured from the 300 K reservoir; no production table
+// integration or interface solver is used by these endpoint oracles.
+fn sharp_material() -> SolidMaterial {
+    SolidMaterial::new("sharp conductivity transition", 1.0)
+        .with_conductivity_table(&[(300.0, 1.0), (350.0, 1.0), (351.0, 100.0), (400.0, 100.0)])
+        .with_heat_capacity(2.0)
+}
+
+fn sharp_potential(t: f64) -> f64 {
+    let ramp = (t - 350.0).clamp(0.0, 1.0);
+    t.min(350.0) - 300.0 + ramp + 49.5 * ramp * ramp
+        + 100.0 * (t - 351.0).max(0.0)
+}
+
+#[test]
+fn sharp_conductivity_heating_closes_steady_and_original_time_storage() {
+    // Minmod previously cycled inside its nested reconstruction solve before
+    // the conductivity owner's line search could inspect a single proposal.
+    for scheme in [ConvectionScheme::PowerLaw, ConvectionScheme::EnthalpyMinmod] {
+        let config = EnergyConfig { scheme, ..EnergyConfig::default() };
+        let domain = VoxelDomain::from_fn(1, 1, 1, 1.0, |_| Voxel::Solid(0)).unwrap();
+        let material = sharp_material();
+        let flow = FlowField::quiescent(&domain);
+        let mut faces = [ThermalFace::Adiabatic; 6];
+        faces[0] = ThermalFace::Temperature(300.0);
+        let mut setup = ThermalSetup::new(faces);
+        let expected = 350.5;
+        let outward = 2.0 * sharp_potential(expected); // half-cell Fourier integral
+        setup.power_w = vec![outward];
+        let solution = solve_energy(
+            &domain, &unit_fluid(), std::slice::from_ref(&material), &flow,
+            &setup, &config, &CancelGate::new(),
+        ).unwrap();
+        // Undamped Picard instead cycles between 362.875 and 303.069305609472 K.
+        assert!((solution.temperature[0] - expected).abs() < 1e-7, "{solution:?}");
+        let actual_outward = 2.0 * sharp_potential(solution.temperature[0]);
+        assert!((actual_outward - outward).abs() < 1e-7);
+        assert!((solution.report.balance.boundary_outflow_w - actual_outward).abs() < 1e-8);
+        assert!(solution.report.balance.relative_residual < 1e-9);
+        assert!(solution.report.relative_residual <= config.tolerance);
+        for k in solution.conductivity[0] {
+            assert!((k - 50.5).abs() < 1e-7);
+        }
+
+        // One backward-Euler endpoint has the same target with additional stored
+        // energy. Every line-search trial must retain this ORIGINAL old state.
+        let initial = [300.0];
+        let dt = 0.25;
+        let stored = 2.0 * (expected - initial[0]);
+        setup.power_w[0] = outward + stored / dt;
+        let transient = march_energy(
+            &domain, &unit_fluid(), &[material], &flow, &setup, &initial, |_| 1.0,
+            &TransientConfig { time_step_s: dt, steps: 1, energy: config },
+            None, &CancelGate::new(),
+        ).unwrap();
+        assert!((transient.temperature[0] - expected).abs() < 1e-7, "{transient:?}");
+        let record = transient.records[0];
+        assert!((record.stored_energy_change_j - stored).abs() < 1e-7);
+        assert!((record.boundary_outflow_j - dt * outward).abs() < 1e-7);
+        assert!((record.source_j - (stored + dt * outward)).abs() < 1e-10);
+        assert!(record.closure_j.abs() < 1e-7);
+    }
+}
+
+#[test]
+fn sharp_conductivity_graded_composite_preserves_contact_jump_in_each_axis() {
+    let (width_a, width_b) = (0.5, 0.8);
+    let (cell_a, surface_a, resistance, kb) = (350.5, 350.2, 0.2, 2.0);
+    let flux = (sharp_potential(cell_a) - sharp_potential(surface_a)) / (0.5 * width_a);
+    let surface_b = surface_a - resistance * flux;
+    let cell_b = surface_b - flux * 0.5 * width_b / kb;
+    let bath = surface_b - flux * width_b / kb;
+    let solids = [sharp_material(), SolidMaterial::new("constant backing", kb)];
+    for axis in 0..3 {
+        for reversed in [false, true] {
+            let mut widths = [vec![0.2], vec![0.3], vec![0.4]];
+            widths[axis] = if reversed { vec![width_b, width_a] } else { vec![width_a, width_b] };
+            let split = widths[axis][0];
+            let domain = VoxelDomain::graded_from_fn(widths, |p| {
+                Voxel::Solid(u16::from((p[axis] < split) == reversed))
+            }).unwrap();
+            let (a, b) = (usize::from(reversed), usize::from(!reversed));
+            let area = domain.face_area(a, axis);
+            let mut faces = [ThermalFace::Adiabatic; 6];
+            faces[2 * axis + usize::from(!reversed)] = ThermalFace::Temperature(bath);
+            let mut setup = ThermalSetup::new(faces);
+            setup.power_w = vec![0.0; 2];
+            setup.power_w[a] = flux * area;
+            setup.contacts.push(ContactResistance {
+                materials: (0, 1), resistance_m2_k_w: resistance,
+            });
+            let solution = solve_energy(
+                &domain, &unit_fluid(), &solids, &FlowField::quiescent(&domain),
+                &setup, &EnergyConfig::default(), &CancelGate::new(),
+            ).unwrap();
+            assert!((solution.temperature[a] - cell_a).abs() < 1e-7, "{solution:?}");
+            assert!((solution.temperature[b] - cell_b).abs() < 1e-7, "{solution:?}");
+            let actual_flux = kb * (solution.temperature[b] - bath) / (0.5 * width_b);
+            assert!((actual_flux - flux).abs() < 1e-7);
+            // Invert the independent quadratic in the crossed transition
+            // interval to recover A's physical surface, then check the jump.
+            let potential = sharp_potential(solution.temperature[a])
+                - actual_flux * 0.5 * width_a - 50.0;
+            let sa = 350.0 + 2.0 * potential / (1.0 + (1.0 + 198.0 * potential).sqrt());
+            let sb = solution.temperature[b] + actual_flux * 0.5 * width_b / kb;
+            assert!((sa - sb - resistance * actual_flux).abs() < 1e-7);
+            assert!((solution.report.balance.boundary_outflow_w - area * flux).abs() < 1e-7);
+            assert!(solution.report.balance.relative_residual < 1e-9);
+        }
+    }
+}
+
+#[test]
+fn heterogeneous_graded_face_peclet_matches_the_actual_series_resistance() {
+    let fluid = FluidProperties {
+        density_kg_m3: 2.0,
+        specific_heat_j_kg_k: 3.0,
+        ..unit_fluid()
+    };
+    let field = [[0.5, 1.0, 2.0], [5.0, 10.0, 20.0]];
+    for axis in 0..3 {
+        let mut widths = [vec![0.3], vec![0.4], vec![0.5]];
+        widths[axis] = vec![0.2, 0.8];
+        let domain = VoxelDomain::graded(widths).unwrap();
+        for speed in [-2.0_f64, 2.0] {
+            let mut flow_faces = [FlowFace::Wall; 6];
+            flow_faces[2 * axis] = FlowFace::Fixed;
+            flow_faces[2 * axis + 1] = FlowFace::Free;
+            let flow = FlowField::from_face_velocity(&domain, flow_faces, |component, _| {
+                if component == axis { speed } else { 0.0 }
+            }).unwrap();
+            let inlet = 2 * axis + usize::from(speed < 0.0);
+            let mut faces = [ThermalFace::Adiabatic; 6];
+            faces[inlet] = ThermalFace::Inflow { temperature: 300.0 };
+            faces[inlet ^ 1] = ThermalFace::Outflow { backflow_temperature: 300.0 };
+            let solution = EnergyConfig::default().solve_with_conductivity(
+                &domain, &fluid, &[], &flow, &ThermalSetup::new(faces), &field, &CancelGate::new(),
+            ).unwrap();
+            // Area cancels between rho*Cp*Q and A/(h0/(2*k0)+h1/(2*k1)).
+            let expected = fluid.density_kg_m3 * fluid.specific_heat_j_kg_k * speed.abs()
+                * (0.1 / field[0][axis] + 0.4 / field[1][axis]);
+            assert!((solution.report.max_cell_peclet - expected).abs() < 1e-12 * expected,
+                "axis={axis}, speed={speed}: {:?}", solution.report);
+            for t in solution.temperature {
+                assert!((t - 300.0).abs() < 1e-8);
+            }
+        }
+    }
+}
