@@ -96,6 +96,8 @@ pub mod radioactive {
 }
 
 pub mod acoustic_realize;
+/// Compact outlet radiation reaction through the original impedance-wall field.
+pub mod compact_wall_radiation;
 pub mod air_path;
 /// Original admitted frequency-dependent loads on accepted shell assemblies.
 pub mod assembly_harmonic;

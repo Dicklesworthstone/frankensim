@@ -743,6 +743,26 @@ pub struct CoupledTermination {
     pub source_id: String,
 }
 
+impl CoupledTermination {
+    /// Admit a complete exterior load before attaching it to a network.
+    /// This is the same full Hermitian passivity check used by the loaded
+    /// source solver, not an entrywise resistance test. No value is repaired.
+    pub fn validate(&self) -> Result<(), DuctError> {
+        if !self.omega.is_finite()
+            || self.omega <= 0.0
+            || self.labels.len() > MAX_NETWORK_PORTS
+            || self.labels.iter().enumerate().any(|(i, label)| {
+                label.trim().is_empty() || self.labels[..i].contains(label)
+            })
+        {
+            return Err(bad(
+                "coupled termination needs positive frequency and unique nonempty labels",
+            ));
+        }
+        admit_coupled(self, self.omega)
+    }
+}
+
 /// Finite, nonempty, square, at the response frequency, with a positive
 /// semidefinite Hermitian part (an active coupled load refuses). Exact
 /// reciprocity is not required: a collocation radiation matrix is reciprocal
