@@ -242,6 +242,38 @@ and budget refusal. This is source-free, isotropic, quasi-steady conduction
 through a layer with two original lumped caloric inventories. It does not add
 another heat store or resolve a spatial transient temperature field.
 
+### Growing layers with nonlinear original conductivity and prescribed power
+
+`GasIntegratedGrowingCoating` and `advance_growing_integrated_chamber` combine
+the original mass-owned planar/spherical/cylindrical geometry, conductivity
+integrals and finite inner contact with the same two-temperature finite-gas
+history. Only geometry is frozen within a physical interval. Every thermal
+endpoint evaluates the original conductivity curve over the actual coating
+temperature drop and solves its contact face. Actual deposited mass refreshes
+area and thickness between half intervals. The reported equivalent circuit uses
+the original average conductivity across only the material segment; it does not
+subtract nearly equal total/contact resistances or freeze a trace conductivity.
+
+The existing adaptive owner retains molecular streams, both independent caloric
+inventories, one gas reconstruction and one equal/opposite interface transfer.
+Thickness and source-integrated secant conductance participate in its temporal
+error estimate. Optional signed support/deposit powers are integrated over each
+actual trial interval, and only accepted half intervals contribute source heat.
+Each accepted body source is independently checked against prescribed power
+times the full requested duration. The layer owns its interface law; a competing
+interface in the power map is refused. Piecewise power schedules use successive
+explicit time windows.
+
+Original conductivity knots, finite inner and outer solve budgets, and the same
+caller cancellation gate bound work. Source failures or late cancellation return
+no partial geometry, heat history or gas candidate. The earlier frozen-law
+growing entry point retains its original path without allocating nonlinear
+interface objects or source maps. Both paths retain positive-film, constant-density,
+shape-preserving and fixed-accessible-gas-volume assumptions. The deposit-volume
+ceiling bounds omitted displacement, not pressure-work error. This extension
+does not resolve nucleation/extinction, porosity, densification or a transient
+temperature field through the coating.
+
 ## Source-bound finite membrane entropy and thermal stress
 
 `HyperelasticMembrane::thermoelastic_state` prepares the original expansion
