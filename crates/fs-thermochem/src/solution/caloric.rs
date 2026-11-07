@@ -29,6 +29,9 @@ mod response;
 /// Shared bounded scalar caloric inverse for source-owned thermal responses.
 pub mod temperature;
 
+/// Homogeneous nonisothermal liquid transport with reciprocal heat/diffusion.
+pub mod transport;
+
 pub use heat_capacity::{MAX_CALORIC_KNOTS_V1, MolarHeatCapacityCurveV1};
 pub use response::{BinaryCaloricHeatCapacityQualificationV1, BinaryCaloricHeatCapacityResponseV1};
 

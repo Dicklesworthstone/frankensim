@@ -3991,3 +3991,9 @@ radiation equilibrium model. Stimulated recombination, excited-state cascades,
 photon trapping, dielectronic completion and recoil are not inferred.
 References: Castor, Radiation Hydrodynamics (2003), Eq. 8.58; Mao, Kaastra &
 Badnell (2017), A&A 599 A10, <https://arxiv.org/abs/1612.01017>.
+
+### Original-source nonisothermal binary-liquid transport
+
+`solution::caloric::transport` supplies a molar-frame face with equal fixed partial molar volumes, original-source Cp/interaction calorics, and an explicitly authored A-minus-B heat-of-transport contrast. The two-point chemical/enthalpy split preserves the original chemical-potential-over-temperature identity. Total energy carries source partial enthalpy once; reduced heat includes reciprocal Dufour transport. Conductivity is defined at zero diffusive species flux. Unequal pure heat capacities do not fabricate Soret flow when the authored heat contrast is zero. Exact absent support is refused rather than floored.
+
+The face entropy form is nonnegative. A spatial owner must separately enforce kappa=0, convex admission over its complete temperature interval (including the possible interior interaction maximum), source D/k/Q domains, conservative finite transfers, and finite-step entropy acceptance. Changing-inventory caloric recovery stays homogeneous and uses original-source enthalpy/entropy increments without an equilibrium phase flash. Nine source-native tests cover the conjugate energy/entropy identity, reciprocal heat, variable and excess Cp, critical and trace limits, changing inventories, bounded caloric inversion, interior convexity and cancellation.
