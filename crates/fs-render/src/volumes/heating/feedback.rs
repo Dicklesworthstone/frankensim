@@ -31,6 +31,9 @@ use std::sync::Arc;
 mod refinement;
 pub use refinement::{FeedbackConvergence, FeedbackRefinement};
 
+/// Source-bound two-photon absorption on the same native thermal history.
+pub mod nonlinear;
+
 /// Explicitly source-bound samples of mass absorption versus temperature.
 /// Interpolation is linear in coefficient, first in wavelength through the
 /// original spectrum owner, then in kelvin. Neither coordinate extrapolates.
@@ -133,9 +136,12 @@ pub struct ThermalOpticalCell {
 #[derive(Clone, Copy, Debug)]
 pub struct OpticalFeedbackBudget {
     pub max_path_cells: usize,
+    /// Total linear and optional nonlinear source tables.
     pub max_tables: usize,
+    /// Total knots in linear and optional nonlinear temperature tables.
     pub max_total_temperature_knots: usize,
-    /// Whole native advance; counts each attempted source preparation.
+    /// Whole native advance; counts each attempted source preparation and,
+    /// for two-photon feedback, each endpoint irradiance-domain validation.
     pub max_source_evaluations: usize,
 }
 
@@ -148,6 +154,15 @@ pub enum OpticalFeedbackError {
         temperature_k: f64,
         minimum_k: f64,
         maximum_k: f64,
+    },
+    /// Local incident irradiance exceeds the nonlinear source's support.
+    IrradianceDomain {
+        /// Original native grid cell.
+        grid_cell: usize,
+        /// Locally incident power divided by the declared beam area, W/m².
+        irradiance_w_m2: f64,
+        /// Source-declared upper irradiance, W/m².
+        maximum_w_m2: f64,
     },
     /// Native specific enthalpy is outside its source-bound optical domain.
     EnthalpyDomain {
@@ -334,6 +349,7 @@ struct FeedbackModel<const N: usize> {
     path: Vec<BoundSegment>,
     budget: OpticalFeedbackBudget,
     power_tolerance_w: f64,
+    two_photon: Option<nonlinear::CompiledTwoPhoton>,
 }
 
 /// Immutable optical data are shared by cheap candidate clones; accumulated
@@ -472,6 +488,7 @@ impl<const N: usize> TemperatureOpticalHeating<N> {
             path: bound_path,
             budget,
             power_tolerance_w,
+            two_photon: None,
         });
         let (power, sources_w) = model.evaluate(thermal, &mut checkpoint)?;
         let sums = EnergySums::default();
@@ -511,6 +528,14 @@ impl<const N: usize> TemperatureOpticalHeating<N> {
         }
         Ok(())
     }
+
+    fn admit_evaluation(&mut self) -> Result<(), OpticalFeedbackError> {
+        if self.evaluations >= self.model.budget.max_source_evaluations {
+            return Err(OpticalFeedbackError::Budget);
+        }
+        self.evaluations += 1;
+        Ok(())
+    }
 }
 
 impl<const N: usize> FeedbackModel<N> {
@@ -524,19 +549,29 @@ impl<const N: usize> FeedbackModel<N> {
         let mut transmitted = self.beam.incident_power_w;
         let mut absorbed = [CheckedSum::default(); N];
         let mut sources = BTreeMap::<CellId, CheckedSum>::new();
-        for segment in &self.path {
+        for (index, segment) in self.path.iter().enumerate() {
             checkpoint()?;
             let temperature = thermal.temperature_k(segment.thermal_cell)?;
             let coefficients = self.tables[segment.table].at(segment.thermal_cell, temperature)?;
             hash.update(&temperature.to_bits().to_le_bytes());
             let mut heat = CheckedSum::default();
             for lane in 0..N {
-                let (removed, remaining) = absorb_beam(
-                    transmitted[lane],
-                    segment.path.density_kg_m3,
-                    segment.path.length_m,
-                    coefficients[lane],
-                );
+                let (removed, remaining) = if let Some(nonlinear) = &self.two_photon {
+                    nonlinear.absorb(
+                        index,
+                        segment,
+                        temperature,
+                        transmitted[lane],
+                        coefficients[lane],
+                    )?
+                } else {
+                    absorb_beam(
+                        transmitted[lane],
+                        segment.path.density_kg_m3,
+                        segment.path.length_m,
+                        coefficients[lane],
+                    )
+                };
                 absorbed[lane].add(removed)?;
                 heat.add(removed)?;
                 transmitted[lane] = finite(remaining)?;
@@ -588,6 +623,32 @@ impl<const N: usize> FeedbackModel<N> {
         checkpoint()?;
         Ok((power, result))
     }
+
+    fn check_domains(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), OpticalFeedbackError> {
+        // A warmer upstream cell can admit more power into a downstream law
+        // whose irradiance ceiling is lower. Check the actual endpoint path,
+        // including the final endpoint when no next source query follows.
+        // This pass allocates no heat map and publishes no source rates.
+        let mut incident = self.beam.incident_power_w[0];
+        for (index, segment) in self.path.iter().enumerate() {
+            checkpoint()?;
+            let temperature = thermal.temperature_k(segment.thermal_cell)?;
+            let table = &self.tables[segment.table];
+            if let Some(nonlinear) = &self.two_photon {
+                let coefficient = table.at(segment.thermal_cell, temperature)?[0];
+                incident = nonlinear
+                    .absorb(index, segment, temperature, incident, coefficient)?
+                    .1;
+            } else {
+                table.check_temperature(segment.thermal_cell, temperature)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl<const N: usize> DepositionObserver for TemperatureOpticalHeating<N> {
@@ -604,10 +665,7 @@ impl<const N: usize> DepositionObserver for TemperatureOpticalHeating<N> {
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
         self.check_clock(thermal)?;
-        if self.evaluations >= self.model.budget.max_source_evaluations {
-            return Err(OpticalFeedbackError::Budget);
-        }
-        self.evaluations += 1;
+        self.admit_evaluation()?;
         let (power, sources) = self.model.evaluate(thermal, checkpoint)?;
         self.power = power;
         self.sources_w = sources;
@@ -618,12 +676,10 @@ impl<const N: usize> DepositionObserver for TemperatureOpticalHeating<N> {
         self.check_clock(thermal)?;
         // Final-time events are observable even when no further source query
         // follows. Validate the same bindings/domains at that accepted state.
-        for segment in &self.model.path {
-            self.model.tables[segment.table].check_temperature(
-                segment.thermal_cell,
-                thermal.temperature_k(segment.thermal_cell)?,
-            )?;
+        if self.model.two_photon.is_some() {
+            self.admit_evaluation()?;
         }
+        self.model.check_domains(thermal, &mut || Ok(()))?;
         Ok(())
     }
 
@@ -646,13 +702,10 @@ impl<const N: usize> DepositionObserver for TemperatureOpticalHeating<N> {
         }
         // Also admit the endpoint, including the final endpoint of an advance:
         // a coarse step must not escape a source's domain without a next query.
-        for segment in &self.model.path {
-            checkpoint()?;
-            self.model.tables[segment.table].check_temperature(
-                segment.thermal_cell,
-                thermal.temperature_k(segment.thermal_cell)?,
-            )?;
+        if self.model.two_photon.is_some() {
+            self.admit_evaluation()?;
         }
+        self.model.check_domains(thermal, checkpoint)?;
         let mut sums = self.sums.clone();
         sums.add(&self.power, duration_s)?;
         let energy = sums.value()?;

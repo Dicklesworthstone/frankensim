@@ -9248,3 +9248,33 @@ Fresnel/Jones probe retaining the finite near-Brewster pure-p channel. The three
 native scene regression groups are authored but unrun under the current build
 and storage limits; the numerical probe does not establish scene replay or NEE
 integration.
+
+### Temperature-dependent two-photon heating and shielding
+
+`TemperatureOpticalHeating<1>::try_new_two_photon` binds independently sourced
+bulk beta(T) tables to the original non-vacuum optical cells. Each table carries
+a constant-beta wavelength band, an incident-irradiance ceiling and ordered
+kelvin knots. Linear interpolation does not extrapolate; bulk beta remains in
+m/W without density scaling. Linear and nonlinear source assignments remain
+independent, while both use the original receiving thermal cells.
+
+The existing cached DDA, linear temperature tables, positive analytic
+two-photon attenuation kernel, native thermal observer and complete-trajectory
+refinement remain the owners. Each native step refreshes alpha(T) and beta(T),
+so upstream heating changes downstream nonlinear shielding. Applied-source and
+endpoint checks enforce the local irradiance domain, including final endpoints
+with no subsequent source query. The endpoint transport pass allocates no source
+map and consumes the original source-evaluation allowance. Linear and nonlinear
+tables and knots share the declared preparation budgets.
+
+The monochromatic constructor requires a constant uniform beam area and power
+already inside the medium. Prompt thermalization is explicit. It does not infer
+cross-frequency absorption, carrier storage, saturation, nonlinear refraction
+or changing density/geometry. Coefficients remain frozen over one native
+explicit step; exact spatial attenuation does not remove temporal error.
+
+Focused regressions cover an independent nonlinear heating solution and time
+refinement, changing shielding, weak/dark/opaque limits, area scaling, native
+latent/event/restart behavior, and transactional source-domain/work refusal.
+These are numerical constitutive checks, not measured-material qualification
+or a certified global time-error bound.

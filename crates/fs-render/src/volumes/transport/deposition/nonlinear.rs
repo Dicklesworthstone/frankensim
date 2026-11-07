@@ -317,7 +317,7 @@ impl<'m, 'g> TwoPhotonAbsorbingGrid<'m, 'g> {
     }
 }
 
-fn absorb_two_photon(
+pub(crate) fn absorb_two_photon(
     power: f64,
     area: f64,
     rho: f64,
@@ -325,6 +325,9 @@ fn absorb_two_photon(
     kappa: f64,
     beta: f64,
 ) -> (f64, f64) {
+    if power == 0.0 {
+        return (0.0, 0.0);
+    }
     if beta == 0.0 {
         return absorb_beam(power, rho, length, kappa);
     }
