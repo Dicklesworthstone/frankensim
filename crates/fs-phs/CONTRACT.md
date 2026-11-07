@@ -1,5 +1,36 @@
 # fs-phs — Contract
 
+## Reciprocal commutated motor and generator
+
+`circuit::motor::DcMotor` retains armature flux and both absolute rotor/stator
+angular momenta. Its one signed SI coefficient owns `emf = k*(omega_r-omega_s)`
+and `tau_em = k*i` through the same native skew exchange. Electrical input is
+voltage; rotor/stator inputs are external torques, with current and absolute
+speeds as outputs. Both electromagnetic and viscous bearing torques act equally
+and oppositely, so only the external torque sum changes total angular momentum.
+No stator reaction, rotor inertia, winding inductance or regenerative sign is
+discarded. Finite converter buses compose through `interconnect_mapped` into
+one original flux/charge/momentum solve, without lagged electrical torque.
+
+`PreparedDcMotor` reuses the exact quadratic held-input propagator. Independent
+positive source observations integrate winding `R*i^2` and bearing
+`b*(omega_r-omega_s)^2` on that same trajectory; these describe the native heat,
+not extra losses or fixed fractions of an energy deficit. Actual interval means
+provide electrical/shaft work, internal torques, back EMF and angular increments.
+Cold preparation is explicitly bounded. Successful warm steps allocate nothing;
+native admission, complete reporting and final cancellation precede publication.
+
+This is a numerical frozen-parameter coaxial DC machine, with linear inductance
+and viscous internal bearings. It does not model commutation ripple, saturation,
+brush/iron losses, thermal evolution, 3D moving axes or a silently fixed stator.
+Physical data and applicability remain caller-owned. SI reciprocity reference:
+MIT MAS.865, https://fab.cba.mit.edu/classes/MAS.865/topics/motors_and_actuators/index.html.
+Focused `tests/circuit_motor.rs` checks analytical startup/stator recoil,
+four-quadrant equilibria, shorted generation with independent copper/bearing
+integrals, external torque work, finite-bus motoring/regeneration and transactional
+refusals. These are numerical checks, not dynamometer or full-drive qualification.
+
+
 ## Signed physical port observation
 
 `PortHamiltonian::output_from_effort_into` is the allocation-free owner of

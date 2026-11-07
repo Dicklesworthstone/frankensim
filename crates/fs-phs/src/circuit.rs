@@ -56,6 +56,8 @@ pub mod conductance;
 pub mod converter;
 /// Bounded current/flux laws on the original inductor coordinates.
 pub mod inductance;
+/// Reciprocal motor/generator exchange with finite rotor and stator inertia.
+pub mod motor;
 mod scalar;
 use conductance::ConductanceBlock;
 
