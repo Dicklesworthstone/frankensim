@@ -185,7 +185,8 @@ impl PreparedKinematicTrajectory {
                     Interval::point(*value) / Interval::point(c)
                 };
                 segment_velocity[axis] = segment_velocity[axis].hull(endpoint);
-                velocity_mach_bounds[axis] = velocity_mach_bounds[axis].hull(segment_velocity[axis]);
+                velocity_mach_bounds[axis] =
+                    velocity_mach_bounds[axis].hull(segment_velocity[axis]);
             }
             segments.push(KinematicSegment {
                 polynomial,
@@ -249,6 +250,27 @@ impl PreparedKinematicTrajectory {
         let state = self.kinematics_at(time_s)?;
         self.flow_frame
             .map_or(Ok(state), |frame| frame.to_laboratory_frame(time_s, state))
+    }
+
+    /// Next ORIGINAL accepted geometry knot strictly after `time_s`.
+    ///
+    /// History quadrature can split at the same C2 piece boundaries without
+    /// reconstructing or sampling a second motion model. No knot is inserted
+    /// by the continuous speed-bound subdivision.
+    pub fn next_source_knot_after(&self, time_s: f64) -> Result<Option<f64>, AeroacError> {
+        let [first, last] = self.time_interval_s();
+        if !time_s.is_finite() || time_s < first || time_s > last {
+            return Err(invalid(
+                "history time is outside retained kinematic trajectory",
+            ));
+        }
+        let index = self
+            .segments
+            .partition_point(|segment| segment.polynomial.last.source_time_s <= time_s);
+        Ok(self
+            .segments
+            .get(index)
+            .map(|segment| segment.polynomial.last.source_time_s))
     }
 
     pub(super) fn segment_at(&self, time_s: f64) -> Result<&QuinticSegment, AeroacError> {

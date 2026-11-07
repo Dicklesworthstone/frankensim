@@ -4,10 +4,10 @@ use super::super::{
     CompactMotion, CompactSourceMotion, acoustic, admit_clearance, check_cancel, sizing,
 };
 use crate::render::RenderError;
-use fs_aeroac::curle3d::moving::{MovingCompactObserver, UniformSourceMotion};
 use fs_aeroac::curle3d::moving::trajectory::{
     PreparedReflectedSourceTrajectory, PreparedSourceTrajectory,
 };
+use fs_aeroac::curle3d::moving::{MovingCompactObserver, UniformSourceMotion};
 
 /// One original direct or image receiver for a fixed-observer history integral.
 #[doc(hidden)]
@@ -19,6 +19,8 @@ pub struct ForceHistoryPath {
     pub(super) velocity_transform: Option<[[f64; 3]; 3]>,
     pub(super) source_end_s: f64,
     pub(super) maximum_source_speed_m_s: f64,
+    // Zero for fixed paths whose complete past geometry was admitted earlier.
+    pub(super) minimum_history_distance_m: f64,
 }
 
 /// Source motion whose every propagation path has one fixed fluid-frame receiver.
@@ -44,13 +46,61 @@ pub trait FixedForceMotion: CompactMotion {
     fn next_source_knot_after(self, time: f64) -> Result<Option<f64>, RenderError>;
 }
 
+/// Original motion accepted by the full-field force-history renderer.
+///
+/// Fixed microphones retain their immutable prefix integrals. Native moving
+/// microphones retain only the original knot partition and integrate at each
+/// current virtual receiver position. This trait is sealed by `CompactMotion`.
+pub trait ForceMotion: CompactMotion {
+    /// Whether the spatial history kernel changes between receiver events.
+    #[doc(hidden)]
+    const MOVING_HISTORY_KERNEL: bool;
+
+    /// Bind the current image geometry and complete retained source-time domain.
+    #[doc(hidden)]
+    fn force_history_path_at(
+        self,
+        observer: &Self::Observer,
+        path: usize,
+        receiver_time_s: f64,
+        source_interval_s: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ForceHistoryPath, RenderError>;
+
+    /// Next original geometry knot, never an adaptive quadrature node.
+    #[doc(hidden)]
+    fn next_force_history_knot_after(self, time: f64) -> Result<Option<f64>, RenderError>;
+}
+
+// Preserve every existing fixed-receiver implementation and its fast path.
+impl<M: FixedForceMotion> ForceMotion for M {
+    const MOVING_HISTORY_KERNEL: bool = false;
+
+    fn force_history_path_at(
+        self,
+        observer: &Self::Observer,
+        path: usize,
+        _receiver_time_s: f64,
+        source_interval_s: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ForceHistoryPath, RenderError> {
+        self.admit_force_history(observer, path, source_interval_s, cancelled)
+    }
+
+    fn next_force_history_knot_after(self, time: f64) -> Result<Option<f64>, RenderError> {
+        self.next_source_knot_after(time)
+    }
+}
+
 fn trajectory_speed_bound(trajectory: &PreparedSourceTrajectory) -> f64 {
     (trajectory.maximum_source_mach() * trajectory.observer().medium().sound_speed_m_s()).next_up()
 }
 
 fn interval(interval: [f64; 2]) -> Result<(), RenderError> {
     if interval.iter().any(|time| !time.is_finite()) || interval[0] > interval[1] {
-        return Err(sizing("force history requires a finite ordered source interval"));
+        return Err(sizing(
+            "force history requires a finite ordered source interval",
+        ));
     }
     Ok(())
 }
@@ -63,7 +113,9 @@ fn retained_end(
     let [first, last] = trajectory.source_time_interval_s();
     let end = requested[1].min(last);
     if requested[0] < first || requested[0] > end {
-        return Err(sizing("force prehistory lacks its original source geometry"));
+        return Err(sizing(
+            "force prehistory lacks its original source geometry",
+        ));
     }
     // The prepared owner admitted continuous clearance throughout this domain.
     Ok(end)
@@ -83,7 +135,8 @@ impl FixedForceMotion for UniformSourceMotion {
             return Err(sizing("uniform force history has only its direct path"));
         }
         for time in source_interval_s {
-            observer.prepare_emission(time, self.kinematics_at(time).map_err(acoustic)?)
+            observer
+                .prepare_emission(time, self.kinematics_at(time).map_err(acoustic)?)
                 .map_err(acoustic)?;
         }
         admit_clearance(observer, &self, source_interval_s[0], source_interval_s[1])?;
@@ -92,7 +145,10 @@ impl FixedForceMotion for UniformSourceMotion {
             pressure_sign: 1.0,
             velocity_transform: None,
             source_end_s: source_interval_s[1],
-            maximum_source_speed_m_s: self.velocity_m_s().iter()
+            minimum_history_distance_m: 0.0,
+            maximum_source_speed_m_s: self
+                .velocity_m_s()
+                .iter()
                 .fold(0.0_f64, |sum, v| (sum + v.abs()).next_up()),
         })
     }
@@ -121,6 +177,7 @@ impl FixedForceMotion for &PreparedSourceTrajectory {
             velocity_transform: None,
             source_end_s: retained_end(self, source_interval_s)?,
             maximum_source_speed_m_s: trajectory_speed_bound(self),
+            minimum_history_distance_m: 0.0,
         })
     }
 
@@ -139,7 +196,9 @@ impl FixedForceMotion for CompactSourceMotion<'_> {
     ) -> Result<ForceHistoryPath, RenderError> {
         match self {
             Self::Uniform(m) => m.admit_force_history(observer, path, source_interval_s, cancelled),
-            Self::Trajectory(m) => m.admit_force_history(observer, path, source_interval_s, cancelled),
+            Self::Trajectory(m) => {
+                m.admit_force_history(observer, path, source_interval_s, cancelled)
+            }
         }
     }
 
@@ -162,9 +221,13 @@ impl FixedForceMotion for &PreparedReflectedSourceTrajectory<'_> {
         check_cancel(cancelled)?;
         self.admit_observer(observer)?;
         let source_end_s = retained_end(self.trajectory(), source_interval_s)?;
-        let source = self.trajectory().kinematics_at(source_interval_s[0]).map_err(acoustic)?;
-        let (virtual_receiver, pressure_sign, velocity_transform) =
-            observer.stationary_field_path(path, source.position_m).map_err(acoustic)?;
+        let source = self
+            .trajectory()
+            .kinematics_at(source_interval_s[0])
+            .map_err(acoustic)?;
+        let (virtual_receiver, pressure_sign, velocity_transform) = observer
+            .stationary_field_path(path, source.position_m)
+            .map_err(acoustic)?;
         // The reflected trajectory owner admitted every image throughout the
         // original curve, including halfspaces and continuous image clearance.
         Ok(ForceHistoryPath {
@@ -173,10 +236,13 @@ impl FixedForceMotion for &PreparedReflectedSourceTrajectory<'_> {
             velocity_transform: (path != 0).then_some(velocity_transform),
             source_end_s,
             maximum_source_speed_m_s: trajectory_speed_bound(self.trajectory()),
+            minimum_history_distance_m: 0.0,
         })
     }
 
     fn next_source_knot_after(self, time: f64) -> Result<Option<f64>, RenderError> {
-        self.trajectory().next_source_knot_after(time).map_err(acoustic)
+        self.trajectory()
+            .next_source_knot_after(time)
+            .map_err(acoustic)
     }
 }

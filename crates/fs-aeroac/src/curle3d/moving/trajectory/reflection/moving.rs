@@ -95,7 +95,8 @@ impl<'a> MovingReflectionObserver<'a> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, AeroacError> {
         budget.admit_payload(
-            path_count.checked_mul(size_of::<f64>())
+            path_count
+                .checked_mul(size_of::<f64>())
                 .and_then(|bytes| bytes.checked_add(size_of::<Self>())),
         )?;
         admit_halfspaces(receiver, planes, false, budget, cancelled)?;
@@ -180,7 +181,9 @@ impl<'a> MovingReflectionObserver<'a> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, AeroacError> {
         budget.admit_payload(
-            images.path_count().checked_mul(size_of::<f64>() + size_of::<WedgeReceiverImage>())
+            images
+                .path_count()
+                .checked_mul(size_of::<f64>() + size_of::<WedgeReceiverImage>())
                 .and_then(|bytes| bytes.checked_add(size_of::<Self>())),
         )?;
         admit_halfspaces(receiver, &planes, false, budget, cancelled)?;
@@ -302,7 +305,9 @@ impl<'a> PreparedReflectedMovingReceiverSource<'a> {
             ));
         }
         source_bounds.admit_payload(
-            observer.path_count().checked_mul(size_of::<PreparedMovingReceiverSource<'a>>())
+            observer
+                .path_count()
+                .checked_mul(size_of::<PreparedMovingReceiverSource<'a>>())
                 .and_then(|bytes| bytes.checked_add(size_of::<Self>())),
         )?;
         admit_halfspaces(source, observer.planes(), true, source_bounds, cancelled)?;
@@ -393,6 +398,41 @@ impl<'a> PreparedReflectedMovingReceiverSource<'a> {
     /// clearance limits. The direct path is preserved bit-for-bit.
     pub fn observer_at(&self, time: f64) -> Result<MovingCompactObserver, AeroacError> {
         self.paths[0].observer_at(time)
+    }
+
+    /// Current virtual microphone and vector frame for one full-field history.
+    ///
+    /// Returns the original path's observer at this ARRIVAL event, pressure
+    /// parity, and a row-major map from virtual to physical particle velocity.
+    /// The matrix includes parity and the transpose inverse-image Jacobian.
+    /// A history integral must use this fixed spatial point for its entire past
+    /// source worldline; it cannot be reused at another microphone event.
+    pub fn force_history_path_at(
+        &self,
+        path: usize,
+        receiver_time: f64,
+    ) -> Result<(MovingCompactObserver, f64, [[f64; 3]; 3]), AeroacError> {
+        let observer = self.path(path)?.observer_at(receiver_time)?;
+        let sign = self.observer.signs[path];
+        let columns: [[Dd; 3]; 3] = core::array::from_fn(|axis| {
+            let mut unit = [Dd::ZERO; 3];
+            unit[axis] = Dd::ONE;
+            image_velocity(
+                unit,
+                sign,
+                self.observer.planes(),
+                path,
+                self.observer
+                    .wedge_images
+                    .get(path)
+                    .filter(|_| path != 0)
+                    .map(|image| &image.matrix),
+            )
+        });
+        let velocity = core::array::from_fn(|row| {
+            core::array::from_fn(|column| columns[column][row].to_f64())
+        });
+        Ok((observer, sign, velocity))
     }
 
     /// Prepare one image on the ORIGINAL source history. The pressure already

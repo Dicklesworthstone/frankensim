@@ -219,7 +219,24 @@ impl PreparedMovingForceFieldSample {
         strength: CompactSourceStrength,
         force_history_integral_n_s_m3: [f64; 3],
     ) -> Result<(MovingCompactSample, Dd, [Dd; 3]), AeroacError> {
-        if force_history_integral_n_s_m3.iter().any(|v| !v.is_finite()) {
+        self.evaluate_dd(strength, force_history_integral_n_s_m3.map(Dd::from_f64))
+    }
+
+    /// Unrounded pressure and velocity for coherent source/image composition.
+    ///
+    /// The accepted-history owner may retain the past-force integral in DD,
+    /// then accumulate every path before rounding, forming intensity or applying
+    /// a directional microphone. This evaluates the SAME field as `evaluate`;
+    /// it neither supplies missing prehistory nor squares individual sources.
+    pub fn evaluate_dd(
+        &self,
+        strength: CompactSourceStrength,
+        force_history_integral_n_s_m3: [Dd; 3],
+    ) -> Result<(MovingCompactSample, Dd, [Dd; 3]), AeroacError> {
+        if force_history_integral_n_s_m3
+            .iter()
+            .any(|v| !v.to_f64().is_finite())
+        {
             return Err(nonfinite("moving force history integral"));
         }
         let (sample, pressure) = self.pressure.evaluate_with_pressure_dd(strength)?;
@@ -245,9 +262,7 @@ impl PreparedMovingForceFieldSample {
                     + Dd::from_f64(self.force_near_velocity[i][j])
                         * Dd::from_f64(strength.force_on_fluid_n[j]);
             }
-            value
-                + Dd::from_f64(self.history_velocity_scale)
-                    * Dd::from_f64(force_history_integral_n_s_m3[i])
+            value + Dd::from_f64(self.history_velocity_scale) * force_history_integral_n_s_m3[i]
         });
         if velocity.iter().any(|v| !v.to_f64().is_finite()) {
             return Err(nonfinite("moving compact particle velocity"));

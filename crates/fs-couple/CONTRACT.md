@@ -1,3 +1,41 @@
+## Complete force histories at moving acoustic receivers
+
+`pcm_wav::observation::moving::force::MovingForceRenderer` now accepts the
+original direct and reflected moving source/receiver owners through
+`with_moving_receiver` and `with_moving_receiver_reflections`. The existing
+accepted C1 volume/force histories, causal source clocks, receiver identity,
+whole-window bandwidth admission and `PressureRenderer` output remain the
+owners. Callers supply accepted histories and explicit zero force prehistory,
+rather than implementing the past-force integral themselves.
+
+For each arrival, every source/image evaluates its complete force past at that
+image's CURRENT virtual microphone position. Only the immutable original
+force/geometry knot partition is shared between arrivals; a spatial integral
+from another microphone event is never reused. Fixed fluid-frame microphones
+retain their cached-prefix fast path. Moving queries allocate no buffers and
+charge every integrand evaluation, including failed attempts, to the original
+finite lifetime work budget. Complete blocks and their receiver clock publish
+atomically.
+
+The original continuous source-speed bound resolves narrow history peaks and
+checks separation from earlier source positions at the current microphone,
+which is stronger than clearance of the current causal pair alone. Unresolved
+past clearance, missing geometry, quadrature depth/work exhaustion and
+cancellation refuse the complete block. Adaptive Simpson discrepancies remain
+error estimates, not interval certificates or evidence of producer interpolation
+accuracy. Both force and force derivative must vanish at the first strength
+knot; unknown initial acoustic fields are not inferred.
+
+History integrals, pressure and polar-vector velocity retain DD accumulation
+through all sources and image transforms before total instantaneous `p*u`
+and ideal first-order pickup. Receiver speed changes the sampled source clock,
+not pressure gain or fluid perturbation velocity. The original fluid frame,
+including admitted tangential uniform flow, is retained; pressure-work flux
+excludes mean-flow advection. Focused regressions compare current-position
+histories against analytic reflected arrays and independent dense quadrature,
+retain weak force fields after volume-source cancellation, and check complete
+past clearance, exact block replay and transactional work refusal.
+
 ## Tensile admission from original ribbon material histories
 
 Fiber tensile admission composes sourced Kelvin–Voigt stress with each original

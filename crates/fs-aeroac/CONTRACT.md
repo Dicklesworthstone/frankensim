@@ -1,3 +1,22 @@
+## Moving-receiver history composition seams
+
+`PreparedKinematicTrajectory::next_source_knot_after` exposes only the next
+original accepted geometry knot so the existing history renderer can integrate
+each original polynomial piece without rebuilding motion.
+`PreparedReflectedMovingReceiverSource::force_history_path_at` exposes the
+actual virtual receiver at one arrival event, pressure parity and the same
+parity-weighted transpose image Jacobian used by native full-field reflection.
+A past-force integral must use this current spatial point throughout its source
+history; an integral from a different image or receiver event is invalid.
+
+`PreparedMovingForceFieldSample::evaluate_dd` evaluates the existing local
+Q/F field with a DD past-force integral and retains DD pressure and velocity
+for coherent downstream source/image accumulation. No new propagation law,
+root, strength interpolation, homogeneous initial field or per-source intensity
+is introduced. The accepted-history owner still supplies causal coverage,
+past-worldline clearance and bounded quadrature. The original f64 field APIs
+continue through the same native evaluation.
+
 # fs-aeroac — Contract
 
 ## Spherical reflection at a local impedance plane
