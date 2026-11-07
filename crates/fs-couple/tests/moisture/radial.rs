@@ -2,6 +2,9 @@
 use super::*;
 use fs_couple::moisture::radial::*;
 
+#[path = "radial/sdirk.rs"]
+mod sdirk;
+
 fn nonlinear() -> MoistureNonlinearConfig {
     MoistureNonlinearConfig {
         relative_tolerance: 1e-12,

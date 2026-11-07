@@ -267,4 +267,25 @@ impl MoistureRadialSolid {
             solid,
         })
     }
+
+    /// Resolve native mechanics only after both conservative SDIRK stages are
+    /// admitted. The original state survives any stage or mechanical refusal.
+    pub fn advance_sdirk2(
+        &self,
+        moisture: &MoistureRadial,
+        dt_s: f64,
+        faces: &[MoistureFace; 2],
+        transport: MoistureStepConfig,
+        nonlinear: MoistureNonlinearConfig,
+        cx: &Cx<'_>,
+    ) -> Result<MoistureRadialSolidStep<MoistureSdirk2Report>, MoistureError> {
+        let (moisture, report) = moisture.advance_sdirk2(dt_s, faces, transport, nonlinear, cx)?;
+        let solid = self.resolve(&moisture, cx)?;
+        poll(cx)?;
+        Ok(MoistureRadialSolidStep {
+            moisture,
+            transport: report,
+            solid,
+        })
+    }
 }

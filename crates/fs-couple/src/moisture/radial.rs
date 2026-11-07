@@ -14,6 +14,8 @@
 
 use super::*;
 
+mod sdirk;
+
 /// Physical area and storage measure for a radial reduction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RadialMoistureSymmetry {
@@ -302,24 +304,40 @@ impl MoistureRadial {
         cx: &Cx<'_>,
     ) -> Result<(Self, MoistureStepReport), MoistureError> {
         poll(cx)?;
-        nonlinear.validate()?;
-        let end = self.time_s + dt_s;
-        if !positive(dt_s)
-            || !end.is_finite()
-            || end <= self.time_s
-            || !positive(step.water_balance_tolerance_kg)
-            || !positive(step.maximum_content_increment)
-            || (self.geometry.faces_m[0] == 0.0 && !matches!(faces[0], MoistureFace::Sealed))
-        {
-            return Err(MoistureError::Invalid(
-                "forward radial interval, positive limits and sealed zero-area center required",
-            ));
-        }
         let temperature = self.reference.query().axes()["temperature"];
         let boundaries = [
             faces[0].resolve(temperature)?,
             faces[1].resolve(temperature)?,
         ];
+        self.advance_stage(dt_s, dt_s, boundaries, step, nonlinear, None, cx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::moisture) fn advance_stage(
+        &self,
+        dt_s: f64,
+        implicit_dt_s: f64,
+        boundaries: [ResolvedMoistureFace; 2],
+        step: MoistureStepConfig,
+        nonlinear: MoistureNonlinearConfig,
+        known: Option<&crate::moisture::sdirk::StageLoad>,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, MoistureStepReport), MoistureError> {
+        poll(cx)?;
+        nonlinear.validate()?;
+        let end = self.time_s + dt_s;
+        if !positive(dt_s)
+            || !positive(implicit_dt_s)
+            || !end.is_finite()
+            || end <= self.time_s
+            || !positive(step.water_balance_tolerance_kg)
+            || !positive(step.maximum_content_increment)
+            || (self.geometry.faces_m[0] == 0.0 && boundaries[0].equilibrium.is_some())
+        {
+            return Err(MoistureError::Invalid(
+                "forward radial interval, positive limits and sealed zero-area center required",
+            ));
+        }
         let reservoir = [boundaries[0].equilibrium, boundaries[1].equilibrium];
         if reservoir
             .into_iter()
@@ -352,7 +370,10 @@ impl MoistureRadial {
         let mut iterate = self.moisture.clone();
         let mut workspace = fs_la::tridiagonal::TridiagonalWorkspace::new(iterate.len())
             .map_err(MoistureError::Tridiagonal)?;
-        let mut system = self.system(dt_s, &boundaries, &profile, &iterate, lower, cx)?;
+        let mut system = self.system(implicit_dt_s, &boundaries, &profile, &iterate, lower, cx)?;
+        if let Some(known) = known {
+            known.add_to(&mut system.1, cx)?;
+        }
         let mut solves = 0;
         for iteration in 1..=nonlinear.maximum_iterations {
             poll(cx)?;
@@ -365,24 +386,38 @@ impl MoistureRadial {
                 return Err(MoistureError::NotConverged(solution.report));
             }
             let candidate: Vec<_> = solution.x.iter().map(|m| m + lower).collect();
+            if let Some(known) = known {
+                known.check_range_with(
+                    &candidate,
+                    self.geometry.maximum_moisture,
+                    system
+                        .2
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, coupling)| coupling.0 != 0.0)
+                        .map(|(side, _)| reservoir[side].expect("active radial face")),
+                    cx,
+                )?;
+            }
             let stored = [self.water_mass_kg(), self.water(&candidate)];
             if !stored[1].is_finite() || !positive(self.dry_mass_kg() + stored[1]) {
                 return Err(MoistureError::Invalid(
                     "radial candidate water or wet inventory is unrepresentable",
                 ));
             }
-            let endpoint = self.system(dt_s, &boundaries, &profile, &candidate, lower, cx)?;
+            let mut endpoint =
+                self.system(implicit_dt_s, &boundaries, &profile, &candidate, lower, cx)?;
+            if let Some(known) = known {
+                known.add_to(&mut endpoint.1, cx)?;
+            }
             let (_, residual) = endpoint.0.defect(&solution.x, &endpoint.1, cx)?;
-            let boundary_water_kg = std::array::from_fn(|side| {
-                let i = if side == 0 { 0 } else { candidate.len() - 1 };
-                let difference = reservoir[side].unwrap_or(candidate[i]) - candidate[i];
-                // Balance the three finite factors before multiplication: a
-                // large normalized conductance must not overflow before a
-                // zero/small driving difference restores a finite transfer.
-                let mut factors = [self.mass_scale_kg, endpoint.2[side].0, difference.abs()];
-                factors.sort_unstable_by(f64::total_cmp);
-                ((factors[0] * factors[2]) * factors[1]).copysign(difference)
-            });
+            let mut boundary_water_kg =
+                self.boundary_transfers(&candidate, &boundaries, &endpoint.2)?;
+            if let Some(known) = known {
+                for (total, prior) in boundary_water_kg.iter_mut().zip(known.boundary_water_kg) {
+                    *total += prior;
+                }
+            }
             if boundary_water_kg.iter().any(|water| !water.is_finite()) {
                 return Err(MoistureError::Invalid(
                     "radial boundary water inventory is unrepresentable",
@@ -399,11 +434,24 @@ impl MoistureRadial {
                 && balance.is_finite()
                 && balance.abs() <= step.water_balance_tolerance_kg
             {
+                if let Some(known) = known {
+                    known.check_range_with(
+                        &candidate,
+                        self.geometry.maximum_moisture,
+                        endpoint
+                            .2
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, coupling)| coupling.0 != 0.0)
+                            .map(|(side, _)| reservoir[side].expect("active radial face")),
+                        cx,
+                    )?;
+                }
                 for (i, (&old, &m)) in self.moisture.iter().zip(&candidate).enumerate() {
                     if !m.is_finite()
-                        || m < lower
-                        || m > upper
+                        || m < 0.0
                         || m > self.geometry.maximum_moisture
+                        || (known.is_none() && (m < lower || m > upper))
                     {
                         return Err(MoistureError::Invalid(
                             "radial candidate violates moisture maximum principle",
@@ -455,10 +503,36 @@ impl MoistureRadial {
                 for (old, new) in iterate.iter_mut().zip(candidate) {
                     *old = nonlinear.relaxation.mul_add(new - *old, *old);
                 }
-                system = self.system(dt_s, &boundaries, &profile, &iterate, lower, cx)?;
+                system = self.system(implicit_dt_s, &boundaries, &profile, &iterate, lower, cx)?;
+                if let Some(known) = known {
+                    known.add_to(&mut system.1, cx)?;
+                }
             }
         }
         unreachable!("positive nonlinear iteration budget")
+    }
+
+    fn boundary_transfers(
+        &self,
+        moisture: &[f64],
+        faces: &[ResolvedMoistureFace; 2],
+        coupling: &[(f64, f64); 2],
+    ) -> Result<[f64; 2], MoistureError> {
+        let water = std::array::from_fn(|side| {
+            let i = if side == 0 { 0 } else { moisture.len() - 1 };
+            let difference = faces[side].equilibrium.unwrap_or(moisture[i]) - moisture[i];
+            // Preserve the original range-safe physical transfer, shared by
+            // complete backward-Euler steps and the weighted SDIRK face load.
+            let mut factors = [self.mass_scale_kg, coupling[side].0, difference.abs()];
+            factors.sort_unstable_by(f64::total_cmp);
+            ((factors[0] * factors[2]) * factors[1]).copysign(difference)
+        });
+        if water.iter().any(|value| !value.is_finite()) {
+            return Err(MoistureError::Invalid(
+                "radial boundary water inventory is unrepresentable",
+            ));
+        }
+        Ok(water)
     }
 
     fn system(

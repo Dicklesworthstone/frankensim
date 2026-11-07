@@ -3135,6 +3135,25 @@ eigenmode, nonlinear dry-front balance and finite surface flux define the focuse
 verification in `tests/moisture/radial.rs`; they are not measured validation or
 a continuum-error certificate for an arbitrary mesh or time step.
 
+### Second-order radial transients
+
+`MoistureRadial::advance_sdirk2` uses the same two-stage L-stable SDIRK method
+as the existing slab and Cartesian owners. Both stages reuse the original radial
+Kirchhoff law, unequal shell storage, curved surface exchange and bounded native
+tridiagonal nonlinear solve. The first-stage explicit load is assembled from
+actual conservative face rates, never rounded water differences. The endpoint
+water account uses the RK-weighted sum of both stage boundary transfers.
+`MoistureRadialSolid::advance_sdirk2` resolves compatible native mechanics after
+the complete admitted endpoint, preserving atomic transport/mechanics publication.
+
+L-stability does not guarantee monotonicity: a nonphysical stage returns the
+existing typed `StageRange` refusal and requires a shorter time interval. It is
+not clipped or replaced by backward Euler. Conditions are constant within the
+call; callers split intervals at environmental events. Independent unequal-shell
+linear modes, a nonlinear dry-front ODE, finite surface resistance and weighted
+water balances define six focused native regressions. A converged stage is not
+a global temporal-error estimate.
+
 ### Radial diffusion driving native solid mechanics
 
 `moisture::solid::MoistureRadialSolid` maps every original cylindrical or
