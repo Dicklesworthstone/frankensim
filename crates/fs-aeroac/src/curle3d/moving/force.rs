@@ -68,6 +68,17 @@ impl MovingCompactObserver {
         kinematics: SourceKinematics,
     ) -> Result<PreparedMovingForceFieldSample, AeroacError> {
         let pressure = self.prepare_emission(source_time_s, kinematics)?;
+        self.prepare_force_sample(pressure, kinematics)
+    }
+
+    // The trajectory owners already solved and admitted this exact retarded
+    // event. Reuse their original pressure preparation without a second root
+    // or another pressure-coefficient evaluation.
+    pub(super) fn prepare_force_sample(
+        &self,
+        pressure: PreparedMovingCompactSample,
+        kinematics: SourceKinematics,
+    ) -> Result<PreparedMovingForceFieldSample, AeroacError> {
         let radius = pressure.distance_m();
         let c = self.medium().sound_speed_m_s();
         let rho = self.medium().density_kg_m3();
@@ -183,6 +194,31 @@ impl PreparedMovingForceFieldSample {
         strength: CompactSourceStrength,
         force_history_integral_n_s_m3: [f64; 3],
     ) -> Result<MovingCompactField, AeroacError> {
+        let (sample, pressure, velocity) =
+            self.evaluate_with_fields_dd(strength, force_history_integral_n_s_m3)?;
+        let particle_velocity_m_s = velocity.map(Dd::to_f64);
+        let instantaneous_intensity_w_m2 = velocity.map(|u| (pressure * u).to_f64());
+        if particle_velocity_m_s
+            .iter()
+            .chain(&instantaneous_intensity_w_m2)
+            .any(|v| !v.is_finite())
+        {
+            return Err(nonfinite("moving compact particle velocity or intensity"));
+        }
+        Ok(MovingCompactField {
+            sample,
+            particle_velocity_m_s,
+            instantaneous_intensity_w_m2,
+        })
+    }
+
+    // Retain the first-order fields through coherent image-path contraction.
+    // Squaring individual paths here would omit cross-path energy transport.
+    pub(super) fn evaluate_with_fields_dd(
+        &self,
+        strength: CompactSourceStrength,
+        force_history_integral_n_s_m3: [f64; 3],
+    ) -> Result<(MovingCompactSample, Dd, [Dd; 3]), AeroacError> {
         if force_history_integral_n_s_m3.iter().any(|v| !v.is_finite()) {
             return Err(nonfinite("moving force history integral"));
         }
@@ -213,19 +249,9 @@ impl PreparedMovingForceFieldSample {
                 + Dd::from_f64(self.history_velocity_scale)
                     * Dd::from_f64(force_history_integral_n_s_m3[i])
         });
-        let particle_velocity_m_s = velocity.map(Dd::to_f64);
-        let instantaneous_intensity_w_m2 = velocity.map(|u| (pressure * u).to_f64());
-        if particle_velocity_m_s
-            .iter()
-            .chain(&instantaneous_intensity_w_m2)
-            .any(|v| !v.is_finite())
-        {
-            return Err(nonfinite("moving compact particle velocity or intensity"));
+        if velocity.iter().any(|v| !v.to_f64().is_finite()) {
+            return Err(nonfinite("moving compact particle velocity"));
         }
-        Ok(MovingCompactField {
-            sample,
-            particle_velocity_m_s,
-            instantaneous_intensity_w_m2,
-        })
+        Ok((sample, pressure, velocity))
     }
 }

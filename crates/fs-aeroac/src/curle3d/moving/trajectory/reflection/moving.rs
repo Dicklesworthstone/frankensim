@@ -10,7 +10,10 @@ use super::super::{
     MAX_BOUND_DEPTH, MovingReceiverBudget, MovingReceiverConfig, PreparedKinematicTrajectory,
     PreparedMovingReceiverSample, PreparedMovingReceiverSource, invalid, poll, split_controls,
 };
-use super::{PositionNode, ReflectedTrajectoryBudget, admit_planes, apply_image};
+use super::{
+    PositionNode, ReflectedCompactField, ReflectedFieldSum, ReflectedTrajectoryBudget,
+    admit_planes, apply_image, image_velocity,
+};
 use crate::AeroacError;
 use crate::curle3d::IdealAcousticPlane;
 use crate::curle3d::array::wedge::{WedgeImages, WedgeReceiverImage};
@@ -465,6 +468,71 @@ impl<'a> PreparedReflectedMovingReceiverSource<'a> {
             return Err(invalid("moving reflected pressure is unrepresentable"));
         }
         Ok(value)
+    }
+
+    /// Full coherent Q/F field at the microphone's original arrival event.
+    ///
+    /// Each image uses its own causal source time and its virtual microphone
+    /// position at `receiver_time`. The history callback receives that path
+    /// index, virtual observer and source time. Supply the ORIGINAL force
+    /// integral `(3 n (n.F) - F)/R^3` [N s/m³] at that fixed virtual position,
+    /// using the original source history in the fluid-rest frame. A history
+    /// computed at another path or a previous microphone event is invalid.
+    /// The observer's `force_history_integrand` supplies the native kernel.
+    ///
+    /// Velocity is the fluid's acoustic perturbation in physical receiver
+    /// axes; microphone velocity is not added. The result retains near fields
+    /// and cross-path pressure-work flux, including in a tangential uniform
+    /// flow. Mean-flow advection of acoustic energy is not part of `p*u`.
+    /// The caller owns explicit prehistory, quadrature accuracy and continuous
+    /// past-worldline clearance. Any failure aborts the complete field.
+    pub fn force_field_at(
+        &self,
+        receiver_time: f64,
+        source_at: &mut impl FnMut(f64) -> Result<CompactSourceStrength, AeroacError>,
+        force_history_at: &mut impl FnMut(
+            usize,
+            &MovingCompactObserver,
+            f64,
+        ) -> Result<[f64; 3], AeroacError>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ReflectedCompactField, AeroacError> {
+        poll(cancelled)?;
+        let mut sum = ReflectedFieldSum::default();
+        for path in 0..self.path_count() {
+            let original = self
+                .path(path)?
+                .prepare_receiver(receiver_time, cancelled)?
+                .pressure;
+            let source_time = original.source_time_s();
+            let residual = original.retarded_time_residual_s();
+            let virtual_observer = self.path(path)?.observer_at(receiver_time)?;
+            let prepared = virtual_observer
+                .prepare_force_sample(original, self.source().kinematics_at(source_time)?)?;
+            poll(cancelled)?;
+            let strength = source_at(source_time)?;
+            poll(cancelled)?;
+            let history = force_history_at(path, &virtual_observer, source_time)?;
+            let (_, pressure, velocity) = prepared.evaluate_with_fields_dd(strength, history)?;
+            let sign = self.observer.signs[path];
+            sum.add(
+                pressure * Dd::from_f64(sign),
+                image_velocity(
+                    velocity,
+                    sign,
+                    self.observer.planes(),
+                    path,
+                    self.observer
+                        .wedge_images
+                        .get(path)
+                        .filter(|_| path != 0)
+                        .map(|image| &image.matrix),
+                ),
+                residual,
+            );
+        }
+        poll(cancelled)?;
+        sum.finish(receiver_time)
     }
 }
 

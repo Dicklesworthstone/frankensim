@@ -35,6 +35,64 @@ pub mod moving;
 
 pub use moving::{MovingReflectionObserver, PreparedReflectedMovingReceiverSource};
 
+/// Coherent instantaneous Q/F field of one complete ideal-wall image group.
+///
+/// Velocity is the acoustic perturbation in the original fluid-rest axes,
+/// including force induction and past forcing. It is not microphone velocity.
+/// The signed pressure-work flux is formed AFTER summing all path fields;
+/// neither a harmonic half-product nor a plane-wave approximation is used.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReflectedCompactField {
+    /// Common physical microphone event [s].
+    pub receiver_time_s: f64,
+    /// Coherent total pressure [Pa].
+    pub pressure_pa: f64,
+    /// Coherent total Cartesian acoustic particle velocity [m/s].
+    pub particle_velocity_m_s: [f64; 3],
+    /// Signed instantaneous pressure-work flux [W/m²].
+    pub instantaneous_intensity_w_m2: [f64; 3],
+    /// Largest absolute retarded-time residual over the complete image group.
+    pub maximum_time_residual_s: f64,
+}
+
+#[derive(Default)]
+struct ReflectedFieldSum {
+    pressure: Dd,
+    velocity: [Dd; 3],
+    maximum_time_residual_s: f64,
+}
+
+impl ReflectedFieldSum {
+    fn add(&mut self, pressure: Dd, velocity: [Dd; 3], residual: f64) {
+        self.pressure = self.pressure + pressure;
+        for (sum, value) in self.velocity.iter_mut().zip(velocity) {
+            *sum = *sum + value;
+        }
+        self.maximum_time_residual_s = self.maximum_time_residual_s.max(residual.abs());
+    }
+
+    fn finish(self, receiver_time_s: f64) -> Result<ReflectedCompactField, AeroacError> {
+        let pressure_pa = self.pressure.to_f64();
+        let particle_velocity_m_s = self.velocity.map(Dd::to_f64);
+        let instantaneous_intensity_w_m2 = self.velocity.map(|u| (self.pressure * u).to_f64());
+        if !pressure_pa.is_finite()
+            || particle_velocity_m_s
+                .iter()
+                .chain(&instantaneous_intensity_w_m2)
+                .any(|value| !value.is_finite())
+        {
+            return Err(invalid("coherent reflected field is unrepresentable"));
+        }
+        Ok(ReflectedCompactField {
+            receiver_time_s,
+            pressure_pa,
+            particle_velocity_m_s,
+            instantaneous_intensity_w_m2,
+            maximum_time_residual_s: self.maximum_time_residual_s,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ImagePath {
     observer: MovingCompactObserver,
@@ -505,6 +563,27 @@ impl<'a> PreparedReflectedSourceTrajectory<'a> {
         maximum_time_residual_s: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedMovingCompactSample, AeroacError> {
+        let prepared =
+            self.prepare_original_path(path, receiver_time, maximum_time_residual_s, cancelled)?;
+        let image = self.observer.path(path)?;
+        Ok(apply_image(
+            prepared,
+            image.sign,
+            self.observer.planes(),
+            path,
+            image.inverse_jacobian.as_ref(),
+        ))
+    }
+
+    // Original source axes at the virtual receiver, before image parity or
+    // vector rotation. Pressure and force-field queries share this exact root.
+    fn prepare_original_path(
+        &self,
+        path: usize,
+        receiver_time: f64,
+        maximum_time_residual_s: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedMovingCompactSample, AeroacError> {
         poll(cancelled)?;
         let image = self.observer.path(path)?;
         let [first, last] = self.arrival_intervals[path];
@@ -552,21 +631,14 @@ impl<'a> PreparedReflectedSourceTrajectory<'a> {
             .observer
             .prepare_emission(segment.last.source_time_s, segment.last.kinematics)?
             .receiver_time_s();
-        let prepared = self.trajectory.prepare_segment(
+        self.trajectory.prepare_segment(
             &image.observer,
             segment,
             receiver_time,
             [first_arrival, last_arrival],
             maximum_time_residual_s,
             cancelled,
-        )?;
-        Ok(apply_image(
-            prepared,
-            image.sign,
-            self.observer.planes(),
-            path,
-            image.inverse_jacobian.as_ref(),
-        ))
+        )
     }
 
     /// Prepare an original emission event for exact rounded-endpoint
@@ -618,6 +690,107 @@ impl<'a> PreparedReflectedSourceTrajectory<'a> {
         }
         Ok(pressure)
     }
+
+    /// Full coherent volume/force field at one physical microphone event.
+    ///
+    /// `source_at` supplies ORIGINAL fixed-frame Q/F strengths and derivatives
+    /// at each path's own retarded time. `force_history_at` receives the path
+    /// index, its VIRTUAL observer and that same source time. It must return
+    /// `integral (3 n (n.F) - F)/R^3 ds` [N s/m³] on the original source clock,
+    /// using original source positions and forces at this virtual observer.
+    /// [`MovingCompactObserver::force_history_integrand`] supplies the kernel.
+    /// A direct-path integral cannot be reused for a different virtual observer.
+    ///
+    /// Explicit prehistory, integration accuracy and continuous separation of
+    /// every virtual observer from the complete past worldline remain the
+    /// history owner's obligations. Zero history declares zero prior forcing.
+    /// A path, history or cancellation error aborts the entire result. Queries
+    /// allocate nothing; each path solves its original causal root only once.
+    pub fn force_field_at(
+        &self,
+        receiver_time: f64,
+        maximum_time_residual_s: f64,
+        source_at: &mut impl FnMut(f64) -> Result<CompactSourceStrength, AeroacError>,
+        force_history_at: &mut impl FnMut(
+            usize,
+            &MovingCompactObserver,
+            f64,
+        ) -> Result<[f64; 3], AeroacError>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ReflectedCompactField, AeroacError> {
+        poll(cancelled)?;
+        let [first, last] = self.receiver_interval;
+        if !receiver_time.is_finite() || receiver_time < first || receiver_time > last {
+            return Err(invalid("receiver time lacks complete reflected history"));
+        }
+        let mut sum = ReflectedFieldSum::default();
+        for path in 0..self.path_count() {
+            let original = self.prepare_original_path(
+                path,
+                receiver_time,
+                maximum_time_residual_s,
+                cancelled,
+            )?;
+            let source_time = original.source_time_s();
+            let residual = original.retarded_time_residual_s();
+            let image = self.observer.path(path)?;
+            let prepared = image
+                .observer
+                .prepare_force_sample(original, self.trajectory.kinematics_at(source_time)?)?;
+            poll(cancelled)?;
+            let strength = source_at(source_time)?;
+            poll(cancelled)?;
+            let history = force_history_at(path, &image.observer, source_time)?;
+            let (_, pressure, velocity) = prepared.evaluate_with_fields_dd(strength, history)?;
+            sum.add(
+                pressure * Dd::from_f64(image.sign),
+                image_velocity(
+                    velocity,
+                    image.sign,
+                    self.observer.planes(),
+                    path,
+                    image.inverse_jacobian.as_ref(),
+                ),
+                residual,
+            );
+        }
+        poll(cancelled)?;
+        sum.finish(receiver_time)
+    }
+}
+
+// Velocity is a polar vector: parity times the transpose of the virtual
+// receiver's image Jacobian. Keep DD fields until AFTER coherent summation.
+fn image_velocity(
+    mut velocity: [Dd; 3],
+    sign: f64,
+    planes: &[IdealAcousticPlane],
+    mask: usize,
+    inverse_jacobian: Option<&[[f64; 3]; 3]>,
+) -> [Dd; 3] {
+    if sign < 0.0 {
+        velocity = velocity.map(|value| -value);
+    }
+    if let Some(jacobian) = inverse_jacobian {
+        return core::array::from_fn(|row| {
+            (0..3).fold(Dd::ZERO, |sum, axis| {
+                sum + Dd::from_f64(jacobian[axis][row]) * velocity[axis]
+            })
+        });
+    }
+    for (index, plane) in planes.iter().enumerate() {
+        if mask & (1 << index) == 0 {
+            continue;
+        }
+        let normal = plane.inward_normal();
+        let projection = (0..3).fold(Dd::ZERO, |sum, axis| {
+            sum + Dd::from_f64(normal[axis]) * velocity[axis]
+        });
+        for axis in 0..3 {
+            velocity[axis] = velocity[axis] - Dd::from_f64(2.0 * normal[axis]) * projection;
+        }
+    }
+    velocity
 }
 
 fn apply_image(

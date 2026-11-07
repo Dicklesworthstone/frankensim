@@ -2863,6 +2863,36 @@ refinement steps, rotation covariance and admission refusals. This remains
 prescribed linear compact-source acoustics in a homogeneous lossless medium,
 without finite-source, viscous, scattering, feedback or measured-SPL claims.
 
+### Coherent moving-force fields through ideal reflections
+
+The fixed and moving reflected trajectory owners expose `force_field_at` for
+the complete orthogonal or admitted pi/m image group. Every path retains its
+own original causal source event. Full Q/F pressure and particle velocity,
+including induction and the past-force term, are summed in double-double
+before the signed instantaneous pressure-work flux `p*u` is formed. A pressure
+node therefore does not erase particle motion, and image powers are not added
+independently. Velocity follows parity times the transpose virtual-receiver
+Jacobian into physical fluid-rest axes; microphone velocity is never added.
+
+The history callback receives the path index, its actual virtual observer and
+its retarded source time. It supplies the original `J` at that fixed virtual
+position. A direct-path history or one evaluated at a previous receiver event
+cannot be substituted. Prehistory, continuous separation over the entire past
+worldline and integration accuracy retain the original force owner's explicit
+obligations. Existing causal, finite-history, image-group and cancellation
+admission remains authoritative; no failed path publishes a partial field.
+Preparation reuses each native retarded pressure event, and field queries
+allocate nothing. In admitted tangential mean flow, `p*u` remains the pressure
+work flux and does not include mean-flow advection of acoustic energy.
+
+G1/G3 `tests/moving_reflected_force.rs` compares all eight corner boundary
+combinations with independent stationary Green-function derivatives and source
+images; distinguishes coherent flux from summed path flux; checks complete
+rotated wedge forces at a moving microphone; and verifies rigid/release wall
+conditions and nonzero pressure-node motion for an accelerating source.
+Missing or nonfinite image history, incomplete time coverage and cancellation
+refuse the complete result.
+
 ## Uniformly moving transient quadrupole pressure
 
 `MovingCompactObserver::prepare_uniform_quadrupole` evaluates the complete
