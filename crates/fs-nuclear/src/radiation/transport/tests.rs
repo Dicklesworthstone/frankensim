@@ -72,6 +72,263 @@ fn escape_from_uniform_source(optical_thickness: f64) -> f64 {
     }
 }
 
+fn beam(source_id: u64, boundary: PhotonSlabBoundary, mu: f64) -> PhotonSlabSource {
+    PhotonSlabSource {
+        source_id,
+        geometry: PhotonSourceGeometry::Collimated { boundary, mu },
+    }
+}
+
+fn prepare_sources(
+    cells: Vec<PhotonSlabCell>,
+    sources: Vec<PhotonSlabSource>,
+) -> PhotonSlabResponse {
+    let edges = (0..=cells[0].groups.len())
+        .map(|group| group as f64 * 1e-13)
+        .collect();
+    prepare_slab_response_with_sources(
+        "manufactured internal and external sources".into(),
+        DecayRadiation::Gamma,
+        edges,
+        cells,
+        sources,
+        normal_pair(),
+        PhotonSlabLimits::default(),
+        || Ok(()),
+    )
+    .unwrap()
+}
+
+#[test]
+fn g1_incident_beam_matches_thin_and_thick_oblique_beer_lambert_absorption() {
+    for mu in [1.0, 0.37] {
+        for tau in [1e-12, 0.7, 3.0, 100.0] {
+            let response = prepare_sources(
+                vec![mono(5, 1.0, tau, 0.0)],
+                vec![beam(99, PhotonSlabBoundary::Left, mu)],
+            );
+            let result = apply(&response, &[(99, &[7.0])]);
+            let absorbed = 7.0 * (-(-tau / mu).exp_m1());
+            near(heat(&result, 5), absorbed, 5e-14 * absorbed);
+            near(result.escaped_j, 7.0 * (-tau / mu).exp(), 5e-14);
+            near(result.deposited_j + result.escaped_j, 7.0, 5e-14);
+            assert!(heat(&result, 5) > 0.0);
+            assert!(!result.receiver_energy_j.contains_key(&99));
+        }
+    }
+}
+
+#[test]
+fn g1_beam_layer_heat_and_reversed_illumination_follow_ordered_path_lengths() {
+    let cells = vec![
+        mono(50, 0.5, 0.6, 0.0),
+        mono(7, 0.8, 0.0, 0.0),
+        mono(3, 2.0, 0.7, 0.0),
+    ];
+    let mu = 0.4;
+    let left = prepare_sources(cells.clone(), vec![beam(99, PhotonSlabBoundary::Left, mu)]);
+    let result = apply(&left, &[(99, &[3.0])]);
+    let front_pass = (-0.3_f64 / mu).exp();
+    let rear_pass = (-1.4_f64 / mu).exp();
+    near(heat(&result, 50), 3.0 * (1.0 - front_pass), 3e-14);
+    assert_eq!(heat(&result, 7), 0.0);
+    near(
+        heat(&result, 3),
+        3.0 * front_pass * (1.0 - rear_pass),
+        3e-14,
+    );
+    near(result.escaped_j, 3.0 * front_pass * rear_pass, 3e-14);
+
+    let reversed = prepare_sources(
+        cells.into_iter().rev().collect(),
+        vec![beam(99, PhotonSlabBoundary::Right, mu)],
+    );
+    let reversed = apply(&reversed, &[(99, &[3.0])]);
+    assert_eq!(result.receiver_energy_j, reversed.receiver_energy_j);
+    assert_eq!(result.escaped_j, reversed.escaped_j);
+}
+
+#[test]
+fn g1_beam_repeated_scattering_matches_single_cell_collision_series() {
+    // A first collision creates local heat h and an isotropic outgoing fraction
+    // a. Each ensuing flight collides inside the cell with probability c, so
+    // total heat is q*h * sum_k (a*c)^k. This tests the infinite scattering
+    // series, rather than treating total beam attenuation as absorbed energy.
+    let thickness = 0.8;
+    let absorption = 0.4;
+    let scattering = 1.6;
+    let mu = 0.6;
+    let tau = thickness * (absorption + scattering);
+    let response = prepare_sources(
+        vec![mono(5, thickness, absorption, scattering)],
+        vec![beam(99, PhotonSlabBoundary::Right, mu)],
+    );
+    let result = apply(&response, &[(99, &[7.0])]);
+    let first_collision = -(-tau / mu).exp_m1();
+    let uniform_collision = 1.0 - escape_from_uniform_source(tau);
+    let expected = 7.0 * first_collision * 0.2 / (1.0 - 0.8 * uniform_collision);
+    near(heat(&result, 5), expected, 5e-14);
+    near(result.escaped_j, 7.0 - expected, 5e-14);
+    assert!(heat(&result, 5) < 7.0 * first_collision);
+
+    let elastic = prepare_sources(
+        vec![mono(5, thickness, 0.0, 2.0), mono(8, 0.3, 0.0, 0.8)],
+        vec![beam(99, PhotonSlabBoundary::Left, mu)],
+    );
+    let result = apply(&elastic, &[(99, &[7.0])]);
+    assert_eq!(result.deposited_j, 0.0);
+    near(result.escaped_j, 7.0, 8e-14);
+}
+
+#[test]
+fn g1_beam_downscatter_reuses_lower_group_absorption_without_losing_energy() {
+    let response = prepare_sources(
+        vec![PhotonSlabCell {
+            cell_id: 5,
+            thickness_m: 1.0,
+            groups: vec![
+                PhotonCollision {
+                    total_per_m: 1.0,
+                    heat_per_m: 1.0,
+                    redistribution_per_m: vec![0.0, 0.0],
+                },
+                PhotonCollision {
+                    total_per_m: 2.0,
+                    heat_per_m: 1.2,
+                    redistribution_per_m: vec![0.8, 0.0],
+                },
+            ],
+        }],
+        vec![beam(99, PhotonSlabBoundary::Left, 0.5)],
+    );
+    let result = apply(&response, &[(99, &[2.0, 7.0])]);
+    let high_collision = -(-4.0_f64).exp_m1();
+    let low_escape = escape_from_uniform_source(1.0);
+    let expected_heat =
+        2.0 * (-(-2.0_f64).exp_m1()) + 7.0 * high_collision * (0.6 + 0.4 * (1.0 - low_escape));
+    near(heat(&result, 5), expected_heat, 5e-14);
+    near(result.escaped_j, 9.0 - expected_heat, 5e-14);
+    near(result.deposited_j + result.escaped_j, 9.0, 5e-14);
+}
+
+#[test]
+fn g3_internal_and_external_sources_share_one_response_and_superpose() {
+    let cells = vec![mono(5, 0.6, 0.4, 0.8), mono(9, 0.3, 0.7, 0.2)];
+    let response = prepare_sources(
+        cells.clone(),
+        vec![
+            beam(99, PhotonSlabBoundary::Left, 0.8),
+            PhotonSlabSource {
+                source_id: 42,
+                geometry: PhotonSourceGeometry::UniformLayer { cell_id: 5 },
+            },
+        ],
+    );
+    let old = prepare(cells, vec![5], normal_pair());
+    let internal = apply(&response, &[(42, &[3.0]), (99, &[0.0])]);
+    let old = apply(&old, &[(5, &[3.0])]);
+    assert_eq!(internal.receiver_energy_j, old.receiver_energy_j);
+    assert_eq!(internal.escaped_j, old.escaped_j);
+    let external = apply(&response, &[(42, &[0.0]), (99, &[2.0])]);
+    let both = apply(&response, &[(42, &[3.0]), (99, &[2.0])]);
+    for cell in [5, 9] {
+        near(
+            heat(&both, cell),
+            heat(&internal, cell) + heat(&external, cell),
+            3e-14,
+        );
+    }
+    near(
+        both.escaped_j,
+        internal.escaped_j + external.escaped_j,
+        3e-14,
+    );
+    near(both.deposited_j + both.escaped_j, 5.0, 5e-14);
+}
+
+#[test]
+fn g4_beam_sources_refuse_invalid_incidence_identity_budgets_and_cancellation() {
+    let run = |sources, limits, checkpoint: &mut dyn FnMut() -> Result<(), RadiationError>| {
+        prepare_slab_response_with_sources(
+            "manufactured beam admission".into(),
+            DecayRadiation::Gamma,
+            vec![0.0, 1e-13],
+            vec![mono(5, 1.0, 0.4, 0.6)],
+            sources,
+            normal_pair(),
+            limits,
+            checkpoint,
+        )
+    };
+    let limits = PhotonSlabLimits::default();
+    for mu in [0.0, -0.5, 1.1, f64::INFINITY, f64::NAN] {
+        assert!(matches!(
+            run(
+                vec![beam(99, PhotonSlabBoundary::Left, mu)],
+                limits,
+                &mut || Ok(())
+            ),
+            Err(RadiationError::InvalidInput(_))
+        ));
+    }
+    let source = beam(99, PhotonSlabBoundary::Left, 0.5);
+    assert!(matches!(
+        run(vec![source, source], limits, &mut || Ok(())),
+        Err(RadiationError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        run(
+            vec![PhotonSlabSource {
+                source_id: 99,
+                geometry: PhotonSourceGeometry::UniformLayer { cell_id: 77 },
+            }],
+            limits,
+            &mut || Ok(())
+        ),
+        Err(RadiationError::InvalidInput(_))
+    ));
+    let mut count = 0;
+    let completed = run(vec![source], limits, &mut || {
+        count += 1;
+        Ok(())
+    })
+    .unwrap();
+    let mut short = limits;
+    short.max_work = completed.work - 1;
+    assert!(matches!(
+        run(vec![source], short, &mut || Ok(())),
+        Err(RadiationError::Budget(_))
+    ));
+    short = limits;
+    short.max_values = 0;
+    assert!(matches!(
+        run(vec![source], short, &mut || Ok(())),
+        Err(RadiationError::Budget(_))
+    ));
+    short = limits;
+    short.response.max_sources = 0;
+    assert!(matches!(
+        run(vec![source], short, &mut || Ok(())),
+        Err(RadiationError::Budget(_))
+    ));
+    // Cancel during preparation, including after all physical work is finished;
+    // no partial response may be published at either boundary.
+    for stop in [1, count / 2, count] {
+        let mut observed = 0;
+        assert!(matches!(
+            run(vec![source], limits, &mut || {
+                observed += 1;
+                if observed == stop {
+                    Err(RadiationError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            }),
+            Err(RadiationError::Cancelled)
+        ));
+    }
+}
+
 #[test]
 fn g1_vacuum_layers_export_every_joule_without_creating_heat() {
     let response = prepare(

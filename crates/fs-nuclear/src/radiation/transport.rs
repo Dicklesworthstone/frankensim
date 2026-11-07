@@ -1,8 +1,9 @@
 //! Planar multigroup photon transport with vacuum exterior boundaries.
 //!
 //! Exact characteristic integrals give the first collision and escape fractions
-//! for an isotropic, spatially uniform source in each homogeneous layer. Angular
-//! integration uses an explicit positive quadrature. Scattered energy is again
+//! for an isotropic, spatially uniform source in each homogeneous layer or a
+//! collimated beam incident on either exterior boundary. Angular integration of
+//! internal emission uses an explicit positive quadrature. Scattered energy is again
 //! isotropic and uniform in its receiving layer (the flat-source collision-
 //! probability approximation). Repeated same-group scattering is solved with
 //! the original prepared LU owner, once factored per group. Lower-energy groups
@@ -64,6 +65,35 @@ pub struct PhotonSlabCell {
     pub cell_id: u64,
     pub thickness_m: f64,
     pub groups: Vec<PhotonCollision>,
+}
+
+/// Exterior face through which an incident beam enters the ordered slab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhotonSlabBoundary {
+    Left,
+    Right,
+}
+
+/// Spatial and angular distribution of one independently supplied photon source.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PhotonSourceGeometry {
+    /// Isotropic emission distributed uniformly through an existing layer.
+    UniformLayer { cell_id: u64 },
+    /// Collimated energy entering an exterior face. `mu` is the positive cosine
+    /// relative to that face's inward normal, in `(0, 1]`. Each path length is
+    /// the layer thickness divided by `mu`; `mu` need not be a quadrature node.
+    Collimated {
+        boundary: PhotonSlabBoundary,
+        mu: f64,
+    },
+}
+
+/// A physical source identity and its explicit spatial/angular distribution.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PhotonSlabSource {
+    /// Unique source identity; it need not name a receiving material cell.
+    pub source_id: u64,
+    pub geometry: PhotonSourceGeometry,
 }
 
 /// A positive direction cosine and its probability weight on one hemisphere.
@@ -175,6 +205,62 @@ pub fn prepare_slab_response(
     mut checkpoint: impl FnMut() -> Result<(), RadiationError>,
 ) -> Result<PhotonSlabResponse, RadiationError> {
     checkpoint()?;
+    // Bound expansion before allocating the explicit source descriptions.
+    admit_slab_dimensions(
+        cells.len(),
+        group_edges_j.len().checked_sub(1).unwrap_or(0),
+        source_ids.len(),
+        ordinates.len(),
+        limits,
+    )?;
+    let sources = source_ids
+        .into_iter()
+        .map(|cell_id| PhotonSlabSource {
+            source_id: cell_id,
+            geometry: PhotonSourceGeometry::UniformLayer { cell_id },
+        })
+        .collect();
+    prepare_slab_response_with_sources(
+        data_id,
+        radiation,
+        group_edges_j,
+        cells,
+        sources,
+        ordinates,
+        limits,
+        checkpoint,
+    )
+}
+
+/// Prepare internal emission and external irradiation with one transport solve.
+///
+/// Applying the returned response takes energy in joules for each source/group.
+/// A collimated source's input is the energy that actually crosses the slab face,
+/// not intensity per unit area or solid angle: no area or additional cosine
+/// factor is applied. Direct first collisions follow Beer–Lambert attenuation
+/// along the incident path. Their heat deposits locally; their outgoing photon
+/// energy enters the original isotropic flat-source scattering operator. That
+/// operator is factored once per group and shared by all source kinds.
+///
+/// Source identities are independent of receiver identities. Escape includes
+/// direct transmission and all photons scattered out through either face.
+/// There is no surface reflection/refraction or interface Fresnel law. As in
+/// [`prepare_slab_response`], scattered sources require spatial and angular
+/// convergence; direct ballistic absorption is analytic for the supplied beam.
+/// [`refinement::refine_slab_response_with_sources`] retains these explicit
+/// source geometries while refining and reducing to the original receivers.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_slab_response_with_sources(
+    data_id: String,
+    radiation: DecayRadiation,
+    group_edges_j: Vec<f64>,
+    cells: Vec<PhotonSlabCell>,
+    sources: Vec<PhotonSlabSource>,
+    ordinates: Vec<PhotonOrdinate>,
+    limits: PhotonSlabLimits,
+    mut checkpoint: impl FnMut() -> Result<(), RadiationError>,
+) -> Result<PhotonSlabResponse, RadiationError> {
+    checkpoint()?;
     if !matches!(radiation, DecayRadiation::Gamma | DecayRadiation::XRay) {
         return Err(invalid("a photon radiation kind is required"));
     }
@@ -183,7 +269,7 @@ pub fn prepare_slab_response(
     }
     let n = cells.len();
     let groups = group_edges_j.len().checked_sub(1).unwrap_or(0);
-    admit_slab_dimensions(n, groups, source_ids.len(), ordinates.len(), limits)?;
+    admit_slab_dimensions(n, groups, sources.len(), ordinates.len(), limits)?;
     if !group_edges_j.iter().copied().all(nonnegative)
         || !group_edges_j.windows(2).all(|v| v[0] < v[1])
     {
@@ -241,10 +327,21 @@ pub fn prepare_slab_response(
         }
     }
     let mut seen = BTreeSet::new();
-    for id in &source_ids {
+    for source in &sources {
         work.charge(1, &mut checkpoint)?;
-        if !indices.contains_key(id) || !seen.insert(*id) {
-            return Err(invalid("unique sources must name original photon layers"));
+        if !seen.insert(source.source_id) {
+            return Err(invalid("unique photon source identities required"));
+        }
+        match source.geometry {
+            PhotonSourceGeometry::UniformLayer { cell_id } if !indices.contains_key(&cell_id) => {
+                return Err(invalid("uniform sources must name original photon layers"));
+            }
+            PhotonSourceGeometry::Collimated { mu, .. }
+                if !mu.is_finite() || mu <= 0.0 || mu > 1.0 =>
+            {
+                return Err(invalid("incident beam direction cosine must be in (0, 1]"));
+            }
+            _ => {}
         }
     }
     let mut plans = Vec::with_capacity(groups);
@@ -289,18 +386,53 @@ pub fn prepare_slab_response(
             factor,
         });
     }
-    let mut rows = Vec::with_capacity(source_ids.len());
-    let mut preparation_errors = Vec::with_capacity(source_ids.len());
+    let mut rows = Vec::with_capacity(sources.len());
+    let mut preparation_errors = Vec::with_capacity(sources.len());
     let mut max_solve_residual = 0.0_f64;
     let mut max_response_defect = 0.0_f64;
-    for source_id in source_ids {
+    for source in sources {
+        let source_id = source.source_id;
         let mut source_groups = Vec::with_capacity(groups);
         let mut source_errors = Vec::with_capacity(groups);
         for incident in 0..groups {
             let mut rhs = vec![Sum::default(); n * groups];
-            rhs[incident * n + indices[&source_id]].add(1.0)?;
             let mut deposited = vec![Sum::default(); n];
             let mut escaped = Sum::default();
+            let mut preparation_error = ErrorBudget::new(f64::MAX);
+            match source.geometry {
+                PhotonSourceGeometry::UniformLayer { cell_id } => {
+                    rhs[incident * n + indices[&cell_id]].add(1.0)?;
+                }
+                PhotonSourceGeometry::Collimated { boundary, mu } => {
+                    let (collided, transmitted, defect) = beam_first_flight(
+                        &cells,
+                        incident,
+                        boundary,
+                        mu,
+                        &mut work,
+                        &mut checkpoint,
+                    )?;
+                    first_flight_defect = first_flight_defect.max(defect);
+                    preparation_error.charge(defect)?;
+                    escaped.add(transmitted)?;
+                    for (cell, &energy) in collided.iter().enumerate() {
+                        work.charge(incident + 2, &mut checkpoint)?;
+                        preparation_error.charge(scaled_bound(
+                            energy,
+                            kernel_defect[cell * groups + incident],
+                        )?)?;
+                        deposited[cell].add(multiply(energy, heat[cell * groups + incident])?)?;
+                        // Include same-group redistribution: these are the
+                        // initial isotropic emissions for the repeated-scatter
+                        // equation, not another copy of the incident beam.
+                        for outgoing in 0..=incident {
+                            let fraction =
+                                redistribution[(cell * groups + incident) * groups + outgoing];
+                            rhs[outgoing * n + cell].add(multiply(energy, fraction)?)?;
+                        }
+                    }
+                }
+            }
             let mut b = vec![0.0; n];
             let mut emitted = vec![0.0; n];
             // Reused across all active groups; included in the existing linear
@@ -308,7 +440,6 @@ pub fn prepare_slab_response(
             let mut solve_residual = vec![0.0; n];
             let mut correction = vec![0.0; n];
             let mut residual_total = Sum::default();
-            let mut preparation_error = ErrorBudget::new(f64::MAX);
             for group in (0..=incident).rev() {
                 for cell in 0..n {
                     b[cell] = value(rhs[group * n + cell])?;
@@ -628,6 +759,44 @@ fn first_flights(
     Ok((collision, escape, max_defect))
 }
 
+// Exact first collisions of a unit-energy collimated beam. Only the subsequent
+// scattered emission uses the flat-source approximation or angular quadrature.
+fn beam_first_flight(
+    cells: &[PhotonSlabCell],
+    group: usize,
+    boundary: PhotonSlabBoundary,
+    mu: f64,
+    work: &mut Work,
+    checkpoint: &mut impl FnMut() -> Result<(), RadiationError>,
+) -> Result<(Vec<f64>, f64, f64), RadiationError> {
+    let mut collided = vec![0.0; cells.len()];
+    let mut ray = 1.0;
+    let mut closure = Sum::default();
+    closure.add(-1.0)?;
+    for offset in 0..cells.len() {
+        work.charge(1, checkpoint)?;
+        let index = match boundary {
+            PhotonSlabBoundary::Left => offset,
+            PhotonSlabBoundary::Right => cells.len() - 1 - offset,
+        };
+        let cell = &cells[index];
+        let tau = finite(multiply(cell.groups[group].total_per_m, cell.thickness_m)? / mu)?;
+        let transmission = det::exp(-tau);
+        if transmission == 0.0 {
+            return Err(RadiationError::Arithmetic);
+        }
+        collided[index] = multiply(ray, -det::expm1(-tau))?;
+        closure.add(collided[index])?;
+        ray = multiply(ray, transmission)?;
+    }
+    closure.add(ray)?;
+    let defect = value(closure)?.abs();
+    if defect > ROW_CLOSURE_TOLERANCE {
+        return Err(RadiationError::Budget("photon beam first-flight closure"));
+    }
+    Ok((collided, ray, defect))
+}
+
 // 1 - (1-exp(-tau))/tau. The power series retains collision energy in optically
 // thin emitting cells when subtracting the escape fraction would round to zero.
 fn uniform_collision(tau: f64, escape: f64) -> Result<f64, RadiationError> {
@@ -731,6 +900,8 @@ fn storage_values(cells: usize, groups: usize, sources: usize) -> Result<usize, 
         .checked_add(size(&[3, cells, groups, groups])?)
         .and_then(|x| x.checked_add(size(&[32, cells, groups]).ok()?))
         .and_then(|x| x.checked_add(size(&[4, sources, groups, cells]).ok()?))
+        // Explicit source geometry stays live while output rows accumulate.
+        .and_then(|x| x.checked_add(size(&[4, sources]).ok()?))
         .ok_or(RadiationError::Budget("photon scalar storage"))
 }
 

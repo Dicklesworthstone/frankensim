@@ -2865,6 +2865,40 @@ slab solution, density/depth scaling, numerical/resource refusal and
 cancellation. Manufactured kernels establish these equations, not accuracy for
 an evaluated shielding material.
 
+## External collimated photon absorption
+
+`radiation::transport::prepare_slab_response_with_sources` admits explicit
+uniform layer emission and collimated gamma/X-ray irradiation through either
+exterior face. Sources have independent identities; every physical layer remains
+a heat receiver. A beam's supplied `mu` is its positive inward direction cosine,
+so its path through a layer is `thickness / mu`. The grouped response accepts
+incident joules actually crossing that face, with no inferred area or extra
+cosine weighting.
+
+Analytic Beer–Lambert first collisions partition the beam into direct local
+heat, outgoing photons and uncollided transmission. Outgoing energy, including
+same-group scattering and downscatter, enters the original flat-source
+multigroup operator; its factorization is shared with all internal sources.
+Escape includes both transmitted and scattered energy leaving either face.
+Total attenuation is never treated as absorbed heat. Beam closure and kernel
+roundoff are retained in the original per-joule deposition audit; work,
+storage, cancellation and positive-tail refusal remain enforced.
+
+G1/G3/G4 tests cover normal/oblique thin/thick absorption, ordered multilayer
+calorimetry and reversal, an independent infinite collision-series solution,
+pure scattering with zero heat, lower-group absorption, simultaneous internal
+and external sources, and incidence/identity/resource/cancellation refusal.
+Scattered emission retains the isotropic flat-source approximation and requires
+spatial/angular convergence. Automatic spatial refinement presently accepts
+uniform internal sources through its original entry point. The explicit-source
+`refine_slab_response_with_sources` also supports boundary beams and mixed
+source families. Internal sources divide among sublayers; boundary beams retain
+their full incident joules, physical side and cosine on every grid. Receiver
+energies reduce to original physical cells. The same work/storage allowances,
+consecutive-grid convergence rule and charged arithmetic audit remain active.
+G1/G3/G4 controls add beam convergence against an independent two-stream
+solution. Surface reflection, flight-time storage and dose remain unmodeled.
+
 ## Evaluated prompt fission energy on the changing material timeline
 
 `endf::fission_energy::temperature::append_prompt_temperature_series_to_burnup`

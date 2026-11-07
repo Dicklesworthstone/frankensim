@@ -1,7 +1,8 @@
 //! Spatial refinement of the original flat-source photon transport owner.
 //!
-//! Every original layer is divided into equal sublayers. Its original uniform
-//! source is shared equally among them, then all receiving sublayers are reduced
+//! Every original layer is divided into equal sublayers. Each original uniform
+//! source is shared equally among them; an exterior beam retains its original
+//! boundary, direction and full incident energy. All receiving sublayers are reduced
 //! to their original physical cell. Angular ordinates, energy groups and material
 //! coefficients stay unchanged. The maximum change between successive spatial
 //! grids is an observed convergence diagnostic, not a certified error bound,
@@ -56,6 +57,58 @@ pub fn refine_slab_response(
     mut checkpoint: impl FnMut() -> Result<(), RadiationError>,
 ) -> Result<RefinedPhotonSlabResponse, RadiationError> {
     checkpoint()?;
+    admit_slab_dimensions(
+        cells.len(),
+        group_edges_j.len().checked_sub(1).unwrap_or(0),
+        source_ids.len(),
+        ordinates.len(),
+        limits,
+    )?;
+    let sources = source_ids
+        .into_iter()
+        .map(|cell_id| PhotonSlabSource {
+            source_id: cell_id,
+            geometry: PhotonSourceGeometry::UniformLayer { cell_id },
+        })
+        .collect();
+    refine_slab_response_with_sources(
+        data_id,
+        radiation,
+        group_edges_j,
+        cells,
+        sources,
+        ordinates,
+        limits,
+        refinement,
+        checkpoint,
+    )
+}
+
+/// Refine internal emission and external irradiation on the same physical slab.
+///
+/// Only uniform internal emitters are split and averaged. A boundary beam is
+/// never divided by the number of spatial cells: its original incident joules
+/// enter the same face at the same cosine on every grid. The return map retains
+/// all original source and receiving-cell identities. Source IDs need not be
+/// cell IDs and distinct sources may illuminate the same boundary or layer.
+///
+/// The convergence criterion, consecutive-agreement rule, work/storage limits
+/// and no-claim boundaries are those of [`refine_slab_response`]. In particular,
+/// refinement resolves the scattered flat-source approximation; it does not
+/// change the explicitly supplied angular quadrature or scattering phase law.
+#[allow(clippy::too_many_arguments)]
+pub fn refine_slab_response_with_sources(
+    data_id: String,
+    radiation: DecayRadiation,
+    group_edges_j: Vec<f64>,
+    cells: Vec<PhotonSlabCell>,
+    sources: Vec<PhotonSlabSource>,
+    ordinates: Vec<PhotonOrdinate>,
+    limits: PhotonSlabLimits,
+    refinement: PhotonSlabRefinement,
+    mut checkpoint: impl FnMut() -> Result<(), RadiationError>,
+) -> Result<RefinedPhotonSlabResponse, RadiationError> {
+    checkpoint()?;
     if !nonnegative(refinement.absolute_tolerance) || !nonnegative(refinement.relative_tolerance) {
         return Err(invalid(
             "finite nonnegative photon refinement tolerances required",
@@ -65,15 +118,15 @@ pub fn refine_slab_response(
         return Err(RadiationError::Budget("photon refinement needs two grids"));
     }
     let groups = group_edges_j.len().checked_sub(1).unwrap_or(0);
-    if cells.is_empty() || groups == 0 || source_ids.is_empty() || ordinates.is_empty() {
+    if cells.is_empty() || groups == 0 || sources.is_empty() || ordinates.is_empty() {
         return Err(invalid("nonempty photon refinement inputs required"));
     }
     // Reserve the original input, previous/current reduced maps and reduction
     // scratch alongside the core's conservative allocation bound. Check this
     // before cloning either authored coefficients or an expanded layer grid.
     let retained_values = size(&[3, cells.len(), groups, groups])?
-        .checked_add(size(&[8, source_ids.len(), groups, cells.len()])?)
-        .and_then(|n| n.checked_add(size(&[4, source_ids.len(), groups]).ok()?))
+        .checked_add(size(&[8, sources.len(), groups, cells.len()])?)
+        .and_then(|n| n.checked_add(size(&[8, sources.len(), groups]).ok()?))
         .and_then(|n| n.checked_add(size(&[4, cells.len()]).ok()?))
         .and_then(|n| n.checked_add(size(&[4, ordinates.len()]).ok()?))
         .and_then(|n| n.checked_add(size(&[2, group_edges_j.len()]).ok()?))
@@ -81,7 +134,7 @@ pub fn refine_slab_response(
     grid_limits(
         cells.len(),
         groups,
-        source_ids.len(),
+        sources.len(),
         ordinates.len(),
         retained_values,
         limits,
@@ -108,16 +161,30 @@ pub fn refine_slab_response(
             has_redistribution |= row.redistribution_per_m.iter().any(|&value| value > 0.0);
         }
     }
-    let mut source_indices = Vec::with_capacity(source_ids.len());
+    let mut source_indices = Vec::with_capacity(sources.len());
     let mut seen = BTreeSet::new();
-    for &id in &source_ids {
+    let mut internal_sources = 0_usize;
+    for source in &sources {
         work.charge(1, &mut checkpoint)?;
-        let index = *indices
-            .get(&id)
-            .ok_or_else(|| invalid("unknown original photon source"))?;
-        if !seen.insert(id) {
+        if !seen.insert(source.source_id) {
             return Err(invalid("duplicate original photon source"));
         }
+        let index = match source.geometry {
+            PhotonSourceGeometry::UniformLayer { cell_id } => {
+                internal_sources += 1;
+                Some(
+                    *indices
+                        .get(&cell_id)
+                        .ok_or_else(|| invalid("unknown original photon source layer"))?,
+                )
+            }
+            PhotonSourceGeometry::Collimated { mu, .. } => {
+                if !mu.is_finite() || mu <= 0.0 || mu > 1.0 {
+                    return Err(invalid("incident beam direction cosine must be in (0, 1]"));
+                }
+                None
+            }
+        };
         source_indices.push(index);
     }
 
@@ -127,17 +194,19 @@ pub fn refine_slab_response(
     let mut agreement_streak = 0_usize;
     for level in 0..=refinement.max_levels {
         let count = size(&[cells.len(), subdivisions])?;
-        let sources = size(&[source_ids.len(), subdivisions])?;
+        let expanded_sources = size(&[internal_sources, subdivisions])?
+            .checked_add(sources.len() - internal_sources)
+            .ok_or(RadiationError::Budget("photon refinement sources"))?;
         let mut inner = grid_limits(
             count,
             groups,
-            sources,
+            expanded_sources,
             ordinates.len(),
             retained_values,
             limits,
         )?;
         let mut expanded = Vec::with_capacity(count);
-        let mut emitters = Vec::with_capacity(sources);
+        let mut emitters = Vec::with_capacity(expanded_sources);
         for cell in &cells {
             let thickness = ratio(cell.thickness_m, subdivisions as f64)?;
             if multiply(thickness, subdivisions as f64)? != cell.thickness_m {
@@ -152,13 +221,28 @@ pub fn refine_slab_response(
                 });
             }
         }
-        for &source in &source_indices {
-            work.charge(subdivisions, &mut checkpoint)?;
-            emitters.extend((0..subdivisions).map(|part| (source * subdivisions + part) as u64));
+        for (source, &index) in sources.iter().zip(&source_indices) {
+            if let Some(index) = index {
+                work.charge(subdivisions, &mut checkpoint)?;
+                for part in 0..subdivisions {
+                    emitters.push(PhotonSlabSource {
+                        source_id: emitters.len() as u64,
+                        geometry: PhotonSourceGeometry::UniformLayer {
+                            cell_id: (index * subdivisions + part) as u64,
+                        },
+                    });
+                }
+            } else {
+                work.charge(1, &mut checkpoint)?;
+                emitters.push(PhotonSlabSource {
+                    source_id: emitters.len() as u64,
+                    geometry: source.geometry,
+                });
+            }
         }
         work.charge(group_edges_j.len() + 2 * ordinates.len(), &mut checkpoint)?;
         inner.max_work = work.remaining;
-        let solved = prepare_slab_response(
+        let solved = prepare_slab_response_with_sources(
             data_id.clone(),
             radiation,
             group_edges_j.clone(),
@@ -172,8 +256,7 @@ pub fn refine_slab_response(
         let mut current = aggregate(
             solved,
             &cells,
-            &source_ids,
-            &source_indices,
+            &sources,
             subdivisions,
             limits.response,
             &mut work,
@@ -226,26 +309,31 @@ fn grid_limits(
 fn aggregate(
     mut solved: PhotonSlabResponse,
     cells: &[PhotonSlabCell],
-    source_ids: &[u64],
-    source_indices: &[usize],
+    sources: &[PhotonSlabSource],
     subdivisions: usize,
     limits: GroupedRadiationResponseLimits,
     work: &mut Work,
     checkpoint: &mut impl FnMut() -> Result<(), RadiationError>,
 ) -> Result<PhotonSlabResponse, RadiationError> {
     let groups = solved.response.group_edges_j().len() - 1;
-    let weight = 1.0 / subdivisions as f64;
-    let mut rows = Vec::with_capacity(source_ids.len());
-    let mut preparation_errors = Vec::with_capacity(source_ids.len());
-    for (&source_id, &source_index) in source_ids.iter().zip(source_indices) {
+    let mut rows = Vec::with_capacity(sources.len());
+    let mut preparation_errors = Vec::with_capacity(sources.len());
+    let mut first_emitter = 0_u64;
+    for source in sources {
+        let source_id = source.source_id;
+        let emitters = match source.geometry {
+            PhotonSourceGeometry::UniformLayer { .. } => subdivisions,
+            PhotonSourceGeometry::Collimated { .. } => 1,
+        };
+        let weight = 1.0 / emitters as f64;
         let mut group_rows = Vec::with_capacity(groups);
         let mut group_errors = Vec::with_capacity(groups);
         for group in 0..groups {
             let mut received = vec![Sum::default(); cells.len()];
             let mut escaped = Sum::default();
             let mut errors = ErrorBudget::new(f64::MAX);
-            for part in 0..subdivisions {
-                let id = (source_index * subdivisions + part) as u64;
+            for part in 0..emitters {
+                let id = first_emitter + part as u64;
                 let row = solved
                     .response
                     .source_group_row(id, group)
@@ -302,6 +390,7 @@ fn aggregate(
             groups: group_rows,
         });
         preparation_errors.push((source_id, group_errors));
+        first_emitter += emitters as u64;
     }
     solved.response = Arc::new(
         GroupedRadiationResponse::new(

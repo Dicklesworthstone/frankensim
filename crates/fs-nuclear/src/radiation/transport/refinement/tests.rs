@@ -250,3 +250,188 @@ fn g4_original_ids_zero_receivers_and_shared_refinement_limits_are_preserved() {
     assert!(matches!(cancelled, Err(RadiationError::Cancelled)));
     assert_eq!(observed, checkpoints);
 }
+
+fn run_sources(
+    cells: Vec<PhotonSlabCell>,
+    sources: Vec<PhotonSlabSource>,
+    accuracy: PhotonSlabRefinement,
+    limits: PhotonSlabLimits,
+    checkpoint: impl FnMut() -> Result<(), RadiationError>,
+) -> Result<RefinedPhotonSlabResponse, RadiationError> {
+    refine_slab_response_with_sources(
+        "manufactured refined illumination".into(),
+        DecayRadiation::Gamma,
+        vec![0.0, 1e-13],
+        cells,
+        sources,
+        vec![PhotonOrdinate {
+            mu: 1.0,
+            weight: 1.0,
+        }],
+        limits,
+        accuracy,
+        checkpoint,
+    )
+}
+
+fn beam(id: u64, boundary: PhotonSlabBoundary, mu: f64) -> PhotonSlabSource {
+    PhotonSlabSource {
+        source_id: id,
+        geometry: PhotonSourceGeometry::Collimated { boundary, mu },
+    }
+}
+
+#[test]
+fn g1_refined_oblique_beams_keep_full_incident_energy_and_original_receivers() {
+    let sources = vec![
+        beam(u64::MAX, PhotonSlabBoundary::Left, 0.5),
+        beam(8, PhotonSlabBoundary::Right, 0.25),
+    ];
+    let mut limits = PhotonSlabLimits::default();
+    // A spatial split must not invent another boundary source or charge its
+    // source budget as if it were an internal emitter in every sublayer.
+    limits.response.max_sources = 2;
+    let result = run_sources(
+        vec![mono(900, 0.8, 0.7, 0.0), mono(3, 0.4, 1.1, 0.0)],
+        sources,
+        accuracy(1e-12, 1),
+        limits,
+        || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(result.subdivisions_per_layer, 2);
+    assert_eq!(
+        result.transport.response.source_ids().collect::<Vec<_>>(),
+        [8, u64::MAX]
+    );
+    assert_eq!(
+        result.transport.response.receiver_ids().collect::<Vec<_>>(),
+        [3, 900]
+    );
+    let energy = result
+        .transport
+        .response
+        .apply(&[(u64::MAX, &[7.0]), (8, &[4.0])], 1e-10, || Ok(()))
+        .unwrap();
+    let left_a = 7.0 * -(-1.12_f64).exp_m1();
+    let left_b = 7.0 * (-1.12_f64).exp() * -(-0.88_f64).exp_m1();
+    let right_b = 4.0 * -(-1.76_f64).exp_m1();
+    let right_a = 4.0 * (-1.76_f64).exp() * -(-2.24_f64).exp_m1();
+    near(energy.receiver_energy_j[&900], left_a + right_a, 5e-14);
+    near(energy.receiver_energy_j[&3], left_b + right_b, 5e-14);
+    near(
+        energy.escaped_j,
+        7.0 * (-2.0_f64).exp() + 4.0 * (-4.0_f64).exp(),
+        5e-14,
+    );
+    near(energy.deposited_j + energy.escaped_j, 11.0, 5e-14);
+}
+
+#[test]
+fn g3_incident_scattering_refines_to_independent_two_stream_boundary_solution() {
+    let solve = |tolerance| {
+        run_sources(
+            vec![mono(21, 2.0, 0.4, 3.6)],
+            vec![beam(100, PhotonSlabBoundary::Left, 1.0)],
+            accuracy(tolerance, 7),
+            PhotonSlabLimits::default(),
+            || Ok(()),
+        )
+        .unwrap()
+    };
+    let loose = solve(1e-2);
+    let tight = solve(8e-4);
+    // Independent two-stream ODE: I+'=-c I+ + d I-,
+    // I-'=-d I+ + c I-, with I+(0)=1 and I-(L)=0.
+    // exp(M L) gives R and T directly, without collision probabilities.
+    let k = (0.4_f64 * 4.0).sqrt();
+    let z = 2.0 * k;
+    let c = 0.4 + 0.5 * 3.6;
+    let d = 0.5 * 3.6;
+    let reflected = d * z.tanh() / (k + c * z.tanh());
+    let transmitted = 1.0 / (z.cosh() + c / k * z.sinh());
+    let exact = reflected + transmitted;
+    let escape = |result: &RefinedPhotonSlabResponse| {
+        result
+            .transport
+            .response
+            .apply(&[(100, &[1.0])], 1e-10, || Ok(()))
+            .unwrap()
+            .escaped_j
+    };
+    assert!(loose.levels >= 2);
+    assert!(tight.levels > loose.levels);
+    assert!((escape(&tight) - exact).abs() < (escape(&loose) - exact).abs());
+    near(escape(&tight), exact, 6e-4);
+}
+
+#[test]
+fn g3_mixed_internal_and_boundary_sources_preserve_superposition_and_cancellation() {
+    let cells = vec![mono(81, 0.4, 0.8, 0.0), mono(17, 0.7, 0.3, 0.0)];
+    let sources = vec![
+        beam(600, PhotonSlabBoundary::Right, 0.6),
+        PhotonSlabSource {
+            source_id: 20,
+            geometry: PhotonSourceGeometry::UniformLayer { cell_id: 81 },
+        },
+        // Same physical emitting layer with a distinct source identity.
+        PhotonSlabSource {
+            source_id: 7,
+            geometry: PhotonSourceGeometry::UniformLayer { cell_id: 81 },
+        },
+    ];
+    let config = accuracy(1e-12, 1);
+    let mut checkpoints = 0;
+    let refined = run_sources(
+        cells.clone(),
+        sources.clone(),
+        config,
+        PhotonSlabLimits::default(),
+        || {
+            checkpoints += 1;
+            Ok(())
+        },
+    )
+    .unwrap();
+    let coarse = prepare_slab_response_with_sources(
+        "same mixed source slab".into(),
+        DecayRadiation::Gamma,
+        vec![0.0, 1e-13],
+        cells.clone(),
+        sources.clone(),
+        vec![PhotonOrdinate {
+            mu: 1.0,
+            weight: 1.0,
+        }],
+        PhotonSlabLimits::default(),
+        || Ok(()),
+    )
+    .unwrap();
+    let input: &[(u64, &[f64])] = &[(600, &[2.0]), (20, &[3.0]), (7, &[5.0])];
+    let expected = coarse.response.apply(input, 1e-10, || Ok(())).unwrap();
+    let actual = refined
+        .transport
+        .response
+        .apply(input, 1e-10, || Ok(()))
+        .unwrap();
+    for id in [81, 17] {
+        near(
+            actual.receiver_energy_j[&id],
+            expected.receiver_energy_j[&id],
+            5e-14,
+        );
+    }
+    near(actual.escaped_j, expected.escaped_j, 5e-14);
+    let mut observed = 0;
+    assert!(matches!(
+        run_sources(cells, sources, config, PhotonSlabLimits::default(), || {
+            observed += 1;
+            if observed == checkpoints {
+                Err(RadiationError::Cancelled)
+            } else {
+                Ok(())
+            }
+        }),
+        Err(RadiationError::Cancelled)
+    ));
+}
