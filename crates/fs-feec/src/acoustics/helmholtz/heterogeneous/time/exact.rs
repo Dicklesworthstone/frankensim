@@ -24,9 +24,9 @@
 
 use super::super::{BoundaryVelocitySource, VolumeVelocitySource};
 use super::{
-    BoundaryAdmittance, C64, Dd, HeterogeneousError, HeterogeneousHelmholtzFe,
-    HeterogeneousTimeEnergy, HeterogeneousTimeState, PressureReleaseConstraints, RealVelocityTrace,
-    ResistiveBoundary, det, energy_change, invalid, poll, positive_form,
+    Dd, HeterogeneousError, HeterogeneousHelmholtzFe, HeterogeneousTimeEnergy,
+    HeterogeneousTimeState, PressureReleaseConstraints, RealVelocityTrace, ResistiveBoundary, det,
+    energy_change, invalid, poll, positive_form,
 };
 use fs_la::factor::cholesky;
 use fs_phs::linear_exact::{
@@ -275,6 +275,40 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         limits: ExactTimeLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedExactTime<'m, 'f, 'c>, HeterogeneousError> {
+        self.prepare_exact_time_with_spatial_boundaries(
+            duration_s,
+            boundaries,
+            &[],
+            ports,
+            boundary_sources,
+            sources,
+            pressure_release_faces,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Exact complete-field propagation with spatial memoryless wall losses.
+    ///
+    /// The same pointwise conductance form enters the dynamics and the
+    /// trajectory-integrated dissipation. Uniform, spatial and release faces
+    /// must be disjoint, and every spatial field must belong to this exact
+    /// model. Held boundary/volume sources, original trace coordinates and
+    /// pressure-release constraints retain their existing semantics. No
+    /// frequency sample is converted into a broadband material law.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_exact_time_with_spatial_boundaries<'m>(
+        &'m self,
+        duration_s: f64,
+        boundaries: &[ResistiveBoundary],
+        spatial_boundaries: &[&super::SpatialResistiveBoundary<'_, '_, '_>],
+        ports: &[ExactVelocityPort],
+        boundary_sources: &[&BoundaryVelocitySource<'_, '_, '_>],
+        sources: &[&VolumeVelocitySource<'_, '_, '_>],
+        pressure_release_faces: &[[u32; 3]],
+        limits: ExactTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedExactTime<'m, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
         super::super::boundary_source::admit_count(boundary_sources.len())?;
         super::super::source::admit_count(sources.len())?;
@@ -326,28 +360,8 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             poll(cancelled)?;
             source.validate(self)?;
         }
-        let mut admitted = Vec::with_capacity(boundaries.len());
-        for boundary in boundaries {
-            poll(cancelled)?;
-            if !pressure_release.faces.is_empty() {
-                for &face in &boundary.faces {
-                    poll(cancelled)?;
-                    let mut key = face;
-                    key.sort_unstable();
-                    if pressure_release.faces.contains(&key) {
-                        return Err(invalid(
-                            "pressure-release and real-admittance faces must not overlap",
-                        )
-                        .into());
-                    }
-                }
-            }
-            admitted.push(BoundaryAdmittance {
-                faces: boundary.faces.clone(),
-                admittance_m_pa_s: C64::from_re(boundary.admittance_m_pa_s),
-            });
-        }
-        let (conductance, _) = self.admittance_matrices(&admitted, cancelled)?;
+        let conductance =
+            self.resistive_matrix(boundaries, spatial_boundaries, &pressure_release, cancelled)?;
         let mut loads = Vec::with_capacity(port_count);
         for port in ports {
             poll(cancelled)?;

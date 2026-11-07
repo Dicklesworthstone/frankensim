@@ -30,8 +30,8 @@
 
 use super::super::pressure_release::PressureReleaseConstraints;
 use super::{
-    AcousticFeError, BoundaryAdmittance, HeterogeneousError, HeterogeneousHelmholtzFe, invalid,
-    poll,
+    AcousticFeError, BoundaryAdmittance, HeterogeneousError, HeterogeneousHelmholtzFe,
+    SpatialResistiveBoundary, invalid, poll,
 };
 use fs_math::{c64::C64, dd::Dd, det};
 use fs_sparse::direct::{DirectOrdering, LdltFactor, LdltOptions, SymbolicLdlt};
@@ -220,6 +220,35 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         limits: HeterogeneousTimeLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedHeterogeneousTime<'m, 'f, 'c>, HeterogeneousError> {
+        self.prepare_time_with_spatial_boundaries(
+            duration_s,
+            boundaries,
+            &[],
+            pressure_release_faces,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Prepare broadband waves with the original pointwise resistive walls.
+    ///
+    /// Uniform and spatial patches must be disjoint from each other and from
+    /// pressure-release faces. Sources may share a resistive face. Each spatial
+    /// law belongs to this exact geometry/material owner and is explicitly
+    /// memoryless. Its full trace form enters both the sparse factor and the
+    /// independently evaluated heat `h integral(Y(x) p_mid(x)^2)`.
+    /// The form is reused at every step; no surface resampling or additional
+    /// dynamic coordinates are introduced. Empty spatial patches preserve the
+    /// uniform-boundary arithmetic and all original source/constraint semantics.
+    pub fn prepare_time_with_spatial_boundaries<'m>(
+        &'m self,
+        duration_s: f64,
+        boundaries: &[ResistiveBoundary],
+        spatial_boundaries: &[&SpatialResistiveBoundary<'_, '_, '_>],
+        pressure_release_faces: &[[u32; 3]],
+        limits: HeterogeneousTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedHeterogeneousTime<'m, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
         let half_h = 0.5 * duration_s;
         let quarter_h2 = half_h * half_h;
@@ -259,26 +288,8 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 maximum: limits.max_dofs,
             });
         }
-        let mut admitted = Vec::with_capacity(boundaries.len());
-        for boundary in boundaries {
-            poll(cancelled)?;
-            for &face in &boundary.faces {
-                poll(cancelled)?;
-                let mut key = face;
-                key.sort_unstable();
-                if pressure_release.faces.contains(&key) {
-                    return Err(invalid(
-                        "pressure-release and resistive boundary faces must not overlap",
-                    )
-                    .into());
-                }
-            }
-            admitted.push(BoundaryAdmittance {
-                faces: boundary.faces.clone(),
-                admittance_m_pa_s: C64::from_re(boundary.admittance_m_pa_s),
-            });
-        }
-        let (conductance, _) = self.admittance_matrices(&admitted, cancelled)?;
+        let conductance =
+            self.resistive_matrix(boundaries, spatial_boundaries, &pressure_release, cancelled)?;
         let mut effective = Coo::new(n, n);
         for (row, &original_row) in pressure_release.free_dofs.iter().enumerate() {
             poll(cancelled)?;
@@ -366,6 +377,75 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             pressure_release,
             limits,
         })
+    }
+
+    // Shared physical conductance for midpoint, exact and mechanical-wall
+    // evolutions. Keep the original uniform assembly when no spatial field is
+    // supplied, and never turn a frequency-local harmonic sample into a law.
+    fn resistive_matrix(
+        &self,
+        boundaries: &[ResistiveBoundary],
+        spatial_boundaries: &[&SpatialResistiveBoundary<'_, '_, '_>],
+        pressure_release: &PressureReleaseConstraints,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Csr, HeterogeneousError> {
+        let mut seen = pressure_release.faces.clone();
+        for field in spatial_boundaries {
+            poll(cancelled)?;
+            field.validate(self)?;
+        }
+        for faces in boundaries
+            .iter()
+            .map(|boundary| boundary.faces.as_slice())
+            .chain(
+                spatial_boundaries
+                    .iter()
+                    .map(|field| field.faces.as_slice()),
+            )
+        {
+            for &face in faces {
+                poll(cancelled)?;
+                let mut key = face;
+                key.sort_unstable();
+                if !seen.insert(key) {
+                    return Err(invalid(
+                        "uniform, spatial resistive and pressure-release faces must be disjoint",
+                    )
+                    .into());
+                }
+            }
+        }
+        let admitted = boundaries
+            .iter()
+            .map(|boundary| BoundaryAdmittance {
+                faces: boundary.faces.clone(),
+                admittance_m_pa_s: C64::from_re(boundary.admittance_m_pa_s),
+            })
+            .collect::<Vec<_>>();
+        let (uniform, _) = self.admittance_matrices(&admitted, cancelled)?;
+        if spatial_boundaries.is_empty() {
+            return Ok(uniform);
+        }
+        let mut combined = Coo::new(self.ndof(), self.ndof());
+        for matrix in core::iter::once(&uniform)
+            .chain(spatial_boundaries.iter().map(|field| &field.conductance))
+        {
+            for row in 0..self.ndof() {
+                poll(cancelled)?;
+                let (cols, values) = matrix.row(row);
+                for (&col, &value) in cols.iter().zip(values) {
+                    combined.push(row, col, value);
+                }
+            }
+        }
+        let combined = combined.assemble();
+        for row in 0..self.ndof() {
+            poll(cancelled)?;
+            if combined.row(row).1.iter().any(|value| !value.is_finite()) {
+                return Err(invalid("spatial resistive boundary assembly overflow").into());
+            }
+        }
+        Ok(combined)
     }
 }
 

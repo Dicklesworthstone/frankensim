@@ -2306,3 +2306,34 @@ were performed. Native compilation and test execution remain unverified under
 the existing upstream dependency-memory failure and full workspace. No
 closed-cylinder, instrument, spatial-resolution or broader bead acceptance is
 inferred.
+
+## Spatial resistance in broadband pressure and wall evolution
+
+`HeterogeneousHelmholtzFe::spatial_resistive_boundary` prepares the local,
+frequency-independent law `v_out = Y(x) p`, with nonnegative specific
+conductance in m/(Pa s). It uses the original affine or quadratic surface map,
+normal and complete pressure trace at explicit quadrature points. The retained
+form is `C_ij = integral(Y(x) phi_i phi_j)`, preserving spatial pressure/material
+correlation. No face-average conductance or replacement surface is introduced.
+This typed law is distinct from a frequency-local `SpatialBoundaryAdmittance`:
+real admittance at one frequency alone is not a causal broadband law.
+Its `at_frequency` method reuses the same prepared form for harmonic fields
+and their peak-phasor power without another material sampling pass.
+
+Sparse midpoint, complete-field exponential, and both causal mechanical-wall
+evolutions accept this same prepared form. It enters the dynamics and the
+independent boundary-heat calculation: `h p_mid^T C p_mid` for midpoint and
+`integral(p^T C p dt)` for exact held-input evolution. Mechanical resistance,
+Maxwell relaxation and reversible fluid/wall work remain separate. Every
+original pressure and wall coordinate remains present. Warm steps retain their
+existing cost and do not resample material or geometry.
+
+Uniform, spatial, mechanical and pressure-release patches must be disjoint;
+inward sources may share non-release faces. Foreign-model fields, nonfinite or
+active samples, invalid quadrature and cancellation refuse without publishing
+partial state. Existing uniform paths preserve their arithmetic when the
+spatial patch list is empty. G1/G3 regressions use exact triangle moments for
+nonuniform wall heat, uniform-limit recovery, independent midpoint/exponential
+refinement, and separate coupled fluid/wall work balances. The law is prescribed,
+linear and memoryless; dispersive materials require their own causal states.
+Geometry, material quadrature, spatial and temporal convergence remain distinct.

@@ -27,8 +27,8 @@ use super::super::{
 use super::{
     BoundaryAdmittance, BoundaryVelocitySource, C64, Coo, Csr, Dd, HeterogeneousError,
     HeterogeneousHelmholtzFe, HeterogeneousTimeEnergy, HeterogeneousTimeState, MechanicalBoundary,
-    MechanicalTimeEnergy, RelaxationBranch, ResistiveBoundary, VolumeVelocitySource, energy_change,
-    invalid, poll, positive_form,
+    MechanicalTimeEnergy, RelaxationBranch, ResistiveBoundary, SpatialResistiveBoundary,
+    VolumeVelocitySource, energy_change, invalid, poll, positive_form,
 };
 use fs_la::factor::cholesky;
 use fs_math::det;
@@ -408,6 +408,42 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         limits: ExactMechanicalTimeLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedExactMechanicalTime<'m, 'f, 'c>, HeterogeneousError> {
+        self.prepare_exact_time_with_walls_and_spatial_boundaries(
+            duration_s,
+            resistive,
+            &[],
+            boundaries,
+            ports,
+            boundary_sources,
+            volume_sources,
+            pressure_release_faces,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Exact full fluid/wall propagation with original spatial resistive traces.
+    ///
+    /// Pointwise memoryless conductance enters both the complete coupled
+    /// dynamics and its trajectory-integrated boundary heat. Causal wall
+    /// displacement, velocity, relaxation memories and their independent work
+    /// remain unchanged. Spatial, uniform, mechanical and pressure-release
+    /// patches must be disjoint. Each spatial law belongs to this exact model;
+    /// no material sampling occurs during warm steps.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_exact_time_with_walls_and_spatial_boundaries<'m>(
+        &'m self,
+        duration_s: f64,
+        resistive: &[ResistiveBoundary],
+        spatial_boundaries: &[&SpatialResistiveBoundary<'_, '_, '_>],
+        boundaries: &[MechanicalBoundary],
+        ports: &[ExactVelocityPort],
+        boundary_sources: &[&BoundaryVelocitySource<'_, '_, '_>],
+        volume_sources: &[&VolumeVelocitySource<'_, '_, '_>],
+        pressure_release_faces: &[[u32; 3]],
+        limits: ExactMechanicalTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedExactMechanicalTime<'m, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
         super::super::super::boundary_source::admit_count(boundary_sources.len())?;
         super::super::super::source::admit_count(volume_sources.len())?;
@@ -449,6 +485,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         for faces in resistive
             .iter()
             .map(|b| &b.faces)
+            .chain(spatial_boundaries.iter().map(|b| &b.faces))
             .chain(boundaries.iter().map(|b| &b.faces))
         {
             for &face in faces {
@@ -463,14 +500,8 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 }
             }
         }
-        let real = resistive
-            .iter()
-            .map(|b| BoundaryAdmittance {
-                faces: b.faces.clone(),
-                admittance_m_pa_s: C64::from_re(b.admittance_m_pa_s),
-            })
-            .collect::<Vec<_>>();
-        let (conductance, _) = self.admittance_matrices(&real, cancelled)?;
+        let conductance =
+            self.resistive_matrix(resistive, spatial_boundaries, &pressure_release, cancelled)?;
         let conductance = pressure_release.restrict(&conductance, cancelled)?;
         let mut walls = Vec::new();
         for boundary in boundaries {

@@ -32,6 +32,74 @@ pub struct SpatialBoundaryAdmittance<'m, 'f, 'c> {
     pub(super) susceptance: Csr,
 }
 
+/// A prescribed, frequency-independent local law `v_out = Y(x) p`.
+///
+/// `Y` is a finite nonnegative specific conductance [m/(Pa s)]. The original
+/// surface integral is retained, so nonuniform pressure and wall properties
+/// remain correlated. This law is causal and memoryless: it is deliberately
+/// distinct from a frequency sample of [`SpatialBoundaryAdmittance`]. A real
+/// value at one frequency alone does not establish a broadband wall law.
+pub struct SpatialResistiveBoundary<'m, 'f, 'c> {
+    model: &'m HeterogeneousHelmholtzFe<'f, 'c>,
+    quadrature_order: usize,
+    pub(super) faces: Vec<[u32; 3]>,
+    pub(super) conductance: Csr,
+}
+
+impl<'m, 'f, 'c> SpatialResistiveBoundary<'m, 'f, 'c> {
+    /// Original boundary triangles in canonical order.
+    #[must_use]
+    pub fn faces(&self) -> &[[u32; 3]] {
+        &self.faces
+    }
+
+    /// Gauss points per surface Duffy axis used for this material field.
+    #[must_use]
+    pub const fn quadrature_order(&self) -> usize {
+        self.quadrature_order
+    }
+
+    /// Use the SAME memoryless physical law in a harmonic solve.
+    ///
+    /// The already sampled original trace form is cloned without calling the
+    /// material again. This direction is physically defined because the law is
+    /// frequency independent; converting an arbitrary harmonic sample into a
+    /// transient boundary is deliberately not provided.
+    pub fn at_frequency(
+        &self,
+        frequency_hz: f64,
+    ) -> Result<SpatialBoundaryAdmittance<'m, 'f, 'c>, HeterogeneousError> {
+        let omega = core::f64::consts::TAU * frequency_hz;
+        if !omega.is_finite()
+            || omega <= 0.0
+            || !(omega * omega).is_finite()
+            || omega * omega == 0.0
+        {
+            return Err(invalid("positive representable harmonic frequency required").into());
+        }
+        Ok(SpatialBoundaryAdmittance {
+            model: self.model,
+            frequency_hz,
+            quadrature_order: self.quadrature_order,
+            faces: self.faces.clone(),
+            conductance: self.conductance.clone(),
+            susceptance: Coo::new(self.model.ndof(), self.model.ndof()).assemble(),
+        })
+    }
+
+    pub(super) fn validate(
+        &self,
+        model: &HeterogeneousHelmholtzFe<'_, '_>,
+    ) -> Result<(), HeterogeneousError> {
+        if !core::ptr::eq(self.model, model) {
+            return Err(
+                invalid("spatial resistance belongs to another spatial/material operator").into(),
+            );
+        }
+        Ok(())
+    }
+}
+
 impl SpatialBoundaryAdmittance<'_, '_, '_> {
     /// Exact frequency [Hz] at which the original wall callback was evaluated.
     #[must_use]
@@ -111,6 +179,68 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         {
             return Err(invalid("positive representable harmonic frequency required").into());
         }
+        let (faces, conductance, susceptance) = self.sample_boundary_admittance(
+            faces,
+            quadrature_order,
+            &mut |face, point| admittance_at(frequency_hz, face, point),
+            cancelled,
+        )?;
+        Ok(SpatialBoundaryAdmittance {
+            model: self,
+            frequency_hz,
+            quadrature_order,
+            faces,
+            conductance,
+            susceptance,
+        })
+    }
+
+    /// Prepare a spatially varying, passive MEMORYLESS boundary law once.
+    ///
+    /// The callback returns `Y(x)` [m/(Pa s)] at each original curved or affine
+    /// face quadrature point. It must describe a frequency-independent local
+    /// resistance, not the real part of a dispersive impedance sample. There
+    /// is no face averaging, representative normal or replacement geometry.
+    /// Sampling and quadrature admission match [`Self::spatial_boundary_admittance`].
+    /// Subsequent midpoint/exact steps reuse the original sparse form without
+    /// material callbacks or added time-step work. A callback refusal propagates
+    /// unchanged and cancellation returns no partially prepared boundary.
+    pub fn spatial_resistive_boundary<'m, E: From<AcousticFeError>>(
+        &'m self,
+        faces: &[[u32; 3]],
+        quadrature_order: usize,
+        conductance_at: &mut impl FnMut([u32; 3], GeometryFacePoint) -> Result<f64, E>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialResistiveBoundary<'m, 'f, 'c>, E> {
+        let (faces, conductance, _) = self.sample_boundary_admittance(
+            faces,
+            quadrature_order,
+            &mut |face, point| conductance_at(face, point).map(C64::from_re),
+            cancelled,
+        )?;
+        Ok(SpatialResistiveBoundary {
+            model: self,
+            quadrature_order,
+            faces,
+            conductance,
+        })
+    }
+
+    fn sample_boundary_admittance<E: From<AcousticFeError>>(
+        &self,
+        faces: &[[u32; 3]],
+        quadrature_order: usize,
+        admittance_at: &mut impl FnMut([u32; 3], GeometryFacePoint) -> Result<C64, E>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<[u32; 3]>, Csr, Csr), E> {
+        let poll = |cancelled: &mut dyn FnMut() -> bool| {
+            if cancelled() {
+                Err(AcousticFeError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+        poll(cancelled)?;
         let minimum = self.geometry.face_quadrature_order(self.geometry.order + 1);
         if quadrature_order < minimum || quadrature_order > MAX_QUADRATURE_ORDER {
             return Err(
@@ -150,7 +280,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 let point = self
                     .geometry
                     .geometry_face_point(element, omitted, barycentric)?;
-                let y = admittance_at(frequency_hz, face, point)?;
+                let y = admittance_at(face, point)?;
                 let weight = rule.weights[q];
                 if !finite(y) || y.re < 0.0 || !weight.is_finite() || weight <= 0.0 {
                     return Err(invalid(
@@ -203,14 +333,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 return Err(invalid("spatial admittance global assembly overflow").into());
             }
         }
-        Ok(SpatialBoundaryAdmittance {
-            model: self,
-            frequency_hz,
-            quadrature_order,
-            faces: canonical.into_iter().collect(),
-            conductance,
-            susceptance,
-        })
+        Ok((canonical.into_iter().collect(), conductance, susceptance))
     }
 }
 

@@ -32,8 +32,8 @@ use super::super::{BoundaryVelocitySource, VolumeVelocitySource, source::admit_c
 use super::{
     BoundaryAdmittance, C64, Coo, Csr, Dd, HeterogeneousError, HeterogeneousHelmholtzFe,
     HeterogeneousTimeEnergy, HeterogeneousTimeLimits, HeterogeneousTimeState,
-    PreparedHeterogeneousTime, RealVelocityTrace, ResistiveBoundary, energy_change, invalid, poll,
-    positive_form, relative,
+    PreparedHeterogeneousTime, RealVelocityTrace, ResistiveBoundary, SpatialResistiveBoundary,
+    energy_change, invalid, poll, positive_form, relative,
 };
 use fs_phs::acoustic_outlet::AcousticWallRelaxation;
 use fs_phs::{RelaxationBranch, WallPin};
@@ -263,6 +263,36 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         limits: MechanicalTimeLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedMechanicalTime<'m, 'f, 'c>, HeterogeneousError> {
+        self.prepare_time_with_walls_and_spatial_boundaries(
+            duration_s,
+            resistive,
+            &[],
+            boundaries,
+            pressure_release_faces,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Couple complete causal mechanical walls to spatial resistive patches.
+    ///
+    /// Spatial conductance retains its original pressure trace and contributes
+    /// only to boundary heat. Mechanical resistance, relaxation and reversible
+    /// fluid/wall work retain their independent physical accounts. Uniform,
+    /// spatial, mechanical and pressure-release patches must be disjoint;
+    /// velocity sources may share any non-release face. No wall or pressure
+    /// coordinate is averaged or discarded.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_time_with_walls_and_spatial_boundaries<'m>(
+        &'m self,
+        duration_s: f64,
+        resistive: &[ResistiveBoundary],
+        spatial_boundaries: &[&SpatialResistiveBoundary<'_, '_, '_>],
+        boundaries: &[MechanicalBoundary],
+        pressure_release_faces: &[[u32; 3]],
+        limits: MechanicalTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedMechanicalTime<'m, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
         if !duration_s.is_finite() || duration_s <= 0.0 || limits.max_wall_dofs == 0 {
             return Err(
@@ -288,6 +318,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         for faces in resistive
             .iter()
             .map(|b| &b.faces)
+            .chain(spatial_boundaries.iter().map(|b| &b.faces))
             .chain(boundaries.iter().map(|b| &b.faces))
         {
             for &face in faces {
@@ -302,14 +333,11 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 }
             }
         }
-        let real = resistive
-            .iter()
-            .map(|b| BoundaryAdmittance {
-                faces: b.faces.clone(),
-                admittance_m_pa_s: C64::from_re(b.admittance_m_pa_s),
-            })
-            .collect::<Vec<_>>();
-        let (conductance, _) = self.admittance_matrices(&real, cancelled)?;
+        let pressure_release = self
+            .geometry
+            .pressure_release_constraints(pressure_release_faces, cancelled)?;
+        let conductance =
+            self.resistive_matrix(resistive, spatial_boundaries, &pressure_release, cancelled)?;
         let mut total = 0usize;
         let mut total_memory = 0usize;
         let mut walls = Vec::with_capacity(boundaries.len());
@@ -427,9 +455,10 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 relaxation,
             });
         }
-        let condensed = self.prepare_time_with_pressure_release(
+        let condensed = self.prepare_time_with_spatial_boundaries(
             duration_s,
             &effective,
+            spatial_boundaries,
             pressure_release_faces,
             limits.acoustic,
             cancelled,

@@ -1,11 +1,550 @@
 //! G1/G3: spatial wall/pressure correlation, source work and original curved maps.
 
-use super::*;
+use super::super::time::exact::ExactTimeLimits;
+use super::super::time::{HeterogeneousTimeLimits, ResistiveBoundary};
 use super::super::{BoundaryAdmittance, HarmonicLimits};
+use super::*;
 use crate::acoustics::helmholtz::{HelmholtzFe, Medium, QuadraticGeometryControls};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_rep_mesh::TetComplex;
 use std::cell::Cell;
+
+// G1: exact integral of (1+x) lambda_i lambda_j over the unit right triangle.
+// This oracle does not call the FE surface or material quadrature.
+fn resistive_power(pressure: &[f64]) -> f64 {
+    let gram = [
+        [1.0 / 10.0, 7.0 / 120.0, 1.0 / 20.0],
+        [7.0 / 120.0, 2.0 / 15.0, 7.0 / 120.0],
+        [1.0 / 20.0, 7.0 / 120.0, 1.0 / 10.0],
+    ];
+    (0..3)
+        .flat_map(|i| (0..3).map(move |j| pressure[i] * gram[i][j] * pressure[j]))
+        .sum()
+}
+
+#[test]
+fn spatial_resistance_retains_pressure_correlation_and_midpoint_physical_heat() {
+    let mesh = TetComplex::from_tets(4, vec![[0, 1, 2, 3]]);
+    let geometry = HelmholtzFe::new(&mesh, &POSITIONS, 1, MEDIUM).unwrap();
+    let model = uniform(&geometry);
+    let calls = Cell::new(0);
+    let boundary = model
+        .spatial_resistive_boundary(
+            &[FACE],
+            4,
+            &mut |_, point| {
+                calls.set(calls.get() + 1);
+                Ok::<_, AcousticFeError>(1.0 + point.point.position_m[0])
+            },
+            &mut || false,
+        )
+        .unwrap();
+    assert_eq!(boundary.faces(), &[FACE]);
+    assert_eq!(boundary.quadrature_order(), 4);
+    assert_eq!(calls.get(), 16);
+    let harmonic_boundary = boundary.at_frequency(FREQUENCY).unwrap();
+    let harmonic = model
+        .prepare_with_spatial_admittances(
+            FREQUENCY,
+            &[],
+            &[&harmonic_boundary],
+            &[],
+            HarmonicLimits::default(),
+            &mut || false,
+        )
+        .unwrap();
+    let harmonic_field = harmonic
+        .solve(&[(FACE, [C64::ONE; 3])], &mut || false)
+        .unwrap();
+    let harmonic_heat = 0.5
+        * (resistive_power(
+            &harmonic_field
+                .pressure_pa
+                .iter()
+                .map(|p| p.re)
+                .collect::<Vec<_>>(),
+        ) + resistive_power(
+            &harmonic_field
+                .pressure_pa
+                .iter()
+                .map(|p| p.im)
+                .collect::<Vec<_>>(),
+        ));
+    close(harmonic_field.boundary_dissipation_w, harmonic_heat, 1e-12);
+    close(harmonic_field.power_balance_residual_w(), 0.0, 1e-12);
+    assert!(boundary.at_frequency(0.0).is_err());
+    assert!(boundary.at_frequency(f64::NAN).is_err());
+    let h = 0.004;
+    let owner = model
+        .prepare_time_with_spatial_boundaries(
+            h,
+            &[],
+            &[&boundary],
+            &[],
+            HeterogeneousTimeLimits::default(),
+            &mut || false,
+        )
+        .unwrap();
+    let averaged = model
+        .prepare_time(
+            h,
+            &[ResistiveBoundary {
+                faces: vec![FACE],
+                admittance_m_pa_s: 4.0 / 3.0,
+            }],
+            HeterogeneousTimeLimits::default(),
+            &mut || false,
+        )
+        .unwrap();
+    let initial = owner.state(&[0.0; 4], &[1.0, -0.4, 2.0, 0.3]).unwrap();
+    let average_step = averaged.step(&initial, &[], &mut || false).unwrap();
+    let mut state = initial;
+    let mut dissipated = 0.0;
+    let initial_energy = owner.energy(&state).unwrap().total_j();
+    for index in 0..30 {
+        let step = owner.step(&state, &[], &mut || false).unwrap();
+        let midpoint = state
+            .pressure_pa()
+            .iter()
+            .zip(step.state.pressure_pa())
+            .map(|(a, b)| 0.5 * (a + b))
+            .collect::<Vec<_>>();
+        let heat = h * resistive_power(&midpoint);
+        close(
+            step.work.boundary_dissipation_j,
+            heat,
+            2e-13 * initial_energy,
+        );
+        assert!(heat > 0.0);
+        close(step.work.balance_residual_j(), 0.0, 2e-12 * initial_energy);
+        if index == 0 {
+            assert!(
+                step.state
+                    .pressure_pa()
+                    .iter()
+                    .zip(average_step.state.pressure_pa())
+                    .any(|(a, b)| (a - b).abs() > 1e-3),
+                "face averaging must change the solved wave"
+            );
+        }
+        dissipated += heat;
+        state = step.state;
+    }
+    close(
+        owner.energy(&state).unwrap().total_j() + dissipated,
+        initial_energy,
+        2e-11 * initial_energy,
+    );
+    assert_eq!(calls.get(), 16, "warm steps must not resample the wall");
+}
+
+#[test]
+fn spatial_resistance_exact_evolution_matches_midpoint_convergence_and_heat() {
+    let mesh = TetComplex::from_tets(4, vec![[0, 1, 2, 3]]);
+    let geometry = HelmholtzFe::new(&mesh, &POSITIONS, 1, MEDIUM).unwrap();
+    let model = uniform(&geometry);
+    let boundary = model
+        .spatial_resistive_boundary(
+            &[FACE],
+            4,
+            &mut |_, p| Ok::<_, AcousticFeError>(1.0 + p.point.position_m[0]),
+            &mut || false,
+        )
+        .unwrap();
+    let duration = 0.04;
+    let exact = model
+        .prepare_exact_time_with_spatial_boundaries(
+            duration,
+            &[],
+            &[&boundary],
+            &[],
+            &[],
+            &[],
+            &[],
+            ExactTimeLimits::default(),
+            &mut || false,
+        )
+        .unwrap();
+    let initial = exact.state(&[0.0; 4], &[1.0, -0.4, 2.0, 0.3]).unwrap();
+    let expected = exact.step(&initial, &[], &mut || false).unwrap();
+    let energy = exact.energy(&initial).unwrap().total_j();
+    assert!(expected.work.boundary_dissipation_j > 0.1 * energy);
+    close(expected.work.balance_residual_j(), 0.0, 2e-10 * energy);
+    let mut errors = Vec::new();
+    for steps in [16, 32, 64] {
+        let h = duration / steps as f64;
+        let midpoint = model
+            .prepare_time_with_spatial_boundaries(
+                h,
+                &[],
+                &[&boundary],
+                &[],
+                HeterogeneousTimeLimits::default(),
+                &mut || false,
+            )
+            .unwrap();
+        let mut state = initial.clone();
+        let mut heat = 0.0;
+        for _ in 0..steps {
+            let result = midpoint.step(&state, &[], &mut || false).unwrap();
+            let p = state
+                .pressure_pa()
+                .iter()
+                .zip(result.state.pressure_pa())
+                .map(|(a, b)| 0.5 * (a + b))
+                .collect::<Vec<_>>();
+            heat += h * resistive_power(&p);
+            state = result.state;
+        }
+        let field_error = state
+            .pressure_pa()
+            .iter()
+            .zip(expected.state.pressure_pa())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        errors.push(field_error);
+        close(
+            heat,
+            expected.work.boundary_dissipation_j,
+            2.0 * energy / (steps * steps) as f64,
+        );
+    }
+    assert!(errors[0] > 1e-5, "time refinement must be live");
+    for pair in errors.windows(2) {
+        assert!(
+            pair[1] < 0.28 * pair[0],
+            "second-order field ladder: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn spatial_resistance_constant_limit_and_original_constraints() {
+    let mesh = TetComplex::from_tets(4, vec![[0, 1, 2, 3]]);
+    for order in 1..=3 {
+        let geometry = HelmholtzFe::new(&mesh, &POSITIONS, order, MEDIUM).unwrap();
+        let model = uniform(&geometry);
+        let boundary = model
+            .spatial_resistive_boundary(
+                &[FACE],
+                order + 2,
+                &mut |_, _| Ok::<_, AcousticFeError>(0.7),
+                &mut || false,
+            )
+            .unwrap();
+        let uniform = [ResistiveBoundary {
+            faces: vec![FACE],
+            admittance_m_pa_s: 0.7,
+        }];
+        let spatial = model
+            .prepare_time_with_spatial_boundaries(
+                0.01,
+                &[],
+                &[&boundary],
+                &[],
+                HeterogeneousTimeLimits::default(),
+                &mut || false,
+            )
+            .unwrap();
+        let constant = model
+            .prepare_time(
+                0.01,
+                &uniform,
+                HeterogeneousTimeLimits::default(),
+                &mut || false,
+            )
+            .unwrap();
+        let p = (0..model.ndof())
+            .map(|i| 1.0 / (i + 1) as f64)
+            .collect::<Vec<_>>();
+        let state = spatial.state(&vec![0.0; model.ndof()], &p).unwrap();
+        let a = spatial.step(&state, &[], &mut || false).unwrap();
+        let b = constant.step(&state, &[], &mut || false).unwrap();
+        for (p, q) in a.state.pressure_pa().iter().zip(b.state.pressure_pa()) {
+            close(*p, *q, 1e-9);
+        }
+        close(
+            a.work.boundary_dissipation_j,
+            b.work.boundary_dissipation_j,
+            1e-12,
+        );
+        assert!(
+            model
+                .prepare_time_with_spatial_boundaries(
+                    0.01,
+                    &uniform,
+                    &[&boundary],
+                    &[],
+                    HeterogeneousTimeLimits::default(),
+                    &mut || false,
+                )
+                .is_err()
+        );
+        assert!(
+            model
+                .prepare_time_with_spatial_boundaries(
+                    0.01,
+                    &[],
+                    &[&boundary, &boundary],
+                    &[],
+                    HeterogeneousTimeLimits::default(),
+                    &mut || false,
+                )
+                .is_err()
+        );
+        assert!(
+            model
+                .prepare_time_with_spatial_boundaries(
+                    0.01,
+                    &[],
+                    &[&boundary],
+                    &[FACE],
+                    HeterogeneousTimeLimits::default(),
+                    &mut || false,
+                )
+                .is_err()
+        );
+        let other_model = super::tests::uniform(&geometry);
+        assert!(
+            other_model
+                .prepare_time_with_spatial_boundaries(
+                    0.01,
+                    &[],
+                    &[&boundary],
+                    &[],
+                    HeterogeneousTimeLimits::default(),
+                    &mut || false,
+                )
+                .is_err()
+        );
+        assert!(
+            model
+                .prepare_exact_time_with_spatial_boundaries(
+                    0.01,
+                    &[],
+                    &[&boundary],
+                    &[],
+                    &[],
+                    &[],
+                    &[FACE],
+                    ExactTimeLimits::default(),
+                    &mut || false,
+                )
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn spatial_resistance_rejects_active_samples_and_cancels_without_publication() {
+    let mesh = TetComplex::from_tets(4, vec![[0, 1, 2, 3]]);
+    let geometry = HelmholtzFe::new(&mesh, &POSITIONS, 1, MEDIUM).unwrap();
+    let model = uniform(&geometry);
+    for value in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            model
+                .spatial_resistive_boundary(
+                    &[FACE],
+                    4,
+                    &mut |_, _| Ok::<_, AcousticFeError>(value),
+                    &mut || false,
+                )
+                .is_err()
+        );
+    }
+    let calls = Cell::new(0);
+    let result = model.spatial_resistive_boundary(
+        &[FACE],
+        4,
+        &mut |_, _| {
+            calls.set(calls.get() + 1);
+            Ok::<_, AcousticFeError>(0.4)
+        },
+        &mut || calls.get() >= 3,
+    );
+    assert!(matches!(result, Err(AcousticFeError::Cancelled)));
+    assert_eq!(calls.get(), 3);
+    let boundary = model
+        .spatial_resistive_boundary(
+            &[FACE],
+            4,
+            &mut |_, _| Ok::<_, AcousticFeError>(0.4),
+            &mut || false,
+        )
+        .unwrap();
+    assert!(matches!(
+        model.prepare_time_with_spatial_boundaries(
+            0.01,
+            &[],
+            &[&boundary],
+            &[],
+            HeterogeneousTimeLimits::default(),
+            &mut || true,
+        ),
+        Err(HeterogeneousError::Cancelled)
+    ));
+    assert!(matches!(
+        model.prepare_exact_time_with_spatial_boundaries(
+            0.01,
+            &[],
+            &[&boundary],
+            &[],
+            &[],
+            &[],
+            &[],
+            ExactTimeLimits::default(),
+            &mut || true,
+        ),
+        Err(HeterogeneousError::Cancelled)
+    ));
+}
+
+#[test]
+fn spatial_resistance_and_causal_walls_close_distinct_heat_and_exchange_channels() {
+    use super::super::time::mechanical::exact::ExactMechanicalTimeLimits;
+    use super::super::time::mechanical::{MechanicalBoundary, MechanicalTimeLimits};
+    let mesh = TetComplex::from_tets(4, vec![[0, 1, 2, 3]]);
+    let geometry = HelmholtzFe::new(&mesh, &POSITIONS, 1, MEDIUM).unwrap();
+    let model = uniform(&geometry);
+    let boundary = model
+        .spatial_resistive_boundary(
+            &[FACE],
+            4,
+            &mut |_, p| Ok::<_, AcousticFeError>(1.0 + p.point.position_m[0]),
+            &mut || false,
+        )
+        .unwrap();
+    let walls = [MechanicalBoundary {
+        faces: vec![[0, 1, 3]],
+        wall: fs_phs::WallPin {
+            surface_density: 0.4,
+            stiffness_per_area: 1.7,
+            resistance: 0.3,
+        },
+        relaxation: vec![fs_phs::acoustic_outlet::AcousticWallRelaxation {
+            stiffness_per_area: 0.8,
+            relaxation_time_s: 0.05,
+        }],
+    }];
+    let duration = 0.04;
+    let exact = model
+        .prepare_exact_time_with_walls_and_spatial_boundaries(
+            duration,
+            &[],
+            &[&boundary],
+            &walls,
+            &[],
+            &[],
+            &[],
+            &[],
+            ExactMechanicalTimeLimits::default(),
+            &mut || false,
+        )
+        .unwrap();
+    let pressure = [1.0, -0.4, 2.0, 0.3];
+    let initial = exact.state(&[0.0; 4], &pressure).unwrap();
+    let result = exact.step(&initial, &[], &mut || false).unwrap();
+    let energy = exact.energy(&initial).unwrap().total_j();
+    close(result.work.balance_residual_j(), 0.0, 1e-9 * energy);
+    close(
+        result.work.acoustic_balance_residual_j(),
+        0.0,
+        1e-9 * energy,
+    );
+    close(result.work.wall_balance_residual_j(), 0.0, 1e-9 * energy);
+    assert!(result.work.boundary_dissipation_j > 0.1 * energy);
+    assert!(result.work.wall_resistance_dissipation_j > 0.0);
+    assert!(result.work.wall_relaxation_dissipation_j > 0.0);
+    assert!(result.work.wall_work_j > 0.0);
+    let mut errors = Vec::new();
+    for steps in [16, 32, 64] {
+        let h = duration / steps as f64;
+        let midpoint = model
+            .prepare_time_with_walls_and_spatial_boundaries(
+                h,
+                &[],
+                &[&boundary],
+                &walls,
+                &[],
+                MechanicalTimeLimits::default(),
+                &mut || false,
+            )
+            .unwrap();
+        let mut state = midpoint.state(&[0.0; 4], &pressure).unwrap();
+        let mut heat = 0.0;
+        for _ in 0..steps {
+            let next = midpoint.step(&state, &[], &mut || false).unwrap();
+            let p = state
+                .pressure_pa()
+                .iter()
+                .zip(next.state.pressure_pa())
+                .map(|(a, b)| 0.5 * (a + b))
+                .collect::<Vec<_>>();
+            let independent_heat = h * resistive_power(&p);
+            close(
+                next.work.boundary_dissipation_j,
+                independent_heat,
+                1e-12 * energy,
+            );
+            close(next.work.acoustic_balance_residual_j(), 0.0, 1e-10 * energy);
+            close(next.work.wall_balance_residual_j(), 0.0, 1e-10 * energy);
+            heat += independent_heat;
+            state = next.state;
+        }
+        errors.push(
+            state
+                .pressure_pa()
+                .iter()
+                .zip(result.state.pressure_pa())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f64::max),
+        );
+        close(
+            heat,
+            result.work.boundary_dissipation_j,
+            2.0 * energy / (steps * steps) as f64,
+        );
+    }
+    for pair in errors.windows(2) {
+        assert!(
+            pair[1] < 0.28 * pair[0],
+            "coupled time refinement: {errors:?}"
+        );
+    }
+    let conflicting = [MechanicalBoundary {
+        faces: vec![FACE],
+        ..walls[0].clone()
+    }];
+    assert!(
+        model
+            .prepare_time_with_walls_and_spatial_boundaries(
+                duration,
+                &[],
+                &[&boundary],
+                &conflicting,
+                &[],
+                MechanicalTimeLimits::default(),
+                &mut || false,
+            )
+            .is_err()
+    );
+    assert!(
+        model
+            .prepare_exact_time_with_walls_and_spatial_boundaries(
+                duration,
+                &[],
+                &[&boundary],
+                &conflicting,
+                &[],
+                &[],
+                &[],
+                &[],
+                ExactMechanicalTimeLimits::default(),
+                &mut || false,
+            )
+            .is_err()
+    );
+}
 
 const FREQUENCY: f64 = 0.4;
 const MEDIUM: Medium = Medium {
@@ -49,7 +588,9 @@ fn spatial<'m, 'f, 'c>(
 
 fn entry(matrix: &Csr, row: usize, col: usize) -> f64 {
     let (cols, values) = matrix.row(row);
-    cols.iter().position(|&c| c == col).map_or(0.0, |i| values[i])
+    cols.iter()
+        .position(|&c| c == col)
+        .map_or(0.0, |i| values[i])
 }
 
 fn close(actual: f64, expected: f64, tolerance: f64) {
@@ -109,16 +650,12 @@ fn affine_linear_admittance_matches_exact_triangle_moments_and_power() {
             }
         }
     }
-    let p = [
-        C64::new(1.0, 0.3),
-        C64::new(-0.4, 0.8),
-        C64::new(2.0, -0.2),
-    ];
+    let p = [C64::new(1.0, 0.3), C64::new(-0.4, 0.8), C64::new(2.0, -0.2)];
     let mut power = 0.0;
     for i in 0..3 {
         for j in 0..3 {
-            power += 0.5 * entry(&field.conductance, i, j)
-                * (p[i].re * p[j].re + p[i].im * p[j].im);
+            power +=
+                0.5 * entry(&field.conductance, i, j) * (p[i].re * p[j].re + p[i].im * p[j].im);
         }
     }
     close(power, 0.3415, 8e-15);
@@ -155,7 +692,10 @@ fn constant_fields_recover_uniform_walls_at_every_pressure_order_without_resampl
         let old = model
             .prepare(
                 FREQUENCY,
-                &[BoundaryAdmittance { faces, admittance_m_pa_s: y }],
+                &[BoundaryAdmittance {
+                    faces,
+                    admittance_m_pa_s: y,
+                }],
                 HarmonicLimits::default(),
                 &mut || false,
             )
@@ -220,18 +760,18 @@ fn graded_wall_solves_a_manufactured_field_and_closes_independent_surface_work()
         let mut nodes = [[0.0; 3]; 6];
         nodes[..3].copy_from_slice(&vertices);
         for (i, (a, b)) in [(0, 1), (1, 2), (2, 0)].into_iter().enumerate() {
-            nodes[i + 3] = core::array::from_fn(|axis| {
-                f64::midpoint(vertices[a][axis], vertices[b][axis])
-            });
+            nodes[i + 3] =
+                core::array::from_fn(|axis| f64::midpoint(vertices[a][axis], vertices[b][axis]));
         }
         let values = nodes.map(|x| {
-            y(face, x).scale(1.0 + x[0])
-                - C64::new(0.0, normal[0] / (omega * MEDIUM.density_kg_m3))
+            y(face, x).scale(1.0 + x[0]) - C64::new(0.0, normal[0] / (omega * MEDIUM.density_kg_m3))
         });
         real_traces.push((face, values.map(|z| z.re)));
         imaginary_traces.push((face, values.map(|z| z.im)));
     }
-    let real_source = model.quadratic_velocity_source(&real_traces, &mut || false).unwrap();
+    let real_source = model
+        .quadratic_velocity_source(&real_traces, &mut || false)
+        .unwrap();
     let imaginary_source = model
         .quadratic_velocity_source(&imaginary_traces, &mut || false)
         .unwrap();
@@ -280,12 +820,20 @@ fn graded_wall_solves_a_manufactured_field_and_closes_independent_surface_work()
         admittance_m_pa_s: C64::new(4.0 / 3.0, -1.0 / 12.0),
     });
     let averaged = model
-        .prepare(FREQUENCY, &averaged_walls, HarmonicLimits::default(), &mut || false)
+        .prepare(
+            FREQUENCY,
+            &averaged_walls,
+            HarmonicLimits::default(),
+            &mut || false,
+        )
         .unwrap()
         .solve_with_boundary_sources(&[], &boundary_sources, &volume_sources, &mut || false)
         .unwrap();
     assert!(
-        averaged.pressure_pa.iter().zip(&actual.pressure_pa)
+        averaged
+            .pressure_pa
+            .iter()
+            .zip(&actual.pressure_pa)
             .any(|(&a, &b)| (a - b).abs() > 1e-4)
     );
 }
@@ -302,7 +850,12 @@ fn with_cx(f: impl FnOnce(&Cx<'_>)) {
         f(&Cx::new(
             &gate,
             arena,
-            StreamKey { seed: 93, kernel_id: 4, tile: 0, iteration: 0 },
+            StreamKey {
+                seed: 93,
+                kernel_id: 4,
+                tile: 0,
+                iteration: 0,
+            },
             Budget::INFINITE,
             ExecMode::Deterministic,
         ));
@@ -317,14 +870,18 @@ fn curved_wall_uses_original_positions_normals_and_measure() {
         for tet in [[0, 1, 2, 3], [3, 1, 0, 2]] {
             let mesh = TetComplex::from_tets(4, vec![tet]);
             let positions: Vec<_> = POSITIONS.iter().copied().map(&map).collect();
-            let midsides: Vec<_> = mesh.edges.iter().map(|edge| {
-                map(core::array::from_fn(|axis| {
-                    f64::midpoint(
-                        POSITIONS[edge[0] as usize][axis],
-                        POSITIONS[edge[1] as usize][axis],
-                    )
-                }))
-            }).collect();
+            let midsides: Vec<_> = mesh
+                .edges
+                .iter()
+                .map(|edge| {
+                    map(core::array::from_fn(|axis| {
+                        f64::midpoint(
+                            POSITIONS[edge[0] as usize][axis],
+                            POSITIONS[edge[1] as usize][axis],
+                        )
+                    }))
+                })
+                .collect();
             let geometry = HelmholtzFe::new_quadratic(
                 &mesh,
                 &positions,
@@ -334,7 +891,8 @@ fn curved_wall_uses_original_positions_normals_and_measure() {
                 MEDIUM,
                 QuadraticGeometryControls::default(),
                 cx,
-            ).unwrap();
+            )
+            .unwrap();
             let model = uniform(&geometry);
             let field = spatial(&model, &[FACE], 6, |sample| {
                 let [x, y, z] = sample.point.position_m;
@@ -379,40 +937,59 @@ fn spatial_wall_errors_cancellation_and_owner_frequency_conflicts_are_preserved(
     let mesh = TetComplex::from_tets(4, vec![[0, 1, 2, 3]]);
     let geometry = HelmholtzFe::new(&mesh, &POSITIONS, 1, MEDIUM).unwrap();
     let model = uniform(&geometry);
-    let mut passive = |_: f64, _: [u32; 3], _: GeometryFacePoint| {
-        Ok::<_, AcousticFeError>(C64::from_re(0.2))
-    };
+    let mut passive =
+        |_: f64, _: [u32; 3], _: GeometryFacePoint| Ok::<_, AcousticFeError>(C64::from_re(0.2));
     for frequency in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MAX] {
-        assert!(model.spatial_boundary_admittance(
-            frequency, &[FACE], 3, &mut passive, &mut || false
-        ).is_err());
+        assert!(
+            model
+                .spatial_boundary_admittance(frequency, &[FACE], 3, &mut passive, &mut || false)
+                .is_err()
+        );
     }
     for order in [0, 1, MAX_QUADRATURE_ORDER + 1] {
-        assert!(model.spatial_boundary_admittance(
-            FREQUENCY, &[FACE], order, &mut passive, &mut || false
-        ).is_err());
+        assert!(
+            model
+                .spatial_boundary_admittance(FREQUENCY, &[FACE], order, &mut passive, &mut || false)
+                .is_err()
+        );
     }
     for faces in [vec![], vec![FACE, [2, 1, 0]], vec![[0, 1, 99]]] {
-        assert!(model.spatial_boundary_admittance(
-            FREQUENCY, &faces, 3, &mut passive, &mut || false
-        ).is_err());
+        assert!(
+            model
+                .spatial_boundary_admittance(FREQUENCY, &faces, 3, &mut passive, &mut || false)
+                .is_err()
+        );
     }
-    for y in [C64::from_re(-0.1), C64::new(0.1, f64::NAN), C64::from_re(f64::INFINITY)] {
-        assert!(model.spatial_boundary_admittance(
-            FREQUENCY, &[FACE], 3,
-            &mut |_, _, _| Ok::<_, AcousticFeError>(y),
-            &mut || false,
-        ).is_err());
+    for y in [
+        C64::from_re(-0.1),
+        C64::new(0.1, f64::NAN),
+        C64::from_re(f64::INFINITY),
+    ] {
+        assert!(
+            model
+                .spatial_boundary_admittance(
+                    FREQUENCY,
+                    &[FACE],
+                    3,
+                    &mut |_, _, _| Ok::<_, AcousticFeError>(y),
+                    &mut || false,
+                )
+                .is_err()
+        );
     }
     let original_error = model.spatial_boundary_admittance(
-        FREQUENCY, &[FACE], 3,
+        FREQUENCY,
+        &[FACE],
+        3,
         &mut |_, _, _| Err::<C64, _>(SourceError::MissingWall),
         &mut || false,
     );
     assert_eq!(original_error.err(), Some(SourceError::MissingWall));
     let calls = Cell::new(0);
     let cancelled = model.spatial_boundary_admittance(
-        FREQUENCY, &[FACE], 3,
+        FREQUENCY,
+        &[FACE],
+        3,
         &mut |_, _, _| {
             calls.set(calls.get() + 1);
             Ok::<_, AcousticFeError>(C64::from_re(0.2))
@@ -428,20 +1005,55 @@ fn spatial_wall_errors_cancellation_and_owner_frequency_conflicts_are_preserved(
         (&model, FREQUENCY * 2.0, vec![]),
         (&model, FREQUENCY, vec![FACE]),
     ] {
-        assert!(owner.prepare_with_spatial_admittances(
-            frequency, &[], &[&field], &release, HarmonicLimits::default(), &mut || false
-        ).is_err());
+        assert!(
+            owner
+                .prepare_with_spatial_admittances(
+                    frequency,
+                    &[],
+                    &[&field],
+                    &release,
+                    HarmonicLimits::default(),
+                    &mut || false
+                )
+                .is_err()
+        );
     }
-    assert!(model.prepare_with_spatial_admittances(
-        FREQUENCY, &[], &[&field, &field], &[], HarmonicLimits::default(), &mut || false
-    ).is_err());
-    assert!(model.prepare_with_spatial_admittances(
-        FREQUENCY,
-        &[BoundaryAdmittance { faces: vec![FACE], admittance_m_pa_s: C64::from_re(0.1) }],
-        &[&field], &[], HarmonicLimits::default(), &mut || false
-    ).is_err());
+    assert!(
+        model
+            .prepare_with_spatial_admittances(
+                FREQUENCY,
+                &[],
+                &[&field, &field],
+                &[],
+                HarmonicLimits::default(),
+                &mut || false
+            )
+            .is_err()
+    );
+    assert!(
+        model
+            .prepare_with_spatial_admittances(
+                FREQUENCY,
+                &[BoundaryAdmittance {
+                    faces: vec![FACE],
+                    admittance_m_pa_s: C64::from_re(0.1)
+                }],
+                &[&field],
+                &[],
+                HarmonicLimits::default(),
+                &mut || false
+            )
+            .is_err()
+    );
     // Adjacent faces may share constrained DOFs; only physical-face overlap refuses.
-    model.prepare_with_spatial_admittances(
-        FREQUENCY, &[], &[&field], &[[0, 1, 3]], HarmonicLimits::default(), &mut || false
-    ).unwrap();
+    model
+        .prepare_with_spatial_admittances(
+            FREQUENCY,
+            &[],
+            &[&field],
+            &[[0, 1, 3]],
+            HarmonicLimits::default(),
+            &mut || false,
+        )
+        .unwrap();
 }
