@@ -628,3 +628,6 @@ fn native_integrated_density_link_preserves_closed_inventory_in_graph_sdirk() {
         assert_eq!(cell.geometry, initial.cells()[&id].geometry);
     }
 }
+
+#[path = "conduction/gray.rs"]
+mod gray;

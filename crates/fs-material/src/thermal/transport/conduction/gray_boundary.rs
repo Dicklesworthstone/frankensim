@@ -59,6 +59,8 @@ struct SurfaceTangent {
 /// The kernel allocates no memory; an optional original source retains its own
 /// evaluation costs. Spatial and temporal accuracy remain the native solver's
 /// responsibility rather than a consequence of this constitutive closure.
+/// The geometry-aware native query includes density-driven normal thickness
+/// through the same coating/exterior balance, at fixed area and bath states.
 pub struct IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
     layer: &'l CaloricConductionLayer<'a, 'm>,
     geometry: ImplicitBoundaryGeometry,
@@ -231,7 +233,31 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
         gas_temperature_k: f64,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<GrayTwoBathResponse, DepositionError> {
+        self.evaluate_with_geometry_tangent(
+            specific_energy_j_kg,
+            gas_temperature_k,
+            self.geometry,
+            0.0,
+            checkpoint,
+        )
+    }
+
+    fn evaluate_with_geometry_tangent(
+        &self,
+        specific_energy_j_kg: f64,
+        gas_temperature_k: f64,
+        geometry: ImplicitBoundaryGeometry,
+        relative_distance_slope_kg_j: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<GrayTwoBathResponse, DepositionError> {
         checkpoint()?;
+        let (flux_geometry, material_multiplier_m) = if geometry == self.geometry {
+            (self.flux_geometry, self.material_multiplier_m)
+        } else {
+            let current =
+                ReservoirLayerGeometry::planar(geometry.area_m2, geometry.half_distance_m)?;
+            (current, current.conductance_multiplier_m())
+        };
         let material = self.layer.state_at_specific_energy(specific_energy_j_kg)?;
         let coefficients = if let Some(surface) = &self.surface {
             let [lo, hi] = surface.bounds_j_kg;
@@ -272,8 +298,7 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
                     .max(self.radiative_temperature_k),
             ]
         };
-        let response = self
-            .flux_geometry
+        let response = flux_geometry
             .evaluate_material_to_two_baths_with_resistance(
                 curve,
                 material.temperature_k,
@@ -311,14 +336,15 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
                     "integrated caloric gray surface balance did not converge",
                 ),
             })?;
-        let mut cell_slope = finite(self.material_multiplier_m * material.conductivity_w_m_k)?;
+        let mut cell_slope = finite(material_multiplier_m * material.conductivity_w_m_k)?;
         let mut surface_slope = finite(
-            self.material_multiplier_m
+            material_multiplier_m
                 * curve.conductivity_w_m_k(response.material_face_temperature_k)?,
         )?;
         if cell_slope <= 0.0 || surface_slope <= 0.0 {
             return Err(DepositionError::Arithmetic);
         }
+        let mut coating_response = 1.0;
         if self.coating_resistance_k_w > 0.0 {
             // Eliminate Tmaterial = Texterior + R*Q analytically. The effective
             // material derivatives are Gcell/(1+R*Gface) and Gface/(1+R*Gface).
@@ -327,11 +353,13 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
             let ratio = self.coating_resistance_k_w * surface_slope;
             if ratio <= 1.0 {
                 let factor = 1.0 / (1.0 + ratio);
+                coating_response = factor;
                 cell_slope *= factor;
                 surface_slope *= factor;
             } else {
                 let coating_slope = self.coating_resistance_k_w.recip();
                 let combined = coating_slope / (1.0 + coating_slope / surface_slope);
+                coating_response = combined / surface_slope;
                 cell_slope = finite(combined * (cell_slope / surface_slope))?;
                 surface_slope = combined;
             }
@@ -339,6 +367,18 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
                 return Err(DepositionError::Arithmetic);
             }
         }
+        // Q=C*integral(Tmaterial..Tcell) k dT, C=A/d. Eliminating
+        // Tmaterial=Texterior+Rcoat*Q leaves the geometric forcing
+        // -Q*(d'/d)/(1+Rcoat*C*k(Tmaterial)). Use the retained integral
+        // power and SAME accepted source payload, without a second solve.
+        let geometry_forcing = if relative_distance_slope_kg_j == 0.0 {
+            0.0
+        } else {
+            finite(
+                (-response.solid_power_to_surface_w * coating_response)
+                    * relative_distance_slope_kg_j,
+            )?
+        };
         let exterior_slope = response.film.temperature_derivative_w_k;
         // Differentiate the material/coat/exterior balance with the eliminated
         // leg slopes. The integral's two endpoint conductivities already
@@ -347,8 +387,11 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
         // be signed, including zero-coefficient onset.
         let derivative = if exterior_slope >= 0.0 {
             // Preserve the original fixed/bulk coefficient arithmetic exactly.
-            let storage = (fraction(exterior_slope, surface_slope) * cell_slope)
-                * material.temperature_slope_kg_k_j;
+            let exterior_weight = fraction(exterior_slope, surface_slope);
+            let mut storage = (exterior_weight * cell_slope) * material.temperature_slope_kg_k_j;
+            if relative_distance_slope_kg_j != 0.0 {
+                storage = finite(exterior_weight.mul_add(geometry_forcing, storage))?;
+            }
             finite(
                 fraction(surface_slope, exterior_slope)
                     .mul_add(response.film.energy_derivative_w_kg_j, storage),
@@ -363,7 +406,10 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
             // A passive source can have negative differential feedback. Keep
             // that signed response; normalized positive-only fractions would
             // silently turn it into a different Newton/adjoint tangent.
-            let body = finite(cell_slope * material.temperature_slope_kg_k_j)?;
+            let mut body = finite(cell_slope * material.temperature_slope_kg_k_j)?;
+            if relative_distance_slope_kg_j != 0.0 {
+                body = finite(body + geometry_forcing)?;
+            }
             finite((exterior_slope / denominator).mul_add(
                 body,
                 (surface_slope / denominator) * response.film.energy_derivative_w_kg_j,
@@ -503,6 +549,33 @@ impl ImplicitBoundaryExchangeLaw for IntegratedCaloricGrayBoundary<'_, '_, '_> {
         }
         self.evaluate(specific_h_j_kg, bath_temperature_k, checkpoint)
             .map(|response| response.boundary)
+    }
+
+    fn state_at_specific_enthalpy_with_geometry_tangent(
+        &self,
+        specific_h_j_kg: f64,
+        bath_temperature_k: f64,
+        geometry: ImplicitBoundaryGeometry,
+        half_distance_relative_enthalpy_derivative_kg_j: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<ImplicitBoundaryExchangeState>, DepositionError> {
+        checkpoint()?;
+        if geometry.area_m2 != self.geometry.area_m2
+            || geometry.surface_resistance_m2_k_w != self.geometry.surface_resistance_m2_k_w
+            || !half_distance_relative_enthalpy_derivative_kg_j.is_finite()
+        {
+            return Err(DepositionError::InvalidInput(
+                "density-driven caloric gray boundary requires its original area, coating and finite length tangent",
+            ));
+        }
+        self.evaluate_with_geometry_tangent(
+            specific_h_j_kg,
+            bath_temperature_k,
+            geometry,
+            half_distance_relative_enthalpy_derivative_kg_j,
+            checkpoint,
+        )
+        .map(|response| Some(response.boundary))
     }
 }
 

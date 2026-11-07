@@ -26,7 +26,9 @@ use fs_thermal::enthalpy::{ContactPatch, DepositionError, DepositionSimulation, 
 /// material legs use their original exact resistance coordinates. Radial faces
 /// are the two material-side traces at ONE shared interface radius: a cylinder
 /// retains one common axial length, and a sphere retains its full solid angle.
-/// Both actual covered areas must equal that geometric interface area.
+/// Both actual covered areas must equal that geometric interface area. The
+/// geometry-aware native query admits density-driven planar material thickness;
+/// original radial resistance coordinates remain fixed.
 ///
 /// The source owns the complete interface response; no separate authored
 /// contact resistance may coexist. Radiation/view assumptions or gas/contact
@@ -154,13 +156,15 @@ impl<'l, 'a, 'm> IntegratedCaloricSurfaceLink<'l, 'a, 'm> {
         energies_j_kg: [f64; 2],
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<SurfaceLayerConductionResponse<ImplicitSurfaceExchangeState>, DepositionError> {
-        self.response(energies_j_kg, &mut checkpoint)
+        self.response(energies_j_kg, self.geometry, [0.0; 2], &mut checkpoint)
             .map(|(response, _)| response)
     }
 
     fn response(
         &self,
         energies_j_kg: [f64; 2],
+        geometry: LayerGeometry,
+        relative_distance_slopes_kg_j: [f64; 2],
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<
         (
@@ -181,8 +185,7 @@ impl<'l, 'a, 'm> IntegratedCaloricSurfaceLink<'l, 'a, 'm> {
             self.layers[1].state_at_specific_energy(energies_j_kg[1])?,
         ];
         let temperatures = states.map(|state| state.temperature_k);
-        let response = self
-            .geometry
+        let response = geometry
             .conduction(
                 self.layers.map(CaloricConductionLayer::conductivity_curve),
                 0.0,
@@ -208,12 +211,28 @@ impl<'l, 'a, 'm> IntegratedCaloricSurfaceLink<'l, 'a, 'm> {
         let allowance = self.config.absolute_heat_tolerance_w
             + self.config.relative_heat_tolerance
                 * applied.abs().max(response.power_a_to_b_w.abs());
-        let derivatives = std::array::from_fn(|side| {
+        let mut derivatives = std::array::from_fn(|side| {
             response.source_flux_derivative_scale_m2.mul_add(
                 response.source.energy_derivatives_w_kg_m2_j[side],
                 response.endpoint_derivative_w_k[side] * states[side].temperature_slope_kg_k_j,
             )
         });
+        for side in 0..2 {
+            let slope = relative_distance_slopes_kg_j[side];
+            if slope != 0.0 {
+                // Differentiate the original Kirchhoff legs at fixed source
+                // energies: Q_dA=-(Q/A)*Q_TA/k(TA), Q_dB=(Q/A)*Q_TB/k(TB).
+                // These signed endpoint partials already include both solved
+                // surface responses. Do not query the accepted source again.
+                let sign = if side == 0 { -1.0 } else { 1.0 };
+                let temperature_response = (sign
+                    * (response.power_a_to_b_w / geometry.contact_area_m2()))
+                    * (geometry.equivalent_distances_m()[side] / states[side].conductivity_w_m_k)
+                    * slope;
+                derivatives[side] = response.endpoint_derivative_w_k[side]
+                    .mul_add(temperature_response, derivatives[side]);
+            }
+        }
         if !applied.is_finite()
             || !allowance.is_finite()
             || (applied - response.power_a_to_b_w).abs() > allowance
@@ -244,10 +263,49 @@ impl ImplicitLinkLaw for IntegratedCaloricSurfaceLink<'_, '_, '_> {
                 "caloric surface exchange requires its original ordered patch and complete native geometry",
             ));
         }
-        let (response, derivatives) = self.response(energies_j_kg, checkpoint)?;
+        let (response, derivatives) =
+            self.response(energies_j_kg, self.geometry, [0.0; 2], checkpoint)?;
         Ok(ImplicitLinkState {
             conductance_w_k: response.conductance_w_k,
             power_enthalpy_derivatives_w_kg_j: derivatives,
         })
+    }
+
+    fn state_at_specific_enthalpies_with_geometry_tangent(
+        &self,
+        energies_j_kg: [f64; 2],
+        geometry: ConductiveLink,
+        patch: ContactPatch,
+        half_distance_relative_enthalpy_derivatives_kg_j: [f64; 2],
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<ImplicitLinkState>, DepositionError> {
+        checkpoint()?;
+        // Radial resistance coordinates are not physical planar thicknesses.
+        if self.geometry.radial_coordinates_m().is_some() {
+            return Ok(None);
+        }
+        if patch != self.patch
+            || geometry.link_id != self.link_id()
+            || geometry.contact_resistance_m2_k_w != 0.0
+            || half_distance_relative_enthalpy_derivatives_kg_j
+                .iter()
+                .any(|slope| !slope.is_finite())
+        {
+            return Err(DepositionError::InvalidInput(
+                "density-driven caloric surface exchange requires its original patch, source ownership and finite length tangents",
+            ));
+        }
+        let current =
+            LayerGeometry::planar(geometry.half_distances_m, self.geometry.contact_area_m2())?;
+        let (response, derivatives) = self.response(
+            energies_j_kg,
+            current,
+            half_distance_relative_enthalpy_derivatives_kg_j,
+            checkpoint,
+        )?;
+        Ok(Some(ImplicitLinkState {
+            conductance_w_k: response.conductance_w_k,
+            power_enthalpy_derivatives_w_kg_j: derivatives,
+        }))
     }
 }

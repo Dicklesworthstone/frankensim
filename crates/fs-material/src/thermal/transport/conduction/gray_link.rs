@@ -25,8 +25,9 @@ use fs_thermal::enthalpy::{ContactPatch, DepositionError, DepositionSimulation, 
 /// `GrayLayerGap::equal_area_full_view` explicitly supplies the equal-area,
 /// opaque diffuse-gray, nonparticipating-gap/full-view model. This adapter
 /// admits planar geometry only; it does not infer view factors for curved or
-/// unequal-area faces. Emissivities and physical geometry remain fixed; an
-/// optional original source supplies the nonradiative gap resistance.
+/// unequal-area faces. Emissivities, area and independently authored gap remain
+/// fixed; an optional original source supplies its nonradiative resistance.
+/// The geometry-aware native query includes density-driven material thickness.
 /// Material profiles are source-free and quasi-steady within each half-cell;
 /// transient accuracy still requires the original spatial/time refinement.
 #[derive(Debug)]
@@ -194,13 +195,15 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayLink<'l, 'a, 'm> {
         energies_j_kg: [f64; 2],
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<GrayLayerConductionResponse, DepositionError> {
-        self.response(energies_j_kg, &mut checkpoint)
+        self.response(energies_j_kg, self.geometry, [0.0; 2], &mut checkpoint)
             .map(|(response, _)| response)
     }
 
     fn response(
         &self,
         energies_j_kg: [f64; 2],
+        geometry: LayerGeometry,
+        relative_distance_slopes_kg_j: [f64; 2],
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(GrayLayerConductionResponse, [f64; 2]), DepositionError> {
         checkpoint()?;
@@ -217,8 +220,7 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayLink<'l, 'a, 'm> {
         } else {
             self.gap
         };
-        let response = self
-            .geometry
+        let response = geometry
             .conduction(
                 self.layers.map(CaloricConductionLayer::conductivity_curve),
                 0.0,
@@ -248,11 +250,30 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayLink<'l, 'a, 'm> {
                 );
             }
         }
+        for side in 0..2 {
+            let slope = relative_distance_slopes_kg_j[side];
+            if slope != 0.0 {
+                // The same accepted surface elimination gives
+                // Q_dA=-(Q/A)*Q_TA/k(TA), Q_dB=(Q/A)*Q_TB/k(TB).
+                // Endpoint partials hold the original gap source fixed; its
+                // explicit energy response above must not enter this factor.
+                let k = [a.conductivity_w_m_k, b.conductivity_w_m_k][side];
+                let sign = if side == 0 { -1.0 } else { 1.0 };
+                let temperature_response = (sign
+                    * (response.power_a_to_b_w / geometry.contact_area_m2()))
+                    * (geometry.equivalent_distances_m()[side] / k)
+                    * slope;
+                derivatives[side] = response.endpoint_derivative_w_k[side]
+                    .mul_add(temperature_response, derivatives[side]);
+            }
+        }
         if !applied.is_finite()
             || !allowance.is_finite()
             || (applied - response.power_a_to_b_w).abs() > allowance
             || derivatives.iter().any(|value| !value.is_finite())
-            || (resistance.is_none() && (derivatives[0] < 0.0 || derivatives[1] > 0.0))
+            || (resistance.is_none()
+                && relative_distance_slopes_kg_j == [0.0; 2]
+                && (derivatives[0] < 0.0 || derivatives[1] > 0.0))
         {
             return Err(DepositionError::Arithmetic);
         }
@@ -279,10 +300,45 @@ impl ImplicitLinkLaw for IntegratedCaloricGrayLink<'_, '_, '_> {
                 "integrated caloric gray gap requires its original geometry and contact coverage",
             ));
         }
-        let (response, derivatives) = self.response(energies_j_kg, checkpoint)?;
+        let (response, derivatives) =
+            self.response(energies_j_kg, self.geometry, [0.0; 2], checkpoint)?;
         Ok(ImplicitLinkState {
             conductance_w_k: response.conductance_w_k,
             power_enthalpy_derivatives_w_kg_j: derivatives,
         })
+    }
+
+    fn state_at_specific_enthalpies_with_geometry_tangent(
+        &self,
+        energies_j_kg: [f64; 2],
+        geometry: ConductiveLink,
+        patch: ContactPatch,
+        half_distance_relative_enthalpy_derivatives_kg_j: [f64; 2],
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<ImplicitLinkState>, DepositionError> {
+        checkpoint()?;
+        if patch != self.patch
+            || geometry.link_id != self.link_id()
+            || geometry.contact_resistance_m2_k_w != 0.0
+            || half_distance_relative_enthalpy_derivatives_kg_j
+                .iter()
+                .any(|slope| !slope.is_finite())
+        {
+            return Err(DepositionError::InvalidInput(
+                "density-driven caloric gray gap requires its original patch, gap ownership and finite length tangents",
+            ));
+        }
+        let current =
+            LayerGeometry::planar(geometry.half_distances_m, self.geometry.contact_area_m2())?;
+        let (response, derivatives) = self.response(
+            energies_j_kg,
+            current,
+            half_distance_relative_enthalpy_derivatives_kg_j,
+            checkpoint,
+        )?;
+        Ok(Some(ImplicitLinkState {
+            conductance_w_k: response.conductance_w_k,
+            power_enthalpy_derivatives_w_kg_j: derivatives,
+        }))
     }
 }

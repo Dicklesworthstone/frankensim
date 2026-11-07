@@ -10499,8 +10499,9 @@ declaration. Free tangential expansion does not establish a constrained-solid
 density law or fixed footprint; evolving area, 3-D strain compatibility,
 stress and radial motion need their original physical owners. This extension
 does not reinterpret equivalent radial resistance distances as physical
-thicknesses. Cv, fixed-volume storage and the other prepared gray/surface
-integrated owners keep their existing constraints and admission.
+thicknesses. Cv and fixed-volume storage retain their existing constraints;
+planar gray and surface-source integrated owners support the same optional
+geometry tangent as described below.
 
 Five regressions in `isobaric/expansion/tests/conduction.rs` cover current-Cp
 volume tangents and source corners, complete integrated boundary/contact
@@ -10511,6 +10512,49 @@ has normal-only free expansion and unchanged tangential stretches. These
 regressions are authored and syntax checked; native execution remains blocked
 by workspace storage and dependency-build resource limits.
 
+
+### Expanding original Cp bodies with radiation and actual surface sources
+
+`IntegratedCaloricGrayLink`, `IntegratedCaloricSurfaceLink` and
+`IntegratedCaloricGrayBoundary` also implement the optional native planar
+geometry query. They combine current density-driven half-distances with the
+original h/Cp inverse and k(T) integrals. The native owner still supplies
+d=m/(2*A*rho(h)) and (d'/d)=rho*d(1/rho)/dh; source heat capacities, pressure,
+reference density, stored mass and reference mesh retain their original owners.
+
+For a two-sided flux Q from A to B, the SAME accepted surface elimination gives
+`Q_dA=-(Q/A)*Q_TA/k(TA)` and `Q_dB=(Q/A)*Q_TB/k(TB)`.
+The endpoint partials hold source energies fixed; their density contributions
+are added to original 1/Cp and source-energy terms exactly once. This includes
+radiation and a separately authored nonradiative gap resistance, or a complete
+original two-surface exchange law. Neither path queries the accepted source
+again or repeats the nonlinear solve. Signed differential responses remain
+available even when the heat/secant is passive.
+
+For the exterior owner, C=A/d and f=1/(1+Rcoat*C*k(Tmaterial)). After eliminating
+the coating, gc=f*C*k(Tbulk) and gs=f*C*k(Tmaterial). The complete tangent is
+`Q_h=[F_T*(gc*T_h-Q*(d'/d)*f)+gs*F_h]/(gs+F_T)`, using the retained
+Kirchhoff-integral Q and original accepted exterior partials. The existing
+positive combined-stiffness admission remains authoritative for negative
+exterior feedback. Bulk-only coefficients are sampled once, actual exterior
+sources retain their accepted surface query, and both actual bath powers and
+temperatures still reach the native entropy/heat accounts.
+
+Area, coverage, coating resistance and independently declared gap/source
+geometry remain fixed. Changing solid thickness does not infer gap motion,
+new view factors, changing convection length or lateral strain constraints.
+Fixed cylindrical/spherical surface-link coordinates retain their prior
+support; the density-driven geometry hook refuses those radial coordinates.
+There is no additional pressure-work heat: original isobaric storage already
+accounts for Q=Delta H=Delta U+p*Delta V at the declared maintained pressure.
+
+Six regressions in `isobaric/expansion/tests/conduction/gray.rs` cover both
+heat-flow directions and original source-energy feedback against complete
+finite differences, unchanged source-query counts, coating and signed exterior
+feedback, native SDIRK closed-network mass/energy, and native backward-Euler
+actual-bath entropy with independent enthalpy/pressure-work accounting. Final
+Rust buffers are syntax checked; these new native regressions have not been
+executed because workspace storage prevents a dependency build.
 
 ## Saturated-water boiling and condensation
 
