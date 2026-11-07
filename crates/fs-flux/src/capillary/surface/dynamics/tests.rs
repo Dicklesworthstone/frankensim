@@ -453,6 +453,344 @@ fn empty_diffusion_graph_recovers_the_original_coated_mechanical_trajectory() {
     assert_eq!(report.amount_defect_mol, 0.0);
 }
 
+fn partition_laws(langmuir: bool) -> [super::super::surfactant::SurfactantLaw; 4] {
+    use super::super::surfactant::SurfactantLaw;
+    let clean = [0.3, 0.4, 0.5, 0.6];
+    let references = [0.4, 0.8, 1.2, 0.6];
+    core::array::from_fn(|i| {
+        if langmuir {
+            SurfactantLaw::Langmuir {
+                clean_tension_n_m: clean[i],
+                thermal_energy_j_mol: 0.5,
+                saturation_concentration_mol_m2: references[i],
+            }
+        } else {
+            SurfactantLaw::IdealDilute {
+                clean_tension_n_m: clean[i],
+                thermal_energy_j_mol: 0.5,
+                reference_concentration_mol_m2: references[i],
+            }
+        }
+    })
+}
+
+fn diffusion_controls(
+    edges: usize,
+) -> super::super::surfactant::diffusion::SurfaceDiffusionControls {
+    super::super::surfactant::diffusion::SurfaceDiffusionControls {
+        maximum_step_s: 0.002,
+        maximum_substeps: 8,
+        maximum_faces: 4,
+        maximum_edges: edges,
+        amount_tolerance_mol: 1e-13,
+        energy_increase_tolerance_j: 1e-13,
+    }
+}
+
+#[test]
+fn moving_partitioned_coating_preserves_original_energy_amount_and_momentum() {
+    use super::super::surfactant::{SurfactantFace, diffusion::SurfacePartitionDiffusionEdge};
+    use super::surfactant_transport::SurfacePartitionedSurfactantTransport;
+    let (q, faces, masses, v) = tetrahedron();
+    let model = CapillarySurfaceDynamics::try_new(&masses, &faces, 4, 4).unwrap();
+    let viscosity = SurfaceViscosityField::Uniform(SurfaceViscosity {
+        shear_n_s_m: 0.1,
+        dilatational_n_s_m: 0.15,
+    });
+    let external = [[0.0; 3]; 4];
+    let edges = core::array::from_fn::<_, 3, _>(|i| SurfacePartitionDiffusionEdge {
+        faces: [i, i + 1],
+        conductance_mol_s: [0.4, 0.2, 0.3][i],
+    });
+    for langmuir in [false, true] {
+        let laws = partition_laws(langmuir);
+        let initial_amounts = [0.02, 0.07, 0.03, 0.05];
+        let mut amounts = initial_amounts;
+        let coating = core::array::from_fn::<_, 4, _>(|i| SurfactantFace {
+            law: laws[i],
+            amount_mol: amounts[i],
+        });
+        let mut state = model
+            .initial_state_surfactant(
+                0.0,
+                &q,
+                &v,
+                SurfactantField::PerFace(&coating),
+                viscosity,
+                &external,
+            )
+            .unwrap();
+        // Independently reconstruct physical storage using each ORIGINAL law
+        // and actual endpoint area, rather than the composed account alone.
+        let storage = |p: &[Vector], n: &[f64]| {
+            (0..4)
+                .map(|i| {
+                    SurfactantFace {
+                        law: laws[i],
+                        amount_mol: n[i],
+                    }
+                    .at_area(geometry(faces[i].map(|j| p[j])).unwrap().area)
+                    .unwrap()
+                    .free_energy_j
+                })
+                .sum::<f64>()
+        };
+        let mut stored = storage(&q, &amounts);
+        let initial_energy = kinetic(&masses, &state.v).unwrap() + stored;
+        let (linear, angular) = momentum(&state, &masses);
+        let mut viscous_loss = 0.0;
+        let mut diffusion_loss = 0.0;
+        for _ in 0..12 {
+            let report = model
+                .advance_partitioned_surfactant_diffusive(
+                    &mut state,
+                    &mut amounts,
+                    SurfacePartitionedSurfactantTransport {
+                        laws: &laws,
+                        edges: &edges,
+                        controls: diffusion_controls(3),
+                    },
+                    viscosity,
+                    &external,
+                    0.005,
+                    controls(),
+                    || false,
+                )
+                .unwrap();
+            let after = storage(&positions(&state), &amounts);
+            close(report.surface_free_energy_before_j, stored, 2e-14);
+            close(report.surface_free_energy_after_j, after, 2e-14);
+            close(report.surface_free_energy_change_j, after - stored, 2e-14);
+            stored = after;
+            viscous_loss += report.mechanics.surface_viscous_dissipation_j;
+            diffusion_loss += report.diffusion_free_energy_dissipation_j;
+            close(
+                kinetic(&masses, &state.v).unwrap() + stored + viscous_loss + diffusion_loss,
+                initial_energy,
+                5e-11,
+            );
+            close(amounts.iter().sum(), initial_amounts.iter().sum(), 2e-14);
+            assert!(amounts.iter().all(|n| *n > 0.0));
+            assert_eq!(report.mechanics.surface.coefficient_supply_j, 0.0);
+            let (p, l) = momentum(&state, &masses);
+            for d in 0..3 {
+                close(p[d], linear[d], 3e-11);
+                close(l[d], angular[d], 3e-11);
+            }
+        }
+        assert!(viscous_loss > 0.0 && diffusion_loss > 0.0);
+        assert!(
+            amounts
+                .iter()
+                .zip(initial_amounts)
+                .any(|(&after, before)| (after - before).abs() > 1e-4)
+        );
+    }
+}
+
+#[test]
+fn partitioned_uniform_law_recovers_composition_and_late_cancellation_is_atomic() {
+    use super::super::surfactant::{
+        SurfactantLaw,
+        diffusion::{SurfaceDiffusionEdge, SurfacePartitionDiffusionEdge},
+    };
+    use super::surfactant_transport::{
+        SurfacePartitionedSurfactantTransport, SurfaceSurfactantTransport,
+    };
+    let (q, faces, masses, v) = tetrahedron();
+    let model = CapillarySurfaceDynamics::try_new(&masses, &faces, 4, 4).unwrap();
+    let law = SurfactantLaw::IdealDilute {
+        clean_tension_n_m: 0.3,
+        thermal_energy_j_mol: 0.5,
+        reference_concentration_mol_m2: 2.0,
+    };
+    let initial_amounts = [0.02, 0.07, 0.03, 0.05];
+    let coating = SurfactantField::Uniform {
+        law,
+        amounts_mol: &initial_amounts,
+    };
+    let viscosity = SurfaceViscosityField::Uniform(SurfaceViscosity::ZERO);
+    let external = [[0.0; 3]; 4];
+    let mut initial = model
+        .initial_state_surfactant(0.0, &q, &v, coating, viscosity, &external)
+        .unwrap();
+    model
+        .advance_surfactant(
+            &mut initial,
+            coating,
+            viscosity,
+            &external,
+            0.005,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    assert!(!initial.history.is_empty());
+    let edges = core::array::from_fn::<_, 3, _>(|i| SurfaceDiffusionEdge {
+        faces: [i, i + 1],
+        conductance_m2_s: [0.4, 0.2, 0.3][i],
+    });
+    let partition_edges = edges.map(|edge| SurfacePartitionDiffusionEdge {
+        faces: edge.faces,
+        conductance_mol_s: 2.0 * edge.conductance_m2_s,
+    });
+    let laws = [law; 4];
+    let transport = SurfacePartitionedSurfactantTransport {
+        laws: &laws,
+        edges: &partition_edges,
+        controls: diffusion_controls(3),
+    };
+    let mut reference = initial.clone();
+    let mut reference_amounts = initial_amounts;
+    model
+        .advance_surfactant_diffusive(
+            &mut reference,
+            &mut reference_amounts,
+            SurfaceSurfactantTransport {
+                law,
+                edges: &edges,
+                controls: diffusion_controls(3),
+            },
+            viscosity,
+            &external,
+            0.005,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    let mut composed = initial.clone();
+    let mut amounts = initial_amounts;
+    let mut calls = 0;
+    model
+        .advance_partitioned_surfactant_diffusive(
+            &mut composed,
+            &mut amounts,
+            transport,
+            viscosity,
+            &external,
+            0.005,
+            controls(),
+            || {
+                calls += 1;
+                false
+            },
+        )
+        .unwrap();
+    assert_eq!(reference, composed);
+    assert_eq!(reference_amounts, amounts);
+
+    let mut retry = initial.clone();
+    let mut retry_amounts = initial_amounts;
+    let mut current = 0;
+    let result = model.advance_partitioned_surfactant_diffusive(
+        &mut retry,
+        &mut retry_amounts,
+        transport,
+        viscosity,
+        &external,
+        0.005,
+        controls(),
+        || {
+            current += 1;
+            current == calls
+        },
+    );
+    assert!(matches!(result, Err(SurfaceDynamicsError::Cancelled)));
+    assert_eq!(retry_amounts, initial_amounts);
+    assert_eq!(retry, initial);
+}
+
+#[test]
+fn empty_partition_graph_recovers_per_face_mechanics_and_bad_law_count_is_atomic() {
+    use super::super::surfactant::{SurfactantFace, SurfactantLaw};
+    use super::surfactant_transport::SurfacePartitionedSurfactantTransport;
+    let (q, faces, masses, v) = tetrahedron();
+    let model = CapillarySurfaceDynamics::try_new(&masses, &faces, 4, 4).unwrap();
+    let mut laws = partition_laws(false);
+    laws[1] = partition_laws(true)[1];
+    laws[2] = SurfactantLaw::IdealDilute {
+        clean_tension_n_m: 0.5,
+        thermal_energy_j_mol: 0.7,
+        reference_concentration_mol_m2: 1.2,
+    };
+    // Disconnected components may use different law families and temperatures.
+    let initial_amounts = [0.02, 0.07, 0.03, 0.05];
+    let coating = core::array::from_fn::<_, 4, _>(|i| SurfactantFace {
+        law: laws[i],
+        amount_mol: initial_amounts[i],
+    });
+    let viscosity = SurfaceViscosityField::Uniform(SurfaceViscosity::ZERO);
+    let external = [[0.0; 3]; 4];
+    let mut reference = model
+        .initial_state_surfactant(
+            0.0,
+            &q,
+            &v,
+            SurfactantField::PerFace(&coating),
+            viscosity,
+            &external,
+        )
+        .unwrap();
+    let initial = reference.clone();
+    let mut composed = reference.clone();
+    model
+        .advance_surfactant(
+            &mut reference,
+            SurfactantField::PerFace(&coating),
+            viscosity,
+            &external,
+            0.005,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    let mut amounts = initial_amounts;
+    let report = model
+        .advance_partitioned_surfactant_diffusive(
+            &mut composed,
+            &mut amounts,
+            SurfacePartitionedSurfactantTransport {
+                laws: &laws,
+                edges: &[],
+                controls: diffusion_controls(0),
+            },
+            viscosity,
+            &external,
+            0.005,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    assert_eq!(reference.q, composed.q);
+    assert_eq!(reference.v, composed.v);
+    assert_eq!(reference.a, composed.a);
+    assert_eq!(amounts, initial_amounts);
+    assert_eq!(report.diffusion_free_energy_dissipation_j, 0.0);
+    let mut retry = initial.clone();
+    let result = model.advance_partitioned_surfactant_diffusive(
+        &mut retry,
+        &mut amounts,
+        SurfacePartitionedSurfactantTransport {
+            laws: &laws[..3],
+            edges: &[],
+            controls: diffusion_controls(0),
+        },
+        viscosity,
+        &external,
+        0.005,
+        controls(),
+        || false,
+    );
+    assert!(matches!(
+        result,
+        Err(SurfaceDynamicsError::Diffusion(
+            SurfaceDiffusionError::InvalidInput(_)
+        ))
+    ));
+    assert_eq!(amounts, initial_amounts);
+    assert_eq!(retry, initial);
+}
+
 #[test]
 fn interfacial_dilatational_viscosity_matches_the_analytical_damped_breathing_mode() {
     let q = [

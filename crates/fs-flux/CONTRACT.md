@@ -2220,8 +2220,7 @@ thermal diffusion or adsorption law is inferred. Analytic unequal-affinity and
 stiff Langmuir pairs, an independent capacity-weighted graph spectrum,
 homogeneous recovery, extreme normalized concentrations and incompatible-law
 or cancelled-state rollback exercise this path. The partitioned operator acts
-on fixed stage areas; the composed mechanical wrapper below still accepts the
-common-law transport model.
+on fixed stage areas.
 
 `advance_surfactant_diffusive` composes half diffusion on the initial areas,
 the original mechanical trial, and half diffusion on its solved final areas.
@@ -2241,6 +2240,18 @@ stiff Langmuir bounds, an independent three-face spectral convergence oracle,
 stationary/vacuum limits, invariance and rollback. Native composed regressions
 exercise moving/viscous surface storage, diffusion loss, momentum, total
 amount, empty-graph trajectory recovery and late cancellation of both states.
+
+`advance_partitioned_surfactant_diffusive` reuses this same composition with
+`SurfacePartitionedSurfactantTransport`. Each original law stays attached to
+its material face through diffusion, the exact mechanical force/tangent, and
+both endpoint storage evaluations. Actual evolving areas determine the
+capacities `A*Gamma_ref` or `A*Gamma_sat`; temperature and material parameters
+remain held. One bounded per-face coating array stages the intermediate
+mechanical inventory, without cloning trajectory history. Native moving
+ideal/Langmuir regressions independently reconstruct original-law storage and
+check complete energy, amount and momentum conservation; homogeneous recovery,
+disconnected-law recovery and late cancellation preserve the original behavior
+and atomic trajectory/inventory publication.
 
 
 ## Damped Newton BDF1 for stiff rheology

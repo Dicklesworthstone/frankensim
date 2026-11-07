@@ -15,9 +15,10 @@
 //! while the coating carries interfacial free energy and changes its stress.
 
 use super::super::surfactant::{
-    SurfactantLaw,
+    SurfactantFace, SurfactantLaw,
     diffusion::{
         SurfaceDiffusionControls, SurfaceDiffusionEdge, SurfaceDiffusionReport,
+        SurfacePartitionDiffusionEdge, diffuse_partitioned_surface_surfactant,
         diffuse_surface_surfactant,
     },
 };
@@ -32,6 +33,56 @@ pub struct SurfaceSurfactantTransport<'a> {
     pub edges: &'a [SurfaceDiffusionEdge],
     /// Substep, work, allocation and physical-balance limits for each half step.
     pub controls: SurfaceDiffusionControls,
+}
+
+/// Held chemical laws and a partition-aware graph on the original material faces.
+#[derive(Clone, Copy, Debug)]
+pub struct SurfacePartitionedSurfactantTransport<'a> {
+    /// One original constitutive law per face. Connected patches share the
+    /// same family and thermal energy; references/capacities and clean tensions
+    /// may differ. Ideal references use one common chemical-energy datum.
+    pub laws: &'a [SurfactantLaw],
+    /// Symmetric authored molar conductances in fixed canonical edge order.
+    pub edges: &'a [SurfacePartitionDiffusionEdge],
+    /// Substep, work, allocation and physical-balance limits for each half step.
+    pub controls: SurfaceDiffusionControls,
+}
+
+#[derive(Clone, Copy)]
+enum Transport<'a> {
+    Uniform(SurfaceSurfactantTransport<'a>),
+    Partitioned(SurfacePartitionedSurfactantTransport<'a>),
+}
+
+impl Transport<'_> {
+    fn diffuse(
+        self,
+        areas: &[f64],
+        amounts: &mut [f64],
+        duration_s: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SurfaceDiffusionReport, SurfaceDiffusionError> {
+        match self {
+            Self::Uniform(transport) => diffuse_surface_surfactant(
+                transport.law,
+                areas,
+                amounts,
+                transport.edges,
+                duration_s,
+                transport.controls,
+                cancelled,
+            ),
+            Self::Partitioned(transport) => diffuse_partitioned_surface_surfactant(
+                transport.laws,
+                areas,
+                amounts,
+                transport.edges,
+                duration_s,
+                transport.controls,
+                cancelled,
+            ),
+        }
+    }
 }
 
 /// Accepted composition, including independent substage and complete accounts.
@@ -63,8 +114,8 @@ impl CapillarySurfaceDynamics<'_> {
     /// Material advection and concentration-dependent stress use the original
     /// exact finite-area force and tangent. Diffusion changes the same face
     /// amounts on the actual initial/final geometry. Its graph is homogeneous
-    /// in temperature and chemical law; heterogeneous coatings remain available
-    /// through `advance_surfactant` without this concentration-driven diffusion.
+    /// in temperature and chemical law. Heterogeneous coatings use
+    /// [`Self::advance_partitioned_surfactant_diffusive`].
     ///
     /// The symmetric composition is second order for smooth admitted states and
     /// a held graph, with the diffusion substep limit controlling edge splitting.
@@ -76,6 +127,66 @@ impl CapillarySurfaceDynamics<'_> {
         state: &mut SecondOrderState,
         amounts_mol: &mut [f64],
         transport: SurfaceSurfactantTransport<'_>,
+        viscosity: SurfaceViscosityField<'_>,
+        external_forces_n: &[Vector],
+        dt_s: f64,
+        controls: SurfaceDynamicsControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SurfaceSurfactantReport, SurfaceDynamicsError> {
+        self.advance_with_surfactant_transport(
+            state,
+            amounts_mol,
+            Transport::Uniform(transport),
+            viscosity,
+            external_forces_n,
+            dt_s,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Diffuse and move a coating with distinct material affinities or site
+    /// capacities through the same atomic mechanical composition.
+    ///
+    /// Each face retains its original law during both diffusion stages and the
+    /// mechanical trial. The actual initial/final areas set concentrations and
+    /// site capacities. The same laws supply chemical potentials, capillary
+    /// stress and every surface-energy increment. Temperature, references and
+    /// conductances remain held physical inputs throughout this step.
+    ///
+    /// The partitioned diffusion admission rules apply independently to each
+    /// conducting connection. Any refusal, including final-geometry diffusion,
+    /// publishes neither trajectory nor amounts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_partitioned_surfactant_diffusive(
+        &self,
+        state: &mut SecondOrderState,
+        amounts_mol: &mut [f64],
+        transport: SurfacePartitionedSurfactantTransport<'_>,
+        viscosity: SurfaceViscosityField<'_>,
+        external_forces_n: &[Vector],
+        dt_s: f64,
+        controls: SurfaceDynamicsControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SurfaceSurfactantReport, SurfaceDynamicsError> {
+        self.advance_with_surfactant_transport(
+            state,
+            amounts_mol,
+            Transport::Partitioned(transport),
+            viscosity,
+            external_forces_n,
+            dt_s,
+            controls,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_with_surfactant_transport(
+        &self,
+        state: &mut SecondOrderState,
+        amounts_mol: &mut [f64],
+        transport: Transport<'_>,
         viscosity: SurfaceViscosityField<'_>,
         external_forces_n: &[Vector],
         dt_s: f64,
@@ -94,8 +205,20 @@ impl CapillarySurfaceDynamics<'_> {
                 "complete mechanical coordinates, one amount per face and a positive finite step required",
             ));
         }
-        if self.faces.len() > transport.controls.maximum_faces
-            || transport.edges.len() > transport.controls.maximum_edges
+        let (diffusion_controls, edges) = match transport {
+            Transport::Uniform(data) => (data.controls, data.edges.len()),
+            Transport::Partitioned(data) => {
+                if data.laws.len() != self.faces.len() {
+                    return Err(SurfaceDiffusionError::InvalidInput(
+                        "one original constitutive law required per face",
+                    )
+                    .into());
+                }
+                (data.controls, data.edges.len())
+            }
+        };
+        if self.faces.len() > diffusion_controls.maximum_faces
+            || edges > diffusion_controls.maximum_edges
         {
             return Err(SurfaceDiffusionError::WorkBudget.into());
         }
@@ -105,35 +228,49 @@ impl CapillarySurfaceDynamics<'_> {
             .try_reserve_exact(amounts_mol.len())
             .map_err(|_| SurfaceDynamicsError::Allocation)?;
         candidate_amounts.extend_from_slice(amounts_mol);
-        let diffusion_before = diffuse_surface_surfactant(
-            transport.law,
+        let diffusion_before = transport.diffuse(
             &before_areas,
             &mut candidate_amounts,
-            transport.edges,
             0.5 * dt_s,
-            transport.controls,
             &mut cancelled,
         )?;
-        let (candidate, mechanics) = self.surface_trial(
-            state,
-            SurfaceForces::Insoluble(SurfactantField::Uniform {
-                law: transport.law,
-                amounts_mol: &candidate_amounts,
-            }),
-            viscosity,
-            external_forces_n,
-            dt_s,
-            controls,
-            &mut cancelled,
-        )?;
+        let (candidate, mechanics) = {
+            let mut coating_faces = Vec::new();
+            let coating = match transport {
+                Transport::Uniform(data) => SurfactantField::Uniform {
+                    law: data.law,
+                    amounts_mol: &candidate_amounts,
+                },
+                Transport::Partitioned(data) => {
+                    coating_faces
+                        .try_reserve_exact(self.faces.len())
+                        .map_err(|_| SurfaceDynamicsError::Allocation)?;
+                    for (face, (&law, &amount_mol)) in
+                        data.laws.iter().zip(&candidate_amounts).enumerate()
+                    {
+                        if face % 64 == 0 && cancelled() {
+                            return Err(SurfaceDynamicsError::Cancelled);
+                        }
+                        coating_faces.push(SurfactantFace { law, amount_mol });
+                    }
+                    SurfactantField::PerFace(&coating_faces)
+                }
+            };
+            self.surface_trial(
+                state,
+                SurfaceForces::Insoluble(coating),
+                viscosity,
+                external_forces_n,
+                dt_s,
+                controls,
+                &mut cancelled,
+            )?
+        };
         let after_areas = face_areas(self.faces, &candidate.q, &mut cancelled)?;
-        let diffusion_after = diffuse_surface_surfactant(
-            transport.law,
+        let diffusion_after = transport.diffuse(
             &after_areas,
             &mut candidate_amounts,
-            transport.edges,
             0.5 * dt_s,
-            transport.controls,
             &mut cancelled,
         )?;
 
@@ -148,7 +285,7 @@ impl CapillarySurfaceDynamics<'_> {
         if !amount_defect.is_finite() {
             return Err(SurfaceDiffusionError::Unrepresentable.into());
         }
-        if amount_defect.abs() > transport.controls.amount_tolerance_mol {
+        if amount_defect.abs() > diffusion_controls.amount_tolerance_mol {
             return Err(SurfaceDiffusionError::AmountBalance {
                 defect_mol: amount_defect,
             }
