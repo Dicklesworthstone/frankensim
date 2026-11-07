@@ -16,6 +16,8 @@ use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
 
 #[path = "phase_conductivity/caloric.rs"]
 mod caloric_source;
+#[path = "phase_conductivity/density.rs"]
+mod density;
 #[path = "phase_conductivity/mushy.rs"]
 mod mushy;
 

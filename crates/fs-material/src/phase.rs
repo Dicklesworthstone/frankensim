@@ -687,7 +687,10 @@ impl ResolvedHeatCapacityCurve {
             .iter()
             .map(|knot| [knot.temperature_k, knot.specific_heat_capacity_j_kg_k])
             .collect();
-        Ok(Self { curve, source_heat_capacities })
+        Ok(Self {
+            curve,
+            source_heat_capacities,
+        })
     }
 
     /// The source-bound chart accepted by thermal and phase-state consumers.
@@ -1444,6 +1447,27 @@ impl EquilibriumEnthalpyPhaseCurve {
         Ok((slope, law))
     }
 
+    /// Original specific-volume derivative `d(1/rho)/dh` [m³/J], including
+    /// density changes on a latent plateau. Sourced sensible intervals retain
+    /// their affine rho(T) and original Cp(T); coexistence retains its authored
+    /// specific-volume interpolation. No independent density fit is introduced.
+    ///
+    /// Interior knots select the right interval and the upper endpoint selects
+    /// left, as for [`Self::temperature_derivative_at_specific_enthalpy`].
+    ///
+    /// # Errors
+    /// Refuses nonfinite/out-of-domain enthalpy and an unrepresentable original
+    /// volume slope, including a nonzero slope that underflows to zero.
+    pub fn specific_volume_derivative_at_specific_enthalpy(
+        &self,
+        specific_enthalpy_j_kg: f64,
+    ) -> Result<f64, PhaseStateError> {
+        let index = self.derivative_interval(specific_enthalpy_j_kg)?;
+        let state = self.values_at_specific_enthalpy(specific_enthalpy_j_kg)?;
+        self.volume_slope_on_interval(index, state)
+            .map(|(slope, _)| slope)
+    }
+
     /// Original temperature derivative `dT/dh` [K/(J/kg)] on this
     /// specific-enthalpy chart, without extrapolation or phase smoothing.
     ///
@@ -2035,6 +2059,79 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn specific_volume_tangents_retain_latent_and_original_sensible_density_laws() {
+        let phase = plateau_curve();
+        for (h, interval) in [
+            (0.0, 0),
+            (30_000.0, 1),
+            (42_500.0, 1),
+            (55_000.0, 2),
+            (95_000.0, 2),
+        ] {
+            let lower = phase.knots()[interval];
+            let upper = phase.knots()[interval + 1];
+            let expected = (upper.bulk_density_kg_m3.recip() - lower.bulk_density_kg_m3.recip())
+                / (upper.specific_enthalpy_j_kg - lower.specific_enthalpy_j_kg);
+            let actual = phase
+                .specific_volume_derivative_at_specific_enthalpy(h)
+                .unwrap();
+            assert!((actual / expected - 1.0).abs() < 2e-13);
+        }
+        assert_eq!(
+            phase
+                .temperature_derivative_at_specific_enthalpy(42_500.0)
+                .unwrap(),
+            0.0
+        );
+        assert!(
+            phase
+                .specific_volume_derivative_at_specific_enthalpy(42_500.0)
+                .unwrap()
+                > 0.0
+        );
+
+        // rho(T) is affine, while h(T) has the original quadratic Cp integral.
+        // Differentiating a chord in h would miss both local factors.
+        for densities in [[1000.0, 900.0], [900.0, 1000.0]] {
+            let mut source = heat_capacity_knots(1000.0, 2000.0);
+            source[0].bulk_density_kg_m3 = densities[0];
+            source[1].bulk_density_kg_m3 = densities[1];
+            let curve = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity_exact(
+                ContentHash([0x76; 32]),
+                SolidLiquidPhase::Solid,
+                0.0,
+                &source,
+            )
+            .unwrap();
+            let h = 62_500.0; // T=350 K, Cp=1500 J/(kg K), rho=950 kg/m³.
+            let expected = -(densities[1] - densities[0]) / (100.0 * 950.0 * 950.0 * 1500.0);
+            let actual = curve
+                .specific_volume_derivative_at_specific_enthalpy(h)
+                .unwrap();
+            assert!((actual / expected - 1.0).abs() < 2e-13);
+            let volume = |h| {
+                curve
+                    .values_at_specific_enthalpy(h)
+                    .unwrap()
+                    .bulk_density_kg_m3
+                    .recip()
+            };
+            let difference = (volume(h + 0.1) - volume(h - 0.1)) / 0.2;
+            assert!((actual / difference - 1.0).abs() < 1e-8);
+        }
+        assert!(
+            phase
+                .specific_volume_derivative_at_specific_enthalpy(f64::NAN)
+                .is_err()
+        );
+        assert!(
+            phase
+                .specific_volume_derivative_at_specific_enthalpy(95_001.0)
+                .is_err()
+        );
     }
 
     #[test]

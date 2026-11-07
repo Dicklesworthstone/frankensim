@@ -367,8 +367,10 @@ impl<'a> ConductionObserver<'a> {
     ///
     /// Fixed-density and material-density layers may coexist on separate cells.
     /// Unknown density, unsupported states, changed reference geometry or face
-    /// coverage refuse. The implicit fixed-geometry solver does not admit these
-    /// layers; explicit temporal and spatial refinement remain necessary.
+    /// coverage refuse. Implicit chains/graphs admit fixed-mass layers when
+    /// their original tangent law also supplies `d(1/rho)/dh`; their endpoint
+    /// geometry and Newton derivative then evolve together. Temporal and
+    /// spatial refinement remain necessary for either integration method.
     pub fn with_material_density_layers(
         self,
         thermal: &DepositionSimulation<'_>,

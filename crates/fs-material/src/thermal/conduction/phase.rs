@@ -560,6 +560,36 @@ impl ImplicitConductionLaw for PreparedPhaseConductivity<'_> {
             conductivity_slope_kg_w_m_k_j: sample.conductivity_enthalpy_derivative_kg_w_m_k_j(),
         })
     }
+    fn specific_volume_derivative_at_specific_enthalpy(
+        &self,
+        h: f64,
+    ) -> Result<Option<f64>, DepositionError> {
+        let bounds = self.enthalpy_bounds_j_kg();
+        if !h.is_finite() || !(bounds[0]..=bounds[1]).contains(&h) {
+            return Err(DepositionError::MaterialDomain);
+        }
+        let slope = if h == bounds[1] {
+            // A source path clipped at a phase boundary uses the admitted
+            // LEFT interval, matching its temperature/conductivity tangents.
+            let index = self
+                .caloric
+                .knots()
+                .partition_point(|knot| knot.specific_enthalpy_j_kg < h)
+                - 1;
+            let state = self
+                .caloric
+                .values_at_specific_enthalpy(h)
+                .map_err(|_| DepositionError::MaterialDomain)?;
+            self.caloric
+                .volume_slope_on_interval(index, state)
+                .map(|(slope, _)| slope)
+        } else {
+            self.caloric
+                .specific_volume_derivative_at_specific_enthalpy(h)
+        }
+        .map_err(|_| DepositionError::MaterialDomain)?;
+        Ok(Some(slope))
+    }
     fn time_observables(&self, h: f64) -> Result<ImplicitConductionObservables, DepositionError> {
         let sample = self
             .state_at_specific_enthalpy(h)

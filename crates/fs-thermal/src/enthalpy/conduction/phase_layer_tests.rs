@@ -262,7 +262,7 @@ fn planar_reference_and_per_side_contact_measures_are_admitted_explicitly() {
 }
 
 #[test]
-fn changed_unselected_mass_cancellation_and_fixed_implicit_paths_refuse() {
+fn changed_unselected_mass_cancellation_and_missing_implicit_bindings_refuse() {
     let thermal = simulation(cells(&[300.0, 400.0], 1.0, None), &SENSIBLE, vec![], 100);
     let observer = ConductionObserver::new(
         &thermal,
@@ -301,7 +301,7 @@ fn changed_unselected_mass_cancellation_and_fixed_implicit_paths_refuse() {
     assert!(matches!(
         implicit::ImplicitConductionChain::new(&thermal, &observer, &[], || Ok(())),
         Err(implicit::ImplicitConductionError::Invalid(
-            "mass- or density-evolving planar layers require the explicit conduction observer"
+            "active thermal cells and one tangent law per caloric material required"
         ))
     ));
 }

@@ -15514,7 +15514,13 @@ fraction axis, even for a phase-independent conductivity source.
 The compiled law implements the native `ConductivityLaw` and
 `ImplicitConductionLaw`, including nonzero `dk/dh` on a plateau where `dT/dh=0`.
 Interior breakpoints use right derivatives and the admitted upper bound uses
-left derivatives. The caloric owner's public numeric sample supplies unchanged
+left derivatives. The adapter also supplies the original curve's analytic
+`d(1/rho)/dh` for fixed-mass implicit planar expansion/contraction, preserving
+the same one-sided convention at a clipped phase boundary. Sensible intervals
+differentiate the retained rho(T) through original Cp(T); latent intervals
+retain their specific-volume law even when `dT/dh=0`. This volume tangent
+changes transport resistance without changing inventory or adding pressure
+work. The caloric owner's public numeric sample supplies unchanged
 temperature, fraction and density without constructing a state identity. Runtime
 evaluation allocates nothing and performs no source query or hashing. Original
 source paths retain their receipts through `source_paths`; samples identify

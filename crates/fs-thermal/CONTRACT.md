@@ -1466,7 +1466,8 @@ per-side contact measures. Source identity, reference mesh, contact coverage
 and footprint remain fixed. A nonzero positive mass/thickness must remain
 representable. All selected channels must be normal to those planar faces;
 this is an explicit caller assertion, not an inferred geometric orientation.
-The fixed-mass implicit chain/graph constructor refuses this explicit mode.
+The implicit chain/graph can reuse a selected layer at fixed mass; any later
+mass change still refuses and requires rebinding the fixed-mass solve.
 
 This closure supplies no mesh motion, sidewall growth, porosity, nucleation,
 complete extinction, gas displacement work or density evolution. In particular,
@@ -1475,7 +1476,7 @@ The existing first-order thermal/phase split requires timestep refinement.
 The four G0/G1/G3/G4 groups in `conduction/phase_layer_tests.rs` exercise growth
 and retreat resistance, both link sides, finite heat storage/conservation,
 temperature-dependent conductivity shared by both baths, per-side coverage,
-unchanged default admission, cancellation and the implicit-mode refusal.
+unchanged default admission, cancellation and missing implicit bindings.
 
 ### Original material density in planar heat transport
 
@@ -1495,14 +1496,33 @@ volume, and latent density changes remain visible when temperature is constant.
 This mode requires enthalpy storage; an internal-energy law with moving volume
 would need its own pressure-work equation. No extra p*dV heat is added.
 The declared fixed-footprint, normal-expansion reduction supplies no lateral
-strain, stress, mesh motion or gas displacement. The fixed-geometry implicit
-solver refuses this mode; explicit timestep and spatial refinement still apply.
+strain, stress, mesh motion or gas displacement. Temporal and spatial
+refinement remain necessary.
+
+The implicit chain/graph admits these layers at fixed mass when the original
+`ImplicitConductionLaw` additionally supplies `d(1/rho)/dh`. Each endpoint
+queries the original density and tangent once per selected cell and reuses
+its half-distance across normal links, reservoir and ambient faces. The exact
+Newton derivative includes `d'/d = rho * d(1/rho)/dh` alongside `k'/k` in the
+series-resistance derivative, including on isothermal latent plateaus. Native
+state-dependent contact resistance composes with this same derivative. No
+mass is reconstructed from the reference mesh and no second pressure-work
+term is added. The same endpoint serves backward Euler, SDIRK2 and their graph
+owners. Fixed-density layers need no extra tangent. Missing density tangents
+and integrated custom link/boundary/exchange laws with fixed-geometry tangent
+contracts refuse; their omitted geometric derivatives are never guessed.
 
 G0/G1/G3 tests in `conduction/density_layer_tests.rs` cover a heating trajectory
 with evolving resistance, both external faces, one density query per cell,
 constant-density equivalence, missing data and final-state refusal. Material
 integration in `fs-material/tests/density_conduction.rs` exercises the original
 solid/liquid density law through a latent plateau and conserved heat transport.
+`implicit/density_tests.rs` additionally checks analytic expanding/contracting
+backward-Euler endpoints, the complete energy-coordinate link and two-bath
+Jacobian, fixed-density reduction, closed chain/graph SDIRK conservation and
+unsupported-law refusal. `fs-material/tests/phase_conductivity/density.rs`
+drives a latent-density endpoint through the original source adapter and
+checks its independently eliminated energy equation.
 
 
 ## Implicit enthalpy transport on geometric conduction chains
@@ -1567,8 +1587,10 @@ Every admitted caloric law must provide the original entropy integral.
 This path removes the explicit diffusion CFL restriction for an accepted
 implicit interval. Backward Euler remains first order; interval halving here
 is nonlinear globalization, not a time-error estimator. Global uniqueness,
-unconditional nonlinear convergence, a general graph solve, evolving geometry
-and constitutive accuracy beyond the supplied laws are not claimed.
+unconditional nonlinear convergence, general mesh motion and constitutive
+accuracy beyond the supplied laws are not claimed. Fixed-footprint planar
+density evolution is the explicitly selected geometric reduction above;
+general network connectivity is supplied by the separate graph owner below.
 
 Five focused chain regressions cover stiff exact solutions, latent traversal,
 original-residual Jacobian differences, nonlinear time refinement, event
