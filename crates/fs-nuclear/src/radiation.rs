@@ -2,10 +2,11 @@
 //!
 //! Coefficients describe the fraction of energy leaving each nuclear source
 //! that actually deposits in each receiver, plus energy escaping the modeled
-//! domain. They must come from an independently resolved transport problem for
-//! the declared geometry, materials and emitted spectrum. This module neither
-//! solves transport nor equates attenuation or particle counts with heating.
-//! It supplies no nuclear data, dose model, or automatic geometry update.
+//! domain. They must describe a resolved transport problem for the declared
+//! geometry, materials and emitted spectrum. They may be supplied independently
+//! or prepared by the explicitly scoped planar photon [`transport`] owner.
+//! Attenuation and particle counts are not equated with heating. No nuclear
+//! data, dose model or automatic geometry update is supplied.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -15,6 +16,9 @@ pub mod grouped;
 
 /// Evaluated decay spectra reconciled to the original outward energy account.
 pub mod decay;
+
+/// Conservative planar photon transport that prepares energy-group responses.
+pub mod transport;
 
 /// Fixed admission tolerance for the sum of a supplied response row.
 /// Coefficients are never renormalized; admitted defects are charged in joules.
@@ -55,7 +59,7 @@ pub struct RadiationResponseLimits {
 #[derive(Clone, Debug)]
 pub struct RadiationResponse(Arc<ResponseData>);
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ResponseData {
     data_id: String,
     rows: Vec<RadiationSourceResponse>,
@@ -198,6 +202,23 @@ impl RadiationResponse {
     #[must_use]
     pub fn rows(&self) -> &[RadiationSourceResponse] {
         &self.0.rows
+    }
+
+    // Generated transport responses retain their measured preparation defects
+    // in the same per-emitted-joule audit as supplied row closure. They cannot
+    // silently discard a solve residual or endpoint-rounding adjustment.
+    pub(super) fn add_preparation_roundoff(&mut self, fractions: &[f64]) -> Result<(), RadiationError> {
+        if fractions.len() != self.0.rows.len() || !fractions.iter().copied().all(nonnegative) {
+            return Err(RadiationError::InvalidInput("exact nonnegative preparation defect coverage required"));
+        }
+        let data = Arc::make_mut(&mut self.0);
+        for ((_, uncertainty), &fraction) in data.closure_defects.iter_mut().zip(fractions) {
+            let mut error = ErrorBudget::new(f64::MAX);
+            error.charge(*uncertainty)?;
+            error.charge(fraction)?;
+            *uncertainty = error.used;
+        }
+        Ok(())
     }
 
     /// Unique physical emitting identities in ascending order.

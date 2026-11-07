@@ -59,12 +59,13 @@ pub struct GroupedRadiationResponseLimits {
 #[derive(Clone, Debug)]
 pub struct GroupedRadiationResponse(Arc<GroupedResponseData>);
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct GroupedResponseData {
     radiation: DecayRadiation,
     edges_j: Vec<f64>,
     source_ids: Vec<u64>,
     response: RadiationResponse,
+    preparation_roundoff: Vec<f64>,
 }
 
 impl GroupedRadiationResponse {
@@ -157,7 +158,60 @@ impl GroupedRadiationResponse {
             edges_j: group_edges_j,
             source_ids,
             response,
+            preparation_roundoff: vec![0.0; row_count],
         })))
+    }
+
+    /// Retain generated-response arithmetic defects without changing its rows.
+    pub(crate) fn with_preparation_roundoff(
+        mut self,
+        errors: Vec<(u64, Vec<f64>)>,
+    ) -> Result<Self, RadiationError> {
+        let groups = self.0.edges_j.len() - 1;
+        if errors.len() != self.0.source_ids.len() {
+            return Err(RadiationError::InvalidInput("exact preparation source coverage required"));
+        }
+        let mut expanded = vec![0.0; self.0.preparation_roundoff.len()];
+        let mut seen = vec![false; self.0.source_ids.len()];
+        for (id, values) in errors {
+            let source = self.0.source_ids.binary_search(&id)
+                .map_err(|_| RadiationError::InvalidInput("unknown preparation source"))?;
+            if seen[source] || values.len() != groups || !values.iter().copied().all(nonnegative) {
+                return Err(RadiationError::InvalidInput("exact nonnegative preparation group coverage required"));
+            }
+            seen[source] = true;
+            expanded[source * groups..(source + 1) * groups].copy_from_slice(&values);
+        }
+        let data = Arc::make_mut(&mut self.0);
+        data.response.add_preparation_roundoff(&expanded)?;
+        for (total, extra) in data.preparation_roundoff.iter_mut().zip(expanded) {
+            let mut error = super::ErrorBudget::new(f64::MAX);
+            error.charge(*total)?;
+            error.charge(extra)?;
+            *total = error.used;
+        }
+        Ok(self)
+    }
+
+    pub(crate) fn preparation_roundoff(&self, source_id: u64, group: usize) -> Option<f64> {
+        let groups = self.0.edges_j.len() - 1;
+        if group >= groups { return None; }
+        let source = self.0.source_ids.binary_search(&source_id).ok()?;
+        Some(self.0.preparation_roundoff[source * groups + group])
+    }
+
+    /// Borrow one canonical coefficient row without applying unit-energy inputs.
+    pub(crate) fn source_group_row(
+        &self,
+        source_id: u64,
+        group: usize,
+    ) -> Option<&RadiationSourceResponse> {
+        let groups = self.0.edges_j.len() - 1;
+        if group >= groups {
+            return None;
+        }
+        let source = self.0.source_ids.binary_search(&source_id).ok()?;
+        self.0.response.rows().get(source * groups + group)
     }
 
     /// Supplied dataset identity, including its intended physical applicability.

@@ -2617,3 +2617,49 @@ closure, independent production/energy moments, shared storage, one-group hazard
 work, positive numerical range, zero anchors, incompatible source content,
 aggregate limits and cancellation. This is numerical/assembly evidence for
 manufactured sources, not empirical isotope validation or a workspace Cargo gate.
+
+## Prepared planar photon transport
+
+`radiation::transport::prepare_slab_response` calculates a native
+`GroupedRadiationResponse` from ordered homogeneous layers and independently
+supplied gamma/X-ray collision kernels. Analytic characteristic integration
+retains uniform-source self-absorption, interlayer attenuation and two-sided
+vacuum escape. A positive angular quadrature explicitly represents isotropic
+emission. Same-group isotropic scattering is resolved by the original
+`fs_la::prepared_lu::LuWorkspace`, factored once per interacting energy group
+and reused across all physical sources. Groups without same-group scattering
+bypass factorization. Downscatter is solved in descending energy order.
+
+The transported coefficients describe ENERGY: local heat plus outgoing photon
+energy must close the total collision coefficient. Photon-number cross
+sections, total attenuation or a mass energy-absorption coefficient alone do not
+supply this kernel. `PhotonMassMaterial` retains explicit material identity,
+radiation kind, group grid and per-mass coefficients; conversion uses a supplied
+original reference density and refuses lost positive products. No material
+mixture, secondary-electron stopping law or evaluated data is invented.
+
+Preparation checks resource bounds before expansion, retains the original
+linear equations for absolute residual checks, and refuses nonclosing or
+negative solutions without clipping or normalizing them. Admitted floating-point
+overshoot of a generated unit fraction is bounded to one with its complete
+correction charged, together with observed preparation closure/solve defects,
+through the original response's numerical energy audit on every application. The sparse response
+retains every optical layer, including zero-heating receivers. Arithmetic
+closure, solve residual and charged work are reported separately. Subsequent
+decay intervals reuse the immutable response and the existing energy audit.
+
+This is steady infinite-planar transport with flat isotropic scattering
+sources inside each layer. Ballistic characteristic integration is analytic
+for each supplied ordinate; spatial scattering, angular and energy-group
+discretizations still require refinement. There is no flight-time storage,
+anisotropic phase function, upscatter, electron transport, dose or automatic
+material-property refresh. Unrepresentable positive transmission tails refuse.
+The formulation follows the collision-probability equations in SCALE/CENTRM
+section 7.4.3.3; its use of photon energy kernels is explicit here.
+
+G1/G3/G4 regressions cover analytic uniform-source absorption, multilayer
+shielding, elastic-scattering zero heat, lower-group energy redistribution,
+ballistic subdivision, convergence toward an independently derived two-stream
+slab solution, density/depth scaling, numerical/resource refusal and
+cancellation. Manufactured kernels establish these equations, not accuracy for
+an evaluated shielding material.
