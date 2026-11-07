@@ -2,10 +2,13 @@
 //!
 //! The depth coordinate is exposed original MATERIAL depth after removal. It is
 //! not indenter penetration, accumulated plastic indentation, or a coating law.
-//! An original test-qualified source supplies the profile; temperature and every
-//! other admitted external condition remain fixed. Continuous source support is
-//! checked once, including interior breakpoints and holes, with no extrapolation.
-//! Runtime evaluation is a binary search without source allocation or querying.
+//! An original test-qualified source supplies the profile. Each prepared owner
+//! holds temperature and every other admitted external condition fixed;
+//! `at_temperature` re-prepares the same original test over its complete depth
+//! interval at a new prescribed temperature. Continuous support and positivity
+//! are checked including interior breakpoints and holes, with no extrapolation.
+//! Runtime depth evaluation is a binary search without source allocation or
+//! querying. Temperature refresh adds no heat, annealing kinetics or depth change.
 
 mod integral;
 pub use integral::DepthHardnessAdvance;
@@ -15,7 +18,8 @@ use fs_matdb::{
     ClaimSelection, MatDbError, MaterialCard, PropertyKey, PropertyLineSlice, PropertySupportError,
     QueryPoint,
 };
-use fs_qty::{Dims, QuantitySpec};
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::{Dims, QuantitySpec, Temperature};
 
 use super::IndentationHardnessStatePoint;
 use crate::state_point::{
@@ -75,6 +79,17 @@ impl ResolvedDepthHardness {
             resolve_material_state_point(card, &lower, &[requirement], selection)?,
             hardness_key,
         )?;
+        Self::prepare_from_source(card, source, maximum_depth_m)
+    }
+
+    // Both initial preparation and temperature continuation retain the same
+    // full-depth support, positivity, original source receipts and identity.
+    fn prepare_from_source(
+        card: &MaterialCard,
+        source: IndentationHardnessStatePoint,
+        maximum_depth_m: f64,
+    ) -> Result<Self, DepthHardnessError> {
+        let depth_quantity = QuantitySpec::dimensional(Dims([1, 0, 0, 0, 0, 0]));
         require(
             source
                 .property()
@@ -84,6 +99,7 @@ impl ResolvedDepthHardness {
                 ),
             "hardness may depend only on exposed material depth and fixed external conditions",
         )?;
+        let lower = source.resolved().query();
         let upper = lower
             .clone()
             .with(EXPOSED_MATERIAL_DEPTH_AXIS, maximum_depth_m)?;
@@ -119,6 +135,57 @@ impl ResolvedDepthHardness {
             maximum_depth_m,
             identity: hash.finalize(),
         })
+    }
+
+    /// Re-prepare the SAME original depth profile at a prescribed temperature.
+    ///
+    /// Only the existing canonical absolute `T` coordinate changes. Its exact
+    /// untyped, dimensional-temperature or semantic-absolute convention remains
+    /// unchanged, as do every other condition, the complete test, pinned claim
+    /// and maximum depth. The original card is required even for a no-op.
+    ///
+    /// Full continuous depth support and positive hardness at every retained
+    /// breakpoint must pass again. Positive surface/deep endpoints alone are
+    /// insufficient. This checks the new temperature's full depth line, not
+    /// support along the intervening thermal path. No thermal history, heat,
+    /// annealing, expansion, wear recession or indentation state is advanced.
+    pub fn at_temperature(
+        &self,
+        card: &MaterialCard,
+        temperature_k: f64,
+    ) -> Result<Self, DepthHardnessError> {
+        let original = self.source.resolved().query();
+        let absolute = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        require(
+            temperature_k.is_finite()
+                && temperature_k > 0.0
+                && original
+                    .axes()
+                    .get("T")
+                    .is_some_and(|t| t.is_finite() && *t > 0.0)
+                && original.axis_quantities().get("T").is_none_or(|quantity| {
+                    *quantity == absolute
+                        || *quantity == QuantitySpec::dimensional(Temperature::DIMS)
+                }),
+            "depth hardness refresh requires its original absolute-temperature T coordinate",
+        )?;
+        require(
+            card.content_hash() == self.source.resolved().card_identity()
+                && card.id() == self.source.resolved().material(),
+            "depth hardness refresh requires the original immutable material card",
+        )?;
+        // Preserve the exact initial selection receipt and prepared identity.
+        // A changed temperature correctly records a pinned-claim requery, but
+        // an exact no-op needs neither another source query nor another proof.
+        if original.axes()["T"].to_bits() == temperature_k.to_bits() {
+            return Ok(self.clone());
+        }
+        let query = original.with("T", temperature_k)?;
+        let source = self.source.at_query_point(card, &query)?;
+        Self::prepare_from_source(card, source, self.maximum_depth_m)
     }
 
     /// Original surface endpoint with the exact selected claim and indentation test.

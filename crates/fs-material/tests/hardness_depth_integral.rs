@@ -7,9 +7,12 @@ use fs_matdb::{
     QueryPoint, UncertaintyModel,
 };
 use fs_material::hardness::INDENTATION_HARDNESS_QUANTITY;
-use fs_material::hardness::depth::{EXPOSED_MATERIAL_DEPTH_AXIS as Z, ResolvedDepthHardness};
+use fs_material::hardness::depth::{
+    DepthHardnessError, EXPOSED_MATERIAL_DEPTH_AXIS as Z, ResolvedDepthHardness,
+};
 use fs_material::state_point::MaterialPropertySelection;
-use fs_qty::{Dims, Pressure, QtyAny, QuantitySpec};
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::{Dims, Pressure, QtyAny, QuantitySpec, Temperature};
 
 fn profile(knots: Vec<(f64, f64)>) -> ResolvedDepthHardness {
     let maximum = knots.last().unwrap().0;
@@ -220,4 +223,347 @@ fn source_limits_invalid_measures_and_lost_depth_resolution_refuse() {
     assert_eq!(unchanged.increment_m, 0.0);
     assert_eq!(unchanged.path_mean_hardness_pa, 200.0);
     assert_eq!(source, before);
+}
+
+fn absolute_temperature() -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ))
+}
+
+fn thermal_surface(negative_interior: bool, hole: bool) -> PropertyValue {
+    let depths = [0.0, 0.4, 0.6, 1.0];
+    let temperatures = [300.0, 350.0, 400.0];
+    let mut samples = Vec::new();
+    for temperature in temperatures {
+        for depth in depths {
+            let h = if negative_interior && temperature == 400.0 && depth > 0.0 && depth < 1.0 {
+                -50.0
+            } else {
+                900.0 - 2.0 * (temperature - 300.0) + 400.0 * depth
+            };
+            samples.push(([depth, temperature], h));
+        }
+    }
+    let mut triangles = Vec::new();
+    for row in 0..2_u32 {
+        for column in 0..3_u32 {
+            if hole && row == 1 && column == 1 {
+                continue;
+            }
+            let lower = 4 * row + column;
+            triangles.push([lower, lower + 1, lower + 5]);
+            triangles.push([lower, lower + 5, lower + 4]);
+        }
+    }
+    PropertyValue::Surface2D {
+        axes: [Z.into(), "T".into()],
+        axis_dims: [Dims([1, 0, 0, 0, 0, 0]), Temperature::DIMS],
+        samples,
+        triangles,
+        dims: Pressure::DIMS,
+    }
+}
+
+fn thermal_profile(
+    value: PropertyValue,
+    temperature_quantity: Option<QuantitySpec>,
+    competing_hot_claim: bool,
+) -> (MaterialCard, ResolvedDepthHardness) {
+    let pressure =
+        QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static));
+    let environment = ValidityDomain::unconstrained()
+        .with_quantity("P", pressure, 101_325.0, 101_325.0)
+        .with_quantity(
+            Z,
+            QuantitySpec::dimensional(Dims([1, 0, 0, 0, 0, 0])),
+            0.0,
+            1.0,
+        );
+    let fixed = QueryPoint::new()
+        .with_quantity("P", pressure, 101_325.0)
+        .unwrap();
+    let (validity, fixed) = match temperature_quantity {
+        Some(quantity) => (
+            environment
+                .clone()
+                .with_quantity("T", quantity, 300.0, 400.0),
+            fixed.with_quantity("T", quantity, 300.0).unwrap(),
+        ),
+        None => (
+            environment.clone().with("T", 300.0, 400.0),
+            fixed.with("T", 300.0).unwrap(),
+        ),
+    };
+    let provenance = Provenance {
+        source: "synthetic temperature/depth hardness; no measured qualification".into(),
+        license: "CC0-1.0".into(),
+        artifact: None,
+    };
+    let mut claims = ClaimSet::new();
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: "synthetic graded specimen at declared temperature".into(),
+            method: "synthetic force/projected-area indentation".into(),
+            artifact: fs_blake3::hash_domain("fixture", b"thermal depth hardness"),
+            caveats: "numerical references only".into(),
+            provenance: provenance.clone(),
+        })
+        .unwrap();
+    let key = PropertyKey::with_quantity("H", INDENTATION_HARDNESS_QUANTITY)
+        .with_hardness_test(
+            HardnessTestContext::new(
+                "synthetic sphere radius 1 mm",
+                vec![
+                    HardnessLoadStep::new(
+                        QtyAny::new(10.0, Dims([1, 1, -2, 0, 0, 0])),
+                        QtyAny::new(1.0, Dims([0, 0, 1, 0, 0, 0])),
+                    )
+                    .unwrap(),
+                ],
+                "synthetic thermal depth protocol revision 1",
+                observation,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    claims
+        .insert_claim(PropertyClaim {
+            key: key.clone(),
+            value,
+            validity,
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::LinearInside,
+            observations: vec![observation],
+            provenance: provenance.clone(),
+        })
+        .unwrap();
+    if competing_hot_claim {
+        let validity = match temperature_quantity {
+            Some(quantity) => environment.with_quantity("T", quantity, 350.0, 450.0),
+            None => environment.with("T", 350.0, 450.0),
+        };
+        claims
+            .insert_claim(PropertyClaim {
+                key: key.clone(),
+                value: PropertyValue::Scalar {
+                    value: 10_000.0,
+                    dims: Pressure::DIMS,
+                },
+                validity,
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                observations: vec![observation],
+                provenance,
+            })
+            .unwrap();
+    }
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "synthetic thermal graded solid".into(),
+            phase: "solid".into(),
+            process: "synthetic hardness depth/temperature observations".into(),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    )
+    .unwrap();
+    let profile = ResolvedDepthHardness::new(
+        &card,
+        &fixed,
+        key,
+        MaterialPropertySelection::SingleClaimOnly,
+        1.0,
+    )
+    .unwrap();
+    (card, profile)
+}
+
+#[test]
+fn original_thermal_profile_refresh_preserves_test_context_and_exact_depth_integrals() {
+    for convention in [
+        None,
+        Some(QuantitySpec::dimensional(Temperature::DIMS)),
+        Some(absolute_temperature()),
+    ] {
+        let (card, cold) = thermal_profile(thermal_surface(false, false), convention, true);
+        let before = cold.clone();
+        let noop = cold.at_temperature(&card, 300.0).unwrap();
+        assert_eq!(noop, cold);
+        let original = cold.reference_source().resolved();
+        let fixed = original
+            .query_point()
+            .iter()
+            .filter(|(axis, _)| axis != Z)
+            .try_fold(QueryPoint::new(), |point, (axis, value)| {
+                match original.axis_quantities().get(axis) {
+                    Some(quantity) => point.with_quantity(axis, *quantity, *value),
+                    None => point.with(axis, *value),
+                }
+            })
+            .unwrap();
+        let pinned_cold = ResolvedDepthHardness::new(
+            &card,
+            &fixed,
+            cold.reference_source().key().clone(),
+            MaterialPropertySelection::PinnedByProperty(vec![(
+                cold.reference_source().key().name().to_owned(),
+                cold.reference_source().property().answer().receipt.selected,
+            )]),
+            cold.maximum_depth_m(),
+        )
+        .unwrap();
+        for temperature in [325.0, 350.0, 400.0] {
+            let hot = cold.at_temperature(&card, temperature).unwrap();
+            assert_eq!(hot.maximum_depth_m(), cold.maximum_depth_m());
+            assert_ne!(hot.identity(), cold.identity());
+            assert_eq!(hot.reference_source().key(), cold.reference_source().key());
+            assert_eq!(
+                hot.reference_source().property().answer().receipt.selected,
+                cold.reference_source().property().answer().receipt.selected
+            );
+            assert_eq!(
+                hot.reference_source().resolved().axis_quantities(),
+                cold.reference_source().resolved().axis_quantities()
+            );
+            assert_eq!(
+                hot.reference_source().resolved().state_coordinate("T"),
+                Some(temperature)
+            );
+            assert_eq!(
+                hot.reference_source().resolved().state_coordinate("P"),
+                Some(101_325.0)
+            );
+            assert_eq!(
+                hot.reference_source().resolved().state_coordinate(Z),
+                Some(0.0)
+            );
+            assert_eq!(
+                hot.reference_source()
+                    .resolved()
+                    .query_point()
+                    .iter()
+                    .filter(|(axis, _)| axis != "T")
+                    .collect::<Vec<_>>(),
+                cold.reference_source()
+                    .resolved()
+                    .query_point()
+                    .iter()
+                    .filter(|(axis, _)| axis != "T")
+                    .collect::<Vec<_>>()
+            );
+            let base = 900.0 - 2.0 * (temperature - 300.0);
+            for depth in [0.0, 0.2, 0.4, 0.55, 0.8, 1.0] {
+                close(
+                    hot.hardness_pa_at(depth).unwrap(),
+                    base + 400.0 * depth,
+                    2e-15,
+                );
+                let typed = hot.resolve_at_depth(&card, depth).unwrap();
+                close(typed.hardness_pa(), base + 400.0 * depth, 2e-15);
+                assert_eq!(typed.key(), cold.reference_source().key());
+            }
+            let expected = base * (0.8 - 0.2) + 200.0 * (0.8_f64.powi(2) - 0.2_f64.powi(2));
+            close(
+                hot.hardness_integral_between(0.2, 0.8).unwrap(),
+                expected,
+                3e-15,
+            );
+            close(
+                hot.advance_by_integral(0.2, expected).unwrap().depth_m,
+                0.8,
+                3e-15,
+            );
+            assert!(
+                hot.advance_by_integral(0.2, 100.0).unwrap().depth_m
+                    > cold.advance_by_integral(0.2, 100.0).unwrap().depth_m
+            );
+            // A real thermal revisit truthfully records explicit source pinning;
+            // compare with the same original cold profile prepared with that pin.
+            assert_eq!(hot.at_temperature(&card, 300.0).unwrap(), pinned_cold);
+        }
+        assert_eq!(cold, before);
+    }
+}
+
+#[test]
+fn thermal_refresh_checks_positive_continuous_full_depth_support_not_only_endpoints() {
+    for (negative_interior, hole) in [(true, false), (false, true)] {
+        let (card, cold) = thermal_profile(
+            thermal_surface(negative_interior, hole),
+            Some(absolute_temperature()),
+            true,
+        );
+        let before = cold.clone();
+        for depth in [0.0, 1.0] {
+            let query = cold
+                .reference_source()
+                .resolved()
+                .query()
+                .with("T", 400.0)
+                .unwrap()
+                .with(Z, depth)
+                .unwrap();
+            let endpoint = cold
+                .reference_source()
+                .at_query_point(&card, &query)
+                .unwrap();
+            assert!(endpoint.hardness_pa() > 0.0);
+        }
+        let refused = cold.at_temperature(&card, 400.0);
+        if hole {
+            assert!(matches!(refused, Err(DepthHardnessError::Support(_))));
+        } else {
+            assert!(matches!(refused, Err(DepthHardnessError::Invalid(_))));
+        }
+        // The competing positive hot claim cannot fill a hole or replace a
+        // nonpositive interior of the exact original indentation profile.
+        assert_eq!(cold, before);
+        close(
+            cold.hardness_integral_between(0.0, 1.0).unwrap(),
+            1100.0,
+            2e-15,
+        );
+    }
+}
+
+#[test]
+fn temperature_refuses_changed_cards_unowned_temperature_and_outside_original_claim() {
+    let (card, cold) = thermal_profile(
+        thermal_surface(false, false),
+        Some(absolute_temperature()),
+        true,
+    );
+    let before = cold.clone();
+    let foreign = MaterialCard::supersede(&card, card.claims().clone(), vec![]).unwrap();
+    for temperature in [300.0, 350.0] {
+        assert!(cold.at_temperature(&foreign, temperature).is_err());
+    }
+    for temperature in [0.0, -1.0, f64::NAN, f64::INFINITY, 299.0, 450.0] {
+        assert!(cold.at_temperature(&card, temperature).is_err());
+    }
+    assert_eq!(cold, before);
+    let no_temperature = profile(vec![(0.0, 100.0), (1.0, 200.0)]);
+    assert!(matches!(
+        no_temperature.at_temperature(&card, 300.0),
+        Err(DepthHardnessError::Invalid(_))
+    ));
+    let pressure =
+        QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static));
+    let (misnamed_card, misnamed) = thermal_profile(
+        PropertyValue::Curve {
+            abscissa: Z.into(),
+            abscissa_dims: Dims([1, 0, 0, 0, 0, 0]),
+            knots: vec![(0.0, 100.0), (1.0, 200.0)],
+            dims: Pressure::DIMS,
+        },
+        Some(pressure),
+        false,
+    );
+    assert!(matches!(
+        misnamed.at_temperature(&misnamed_card, 350.0),
+        Err(DepthHardnessError::Invalid(_))
+    ));
 }

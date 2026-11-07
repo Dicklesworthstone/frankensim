@@ -839,6 +839,21 @@ elastic compliance, and does not attest a mesh or loading trajectory. Contact
 consumers retain their own homogeneous half-space geometry and mapping; contact
 depth/recession cannot replace alpha or duplicate bulk indentation work.
 
+`hardness::depth::ResolvedDepthHardness::at_temperature` re-prepares the exact
+original H(depth) test at a new prescribed canonical absolute T. The immutable
+card is required even for a no-op; the selected claim, complete test, all other
+typed coordinates and maximum original-material depth remain pinned. The same
+preparation owner rechecks continuous support and positive hardness across the
+entire depth interval, including source-cell boundaries, holes and nonpositive
+interiors despite positive endpoints. Runtime depth evaluation and exact depth
+integration retain the existing prepared numerical kernels. This supports
+original H(T, depth) tables without annealing kinetics, heat, expansion or any
+change to removed material or indentation history. It admits the new depth
+line only, not the unobserved intervening temperature path. The existing
+`hardness_depth_integral` target covers independent hot/cold affine integrals,
+typed-coordinate retention, competing claims, pinned cooling, no-op identity and
+whole-profile/card/temperature refusals using synthetic data.
+
 `hardness::thermal_history::ThermoplasticHardnessSource` observes an independent
 original H(T, accumulated-equivalent-plastic-strain) test at accepted native
 `CaloricPoint` states. J2, Voce/viscous and complete N-branch Chaboche histories
