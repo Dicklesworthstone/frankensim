@@ -11640,3 +11640,50 @@ and retry/cancellation without changing the accepted owner. The existing dry
 porous, P1 locking, source calibration and prescribed-field limitations remain.
 
 Native regression execution remains unverified on the exhausted shared build host.
+
+
+### Retained porous dynamics with independently sealed cavities
+
+`hyper3::plastic::porous::dynamics::FinitePorousTetMotion::advance_with_cavities`
+advances one physical backward-Euler interval through the original native
+material, cavity and consistent-mass owners. Current gas pressure, sparse
+follower geometry, independent acoustic rank-one factors, porous tangents and
+the full original `M/dt²` enter the same Newton solve. Original reference mass
+survives compaction; current density remains `rho_ref/J`. Free bodies require
+no artificial restraints, and prescribed-motion reactions include the full
+mass action and cavity forces.
+
+Each cavity retains its original undeformed-volume gas reference across
+increments. Ideal and Peng--Robinson source owners retain their own calorics,
+homogeneous-phase admission and acoustic derivatives. Accepted gas parcels are
+output evidence, never replacement reference sources. The homogeneous
+isentropic gas closure resolves neither gas momentum nor pressure waves and
+does not transfer solid plastic heat into gas energy.
+
+`FinitePorousCavitiesMotionStep` retains the material/momentum step, each
+independent gas endpoint, original-source gas/exterior work, and the combined
+signed endpoint-integration defect. Direct caloric and compact geometric
+increments preserve small interval work without subtracting absolute gas
+energies or reference-relative cavity potentials. Its whole-system identity is
+
+`dead + support + held pressure + sum(exterior work)
+ = delta(solid storage) + sum(delta(gas storage)) + plastic loss
+   + delta(kinetic) + numerical kinetic loss
+   + external_work_defect + step.balance_error`.
+
+Gas storage, physical plastic loss, signed material/pressure/cavity endpoint
+defects and numerical kinetic loss remain separate. The material work budget
+bounds the sum of absolute constituent endpoint defects; the kinetic-loss
+budget remains independent. Failure of any source, history, momentum, work or
+cancellation gate preserves the original motion and all borrowed gas references.
+An empty cavity list preserves the original pressure/dead-load dynamic path.
+Gravity coupling remains outside this finite-inertia API.
+
+The `hyper_porous_cavity/dynamics.rs` regressions specify a fully free hollow
+shell with independent consistent-mass loads, analytic gas/solid compaction
+and kinetic work; and retained release of two mechanically connected cavities
+with different source calorics, independent support reactions, a large energy
+datum, unchanged inventories, source order, empty-list parity and late kinetic
+refusal/retry. Sources were parsed/formatted and the independent shell force,
+mass and kinetic formulas were checked algebraically. Native Cargo compilation
+and regression execution remain unverified under the shared resource blocker.

@@ -20,14 +20,24 @@
 //! contact, mass transfer or pressure stabilization. Held current-area pressure
 //! uses the native surface force, analytic follower tangent and exact declared
 //! path work in the same momentum solve; it is never frozen to reference area.
+//! Sealed cavities use that same solve with original gas storage and acoustic
+//! derivatives. Their homogeneous gas closure resolves neither gas momentum
+//! nor pressure waves, and transfers no plastic heat into the gas.
 
 use std::sync::Arc;
 
 use fs_exec::Cx;
 use fs_material::plastic::finite::porous::{FinitePorous, FinitePorousMaterial};
+use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 
-use super::{FinitePorousPressureEnergy, FinitePorousTetError, FinitePorousTetSolid};
-use crate::hyper3::plastic::{FinitePlasticTetEnergy, checkpoint, energy_gate, invalid};
+use super::cavity::FinitePorousCavityEnergy;
+use super::{
+    FinitePorousPressureEnergy, FinitePorousTetError, FinitePorousTetSolid, FinitePorousTetStep,
+};
+use crate::hyper3::plastic::{
+    AcceptedMotion, FinitePlasticTetEnergy, checkpoint, energy_gate, invalid,
+};
+use crate::hyper3::pressure::cavity::{AdiabaticCavity, AdiabaticCavityGas, TetCavityGasLoad};
 use crate::hyper3::pressure::{ClosedTetPressureSurface, TetPressure};
 use crate::hyper3::{HyperTetSettings, HyperTetSolution, inertia_error};
 use crate::inertia::{BackwardEulerInertia, P1ReferenceMass};
@@ -68,7 +78,37 @@ pub struct FinitePorousMotionStep<'a, L: FinitePorousMaterial = FinitePorous> {
     /// numerical kinetic loss and the signed external endpoint-work defect.
     /// Computed from the native momentum and independent kinetic identities to
     /// retain their precision instead of subtracting large absolute energies.
+    /// A cavity-coupled result supplies the complete external defect in its
+    /// enclosing `FinitePorousCavitiesMotionStep`.
     pub balance_error_j: f64,
+}
+
+/// Complete admitted motion and independently sealed gas endpoints.
+///
+/// All gas receipts retain the original source order. The whole-system work
+/// identity is dead + support + held-pressure + summed exterior work = material
+/// storage change + summed gas storage changes + physical plastic loss + kinetic
+/// change + numerical kinetic loss + `external_work_defect_j` +
+/// `step.balance_error_j`. Gas compression work is storage, not material heat.
+///
+/// Continue through `step.motion.advance_with_cavities` using the same original
+/// undeformed-volume gas references. Deformed gas endpoints are output evidence,
+/// never replacement reference parcels.
+#[derive(Debug)]
+pub struct FinitePorousCavitiesMotionStep<
+    'a,
+    L: FinitePorousMaterial = FinitePorous,
+    G = ClosedGasParcel,
+> {
+    /// Complete material/momentum state; equilibrium includes all cavity loads.
+    pub step: FinitePorousMotionStep<'a, L>,
+    /// Native accepted gas states with independent inventories and tangents.
+    pub cavities: Vec<TetCavityGasLoad<G>>,
+    /// Stable original-source gas, exterior, and endpoint work for each cavity.
+    pub cavity_energy: Vec<FinitePorousCavityEnergy>,
+    /// Material endpoint defect plus held-pressure and individual cavity
+    /// corrections. Kinetic numerical loss retains its own separate account.
+    pub external_work_defect_j: f64,
 }
 
 fn validate_nodal_vectors(
@@ -329,6 +369,72 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetMotion<'a, L> {
         )
     }
 
+    /// Advance solid momentum and retained compaction with independently sealed gases.
+    ///
+    /// Every cavity retains its original reference geometry and undeformed gas
+    /// parcel. Current pressure, follower geometry, original acoustic derivatives,
+    /// porous tangents and the full consistent M/dt² act in one native solve.
+    /// The original ideal or Peng--Robinson gas owns its caloric and phase-domain
+    /// admission. This homogeneous isentropic closure neglects gas momentum and
+    /// pressure waves; physical plastic loss is not transferred to gas heat.
+    ///
+    /// Direct gas energy increments and compact geometric work are evaluated
+    /// between accepted endpoints, without subtracting reference-relative
+    /// potentials or rebuilding reference parcels. Every cavity keeps its own
+    /// mass, species, entropy and exterior pressure. Additional held pressure,
+    /// dead/body loads and absolute moving supports retain their existing roles.
+    ///
+    /// One physical interval is accepted only after material, cavity, momentum
+    /// and work gates pass. The sum of absolute material, held-pressure and
+    /// individual cavity endpoint defects uses the material budget; numerical
+    /// kinetic loss uses its independent budget. An empty cavity slice follows
+    /// the original pressure/dead-load dynamic path.
+    ///
+    /// # Errors
+    /// Original gas-domain/source/geometry refusal, native solve refusal,
+    /// unrepresentable timestep or work, an exceeded material/kinetic budget,
+    /// or cancellation. Every refusal preserves the original motion and every
+    /// borrowed gas reference, including after a converged coupled solve.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_cavities<G: AdiabaticCavityGas>(
+        &self,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        dt_s: f64,
+        cavities: &[AdiabaticCavity<'_, G>],
+        pressure: Option<(&ClosedTetPressureSurface, TetPressure<'_>)>,
+        settings: HyperTetSettings,
+        controls: FinitePlasticMotionControls,
+        cx: &Cx<'_>,
+    ) -> Result<FinitePorousCavitiesMotionStep<'a, L, G>, FinitePorousTetError> {
+        let inertia = self.prepare_inertia(dt_s, controls, cx)?;
+        let (coupled, motion) = self.solid.advance_cavities_loaded(
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            cavities,
+            pressure,
+            settings,
+            controls.material,
+            Some(&inertia),
+            cx,
+        )?;
+        let step = self.accept_motion(
+            coupled.step,
+            motion.expect("inertial cavity endpoint returns native motion"),
+            controls,
+            cx,
+        )?;
+        checkpoint(cx)?;
+        Ok(FinitePorousCavitiesMotionStep {
+            step,
+            cavities: coupled.cavities,
+            cavity_energy: coupled.cavity_energy,
+            external_work_defect_j: coupled.external_work_defect_j,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn advance_loaded(
         &self,
@@ -341,22 +447,7 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetMotion<'a, L> {
         pressure: Option<(&ClosedTetPressureSurface, TetPressure<'_>)>,
         cx: &Cx<'_>,
     ) -> Result<FinitePorousMotionStep<'a, L>, FinitePorousTetError> {
-        checkpoint(cx)?;
-        if !controls.maximum_numerical_kinetic_loss_j.is_finite()
-            || controls.maximum_numerical_kinetic_loss_j < 0.0
-        {
-            return Err(
-                invalid("finite nonnegative numerical kinetic-loss budget required").into(),
-            );
-        }
-        let inertia = BackwardEulerInertia::new(
-            &self.mass,
-            self.solid.state.displacement_m.as_flattened(),
-            self.velocity_mps.as_flattened(),
-            dt_s,
-            cx,
-        )
-        .map_err(inertia_error)?;
+        let inertia = self.prepare_inertia(dt_s, controls, cx)?;
         let (step, motion) = self.solid.advance_loaded(
             prescribed_m,
             nodal_forces_n,
@@ -367,7 +458,46 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetMotion<'a, L> {
             pressure,
             cx,
         )?;
-        let (velocity_mps, inertia) = motion.expect("inertial endpoint returns native motion");
+        self.accept_motion(
+            step,
+            motion.expect("inertial endpoint returns native motion"),
+            controls,
+            cx,
+        )
+    }
+
+    fn prepare_inertia<'s>(
+        &'s self,
+        dt_s: f64,
+        controls: FinitePlasticMotionControls,
+        cx: &Cx<'_>,
+    ) -> Result<BackwardEulerInertia<'s>, FinitePorousTetError> {
+        checkpoint(cx)?;
+        if !controls.maximum_numerical_kinetic_loss_j.is_finite()
+            || controls.maximum_numerical_kinetic_loss_j < 0.0
+        {
+            return Err(
+                invalid("finite nonnegative numerical kinetic-loss budget required").into(),
+            );
+        }
+        Ok(BackwardEulerInertia::new(
+            &self.mass,
+            self.solid.state.displacement_m.as_flattened(),
+            self.velocity_mps.as_flattened(),
+            dt_s,
+            cx,
+        )
+        .map_err(inertia_error)?)
+    }
+
+    fn accept_motion(
+        &self,
+        step: FinitePorousTetStep<'a, L>,
+        motion: AcceptedMotion,
+        controls: FinitePlasticMotionControls,
+        cx: &Cx<'_>,
+    ) -> Result<FinitePorousMotionStep<'a, L>, FinitePorousTetError> {
+        let (velocity_mps, inertia) = motion;
         energy_gate(
             "porous backward-Euler numerical kinetic loss",
             inertia.numerical_loss_j,

@@ -1,6 +1,9 @@
 //! Sealed source-gas work and retained foam compaction through one native solve.
 //! These synthetic coefficients test physical identities, not measured accuracy.
 
+#[path = "hyper_porous_cavity/dynamics.rs"]
+mod dynamics;
+
 use std::sync::Arc;
 
 use fs_alloc::{ArenaConfig, ArenaPool};

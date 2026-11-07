@@ -10,9 +10,10 @@
 //! Accepted deformed parcels are output evidence, not new reference sources.
 //! Work uses direct original-law energy and compact geometric increments;
 //! subtracting reference-relative cavity potentials would lose small steps.
-//! No gas transport, thermal exchange, pore-fluid model or physical time
-//! integration is introduced. The gas occupies explicit resolved voids, not an
-//! inferred evolving porosity inside the material law.
+//! The retained dynamics wrapper supplies original solid inertia and physical
+//! time integration; this owner adds no gas momentum, transport, thermal
+//! exchange or pore-fluid model. The gas occupies explicit resolved voids,
+//! not an inferred evolving porosity inside the material law.
 
 use fs_exec::Cx;
 use fs_material::plastic::finite::porous::{FinitePorous, FinitePorousMaterial};
@@ -21,7 +22,9 @@ use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_math::dd::Dd;
 
 use super::{FinitePorousTetError, FinitePorousTetSolid, FinitePorousTetStep};
-use crate::hyper3::plastic::{FinitePlasticStepControls, checkpoint, invalid, validate_controls};
+use crate::hyper3::plastic::{
+    AcceptedMotion, FinitePlasticStepControls, checkpoint, invalid, validate_controls,
+};
 use crate::hyper3::pressure::cavity::equilibrium::CavityBatch;
 use crate::hyper3::pressure::cavity::{AdiabaticCavity, AdiabaticCavityGas, TetCavityGasLoad};
 use crate::hyper3::pressure::{ClosedTetPressureSurface, TetPressure};
@@ -42,9 +45,9 @@ pub struct FinitePorousCavitiesStep<'a, L: FinitePorousMaterial = FinitePorous, 
     pub cavities: Vec<TetCavityGasLoad<G>>,
     /// Direct work for each independent source over this accepted increment.
     pub cavity_energy: Vec<FinitePorousCavityEnergy>,
-    /// Dead/support endpoint work plus exact pressure/cavity work, minus the
-    /// material storage change and physical plastic loss, excluding equilibrium
-    /// error. This signed integration defect is not gas heat or plastic heat.
+    /// Material endpoint defect plus held-pressure and individual cavity work
+    /// corrections, excluding equilibrium error and any inertial endpoint work.
+    /// This signed integration defect is not gas heat or plastic heat.
     pub external_work_defect_j: f64,
 }
 
@@ -107,7 +110,7 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
     /// refusal, repeated cavity faces, mismatched reference volumes, or
     /// cancellation. The accepted solid and every borrowed reference parcel
     /// remain unchanged, including refusals after a converged native solve.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     pub fn advance_with_cavities<G: AdiabaticCavityGas>(
         &self,
         prescribed_m: &[(usize, f64)],
@@ -119,15 +122,48 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
         controls: FinitePlasticStepControls,
         cx: &Cx<'_>,
     ) -> Result<FinitePorousCavitiesStep<'a, L, G>, FinitePorousTetError> {
+        self.advance_cavities_loaded(
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            cavities,
+            pressure,
+            settings,
+            controls,
+            None,
+            cx,
+        )
+        .map(|(step, _)| step)
+    }
+
+    /// One shared source/geometry/work owner for static and inertial endpoints.
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        clippy::type_complexity
+    )]
+    pub(super) fn advance_cavities_loaded<G: AdiabaticCavityGas>(
+        &self,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        cavities: &[AdiabaticCavity<'_, G>],
+        pressure: Option<(&ClosedTetPressureSurface, TetPressure<'_>)>,
+        settings: HyperTetSettings,
+        controls: FinitePlasticStepControls,
+        inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
+        cx: &Cx<'_>,
+    ) -> Result<(FinitePorousCavitiesStep<'a, L, G>, Option<AcceptedMotion>), FinitePorousTetError>
+    {
         checkpoint(cx)?;
         if cavities.is_empty() {
-            let (step, _) = self.advance_loaded(
+            let (step, motion) = self.advance_loaded(
                 prescribed_m,
                 nodal_forces_n,
                 body_force_n_m3,
                 settings,
                 controls,
-                None,
+                inertia,
                 pressure,
                 cx,
             )?;
@@ -137,12 +173,15 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
                 .map_or(step.energy.endpoint_work_defect_j, |work| {
                     work.external_work_defect_j
                 });
-            return Ok(FinitePorousCavitiesStep {
-                step,
-                cavities: Vec::new(),
-                cavity_energy: Vec::new(),
-                external_work_defect_j,
-            });
+            return Ok((
+                FinitePorousCavitiesStep {
+                    step,
+                    cavities: Vec::new(),
+                    cavity_energy: Vec::new(),
+                    external_work_defect_j,
+                },
+                motion,
+            ));
         }
         validate_controls(settings, controls)?;
         self.validate_accepted_history(controls, cx)?;
@@ -178,7 +217,7 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
             Some(&self.state.elements),
             pressure,
             None,
-            None,
+            inertia,
             batch,
             cx,
         )?;
@@ -250,11 +289,11 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
             cavity_energy.push(receipt);
         }
         let force = problem.external(&self.state.elements, 1.0);
-        let (step, _) = self.accept_endpoint(
+        let (step, motion) = self.accept_endpoint(
             solution.solid,
             &force,
             controls,
-            None,
+            inertia,
             pressure,
             Some(CavityEndpointWork {
                 endpoint_work_j: endpoint_work.to_f64(),
@@ -274,11 +313,14 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
             return Err(invalid("finite combined porous/cavity work defect required").into());
         }
         checkpoint(cx)?;
-        Ok(FinitePorousCavitiesStep {
-            step,
-            cavities: solution.cavities,
-            cavity_energy,
-            external_work_defect_j,
-        })
+        Ok((
+            FinitePorousCavitiesStep {
+                step,
+                cavities: solution.cavities,
+                cavity_energy,
+                external_work_defect_j,
+            },
+            motion,
+        ))
     }
 }
