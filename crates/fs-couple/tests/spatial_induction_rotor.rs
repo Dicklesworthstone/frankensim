@@ -2,6 +2,9 @@
 //! Synthetic coefficients and a faceted cylinder are numerical fixtures, not
 //! validation against a measured machine or a continuum braking coefficient.
 
+#[path = "spatial_induction_rotor/thermal.rs"]
+mod thermal;
+
 use fs_couple::{
     induction_rotor::RotorControls,
     spatial_induction::{

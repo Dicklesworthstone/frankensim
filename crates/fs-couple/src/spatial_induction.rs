@@ -14,6 +14,8 @@
 //! own motion models and are not inferred from a prescribed velocity field.
 
 mod geometry;
+/// Source-pinned endpoint coefficients shared across rotor-speed trials.
+pub mod thermal;
 
 use crate::induction_rotor::{self, RotorStageError};
 pub use crate::induction_rotor::{RotorBalance, RotorControls};

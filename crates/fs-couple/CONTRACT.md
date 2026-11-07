@@ -1,3 +1,39 @@
+## Finite-temperature feedback on the three-dimensional induction rotor
+
+`SpatialMagneticThermalNetwork::step_rotor_candidate` advances the original
+spatial field, native finite-inertia rotor and finite enthalpy together. The
+linear material/entropy residual is shared with standalone induction and
+physical electrode circuits. Every temperature proposal resolves original
+conductivity and magnetic sources, then restarts the same accepted field and
+mechanical histories for the bounded speed closure. Source-weighted operators
+are prepared once per temperature proposal and shared across its field trials.
+
+The joint driver includes magnetic free-energy change minus original parameter
+work, native kinetic-energy change, impressed supply and external shaft work.
+The original magnetic-caloric owner deposits reversible field exchange and
+recovers magnetic internal energy. Actual conductor-frame Joule heat enters
+the original finite body once; Lorentz work cancels internally against rotor
+motion. Final admission independently closes magnetic internal energy, kinetic
+energy and finite caloric storage against external electrical/shaft work and
+external heat. Bearing reactions retain the native full impulse account.
+
+All inner speed/field trials consume the original thermal work budget. Invalid
+caller controls are admitted before remaining-budget restriction. Cancellation,
+source refusal and exhausted solves publish no field, angle, speed or thermal
+state. Complete heat-assembly entry points retain contact/layer/radiation and
+finite-coolant source payloads and typed errors; closed-radiation roundoff is
+not external supply, and unowned electrical contact/resistor work refuses.
+
+The rotor remains a homogeneous isotropic cylinder/tube with uniform scalar
+permeability throughout the field domain. A whole-body finite caloric cell
+provides its uniform temperature; a nonuniform rotating material source refuses.
+Endpoint thermal coefficients make the combined method generally first order.
+Moving interfaces, transported magnetic memory, phase transitions and thermal
+expansion remain outside this model. One focused source-bound regression
+definition covers heating-dependent braking through two retained intervals,
+independent current/field/kinetic/enthalpy balance and trial-budget rollback.
+Native execution remains unverified while constellation dependencies are absent.
+
 ## Native three-dimensional induction with finite rotor inertia
 
 `spatial_induction::SpatialInductionRotor` closes the original Whitney A–phi

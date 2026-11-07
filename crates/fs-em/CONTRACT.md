@@ -1,5 +1,17 @@
 # fs-em contract
 
+## Prepared source-temperature trials for coupled induction motion
+
+`SpatialInduction::prepare_materials_trial` retains one source-pinned endpoint
+operator set over the unchanged accepted A–phi history. Its reusable view
+serves multiple prescribed-velocity trials without repeating material-weighted
+assembly or replacing the accepted magnetic source, impressed-current history,
+gauge, trace or clock. Every native solve still reports original magnetic
+parameter work, conductor-frame Joule heat, Lorentz work and source supply.
+The ordinary material-refresh entry point delegates through this same view.
+This supplies operator reuse for finite-inertia thermal feedback; it does not
+advance mechanics, choose temperature or deposit heat on its own.
+
 ## Native circuits on nonlinear and hysteretic solid electrodes
 
 The `nonlinear::terminals::circuit` and feature-gated

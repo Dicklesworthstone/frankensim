@@ -16,6 +16,8 @@ pub mod circuit;
 pub mod hysteretic;
 /// Source-pinned saturation/recoil and local conductivity-temperature feedback.
 pub mod nonlinear;
+/// Finite rotor momentum, source-temperature feedback and local induction heat.
+pub mod rotor;
 /// Joint finite thermal candidates for physical conducting electrodes.
 pub mod terminals;
 // Complete sourced heat transport uses these same retained field residuals.
@@ -117,9 +119,10 @@ pub struct SpatialInductionThermalReport<D = SpatialInductionStep, S = MaterialN
     /// Authored thermal sources, conduction/reservoir transfer and boundary heat.
     /// Internal reversible field heat is excluded from this external account.
     pub external_heat_j: f64,
-    /// Delta U_field + Delta H_caloric + W_mechanical - W_impressed
-    /// - Q_external, additionally including delta W_circuit - W_external
-    /// for native electrode circuits. Midpoint numerical loss is zero.
+    /// Physical energy residual of the owning adapter. Standalone fields
+    /// include exported mechanical work; rotor coupling replaces that export
+    /// with kinetic storage and external shaft supply. Numerical loss is zero
+    /// for the linear midpoint field/mechanics law.
     pub total_energy_residual_j: f64,
 }
 
@@ -216,6 +219,11 @@ trait LinearInductionThermalDriver: ThermalDriver {
         0.0
     }
     fn additional_supplied_j(_: &Self::Step) -> f64 {
+        0.0
+    }
+    /// Mechanical work received by another state owned by this same driver.
+    /// Standalone fields and external-motion circuits export all Lorentz work.
+    fn internal_mechanical_work_j(_: &Self::Step) -> f64 {
         0.0
     }
 }
@@ -633,6 +641,7 @@ impl SpatialMagneticThermalNetwork<'_> {
             report.source.field_internal_energy_j[1] - report.source.field_internal_energy_j[0]
                 + report.thermal.stored_energy_change_j
                 + electrical.mechanical_work_j
+                - D::internal_mechanical_work_j(&report.electrical)
                 - electrical.impressed_work_j
                 + D::additional_stored_change_j(&report.electrical)
                 - D::additional_supplied_j(&report.electrical)

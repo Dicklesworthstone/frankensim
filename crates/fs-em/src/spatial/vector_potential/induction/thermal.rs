@@ -19,7 +19,65 @@ use fs_material::{
 };
 use std::sync::Arc;
 
+/// Reusable endpoint material operators over one unchanged accepted history.
+///
+/// Coupled mechanics may try several velocities at the same temperature. This
+/// prepared view shares their material-weighted operators without replacing the
+/// old magnetic source, potential, impressed-current history or physical time.
+/// Each solve still reconstructs the complete original parameter-work receipt.
+pub struct SpatialInductionMaterialTrial<'s, 'm, C: SpatialConductorMaterial> {
+    original: &'s SpatialInduction<'m, C>,
+    prepared: Arc<Prepared<'m, C>>,
+}
+
+impl<'m, C: SpatialConductorMaterial> SpatialInductionMaterialTrial<'_, 'm, C> {
+    pub fn problem(&self) -> &super::super::SpatialVectorMagnetostatics {
+        &self.prepared.problem
+    }
+
+    pub fn conductors(&self) -> &[Option<C>] {
+        &self.prepared.sources
+    }
+
+    /// Advance from the original accepted history using the prepared endpoint
+    /// coefficients. Rejected trials do not advance this view or its source.
+    pub fn step_candidate(
+        &self,
+        endpoint_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        duration_s: f64,
+        controls: SpatialInductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialInductionCandidate<'m, C>> {
+        self.original.step_prepared_candidate(
+            Arc::clone(&self.prepared),
+            endpoint_current_a_m2,
+            velocity_m_s,
+            duration_s,
+            controls,
+            cancelled,
+        )
+    }
+}
+
 impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
+    /// Prepare one source-pinned endpoint for repeated coupled velocity trials.
+    /// Geometry, trace, gauge and accepted history remain owned by this state.
+    pub fn prepare_materials_trial(
+        &self,
+        materials: Vec<SpatialMagneticMaterial>,
+        conductors: Vec<Option<C>>,
+        assembly: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialInductionMaterialTrial<'_, 'm, C>> {
+        let prepared = self.prepare_materials(materials, conductors, assembly, cancelled)?;
+        poll(cancelled)?;
+        Ok(SpatialInductionMaterialTrial {
+            original: self,
+            prepared,
+        })
+    }
+
     /// Advance the same accepted history with complete endpoint source bundles.
     ///
     /// Magnetic cells must remain original induced-linear materials; their
@@ -45,15 +103,14 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
         controls: SpatialInductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialInductionCandidate<'m, C>> {
-        let prepared = self.prepare_materials(materials, conductors, assembly, cancelled)?;
-        self.step_prepared_candidate(
-            prepared,
-            endpoint_current_a_m2,
-            velocity_m_s,
-            duration_s,
-            controls,
-            cancelled,
-        )
+        self.prepare_materials_trial(materials, conductors, assembly, cancelled)?
+            .step_candidate(
+                endpoint_current_a_m2,
+                velocity_m_s,
+                duration_s,
+                controls,
+                cancelled,
+            )
     }
 
     /// Prepare endpoint operators without replacing the accepted source history.
