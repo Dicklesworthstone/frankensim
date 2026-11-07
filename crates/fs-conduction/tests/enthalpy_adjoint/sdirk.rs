@@ -262,6 +262,39 @@ fn authentic_stages_admit_when_extrapolated_history_is_outside_the_chart() {
             25.0 + 75.0 * stability,
             1e-10,
         );
+        let controls = response
+            .conductivity_scale_pullback(
+                cx,
+                [&gradient.stage_adjoint[0], &gradient.stage_adjoint[1]],
+                1,
+            )
+            .unwrap();
+        let denominator = 1.0 - G * z;
+        let scaled_rate = -G * z;
+        let first_decay = 75.0 / denominator;
+        let last_decay = 75.0 * stability;
+        // Independent stage sensitivities of the two scalar diffusion equations.
+        near(
+            controls.stage_scales[0][0],
+            -(1.0 - G) / G * scaled_rate * first_decay / denominator.powi(2),
+            1e-9,
+        );
+        near(
+            controls.stage_scales[1][0],
+            -scaled_rate * last_decay / denominator,
+            1e-9,
+        );
+        let stability_derivative = (1.0 - 2.0 * G) / denominator.powi(2)
+            + 2.0 * G * (1.0 + (1.0 - 2.0 * G) * z) / denominator.powi(3);
+        near(
+            controls.shared_scales[0],
+            75.0 * z * stability_derivative,
+            1e-9,
+        );
+        assert_eq!(
+            controls.shared_scales[0],
+            controls.stage_scales[0][0] + controls.stage_scales[1][0]
+        );
     });
 }
 
@@ -394,5 +427,198 @@ fn reverse_fixed_grid_trajectory_matches_independent_history_and_forcing_perturb
             2e-8,
         );
         near(forcing, five_point(|delta| evaluate(0.0, delta)), 2e-8);
+    });
+}
+
+#[test]
+fn conductivity_controls_follow_both_nonlinear_stages_and_their_prescribed_masks() {
+    let fixture = Fixture::new();
+    with_cx(|cx| {
+        let engine = fixture
+            .stepper(cx)
+            .with_phase_conductivity(
+                cx,
+                vec![LiquidMassFractionConductivity::declared(0.4, 2.5).unwrap()],
+            )
+            .unwrap();
+        let sources = [nodal(&SOURCE), nodal(&Q2)];
+        for changing_baths in [false, true] {
+            let old = if changing_baths {
+                [60.0, 70.0, 65.0, 55.0]
+            } else {
+                OLD
+            };
+            let boundaries = if changing_baths {
+                [bath(&fixture.mesh, 0, 330.0), bath(&fixture.mesh, 1, 335.0)]
+            } else {
+                [fixture.boundary.clone(), fixture.boundary.clone()]
+            };
+            let inputs = std::array::from_fn(|i| {
+                input(ConductionProblem {
+                    boundary: &boundaries[i],
+                    ..fixture.problem(&sources[i])
+                })
+            });
+            let response = engine
+                .linearize_sdirk2(cx, inputs, &old, DT, config(), 0)
+                .unwrap();
+            let mut seeds = response
+                .temperature_pullback(cx, [&FIRST_T, &WEIGHTS])
+                .unwrap();
+            for i in 0..4 {
+                seeds[0][i] += FIRST_H[i];
+                seeds[1][i] += LAST_H[i];
+            }
+            let gradient = response
+                .pullback_stages(cx, [&seeds[0], &seeds[1]], linear())
+                .unwrap();
+            let actual = response
+                .conductivity_scale_pullback(
+                    cx,
+                    [&gradient.stage_adjoint[0], &gradient.stage_adjoint[1]],
+                    1,
+                )
+                .unwrap();
+            let evaluate = |scales: [f64; 2]| {
+                let materials = scales.map(|scale| {
+                    ConductivityModel::isotropic(
+                        ConductivityTable::declared_curve(vec![
+                            (300.0, 2.0 * scale),
+                            (450.0, 5.0 * scale),
+                        ])
+                        .unwrap(),
+                    )
+                });
+                let inputs = std::array::from_fn(|i| {
+                    input(ConductionProblem {
+                        boundary: &boundaries[i],
+                        material: &materials[i],
+                        ..fixture.problem(&sources[i])
+                    })
+                });
+                both_objective(
+                    &engine
+                        .advance_sdirk2(cx, inputs, &old, DT, config())
+                        .unwrap(),
+                )
+            };
+            let differentiate = |direction: [f64; 2]| {
+                let value = |delta: f64| evaluate(direction.map(|d| 1.0 + delta * d));
+                let epsilon = 0.001;
+                (-value(2.0 * epsilon) + 8.0 * value(epsilon) - 8.0 * value(-epsilon)
+                    + value(-2.0 * epsilon))
+                    / (12.0 * epsilon)
+            };
+            for stage in 0..2 {
+                let mut direction = [0.0; 2];
+                direction[stage] = 1.0;
+                let expected = differentiate(direction);
+                assert!(
+                    expected.abs() > 1e-6,
+                    "each stage must affect the thermal goal"
+                );
+                near(
+                    actual.stage_scales[stage][0],
+                    expected,
+                    2e-7 * (1.0 + expected.abs()),
+                );
+            }
+            let shared = differentiate([1.0; 2]);
+            near(actual.shared_scales[0], shared, 2e-7 * (1.0 + shared.abs()));
+            assert_eq!(
+                actual.shared_scales[0],
+                actual.stage_scales[0][0] + actual.stage_scales[1][0]
+            );
+            assert_eq!(
+                actual,
+                response
+                    .conductivity_scale_pullback(
+                        cx,
+                        [&gradient.stage_adjoint[0], &gradient.stage_adjoint[1]],
+                        1,
+                    )
+                    .unwrap()
+            );
+        }
+    });
+}
+
+#[test]
+fn conductivity_controls_preserve_latent_equilibrium_and_refuse_invalid_work() {
+    let fixture = Fixture::new();
+    let source = ScalarField::Uniform(0.0);
+    with_cx(|cx| {
+        let engine = fixture
+            .stepper(cx)
+            .with_phase_conductivity(
+                cx,
+                vec![LiquidMassFractionConductivity::declared(0.4, 2.5).unwrap()],
+            )
+            .unwrap();
+        let response = engine
+            .linearize_sdirk2(
+                cx,
+                [input(fixture.problem(&source)); 2],
+                &[200.0; 4],
+                DT,
+                config(),
+                0,
+            )
+            .unwrap();
+        let gradient = response.pullback(cx, &WEIGHTS, linear()).unwrap();
+        assert!(
+            gradient
+                .stage_adjoint
+                .iter()
+                .flatten()
+                .any(|lambda| lambda.abs() > 1.0)
+        );
+        let multipliers = [
+            &gradient.stage_adjoint[0][..],
+            &gradient.stage_adjoint[1][..],
+        ];
+        let actual = response
+            .conductivity_scale_pullback(cx, multipliers, 1)
+            .unwrap();
+        for values in actual
+            .stage_scales
+            .iter()
+            .chain(std::iter::once(&actual.shared_scales))
+        {
+            assert_eq!(values.len(), 1);
+            assert!(values[0].is_finite() && values[0].abs() < 1e-10);
+        }
+        assert!(
+            response
+                .conductivity_scale_pullback(cx, multipliers, 0)
+                .is_err()
+        );
+        assert!(
+            response
+                .conductivity_scale_pullback(cx, [&[0.0; 3], &[0.0; 4]], 1)
+                .is_err()
+        );
+        assert!(
+            response
+                .conductivity_scale_pullback(cx, [&[0.0; 4], &[f64::NAN; 4]], 1)
+                .is_err()
+        );
+        with_cancelled_cx(|cancelled| {
+            assert!(
+                response
+                    .conductivity_scale_pullback(cancelled, multipliers, 1)
+                    .is_err()
+            );
+        });
+        assert_eq!(
+            response.primal().second_stage.specific_enthalpy_j_kg,
+            [200.0; 4]
+        );
+        assert_eq!(
+            actual,
+            response
+                .conductivity_scale_pullback(cx, multipliers, 1)
+                .unwrap()
+        );
     });
 }

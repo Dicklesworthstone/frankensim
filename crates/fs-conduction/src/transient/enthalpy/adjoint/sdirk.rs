@@ -33,6 +33,18 @@ pub struct EnthalpySdirk2Gradient {
     pub iterations: [usize; 2],
 }
 
+/// Elementwise conductivity controls of both genuine SDIRK2 stages.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnthalpySdirk2ConductivityGradient {
+    /// Independent full-law scale derivatives at the first and second stage.
+    /// Each vector uses mesh element order and already includes its complete
+    /// eliminated-block adjoint and diagonal tableau time factor.
+    pub stage_scales: [Vec<f64>; 2],
+    /// Derivative when the same element scale controls both stage laws.
+    /// Exactly the elementwise sum of `stage_scales`.
+    pub shared_scales: Vec<f64>,
+}
+
 #[derive(Debug)]
 struct StageTangent {
     tangent: Csr,
@@ -40,6 +52,8 @@ struct StageTangent {
     storage_diagonal: Vec<f64>,
     prescribed: Vec<bool>,
     inverse_diagonal: Vec<f64>,
+    // Original stage K_eff*T only, excluding storage and all external loads.
+    conductive_loads: Vec<[f64; 4]>,
     radiation: Option<PointwiseBoundaryAssembly>,
 }
 
@@ -276,6 +290,10 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             }
             inverse_diagonal.push(finite(1.0 / diagonal)?);
         }
+        let conductive_loads = {
+            let conductivity = context.phase_scales(h)?;
+            super::conductivity::element_loads(cx, input.problem, &primal.temperature, conductivity.as_ref())?
+        };
         poll(cx, h.len())?;
         Ok(StageTangent {
             tangent: stage.tangent,
@@ -283,6 +301,7 @@ impl<'m> EnthalpyBackwardEuler<'m, '_> {
             storage_diagonal: stage.storage_diagonal,
             prescribed,
             inverse_diagonal,
+            conductive_loads,
             radiation: stage.radiation,
         })
     }
@@ -336,6 +355,85 @@ impl EnthalpySdirk2Linearization<'_> {
         }
         poll(cx, self.masses.len())?;
         Ok(result)
+    }
+
+    /// Pull the complete two-stage adjoint back to element conductivity scales.
+    ///
+    /// At each stage the control is `K_eff,e(T,f) -> s_e*K_eff,e(T,f)` at
+    /// `s_e=1`, equivalently a log scale at zero. The retained load includes
+    /// the original directional temperature law and any admitted phase
+    /// multiplier or source-resolved tensor. Neither storage, source, boundary
+    /// nor contact coefficients are scaled.
+    ///
+    /// Pass the unchanged `stage_adjoint` from [Self::pullback] or
+    /// [Self::pullback_stages]. Each contribution is
+    /// `-gamma*dt*lambda_stage^T*(K_eff*T)_stage`, with that stage's
+    /// prescribed rows removed. The eliminated block transpose ALREADY carries
+    /// first-stage influence: adding a separate off-diagonal tableau term or
+    /// another k'(T)/phase chain rule would count it twice.
+    ///
+    /// Stage contributions describe independent controls at the two tableau
+    /// times. `shared_scales` sums them for a material control held throughout
+    /// the interval; a trajectory additionally propagates the existing history
+    /// pullback and sums accepted interval contributions. Explicit objective
+    /// dependence stays caller-owned.
+    ///
+    /// No state, material query, sparse assembly or transpose solve is repeated.
+    /// The linearization retains 64 bytes per element for these two loads;
+    /// this call allocates 24 bytes per element for the two contributions and
+    /// shared sum. `max_elements` bounds output/traversal, not total RSS.
+    ///
+    /// # Errors
+    /// Wrong or nonfinite full-stage multipliers, exhausted element/address
+    /// allowance, allocation failure, overflow, and cancellation return no
+    /// partial gradient or changed accepted state.
+    pub fn conductivity_scale_pullback(
+        &self,
+        cx: &Cx<'_>,
+        full_stage_joule_multipliers: [&[f64]; 2],
+        max_elements: usize,
+    ) -> Result<EnthalpySdirk2ConductivityGradient, EnthalpyAdjointError> {
+        poll(cx, 0)?;
+        let elements = self.mesh.element_count();
+        if elements > max_elements
+            || self.stages.iter().any(|stage| stage.conductive_loads.len() != elements)
+            || elements
+                .checked_mul(std::mem::size_of::<[f64; 3]>())
+                .is_none_or(|bytes| isize::try_from(bytes).is_err())
+        {
+            return Err(EnthalpyAdjointError::InvalidInput(
+                "SDIRK2 conductivity pullback exceeds its element allowance",
+            ));
+        }
+        for multiplier in full_stage_joule_multipliers {
+            vector(cx, multiplier, self.masses.len())?;
+        }
+        let mut stage_scales = [Vec::new(), Vec::new()];
+        let mut shared_scales = Vec::new();
+        for output in stage_scales.iter_mut().chain(std::iter::once(&mut shared_scales)) {
+            output.try_reserve_exact(elements).map_err(|_| {
+                EnthalpyAdjointError::InvalidInput("SDIRK2 conductivity gradient allocation refused")
+            })?;
+        }
+        for (element, &tet) in self.mesh.complex().tets.iter().enumerate() {
+            if element % ASSEMBLY_TILE == 0 {
+                poll(cx, element)?;
+            }
+            let mut contributions = [0.0; 2];
+            for stage in 0..2 {
+                contributions[stage] = stage_conductivity_contraction(
+                    self.diagonal_dt,
+                    self.stages[stage].conductive_loads[element],
+                    tet.map(|v| full_stage_joule_multipliers[stage][v as usize]),
+                    tet.map(|v| self.stages[stage].prescribed[v as usize]),
+                )
+                .ok_or(EnthalpyAdjointError::NonFiniteArithmetic)?;
+                stage_scales[stage].push(contributions[stage]);
+            }
+            shared_scales.push(finite(contributions[0] + contributions[1])?);
+        }
+        poll(cx, elements)?;
+        Ok(EnthalpySdirk2ConductivityGradient { stage_scales, shared_scales })
     }
 
     /// Apply the complete block Jacobian of the eliminated two-stage balance.
@@ -453,6 +551,27 @@ impl EnthalpySdirk2Linearization<'_> {
             iterations: [first.iterations, second.iterations],
         })
     }
+}
+
+// Local contraction of the admitted joule-residual multiplier. Keeping the
+// prescribed-row mask at its own physical stage is essential when baths change.
+fn stage_conductivity_contraction(
+    diagonal_dt: f64,
+    loads: [f64; 4],
+    multipliers: [f64; 4],
+    prescribed: [bool; 4],
+) -> Option<f64> {
+    let mut contraction = 0.0_f64;
+    for row in 0..4 {
+        if !prescribed[row] {
+            contraction = multipliers[row].mul_add(loads[row], contraction);
+            if !contraction.is_finite() {
+                return None;
+            }
+        }
+    }
+    let value = -diagonal_dt * contraction;
+    value.is_finite().then_some(value)
 }
 
 fn radiation_entries(

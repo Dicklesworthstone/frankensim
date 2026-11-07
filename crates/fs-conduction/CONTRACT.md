@@ -1,5 +1,31 @@
 # CONTRACT: fs-conduction
 
+## Conductivity design through both physical SDIRK2 stages
+
+`EnthalpySdirk2Linearization::conductivity_scale_pullback` retains each
+accepted stage's original effective conductive element loads and returns
+independent first/second-stage full-law scale derivatives plus their shared
+material-control sum. Contractions use the complete eliminated-block stage
+adjoints, `gamma*dt`, and each stage's own prescribed-row mask; no extra
+off-diagonal tableau or state-derivative term is added. Accepted phase
+multipliers and complete source-resolved directional tensors use the existing
+constitutive integration and native element stiffness. Contact/radiation
+feedback stays in the complete state transpose; bulk controls do not scale
+storage, interfaces, boundaries or heat sources.
+
+The pullback needs no additional solve, material query or sparse assembly.
+Its two retained loads use 64 bytes per element; the bounded stage and shared
+result vectors use 24 bytes per element. Element/address/allocation limits,
+finite arithmetic and cancellation refuse without a partial gradient.
+Explicit objective dependence remains caller-owned.
+
+The exact production local contraction passed four native Rust checks against
+the independent diffusion amplification factor, the uneliminated Butcher
+stage equations, changing prescribed masks and interstage carry, and
+nonfinite refusal. Full nonlinear material/phase finite-difference and latent
+equilibrium integration regressions are defined but have not been executed
+in this workspace's incomplete native build.
+
 ## Material-orientation controls for anisotropic conduction
 
 `ConductivityModel::rotated` applies a declared proper world-frame rotation
