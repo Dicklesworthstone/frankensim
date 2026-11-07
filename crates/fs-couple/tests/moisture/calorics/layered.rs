@@ -1,5 +1,8 @@
 //! Unlike-material heat storage, native curved inventories and one shared gas.
 //! Constitutive sources are authored numerical verification data.
+#[path = "layered/sdirk.rs"]
+mod sdirk;
+
 use super::*;
 use fs_couple::moisture::{
     layered::{MoistureActivityTransfer, MoistureLayer, MoistureLayeredSlab},

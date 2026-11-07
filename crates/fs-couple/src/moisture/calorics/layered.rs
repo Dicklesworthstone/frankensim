@@ -8,9 +8,12 @@
 
 use super::*;
 use crate::moisture::{
-    layered::{MoistureLayeredReport, MoistureLayeredSlab},
+    layered::{MoistureLayeredReport, MoistureLayeredSdirk2Report, MoistureLayeredSlab},
     radial::layered::MoistureLayeredRadial,
 };
+
+mod sdirk;
+pub use sdirk::{LayeredRadialSdirk2SorptionEnergyCandidate, LayeredSdirk2SorptionEnergyCandidate};
 
 /// Actual storage changes for one original material, in physical layer order.
 /// The binding increment is relative to the common original vapor-u datum.
@@ -47,12 +50,15 @@ pub struct LayeredSorptionEnergyStep {
 
 /// Native transport and the full isothermal energy account publish together.
 #[derive(Clone, Debug)]
-pub struct LayeredSorptionEnergyCandidate<Field = MoistureLayeredSlab> {
-    native: AtmosphereMoistureCandidate<Field, MoistureLayeredReport>,
+pub struct LayeredSorptionEnergyCandidate<
+    Field = MoistureLayeredSlab,
+    Report = MoistureLayeredReport,
+> {
+    native: AtmosphereMoistureCandidate<Field, Report>,
     energy: LayeredSorptionEnergyStep,
 }
-impl<Field> LayeredSorptionEnergyCandidate<Field> {
-    pub const fn native(&self) -> &AtmosphereMoistureCandidate<Field, MoistureLayeredReport> {
+impl<Field, Report> LayeredSorptionEnergyCandidate<Field, Report> {
+    pub const fn native(&self) -> &AtmosphereMoistureCandidate<Field, Report> {
         &self.native
     }
     pub const fn energy(&self) -> &LayeredSorptionEnergyStep {
@@ -61,7 +67,7 @@ impl<Field> LayeredSorptionEnergyCandidate<Field> {
     pub fn into_parts(
         self,
     ) -> (
-        AtmosphereMoistureCandidate<Field, MoistureLayeredReport>,
+        AtmosphereMoistureCandidate<Field, Report>,
         LayeredSorptionEnergyStep,
     ) {
         (self.native, self.energy)

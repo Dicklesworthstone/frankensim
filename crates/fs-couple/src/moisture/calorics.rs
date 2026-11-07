@@ -38,7 +38,8 @@ use fs_thermochem::{
 mod layered;
 mod radial;
 pub use layered::{
-    LayeredRadialSorptionEnergyCandidate, LayeredSorptionEnergyCandidate,
+    LayeredRadialSdirk2SorptionEnergyCandidate, LayeredRadialSorptionEnergyCandidate,
+    LayeredSdirk2SorptionEnergyCandidate, LayeredSorptionEnergyCandidate,
     LayeredSorptionEnergyStep, SorptionLayerEnergy,
 };
 pub use radial::{RadialSdirk2SorptionEnergyCandidate, RadialSorptionEnergyCandidate};
