@@ -67,6 +67,11 @@ impl<'a> EquilibriumSublimation<'a> {
     pub fn new(curve: &'a EquilibriumEnthalpyPhaseCurve) -> Result<Self, GasSurfaceError> {
         Ok(Self { source: SharpMeltingCaloric::new(curve)? })
     }
+    // Composing original owners already retain the admitted source. Reuse that
+    // binding without scanning or copying its caloric knots on every trial.
+    pub(in crate::sublimation::gas) const fn from_source(source: SharpMeltingCaloric<'a>) -> Self {
+        Self { source }
+    }
     #[must_use]
     pub const fn curve(self) -> &'a EquilibriumEnthalpyPhaseCurve { self.source.curve() }
     /// Same immutable source binding for the joint/adaptive partitioned chamber.

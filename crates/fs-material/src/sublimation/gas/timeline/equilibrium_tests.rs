@@ -8,9 +8,9 @@ use fs_thermal::enthalpy::{
 };
 use fs_thermochem::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
 
-const FUSION: f64 = 80_000.0;
+pub(super) const FUSION: f64 = 80_000.0;
 
-fn curve(
+pub(super) fn curve(
     catalog: &ThermochemicalGasModel,
     binding: &GasSurfaceBinding,
     fusion: f64,
@@ -48,19 +48,19 @@ fn curve(
     .unwrap()
 }
 
-fn heat(dt: f64) -> StepConfig {
+pub(super) fn heat(dt: f64) -> StepConfig {
     StepConfig {
         max_dt_s: dt,
         energy_tolerance_j: 1e-7,
     }
 }
-fn controls() -> GasChamberSolve {
+pub(super) fn controls() -> GasChamberSolve {
     GasChamberSolve {
         surface: fixture::controls(),
         maximum_surfaces: 2,
     }
 }
-fn cell(id: u64, h: f64, power: f64) -> DepositedCell {
+pub(super) fn cell(id: u64, h: f64, power: f64) -> DepositedCell {
     DepositedCell {
         id: CellId(id),
         segment_id: id,
@@ -82,13 +82,13 @@ fn cell(id: u64, h: f64, power: f64) -> DepositedCell {
         },
     }
 }
-fn birth(time_s: f64, cell: DepositedCell) -> TimedEvent {
+pub(super) fn birth(time_s: f64, cell: DepositedCell) -> TimedEvent {
     TimedEvent {
         time_s,
         event: Event::Birth(cell),
     }
 }
-fn schedule(
+pub(super) fn schedule(
     curve: &EquilibriumEnthalpyPhaseCurve,
     events: Vec<TimedEvent>,
 ) -> DepositionSimulation<'_> {
@@ -104,7 +104,7 @@ fn schedule(
     )
     .unwrap()
 }
-fn selection<'a>(
+pub(super) fn selection<'a>(
     curve: &'a EquilibriumEnthalpyPhaseCurve,
     binding: &'a GasSurfaceBinding,
     phase: &'a dyn SublimationLaw,

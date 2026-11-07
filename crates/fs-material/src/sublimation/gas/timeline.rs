@@ -32,6 +32,10 @@ pub mod observed;
 #[path = "timeline/coating.rs"]
 pub mod coating;
 
+/// Sharp-fusion histories and explicit complete-melting handoff.
+#[path = "timeline/equilibrium.rs"]
+pub mod equilibrium;
+
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -50,6 +54,8 @@ use fs_thermal::enthalpy::{
 use fs_thermal::sublimation::{SolidSurfaceState, SublimationError, SublimationLaw};
 use fs_thermal::observers::CoupledObservers;
 use observed::GasTimelineObservedError;
+use equilibrium::boundary::{MeltingSearch, PhaseInterval, inactive_at_melting};
+use super::equilibrium::{EquilibriumSublimation, boundary::advance_to_melting};
 
 /// Original cell identity and explicitly admitted pure-solid phase binding.
 #[derive(Clone, Copy)]
@@ -381,10 +387,18 @@ struct SolidBranchGuard<'a> {
     ranges: BTreeMap<CellId, [f64; 2]>,
     calorics: BTreeMap<CellId, SharpMeltingCaloric<'a>>,
     work: Option<&'a ThermalWork>,
+    allow_liquid_trials: bool,
+    // First native completion, before any later substep could freeze it again.
+    first_liquid_step: Option<(f64, f64, f64)>,
 }
 impl SolidBranchGuard<'_> {
-    fn check(&self, cell: &DepositedCell, thermal: &DepositionSimulation<'_>) -> Result<(), DepositionError> {
+    fn check_cell(&self, cell: &DepositedCell, thermal: &DepositionSimulation<'_>, allow_liquid: bool)
+        -> Result<Option<f64>, DepositionError> {
         if let Some(&[lo, hi]) = self.ranges.get(&cell.id) {
+            let hi = if allow_liquid {
+                self.calorics.get(&cell.id).map_or(hi, |source|
+                    source.curve().knots().last().expect("admitted phase chart").specific_enthalpy_j_kg)
+            } else { hi };
             if !(lo..=hi).contains(&cell.specific_h_j_kg) {
                 return Err(DepositionError::MaterialDomain);
             }
@@ -393,12 +407,24 @@ impl SolidBranchGuard<'_> {
             if thermal.material_caloric_identity(cell.material_id)? != Some(*source.curve().identity().as_bytes()) {
                 return Err(DepositionError::InvalidInput("partitioned timeline caloric identity mismatch"));
             }
-            let inventory = CondensedInventory::new(*source, SolidSurfaceState {
-                mass_kg: cell.mass_kg, specific_enthalpy_j_kg: cell.specific_h_j_kg, area_m2: 0.0,
-            }).map_err(|_| DepositionError::MaterialDomain)?;
-            if inventory.solid_mass_kg <= 0.0
-                || thermal.temperature_at_specific_enthalpy_k(cell.id, cell.specific_h_j_kg)?
-                    != inventory.caloric.temperature_k() {
+            let state = source.curve().values_at_specific_enthalpy(cell.specific_h_j_kg)
+                .map_err(|_| DepositionError::MaterialDomain)?;
+            let solid_fraction = 1.0 - state.liquid_mass_fraction;
+            let solid_mass = cell.mass_kg * solid_fraction;
+            let liquid_mass = cell.mass_kg * state.liquid_mass_fraction;
+            if !super::positive(cell.mass_kg)
+                || !(super::positive(solid_mass) || (allow_liquid && solid_fraction == 0.0))
+                || !super::nonnegative(liquid_mass)
+                || (state.liquid_mass_fraction > 0.0 && liquid_mass == 0.0) {
+                return Err(DepositionError::MaterialDomain);
+            }
+            return Ok(Some(state.temperature_k));
+        }
+        Ok(None)
+    }
+    fn check(&self, cell: &DepositedCell, thermal: &DepositionSimulation<'_>) -> Result<(), DepositionError> {
+        if let Some(temperature) = self.check_cell(cell, thermal, self.allow_liquid_trials)? {
+            if thermal.temperature_at_specific_enthalpy_k(cell.id, cell.specific_h_j_kg)? != temperature {
                 return Err(DepositionError::MaterialDomain);
             }
         }
@@ -424,6 +450,8 @@ impl DepositionObserver for SolidBranchGuard<'_> {
     type Error = DepositionError;
     fn event(&mut self, event: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
         if let Event::Birth(cell) = event {
+            // A birth is never an event-search trial or an invented solid seed.
+            self.check_cell(cell, thermal, false)?;
             self.check(cell, thermal)?;
         }
         Ok(())
@@ -437,7 +465,18 @@ impl DepositionObserver for SolidBranchGuard<'_> {
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Self::Error> {
         if let Some(work) = self.work { work.charge()?; }
-        self.check_all(thermal, checkpoint)
+        self.check_all(thermal, checkpoint)?;
+        if self.allow_liquid_trials && self.first_liquid_step.is_none() {
+            for (&id, source) in &self.calorics {
+                if let Some(cell) = thermal.cells().get(&id) {
+                    if cell.specific_h_j_kg >= source.liquid_at_melting_h_j_kg() {
+                        self.first_liquid_step = Some((thermal.time_s(), cell.specific_h_j_kg, cell.mass_kg));
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -567,6 +606,26 @@ fn advance_deposition_observed<'thermal, 'catalog, O: DepositionObserver>(
     phase_config: GasChamberSolve,
     work: Option<&ThermalWork>,
     begin_observer: bool,
+    checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<(GasTimelineCandidate<'thermal, 'catalog>, O), GasTimelineObservedError<O::Error>> {
+    advance_deposition_observed_mode(thermal, surfaces, accommodation, observer, gas, catalog,
+        target_s, thermal_config, phase_config, work, begin_observer, false, checkpoint)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_deposition_observed_mode<'thermal, 'catalog, O: DepositionObserver>(
+    thermal: &DepositionSimulation<'thermal>,
+    surfaces: &[TimelineSurface<'_>],
+    accommodation: Option<&BTreeMap<CellId, ThermalAccommodation>>,
+    observer: &O,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    target_s: f64,
+    thermal_config: StepConfig,
+    phase_config: GasChamberSolve,
+    work: Option<&ThermalWork>,
+    begin_observer: bool,
+    stop_at_melting: bool,
     mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<(GasTimelineCandidate<'thermal, 'catalog>, O), GasTimelineObservedError<O::Error>> {
     checkpoint()?;
@@ -582,6 +641,9 @@ fn advance_deposition_observed<'thermal, 'catalog, O: DepositionObserver>(
             "finite forward target, positive timestep and selected solid cells required",
         )
         .into());
+    }
+    if stop_at_melting && (surfaces.len() != 1 || surfaces[0].caloric.is_none()) {
+        return Err(DepositionError::InvalidInput("melting completion requires one original sharp-fusion surface").into());
     }
     let budget = thermal.work_budget();
     if surfaces.len() > budget.max_cells || surfaces.len() > phase_config.maximum_surfaces {
@@ -647,8 +709,19 @@ fn advance_deposition_observed<'thermal, 'catalog, O: DepositionObserver>(
             }
         }
     }
-    let guard = SolidBranchGuard { ranges, calorics: phase_sources, work };
+    let guard = SolidBranchGuard { ranges, calorics: phase_sources, work,
+        allow_liquid_trials: false, first_liquid_step: None };
     guard.check_all(thermal, &mut checkpoint)?;
+    if stop_at_melting {
+        // Source/seed admission is independent of whether this call reaches a
+        // selected future birth. Completion cannot smuggle an all-liquid seed.
+        for event in thermal.pending_events() {
+            checkpoint()?;
+            if let Event::Birth(cell) = &event.event {
+                guard.check_cell(cell, thermal, false)?;
+            }
+        }
+    }
     // Validate original gas/catalog/controls even for a zero-duration window or
     // when all selected cells are scheduled strictly after the target.
     let mut checkpoint_error = None;
@@ -763,113 +836,174 @@ fn advance_deposition_observed<'thermal, 'catalog, O: DepositionObserver>(
         if !stop_s.is_finite() || stop_s <= start_s {
             return Err(DepositionError::Arithmetic.into());
         }
-        let remaining = budget
-            .max_substeps
-            .checked_sub(heat.substeps)
-            .ok_or(DepositionError::Budget("evolving-gas thermal substeps"))?;
-        let remaining = work.map_or(remaining, |meter| meter.remaining().min(remaining));
-        let (heated, accepted_observer, report) = next.advance_observed_continuing_limited(
-            &observed,
-            stop_s,
-            thermal_config,
-            remaining,
-            &mut checkpoint,
-        ).map_err(observed::coupled_error)?;
-        next = heated;
-        observed = accepted_observer;
-        heat.add(report)?;
-        if exposed.is_empty() {
-            continue;
-        }
+        let mut melting_search = if stop_at_melting && !exposed.is_empty() {
+            let surface = exposed[0].0;
+            let cell = &next.cells()[&surface.cell_id];
+            let source = surface.caloric.expect("admitted melting source");
+            Some(MeltingSearch::new(start_s,
+                finite(cell.mass_kg * (source.liquid_at_melting_h_j_kg() - cell.specific_h_j_kg))?))
+        } else { None };
+        let (heated, accepted_observer, report, candidate, melting_completed) = loop {
+            checkpoint()?;
+            let remaining = budget.max_substeps.checked_sub(heat.substeps)
+                .ok_or(DepositionError::Budget("evolving-gas thermal substeps"))?;
+            let remaining = work.map_or(remaining, |meter| meter.remaining().min(remaining));
+            let mut trial_observer = observed.clone();
+            trial_observer.first.allow_liquid_trials = stop_at_melting;
+            trial_observer.first.first_liquid_step = None;
+            let (mut heated, accepted_observer, mut report) = next.advance_observed_continuing_limited(
+                &trial_observer, stop_s, thermal_config, remaining, &mut checkpoint,
+            ).map_err(observed::coupled_error)?;
+            if exposed.is_empty() { break (heated, accepted_observer, report, None, false); }
 
-        let chart_error = RefCell::new(None);
-        let calorics: Vec<_> = exposed
-            .iter()
-            .map(|(surface, _)| {
-                let state = &next;
+            if let Some(search) = &mut melting_search {
+                let (surface, area) = exposed[0];
+                let source = surface.caloric.expect("admitted melting source");
+                let liquid_h = source.liquid_at_melting_h_j_kg();
+                let cell = &heated.cells()[&surface.cell_id];
+                let headroom = finite(cell.mass_kg * (liquid_h - cell.specific_h_j_kg))?;
+                let first_liquid = accepted_observer.first.first_liquid_step;
+                let has_crossing = first_liquid.is_some() || search.is_bracketed();
+                if has_crossing && first_liquid.is_none_or(|(time, _, _)| time == stop_s)
+                    && headroom.abs() + report.residual_j.abs() + heat.residual.value()?.abs()
+                        <= thermal_config.energy_tolerance_j {
+                    let original = &next.cells()[&surface.cell_id];
+                    let mut checkpoint_error = None;
+                    let inactive = inactive_at_melting(surface.cell_id.0, source,
+                        surface.law, surface.binding, SolidSurfaceState {
+                            mass_kg: original.mass_kg, specific_enthalpy_j_kg: original.specific_h_j_kg,
+                            area_m2: area,
+                        }, &next_gas, catalog, active_accommodation.get(&surface.cell_id.0),
+                        stop_s - start_s, phase_config.surface, || match checkpoint() {
+                            Ok(()) => false, Err(error) => { checkpoint_error = Some(error); true }
+                        });
+                    if let Some(error) = checkpoint_error { return Err(error.into()); }
+                    if let Some(candidate) = inactive? {
+                        let expected = cell.clone();
+                        // The trial may lie just beyond h_l on the ORIGINAL
+                        // liquid branch. Its measured correction is charged to
+                        // native storage/residual before the strict handoff.
+                        heated.apply_condensed_exchanges(&[CondensedCellExchange {
+                            expected, interval_exposed_area_m2: area,
+                            replacement: candidate.surfaces[0].solid,
+                            enthalpy_range_j_kg: [surface.enthalpy_range_j_kg[0],
+                                source.curve().knots().last().expect("admitted curve").specific_enthalpy_j_kg],
+                            caloric_identity: *source.curve().identity().as_bytes(),
+                        }], &mut checkpoint)?;
+                        report.stored_energy_change_j = add(report.stored_energy_change_j, headroom)?;
+                        report.residual_j = add(report.residual_j, headroom)?;
+                        break (heated, accepted_observer, report, Some(candidate), true);
+                    }
+                }
+                if let Some((time, h, mass)) = first_liquid {
+                    stop_s = search.observe(time, finite(mass * (liquid_h - h))?)?
+                        .ok_or(DepositionError::Arithmetic)?;
+                    continue;
+                }
+            }
+
+            let chart_error = RefCell::new(None);
+            let calorics: Vec<_> = exposed.iter().map(|(surface, _)| {
+                let state = &heated;
                 let errors = &chart_error;
                 let id = surface.cell_id;
                 let [lo, hi] = surface.enthalpy_range_j_kg;
                 move |h| {
                     let result = if (lo..=hi).contains(&h) {
                         state.temperature_at_specific_enthalpy_k(id, h)
-                    } else {
-                        Err(DepositionError::MaterialDomain)
-                    };
+                    } else { Err(DepositionError::MaterialDomain) };
                     result.map_err(|error| {
                         *errors.borrow_mut() = Some(error);
-                        SublimationError::Invalid(
-                            "original pure-solid caloric chart refused endpoint",
-                        )
+                        SublimationError::Invalid("original pure-solid caloric chart refused endpoint")
                     })
                 }
-            })
-            .collect();
-        let inputs: Vec<_> = exposed
-            .iter()
-            .zip(&calorics)
-            .map(|((surface, area), caloric)| {
-                let cell = &next.cells()[&surface.cell_id];
-                GasChamberSurface {
-                    id: surface.cell_id.0,
-                    law: surface.law,
-                    binding: surface.binding,
-                    solid: SolidSurfaceState {
-                        mass_kg: cell.mass_kg,
-                        specific_enthalpy_j_kg: cell.specific_h_j_kg,
-                        area_m2: *area,
-                    },
-                    temperature_from_enthalpy: caloric,
-                }
-            })
-            .collect();
-        let mut checkpoint_error = None;
-        let result = {
-            let mut cancelled = || match checkpoint() {
-                Ok(()) => false,
-                Err(error) => {
-                    checkpoint_error = Some(error);
-                    true
+            }).collect();
+            let inputs: Vec<_> = exposed.iter().zip(&calorics).map(|((surface, area), caloric)| {
+                let cell = &heated.cells()[&surface.cell_id];
+                GasChamberSurface { id: surface.cell_id.0, law: surface.law, binding: surface.binding,
+                    solid: SolidSurfaceState { mass_kg: cell.mass_kg,
+                        specific_enthalpy_j_kg: cell.specific_h_j_kg, area_m2: *area },
+                    temperature_from_enthalpy: caloric }
+            }).collect();
+            let mut checkpoint_error = None;
+            let mut terminal = None;
+            let result = {
+                let mut cancelled = || match checkpoint() {
+                    Ok(()) => false, Err(error) => { checkpoint_error = Some(error); true }
+                };
+                if stop_at_melting {
+                    let input = &inputs[0];
+                    let source = active_calorics[&input.id];
+                    advance_to_melting(EquilibriumSublimation::from_source(source), input.law,
+                        input.binding, input.solid, &next_gas, catalog,
+                        active_accommodation.get(&input.id), stop_s - start_s,
+                        phase_config.surface, &mut cancelled).and_then(|candidate| {
+                            terminal = Some(*candidate.boundary());
+                            PhaseInterval::from_scalar(input.id, input.binding, input.solid,
+                                &next_gas, candidate)
+                        })
+                } else if !active_calorics.is_empty() {
+                    advance_partitioned_chamber(&inputs, &active_calorics,
+                        accommodation.map(|_| &active_accommodation), &next_gas, catalog,
+                        stop_s - start_s, phase_config, &mut cancelled).map(|candidate| {
+                            let (exchange, _, reflection) = candidate.into_parts();
+                            PhaseInterval::from_chamber(exchange, reflection)
+                        })
+                } else if accommodation.is_some() {
+                    advance_chamber_with_accommodation(&inputs, &active_accommodation,
+                        &next_gas, catalog, stop_s - start_s, phase_config, &mut cancelled)
+                        .map(|(candidate, reflection)| PhaseInterval::from_chamber(candidate, reflection))
+                } else {
+                    advance_chamber_with_gas(&inputs, &next_gas, catalog,
+                        stop_s - start_s, phase_config, &mut cancelled)
+                        .map(|candidate| PhaseInterval::from_chamber(candidate, BTreeMap::new()))
                 }
             };
-            if !active_calorics.is_empty() {
-                advance_partitioned_chamber(&inputs, &active_calorics,
-                    accommodation.map(|_| &active_accommodation), &next_gas, catalog,
-                    stop_s - start_s, phase_config, &mut cancelled)
-                    .map(|candidate| {
-                        let (exchange, _, reflection) = candidate.into_parts();
-                        (exchange, reflection)
-                    })
-            } else if accommodation.is_some() {
-                advance_chamber_with_accommodation(&inputs, &active_accommodation,
-                    &next_gas, catalog, stop_s - start_s, phase_config, &mut cancelled)
-            } else {
-                advance_chamber_with_gas(&inputs, &next_gas, catalog,
-                    stop_s - start_s, phase_config, &mut cancelled)
-                    .map(|candidate| (candidate, BTreeMap::new()))
+            drop(inputs);
+            drop(calorics);
+            if let Some(error) = checkpoint_error { return Err(error.into()); }
+            let candidate = match result {
+                Ok(value) => value,
+                Err(error) => return Err(match chart_error.into_inner() {
+                    Some(error) => error.into(), None => error.into(),
+                }),
+            };
+            let mut completed = false;
+            if let (Some(search), Some(terminal)) = (&mut melting_search, terminal) {
+                let surface = exposed[0].0;
+                let source = surface.caloric.expect("admitted melting source");
+                let liquid_h = source.liquid_at_melting_h_j_kg();
+                if terminal.melting_completed && terminal.elapsed_duration_s == stop_s - start_s {
+                    completed = true;
+                } else {
+                    let residual = if terminal.melting_completed {
+                        let cell = &heated.cells()[&surface.cell_id];
+                        let headroom = finite(cell.mass_kg * (liquid_h - cell.specific_h_j_kg))?;
+                        finite(headroom * ((terminal.elapsed_duration_s - (stop_s - start_s))
+                            / terminal.elapsed_duration_s))?
+                    } else {
+                        let bulk = candidate.surfaces[0].solid;
+                        finite(bulk.mass_kg * (liquid_h - bulk.specific_enthalpy_j_kg))?
+                    };
+                    if let Some(retry) = search.observe(stop_s, residual)? {
+                        stop_s = retry;
+                        continue;
+                    }
+                }
             }
+            break (heated, accepted_observer, report, Some(candidate), completed);
         };
-        drop(inputs);
-        drop(calorics);
-        if let Some(error) = checkpoint_error {
-            return Err(error.into());
-        }
-        let (candidate, reflection) = match result {
-            Ok(value) => value,
-            Err(error) => {
-                return Err(match chart_error.into_inner() {
-                    Some(error) => error.into(),
-                    None => error.into(),
-                });
-            }
-        };
-        if candidate.surfaces().len() != exposed.len() {
+        next = heated;
+        observed = accepted_observer;
+        heat.add(report)?;
+        let Some(candidate) = candidate else { continue };
+        if candidate.surfaces.len() != exposed.len() {
             return Err(DepositionError::InvalidInput("joint phase endpoint count changed").into());
         }
         let mut updates = Vec::with_capacity(exposed.len());
         let mut condensed_updates = Vec::new();
         for (index, ((surface, area), endpoint)) in
-            exposed.iter().zip(candidate.surfaces()).enumerate()
+            exposed.iter().zip(&candidate.surfaces).enumerate()
         {
             if index % 256 == 0 {
                 checkpoint()?;
@@ -881,7 +1015,7 @@ fn advance_deposition_observed<'thermal, 'catalog, O: DepositionObserver>(
             }
             if let Some(source) = surface.caloric {
                 let inventory = CondensedInventory::new(source, endpoint.solid)?;
-                if inventory.solid_mass_kg <= 0.0 {
+                if inventory.solid_mass_kg <= 0.0 && !melting_completed {
                     return Err(DepositionError::MaterialDomain.into());
                 }
                 condensed_updates.push(CondensedCellExchange {
@@ -899,14 +1033,14 @@ fn advance_deposition_observed<'thermal, 'catalog, O: DepositionObserver>(
                 });
             }
         }
-        let iterations = candidate.gas_exchange().step().iterations;
+        let iterations = candidate.gas_iterations;
         if condensed_updates.is_empty() {
             next.apply_solid_exchanges(&updates, &mut checkpoint)?;
         } else {
             next.apply_condensed_exchanges(&condensed_updates, &mut checkpoint)?;
         }
-        gas_stream_residual.add(candidate.gas_exchange().step().energy_residual_j)?;
-        let (endpoints, accepted_gas, _, report) = candidate.into_parts();
+        gas_stream_residual.add(candidate.gas_residual_j)?;
+        let PhaseInterval { surfaces: endpoints, gas: accepted_gas, report, reflection, .. } = candidate;
         next_gas = accepted_gas;
         outgoing.add(report.outgoing_mass_kg)?;
         incoming.add(report.incoming_mass_kg)?;
@@ -942,6 +1076,7 @@ fn advance_deposition_observed<'thermal, 'catalog, O: DepositionObserver>(
                 .ok_or(DepositionError::Arithmetic)?;
         }
         last_step = Some(report);
+        if melting_completed { break; }
     }
     let thermal_audit = heat.audit()?;
     let mut solid_mass_without_births = Sum::default();

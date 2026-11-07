@@ -8378,6 +8378,31 @@ and caloric-datum offset. Any external heat split must be retried as a complete
 interval at an earlier event. Frozen-rate event timing still requires physical
 timestep refinement and does not establish moving-interface geometry.
 
+`sublimation::gas::timeline::equilibrium::boundary::advance_deposition_to_melting`
+extends that completion owner to one selected solid interface on the original
+native heat timeline. Network heat, both molecular streams, optional reflected
+gas heat and every neighboring cell share the accepted event duration. A clipped
+molecular event only brackets time; the complete native/phase trial is replayed
+from the unchanged accepted start. The first fully liquid native substep remains
+visible even if later heat would freeze it again. Discarded trials spend the
+original thermal work allowance and a bounded 64-trial event search. Initial
+and scheduled births retain strict original source identity and solid inventory.
+
+Native heat can finish melting under full coverage or with exactly zero net
+molecular mass and combined molecular/reflected energy. The latter is a separate
+identity phase operation commuting with native heat at the fusion endpoint:
+it retains the real whole-interval old solid and vapor donors, original gross
+turnover and source admission, without inventing a positive-solid post-heat seed.
+Exact liquid-knot selection spends the original thermal joule allowance and is
+recorded in stored energy and residual, never as an added heat source. Active
+molecular completion uses the existing scalar event and its one gas reconstruction;
+the timeline only converts its accepted receipts into the existing joint accounts.
+Whole-window `condensed_phases` includes the final zero solid inventory, and the
+receipt returns unconsumed time for an explicitly chosen liquid-interface owner.
+Existing multi-surface, observed and adaptive entry points retain their strict
+admission. Source-domain escape and unsupported intermediates still refuse;
+physical timestep refinement and original donor limits remain necessary.
+
 ### State-dependent heat transport during deposition
 
 `sublimation::gas::timeline::observed` supplies pure-solid and sharp-equilibrium
