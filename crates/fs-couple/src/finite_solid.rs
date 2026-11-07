@@ -54,6 +54,9 @@ pub mod split;
 /// Simultaneous mixed contact and trajectories through original mechanical owners.
 pub mod contact;
 
+/// Original-reference release of a relaxed accepted body into native thermal liquid.
+pub mod liquid;
+
 use std::cell::RefCell;
 use std::sync::Arc;
 

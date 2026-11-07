@@ -5727,3 +5727,35 @@ The result remains held-temperature external thermostat duty, with no inferred s
 Only accepted fine endpoints accumulate exterior and paired intermaterial exchange. Each original layer and the complete gas/body system retain one original-to-final water tolerance, with the existing final carrier and total-mass admission. A late work, source, stage, conservation or cancellation refusal discards the full private duration. Temperature, free gas volume, geometry and exposed faces remain held; local error control does not add condensation, heat feedback or a global accuracy certificate. The generic atmosphere-report forwarding also preserves existing backward-Euler consumers.
 
 Three authored regression groups check refinement against independent continuous finite-air storage equations in all three geometries, exact agreement with two native half steps and accepted-only transfer accounts, and work exhaustion after an accepted private prefix. All four changed Rust files passed the pinned formatter check. Native tests remain unexecuted under the known dependency/resource build block; independent graph/controller fixture checks are not native test execution.
+
+### Relaxed finite-solid release with original reference density
+
+The opt-in finite-solid liquid release binds the actual accepted plain hyperelastic
+body and complete original thermal timeline at the same clock. Original reference
+positions, per-element or retained P1 nodal densities, current motion and the identical
+caloric object enter the existing reference-density/native thermal ingress. The
+original consistent mass operator independently supplies M, first moment, P, L and
+datum-centered K. Different reference densities and volume Jacobians can enter one
+native liquid only when their current physical densities agree within the explicit
+kg/m3 bound. Actual native occupied fill volume and mass remain separately audited.
+
+Each thermal cell maps to one original tetrahedron with its retained reference
+mass/volume and fully liquid caloric state at the original mechanical temperature.
+Shared vertices require equal incident-cell h; no P0-to-P1 averaging is invented.
+Original external conditions and density claims stay pinned. Detached-component
+mass, momentum, angular momentum and enthalpy cannot cancel between pieces.
+
+Native Cauchy stress, signed/absolute elastic storage and accepted M*a must fit
+explicit near-zero gates. The signed mechanical discrepancy is liquid K minus
+original consistent-mass K minus original elastic storage. Absolute source kinetic
+identity error, per-component projection error and absolute elastic storage share
+the projection budget; none becomes heat. Supports, pressure/gravity, original
+nonzero loads, receiving gravity, thermal ports/links and future events refuse.
+
+This zero-duration representation change does not supply melting kinetics,
+stress relaxation or plastic/damage/viscoelastic/contact-history discharge. Both
+borrowed sources remain unchanged on any outcome; accepting the native thermal
+candidate replaces both source representations at their existing clock. Native
+regression fixtures cover unequal reference densities/Jacobians, analytic cuboid
+inventories, actual fill geometry, continuing thermal liquid motion and refusal/
+retry for source identity, clock, heat inventory, retained owners and work budgets.
