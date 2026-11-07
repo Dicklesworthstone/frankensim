@@ -3932,3 +3932,55 @@ iteration and replacement-reference refusals. The pinned formatter parsed the
 new source. Native compilation and execution were not available in this shared
 workspace because disk and memory were exhausted; these tests are authored,
 not reported as passed.
+
+## Source-bound thermal frame malleability with finite enthalpy transport
+
+`frame_enthalpy::ThermoplasticFrame` connects retained tabulated thermal
+fibers to the existing quasistatic or backward-Euler frame solver and the
+original deposition/enthalpy transport owner. Binding requires complete,
+nonduplicated fiber coverage and checks each original cell's reference volume,
+mass, material, caloric-law identity and accepted temperature. Original fiber
+quadrature volumes and member inertia remain authoritative. Bound inventories
+and accepted enthalpies are checked again before each advance.
+
+Each feedback proposal prepares one source-bound thermal interval per cell,
+shared by its fibers, using the accepted old temperature, proposed endpoint
+temperature and actual elapsed time. Native frame mechanics retains plastic,
+kinematic and rate-dependent history. All proposals start from the same
+accepted history; changing a feedback temperature never advances time or
+accumulates plastic flow. Original source-family and caloric bindings survive
+subsequent intervals.
+
+The observer adapter deposits the frame's physical material heat plus signed
+reversible thermal exchange exactly once, as a mean source over the physical
+interval. It forwards the original observer's sources, conductances, reservoirs,
+ambient conditions, transitions, time-step limits, events and step hooks.
+Native transport still owns thermal substeps, incoming deposition energy and
+external heat. Material numerical defects and backward-Euler inertial loss
+remain separately audited and never become heat.
+
+After transport returns, the full frame is solved again at the actual candidate
+enthalpies. Publication requires both temperature convergence and agreement
+between the material heat injected into transport and that of the actual
+temperature frame. Per-cell heat defects, the native thermal balance and the
+combined material, reciprocal thermal, kinetic and caloric balance must all
+meet their configured tolerances. Compensated sums retain opposing heat/work
+terms. The accepted frame therefore has the exact transported temperature for
+the next interval. Frame, thermal and observer candidates remain private until
+all gates pass; failure or cancellation leaves accepted owners unchanged.
+
+Four focused regression definitions cover loaded heating/cooling/release with
+retained permanent extension and an independent first-law oracle; unequal fiber
+temperatures changing extension and curvature; successive nonlinear dynamic
+steps for both native mass forms with numerical inertia excluded from heat;
+and wrong mass, failed feedback or observer failure with successful retry.
+New production and test files pass Rust formatting checks, and independent
+scalar arithmetic checks the fixtures. Cargo compilation and native regression
+execution remain unverified on the resource-constrained shared build host.
+
+This is a first-order coupled time advance within the native frame's linear
+geometry, small-strain, fixed-reference-mass and stationary-support domains.
+Thermal cell/fiber resolution and reference transport coefficients remain
+explicit caller choices. The extension does not establish finite-rotation
+forming, deformed heat-transfer geometry, experimental material validation or
+a global time-accuracy certificate.
