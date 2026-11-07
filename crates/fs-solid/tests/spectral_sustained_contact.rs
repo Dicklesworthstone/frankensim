@@ -250,6 +250,83 @@ fn distinct_static_and_kinetic_bounds_use_the_complete_spectral_flow() {
 }
 
 #[test]
+fn directional_breakaway_retains_elastic_contact_spectators_and_modal_continuation() {
+    use fs_contact::frictional_multicontact::elliptic::EllipticFriction;
+    use fs_solid::dynamics::sustained::elliptic::SolidSustainedEllipticContact;
+    with_cx(|cx, _| {
+        let h = 0.125;
+        let make = || {
+            CompleteSpectralSolid::prepare_with_basis(
+                &assembly(&[4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 9.0], &I, 3),
+                &[4.0, 0.0, 9.0],
+                &I,
+                h,
+                &[0.0, 0.0, 0.4],
+                &[0.0; 3],
+                native_controls(),
+                cx,
+            )
+            .unwrap()
+        };
+        let mut solid = make();
+        let mut direct = make();
+        let zero = [0.0; 3];
+        let c = SolidSustainedEllipticContact {
+            id: 7,
+            velocity_weights: [&N, &T1, &zero],
+            gap_m: 0.0,
+            prescribed_surface_velocity_mps: [0.0; 3],
+            friction: EllipticFriction {
+                coefficients_mu: [0.6, 0.2],
+                principal_axis: [1.0, 0.0],
+            },
+            scales: contact(h, 0.6, [0.0; 3]).scales,
+        };
+        let r = solid
+            .advance_sustained_static_kinetic_elliptic_contacts(
+                &[c],
+                &[[0.3, 0.05]],
+                &[[10.0, -6.0, 0.0]],
+                &[8.0, -10.0, 0.0],
+                controls(),
+                cx,
+                |p| {
+                    // x(t)=5/4*(1-cos(2t)), x'(t)=5/2*sin(2t)>0 inside.
+                    // The separate z oscillator is absent from this point trace.
+                    assert!(2.0 * h < core::f64::consts::PI);
+                    near(p.total_force_n[0], 5.0, 1e-9);
+                    near(p.total_force_n[1], 0.0, 1e-9);
+                    near(p.velocity_after_mps[0], 2.5 * (2.0 * h).sin(), 1e-9);
+                    Ok::<_, &'static str>(())
+                },
+            )
+            .unwrap();
+        assert_eq!(r.transformed.friction_regime_resolves, 1);
+        assert_eq!(r.friction[0].coefficients_mu, [0.3, 0.05]);
+        near(
+            solid.displacement_m()[0],
+            1.25 * (1.0 - (2.0 * h).cos()),
+            1e-10,
+        );
+        near(solid.displacement_m()[2], 0.4 * (3.0 * h).cos(), 1e-13);
+        near(solid.velocity_mps()[2], -1.2 * (3.0 * h).sin(), 1e-13);
+        near(
+            r.transformed.frictional_dissipation_j,
+            3.0 * solid.displacement_m()[0],
+            1e-9,
+        );
+        energy(&r.transformed);
+        direct.advance(&[5.0, 0.0, 0.0], cx).unwrap();
+        assert_eq!(bits(&solid), bits(&direct));
+        for body in [&mut solid, &mut direct] {
+            body.advance_affine(&[1.0, 0.0, -0.2], &[-0.5, 0.0, 0.3], cx)
+                .unwrap();
+        }
+        assert_eq!(bits(&solid), bits(&direct));
+    });
+}
+
+#[test]
 fn g1_spectral_sticking_breakaway_and_circular_sliding_retain_original_work() {
     with_cx(|cx, _| {
         let h = 0.125;

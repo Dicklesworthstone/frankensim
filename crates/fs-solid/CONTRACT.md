@@ -1891,6 +1891,42 @@ directional breakaway, static holding, oblique maximum dissipation, translating
 surface work, tangent-frame covariance, isotropic reduction and atomic refusal.
 Runtime verification is recorded with the implementation commit.
 
+### Static capture and kinetic breakaway with directional friction
+
+`advance_sustained_static_kinetic_elliptic_contacts` on the same dense,
+complete-spectral and supported owners accepts a static ellipse and a kinetic
+principal-coefficient pair on each contact's unchanged material axes. Each
+kinetic strength lies between zero and its static counterpart. The two axes
+can weaken by different proportions; the full work-conjugate map changes with
+the selected ellipse, preserving its physical shape and original trace.
+
+Any actual incoming tangential motion selects kinetic strength immediately.
+An initially resting contact first attempts static capture. Resolved slip or
+endpoint velocity discards that numerical trial, switches the contact to its
+kinetic ellipse and re-solves all coupled forces from the same accepted native
+predecessor. Selection occurs before physical mode admission, so an intermediate
+static trial cannot wrongly reject the eventual kinetic trajectory. Each
+contact switches at most once, and all coordinate staging, selection, response
+evaluations and native product work share bounded budgets. No prepared matrix,
+accepted checkpoint or physical clock is cloned or advanced during retries.
+
+The returned `friction` array exposes actual physical principal strengths and
+axes in canonical contact-ID order. The transformed receipt counts every force
+response and feasibility refinement, including discarded static trials, and
+reports the number of coupled regime re-solves. All original endpoint, work,
+support-reaction and mandatory whole-path checks precede one native acceptance.
+Exact isotropic pairs recover the original circular static/kinetic trajectory
+bit for bit on the admitted fixtures. Rank-one ellipses, interior stopping,
+reversal, changing texture or coefficients, and thermal allocation remain
+outside this held-law interval's domain; existing event/source owners retain
+those responsibilities.
+
+G1/G3/G4 native regressions cover nonproportional breakaway and subsequent
+kinetic continuation, oblique maximum dissipation, mixed static/kinetic contacts
+with full normal/shear and cross-contact inertia, moving support and opposing
+surface work under velocity boosts, elastic spectator/modal continuation,
+isotropic equivalence, shared response budgets and late refusal/cancel/retry.
+
 ## Native quadratic Maxwell force, contact and pressure drift
 
 `MixedViscoTetMotion::force_kick_candidate` integrates the accepted original

@@ -18,6 +18,43 @@ pub(super) struct Workspace {
 }
 
 impl SupportedSpectralSolid {
+    /// Resolve distinct static and kinetic friction ellipses while retaining
+    /// the actual prescribed support history, full reactions and actuator work.
+    /// Each kinetic pair weakens the corresponding static principal strengths
+    /// on their unchanged material axes. Every coupled regime trial starts at
+    /// the same accepted native state and shares the original work budgets.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_sustained_static_kinetic_elliptic_contacts<P, E>(
+        &mut self,
+        support_acceleration_end_mps2: &[f64],
+        contacts: &[contact::elliptic::SolidSustainedEllipticContact<'_>],
+        kinetic_coefficients_mu: &[[f64; 2]],
+        initial_forces_n: &[[f64; 3]],
+        external_force_n: &[f64],
+        controls: SolidSustainedControls,
+        cx: &Cx<'_>,
+        admit_path: impl FnOnce(
+            &contact::elliptic::SolidSustainedEllipticPath<'_, '_, Self>,
+        ) -> core::result::Result<P, E>,
+    ) -> core::result::Result<
+        contact::elliptic::SolidSustainedEllipticStep<P, SupportedSolidStep>,
+        SolidSustainedError<E, SupportedSolidError>,
+    > {
+        contact::elliptic::advance_static_kinetic(
+            &mut Interval {
+                body: self,
+                acceleration_end: support_acceleration_end_mps2,
+            },
+            contacts,
+            kinetic_coefficients_mu,
+            initial_forces_n,
+            external_force_n,
+            controls,
+            cx,
+            admit_path,
+        )
+    }
+
     /// Advance an oriented Coulomb ellipse through the same original complete
     /// response, work gates and atomic acceptance as sustained disk contact.
     /// Physical contacts/forces reach the mandatory whole-path callback; the

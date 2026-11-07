@@ -16,6 +16,37 @@ pub(crate) struct Workspace {
 }
 
 impl CompleteSpectralSolid {
+    /// Resolve distinct static/kinetic principal strengths on the original
+    /// complete spectrum. Each kinetic pair uses its static contact's material
+    /// axes; coupled breakaway re-solves share budgets and one native commit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_sustained_static_kinetic_elliptic_contacts<P, E>(
+        &mut self,
+        contacts: &[contact::elliptic::SolidSustainedEllipticContact<'_>],
+        kinetic_coefficients_mu: &[[f64; 2]],
+        initial_forces_n: &[[f64; 3]],
+        external_force_n: &[f64],
+        controls: SolidSustainedControls,
+        cx: &Cx<'_>,
+        admit_path: impl FnOnce(
+            &contact::elliptic::SolidSustainedEllipticPath<'_, '_, Self>,
+        ) -> core::result::Result<P, E>,
+    ) -> core::result::Result<
+        contact::elliptic::SolidSustainedEllipticStep<P, ExactLinearSolidStep>,
+        SolidSustainedError<E, CompleteSpectralSolidError>,
+    > {
+        contact::elliptic::advance_static_kinetic(
+            self,
+            contacts,
+            kinetic_coefficients_mu,
+            initial_forces_n,
+            external_force_n,
+            controls,
+            cx,
+            admit_path,
+        )
+    }
+
     /// Locate a stop, static recapture or reversal along one rigid contact
     /// trace, retaining every native elastic mode and the original full energy
     /// and cumulative-work gates. See the dense owner's event method for the

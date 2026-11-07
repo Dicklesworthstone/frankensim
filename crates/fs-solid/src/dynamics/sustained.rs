@@ -366,6 +366,12 @@ fn native_error<E, B: Native>(error: B::Error) -> SolidSustainedError<E, B::Erro
     }
 }
 
+fn response_terms<B: Native>(body: &B, contacts: usize) -> u128 {
+    let n = body.state().displacement.len() as u128;
+    let m = contacts as u128;
+    body.response_multiply_terms() + 12 * n * m + 64 * n + 128 * m
+}
+
 pub(crate) fn advance<B: Native, P, E>(
     body: &mut B,
     contacts: &[SolidSustainedContact<'_>],
@@ -396,6 +402,36 @@ pub(crate) fn advance_with_kinetic<B: Native, P, E>(
     external_force_n: &[f64],
     controls: SolidSustainedControls,
     cx: &Cx<'_>,
+    admit_path: impl FnOnce(&SolidSustainedPath<'_, '_, B::Owner>) -> Result<P, E>,
+) -> Result<SolidSustainedStep<P, B::Step>, SolidSustainedError<E, B::Error>> {
+    advance_with_selection(
+        body,
+        contacts,
+        kinetic_coefficients,
+        initial_forces_n,
+        external_force_n,
+        controls,
+        cx,
+        |_, _| Ok(()),
+        admit_path,
+    )
+}
+
+// A directional static/kinetic transition may change the entire conjugate
+// tangent map, rather than only one disk radius. Inspect its original replay
+// before physical mode admission, then discard and re-solve from this same
+// predecessor if that map must change. This hook publishes no native state and
+// confers no physical authority on a discarded numerical force trial.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn advance_with_selection<B: Native, P, E>(
+    body: &mut B,
+    contacts: &[SolidSustainedContact<'_>],
+    kinetic_coefficients: Option<&[f64]>,
+    initial_forces_n: &[[f64; 3]],
+    external_force_n: &[f64],
+    controls: SolidSustainedControls,
+    cx: &Cx<'_>,
+    select_trial: impl FnOnce(&SolidSustainedPath<'_, '_, B::Owner>, &SolveReport) -> Result<(), E>,
     admit_path: impl FnOnce(&SolidSustainedPath<'_, '_, B::Owner>) -> Result<P, E>,
 ) -> Result<SolidSustainedStep<P, B::Step>, SolidSustainedError<E, B::Error>> {
     poll(cx)?;
@@ -444,7 +480,7 @@ pub(crate) fn advance_with_kinetic<B: Native, P, E>(
     )?;
     // Includes source transforms, transition, the optional full loss form,
     // contact transpose/path reductions and one complete physical audit.
-    let terms_per_response = body.response_multiply_terms() + 12 * nn * mm + 64 * nn + 128 * mm;
+    let terms_per_response = response_terms(body, m);
     bound(
         "native response multiply terms",
         2 * terms_per_response,
@@ -621,6 +657,22 @@ pub(crate) fn advance_with_kinetic<B: Native, P, E>(
         friction_regime_resolves += 1;
         initial.copy_from_slice(&solve.forces_n);
     };
+    poll(cx)?;
+    select_trial(
+        &SolidSustainedPath {
+            before: body.owner(),
+            displacement_after_m: body.displacement(&workspace),
+            velocity_after_mps: body.velocity(&workspace),
+            displacement_change_m: &displacement,
+            contacts: &ordered,
+            forces_n: &solve.forces_n,
+            external_force_n,
+            total_force_n: &total_force,
+            duration_s: h,
+        },
+        &solve,
+    )
+    .map_err(SolidSustainedError::Path)?;
     poll(cx)?;
     let work = body
         .work(&total_force, &workspace, cx)

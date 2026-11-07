@@ -16,6 +16,9 @@ use fs_contact::sustained::{ContactLawError, NaturalMapScales};
 use fs_exec::Cx;
 use fs_math::dd::Dd;
 
+mod static_kinetic;
+pub(crate) use static_kinetic::advance as advance_static_kinetic;
+
 /// Original orthonormal point trace with an oriented Coulomb friction ellipse.
 ///
 /// Coefficients and the principal axis are expressed in this contact's two
@@ -63,10 +66,46 @@ pub struct SolidSustainedEllipticStep<P, S = super::ExactLinearSolidStep> {
     /// Actual original physical gap/slip, independently reconstructed before
     /// acceptance, in the same contact order.
     pub paths_m: Vec<[f64; 3]>,
+    /// Actual physical ellipse selected for each contact, in the same order.
+    /// A static/kinetic solve may select different pairs at different contacts.
+    pub friction: Vec<EllipticFriction>,
     pub coordinates: Vec<EllipticForceCoordinates>,
 }
 
 impl ExactLinearSolid {
+    /// Resolve static capture and kinetic sliding with distinct principal
+    /// coefficient pairs on each contact's original material axes.
+    ///
+    /// `contacts` carries the static ellipse. Each kinetic coefficient must
+    /// lie between zero and its corresponding static coefficient; the two
+    /// principal directions may weaken by different proportions. Incoming
+    /// relative motion immediately uses kinetic strength. A resting contact
+    /// first attempts static capture, then every coupled force is re-solved
+    /// from the same native predecessor if capture fails. The original
+    /// held-trajectory admission still excludes interior stops or reversals.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_sustained_static_kinetic_elliptic_contacts<P, E>(
+        &mut self,
+        contacts: &[SolidSustainedEllipticContact<'_>],
+        kinetic_coefficients_mu: &[[f64; 2]],
+        initial_forces_n: &[[f64; 3]],
+        external_force_n: &[f64],
+        controls: SolidSustainedControls,
+        cx: &Cx<'_>,
+        admit_path: impl FnOnce(&SolidSustainedEllipticPath<'_, '_>) -> Result<P, E>,
+    ) -> Result<SolidSustainedEllipticStep<P>, SolidSustainedError<E>> {
+        advance_static_kinetic(
+            self,
+            contacts,
+            kinetic_coefficients_mu,
+            initial_forces_n,
+            external_force_n,
+            controls,
+            cx,
+            admit_path,
+        )
+    }
+
     /// Advance held directional contact through the original exact solid flow.
     ///
     /// Two positive principal coefficients, or equal coefficients including
@@ -147,6 +186,21 @@ fn flatten<E, N>(
     }
 }
 
+fn staging_requirements(n: usize, m: usize) -> (u128, u128) {
+    let (nn, mm) = (n as u128, m as u128);
+    let bytes_per_contact = core::mem::size_of::<SolidSustainedEllipticContact<'_>>()
+        + core::mem::size_of::<SolidSustainedContact<'_>>()
+        + core::mem::size_of::<EllipticForceCoordinates>()
+        + core::mem::size_of::<EllipticFriction>()
+        + core::mem::size_of::<[Vec<f64>; 2]>()
+        + core::mem::size_of::<usize>()
+        + 3 * core::mem::size_of::<[f64; 3]>();
+    (
+        16 * nn * mm + mm * bytes_per_contact as u128 + 512,
+        16 * nn * mm + 256 * mm,
+    )
+}
+
 pub(crate) fn advance<B: Native, P, E>(
     body: &mut B,
     contacts: &[SolidSustainedEllipticContact<'_>],
@@ -154,6 +208,33 @@ pub(crate) fn advance<B: Native, P, E>(
     external_force_n: &[f64],
     controls: SolidSustainedControls,
     cx: &Cx<'_>,
+    admit_path: impl FnOnce(&SolidSustainedEllipticPath<'_, '_, B::Owner>) -> Result<P, E>,
+) -> Result<SolidSustainedEllipticStep<P, B::Step>, SolidSustainedError<E, B::Error>> {
+    advance_selected(
+        body,
+        contacts,
+        initial_forces_n,
+        external_force_n,
+        controls,
+        cx,
+        |_, _, _| Ok(()),
+        admit_path,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_selected<B: Native, P, E>(
+    body: &mut B,
+    contacts: &[SolidSustainedEllipticContact<'_>],
+    initial_forces_n: &[[f64; 3]],
+    external_force_n: &[f64],
+    controls: SolidSustainedControls,
+    cx: &Cx<'_>,
+    select_trial: impl FnOnce(
+        &super::SolidSustainedPath<'_, '_, B::Owner>,
+        &super::SolveReport,
+        &[EllipticForceCoordinates],
+    ) -> Result<(), E>,
     admit_path: impl FnOnce(&SolidSustainedEllipticPath<'_, '_, B::Owner>) -> Result<P, E>,
 ) -> Result<SolidSustainedEllipticStep<P, B::Step>, SolidSustainedError<E, B::Error>> {
     poll(cx)?;
@@ -169,15 +250,7 @@ pub(crate) fn advance<B: Native, P, E>(
             "complete bounded elliptic contact inputs required",
         ));
     }
-    let (nn, mm) = (n as u128, m as u128);
-    let bytes_per_contact = core::mem::size_of::<SolidSustainedEllipticContact<'_>>()
-        + core::mem::size_of::<SolidSustainedContact<'_>>()
-        + core::mem::size_of::<EllipticForceCoordinates>()
-        + core::mem::size_of::<[Vec<f64>; 2]>()
-        + core::mem::size_of::<usize>()
-        + 3 * core::mem::size_of::<[f64; 3]>();
-    let staging_bytes = 16 * nn * mm + mm * bytes_per_contact as u128 + 512;
-    let staging_terms = 16 * nn * mm + 256 * mm;
+    let (staging_bytes, staging_terms) = staging_requirements(n, m);
     bound(
         "elliptic contact staging bytes",
         staging_bytes,
@@ -251,13 +324,16 @@ pub(crate) fn advance<B: Native, P, E>(
     }
     let mut forces_n = Vec::with_capacity(m);
     let mut paths_m = Vec::with_capacity(m);
-    let transformed = super::advance(
+    let friction = ordered.iter().map(|contact| contact.friction).collect();
+    let transformed = super::advance_with_selection(
         body,
         &transformed_contacts,
+        None,
         &initial,
         external_force_n,
         inner_controls,
         cx,
+        |path, solve| select_trial(path, solve, &coordinates).map_err(SolidSustainedError::Path),
         |path| {
             poll(cx)?;
             let h = Dd::from_f64(path.duration_s);
@@ -351,6 +427,7 @@ pub(crate) fn advance<B: Native, P, E>(
         transformed,
         forces_n,
         paths_m,
+        friction,
         coordinates,
     })
 }

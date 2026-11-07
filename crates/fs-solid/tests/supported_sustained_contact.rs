@@ -218,6 +218,131 @@ fn kinetic_sliding_keeps_prescribed_support_reactions_and_actuator_work() {
 }
 
 #[test]
+fn directional_kinetic_motion_retains_full_support_reactions_surface_work_and_boosts() {
+    use fs_contact::frictional_multicontact::elliptic::EllipticFriction;
+    use fs_solid::dynamics::sustained::elliptic::SolidSustainedEllipticContact;
+    with_cx(|cx, _| {
+        let h = 0.125;
+        let mu: [f64; 2] = [0.3, 0.05];
+        let support = (mu[0] * 3.0).hypot(mu[1] * 4.0);
+        let friction = [
+            -10.0 * mu[0] * mu[0] * 3.0 / support,
+            -10.0 * mu[1] * mu[1] * 4.0 / support,
+        ];
+        for boost in [[0.0, 0.0], [7.0, -2.0]] {
+            let mut solid = point(h, boost, cx);
+            let base = contact(h, 0.6, [0.0, boost[0], boost[1]]);
+            let c = SolidSustainedEllipticContact {
+                id: base.id,
+                velocity_weights: base.velocity_weights,
+                gap_m: base.gap_m,
+                prescribed_surface_velocity_mps: base.prescribed_surface_velocity_mps,
+                friction: EllipticFriction {
+                    coefficients_mu: [0.6, 0.2],
+                    principal_axis: [1.0, 0.0],
+                },
+                scales: base.scales,
+            };
+            let step = solid
+                .advance_sustained_static_kinetic_elliptic_contacts(
+                    &[0.0],
+                    &[c],
+                    &[mu],
+                    &[[10.0, 0.0, 0.0]],
+                    &[-friction[0], -10.0, 0.0],
+                    controls(),
+                    cx,
+                    |p| {
+                        // The complete held native force leaves free acceleration
+                        // zero, and the prescribed support velocity stays fixed.
+                        for i in 0..3 {
+                            near(p.velocity_after_mps[i], p.before.velocity_mps()[i], 1e-9);
+                        }
+                        assert_eq!(p.contacts[0].friction.coefficients_mu, mu);
+                        Ok::<_, &'static str>(())
+                    },
+                )
+                .unwrap();
+            assert_eq!(step.transformed.friction_regime_resolves, 0);
+            near(step.forces_n[0][1], friction[0], 1e-8);
+            near(step.forces_n[0][2], friction[1], 1e-8);
+            near(
+                step.transformed.native.support_reaction_n[0],
+                -friction[1],
+                1e-8,
+            );
+            near(
+                step.transformed.external_work_j,
+                -friction[0] * (3.0 + boost[0]) * h,
+                1e-9,
+            );
+            near(
+                step.transformed.support_work_j,
+                -friction[1] * (4.0 + boost[1]) * h,
+                1e-9,
+            );
+            near(
+                step.transformed.prescribed_surface_work_j,
+                (friction[0] * boost[0] + friction[1] * boost[1]) * h,
+                1e-9,
+            );
+            near(
+                step.transformed.frictional_dissipation_j,
+                10.0 * support * h,
+                1e-9,
+            );
+            energy(&step.transformed);
+        }
+        // Supported static trials still precede one physical breakaway. A
+        // nine-newton load holds while fourteen newtons selects kinetic six.
+        for load in [9.0, 14.0] {
+            let mut solid = point(h, [-3.0, -4.0], cx);
+            let base = contact(h, 0.6, [0.0; 3]);
+            let c = SolidSustainedEllipticContact {
+                id: base.id,
+                velocity_weights: base.velocity_weights,
+                gap_m: 0.0,
+                prescribed_surface_velocity_mps: [0.0; 3],
+                scales: base.scales,
+                friction: EllipticFriction {
+                    coefficients_mu: [0.6, 0.2],
+                    principal_axis: [1.0, 0.0],
+                },
+            };
+            let force = if load > 12.0 { 6.0 } else { load };
+            let acceleration = load - force;
+            let step = solid
+                .advance_sustained_static_kinetic_elliptic_contacts(
+                    &[0.0],
+                    &[c],
+                    &[mu],
+                    &[[0.0; 3]],
+                    &[load, -20.0, 0.0],
+                    controls(),
+                    cx,
+                    |p| {
+                        near(p.velocity_after_mps[0], h * acceleration, 1e-9);
+                        near(
+                            p.displacement_change_m[0],
+                            0.5 * h * h * acceleration,
+                            1e-10,
+                        );
+                        assert!(acceleration >= 0.0);
+                        Ok::<_, &'static str>(())
+                    },
+                )
+                .unwrap();
+            near(step.forces_n[0][1], -force, 1e-8);
+            assert_eq!(
+                step.transformed.friction_regime_resolves,
+                usize::from(load > 12.0)
+            );
+            energy(&step.transformed);
+        }
+    });
+}
+
+#[test]
 fn supported_resting_contacts_capture_or_break_away_from_the_original_state() {
     with_cx(|cx, _| {
         let h = 0.125;

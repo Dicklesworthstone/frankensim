@@ -7,6 +7,9 @@ use fs_solid::dynamics::sustained::elliptic::{
     SolidSustainedEllipticContact, SolidSustainedEllipticPath,
 };
 
+#[path = "elliptic/static_kinetic.rs"]
+mod static_kinetic;
+
 fn elliptic(h: f64, mu: [f64; 2], axis: [f64; 2]) -> SolidSustainedEllipticContact<'static> {
     let original = contact(h, mu[0].max(mu[1]), [0.0; 3]);
     SolidSustainedEllipticContact {
