@@ -7,7 +7,7 @@ use fs_lbm::material::free_surface::wetting::{
 };
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 
-fn cox_controls() -> CoxVoinovControls {
+pub(super) fn cox_controls() -> CoxVoinovControls {
     CoxVoinovControls {
         microscopic_cutoff_m: 1e-9,
         observation_length_m: 0.001,
@@ -33,7 +33,7 @@ fn fixed_ratio(
 
 // Direct Simpson integration of the original two-viscous-wedge equation,
 // independent of the production angular table, local mapping and inverse.
-fn cox_difference(from: f64, to: f64, ratio: f64) -> f64 {
+pub(super) fn cox_difference(from: f64, to: f64, ratio: f64) -> f64 {
     let intervals = 256;
     let h = (to - from) / intervals as f64;
     let slope = |theta: f64| {

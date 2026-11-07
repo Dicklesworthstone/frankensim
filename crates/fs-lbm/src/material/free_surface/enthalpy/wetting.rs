@@ -19,7 +19,7 @@
 use super::*;
 use crate::d3q19::freesurface3::PlanarWall3;
 use crate::material::free_surface::wetting::{
-    CoxVoinovControls, CoxVoinovLaw, EquilibriumAngleOrigin, EquilibriumWettingRateLaw,
+    CoxVoinovControls, CoxVoinovLaw, EquilibriumAngleOrigin, EquilibriumWettingPatch, EquilibriumWettingRateLaw,
     FreeSurfaceWettingControls, FreeSurfaceWettingSample, MolecularKineticLaw, WettingThermalPoint,
 };
 use fs_matdb::InterfaceSystemCard;
@@ -107,6 +107,62 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             self.states = resolved.states;
             self.rheology_samples = resolved.rheology;
         }
+        Ok(self)
+    }
+
+    /// Resolve fixed chemical/finish patches on the original equilibrium wall.
+    ///
+    /// Attach once before the first accepted step and before selecting Cox or
+    /// molecular kinetics. Every listed wall cell uses its patch's original
+    /// angle or adhesion-work claim; all other cells retain the explicit base
+    /// substrate. Patch order has no physical meaning. Duplicate/overlapping
+    /// cells, off-wall coordinates, source-domain exits and incompatible liquid
+    /// or gas context refuse the complete candidate.
+    ///
+    /// Temperature, Young--Dupre tension, dynamic contact history and any later
+    /// sourced outer gas are refreshed through the same per-patch owner. A
+    /// subsequently selected rate law and its explicit calibration apply to all
+    /// patches. Native ghosts and capillary pressure consume the actual spatial
+    /// angle field. Height graphs retain their existing column and corner
+    /// admission. This cell-scale model neither homogenizes subcell texture nor
+    /// adds a chemical-edge pinning or surface-energy/heat law.
+    pub fn with_equilibrium_wetting_patches(
+        mut self,
+        patches: &[EquilibriumWettingPatch<'m>],
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        poll(gate)?;
+        if self.accepted_steps() != 0 {
+            return Err(Error::Invalid("substrate patches must be assigned before native time advances"));
+        }
+        let graph_tension = self.height_graph_thermocapillary_surface().is_some();
+        let evolving_tension = self.uniform_thermal_capillarity() || graph_tension;
+        let binding = self.wetting.take()
+            .ok_or(Error::Invalid("substrate patches require an original equilibrium wall"))?
+            .with_equilibrium_patches(
+                patches, self.flow.lattice.domain_cells(), &self.flow.scaling,
+                self.law.temperature_axis(), evolving_tension, gate,
+            )?;
+        let temperatures = temperatures(&self.states, self.law.temperature_axis(), gate)?;
+        let binding = binding.at_temperatures(self.law.temperature_axis(), &temperatures, gate)?;
+        binding.install(&mut self.flow.lattice, gate)?;
+        self.wetting = Some(binding);
+        if graph_tension {
+            // The same contact field determines the graph normal, area and
+            // Marangoni stress. Rebuild it now, before accepting patch geometry.
+            let masses = self.flow.lattice.mass_snapshot();
+            let mut resolved = self.resolve_liquid_states(&self.flow.lattice, &self.h, &masses, gate)?;
+            self.resolve_surface_fields(&self.flow.lattice, &mut resolved, &mut None, gate)?;
+            if let Some(tensions) = resolved.surface_tensions {
+                self.flow.lattice.rebind_surface_tensions(tensions, gate)?;
+            }
+            if let Some(forces) = resolved.forces {
+                self.flow.lattice.rebind_material_force_field(forces, gate)?;
+            }
+            self.states = resolved.states;
+            self.rheology_samples = resolved.rheology;
+        }
+        poll(gate)?;
         Ok(self)
     }
 
@@ -366,7 +422,8 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             .and_then(WettingBinding::cox_voinov_law)
     }
 
-    /// Original selected equilibrium or hysteresis interface source bundle.
+    /// Original selected base-substrate equilibrium or hysteresis source bundle.
+    /// A patterned wall retains each patch's distinct source in `wetting_samples`.
     #[must_use]
     pub fn wetting_source(&self) -> Option<&ResolvedInterfaceStatePoint> {
         self.wetting.as_ref().map(WettingBinding::source)

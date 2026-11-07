@@ -175,16 +175,16 @@ impl WettingBinding<'_> {
         scaling: &MaterialFreeSurfaceScaling<'_>,
         gate: &CancelGate,
     ) -> Result<Self, Error> {
-        self.physics = self
-            .physics
-            .with_molecular_kinetic(law, temperature_axis, scaling, gate)?;
+        for physics in self.physics_mut() {
+            *physics = physics.clone().with_molecular_kinetic(law, temperature_axis, scaling, gate)?;
+        }
         let mut samples = BTreeMap::new();
         for (&position, current) in &self.geometry {
             checkpoint(gate)?;
             let speed = self.samples[&position].signed_speed_m_s;
             samples.insert(
                 position,
-                self.physics
+                self.physics_at(position)
                     .sample(current.angle_radians, speed, None, gate)?,
             );
         }

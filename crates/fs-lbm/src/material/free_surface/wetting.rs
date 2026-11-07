@@ -49,6 +49,9 @@ mod molecular_binding;
 use molecular_binding::MolecularKineticWetting;
 mod equilibrium;
 use equilibrium::EquilibriumWetting;
+mod pattern;
+pub use pattern::EquilibriumWettingPatch;
+use pattern::WettingPattern;
 pub use fs_material::liquid::surface::adhesion::EquilibriumAngleOrigin;
 
 /// Local liquid properties supplied by the existing enthalpy source owner.
@@ -183,6 +186,7 @@ pub struct MaterialFreeSurfaceWetting3<'s, 'm> {
 #[derive(Clone)]
 pub(super) struct WettingBinding<'m> {
     physics: WettingPhysics<'m>,
+    pattern: Option<WettingPattern<'m>>,
     wall: PlanarWall3,
     geometry: BTreeMap<[usize; 3], WallFill3>,
     samples: BTreeMap<[usize; 3], FreeSurfaceWettingSample>,
@@ -254,6 +258,7 @@ impl<'m> WettingBinding<'m> {
             .planar_wall_fill(wall, physics.controls.maximum_wall_cells, gate)?;
         let mut candidate = Self {
             physics,
+            pattern: None,
             wall,
             geometry,
             samples: BTreeMap::new(),
@@ -400,12 +405,14 @@ impl WettingBinding<'_> {
         scaling: &MaterialFreeSurfaceScaling<'_>,
         gate: &CancelGate,
     ) -> Result<Self, Error> {
-        self.physics = self.physics.with_cox_voinov(law, scaling, gate)?;
+        for physics in self.physics_mut() {
+            *physics = physics.clone().with_cox_voinov(law.clone(), scaling, gate)?;
+        }
         let mut samples = BTreeMap::new();
         for (&position, current) in &self.geometry {
             checkpoint(gate)?;
             let speed = self.samples[&position].signed_speed_m_s;
-            samples.insert(position, self.physics.sample(current.angle_radians, speed, None, gate)?);
+            samples.insert(position, self.physics_at(position).sample(current.angle_radians, speed, None, gate)?);
         }
         self.samples = samples;
         Ok(self)
@@ -493,7 +500,9 @@ impl WettingBinding<'_> {
         let law = CoxVoinovLaw::try_new_with_viscosity_ratio(controls, ratio, gate)?;
         let mut candidate = self.with_cox_voinov(law, scaling, gate)?;
         let source = Arc::new(gas.clone());
-        candidate.physics.hydrodynamic.as_mut().expect("admitted Cox law").outer_gas = Some(source.clone());
+        for physics in candidate.physics_mut() {
+            physics.hydrodynamic.as_mut().expect("admitted Cox law").outer_gas = Some(source.clone());
+        }
         for sample in candidate.samples.values_mut() {
             checkpoint(gate)?;
             sample.outer_gas = Some(source.clone());
@@ -509,11 +518,15 @@ impl WettingBinding<'_> {
     /// passing this prepared snapshot. Existing fixed-ratio bindings stay fixed.
     pub(super) fn at_prepared_outer_gas(&self, gas: &ResolvedThermochemicalGasState) -> Self {
         let mut candidate = self.clone();
-        if let Some(binding) = &mut candidate.physics.hydrodynamic
-            && binding.outer_gas.is_some()
-            && binding.outer_gas.as_deref() != Some(gas)
-        {
-            binding.outer_gas = Some(Arc::new(gas.clone()));
+        if self.outer_gas().is_some_and(|original| original != gas) {
+            let source = Arc::new(gas.clone());
+            for physics in candidate.physics_mut() {
+                if let Some(binding) = &mut physics.hydrodynamic
+                    && binding.outer_gas.is_some()
+                {
+                    binding.outer_gas = Some(source.clone());
+                }
+            }
         }
         candidate
     }
@@ -568,7 +581,7 @@ impl WettingBinding<'_> {
             checkpoint(gate)?;
             let speed = self.samples[&position].signed_speed_m_s;
             let temperature = temperatures.get(&position).map(|&t| (axis, t));
-            samples.insert(position, self.physics.sample(current.angle_radians, speed, temperature, gate)?);
+            samples.insert(position, self.physics_at(position).sample(current.angle_radians, speed, temperature, gate)?);
         }
         Ok(Self { samples, ..self.clone() })
     }
@@ -583,7 +596,7 @@ impl WettingBinding<'_> {
         gate: &CancelGate,
     ) -> Result<(), Error> {
         if let Some(current) = self.geometry.get(&position) {
-            self.physics.sample(
+            self.physics_at(position).sample(
                 current.angle_radians,
                 self.samples[&position].signed_speed_m_s,
                 Some((axis, WettingThermalPoint {
@@ -609,8 +622,8 @@ impl WettingBinding<'_> {
             let old_fill = previous.map_or(current.fill, |map| {
                 map.get(&position).map_or(0.0, |g| g.fill)
             });
-            let speed = if self
-                .physics
+            let physics = self.physics_at(position);
+            let speed = if physics
                 .equilibrium
                 .as_ref()
                 .is_some_and(|binding| !binding.dynamic)
@@ -628,7 +641,7 @@ impl WettingBinding<'_> {
             };
             let temperature = temperatures
                 .and_then(|(axis, field)| field.get(&position).map(|&t| (axis, t)));
-            result.insert(position, self.physics.sample(current.angle_radians, speed, temperature, gate)?);
+            result.insert(position, physics.sample(current.angle_radians, speed, temperature, gate)?);
         }
         Ok(result)
     }

@@ -8552,6 +8552,34 @@ two-wedge equation, finite-gas feedback into native momentum, original adhesion
 receipts, combined thermal balance and transactional refusal. Their native
 execution remains unverified in the current environment.
 
+`MaterialFreeSurfaceEnthalpy3::with_equilibrium_wetting_patches` resolves
+explicit, fixed substrate chemistry/finish regions on that same planar wall.
+Each `EquilibriumWettingPatch` names native wall-cell footprints and its own
+original equilibrium-angle or reversible adhesion-work source. Surface A and
+its fixed finish/history may differ; the original liquid surface, medium and
+named gas environment must agree. Unlisted cells retain the explicit base
+substrate. Overlaps, repeated cells, off-wall coordinates and the original
+wall-cell budget refuse deterministically; ordering does not select a winner.
+
+One source/physics binding is shared per patch, and an immutable shared index
+routes cell history and temperature without cloning cards per cell. The
+pattern is assigned once before physical time advances and before rate-law
+selection. Static Young--Dupre, subsequent Cox/MKT and sourced-gas refresh
+all use the selected local original claims, actual liquid temperature and the
+same native tension. Existing finite-atmosphere paths update the same outer
+gas on every patch. Samples retain distinct original receipts; `wetting_source`
+continues to identify the base substrate.
+
+The spatial angle field drives the original capillary ghosts, pressure and
+native populations. Static height-graph coupling rebuilds the same boundary
+normal, area and Marangoni stress and retains column/corner admission. Patch
+edges are resolved only at wall-cell scale: no subcell Cassie/Wenzel mixture,
+chemical-edge pinning law, moving substrate, evolving coating chemistry or
+surface-energy/heat transfer is inferred. Focused synthetic regressions
+specify original-source/temperature routing, native momentum response,
+homogeneous parity, order independence, molecular/two-phase Cox forward
+relations, evolving-gas refresh and complete rollback on patch-source exit.
+
 `free_surface3_from_cells_with_uniform_thermal_capillarity` extends that same
 owner to time-varying sigma(T) in the exact zero-Marangoni domain. Every actual
 wet-cell source value must agree exactly in SI units before lattice conversion,

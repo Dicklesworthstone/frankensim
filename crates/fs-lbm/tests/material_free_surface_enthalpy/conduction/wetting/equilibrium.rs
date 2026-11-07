@@ -14,6 +14,9 @@ mod dynamic;
 #[path = "equilibrium_gas.rs"]
 mod outer_gas;
 
+#[path = "equilibrium_pattern.rs"]
+mod pattern;
+
 fn equilibrium_interface(
     liquid: &MaterialCard,
     solid: &MaterialCard,
