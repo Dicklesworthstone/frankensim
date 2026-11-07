@@ -35,6 +35,9 @@ use fs_plate::shell::viscosity::harmonic::{
     PreparedTensorPronyShell, TensorPronyShell, TensorShellHarmonicError,
 };
 
+/// Two-sided open-shell radiation with the complete original material coordinates.
+pub mod open;
+
 /// Explicit source-to-boundary geometry and physical-map resources.
 #[derive(Clone, Copy, Debug)]
 pub struct TensorShellRadiationControls {

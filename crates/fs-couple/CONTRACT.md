@@ -1,3 +1,32 @@
+## Full-coordinate material shells with two-sided open radiation
+
+`tensor_shell_radiation::open::OpenTensorShellRadiation` binds the original
+`TensorPronyShell` to the existing open-screen pressure-jump BEM. Every free
+translation and rotation, consistent mass, tensor relaxation branch and Kelvin
+loss remains in the native mechanical factor. Actual facet-local P1 normal
+velocity and its exact triangle-mass transpose exchange work; the pressure jump
+already represents both faces. Supported facets remain in the acoustic mesh.
+Conforming planar quartering preserves source topology and the original P1
+trace, without welding, capping or replacing the shell by modal radiators.
+
+One boundary factor prepares all physical velocity columns at a frequency;
+one loaded material factor then serves repeated force/torque vectors. The same
+accepted velocity drives pressure on either side, the pressure difference and
+the outgoing angular flux. Independent native port, pressure-jump and far-field
+work checks enforce input = intrinsic material loss + radiation. No second
+radiation debit, fitted damping, pressure clipping or mode removal is applied.
+
+The scope is forced harmonic small-signal motion with peak exp(-i omega t)
+phasors, zero-offset midsurface acoustics and the same homogeneous fluid on
+both sides. Structural thickness still enters material stiffness and inertia.
+Finite-thickness skins, cavity-backed faces, nonlinear motion, causal time
+realizations, loaded-pole benchmarks and continuum/experimental accuracy are
+not established by this adapter. Original source bands, strain limits, screen
+topology, wavelength, singular quadrature, angular and explicit work/memory
+admission remain active. The focused G0/G1/G3/G4 integration regressions are
+`tests/tensor_shell_radiation_open.rs`; this slice does not close the broader
+shell-radiation validation bead `frankensim-irp-v5-instrument-realism-pexfp.106`.
+
 ## Canonical electrical histories on native material fields
 
 `scenario_electric` binds the existing typed `Electrics/ElectricPotential`
