@@ -1601,6 +1601,28 @@ sensitivity + pinned golden. JSONL receipts per case.
 
 ## Transient wake, shaft and aircraft propulsion
 
+`OpenLoopDesign::{shaft_drive, drive_command}` selects the actual mechanical
+source used by the aircraft force/trim owner. `drive_at` delegates to the
+prepared `fs-airscrew::drive::ShaftDrive`; `ForceBuildup::drive` retains source,
+delivered power and separate transmission/bearing heat. The common drive torque
+is divided over the two synchronized propellers exactly once before subtracting
+their mean aerodynamic load. Trim and the existing augmented rotor derivatives
+therefore respond to source rating, gear ratio, command and physical losses.
+The native geared/independent-shaft APIs retain their explicit motor ports;
+their callers can evaluate this source at actual stage speeds with the declared
+coordinate mapping. They do not silently apply a historical engine to arbitrary
+rotors. The fixed historical lifecycle still selects the original reference drive.
+
+The original ideal 12 hp reference preserves its per-prop torque arithmetic and
+design identity. Alternate source parameters and command enter design identity.
+Engine-off leaves passive bearing resistance and heat; it does not erase the
+already spinning rotors' aerodynamic load. These are instantaneous mechanical
+source/loss accounts, not a fuel-consumption model, thermal feedback, a claim
+about historical pilot throttle controls or an exact finite-step power bound.
+Focused analytic source tests and actual aircraft-load regressions establish
+gearing, limits, loss closure, invalid-command refusal and separation of drive
+torque from fixed-speed aerodynamic forces.
+
 Steady `propcoupling::CoupledStep::power` carries both original BEMT disk
 power splits through the accepted coupling evaluation, including spatial
 disk adapters and `GearedPropulsion` results. Shaft power agrees with the

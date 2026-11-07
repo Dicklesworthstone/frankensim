@@ -21,6 +21,7 @@
 use fs_airfoil::flat_plate_separated;
 use fs_math::det;
 
+pub mod drive;
 pub mod dynamic_inflow;
 pub mod oblique;
 pub mod swirl;
@@ -732,15 +733,7 @@ impl StationProblem<'_> {
 /// DISCLOSED — the real curve is an E1 follow-on).
 #[must_use]
 pub fn engine_torque_at_prop_nm(omega_prop_rad_s: f64) -> f64 {
-    let p_w = 8948.0; // 12 hp sustained (flyer-reference)
-    let omega_rated_prop = 1025.0 / 60.0 * 2.0 * core::f64::consts::PI * (8.0 / 23.0);
-    // Flat torque up to rated speed, power-limited beyond.
-    let q_rated = p_w / omega_rated_prop / 2.0; // per prop (two props share)
-    if omega_prop_rad_s <= omega_rated_prop {
-        q_rated
-    } else {
-        p_w / omega_prop_rad_s / 2.0
-    }
+    drive::ShaftDrive::wright_reference().unscaled_prop_torque(omega_prop_rad_s) / 2.0
 }
 
 /// Accepted held-torque rotor motion and its actual shaft-power quadrature.

@@ -28,6 +28,10 @@ CoupledPropAirframeStep (Aitken candidate A).
   annular induced power, and profile-drag power from its accepted states.
 - `rotor_spinup_step_with_work` returns signed held-torque shaft motion,
   midpoint mean powers, mechanical work, and actual kinetic-energy change.
+- `drive::ShaftDrive` prepares a declared engine rating, rated engine speed,
+  engine/propeller speed ratio, constant transmission efficiency and viscous
+  bearing loss. `evaluate` takes the actual common propeller speed and output
+  command; its torque is the total drive for that coordinate, not per propeller.
 
 ## Invariants
 
@@ -102,6 +106,18 @@ CoupledPropAirframeStep (Aitken candidate A).
   mechanical transfer, not rotor heating. The original speed-only entry point
   shares the same admission and rejects nonfinite torques/inertia and
   unrepresentable power/work. Reversal is signed rather than clamped.
+- The selectable shaft drive has finite starting torque and a continuous
+  torque-to-power transition. Command scales both source limits; it does not
+  switch off bearing resistance. With engine/propeller speed ratio `g`, the
+  source torque transforms by `g`, while source power is unchanged. Delivered
+  torque is `eta Q_source,prop - b Omega_prop`; transmission heat is
+  `(1-eta) P_engine`, and bearing heat is `b Omega_prop^2`. Negative net output
+  remains braking, with a separate floating-point power residual. The law is
+  unidirectional and refuses reverse speeds and nonfinite results. It supplies
+  mechanical power only: fuel use, measured torque maps, redline, electrical
+  generation, thermal derating and whole-aircraft passivity are not inferred.
+  A frozen sampled torque does not enforce the instantaneous nonlinear source
+  power limit throughout an arbitrary finite acceleration step.
 
 ## Error model
 
@@ -112,6 +128,8 @@ CoupledPropAirframeStep (Aitken candidate A).
 `station-section-domain` (incidence outside the native fs-airfoil domain),
 `station-numerical-invalid` (unrepresentable station arithmetic),
 `rotor-dynamics-invalid`.
+The configured source/transmission uses `shaft-drive-invalid` for inadmissible
+rating, gearing, losses, command, speed or unrepresentable arithmetic.
 
 ## Determinism class
 
@@ -156,6 +174,10 @@ checks analytic held-torque spin-up from rest, regeneration, reverse rotation,
 load-driven acceleration and exact work/kinetic closure, with nonfinite and
 overflow refusals. No additional station solves or allocations are introduced
 by the power split; only one relative-speed evaluation per accepted station.
+The same battery independently checks commanded torque and power limits,
+gear-coordinate power invariance, engine-off bearing heat, negative delivered
+power, overflow refusal and exact original reference-torque arithmetic. Source
+and passive-loss evaluation is constant work and allocation-free on success.
 
 ## No-claim boundaries
 

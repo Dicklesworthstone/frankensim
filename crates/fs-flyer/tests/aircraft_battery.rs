@@ -13,6 +13,69 @@ fn jlog(case: &str, payload: &str) {
 const RHO: f64 = 1.294;
 
 #[test]
+fn configured_shaft_power_and_losses_drive_the_actual_aircraft_torque_balance() {
+    use fs_airscrew::drive::ShaftDrive;
+    let mut design = wright_openloop_v1();
+    design.coupling = fs_flyer::propcoupling::CANDIDATE_B;
+    let original_identity = design.digest();
+    let run = |design: &fs_flyer::aircraft::OpenLoopDesign| {
+        design
+            .force_buildup(13.86, 0.06, 0.05, 40.0, 0.1, RHO)
+            .unwrap()
+    };
+    let original = run(&design);
+    let mean_aerodynamic_torque =
+        0.5 * (original.coupled.torque_nm[0] + original.coupled.torque_nm[1]);
+    assert_eq!(
+        original.torque_imbalance_nm,
+        fs_airscrew::engine_torque_at_prop_nm(40.0) - mean_aerodynamic_torque,
+    );
+    design = design
+        .with_shaft_drive(ShaftDrive::new(10000.0, 200.0, 4.0, 0.8, 2.0).unwrap(), 0.5)
+        .unwrap();
+    let part = run(&design);
+    // At 40 rad/s: engine = 4000 W; transmission = 800 W;
+    // bearings = 3200 W; zero drive remains for accelerating the props.
+    assert_eq!(part.drive.engine_power_w, 4000.0);
+    assert_eq!(part.drive.prop_power_w, 0.0);
+    assert_eq!(part.drive.prop_torque_nm, 0.0);
+    assert!((part.drive.transmission_heat_w - 800.0).abs() < 1e-12);
+    assert_eq!(part.drive.bearing_heat_w, 3200.0);
+    assert_eq!(part.torque_imbalance_nm, -mean_aerodynamic_torque);
+    assert_eq!(part.coupled, original.coupled);
+    assert_eq!(part.force_n, original.force_n);
+    assert_eq!(part.moment_y_nm, original.moment_y_nm);
+    assert_ne!(design.digest(), original_identity);
+    let part_identity = design.digest();
+
+    design.drive_command = 0.0;
+    let stopped = run(&design);
+    assert_eq!(stopped.drive.engine_power_w, 0.0);
+    assert_eq!(stopped.drive.prop_power_w, -3200.0);
+    assert_eq!(stopped.drive.bearing_heat_w, 3200.0);
+    assert_eq!(stopped.torque_imbalance_nm, -40.0 - mean_aerodynamic_torque);
+    assert_eq!(stopped.coupled, original.coupled);
+    assert_ne!(design.digest(), part_identity);
+
+    assert_eq!(
+        design
+            .clone()
+            .with_shaft_drive(ShaftDrive::wright_reference(), -0.01)
+            .unwrap_err()
+            .code,
+        "shaft-drive-invalid",
+    );
+    design.drive_command = f64::NAN;
+    assert_eq!(
+        design
+            .force_buildup(13.86, 0.06, 0.05, 40.0, 0.1, RHO)
+            .unwrap_err()
+            .code,
+        "shaft-drive-invalid",
+    );
+}
+
+#[test]
 fn g3_material_viscosity_drives_selected_component_loads_in_the_longitudinal_owner() {
     use fs_flyer::dragledger::{
         ComponentDragCoefficients, ComponentDragGeometry, ComponentDragLaw, ComponentDragShape,

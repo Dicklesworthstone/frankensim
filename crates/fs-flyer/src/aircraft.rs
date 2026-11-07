@@ -36,6 +36,7 @@ use crate::propcoupling::{
     CANDIDATE_A, CoupledStep, IncidentInflow, PropCouplingSolverSpec, PropDisk,
     coupled_prop_airframe_step_with_incident,
 };
+use fs_airscrew::drive::{DriveOperatingPoint, ShaftDrive};
 use fs_airscrew::{BladeStation, Rotor};
 use fs_blake3::hash_domain;
 use fs_material::gas::GasState;
@@ -81,6 +82,11 @@ pub struct OpenLoopDesign {
     pub disks: [PropDisk; 2],
     /// Rotor definition (E1.6 reconstruction path).
     pub rotor: Rotor,
+    /// Total engine/common-propeller drive and passive transmission losses.
+    pub shaft_drive: ShaftDrive,
+    /// Available engine output fraction in [0,1], held for this design/run.
+    /// This explicit engineering command does not assert a historical throttle.
+    pub drive_command: f64,
     /// Parasite ledger.
     pub ledger: DragLedger,
     /// z at which the ledger's parasite drag acts (Estimated near CG).
@@ -180,6 +186,8 @@ pub fn wright_openloop_v1() -> OpenLoopDesign {
             },
         ],
         rotor: wright_rotor_v1(),
+        shaft_drive: ShaftDrive::wright_reference(),
+        drive_command: 1.0,
         ledger: wright_ledger_v1(),
         drag_z_m: -0.6,
         drag_geometry: Vec::new(),
@@ -211,6 +219,9 @@ pub struct ForceBuildup {
     pub parasite_wrench: DragWrench,
     /// The coupled prop step receipt.
     pub coupled: CoupledStep,
+    /// Actual total engine/drive power and physical transmission/bearing heat.
+    /// Shared by both props; do not credit these losses a second time per prop.
+    pub drive: DriveOperatingPoint,
     /// Engine-vs-prop torque imbalance [N·m] (per prop, symmetric):
     /// Q_engine(omega) − mean(Q_prop). Zero at a true fixed-throttle trim.
     pub torque_imbalance_nm: f64,
@@ -367,6 +378,20 @@ pub struct TrimResult {
 }
 
 impl OpenLoopDesign {
+    /// Select a declared drive and output command before trim or simulation.
+    /// Command admission does not depend on a prospective flight or shaft speed.
+    /// The original historical lifecycle keeps its reference drive unless a
+    /// caller explicitly builds an engineering design with this selection.
+    ///
+    /// # Errors
+    /// `shaft-drive-invalid` for command or starting-torque representation.
+    pub fn with_shaft_drive(mut self, drive: ShaftDrive, command: f64) -> Result<Self, Refusal> {
+        self.shaft_drive = drive;
+        self.drive_command = command;
+        self.drive_at(0.0)?;
+        Ok(self)
+    }
+
     /// Design content digest (ModelId ingredient).
     #[must_use]
     pub fn digest(&self) -> String {
@@ -403,7 +428,27 @@ impl OpenLoopDesign {
                     .as_bytes(),
             );
         }
+        if self.shaft_drive != ShaftDrive::wright_reference() || self.drive_command != 1.0 {
+            p.extend_from_slice(self.shaft_drive.digest().as_bytes());
+            p.extend_from_slice(&self.drive_command.to_bits().to_le_bytes());
+        }
         hash_domain("org.frankensim.fs-flyer.openloop-design.v1", &p).to_hex()
+    }
+
+    /// Evaluate the configured source on the actual common relative shaft speed.
+    /// Native shaft consumers can use its total torque with their declared
+    /// gear-coordinate mapping; the longitudinal owner splits it over two props.
+    ///
+    /// # Errors
+    /// `shaft-drive-invalid` for command/speed domain or unrepresentable power.
+    pub fn drive_at(&self, omega_prop_rad_s: f64) -> Result<DriveOperatingPoint, Refusal> {
+        self.shaft_drive
+            .evaluate(omega_prop_rad_s, self.drive_command)
+            .map_err(|e| Refusal {
+                code: e.code,
+                message: e.message,
+                ranked_repairs: e.ranked_repairs,
+            })
     }
 
     /// Parasite force and moment about the CG from the selected load geometry.
@@ -721,6 +766,7 @@ impl OpenLoopDesign {
                 ranked_repairs: vec!["stay inside the open-loop model domain".into()],
             });
         }
+        let drive = self.drive_at(omega_prop_rad_s)?;
         let map_err = |e: fs_wing::Refusal| Refusal {
             code: e.code,
             message: e.message,
@@ -916,8 +962,7 @@ impl OpenLoopDesign {
         force[0] -= wx;
         force[2] += wz;
         let mean_prop_torque = 0.5 * (coupled.torque_nm[0] + coupled.torque_nm[1]);
-        let torque_imbalance_nm =
-            fs_airscrew::engine_torque_at_prop_nm(omega_prop_rad_s) - mean_prop_torque;
+        let torque_imbalance_nm = 0.5 * drive.prop_torque_nm - mean_prop_torque;
         Ok(ForceBuildup {
             force_n: force,
             moment_y_nm: m_y,
@@ -927,6 +972,7 @@ impl OpenLoopDesign {
             induced_drag_n: d_ind,
             parasite_wrench: parasite,
             coupled,
+            drive,
             torque_imbalance_nm,
         })
     }

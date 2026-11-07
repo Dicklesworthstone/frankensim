@@ -954,6 +954,68 @@ fn g3_separated_drag_is_shared_by_longitudinal_lateral_and_six_dof_loads() {
 }
 
 #[test]
+fn g3_configured_engine_and_bearing_losses_drive_real_coupled_motion() {
+    use fs_airscrew::drive::ShaftDrive;
+    let mut design = wright_openloop_v1()
+        .with_shaft_drive(ShaftDrive::new(10000.0, 200.0, 4.0, 0.8, 0.5).unwrap(), 1.0)
+        .unwrap();
+    design.coupling = CANDIDATE_B;
+    let a = aero_assembly(design.gross_mass_kg);
+    let state = flight_state(&a);
+    let dt = 0.002;
+    let run = |design: &OpenLoopDesign| {
+        let model = GearedPropulsion::new(design, &a, mounts()).unwrap();
+        let mut drive_stages = Vec::new();
+        let motion = model
+            .step(
+                &state,
+                0.0,
+                dt,
+                ZERO,
+                None,
+                |_, stage| {
+                    // This assembly's relative propeller ratios are +1 and -1:
+                    // the model's common prop coordinate is the actual gear angle.
+                    let drive = design.drive_at(a.speed(stage)?)?;
+                    drive_stages.push(drive);
+                    Ok(PropulsionInputs {
+                        motor_nm: drive.prop_torque_nm,
+                        ..inputs()
+                    })
+                },
+                |_, _| Ok(ZERO),
+            )
+            .unwrap();
+        assert_eq!(drive_stages.len(), 2);
+        assert_eq!(
+            motion.initial.loads.motor_nm,
+            drive_stages[0].prop_torque_nm
+        );
+        assert_eq!(
+            motion.midpoint.loads.motor_nm,
+            drive_stages[1].prop_torque_nm
+        );
+        let actual_angle = motion.motion.state.phase_rad - state.phase_rad;
+        assert!(
+            (motion.motion.motor_work_j - drive_stages[1].prop_torque_nm * actual_angle).abs()
+                < 1e-12
+        );
+        assert!(v(motion.motion.angular_momentum_residual).norm() < 1e-9);
+        (motion, drive_stages)
+    };
+    let (powered, source) = run(&design);
+    assert!(source[0].engine_power_w > source[0].prop_power_w);
+    assert!(powered.motion.motor_work_j > 0.0);
+    design.drive_command = 0.0;
+    let (coasting, source) = run(&design);
+    assert_eq!(source[0].engine_power_w, 0.0);
+    assert!(source[0].bearing_heat_w > 0.0);
+    assert!(coasting.motion.motor_work_j < 0.0);
+    assert_eq!(powered.initial.coupled, coasting.initial.coupled);
+    assert!(powered.motion.state.momentum > coasting.motion.state.momentum);
+}
+
+#[test]
 fn g3_real_asymmetric_aerodynamics_drive_all_motion_and_close_external_momentum() {
     let mut design = wright_openloop_v1();
     design.coupling = CANDIDATE_B;

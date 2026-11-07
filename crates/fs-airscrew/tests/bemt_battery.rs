@@ -7,10 +7,129 @@
 //! operating class, caps, golden.
 //! Repro: cargo test -p fs-airscrew --test bemt_battery
 
+use fs_airscrew::drive::ShaftDrive;
 use fs_airscrew::{
     BladeStation, MAX_STATIONS, Rotor, bemt_solve, engine_torque_at_prop_nm, rotor_spinup_step,
     rotor_spinup_step_with_work,
 };
+
+#[test]
+fn shaft_drive_closes_source_transmission_and_bearing_power() {
+    let drive = ShaftDrive::new(10000.0, 200.0, 4.0, 0.8, 2.0).unwrap();
+    assert_eq!(drive.rated_prop_speed_rad_s(), 50.0);
+    // Hand-calculated mechanical source, delivered torque and separate losses.
+    // The last point is externally driven: bearing load exceeds engine torque.
+    for (omega, command, source, torque, transmission, bearing) in [
+        (0.0, 0.5, 0.0, 80.0, 0.0, 0.0),
+        (25.0, 0.5, 2500.0, 30.0, 500.0, 1250.0),
+        (50.0, 1.0, 10000.0, 60.0, 2000.0, 5000.0),
+        (100.0, 1.0, 10000.0, -120.0, 2000.0, 20000.0),
+        (75.0, 0.0, 0.0, -150.0, 0.0, 11250.0),
+    ] {
+        let point = drive.evaluate(omega, command).unwrap();
+        assert_eq!(point.engine_speed_rad_s, 4.0 * omega);
+        assert_eq!(point.engine_power_w, source);
+        assert_eq!(point.prop_torque_nm, torque);
+        assert_eq!(point.prop_power_w, torque * omega);
+        assert!((point.transmission_heat_w - transmission).abs() < 1e-11);
+        assert_eq!(point.bearing_heat_w, bearing);
+        assert!(point.power_residual_w.abs() < 1e-11);
+        assert!(point.transmission_heat_w >= 0.0);
+        assert!(point.bearing_heat_w >= 0.0);
+        assert!(point.engine_power_w <= command * drive.rated_power_w());
+    }
+}
+
+#[test]
+fn shaft_drive_has_continuous_torque_and_power_limits_and_correct_gearing() {
+    let drive = ShaftDrive::new(1024.0, 64.0, 4.0, 1.0, 0.0).unwrap();
+    for command in [0.0, 0.25, 1.0] {
+        for omega in [0.0, 8.0, 16.0 - 1e-8, 16.0, 16.0 + 1e-8, 32.0, 64.0] {
+            let point = drive.evaluate(omega, command).unwrap();
+            let expected_torque = if omega <= 16.0 {
+                command * 64.0
+            } else {
+                command * 1024.0 / omega
+            };
+            assert!((point.prop_torque_nm - expected_torque).abs() < 1e-13);
+            assert!(point.prop_torque_nm <= command * 64.0);
+            assert!(point.prop_power_w <= command * 1024.0 + 1e-12);
+        }
+    }
+    let slow = drive.evaluate(8.0, 0.75).unwrap();
+    let fast = ShaftDrive::new(1024.0, 64.0, 2.0, 1.0, 0.0)
+        .unwrap()
+        .evaluate(16.0, 0.75)
+        .unwrap();
+    assert_eq!(slow.engine_speed_rad_s, fast.engine_speed_rad_s);
+    assert_eq!(slow.engine_torque_nm, fast.engine_torque_nm);
+    assert_eq!(slow.engine_power_w, fast.engine_power_w);
+    assert_eq!(slow.prop_power_w, fast.prop_power_w);
+    assert_eq!(slow.prop_torque_nm, 2.0 * fast.prop_torque_nm);
+}
+
+#[test]
+fn reference_drive_preserves_original_per_prop_torque_arithmetic() {
+    let drive = ShaftDrive::wright_reference();
+    let rated = 1025.0 / 60.0 * 2.0 * core::f64::consts::PI * (8.0 / 23.0);
+    for omega in [0.0, 10.0, rated - 1e-8, rated, rated + 1e-8, 40.0, 120.0] {
+        let original = if omega <= rated {
+            8948.0 / rated / 2.0
+        } else {
+            8948.0 / omega / 2.0
+        };
+        assert_eq!(engine_torque_at_prop_nm(omega), original);
+        assert_eq!(
+            drive.evaluate(omega, 1.0).unwrap().prop_torque_nm / 2.0,
+            original
+        );
+    }
+}
+
+#[test]
+fn shaft_drive_refuses_unrepresentable_and_unsupported_inputs() {
+    for parameters in [
+        [0.0, 200.0, 4.0, 0.8, 2.0],
+        [10000.0, -1.0, 4.0, 0.8, 2.0],
+        [10000.0, 200.0, 0.0, 0.8, 2.0],
+        [10000.0, 200.0, 4.0, 1.01, 2.0],
+        [10000.0, 200.0, 4.0, 0.8, -1.0],
+        [f64::NAN, 200.0, 4.0, 0.8, 2.0],
+        [10000.0, f64::INFINITY, 4.0, 0.8, 2.0],
+        [f64::MAX, f64::MIN_POSITIVE, 4.0, 0.8, 2.0],
+    ] {
+        let [power, speed, ratio, efficiency, drag] = parameters;
+        assert_eq!(
+            ShaftDrive::new(power, speed, ratio, efficiency, drag)
+                .unwrap_err()
+                .code,
+            "shaft-drive-invalid"
+        );
+    }
+    let drive = ShaftDrive::new(10000.0, 200.0, 4.0, 0.8, 2.0).unwrap();
+    for (omega, command) in [
+        (-1.0, 1.0),
+        (40.0, -0.01),
+        (40.0, 1.01),
+        (f64::NAN, 1.0),
+        (40.0, f64::NAN),
+        (f64::MAX, 0.0),
+    ] {
+        assert_eq!(
+            drive.evaluate(omega, command).unwrap_err().code,
+            "shaft-drive-invalid"
+        );
+    }
+    let tiny = ShaftDrive::new(1e-300, 1.0, 1.0, 1.0, 0.0).unwrap();
+    assert_eq!(
+        tiny.evaluate(1.0, 1e-100).unwrap_err().code,
+        "shaft-drive-invalid"
+    );
+    assert_eq!(
+        tiny.evaluate(1e-100, 1.0).unwrap_err().code,
+        "shaft-drive-invalid"
+    );
+}
 
 #[test]
 fn held_torque_power_accounts_for_spinup_regeneration_and_reversal() {
