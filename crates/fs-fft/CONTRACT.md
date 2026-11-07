@@ -912,6 +912,44 @@ weights, coherent and partially correlated channels, layout equivalence,
 numerical range, resource refusal, cancellation and replay. This scoped
 execution is not the full workspace or distributed repository gate.
 
+### Coherent transfer of recorded channels
+
+`WelchCrossSpectrum::transfer_channels` applies an explicitly supplied complex
+frequency-dependent map `y=H(f)x` to every retained segment factor before any
+power contraction. The resulting joint spectrum has `S_out=H S_in H*`; its
+clock, window, segment count, bin width, tail accounting and one-sided
+normalization remain the original record's. Existing physical peak-bin
+consumers can propagate the result without an additional FFT or another
+peak/RMS or bandwidth conversion. Channel order, source identity, physical
+units, calibration and transfer validity remain explicit caller obligations.
+
+The transfer uses the existing negative-time phasor convention without an
+implicit conjugation: a delayed signal has gain `exp(+i omega tau)`, while a
+readout written `w* x` supplies conjugated weights. DC and even-length Nyquist
+coefficients must be real; the highest positive odd-length bin retains its
+complex transfer. This operates on the estimated spectral bins. It does not
+reconstruct a causal finite-record filter, remove taper leakage or edge
+transients, or infer cross-frequency covariance and statistical confidence.
+
+Complex products and complete channel contractions remain double-double until
+each output factor is rounded once, protecting weak residuals through strong
+cancellation. Coefficients are evaluated once per bin/output/input and reused
+across all segments. One frequency matrix is cached; no dense CSD or
+eigenfactorization is constructed. `channel_transfer_requirements` reports
+exact logical coefficient/product counts, output factors and numerical storage.
+The complete output plus reusable matrix is admitted before callbacks or
+allocation. Input and callback-owned storage and allocator overhead are
+excluded. Bounded cancellation, callback errors, nonfinite coefficients,
+endpoint violations and unrepresentable factors publish no partial result and
+leave the input untouched.
+
+Six focused regression groups compare real calibration against independently
+mixed original records, complex maps against dense `H S H*`, compensated
+delayed-channel reinforcement/cancellation, odd-bin peak-power normalization,
+quiet fields and exact product residuals, preflight work/storage refusal,
+coefficient caching and transactional cancellation/replay. These are numerical
+regressions, not an arbitrary-null relative-error certificate.
+
 ### Shared physical-bin admission for propagation owners
 
 `peak_bin_hz` and `peak_bin_rad_s` borrow a `WelchPeakBin` without copying its

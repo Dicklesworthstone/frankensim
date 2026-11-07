@@ -23,6 +23,10 @@ use fs_math::{dd::Dd, det};
 mod stream;
 pub use stream::WelchStream;
 
+#[path = "welch/transfer.rs"]
+mod transfer;
+pub use transfer::{WelchChannelTransferBudget, WelchChannelTransferRequirements};
+
 /// Bounds the physical segment length. Non-power-of-two segments use the
 /// existing Bluestein owner, whose convolution is at most twice this length.
 /// Cancellation is checked during admission and between channel transforms.
