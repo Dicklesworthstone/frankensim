@@ -1,4 +1,4 @@
-//! Density jets from the original IF97 Region 1/2 Gibbs equations.
+//! Density jets from the original IF97 Region 1/2/5 Gibbs equations.
 //!
 //! These optional derivatives support spatial constitutive laws driven by
 //! accepted pressure and temperature fields. No fit, finite difference, phase
@@ -11,9 +11,10 @@
 //! `rho_TT = rho*(2*(v_T/v)^2 - v_TT/v)`. The third Gibbs partial is evaluated
 //! directly from the original coefficients only when this jet is requested.
 //! The full jet also retains pressure curvature and the mixed derivative.
-//! Region 2 pressure curvature is evaluated through the residual derivatives
+//! Vapor pressure curvature is evaluated through the residual derivatives
 //! of `q`, avoiding cancellation of the ideal-gas contribution as `p -> 0`.
-//! Source: IAPWS R7-97(2012), equations (7), (15)--(17), Tables 2 and 11:
+//! Source: IAPWS R7-97(2012), equations (7), (15)--(17), (32)--(34),
+//! Tables 2, 11 and 38:
 //! <https://iapws.org/technical-guidance/release/IF97-Rev.download>.
 //!
 //! Saturation endpoints retain the selected single-phase branch derivative;
@@ -21,8 +22,8 @@
 
 use super::{
     GibbsTerm, If97Error, If97Region, If97State, R_SPECIFIC_J_KG_K, R1_PRESSURE_STAR_PA,
-    R1_TEMPERATURE_STAR_K, R1_TERMS, R2_PRESSURE_STAR_PA, R2_RESIDUAL, R2_TEMPERATURE_STAR_K, Sum,
-    powers,
+    R1_TEMPERATURE_STAR_K, R1_TERMS, R2_PRESSURE_STAR_PA, R2_RESIDUAL, R2_TEMPERATURE_STAR_K,
+    R5_PRESSURE_STAR_PA, R5_RESIDUAL, R5_TEMPERATURE_STAR_K, Sum, powers,
 };
 use fs_qty::{Density, Qty};
 
@@ -80,6 +81,13 @@ impl If97State {
                     region2_thirds::<false>(p / R2_PRESSURE_STAR_PA, tau)[0],
                 )
             }
+            If97Region::Region5 => {
+                let tau = R5_TEMPERATURE_STAR_K / t;
+                (
+                    tau,
+                    region5_thirds::<false>(p / R5_PRESSURE_STAR_PA, tau)[0],
+                )
+            }
         };
         self.temperature_density_jet(tau, qtt)
     }
@@ -106,15 +114,29 @@ impl If97State {
                 let second = rho * (2.0 * pressure_slope).mul_add(pressure_slope, -v_pp_over_v);
                 (tau, qtt, ppt, second)
             }
-            If97Region::Region2 => {
-                let tau = R2_TEMPERATURE_STAR_K / t;
-                let [qtt, ppt, q_pi, q_pipi] = region2_thirds::<true>(p / R2_PRESSURE_STAR_PA, tau);
+            If97Region::Region2 | If97Region::Region5 => {
+                let (p_star, tau, thirds) = if self.region() == If97Region::Region2 {
+                    let tau = R2_TEMPERATURE_STAR_K / t;
+                    (
+                        R2_PRESSURE_STAR_PA,
+                        tau,
+                        region2_thirds::<true>(p / R2_PRESSURE_STAR_PA, tau),
+                    )
+                } else {
+                    let tau = R5_TEMPERATURE_STAR_K / t;
+                    (
+                        R5_PRESSURE_STAR_PA,
+                        tau,
+                        region5_thirds::<true>(p / R5_PRESSURE_STAR_PA, tau),
+                    )
+                };
+                let [qtt, ppt, q_pi, q_pipi] = thirds;
                 // rho = p/(R*T*q). Differentiate q's residual directly:
                 // rho_pp = (rho/p) * ((2*p*a - 2)*a - p*b),
                 // a = q_p/q, b = q_pp/q. Neither residual contains log(pi),
                 // so dilute vapor retains its small, finite virial curvature.
-                let a = (q_pi / R2_PRESSURE_STAR_PA) / q;
-                let b = ((q_pipi / R2_PRESSURE_STAR_PA) / R2_PRESSURE_STAR_PA) / q;
+                let a = (q_pi / p_star) / q;
+                let b = ((q_pipi / p_star) / p_star) / q;
                 let second = (rho / p) * ((2.0 * p).mul_add(a, -2.0)).mul_add(a, -p * b);
                 (tau, qtt, ppt, second)
             }
@@ -170,7 +192,7 @@ impl If97State {
 }
 
 // Retain the original scaled-pressure convention to avoid 1/pi intermediates
-// in the vapor limit. The ideal Region 2 log(pi) has zero mixed third partial.
+// in the vapor limit. The ideal log(pi) has zero mixed third partial.
 fn region1_thirds<const PRESSURE: bool>(pi: f64, tau: f64) -> [f64; 3] {
     let x = powers::<33>(7.1 - pi, 0);
     let y = powers::<61>(tau - 1.222, 43);
@@ -197,10 +219,20 @@ fn region1_thirds<const PRESSURE: bool>(pi: f64, tau: f64) -> [f64; 3] {
 }
 
 fn region2_thirds<const PRESSURE: bool>(pi: f64, tau: f64) -> [f64; 4] {
-    let x = powers::<25>(pi, 0);
-    let y = powers::<59>(tau - 0.5, 0);
+    vapor_thirds::<PRESSURE, 25, 59>(pi, tau - 0.5, &R2_RESIDUAL)
+}
+fn region5_thirds<const PRESSURE: bool>(pi: f64, tau: f64) -> [f64; 4] {
+    vapor_thirds::<PRESSURE, 4, 10>(pi, tau, &R5_RESIDUAL)
+}
+fn vapor_thirds<const PRESSURE: bool, const P: usize, const T: usize>(
+    pi: f64,
+    thermal_coordinate: f64,
+    terms: &[GibbsTerm],
+) -> [f64; 4] {
+    let x = powers::<P>(pi, 0);
+    let y = powers::<T>(thermal_coordinate, 0);
     let mut sums = [Sum::default(); 4];
-    for &GibbsTerm { i, j, n } in &R2_RESIDUAL {
+    for &GibbsTerm { i, j, n } in terms {
         if j >= 2 {
             let coefficient = n * f64::from(i) * f64::from(j) * f64::from(j - 1);
             sums[0].add(coefficient * x[i as usize] * y[(j - 2) as usize]);

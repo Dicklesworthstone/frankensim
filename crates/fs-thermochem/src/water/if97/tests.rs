@@ -122,6 +122,70 @@ fn original_region2_table15_in_coherent_si() {
 }
 
 #[test]
+fn original_region5_table42_in_coherent_si() {
+    // IAPWS R7-97(2012), Table 42, original revised Region 5. Tolerances
+    // are half the last printed digit after converting kJ to coherent SI.
+    for (p, t, expected, tolerance) in [
+        (
+            0.5e6,
+            1500.0,
+            [
+                1.38455090, 5219768.55, 4527493.10, 9654.08875, 2616.09445, 917.068690,
+            ],
+            [5e-9, 5e-3, 5e-3, 5e-6, 5e-6, 5e-7],
+        ),
+        (
+            30e6,
+            1500.0,
+            [
+                0.0230761299,
+                5167235.14,
+                4474951.24,
+                7729.70133,
+                2727.24317,
+                928.548002,
+            ],
+            [5e-11, 5e-3, 5e-3, 5e-6, 5e-6, 5e-7],
+        ),
+        (
+            30e6,
+            2000.0,
+            [
+                0.0311385219,
+                6571226.04,
+                5637070.38,
+                8536.40523,
+                2885.69882,
+                1067.36948,
+            ],
+            [5e-11, 5e-3, 5e-3, 5e-6, 5e-6, 5e-6],
+        ),
+    ] {
+        let s = state(p, t, If97Region::Region5);
+        let actual = [
+            s.specific_volume().value(),
+            s.specific_enthalpy().value(),
+            s.specific_internal_energy().value(),
+            s.specific_entropy().value(),
+            s.cp().value(),
+            s.sound_speed().value(),
+        ];
+        for k in 0..actual.len() {
+            close(actual[k], expected[k], tolerance[k]);
+        }
+        assert_eq!(s.region(), If97Region::Region5);
+        assert_eq!(
+            s.phase(),
+            if p > CRITICAL_PRESSURE_PA {
+                If97Phase::Supercritical
+            } else {
+                If97Phase::Vapor
+            }
+        );
+    }
+}
+
+#[test]
 fn original_region4_tables35_36_and_b23_reference() {
     for (t, p, allowance) in [
         (300.0, 3536.58941, 5e-6),
@@ -162,6 +226,9 @@ fn analytic_derivatives_obey_independent_caloric_and_maxwell_differences() {
         (1e5, 500.0, If97Region::Region2),
         (30e6, 700.0, If97Region::Region2),
         (90e6, 1000.0, If97Region::Region2),
+        (0.5e6, 1500.0, If97Region::Region5),
+        (30e6, 1500.0, If97Region::Region5),
+        (30e6, 2000.0, If97Region::Region5),
     ] {
         let s = state(p, t, region);
         let dh_dt = derivative(
@@ -243,6 +310,9 @@ fn cv_is_actual_constant_volume_internal_energy_derivative() {
         (80e6, 500.0, If97Region::Region1),
         (1e5, 500.0, If97Region::Region2),
         (30e6, 700.0, If97Region::Region2),
+        (0.5e6, 1500.0, If97Region::Region5),
+        (30e6, 1500.0, If97Region::Region5),
+        (30e6, 2000.0, If97Region::Region5),
     ] {
         let s = state(p, t, region);
         let v = s.specific_volume().value();
@@ -396,6 +466,8 @@ fn full_implemented_domains_and_unimplemented_regions_are_explicit() {
         (100e6, REGION1_MAXIMUM_TEMPERATURE_K, If97Region::Region1),
         (100e6, 863.15, If97Region::Region2),
         (100e6, REGION2_MAXIMUM_TEMPERATURE_K, If97Region::Region2),
+        (50e6, REGION2_MAXIMUM_TEMPERATURE_K, If97Region::Region5),
+        (50e6, REGION5_MAXIMUM_TEMPERATURE_K, If97Region::Region5),
     ] {
         state(p, t, region);
     }
@@ -418,6 +490,20 @@ fn full_implemented_domains_and_unimplemented_regions_are_explicit() {
         (0.0, 300.0, If97Region::Region2),
         (f64::NAN, 300.0, If97Region::Region2),
         (1e5, f64::INFINITY, If97Region::Region2),
+        (50e6_f64.next_up(), 1500.0, If97Region::Region5),
+        (
+            1e5,
+            REGION2_MAXIMUM_TEMPERATURE_K.next_down(),
+            If97Region::Region5,
+        ),
+        (
+            1e5,
+            REGION5_MAXIMUM_TEMPERATURE_K.next_up(),
+            If97Region::Region5,
+        ),
+        (0.0, 1500.0, If97Region::Region5),
+        (f64::NAN, 1500.0, If97Region::Region5),
+        (1e5, f64::INFINITY, If97Region::Region5),
     ] {
         assert!(
             If97State::at_pressure_temperature(Pressure::new(p), Temperature::new(t), region)

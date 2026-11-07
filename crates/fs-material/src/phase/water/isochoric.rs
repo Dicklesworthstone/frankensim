@@ -820,15 +820,16 @@ fn resolve(
     } else {
         If97Region::Region2
     };
-    let (low_p, high_p) = match region {
-        If97Region::Region1 => (
+    let (low_p, high_p) = if region == If97Region::Region1 {
+        (
             ps.max(controls.minimum_pressure_pa),
             controls.maximum_pressure_pa,
-        ),
-        If97Region::Region2 => (
+        )
+    } else {
+        (
             controls.minimum_pressure_pa,
             ps.min(controls.maximum_pressure_pa),
-        ),
+        )
     };
     if low_p > high_p {
         return Err(IsochoricWaterError::OutsideDomain);

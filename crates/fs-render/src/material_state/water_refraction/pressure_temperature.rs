@@ -104,6 +104,7 @@ impl<'a, F: PressureTemperatureGradientField + ?Sized> PressureTemperatureWaterF
         hash.update(&[match region {
             If97Region::Region1 => 1,
             If97Region::Region2 => 2,
+            If97Region::Region5 => 5,
         }]);
         Ok(Self { source, region, snapshot_identity, identity: hash.finalize() })
     }

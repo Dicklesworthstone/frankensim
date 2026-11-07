@@ -45,6 +45,10 @@ fn regional_routing_preserves_original_states_and_density_work() {
         (25e6, 650.0, If97FluidRegion::Region3),
         (25e6, 823.15, If97FluidRegion::Region2),
         (100e6, 900.0, If97FluidRegion::Region2),
+        (0.5e6, 1500.0, If97FluidRegion::Region5),
+        (30e6, 1500.0, If97FluidRegion::Region5),
+        (30e6, 2000.0, If97FluidRegion::Region5),
+        (50e6, 2273.15, If97FluidRegion::Region5),
     ] {
         let point = state(p, t);
         assert_eq!(point.region(), expected);
@@ -103,6 +107,23 @@ fn regional_routing_preserves_original_states_and_density_work() {
     assert_eq!(
         state(25e6, 647.096).phase(),
         If97FluidPhase::CriticalIsotherm
+    );
+    assert_eq!(state(50e6, 1073.15).region(), If97FluidRegion::Region2);
+    assert_eq!(
+        state(50e6, 1073.15_f64.next_up()).region(),
+        If97FluidRegion::Region5
+    );
+    let high = state(30e6, 1500.0);
+    let original = If97State::at_pressure_temperature(
+        Pressure::new(30e6),
+        Temperature::new(1500.0),
+        If97Region::Region5,
+    )
+    .unwrap();
+    assert_eq!(high.density_jet().unwrap(), original.density_jet().unwrap());
+    assert_eq!(
+        high.isobaric_density_jet().unwrap(),
+        original.isobaric_density_jet().unwrap()
     );
 }
 
@@ -233,10 +254,74 @@ fn regional_junctions_keep_signed_caloric_gaps_and_admitted_one_sided_sources() 
 }
 
 #[test]
+fn region2_region5_junction_preserves_the_original_matching_defects() {
+    // IAPWS section 10/Table 43: the source equations have a small finite
+    // matching error, not latent heat. Neither endpoint is shifted to hide it.
+    for p in [1e5, 1e6, 30e6, 50e6] {
+        let pair = If97RegionalJunction::new(
+            Pressure::new(p),
+            If97JunctionKind::VaporHighTemperature,
+            junction_controls(),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(pair.temperature_bounds_k(), [1073.15; 2]);
+        assert_eq!(pair.lower().region(), If97FluidRegion::Region2);
+        assert_eq!(pair.upper().region(), If97FluidRegion::Region5);
+        assert_eq!(pair.lower().phase(), pair.upper().phase());
+        assert_eq!(pair.boundary_iterations(), 0);
+        assert_eq!(pair.source_evaluations(), 0);
+        assert_eq!(pair.pressure_residuals_pa(), [0.0; 2]);
+        assert_eq!(pair.lower(), state(p, 1073.15));
+        let original = If97State::at_pressure_temperature(
+            Pressure::new(p),
+            Temperature::new(1073.15),
+            If97Region::Region5,
+        )
+        .unwrap();
+        assert_eq!(pair.upper(), If97FluidState::Gibbs(original));
+        let dh = pair.enthalpy_change().value();
+        assert_eq!(
+            dh,
+            original.specific_enthalpy().value() - pair.lower().specific_enthalpy().value()
+        );
+        assert!(dh.abs() > 1e-3 && dh.abs() < 96.5);
+        assert!(pair.entropy_change().value().abs() < 0.1425);
+        assert!(pair.gibbs_energy_change().value().abs() < 87.5);
+        assert!(
+            pair.volume_change().value().abs() < 0.000125 * pair.lower().specific_volume().value()
+        );
+        near(
+            pair.internal_energy_change().value() + p * pair.volume_change().value(),
+            dh,
+            3e-9,
+        );
+    }
+    assert_eq!(
+        If97RegionalJunction::new(
+            Pressure::new(50e6_f64.next_up()),
+            If97JunctionKind::VaporHighTemperature,
+            junction_controls(),
+            || false,
+        ),
+        Err(If97FluidError::OutsideDomain)
+    );
+    assert_eq!(
+        If97RegionalJunction::new(
+            Pressure::new(1e5),
+            If97JunctionKind::VaporHighTemperature,
+            junction_controls(),
+            || true,
+        ),
+        Err(If97FluidError::Cancelled)
+    );
+}
+
+#[test]
 fn common_pressure_derivatives_follow_original_maxwell_relations() {
     // G1: finite-pressure perturbations are independent of the common derivative
     // accessors and exercise both Gibbs and density-inverted Helmholtz sources.
-    for (p, t) in [(25e6, 600.0), (25e6, 650.0), (25e6, 823.15)] {
+    for (p, t) in [(25e6, 600.0), (25e6, 650.0), (25e6, 823.15), (30e6, 1500.0)] {
         let center = state(p, t);
         let step = 100.0;
         let below = state(p - step, t);
@@ -269,7 +354,8 @@ fn domain_critical_boundary_work_and_late_cancellation_refuse_without_a_state() 
     for (p, t) in [
         (1e5, 273.15),
         (100e6_f64.next_up(), 700.0),
-        (1e5, 1073.15_f64.next_up()),
+        (1e5, 2273.15_f64.next_up()),
+        (50e6_f64.next_up(), 1073.15_f64.next_up()),
     ] {
         assert_eq!(
             If97FluidState::at_pressure_temperature(

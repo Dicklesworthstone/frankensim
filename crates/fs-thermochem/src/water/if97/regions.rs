@@ -1,6 +1,6 @@
 //! Original IF97 fluid routing and explicit regional matching defects.
 //!
-//! Regions 1, 2 and 3 retain their own equations, references and admission.
+//! Regions 1, 2, 3 and 5 retain their own equations, references and admission.
 //! Routing supplies no interpolated EOS, latent-heat adjustment or continuity
 //! correction. In particular, a single-phase regional boundary is not a phase
 //! transition. Its original h/u/s/v mismatch remains visible to the consumer.
@@ -8,8 +8,9 @@
 //! and the finite matching errors: <https://iapws.org/technical-guidance/release/IF97-Rev.download>.
 //!
 //! The stable engineering ingress starts at the canonical 273.16 K anchor;
-//! ice, metastable continuations, Region 5 and the exact critical singularity
+//! ice, metastable continuations and the exact critical singularity
 //! remain unsupported. Near-critical source solves may also refuse resolution.
+//! Region 5 assumes pure undissociated water, as required by the source.
 
 use super::region3::pressure::{
     DensePressureError, DensePressureSolution, DensePressureSolve, If97DenseSaturationPair,
@@ -18,7 +19,8 @@ use super::region3::{If97DensePhase, If97DenseState};
 use super::{
     CRITICAL_PRESSURE_PA, CRITICAL_TEMPERATURE_K, If97Error, If97Phase, If97Region,
     If97SaturationPair, If97State, IsothermalCompressibility, MAXIMUM_PRESSURE_PA,
-    REGION1_MAXIMUM_TEMPERATURE_K, REGION2_MAXIMUM_TEMPERATURE_K, SpecificVolumePressureDerivative,
+    REGION1_MAXIMUM_TEMPERATURE_K, REGION2_MAXIMUM_TEMPERATURE_K, REGION5_MAXIMUM_PRESSURE_PA,
+    REGION5_MAXIMUM_TEMPERATURE_K, SpecificVolumePressureDerivative,
     SpecificVolumeTemperatureDerivative, ThermalExpansion, boundary23_pressure_raw, on_saturation,
     saturation_pressure,
 };
@@ -35,6 +37,7 @@ pub enum If97FluidRegion {
     Region1,
     Region2,
     Region3,
+    Region5,
 }
 
 /// Original phase classification; a saturation pair additionally names its sides.
@@ -125,8 +128,10 @@ impl If97FluidState {
             }
         } else if t <= 863.15 && p > boundary23_pressure_raw(t) {
             If97FluidRegion::Region3
-        } else {
+        } else if t <= REGION2_MAXIMUM_TEMPERATURE_K {
             If97FluidRegion::Region2
+        } else {
+            If97FluidRegion::Region5
         };
         Self::at_pressure_temperature_in_region(pressure, temperature, region, controls, cancelled)
     }
@@ -144,11 +149,11 @@ impl If97FluidState {
         poll(&mut cancelled)?;
         validate_point(pressure.value(), temperature.value())?;
         let state = match region {
-            If97FluidRegion::Region1 | If97FluidRegion::Region2 => {
-                let source = if region == If97FluidRegion::Region1 {
-                    If97Region::Region1
-                } else {
-                    If97Region::Region2
+            If97FluidRegion::Region1 | If97FluidRegion::Region2 | If97FluidRegion::Region5 => {
+                let source = match region {
+                    If97FluidRegion::Region1 => If97Region::Region1,
+                    If97FluidRegion::Region2 => If97Region::Region2,
+                    _ => If97Region::Region5,
                 };
                 Self::Gibbs(If97State::at_pressure_temperature(
                     pressure,
@@ -179,6 +184,7 @@ impl If97FluidState {
             Self::Gibbs(s) => match s.region() {
                 If97Region::Region1 => If97FluidRegion::Region1,
                 If97Region::Region2 => If97FluidRegion::Region2,
+                If97Region::Region5 => If97FluidRegion::Region5,
             },
             Self::Dense(_) => If97FluidRegion::Region3,
         }
@@ -250,16 +256,22 @@ impl If97FluidState {
     pub fn density_jet(self) -> Result<super::density::DensityJet, If97FluidError> {
         match self {
             Self::Gibbs(s) => s.density_jet().map_err(If97FluidError::Gibbs),
-            Self::Dense(s) => s.state.density_jet()
+            Self::Dense(s) => s
+                .state
+                .density_jet()
                 .map_err(|error| DensePressureError::Source(error).into()),
         }
     }
 
     /// Original isobaric density slope and curvature without regional blending.
-    pub fn isobaric_density_jet(self) -> Result<super::density::IsobaricDensityJet, If97FluidError> {
+    pub fn isobaric_density_jet(
+        self,
+    ) -> Result<super::density::IsobaricDensityJet, If97FluidError> {
         match self {
             Self::Gibbs(s) => s.isobaric_density_jet().map_err(If97FluidError::Gibbs),
-            Self::Dense(s) => s.state.isobaric_density_jet()
+            Self::Dense(s) => s
+                .state
+                .isobaric_density_jet()
                 .map_err(|error| DensePressureError::Source(error).into()),
         }
     }
@@ -400,6 +412,8 @@ impl If97FluidSaturationPair {
 pub enum If97JunctionKind {
     LiquidDense,
     DenseVapor,
+    /// Original Region 2/5 equations at their common 1073.15 K boundary.
+    VaporHighTemperature,
 }
 
 /// Separate bounded work for the numerical B23 temperature bracket and density.
@@ -440,12 +454,19 @@ impl If97RegionalJunction {
             ));
         }
         let p = pressure.value();
-        let join = saturation_pressure(Temperature::new(REGION1_MAXIMUM_TEMPERATURE_K))?.value();
-        if !p.is_finite()
-            || p <= join.max(boundary23_pressure_raw(REGION1_MAXIMUM_TEMPERATURE_K))
-            || p > MAXIMUM_PRESSURE_PA
-        {
+        if !p.is_finite() || p <= 0.0 || p > MAXIMUM_PRESSURE_PA {
             return Err(If97FluidError::OutsideDomain);
+        }
+        if kind == If97JunctionKind::VaporHighTemperature {
+            if p > REGION5_MAXIMUM_PRESSURE_PA {
+                return Err(If97FluidError::OutsideDomain);
+            }
+        } else {
+            let join =
+                saturation_pressure(Temperature::new(REGION1_MAXIMUM_TEMPERATURE_K))?.value();
+            if p <= join.max(boundary23_pressure_raw(REGION1_MAXIMUM_TEMPERATURE_K)) {
+                return Err(If97FluidError::OutsideDomain);
+            }
         }
         let (temperatures, boundary_iterations, lower_region, upper_region) = match kind {
             If97JunctionKind::LiquidDense => (
@@ -463,6 +484,12 @@ impl If97RegionalJunction {
                     If97FluidRegion::Region2,
                 )
             }
+            If97JunctionKind::VaporHighTemperature => (
+                [REGION2_MAXIMUM_TEMPERATURE_K; 2],
+                0,
+                If97FluidRegion::Region2,
+                If97FluidRegion::Region5,
+            ),
         };
         let lower = If97FluidState::at_pressure_temperature_in_region(
             pressure,
@@ -559,7 +586,8 @@ fn validate_point(p: f64, t: f64) -> Result<(), If97FluidError> {
         ));
     }
     if p > MAXIMUM_PRESSURE_PA
-        || !(MINIMUM_STABLE_TEMPERATURE_K..=REGION2_MAXIMUM_TEMPERATURE_K).contains(&t)
+        || !(MINIMUM_STABLE_TEMPERATURE_K..=REGION5_MAXIMUM_TEMPERATURE_K).contains(&t)
+        || (t > REGION2_MAXIMUM_TEMPERATURE_K && p > REGION5_MAXIMUM_PRESSURE_PA)
     {
         return Err(If97FluidError::OutsideDomain);
     }

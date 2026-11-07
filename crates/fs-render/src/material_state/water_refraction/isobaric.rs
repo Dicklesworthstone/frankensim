@@ -68,6 +68,7 @@ impl<'a, F: TemperatureGradientField + ?Sized> IsobaricWaterField<'a, F> {
         hash.update(&[match region {
             If97Region::Region1 => 1,
             If97Region::Region2 => 2,
+            If97Region::Region5 => 5,
         }]);
         Ok(Self {
             temperature,

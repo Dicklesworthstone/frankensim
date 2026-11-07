@@ -9,7 +9,8 @@
 use super::{
     If97Error, If97Region, If97State, MassSpecificEnergyQuantityV1, MassSpecificThermalQuantityV1,
     MassSpecificVolume, R_SPECIFIC_J_KG_K, R1_PRESSURE_STAR_PA, R1_TEMPERATURE_STAR_K, R1_TERMS,
-    R2_IDEAL, R2_PRESSURE_STAR_PA, R2_RESIDUAL, R2_TEMPERATURE_STAR_K,
+    R2_IDEAL, R2_PRESSURE_STAR_PA, R2_RESIDUAL, R2_TEMPERATURE_STAR_K, R5_IDEAL,
+    R5_PRESSURE_STAR_PA, R5_RESIDUAL, R5_TEMPERATURE_STAR_K,
 };
 use fs_qty::{Pressure, Temperature};
 
@@ -42,7 +43,7 @@ impl If97IsobaricDifference {
 
 /// Evaluate changes before rounding them into absolute source properties.
 ///
-/// The operation count is bounded by the retained 34 or 52 source monomials.
+/// The operation count is bounded by the retained 34, 52 or 12 source monomials.
 /// Reversing the path changes only the sign; equal endpoints return exact zero.
 /// This is a mathematical difference of the original regional equation, not a
 /// patch to either endpoint's rounded state. Consumers still own their actual
@@ -83,6 +84,12 @@ pub fn isobaric_difference(
             R2_TEMPERATURE_STAR_K,
             0.5,
             &R2_RESIDUAL[..],
+        ),
+        If97Region::Region5 => (
+            R5_PRESSURE_STAR_PA,
+            R5_TEMPERATURE_STAR_K,
+            0.0,
+            &R5_RESIDUAL[..],
         ),
     };
     let dt = t1 - t0;
@@ -132,9 +139,14 @@ pub fn isobaric_difference(
             );
         }
     }
-    if region == If97Region::Region2 {
+    let ideal_terms = match region {
+        If97Region::Region1 => &[][..],
+        If97Region::Region2 => &R2_IDEAL[..],
+        If97Region::Region5 => &R5_IDEAL[..],
+    };
+    if !ideal_terms.is_empty() {
         let ideal = DifferencePowers::<11>::new(tau0, tau1, delta_tau, 7);
-        for term in &R2_IDEAL {
+        for term in ideal_terms {
             let j = f64::from(term.j);
             let k = (term.j + 7) as usize;
             dh.add(term.n * j * ideal.delta[k - 1]);
@@ -144,7 +156,7 @@ pub fn isobaric_difference(
     let h = sign * R_SPECIFIC_J_KG_K * t_star * dh.value;
     let s = sign * R_SPECIFIC_J_KG_K * ds.value;
     let mut v = R_SPECIFIC_J_KG_K / p_star * dv.value;
-    if region == If97Region::Region2 {
+    if region != If97Region::Region1 {
         v += R_SPECIFIC_J_KG_K * dt / pressure.value();
     }
     v *= sign;
@@ -160,7 +172,7 @@ pub fn isobaric_difference(
     })
 }
 
-// At fixed pressure each piece of either released region is connected in T.
+// At fixed pressure each piece of a released region is connected in T.
 // Check both one-sided limits where R2 changes its pressure-bound equation;
 // the independently fitted R4 and B23 equations are not silently equated.
 pub(super) fn admit_isobaric_interval(

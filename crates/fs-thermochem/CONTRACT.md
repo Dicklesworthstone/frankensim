@@ -2968,7 +2968,8 @@ References: Neufeld, Janzen and Aziz, J. Chem. Phys.57,1100-1102(1972),
 ## Original IF97 compressed-liquid and steam source
 
 `water::if97` implements the original IAPWS industrial formulation in native
-Rust: Region 1 liquid, Region 2 vapor, Region 4 saturation and the B23 boundary.
+Rust: Region 1 liquid, Region 2 vapor, Region 5 high-temperature steam,
+Region 4 saturation and the B23 boundary.
 The source is the [IAPWS R7-97(2012) revised release](https://iapws.org/technical-guidance/release/IF97-Rev.download).
 The released coefficients and equations are attributed to IAPWS; this is a
 separate source from the existing SR1-86(1992) saturation formulation. They are
@@ -2977,8 +2978,15 @@ never silently combined into one caloric chart.
 States retain typed pressure, temperature, density, specific volume, enthalpy,
 internal energy, entropy and Gibbs energy, together with Cp, Cv, sound speed and
 analytic thermodynamic derivatives. Admission follows the original regional
-bounds through 100 MPa and 1073.15 K. Region 5 and the separate metastable-vapor formulation are absent. Region 3
-is supplied by the distinct density/temperature source documented below. The source's 273.15–273.16 K extension
+bounds through 100 MPa and 1073.15 K, followed by the revised Region 5 domain
+through 50 MPa and 2273.15 K. The Region 5 equation also admits its common
+1073.15 K boundary when selected explicitly. Its original six ideal and six
+residual terms (equations 32–34, Tables 37/38) feed the same Gibbs derivative
+algebra with smaller fixed stack power tables; no Region 2 extrapolation or
+constant-Cp substitution is used. The source assumes pure **undissociated**
+water, so chemical dissociation requires a separate model. The separate
+metastable-vapor formulation remains absent. Region 3 is supplied by the
+distinct density/temperature source documented below. The source's 273.15–273.16 K extension
 includes the metastability explicitly described in the release; it does not
 establish stable liquid water against ice. Saturation pressure and temperature
 extend to the critical point, while paired Region 1/2 saturated calorics stop
@@ -2999,6 +3007,14 @@ input temperature increment before subtracting reduced temperatures or large
 absolute caloric values. The first-law relation is delta_u=delta_h-p*delta_v.
 Both endpoints and the complete regional path are admitted; cancellation is
 polled and no foreign numerical runtime is used.
+
+Region 5 participates in these original-source heat-capacity enclosures and
+finite caloric/volume increments, and in both density-jet APIs, including the
+complete pressure/temperature Hessian. Its pressure curvature uses the original
+residual terms to preserve the dilute-gas limit. The extended focused cases
+cover all three published Table 42 verification points, independent Maxwell
+and constant-volume Cv derivatives, finite Cp/Cp-over-T integrals, adjacent
+binary64 temperature increments, full-domain Cp enclosures and source limits.
 
 The 17 focused tests cover published verification tables, independent
 thermodynamic derivative identities, density anomaly and Cv behavior, raw
@@ -3122,7 +3138,7 @@ ice or Region 5 claim. Full-workspace DSR/Cargo validation remains separate.
 
 ## Original water regional routing and source junctions
 
-`water::if97::regions` selects the original stable Region 1, 2 or 3 equation
+`water::if97::regions` selects the original stable Region 1, 2, 3 or 5 equation
 from pressure and temperature. `If97FluidState` retains its original source
 state and typed h, u, s, v, density, Cp, Cv, sound speed and derivatives.
 Requested pressure, achieved dense-source pressure residual and density work
@@ -3145,14 +3161,19 @@ admitted one-sided temperatures. Their finite width, work and pressure residuals
 are exposed. The temperature bracket is a numerical admission diagnostic, not
 a certified real-arithmetic root enclosure. A 100 MPa B23 endpoint pair is
 admitted within the tested 1e-8 K caller budget without widening source domains.
+Region 2/5 uses the exact 1073.15 K boundary through 50 MPa, with zero root
+iterations. Automatic routing retains Region 2 at that boundary and selects
+Region 5 above it; explicit source selection and the junction retain both
+unadjusted source endpoints and their finite matching errors.
 
 Signed original h/u/s/v/Gibbs differences at these junctions are retained.
 Section 10/Table 43 of the attributed IAPWS release describes finite regional
 matching errors; a junction is not a phase transition and its caloric mismatch
 is not latent heat. No interpolation, entropy/enthalpy reference correction or
 common shifted equation is introduced by this router. The engineering ingress
-is 273.16–1073.15 K with original regional pressure limits through 100 MPa.
-Ice, Region 5, metastable continuation and the exact critical singularity remain
+is 273.16–2273.15 K with original regional pressure limits through 100 MPa
+up to 1073.15 K and 50 MPa above it.
+Ice, metastable continuation and the exact critical singularity remain
 unsupported; unresolved near-critical solves retain their explicit refusal.
 
 Five focused tests verify regional source identity, canonical saturation
@@ -3675,15 +3696,15 @@ physical absence/refusal cases and bounded work/cancellation.
 
 ## Original IF97 isobaric density curvature
 
-`water::if97::If97State::isobaric_density_jet` supplies density and its first/second temperature derivatives at the original fixed pressure. It retains the existing Region 1/2 state value and first Gibbs derivative, evaluating only the additional mixed third Gibbs partial from the original released coefficients on demand. Fixed-size power tables and the native compensated accumulator allocate nothing; ordinary state queries retain their previous operation tree and cost. The exact relation is rho_TT = rho * (2 * (v_T/v)^2 - v_TT/v).
+`water::if97::If97State::isobaric_density_jet` supplies density and its first/second temperature derivatives at the original fixed pressure. It retains the existing Region 1/2/5 state value and first Gibbs derivative, evaluating only the additional mixed third Gibbs partial from the original released coefficients on demand. Fixed-size power tables and the native compensated accumulator allocate nothing; ordinary state queries retain their previous operation tree and cost. The exact relation is rho_TT = rho * (2 * (v_T/v)^2 - v_TT/v).
 
-Three focused actual-source controls cover fourth-order differences of the original scalar EOS and retained first derivatives at ten liquid/vapor states, the dilute ideal-gas limit, water's density-maximum sign change and the separate saturation-branch endpoints. The jet retains the existing source domain and uncertainty. It is a single-phase branch derivative, not a two-phase mixture tangent, automatic regional continuation, or a pressure-derivative API.
+Focused actual-source controls cover fourth-order differences of the original scalar EOS and retained first derivatives at liquid, vapor and high-temperature steam states, the dilute ideal-gas limit, water's density-maximum sign change and the separate saturation-branch endpoints. The jet retains the existing source domain and uncertainty. It is a single-phase branch derivative, not a two-phase mixture tangent, automatic regional continuation, or a pressure-derivative API.
 
 `If97State::density_jet` additionally supplies the complete pressure/temperature density Hessian, including the mixed partial. The value and first responses reuse the same admitted state, and its temperature derivatives agree exactly with `isobaric_density_jet`. The extra original Gibbs partials share fixed-size power tables and compensated sums; the isobaric path omits pressure work. Vapor pressure curvature differentiates the residual of `pi*gamma_pi` directly, retaining the finite virial limit without cancellation of ideal-gas terms. The original scalar EOS operation tree, domain and source uncertainty remain unchanged.
 
-Focused controls compare the pressure and both mixed-derivative directions with fourth-order differences of the original state across ten liquid/vapor conditions, preserve the separate saturation tangents, and recover the independently evaluated dilute virial curvature down to 1e-140 Pa. These are single-phase local derivatives; the API supplies no phase-mixture tangent or regional crossing.
+Focused controls compare the pressure and both mixed-derivative directions with fourth-order differences of the original state across liquid, vapor and high-temperature steam conditions, preserve the separate saturation tangents, and recover the independently evaluated dilute virial curvature down to 1e-140 Pa. These are single-phase local derivatives; the API supplies no phase-mixture tangent or regional crossing.
 
-`If97DenseState::density_jet` extends that same typed response to Region 3 by implicit differentiation of the original Helmholtz pressure law. Three compensated coefficient sums evaluate its pressure Hessian directly; first responses retain the admitted state's stiffness and thermal pressure slope. This allocation-free query requires no pressure inversion and leaves ordinary state cost unchanged. Its isobaric projection uses the same derivatives. `If97FluidState` routes both jet queries to the retained Region 1, 2 or 3 source, preserving achieved pressure and solve diagnostics. Saturation endpoints keep their single-phase tangent and near-critical amplification remains visible; no finite mixture derivative, smoothing, extrapolation or reduced source uncertainty is implied. Focused regressions compare native pressure and density derivatives in both mixed directions with independent fourth-order differences, and cover dense coexistence, critical amplification and exact regional delegation.
+`If97DenseState::density_jet` extends that same typed response to Region 3 by implicit differentiation of the original Helmholtz pressure law. Three compensated coefficient sums evaluate its pressure Hessian directly; first responses retain the admitted state's stiffness and thermal pressure slope. This allocation-free query requires no pressure inversion and leaves ordinary state cost unchanged. Its isobaric projection uses the same derivatives. `If97FluidState` routes both jet queries to the retained Region 1, 2, 3 or 5 source, preserving achieved pressure and solve diagnostics. Saturation endpoints keep their single-phase tangent and near-critical amplification remains visible; no finite mixture derivative, smoothing, extrapolation or reduced source uncertainty is implied. Focused regressions compare native pressure and density derivatives in both mixed directions with independent fourth-order differences, and cover dense coexistence, critical amplification and exact regional delegation.
 
 ## Source-bound pyrrhotite oxidant and acid balances
 

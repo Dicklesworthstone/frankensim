@@ -15,6 +15,8 @@ fn complete_liquid_and_steam_isobars_have_conservative_useful_caloric_bounds() {
         (If97Region::Region2, 100_000.0, 373.2, 1073.15),
         (If97Region::Region2, 30e6, 700.0, 1073.15),
         (If97Region::Region2, 100e6, 863.16, 1073.15),
+        (If97Region::Region5, 0.5e6, 1073.15, 2273.15),
+        (If97Region::Region5, 50e6, 1073.15, 2273.15),
     ] {
         let bound = isobaric_heat_capacity_bound(
             Pressure::new(p),
@@ -57,6 +59,9 @@ fn zero_width_enclosures_cover_the_original_published_reference_states() {
         (If97Region::Region2, 3500.0, 300.0),
         (If97Region::Region2, 3500.0, 700.0),
         (If97Region::Region2, 30e6, 700.0),
+        (If97Region::Region5, 0.5e6, 1500.0),
+        (If97Region::Region5, 30e6, 1500.0),
+        (If97Region::Region5, 30e6, 2000.0),
     ] {
         let state =
             If97State::at_pressure_temperature(Pressure::new(p), Temperature::new(t), region)

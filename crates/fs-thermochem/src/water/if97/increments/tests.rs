@@ -26,6 +26,8 @@ fn regional_increments_match_independent_cp_and_cp_over_t_integrals() {
         (If97Region::Region1, 80e6, 290.0, 610.0),
         (If97Region::Region2, 1e6, 500.0, 900.0),
         (If97Region::Region2, 30e6, 700.0, 1000.0),
+        (If97Region::Region5, 0.5e6, 1073.15, 2273.15),
+        (If97Region::Region5, 50e6, 1073.15, 2273.15),
     ] {
         let result = difference(region, p, lo, hi);
         // Composite Simpson integration uses independently evaluated original
@@ -94,6 +96,8 @@ fn adjacent_temperatures_keep_sensible_heat_and_entropy_beside_absolute_referenc
         (If97Region::Region1, 80e6, 600.0),
         (If97Region::Region2, 100_000.0, 600.0),
         (If97Region::Region2, 30e6, 700.0),
+        (If97Region::Region5, 0.5e6, 1500.0),
+        (If97Region::Region5, 50e6, 2000.0),
     ] {
         let next = t.next_up();
         let initial = state(region, p, t);
@@ -140,6 +144,7 @@ fn isobaric_increments_are_additive_reversible_and_zero_at_equal_endpoints() {
     for (region, p, a, b, c) in [
         (If97Region::Region1, 80e6, 300.0, 450.0, 600.0),
         (If97Region::Region2, 100_000.0, 400.0, 600.0, 1000.0),
+        (If97Region::Region5, 30e6, 1073.15, 1500.0, 2273.15),
     ] {
         let (ab, bc, ac, ca) = (
             difference(region, p, a, b),
@@ -196,6 +201,9 @@ fn regional_changes_refuse_unimplemented_dense_or_metastable_paths() {
         (If97Region::Region2, 3e6, 300.0, 600.0),
         (If97Region::Region2, 100_000.0, 400.0, 1500.0),
         (If97Region::Region2, 0.0, 400.0, 500.0),
+        (If97Region::Region5, 30e6, 1000.0, 1500.0),
+        (If97Region::Region5, 50e6_f64.next_up(), 1500.0, 2000.0),
+        (If97Region::Region5, 30e6, 2000.0, 2273.15_f64.next_up()),
     ] {
         assert!(
             isobaric_difference(

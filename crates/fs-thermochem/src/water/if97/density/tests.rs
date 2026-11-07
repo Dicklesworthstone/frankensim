@@ -25,6 +25,9 @@ fn g1_density_curvature_matches_original_scalar_eos_on_both_branches() {
         (3e6, 600.0, V),
         (25e6, 700.0, V),
         (1e6, 1000.0, V),
+        (0.5e6, 1500.0, If97Region::Region5),
+        (30e6, 1500.0, If97Region::Region5),
+        (30e6, 2000.0, If97Region::Region5),
     ];
     for (p, t, region) in cases {
         let original = state(p, t, region);
@@ -118,6 +121,9 @@ fn g1_joint_density_jet_matches_original_pressure_and_temperature_responses() {
         (3e6, 600.0, V),
         (25e6, 700.0, V),
         (1e6, 1000.0, V),
+        (0.5e6, 1500.0, If97Region::Region5),
+        (30e6, 1500.0, If97Region::Region5),
+        (30e6, 2000.0, If97Region::Region5),
     ] {
         let original = state(p, t, region);
         let full = original.density_jet().unwrap();

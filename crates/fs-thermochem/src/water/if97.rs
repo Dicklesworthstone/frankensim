@@ -1,16 +1,17 @@
 //! Original IAPWS-IF97 liquid and steam Gibbs formulations in coherent SI.
 //!
-//! Implements Regions 1 and 2, the Region 4 saturation equations, and the B23
-//! boundary from IAPWS R7-97(2012), equations (5)--(7), (15)--(17), (29)--(31).
-//! Coefficients are transcribed from that release's Tables 1, 2, 10, 11 and 34.
+//! Implements Regions 1, 2 and 5, the Region 4 saturation equations, and the B23
+//! boundary from IAPWS R7-97(2012), equations (5)--(7), (15)--(17), (29)--(34).
+//! Coefficients are transcribed from Tables 1, 2, 10, 11, 34, 37 and 38.
 //! Attribution: International Association for the Properties of Water and Steam,
 //! <https://iapws.org/technical-guidance/release/IF97-Rev.download>.
 //!
 //! This is a separate source from the parent module's SR1-86 saturation model.
 //! No coefficients, caloric datums or endpoints are mixed between the releases.
 //! The separate `region3` module supplies the original dense-water Helmholtz
-//! source. Region 5, ice and the separate metastable-vapor equation are not
-//! implemented. Gibbs-region requests never extrapolate into those domains. IF97's
+//! source. Ice and the separate metastable-vapor equation are not implemented.
+//! Region 5 retains the source's pure, undissociated-water assumption; chemical
+//! dissociation requires a separate model. IF97's
 //! stated 273.15--273.16 K extension includes states metastable relative to ice.
 //! Source uncertainties remain those in release section 12, not floating-point
 //! error bars. The raw Gibbs energies of the two saturation branches have the
@@ -43,18 +44,24 @@ pub const R_SPECIFIC_J_KG_K: f64 = 461.526;
 pub const MINIMUM_TEMPERATURE_K: f64 = 273.15;
 /// Inclusive Region 1 upper temperature [K].
 pub const REGION1_MAXIMUM_TEMPERATURE_K: f64 = 623.15;
-/// Region 2 upper temperature [K]; hotter Region 5 is not implemented.
+/// Region 2 upper temperature and Region 5 lower boundary [K].
 pub const REGION2_MAXIMUM_TEMPERATURE_K: f64 = 1073.15;
+/// Inclusive Region 5 upper temperature [K], for pure undissociated steam.
+pub const REGION5_MAXIMUM_TEMPERATURE_K: f64 = 2273.15;
+/// Inclusive Region 5 pressure limit [Pa] in the revised 2007 equation.
+pub const REGION5_MAXIMUM_PRESSURE_PA: f64 = 50e6;
 /// Source critical temperature [K]. The exact critical state has singular response.
 pub const CRITICAL_TEMPERATURE_K: f64 = 647.096;
 /// Source critical pressure [Pa], equation (3).
 pub const CRITICAL_PRESSURE_PA: f64 = 22.064e6;
-/// Upper pressure of both implemented regions [Pa].
+/// Upper pressure of Regions 1 and 2 [Pa]; Region 5 stops at 50 MPa.
 pub const MAXIMUM_PRESSURE_PA: f64 = 100e6;
 pub(super) const R1_PRESSURE_STAR_PA: f64 = 16.53e6;
 pub(super) const R1_TEMPERATURE_STAR_K: f64 = 1386.0;
 pub(super) const R2_PRESSURE_STAR_PA: f64 = 1e6;
 pub(super) const R2_TEMPERATURE_STAR_K: f64 = 540.0;
+pub(super) const R5_PRESSURE_STAR_PA: f64 = 1e6;
+pub(super) const R5_TEMPERATURE_STAR_K: f64 = 1000.0;
 
 /// Supported original Gibbs equation; a saturation point requires an explicit side.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +70,8 @@ pub enum If97Region {
     Region1,
     /// Equations (15)--(17): vapor and the admitted high-temperature fluid.
     Region2,
+    /// Equations (32)--(34): pure undissociated steam, 1073.15--2273.15 K.
+    Region5,
 }
 
 /// Source branch and its saturation/supercritical status; no ice stability claim.
@@ -72,11 +81,11 @@ pub enum If97Phase {
     Liquid,
     /// Explicit Region 1 side of Region 4.
     SaturatedLiquid,
-    /// Region 2 outside the saturated or supercritical classifications below.
+    /// Region 2 or 5 outside the saturated or supercritical classifications below.
     Vapor,
     /// Explicit Region 2 side of Region 4, through 623.15 K.
     SaturatedVapor,
-    /// Region 2 with both T and p strictly above the critical constants.
+    /// Region 2 or 5 with both T and p strictly above the critical constants.
     Supercritical,
 }
 
@@ -85,7 +94,7 @@ pub enum If97Phase {
 pub enum If97Error {
     /// Invalid/nonfinite input or a saturation query outside its source interval.
     InvalidInput(&'static str),
-    /// Requested equation does not cover this point, including Region 3/5 points.
+    /// Requested Gibbs equation does not cover this point.
     OutsideRegion {
         region: If97Region,
         pressure_pa: f64,
@@ -146,12 +155,12 @@ impl If97State {
             (If97Region::Region1, true) => If97Phase::SaturatedLiquid,
             (If97Region::Region1, false) => If97Phase::Liquid,
             (If97Region::Region2, true) => If97Phase::SaturatedVapor,
-            (If97Region::Region2, false)
+            (If97Region::Region2 | If97Region::Region5, _)
                 if t > CRITICAL_TEMPERATURE_K && p > CRITICAL_PRESSURE_PA =>
             {
                 If97Phase::Supercritical
             }
-            (If97Region::Region2, false) => If97Phase::Vapor,
+            (If97Region::Region2 | If97Region::Region5, _) => If97Phase::Vapor,
         };
         evaluate(p, t, region, phase)
     }
@@ -416,6 +425,10 @@ pub(super) fn admit(p: f64, t: f64, region: If97Region) -> Result<(), If97Error>
                         true
                     }
             }
+            If97Region::Region5 => {
+                (REGION2_MAXIMUM_TEMPERATURE_K..=REGION5_MAXIMUM_TEMPERATURE_K).contains(&t)
+                    && p <= REGION5_MAXIMUM_PRESSURE_PA
+            }
         };
     if inside {
         Ok(())
@@ -437,6 +450,10 @@ fn evaluate(p: f64, t: f64, region: If97Region, phase: If97Phase) -> Result<If97
         If97Region::Region2 => {
             let tau = R2_TEMPERATURE_STAR_K / t;
             (tau, region2(p / R2_PRESSURE_STAR_PA, tau))
+        }
+        If97Region::Region5 => {
+            let tau = R5_TEMPERATURE_STAR_K / t;
+            (tau, region5(p / R5_PRESSURE_STAR_PA, tau))
         }
     };
     let rt = R_SPECIFIC_J_KG_K * t;
@@ -502,7 +519,7 @@ fn evaluate(p: f64, t: f64, region: If97Region, phase: If97Phase) -> Result<If97
 }
 
 // Pressure derivatives are scaled as pi*gamma_pi, pi^2*gamma_pipi and
-// pi*gamma_pitau. This retains the Region 2 ideal-gas limit without forming
+// pi*gamma_pitau. This retains the vapor ideal-gas limit without forming
 // enormous 1/pi^2 intermediates at low pressure.
 struct Gibbs {
     value: f64,
@@ -571,15 +588,31 @@ fn region1(pi: f64, tau: f64) -> Gibbs {
     }
 }
 fn region2(pi: f64, tau: f64) -> Gibbs {
-    let x = powers::<25>(pi, 0);
-    let y = powers::<59>(tau - 0.5, 0);
-    let ideal = powers::<11>(tau, 7);
+    vapor_gibbs::<25, 59, 11>(pi, tau, 0.5, 7, &R2_IDEAL, &R2_RESIDUAL)
+}
+fn region5(pi: f64, tau: f64) -> Gibbs {
+    vapor_gibbs::<4, 10, 8>(pi, tau, 0.0, 5, &R5_IDEAL, &R5_RESIDUAL)
+}
+// Same derivative algebra and summation order for each original vapor source.
+// Region 5 uses its own 12 terms and small stack tables, never a Region 2
+// extrapolation or a constant-Cp ideal-gas substitute.
+fn vapor_gibbs<const P: usize, const T: usize, const I: usize>(
+    pi: f64,
+    tau: f64,
+    shift: f64,
+    ideal_zero: usize,
+    ideal_terms: &[IdealTerm],
+    residual_terms: &[GibbsTerm],
+) -> Gibbs {
+    let x = powers::<P>(pi, 0);
+    let y = powers::<T>(tau - shift, 0);
+    let ideal = powers::<I>(tau, ideal_zero);
     let mut sums = [Sum::default(); 6];
     sums[0].add(det::ln(pi));
     sums[3].add(1.0);
     sums[4].add(-1.0);
-    for &IdealTerm { j, n } in &R2_IDEAL {
-        let k = (j + 7) as usize;
+    for &IdealTerm { j, n } in ideal_terms {
+        let k = (j + ideal_zero as i32) as usize;
         sums[0].add(n * ideal[k]);
         if j != 0 {
             sums[1].add(n * f64::from(j) * ideal[k - 1]);
@@ -588,7 +621,7 @@ fn region2(pi: f64, tau: f64) -> Gibbs {
             sums[2].add(n * f64::from(j * (j - 1)) * ideal[k - 2]);
         }
     }
-    for &GibbsTerm { i, j, n } in &R2_RESIDUAL {
+    for &GibbsTerm { i, j, n } in residual_terms {
         let (ix, jy) = (i as usize, j as usize);
         let coefficient = n * x[ix];
         let term = coefficient * y[jy];
@@ -745,6 +778,24 @@ pub(super) const R2_RESIDUAL: [GibbsTerm; 43] = [
     g(24, 26, 0.73087610595061e-28),
     g(24, 40, 0.55414715350778e-16),
     g(24, 58, -0.94369707241210e-6),
+];
+// Table 37, equation (33). Source reference constants remain unadjusted.
+pub(super) const R5_IDEAL: [IdealTerm; 6] = [
+    ideal(0, -0.13179983674201e2),
+    ideal(1, 0.68540841634434e1),
+    ideal(-3, -0.24805148933466e-1),
+    ideal(-2, 0.36901534980333),
+    ideal(-1, -0.31161318213925e1),
+    ideal(2, -0.32961626538917),
+];
+// Table 38, revised equation (34), valid through 50 MPa.
+pub(super) const R5_RESIDUAL: [GibbsTerm; 6] = [
+    g(1, 1, 0.15736404855259e-2),
+    g(1, 2, 0.90153761673944e-3),
+    g(1, 3, -0.50270077677648e-2),
+    g(2, 3, 0.22440037409485e-5),
+    g(2, 9, -0.41163275453471e-5),
+    g(3, 7, 0.37919454822955e-7),
 ];
 // Table 1, equation (5), shared with original-source interval admission.
 pub(super) const B23_COEFFICIENTS: [f64; 3] =

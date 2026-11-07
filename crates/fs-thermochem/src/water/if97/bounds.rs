@@ -8,7 +8,8 @@
 
 use super::{
     If97Error, If97Region, R_SPECIFIC_J_KG_K, R1_PRESSURE_STAR_PA, R1_TEMPERATURE_STAR_K, R1_TERMS,
-    R2_IDEAL, R2_PRESSURE_STAR_PA, R2_RESIDUAL, R2_TEMPERATURE_STAR_K,
+    R2_IDEAL, R2_PRESSURE_STAR_PA, R2_RESIDUAL, R2_TEMPERATURE_STAR_K, R5_IDEAL,
+    R5_PRESSURE_STAR_PA, R5_RESIDUAL, R5_TEMPERATURE_STAR_K,
 };
 use core::fmt;
 use fs_qty::{Pressure, Temperature};
@@ -73,7 +74,7 @@ impl If97HeatCapacityBound {
     }
 }
 
-/// Prove Cp bounds on one original Region 1 or Region 2 isobaric path.
+/// Prove Cp bounds on one original Region 1, 2 or 5 isobaric path.
 ///
 /// The returned lower bound also bounds the inverse caloric law globally.
 /// A local enclosure must have upper/lower <= 2 before acceptance, so a nearly
@@ -236,6 +237,12 @@ fn heat_capacity_interval(p: f64, region: If97Region, lo: f64, hi: f64) -> Inter
             0.5,
             &R2_RESIDUAL[..],
         ),
+        If97Region::Region5 => (
+            R5_PRESSURE_STAR_PA,
+            R5_TEMPERATURE_STAR_K,
+            0.0,
+            &R5_RESIDUAL[..],
+        ),
     };
     let tau = Interval { lo, hi }
         .reciprocal_positive()
@@ -244,7 +251,7 @@ fn heat_capacity_interval(p: f64, region: If97Region, lo: f64, hi: f64) -> Inter
     let pi = Interval::point(p).multiply(Interval::point(p_star).reciprocal_positive());
     let x = match region {
         If97Region::Region1 => Interval::point(7.1).subtract(pi),
-        If97Region::Region2 => pi,
+        If97Region::Region2 | If97Region::Region5 => pi,
     };
     let minus_r = Interval::point(-R_SPECIFIC_J_KG_K);
     let tau_squared = tau.positive_power(2);
@@ -262,20 +269,23 @@ fn heat_capacity_interval(p: f64, region: If97Region, lo: f64, hi: f64) -> Inter
             .multiply(minus_r);
         cp = cp.add(value);
     }
-    if region == If97Region::Region2 {
-        for term in &R2_IDEAL {
-            if term.j == 0 || term.j == 1 {
-                continue;
-            }
-            // Here tau^2 cancels algebraically before enclosing the original
-            // ideal-gas Gibbs second derivative, improving the global bound.
-            let value = Interval::point(term.n)
-                .multiply(Interval::point(f64::from(term.j)))
-                .multiply(Interval::point(f64::from(term.j - 1)))
-                .multiply(tau.positive_power(term.j))
-                .multiply(minus_r);
-            cp = cp.add(value);
+    let ideal_terms = match region {
+        If97Region::Region1 => &[][..],
+        If97Region::Region2 => &R2_IDEAL[..],
+        If97Region::Region5 => &R5_IDEAL[..],
+    };
+    for term in ideal_terms {
+        if term.j == 0 || term.j == 1 {
+            continue;
         }
+        // Here tau^2 cancels algebraically before enclosing the original
+        // ideal-gas Gibbs second derivative, improving the global bound.
+        let value = Interval::point(term.n)
+            .multiply(Interval::point(f64::from(term.j)))
+            .multiply(Interval::point(f64::from(term.j - 1)))
+            .multiply(tau.positive_power(term.j))
+            .multiply(minus_r);
+        cp = cp.add(value);
     }
     cp
 }
