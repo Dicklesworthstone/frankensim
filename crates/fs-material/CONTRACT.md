@@ -1,5 +1,32 @@
 # fs-material — CONTRACT
 
+## Source-prepared natural strain for finite membranes
+
+`sheet::hyperelastic::expansion` binds a reusable `PreparedFreeExpansion`
+engineering-length path to the original sheet. Every temperature endpoint is
+evaluated relative to the retained original datum; expansion ratios never
+compound and the original mass, thickness and property receipts never refresh.
+The exact selected hyperelastic model is admitted at the endpoint temperature.
+The source card, typed temperature coordinate and fixed external conditions
+remain bound to the prepared path.
+
+Isotropic sources and explicitly aligned fixed-principal sources are supported.
+Directional mappings must be proper signed axis permutations into the fixed
+warp/weft/normal frame. Unsupported thermal shear, inconsistent frame identities,
+foreign cards, ambiguous temperatures and out-of-domain endpoints refuse.
+Preparation runs outside native mechanical iterations and shares the immutable
+source path across endpoints.
+
+`with_hyperelastic_free_expansion` selects the path once;
+`at_hyperelastic_temperature` prepares later endpoints. Accepted viscous states
+must continue through their native reference-change transaction and its separate
+signed work accounts. This is prescribed thermal strain preparation, not a
+caloric or entropy closure; native viscoelastic reference events still require
+unchanged equilibrium and ordered branch energies.
+`tests/sheet_hyperelastic/expansion.rs` covers retained datum/inventory,
+directional and exact-volume free shapes, source/frame refusals and continuation
+of the original native Maxwell memory.
+
 ## Prescribed membrane strain-reference changes with retained memory
 
 `ViscoHyperelastic::change_membrane_reference_from` preserves the installed

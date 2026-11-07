@@ -47,6 +47,8 @@ pub enum SheetError {
     Material(MaterialStatePointError),
     /// The original three-dimensional constitutive owner refused the state.
     Hyperelastic(crate::MaterialError),
+    /// Original prepared engineering-length path refused the thermal endpoint.
+    Expansion(crate::thermal::transport::ThermalTransportError),
     /// Missing capability, incompatible meaning, nonfinite or unstable data.
     Invalid(&'static str),
 }
@@ -56,14 +58,17 @@ impl From<MaterialStatePointError> for SheetError {
 impl From<crate::MaterialError> for SheetError {
     fn from(value: crate::MaterialError) -> Self { Self::Hyperelastic(value) }
 }
+impl From<crate::thermal::transport::ThermalTransportError> for SheetError {
+    fn from(value: crate::thermal::transport::ThermalTransportError) -> Self { Self::Expansion(value) }
+}
 impl core::fmt::Display for SheetError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self { Self::Material(e) => e.fmt(f), Self::Hyperelastic(e) => e.fmt(f), Self::Invalid(s) => write!(f, "sheet: {s}") }
+        match self { Self::Material(e) => e.fmt(f), Self::Hyperelastic(e) => e.fmt(f), Self::Expansion(e) => e.fmt(f), Self::Invalid(s) => write!(f, "sheet: {s}") }
     }
 }
 impl std::error::Error for SheetError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self { Self::Material(e) => Some(e), Self::Hyperelastic(e) => Some(e), _ => None }
+        match self { Self::Material(e) => Some(e), Self::Hyperelastic(e) => Some(e), Self::Expansion(e) => Some(e), _ => None }
     }
 }
 

@@ -10,6 +10,9 @@
 //! Green-strain tangent, including the stress times second-kinematic-derivative
 //! term. The physical membrane element retains its own geometric stiffness.
 
+/// Reusable engineering-length paths with retained original sheet inventory.
+pub mod expansion;
+
 use super::{
     AREAL_DENSITY, MEMBRANE_PROPERTIES, ResolvedSheet, SheetError, SheetLaw, SheetResponse,
     THICKNESS,
@@ -52,6 +55,7 @@ struct NaturalReference {
     inverse: [f64; 3],
     volume_ratio: f64,
     thermal: Option<Box<MeanThermalSource>>,
+    expansion: Option<Box<expansion::SheetExpansionReference>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -213,6 +217,7 @@ impl HyperelasticMembrane {
             inverse,
             volume_ratio,
             thermal: None,
+            expansion: None,
         });
         Ok(self)
     }

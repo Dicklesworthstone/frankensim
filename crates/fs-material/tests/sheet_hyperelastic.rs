@@ -1,4 +1,7 @@
 //! Native finite-strain sheet laws; all sources below are synthetic fixtures.
+#[path = "sheet_hyperelastic/expansion.rs"]
+mod expansion;
+
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, ConstitutiveModelCard, InitialStatePolicy, InterpolationPolicy, LawId, LawParameter,
