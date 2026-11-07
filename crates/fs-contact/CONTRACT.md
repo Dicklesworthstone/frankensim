@@ -3822,3 +3822,44 @@ texture/footprint covariance, unloaded admission, and transactional source,
 geometry, schema and late-cancellation refusals. Existing numerical/source
 owners are compiled directly in the focused harness; this is not full-workspace
 or measured-material qualification.
+
+## Low-Tabor adhesion with evolving-area elastic microslip
+
+`normal_patch::dmt::mindlin::SourceDmtMindlinContact` retains the original
+DMT-M normal source and resolves an explicitly requested constant Coulomb
+coefficient from the same ordered interface and physical query. Both original
+bulk states determine the native Hertz--Mindlin compliance. The existing
+analytic `HertzMindlinContact` owns growing/shrinking contact, nested scalar
+reversals, elastic shear storage, partial slip and gross sliding. Only the
+original Hertz repulsive pressure enters its capacity; zero or tensile net
+normal force can coexist with finite shear. No adhesion datum is replaced by
+zero to pass the nonadhesive source wrapper.
+
+Simultaneous affine indentation and scalar shear use the original exact-work
+average effort and optional scalar body compliance. Allocation-free probes
+reuse the native analytic response/solve without constructing history; final
+candidate construction still checks the original memory ceiling. The original
+DMT potential supplies normal work and its stable piecewise analytic
+`mean_force_between`, including the equal-endpoint limit. Adhesive normal
+storage and native friction heat remain separate; neither is counted twice.
+
+Both endpoint indentations must be nonnegative. The source refuses a finite-gap
+crossing instead of silently clamping the path or inventing contact-entry
+timing. Touch releases the native memory through its physical microslip work;
+subsequent contact can grow from that explicit zero-area state. Original DMT
+applicability limits, exact source/checkpoint identity, fixed external property
+coordinates, input/force/iteration budgets and cancellation remain enforced.
+Normal mechanics, step/rate limits, finite-rotation transport, heat partition,
+JKR partial slip, finite junction shear strength and shear-induced peeling
+remain with their declared physical owners. This is the decoupled scalar
+Hertz--Mindlin approximation on the DMT repulsive disk, not a general adhesive
+friction model.
+
+Five G1/G3/G4 source regressions check independent zero/tensile-load Cattaneo
+forces and radial tractions, native evolving-area history and unloading heat,
+adhesion-dependent normal work and force-controlled area, exact mean force
+through gap/contact branches and adjacent endpoints, original evidence and
+atomic source/domain/cancellation refusals. The native changing-load trial
+owner's 19 tests passed in a focused original-source Rust build with actual
+`fs-math`; the full source-bound contact tests and workspace build are not
+claimed by that limited run.

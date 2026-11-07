@@ -2,6 +2,39 @@
 use super::{DmtError, SourceDmtSphereContact};
 
 impl SourceDmtSphereContact {
+    /// Exact path-average normal effort on the same affine signed-approach
+    /// interval as `reversible_work_between`. Equal endpoints return the
+    /// original force. Piece fractions avoid division by a vanishing travel.
+    pub fn mean_force_between(&self, from_m: f64, to_m: f64) -> Result<f64, DmtError> {
+        let from = self.evaluate(from_m)?;
+        self.evaluate(to_m)?;
+        if from_m == to_m {
+            return Ok(from.normal_force_n);
+        }
+        let lo = from_m.min(to_m);
+        let hi = from_m.max(to_m);
+        let width = hi - lo;
+        let a = lo.max(-self.interaction_range_m);
+        let b = hi.min(0.0);
+        let gap = if b > a {
+            -self.tail_stiffness_n_per_m
+                * (0.5 * (a + self.interaction_range_m)
+                    + 0.5 * (b + self.interaction_range_m))
+                * ((b - a) / width)
+        } else {
+            0.0
+        };
+        let a = lo.max(0.0);
+        let b = hi.max(0.0);
+        let contact = if b > a {
+            (mean_hertz_force(self.hertz_coefficient, a, b) - self.pull_off_magnitude_n)
+                * ((b - a) / width)
+        } else {
+            0.0
+        };
+        finite(gap + contact, "DMT mean normal force")
+    }
+
     /// Conservative work for prescribed signed approach, J. Integrates the
     /// original force analytically, avoiding cancellation between endpoint
     /// potentials for small motion. No intrinsic hysteresis or heat is added.

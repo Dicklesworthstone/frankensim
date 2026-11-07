@@ -32,6 +32,9 @@ pub mod events;
 /// Stable loading-machine branches and finite-range snap events.
 #[path = "dmt/fixture.rs"]
 pub mod fixture;
+/// Sourced low-Tabor adhesion with evolving Hertz--Mindlin partial-slip memory.
+#[path = "dmt/mindlin.rs"]
+pub mod mindlin;
 
 use core::f64::consts::PI;
 
