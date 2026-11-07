@@ -152,10 +152,13 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// Fit momentum and heat separately on each homogeneous channel plane.
     /// Exactly one axis must have halfway walls, and every axis needs at least
     /// three cells. All cells must be fluid. The three wall-normal centers also
-    /// support one-sided differentiation of the Favre-filtered adiabatic scalar.
-    /// The original stationary or translating tangential wall velocities and
-    /// adiabatic/isothermal thermal condition supply the boundary derivatives
-    /// on every preparation, including an accepted-time wall-velocity update.
+    /// support one-sided differentiation of the Favre-filtered scalar. Uniform
+    /// isothermal/adiabatic planes retain their original wall derivatives.
+    /// Heterogeneous thermal data and flux/film planes use the original
+    /// three-fluid-center derivative at both scalar levels, without inventing
+    /// a mean wall temperature or a boundary condition on the Favre quotient.
+    /// Original stationary/translating wall velocities and the actual thermal
+    /// table are consumed on every preparation and accepted-time wall update.
     ///
     /// This resolved-wall exploratory closure adds no wall function. Modeled
     /// heat acts only on interior shared faces; wall conduction remains the
@@ -169,9 +172,6 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         config: NsfChannelDynamicThermalSgsConfig,
         maximum_workspace_bytes: usize,
     ) -> Result<Self, NsfError> {
-        if !self.thermal_walls.is_empty() {
-            return Err(NsfError::Input("channel dynamic SGS requires uniform global thermal walls"));
-        }
         config.validate()?;
         if self.sgs.is_some() || self.dynamic_sgs.is_some() {
             return Err(NsfError::Input(
@@ -332,12 +332,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     .lock()
                     .map_err(|_| NsfError::Input("channel NSF workspace lock poisoned"))?;
                 let ChannelWorkspace { momentum, heat } = &mut *workspace;
-                let scalar_wall = match self.spec.wall {
-                    WallThermal::Adiabatic => ScalarWall::ZeroGradient,
-                    WallThermal::Isothermal(kelvin) => {
-                        ScalarWall::Value(self.law.theta_of_kelvin(kelvin))
-                    }
-                };
+                let scalar_walls = self.channel_scalar_walls(*normal_axis);
                 momentum
                     .prepare_with_scalar(
                         config.momentum,
@@ -346,7 +341,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                         velocity,
                         self.edge_velocity[*normal_axis],
                         theta,
-                        [scalar_wall; 2],
+                        scalar_walls,
                         heat,
                         || false,
                     )
@@ -361,6 +356,68 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 )
             }
         }
+    }
+
+    /// Only a genuinely uniform prescribed scalar survives Favre filtering as
+    /// that same wall value. A varying wall value, heat flux or film does not
+    /// authorize a boundary gradient for the density-weighted quotient. Reuse
+    /// the channel owner's second-order fluid-only reconstruction on that side
+    /// at BOTH levels; native molecular faces still impose their actual law.
+    ///
+    /// One sparse-table pass, no per-cell wall array, material query or inferred
+    /// wall density. Complete uniform overrides retain their exact wall law;
+    /// partial overrides must also agree with the unlisted global default.
+    fn channel_scalar_walls(&self, normal_axis: usize) -> [ScalarWall; 2] {
+        let default = match self.spec.wall {
+            WallThermal::Adiabatic => ScalarWall::ZeroGradient,
+            WallThermal::Isothermal(kelvin) => {
+                ScalarWall::Value(self.law.theta_of_kelvin(kelvin))
+            }
+        };
+        if self.thermal_walls.is_empty() {
+            return [default; 2];
+        }
+        let mut declared = [None; 2];
+        let mut count = [0usize; 2];
+        for wall in &self.thermal_walls {
+            // Channel admission excludes interior solids and every other wall
+            // axis. Retain the explicit face test instead of inferring a side
+            // from a non-boundary coordinate.
+            let side = usize::from(wall.high);
+            let edge = if wall.high {
+                self.spec.dims[normal_axis] - 1
+            } else {
+                0
+            };
+            if wall.axis != normal_axis || wall.cell[normal_axis] != edge {
+                continue;
+            }
+            let policy = match wall.thermal {
+                NsfWallThermal::Adiabatic | NsfWallThermal::HeatFlux(0.0) => {
+                    ScalarWall::ZeroGradient
+                }
+                NsfWallThermal::Isothermal(kelvin) => {
+                    ScalarWall::Value(self.law.theta_of_kelvin(kelvin))
+                }
+                NsfWallThermal::Film { coefficient_w_m2_k: 0.0, .. } => {
+                    ScalarWall::ZeroGradient
+                }
+                NsfWallThermal::HeatFlux(_) | NsfWallThermal::Film { .. } => {
+                    ScalarWall::Interior
+                }
+            };
+            count[side] += 1;
+            declared[side] = Some(match declared[side] {
+                Some(previous) if previous != policy => ScalarWall::Interior,
+                _ => policy,
+            });
+        }
+        let plane_cells = self.n / self.spec.dims[normal_axis];
+        core::array::from_fn(|side| match declared[side] {
+            Some(policy) if count[side] == plane_cells || policy == default => policy,
+            Some(_) => ScalarWall::Interior,
+            None => default,
+        })
     }
 
     fn dynamic_transport_field(

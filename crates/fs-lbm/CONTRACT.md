@@ -4091,13 +4091,31 @@ the original deterministic reduction order. There is no additional full-cell
 sweep or modeled SGS wall heat. Wall stress work remains a separate account,
 including at a face that is simultaneously heated/cooled and moving. Local
 molecular, Smagorinsky, WALE and Vreman flow paths retain their existing owners.
-The channel dynamic SGS filter still requires its original uniform scalar
-ghost-wall law, so heterogeneous overrides and that filter are mutually
-exclusive in both attachment orders.
+Channel dynamic SGS now accepts these thermal tables in either attachment
+order. A sparse scan determines each wall plane's actual scalar derivative
+policy. Uniform isothermal planes retain their own prescribed value, including
+different values on the two sides; uniform insulated planes retain the original
+zero physical gradient and separate Favre derivative. Full-plane overrides can
+replace the global default. Partial overrides retain a uniform policy only
+when they agree with the remaining default faces. Zero flux and zero film
+coefficient are exact insulation.
+
+Heterogeneous, nonzero-flux and finite-film planes instead use the shared
+channel filter's `ScalarWall::Interior`: second-order three-fluid-center normal
+derivatives at both physical and Favre-filtered levels. A spatially varying
+prescribed value or native material-dependent wall flux does not authorize an
+invented wall datum on the Favre quotient. No averaged wall temperature,
+additional material query or SGS wall heat is supplied. The original molecular
+faces still impose every actual local boundary law. This extends the existing
+exploratory plane-averaged closure, retaining its derivative truncation and
+plane-averaging assumptions; it does not calibrate a localized turbulent
+thermal boundary layer. Empty tables keep the original global path exactly.
 
 Changing the table at an accepted time preserves populations, temperature,
 force, energy, clocks and cumulative ledgers, and refreshes the current native
-FV history under the new wall data. The next original trapezoid therefore uses
+FV history under the new wall data. Channel scalar transport is refitted from
+the current accepted fields in the same transaction, including when the table
+is cleared; failures preserve the previously accepted coefficients. The next original trapezoid therefore uses
 the new condition at both time levels, without an instantaneous energy impulse.
 `set_thermal_walls_cancellable` checks cancellation before/after admission and
 after the complete flux evaluation; any refusal restores controls and history.
@@ -4331,10 +4349,12 @@ maximum_bytes)` extends that same native transport/energy owner to an entirely
 fluid plane channel: exactly one halfway-wall axis, two periodic axes and at
 least three cells on every axis. Its paired channel momentum/scalar workspace
 also requires 200 nominal bytes per cell. Current stationary or tangentially
-moving wall velocities and the original uniform isothermal or adiabatic wall
-condition enter each fit. Adiabatic physical scalar derivatives and the
-Favre-filtered scalar's one-sided normal derivatives remain distinct, as
-specified by the shared channel model.
+moving wall velocities and the actual thermal table enter each fit. Uniform
+isothermal or adiabatic planes retain their declared values/derivatives;
+heterogeneous or native flux/film planes use the original three-fluid-center
+reconstruction at both scalar levels, as specified above. Adiabatic physical
+scalar derivatives and the Favre-filtered scalar's one-sided normal derivatives
+remain distinct, as specified by the shared channel model.
 
 The original material heat capacity, Guo velocity, independent molecular bulk
 rate, interior shared-face conductivity and conservative total-energy owner
@@ -4347,12 +4367,18 @@ changes refresh transport and energy history transactionally. Attaching open
 faces or characteristic boundaries after either dynamic closure refuses before
 mutation, retaining the admitted filter topology.
 
-Four focused native channel regressions cover current source heat capacity and
+The focused native channel regressions cover current source heat capacity and
 force/wall data, heat-only planes, molecular wall conduction, shared-face
 admission, moving-wall energy, worker identity, workspace reuse, refused-step
 rollback, zero controls and topology/budget refusals. The periodic regressions
-retain their original physical assertions. Interior solids, spatially varying
-wall data, wall functions and channel DNS calibration remain outside this path.
+retain their original physical assertions. Additional local-wall regressions
+compare both attachment orders and exact uniform trajectories, preserve
+distinct uniform side values, exercise heterogeneous temperature/flux/film
+planes with one molecular heat account, verify current-endpoint refits and
+coefficient/cancellation rollback, and cover all three wall axes and both sides.
+The shared channel derivative MMS remains the independent physical/Favre
+gradient oracle. Interior solids, wall functions, spatially varying wall
+velocity and channel DNS calibration remain outside this path.
 
 ### Evolving Mann turbulence on an original reservoir aperture
 

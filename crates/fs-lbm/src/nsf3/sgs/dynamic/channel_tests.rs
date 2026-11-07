@@ -8,6 +8,9 @@ mod source;
 
 const SHAPE: [usize; 3] = [5, 4, 5];
 
+#[path = "channel_tests/thermal_wall.rs"]
+mod thermal_wall;
+
 fn spec(workers: usize, wall: WallThermal) -> NsfSpec {
     NsfSpec {
         dims: SHAPE,

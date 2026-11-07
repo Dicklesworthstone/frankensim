@@ -93,8 +93,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// reservoir/characteristic openings and solid donor cells are refused.
     /// Temperatures (including film ambient) must lie in the declared gas window;
     /// source material failures and nonfinite heat fluxes are never extrapolated.
-    /// The channel dynamic SGS filter currently requires uniform global thermal
-    /// walls and refuses these local overrides in either attachment order.
+    /// Channel dynamic SGS retains exact uniform scalar wall data where valid;
+    /// heterogeneous or flux/film planes use its existing fluid-only derivative
+    /// at both physical and Favre-filtered levels. Its fit is refreshed in this
+    /// same transaction; native molecular faces remain the sole wall heat owner.
     pub fn set_thermal_walls(&mut self, walls: Vec<NsfThermalWallFace>) -> Result<(), NsfError> {
         self.set_thermal_walls_cancellable(walls, || false)
     }
@@ -108,11 +110,6 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(), NsfError> {
         checkpoint(&mut cancelled)?;
-        if !walls.is_empty() && self.dynamic_sgs.is_some() {
-            return Err(NsfError::Input(
-                "dynamic SGS filters require their original uniform thermal walls",
-            ));
-        }
         if walls.len() > self.n.saturating_mul(6) {
             return Err(NsfError::Input(
                 "thermal wall count exceeds the grid's face count",
@@ -189,15 +186,29 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let history = (|| {
             let (rho, momentum) = self.macro_fields(&self.f);
             let velocity = self.velocity_field(&rho, &momentum, &self.force);
-            // Thermal wall data do not change this accepted state's momentum,
-            // material, SGS transport or open-face traces. Reuse those owners.
+            // Dynamic scalar derivatives depend on the actual wall table.
+            // Stage their new fit before refreshing this accepted state's FV
+            // history; neither its transport nor its controls publish on error.
+            // Momentum, material and open-face traces stay with their owners.
+            let transport = if self.dynamic_sgs.is_some() {
+                Some(self.sgs_field(
+                    &rho,
+                    &velocity,
+                    &self.theta,
+                    &self.material,
+                    self.open_faces.as_ref(),
+                )?)
+            } else {
+                None
+            };
+            let coefficients = transport.as_deref().unwrap_or(&self.sgs_transport);
             let stress = self.stress_field(
                 &self.f,
                 &self.force,
                 &rho,
                 &self.theta,
                 &self.material,
-                &self.sgs_transport,
+                coefficients,
             );
             let history = self.flux_divergence(
                 &self.e,
@@ -205,19 +216,22 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 &velocity,
                 &self.theta,
                 &stress,
-                &self.sgs_transport,
+                coefficients,
                 self.open_faces.as_ref(),
             )?;
             checkpoint(&mut cancelled)?;
-            Ok(history)
+            Ok((history, transport))
         })();
-        let (div, wall, open) = match history {
+        let ((div, wall, open), transport) = match history {
             Ok(history) => history,
             Err(error) => {
                 self.thermal_walls = old;
                 return Err(error);
             }
         };
+        if let Some(transport) = transport {
+            self.sgs_transport = transport;
+        }
         self.div = div;
         self.wall_out = wall;
         self.open_out = open;
