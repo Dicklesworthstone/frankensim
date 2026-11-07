@@ -21,6 +21,8 @@ use super::{
 };
 
 mod local;
+mod transient;
+pub use transient::{TensorConductionStep, advance_tensor_conduction};
 use local::LocalOperator;
 
 /// Frozen physical conductivity in grid Cartesian coordinates, W/(m K).

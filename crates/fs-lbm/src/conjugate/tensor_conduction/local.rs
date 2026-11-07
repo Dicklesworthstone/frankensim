@@ -186,4 +186,98 @@ mod tests {
         assert!(LocalOperator::new(k, [1e-300;3]).is_none());
         assert!(LocalOperator::new(k, [1e300;3]).is_none());
     }
+
+    // The independent dense reference is deliberately confined to tiny leaf
+    // tests; production uses the existing bounded sparse Krylov owner.
+    fn solve_storage_pair(old: [f64; 2], capacities: [f64; 2], dt: f64)
+        -> ([f64; 2], [[f64; 6]; 2], [[f64; 6]; 2])
+    {
+        let op = LocalOperator::new(
+            [[1.0,0.0,0.0],[0.0,2.0,0.0],[0.0,0.0,3.0]], [1.0;3],
+        ).unwrap();
+        let mut a = [[0.0; 12]; 12];
+        let mut rhs = [0.0; 12];
+        for cell in 0..2 {
+            let storage = capacities[cell] / dt;
+            let local = op.schur(storage);
+            let load = storage * old[cell];
+            for f in 0..6 {
+                rhs[6*cell+f] = op.cell_link[f] * load / (op.cell_diagonal+storage);
+                for g in 0..6 {
+                    a[6*cell+f][6*cell+g] = local[f][g];
+                }
+            }
+        }
+        // A=1 m2, R''=0.5 m2 K/W, between the two physical face traces.
+        let contact = 2.0;
+        a[1][1] += contact;
+        a[6][6] += contact;
+        a[1][6] -= contact;
+        a[6][1] -= contact;
+        for column in 0..12 {
+            let pivot = (column..12).max_by(|&i, &j| {
+                a[i][column].abs().partial_cmp(&a[j][column].abs()).unwrap()
+            }).unwrap();
+            a.swap(column, pivot);
+            rhs.swap(column, pivot);
+            let divisor = a[column][column];
+            assert!(divisor.abs() > 1e-14);
+            for j in column..12 { a[column][j] /= divisor; }
+            rhs[column] /= divisor;
+            for row in 0..12 {
+                if row == column { continue; }
+                let factor = a[row][column];
+                for j in column..12 { a[row][j] -= factor * a[column][j]; }
+                rhs[row] -= factor * rhs[column];
+            }
+        }
+        let faces: [[f64;6];2] = core::array::from_fn(|cell| {
+            core::array::from_fn(|f| rhs[6*cell+f])
+        });
+        let temperature = core::array::from_fn(|cell| {
+            let storage = capacities[cell]/dt;
+            (storage*old[cell] + op.cell_link.iter().zip(faces[cell])
+                .map(|(b,t)| b*t).sum::<f64>())/(op.cell_diagonal+storage)
+        });
+        let heat = core::array::from_fn(|cell| op.outward_heat(temperature[cell], faces[cell]));
+        (temperature, faces, heat)
+    }
+
+    #[test]
+    fn storage_condensation_preserves_unequal_capacity_contact_equilibration() {
+        let old = [400.0, 300.0];
+        let capacity = [2.0, 3.0];
+        let dt = 2.0;
+        let (temperature, face, heat) = solve_storage_pair(old, capacity, dt);
+        let conductance = 1.0/(0.5+0.5+0.5);
+        let difference = 100.0/(1.0+dt*conductance*(1.0/capacity[0]+1.0/capacity[1]));
+        let total = capacity[0]*old[0]+capacity[1]*old[1];
+        let exact = [(total+capacity[1]*difference)/5.0, (total-capacity[0]*difference)/5.0];
+        for cell in 0..2 {
+            assert!((temperature[cell]-exact[cell]).abs()<2e-11);
+            assert!((capacity[cell]*(temperature[cell]-old[cell])
+                + dt*heat[cell].iter().sum::<f64>()).abs()<2e-10);
+        }
+        assert!((heat[0][1]+heat[1][0]).abs()<2e-11);
+        assert!((heat[0][1]-conductance*difference).abs()<2e-11);
+        assert!((face[0][1]-face[1][0]-0.5*heat[0][1]).abs()<2e-11);
+        let storage: f64 = (0..2).map(|c| capacity[c]*(temperature[c]-old[c])).sum();
+        assert!(storage.abs()<2e-10);
+    }
+
+    #[test]
+    fn storage_condensation_converges_to_the_independent_diffusion_mode() {
+        let capacity = [2.0, 3.0];
+        let march = |steps: usize| {
+            let mut temperature = [400.0,300.0];
+            for _ in 0..steps {
+                temperature = solve_storage_pair(temperature, capacity, 1.0/steps as f64).0;
+            }
+            temperature[0]-temperature[1]
+        };
+        let exact = 100.0 * (-(2.0_f64/3.0)*(1.0/2.0+1.0/3.0)).exp();
+        let coarse = (march(10)-exact).abs();
+        let fine = (march(20)-exact).abs();
+        assert!(coarse/fine>1.9 && coarse/fine<2.1, "{coarse} {fine}");
+    }
 }

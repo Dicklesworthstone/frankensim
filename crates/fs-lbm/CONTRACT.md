@@ -1,5 +1,36 @@
 # CONTRACT: fs-lbm
 
+## Transient full-tensor conduction with physical cell storage
+
+`advance_tensor_conduction` advances the same conservative hybrid face
+operator by one backward-Euler interval. Its explicit per-cell sensible
+capacities are in J/K and are counted once, without another volume factor.
+The original previous temperature contributes C/dt and (C/dt)*T_old only to
+cell equations before static condensation. Faces and zero-thickness contacts
+carry no invented storage. Positive cell storage admits insulated bodies.
+
+`TensorConductionStep` retains the actual endpoint face temperatures and
+outward heat together with the native `TransientRecord`. Native local
+heat-residual checks include storage. The shared physical record accounts
+for source heat, external/sink exchange and prescribed-cell reservoir
+reactions; a prescribed-temperature jump also receives its C*delta(T) from
+that reservoir exactly once. Failed/cancelled trials cannot mutate the
+caller's original temperature, capacities or authored setup.
+
+This entry has fixed SPD tensors and fixed sensible capacities over each
+interval, and uses the supplied endpoint boundary/source sample. It does not
+infer latent heat, varying calorics, advected enthalpy or nonlinear tensor
+updates. Backward Euler remains first order in time; a general discrete
+maximum principle for rotated anisotropy is not claimed.
+
+Two exact production-kernel native Rust checks passed for statically condensed
+unequal-capacity contact equilibration, interface flux/jump and stored-energy
+conservation, and convergence to the independent diffusion decay mode.
+Four full native pipeline regressions cover those contacts, non-unit-volume
+uniform heating with rotated tensors, fixed-cell reservoir storage, and time
+refinement; they are defined but unexecuted in this workspace's incomplete
+native build.
+
 ## Conservative full-tensor conduction on the native box grid
 
 The opt-in `solve_tensor_conduction` owner admits one frozen finite symmetric

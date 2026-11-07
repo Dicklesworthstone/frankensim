@@ -390,8 +390,35 @@ pub(super) fn record_energy_step(
     radiated_w: f64,
     outflow_correction_w: f64,
 ) -> Result<TransientRecord, ChtError> {
+    record_conduction_step(
+        domain,
+        setup,
+        &next.temperature,
+        next.report.balance,
+        next.report.iterations,
+        stored_by_cell,
+        (time_s, dt, solids_present),
+        radiated_w,
+        outflow_correction_w,
+    )
+}
+
+/// Shared physical heat ledger for native cell/trace conduction operators.
+/// Only their actual temperature and face-energy evidence are consumed; no
+/// scalar two-point conductance is inferred for a full tensor discretization.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn record_conduction_step(
+    domain: &VoxelDomain,
+    setup: &ThermalSetup,
+    temperature: &[f64],
+    balance: super::energy::EnergyBalance,
+    iterations: usize,
+    stored_by_cell: impl Fn(usize) -> f64,
+    (time_s, dt, solids_present): (f64, f64, bool),
+    radiated_w: f64,
+    outflow_correction_w: f64,
+) -> Result<TransientRecord, ChtError> {
     let stored: f64 = (0..domain.cell_count()).map(&stored_by_cell).sum();
-    let balance = next.report.balance;
     let source_j = balance.source_w * dt;
     // Prescribed cells may jump from the initial state. Their reservoir
     // supplies that storage change as well as the steady face/sink reaction.
@@ -408,14 +435,14 @@ pub(super) fn record_energy_step(
         + outflow_correction_w)
         * dt
         - fixed_storage_j;
-    let max_temperature_k = next
-        .temperature
+    let max_temperature_k = temperature
         .iter()
         .copied()
         .fold(f64::NEG_INFINITY, f64::max);
     let max_solid_temperature_k = if solids_present {
-        next.max_where(|c| !domain.is_fluid(c))
-            .map_or(f64::NAN, |(_, t)| t)
+        temperature.iter().enumerate()
+            .filter_map(|(cell, &value)| (!domain.is_fluid(cell)).then_some(value))
+            .fold(f64::NEG_INFINITY, f64::max)
     } else {
         f64::NAN
     };
@@ -428,7 +455,7 @@ pub(super) fn record_energy_step(
         boundary_outflow_j,
         closure_j: stored - (source_j - boundary_outflow_j),
         radiated_w,
-        iterations: next.report.iterations,
+        iterations,
     };
     for value in [record.stored_energy_change_j, record.source_j,
         record.boundary_outflow_j, record.closure_j] {
