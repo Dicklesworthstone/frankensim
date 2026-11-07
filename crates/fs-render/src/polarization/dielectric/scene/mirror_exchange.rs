@@ -21,6 +21,26 @@ pub struct MirrorInteraction {
 pub struct MirrorPathResult {
     pub path: PathResult,
     pub mirrors: Vec<MirrorInteraction>,
+    source_beam: PolarizedBeam,
+    seed: u64,
+    path_id: u64,
+}
+
+impl MirrorPathResult {
+    /// Original launch beam used to normalize actual intercepted powers.
+    pub const fn source_beam(&self) -> &PolarizedBeam {
+        &self.source_beam
+    }
+
+    /// Seed of the original native path draws.
+    pub const fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Logical ID of the original native path draws.
+    pub const fn path_id(&self) -> u64 {
+        self.path_id
+    }
 }
 
 impl PolarizedScene<'_> {
@@ -56,6 +76,6 @@ impl PolarizedScene<'_> {
             |beam, _, distance| SegmentProgress::homogeneous(beam, distance),
             Some(&mut mirrors),
         )?;
-        Ok(MirrorPathResult { path, mirrors })
+        Ok(MirrorPathResult { path, mirrors, source_beam: beam, seed, path_id })
     }
 }

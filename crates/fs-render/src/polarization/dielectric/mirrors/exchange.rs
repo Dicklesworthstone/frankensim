@@ -1,6 +1,7 @@
 //! Heat and stationary radiation force from the original smooth reflection.
 
 use super::{BeamSample, ConductorBeamError, ConductorOptics, PolarizedBeam, Vec3, phase_index, unit};
+use fs_blake3::ContentHash;
 
 const LIGHT_M_S: f64 = 299_792_458.0;
 
@@ -13,8 +14,11 @@ const LIGHT_M_S: f64 = 299_792_458.0;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ConductorBeamBalance {
     reflection: BeamSample,
+    incident_power_w: f64,
     absorbed_power_w: f64,
+    absorbed_fraction: Option<f64>,
     vacuum_force_n: Option<Vec3>,
+    optics_identity: ContentHash,
 }
 
 impl ConductorBeamBalance {
@@ -23,9 +27,27 @@ impl ConductorBeamBalance {
         &self.reflection
     }
 
+    /// Actual ray power reaching this boundary after preceding propagation [W].
+    pub const fn incident_power_w(&self) -> f64 {
+        self.incident_power_w
+    }
+
+    /// Identity of the original conductor and coherent coating optical law.
+    pub const fn optics_identity(&self) -> ContentHash {
+        self.optics_identity
+    }
+
     /// Positive optical power entering the coating and opaque substrate [W].
     pub const fn absorbed_power_w(&self) -> f64 {
         self.absorbed_power_w
+    }
+
+    /// Native loss per unit incident power, before scaling by this ray's power.
+    /// A dark input has no normalized polarization and returns `None`. This
+    /// independent fraction detects loss of relative precision when tiny ray
+    /// weights later normalize a physical illumination schedule.
+    pub const fn absorbed_fraction(&self) -> Option<f64> {
+        self.absorbed_fraction
     }
 
     /// World-space force on stationary matter [N] in an index-one optical host.
@@ -69,15 +91,25 @@ impl PolarizedBeam {
         let eta = phase_index(self)?;
         let balance = optics.power_balance(self.wavelength_nm(), eta, cosine)?;
         let incident = self.with_reference_axis(reflection.beam.frame().horizontal())?.power();
-        let absorbed_power_w = if incident.i == 0.0 {
-            0.0
+        let (absorbed_power_w, absorbed_fraction) = if incident.i == 0.0 {
+            (0.0, None)
         } else {
             // Normalize Q before mixing: I+Q can overflow for a finite beam.
             // Apply the small absorption fraction to I before the polarization
             // weights, retaining weak absolute heat even for very large powers.
             let s = (0.5 + 0.5 * (incident.q / incident.i)).clamp(0.0, 1.0);
-            (incident.i * balance.absorbed[0]) * s
-                + (incident.i * balance.absorbed[1]) * (1.0 - s)
+            let [a_s, a_p] = balance.absorbed;
+            // A convex interpolation avoids halving two subnormal losses
+            // before adding them. Absolute watts retain their scale-first law.
+            let fraction = if a_s >= a_p {
+                a_p + s * (a_s - a_p)
+            } else {
+                a_s + (1.0 - s) * (a_p - a_s)
+            };
+            (
+                (incident.i * a_s) * s + (incident.i * a_p) * (1.0 - s),
+                Some(fraction),
+            )
         };
         let vacuum_force_n = (eta == 1.0).then(|| {
             // P_in k - P_ref k_ref = P_abs k - 2 P_ref cos(theta) n.
@@ -91,7 +123,14 @@ impl PolarizedBeam {
                 absorption * k.z - reflection * normal.z,
             )
         });
-        Ok(ConductorBeamBalance { reflection, absorbed_power_w, vacuum_force_n })
+        Ok(ConductorBeamBalance {
+            reflection,
+            incident_power_w: self.power().i,
+            absorbed_power_w,
+            absorbed_fraction,
+            vacuum_force_n,
+            optics_identity: optics.content_identity(),
+        })
     }
 }
 

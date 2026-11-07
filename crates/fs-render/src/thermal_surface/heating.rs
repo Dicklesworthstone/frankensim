@@ -12,6 +12,8 @@
 //! deposition depth, emission or cooling law is inferred. Native caloric storage,
 //! conduction and independently composed boundary owners remain authoritative.
 
+/// Actual smooth-mirror paths bound to the native thermal timeline.
+pub mod mirror_path;
 mod response;
 pub use response::SurfacePowerResponse;
 /// Coherent coating absorption assigned to separate native thermal receivers.
