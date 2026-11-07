@@ -12629,6 +12629,28 @@ exactly to the phase-only path before inspecting unused heat controls. The
 sensible coefficient must exclude vapor-carried sensible and latent energy.
 The original fixed-volume, authored-area and interface-event limitations apply.
 
+`evaporation::gas::equilibrium::heat::boundary::advance_to_freezing_with_heat`
+locates conservative complete freezing with reciprocal gas heat and vapor on
+one duration. Each bounded trial replays both original owners from unchanged
+inputs. An early vapor endpoint only brackets time; it is accepted only when
+its elapsed time equals the complete heat interval. The returned whole-body
+phase account includes both stages, and unconsumed time belongs to an explicit
+next interface owner. Zero sensible coefficient delegates exactly to the
+analytic phase boundary without inspecting unused heat or event controls.
+
+The heat bracket retains the exact original solid knot as its terminal lower
+bound. Original nonzero-heat bisection endpoints may consequently differ within
+their original temperature and energy allowances from the strict partial-phase
+facade. With zero original vapor flux, including exact saturation, heat itself
+may finish freezing. Any exact-knot correction must fit both the original
+heat-equation tolerance and the single sum-of-absolute energy-defect allowance;
+it is reported explicitly. Active vapor is never suppressed because heat has
+exhausted the liquid seed: those trials only bracket the event or refuse with
+a smaller-step request. Source, donor, endpoint and cancellation gates remain
+shared. The terminal event belongs to the heat-first split; physical timestep
+refinement remains necessary, and neither continuous-time uniqueness nor an
+automatic solid-interface handoff is implied.
+
 `advance_surface_with_gas_mass_selection` accepts a native inventory selector
 before the existing caloric solve. The selected signed transfer must preserve
 direction and nonzero mass within the original absolute mass budget. Both

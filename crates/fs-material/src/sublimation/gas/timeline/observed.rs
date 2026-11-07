@@ -280,4 +280,5 @@ pub fn advance_deposition_adaptive_with_equilibrium<'thermal, 'catalog, O: Depos
 }
 
 #[cfg(test)]
+#[path = "observed/tests.rs"]
 mod tests;

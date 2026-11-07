@@ -13,6 +13,9 @@
 //! Trial heat brackets may use the original solid branch without publishing a
 //! solid endpoint as a liquid surface. Exposed area and geometry remain explicit.
 
+/// Complete freezing with both original substeps on the same accepted clock.
+pub mod boundary;
+
 use super::{
     ClosedGasParcel, EquilibriumEvaporation, EquilibriumSurfaceCandidate, EvaporationLaw,
     GasEvaporationError, GasEvaporationSolve, GasLiquidBinding, LiquidSurfaceState,
@@ -157,6 +160,43 @@ fn finite(value: f64) -> Result<f64, GasEvaporationError> {
     }
 }
 
+// One receipt owner for the strict and terminal heat/phase facades. The caller
+// supplies the absolute substep allowance, including any exact-knot projection.
+fn combine_step(
+    original: &GasEvaporationStep,
+    mut step: GasEvaporationStep,
+    heat: GasFilmHeatStep,
+    sum_absolute_energy_residual_j: f64,
+    controls: GasEvaporationSolve,
+) -> Result<(GasEvaporationStep, f64), GasEvaporationError> {
+    step.surface_temperature_k[0] = original.surface_temperature_k[0];
+    step.gas_temperature_k[0] = original.gas_temperature_k[0];
+    step.vapor_partial_pressure_pa[0] = original.vapor_partial_pressure_pa[0];
+    step.liquid_enthalpy_change_j =
+        finite(step.liquid_enthalpy_change_j + heat.liquid_enthalpy_change_j)?;
+    step.gas_internal_energy_change_j =
+        finite(step.gas_internal_energy_change_j + heat.gas_internal_energy_change_j)?;
+    let sum_absolute_energy_residual_j = finite(sum_absolute_energy_residual_j)?;
+    step.energy_residual_j = finite(step.energy_residual_j + heat.energy_residual_j)?;
+    if sum_absolute_energy_residual_j > controls.gas.energy_tolerance_j {
+        return Err(GasEvaporationError::EnergyBalance {
+            residual_j: sum_absolute_energy_residual_j,
+            tolerance_j: controls.gas.energy_tolerance_j,
+        });
+    }
+    if (step.surface_temperature_k[1] - step.surface_temperature_k[0]).abs()
+        > controls.maximum_temperature_increment_k
+        || (step.gas_temperature_k[1] - step.gas_temperature_k[0]).abs()
+            > controls.maximum_temperature_increment_k
+    {
+        return Err(smaller_step(
+            step.duration_s,
+            "combined heat and phase temperature departure",
+        ));
+    }
+    Ok((step, sum_absolute_energy_residual_j))
+}
+
 /// Implicit reciprocal gas heat, then original fusion-aware vapor transfer.
 ///
 /// Zero sensible coefficient delegates exactly to `advance_equilibrium_surface`
@@ -255,33 +295,13 @@ pub fn advance_equilibrium_surface_with_heat<'curve, 'catalog, L: EvaporationLaw
         phase_controls,
         &mut cancelled,
     )?;
-    let mut step = transfer.exchange().step().clone();
-    step.surface_temperature_k[0] = initial_t;
-    step.gas_temperature_k[0] = gas.state().state().temperature;
-    step.vapor_partial_pressure_pa[0] = original.exchange().step().vapor_partial_pressure_pa[0];
-    step.liquid_enthalpy_change_j =
-        finite(step.liquid_enthalpy_change_j + heat.liquid_enthalpy_change_j)?;
-    step.gas_internal_energy_change_j =
-        finite(step.gas_internal_energy_change_j + heat.gas_internal_energy_change_j)?;
-    let sum_absolute_energy_residual_j =
-        finite(step.energy_residual_j.abs() + heat.energy_residual_j.abs())?;
-    step.energy_residual_j = finite(step.energy_residual_j + heat.energy_residual_j)?;
-    if sum_absolute_energy_residual_j > phase_controls.gas.energy_tolerance_j {
-        return Err(GasEvaporationError::EnergyBalance {
-            residual_j: sum_absolute_energy_residual_j,
-            tolerance_j: phase_controls.gas.energy_tolerance_j,
-        });
-    }
-    if (step.surface_temperature_k[1] - step.surface_temperature_k[0]).abs()
-        > phase_controls.maximum_temperature_increment_k
-        || (step.gas_temperature_k[1] - step.gas_temperature_k[0]).abs()
-            > phase_controls.maximum_temperature_increment_k
-    {
-        return Err(smaller_step(
-            duration_s,
-            "combined heat and phase temperature departure",
-        ));
-    }
+    let (step, sum_absolute_energy_residual_j) = combine_step(
+        original.exchange().step(),
+        transfer.exchange().step().clone(),
+        heat,
+        transfer.exchange().step().energy_residual_j.abs() + heat.energy_residual_j.abs(),
+        phase_controls,
+    )?;
     let phase = inventory.partition_step(
         bulk,
         transfer.exchange().liquid(),

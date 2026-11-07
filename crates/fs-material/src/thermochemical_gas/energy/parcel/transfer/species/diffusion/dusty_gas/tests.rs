@@ -139,7 +139,7 @@ pub(super) fn card(value: f64) -> MaterialCard {
         BINARY_DIFFUSIVITY_DIMS, InterpolationPolicy::ConstantWithinValidity, [1000.0, 1e7],
     )
 }
-fn pair<'a>(a: &str, b: &str, card: &'a MaterialCard, context: &'a QueryPoint)
+pub(super) fn pair<'a>(a: &str, b: &str, card: &'a MaterialCard, context: &'a QueryPoint)
     -> BinaryDiffusionMaterial<'a>
 {
     BinaryDiffusionMaterial {

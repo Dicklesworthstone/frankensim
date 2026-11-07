@@ -69,14 +69,16 @@ pub(in crate::evaporation::gas) fn zero_flux_at_freezing<L: EvaporationLaw + ?Si
 /// Physical time consumed by the existing film and the terminal phase decision.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FreezingBoundaryStep {
-    /// Accepted film duration [s]; also `exchange().step().duration_s`.
+    /// Accepted interface duration [s]; also the reciprocal heat duration when
+    /// this receipt is returned by the combined heat/phase owner.
     pub elapsed_duration_s: f64,
     /// Requested duration not consumed before completion [s].
     pub remaining_duration_s: f64,
     /// The body is exactly at the original all-solid fusion endpoint.
     pub freezing_completed: bool,
-    /// Represented condensed storage minus the original vapor energy target
-    /// [J]. Included in the exchange residual, never an added heat source.
+    /// Represented condensed storage minus the original phase/heat target [J],
+    /// as documented by the consuming owner. Included in its energy residual,
+    /// never an added heat source.
     pub condensed_energy_residual_j: f64,
 }
 
