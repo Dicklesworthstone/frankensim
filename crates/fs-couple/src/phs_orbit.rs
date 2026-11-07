@@ -31,6 +31,9 @@ pub use tangent::{
 /// Physical port harmonics evaluated through the original nonlinear storage.
 pub mod spectrum;
 
+/// Local finite-amplitude resonance surveys of the original forced response.
+pub mod forced_resonance;
+
 /// Original harmonic and sideband outputs through physical BEM receivers.
 pub mod acoustic;
 

@@ -4083,3 +4083,34 @@ Tests verify rotated A/D and full modal-matrix/power scaling, repeatable
 temperature changes, reference-source identity and both expanded and contracted
 frequency admission. This is fixed-temperature preparation without live heat
 feedback or changes to elastic stiffness.
+
+## Local resonance surveys of complete nonlinear forced responses
+
+`phs_orbit::forced_resonance::survey_forced_port_resonances` connects the original
+forced harmonic-balance solution, complete analytic frequency tangent, nonlinear
+physical port observer and shared driven-peak search. Every query predicts all
+original state coefficients, including material memory, from the same admitted
+anchor and its logarithmic frequency derivative, then corrects through the
+existing physically scaled HB solve. Per-state physical RMS correction limits
+and a declared logarithmic frequency interval bound this local operation.
+Query order does not choose the seed, and correction limits do not prove branch
+uniqueness. Singular frequency graphs and source/resolution refusals remain
+failures; pseudo-arclength continuation and stability analysis retain their
+separate existing owners.
+
+The output is an authored port/harmonic of `G^T grad(H)`. Its derivative uses
+`G^T Hxx dX/dln(omega)`, the original coherent input phase, and both original
+output-resolution gates. Peak phasors use `2 conj(c_k)`; derivatives are per
+DRIVE fundamental rad/s even when observing harmonic k. The shared survey owns
+query/peak caps and bracket refinement. Each synchronous HB correction is
+bounded by its native caps; cancellation is polled between owners and inside
+the existing cancellable tangent/observation/search operations. No orbit cache,
+scalar fitted resonance, artificial loss, completeness or stability claim is
+introduced.
+
+Three focused integration regressions cover independent mass/spring/damper plus
+Maxwell response and complex phase at harmonics one and three, finite-amplitude
+nonlinear restoring-effort peaks with changing waveforms, and source-clock,
+anchor, branch-distance, resolution and cancellation refusals. These tests are
+authored but not claimed executed without the complete `fs-couple` dependency
+closure. Formatting and bounded native-API/physics review passed.
