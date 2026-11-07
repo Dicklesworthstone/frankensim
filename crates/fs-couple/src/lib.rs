@@ -99,6 +99,8 @@ pub mod acoustic_realize;
 pub mod air_path;
 /// Original admitted frequency-dependent loads on accepted shell assemblies.
 pub mod assembly_harmonic;
+/// Original-coordinate tensor-Prony shell loading and coherent acoustic receivers.
+pub mod tensor_shell_radiation;
 pub mod bakeoff;
 /// Source-owned shell resonances retaining the original complex BEM pressure equations.
 pub mod bem_loaded_modes;
