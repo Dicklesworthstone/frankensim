@@ -74,6 +74,25 @@ pressure/velocity source derivatives, Robin pressure/velocity and passive wall
 absorption, independent narrow-surface-mode references within a fixed work
 budget, finite reflected self-fields, original-clock harmonic lines and refusals.
 
+`PreparedImpedanceWallQuadrupole` carries a full original symmetric Lighthill
+volume-stress moment [N m] through the same passive-wall Green field. Its six
+physical components `(xx,yy,zz,xy,xz,yz)` retain trace and both shear contractions.
+Four pressure Hessian and ten velocity third-derivative channels preserve
+transverse motion at pressure nulls. Exact rigid/release limits reflect both
+tensor indices with `S M S`, `S=I-2nn^T`; finite walls reuse the original spectral
+coefficient, lossy surface-mode split and evanescent amplification bounds with
+second/third derivative powers and Frobenius shear weights. Cached reflected
+and coherent total 4-by-6 transfers apply without allocation or integration;
+harmonic lines retain the original source clock. A receiver may lie on the wall,
+or coincide with the source for reflected-only evaluation. Native diagnostics
+separate estimated quadrature error from analytic tail bounds per N m.
+`impedance_wall_quadrupole` checks independently differentiated spherical image
+fields, every source derivative of the wall force field, the rotated Robin law
+and passive energy absorption, and independent exponential-integral derivatives
+for a narrow lossy surface mode including axial pressure-null shear velocity.
+This remains a prescribed compact moment, without finite-source resolution,
+unresolved subgrid sound, source loading, finite edges or bulk propagation loss.
+
 `PreparedImpedanceWallCompactSourceObserver` prepares complete physical Q/F
 source assemblies for reflected-only or coherent total observation, including
 receivers on the wall. One 4-by-4 Cartesian transfer per original source feeds

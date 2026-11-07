@@ -308,7 +308,27 @@ fn equal_speed_image(
     observer: [f64; 3],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Transfer, AeroacError> {
-    let reflection = exact_reflection(interface);
+    image_transfer(
+        interface,
+        frequency_hz,
+        source,
+        observer,
+        exact_reflection(interface),
+        cancelled,
+    )
+}
+
+/// Exact planar image stress, shared with the rigid/release impedance limits.
+/// Both source tensor indices transform through the physical mirror; the
+/// scalar reflection coefficient changes only the final image amplitude.
+pub(in crate::curle3d::refraction::full_wave) fn image_transfer(
+    interface: PlanarFluidInterface,
+    frequency_hz: f64,
+    source: [f64; 3],
+    observer: [f64; 3],
+    reflection: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Transfer, AeroacError> {
     if reflection == 0.0 {
         return Ok([[C64::ZERO; 6]; 4]);
     }
