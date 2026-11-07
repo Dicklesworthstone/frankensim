@@ -30,6 +30,8 @@ pub mod network;
 pub mod parallel;
 /// Coupled developed sections with separate viscosity histories and heat.
 pub mod series;
+/// Continuous pulsatile pressure driving on the same viscous history.
+pub mod tones;
 
 use std::sync::Arc;
 

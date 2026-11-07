@@ -4489,6 +4489,31 @@ caller-qualified low-Mach/frozen-density support. Native regressions exercise
 independent radial Stokes startup/reversal and kinetic energy, harmonic phase
 and power, finite-reservoir composition, and atomic history/regime admission.
 
+### Continuous pulsatile pressure histories
+
+`LaminarPipe::prepare_tones` drives that same material-bound pipe and viscous
+history with simultaneous continuous pressure-difference tones, including DC.
+The original `PreparedExactTones` owner integrates the full forced trajectory,
+displaced volume, pressure work and irreversible heat, retaining cross-frequency
+terms. Pressure is not held at a sampled value inside the interval. This removes
+forcing-hold error without changing the physical wall spectrum or dropping
+profile memory. Every oscillatory frequency must be inside the original sampled
+wall-response band; DC retains the exact Poiseuille limit.
+
+`PreparedLaminarTones::advance` advances the pipe clock and caller-owned source
+phase coefficients atomically. Restarts retain both. The sum of pressure-tone
+amplitudes supplies a conservative comparison envelope for the entire interval's
+Reynolds admission, including reversals and peaks missed by endpoint samples.
+It may refuse strongly cancelling waves; it is not a turbulence predictor or a
+time-domain continuum error certificate. Original fixed geometry/density,
+Newtonian, developed, incompressible and rigid no-slip assumptions still apply.
+
+Preparation owns the explicit dense work/memory budget and reusable buffers.
+Warm calls allocate nothing and use cached phase rotations. G1/G3 regressions
+compare pulsatile startup with independent radial Stokes modes, recover the
+held-pressure DC path, preserve flow/displacement/work/heat under interval
+subdivision, and retain accepted flow and forcing phases on refusal.
+
 ## Material-backed finite rectangular cooling-channel sections
 
 `graph::thermal::medium::convection::duct` evaluates the original rectangular
