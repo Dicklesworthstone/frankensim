@@ -65,7 +65,7 @@ impl StochasticDecayBudget {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum EventClock {
+pub(crate) enum EventClock {
     Inactive,
     Finite(Accumulator),
     // A positive waiting time beyond every finite binary64 observation endpoint.
@@ -366,7 +366,7 @@ impl StochasticDecayInventory {
 
 /// The same admitted exponential clock arithmetic for decay, supply and movement.
 /// Callers own the physical rate/count admission and the selected random stream.
-fn sample_clock(
+pub(crate) fn sample_clock(
     rng: &mut StreamCheckpoint,
     rate: f64,
     nuclei: u64,
@@ -418,11 +418,11 @@ fn increment(value: &mut u64) -> Result<(), DecayError> {
     Ok(())
 }
 
-fn before(a: Accumulator, b: Accumulator) -> bool {
+pub(crate) fn before(a: Accumulator, b: Accumulator) -> bool {
     a.hi < b.hi || (a.hi == b.hi && a.lo < b.lo)
 }
 
-fn ceiling(time: Accumulator) -> f64 {
+pub(crate) fn ceiling(time: Accumulator) -> f64 {
     if time.lo > 0.0 {
         time.hi.next_up()
     } else {

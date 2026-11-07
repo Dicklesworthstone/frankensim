@@ -44,6 +44,9 @@ pub mod production;
 /// Conservative finite-inventory exchange between material compartments.
 pub mod transport;
 
+/// Integer capture/decay histories with explicit scheduled neutron irradiation.
+pub mod stochastic;
+
 /// A physical identity and its admitted total spontaneous-decay law.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BurnupNuclide {

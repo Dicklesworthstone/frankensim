@@ -495,6 +495,50 @@ The existing optional radiation response can distribute the outward channel.
 The example `cargo run -p fs-nuclear --example stochastic_production` demonstrates
 explicit manufactured source pulses, shutdown decay and complete restart.
 
+## Integer capture activation and radioactive decay
+
+`burnup::stochastic::StochasticActivationState` evolves finite targets, capture
+products and their subsequent radioactive daughters on one integer history.
+`StochasticActivationSchedule` prepares the original `BurnupModel` reaction
+rates for each explicitly authored flux and nuclear-temperature frame. Fixed
+and tabulated multigroup cross sections, original nuclide identities, half-lives,
+temperature domains and immediate event energy keep their existing owners.
+New products can capture again or decay within the same observation interval;
+their decay clocks start at their actual creation time. Capture deposits prompt
+energy, while later decay events own their separate delayed energy. Shutdown
+removes capture hazards and preserves the radioactive tail.
+
+Each channel must remove one represented parent and retain exactly one daughter
+with unit yield. Fission, missing products and fractional/multiple expected
+yields refuse: mean yields alone do not define a joint discrete outcome. In
+particular, a burnup model retaining multiple charged decay products uses the
+existing expected-population owner, not this one-product stochastic lane.
+Spontaneous branches close to exactly one without normalization. Total integer
+population is conserved and bounded by 2^53; lifetime reaction counters are
+checked against integer overflow.
+
+The original compensated radioactive clock sampler and counter-based random
+stream are reused. An event resamples only reactions whose parent population
+changed; self-product channels resample only themselves. Rate changes redraw
+only changed hazards; unchanged rates and observation boundaries preserve their
+pending clocks. Authored forcing wins exact ties, while genuinely earlier
+sub-ULP reactions retain their order. Cross sections are evaluated once per
+prepared frame, and events allocate nothing. Reaction scans, frame work,
+resampling, events and noncancelling energy roundoff have explicit trial bounds.
+Failures and cancellation publish no partial populations, energy, clocks or RNG.
+Cloned checkpoints preserve trajectories on the same ISA/toolchain profile.
+
+Six focused activation regressions check independent competing-hazard and
+equal-rate birth-age formulas, tabulated multigroup shutdown, partitions and
+forcing replacement, exact/sub-ULP ordering, and atomic budget/cancellation
+refusals. All 68 focused activation and existing burnup/decay/stochastic tests
+passed the original-source native gate. The `stochastic_activation` example
+exercises two capture generations, two half-lives, a changing incident spectrum,
+shutdown and restart with exact 64-nucleus conservation. Its coefficients are
+explicitly manufactured; they are not evaluated isotope data. This scope does
+not add neutron feedback, automatic thermal-temperature feedback, or a joint
+fission-product distribution.
+
 ## Stochastic transport and event-local radioactive heat
 
 `decay::stochastic::transport::StochasticDecayTransportState` advances a complete
