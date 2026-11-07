@@ -26,6 +26,8 @@ use fs_qty::{Length, Pressure, QuantitySpec};
 
 /// Maximum principal tension under combined axial, bending and circular torsion.
 pub mod combined;
+mod viscous;
+pub use viscous::{KelvinVoigtTensileCapacity, KelvinVoigtTensileLayer};
 
 /// Sourced limits of every layer of one bonded section under axial force.
 #[derive(Clone, Debug, PartialEq)]
@@ -223,6 +225,39 @@ impl AxialTensileCapacity {
         checked_utilization(axial_force_n, self.capacity_n)
     }
 
+    /// Assess one original layer from its actual signed mean normal stress and
+    /// nonnegative bending-stress amplitude [Pa]. The caller owns the stress
+    /// reconstruction, including any viscous or hereditary layer history.
+    /// This method supplies no elastic redistribution or equivalent stiffness.
+    /// Compression is reported but contributes no tensile utilization.
+    ///
+    /// # Errors
+    /// An invalid layer, nonfinite stress, negative amplitude or unrepresentable
+    /// extrema/utilization refuses without changing the material state.
+    pub fn assess_layer_normal_stress(
+        &self,
+        layer: usize,
+        mean_stress_pa: f64,
+        bending_stress_amplitude_pa: f64,
+    ) -> Result<LayerTensileAssessment, MaterialStatePointError> {
+        let limit = *self.layer_limits_pa.get(layer)
+            .ok_or_else(|| invalid("normal-stress assessment layer is outside the original section"))?;
+        if !mean_stress_pa.is_finite() || !bending_stress_amplitude_pa.is_finite()
+            || bending_stress_amplitude_pa < 0.0 {
+            return Err(invalid("layer tensile assessment requires finite signed mean stress and nonnegative bending amplitude"));
+        }
+        let minimum = mean_stress_pa - bending_stress_amplitude_pa;
+        let maximum = mean_stress_pa + bending_stress_amplitude_pa;
+        if !minimum.is_finite() || !maximum.is_finite() {
+            return Err(invalid("section tensile assessment normal-stress extrema are unrepresentable"));
+        }
+        Ok(LayerTensileAssessment {
+            minimum_axial_stress_pa: minimum,
+            maximum_axial_stress_pa: maximum,
+            tensile_utilization: checked_utilization(maximum.max(0.0), limit)?,
+        })
+    }
+
     /// Assess signed axial force [N] and bending moments [N m] about two
     /// orthogonal centroidal transverse axes. For a concentric section their
     /// orientation does not change the annular extrema:
@@ -323,18 +358,13 @@ impl AxialTensileCapacity {
             if bending_strain > 0.0 && amplitude == 0.0 {
                 return Err(invalid("section tensile assessment bending stress is unrepresentable"));
             }
-            let minimum = mean - amplitude;
-            let maximum = mean + amplitude;
-            if !minimum.is_finite() || !maximum.is_finite() {
-                return Err(invalid("section tensile assessment normal-stress extrema are unrepresentable"));
-            }
-            let utilization = checked_utilization(maximum.max(0.0), self.layer_limits_pa[i])?;
+            let assessment = self.assess_layer_normal_stress(i, mean, amplitude)?;
+            let utilization = assessment.tensile_utilization;
             if utilization > maximum_utilization {
                 maximum_utilization = utilization;
                 governing_layer = i;
             }
-            layers.push(LayerTensileAssessment { minimum_axial_stress_pa: minimum,
-                maximum_axial_stress_pa: maximum, tensile_utilization: utilization });
+            layers.push(assessment);
         }
         Ok(ConcentricTensileAssessment { layers, governing_layer })
     }

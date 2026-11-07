@@ -3766,6 +3766,24 @@ homogenization, the P2 milestone.
   These are small-strain, perfectly bonded elastic stress assessments;
   residual drawing/winding stress, shear/torsional failure, yielding
   redistribution, crack evolution, buckling and fatigue are absent.
+- `section::strength::KelvinVoigtTensileCapacity` prepares both original axial
+  and bending viscosity owners against the exact tensile-capacity section,
+  geometry, layer order and material sources. Each layer retains its own E,
+  axial eta and bending eta: mean stress is `E_i epsilon + eta_ai epsilon_dot`,
+  and bending amplitude is `r_i |E_i kappa + eta_bi kappa_dot|`. Signed elastic
+  and viscous vectors combine before their magnitude; section-average eta/E
+  cannot assign another layer's loss stress. Original viscosity selectors,
+  receipts, integrated rigidities and intersected source bands survive; actual
+  history/frequency admission remains with the dynamics owner. Cached layer
+  coefficients and single-layer assessment allocate nothing during evaluation.
+  `AxialTensileCapacity::assess_layer_normal_stress` also admits actual signed
+  mean stress and nonnegative bending amplitude from a consumer that owns the
+  complete layer history, without an inferred equivalent stiffness. Both paths
+  compare only positive total normal stress against the unchanged sourced
+  limit. These observations supply no rate-dependent strength, thermal
+  eigenstrain, hereditary history, plasticity or fracture evolution. Manufactured
+  regressions cover distinct layer viscosities, signed cancellation, rotation,
+  subdivision, lossless limits, source/state mismatch and numerical refusals.
 - `section::loss_angle::ConcentricLossAngleSection` binds a named dimensionless
   loss tangent `Im(E)/Re(E)` from every bonded layer: the complex bending
   stiffness is `EI + iH`, `H = sum(E_i I_i tan(delta_i))`, with no averaged
