@@ -9703,6 +9703,36 @@ compressive response, SI conditioning, common support translation and external
 work, exact shared-edge aggregation, open unloaded interfaces and transactional
 budget/cancellation/refusal. Native test execution is a separate obligation.
 
+## Support-driven approach to released tensile-face contact
+
+`BrittleTetSolid::advance_toward_released_face_contact` advances initially
+open, support-driven released faces through bounded native equilibrium prefixes.
+It returns the full open interval or an accepted nonnegative gap within explicit
+activation and load-fraction tolerances. Every candidate replays the unchanged
+original `advance_path` history, preserving native constitutive evolution,
+source admission, damage subdivision and physical work. The endpoint-work
+allowance scales with the actual accepted prefix fraction.
+
+A private read-only endpoint admission checks nonnegative gaps at every
+represented intermediate endpoint, including openings inside the original
+negative roundoff allowance. Only finite negative released-face openings narrow
+the sampled admissibility bracket. Other native material, source, strain,
+equilibrium, work and cancellation refusals propagate without publishing a
+partial state. No positions or constitutive histories are interpolated or
+projected into contact.
+
+The returned solid continues through the existing loaded released-face
+equilibrium owner with its geometry, activation and contact-work gates intact.
+This resolves the represented support-driven path; it does not certify global
+continuous first contact or a monotone nonlinear branch. Initially active pairs
+and unsupported free-fragment motion require their existing contact or dynamic
+owners. Explicit prefix and native-path trial budgets bound repeated solves.
+
+`brittle_tet_fragment_contact/quasistatic/approach.rs` covers analytic approach
+followed by native pressure transmission, full-open-path receipt equivalence,
+strict exclusion of the original negative roundoff allowance, and rollback on
+work, initial-equilibrium, strain-domain, active-pair and cancellation refusals.
+
 ## Native pressure-sensitive porous compression
 
 The existing generic `SmallStrainLaw` assembly and plastic-increment solver

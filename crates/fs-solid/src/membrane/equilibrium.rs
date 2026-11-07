@@ -198,7 +198,7 @@ impl MembranePatch {
     // All trials keep one immutable constitutive interval. Histories and their
     // physical work are committed only by the composing accepted-state owner.
     #[allow(clippy::too_many_arguments)]
-    fn solve_with_response(
+    pub(super) fn solve_with_response(
         &self, response: &impl Fn(usize, [f64; 3]) -> Result<SheetResponse, SheetError>,
         inertia: Option<&dyn MembraneInertialPotential>,
         dead_load_n: &[[f64;3]], pressure_pa: f64, prescribed: &[(usize,f64)],

@@ -610,7 +610,8 @@ fn trajectory_energy(
     accepted: MovingPartialSaturationBody3,
 ) -> (KineticChange, KineticChange) {
     let moments = array(initial.inertia.principal_moments());
-    let q = initial.inertia.principal_to_body().as_quat();
+    let principal_to_body = initial.inertia.principal_to_body();
+    let q = principal_to_body.as_quat();
     let frame = [q.w, q.x, q.y, q.z];
     let before = array(initial.angular_momentum_body);
     let after = array(accepted.angular_momentum_body);

@@ -19,6 +19,9 @@
 //! DOI 10.1051/m2an:2005036, and the shared sustained-contact owner. Here
 //! `g = n.(u_b-u_a)` and the work-conjugate nodal forces are `(-p*n,+p*n)`.
 
+/// Native equilibrium prefixes approaching contact from an open crack.
+pub mod approach;
+
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
@@ -171,7 +174,7 @@ fn group_rows(
     cx: &Cx<'_>,
 ) -> Result<(Vec<Row>, Vec<BrittleFaceEquilibriumAlias>, Vec<f64>), BrittleFaceEquilibriumError> {
     use BrittleFaceEquilibriumError as E;
-    let mut unique = BTreeMap::new();
+    let mut unique: BTreeMap<([usize; 2], [u64; 3]), usize> = BTreeMap::new();
     let mut rows: Vec<Row> = Vec::new();
     let mut original = Vec::new();
     let mut summed_seeds = Vec::<f64>::new();

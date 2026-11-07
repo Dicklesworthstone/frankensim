@@ -128,6 +128,28 @@ impl<'a> BrittleTetSolid<'a> {
         controls: BrittleTetPathControls,
         cx: &Cx<'_>,
     ) -> Result<BrittleTetPathStep<'a>, BrittleTetPathError> {
+        self.advance_path_admitted(
+            prescribed_end_m,
+            force_intervals_n,
+            settings,
+            controls,
+            cx,
+            &mut |_| Ok(()),
+        )
+    }
+
+    /// Additional read-only endpoint admission for native event owners. The
+    /// original equilibrium, work, damage subdivision and publication remain
+    /// here; a rejected intermediate endpoint cannot disappear from the path.
+    pub(crate) fn advance_path_admitted(
+        &self,
+        prescribed_end_m: &[(usize, f64)],
+        force_intervals_n: &[(usize, [f64; 2])],
+        settings: IncrementSettings,
+        controls: BrittleTetPathControls,
+        cx: &Cx<'_>,
+        admit_endpoint: &mut impl FnMut(&BrittleTetSolid<'a>) -> Result<(), BrittleTetError>,
+    ) -> Result<BrittleTetPathStep<'a>, BrittleTetPathError> {
         checkpoint(cx)?;
         validate_controls(controls)?;
         let old_u = self.solution.displacement_m.as_flattened();
@@ -308,6 +330,7 @@ impl<'a> BrittleTetSolid<'a> {
                 rejected += 1;
                 continue;
             }
+            admit_endpoint(&candidate.solid)?;
             let energy = candidate.energy;
             let defect = energy.endpoint_work_defect_j.abs();
             for (sum, value) in sums.iter_mut().zip([

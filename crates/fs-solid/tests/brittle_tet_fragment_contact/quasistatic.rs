@@ -7,6 +7,9 @@ use fs_solid::brittle::solid::fracture::contact::{
 };
 use fs_solver::NewtonKrylovConfig;
 
+#[path = "quasistatic/approach.rs"]
+mod approach;
+
 fn controls() -> BrittleFaceEquilibriumControls {
     BrittleFaceEquilibriumControls {
         newton: NewtonKrylovConfig {
