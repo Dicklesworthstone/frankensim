@@ -29,23 +29,40 @@ pub enum VectorBoundary2<'a> {
 }
 
 impl<'a> VectorBoundary2<'a> {
-    /// Bind the canonical Elasticity/Neumann typed-vector row to an explicitly
-    /// resolved mesh patch. Legacy scalar Traction/Dirichlet rows are NOT
-    /// reinterpreted as vectors. Prescribed vector displacements use the explicit
-    /// `Displacement` binding above; this does not widen the native IR grammar.
-    pub fn scenario_traction(patch: Patch, row: &'a BoundaryCondition) -> Result<Self, VectorBoundaryError2> {
+    /// Bind a canonical typed Elasticity/Dirichlet displacement or
+    /// Elasticity/Neumann traction to an explicitly resolved mesh patch.
+    ///
+    /// Both roles retain the original scenario's vector history and component
+    /// frame. The solver samples them together at the requested endpoint. A
+    /// displacement is a free vector in metres, not a position or the motion of
+    /// the frame origin. Scalar legacy rows have no implied direction and refuse.
+    pub fn from_scenario(patch: Patch, row: &'a BoundaryCondition) -> Result<Self, VectorBoundaryError2> {
         let mut violations = Vec::new();
         row.check(&mut violations);
         if let Some(first) = violations.first() {
             return Err(VectorBoundaryError2::Scenario(first.what.clone()));
         }
+        if row.physics != Physics::Elasticity {
+            return Err(VectorBoundaryError2::Invalid("only Elasticity vector rows lower to solid boundaries"));
+        }
+        let Some(BcValue::Typed(Payload::Vector(value))) = &row.value else {
+            return Err(VectorBoundaryError2::Invalid("a typed vector payload is required"));
+        };
+        match row.kind {
+            BcKind::Dirichlet => Ok(Self::Displacement { patch, value }),
+            BcKind::Neumann => Ok(Self::Traction { patch, value }),
+            _ => Err(VectorBoundaryError2::Invalid("only explicit Elasticity/Dirichlet and Elasticity/Neumann vector rows lower through this constructor")),
+        }
+    }
+
+    /// Bind the canonical Elasticity/Neumann typed-vector row to an explicitly
+    /// resolved mesh patch. Legacy scalar Traction/Dirichlet rows have no implied
+    /// direction. Use `from_scenario` when binding prescribed displacement rows.
+    pub fn scenario_traction(patch: Patch, row: &'a BoundaryCondition) -> Result<Self, VectorBoundaryError2> {
         if row.physics != Physics::Elasticity || row.kind != BcKind::Neumann {
             return Err(VectorBoundaryError2::Invalid("only the explicit Elasticity/Neumann vector row lowers through this constructor"));
         }
-        match &row.value {
-            Some(BcValue::Typed(Payload::Vector(value))) => Ok(Self::Traction { patch, value }),
-            _ => Err(VectorBoundaryError2::Invalid("a typed vector payload is required")),
-        }
+        Self::from_scenario(patch, row)
     }
 }
 

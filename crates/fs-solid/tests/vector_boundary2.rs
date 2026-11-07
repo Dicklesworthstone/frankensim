@@ -2,6 +2,8 @@
 use fs_ga::{Quat, Vec3};
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::{BcKind, BcValue, BoundaryCondition, Frame, FrameId, FrameMotion, FrameTree, Physics, WORLD};
+use fs_scenario::{Environment, Scenario};
+use fs_scenario::ir::{parse_ir, write_ir};
 use fs_scenario::payload::{
     OrientationParity, OutsideDomainPolicy, Payload, PayloadId, PayloadMeta, QuantityContract,
     ReferenceSemantics, SampleSource, TableInterpolation, VectorPayload,
@@ -82,6 +84,54 @@ fn nonzero_scheduled_supports_use_the_actual_dirichlet_rhs_lift() {
     }
     let translated = run(&p, &FrameTree::new(), &rows, 0.0);
     for value in translated { assert!((value[0] - 0.001).abs() < 1e-9); }
+}
+
+#[test]
+fn native_scenario_displacement_history_reaches_both_elasticity_families() {
+    let mut authored = Scenario::new("scheduled supports", 42, Environment::earth_lab());
+    authored.frames.add(Frame {
+        id: FrameId(1), name: "support axes".into(), parent: WORLD,
+        motion: FrameMotion::Fixed {
+            orientation: Quat::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), std::f64::consts::FRAC_PI_2),
+            translation: Vec3::new(100.0, -200.0, 300.0),
+        },
+    });
+    let right = payload(LENGTH, FrameId(1), SampleSource::table(
+        vec![QtyAny::new(0.0, TIME), QtyAny::new(2.0, TIME)],
+        vec![values([0.0, -0.001, 0.0], LENGTH), values([0.0, -0.009, 0.0], LENGTH)],
+        TableInterpolation::Linear, OutsideDomainPolicy::Refuse).unwrap());
+    for (region, value) in [("left", fixed([0.001, 0.0, 0.0], LENGTH)), ("right", right)] {
+        authored.base_bcs.push(BoundaryCondition {
+            region: region.into(), physics: Physics::Elasticity, kind: BcKind::Dirichlet,
+            frame: value.meta().frame().0, value: Some(BcValue::Typed(Payload::Vector(value))),
+            compatibility: None,
+        });
+    }
+    assert!(authored.validate().is_empty());
+    let canonical = write_ir(&authored);
+    let decoded = parse_ir(&canonical).unwrap();
+    let scenario = decoded.scenario();
+    assert_eq!(write_ir(scenario), canonical);
+    let boundaries = [
+        Bc::from_scenario(Patch::Left, &scenario.base_bcs[0]).unwrap(),
+        Bc::from_scenario(Patch::Right, &scenario.base_bcs[1]).unwrap(),
+    ];
+    for mesh in [Mesh2::quads(2.0, 1.0, 4, 2), Mesh2::triangles(2.0, 1.0, 4, 2)] {
+        for time in [0.0, 1.0, 2.0] {
+            let displacement = run(&problem(&mesh), &scenario.frames, &boundaries, time);
+            for (point, u) in mesh.nodes.iter().zip(displacement) {
+                // u_right = 0.001 + 0.004*t; the frame's translated origin
+                // never enters this free-vector displacement field.
+                assert!((u[0] - (0.001 + 0.002 * time * point[0])).abs() < 1e-9);
+                assert!(u[1].abs() < 1e-9);
+            }
+        }
+    }
+
+    let mut scalar = scenario.base_bcs[0].clone();
+    scalar.value = Some(BcValue::Uniform(QtyAny::new(0.001, LENGTH)));
+    assert!(Bc::from_scenario(Patch::Left, &scalar).is_err());
+    assert!(Bc::scenario_traction(Patch::Left, &scenario.base_bcs[0]).is_err());
 }
 
 #[test]

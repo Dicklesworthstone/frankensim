@@ -198,7 +198,7 @@ pub fn expectation(physics: Physics, kind: BcKind) -> Expectation {
         (Physics::Thermal, BcKind::Dirichlet) => Value(dims::TEMPERATURE),
         (Physics::Thermal, BcKind::Neumann) => Value(dims::HEAT_FLUX),
         (Physics::Thermal, BcKind::Robin) => Value(dims::HTC),
-        (Physics::Elasticity, BcKind::Dirichlet) => Value(dims::DISPLACEMENT),
+        (Physics::Elasticity, BcKind::Dirichlet) => ValueOrVector(dims::DISPLACEMENT),
         (Physics::Elasticity, BcKind::Neumann) => Typed {
             kind: PayloadKind::Vector,
             dims: Some(dims::PRESSURE),
@@ -319,25 +319,35 @@ impl BoundaryCondition {
                 {
                     self.check_typed_payload(payload, PayloadKind::Vector, Some(expected), ctx, out);
                     if let Payload::Vector(vector) = payload {
+                        let (quantity, components_code, parity_code) = match self.physics {
+                            Physics::Elasticity => (
+                                "displacement",
+                                "bc-displacement-components",
+                                "bc-displacement-parity",
+                            ),
+                            _ => ("velocity", "bc-velocity-components", "bc-velocity-parity"),
+                        };
                         if vector.components() != 3 {
                             out.push(Violation {
-                                code: "bc-velocity-components",
+                                code: components_code,
                                 what: format!(
-                                    "{ctx}: Cartesian velocity requires three components, found {}",
+                                    "{ctx}: Cartesian {quantity} requires three components, found {}",
                                     vector.components()
                                 ),
-                                fix: "supply all three signed velocity components in the declared Cartesian frame"
-                                    .to_string(),
+                                fix: format!(
+                                    "supply all three signed {quantity} components in the declared Cartesian frame"
+                                ),
                             });
                         }
                         if vector.meta().orientation() != OrientationParity::Even {
                             out.push(Violation {
-                                code: "bc-velocity-parity",
+                                code: parity_code,
                                 what: format!(
-                                    "{ctx}: prescribed velocity requires ordinary even-parity vector components"
+                                    "{ctx}: prescribed {quantity} requires ordinary even-parity vector components"
                                 ),
-                                fix: "declare OrientationParity::Even for the physical velocity vector"
-                                    .to_string(),
+                                fix: format!(
+                                    "declare OrientationParity::Even for the physical {quantity} vector"
+                                ),
                             });
                         }
                     }

@@ -21,6 +21,7 @@ const MASS_FLOW: Dims = Dims([0, 1, -1, 0, 0, 0]);
 const PRESSURE: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 const TEMPERATURE: Dims = Dims([0, 0, 0, 1, 0, 0]);
 const VELOCITY: Dims = Dims([1, 0, -1, 0, 0, 0]);
+const DISPLACEMENT: Dims = Dims([1, 0, 0, 0, 0, 0]);
 const MAGNETIC_VECTOR_POTENTIAL: Dims = Dims([1, 1, -2, 0, -1, 0]);
 const MAGNETIC_FLUX_DENSITY: Dims = Dims([0, 1, -2, 0, -1, 0]);
 const ELECTRIC_POTENTIAL: Dims = Dims([2, 1, -3, 0, -1, 0]);
@@ -554,6 +555,67 @@ fn g0_prescribed_velocity_refuses_odd_parity_at_admission() {
     let mut findings = Vec::new();
     row.check(&mut findings);
     assert_eq!(codes(&findings), ["bc-velocity-parity"]);
+}
+
+#[test]
+fn g0_prescribed_displacement_retains_vector_units_frame_rank_and_parity() {
+    assert_eq!(
+        expectation(Physics::Elasticity, BcKind::Dirichlet),
+        Expectation::ValueOrVector(DISPLACEMENT)
+    );
+    let mut row = typed_bc(
+        Physics::Elasticity,
+        BcKind::Dirichlet,
+        vector_payload(DISPLACEMENT, 0),
+    );
+    let mut findings = Vec::new();
+    row.check(&mut findings);
+    assert!(findings.is_empty(), "{findings:?}");
+
+    for (value, expected) in [
+        (scalar_payload(DISPLACEMENT, 0), "bc-payload-kind"),
+        (vector_payload(PRESSURE, 0), "bc-payload-dims"),
+        (vector_payload(DISPLACEMENT, 7), "bc-payload-frame"),
+        (
+            Payload::Vector(
+                VectorPayload::new(
+                    dimensional_meta(DISPLACEMENT, 0),
+                    SampleSource::fixed(vec![QtyAny::new(1.0, DISPLACEMENT); 2]),
+                )
+                .unwrap(),
+            ),
+            "bc-displacement-components",
+        ),
+        (
+            Payload::Vector(
+                VectorPayload::new(
+                    PayloadMeta::new(
+                        QuantityContract::Dimensions(DISPLACEMENT),
+                        id("basis/world-cartesian"),
+                        FrameId(0),
+                        OrientationParity::Odd,
+                        ReferenceSemantics::Continuous,
+                    )
+                    .unwrap(),
+                    SampleSource::fixed(vec![QtyAny::new(1.0, DISPLACEMENT); 3]),
+                )
+                .unwrap(),
+            ),
+            "bc-displacement-parity",
+        ),
+    ] {
+        findings.clear();
+        row.value = Some(BcValue::Typed(value));
+        row.check(&mut findings);
+        assert_eq!(codes(&findings), [expected]);
+    }
+
+    // Existing scalar declarations keep their wire meaning; only a typed
+    // vector can be lowered into a Cartesian displacement by the solver.
+    findings.clear();
+    row.value = Some(BcValue::Uniform(QtyAny::new(0.001, DISPLACEMENT)));
+    row.check(&mut findings);
+    assert!(findings.is_empty(), "{findings:?}");
 }
 
 #[test]

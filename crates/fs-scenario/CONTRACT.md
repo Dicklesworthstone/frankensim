@@ -256,10 +256,14 @@ flagships.
   frame }`; `expectation(physics, kind)` is the closed dimensional and carrier
   contract table. Existing rows retain velocity for flow Dirichlet, kg/s for
   mass-flow inlets, Pa for pressure/traction, K / W/m² / W/(m²K) for thermal,
-  m for elastic Dirichlet, and no-value wall kinds. Flow Dirichlet additionally
-  admits an explicit three-component velocity vector under `ValueOrVector`:
-  dimensions and the payload/boundary frame must agree, and velocity parity
-  must be ordinary/even at admission. Legacy scalar values
+  m for elastic Dirichlet, and no-value wall kinds. Flow and elastic Dirichlet
+  additionally admit explicit three-component velocity and displacement vectors
+  under `ValueOrVector`: dimensions and the payload/boundary frame must agree,
+  and vector parity must be ordinary/even at admission. The solid solver's
+  `VectorBoundary2::from_scenario` binds displacement and traction histories to
+  resolved mesh patches, preserving their frame and physical-time sampling.
+  Displacements are free vectors; translating a frame origin adds no motion.
+  Legacy scalar values
   keep their existing wire meaning and acquire no inferred Cartesian direction.
   `BoundaryCondition::velocity_world_at` executes the typed form through the
   original Cartesian vector evaluator, retaining signed components, time-table
