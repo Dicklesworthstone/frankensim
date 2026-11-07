@@ -24,6 +24,26 @@ to parallel biquad sections and discrete state-space.
 - Passivity is impedance-form positive realness `Re H(i*omega) >= 0`
   with `d >= 0`, `e >= 0`.
 
+## Sampled RL and RC port responses
+
+`RelaxationImpedanceSpec::sampled_impedance(f, dt)` and the bound owner's
+`sampled_impedance(f)` describe the same runtime pressure/flow port under
+`exp(+i*2*pi*f*n*dt)`. Midpoint branches use their bilinear response; exact
+branches use continuous interval-mean pressure under held flow. The base RLC
+keeps midpoint in either case. The dual admittance exposes the corresponding
+mean-flow/held-pressure response. These queries do not advance histories and
+do not replace the continuous material spectrum.
+
+The exact response separates nonnegative squared real contributions. Its weak
+RC Nyquist resistance comes from the existing positive Prony heat remainder,
+not subtraction of nearly identical high/low-pass transfers. DC and Nyquist
+limits are explicit; base compliance at DC, base inertance at Nyquist, invalid
+frequency/clock and unrepresentable queries refuse. Harmonic runtime tests
+compare both selected rules and dual ports, independently check resistor heat,
+and retain arbitrarily weak representable Nyquist resistance. A sampled query
+is not an all-frequency error or passivity certificate.
+
+
 ## Exact RL and RC boundary memory
 
 `RelaxationImpedanceSpec::with_sampling(ExactHeldFlow)` selects exact continuous

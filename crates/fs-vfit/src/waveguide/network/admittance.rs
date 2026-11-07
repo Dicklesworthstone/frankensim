@@ -57,6 +57,15 @@ impl RelaxationAdmittanceSpec {
     /// The selected time representation of the RC branch histories.
     #[must_use]
     pub const fn sampling(&self) -> RelaxationSampling { self.dual.sampling() }
+    /// Actual selected-rule flow/pressure transfer at exp(+i*2*pi*f*n*dt).
+    /// Exact branches return interval-mean flow under held pressure; the direct
+    /// compliance retains midpoint. Frequency/clock/pole refusals are shared
+    /// with `RelaxationImpedanceSpec::sampled_impedance` through port duality.
+    pub fn sampled_admittance(&self, frequency_hz: f64, dt: f64)
+        -> Result<fs_math::c64::C64, WaveguideError>
+    {
+        self.dual.sampled_impedance(frequency_hz, dt)
+    }
     /// Ordered branch coefficients with physical admittance units.
     pub fn terms(&self)->impl ExactSizeIterator<Item=AdmittanceTerm> + '_ {
         self.dual.terms().iter().map(|t|AdmittanceTerm {
@@ -103,6 +112,12 @@ impl RelaxationAdmittance {
     /// Accepted base compliance pressure [Pa]; zero when no base C is present.
     #[must_use]
     pub fn base_pressure_pa(&self)->f64 {self.dual.base_state().inertive_flow_m3_s}
+    /// Sample the same flow/pressure port as this owner without changing state.
+    pub fn sampled_admittance(&self, frequency_hz: f64)
+        -> Result<fs_math::c64::C64, WaveguideError>
+    {
+        self.dual.sampled_impedance(frequency_hz)
+    }
     /// Accepted internal RC pressures [Pa], not impedance branch flows.
     #[must_use]
     pub fn branch_pressures_pa(&self)->&[f64] {self.dual.branch_flows_m3_s()}

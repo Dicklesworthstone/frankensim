@@ -37,6 +37,7 @@
 //! is explicit; existing midpoint/bilinear consumers retain their owner.
 
 mod exact;
+mod sampled;
 pub use exact::ExactParallelCellLoad;
 
 use crate::impedance::{ImpedanceFrame, SeriesImpedance, SeriesImpedanceSpec};
