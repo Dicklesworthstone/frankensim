@@ -6885,3 +6885,48 @@ and depth-dependent absorption heat and flux. The source fixtures create
 revision zero and advance through MatDb's original immutable predecessor chain;
 they retain their requested revision and source mismatch assertions. Excessive
 spectral gaps still refuse at the original optical-source constructor.
+
+### Native three-dimensional harmonic moving-conductor induction
+
+`SpatialInduction::solve_harmonic` solves the fixed-domain Whitney A-phi
+magnetoquasistatic equations for peak phasors with the `exp(-i omega t)`
+convention. The response borrows the original prepared induction owner: mesh,
+relative tree gauge, material sources, physical boundary traces, floating
+conductor components and conductivity tensors remain the same authorities as
+the transient solve. The harmonic perturbation has zero prescribed tangential
+A on physical fixed traces; solving it does not advance or mutate the accepted
+transient state.
+
+The native real two-by-two block represents `K - V - i omega M`, with
+`q = phi/(-i omega)`. FGMRES uses a scaled complex-diagonal Jacobi inverse.
+Each sparse row is traversed once for both phasor components without allocating
+full-field work vectors during an operator application. Identically stationary
+conductors skip motion assembly. Admission bounds Krylov and recovered-field
+storage, cell magnetic Peclet number, and cell diameter relative to skin depth;
+the last is a resolution screen, not an a posteriori discretization certificate.
+
+Recovery retains local complex laboratory and conductor-frame electric fields,
+current density, scalar potential and magnetic flux. Original quadrature yields
+cycle-mean Ohmic heat, Lorentz force and prescribed-motion work, with the peak
+phasor factor of one half. Real supply must close against heat plus mechanical
+work. Reactive supply must close against reactive mechanical exchange and twice
+frequency times mean magnetic energy. Original Ampere rows, including eliminated
+tree-gauge rows, original charge rows including floating gauge vertices, and
+discrete magnetic-flux closure are checked before publishing a response. A
+Krylov residual alone cannot authorize a result.
+
+This lane supports source-backed linear isotropic or orthotropic magnetic and
+conductive laws and prescribed Eulerian velocity. Recoil magnets refuse because
+a harmonic perturbation alone cannot certify their full-cycle operating
+envelope. Saturation, hysteresis, moving mesh/occupancy transport, physical
+terminal or winding-circuit closure, temperature evolution and displacement
+current are not supplied by this harmonic API. Its source-bound powers and
+fields are available to receiving models without relabeling mechanical work
+as heat.
+
+Focused regressions cover an independent analytic tetrahedral skin-response
+problem over four frequencies, signed moving-conductor real and reactive power,
+second-order transient-to-phasor agreement, phase and DC-gauge invariance,
+resource/skin/material admission and cancellation. A separate dense reference
+checks the nonsymmetric motion operator, its actual transpose, and the complex
+Jacobi inverse.

@@ -22,6 +22,8 @@
 //! A-v formulation reference: https://getdp.info/doc/texinfo/getdp.html .
 
 mod coupling;
+/// Native frequency-domain A–phi fields, resolved AC heat and Lorentz work.
+pub mod harmonic;
 /// Stationary A–phi evolution with the original three-dimensional vector memory.
 #[cfg(feature = "magnetic-hysteresis")]
 pub mod hysteretic;
