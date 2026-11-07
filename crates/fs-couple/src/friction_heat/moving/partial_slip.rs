@@ -1,6 +1,6 @@
 //! Advected material shear memory with finite, locally partitioned friction heat.
 //!
-//! A declared uniform-pressure brush attaches the native two-region Iwan strains
+//! A declared finite-pressure brush attaches the native two-region Iwan strains
 //! to surface A material coordinates. Translation clips the original parcels;
 //! surviving strains and kinetic branches are copied exactly, never averaged.
 //! Fresh material enters unloaded. Elastic energy leaving the footprint is an
@@ -11,21 +11,28 @@
 //! linear thermal footprint path. This is a convergent time discretization of
 //! the declared brush model, not exact finite-step residence-time integration.
 //! Refine time independently of the original finite thermal cells. The pressure
-//! is uniform; a reference ellipse supplies the native shear law's area and
-//! total load, not an elliptical pressure field. Torsion, changing normal load,
+//! is uniform by default; an original normal owner's piecewise-constant profile
+//! can instead supply spatially resolved pressure. Its boundaries split the
+//! material parcels without averaging their histories. A reference ellipse
+//! supplies the native shear law's area and total load, not an elliptical
+//! pressure field. Torsion, changing normal load,
 //! adhesion, recirculated outflow memory and native body dynamics are absent.
 
 use super::*;
+use fs_math::dd::Dd;
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
 use fs_solver::{
     NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, SolverRunProgress,
 };
 use fs_tribo::partial_slip::{
-    GeneralizedWorkOwnership, PartialSlipCheckpoint, PartialSlipError, PartialSlipKinematics,
-    PartialSlipLaw, PartialSlipState, PartialSlipStep, TangentFrame,
+    GeneralizedWorkOwnership, NormalPatchView, PartialSlipCheckpoint, PartialSlipError,
+    PartialSlipKinematics, PartialSlipLaw, PartialSlipState, PartialSlipStep, TangentFrame,
 };
 use std::cell::Cell;
 use std::convert::Infallible;
+
+mod pressure;
+pub use pressure::{MovingPressureCell, MovingPressureProfile};
 
 /// One unchanged physical material parcel, measured in surface A coordinates.
 #[derive(Clone, Debug, PartialEq)]
@@ -48,6 +55,7 @@ pub struct MovingPartialSlip {
     position: MovingContactPosition,
     time_s: f64,
     frame: TangentFrame,
+    pressure: Option<MovingPressureProfile>,
 }
 
 /// Candidate parcel geometry. Each region lies within one ORIGINAL A cell;
@@ -57,7 +65,12 @@ pub struct MovingSlipRegion {
     pub material_span_m: [f64; 2],
     pub surface_a_cell: CellId,
     pub area_fraction: f64,
+    /// Actual supplied pressure on this region [Pa], before any friction law.
+    pub normal_pressure_pa: f64,
+    /// Actual compressive force carried by this material region [N].
+    pub normal_load_n: f64,
     state: PartialSlipState,
+    normalized_patch: NormalPatchView,
 }
 impl MovingSlipRegion {
     pub const fn accepted_state(&self) -> &PartialSlipState {
@@ -236,10 +249,54 @@ impl MovingPartialSlip {
         route: MovingFrictionRoute,
         reference: PartialSlipCheckpoint,
         position: MovingContactPosition,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, MovingPartialSlipError> {
+        Self::build(thermal, route, reference, position, None, checkpoint)
+    }
+
+    /// Retain an original normal owner's resolved positive pressure cells.
+    ///
+    /// The cells must exactly cover the unchanged footprint and integrate to
+    /// the original normal load; neither missing coverage nor load mismatch is
+    /// repaired. Normal patch identity, source, authority and geometry must
+    /// match the original checkpoint. Pressure is held in footprint coordinates
+    /// while the original shear memory advects with material A. Each regional
+    /// source sees that actual local pressure and its original caloric cell.
+    pub fn new_with_pressure_profile(
+        thermal: &DepositionSimulation<'_>,
+        route: MovingFrictionRoute,
+        reference: PartialSlipCheckpoint,
+        position: MovingContactPosition,
+        pressure: MovingPressureProfile,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, MovingPartialSlipError> {
+        Self::build(
+            thermal,
+            route,
+            reference,
+            position,
+            Some(pressure),
+            checkpoint,
+        )
+    }
+
+    fn build(
+        thermal: &DepositionSimulation<'_>,
+        route: MovingFrictionRoute,
+        reference: PartialSlipCheckpoint,
+        position: MovingContactPosition,
+        pressure: Option<MovingPressureProfile>,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, MovingPartialSlipError> {
         checkpoint()?;
         route.validate(thermal, &mut checkpoint)?;
+        if let Some(profile) = &pressure {
+            profile.validate_for(
+                reference.normal_patch(),
+                route.footprint_m,
+                route.frame.width_m,
+            )?;
+        }
         let frame = TangentFrame::new(route.frame.normal, route.frame.tangent)?;
         let patch = reference.normal_patch();
         let area =
@@ -258,7 +315,7 @@ impl MovingPartialSlip {
                 .any(|x| !x.is_finite())
         {
             return Err(MovingPartialSlipError::Invalid(
-                "uniform shear brush requires the same reference area/frame and zero torsional history",
+                "shear brush requires the same reference area/frame and zero torsional history",
             ));
         }
         reference
@@ -289,6 +346,7 @@ impl MovingPartialSlip {
             position,
             time_s: thermal.time_s(),
             frame,
+            pressure,
         })
     }
     pub const fn time_s(&self) -> f64 {
@@ -302,6 +360,9 @@ impl MovingPartialSlip {
     }
     pub const fn reference(&self) -> &PartialSlipCheckpoint {
         &self.reference
+    }
+    pub const fn pressure_profile(&self) -> Option<&MovingPressureProfile> {
+        self.pressure.as_ref()
     }
     pub fn stored_energy_j(&self) -> Result<f64, DepositionError> {
         let length = self.route.footprint_m[1] - self.route.footprint_m[0];
@@ -370,6 +431,13 @@ impl MovingPartialSlip {
                 "synchronized finite bounded moving contact solve required",
             ));
         }
+        if self
+            .pressure
+            .as_ref()
+            .is_some_and(|profile| profile.cells().len() > controls.maximum_regions)
+        {
+            return Err(MovingPartialSlipError::RegionBudget);
+        }
         let path = MovingContactPath {
             start: self.position,
             end,
@@ -416,10 +484,15 @@ impl MovingPartialSlip {
                 state: PartialSlipState::zero(),
             });
         }
-        // Split only at actual material boundaries. No interpolation or spring
-        // averaging occurs, including when a warm parcel revisits a thermal cell.
+        // Split at actual material and supplied pressure boundaries. Sorted
+        // cursors visit each pressure interval once; no dense cross product,
+        // interpolation or spring averaging occurs when material is advected.
         let mut regions = Vec::new();
         let mut first_cell = 0;
+        let mut pressure_cell = 0;
+        let footprint_area = self.route.footprint_area_m2();
+        let uniform_pressure =
+            finite(self.reference.normal_patch().normal_load_n() / footprint_area)?;
         for parcel in transported {
             while first_cell < self.route.surfaces[0].len()
                 && self.route.surfaces[0][first_cell].face.span_m[1] <= parcel.span_m[0]
@@ -438,16 +511,67 @@ impl MovingPartialSlip {
                 if span[1] <= span[0] {
                     continue;
                 }
-                if regions.len() >= controls.maximum_regions {
-                    return Err(MovingPartialSlipError::RegionBudget);
+                let mut push = |span: [f64; 2],
+                                pressure: f64,
+                                normalized_patch: NormalPatchView| {
+                    if regions.len() >= controls.maximum_regions {
+                        return Err(MovingPartialSlipError::RegionBudget);
+                    }
+                    let area_fraction = (span[1] - span[0]) / length;
+                    let normal_load_n = finite(area_fraction * normalized_patch.normal_load_n())?;
+                    regions.push(MovingSlipRegion {
+                        material_span_m: span,
+                        surface_a_cell: face.face.cell,
+                        area_fraction,
+                        normal_pressure_pa: pressure,
+                        normal_load_n,
+                        state: parcel.state.clone(),
+                        normalized_patch,
+                    });
+                    Ok(())
+                };
+                if let Some(profile) = &self.pressure {
+                    while pressure_cell < profile.cells().len()
+                        && finite(profile.cells()[pressure_cell].span_m[1] + shift)? <= span[0]
+                    {
+                        pressure_cell += 1;
+                    }
+                    for cell in profile.cells().iter().skip(pressure_cell) {
+                        check()?;
+                        let start = finite(cell.span_m[0] + shift)?;
+                        let end = finite(cell.span_m[1] + shift)?;
+                        if start >= span[1] {
+                            break;
+                        }
+                        let segment = [span[0].max(start), span[1].min(end)];
+                        if segment[1] > segment[0] {
+                            push(
+                                segment,
+                                cell.normal_pressure_pa,
+                                profile
+                                    .normalized_patch(cell.normal_pressure_pa, footprint_area)?,
+                            )?;
+                        }
+                    }
+                } else {
+                    push(
+                        span,
+                        uniform_pressure,
+                        self.reference.normal_patch().clone(),
+                    )?;
                 }
-                regions.push(MovingSlipRegion {
-                    material_span_m: span,
-                    surface_a_cell: face.face.cell,
-                    area_fraction: (span[1] - span[0]) / length,
-                    state: parcel.state.clone(),
-                });
             }
+        }
+        let normal_load = finite(
+            regions
+                .iter()
+                .fold(Dd::ZERO, |sum, r| sum + Dd::from_f64(r.normal_load_n))
+                .to_f64(),
+        )?;
+        if !close(normal_load, self.reference.normal_patch().normal_load_n()) {
+            return Err(MovingPartialSlipError::Invalid(
+                "material regions lost original pressure or normal-load coverage",
+            ));
         }
         let before = self.stored_energy_j()?;
         let after_transport = regions.iter().try_fold(0.0, |sum, r| {
@@ -597,7 +721,7 @@ impl MovingPartialSlip {
                         check()?;
                         compatible(self.reference.law(), &law)?;
                         let response = law.advance(
-                            self.reference.normal_patch(),
+                            &region.normalized_patch,
                             self.reference.interface(),
                             self.frame,
                             kinematics,

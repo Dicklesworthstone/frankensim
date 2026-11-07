@@ -10,6 +10,9 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 
+#[path = "friction_heat_moving_partial_slip/pressure.rs"]
+mod pressure;
+
 struct Caloric;
 impl ThermalLaw for Caloric {
     fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
@@ -130,6 +133,18 @@ fn fixture_state(
     mu: f64,
     state: PartialSlipState,
 ) -> (DepositionSimulation<'static>, MovingPartialSlip) {
+    let (thermal, route) = fixture_route(edges);
+    let contact = MovingPartialSlip::new(
+        &thermal,
+        route,
+        reference(mu, state),
+        position(0.0, 0.0, 0.0),
+        || Ok(()),
+    )
+    .unwrap();
+    (thermal, contact)
+}
+fn fixture_route(edges: &[f64]) -> (DepositionSimulation<'static>, MovingFrictionRoute) {
     let n = edges.len() - 1;
     let mut events = Vec::new();
     let mut surfaces: [Vec<StripSurfaceCell>; 2] = std::array::from_fn(|_| Vec::new());
@@ -208,15 +223,7 @@ fn fixture_state(
         || Ok(()),
     )
     .unwrap();
-    let contact = MovingPartialSlip::new(
-        &thermal,
-        route,
-        reference(mu, state),
-        position(0.0, 0.0, 0.0),
-        || Ok(()),
-    )
-    .unwrap();
-    (thermal, contact)
+    (thermal, route)
 }
 fn source(
     thermal: &DepositionSimulation<'_>,

@@ -3294,6 +3294,43 @@ nonvirgin state retention after refusal, and successful retry. Their independent
 scalar energy identities and Rust syntax were checked; native regression
 execution remains unverified in the resource-constrained session.
 
+## Spatial pressure in moving partial-slip friction and heat
+
+`friction_heat::moving::partial_slip::MovingPartialSlip::new_with_pressure_profile`
+accepts `MovingPressureProfile` from the original normal-patch authority. Its
+positive, piecewise-constant pressure cells exactly cover the unchanged strip
+footprint and integrate to the original normal load, to arithmetic precision.
+The original patch identity, source, authority, load and geometry must match the
+retained checkpoint. Gaps, overlap, foreign receipts and load mismatch refuse;
+there is no extrapolation, load renormalization or inferred pressure shape.
+
+Pressure stays in footprint coordinates while the two native Jenkins-region
+histories travel with surface A material. Exact intersections split parcels at
+thermal/material and pressure boundaries without averaging strains or resetting
+kinetic branches. Sorted interval cursors keep this splitting proportional to
+the actual intersections. Each source callback receives its local pressure,
+actual regional normal force and original caloric cell. The original return
+map still owns local force, microslip, stored energy and physical heat; its
+reference-normalized response is multiplied by the actual regional area share.
+
+Stiffness, region decomposition and the storage-source identity remain fixed.
+A lower local pressure may relax retained shear energy through the original
+return map, even at zero additional imposed slip. Only its physical plastic
+loss heats the finite cells. Numerical return-map loss and elastic energy
+leaving the footprint remain separate accounts; no parameter work or normal
+work is invented or thermalized. Raising pressure preserves loaded history.
+
+Six new physical regressions cover uniform-profile equivalence, early edge
+microslip with a sticking core and spatial heat, transport across pressure
+boundaries with independent release/outflow balances, local pressure plus
+endpoint-temperature source feedback, exact source/load/coverage admission,
+and bounded transactional refusal/retry. They accompany the existing moving
+brush tests for work, frame covariance, history and temporal refinement.
+Pressure-space, thermal-space and time refinement remain independent. The
+existing pure-shear, fixed-load, fixed-width and first-order transport/contact
+composition is retained; zero-pressure gaps require a separate normal/contact
+topology, and no resolved continuum traction or measured calibration is inferred.
+
 ## CST/DKT hereditary material memory on the original modal basis
 
 `plate_viscosity::shell::relaxation::ModalShellRelaxation` projects per-facet
