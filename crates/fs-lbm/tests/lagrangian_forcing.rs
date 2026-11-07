@@ -279,3 +279,6 @@ fn rejected_endpoint_or_late_cancellation_keeps_force_and_memory_retryable() {
     rollback::<D3q19, 19>(CollisionModel3::Bgk { tau: 0.8 }, equilibrium3);
     rollback::<D3q27, 27>(cumulant(), eq27);
 }
+
+#[path = "lagrangian_forcing/channel.rs"]
+mod channel;

@@ -14712,18 +14712,31 @@ first-order trajectories and exploratory-model limits remain.
 
 ## Lagrangian SGS with spatial and changing body forces
 
-`ForcedGrid3` composes the original periodic Lagrangian SGS workspace with
-spatial and time-dependent force fields. Fits, pathline departures and
-pre-step dissipation use the incoming per-cell Guo half-force velocity.
-Held-force and next-force serial/pooled steps retain the original force
-transaction, molecular collision fields and D3Q27 nonshear rates. Turbulence
-history publishes only after populations, force epoch and clock succeed.
-The adapters add no preparation arrays and retain the original workspace
-byte gate. Periodic all-fluid topology, explicit memory time, departure
-limits and exploratory-use restrictions remain; this adds no wall, inflow,
+`ForcedGrid3` composes the original Lagrangian SGS workspace with spatial
+and time-dependent force fields in periodic domains and stationary channels.
+`channel_lagrangian_sgs_workspace` binds the physical wall normal, and the
+serial/pooled `step_with_channel_lagrangian_sgs_and_moving_walls` and
+`advance_with_channel_lagrangian_sgs_and_moving_walls` families also compose
+moving walls with held or next force fields. Fits, pathline departures and
+pre-step dissipation use the incoming per-cell Guo half-force velocity and
+the prescribed physical wall velocities.
+
+The original forced-wall transaction admits and publishes any next force
+together with populations, clock and wall impulse/work. Turbulence history
+commits only after that native step succeeds. Refused drive, wall data,
+departure or late cancellation leaves the accepted history retryable.
+Molecular collision fields and D3Q27 nonshear rates remain under their
+original owners. The adapters add no preparation arrays or history banks
+and retain the original workspace byte gate.
+
+Explicit memory time, departure limits, resolved-wall treatment and
+exploratory-use restrictions remain. This adds no open-boundary history,
 scalar-flux or turbulence-validation claim. `tests/lagrangian_forcing.rs`
-contains independent-owner, force-epoch, worker-identity, endpoint-refusal
-and late-cancellation regression sources.
+retains the periodic regression sources; its `channel.rs` child adds four
+regression groups covering independent pathline/native owners, held and
+changing force epochs, moving-wall receipts, worker identity, endpoint
+refusal and post-stream cancellation/retry. The new channel sources were
+parsed and reviewed, but have not been compiled or executed.
 
 ## Compressible gas gravity and mechanical work
 
