@@ -14,6 +14,9 @@ mod adaptive;
 #[path = "plastic_sliding_heat/resistance.rs"]
 mod resistance;
 
+#[path = "plastic_sliding_heat/depth.rs"]
+mod depth;
+
 #[path = "../../fs-contact/tests/source_point/common.rs"]
 mod source_common;
 

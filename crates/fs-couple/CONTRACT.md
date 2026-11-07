@@ -1136,6 +1136,35 @@ work, nonconvergence and cancellation publish no partial physical history.
 The report retains both native mechanical operations, source callback evidence,
 friction heat, normal/plastic/parameter accounts and cumulative removed volumes.
 
+### Depth-dependent hardness in live caloric feedback
+
+`friction_heat::plastic_wear::depth::DepthSlidingHeatContact` binds the
+original `SourceDepthSlidingWear` history to the same finite-cell caloric
+engine. Each trial resolves each body's original H(T,z) at its own temperature
+and exposed material depth, with independent elastic properties. Original wear
+and friction sources use the solved interface temperature and actual pressure.
+Actual unsigned Coulomb slip drives each body's own depth-hardness integral;
+signed shear travel, retained indentation and removed inventories survive.
+
+Held approach, maintained force and a fixed finite-stiffness drive use the
+native boundary continuations. Temperature refresh, recession and exposure of
+the new hardness cap retain three separate normal-work receipts. All three
+enter the work audit, sum-of-absolute-parameter-work limit and optional explicit
+plastic-heat conversion; parameter work remains separate from friction heat.
+The complete thermal, depth, shear and contact candidates are adopted together.
+The ordinary and depth owners share the existing Newton/caloric engine and
+source/footprint/inventory admission, with no second contact or thermal law.
+
+Fixed and evolving active footprints retain their original geometry limits.
+Contact resistance is the explicitly supplied fixed route resistance. This
+owner does not add adaptive depth marching, lateral temperature fields or a
+reciprocal thermoelastic free-energy model. Thermal mass and geometry remain
+fixed within each interval, and cumulative removal uses the original receiving
+volumes. The regression definitions cover an independent coupled quadratic,
+actual reversal under force and spring control, all three work accounts and
+transactional source, removal, iteration and cancellation refusal. Native Rust
+compilation and test execution were unavailable during this implementation.
+
 ## Static breakaway and kinetic sliding through joint heat and motion
 
 Existing joint-friction thermal source callbacks now accept explicitly authored
