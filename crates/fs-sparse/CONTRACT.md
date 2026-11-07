@@ -71,7 +71,17 @@ results are machine-specific, not a universal throughput guarantee.
   when it gives a wider band. The row-sum bound covers the supplied finite
   coefficients, not symmetry or positive definiteness, which remain caller
   assumptions. ILU(0): zero-fill on the CSR pattern, sequential
-  v1, typed `IluBreakdown{row}` (shift-retry is caller policy). SaAmg:
+  v1, typed `IluBreakdown{row}` (shift-retry is caller policy).
+  `ilu0_controlled` and `Ilu0::apply_controlled` expose the same
+  ascending-order elimination and substitution with caller checkpoints.
+  Flat CSR factors retain O(rows + stored entries) storage and use a row-position
+  marker for constant-time update lookup without per-pivot row copies or merge
+  rescans. Finite signed pivots remain valid. Missing/zero pivots and nonfinite
+  arithmetic retain their original `IluControlledError::Breakdown` row;
+  failed reservations return `Capacity` and checkpoint errors remain unchanged.
+  Unsafe substitution leaves scratch output for caller fallback. The original
+  `ilu0`/`Precond::apply` APIs retain their allocation/nonfinite panic behavior.
+  SaAmg:
   symmetric strength graph, GREEDY INDEX-ORDER aggregation with
   lowest-index tie-breaks (P2 on setup), Jacobi-smoothed prolongator
   (the historical power-estimate weight is retained only when the conservative
@@ -194,8 +204,9 @@ growth. These new gates have not yet run centrally.
 Structural violations panic with structured messages: out-of-range COO
 indices, non-canonical `from_parts` input, dimension mismatches in
 spmv/spmm/spgemm/symmetrize, indivisible BSR block shapes. These are
-programmer errors; silently proceeding would void determinism claims. No
-allocation-failure handling beyond std's. The checkpointed CSR constructor
+programmer errors; silently proceeding would void determinism claims. Most
+kernels use std's allocation behavior; controlled ILU reserves all factor and
+marker storage fallibly and returns typed `Capacity`. The checkpointed CSR constructor
 instead returns `Ok(None)` for malformed canonical parts and passes through a
 caller checkpoint error as `Err`. SELL tuning parameters are a separate typed
 admission boundary: `Sell::from_csr` returns `SellError::InvalidChunkHeight`
@@ -228,8 +239,13 @@ The serial and `std`-threaded numeric kernels do not accept an asupersync `Cx`
 and are uninterruptible once called. Scoped parallel lanes join/drain their
 workers before returning. After top-level shape checks,
 `Csr::try_from_parts_with_checkpoint` invokes a caller checkpoint once per row
-and once per visited stored column. No bounded-latency cancellation claim is
-made for SpMV, SpMM, SpGEMM, parallel assembly, or preconditioners.
+and once per visited stored column. Checkpointed ILU setup and substitution
+poll between at most 256 visited numerical entries/row steps and bounded copy
+chunks. Allocation itself is not preemptible. A setup refusal returns no factor;
+interrupted or numerically unsafe substitution leaves incomplete output that
+must be discarded or overwritten, while the factor remains reusable.
+No bounded-latency cancellation claim is made for SpMV, SpMM, SpGEMM, parallel
+assembly, or the other preconditioners.
 
 ## Unsafe boundary
 One registered capsule exists at `src/fma/mod.rs`, with its calling invariants

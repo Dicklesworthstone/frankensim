@@ -1,6 +1,8 @@
 //! Sparse nonlinear heat transport on the original fixed thermal graph.
 use super::*;
 use fs_solver::{FgmresState, FlexiblePreconditioner, LinearOp, SolverRunProgress};
+use fs_sparse::Csr;
+use fs_sparse::precond::{Ilu0, IluControlledError, ilu0_controlled};
 use std::cell::RefCell;
 
 #[path = "graph/forest.rs"]
@@ -44,8 +46,8 @@ pub(super) enum LinearTopology {
 /// This uses the same enthalpy residual, analytic conductivity/temperature
 /// derivatives, line search, events, heat/entropy accounts and adaptive owner
 /// as `ImplicitConductionChain`. Bounded FGMRES replaces the chain's O(n)
-/// direct solve. Acyclic Jacobians use exact
-/// sparse forest preconditioning; cycles and unsafe pivots use diagonal scaling.
+/// direct solve. Acyclic Jacobians use exact sparse forest preconditioning;
+/// cyclic graphs use zero-fill ILU. Unsafe factors retain diagonal scaling.
 pub struct ImplicitConductionGraph<'a> {
     inner: ImplicitConductionChain<'a>,
 }
@@ -359,10 +361,92 @@ impl<'a> ImplicitConductionGraph<'a> {
 // The physical Jacobian has one diagonal and two off-diagonals per link, even
 // with unequal masses, nonlinear k or latent plateaus (generally nonsymmetric).
 // No dense matrix, symmetry assumption or numerical constitutive difference.
+enum SparsePreconditioner {
+    Forest(forest::Forest),
+    Incomplete(Ilu0),
+}
+
+// Canonical assembly for the existing nonsymmetric sparse ILU owner. Map
+// insertion keeps duplicate summation in the original contribution order and
+// gives bounded checkpoint gaps without an uninterruptible global sort.
+fn incomplete_factor(
+    diagonal: &[f64],
+    entries: &[(usize, usize, f64)],
+    checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+) -> Result<Option<Ilu0>, DepositionError> {
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let n = diagonal.len();
+    let mut combined = BTreeMap::new();
+    for (i, &value) in diagonal.iter().enumerate() {
+        if i % 256 == 0 {
+            checkpoint()?;
+        }
+        combined.insert((i, i), value);
+    }
+    for (i, &(row, column, value)) in entries.iter().enumerate() {
+        if i % 256 == 0 {
+            checkpoint()?;
+        }
+        if row >= n || column >= n {
+            return Ok(None);
+        }
+        let entry = combined.entry((row, column)).or_insert(0.0);
+        *entry += value;
+        if !entry.is_finite() {
+            return Ok(None);
+        }
+    }
+    let row_count = n.checked_add(1).ok_or(DepositionError::Budget(
+        "conduction sparse factor allocation",
+    ))?;
+    let mut rows = Vec::new();
+    let mut columns = Vec::new();
+    let mut values = Vec::new();
+    rows.try_reserve_exact(row_count)
+        .map_err(|_| DepositionError::Budget("conduction sparse factor allocation"))?;
+    rows.resize(row_count, 0);
+    columns
+        .try_reserve_exact(combined.len())
+        .map_err(|_| DepositionError::Budget("conduction sparse factor allocation"))?;
+    values
+        .try_reserve_exact(combined.len())
+        .map_err(|_| DepositionError::Budget("conduction sparse factor allocation"))?;
+    for (i, ((row, column), value)) in combined.into_iter().enumerate() {
+        if i % 256 == 0 {
+            checkpoint()?;
+        }
+        if row != column && value == 0.0 {
+            continue;
+        }
+        rows[row + 1] += 1;
+        columns.push(column);
+        values.push(value);
+    }
+    for i in 1..rows.len() {
+        if i % 256 == 0 {
+            checkpoint()?;
+        }
+        rows[i] += rows[i - 1];
+    }
+    let matrix =
+        Csr::try_from_parts_with_checkpoint(n, n, rows, columns, values, &mut *checkpoint)?
+            .ok_or(DepositionError::Arithmetic)?;
+    match ilu0_controlled(&matrix, checkpoint) {
+        Ok(factor) => Ok(Some(factor)),
+        Err(IluControlledError::Breakdown(_)) => Ok(None),
+        Err(IluControlledError::Capacity) => Err(DepositionError::Budget(
+            "conduction sparse factor allocation",
+        )),
+        Err(IluControlledError::Checkpoint(error)) => Err(error),
+    }
+}
+
 struct GraphOperator<'a, 'c> {
     diagonal: &'a [f64],
     entries: &'a [(usize, usize, f64)],
-    forest: Option<forest::Forest>,
+    preconditioner: Option<SparsePreconditioner>,
     checkpoint: &'a RefCell<&'c mut dyn FnMut() -> Result<(), DepositionError>>,
     error: &'a RefCell<Option<DepositionError>>,
 }
@@ -419,13 +503,32 @@ impl LinearOp for GraphOperator<'_, '_> {
 }
 impl FlexiblePreconditioner for GraphOperator<'_, '_> {
     fn apply(&self, _: usize, residual: &[f64], output: &mut [f64]) {
-        if let Some(forest) = &self.forest {
-            if forest.apply(residual, output, || self.poll()) || self.error.borrow().is_some() {
-                return;
+        let applied = match &self.preconditioner {
+            Some(SparsePreconditioner::Forest(forest)) => {
+                forest.apply(residual, output, || self.poll())
             }
-            // Unsafe preconditioner arithmetic does not reject the original
-            // system. Retry this action with the existing diagonal scaling.
+            Some(SparsePreconditioner::Incomplete(factor)) => {
+                match factor.apply_controlled(residual, output, || {
+                    if self.poll() { Ok(()) } else { Err(()) }
+                }) {
+                    Ok(()) => true,
+                    Err(IluControlledError::Breakdown(_)) => false,
+                    Err(IluControlledError::Capacity) => {
+                        *self.error.borrow_mut() = Some(DepositionError::Budget(
+                            "conduction sparse factor allocation",
+                        ));
+                        false
+                    }
+                    Err(IluControlledError::Checkpoint(())) => false,
+                }
+            }
+            None => false,
+        };
+        if applied || self.error.borrow().is_some() {
+            return;
         }
+        // Unsafe preconditioner arithmetic does not reject the original
+        // system. Retry this action with the existing diagonal scaling.
         for (i, ((out, &r), &d)) in output
             .iter_mut()
             .zip(residual)
@@ -472,13 +575,19 @@ pub(super) fn solve(
                 forest::FactorError::Checkpoint(error) => error,
             }
         })?;
+    let preconditioner = if let Some(forest) = forest {
+        Some(SparsePreconditioner::Forest(forest))
+    } else {
+        incomplete_factor(&workspace.diagonal, entries, checkpoint)?
+            .map(SparsePreconditioner::Incomplete)
+    };
     let error = RefCell::new(None);
     let checkpoint: &mut dyn FnMut() -> Result<(), DepositionError> = checkpoint;
     let checkpoint = RefCell::new(checkpoint);
     let operator = GraphOperator {
         diagonal: &workspace.diagonal,
         entries,
-        forest,
+        preconditioner,
         checkpoint: &checkpoint,
         error: &error,
     };

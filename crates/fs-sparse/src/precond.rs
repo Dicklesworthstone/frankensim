@@ -202,34 +202,9 @@ impl Precond for Chebyshev {
 // ILU(0) / IC(0)
 // ---------------------------------------------------------------------------
 
-/// Typed incomplete-factorization breakdown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IluBreakdown {
-    /// Row at which the pivot became zero/non-positive. Standard remedy:
-    /// retry on A + σ·diag(A) with growing σ (caller policy, documented).
-    pub row: usize,
-}
-
-/// ILU(0): incomplete LU with zero fill on the CSR pattern. Sequential v1
-/// (the bandwidth-hostile fallback per plan; level scheduling recorded).
-#[derive(Debug, Clone)]
-pub struct Ilu0 {
-    n: usize,
-    /// Factored values on A's pattern (L unit-lower strictly below diag,
-    /// U on/above), plus A's structure.
-    factored: Csr,
-}
-
-/// Incomplete-factorization failure with the caller's original checkpoint error.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IluControlledError<E> {
-    /// A missing/zero pivot or non-finite coefficient/intermediate.
-    Breakdown(IluBreakdown),
-    /// Sparse storage could not be reserved.
-    Capacity,
-    /// Cancellation or another caller-owned work limit.
-    Checkpoint(E),
-}
+#[path = "precond/ilu0.rs"]
+mod incomplete;
+pub use incomplete::{Ilu0, IluBreakdown, IluControlledError};
 
 /// Factor. # Errors: [`IluBreakdown`] with the failing row.
 pub fn ilu0(a: &Csr) -> Result<Ilu0, IluBreakdown> {
@@ -241,199 +216,19 @@ pub fn ilu0(a: &Csr) -> Result<Ilu0, IluBreakdown> {
     }
 }
 
-/// Zero-fill LU on the original CSR pattern, polling at entry and after at most
-/// 256 scalar copy/elimination operations (including inside a high-degree row).
+/// The same zero-fill factorization with bounded setup checkpoints.
 ///
-/// Storage is O(rows + nonzeros); elimination does not clone individual rows.
-/// The ascending pivot/update order and fused arithmetic match [`ilu0`]. This
-/// is a preconditioner, not a factorization of omitted fill or a proof that the
-/// physical matrix is singular when an incomplete pivot breaks down. No
-/// diagonal shift or coefficient change is introduced on failure.
-///
-/// # Panics
-/// The matrix must be square, as for [`ilu0`].
+/// Finite positive or negative pivots are admitted without shifting. Missing
+/// or zero pivots and nonfinite factor arithmetic return typed breakdown;
+/// checkpoint refusal publishes no factor and preserves the original error.
+/// Storage is O(rows + stored entries). Factor work depends on the original
+/// sparse row intersections; no fill or dense matrix is introduced.
 pub fn ilu0_controlled<E>(
     a: &Csr,
-    mut checkpoint: impl FnMut() -> Result<(), E>,
+    checkpoint: impl FnMut() -> Result<(), E>,
 ) -> Result<Ilu0, IluControlledError<E>> {
-    let n = a.nrows();
-    assert_eq!(n, a.ncols(), "ilu0 requires a square matrix");
-    checkpoint().map_err(IluControlledError::Checkpoint)?;
-    let mut work = 0_usize;
-    let mut poll = || {
-        work += 1;
-        if work == 256 {
-            work = 0;
-            checkpoint().map_err(IluControlledError::Checkpoint)?;
-        }
-        Ok(())
-    };
-    let copy = |source: &[usize], poll: &mut dyn FnMut() -> Result<(), IluControlledError<E>>| {
-        let mut target = Vec::new();
-        target
-            .try_reserve_exact(source.len())
-            .map_err(|_| IluControlledError::Capacity)?;
-        for &value in source {
-            poll()?;
-            target.push(value);
-        }
-        Ok::<_, IluControlledError<E>>(target)
-    };
-    let row_ptr = copy(&a.row_ptr, &mut poll)?;
-    let cols = copy(&a.col_idx, &mut poll)?;
-    let mut vals = Vec::new();
-    vals.try_reserve_exact(a.nnz())
-        .map_err(|_| IluControlledError::Capacity)?;
-    let mut diagonal = Vec::new();
-    diagonal
-        .try_reserve_exact(n)
-        .map_err(|_| IluControlledError::Capacity)?;
-    for row in 0..n {
-        poll()?;
-        let start = row_ptr[row];
-        let end = row_ptr[row + 1];
-        let mut pivot = usize::MAX;
-        for index in start..end {
-            poll()?;
-            let value = a.vals[index];
-            if !value.is_finite() {
-                return Err(IluControlledError::Breakdown(IluBreakdown { row }));
-            }
-            if cols[index] == row {
-                pivot = index;
-            }
-            vals.push(value);
-        }
-        diagonal.push(pivot);
-    }
-    for i in 0..n {
-        poll()?;
-        let end = row_ptr[i + 1];
-        for kk in row_ptr[i]..end {
-            poll()?;
-            let k = cols[kk];
-            if k >= i {
-                break;
-            }
-            let dk = diagonal[k];
-            if dk == usize::MAX || vals[dk] == 0.0 || !vals[dk].is_finite() {
-                return Err(IluControlledError::Breakdown(IluBreakdown { row: k }));
-            }
-            let lik = vals[kk] / vals[dk];
-            if !lik.is_finite() {
-                return Err(IluControlledError::Breakdown(IluBreakdown { row: i }));
-            }
-            vals[kk] = lik;
-            // Merge canonical upper-row patterns without allocating a pivot
-            // row copy or searching the complete destination for every entry.
-            let mut pos_i = kk + 1;
-            for pos_k in dk + 1..row_ptr[k + 1] {
-                poll()?;
-                let j = cols[pos_k];
-                while pos_i < end && cols[pos_i] < j {
-                    poll()?;
-                    pos_i += 1;
-                }
-                if pos_i == end {
-                    break;
-                }
-                if cols[pos_i] == j {
-                    vals[pos_i] = (-lik).mul_add(vals[pos_k], vals[pos_i]);
-                    if !vals[pos_i].is_finite() {
-                        return Err(IluControlledError::Breakdown(IluBreakdown { row: i }));
-                    }
-                }
-            }
-        }
-        let di = diagonal[i];
-        if di == usize::MAX || vals[di] == 0.0 || !vals[di].is_finite() {
-            return Err(IluControlledError::Breakdown(IluBreakdown { row: i }));
-        }
-    }
-    // The original immutable canonical pattern was copied without alteration.
-    Ok(Ilu0 {
-        n,
-        factored: Csr {
-            nrows: n,
-            ncols: n,
-            row_ptr,
-            col_idx: cols,
-            vals,
-        },
-    })
-}
-
-impl Ilu0 {
-    /// Apply the incomplete inverse without allocation, polling at entry and
-    /// after at most 256 scalar operations. On failure `z` is scratch only;
-    /// callers must discard it or replace it with a fallback preconditioner.
-    pub fn apply_controlled<E>(
-        &self,
-        r: &[f64],
-        z: &mut [f64],
-        mut checkpoint: impl FnMut() -> Result<(), E>,
-    ) -> Result<(), IluControlledError<E>> {
-        let n = self.n;
-        assert_eq!(r.len(), n, "ilu0 residual length");
-        assert_eq!(z.len(), n, "ilu0 output length");
-        checkpoint().map_err(IluControlledError::Checkpoint)?;
-        let mut work = 0_usize;
-        let mut poll = || {
-            work += 1;
-            if work == 256 {
-                work = 0;
-                checkpoint().map_err(IluControlledError::Checkpoint)?;
-            }
-            Ok(())
-        };
-        for (row, (out, &value)) in z.iter_mut().zip(r).enumerate() {
-            poll()?;
-            if !value.is_finite() {
-                return Err(IluControlledError::Breakdown(IluBreakdown { row }));
-            }
-            *out = value;
-        }
-        // Forward: L is unit-lower on the strict-lower pattern.
-        for i in 0..n {
-            poll()?;
-            let (cols, vals) = self.factored.row(i);
-            let mut v = z[i];
-            for (&c, &lv) in cols.iter().zip(vals) {
-                poll()?;
-                if c >= i {
-                    break;
-                }
-                v = (-lv).mul_add(z[c], v);
-            }
-            if !v.is_finite() {
-                return Err(IluControlledError::Breakdown(IluBreakdown { row: i }));
-            }
-            z[i] = v;
-        }
-        // Backward with U (diag included).
-        for i in (0..n).rev() {
-            poll()?;
-            let (cols, vals) = self.factored.row(i);
-            let mut v = z[i];
-            let mut diag = 1.0;
-            for (&c, &uv) in cols.iter().zip(vals) {
-                poll()?;
-                if c < i {
-                    continue;
-                }
-                if c == i {
-                    diag = uv;
-                } else {
-                    v = (-uv).mul_add(z[c], v);
-                }
-            }
-            z[i] = v / diag;
-            if !z[i].is_finite() {
-                return Err(IluControlledError::Breakdown(IluBreakdown { row: i }));
-            }
-        }
-        Ok(())
-    }
+    assert_eq!(a.nrows(), a.ncols(), "ilu0 requires a square matrix");
+    incomplete::factor(&a.row_ptr, &a.col_idx, &a.vals, checkpoint)
 }
 
 impl Precond for Ilu0 {

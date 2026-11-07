@@ -14,6 +14,7 @@ layer = "L3"
 fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
 fs-solver = { path = "../fs-solver" }
+fs-sparse = { path = "../fs-sparse" }
 
 [lints]
 workspace = true

@@ -1881,11 +1881,15 @@ The existing `fs-solver` FGMRES owner applies this generally nonsymmetric
 operator without assembling a dense global matrix. Each current Jacobian is
 checked for acyclic off-diagonal support after combining parallel contributions.
 Forests use exact leaf elimination, retaining unequal directional derivatives,
-one-sided couplings and disconnected cells; active cycles or unsafe pivots retain
-diagonal preconditioning. Assembly and factorization take
+one-sided couplings and disconnected cells. Forest assembly and factorization take
 O(cells + Jacobian contributions), and each forest inverse action takes
-O(cells) without scratch allocation. Unsafe
-inverse arithmetic also falls back to diagonal scaling. The Krylov solver still
+O(cells) without scratch allocation. Cyclic graphs use the existing `fs-sparse`
+zero-fill ILU owner on the same nonsymmetric Jacobian, with checkpointed setup
+and substitution. Canonical duplicate assembly takes O(entries log entries);
+factor storage and each inverse action remain O(cells + entries), while setup
+work depends on sparse row intersections. Neither path shifts the physical
+matrix or assumes positive definiteness. Unsafe factors or inverse arithmetic
+fall back to diagonal scaling. The Krylov solver still
 verifies the true residual of the original, uncombined contributions.
 Each operator action is O(cells + links), and bounded restart storage is
 O(cells * restart + links). Original map-based physical bookkeeping remains.
@@ -1901,7 +1905,8 @@ residual convergence never replaces the original joule acceptance gates.
 
 Regression coverage includes stiff star equilibration with unequal capacities,
 independent endpoint elimination, a manufactured 49-cell branched endpoint with
-parallel contacts and a one-iteration linear budget, energy and entropy accounts,
+parallel contacts and a one-iteration linear budget, a stiff cyclic loop under
+an eight-iteration budget, sparse-factor fallback, energy and entropy accounts,
 latent branches,
 active cycles and parallel links, an isolated cell, asymmetric covered areas,
 the original-residual Jacobian and transpose, adaptive analytical diffusion,

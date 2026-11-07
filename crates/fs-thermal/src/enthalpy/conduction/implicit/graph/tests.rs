@@ -299,6 +299,91 @@ fn stiff_branched_network_with_parallel_contacts_needs_one_krylov_iteration() {
 }
 
 #[test]
+fn stiff_cyclic_conduction_uses_sparse_ilu_with_original_energy_acceptance() {
+    let law = Law {
+        plateau: false,
+        nonlinear: false,
+    };
+    let count = 49;
+    let dt = 1000.0;
+    let masses: Vec<_> = (0..count)
+        .map(|i| 0.5 + 0.25 * ((5 * i) % 11) as f64)
+        .collect();
+    let expected: Vec<_> = (0..count)
+        .map(|i| 400.0 + (((7 * i) % 13) as f64 - 6.0) / dt)
+        .collect();
+    let mut edges = Vec::new();
+    for i in 0..count {
+        edges.push((i, (i + 1) % count, 0.25 * (i % 5) as f64));
+        if i % 7 == 0 {
+            edges.push(((i + 1) % count, i, 0.5));
+        }
+    }
+    let mut initial = expected.clone();
+    for &(a, b, resistance) in &edges {
+        let heat = dt * (expected[a] - expected[b]) / (1.0 + resistance);
+        initial[a] += heat / masses[a];
+        initial[b] -= heat / masses[b];
+    }
+    let (thermal, observer) = setup(&law, &initial, &masses, &edges);
+    let graph = ImplicitConductionGraph::new(
+        &thermal,
+        &observer,
+        &[(MaterialId(1), &law)],
+        ImplicitConductionLinearControls {
+            maximum_iterations: 8,
+            ..Default::default()
+        },
+        || Ok(()),
+    )
+    .unwrap();
+    let (next, report) = graph
+        .advance_to(
+            &thermal,
+            dt,
+            ImplicitConductionControls {
+                minimum_dt_s: dt,
+                maximum_halvings: 0,
+                cell_tolerance_j: 2e-8,
+                ..controls(dt)
+            },
+            &mut ImplicitConductionWorkspace::new(count).unwrap(),
+            || Ok(()),
+        )
+        .unwrap();
+    for (i, &temperature) in expected.iter().enumerate() {
+        near(next.temperature_k(id(i)).unwrap(), temperature, 2e-9);
+    }
+    assert!(report.linear_iterations <= 8);
+    assert_eq!(report.energy.substeps, 1);
+    assert_eq!(report.rejected_intervals, 0);
+    near(report.energy.external_heat_j, 0.0, 0.0);
+    near(report.energy.residual_j, 0.0, 1e-8);
+    assert!(report.entropy.conduction_generation_j_k > 0.0);
+    assert_eq!(thermal.time_s(), 0.0);
+}
+
+#[test]
+fn unsafe_sparse_pivots_retain_the_original_general_krylov_solve() {
+    // Invertible nonsymmetric-capable system requiring a pivot: neither the
+    // forest nor zero-fill factor may turn its unsafe first pivot into a
+    // refusal of the original linear equations.
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    workspace.diagonal.copy_from_slice(&[0.0, 2.0]);
+    workspace.graph_entries = Some(vec![(0, 1, 1.0), (1, 0, 1.0)]);
+    workspace.rhs.copy_from_slice(&[2.0, 5.0]);
+    solve(
+        &mut workspace,
+        ImplicitConductionLinearControls::default(),
+        &mut empty_report(),
+        &mut || Ok(()),
+    )
+    .unwrap();
+    near(workspace.direction[0], 1.0, 1e-12);
+    near(workspace.direction[1], 2.0, 1e-12);
+}
+
+#[test]
 fn branched_latent_transport_and_cyclic_nonlinear_jacobian_keep_original_calorics() {
     let law = Law {
         plateau: true,
@@ -382,7 +467,7 @@ fn branched_latent_transport_and_cyclic_nonlinear_jacobian_keep_original_caloric
     let operator = GraphOperator {
         diagonal: &workspace.diagonal,
         entries: workspace.graph_entries.as_deref().unwrap(),
-        forest: None,
+        preconditioner: None,
         checkpoint: &checkpoint,
         error: &error,
     };

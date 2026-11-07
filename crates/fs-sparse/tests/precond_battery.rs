@@ -250,6 +250,39 @@ fn ilu_breakdown_is_typed() {
 }
 
 #[test]
+fn original_and_controlled_ilu_apis_preserve_nonsymmetric_solutions() {
+    let a = Csr::from_parts(
+        3,
+        3,
+        vec![0, 3, 6, 9],
+        vec![0, 1, 2, 0, 1, 2, 0, 1, 2],
+        vec![4.0, -1.0, 0.5, -2.0, 5.0, -1.0, 0.25, -1.0, 3.0],
+    );
+    let original = a.clone();
+    let legacy = ilu0(&a).unwrap();
+    let checked = ilu0_controlled(&a, || Ok::<(), ()>(())).unwrap();
+    let rhs = [10.5, -12.0, 10.5];
+    let mut old_api = [0.0; 3];
+    let mut new_api = [0.0; 3];
+    legacy.apply(&rhs, &mut old_api);
+    checked
+        .apply_controlled(&rhs, &mut new_api, || Ok::<(), ()>(()))
+        .unwrap();
+    assert_eq!(old_api.map(f64::to_bits), new_api.map(f64::to_bits));
+    for (&value, expected) in old_api.iter().zip([2.0, -1.0, 3.0]) {
+        assert!((value - expected).abs() < 2e-14);
+    }
+    assert_eq!(a, original);
+}
+
+#[test]
+#[should_panic(expected = "ilu0 non-finite inverse action")]
+fn legacy_ilu_apply_retains_its_nonfinite_inverse_panic() {
+    let a = Csr::from_parts(1, 1, vec![0, 1], vec![0], vec![f64::from_bits(1)]);
+    ilu0(&a).unwrap().apply(&[1.0], &mut [0.0]);
+}
+
+#[test]
 fn pcg_preserves_rhs_scale_instead_of_squaring_it_away() {
     let a = Csr::identity(2);
     for amplitude in [f64::from_bits(1), 1e-200, 1.0, 1e200, f64::MAX] {
