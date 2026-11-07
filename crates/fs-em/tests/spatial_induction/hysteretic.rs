@@ -1,6 +1,8 @@
 //! Actual spatial vector memory, charge continuity and separated physical heat.
 #[path = "hysteretic/common.rs"]
 mod common;
+#[path = "hysteretic/rate.rs"]
+mod rate;
 
 use super::{cross, grid, near};
 use common::*;

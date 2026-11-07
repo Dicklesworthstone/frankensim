@@ -20,8 +20,8 @@ use fs_material::{
         MAGNETIC_PERMEABILITY_DIMS,
         hysteresis::{
             source::{
-                HysteresisBranchSources, HysteresisSources, ResolvedScalarHysteresis,
-                ResolvedVectorHysteresis,
+                HysteresisBranchSources, HysteresisSources, MAGNETIC_VISCOSITY_DIMS,
+                ResolvedScalarHysteresis, ResolvedVectorHysteresis,
             },
             vector::VectorHysteresisControls,
         },
@@ -77,6 +77,19 @@ pub fn card(fit_upper: f64) -> Arc<MaterialCard> {
     card_with_heat_capacity(fit_upper, CP)
 }
 pub fn card_with_heat_capacity(fit_upper: f64, heat_capacity: f64) -> Arc<MaterialCard> {
+    card_with_parameters(fit_upper, heat_capacity, None)
+}
+pub fn card_with_viscosity(fit_upper: f64, eta: f64) -> Arc<MaterialCard> {
+    card_with_parameters(fit_upper, CP, Some(eta))
+}
+fn viscosity_key() -> PropertyKey {
+    PropertyKey::new("intrinsic_branch_viscosity", MAGNETIC_VISCOSITY_DIMS)
+}
+fn card_with_parameters(
+    fit_upper: f64,
+    heat_capacity: f64,
+    viscosity: Option<f64>,
+) -> Arc<MaterialCard> {
     let roles = roles();
     let branch = &roles.branches[0];
     let mut claims = ClaimSet::new();
@@ -115,6 +128,17 @@ pub fn card_with_heat_capacity(fit_upper: f64, heat_capacity: f64) -> Arc<Materi
             key,
             PropertyValue::Scalar { value, dims },
             domain(upper),
+            InterpolationPolicy::ConstantWithinValidity,
+        );
+    }
+    if let Some(value) = viscosity {
+        insert(
+            viscosity_key(),
+            PropertyValue::Scalar {
+                value,
+                dims: MAGNETIC_VISCOSITY_DIMS,
+            },
+            domain(fit_upper),
             InterpolationPolicy::ConstantWithinValidity,
         );
     }
@@ -166,16 +190,38 @@ pub fn problem(
     positions: Vec<[f64; 3]>,
     tets: Vec<[u32; 4]>,
 ) -> SpatialHystereticProblem {
-    let law = ResolvedVectorHysteresis::from_isotropic_source(
-        ResolvedScalarHysteresis::resolve(
-            card.clone(),
-            &point(300.0),
-            roles(),
-            MaterialPropertySelection::SingleClaimOnly,
-        )
-        .unwrap(),
+    problem_with_profile(card, positions, tets, false)
+}
+pub fn problem_with_viscosity(
+    card: &Arc<MaterialCard>,
+    positions: Vec<[f64; 3]>,
+    tets: Vec<[u32; 4]>,
+) -> SpatialHystereticProblem {
+    problem_with_profile(card, positions, tets, true)
+}
+fn problem_with_profile(
+    card: &Arc<MaterialCard>,
+    positions: Vec<[f64; 3]>,
+    tets: Vec<[u32; 4]>,
+    kinetic: bool,
+) -> SpatialHystereticProblem {
+    let scalar = ResolvedScalarHysteresis::resolve(
+        card.clone(),
+        &point(300.0),
+        roles(),
+        MaterialPropertySelection::SingleClaimOnly,
     )
     .unwrap();
+    let law = if kinetic {
+        ResolvedVectorHysteresis::from_isotropic_source_with_viscosity(
+            scalar,
+            vec![viscosity_key()],
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap()
+    } else {
+        ResolvedVectorHysteresis::from_isotropic_source(scalar).unwrap()
+    };
     let count = tets.len();
     SpatialHystereticProblem::new(
         positions,

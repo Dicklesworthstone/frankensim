@@ -5,14 +5,17 @@
 //! Its shared bounded Newton/FGMRES kernel uses the native vector return map's
 //! frozen-history tangent. Every nonlinear trial starts from the same accepted
 //! cell polarizations; no trial history is published or substituted by a scalar
-//! loop. Backward Euler closes delta W + Q_pinning + Q_Joule + D = W_impressed.
-//! Only the two physical heat terms can enter a thermal receiver. D remains
-//! endpoint numerical dissipation, including during source-free relaxation.
+//! loop. Source-selected intrinsic viscosities use the same physical duration
+//! in every trial. Backward Euler closes
+//! delta W + Q_pinning + Q_viscous + Q_Joule + D = W_impressed + W_terminal.
+//! Only physical heat terms can enter a thermal receiver. D remains endpoint
+//! numerical dissipation, including during source-free relaxation.
 //!
 //! Geometry, occupancy, magnetic coefficients and their physical frame are
 //! fixed. Conductivity can refresh from its original admitted material source.
 //! This owner supplies no motion/transport law, anisotropic hysteresis fit,
 //! empirical excess-loss correction or experimental material qualification.
+//! Intrinsic viscosity fits must exclude the eddy currents resolved here.
 
 /// Physical voltage and total-current electrodes with retained vector memory.
 pub mod terminals;
@@ -216,7 +219,10 @@ pub struct SpatialHystereticInductionMagneticCell {
     pub stored_energy_j: [f64; 2],
     /// Stable increment from the original vector constitutive owner.
     pub energy_change_j: f64,
+    /// Complete physical constitutive heat: dry pinning plus intrinsic viscosity.
     pub irreversible_heat_j: f64,
+    pub pinning_heat_j: f64,
+    pub viscous_heat_j: f64,
     pub numerical_dissipation_j: f64,
     /// Endpoint H paired with the actual curl increment minus its accounts.
     pub energy_residual_j: f64,
@@ -230,8 +236,11 @@ pub struct SpatialHystereticInductionStep {
     pub stored_after_j: f64,
     pub stored_change_j: f64,
     pub joule_heat_j: f64,
+    /// Complete physical constitutive heat: pinning_heat_j + viscous_heat_j.
     pub hysteresis_heat_j: f64,
-    /// Physical Joule plus pinning heat, payable exactly once.
+    pub pinning_heat_j: f64,
+    pub viscous_heat_j: f64,
+    /// Physical Joule plus dry/viscous switching heat, payable exactly once.
     pub heat_j: f64,
     /// Endpoint numerical loss, excluded from heat_j.
     pub numerical_dissipation_j: f64,
@@ -479,6 +488,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialHystereticInduction<'m, C> {
     fn magnetic(
         &self,
         potential: &[f64],
+        duration_s: f64,
         controls: VectorHysteresisControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Magnetic<Vec<VectorHysteresisStep>>> {
@@ -491,12 +501,15 @@ impl<'m, C: SpatialConductorMaterial> SpatialHystereticInduction<'m, C> {
         let mut stored_energy_j = 0.0;
         for (cell, &b) in b.iter().enumerate() {
             poll(cancelled)?;
-            let step = self.problem.materials[cell].law().candidate_flux_density(
-                &self.cell_states[cell],
-                b,
-                controls,
-                cancelled,
-            )?;
+            let step = self.problem.materials[cell]
+                .law()
+                .candidate_flux_density_timed(
+                    &self.cell_states[cell],
+                    b,
+                    duration_s,
+                    controls,
+                    cancelled,
+                )?;
             let h_cell = step.state.field_a_m();
             let volume = self.problem.geometry.geometry.vol_signed[cell].abs();
             let energy = finite(volume * step.state.stored_energy_j_m3())?;
@@ -593,8 +606,14 @@ impl<'m, C: SpatialConductorMaterial> SpatialHystereticInduction<'m, C> {
             controls: settings.induction,
             restart,
         };
+        // The original A–phi Newton kernel globalizes on its complete residual
+        // norm. Its effort and tangent come from the native incremental law,
+        // whose potential includes HALF the physical viscous heat; the energy
+        // retained above is the original storage, without any dissipative term.
         let value = kernel.solve(
-            |potential, mut stop| self.magnetic(potential, settings.material, &mut stop),
+            |potential, mut stop| {
+                self.magnetic(potential, duration_s, settings.material, &mut stop)
+            },
             |error| {
                 matches!(
                     error,
@@ -620,6 +639,8 @@ impl<'m, C: SpatialConductorMaterial> SpatialHystereticInduction<'m, C> {
         let mut magnetic_cells = Vec::with_capacity(g.cells.len());
         let mut stored_change_j = 0.0;
         let mut hysteresis_heat_j = 0.0;
+        let mut pinning_heat_j = 0.0;
+        let mut viscous_heat_j = 0.0;
         let mut numerical_dissipation_j = 0.0;
         let mut constitutive_work_defect_j = 0.0;
         let mut maximum_constitutive_residual_a_m = 0.0_f64;
@@ -632,6 +653,8 @@ impl<'m, C: SpatialConductorMaterial> SpatialHystereticInduction<'m, C> {
             let db = std::array::from_fn(|j| new[j] - old[j]);
             let change = finite(volume * step.energy_change_j_m3)?;
             let heat = finite(volume * step.irreversible_heat_j_m3)?;
+            let pinning = finite(volume * step.pinning_heat_j_m3)?;
+            let viscous = finite(volume * step.viscous_heat_j_m3)?;
             let loss = finite(volume * step.numerical_dissipation_j_m3)?;
             let defect = finite(volume * dot(step.state.field_a_m(), db) - change - heat - loss)?;
             // Preserve actual local memory and independently admit its inverse
@@ -639,6 +662,8 @@ impl<'m, C: SpatialConductorMaterial> SpatialHystereticInduction<'m, C> {
             constitutive_work_defect_j = finite(constitutive_work_defect_j + defect.abs())?;
             stored_change_j = finite(stored_change_j + change)?;
             hysteresis_heat_j = finite(hysteresis_heat_j + heat)?;
+            pinning_heat_j = finite(pinning_heat_j + pinning)?;
+            viscous_heat_j = finite(viscous_heat_j + viscous)?;
             numerical_dissipation_j = finite(numerical_dissipation_j + loss)?;
             maximum_constitutive_residual_a_m =
                 maximum_constitutive_residual_a_m.max(step.maximum_constitutive_residual_a_m);
@@ -654,6 +679,8 @@ impl<'m, C: SpatialConductorMaterial> SpatialHystereticInduction<'m, C> {
                 ],
                 energy_change_j: change,
                 irreversible_heat_j: heat,
+                pinning_heat_j: pinning,
+                viscous_heat_j: viscous,
                 numerical_dissipation_j: loss,
                 energy_residual_j: defect,
             });
@@ -667,7 +694,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialHystereticInduction<'m, C> {
             || energy_residual_j.abs() > controls.energy_tolerance_j
         {
             return Err(invalid(
-                "hysteretic magnetic, Joule, pinning, terminal and numerical work do not close",
+                "hysteretic magnetic, Joule, constitutive, terminal and numerical work do not close",
             )
             .into());
         }
@@ -696,6 +723,8 @@ impl<'m, C: SpatialConductorMaterial> SpatialHystereticInduction<'m, C> {
                 stored_change_j,
                 joule_heat_j: current.heat_j,
                 hysteresis_heat_j,
+                pinning_heat_j,
+                viscous_heat_j,
                 heat_j,
                 numerical_dissipation_j,
                 impressed_work_j,

@@ -139,6 +139,35 @@ that physics and is intentionally absent. The fit's original source evidence
 is retained without claiming measured rotational validity, anisotropic
 hysteresis, temperature-dependent magnetic entropy or continuum error bounds.
 
+## Intrinsic switching kinetics on native three-dimensional induction
+
+An explicitly sourced intrinsic viscosity profile now uses the accepted
+`SpatialHystereticInduction` duration in every native B-driven constitutive
+trial. The same accepted vector memory and physical `dt` remain frozen across
+Newton, backtracking, physical electrode and graph-terminal trials. The native
+branch potential contains `eta*|delta polarization|^2/(2dt)`; its consistent
+effort and inverse permeability enter the original A–phi Newton/FGMRES solve.
+That shared solver globalizes on the complete residual norm. Stored magnetic
+energy remains the original free energy and includes no dissipative term.
+
+Local and complete-field receipts distinguish dry pinning, intrinsic viscous
+switching and resolved Ohmic heat. The complete physical identity is
+`delta W + Q_pinning + Q_viscous + Q_Joule + D_numerical = W_impressed + W_terminal`.
+Existing solid electrodes, their native circuits, stranded winding circuits
+and finite thermal delegates inherit this behavior through the same field
+owner. Their existing physical totals deposit the full constitutive heat once;
+numerical endpoint dissipation is never thermalized. Original kinetic source
+validity and temperature support participate in existing material admission.
+
+Zero viscosity preserves the original rate-independent kernel. Positive
+viscosity is an independently fitted intrinsic loss, not an estimate from
+conductivity or total device core loss; resolved eddy loss must not be included
+again in its fit. Fixed geometry, fixed fitted coefficients and the existing
+default-off feature remain the scope. The independent six-tetrahedron tests in
+`tests/spatial_induction/hysteretic/rate.rs` cover timed holds and relaxation,
+separate local/global work accounts, late-cancellation replay, exact zero-viscosity
+recovery and equivalence of physical voltage and total-current electrodes.
+
 ## Axisymmetric magnetic loads on native mechanical bodies
 
 The original linear and nonlinear axisymmetric fields expose
