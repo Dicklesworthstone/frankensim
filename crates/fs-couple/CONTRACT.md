@@ -3761,3 +3761,68 @@ above relaxed equilibrium remain caller declarations. Tests compare full
 source strain storage, original mass choices, support-frame and basis
 covariance, both initial histories, and actual fs-phs motion, independently
 integrated heat and input work against refined continuous Maxwell equations.
+
+### Original causal rational boundary states
+
+`phs_orbit::rational::PreparedPhsMimo` attaches the original admitted
+`fs_vfit::mimo::load::PreparedMimoLoad` to an original nonlinear pHS through a
+caller-authored state-by-boundary-port map `S`. The complete state is
+`[x_host, z_source]`, in the original coordinates of both owners. Its equations
+are `y=S^T grad H`, `z'=A z+B y`, `e_boundary=C z+D y`, and
+`x'=(J-R) grad H+G f-S e_boundary`. The same signed map carries source flow
+and opposing host reaction. External forcing ports remain independent of the
+boundary map. Full mutual matrices, singular or zero direct terms, real poles,
+conjugate-pair coordinates and source states invisible at the boundary survive.
+There is no fit, pole condensation, direct-term inverse or new time integrator.
+The original continuous owner supplies all A/B/C/D/E matrices. This explicit
+ODE path requires E to be exactly zero; differentiating loads need a separate
+descriptor/mass owner and are never silently truncated.
+
+The existing fs-orbit owner supplies fixed/adaptive scaled harmonic balance
+and variational shooting with the complete discrete Floquet spectrum. The
+original native/caller storage Hessian differentiates the same nonlinear
+effort law, including material-memory states. Exact quadratic joint tangents
+are cached; an unavailable or refusing declared tangent cannot silently become
+a numerical tangent for variational shooting. Source contractions reuse
+prepared scratch. Native J/R/G and the boundary reaction share one original
+pHS compensated row in both the RHS and host-state tangent; a rounded native
+field is never subsequently corrected by a separately rounded reaction.
+Original flow and effort entries remain f64 owner outputs, and the independent
+work audit reports the source/host exchange residual. No arbitrary relative
+accuracy under severe coupled cancellation is asserted.
+Explicit state/port/Fourier/payload caps and per-query
+contraction limits remain separate from the shared solver's numerical budgets;
+callback internals remain caller-owned. Cancellation and refusal publish no
+partial orbit or accepted-source mutation.
+
+This is the continuous ODE of the supplied rational model, including its
+original real DC dynamics, rather than a realization inferred from harmonic
+samples. Every retained positive harmonic must lie in the unchanged source
+band. Physical qualification of DC, transient content and unresolved higher
+harmonics still requires source evidence; source-band or broadband acoustic
+validity is not inferred from mathematical solvability. The original continuous
+and sampled passivity reports remain exposed with their original classification.
+One shooting grid is numerical evidence, not a temporal convergence certificate.
+
+`initial_state` explicitly imports the original accepted real pole history;
+steady harmonic solves never insert that history as an extra forcing.
+`source_candidate` delegates endpoint conversion to the original history owner
+and returns a separate candidate retaining its model, reports and physical
+clock. The enclosing trajectory owns acceptance. Independent cycle auditing
+reevaluates original host H/R/G, authored supply, signed source exchange and
+host-side physical reaction work. Arbitrary rational coordinates acquire no
+invented stored energy, heat or radiation classification. Nonlinear work still
+requires a quadrature sample ladder.
+
+Five real-owner integration regressions cover full mutual real/pair harmonic
+response and history, loaded and dark Floquet modes, a manufactured nonlinear
+Duffing response, original DC/singular-D/band/budget/cancellation behavior, and
+joint host/reaction cancellation in the actual RHS and complete tangent.
+The actual production contraction module was executed with the real fs-math
+dependency: four regressions passed for an independent passive Debye storage
+identity, complex pole/residue response including DC, cancellation-sensitive
+work, and dark-state/history evolution. The exact native pHS row plus its
+original accumulator also passed 12 executable regressions, including the
+three new joint-force cases. Native adapter integration execution
+remains unverified because the unchanged full dependency build is blocked by
+the upstream asupersync memory limit.

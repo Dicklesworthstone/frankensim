@@ -2841,3 +2841,27 @@ The actual complete fs-phs library compiled with this continuous action; all
 four new tangent tests, six existing harmonic-equilibrium tests and seven
 nonlinear-inductor regressions passed. Together with the earlier circuit run,
 these cover 52 distinct targeted integration tests.
+
+## Joint original field and external reaction arithmetic
+
+`PortHamiltonian::vector_field_with_reaction_from_effort_into` evaluates
+`J e-R e+G u-S e_boundary` through one original compensated row accumulator.
+Its explicitly supplied state-by-boundary-port columns may differ from G;
+all signs, original coordinates and source orders remain unchanged. Both words
+of each physical map contraction survive until the complete row is rounded.
+The existing `vector_field_from_effort_into` delegates with empty reaction
+ports, retaining its previous contraction order and semantics. No boundary
+realization, passivity witness, storage law or time integrator is supplied.
+
+The source efforts and flows remain admitted f64 values. This closes the
+premature host-field rounding seam, not every possible relative-accuracy loss
+at a physical source interface. Shapes, finite inputs and representability are
+checked; outputs remain scratch on refusal. The operation allocates nothing.
+
+Three production-row regressions verify a small drive surviving cancellation
+between strong native damping and causal history reaction, the corresponding
+direct-load/Hessian cancellation, and unrounded input/reaction map remainders.
+The exact production row and original accumulator were compiled and executed:
+12 tests passed, including nine existing accumulator regressions. The complete
+native coupled-owner regression remains unexecuted in the dependency-memory
+constrained environment.

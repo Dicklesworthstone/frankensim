@@ -37,6 +37,9 @@ pub mod acoustic;
 /// Full physical impedance back-reaction on forced nonlinear periodic regimes.
 pub mod impedance;
 
+/// Original causal rational boundary states in nonlinear HB and variational shooting.
+pub mod rational;
+
 /// Physical probe response and frequency conversion about driven or self-excited periodic orbits.
 pub mod sideband;
 

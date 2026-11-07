@@ -55,6 +55,8 @@ pub mod multirate;
 /// Complete reciprocal physical power-port composition.
 mod interconnection;
 pub use interconnection::{InterconnectionBudget, interconnect_mapped};
+mod vector_field;
+pub(crate) use vector_field::port_input_row;
 /// Physical outlet volume flow on the original acoustic-chain state.
 pub mod acoustic_outlet;
 
@@ -1121,27 +1123,43 @@ impl PortHamiltonian {
     pub fn vector_field_from_effort_into(
         &self, effort: &[f64], input: &[f64], out: &mut [f64],
     ) -> Result<(), PhsError> {
+        self.vector_field_with_reaction_from_effort_into(effort, input, &[], &[], out)
+    }
+
+    /// Apply `J e - R e + G u - S e_boundary` with ONE final rounding per row.
+    /// `reaction_columns` is row-major original-state-by-boundary-port. Signed,
+    /// repeated or nonorthogonal physical maps need not coincide with G. The
+    /// original J/R/G terms and both words of the opposing port reaction share
+    /// the original accumulator; a large returned boundary force therefore
+    /// cannot erase a small drive by cancellation with a prematurely rounded
+    /// internal field. Empty columns/efforts recover the ordinary field.
+    ///
+    /// This allocates nothing and supplies no boundary law or passivity witness.
+    /// The caller owns its actual source, reciprocal flow and exchanged work.
+    /// # Errors
+    /// Incomplete/nonfinite original data or unrepresentable arithmetic. `out`
+    /// remains scratch on refusal; transactional owners publish only success.
+    pub fn vector_field_with_reaction_from_effort_into(
+        &self, effort: &[f64], input: &[f64], reaction_columns: &[f64],
+        reaction_effort: &[f64], out: &mut [f64],
+    ) -> Result<(), PhsError> {
+        let ports = reaction_effort.len();
         if effort.len() != self.n || input.len() != self.m || out.len() != self.n
             || self.n.checked_mul(self.m) != Some(self.g.len())
             || self.n.checked_mul(self.n) != Some(self.j.len())
             || self.j.len() != self.r.len()
+            || self.n.checked_mul(ports) != Some(reaction_columns.len())
         { return Err(PhsError::Dimension { what: "physical vector field extents" }); }
-        if effort.iter().chain(input).any(|value| !value.is_finite()) {
+        if effort.iter().chain(input).chain(reaction_columns).chain(reaction_effort)
+            .any(|value| !value.is_finite()) {
             return Err(PhsError::Unadmitted { what: "nonfinite physical vector field input" });
         }
         for (row, value) in out.iter_mut().enumerate() {
-            let mut sum = interconnection::accumulation::Sum::default();
-            let refused = || PhsError::Unadmitted { what: "unrepresentable physical vector field" };
-            for (col, &e) in effort.iter().enumerate() {
-                let j = self.j[row * self.n + col];
-                let r = self.r[row * self.n + col];
-                if j != 0.0 { sum.product(j, e).ok_or_else(refused)?; }
-                if r != 0.0 { sum.product(-r, e).ok_or_else(refused)?; }
-            }
-            let forcing = port_input_row(&self.g[row*self.m..(row+1)*self.m], |p| input[p])
-                .ok_or_else(refused)?;
-            sum.add_scaled(forcing, 1.0).ok_or_else(refused)?;
-            *value = sum.value().ok_or_else(refused)?;
+            *value = vector_field::row(&self.j[row*self.n..(row+1)*self.n],
+                &self.r[row*self.n..(row+1)*self.n], effort,
+                &self.g[row*self.m..(row+1)*self.m], input,
+                &reaction_columns[row*ports..(row+1)*ports], reaction_effort)
+                .ok_or(PhsError::Unadmitted { what: "unrepresentable physical vector field" })?;
         }
         Ok(())
     }
@@ -1423,19 +1441,6 @@ fn port_outputs_into(
             .ok_or(PhsError::Unadmitted { what: "unrepresentable physical port output" })?;
     }
     Ok(())
-}
-
-/// Retain the low word for a subsequent flow or power contraction. In
-/// particular, do not call `value()` before adding an internal force or
-/// multiplying by the original effort. Empty rows represent zero-port input.
-pub(crate) fn port_input_row(
-    g: &[f64], input: impl Fn(usize) -> f64,
-) -> Option<interconnection::accumulation::Sum> {
-    let mut sum = interconnection::accumulation::Sum::default();
-    for (port, &coefficient) in g.iter().enumerate() {
-        if coefficient != 0.0 { sum.product(coefficient, input(port))?; }
-    }
-    Some(sum)
 }
 
 // The reciprocal physical input map uses the same signed arithmetic as its
