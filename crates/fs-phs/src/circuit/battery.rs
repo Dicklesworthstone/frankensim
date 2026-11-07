@@ -63,7 +63,7 @@ impl BatteryOcvCurve {
                 "battery requires positive capacity and 2..4096 SOC knots covering [0,1]",
             ));
         }
-        let mut knots = Vec::with_capacity(soc_voltage.len());
+        let mut knots: Vec<(f64, f64)> = Vec::with_capacity(soc_voltage.len());
         let mut slopes = Vec::with_capacity(soc_voltage.len() - 1);
         let mut energy = Vec::with_capacity(soc_voltage.len());
         let mut accumulated = Dd::ZERO;
