@@ -6,6 +6,8 @@ use fs_lbm::d3q19::freesurface3::sgs::FreeSurfaceSgsWorkspace3;
 use fs_lbm::material::free_surface::MaterialFreeSurfaceSgsConfig3;
 use fs_lbm::sgs3::{SgsModel, SgsUse, eddy_viscosity};
 
+mod motion;
+
 fn controls(model: SgsModel) -> MaterialFreeSurfaceSgsConfig3 {
     MaterialFreeSurfaceSgsConfig3 {
         model,

@@ -8,17 +8,19 @@
 use std::borrow::Cow;
 
 use super::*;
-use crate::d3q19::freesurface3::FreeSurfaceKinematicsWorkspace3;
 use crate::d3q19::freesurface3::sgs::{
     FreeSurfaceSgsError3, FreeSurfaceSgsReport3, FreeSurfaceSgsWorkspace3, gradient_sgs_at,
     molecular_relaxation,
 };
+use crate::d3q19::freesurface3::{FreeSurfaceKinematicsWorkspace3, PlanarWallVelocityField3};
 use crate::lattice3::{D3q19, ViscousLattice3};
 use crate::material::free_surface::sgs::SgsUnits;
 use crate::material::free_surface::{
     MaterialFreeSurfaceSgsConfig3, MaterialFreeSurfaceSgsError3, MaterialFreeSurfaceSgsReport3,
 };
 use crate::sgs3::{SgsConfig, SgsError, SgsModel, smagorinsky_viscosity};
+
+mod motion;
 
 impl From<FreeSurfaceSgsError3> for Error {
     fn from(error: FreeSurfaceSgsError3) -> Self {
@@ -61,6 +63,17 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
         kinematics: Option<&mut FreeSurfaceKinematicsWorkspace3>,
         workspace: &mut FreeSurfaceSgsWorkspace3,
     ) -> Result<MaterialFreeSurfaceRheologySgs3<'s, 'm>, Error> {
+        self.bind_sgs(config, gate, kinematics, workspace, None)
+    }
+
+    fn bind_sgs(
+        self,
+        config: MaterialFreeSurfaceSgsConfig3,
+        gate: &CancelGate,
+        kinematics: Option<&mut FreeSurfaceKinematicsWorkspace3>,
+        workspace: &mut FreeSurfaceSgsWorkspace3,
+        wall: Option<PlanarWallVelocityField3<'_>>,
+    ) -> Result<MaterialFreeSurfaceRheologySgs3<'s, 'm>, Error> {
         poll(gate)?;
         let native_config = config.lattice(self.flow.scaling.cell_size_m)?;
         let mut result = MaterialFreeSurfaceRheologySgs3 {
@@ -68,8 +81,13 @@ impl<'s, 'm> MaterialFreeSurfaceRheology3<'s, 'm> {
             config,
             native_config,
         };
-        let (samples, _) =
-            result.prepare(&result.flow.flow.lattice, gate, kinematics, workspace)?;
+        let (samples, _) = result.prepare_with_wall(
+            &result.flow.flow.lattice,
+            gate,
+            kinematics,
+            workspace,
+            wall,
+        )?;
         if native_config.model.coefficient() != 0.0 {
             if let Some(field) = result.flow.flow.scaling.source_bulk_relaxations(
                 samples
@@ -224,19 +242,37 @@ impl MaterialFreeSurfaceRheologySgs3<'_, '_> {
         kinematics: Option<&mut FreeSurfaceKinematicsWorkspace3>,
         workspace: &mut FreeSurfaceSgsWorkspace3,
     ) -> Result<(BTreeMap<MassLocation3, CellMaterial>, FreeSurfaceSgsReport3), Error> {
+        self.prepare_with_wall(lattice, gate, kinematics, workspace, None)
+    }
+
+    fn prepare_with_wall(
+        &self,
+        lattice: &FreeSurface3,
+        gate: &CancelGate,
+        kinematics: Option<&mut FreeSurfaceKinematicsWorkspace3>,
+        workspace: &mut FreeSurfaceSgsWorkspace3,
+        wall: Option<PlanarWallVelocityField3<'_>>,
+    ) -> Result<(BTreeMap<MassLocation3, CellMaterial>, FreeSurfaceSgsReport3), Error> {
         poll(gate)?;
         let scale = self.flow.flow.scaling;
         let config = self.native_config;
         molecular_relaxation(lattice.collision_model())?;
         let disabled = config.model.coefficient() == 0.0;
-        let field =
-            if disabled || matches!(config.model, SgsModel::Smagorinsky { .. }) {
-                None
-            } else {
-                Some(lattice.kinematics(gate, kinematics.ok_or(Error::Invalid(
-                "WALE/Vreman rheology requires the native liquid-gradient workspace",
-            ))?).map_err(FreeSurfaceSgsError3::from)?)
-            };
+        let field = if disabled || matches!(config.model, SgsModel::Smagorinsky { .. }) {
+            None
+        } else {
+            Some(
+                lattice
+                    .kinematics_with_wall(
+                        gate,
+                        kinematics.ok_or(Error::Invalid(
+                            "WALE/Vreman rheology requires the native liquid-gradient workspace",
+                        ))?,
+                        wall,
+                    )
+                    .map_err(FreeSurfaceSgsError3::from)?,
+            )
+        };
         let mass = lattice.mass_snapshot();
         workspace
             .tau

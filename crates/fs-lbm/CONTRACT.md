@@ -14795,3 +14795,38 @@ definitions in `tests/material_free_surface_rheology/sgs.rs` cover nonlinear
 all-closure forcing, exact disabled-source trajectory and newly wet bulk
 coverage. SGS remains exploratory, without turbulence qualification or a
 subgrid free-interface model.
+
+### Moving walls with the bound source-rheology and SGS owner
+
+`MaterialFreeSurfaceRheology3::with_sgs_and_planar_wall_velocity_field_si`
+binds the original joint molecular/eddy constitutive root with the actual SI
+wall field. WALE/Vreman use the prescribed halfway-wall gradient, including
+supported two-layer liquid films; Smagorinsky retains its kinetic-stress root.
+Binding does not advance populations, time or mass, and does not implicitly
+retain wall actuation for a future step.
+
+`MaterialFreeSurfaceRheologySgs3::step_with_planar_wall_velocity_field_si`
+recloses the input source/SGS response under the current wall field before
+collision. The same fresh source response supplies independent bulk viscosity
+inside the original single native wall candidate. This prevents a changed
+wall gradient from leaving the previously fitted molecular or bulk response
+in the applied collision. The accepted endpoint reuses its actual pressure,
+Guo-corrected stress and the held wall field for source admission. Source
+samples retain molecular tau while scratch retains endpoint total tau.
+
+Native wall reflection, gas reconstruction, interface conversion, mass
+transport and SI wall impulse/work remain authoritative. The input state's
+molecular shear, independent bulk and modeled powers remain separate and do
+not deposit heat. Source or convergence failure, invalid wall/SI data and
+cancellation preserve accepted flow and source samples. Zero SGS coefficient
+uses the original molecular epoch and endpoint root, retaining population,
+source and wall-receipt parity. Existing fully flooded, tangent-only fixed-wall
+limits and exploratory isothermal LES scope remain.
+
+Four integration regression groups in
+`tests/material_free_surface_rheology/sgs/motion.rs` cover analytic rotating
+quadratic two-layer binding, changed prior wall/source-bulk epochs, independent
+nonlinear endpoint-root and wall-work checks, constant-source native wall-SGS
+parity, all-three-closure disabled parity, and late source refusal/retry.
+All changed Rust files passed parser/source and whitespace review; these
+integration tests were not compiled or executed in the constrained environment.

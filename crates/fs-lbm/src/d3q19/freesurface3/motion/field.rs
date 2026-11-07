@@ -471,9 +471,26 @@ impl FreeSurface3 {
         tau: Option<&BTreeMap<(u64, usize), f64>>,
         gate: &CancelGate,
     ) -> Result<(Self, PlanarWallFieldReport3), FreeSurfaceError3> {
+        self.planar_wall_field_candidate_with_relaxation_and_bulk(motion, controls, tau, None, gate)
+    }
+
+    // A changed constitutive/SGS input may also change source-owned bulk
+    // viscosity. Install that same source epoch before collision on the ONE
+    // native candidate, without cloning an already-private flow a second time.
+    pub(crate) fn planar_wall_field_candidate_with_relaxation_and_bulk(
+        &self,
+        motion: PlanarWallVelocityField3<'_>,
+        controls: PlanarWallFieldControls3,
+        tau: Option<&BTreeMap<(u64, usize), f64>>,
+        bulk: Option<BTreeMap<(u64, usize), f64>>,
+        gate: &CancelGate,
+    ) -> Result<(Self, PlanarWallFieldReport3), FreeSurfaceError3> {
         let (mut exchange, mass_before, before_speed) =
             self.prepare_planar_wall_velocity_field(motion, controls, gate)?;
         let mut candidate = self.clone();
+        if let Some(bulk) = bulk {
+            candidate.rebind_bulk_relaxations(bulk, gate)?;
+        }
         candidate.step_inner_with_wall(gate, None, tau, None, Some(&mut exchange))?;
         let report = candidate.finish_planar_wall_velocity_field(
             motion,
