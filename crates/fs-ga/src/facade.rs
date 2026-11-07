@@ -60,13 +60,33 @@ impl Vec3 {
         self.x * o.x + self.y * o.y + self.z * o.z
     }
 
-    /// Cross product.
+    /// Cross product with both product roundoffs retained in each component.
+    ///
+    /// Near-parallel force and arm vectors can have a small, physically real
+    /// moment even when their rounded products agree. Symmetric compensation
+    /// retains that moment and antisymmetry, including `v.cross(v) == 0` for
+    /// finite products. A one-sided FMA alone would create a spurious moment
+    /// in that last case. No geometric tolerance or torque clamp is applied.
+    /// Overflow and non-finite products retain ordinary IEEE propagation.
     #[must_use]
     pub fn cross(self, o: Vec3) -> Vec3 {
+        #[inline]
+        fn difference_of_products(a: f64, b: f64, c: f64, d: f64) -> f64 {
+            let ab = a * b;
+            let cd = c * d;
+            let difference = ab - cd;
+            if !difference.is_finite() {
+                return difference;
+            }
+            // TwoProd tails, symmetrically: swapping the operands negates
+            // both terms. When the products nearly cancel their subtraction
+            // is exact (Sterbenz), so the tails recover the resolved moment.
+            difference + (a.mul_add(b, -ab) - c.mul_add(d, -cd))
+        }
         Vec3::new(
-            self.y * o.z - self.z * o.y,
-            self.z * o.x - self.x * o.z,
-            self.x * o.y - self.y * o.x,
+            difference_of_products(self.y, o.z, self.z, o.y),
+            difference_of_products(self.z, o.x, self.x, o.z),
+            difference_of_products(self.x, o.y, self.y, o.x),
         )
     }
 
@@ -245,5 +265,58 @@ impl Mat34 {
             self.m[4] * v.x + self.m[5] * v.y + self.m[6] * v.z + self.m[7],
             self.m[8] * v.x + self.m[9] * v.y + self.m[10] * v.z + self.m[11],
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Vec3;
+
+    #[test]
+    fn g0_force_moments_retain_product_tails_and_antisymmetry() {
+        // Exact integer oracle, independent of floating-point products.
+        // The central case is (2^27 + 1)(2^27 - 1) - 2^54 = -1 Nm.
+        for exponent in [27, 32, 40] {
+            let n = 1_i128 << exponent;
+            for offset in [1_i128, 3, 7, 11] {
+                let arm = [n + offset, n, n - offset];
+                let force = [n, n - offset, n + 2 * offset];
+                let expected = core::array::from_fn::<_, 3, _>(|i| {
+                    let j = (i + 1) % 3;
+                    let k = (i + 2) % 3;
+                    (arm[j] * force[k] - arm[k] * force[j]) as f64
+                });
+                let r = Vec3::new(arm[0] as f64, arm[1] as f64, arm[2] as f64);
+                let f = Vec3::new(force[0] as f64, force[1] as f64, force[2] as f64);
+                let torque = r.cross(f);
+                assert_eq!(torque, Vec3::new(expected[0], expected[1], expected[2]));
+                assert_eq!(f.cross(r), torque.scale(-1.0));
+                assert_eq!(r.cross(r), Vec3::default());
+            }
+        }
+    }
+
+    #[test]
+    fn g3_torque_preserves_binary_unit_rescaling_and_force_reversal() {
+        let n = 134_217_728.0;
+        let arm = Vec3::new(n + 1.0, n, 0.0);
+        let force = Vec3::new(n, n - 1.0, 0.0);
+        for (length_scale, force_scale) in [(1.0, 1.0), (0.125, 32.0), (1024.0, 0.25)] {
+            let torque = arm.scale(length_scale).cross(force.scale(force_scale));
+            assert_eq!(torque, Vec3::new(0.0, 0.0, -length_scale * force_scale));
+            assert_eq!(
+                arm.scale(length_scale).cross(force.scale(-force_scale)),
+                torque.scale(-1.0)
+            );
+        }
+    }
+
+    #[test]
+    fn cross_preserves_ieee_nonfinite_propagation() {
+        let x = Vec3::new(f64::MAX, 0.0, 0.0);
+        let y = Vec3::new(0.0, 2.0, 0.0);
+        assert_eq!(x.cross(y).z, f64::INFINITY);
+        assert_eq!(y.cross(x).z, f64::NEG_INFINITY);
+        assert!(Vec3::new(f64::NAN, 0.0, 0.0).cross(y).z.is_nan());
     }
 }

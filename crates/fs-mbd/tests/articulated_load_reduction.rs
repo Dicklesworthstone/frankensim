@@ -3,7 +3,9 @@
 //! and material-point moments; no high-precision substitute for the solver.
 
 use fs_ga::{Mat3, Se3, So3, Twist, Vec3, Wrench};
-use fs_mbd::articulated::motion::prescribed::{PrescribedBaseMotionState, PrescribedBasePath};
+use fs_mbd::articulated::motion::prescribed::{
+    PrescribedBaseMotionState, PrescribedBasePath, step_prescribed_base,
+};
 use fs_mbd::articulated::motion::spatial_loads::bushing::{
     MaterialFrame, SpatialBushing, evaluate_bushing_forces,
 };
@@ -210,6 +212,54 @@ fn off_center_force_retains_a_small_moment_between_large_products() {
         1.0e-15,
     );
     close(result.motion.external_work, 0.00390625, 1.0e-14);
+}
+
+#[test]
+fn canonical_point_wrenches_drive_the_resolved_small_joint_torque() {
+    let model = single(JointModel::revolute(Vec3::new(0.0, 0.0, 1.0), None).unwrap());
+    let state = supported(0.0);
+    let n = 134_217_728.0;
+    let arm = Vec3::new(n + 1.0, n, 0.0);
+    let body_from_application = Se3::from_parts(So3::identity(), arm).unwrap();
+    for sign in [-1.0, 1.0] {
+        let force = Vec3::new(n, n - 1.0, 0.0).scale(sign);
+        // G0/G3: (n+1)(n-1)-n*n = -1 exactly. Exercise both canonical
+        // point-force assembly and wrench transport, not the spatial load
+        // owner's separately compensated reduction tested above. The force
+        // and attachment are body-held; the stationary pivot supplies recoil.
+        for wrench in [
+            Wrench::new(arm.cross(force), force),
+            Wrench::new(Vec3::default(), force).transform_by(&body_from_application),
+        ] {
+            let result = step_prescribed_base(
+                &model,
+                &state,
+                PrescribedBasePath::stationary(Se3::identity()),
+                FreeFloatingMotionLoads {
+                    generalized_force: &[0.0],
+                    external_body_wrench: &[wrench],
+                    gravity_world: Vec3::default(),
+                },
+                0.125,
+                || false,
+            )
+            .unwrap();
+            // I_z=2, tau=-sign, h=1/8: q=tau*h²/(2I), omega=tau*h/I.
+            close(
+                result.state_after.joint_position[0],
+                -sign * 0.00390625,
+                1.0e-15,
+            );
+            close(
+                result.state_after.joint_velocity[0],
+                -sign * 0.0625,
+                1.0e-15,
+            );
+            close(result.momentum_after.kinetic_energy, 0.00390625, 1.0e-15);
+            close(result.external_work, 0.00390625, 1.0e-15);
+            close(result.kinetic_work_residual, 0.0, 1.0e-15);
+        }
+    }
 }
 
 fn slider() -> ArticulatedModel {

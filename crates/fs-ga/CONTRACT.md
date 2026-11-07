@@ -51,6 +51,17 @@ fs-scenario frames, the gradient stack's manifold variants.
   twist/wrench frame transforms, and invariant dual pairing. `Mat3`/`Mat6`
   are fixed-size differential/interchange views, never pose authorities.
 
+`Vec3::cross` retains both product roundoffs symmetrically, preserving small
+physical force moments without a collinearity tolerance. `Wrench::pairing`
+reduces all six torque/rate and force/velocity products together with product
+and summation compensation; separately rounded powers cannot erase a small
+signed net work rate. `Mat6` actions use the same fixed-size compensated
+reduction. Canonical twist/wrench frame transport applies rotation and the
+lever-arm cross product directly instead of assembling a dense matrix first.
+These remain allocation-free floating-point operations, not exact arithmetic
+or interval enclosures; compensation does not restore bits already lost in
+supplied coordinates, matrix coefficients, underflow or overflow.
+
 ## Invariants
 
 1. **Generated, not written**: every product sign comes from the const
@@ -123,6 +134,12 @@ Zero `unsafe`.
 None.
 
 ## Conformance tests
+
+G0/G3 unit regressions use exact integer force moments, force reversal,
+binary unit rescaling, and a translated nearly radial force with nonzero
+torque and identical signed mechanical power in both frames. The native
+`fs-mbd` articulated-load regression also checks that the recovered moment
+actually drives the original revolute-body position, velocity and work.
 
 `tests/conformance.rs` (JSON verdicts, suite `fs-ga/conformance`):
 

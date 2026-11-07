@@ -184,7 +184,7 @@ impl Mat6 {
         Self { m: out }
     }
 
-    /// Apply to a twist.
+    /// Apply to a twist, retaining product and reduction roundoffs per row.
     #[must_use]
     pub fn apply_twist(self, value: Twist) -> Twist {
         let out = self.apply_array(value.to_array());
@@ -194,7 +194,9 @@ impl Mat6 {
         )
     }
 
-    /// Apply to a wrench in `[torque, force]` ordering.
+    /// Apply to a wrench in `[torque, force]` ordering, retaining product and
+    /// reduction roundoffs per row. This does not recover precision already
+    /// lost when the supplied matrix coefficients were formed.
     #[must_use]
     pub fn apply_wrench(self, value: Wrench) -> Wrench {
         let out = self.apply_array(value.to_array());
@@ -211,17 +213,9 @@ impl Mat6 {
     }
 
     fn apply_array(self, value: [f64; 6]) -> [f64; 6] {
-        let mut out = [0.0; 6];
-        let mut row = 0;
-        while row < 6 {
-            let mut col = 0;
-            while col < 6 {
-                out[row] += self.m[row * 6 + col] * value[col];
-                col += 1;
-            }
-            row += 1;
-        }
-        out
+        core::array::from_fn(|row| {
+            compensated_dot6(core::array::from_fn(|col| self.m[row * 6 + col]), value)
+        })
     }
 
     fn add_scaled(self, rhs: Self, scale: f64) -> Self {
@@ -347,9 +341,18 @@ impl Twist {
     }
 
     /// Transform body coordinates into space coordinates with a pose adjoint.
+    ///
+    /// Apply `omega_s = R omega_b`, `v_s = R v_b + p cross omega_s`
+    /// directly. This retains the compensated moment-arm action instead of
+    /// first rounding it into the entries of a dense 6-by-6 matrix.
     #[must_use]
     pub fn transform_by(self, pose: &Se3) -> Self {
-        pose.adjoint().apply_twist(self)
+        let rotation = pose.rotation().matrix();
+        let angular = rotation.apply(self.angular);
+        Self::new(
+            angular,
+            rotation.apply(self.linear) + pose.translation().cross(angular),
+        )
     }
 
     /// Coordinates as `[wx, wy, wz, vx, vy, vz]`.
@@ -384,16 +387,30 @@ impl Wrench {
 
     /// Dual pairing `torque·angular + force·linear` (instantaneous power
     /// when the coordinates carry physical rates and forces).
+    ///
+    /// Compensate all six products in one reduction. Separately rounding
+    /// torque power and translational power can erase their finite signed
+    /// difference, including reaction work after changing the torque origin.
     #[must_use]
     pub fn pairing(self, twist: Twist) -> f64 {
-        self.torque.dot(twist.angular) + self.force.dot(twist.linear)
+        compensated_dot6(self.to_array(), twist.to_array())
     }
 
     /// Transform body coordinates into space coordinates with the coadjoint
     /// `Ad_pose^{-T}`, preserving [`Wrench::pairing`].
+    ///
+    /// Apply `f_s = R f_b`, `tau_s = R tau_b + p cross f_s` directly.
+    /// The compensated cross product preserves small moments of nearly radial
+    /// forces, which a preassembled dense coadjoint can round away. The
+    /// existing matrix API remains available as an interchange view.
     #[must_use]
     pub fn transform_by(self, pose: &Se3) -> Self {
-        pose.coadjoint().apply_wrench(self)
+        let rotation = pose.rotation().matrix();
+        let force = rotation.apply(self.force);
+        Self::new(
+            rotation.apply(self.torque) + pose.translation().cross(force),
+            force,
+        )
     }
 
     /// Coordinates as `[tx, ty, tz, fx, fy, fz]`.
@@ -407,6 +424,28 @@ impl Wrench {
             self.force.y,
             self.force.z,
         ]
+    }
+}
+
+// Fixed-size Dot2: TwoProd recovers each product tail and TwoSum recovers
+// each reduction tail. No allocation, arbitrary-precision type or data-sized
+// loop enters the canonical spatial-vector path. Finite-product arithmetic
+// has compensated accuracy, not an interval enclosure or exact rounding.
+fn compensated_dot6(lhs: [f64; 6], rhs: [f64; 6]) -> f64 {
+    let mut sum = 0.0;
+    let mut correction = 0.0;
+    for i in 0..6 {
+        let product = lhs[i] * rhs[i];
+        let (next, tail) = fs_math::eft::two_sum(sum, product);
+        correction += lhs[i].mul_add(rhs[i], -product) + tail;
+        sum = next;
+    }
+    if sum.is_finite() {
+        sum + correction
+    } else {
+        // EFT residuals of infinities are NaN; preserve the ordinary ordered
+        // reduction's infinity/NaN rather than treating those tails as data.
+        sum
     }
 }
 
@@ -1448,6 +1487,47 @@ mod tests {
             (before - after).abs() < 2.0e-12,
             "pairing {before} != {after}"
         );
+    }
+
+    #[test]
+    fn g0_nearly_radial_force_retains_moment_through_frame_transport() {
+        let n = 134_217_728.0;
+        let arm = Vec3::new(n + 1.0, n, 0.0);
+        let force = Vec3::new(n, n - 1.0, 0.0);
+        let pose = Se3::from_parts(So3::identity(), arm).unwrap();
+        let local = Wrench::new(Vec3::default(), force);
+        let expected = Wrench::new(Vec3::new(0.0, 0.0, -1.0), force);
+        assert_eq!(local.transform_by(&pose), expected);
+        assert_eq!(pose.coadjoint().apply_wrench(local), expected);
+
+        let twist = Twist::new(force, Vec3::default());
+        let shifted = Twist::new(force, Vec3::new(0.0, 0.0, -1.0));
+        assert_eq!(twist.transform_by(&pose), shifted);
+        assert_eq!(pose.adjoint().apply_twist(twist), shifted);
+
+        // A unit spin about the spatial origin does -1 W in both frames.
+        // Local translational powers nearly cancel: their exact difference
+        // equals the transmitted moment, not zero.
+        let local_motion = Twist::new(Vec3::new(0.0, 0.0, 1.0), Vec3::new(-n, n + 1.0, 0.0));
+        let space_motion = local_motion.transform_by(&pose);
+        assert_eq!(space_motion.linear, Vec3::default());
+        assert_eq!(local.pairing(local_motion), -1.0);
+        assert_eq!(expected.pairing(space_motion), -1.0);
+    }
+
+    #[test]
+    fn g0_signed_power_keeps_torque_and_force_cancellation_in_one_reduction() {
+        let n = 134_217_728.0;
+        let wrench = Wrench::new(Vec3::new(n + 1.0, 0.0, 0.0), Vec3::new(-n * n, 0.0, 0.0));
+        let motion = Twist::new(Vec3::new(n - 1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0));
+        assert_eq!(wrench.pairing(motion), -1.0);
+        assert_eq!(wrench.pairing(motion.scale(-1.0)), 1.0);
+        assert_eq!(wrench.pairing(Twist::zero()), 0.0);
+
+        // A separate additive tail must also survive the large terms.
+        let cancellation = Wrench::new(Vec3::new(n * n, 1.0, -n * n), Vec3::default());
+        let unit = Twist::new(Vec3::new(1.0, 1.0, 1.0), Vec3::default());
+        assert_eq!(cancellation.pairing(unit), 1.0);
     }
 
     #[test]
