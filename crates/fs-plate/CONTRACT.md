@@ -1963,3 +1963,17 @@ This fixed-condition elastic observer excludes laminate-effective calibration,
 plastic reconstruction, thermal cycling and unobserved material viscous stress.
 Miner damage neither changes the native pencil nor supplies heat, cracks or a
 validated service-life certificate.
+
+## Static offset plus harmonic shell strain
+
+`HarmonicElementStrain::isotropic_layer_bound_with_offset` observes a complete
+harmonic cycle about an explicitly supplied real strain polynomial from the same
+native facet and reference configuration. The complete spatial/thickness
+Bernstein hull is retained. A scaled two-dimensional trust-region dual, with at
+most 64 secular bisections per control tensor, bounds the affine cycle while
+preserving component phase; zero-offset and static-only cases reuse the original
+owners. `BIASED_LAYER_BOUND_WORK` admits this bounded query work. G0/G3 regressions
+cover scalar/circular/hard-case solutions, phase rotation, representable extreme
+scales, combined offset/vibration limit crossing, spatial containment and
+cancellation. This is ordinary floating-point linear-shell observation, not an
+interval certificate, nonlinear prestress solve or inferred eigenstrain.

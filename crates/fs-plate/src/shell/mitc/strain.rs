@@ -23,6 +23,9 @@
 use super::{NodalDirectors, PlateError, ShearShellSection, ShellMesh, dot, element};
 use fs_math::det;
 
+/// Complete harmonic cycles about an explicitly supplied static strain field.
+pub mod biased;
+
 const POINTS: [(f64, f64); 6] = [
     (0.0, 0.0),
     (1.0, 0.0),
