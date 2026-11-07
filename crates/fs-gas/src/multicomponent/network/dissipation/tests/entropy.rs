@@ -2,6 +2,8 @@
 use super::*;
 use crate::multicomponent::dissipation::MolecularEntropyControl;
 
+mod stabilized;
+
 // Independently integrate Cp/R=a+b*T and ideal-mixture partial pressure.
 // Each tuple is (R/M, Cv(T=0)/R, b). These sources have p0=1 and s0 datum=0.
 fn source_entropy(network: &MixtureNetwork1d, calorics: &[(f64, f64, f64)]) -> f64 {

@@ -8,6 +8,8 @@ use crate::multicomponent::cell;
 use crate::multicomponent::dissipation::entropy::EntropyTracker;
 use crate::multicomponent::dissipation::{MolecularEntropyControl, MolecularEntropyReport};
 
+mod stabilized;
+
 impl<L: TransportLaw> NetworkDissipationOperator<L> {
     /// Advance source-conjugate molecular transport through finite plenums.
     ///
@@ -93,33 +95,7 @@ impl<L: TransportLaw> NetworkDissipationOperator<L> {
     ) -> Result<(NetworkDissipationReport, MolecularEntropyReport), DissipationError> {
         controls.validate()?;
         self.admit_plenum_volumes(network, &mut cancelled)?;
-        let gas = network.gas();
-        let n = gas.species_count();
-        let m = n + 2;
-        let count = network
-            .branches
-            .iter()
-            .map(|branch| branch.cell_count())
-            .sum::<usize>()
-            + network.plenums.len();
-        let cells = network
-            .branches
-            .iter()
-            .flat_map(|branch| {
-                branch
-                    .states
-                    .chunks_exact(m)
-                    .zip(branch.mesh.volumes())
-                    .map(move |(q, &volume)| (cell(q, n), volume))
-            })
-            .chain(
-                network
-                    .plenums
-                    .iter()
-                    .map(|plenum| (plenum.state(), plenum.volume_m3())),
-            );
-        let mut account =
-            EntropyTracker::from_cells(gas, count, entropy, None, cells, &mut cancelled)?;
+        let mut account = initial_account(network, entropy, &mut cancelled)?;
         self.trial_report = None;
         let report = super::evolve::advance_with_entropy::<ENTROPY_FACES, L>(
             self,
@@ -132,6 +108,42 @@ impl<L: TransportLaw> NetworkDissipationOperator<L> {
         self.trial_report = Some(report);
         Ok((report, account.report()))
     }
+}
+
+/// One original storage basis for either native molecular time integrator.
+fn initial_account(
+    network: &MixtureNetwork1d,
+    controls: MolecularEntropyControl,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<EntropyTracker, DissipationError> {
+    let gas = network.gas();
+    let n = gas.species_count();
+    let m = n + 2;
+    let count = network
+        .branches
+        .iter()
+        .map(|branch| branch.cell_count())
+        .sum::<usize>()
+        + network.plenums.len();
+    let cells = network
+        .branches
+        .iter()
+        .flat_map(|branch| {
+            branch
+                .states
+                .chunks_exact(m)
+                .zip(branch.mesh.volumes())
+                .map(move |(q, &volume)| (cell(q, n), volume))
+        })
+        .chain(
+            network
+                .plenums
+                .iter()
+                .map(|plenum| (plenum.state(), plenum.volume_m3())),
+        );
+    Ok(EntropyTracker::from_cells(
+        gas, count, controls, None, cells, cancelled,
+    )?)
 }
 
 /// Reuse the actual candidate inversions, including kinetic-to-internal

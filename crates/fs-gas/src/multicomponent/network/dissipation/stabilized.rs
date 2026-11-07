@@ -4,11 +4,12 @@
 //! Plenum inventory and every signed endpoint transfer use those same weights;
 //! there is no independently subcycled plenum, approximate port or flux repair.
 
-use super::evolve::{self, Input, Progress, compensated_add, forward, spatial};
+use super::evolve::{self, Input, Progress, compensated_add, forward, spatial_with_scheme};
 use super::{
     Cell, DissipationError, MixtureNetwork1d, NetworkDissipationOperator, NetworkDissipationReport,
     Time, TransportLaw, allocated, poll, positive,
 };
+use crate::multicomponent::dissipation::entropy::EntropyTracker;
 use crate::multicomponent::dissipation::evolve::Stage;
 use crate::multicomponent::dissipation::stabilized::{
     check_rate, extent, recurrence, reserve_evaluation,
@@ -146,6 +147,51 @@ fn advance<L: TransportLaw>(
     evaluations: &mut usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StabilizedNetworkDissipationReport, DissipationError> {
+    advance_inner::<false, L>(
+        owner,
+        network,
+        duration,
+        controls,
+        reservoirs,
+        evaluations,
+        None,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn advance_entropy_consistent<L: TransportLaw>(
+    owner: &mut NetworkDissipationOperator<L>,
+    network: &mut MixtureNetwork1d,
+    duration: Time,
+    controls: StabilizedDissipationControl,
+    evaluations: &mut usize,
+    entropy: &mut EntropyTracker,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<StabilizedNetworkDissipationReport, DissipationError> {
+    advance_inner::<true, L>(
+        owner,
+        network,
+        duration,
+        controls,
+        None,
+        evaluations,
+        Some(entropy),
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_inner<const ENTROPY_FACES: bool, L: TransportLaw>(
+    owner: &mut NetworkDissipationOperator<L>,
+    network: &mut MixtureNetwork1d,
+    duration: Time,
+    controls: StabilizedDissipationControl,
+    reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+    evaluations: &mut usize,
+    mut entropy: Option<&mut EntropyTracker>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<StabilizedNetworkDissipationReport, DissipationError> {
     controls.validate()?;
     let base = controls.transport;
     let (before, active_reservoirs) =
@@ -169,7 +215,16 @@ fn advance<L: TransportLaw>(
             });
         }
         reserve_evaluation(evaluations, controls.maximum_operator_evaluations, elapsed)?;
-        let a = spatial(owner, Input::Current, base, reservoirs, cancelled)?;
+        let a = spatial_with_scheme::<ENTROPY_FACES, L>(
+            owner,
+            Input::Current,
+            base,
+            reservoirs,
+            cancelled,
+        )?;
+        if let Some(account) = entropy.as_deref_mut() {
+            account.begin_attempt(&owner.work.primitive);
+        }
         cache_anchor(owner);
         let remaining = duration.value() - elapsed;
         let mut step = remaining.min(base.maximum_step_s);
@@ -201,21 +256,49 @@ fn advance<L: TransportLaw>(
                 .find(|s| step * a.rate <= base.parabolic_cfl * extent(*s))
                 .unwrap_or(controls.maximum_stages);
             let extension = extent(stages);
-            let attempt = macrostep(
-                owner,
-                Step {
-                    step_s: step,
-                    stages,
-                    anchor: a,
-                    elapsed,
-                },
-                controls,
-                reservoirs,
-                evaluations,
-                cancelled,
-            );
+            let attempt = (|| {
+                let peak = macrostep_with_scheme::<ENTROPY_FACES, L>(
+                    owner,
+                    Step {
+                        step_s: step,
+                        stages,
+                        anchor: a,
+                        elapsed,
+                    },
+                    controls,
+                    reservoirs,
+                    evaluations,
+                    cancelled,
+                )?;
+                if let Some(account) = entropy.as_deref_mut() {
+                    let volumes = owner
+                        .branches
+                        .iter()
+                        .flat_map(|branch| branch.mesh.volumes().iter())
+                        .chain(owner.plenum_volumes.iter());
+                    // Internal RKL stages are not physical entropy substeps.
+                    // The endpoint RHS already admitted these temperatures;
+                    // refusal must preserve the original anchor for halving.
+                    account.check_stabilized_candidate(
+                        &owner.gas,
+                        volumes,
+                        &owner.work.current,
+                        &owner.work.stage,
+                        &owner.work.primitive,
+                        &[[0.0; super::MAX_COMPONENTS]; 2],
+                        cancelled,
+                    )?;
+                }
+                Ok::<_, DissipationError>(peak)
+            })();
             match attempt {
                 Ok(peak) => {
+                    if let Some(account) = entropy.as_deref_mut() {
+                        account.accept_stabilized_candidate(
+                            owner.gas.species_count(),
+                            &owner.work.primitive,
+                        )?;
+                    }
                     for k in 0..owner.work.endpoint_changes.len() {
                         if k % 1024 == 0 {
                             poll(cancelled)?;
@@ -264,6 +347,9 @@ fn advance<L: TransportLaw>(
                 last: Box::new(last),
             });
         }
+    }
+    if let Some(account) = entropy {
+        super::entropy::finish(owner, network, account, cancelled)?;
     }
     let transport = evolve::finish(owner, network, duration, before, progress, cancelled)?;
     Ok(StabilizedNetworkDissipationReport {
@@ -320,6 +406,17 @@ pub(super) fn macrostep<L: TransportLaw>(
     evaluations: &mut usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Stage, DissipationError> {
+    macrostep_with_scheme::<false, L>(owner, trial, controls, reservoirs, evaluations, cancelled)
+}
+
+fn macrostep_with_scheme<const ENTROPY_FACES: bool, L: TransportLaw>(
+    owner: &mut NetworkDissipationOperator<L>,
+    trial: Step,
+    controls: StabilizedDissipationControl,
+    reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+    evaluations: &mut usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Stage, DissipationError> {
     let Step {
         step_s: step,
         stages,
@@ -363,7 +460,13 @@ pub(super) fn macrostep<L: TransportLaw>(
     for j in 2..=stages + 1 {
         poll(cancelled)?;
         reserve_evaluation(evaluations, controls.maximum_operator_evaluations, elapsed)?;
-        let evaluated = spatial(owner, Input::Stage, base, reservoirs, cancelled)?;
+        let evaluated = spatial_with_scheme::<ENTROPY_FACES, L>(
+            owner,
+            Input::Stage,
+            base,
+            reservoirs,
+            cancelled,
+        )?;
         check_rate(step, evaluated.rate, limit)?;
         peak.rate = peak.rate.max(evaluated.rate);
         peak.gradient_residual = peak.gradient_residual.max(evaluated.gradient_residual);

@@ -3122,6 +3122,36 @@ orientation and formation-gauge invariance, late cancellation, cumulative work
 refusal and reuse. The work comparison is a stability comparison, not a claim
 of equal temporal error. Test execution is not implied by this contract.
 
+### Source entropy for stabilized finite-network intervals
+
+`NetworkDissipationOperator::advance_stabilized_entropy_consistent_for` connects
+the original source-conjugate branch/finite-plenum faces to the original RKL2
+recurrence. Divided caloric enthalpies, logarithmic chemical efforts,
+Maxwell--Stefan diffusion, Fourier heat, authored reciprocal cross effects and
+viscous work remain in their existing owners. All finite inventories and signed
+port transfers retain the same Legendre weights. Internal ports supply no
+exterior entropy and stationary plenum support performs no mechanical work.
+
+Every physical macrostep endpoint and the direct complete interval must pass
+the original source-entropy and individual-species continuity bounds. Internal
+Legendre states retain native source, caloric, constitutive and estimated-rate
+checks; they are not independent physical entropy-producing substeps. Negative
+endpoint entropy invokes the original bounded halving retry from its unchanged
+anchor. Native endpoint temperatures are reused, and branch/plenum volumes are
+borrowed directly without another EOS inverse, flattened storage copy,
+per-stage allocation or extra constitutive RHS.
+
+This entry admits stationary closed constant-area geometry with common species
+support at active molecular faces. Baths, moving volumes and other sources are
+separate paths. The physical macrostep cap remains an explicit accuracy choice.
+Linear RKL stability does not establish nonlinear positivity, a fully discrete
+entropy theorem or global temporal order. Focused G1/G4 regressions compare a
+stiff finite-plenum Fourier mode with an independent Legendre polynomial and
+source-entropy integral; compare actual stability work with SSP without claiming
+equal temporal error; retain unequal calorics, common absent species and
+formation-reference invariance; and refuse a negative-entropy RKL endpoint
+despite positive smooth conductivity and admitted intermediate states.
+
 ### Accuracy-controlled molecular intervals with finite storage
 
 `NetworkDissipationOperator::advance_adaptive_for` and

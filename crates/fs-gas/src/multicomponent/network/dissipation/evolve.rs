@@ -446,7 +446,7 @@ pub(super) fn spatial<L: TransportLaw>(
     spatial_with_scheme::<false, L>(owner, input, controls, reservoirs, cancelled)
 }
 
-fn spatial_with_scheme<const ENTROPY_FACES: bool, L: TransportLaw>(
+pub(super) fn spatial_with_scheme<const ENTROPY_FACES: bool, L: TransportLaw>(
     owner: &mut NetworkDissipationOperator<L>,
     input: Input,
     controls: DissipationControl,

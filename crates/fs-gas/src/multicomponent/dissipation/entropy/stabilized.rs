@@ -209,10 +209,10 @@ impl EntropyTracker {
     /// Measure a complete RKL2 candidate against its unchanged physical anchor.
     /// Rejected endpoint temperatures must not become the next retry's anchor.
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::multicomponent::dissipation) fn check_stabilized_candidate(
+    pub(in crate::multicomponent) fn check_stabilized_candidate<'a>(
         &mut self,
         gas: &MixtureGas,
-        volumes: &[f64],
+        volumes: impl IntoIterator<Item = &'a f64>,
         old: &[f64],
         new: &[f64],
         primitive: &[Primitive],
@@ -227,9 +227,10 @@ impl EntropyTracker {
         // Native RKL2 reports retain the molecular error surface; the common
         // state/bath account now returns the original gas owner's errors.
         let check: Result<(), DissipationError> = (|| {
-            for (i, (previous, candidate)) in old
+            for (i, ((previous, candidate), &volume)) in old
                 .chunks_exact(m)
                 .zip(new.chunks_exact(m))
+                .zip(volumes)
                 .enumerate()
             {
                 poll(cancelled)?;
@@ -238,7 +239,7 @@ impl EntropyTracker {
                     previous, candidate, self.current_temperature[i],
                     primitive[i].temperature, cancelled,
                 )?;
-                let volume = Dd::from_f64(volumes[i]);
+                let volume = Dd::from_f64(volume);
                 self.trial_entropy = self.trial_entropy + volume * increment;
                 for k in 0..n {
                     self.trial_mass[k] = self.trial_mass[k]
@@ -268,7 +269,7 @@ impl EntropyTracker {
         check
     }
 
-    pub(in crate::multicomponent::dissipation) fn accept_stabilized_candidate(
+    pub(in crate::multicomponent) fn accept_stabilized_candidate(
         &mut self,
         n: usize,
         primitive: &[Primitive],
