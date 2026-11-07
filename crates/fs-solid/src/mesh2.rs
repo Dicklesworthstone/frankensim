@@ -249,8 +249,12 @@ fn iso_map(
     dref: &[[f64; 2]],
 ) -> (Vec<f64>, Vec<[f64; 2]>, f64) {
     let mut j = [[0.0f64; 2]; 2];
-    for (a, &node) in conn.iter().enumerate() {
-        let p = nodes[node];
+    // Shape gradients sum to zero, so the map depends only on element
+    // edges. Remove the common coordinate origin before contraction to avoid
+    // cancellation when a small body lies far from the global origin.
+    let origin = nodes[conn[0]];
+    for (a, &node) in conn.iter().enumerate().skip(1) {
+        let p = [nodes[node][0] - origin[0], nodes[node][1] - origin[1]];
         for (r, jr) in j.iter_mut().enumerate() {
             jr[0] += dref[a][r] * p[0];
             jr[1] += dref[a][r] * p[1];
@@ -321,5 +325,22 @@ mod tests {
         }
         // Trapezoid: 48 × (44 + 16)/2.
         assert!((area - 48.0 * 30.0).abs() < 1e-9, "area {area}");
+    }
+
+    #[test]
+    fn shape_mapping_is_invariant_under_resolved_coordinate_translation() {
+        // Integer edges remain exactly representable at every tested origin.
+        let nodes = [[0.0, 0.0], [3.0, 0.0], [4.0, 2.0], [0.0, 1.0]];
+        for conn in [&[0, 1, 2][..], &[0, 1, 2, 3][..]] {
+            for power in [20, 40, 48] {
+                let offset = 2.0_f64.powi(power);
+                let translated = nodes.map(|[x, y]| [x + offset, y - offset]);
+                for (xi, eta, _) in quad_points(conn.len()) {
+                    let reference = shapes_at(&nodes, conn, xi, eta);
+                    let moved = shapes_at(&translated, conn, xi, eta);
+                    assert_eq!(moved, reference, "arity {}, offset 2^{power}", conn.len());
+                }
+            }
+        }
     }
 }
