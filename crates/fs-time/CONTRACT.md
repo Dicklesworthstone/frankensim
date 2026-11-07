@@ -349,6 +349,32 @@ where claimed below.
   friction, finite capacity, changing-ratio work, a thermal destination or an
   adjoint; engagement does not reset tooth phase. Timestep refinement remains
   necessary for gyroscopic phase and finite-step energy behavior.
+- `RotorBank::transmission([ShaftConstraint<N>; M])` retains independent
+  constant multi-shaft relations `A*qdot_relative=0`, including genuine
+  differential and planetary modes with `N-M` free shaft momenta. Native
+  fs-la Jacobi SVD prepares the equilibrated inertia-weighted row space once;
+  the orthonormal reaction modes condense only constrained axial inertia into
+  the original 3x3 gyrostat. Redundant, unresolved or nonfinite rows refuse.
+  State admission checks both authored rows and physical orthonormal modes,
+  so near-parallel rows cannot conceal a finite forbidden shaft rate.
+  Explicit inelastic engagement retains total momentum, attitude and original
+  phase offsets, with nonnegative original kinetic loss. Simultaneous original
+  drive ports and external body impulses include full cross-axis carrier recoil.
+  Free precession changes original axial momenta while preserving each free
+  generalized momentum; spatial momentum and kinetic reconstruction are checked.
+  Held body/space torque steps retain second-order phase/work quadrature and
+  separate drive work, reciprocal row reactions, ideal reaction work and native
+  drift error. Multipliers retain authored row units under row rescaling,
+  reordering or orientation reversal. Full rank uses the native exact lock
+  limit; explicit singleton rows retain their original shaft phases exactly.
+  An empty row inventory retains the original free shafts. Preparation may allocate,
+  but hot operations use fixed stack arrays and O(N*M+M*M) work without allocation,
+  factorization or iteration. `tests/lie_rotor_transmission.rs` checks independent
+  original-coordinate KKT mechanics, analytic capture loss, unequal differential
+  output speeds, nonparallel Euler/quaternion refinement, all free momenta,
+  scaled/permuted rows, native limits, reversal and atomic refusal. This ideal
+  fixed-axis/fixed-inertia/fixed-row model does not infer tooth geometry,
+  compliance, backlash, capacity, losses, variable-ratio work or an adjoint.
 - `RotorBank::lock_mode(mask)` prepares retained ideal rotor/carrier shaft
   locks with `I_mode=I_reduced+sum_selected J_i a_i a_i^T`.
   Engagement applies simultaneous original-owner impulses with complete

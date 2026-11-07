@@ -58,6 +58,13 @@ pub use backlash::{
     BacklashStepper, MAX_BACKLASH_ROOT_ITERATIONS,
 };
 
+#[path = "rotors/transmission.rs"]
+mod transmission;
+pub use transmission::{
+    RotorTransmission, ShaftConstraint, TransmissionDrift, TransmissionEngagement,
+    TransmissionImpulse, TransmissionStep,
+};
+
 /// Maximum fixed-axis rotors in this allocation-free stepping lane.
 pub const MAX_AXIAL_ROTORS: usize = 64;
 
