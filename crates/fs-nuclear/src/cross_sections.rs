@@ -27,6 +27,14 @@ pub enum NeutronReaction {
     ThreeNeutronProduction,
     /// Nonfission (n,4n), ENDF MT37; four emitted neutrons and a residual.
     FourNeutronProduction,
+    /// Nonfission (n,nt), ENDF MT33/LR0; one neutron, one triton and a residual.
+    /// This is distinct from neutron-absorbing (n,t), MT105.
+    NeutronTritonProduction,
+    /// ENDF MT91/LR33: continuum inelastic neutron emission followed by
+    /// triton breakup of the intermediate nucleus. One neutron is emitted;
+    /// final nuclides and their yields must still be supplied explicitly.
+    /// Generic MT91 and LR1 reactions are not represented by this identity.
+    ContinuumNeutronTritonBreakup,
     /// Radiative neutron capture, ENDF MT102.
     Capture,
     /// Nonfission (n,p) absorption without neutron-producing breakup, MT103.
@@ -53,7 +61,9 @@ impl NeutronReaction {
             Self::Fission
             | Self::TwoNeutronProduction
             | Self::ThreeNeutronProduction
-            | Self::FourNeutronProduction => false,
+            | Self::FourNeutronProduction
+            | Self::NeutronTritonProduction
+            | Self::ContinuumNeutronTritonBreakup => false,
             Self::Capture
             | Self::ProtonProduction
             | Self::DeuteronProduction
@@ -67,14 +77,16 @@ impl NeutronReaction {
     /// This describes the reaction identity; it supplies neither an outgoing
     /// energy spectrum nor a neutron source. Coupled transport must independently
     /// declare its group yields and check their sum against this multiplicity.
-    /// Total-production tallies and neutron-producing secondary breakup are not
-    /// represented by these LR=0 channels.
+    /// Total-production tallies and additional neutron-producing breakup are
+    /// not represented. The explicit MT91/LR33 identity emits only one neutron;
+    /// it does not admit generic continuum inelastic or MF6-defined breakup.
     #[must_use]
     pub const fn emitted_neutrons_per_event(self) -> Option<u32> {
         match self {
             Self::TwoNeutronProduction => Some(2),
             Self::ThreeNeutronProduction => Some(3),
             Self::FourNeutronProduction => Some(4),
+            Self::NeutronTritonProduction | Self::ContinuumNeutronTritonBreakup => Some(1),
             _ => None,
         }
     }

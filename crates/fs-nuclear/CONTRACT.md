@@ -1,5 +1,52 @@
 # fs-nuclear contract
 
+## Tritium production with an outgoing neutron
+
+Two explicit processed reaction identities enter the original finite-target
+and neutron-energy owners without a separate propagator:
+
+| Identity | ENDF selection | Emitted neutrons per event |
+| --- | --- | --- |
+| `NeutronTritonProduction` | MT33, exactly LR0 | 1 |
+| `ContinuumNeutronTritonBreakup` | MT91, exactly LR33 | 1 |
+
+These generic identities describe neutron/triton emission, with the final
+residual nuclide supplied separately. They are distinct from absorbing (n,t)
+MT105. For Li-7, explicit products H-3 and He-4 give
+`Li7 + n -> H3 + He4 + n`: each event removes one finite Li-7 target and
+preserves neutron number while reducing neutron kinetic energy and consuming
+the authored negative nuclear Q. The original diffusion binding requires
+outgoing group yields summing to one, and the original activation owner retains
+products, signed Q, residual deposition and later separately authored decays.
+No tritium yield, outgoing spectrum or energy-routing fraction is inferred.
+
+The MT/LR pair is checked before a curve is admitted. Generic MT91/LR0,
+MF6-defined LR1 mixtures and discrete/pseudo-level breakup are not admitted as
+these tritium channels. `PointwiseCrossSection::breakup_flag()` exposes the
+exact validated flag retained by its immutable reaction identity. Source QM
+and QI remain separate observable metadata, converted to joules; neither is
+automatically used as prompt Q, a laboratory threshold or deposited heat.
+This matters for breakup, where intermediate excitation and final mass
+difference can have different Q values. Callers still provide the complete
+representative-energy and threshold declaration.
+
+The reaction definitions and Li-7 MT91/LR33 example follow
+[ENDF-102 (2023), §§0.4.3.3–0.4.3.4, 3.2–3.3 and Appendix B](https://www.nndc.bnl.gov/endfdocs/ENDF-102-2023.pdf).
+ENDF names the largest-ZA final nucleus as the residual, making simple Li-7
+neutron/triton emission MT33 rather than MT22. Evaluations can instead use
+discrete levels or different breakup representations. This is an explicit
+supported subset; alternate representations are never automatically added or
+relabelled, and checking physical overlap before separately binding them remains
+the caller's responsibility. Temperature-table assembly rejects mixed identities.
+
+Manufactured processed records exercise both admitted representations separately
+through group collapse, finite Li-7 depletion and H-3/He-4 production. An
+independent nonlinear solution checks timestep convergence; neutron count,
+baryon/charge and signed-energy accounts close independently. Refusal cases
+cover wrong LR, silent absorption and incorrect outgoing multiplicity.
+These fixtures establish the functioning pathway, not evaluated isotope data,
+complete lithium reaction coverage or a total blanket breeding ratio.
+
 ## Nonfission secondary neutrons, signed prompt Q and finite targets
 
 `DiffusionReactionKind::NeutronProduction` consumes one incident neutron and
@@ -17,7 +64,8 @@ charged-product yields remain explicit. The processed ENDF importer retains
 distinct MT16, MT17 and MT37 identities for (n,2n), (n,3n) and (n,4n); these
 tables cannot enter the absorption/irradiation constructors. Spatial binding
 requires a production reaction on both sides and checks that the authored
-outgoing neutron yields sum to the table's declared 2/3/4 multiplicity. It
+outgoing neutron yields sum to the table's declared multiplicity (one for the
+explicit neutron/triton channels above, or 2/3/4 for the multiplication channels). It
 never fills a spectrum, infers products or turns those events into captures.
 Fixed background targets remain possible through unbound diffusion reactions.
 
@@ -1533,7 +1581,8 @@ These are manufactured verification problems, not evaluated-data validation.
 `endf::PointwiseCrossSection::parse` reads caller-supplied text and selects an
 explicit MAT, isotope/isomer, total-fission (MT18), radiative-capture (MT102),
 charged-particle absorption (MT103–107), or nonfission neutron production
-(MT16, MT17, MT37) reaction and exact positive processed
+(MT16, MT17, MT37), neutron/triton (MT33/LR0), or continuum triton-breakup
+(MT91/LR33) reaction and exact positive processed
 temperature. MF1/MT451 supplies ENDF-6
 incident-neutron identity, library/version/release/revision and temperature;
 selected MF3 identity must agree. LRP=0 or 2 is required. LRP=1 MF3 resonance
@@ -1561,8 +1610,9 @@ The channel assignments follow the
 [NNDC ENDF reaction definitions](https://www.nndc.bnl.gov/endf/help.html)
 and ENDF-102 §0.4.3.2.
 
-All imported MF3 channels still require LR=0; additional unrepresented breakup
-is refused. Nonfission neutron-production tables use their distinct rate and
+All imported MF3 channels require LR=0 except the explicit MT91/LR33 identity
+described above; additional unrepresented breakup is refused. Nonfission
+neutron-production tables use their distinct rate and
 binding pathway described above. MF3 supplies no secondary spectrum, product
 yield, threshold closure or deposited-energy model. MT105 identifies one
 triton-producing reaction; it does

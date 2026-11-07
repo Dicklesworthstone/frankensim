@@ -37,7 +37,9 @@ fn temperature_table(reaction: NeutronReaction) -> Arc<CrossSectionTable> {
                     | NeutronReaction::AlphaProduction
                     | NeutronReaction::TwoNeutronProduction
                     | NeutronReaction::ThreeNeutronProduction
-                    | NeutronReaction::FourNeutronProduction => vec![vec![0.0], vec![0.0]],
+                    | NeutronReaction::FourNeutronProduction
+                    | NeutronReaction::NeutronTritonProduction
+                    | NeutronReaction::ContinuumNeutronTritonBreakup => vec![vec![0.0], vec![0.0]],
                 },
             },
             CrossSectionLimits {

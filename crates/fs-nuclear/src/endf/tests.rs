@@ -4,6 +4,7 @@ use super::*;
 
 mod absorption;
 mod neutron_production;
+mod triton_production;
 
 fn selection(temperature_k: f64, reaction: NeutronReaction) -> EndfSelection {
     EndfSelection {
@@ -541,7 +542,9 @@ fn imported_fission_and_capture_tables_drive_competing_burnup_events() {
                 },
                 NeutronReaction::TwoNeutronProduction
                 | NeutronReaction::ThreeNeutronProduction
-                | NeutronReaction::FourNeutronProduction => {
+                | NeutronReaction::FourNeutronProduction
+                | NeutronReaction::NeutronTritonProduction
+                | NeutronReaction::ContinuumNeutronTritonBreakup => {
                     BurnupRate::TabulatedNeutronProduction {
                         cross_sections: table,
                     }

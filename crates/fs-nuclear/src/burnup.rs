@@ -95,8 +95,9 @@ pub enum BurnupRate {
     TabulatedCapture {
         cross_sections: Arc<CrossSectionTable>,
     },
-    /// An exclusive processed (n,2n), (n,3n) or (n,4n) table. Its fixed emitted
-    /// multiplicity remains identified, but no neutron spectrum is inferred.
+    /// An exclusive processed neutron-producing table, including explicit
+    /// neutron/triton channels. Its fixed emitted multiplicity remains identified,
+    /// but no neutron spectrum or nuclide product is inferred.
     /// This channel is distinct from absorption and fission in every event account.
     TabulatedNeutronProduction {
         cross_sections: Arc<CrossSectionTable>,

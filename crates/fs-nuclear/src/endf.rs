@@ -1,8 +1,9 @@
 //! Bounded import of processed neutron ENDF-6/PENDF MF3 reaction curves.
 //!
 //! This deliberately narrow reader accepts total fission (MT18), nonfission
-//! neutron production (MT16, 17, 37), radiative capture (MT102), and charged-particle
-//! absorption (MT103–107), retaining their distinct reaction identities.
+//! neutron production (MT16, 17, 37), neutron/triton production (MT33/LR0),
+//! continuum triton breakup (MT91/LR33), radiative capture (MT102), and
+//! charged-particle absorption (MT103–107), retaining distinct identities.
 //! MF1/MT451 identification, a positive processed
 //! target temperature, and LRP=0 or 2 are required. LRP=1 is rejected: those MF3 values are resonance
 //! backgrounds, not complete reconstructed cross sections. Natural-element
@@ -16,8 +17,11 @@
 //! resonances, self-shield, infer a spectrum or certify data. The separate
 //! [`doppler`] owner can heat an explicitly admitted free-gas processed curve
 //! before either native group-collapse operation.
-//! All admitted MF3 sections require LR=0: secondary breakup is a distinct
-//! unrepresented channel. MT16/17/37 retain their exclusive neutron multiplicity;
+//! Only the explicit continuum triton-breakup identity admits MF3 LR=33;
+//! every other admitted channel requires LR=0. Generic MT91, LR1/MF6 mixtures,
+//! and discrete/pseudo-level breakup are not inferred. Alternative evaluated
+//! representations must not be added as independent channels without checking
+//! their overlap. Admitted production channels retain their neutron multiplicity;
 //! outgoing spectra, residual products, thresholds and energy routing must be
 //! supplied separately to transport. These tables cannot be used as absorption.
 //! MT103–107 do not
@@ -251,6 +255,13 @@ impl PointwiseCrossSection {
     #[must_use]
     pub const fn reaction(&self) -> NeutronReaction {
         self.reaction
+    }
+    /// Original MF3 breakup flag, validated against the selected MT/LR identity.
+    /// The immutable reaction kind retains the exact admitted flag. LR selects
+    /// the physical channel; it supplies no product yields or energy partition.
+    #[must_use]
+    pub const fn breakup_flag(&self) -> i32 {
+        reaction_lr(self.reaction)
     }
     #[must_use]
     pub fn energies_j(&self) -> &[f64] {
@@ -516,6 +527,8 @@ fn reaction_mt(reaction: NeutronReaction) -> i32 {
         NeutronReaction::TwoNeutronProduction => 16,
         NeutronReaction::ThreeNeutronProduction => 17,
         NeutronReaction::FourNeutronProduction => 37,
+        NeutronReaction::NeutronTritonProduction => 33,
+        NeutronReaction::ContinuumNeutronTritonBreakup => 91,
         NeutronReaction::Fission => 18,
         NeutronReaction::Capture => 102,
         NeutronReaction::ProtonProduction => 103,
@@ -523,6 +536,13 @@ fn reaction_mt(reaction: NeutronReaction) -> i32 {
         NeutronReaction::TritonProduction => 105,
         NeutronReaction::Helium3Production => 106,
         NeutronReaction::AlphaProduction => 107,
+    }
+}
+
+const fn reaction_lr(reaction: NeutronReaction) -> i32 {
+    match reaction {
+        NeutronReaction::ContinuumNeutronTritonBreakup => 33,
+        _ => 0,
     }
 }
 
@@ -772,8 +792,12 @@ fn read_curve(
     }
     let tab = reader.section(head.mat, 3, head.mt, checkpoint)?;
     tab.zero_integer(2)?;
-    if tab.integer(3)? != 0 {
-        return Err(EndfError::Unsupported("MF3 breakup flag LR must be zero"));
+    if tab.integer(3)? != reaction_lr(reaction) {
+        return Err(EndfError::Unsupported(if reaction_lr(reaction) == 0 {
+            "MF3 breakup flag LR must be zero"
+        } else {
+            "continuum neutron/triton breakup requires MF3 LR=33"
+        }));
     }
     let curve = read_nonnegative_tab1(reader, tab, BARN_M2, checkpoint)?;
     reader.send(head.mat, 3, checkpoint)?;
