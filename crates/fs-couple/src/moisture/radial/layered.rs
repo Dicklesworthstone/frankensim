@@ -22,6 +22,7 @@ use fs_material::state_point::MonotoneMoistureSorption;
 
 /// Original finite vapor inventories coupled to complete coated radial bodies.
 pub mod atmosphere;
+mod sdirk;
 
 /// One native radial material field and its explicitly associated isotherm.
 #[derive(Clone, Debug)]

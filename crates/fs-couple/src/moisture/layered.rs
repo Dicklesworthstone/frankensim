@@ -23,6 +23,9 @@ pub mod atmosphere;
 pub(super) mod interface;
 #[path = "layered/kernel.rs"]
 pub(super) mod kernel;
+#[path = "layered/sdirk.rs"]
+mod sdirk;
+pub use sdirk::MoistureLayeredSdirk2Report;
 
 use kernel::{LayeredSource, LayeredStorage, LayeredSystem};
 

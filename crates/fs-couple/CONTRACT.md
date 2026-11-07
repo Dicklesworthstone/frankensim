@@ -3475,6 +3475,27 @@ into the solid. Five focused authored regressions define analytic curved uptake
 and release, concentration feedback, unequal-shell shared conservation/order,
 second-order convergence, finite crystal buffering and transactional refusal.
 
+### Second-order heterogeneous water storage and interface transfer
+
+`MoistureLayeredSlab::advance_sdirk2` and
+`MoistureLayeredRadial::advance_sdirk2` use Alexander SDIRK2 through the same
+native layered storage/activity kernel. Both stages retain each original
+nonlinear sorption and Kirchhoff diffusivity, actual dry-cell inventory and
+explicit interface/exterior law. Stage two starts from the original water
+storage and receives the actual first-stage face rates as physical water loads;
+neither an activity increment nor a frozen capacity substitutes for stored water.
+
+`MoistureLayeredSdirk2Report` separates the first diagnostic stage from the
+complete endpoint. Exterior and material-interface water transfers in the
+endpoint already include both RK weights; surface activities and source
+receipts describe the final stage. Shared source preparation, native
+tridiagonal iteration and admission remain in use for both spatial geometries.
+The existing backward-Euler and deforming-slab paths retain their original
+behavior. This SDIRK entry point holds geometry, temperature and reservoir
+activities fixed. A nonmonotone stage returns typed `ActivityStageRange`,
+which the existing duration controller may retry at a shorter interval.
+No clipping, first-order replacement or finite-reservoir SDIRK claim is implied.
+
 ### Finite vapor exchange with coated radial bodies
 
 `moisture::radial::layered::atmosphere` couples single or shared coated spheres

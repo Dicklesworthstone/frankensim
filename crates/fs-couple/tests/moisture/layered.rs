@@ -13,6 +13,8 @@ mod adaptive;
 mod atmosphere;
 #[path = "layered/radial.rs"]
 mod radial;
+#[path = "layered/sdirk.rs"]
+mod sdirk;
 #[path = "layered/transfer.rs"]
 mod transfer;
 

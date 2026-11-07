@@ -201,6 +201,7 @@ impl Retryable for MoistureError {
                 | Self::SpatialNotConverged { .. }
                 | Self::ContentIncrement { .. }
                 | Self::StageRange { .. }
+                | Self::ActivityStageRange { .. }
         )
     }
 }

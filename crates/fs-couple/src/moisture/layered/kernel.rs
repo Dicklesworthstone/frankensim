@@ -16,6 +16,7 @@ pub(in crate::moisture) struct LayeredSource<'a> {
 }
 
 /// Actual accepted cell inventories, independent of the spatial reduction.
+#[derive(Clone, Copy)]
 pub(in crate::moisture) struct LayeredStorage<'a> {
     pub sources: &'a [LayeredSource<'a>],
     pub layer_for_cell: &'a [usize],
@@ -96,6 +97,136 @@ pub(in crate::moisture) struct LayeredCandidate {
     pub activity: Vec<f64>,
     pub moisture: Vec<f64>,
     pub report: MoistureLayeredReport,
+    first_load: Option<StageLoad>,
+}
+
+/// Physical first-stage face transfers, already weighted for stage two.
+/// Nonlinear storage is never replaced by an activity increment or a frozen
+/// capacity. Each internal face has exactly one debit and one credit.
+struct StageLoad {
+    water: Vec<f64>,
+    boundary: [f64; 2],
+    interfaces: Vec<([usize; 2], f64)>,
+    bounds: [f64; 2],
+}
+
+impl StageLoad {
+    fn capture(
+        state: &LayeredStorage<'_>,
+        endpoint: &LayeredSystem,
+        activity: &[f64],
+        reservoir: [Option<f64>; 2],
+        boundary: [f64; 2],
+        weight: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Self, MoistureError> {
+        let mut water = vec![0.0; activity.len()];
+        for (i, &conductance) in endpoint.operator.off.iter().enumerate() {
+            if i % 128 == 0 {
+                poll(cx)?;
+            }
+            let flux = weight * (conductance * (activity[i + 1] - activity[i]));
+            water[i] += flux;
+            water[i + 1] -= flux;
+        }
+        let mut bounds = [f64::INFINITY, f64::NEG_INFINITY];
+        for (i, &a) in state.activity.iter().enumerate() {
+            if i % 128 == 0 {
+                poll(cx)?;
+            }
+            bounds[0] = bounds[0].min(a);
+            bounds[1] = bounds[1].max(a);
+        }
+        let boundary = boundary.map(|q| weight * q);
+        for (side, cell) in [0, activity.len() - 1].into_iter().enumerate() {
+            water[cell] += boundary[side];
+            if endpoint.boundary[side] != 0.0 {
+                let a = reservoir[side].expect("active layered boundary");
+                bounds[0] = bounds[0].min(a);
+                bounds[1] = bounds[1].max(a);
+            }
+        }
+        let mut interfaces = Vec::with_capacity(endpoint.interfaces.len());
+        for face in &endpoint.interfaces {
+            poll(cx)?;
+            let transfer = weight * face.water_left_to_right_kg;
+            if !transfer.is_finite() {
+                return Err(MoistureError::Invalid(
+                    "layered SDIRK interface load overflow",
+                ));
+            }
+            interfaces.push((face.layers, transfer));
+        }
+        if water.iter().chain(&boundary).any(|q| !q.is_finite()) {
+            return Err(MoistureError::Invalid("layered SDIRK face load overflow"));
+        }
+        Ok(Self {
+            water,
+            boundary,
+            interfaces,
+            bounds,
+        })
+    }
+
+    fn add_to(&self, system: &mut LayeredSystem, cx: &Cx<'_>) -> Result<(), MoistureError> {
+        debug_assert_eq!(self.water.len(), system.rhs.len());
+        for (i, (rhs, &water)) in system.rhs.iter_mut().zip(&self.water).enumerate() {
+            if i % 128 == 0 {
+                poll(cx)?;
+            }
+            *rhs += water;
+        }
+        if self.interfaces.len() != system.interfaces.len() {
+            return Err(MoistureError::Invalid(
+                "layered SDIRK interface topology changed",
+            ));
+        }
+        for (face, &(layers, water)) in system.interfaces.iter_mut().zip(&self.interfaces) {
+            poll(cx)?;
+            if face.layers != layers {
+                return Err(MoistureError::Invalid(
+                    "layered SDIRK interface order changed",
+                ));
+            }
+            face.water_left_to_right_kg += water;
+        }
+        Ok(())
+    }
+
+    fn check_range(
+        &self,
+        activity: &[f64],
+        reservoir: [Option<f64>; 2],
+        active: [f64; 2],
+        cx: &Cx<'_>,
+    ) -> Result<(), MoistureError> {
+        let mut bounds = self.bounds;
+        for side in 0..2 {
+            if active[side] != 0.0 {
+                let a = reservoir[side].expect("active layered boundary");
+                bounds[0] = bounds[0].min(a);
+                bounds[1] = bounds[1].max(a);
+            }
+        }
+        let roundoff = 128.0 * f64::EPSILON;
+        for (cell, &a) in activity.iter().enumerate() {
+            if cell % 128 == 0 {
+                poll(cx)?;
+            }
+            if !a.is_finite()
+                || !(0.0..=1.0).contains(&a)
+                || a < bounds[0] - roundoff
+                || a > bounds[1] + roundoff
+            {
+                return Err(MoistureError::ActivityStageRange {
+                    cell,
+                    activity: a,
+                    bounds,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Native geometry adds faces to the same implicit storage operator. A caller
@@ -108,6 +239,96 @@ pub(in crate::moisture) fn advance(
     reservoir: [Option<f64>; 2],
     step: MoistureStepConfig,
     controls: MoistureNonlinearConfig,
+    paths: impl FnMut(
+        &[KirchhoffMoistureDiffusivity],
+        &[f64],
+        f64,
+        &mut LayeredSystem,
+        &Cx<'_>,
+    ) -> Result<(), MoistureError>,
+    cx: &Cx<'_>,
+) -> Result<LayeredCandidate, MoistureError> {
+    advance_stage(state, dt, reservoir, step, controls, None, None, paths, cx)
+}
+
+/// Alexander's two-stage L-stable method on physical original water storage.
+/// The accepted first face rates contribute (1-gamma)*dt; the final implicit
+/// rates contribute gamma*dt. Both stages use the original nonlinear kernel.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::moisture) fn sdirk2(
+    state: LayeredStorage<'_>,
+    dt: f64,
+    reservoir: [Option<f64>; 2],
+    step: MoistureStepConfig,
+    controls: MoistureNonlinearConfig,
+    mut paths: impl FnMut(
+        f64,
+        &[KirchhoffMoistureDiffusivity],
+        &[f64],
+        f64,
+        &mut LayeredSystem,
+        &Cx<'_>,
+    ) -> Result<(), MoistureError>,
+    cx: &Cx<'_>,
+) -> Result<(LayeredCandidate, MoistureLayeredReport), MoistureError> {
+    poll(cx)?;
+    let gamma = crate::moisture::sdirk::GAMMA;
+    let implicit_dt = gamma * dt;
+    let first_time = state.time_s + implicit_dt;
+    let end = state.time_s + dt;
+    if !positive(dt)
+        || !positive(implicit_dt)
+        || !end.is_finite()
+        || first_time <= state.time_s
+        || first_time >= end
+    {
+        return Err(MoistureError::Invalid(
+            "layered SDIRK needs two representable forward stage times",
+        ));
+    }
+    let mut first = advance_stage(
+        state,
+        implicit_dt,
+        reservoir,
+        step,
+        controls,
+        None,
+        Some((1.0 - gamma) / gamma),
+        |profiles, activity, reference, system, cx| {
+            paths(implicit_dt, profiles, activity, reference, system, cx)
+        },
+        cx,
+    )?;
+    let known = first
+        .first_load
+        .take()
+        .expect("requested first-stage face load");
+    let next = advance_stage(
+        state,
+        dt,
+        reservoir,
+        step,
+        controls,
+        Some(&known),
+        None,
+        |profiles, activity, reference, system, cx| {
+            paths(implicit_dt, profiles, activity, reference, system, cx)
+        },
+        cx,
+    )?;
+    poll(cx)?;
+    Ok((next, first.report))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_stage(
+    state: LayeredStorage<'_>,
+    dt: f64,
+    reservoir: [Option<f64>; 2],
+    step: MoistureStepConfig,
+    controls: MoistureNonlinearConfig,
+    known: Option<&StageLoad>,
+    capture_weight: Option<f64>,
     mut paths: impl FnMut(
         &[KirchhoffMoistureDiffusivity],
         &[f64],
@@ -156,6 +377,16 @@ pub(in crate::moisture) fn advance(
         span[0] = span[0].min(a);
         span[1] = span[1].max(a);
     }
+    // Keep the existing old/current algebraic reference even when retained
+    // first-stage source support needs a wider preparation interval.
+    let reference = span[0];
+    if let Some(known) = known {
+        // Retain first-stage source support even if a future finite-reservoir
+        // second stage supplies a different boundary. This is source support,
+        // not permission for a physical activity overshoot.
+        span[0] = span[0].min(known.bounds[0]);
+        span[1] = span[1].max(known.bounds[1]);
+    }
     let mut profiles = Vec::with_capacity(state.sources.len());
     for source in state.sources {
         poll(cx)?;
@@ -170,10 +401,12 @@ pub(in crate::moisture) fn advance(
         )?);
     }
     // Exact uniform activity has a zero RHS even in an arbitrarily stiff solve.
-    let reference = span[0];
     let mut assemble = |activity: &[f64]| -> Result<LayeredSystem, MoistureError> {
         let mut system = LayeredSystem::storage(&state, activity, reference, cx)?;
         paths(&profiles, activity, reference, &mut system, cx)?;
+        if let Some(known) = known {
+            known.add_to(&mut system, cx)?;
+        }
         system.validate()?;
         Ok(system)
     };
@@ -195,6 +428,9 @@ pub(in crate::moisture) fn advance(
             return Err(MoistureError::NotConverged(solution.report));
         }
         let candidate: Vec<f64> = solution.x.iter().map(|delta| reference + delta).collect();
+        if let Some(known) = known {
+            known.check_range(&candidate, reservoir, system.boundary, cx)?;
+        }
         let mut moisture = Vec::with_capacity(candidate.len());
         let mut transport = Vec::with_capacity(candidate.len());
         let mut changes = Vec::with_capacity(candidate.len());
@@ -226,10 +462,15 @@ pub(in crate::moisture) fn advance(
         }
         let water_change = reservoir::water_sum(changes);
         let endpoint = assemble(&candidate)?;
+        if let Some(known) = known {
+            known.check_range(&candidate, reservoir, endpoint.boundary, cx)?;
+        }
         let (_, relative) = endpoint.operator.defect(&solution.x, &endpoint.rhs, cx)?;
         let boundary = std::array::from_fn(|side| {
             let cell = if side == 0 { 0 } else { candidate.len() - 1 };
-            reservoir[side].map_or(0.0, |a| endpoint.boundary[side] * (a - candidate[cell]))
+            let current =
+                reservoir[side].map_or(0.0, |a| endpoint.boundary[side] * (a - candidate[cell]));
+            current + known.map_or(0.0, |load| load.boundary[side])
         });
         let water_after = moisture
             .iter()
@@ -266,6 +507,13 @@ pub(in crate::moisture) fn advance(
                     "layered endpoint wet inventory is unrepresentable",
                 ));
             }
+            let first_load = capture_weight
+                .map(|weight| {
+                    StageLoad::capture(
+                        &state, &endpoint, &candidate, reservoir, boundary, weight, cx,
+                    )
+                })
+                .transpose()?;
             let report = MoistureLayeredReport {
                 interval_s: [state.time_s, end],
                 boundary_water_kg: boundary,
@@ -291,6 +539,7 @@ pub(in crate::moisture) fn advance(
                 activity: candidate,
                 moisture,
                 report,
+                first_load,
             });
         }
         if iteration == controls.maximum_iterations {

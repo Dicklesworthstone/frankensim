@@ -134,6 +134,14 @@ pub enum MoistureError {
         moisture: f64,
         bounds: [f64; 2],
     },
+    /// A higher-order layered stage left the original physical activity range.
+    /// Activity is dimensionless vapor activity, distinct from dry-basis content.
+    /// A shorter interval may restore admissibility; no state is clipped.
+    ActivityStageRange {
+        cell: usize,
+        activity: f64,
+        bounds: [f64; 2],
+    },
     /// Sum of stored water did not match the two measured boundary transfers.
     MassBalance { residual_kg: f64, tolerance_kg: f64 },
     /// No endpoint is published after cancellation.

@@ -7,6 +7,8 @@ use fs_couple::moisture::radial::{
 
 #[path = "radial/atmosphere.rs"]
 mod atmosphere;
+#[path = "radial/sdirk.rs"]
+mod sdirk;
 
 fn radial_layer(
     card: MaterialCard,
