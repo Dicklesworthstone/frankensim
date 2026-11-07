@@ -3,6 +3,9 @@ use super::*;
 use fs_couple::moisture::layered::MoistureLayeredSdirk2Report;
 use fs_material::osmosis::solubility::FiniteSolubilitySolution;
 
+#[path = "sdirk/adaptive.rs"]
+mod adaptive;
+
 const GAMMA: f64 = 1.0 - core::f64::consts::FRAC_1_SQRT_2;
 
 struct Stage {

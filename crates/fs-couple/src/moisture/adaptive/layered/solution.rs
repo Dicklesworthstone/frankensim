@@ -9,9 +9,11 @@ use crate::moisture::{
     },
 };
 
-impl LayeredTransport for SolutionMoistureStep<MoistureLayeredReport> {
+mod sdirk;
+
+impl<R: LayeredTransport> LayeredTransport for SolutionMoistureStep<R> {
     fn transport(&self) -> &MoistureLayeredReport {
-        &self.transport
+        self.transport.transport()
     }
 }
 
