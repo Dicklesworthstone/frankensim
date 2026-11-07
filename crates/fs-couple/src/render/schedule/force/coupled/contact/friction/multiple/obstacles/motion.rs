@@ -4,7 +4,9 @@
 //! compressive reaction applies -N R to the mechanics and supplies -R delta_s
 //! of actuator work. The original potential secant/loss is evaluated on delta_x,
 //! not on string/body motion alone. No source gap is mutated and no startup
-//! overlap, mechanical motion or interface history is discarded.
+//! overlap, mechanical motion or interface history is discarded. A bound
+//! fixed-map omitted-mode compliance adds its original -G R displacement to
+//! this same closure, retaining its separate storage and numerical-loss account.
 
 use super::*;
 
@@ -47,6 +49,8 @@ impl MultiFrictionModalSystem {
     /// A moving support on a receiver adds s to that receiver's existing normal
     /// displacement. Both original attachment bodies still receive reciprocal
     /// reactions. The extra actuator work belongs only to the prescribed s.
+    /// Fixed-map residual compliance remains in series with this contact;
+    /// translation changes neither its projection nor its material source.
     pub fn with_obstacle_motion(mut self, limits: ObstacleMotionLimits,
         gate: &CancelGate) -> Result<Self, ModalFrictionError>
     {
@@ -59,9 +63,6 @@ impl MultiFrictionModalSystem {
             .ok_or_else(|| invalid("normal motion requires existing compliant obstacles"))?;
         if obstacles.motion.is_some() {
             return Err(invalid("normal motion cannot replace an existing binding").into());
-        }
-        if obstacles.has_residual() {
-            return Err(invalid("normal motion does not carry the obstacles' residual compliance").into());
         }
         let count = obstacles.points.len();
         obstacles.motion = Some(MotionState {

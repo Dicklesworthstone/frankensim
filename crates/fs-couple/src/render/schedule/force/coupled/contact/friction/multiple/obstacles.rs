@@ -225,8 +225,12 @@ impl MultiFrictionModalSystem {
     /// and the first step holds its reactions. A load that projects only on the
     /// retained modes does not deflect the omitted ones, in either path.
     ///
-    /// Translating or moving supports and bound nonlinear storage refuse: their
-    /// residual is not wired.
+    /// Prescribed translation along a fixed contact map composes through
+    /// `with_obstacle_motion`: closure is N^T q - G R - s and the original
+    /// support supplies -R delta_s. Either binding order retains the same
+    /// response, residual storage and separately reported numerical loss.
+    /// Moving attachment maps and bound nonlinear storage still refuse; their
+    /// omitted-mode response is not supplied by this fixed compliance.
     pub fn with_obstacle_residual_compliance(mut self, compliance: Vec<f64>, gate: &CancelGate)
         -> Result<Self, ModalFrictionError>
     {
@@ -236,8 +240,8 @@ impl MultiFrictionModalSystem {
         }
         let set = self.obstacles.as_mut()
             .ok_or_else(|| invalid("obstacle residual compliance requires bound obstacles"))?;
-        if set.residual.is_some() || set.motion.is_some() || set.geometry.is_some() {
-            return Err(invalid("obstacle residual compliance binds once, on fixed supports").into());
+        if set.residual.is_some() || set.geometry.is_some() {
+            return Err(invalid("obstacle residual compliance binds once, on fixed attachment maps").into());
         }
         let q = set.points.len();
         if compliance.len() != q*q || compliance.iter().any(|g| !g.is_finite()) {
@@ -691,14 +695,6 @@ impl ObstacleSet {
         for (i, point) in self.points.iter_mut().enumerate() {
             poll(gate)?;
             point.old = dot(&point.column, old_q)?;
-            if !lags.is_empty() {
-                // The free endpoint holds no reaction yet, so no lag; the solve adds G R.
-                point.free = finite(point.old+dot(&point.column, free_delta)?)?;
-                point.old = finite(point.old-lags[i])?;
-                point.law = OpeningContactStep::new(&point.contact.law, -point.old).map_err(ModalCouplingError::ContactLaw)?;
-                point.iterations = 0;
-                continue;
-            }
             if let Some(geometry) = &mut self.geometry {
                 if geometry.moving[i] {
                     point.free = finite(dot(&geometry.end_columns[i], old_q)?
@@ -709,6 +705,13 @@ impl ObstacleSet {
                 }
             } else {
                 point.free = finite(point.old+dot(&point.column, free_delta)?)?;
+            }
+            if !lags.is_empty() {
+                // The accepted closure includes the held omitted-mode deflection.
+                // The free endpoint has no reaction yet: nn already adds G R
+                // during the solve. Both endpoints then use their own support
+                // offsets below, exactly as the final energy/work stage does.
+                point.old = finite(point.old-lags[i])?;
             }
             if let Some(motion) = &self.motion {
                 point.old = finite(point.old-motion.accepted[i])?;

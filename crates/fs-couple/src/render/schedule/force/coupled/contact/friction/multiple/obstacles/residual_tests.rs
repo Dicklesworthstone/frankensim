@@ -4,6 +4,7 @@
 //! declared numerical loss dR G dR / 2.
 
 use super::*;
+use crate::render::schedule::force::coupled::contact::friction::multiple::obstacles::motion::ObstacleMotionLimits;
 
 // obstacle(): the synthetic support's linear (alpha 1) stiffness [N/m].
 const SUPPORT_N_M: f64 = 2000.0;
@@ -305,4 +306,182 @@ fn a_refused_residual_preload_leaves_the_held_reactions_alone() {
     assert_eq!(accepted_reactions(&joint), vec![0.0]);
     assert_eq!(joint.total_energy_j().unwrap().to_bits(), before.to_bits());
     assert_eq!(displacements(&joint), vec![0.0]);
+}
+
+fn translation_limits() -> ObstacleMotionLimits {
+    ObstacleMotionLimits { maximum_abs_offset_m: 0.01, maximum_speed_m_s: 1.0 }
+}
+
+// Two original bodies, with a prescribed translation added to their relative
+// contact coordinate. Undamped oscillators give an independent analytic step.
+fn translated_residual(motion_first: bool, maximum_pressure: f64) -> MultiFrictionModalSystem {
+    let gate = CancelGate::new_clock_free();
+    let models = [300.0, 500.0].into_iter().map(|omega| {
+        ModalAcousticTimeModel::try_new(48000, vec![ModalAcousticMode {
+            angular_frequency_rad_s: omega, damping_ratio: 0.0,
+            pressure_per_modal_velocity: C64::ZERO,
+        }], ModalAcousticTimeBudget::audible_reference()).unwrap()
+    }).collect();
+    let network = CoupledModalSystem::new(models, vec![], config(maximum_pressure), &gate).unwrap();
+    let core = friction(network).with_acceleration_pressure(vec![1.0, 0.0]).unwrap();
+    let mut contact = obstacle(1.0, 0.0);
+    contact.right = attachment(1, 0.8);
+    let joint = multi(core).with_obstacles(vec![(contact, normal_limits())], limits(), &gate).unwrap();
+    if motion_first {
+        joint.with_obstacle_motion(translation_limits(), &gate).unwrap()
+            .with_obstacle_residual_compliance(vec![PAIR_G], &gate).unwrap()
+    } else {
+        joint.with_obstacle_residual_compliance(vec![PAIR_G], &gate).unwrap()
+            .with_obstacle_motion(translation_limits(), &gate).unwrap()
+    }
+}
+
+#[test]
+fn g1_translated_residual_contact_matches_analytic_force_motion_and_energy() {
+    let mut joint = translated_residual(false, 1000.0);
+    let mut reversed = translated_residual(true, 1000.0);
+    let omega: [f64; 2] = [300.0, 500.0];
+    let normal = [1.0, -0.8];
+    let dt = joint.sample_period_s();
+    // Stable closed-form unit-force displacement: (1-cos(w dt))/w^2.
+    let response = omega.map(|w| 2.0*(0.5*w*dt).sin().powi(2)/(w*w));
+    let compliance = normal.iter().zip(response).map(|(n, d)| n*n*d).sum::<f64>();
+    let (mut q, mut v) = ([0.0; 2], [0.0; 2]);
+    let (mut old_offset, mut old_reaction, mut old_energy) = (0.0, 0.0, 0.0);
+    for command in [Some(-1e-5), Some(-2e-5), None, Some(-3e-5), Some(-2.5e-5), Some(-2e-5)] {
+        let offset = command.unwrap_or(old_offset);
+        let free_q: [f64; 2] = std::array::from_fn(|i| q[i]*(omega[i]*dt).cos()
+            + v[i]*(omega[i]*dt).sin()/omega[i]);
+        let free_v: [f64; 2] = std::array::from_fn(|i| v[i]*(omega[i]*dt).cos()
+            - omega[i]*q[i]*(omega[i]*dt).sin());
+        let old_x = normal[0]*q[0]+normal[1]*q[1]-PAIR_G*old_reaction-old_offset;
+        let free_x = normal[0]*free_q[0]+normal[1]*free_q[1]-offset;
+        // U=k*x^2/2 while compressed. Its secant gives R=k*(x0+x1)/2,
+        // with x1=free_x-(N^T D N+G)R. No contact root or native report is
+        // used to manufacture this force or either body's endpoint.
+        let reaction = SUPPORT_N_M*(old_x+free_x)/(2.0+SUPPORT_N_M*(compliance+PAIR_G));
+        q = std::array::from_fn(|i| free_q[i]-response[i]*normal[i]*reaction);
+        v = std::array::from_fn(|i| free_v[i]-(omega[i]*dt).sin()/omega[i]*normal[i]*reaction);
+        let x = normal[0]*q[0]+normal[1]*q[1]-PAIR_G*reaction-offset;
+        assert!(old_x >= 0.0 && x > 0.0, "analytic linear-contact branch must stay compressed");
+        let work = -reaction*(offset-old_offset);
+        let tail_energy = 0.5*PAIR_G*reaction*reaction;
+        let tail_loss = 0.5*PAIR_G*(reaction-old_reaction).powi(2);
+        let contact_energy = 0.5*SUPPORT_N_M*x*x;
+        let mechanical_energy = (0..2).map(|i| 0.5*(v[i]*v[i]+omega[i]*omega[i]*q[i]*q[i])).sum::<f64>();
+        let energy = mechanical_energy+contact_energy+tail_energy;
+        assert!((energy-old_energy+tail_loss-work).abs() < 2e-16);
+        let step = |system: &mut MultiFrictionModalSystem| match command {
+            Some(end) => system.step_with_obstacle_offsets(&[0.0, 0.0], &[released()], &[end]).unwrap().clone(),
+            None => system.step(&[0.0, 0.0], &[released()]).unwrap().clone(),
+        };
+        let frame = step(&mut joint);
+        assert_eq!(frame, step(&mut reversed), "binding order must not change the physical path");
+        let stop = joint.last_obstacle_frames().unwrap()[0];
+        assert!((stop.normal_force_n-reaction).abs() < 2e-12);
+        for i in 0..2 {
+            let state = joint.components()[i].states()[0];
+            assert!((state.displacement_m_sqrt_kg-q[i]).abs() < 2e-15);
+            assert!((state.velocity_m_sqrt_kg_per_s-v[i]).abs() < 2e-11);
+        }
+        assert!((frame.obstacle_work_j-work).abs() < 2e-16);
+        assert!((stop.stored_energy_j-contact_energy).abs() < 2e-16);
+        assert!((frame.obstacle_residual_energy_j-tail_energy).abs() < 2e-16);
+        assert!((frame.obstacle_residual_loss_j-tail_loss).abs() < 2e-16);
+        assert_eq!(frame.obstacle_dissipation_j, 0.0, "omitted-mode loss is not material heat");
+        assert_eq!(stop.support_offset_m, offset);
+        assert_eq!(joint.obstacle_offsets_m().unwrap(), &[offset]);
+        assert!((joint.total_energy_j().unwrap()-energy).abs() < 2e-16);
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        (old_offset, old_reaction, old_energy) = (offset, reaction, energy);
+    }
+    assert!(joint.components()[0].states()[0].velocity_m_sqrt_kg_per_s < 0.0);
+    assert!(joint.components()[1].states()[0].velocity_m_sqrt_kg_per_s > 0.0);
+}
+
+#[test]
+fn g0_translated_opposed_stops_keep_the_full_residual_matrix_and_each_actuator_work() {
+    let gate = CancelGate::new_clock_free();
+    let mut joint = pair(Some(PAIR_G), 0.0)
+        .with_obstacle_motion(translation_limits(), &gate).unwrap();
+    assert_eq!(joint.obstacle_pairs(), vec![(0, 1)]);
+    let mut before = joint.total_energy_j().unwrap();
+    let mut offsets = [0.0; 2];
+    let mut previous_net = 0.0;
+    for endpoint in [[-1e-5, -1e-5], [-2e-5, -1e-5], [-1.5e-5, 0.0], [-1e-5, 1e-5]] {
+        let frame = joint.step_with_obstacle_offsets(&[0.0], &[released()], &endpoint).unwrap().clone();
+        let stops = joint.last_obstacle_frames().unwrap();
+        let net = stops[0].normal_force_n-stops[1].normal_force_n;
+        let work = -(0..2).map(|i| stops[i].normal_force_n*(endpoint[i]-offsets[i])).sum::<f64>();
+        let tail = 0.5*PAIR_G*net*net;
+        let numerical = 0.5*PAIR_G*(net-previous_net).powi(2);
+        let state = joint.components()[0].states()[0];
+        let q = state.displacement_m_sqrt_kg;
+        let energy = 0.5*(state.velocity_m_sqrt_kg_per_s.powi(2)+10000.0*q*q)
+            + 0.5*SUPPORT_N_M*((q-endpoint[0]-PAIR_G*net+1e-4).powi(2)
+                + (-q-endpoint[1]+PAIR_G*net+1e-4).powi(2)) + tail;
+        assert!(stops.iter().all(|stop| stop.normal_force_n > 0.0));
+        for i in 0..2 {
+            assert_eq!(stops[i].support_offset_m, endpoint[i]);
+            assert_eq!(stops[i].actuator_work_j, -stops[i].normal_force_n*(endpoint[i]-offsets[i]));
+        }
+        assert!((frame.obstacle_work_j-work).abs() < 1e-18);
+        assert!((frame.obstacle_residual_energy_j-tail).abs() < 1e-18);
+        assert!((frame.obstacle_residual_loss_j-numerical).abs() < 1e-18);
+        assert!((joint.total_energy_j().unwrap()-energy).abs() < 1e-18);
+        assert!((energy-before+frame.network_dissipation_j+numerical-work).abs() < 1e-13);
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        (before, offsets, previous_net) = (energy, endpoint, net);
+    }
+}
+
+#[test]
+fn g4_refused_residual_motion_keeps_reactions_offsets_clock_and_retry_state() {
+    let mut joint = translated_residual(false, 0.01);
+    let mut reference = translated_residual(false, 0.01);
+    for system in [&mut joint, &mut reference] {
+        system.step_with_obstacle_offsets(&[0.0, 0.0], &[released()], &[-1e-6]).unwrap();
+    }
+    let before = states(&joint);
+    let frame = joint.last_frame().unwrap().clone();
+    let stops = joint.last_obstacle_frames().unwrap().to_vec();
+    let energy = joint.total_energy_j().unwrap();
+    // Motion is within its speed/offset limits. The candidate reaches the late
+    // acceleration-pressure gate, after solving nonzero residual reactions.
+    assert!(matches!(joint.step_with_obstacle_offsets(&[0.0, 0.0], &[released()], &[-2e-5]),
+        Err(ModalFrictionError::Network(ModalCouplingError::Budget { .. }))));
+    let cancelled = CancelGate::new_clock_free(); cancelled.request();
+    assert!(joint.step_with_obstacle_offsets_under_gate(&[0.0, 0.0], &[released()], &[-2e-5], &cancelled).is_err());
+    assert_eq!(states(&joint), before);
+    assert_eq!(joint.last_frame(), Some(&frame));
+    assert_eq!(joint.last_obstacle_frames().unwrap(), stops);
+    assert_eq!(joint.obstacle_offsets_m().unwrap(), &[-1e-6]);
+    assert_eq!(joint.total_energy_j().unwrap(), energy);
+    assert_eq!(joint.samples_rendered(), 1);
+    // Ordinary stepping holds the ACCEPTED offset and lag, not rejected scratch.
+    assert_eq!(joint.step(&[0.0, 0.0], &[released()]).unwrap(),
+        reference.step(&[0.0, 0.0], &[released()]).unwrap());
+    assert_eq!(states(&joint), states(&reference));
+    assert_eq!(joint.last_obstacle_frames(), reference.last_obstacle_frames());
+    assert_eq!(joint.obstacle_offsets_m().unwrap(), &[-1e-6]);
+}
+
+#[test]
+fn g5_zero_translation_preserves_the_existing_residual_trajectory_to_the_bit() {
+    let gate = CancelGate::new_clock_free();
+    let mut fixed = pair(Some(PAIR_G), 0.004);
+    let mut translated = pair(Some(PAIR_G), 0.004)
+        .with_obstacle_motion(translation_limits(), &gate).unwrap();
+    for _ in 0..64 {
+        assert_eq!(fixed.step(&[0.0], &[released()]).unwrap(),
+            translated.step_with_obstacle_offsets(&[0.0], &[released()], &[0.0, 0.0]).unwrap());
+        assert_eq!(states(&fixed), states(&translated));
+        for (a, b) in fixed.components().iter().zip(translated.components()) {
+            for (a, b) in a.states().iter().zip(b.states()) {
+                assert_eq!(a.displacement_m_sqrt_kg.to_bits(), b.displacement_m_sqrt_kg.to_bits());
+                assert_eq!(a.velocity_m_sqrt_kg_per_s.to_bits(), b.velocity_m_sqrt_kg_per_s.to_bits());
+            }
+        }
+        assert_eq!(fixed.last_obstacle_frames(), translated.last_obstacle_frames());
+    }
 }

@@ -1,3 +1,26 @@
+## Translating supports with omitted-mode contact compliance
+
+Fixed-map normal support translation composes with the original omitted-mode
+compliance in `MultiFrictionModalSystem`. The accepted contact closure is
+`N^T q - G R - s`; each candidate uses its proposed support offset and the
+same original contact potential, secant reaction, retained modal response and
+joint friction solve. Translation and compliance may bind in either order.
+Changing attachment maps and nonlinear storage retain their existing refusals.
+
+The native account retains prescribed support work `-R delta_s`, omitted-mode
+storage `R^T G R / 2`, and the declared numerical loss
+`delta_R^T G delta_R / 2` as separate terms. Numerical loss is not material
+heat. Held offsets, original material-source admission, released preload and
+joint publication keep their existing owners; a refused sample publishes no
+motion, contact reaction, offset or clock change.
+
+Focused G0/G1/G4/G5 regression definitions cover independent force/work/storage
+relations, both binding orders, opposed supports, held offsets, zero-motion
+parity and refusal/retry. Native execution remains unverified because the
+execution workspace became unavailable before the targeted tests could run.
+The fixed-map quasistatic omitted-mode approximation and time-resolution
+limits remain unchanged.
+
 ## Complete force histories at moving acoustic receivers
 
 `pcm_wav::observation::moving::force::MovingForceRenderer` now accepts the
