@@ -19631,3 +19631,37 @@ which card describes the exposed surface; membership alone does not infer
 surface topology, constituent exposure or a homogenization law. The native
 contact adapter in `fs-conduction` also binds the actual original caloric
 objects and validates endpoint mass/volume before using this seam.
+
+## Calibrated Walker stress-life mean stress
+
+`fatigue::walker` adds an explicitly supplied Walker exponent and a closed
+load-ratio interval to the shared S-N owner. Every counted full or endpoint half
+cycle maps to the original curve's retained reference ratio using
+`a_ref = a * ((1 - R_ref) / (1 - R))^(1 - gamma)`. The supported domain is
+`0 <= gamma <= 1` and `-1 <= R_min < R_max < 1`, with R_ref inside that same
+interval. Positive-amplitude cycles require a tensile maximum. Zero-amplitude
+observations add no fatigue cycle; the correction supplies no static-strength
+assessment. The original finite-life and endurance declarations still own the
+corrected amplitude's admissibility.
+
+`MeanStressCorrection::Walker` works with fully reversed and non-fully-reversed
+curves without changing their knots. Normalized geometric means avoid powers of
+dimensional stresses, with direct gamma=0, 1/2 and 1 limits. Domain checks use
+stable `1-R`; reference-equivalence tolerance is relative to amplitude so
+ratios near unity cannot hide a large amplitude correction. No default gamma,
+compression credit below R=-1, extrapolation or constitutive yield adjustment
+is inferred. The reference normalization follows NASA/TM-2005-213886/REV2
+section 2.3 equations (23)-(25).
+
+`resolve_walker_sn` retains the separate `fatigue-walker-gamma` claim, selected
+answer and receipt alongside all original S-N observations. Gamma is a fixed
+scalar or an original temperature-only curve; provenance, observation population
+and complete typed support must match the S-N claim except for the explicitly
+declared R interval. The returned curve requires its exact retained Walker
+policy. A different authored gamma or support cannot silently inherit that
+source binding.
+
+Six focused regressions in `tests/fatigue_walker_stress_life.rs` cover analytic
+limits, actual reference ratios, variable means, source receipts/population,
+transactional refusals, scale invariance and near-unity ratio conditioning.
+These are synthetic implementation checks, not measured component-life evidence.

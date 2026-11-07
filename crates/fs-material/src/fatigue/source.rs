@@ -183,7 +183,7 @@ fn query(
 /// remain admitted under that same selection and frozen external context. Only
 /// fully reversed normal-stress calibrations are admitted here. For an original
 /// fixed R != -1 calibration use [`resolve_log_log_sn_at_stress_ratio`], which
-/// requires cycle-by-cycle ratio matching instead of applying a second fit.
+/// requires cycle-by-cycle ratio matching or a separately declared Walker fit.
 /// Source observations are lives TO FAILURE, not censored runouts. No endurance
 /// plateau is inferred from the final measured point.
 pub fn resolve_log_log_sn(
@@ -201,8 +201,9 @@ pub fn resolve_log_log_sn(
 /// Original knots, stress/life conventions and receipts remain unchanged.
 ///
 /// A non-fully-reversed curve requires `MeanStressCorrection::MatchCalibration`
-/// in the rainflow counter. Every complete or endpoint half cycle must match
-/// this ratio; no implicit Goodman, Walker or other mean-stress law is fitted.
+/// or an explicitly declared Walker calibration in the rainflow counter.
+/// MatchCalibration requires every full and endpoint half cycle to match R.
+/// This resolver never fits or enables a mean-stress law implicitly.
 pub fn resolve_log_log_sn_at_stress_ratio(
     card: &MaterialCard,
     point: &QueryPoint,

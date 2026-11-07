@@ -24,6 +24,8 @@ pub mod critical_plane;
 pub mod cyclic;
 /// Bounded Coffin-Manson-Basquin total mechanical strain-life estimates.
 pub mod strain_life;
+/// Explicit Walker stress-life mean-stress correction and original source fits.
+pub mod walker;
 
 /// Conditions identifying the supplied empirical calibration. These strings
 /// are caller declarations, not independent verification of the source.
@@ -67,6 +69,7 @@ pub struct SnCurve {
     endurance_limit_pa: Option<f64>,
     reference_stress_ratio: f64,
     source: Option<Arc<source::SnCalibrationSource>>,
+    walker_source: Option<Arc<walker::WalkerSnCalibrationSource>>,
 }
 
 /// Named treatment of the cycle's signed mean stress.
@@ -79,6 +82,9 @@ pub enum MeanStressCorrection {
     /// Both full and endpoint half cycles must match; the tolerance accounts
     /// only for floating-point reconstruction, not a wider physical domain.
     MatchCalibration,
+    /// Explicit Walker exponent and supported R interval. The counter maps each
+    /// counted cycle to its original S-N reference R; no exponent is inferred.
+    Walker(walker::WalkerParameters),
     /// Modified Goodman for tensile means; compressive means receive no credit.
     /// The declared ultimate strength bounds every accepted tensile sample.
     GoodmanTensionOnly { ultimate_strength_pa: f64 },
@@ -106,6 +112,7 @@ pub enum FatigueError {
     InvalidStressExtrema { minimum_pa: f64, maximum_pa: f64 },
     MeanStressOutsideStrainLife { mean_pa: f64, fatigue_strength_coefficient_pa: f64 },
     StressRatioOutsideCalibration { actual_ratio: f64, required_ratio: f64 },
+    StressRatioOutsideWalkerDomain { actual_ratio: f64, minimum_ratio: f64, maximum_ratio: f64 },
     NoTensileStress { maximum_pa: f64 },
     UnsupportedPairedHistory { sample: u64, what: &'static str },
     StaticStrengthExceeded { peak_pa: f64, ultimate_strength_pa: f64 },
@@ -144,7 +151,8 @@ impl SnCurve {
     /// it as fully reversed. The supported reference domain is -1 <= R < 1,
     /// covering fully reversed, pulsating and tension-tension calibrations.
     /// Non-fully-reversed curves require `MeanStressCorrection::MatchCalibration`
-    /// in the rainflow counter; no Goodman or other transformation is inferred.
+    /// or an explicitly calibrated Walker policy in the rainflow counter.
+    /// No Goodman or other transformation is inferred.
     /// Points and endurance support follow the same rules as [`Self::new`].
     pub fn new_at_stress_ratio(
         scope: FatigueScope,
@@ -174,7 +182,7 @@ impl SnCurve {
         {
             return Err(FatigueError::InvalidCalibration("endurance limit must be positive and strictly below finite-life data"));
         }
-        Ok(Self { scope, points, endurance_limit_pa, reference_stress_ratio, source: None })
+        Ok(Self { scope, points, endurance_limit_pa, reference_stress_ratio, source: None, walker_source: None })
     }
 
     pub fn scope(&self) -> &FatigueScope { &self.scope }
@@ -183,6 +191,8 @@ impl SnCurve {
     /// Stress ratio R = sigma_min/sigma_max of the calibration observations.
     pub fn reference_stress_ratio(&self) -> f64 { self.reference_stress_ratio }
     pub fn source(&self) -> Option<&source::SnCalibrationSource> { self.source.as_deref() }
+    /// Original Walker fit, when gamma and its domain were source-resolved.
+    pub fn walker_source(&self) -> Option<&walker::WalkerSnCalibrationSource> { self.walker_source.as_deref() }
 
     fn admit_cycle_ratio(&self, amplitude_pa: f64, mean_pa: f64) -> Result<(), FatigueError> {
         // Normalize before reconstructing the endpoints so a valid finite
@@ -243,12 +253,16 @@ impl MeanStressCorrection {
                 return Err(FatigueError::InvalidCalibration("Goodman requires a positive finite sourced ultimate strength"));
             }
         }
+        if let Self::Walker(parameters) = self { parameters.validate()?; }
         Ok(())
     }
 
-    /// Equivalent amplitude. Goodman maps to fully reversed calibration and
-    /// gives no credit for compressive mean. `MatchCalibration` leaves amplitude
-    /// unchanged; the counter checks its reference ratio before life lookup.
+    /// Equivalent amplitude at R=-1 for Goodman and Walker. Goodman gives no
+    /// compressive-mean credit; Walker requires explicit calibration support.
+    /// For another reference R use `WalkerParameters::equivalent_amplitude` or
+    /// `RainflowMiner`, which retains the original curve ratio automatically.
+    /// `MatchCalibration` leaves amplitude unchanged; the counter separately
+    /// checks its reference ratio before life lookup.
     pub fn corrected_amplitude(self, amplitude_pa: f64, mean_pa: f64) -> Result<f64, FatigueError> {
         self.validate()?;
         if !amplitude_pa.is_finite() || amplitude_pa < 0.0 || !mean_pa.is_finite() {
@@ -256,6 +270,7 @@ impl MeanStressCorrection {
         }
         let value = match self {
             Self::Uncorrected | Self::MatchCalibration => amplitude_pa,
+            Self::Walker(parameters) => parameters.equivalent_amplitude(amplitude_pa, mean_pa, -1.0)?,
             Self::GoodmanTensionOnly { ultimate_strength_pa: s } => {
                 let peak = mean_pa + amplitude_pa;
                 if !peak.is_finite() || peak >= s {
@@ -306,8 +321,18 @@ pub struct RainflowMiner {
 impl RainflowMiner {
     pub fn new(curve: Arc<SnCurve>, correction: MeanStressCorrection, limits: RainflowLimits) -> Result<Self, FatigueError> {
         correction.validate()?;
-        if curve.reference_stress_ratio != -1.0 && correction != MeanStressCorrection::MatchCalibration {
-            return Err(FatigueError::InvalidCalibration("a non-fully-reversed S-N curve requires MatchCalibration; no R=-1 mean-stress transformation is inferred"));
+        if curve.walker_source().is_some_and(|source| correction != MeanStressCorrection::Walker(source.parameters())) {
+            return Err(FatigueError::InvalidCalibration("Walker policy differs from the original source exponent or R support"));
+        }
+        match correction {
+            MeanStressCorrection::Walker(parameters) => {
+                parameters.validate_reference(curve.reference_stress_ratio)?;
+            }
+            MeanStressCorrection::MatchCalibration => {}
+            _ if curve.reference_stress_ratio != -1.0 => {
+                return Err(FatigueError::InvalidCalibration("a non-fully-reversed S-N curve requires MatchCalibration or an explicit Walker calibration"));
+            }
+            _ => {}
         }
         Ok(Self { curve, correction, history: RainflowHistory::new(limits)? })
     }
@@ -390,19 +415,27 @@ struct StressLife<'a> {
     curve: &'a SnCurve,
     correction: MeanStressCorrection,
 }
+impl StressLife<'_> {
+    fn corrected_amplitude(&self, amplitude: f64, mean: f64) -> Result<f64, FatigueError> {
+        match self.correction {
+            MeanStressCorrection::Walker(parameters) => parameters.equivalent_amplitude(amplitude, mean, self.curve.reference_stress_ratio),
+            _ => self.correction.corrected_amplitude(amplitude, mean),
+        }
+    }
+}
 impl CycleLife for StressLife<'_> {
     fn admit_sample(&self, value: f64, _context: (), sample: u64) -> Result<(), FatigueError> {
         if !value.is_finite() { return Err(FatigueError::InvalidStress { sample }); }
         // Constant or unfinished monotone histories need not close any cycle.
         // Their instantaneous tensile peaks must still pass the strength law.
-        self.correction.corrected_amplitude(0.0, value)?;
+        self.corrected_amplitude(0.0, value)?;
         Ok(())
     }
     fn evaluate_cycle(&self, amplitude: f64, mean: f64, _contexts: [(); 2]) -> Result<(Option<f64>, f64), FatigueError> {
         if self.correction == MeanStressCorrection::MatchCalibration {
             self.curve.admit_cycle_ratio(amplitude, mean)?;
         }
-        let corrected = self.correction.corrected_amplitude(amplitude, mean)?;
+        let corrected = self.corrected_amplitude(amplitude, mean)?;
         Ok((self.curve.cycles_to_failure(corrected)?, corrected))
     }
 }
