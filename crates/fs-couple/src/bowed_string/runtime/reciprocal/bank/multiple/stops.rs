@@ -94,8 +94,10 @@ impl MultiBowStringBank {
     /// With residual flexibility, the omitted bending tail adds its condensed
     /// bridge reaction alongside the original receiver, including a receiver
     /// on a different body. Both reactions use the same closure/force map.
-    /// Oblique stops include both admitted orthogonal bridge axes, retaining
-    /// every bridge's original receiving body and the actual contact receiver.
+    /// Oblique stops include both bridge axes and their full cross compliance,
+    /// retaining every bridge's original receiving body and the contact receiver.
+    /// A coupled support pair requires zero rest extensions for these residual
+    /// contact maps; affine omitted-tail clearance shifts are not supplied.
     /// Prescribed support translation follows the declared fixed normals.
     /// `with_stop_station_motion` also admits migration along the original span,
     /// retaining the complete source basis and accounting for attachment work.

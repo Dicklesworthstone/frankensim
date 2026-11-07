@@ -3022,13 +3022,30 @@ temperature limits, cancellation and refusal of scalar-only electron drag.
 
 ## Two-axis string bridges in omitted-mode contact response
 
-Fixed material bows and stops with residual flexibility include every already
-admitted orthogonal transverse bridge axis. Each axis contributes its own
-static Green-function Schur term to the joint contact compliance and to the
-reciprocal string/body force and displacement maps. Oblique tangents and stop
-normals therefore retain both physical bridge reactions; no retained frequency,
-material loss or torsional coordinate is changed. Preparation occurs once at
-binding, with no additional per-sample projection or integration path.
+Each material string's original plain bridge plus one independently directed
+bridge shares the full two-support omitted-mode Green matrix
+`G_ab = (d_a dot d_b) G(s_a,s_b)`. Nonorthogonal and parallel axes, distinct
+stations, and distinct receiving bodies are admitted. Static spring reduction
+is `K_eff = (I + K G)^-1 K`; viscous reduction remains the first-order
+low-frequency approximation `C_eff = T^T C T`, `T = (I + G K)^-1`. This does not
+resolve omitted resonances or a full frequency-dependent viscoelastic tail.
+
+Positive rank-one factors use at most three existing signed modal connection
+columns, with the original native connection/setup budgets. There is no new
+integrator. Rank-deficient compliance and zero spring/dashpot coefficients need
+no inverse of G or stiffness/compliance floor. Shared double-double arithmetic
+retains a weak conditional direction; only negative correlation roundoff within
+128 machine epsilons is projected onto the passive boundary. The original
+orthogonality admission tolerance (1e-12) and scalar/orthogonal arithmetic remain.
+
+Fixed residual bow and stop maps use the same elastic factors in the complete
+Schur complement. Native bridge energy retains signed rest extensions. Adding
+residual contacts to a coupled pair with nonzero rest extensions refuses:
+affine omitted-tail contact offsets are not represented in this lane. More
+than one extra directed bridge per string, rotational/constant-loss residual
+bridges and the existing mixed-contact, migration, and nonlinear/history
+exclusions remain outside this lane. Preparation occurs once at binding,
+with no additional per-sample projection or integration path.
 
 Support corrections retain every original receiving body. The generic friction
 and normal-contact owners accept one sparse collection of signed attachments
@@ -3039,14 +3056,23 @@ computed. Empty collections add no support. Total support-map work is bounded
 by the original retained mode count and occurs only at binding. The actual
 opposite contact surface remains independent and retains its reaction. The omitted bending
 response remains quasi-static, and its numerical loss stays separate from
-physical dissipation. Existing restrictions on nonorthogonal residual bridges,
-moving contacts and incompatible nonlinear/history mechanisms remain in force.
+physical dissipation. Existing restrictions on moving contacts and incompatible
+nonlinear/history mechanisms remain in force.
 `tests/material_string_torsion/polarization/residual.rs` specifies a bowed X/Y
 mirror with energy checks, an independent omitted-mode sine-series comparison
 for oblique bow cross-compliance, active oblique-stop rotation covariance, and
 equivalence when independent body coordinates are stored together or separately.
 The existing material shear-film and coupled-stop residual tests independently
 check each support's signed reaction, physical contact work and energy balance.
+
+Three focused mathematical tests execute the actual two-support condensation,
+including rank-one compliance at stiffness 1e30 and a weak nonparallel direction.
+A bounded actual-source probe also compares 120 coupled cases against an
+independent 100,000-term sine tail and matrix inverse: passive elastic/damping
+operators, signed native columns, contact Schur maps and virtual work agree
+within their recorded numerical tolerances. New complete-bank and contact
+regressions cover nonorthogonal supports and native energy/storage behavior;
+those material-admission and dynamic integration tests have not been executed.
 
 ## Nonlinear port harmonics and sidebands through physical BEM receivers
 

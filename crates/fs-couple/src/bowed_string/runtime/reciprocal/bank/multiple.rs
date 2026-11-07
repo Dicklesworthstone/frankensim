@@ -133,8 +133,10 @@ impl MultiBowStringBank {
     /// several ribbon cells on one string. String/body force and displacement
     /// maps remain reciprocal; retained modes are unchanged. Torsional modes
     /// remain resolved explicitly, with no invented omitted torsional response.
-    /// Both admitted orthogonal bridge axes contribute, including oblique bow
-    /// tangents. Each bridge retains its own receiving body; the bow's actual
+    /// Both bridge axes and their cross compliance contribute, including oblique
+    /// bow tangents and nonorthogonal supports. A coupled support pair must have
+    /// zero rest extensions; affine omitted-tail contact shifts are not supplied.
+    /// Each bridge retains its own receiving body; the bow's actual
     /// surface or resolved hair reaction remains independent.
     ///
     /// The omitted bending tail is quasi-static. Its separately reported

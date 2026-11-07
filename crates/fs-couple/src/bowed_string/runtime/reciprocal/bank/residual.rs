@@ -9,6 +9,9 @@
 //! supports on one string share it as one matrix, cross terms included:
 //! - A spring bridge condenses exactly to k/(1 + k G_bb). Its dashpot condenses
 //!   to first order in c G omega, c/(1 + k G_bb)^2.
+//! - Two directed supports share the full G matrix, including cross terms:
+//!   K_eff=(I+K G)^-1 K and C_eff=T^T C T, T=(I+G K)^-1. Passive rank-one
+//!   factors remain in the existing modal network, with no omitted-mode stepper.
 //! - A stop's closure gains the bridge cross term, minus k_eff G_sb times the
 //!   bridge link's own column, and the stops' compliance among themselves
 //!   becomes G_ss' - k_eff G_sb G_s'b. The obstacle owner books that storage
@@ -21,6 +24,7 @@ use fs_math::det;
 
 mod polarization;
 pub(super) use polarization::point_residual;
+pub(super) mod coupled_bridge;
 
 /// Exact static deflection [m/N] at span fraction `x` under a unit transverse
 /// force at `y`: EI w'''' - T w'' = delta(y), pinned at both ends of the span.

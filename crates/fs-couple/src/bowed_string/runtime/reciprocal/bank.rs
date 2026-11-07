@@ -408,14 +408,17 @@ impl ReciprocalStringBank {
     /// and EI minus its retained modes' static sum. The source keeps k and c;
     /// later fluid, torsion and cavity rebuilds keep the condensation. Stops
     /// bound later carry the cross terms. Directed bridges (polarization.rs)
-    /// condense along their own axes, admitted only orthogonal to every other
-    /// connection on their string. Fixed bows opt into the same correction with
+    /// share the full two-support Green matrix, including nonorthogonal axes,
+    /// different stations and different receiving bodies. The static spring
+    /// Schur complement and first-order viscous reduction use at most three
+    /// native connection columns per pair, within the declared network budget.
+    /// Fixed bows opt into the same correction with
     /// `MultiBowStringBank::with_bow_residual_flexibility` after their assembly.
     ///
     /// # Errors
     /// After motion, playback or bound nonlinear storage; repeated; beside
-    /// rotational bridges, constant-loss bridge anchors, a directed bridge with a
-    /// nonzero cross term or a string with other than one bridge connection; or
+    /// rotational bridges, constant-loss bridge anchors, more than one extra
+    /// directed bridge per string or other than one original bridge; or
     /// the original assembly's own refusals.
     pub fn with_residual_flexibility(mut self, gate: &CancelGate) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;
@@ -627,25 +630,12 @@ fn assemble_sources(
     if residual && (sources.is_none()
         || !rotational_body_connections.is_empty() || !constant_loss.is_empty()
         || connections.iter().any(|c| c.len() != 1)) {
-        // Only a single spring/dashpot bridge per string condenses here.
-        return Err(invalid("residual flexibility condenses one plain bridge connection per material string"));
+        // One original bridge; a directed companion shares its full matrix below.
+        return Err(invalid("residual flexibility requires one plain original bridge per material string"));
     }
-    if let (true, Some(members)) = (residual, sources) {
-        // Directed springs condense one by one (polarization.rs), which is exact only when the
-        // omitted modes couple none of a string's connections: d_i.d_j G(s_i, s_j) = 0, so every
-        // axis must be orthogonal to its string's bridge axis and to each other directed axis.
-        for (i, a) in translational_body_connections.iter().enumerate() {
-            let member = members.get(a.string)
-                .ok_or_else(|| invalid("directed bridge names an unknown material string"))?;
-            let others = translational_body_connections.iter().enumerate()
-                .filter(|(j, b)| *j != i && b.string == a.string).map(|(_, b)| b.direction.components());
-            let [ax, ay] = a.direction.components();
-            if core::iter::once(self::residual::directions(&member.source).1).chain(others)
-                .any(|[bx, by]| (ax*bx + ay*by).abs() > 1e-12) {
-                return Err(invalid("with residual flexibility a directed bridge must be orthogonal to its string's other connections"));
-            }
-        }
-    }
+    let residual_pairs = if let (true, Some(members)) = (residual, sources) {
+        self::residual::coupled_bridge::pairs(members, cards, translational_body_connections, gate)?
+    } else { Vec::new() };
     let mut components = Vec::with_capacity(cards.len() + bodies.len());
     let mut links = Vec::new();
     for (index, (card, connections)) in cards.iter().zip(connections).enumerate() {
@@ -725,8 +715,15 @@ fn assemble_sources(
         let sources = sources.ok_or_else(|| invalid("cylinder loading requires original material string sources"))?;
         loading.append_components(cards, sources, &mut components, &mut links, options, gate)?;
     }
-    let network = CoupledModalSystem::new_with_preparation(components, links, constant_loss,
-        options.network, prepared.into(), gate).map_err(ReciprocalStringError::Network)?;
+    let network = if residual_pairs.iter().flatten().any(|pair| pair.law.coupled) {
+        let columns = self::residual::coupled_bridge::condensed_columns(
+            &components, links, &residual_pairs, options.network, gate)?;
+        CoupledModalSystem::new_with_columns_preparation(components, columns, constant_loss,
+            options.network, prepared.into(), gate)
+    } else {
+        CoupledModalSystem::new_with_preparation(components, links, constant_loss,
+            options.network, prepared.into(), gate)
+    }.map_err(ReciprocalStringError::Network)?;
     let bow_card = &cards[options.bow.string];
     let bow_shape = match sources {
         Some(members) => members[options.bow.string].source.surface_shape(bow_card, options.bow.station_fraction)?,

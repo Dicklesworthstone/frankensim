@@ -172,18 +172,18 @@ fn g0_directed_bridge_refuses_missing_planes_invalid_laws_and_live_rebinding() {
         }
         assert!(make().with_translational_body_connections(vec![good.clone()], gate).unwrap()
             .with_translational_body_connections(vec![good.clone()], gate).is_err());
-        // Residual flexibility admits an axis orthogonal to the string's bridge, in either order,
-        // and refuses one with an omitted-mode cross term to it.
+        // Both orders admit the diagonal and the full coupled support matrix.
         assert!(make().with_residual_flexibility(gate).unwrap()
             .with_translational_body_connections(vec![good.clone()], gate).is_ok());
         assert!(make().with_translational_body_connections(vec![good.clone()], gate).unwrap()
             .with_residual_flexibility(gate).is_ok());
         let oblique = second_axis(TransverseDirection::try_new([0.6, 0.8]).unwrap());
-        let refused = make().with_residual_flexibility(gate).unwrap()
-            .with_translational_body_connections(vec![oblique.clone()], gate).err().unwrap();
-        assert!(refused.to_string().contains("orthogonal"), "{refused}");
-        assert!(make().with_translational_body_connections(vec![oblique], gate).unwrap()
-            .with_residual_flexibility(gate).is_err());
+        assert!(make().with_residual_flexibility(gate).unwrap()
+            .with_translational_body_connections(vec![oblique.clone()], gate).is_ok());
+        assert!(make().with_translational_body_connections(vec![oblique.clone()], gate).unwrap()
+            .with_residual_flexibility(gate).is_ok());
+        assert!(make().with_residual_flexibility(gate).unwrap()
+            .with_translational_body_connections(vec![good.clone(), oblique], gate).is_err());
         let mut moving = make();
         moving.step(&vec![0.0; moving.system().mode_count()], drive()).unwrap();
         assert!(moving.with_translational_body_connections(vec![good], gate).is_err());

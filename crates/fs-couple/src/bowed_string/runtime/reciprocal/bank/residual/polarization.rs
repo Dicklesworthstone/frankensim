@@ -1,7 +1,6 @@
-//! Fixed point contacts through both independently condensed bridge axes.
-//! The bank admits only orthogonal bridge axes, so their omitted-mode Green
-//! matrix is diagonal. Sum each axis's Schur term without changing the retained
-//! modes, contact force law or time integrator.
+//! Fixed point contacts through the full two-support Schur complement. Use
+//! the SAME passive elastic factors as the retained string/body network, so
+//! nonorthogonal support reactions preserve reciprocal maps and compliance.
 
 use super::super::polarization::StringBodyTranslationConnection;
 use super::*;
@@ -13,7 +12,7 @@ pub(crate) struct PointCorrection {
     pub bodies: Vec<ModalAttachment>,
 }
 
-/// One original bridge and any admitted orthogonal directed bridge per string.
+/// One original bridge and one independently directed bridge per string.
 /// Keep every support's original receiving body, combining rows only within
 /// the same body basis. The existing contact owner assembles their reciprocal
 /// global column once, with no additional state or integration path.
@@ -25,6 +24,7 @@ pub(crate) fn point_residual(
     gate: &CancelGate,
 ) -> Result<(Vec<PointCorrection>, Vec<f64>), ReciprocalStringError> {
     poll(gate)?;
+    let pairs = coupled_bridge::pairs(strings, cards, directed, gate)?;
     let bridges = residual_bridges(strings, cards)?;
     let (cross, mut compliance) = stop_residual(&bridges, points)?;
     let mut corrections = Vec::with_capacity(points.len());
@@ -61,11 +61,22 @@ pub(crate) fn point_residual(
         let card = &cards[connection.string];
         let axis = connection.direction.components();
         let station = connection.station_fraction;
-        let condensed = condense(
-            dot2(axis, axis) * residual_compliance_m_n(card, station, station)?,
-            connection.stiffness_n_m,
-            connection.damping_n_s_m,
-        )?;
+        let pair = pairs[connection.string]
+            .as_ref()
+            .ok_or_else(|| invalid("residual directed bridge lost its condensed pair"))?
+            .law;
+        let original = &member.connections[0];
+        if pair.coupled && (original.rest_extension_m != 0.0 || connection.rest_extension_m != 0.0)
+        {
+            return Err(invalid(
+                "coupled residual contact maps require zero bridge rest extensions",
+            ));
+        }
+        let first_axis = directions(&member.source).1;
+        let first_bridge = member
+            .source
+            .bridge_shape(card, original.station_fraction)?;
+        let condensed = pair.second;
         let bridge = member
             .source
             .transverse_shape_along(card, station, connection.direction)?;
@@ -76,6 +87,16 @@ pub(crate) fn point_residual(
             }
             toward[i] = dot2(point.direction, axis)
                 * residual_compliance_m_n(card, point.station_fraction, station)?;
+            if pair.mix != 0.0 {
+                // The second elastic coordinate is e1-h e0, not e1 alone.
+                toward[i] -= pair.mix
+                    * dot2(point.direction, first_axis)
+                    * residual_compliance_m_n(
+                        card,
+                        point.station_fraction,
+                        original.station_fraction,
+                    )?;
+            }
             let factor = condensed.stiffness_n_m * toward[i];
             if !factor.is_finite() {
                 return Err(invalid(
@@ -91,32 +112,41 @@ pub(crate) fn point_residual(
                     "residual bridge maps must use the same material string basis",
                 ));
             }
-            for (shape, b) in correction.string_shapes.iter_mut().zip(&bridge) {
-                *shape += factor * b;
-            }
-            let component = cards.len() + connection.body.component;
-            if let Some(body) = correction
-                .bodies
+            for ((shape, b), a) in correction
+                .string_shapes
                 .iter_mut()
-                .find(|body| body.component == component)
+                .zip(&bridge)
+                .zip(&first_bridge)
             {
-                if body.shapes.len() != connection.body.shapes.len() {
+                let projected = if pair.mix == 0.0 {
+                    *b
+                } else {
+                    b - pair.mix * a
+                };
+                *shape += factor * projected;
+                if !shape.is_finite() {
                     return Err(invalid(
-                        "residual body corrections must use the same receiving body basis",
+                        "point/bridge residual correction is not representable",
                     ));
                 }
-                for (shape, b) in body.shapes.iter_mut().zip(&connection.body.shapes) {
-                    *shape += factor * b;
-                }
-            } else {
-                correction.bodies.push(ModalAttachment {
-                    component,
-                    shapes: connection.body.shapes.iter().map(|b| factor * b).collect(),
-                });
+            }
+            add_body(
+                &mut correction.bodies,
+                cards.len(),
+                &connection.body,
+                factor,
+            )?;
+            if pair.mix != 0.0 {
+                add_body(
+                    &mut correction.bodies,
+                    cards.len(),
+                    &original.body,
+                    -pair.mix * factor,
+                )?;
             }
         }
-        // G_ij - sum_b k_eff,b G_ib G_jb. Compute each pair once so symmetry
-        // is exact even after multiple axes and differently signed contacts.
+        // Subtract the second elastic factor from the already-condensed first.
+        // This is G_ij-g_i^T K_eff g_j, with exact matrix symmetry.
         for i in 0..q {
             if points[i].string != connection.string {
                 continue;
@@ -140,4 +170,40 @@ pub(crate) fn point_residual(
             .sort_unstable_by_key(|body| body.component);
     }
     Ok((corrections, compliance))
+}
+
+fn add_body(
+    bodies: &mut Vec<ModalAttachment>,
+    strings: usize,
+    original: &ModalAttachment,
+    factor: f64,
+) -> Result<(), ReciprocalStringError> {
+    if factor == 0.0 {
+        return Ok(());
+    }
+    let component = strings + original.component;
+    if let Some(body) = bodies.iter_mut().find(|body| body.component == component) {
+        if body.shapes.len() != original.shapes.len() {
+            return Err(invalid(
+                "residual body corrections must use the same receiving body basis",
+            ));
+        }
+        for (shape, b) in body.shapes.iter_mut().zip(&original.shapes) {
+            *shape += factor * b;
+        }
+        if body.shapes.iter().any(|shape| !shape.is_finite()) {
+            return Err(invalid(
+                "residual receiving-body correction is not representable",
+            ));
+        }
+    } else {
+        let shapes: Vec<_> = original.shapes.iter().map(|b| factor * b).collect();
+        if shapes.iter().any(|shape| !shape.is_finite()) {
+            return Err(invalid(
+                "residual receiving-body correction is not representable",
+            ));
+        }
+        bodies.push(ModalAttachment { component, shapes });
+    }
+    Ok(())
 }

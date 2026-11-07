@@ -112,7 +112,8 @@ impl StringBodyTranslationConnection {
         let shapes = member.source.transverse_shape_along(card, self.station_fraction, self.direction)?;
         // With residual flexibility the omitted modes sit in series with this spring along its own
         // axis, as with the scalar bridge (residual.rs): k/(1 + k G), the dashpot to first order.
-        // The caller has refused any connection with a nonzero cross term (assemble_sources).
+        // For a coupled support pair assemble_sources replaces these scalar
+        // coefficients by the full reciprocal two-support factorization.
         let (stiffness_n_m, damping_n_s_m) = if residual {
             let [dx, dy] = self.direction.components();
             let g = (dx*dx + dy*dy)
@@ -147,11 +148,15 @@ impl ReciprocalStringBank {
     ///
     /// Bind one complete set before string motion or playback and before adding
     /// nonlinear storage. An empty set is a no-op. With omitted-mode residual
-    /// bridge flexibility (before or after this binding), each directed spring
-    /// condenses along its own axis exactly as the scalar bridge does. Only axes
-    /// orthogonal to every other connection on the same string are admitted: the
-    /// omitted modes' cross compliance d_i.d_j G(s_i, s_j) is then zero, and no
-    /// cross term is wired. A one-plane string refuses any direction with a
+    /// bridge flexibility (before or after this binding), one extra support per
+    /// string shares the full compliance d_i.d_j G(s_i, s_j) with its original
+    /// bridge. Nonorthogonal/parallel axes, separated stations and distinct bodies
+    /// retain all static cross terms. Dashpots retain the first-order low-frequency
+    /// reduction; no unresolved dynamic poles are invented. A coupled pair uses
+    /// up to three native columns within the original connection/setup budgets.
+    /// Its signed rest extensions are preserved in the network, but subsequent
+    /// residual bow/stop maps require zero rest extensions for that coupled pair.
+    /// A one-plane string refuses any direction with a
     /// nonzero second component.
     /// This does not infer a bridge's anisotropic law, rigid frame, geometry or
     /// unilateral contact from the bulk string material.

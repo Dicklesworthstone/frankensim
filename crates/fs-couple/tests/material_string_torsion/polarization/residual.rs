@@ -7,6 +7,9 @@ use fs_couple::render::schedule::force::coupled::contact::ModalContactConfig;
 use fs_couple::render::schedule::force::coupled::contact::friction::multiple::obstacles::FrictionObstacleConfig;
 use fs_dcontact::Obstacle;
 
+#[path = "coupled_residual.rs"]
+mod coupled;
+
 fn multi(bank: ReciprocalStringBank, gate: &CancelGate) -> MultiBowStringBank {
     bank.with_additional_bows(
         vec![],
