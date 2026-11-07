@@ -11,7 +11,8 @@ mod forest;
 /// Bounded linear work inside the original Newton/time-step controls.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImplicitConductionLinearControls {
-    /// Arnoldi dimension, 1..=128. Storage is O(cells * restart + links).
+    /// Arnoldi dimension, 1..=128. Storage includes cells * restart, links
+    /// and any explicitly bounded coupled-source dependencies.
     pub restart: usize,
     /// Restart cycles allowed for one Newton direction before interval retry.
     pub maximum_cycles_per_solve: usize,
@@ -52,6 +53,26 @@ pub struct ImplicitConductionGraph<'a> {
     inner: ImplicitConductionChain<'a>,
 }
 impl<'a> ImplicitConductionGraph<'a> {
+    /// Solve sparse nonlocal heat-generation feedback with graph conduction.
+    /// See the chain attachment for immutable original-caloric bindings,
+    /// sparse derivative units, source ownership and physical-time semantics.
+    /// Non-neighbor source dependencies use this graph's existing Jv/J^T and
+    /// bounded Krylov solve; no alternate thermal integration is introduced.
+    pub fn with_coupled_heat_source(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        cells: &[CellId],
+        law: &'a dyn super::coupled_source::ImplicitCoupledHeatSourceLaw,
+        maximum_derivatives: usize,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ImplicitConductionError> {
+        Ok(Self {
+            inner: self.inner.with_coupled_heat_source(
+                thermal, cells, law, maximum_derivatives, checkpoint,
+            )?,
+        })
+    }
+
     /// Solve original local heat-generation feedback with graph conduction.
     /// The chain attachment documents caloric identity, signed-power units and
     /// additive source ownership. Sparse topology and linear budgets are kept.

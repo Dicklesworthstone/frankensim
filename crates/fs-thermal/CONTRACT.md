@@ -1,5 +1,41 @@
 # fs-thermal contract
 
+## Sparse coupled heat-generation feedback in implicit conduction
+
+`ImplicitCoupledHeatSourceLaw` and the chain/graph
+`with_coupled_heat_source` attachment evaluate a declared set of original
+cell calorics at one simultaneous enthalpy state and physical stage time.
+The source returns signed cell powers plus complete derivatives in its
+immutable sparse dependency order. A declared derivative budget bounds
+additional sparse work; original caloric identities, cell coordinates and
+reference masses remain bound. Non-neighbor feedback requires the existing
+graph solver and is refused by the tridiagonal chain before a source query.
+
+The original enthalpy residual adds each coupled power once alongside
+independently owned authored/observed/local heat. Its Newton entry is
+-dt*(dP_row/dh_column)/m_column because the native unknown is an energy
+increment. Both graph forward and transpose actions consume the complete
+entries. BE, both physical SDIRK stages and the adaptive time owners retain
+their existing storage, quadrature and rollback owners; declared continuous
+forcing transitions clip the same native time grid.
+
+This enables original domain owners to supply coupled feedback such as
+fixed-voltage Joule heating without freezing neighboring temperatures or
+dropping cross derivatives. It does not introduce a thermal-side electrical
+solver, infer reaction inventory, or credit upstream work twice. Calibrated
+source validity and upstream energy ownership remain explicit. Source
+entropy stays unclassified even when separately active contributions cancel
+in their net cell power, including retained first-stage SDIRK heat.
+
+Three exact production-leaf native Rust tests passed for ordered sparse
+binding, cross-cell Joule residual derivatives with reversed coordinates and
+unequal masses, and shape/domain/budget/cancellation admission. Full native
+integration regressions cover independently eliminated circuit/conduction
+endpoints, original graph forward/transpose actions, scheduled fixed/adaptive
+BE/SDIRK and rollback, and source-cancellation entropy retention across both
+stages. These integration definitions are unexecuted in this workspace's
+incomplete native build.
+
 ## Crystallization in spatial heat exchange and finite molds
 
 `enthalpy::crystallization::CrystallizationSimulation` can attach before the

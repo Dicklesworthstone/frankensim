@@ -130,6 +130,19 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
 }
 
 impl<'m, T> BackwardEulerTrial<'m, T> {
+    /// Preserve independent source ownership when signed powers cancel.
+    /// Numerical heat and entropy values stay unchanged. Entropy-free Newton
+    /// trials remain entropy-free; retained native stage heat carries the same
+    /// classification into later quadrature even if its endpoint sources stop.
+    pub(in crate::enthalpy) fn preserve_unclassified_sources(&mut self, active: bool) {
+        if let Some(audit) = &mut self.entropy {
+            audit.has_unclassified_sources |= active;
+        }
+        if let Some(heat) = &mut self.stage_heat {
+            heat.has_unclassified_sources |= active;
+        }
+    }
+
     /// Classify only the current endpoint's admitted upwind flow. Earlier
     /// native stages already carry their original classified contributions.
     /// Actual stored energy, rates, residuals and acceptance stay unchanged.

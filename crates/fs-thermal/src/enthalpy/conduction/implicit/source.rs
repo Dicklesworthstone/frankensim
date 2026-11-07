@@ -40,6 +40,9 @@ impl ImplicitHeatSourceState {
 /// source entropy, or cross-cell feedback. A coupled source needs its
 /// corresponding physical owner. Independent authored and observed source watts
 /// remain additive; the caller must not supply the same power through both.
+/// Cross-cell source feedback uses
+/// [`super::coupled_source::ImplicitCoupledHeatSourceLaw`] with a complete
+/// sparse derivative pattern on the original caloric objects.
 pub trait ImplicitHeatSourceLaw {
     fn caloric_law(&self) -> &dyn ThermalLaw;
     fn state_at_specific_enthalpy(
@@ -236,12 +239,15 @@ fn earlier_transition(first: Option<f64>, second: Option<f64>, after_s: f64) -> 
 
 impl ImplicitConductionChain<'_> {
     pub(super) fn next_forcing_transition_time_s(&self, after_s: f64) -> Option<f64> {
-        self.heat_sources.values().fold(
+        let local = self.heat_sources.values().fold(
             self.next_advection_transition_time_s(after_s),
             |next, source| {
                 earlier_transition(next, source.next_transition_time_s(after_s), after_s)
             },
-        )
+        );
+        let coupled = self.coupled_heat_source.as_ref()
+            .and_then(|source| source.law.next_transition_time_s(after_s));
+        earlier_transition(local, coupled, after_s)
     }
 }
 

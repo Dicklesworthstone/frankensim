@@ -828,3 +828,530 @@ fn incomplete_pivot_failure_falls_back_and_cancellation_is_preserved() {
     );
     assert!(matches!(result, Err(DepositionError::Cancelled)));
 }
+
+use super::super::coupled_source::{ImplicitCoupledHeatSourceLaw, ImplicitCoupledHeatSourceState};
+use super::super::source::{HeatSourceSchedule, HeatSourceScheduleKnot};
+
+/// Stationary two-resistor circuit: the same current heats both original
+/// caloric bodies. A resistance increase changes BOTH Joule powers.
+struct SeriesResistanceSource<'a> {
+    calorics: [&'a dyn ThermalLaw; 2],
+    materials: [&'a dyn ImplicitConductionLaw; 2],
+    resistance_ohm_at_300k: [f64; 2],
+    resistance_slope_ohm_k: [f64; 2],
+    voltage_v: f64,
+    dependencies: Vec<(usize, usize)>,
+    drive: Option<&'a HeatSourceSchedule>,
+}
+fn series_source(
+    law: &Law,
+    voltage_v: f64,
+    resistance_ohm_at_300k: [f64; 2],
+    resistance_slope_ohm_k: [f64; 2],
+) -> SeriesResistanceSource<'_> {
+    SeriesResistanceSource {
+        calorics: [law, law],
+        materials: [law, law],
+        resistance_ohm_at_300k,
+        resistance_slope_ohm_k,
+        voltage_v,
+        dependencies: vec![(0, 0), (0, 1), (1, 0), (1, 1)],
+        drive: None,
+    }
+}
+impl ImplicitCoupledHeatSourceLaw for SeriesResistanceSource<'_> {
+    fn caloric_laws(&self) -> &[&dyn ThermalLaw] {
+        &self.calorics
+    }
+    fn power_dependencies(&self) -> &[(usize, usize)] {
+        &self.dependencies
+    }
+    fn state_at_specific_enthalpies_and_time(
+        &self,
+        h: &[f64],
+        time_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ImplicitCoupledHeatSourceState, DepositionError> {
+        checkpoint()?;
+        if h.len() != 2 || !time_s.is_finite() || time_s < 0.0 {
+            return Err(DepositionError::MaterialDomain);
+        }
+        let states = [
+            self.materials[0].state_at_specific_enthalpy(h[0])?,
+            self.materials[1].state_at_specific_enthalpy(h[1])?,
+        ];
+        let mut resistance = [0.0; 2];
+        let mut slope = [0.0; 2];
+        for i in 0..2 {
+            resistance[i] = self.resistance_ohm_at_300k[i]
+                + self.resistance_slope_ohm_k[i] * (states[i].temperature_k - 300.0);
+            slope[i] = self.resistance_slope_ohm_k[i] * states[i].temperature_slope_kg_k_j;
+            if !positive(resistance[i]) {
+                return Err(DepositionError::MaterialDomain);
+            }
+        }
+        let multiplier = self
+            .drive
+            .map_or(Ok(1.0), |drive| drive.multiplier_at(time_s))?;
+        let total = resistance[0] + resistance[1];
+        let current = self.voltage_v / total;
+        let current_squared = multiplier * current * current;
+        Ok(ImplicitCoupledHeatSourceState {
+            powers_w: resistance.iter().map(|r| current_squared * r).collect(),
+            power_enthalpy_derivatives_w_kg_j: self
+                .dependencies
+                .iter()
+                .map(|&(row, col)| {
+                    let direct = if row == col { slope[col] } else { 0.0 };
+                    current_squared * (direct - 2.0 * resistance[row] * slope[col] / total)
+                })
+                .collect(),
+        })
+    }
+    fn next_transition_time_s(&self, after_s: f64) -> Option<f64> {
+        self.drive
+            .and_then(|drive| drive.next_transition_time_s(after_s))
+    }
+}
+
+#[test]
+fn coupled_joule_feedback_and_conduction_match_independent_current_balance() {
+    let law = Law {
+        plateau: false,
+        nonlinear: false,
+    };
+    let masses = [2.0, 3.0];
+    let (mut thermal, observer) = setup(&law, &[300.0, 320.0], &masses, &[(0, 1, 0.0)]);
+    thermal.cells.get_mut(&id(1)).unwrap().boundary.source_w = 3.0;
+    let source = series_source(&law, 12.0, [2.0, 3.0], [0.01, 0.02]);
+    let chain =
+        ImplicitConductionChain::new(&thermal, &observer, &[(MaterialId(1), &law)], || Ok(()))
+            .unwrap()
+            .with_coupled_heat_source(&thermal, &[id(0), id(1)], &source, 4, || Ok(()))
+            .unwrap();
+    let sparse = graph(&thermal, &observer, &law)
+        .with_coupled_heat_source(&thermal, &[id(0), id(1)], &source, 4, || Ok(()))
+        .unwrap();
+    let dt = 0.5;
+    // Independently eliminate the two BE heat balances at a trial I^2=q.
+    // The remaining scalar equation is I*(R0(T0)+R1(T1))=12 V.
+    // G=1 W/K, cp=1 J/(kg K), and the original cell-1 source contributes 3 W.
+    let temperatures = |q: f64| {
+        let a = masses[0] + dt - dt * q * 0.01;
+        let d = masses[1] + dt - dt * q * 0.02;
+        let b0 = dt * q * 2.0;
+        let b1 = masses[1] * 20.0 + dt * (q * 3.0 + 3.0);
+        let determinant = a * d - dt * dt;
+        [
+            (d * b0 + dt * b1) / determinant,
+            (dt * b0 + a * b1) / determinant,
+        ]
+    };
+    let mut lower = 0.0;
+    let mut upper = (12.0_f64 / 5.0).powi(2);
+    for _ in 0..100 {
+        let q = f64::midpoint(lower, upper);
+        let x = temperatures(q);
+        if q.sqrt() * (5.0 + 0.01 * x[0] + 0.02 * x[1]) < 12.0 {
+            lower = q;
+        } else {
+            upper = q;
+        }
+    }
+    let q = f64::midpoint(lower, upper);
+    let expected = temperatures(q);
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let direct_result = chain
+        .advance_to(&thermal, dt, controls(dt), &mut workspace, || Ok(()))
+        .unwrap();
+    let sparse_result = sparse
+        .advance_to(&thermal, dt, controls(dt), &mut workspace, || Ok(()))
+        .unwrap();
+    for (next, report) in [direct_result, sparse_result] {
+        for i in 0..2 {
+            near(
+                next.temperature_k(id(i)).unwrap(),
+                300.0 + expected[i],
+                1e-8,
+            );
+        }
+        let storage = masses[0] * expected[0] + masses[1] * (expected[1] - 20.0);
+        // The circuit's thermal credit is exactly VI, not VI plus I^2R again.
+        near(
+            report.energy.external_heat_j,
+            dt * (12.0 * q.sqrt() + 3.0),
+            1e-8,
+        );
+        near(report.energy.stored_energy_change_j, storage, 1e-8);
+        near(report.energy.residual_j, 0.0, 1e-8);
+        assert_eq!(report.energy.substeps, 1);
+        assert!(report.entropy.conduction_generation_j_k > 0.0);
+        assert!(report.entropy.has_unclassified_sources);
+        near(next.cells()[&id(1)].boundary.source_w, 3.0, 0.0);
+    }
+    near(thermal.time_s(), 0.0, 0.0);
+    near(thermal.temperature_k(id(0)).unwrap(), 300.0, 0.0);
+}
+
+#[test]
+fn nonlocal_joule_tangents_reach_original_graph_action_and_transpose() {
+    let law = Law {
+        plateau: false,
+        nonlinear: true,
+    };
+    let (thermal, observer) = setup(
+        &law,
+        &[360.0, 330.0, 410.0],
+        &[1.5, 2.0, 3.0],
+        &[(0, 1, 0.0), (1, 2, 0.0)],
+    );
+    let source = series_source(&law, 12.0, [2.0, 3.0], [0.01, 0.02]);
+    // Deliberately reverse the source coordinate order. The electrical
+    // coupling skips the middle thermal cell and has unequal column masses.
+    let bindings = [id(2), id(0)];
+    let sparse = graph(&thermal, &observer, &law)
+        .with_coupled_heat_source(&thermal, &bindings, &source, 4, || Ok(()))
+        .unwrap();
+    let chain =
+        ImplicitConductionChain::new(&thermal, &observer, &[(MaterialId(1), &law)], || Ok(()))
+            .unwrap();
+    assert!(matches!(
+        chain.with_coupled_heat_source(&thermal, &bindings, &source, 4, || Ok(())),
+        Err(ImplicitConductionError::Thermal(
+            DepositionError::InvalidInput(
+                "non-neighbor heat-source feedback requires the implicit graph solver",
+            )
+        ))
+    ));
+
+    let dt = 0.37;
+    let energy = [-4.0, 2.0, 6.0];
+    let step = BackwardEulerStep::new(&thermal, dt, || Ok(())).unwrap();
+    let mut work = empty_report();
+    let trial = sparse
+        .inner
+        .evaluate(
+            &step,
+            &energy,
+            &BTreeMap::new(),
+            &[],
+            false,
+            controls(dt),
+            &mut work,
+            &mut || Ok(()),
+        )
+        .unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(3).unwrap();
+    sparse
+        .inner
+        .jacobian(
+            &thermal,
+            trial.payload(),
+            dt,
+            &mut workspace,
+            &mut || Ok(()),
+        )
+        .unwrap();
+    let entries = workspace.graph_entries.as_deref().unwrap();
+    assert!(
+        entries
+            .iter()
+            .any(|&(row, col, value)| row == 0 && col == 2 && value > 0.0)
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|&(row, col, value)| row == 2 && col == 0 && value > 0.0)
+    );
+
+    let mut poll = || Ok(());
+    let poll: &mut dyn FnMut() -> Result<(), DepositionError> = &mut poll;
+    let checkpoint = RefCell::new(poll);
+    let error = RefCell::new(None);
+    let operator = GraphOperator {
+        diagonal: &workspace.diagonal,
+        entries,
+        preconditioner: None,
+        checkpoint: &checkpoint,
+        error: &error,
+    };
+    let mut difference = [[0.0; 3]; 3];
+    for column in 0..3 {
+        let mut plus = energy;
+        let mut minus = energy;
+        plus[column] += 1e-3;
+        minus[column] -= 1e-3;
+        let plus = sparse
+            .inner
+            .evaluate(
+                &step,
+                &plus,
+                &BTreeMap::new(),
+                &[],
+                false,
+                controls(dt),
+                &mut work,
+                &mut || Ok(()),
+            )
+            .unwrap();
+        let minus = sparse
+            .inner
+            .evaluate(
+                &step,
+                &minus,
+                &BTreeMap::new(),
+                &[],
+                false,
+                controls(dt),
+                &mut work,
+                &mut || Ok(()),
+            )
+            .unwrap();
+        let mut basis = [0.0; 3];
+        basis[column] = 1.0;
+        let mut action = [0.0; 3];
+        LinearOp::apply(&operator, &basis, &mut action);
+        for row in 0..3 {
+            difference[row][column] = (plus.residual_j()[row] - minus.residual_j()[row]) / 0.002;
+            near(action[row], difference[row][column], 5e-8);
+        }
+    }
+    let v = [0.3, -1.2, 2.0];
+    let w = [2.0, -0.5, 0.2];
+    let mut jv = [0.0; 3];
+    let mut jtw = [0.0; 3];
+    LinearOp::apply(&operator, &v, &mut jv);
+    operator.apply_transpose(&w, &mut jtw);
+    for i in 0..3 {
+        near(jv[i], (0..3).map(|j| difference[i][j] * v[j]).sum(), 1e-7);
+        near(jtw[i], (0..3).map(|j| difference[j][i] * w[j]).sum(), 1e-7);
+    }
+    near(
+        jv.iter().zip(w).map(|(a, b)| a * b).sum(),
+        v.iter().zip(jtw).map(|(a, b)| a * b).sum(),
+        1e-12,
+    );
+    assert!(error.borrow().is_none());
+
+    // A declared source dependency is admitted once before any stage. Work
+    // and shape errors do not become changing or silently truncated patterns.
+    assert!(
+        graph(&thermal, &observer, &law)
+            .with_coupled_heat_source(&thermal, &bindings, &source, 3, || Ok(()),)
+            .is_err()
+    );
+    assert!(
+        graph(&thermal, &observer, &law)
+            .with_coupled_heat_source(&thermal, &[id(0), id(0)], &source, 4, || Ok(()),)
+            .is_err()
+    );
+    for pattern in [vec![(0, 1), (0, 1)], vec![(0, 2)]] {
+        let invalid = SeriesResistanceSource {
+            dependencies: pattern,
+            ..series_source(&law, 12.0, [2.0, 3.0], [0.01, 0.02])
+        };
+        assert!(
+            graph(&thermal, &observer, &law)
+                .with_coupled_heat_source(&thermal, &bindings, &invalid, 4, || Ok(()),)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn coupled_generation_uses_actual_stage_times_and_adaptive_source_knots() {
+    let law = Law {
+        plateau: false,
+        nonlinear: false,
+    };
+    let (thermal, observer) = setup(&law, &[300.0, 300.0], &[1.0, 1.0], &[(0, 1, 0.0)]);
+    let drive = HeatSourceSchedule::new(
+        [(0.0, 0.0), (0.25, 1.0), (1.0, 0.0), (1.5, 0.0)]
+            .into_iter()
+            .map(|(time_s, power_multiplier)| HeatSourceScheduleKnot {
+                time_s,
+                power_multiplier,
+            })
+            .collect(),
+        4,
+        || Ok(()),
+    )
+    .unwrap();
+    let beta = 0.01;
+    let voltage = 10.0;
+    let source = SeriesResistanceSource {
+        drive: Some(&drive),
+        ..series_source(&law, voltage, [1.0, 1.0], [beta, beta])
+    };
+    let chain =
+        ImplicitConductionChain::new(&thermal, &observer, &[(MaterialId(1), &law)], || Ok(()))
+            .unwrap()
+            .with_coupled_heat_source(&thermal, &[id(0), id(1)], &source, 4, || Ok(()))
+            .unwrap();
+    let sparse = graph(&thermal, &observer, &law)
+        .with_coupled_heat_source(&thermal, &[id(0), id(1)], &source, 4, || Ok(()))
+        .unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+
+    // For identical bodies T0=T1=300+x, Joule power per body is
+    // V^2*drive(t)/(4*(1+beta*x)). Independently integrate:
+    // x + beta*x^2/2 = V^2/4 * integral(drive dt), whose pulse area is 1/2.
+    let exact = 300.0 + ((1.0_f64 + beta * voltage * voltage * 0.5 / 2.0).sqrt() - 1.0) / beta;
+    let direct_result = chain
+        .advance_sdirk2_to(&thermal, 1.5, controls(2.0), &mut workspace, || Ok(()))
+        .unwrap();
+    let sparse_result = sparse
+        .advance_sdirk2_to(&thermal, 1.5, controls(2.0), &mut workspace, || Ok(()))
+        .unwrap();
+    for (next, report) in [direct_result, sparse_result] {
+        assert_eq!(report.energy.substeps, 3); // .25, 1.0, then the declared tail.
+        let t = next.temperature_k(id(0)).unwrap();
+        assert!(t > 300.0);
+        near(next.temperature_k(id(1)).unwrap(), t, 1e-8);
+        near(report.energy.external_heat_j, 2.0 * (t - 300.0), 1e-8);
+        near(report.energy.residual_j, 0.0, 1e-8);
+        assert!(report.entropy.has_unclassified_sources);
+    }
+    let mut errors = Vec::new();
+    for dt in [0.125, 0.0625, 0.03125] {
+        let (next, report) = chain
+            .advance_sdirk2_to(&thermal, 1.5, controls(dt), &mut workspace, || Ok(()))
+            .unwrap();
+        let t = next.temperature_k(id(0)).unwrap();
+        errors.push((t - exact).abs());
+        near(report.energy.external_heat_j, 2.0 * (t - 300.0), 1e-8);
+        near(report.energy.residual_j, 0.0, 1e-8);
+    }
+    assert!(errors[0] / errors[1] > 3.7, "{errors:?}");
+    assert!(errors[1] / errors[2] > 3.7, "{errors:?}");
+
+    let adaptive = super::super::adaptive::AdaptiveImplicitConductionControls {
+        step: controls(2.0),
+        initial_dt_s: 2.0,
+        enthalpy_absolute_tolerance_j_kg: 1e-5,
+        temperature_absolute_tolerance_k: 1e-5,
+        relative_tolerance: 0.0,
+        ..Default::default()
+    };
+    for second_order in [false, true] {
+        let (next, report) = if second_order {
+            sparse.advance_sdirk2_adaptive_to(&thermal, 1.5, adaptive, &mut workspace, || Ok(()))
+        } else {
+            chain.advance_adaptive_to(&thermal, 1.5, adaptive, &mut workspace, || Ok(()))
+        }
+        .unwrap();
+        let t = next.temperature_k(id(0)).unwrap();
+        near(t, exact, if second_order { 1e-3 } else { 0.02 });
+        near(next.temperature_k(id(1)).unwrap(), t, 1e-8);
+        near(report.solve.energy.external_heat_j, 2.0 * (t - 300.0), 1e-8);
+        near(report.solve.energy.residual_j, 0.0, 1e-8);
+        assert!(report.maximum_accepted_normalized_error <= 1.0);
+        assert!(report.accuracy_rejections > 0);
+    }
+    // The same source refuses after its explicit time domain. No already
+    // computed heating prefix or coupled-source state is published.
+    assert!(matches!(
+        sparse.advance_to(&thermal, 2.0, controls(2.0), &mut workspace, || Ok(())),
+        Err(ImplicitConductionError::Thermal(
+            DepositionError::InvalidInput(
+                "heat-source query is outside the prescribed time domain",
+            )
+        ))
+    ));
+    near(thermal.time_s(), 0.0, 0.0);
+    near(thermal.temperature_k(id(0)).unwrap(), 300.0, 0.0);
+    near(thermal.temperature_k(id(1)).unwrap(), 300.0, 0.0);
+}
+
+struct ConstantCellCooling<'a>(&'a dyn ThermalLaw);
+impl super::super::source::ImplicitHeatSourceLaw for ConstantCellCooling<'_> {
+    fn caloric_law(&self) -> &dyn ThermalLaw {
+        self.0
+    }
+    fn state_at_specific_enthalpy(
+        &self,
+        h: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<super::super::source::ImplicitHeatSourceState, DepositionError> {
+        checkpoint()?;
+        self.0.temperature_k(h)?;
+        Ok(super::super::source::ImplicitHeatSourceState {
+            power_w: -4.0,
+            power_enthalpy_derivative_w_kg_j: 0.0,
+        })
+    }
+}
+
+#[test]
+fn cancelling_source_owners_retain_entropy_flags_through_native_stages() {
+    let law = Law {
+        plateau: false,
+        nonlinear: false,
+    };
+    let (mut thermal, observer) = setup(&law, &[300.0, 300.0], &[1.0, 1.0], &[(0, 1, 0.0)]);
+    for cell in thermal.cells.values_mut() {
+        cell.boundary.source_w = -4.0;
+    }
+    // V=4 V across two 1-ohm resistors gives exactly 4 W in each body.
+    // Authored cooling cancels that power bit-for-bit, but both owners act.
+    let circuit = series_source(&law, 4.0, [1.0, 1.0], [0.0, 0.0]);
+    let solver = graph(&thermal, &observer, &law)
+        .with_coupled_heat_source(&thermal, &[id(0), id(1)], &circuit, 4, || Ok(()))
+        .unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let (_, report) = solver
+        .advance_to(&thermal, 1.0, controls(1.0), &mut workspace, || Ok(()))
+        .unwrap();
+    near(report.energy.external_heat_j, 0.0, 0.0);
+    near(report.energy.stored_energy_change_j, 0.0, 0.0);
+    near(report.entropy.unclassified_source_at_cell_j_k, 0.0, 0.0);
+    assert!(report.entropy.has_unclassified_sources);
+
+    let mut clean = thermal.clone();
+    for cell in clean.cells.values_mut() {
+        cell.boundary.source_w = 0.0;
+    }
+    let ramp = HeatSourceSchedule::new(
+        vec![
+            HeatSourceScheduleKnot {
+                time_s: 0.0,
+                power_multiplier: 1.0,
+            },
+            HeatSourceScheduleKnot {
+                time_s: 1.0,
+                power_multiplier: 0.0,
+            },
+        ],
+        2,
+        || Ok(()),
+    )
+    .unwrap();
+    let cooling = ConstantCellCooling(&law);
+    let ramped_cooling = super::super::source::ScheduledHeatSource::new(&cooling, &ramp);
+    let ramped_circuit = SeriesResistanceSource {
+        drive: Some(&ramp),
+        ..series_source(&law, 4.0, [1.0, 1.0], [0.0, 0.0])
+    };
+    let solver = graph(&clean, &observer, &law)
+        .with_heat_sources(
+            &clean,
+            &[(id(0), &ramped_cooling), (id(1), &ramped_cooling)],
+            || Ok(()),
+        )
+        .unwrap()
+        .with_coupled_heat_source(&clean, &[id(0), id(1)], &ramped_circuit, 4, || Ok(()))
+        .unwrap();
+    let (next, report) = solver
+        .advance_sdirk2_to(&clean, 1.0, controls(1.0), &mut workspace, || Ok(()))
+        .unwrap();
+    // Local/coupled powers cancel throughout. Both are ZERO at the second
+    // stage, so only correctly retained first-stage ownership can set this flag.
+    assert_eq!(report.energy.substeps, 1);
+    near(report.energy.external_heat_j, 0.0, 0.0);
+    near(report.energy.stored_energy_change_j, 0.0, 0.0);
+    near(report.entropy.unclassified_source_at_cell_j_k, 0.0, 0.0);
+    assert!(report.entropy.has_unclassified_sources);
+    for i in 0..2 {
+        near(next.temperature_k(id(i)).unwrap(), 300.0, 0.0);
+    }
+}

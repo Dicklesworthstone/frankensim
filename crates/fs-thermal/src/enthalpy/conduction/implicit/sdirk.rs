@@ -120,6 +120,7 @@ impl ImplicitConductionChain<'_> {
         // source/work and advective entropy require their own closures.
         let passive = self.advection.is_none()
             && self.heat_sources.is_empty()
+            && self.coupled_heat_source.is_none()
             && self.reservoir_exchanges.is_empty()
             && self.ambient_exchanges.is_empty()
             && first

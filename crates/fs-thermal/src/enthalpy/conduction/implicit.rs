@@ -59,6 +59,11 @@ pub use observed::ImplicitConductionObservedError;
 pub mod source;
 use source::{ImplicitHeatSourceLaw, ImplicitHeatSourceState};
 
+/// Sparse cross-cell heat-generation feedback in the same native residual.
+#[path = "implicit/coupled_source.rs"]
+pub mod coupled_source;
+use coupled_source::{CoupledHeatSource, ImplicitCoupledHeatSourceState};
+
 /// Source-owned state-dependent contact resistance in the same implicit solve.
 #[path = "implicit/contact.rs"]
 pub mod contact;
@@ -227,8 +232,8 @@ impl core::fmt::Display for ImplicitConductionError {
 }
 impl std::error::Error for ImplicitConductionError {}
 
-/// Reusable Newton storage: O(cells) for the direct chain and O(cells + links)
-/// for graph coefficients. The graph's Krylov owner also uses bounded temporary
+/// Reusable Newton storage: O(cells) for the direct chain and
+/// O(cells + links + source dependencies) for graph coefficients. The graph's Krylov owner also uses bounded temporary
 /// Arnoldi storage. Failed calls may change scratch but not the accepted timeline.
 #[derive(Debug)]
 pub struct ImplicitConductionWorkspace {
@@ -287,6 +292,7 @@ pub struct ImplicitConductionChain<'a> {
     reservoir_exchanges: BTreeMap<CellId, &'a dyn ImplicitBoundaryExchangeLaw>,
     ambient_exchanges: BTreeMap<CellId, &'a dyn ImplicitBoundaryExchangeLaw>,
     heat_sources: BTreeMap<CellId, &'a dyn ImplicitHeatSourceLaw>,
+    coupled_heat_source: Option<CoupledHeatSource<'a>>,
     advection: Option<ImplicitAdvection>,
 }
 
@@ -305,6 +311,7 @@ struct Endpoint {
     reservoir_exchange_states: BTreeMap<CellId, ImplicitBoundaryExchangeState>,
     ambient_exchange_states: BTreeMap<CellId, ImplicitBoundaryExchangeState>,
     heat_source_states: BTreeMap<CellId, ImplicitHeatSourceState>,
+    coupled_heat_source_state: Option<ImplicitCoupledHeatSourceState>,
     transport_tangent: Vec<(usize, usize, f64)>,
     advection_multiplier: f64,
     advection_entropy: Option<ClassifiedAdvectionEntropy>,
@@ -401,6 +408,7 @@ impl<'a> ImplicitConductionChain<'a> {
             reservoir_exchanges: BTreeMap::new(),
             ambient_exchanges: BTreeMap::new(),
             heat_sources: BTreeMap::new(),
+            coupled_heat_source: None,
             advection: None,
         };
         if conduction.has_phase_layers {
@@ -857,6 +865,9 @@ impl<'a> ImplicitConductionChain<'a> {
             state.admit()?;
             heat_source_states.insert(id, state);
         }
+        let coupled_heat_source_state = self.coupled_heat_source.as_ref()
+            .map(|source| source.endpoint(thermal, checkpoint))
+            .transpose()?;
         checkpoint()?;
         Ok(Endpoint {
             states,
@@ -871,6 +882,7 @@ impl<'a> ImplicitConductionChain<'a> {
             reservoir_exchange_states,
             ambient_exchange_states,
             heat_source_states,
+            coupled_heat_source_state,
             transport_tangent: Vec::new(),
             advection_multiplier: 1.0,
             advection_entropy: None,
@@ -929,6 +941,15 @@ impl<'a> ImplicitConductionChain<'a> {
                 let value = sources_w.entry(id).or_default();
                 *value = finite(*value + state.power_w)?;
             }
+            if let (Some(source), Some(state)) =
+                (&self.coupled_heat_source, &endpoint.coupled_heat_source_state)
+            {
+                for (&id, &power) in source.cells.iter().zip(&state.powers_w) {
+                    (checkpoint.borrow_mut())()?;
+                    let value = sources_w.entry(id).or_default();
+                    *value = finite(*value + power)?;
+                }
+            }
             let mut transfers = transfers.to_vec();
             if let Some(advection) = &self.advection {
                 let stage = advection_stage.ok_or(DepositionError::Arithmetic)?;
@@ -947,7 +968,9 @@ impl<'a> ImplicitConductionChain<'a> {
                     // Preserve actual local source ownership even when these
                     // endpoint watts cancel an independent observed source.
                     classified.has_unclassified_sources |= endpoint.heat_source_states
-                        .values().any(|state| state.power_w != 0.0);
+                        .values().any(|state| state.power_w != 0.0)
+                        || endpoint.coupled_heat_source_state.as_ref()
+                            .is_some_and(|state| state.powers_w.iter().any(|&power| power != 0.0));
                     endpoint.advection_entropy = Some(classified);
                 }
                 for (id, watts) in transport.heat.bulk.sources_w {
@@ -986,6 +1009,15 @@ impl<'a> ImplicitConductionChain<'a> {
                 classified.has_unclassified_sources, quadrature,
             )?;
         }
+        if trial.entropy_audit().is_some() {
+            let owned_sources = trial.payload().heat_source_states
+                .values().any(|state| state.power_w != 0.0)
+                || trial.payload().coupled_heat_source_state.as_ref()
+                    .is_some_and(|state| state.powers_w.iter().any(|&power| power != 0.0));
+            // This also updates any retained first-stage heat. Applying it
+            // after advection classification preserves every original owner.
+            trial.preserve_unclassified_sources(owned_sources);
+        }
         Ok(trial)
     }
 
@@ -1014,6 +1046,8 @@ impl<'a> ImplicitConductionChain<'a> {
                             .and_then(|n| n.checked_add(self.advection.as_ref()
                                 .map_or(0, |flow| flow.tangent.len())))
                             .and_then(|n| n.checked_add(endpoint.transport_tangent.len()))
+                            .and_then(|n| n.checked_add(self.coupled_heat_source.as_ref()
+                                .map_or(0, |source| source.dependencies.len())))
                             .ok_or(TridiagonalError::Capacity)?,
                     )
                     .map_err(|_| TridiagonalError::Capacity)?;
@@ -1145,6 +1179,19 @@ impl<'a> ImplicitConductionChain<'a> {
                 derivative = finite(derivative + source.power_enthalpy_derivative_w_kg_j)?;
             }
             add_entry(workspace, i, i, -dt * derivative / cell.mass_kg)?;
+        }
+        if let (Some(source), Some(state)) =
+            (&self.coupled_heat_source, &endpoint.coupled_heat_source_state)
+        {
+            for (&dependency, &derivative) in source.dependencies.iter()
+                .zip(&state.power_enthalpy_derivatives_w_kg_j)
+            {
+                checkpoint()?;
+                add_entry(
+                    workspace, dependency.row, dependency.column,
+                    dependency.energy_jacobian_entry(dt, derivative)?,
+                )?;
+            }
         }
         if let Some(advection) = &self.advection {
             for &(row, col, derivative) in &advection.tangent {
