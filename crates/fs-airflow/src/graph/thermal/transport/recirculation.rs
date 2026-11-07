@@ -102,6 +102,92 @@ pub(super) struct Feedback {
     pub(super) tolerance_k: f64,
 }
 
+/// Common return ownership, expressed in the caller's conserved flow units.
+/// The affine model passes capacity rates; source calorics passes mass rates.
+#[derive(Debug)]
+pub(super) struct ReturnTopology {
+    pub(super) links: Vec<RecirculationLink>,
+    pub(super) sources: Vec<usize>,
+    pub(super) fractions: Vec<f64>,
+    pub(super) remaining_exhaust: Vec<f64>,
+}
+
+pub(super) fn admit_returns(
+    cx: &Cx<'_>,
+    mut links: Vec<RecirculationLink>,
+    external: &[f64],
+) -> Result<ReturnTopology, TransportError> {
+    poll(cx)?;
+    if links.len() > MAX_RECIRCULATION_LINKS {
+        return Err(TransportError::InvalidInput(
+            "recirculation link cap exceeded",
+        ));
+    }
+    links.sort_by_key(|link| (link.supply_node, link.return_node));
+    let mut previous = None;
+    for link in &links {
+        poll(cx)?;
+        if link.supply_node >= external.len()
+            || link.return_node >= external.len()
+            || external[link.supply_node] <= 0.0
+            || external[link.return_node] >= 0.0
+            || !(0.0..1.0).contains(&link.fraction)
+            || previous == Some((link.supply_node, link.return_node))
+        {
+            return Err(TransportError::InvalidInput(
+                "return links need unique sink-to-supply endpoints and fractions in [0,1)",
+            ));
+        }
+        previous = Some((link.supply_node, link.return_node));
+    }
+    links.retain(|link| link.fraction > 0.0);
+    let sources: Vec<_> = links
+        .iter()
+        .map(|l| l.supply_node)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if sources.len() > MAX_RECIRCULATION_SUPPLIES {
+        return Err(TransportError::InvalidInput(
+            "recirculation supply cap exceeded",
+        ));
+    }
+    let mut fractions = vec![0.0; sources.len()];
+    let mut drawn = vec![0.0; external.len()];
+    for link in &links {
+        poll(cx)?;
+        let i = sources
+            .binary_search(&link.supply_node)
+            .expect("collected supply");
+        fractions[i] = finite(fractions[i] + link.fraction, "total return fraction")?;
+        let flow = positive(link.fraction * external[link.supply_node], "return flow")?;
+        drawn[link.return_node] = finite(drawn[link.return_node] + flow, "exhaust draw")?;
+    }
+    if fractions.iter().any(|&f| f >= 1.0) {
+        return Err(TransportError::InvalidInput(
+            "every recycled supply needs positive fresh makeup",
+        ));
+    }
+    let mut remaining_exhaust = vec![0.0; external.len()];
+    for node in 0..external.len() {
+        poll(cx)?;
+        let available = (-external[node]).max(0.0);
+        if drawn[node] > available {
+            return Err(TransportError::Node {
+                node,
+                reason: "return draws exceed available exhaust flow",
+            });
+        }
+        remaining_exhaust[node] = available - drawn[node];
+    }
+    Ok(ReturnTopology {
+        links,
+        sources,
+        fractions,
+        remaining_exhaust,
+    })
+}
+
 impl<'a> TransportNetwork<'a> {
     /// Bind imposed return fractions to this exact hydraulic/thermal network.
     /// Inlet declarations now denote FRESH makeup temperatures. The mixed
@@ -113,62 +199,46 @@ impl<'a> TransportNetwork<'a> {
     /// loss, fan work and delay are NOT solved. Fully closed (100% return)
     /// supplies refuse. Resource caps and cancellation apply before solid work.
     pub fn with_recirculation(
-        mut self, cx: &Cx<'_>, mut links: Vec<RecirculationLink>,
+        mut self,
+        cx: &Cx<'_>,
+        links: Vec<RecirculationLink>,
         temperature_tolerance_k: f64,
     ) -> Result<Self, TransportError> {
         poll(cx)?;
-        positive(temperature_tolerance_k, "recirculation temperature tolerance")?;
+        positive(
+            temperature_tolerance_k,
+            "recirculation temperature tolerance",
+        )?;
         if self.circulation.is_some() && !links.is_empty() {
-            return Err(TransportError::InvalidInput("a closed native circulation has no external return-air supplies"));
+            return Err(TransportError::InvalidInput(
+                "a closed native circulation has no external return-air supplies",
+            ));
         }
         if self.feedback.is_some() || links.len() > MAX_RECIRCULATION_LINKS {
-            return Err(TransportError::InvalidInput("recirculation already bound or link cap exceeded"));
+            return Err(TransportError::InvalidInput(
+                "recirculation already bound or link cap exceeded",
+            ));
         }
-        links.sort_by_key(|link| (link.supply_node, link.return_node));
-        let mut previous = None;
-        for link in &links {
-            poll(cx)?;
-            if link.supply_node >= self.order.len() || link.return_node >= self.order.len()
-                || self.external_capacity[link.supply_node] <= 0.0
-                || self.external_capacity[link.return_node] >= 0.0
-                || !(0.0..1.0).contains(&link.fraction)
-                || previous == Some((link.supply_node, link.return_node))
-            {
-                return Err(TransportError::InvalidInput("return links need unique sink-to-supply endpoints and fractions in [0,1)"));
-            }
-            previous = Some((link.supply_node, link.return_node));
-        }
-        links.retain(|link| link.fraction > 0.0);
-        if links.is_empty() { return Ok(self); }
-        let sources: Vec<_> = links.iter().map(|l| l.supply_node).collect::<BTreeSet<_>>().into_iter().collect();
-        if sources.len() > MAX_RECIRCULATION_SUPPLIES {
-            return Err(TransportError::InvalidInput("recirculation supply cap exceeded"));
-        }
-        let mut fractions = vec![0.0; sources.len()];
-        let mut drawn = vec![0.0; self.order.len()];
-        for link in &links {
-            poll(cx)?;
-            let i = sources.binary_search(&link.supply_node).expect("collected supply");
-            fractions[i] = finite(fractions[i] + link.fraction, "total return fraction")?;
-            let capacity = positive(link.fraction * self.external_capacity[link.supply_node], "return capacity")?;
-            drawn[link.return_node] = finite(drawn[link.return_node] + capacity, "exhaust draw")?;
-        }
-        if fractions.iter().any(|&f| f >= 1.0) {
-            return Err(TransportError::InvalidInput("every recycled supply needs positive fresh makeup"));
-        }
-        let mut remaining_exhaust = vec![0.0; self.order.len()];
-        for node in 0..self.order.len() {
-            poll(cx)?;
-            let available = (-self.external_capacity[node]).max(0.0);
-            if drawn[node] > available {
-                return Err(TransportError::Node { node, reason: "return draws exceed available exhaust capacity" });
-            }
-            remaining_exhaust[node] = available - drawn[node];
+        let ReturnTopology {
+            links,
+            sources,
+            fractions,
+            remaining_exhaust,
+        } = admit_returns(cx, links, &self.external_capacity)?;
+        if links.is_empty() {
+            return Ok(self);
         }
         let matrix = feedback_matrix(&self, cx, &sources, &links, true)?;
         let zero_heat_matrix = feedback_matrix(&self, cx, &sources, &links, false)?;
-        self.feedback = Some(Feedback { links, sources, fractions, matrix, zero_heat_matrix,
-            remaining_exhaust, tolerance_k: temperature_tolerance_k });
+        self.feedback = Some(Feedback {
+            links,
+            sources,
+            fractions,
+            matrix,
+            zero_heat_matrix,
+            remaining_exhaust,
+            tolerance_k: temperature_tolerance_k,
+        });
         Ok(self)
     }
 

@@ -7,7 +7,8 @@
 //! remain subject to the original source support and transport budgets.
 
 use super::super::recirculation::{
-    RecirculatedStream, RecirculatedSupply, RecirculationLink, RecirculationReport, solve_feedback,
+    RecirculatedStream, RecirculatedSupply, RecirculationLink, RecirculationReport, ReturnTopology,
+    admit_returns, solve_feedback,
 };
 use super::*;
 
@@ -61,43 +62,27 @@ impl CaloricTransportNetwork<'_> {
         config: CaloricRecirculationConfig,
     ) -> Result<Self, TransportError> {
         poll(cx)?;
+        positive(
+            config.temperature_tolerance_k,
+            "recirculation temperature tolerance",
+        )?;
         if self.feedback.is_some() || !(1..=256).contains(&config.max_iterations) {
             return Err(TransportError::InvalidInput(
                 "source-caloric returns already bound or iteration budget outside 1..=256",
             ));
         }
-        // Reuse native topology, ownership and resource admission. Its affine
-        // matrices do not solve the source-caloric problem and are discarded.
-        self.topology =
-            self.topology
-                .with_recirculation(cx, links, config.temperature_tolerance_k)?;
-        let Some(native) = self.topology.feedback.take() else {
+        // Admit actual MASS before any Cp-scaled capacity arithmetic can
+        // reject a complete exhaust draw because of reference-Cp roundoff.
+        // Share native ownership/caps without constructing affine matrices
+        // that the source-caloric Newton solve does not use.
+        let ReturnTopology {
+            links,
+            sources,
+            fractions,
+            remaining_exhaust,
+        } = admit_returns(cx, links, &self.external_mass)?;
+        if links.is_empty() {
             return Ok(self);
-        };
-        // Native capacity is proportional to mass at the reference Cp. Recheck
-        // exact MASS availability so cancellation in capacity balances cannot
-        // change the physical return budget when the reference Cp is changed.
-        let mut drawn = vec![0.0; self.external_mass.len()];
-        for link in &native.links {
-            poll(cx)?;
-            let mass = positive(
-                link.fraction * self.external_mass[link.supply_node],
-                "return mass flow",
-            )?;
-            drawn[link.return_node] =
-                finite(drawn[link.return_node] + mass, "returned exhaust mass")?;
-        }
-        let mut remaining_exhaust = vec![0.0; drawn.len()];
-        for (node, &draw) in drawn.iter().enumerate() {
-            poll(cx)?;
-            let available = (-self.external_mass[node]).max(0.0);
-            if draw > available {
-                return Err(TransportError::Node {
-                    node,
-                    reason: "return draws exceed available exhaust mass",
-                });
-            }
-            remaining_exhaust[node] = available - draw;
         }
         let minimum_cp = self
             .caloric
@@ -120,9 +105,9 @@ impl CaloricTransportNetwork<'_> {
             );
         }
         self.feedback = Some(CaloricFeedback {
-            links: native.links,
-            sources: native.sources,
-            fractions: native.fractions,
+            links,
+            sources,
+            fractions,
             remaining_exhaust,
             minimum_cp,
             fresh_enthalpies,

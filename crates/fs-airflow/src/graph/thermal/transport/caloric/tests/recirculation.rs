@@ -164,6 +164,76 @@ fn constant_cp_returns_match_the_native_solver_and_analytical_feedback() {
 }
 
 #[test]
+fn complete_exhaust_recovery_uses_mass_independently_of_reference_cp() {
+    with_cx(|cx| {
+        let flow = LossGraph::new(
+            3,
+            vec![edge("small", 0, 1, 25.0), edge("large", 0, 2, 100.0 / 49.0)],
+        )
+        .unwrap()
+        .solve(
+            &[boundary(0, 1.0), boundary(1, 0.0), boundary(2, 0.0)],
+            hydraulic_config(),
+            cx,
+        )
+        .unwrap();
+        let small = flow.branches[0].flow.value();
+        let large = flow.branches[1].flow.value();
+        assert_eq!((small, large), (0.2, 0.7));
+        let total = small + large;
+        let fraction = small / total;
+        assert_eq!(fraction * total, small);
+        assert!(fraction.next_up() * total > small);
+        // The same Cp(T)=600+T source has Cp=900 or 901 at the two
+        // physical references. At Cp=900 the rounded capacity draw is
+        // 180.00000000000003 W/K, above the available 180 W/K, despite
+        // exact mass availability. A diagnostic Cp must not reject this loop.
+        let law = source(600.0, 1.0, 300.0);
+        let build = |reference| {
+            CaloricTransportNetwork::new(
+                cx,
+                &flow,
+                Density::new(1.0),
+                Temperature::new(reference),
+                law.clone(),
+                vec![BranchThermalModel::Adiabatic; 2],
+                &[inlet(0, 300.0)],
+                budgets(),
+            )
+            .unwrap()
+        };
+        for (reference, cp) in [(300.0, 900.0), (301.0, 901.0)] {
+            let result = build(reference)
+                .with_recirculation(cx, vec![link(0, 1, fraction)], feedback_config())
+                .unwrap()
+                .march(cx, &[])
+                .unwrap();
+            assert_eq!(result.node_temperatures_k, vec![Some(300.0); 3]);
+            assert_eq!(result.wall_heat_rate_w, 0.0);
+            assert_eq!(result.external_heat_gain_w, 0.0);
+            let report = result.recirculation.unwrap();
+            assert_eq!(report.caloric_reference_temperature_k, Some(reference));
+            close(report.supplies[0].fresh_mass_flow_kg_per_s, large, 1e-14);
+            assert_eq!(report.supplies[0].return_mass_flow_kg_per_s, small);
+            assert_eq!(report.streams[0].mass_flow_kg_per_s, small);
+            close(report.streams[0].capacity_w_per_k, small * cp, 1e-14);
+            assert_eq!(report.external_heat_gain_w, 0.0);
+            assert_eq!(report.heat_imbalance_w, 0.0);
+            // Admit the complete draw exactly, without an overdraw tolerance
+            // or clipping that would also admit the next larger fraction.
+            assert!(matches!(
+                build(reference).with_recirculation(
+                    cx,
+                    vec![link(0, 1, fraction.next_up())],
+                    feedback_config(),
+                ),
+                Err(TransportError::Node { node: 1, .. })
+            ));
+        }
+    });
+}
+
+#[test]
 fn weak_return_exchange_retains_heat_below_absolute_temperature_resolution() {
     with_cx(|cx| {
         let flow = single_flow(cx);
