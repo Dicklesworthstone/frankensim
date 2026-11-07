@@ -1,9 +1,10 @@
-//! Original sparse pressure equations and their frozen-coefficient tangent.
+//! Original sparse pressure equations and their analytic frequency tangent.
 //!
 //! For `A = K - omega^2 M - omega B + i omega G` and `A p = i omega b`,
-//! `A p' = i b + i omega b' + 2 omega M p + B p - i G p`.
-//! Derivatives are per rad/s. Material, geometry and the complete complex
-//! admittance `G + i B` are held fixed. Both equations use the retained LU.
+//! `A p' = i b + i omega b' + 2 omega M p + (B + omega B') p
+//!          - i (G + omega G') p`.
+//! Derivatives are per rad/s. Bulk material and geometry remain fixed;
+//! boundary derivatives are explicit inputs. Both equations use the retained LU.
 
 use fs_la::eigen_complex::{LuComplex, LuComplexError};
 use fs_math::{c64::C64, dd::Dd};
@@ -41,6 +42,7 @@ pub(super) struct PressurePencil<'a> {
     pub(super) mass: &'a Csr,
     pub(super) conductance: &'a Csr,
     pub(super) susceptance: &'a Csr,
+    pub(super) boundary_frequency_derivative: Option<(&'a Csr, &'a Csr)>,
     pub(super) factor: &'a LuComplex,
     pub(super) scales: &'a [f64],
     pub(super) free_dofs: &'a [usize],
@@ -66,6 +68,84 @@ fn finite(value: C64) -> bool {
     value.re.is_finite() && value.im.is_finite()
 }
 
+/// Harmonic image of the original surface mass, equilibrium spring, Kelvin
+/// resistance and positive Maxwell arms. The adapter supplies the coefficients
+/// of its existing wall owner, without fitting or changing their units.
+/// `Z = r + i(omega sigma - K/omega) + sum k/(1/tau + i omega)`.
+/// The reciprocal is admitted only for finite, nonzero impedance; a lossless
+/// wall pole requires the uncondensed coupled-state formulation instead.
+pub(super) fn mechanical_admittance(
+    omega: f64,
+    surface_density: f64,
+    stiffness_per_area: f64,
+    resistance: f64,
+    relaxation: impl IntoIterator<Item = (f64, f64)>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(C64, C64), PressureError> {
+    poll(cancelled)?;
+    if ![omega, surface_density, stiffness_per_area]
+        .iter()
+        .all(|v| v.is_finite() && *v > 0.0)
+        || !resistance.is_finite()
+        || resistance < 0.0
+    {
+        return Err(PressureError::Invalid(
+            "physical mechanical wall coefficients required",
+        ));
+    }
+    let w = Dd::from_f64(omega);
+    let mass = Dd::from_f64(surface_density);
+    let spring = Dd::from_f64(stiffness_per_area);
+    // Retain spring/mass cancellation at a high-Q wall resonance.
+    let mut real = Dd::from_f64(resistance);
+    let mut imaginary = w * mass - spring / w;
+    let mut real_derivative = Dd::from_f64(0.0);
+    let mut imaginary_derivative = mass + spring / w / w;
+    for (stiffness, tau) in relaxation {
+        poll(cancelled)?;
+        if !stiffness.is_finite()
+            || stiffness <= 0.0
+            || !tau.is_finite()
+            || tau <= 0.0
+            || !(1.0 / tau).is_finite()
+        {
+            return Err(PressureError::Invalid(
+                "positive representable Maxwell wall arm required",
+            ));
+        }
+        // The rate form avoids forming omega*tau or tau^2. Complex division
+        // also avoids squaring a very large/small relaxation denominator.
+        let denominator = C64::new(1.0 / tau, omega);
+        let arm = C64::from_re(stiffness) / denominator;
+        let derivative = C64::new(arm.im, -arm.re) / denominator;
+        if !finite(arm) || !finite(derivative) {
+            return Err(PressureError::Invalid(
+                "mechanical wall relaxation overflow",
+            ));
+        }
+        real = real + Dd::from_f64(arm.re);
+        imaginary = imaginary + Dd::from_f64(arm.im);
+        real_derivative = real_derivative + Dd::from_f64(derivative.re);
+        imaginary_derivative = imaginary_derivative + Dd::from_f64(derivative.im);
+    }
+    let impedance = C64::new(real.to_f64(), imaginary.to_f64());
+    let impedance_derivative = C64::new(real_derivative.to_f64(), imaginary_derivative.to_f64());
+    if !finite(impedance) || !finite(impedance_derivative) || impedance == C64::ZERO {
+        return Err(PressureError::Invalid(
+            "finite nonzero mechanical wall impedance required",
+        ));
+    }
+    let admittance = impedance.recip();
+    let derivative = -(impedance_derivative / impedance) / impedance;
+    if !finite(admittance) || !finite(derivative) {
+        return Err(PressureError::Invalid(
+            "unrepresentable mechanical wall admittance or slope",
+        ));
+    }
+    poll(cancelled)?;
+    Ok((admittance, derivative))
+}
+
 impl PressurePencil<'_> {
     fn admit(
         &self,
@@ -84,6 +164,11 @@ impl PressurePencil<'_> {
             ]
             .iter()
             .any(|matrix| matrix.nrows() != n || matrix.ncols() != n)
+            || self.boundary_frequency_derivative.is_some_and(|(g, b)| {
+                [g, b]
+                    .iter()
+                    .any(|matrix| matrix.nrows() != n || matrix.ncols() != n)
+            })
             || self.free_dofs.is_empty()
             || self.free_dofs.len() != self.scales.len()
             || self.free_dofs.iter().any(|&row| row >= n)
@@ -167,7 +252,13 @@ impl PressurePencil<'_> {
                 (self.mass, Dd::from_f64(2.0) * omega, false),
                 (self.susceptance, Dd::from_f64(1.0), false),
                 (self.conductance, Dd::from_f64(-1.0), true),
-            ] {
+            ]
+            .into_iter()
+            .chain(
+                self.boundary_frequency_derivative
+                    .into_iter()
+                    .flat_map(|(g, b)| [(b, omega, false), (g, -omega, true)]),
+            ) {
                 let (columns, values) = matrix.row(row);
                 for (&column, &value) in columns.iter().zip(values) {
                     let coefficient = multiplier * Dd::from_f64(value);

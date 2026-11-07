@@ -40,9 +40,10 @@ use fs_sparse::{Coo, Csr};
 
 mod harmonic;
 pub use harmonic::{
-    BoundaryAdmittance, HarmonicLimits, HeterogeneousFrequencyResponse, HeterogeneousPressureField,
-    MAX_HARMONIC_DOFS, PreparedHeterogeneous, ResonanceSurvey, ResonanceSurveyControls,
-    ResonanceSurveyError, VelocityTrace,
+    BoundaryAdmittance, BoundaryAdmittanceFrequencySample, HarmonicLimits,
+    HeterogeneousFrequencyResponse, HeterogeneousPressureField, MAX_HARMONIC_DOFS,
+    PreparedHeterogeneous, ResonanceSurvey, ResonanceSurveyControls, ResonanceSurveyError,
+    VelocityTrace,
 };
 
 mod observation;

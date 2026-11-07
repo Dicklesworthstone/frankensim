@@ -63,6 +63,7 @@ impl Fixture {
             mass: &self.matrices[1],
             conductance: &self.matrices[2],
             susceptance: &self.matrices[3],
+            boundary_frequency_derivative: None,
             factor: &self.factor,
             scales: &self.scales,
             free_dofs: &self.free,
@@ -335,4 +336,160 @@ fn cancellation_and_invalid_derivatives_leave_the_retained_factor_reusable() {
         baseline.backward_error.to_bits(),
         replay.backward_error.to_bits()
     );
+}
+
+// Independent uncondensed physical state equations for a uniform-pressure
+// cavity and a compliant wall. Unknowns are p, displacement w and every
+// energy-normalized Maxwell memory z. Neither Y nor Y' appears in this oracle.
+fn wall_cavity_state(omega: f64, wall: [f64; 3], arms: &[(f64, f64)], drive: [C64; 2]) -> [C64; 4] {
+    let n = 2 + arms.len();
+    let mut a = vec![C64::ZERO; n * n];
+    let mut da = vec![C64::ZERO; n * n];
+    a[0] = C64::new(0.0, omega * 0.02); // Original volume compliance.
+    a[1] = C64::new(0.0, omega * 0.4); // Original wetted wall area.
+    da[0] = C64::new(0.0, 0.02);
+    da[1] = C64::new(0.0, 0.4);
+    a[n] = -C64::ONE;
+    a[n + 1] = C64::new(wall[1] - omega * omega * wall[0], omega * wall[2]);
+    da[n + 1] = C64::new(-2.0 * omega * wall[0], wall[2]);
+    for (j, &(k, tau)) in arms.iter().enumerate() {
+        let memory = j + 2;
+        let coupling = det::sqrt(k);
+        a[n + 1].re += k;
+        a[n + memory] = C64::from_re(-coupling);
+        a[memory * n + 1] = C64::from_re(-coupling);
+        a[memory * n + memory] = C64::new(1.0, omega * tau);
+        da[memory * n + memory] = C64::new(0.0, tau);
+    }
+    let factor = lu_complex_with_cancel(&a, n, &mut || false).unwrap();
+    let mut x = vec![C64::ZERO; n];
+    x[0] = drive[0];
+    factor.solve_with_cancel(&mut x, &mut || false).unwrap();
+    let mut dx = vec![C64::ZERO; n];
+    dx[0] = drive[1];
+    for i in 0..n {
+        for j in 0..n {
+            dx[i] = dx[i] - da[i * n + j] * x[j];
+        }
+    }
+    factor.solve_with_cancel(&mut dx, &mut || false).unwrap();
+    [
+        x[0],
+        dx[0],
+        C64::new(0.0, omega) * x[1],
+        C64::new(0.0, 1.0) * x[1] + C64::new(0.0, omega) * dx[1],
+    ]
+}
+
+#[test]
+fn dispersive_wall_cavity_tangent_matches_the_uncondensed_physical_states() {
+    let drive = [C64::new(0.02, -0.01), C64::new(-0.001, -0.002)];
+    for (resistance, arms) in [(0.002, vec![]), (0.2, vec![(50.0, 0.07), (15.0, 0.2)])] {
+        let wall = [0.7, 280.0, resistance];
+        for omega in [0.2, 19.9, 20.0, 20.1, det::sqrt(300.0 / 0.7), 22.0, 400.0] {
+            let (y, dy) = mechanical_admittance(
+                omega,
+                wall[0],
+                wall[1],
+                wall[2],
+                arms.iter().copied(),
+                &mut || false,
+            )
+            .unwrap();
+            let f = scalar(omega, [0.0, 0.02, 0.4 * y.re, 0.4 * y.im]);
+            let (dg, db) = (matrix(&[0.4 * dy.re], 1), matrix(&[0.4 * dy.im], 1));
+            let mut pencil = f.pencil();
+            pencil.boundary_frequency_derivative = Some((&dg, &db));
+            let p = pencil.solve(&drive[..1], &mut || false).unwrap();
+            let dp = pencil
+                .frequency_derivative(&p.pressure, &drive[..1], &drive[1..], &mut || false)
+                .unwrap();
+            let [exact, tangent, wall_velocity, wall_velocity_slope] =
+                wall_cavity_state(omega, wall, &arms, drive);
+            close(p.pressure[0], exact, 3e-9);
+            close(dp.pressure[0], tangent, 5e-9);
+            close(y * p.pressure[0], wall_velocity, 3e-9);
+            close(
+                dy * p.pressure[0] + y * dp.pressure[0],
+                wall_velocity_slope,
+                5e-8,
+            );
+            assert!(dp.backward_error < 5e-13);
+            if omega == 20.0 && arms.is_empty() {
+                let frozen = f
+                    .pencil()
+                    .frequency_derivative(&p.pressure, &drive[..1], &drive[1..], &mut || false)
+                    .unwrap();
+                assert!((frozen.pressure[0] - tangent).abs() > 0.9 * tangent.abs());
+            }
+        }
+    }
+}
+
+#[test]
+fn high_q_wall_condensation_keeps_the_analytic_slope_and_refuses_its_lossless_pole() {
+    let resistance = 1e-9;
+    let (y, dy) = mechanical_admittance(20.0, 0.75, 300.0, resistance, [], &mut || false).unwrap();
+    close(y, C64::from_re(1.0 / resistance), 2e-15);
+    close(dy, C64::new(0.0, -1.5 / resistance / resistance), 2e-15);
+    assert!(matches!(
+        mechanical_admittance(20.0, 0.75, 300.0, 0.0, [], &mut || false),
+        Err(PressureError::Invalid(_))
+    ));
+    // The FULL wall/cavity problem is regular at the refused local wall pole.
+    // Its pressure is zero; treating 1/Z as an arbitrary large finite number
+    // would hide this change of admissible formulation.
+    let full = wall_cavity_state(20.0, [0.75, 300.0, 0.0], &[], [C64::ONE, C64::ZERO]);
+    assert_eq!(full[0], C64::ZERO);
+    assert!(full[1].abs() > 0.0);
+    assert!(matches!(
+        mechanical_admittance(20.0, 0.75, 300.0, 1.0, [(1.0, 0.0)], &mut || false),
+        Err(PressureError::Invalid(_))
+    ));
+    assert!(matches!(
+        mechanical_admittance(20.0, 0.75, 300.0, 1.0, [(1.0, 0.1)], &mut || true),
+        Err(PressureError::Cancelled)
+    ));
+    // Large omega*tau must not overflow a finite Maxwell impedance or slope.
+    let (y, dy) =
+        mechanical_admittance(1e154, 1e-154, 1e154, 1.0, [(1.0, 1e308)], &mut || false).unwrap();
+    close(y, C64::ONE, 1e-14);
+    close(dy, C64::new(0.0, -2e-154), 1e-14);
+}
+
+#[test]
+fn signed_boundary_slopes_preserve_exact_pressure_release_and_coherent_drive_slopes() {
+    let omega = 3.0;
+    let (y, dy) = mechanical_admittance(omega, 0.4, 2.0, 0.3, [(2.0, 0.2)], &mut || false).unwrap();
+    assert!(dy.re < 0.0); // A passive wall need not have a positive slope.
+    let face = [1.0, 0.5, 0.5, 0.25];
+    let f = Fixture::new(
+        omega,
+        [
+            matrix(&[7.0, -1.0, -1.0, 4.0], 2),
+            matrix(&[0.2, 0.03, 0.03, 0.1], 2),
+            matrix(&face.map(|v| v * y.re), 2),
+            matrix(&face.map(|v| v * y.im), 2),
+        ],
+        vec![0],
+    );
+    let (dg, db) = (
+        matrix(&face.map(|v| v * dy.re), 2),
+        matrix(&face.map(|v| v * dy.im), 2),
+    );
+    let mut pencil = f.pencil();
+    pencil.boundary_frequency_derivative = Some((&dg, &db));
+    let drive = [C64::new(0.3, 0.2), C64::ZERO];
+    let slope = [C64::new(-0.2, 0.3), C64::ZERO];
+    let p = pencil.solve(&drive, &mut || false).unwrap();
+    let dp = pencil
+        .frequency_derivative(&p.pressure, &drive, &slope, &mut || false)
+        .unwrap();
+    let a = C64::from_re(7.0 - omega * omega * 0.2) + C64::new(0.0, omega) * y;
+    let da = C64::from_re(-2.0 * omega * 0.2) + C64::new(0.0, 1.0) * y + C64::new(0.0, omega) * dy;
+    let rhs = C64::new(0.0, omega) * drive[0];
+    let drhs = C64::new(0.0, 1.0) * drive[0] + C64::new(0.0, omega) * slope[0];
+    close(dp.pressure[0], (drhs - da * (rhs / a)) / a, 3e-14);
+    assert_eq!(p.pressure[1], C64::ZERO);
+    assert_eq!(dp.pressure[1], C64::ZERO);
 }

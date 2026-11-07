@@ -11,6 +11,8 @@ use fs_math::{c64::C64, dd::Dd, det};
 use fs_sparse::{Coo, Csr};
 use std::collections::BTreeSet;
 
+mod dispersive;
+pub use dispersive::BoundaryAdmittanceFrequencySample;
 mod frequency;
 mod resonance;
 pub use resonance::{ResonanceSurvey, ResonanceSurveyControls, ResonanceSurveyError};
@@ -84,6 +86,7 @@ pub struct PreparedHeterogeneous<'m, 'f, 'c> {
     scales: Vec<f64>,
     conductance: Csr,
     susceptance: Csr,
+    boundary_frequency_derivative: Option<(Csr, Csr)>,
     pressure_release: PressureReleaseConstraints,
     residual_tolerance: f64,
 }
@@ -114,7 +117,7 @@ pub struct HeterogeneousPressureField {
     pub backward_error: f64,
 }
 
-/// Original pressure response and its analytic, frozen-coefficient tangent.
+/// Original pressure response and its analytic frequency tangent.
 #[derive(Debug, Clone)]
 pub struct HeterogeneousFrequencyResponse {
     /// Original physical response, including its ordinary work and energy.
@@ -385,6 +388,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             scales,
             conductance,
             susceptance,
+            boundary_frequency_derivative: None,
             pressure_release,
             residual_tolerance: limits.residual_tolerance,
         })
@@ -395,18 +399,32 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         admittances: &[BoundaryAdmittance],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Csr, Csr), HeterogeneousError> {
+        self.boundary_coefficient_matrices(
+            admittances
+                .iter()
+                .map(|boundary| (boundary.faces.as_slice(), boundary.admittance_m_pa_s)),
+            true,
+            cancelled,
+        )
+    }
+
+    fn boundary_coefficient_matrices<'a>(
+        &self,
+        boundaries: impl IntoIterator<Item = (&'a [[u32; 3]], C64)>,
+        require_passive: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Csr, Csr), HeterogeneousError> {
         let mut real = Coo::new(self.ndof(), self.ndof());
         let mut imaginary = Coo::new(self.ndof(), self.ndof());
         let quad = tri_quadrature(self.geometry.face_quadrature_order(self.geometry.order + 1));
         let mut seen = BTreeSet::new();
-        for boundary in admittances {
-            let y = boundary.admittance_m_pa_s;
-            if !finite(y) || y.re < 0.0 || boundary.faces.is_empty() {
+        for (faces, y) in boundaries {
+            if !finite(y) || (require_passive && y.re < 0.0) || faces.is_empty() {
                 return Err(
                     invalid("finite passive admittance on nonempty boundary required").into(),
                 );
             }
-            for &face in &boundary.faces {
+            for &face in faces {
                 poll(cancelled)?;
                 let mut key = face;
                 key.sort_unstable();
@@ -519,12 +537,12 @@ impl PreparedHeterogeneous<'_, '_, '_> {
     /// coherent source phase changes. Missing derivative faces contribute zero;
     /// their order and face set need not match the primary traces.
     ///
-    /// Geometry, density, compressibility and all prepared admittances remain
-    /// FROZEN. In particular, a sampled spatial or complex wall admittance is
-    /// not differentiated through an unstated dispersive law. This is the full
-    /// physical frequency tangent only when those coefficients are independent
-    /// of frequency. No finite differences, modal truncation or fitted pole is
-    /// used. Exact pressure-release traces and their tangents stay zero.
+    /// Geometry, density and compressibility remain frozen. Boundary slopes
+    /// supplied through `prepare_with_dispersive_admittances` are included;
+    /// other preparations hold their admittances fixed. A sampled complex or
+    /// spatial wall law never implies an unstated dispersion derivative. No
+    /// finite differences, modal truncation or fitted pole is used. Exact
+    /// pressure-release traces and their tangents stay zero.
     pub fn solve_with_frequency_derivative(
         &self,
         inward_velocity: &[VelocityTrace],
@@ -540,7 +558,7 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         )
     }
 
-    /// Analytic frozen-coefficient response with every original source family.
+    /// Analytic frequency response with every original source family.
     ///
     /// Each source triple is `(original_source, amplitude, d_amplitude/domega)`.
     /// Boundary amplitudes are inward velocity [m/s]; volume amplitudes are
@@ -757,6 +775,10 @@ impl PreparedHeterogeneous<'_, '_, '_> {
             mass: &self.model.mass,
             conductance: &self.conductance,
             susceptance: &self.susceptance,
+            boundary_frequency_derivative: self
+                .boundary_frequency_derivative
+                .as_ref()
+                .map(|(g, b)| (g, b)),
             factor: &self.factor,
             scales: &self.scales,
             free_dofs: &self.pressure_release.free_dofs,

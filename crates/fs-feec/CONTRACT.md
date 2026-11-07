@@ -1741,20 +1741,22 @@ no bulk heat.
 solve_with_sources_frequency_derivative}` returns the original pressure and
 its complex derivative per **rad/s**, with the same equilibrated LU. The
 original sparse pressure equation is differentiated analytically:
-`A p' = i b + i omega b' + 2 omega M_beta p + Im(C_Y) p - i Re(C_Y) p`.
+`A p' = i b + i omega b' + 2 omega M_beta p + Im(C_Y + omega C_Y') p - i Re(C_Y + omega C_Y') p`.
 Linear boundary traces, prepared quadratic boundary motion and volume sources
 retain their coherent amplitudes and independently supplied amplitude/phase
 slopes. A zero primary amplitude does not erase a nonzero source derivative.
 Exact pressure-release coordinates remain zero in both vectors. Derivative
 coefficients are pressure slopes, not a second physical field or energy state.
 
-Geometry, density, compressibility and the complete prepared complex boundary
-admittance are held fixed. A sampled spatial wall law is likewise frozen;
-this does not infer or differentiate an unspecified dispersive law. Thus this
-is a physical frequency-response tangent only within those fixed-coefficient
-assumptions. It introduces no finite difference, modal reduction, artificial
-loss, fitted pole or extra factorization. Additional storage is linear in the
-original DOF count; each solve retains at most two residual corrections.
+Geometry, density and compressibility are held fixed. Existing preparations
+hold their complete complex boundary admittances fixed (`C_Y' = 0`). Explicit
+same-frequency samples supplied through `prepare_with_dispersive_admittances`
+retain their signed analytic boundary slopes; an ordinary sampled uniform or
+spatial law never implies an unspecified dispersion derivative. The tangent
+introduces no finite difference, modal reduction, artificial loss, fitted pole
+or extra factorization. Additional solve storage is linear in the original DOF
+count; explicit boundary derivatives retain sparse face matrices. Each solve
+retains at most two residual corrections.
 
 The sparse solve/tangent leaf retains double-double physical forcing and checks
 the separate original operator terms. The tangent residual denominator includes
@@ -2428,3 +2430,43 @@ zero-residue geometric support, source work, limits, ownership and cancellation.
 Midpoint is passive but requires a time-resolution axis for stiff poles and
 wave phase. This owner does not yet compose these memories with mechanical
 wall states or supply their complete-state exponential propagator.
+
+### Analytic dispersive mechanical walls in full-pressure resonance queries
+
+`BoundaryAdmittanceFrequencySample` binds each uniform complex specific
+admittance and its analytic derivative per rad/s to the same declared frequency
+in Hz. `prepare_with_dispersive_admittances` admits the primary passive law on
+original, disjoint faces and retains its signed sparse derivative forms. The
+existing coherent boundary/volume-source tangent now includes
+`(B + omega B') p - i (G + omega G') p`, reusing the original LU, pressure-release
+elimination, double-double forcing, residual correction and cancellation. Only
+the primary conductance is a heat form. Existing preparations still freeze
+their admittances; bulk density, compressibility and geometry remain fixed.
+
+`BoundaryAdmittanceFrequencySample::mechanical` evaluates the existing
+`MechanicalBoundary`'s original `WallPin` and every positive Maxwell arm:
+`Z = r + i(omega sigma - K/omega) + sum k/(1/tau + i omega)`,
+`Y = 1/Z`, `Y' = -Z'/Z^2` under `exp(+i omega t)`. Double-double spring/mass
+cancellation and rate-form complex divisions avoid unnecessary high-Q loss of
+precision and `omega*tau`, `tau^2` or denominator-square overflow. This exact
+local harmonic condensation requires finite nonzero impedance. In particular,
+a lossless wall-impedance zero refuses even if the uncondensed coupled problem
+is regular; it is never clipped or supplied artificial loss. Reported field
+energies remain fluid energies, without a claim of complete wall storage.
+
+`survey_pressure_resonances_with_mechanical_walls` resamples these original
+wall laws and their analytic slopes at every shared-survey query. Fixed
+admittances and coherent velocity phasors remain constant. Original point
+observations, limits and residual gates are retained. The result is a
+grid-resolved driven-peak survey, not a free-mode census, complete coupled-field
+qualification, half-power width or decay Q. Local condensation failures and
+cancellation publish no partial survey.
+
+Native validation executed the complete production pressure/tangent module
+against real `fs_math`, `fs_sparse` and complex-LU owners: 10 tests passed. New
+tests compare pressure and wall-velocity slopes to independent uncondensed
+cavity/displacement/Maxwell state equations, cover high-Q behavior and lossless
+local-pole refusal, and retain signed wall slopes, coherent source derivatives
+and exact pressure-release zeros. Two focused FE adapter/survey regressions are
+authored; they are not claimed executed because the full `fs-feec` dependency
+build is unavailable in this environment. No broader IRP bead is closed.
