@@ -32,6 +32,9 @@ use fs_math::{c64::C64, dd::Dd, det};
 type Vector = [C64; 3];
 type Result<T> = core::result::Result<T, ReflectionError>;
 
+mod absorption;
+pub use absorption::MagnetizedIonizedGasSlabAbsorption;
+
 /// Original fixed-frequency transport, explicit bound-charge background and
 /// lossless incident medium. Circular labels are relative to the outgoing
 /// interface normal, so reversing B at fixed normal swaps the two responses.

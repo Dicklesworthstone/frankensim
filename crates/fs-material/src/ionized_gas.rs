@@ -34,11 +34,13 @@ use fs_thermochem::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K};
 
 mod coulomb;
 mod harmonic;
+mod refresh;
 mod relaxation;
 pub use harmonic::{
     IonizedGasHarmonic, IonizedGasHarmonicResponse, IonizedGasMagneticLimits,
     IonizedGasMagnetizedHarmonic, IonizedGasMagnetizedHarmonicResponse,
 };
+pub use refresh::IonizedGasRefreshError;
 pub use relaxation::{
     CarrierMomentumRelaxation, CarrierMomentumSource, ElectronNeutralMomentumContribution,
 };

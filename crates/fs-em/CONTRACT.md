@@ -581,6 +581,28 @@ not experimental qualification. The model remains frozen, local and classical,
 with normal-incidence homogeneous half-spaces only: no oblique/longitudinal
 modes, finite films, kinetic spatial response, pulses or nonlinear wave force.
 
+### Finite-volume magnetized carrier absorption
+
+`PreparedMagnetizedIonizedGasWave::slab_absorption` integrates a positive-area,
+positive-depth control volume within the original homogeneous half-space.
+The two outgoing circular modes retain their separate attenuation, signed
+electron/heavy pool powers and original drift-dependent exchange correction.
+Their analytic exponential integrals use expm1, with a logarithmic range
+fallback for otherwise representable products; no depth quadrature, port-power
+subtraction, transport reevaluation or new Maxwell solve occurs. Disjoint
+slabs add to the original total absorption, including weak, deep and opaque
+limits. Signed pool closure is checked against total friction.
+
+The report borrows its exact wave/source and returns the actual geometric
+volume, original friction shares and already-included signed exchange
+correction. Coherent carrier kinetic and lossless background field energies
+are separate storage, never extra heat. A finite-energy consumer must bind
+this volume to its actual parcel and declare the held-field interval. This
+control volume has no second reflecting boundary and does not add a finite
+film, temperature evolution or a continuously refreshed wave solve. Focused
+tests compare independent local-field quadrature, Poynting loss, subslab
+additivity, signed Coulomb partitions and weak/opaque/zero-source limits.
+
 ## Conduction at independent common-voltage references
 
 The planar static, material-response and prescribed-motion current paths retain

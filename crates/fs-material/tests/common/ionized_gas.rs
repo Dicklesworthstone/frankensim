@@ -139,6 +139,14 @@ fn collision_source(
     p: f64,
     rate: f64,
 ) -> CarrierMomentumRelaxation {
+    collision_source_and_card(species, temperatures, p, rate).0
+}
+pub fn collision_source_and_card(
+    species: &str,
+    temperatures: &[(&str, f64)],
+    p: f64,
+    rate: f64,
+) -> (CarrierMomentumRelaxation, MaterialCard) {
     let temperature = QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,
         ValueForm::Static,
@@ -195,11 +203,12 @@ fn collision_source(
         MaterialPropertySelection::SingleClaimOnly,
     )
     .unwrap();
-    if temperatures.len() == 1 {
+    let relaxation = if temperatures.len() == 1 {
         CarrierMomentumRelaxation::new(id(species), resolved, key).unwrap()
     } else {
         CarrierMomentumRelaxation::new_two_temperature(id(species), resolved, key).unwrap()
-    }
+    };
+    (relaxation, card)
 }
 pub fn limits() -> IonizedGasDcLimits {
     IonizedGasDcLimits {

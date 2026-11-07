@@ -3,6 +3,9 @@ use super::*;
 use fs_em::plane_wave::plasma::magnetized::MagnetizedIonizedGasInterface;
 use fs_material::ionized_gas::IonizedGasMagneticLimits;
 
+#[path = "magnetized/absorption.rs"]
+mod absorption;
+
 type Vector = [C64; 3];
 
 fn magnetic_limits() -> IonizedGasMagneticLimits {

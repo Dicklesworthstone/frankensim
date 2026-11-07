@@ -3032,6 +3032,28 @@ transient initialization, background momentum evolution, Maxwell propagation,
 or empirical broadband validation. Its tensor is deliberately not admitted by
 the existing scalar unmagnetized plane-wave or symmetric-Ohmic field owners.
 
+### Original-source refresh after frozen-population heating
+
+`IonizedGasConductivity::at_frozen_state` rebuilds transport at the actual new
+heavy/electron temperatures and ideal-gas pressure of the same fixed-volume
+parcel. It requires exact original thermodynamics, species amounts and volume.
+Every retained electron-neutral momentum cross section is reintegrated at the
+new Te using its original weighting, numerical controls and target-speed bound.
+Material-backed rates require each original immutable card exactly once, retain
+their complete requirements/selected claims and coordinate conventions, and
+requery the actual T or T_h/T_e and p. Common-temperature evidence cannot be
+widened to unequal temperatures; ambiguous schemas, missing/extra/duplicate
+cards and source-domain failures refuse the entire refresh.
+
+The original optional Coulomb model is retained and reevaluated at the actual
+new temperatures, with all mutual drag and original transport admission limits.
+The new owner carries its frozen-state receipt, without a stale LTE equilibrium
+claim. Cancellation or failure leaves the old snapshot intact. This evaluates
+an endpoint; it neither evolves thermal energy nor claims source support along
+an intervening path. The focused refresh tests exercise source/card retention,
+the constant-cross-section sqrt(Te) law, Coulomb reevaluation, fixed-population
+and volume binding, common-temperature refusal and transactional cancellation.
+
 ## Permanent secondary creep
 
 `creep::NortonCreep` adds sub-yield permanent deformation on the existing
