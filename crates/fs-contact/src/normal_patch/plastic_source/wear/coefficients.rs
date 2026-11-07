@@ -118,8 +118,29 @@ impl SourcePlasticArchardWear {
         duration_s: Option<f64>,
         cx: &Cx<'_>,
     ) -> Result<Option<EvaluatedLocalCoefficients>, SourcePlasticWearError> {
+        self.sample_local_coefficients_at_speeds(pressure, slip, duration_s, None, cx)
+    }
+
+    // An adaptive proportional path prescribes ds/dt once for the whole
+    // segment. Re-dividing rounded endpoint differences can move a supported
+    // speed outside the original claim even though the physical speed is fixed.
+    pub(super) fn sample_local_coefficients_at_speeds(
+        &self,
+        pressure: &[f64],
+        slip: &[f64],
+        duration_s: Option<f64>,
+        prescribed_speeds_m_per_s: Option<&[f64]>,
+        cx: &Cx<'_>,
+    ) -> Result<Option<EvaluatedLocalCoefficients>, SourcePlasticWearError> {
         if duration_s.is_some_and(|duration| !duration.is_finite() || duration <= 0.0) {
             return Err(invalid("positive finite wear-step duration"));
+        }
+        if prescribed_speeds_m_per_s
+            .is_some_and(|speeds| speeds.len() != pressure.len() || duration_s.is_none())
+        {
+            return Err(invalid(
+                "one prescribed speed per cell in a timed wear path",
+            ));
         }
         let Some(axes) = &self.local_axes else {
             return Ok(None);
@@ -128,7 +149,7 @@ impl SourcePlasticArchardWear {
         let mut laws = Vec::new();
         let mut cell_source_indices = Vec::with_capacity(pressure.len());
         let mut indices = BTreeMap::new();
-        for (&p, &distance) in pressure.iter().zip(slip) {
+        for (cell, (&p, &distance)) in pressure.iter().zip(slip).enumerate() {
             checkpoint(cx)?;
             if p == 0.0 || distance == 0.0 {
                 cell_source_indices.push(None);
@@ -138,7 +159,8 @@ impl SourcePlasticArchardWear {
                 let duration = duration_s.ok_or_else(|| {
                     invalid("speed-dependent wear requires the actual sliding interval")
                 })?;
-                let speed = distance / duration;
+                let speed = prescribed_speeds_m_per_s
+                    .map_or_else(|| distance / duration, |speeds| speeds[cell]);
                 if !speed.is_finite() || speed <= 0.0 {
                     return Err(invalid("representable positive actual sliding speed"));
                 }

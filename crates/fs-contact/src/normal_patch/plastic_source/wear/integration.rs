@@ -1,6 +1,8 @@
 //! Adaptive pressure/recession feedback along a prescribed local sliding path.
 //!
 //! Each cell follows `s_i(lambda) = total_distance_i * lambda`, 0 <= lambda <= 1.
+//! Timed paths also follow `t(lambda) = duration * lambda`, preserving each
+//! cell's prescribed mean speed as the pressure/recession quadrature is refined.
 //! The original k/H sources and the selected normal boundary condition stay
 //! fixed. Full versus two-half-step comparisons estimate local discretization
 //! error. Only the actual two-half-step history is accepted; extrapolating
@@ -58,7 +60,7 @@ pub enum WearIntegrationError {
         /// Most recent step-dependent physical refusal, if any.
         last_refusal: Option<SourcePlasticWearError>,
     },
-    /// Further subdivision cannot retain a positive path/sliding increment.
+    /// Further subdivision cannot retain a positive path/sliding/time increment.
     ResolutionLimit {
         /// Completed fraction in the discarded candidate path.
         completed_fraction: f64,
@@ -140,9 +142,46 @@ impl SourcePlasticArchardWear {
         controls: WearIntegrationControls,
         cx: &Cx<'_>,
     ) -> Result<IntegratedWearAdvance, WearIntegrationError> {
-        self.integrate_wear_with(before, total_local_slip_m, controls, cx, |state, slip| {
-            self.advance_wear(state, slip, cx)
-        })
+        self.integrate_wear_with(
+            before,
+            total_local_slip_m,
+            None,
+            controls,
+            cx,
+            |state, slip, duration, speeds| match speeds {
+                Some(speeds) => self.advance_wear_at_speeds(state, slip, duration, speeds, cx),
+                None => self.advance_wear_over_interval(state, slip, duration, cx),
+            },
+        )
+    }
+
+    /// Integrate a fixed proportional sliding path over a positive physical duration.
+    ///
+    /// Every trial receives its own elapsed time and irreversible local slip.
+    /// Subdivision therefore retains `total_local_slip_m[i] / duration_s` while
+    /// pressure-dependent wear is resampled at each new equilibrium. The fixed
+    /// speed is prepared once, so endpoint roundoff cannot move it outside its
+    /// original source support during refinement. Varying
+    /// speeds or source temperatures require successive prescribed segments.
+    pub fn integrate_wear_during(
+        &self,
+        before: &SourcePlasticWearState,
+        total_local_slip_m: &[f64],
+        duration_s: f64,
+        controls: WearIntegrationControls,
+        cx: &Cx<'_>,
+    ) -> Result<IntegratedWearAdvance, WearIntegrationError> {
+        self.integrate_wear_with(
+            before,
+            total_local_slip_m,
+            Some(duration_s),
+            controls,
+            cx,
+            |state, slip, duration, speeds| match speeds {
+                Some(speeds) => self.advance_wear_at_speeds(state, slip, duration, speeds, cx),
+                None => self.advance_wear_over_interval(state, slip, duration, cx),
+            },
+        )
     }
 
     /// Integrate the same local-sliding path while maintaining a prescribed load.
@@ -159,6 +198,50 @@ impl SourcePlasticArchardWear {
         controls: WearIntegrationControls,
         cx: &Cx<'_>,
     ) -> Result<IntegratedWearAdvance, WearIntegrationError> {
+        self.integrate_wear_at_load_over_interval(
+            before,
+            total_local_slip_m,
+            None,
+            target_force_n,
+            load_controls,
+            controls,
+            cx,
+        )
+    }
+
+    /// Maintain normal force along a timed proportional local-sliding path.
+    /// Each refined trial retains the prescribed local speed and its own elapsed time.
+    pub fn integrate_wear_at_load_during(
+        &self,
+        before: &SourcePlasticWearState,
+        total_local_slip_m: &[f64],
+        duration_s: f64,
+        target_force_n: f64,
+        load_controls: FiniteGapPlasticLoadControls,
+        controls: WearIntegrationControls,
+        cx: &Cx<'_>,
+    ) -> Result<IntegratedWearAdvance, WearIntegrationError> {
+        self.integrate_wear_at_load_over_interval(
+            before,
+            total_local_slip_m,
+            Some(duration_s),
+            target_force_n,
+            load_controls,
+            controls,
+            cx,
+        )
+    }
+
+    fn integrate_wear_at_load_over_interval(
+        &self,
+        before: &SourcePlasticWearState,
+        total_local_slip_m: &[f64],
+        duration_s: Option<f64>,
+        target_force_n: f64,
+        load_controls: FiniteGapPlasticLoadControls,
+        controls: WearIntegrationControls,
+        cx: &Cx<'_>,
+    ) -> Result<IntegratedWearAdvance, WearIntegrationError> {
         if !target_force_n.is_finite() || target_force_n < 0.0 {
             return Err(WearIntegrationError::Invalid(
                 "finite nonnegative maintained normal force",
@@ -167,10 +250,38 @@ impl SourcePlasticArchardWear {
         self.contact
             .admit_load_controls(load_controls)
             .map_err(SourcePlasticWearError::from)?;
-        self.integrate_wear_with(before, total_local_slip_m, controls, cx, |state, slip| {
-            self.advance_wear_at_load(state, slip, target_force_n, load_controls, cx)
+        self.integrate_wear_with(
+            before,
+            total_local_slip_m,
+            duration_s,
+            controls,
+            cx,
+            |state, slip, duration, speeds| {
+                match (duration, speeds) {
+                    (_, Some(speeds)) => self.advance_wear_at_load_at_speeds(
+                        state,
+                        slip,
+                        duration,
+                        speeds,
+                        target_force_n,
+                        load_controls,
+                        cx,
+                    ),
+                    (Some(duration), None) => self.advance_wear_at_load_during(
+                        state,
+                        slip,
+                        duration,
+                        target_force_n,
+                        load_controls,
+                        cx,
+                    ),
+                    (None, None) => {
+                        self.advance_wear_at_load(state, slip, target_force_n, load_controls, cx)
+                    }
+                }
                 .map(|advance| advance.wear)
-        })
+            },
+        )
     }
 
     // The boundary condition changes the physical leaf, not path integration.
@@ -178,15 +289,23 @@ impl SourcePlasticArchardWear {
         &self,
         before: &SourcePlasticWearState,
         total_local_slip_m: &[f64],
+        duration_s: Option<f64>,
         controls: WearIntegrationControls,
         cx: &Cx<'_>,
         mut step: impl FnMut(
             &SourcePlasticWearState,
             &[f64],
+            Option<f64>,
+            Option<&[f64]>,
         ) -> Result<SourcePlasticWearAdvance, SourcePlasticWearError>,
     ) -> Result<IntegratedWearAdvance, WearIntegrationError> {
         self.admit(before)?;
         checkpoint(cx)?;
+        if duration_s.is_some_and(|duration| !duration.is_finite() || duration <= 0.0) {
+            return Err(WearIntegrationError::Invalid(
+                "positive finite total sliding duration",
+            ));
+        }
         if !controls.absolute_depth_tolerance_m.is_finite()
             || controls.absolute_depth_tolerance_m <= 0.0
             || !controls.absolute_pressure_tolerance_pa.is_finite()
@@ -214,6 +333,7 @@ impl SourcePlasticArchardWear {
             evaluations: 0,
             accepted: 0,
             last_refusal: None,
+            prescribed_speeds_m_per_s: None,
         };
         let mut accounts = Accounts::default();
         let mut rejected = 0;
@@ -222,7 +342,7 @@ impl SourcePlasticArchardWear {
             // Still pass through the original leaf to check source/load ownership
             // and obtain its actual stored energy; zero sliding changes no history.
             let advance = runner
-                .evaluate(before, total_local_slip_m, cx, &mut step)?
+                .evaluate(before, total_local_slip_m, duration_s, cx, &mut step)?
                 .ok_or_else(|| {
                     runner.last_refusal.clone().map_or(
                         WearIntegrationError::Invalid("missing zero-path response"),
@@ -240,6 +360,25 @@ impl SourcePlasticArchardWear {
                 maximum_error,
                 cx,
             );
+        }
+
+        if let Some(duration) = duration_s
+            && self
+                .local_coefficient_axes()
+                .is_some_and(|axes| axes.sliding_speed.is_some())
+        {
+            let mut speeds = Vec::with_capacity(total_local_slip_m.len());
+            for (index, distance) in total_local_slip_m.iter().copied().enumerate() {
+                if index % 64 == 0 {
+                    checkpoint(cx)?;
+                }
+                speeds.push(distance / duration);
+            }
+            // s_i(lambda)=D_i*lambda and t(lambda)=T*lambda prescribe D_i/T,
+            // not a new speed obtained from rounded finite differences. The
+            // native sampler still admits each speed only when its cell slides
+            // under load; unloaded cells make no source-coverage claim.
+            runner.prescribed_speeds_m_per_s = Some(speeds);
         }
 
         let mut current = before.clone();
@@ -272,6 +411,23 @@ impl SourcePlasticArchardWear {
             if !(middle > lambda && end > middle) {
                 return Err(resolution());
             }
+            let (full_duration, first_duration, second_duration) = match duration_s {
+                Some(duration) => {
+                    // The same path endpoints determine slip and elapsed time.
+                    // Retain the full prescribed duration across unequal steps;
+                    // never reuse the whole-path duration for a refined trial.
+                    let start_time = duration * lambda;
+                    let middle_time = duration * middle;
+                    let end_time = if end == 1.0 { duration } else { duration * end };
+                    let first = middle_time - start_time;
+                    let second = end_time - middle_time;
+                    if first <= 0.0 || second <= 0.0 {
+                        return Err(resolution());
+                    }
+                    (Some(end_time - start_time), Some(first), Some(second))
+                }
+                None => (None, None, None),
+            };
             for (index, distance) in total_local_slip_m.iter().copied().enumerate() {
                 if index % 64 == 0 {
                     checkpoint(cx)?;
@@ -288,17 +444,27 @@ impl SourcePlasticArchardWear {
                     return Err(resolution());
                 }
             }
-            let Some(coarse) = runner.evaluate(&current, &full_slip, cx, &mut step)? else {
+            let Some(coarse) =
+                runner.evaluate(&current, &full_slip, full_duration, cx, &mut step)?
+            else {
                 rejected += 1;
                 width = 0.5 * interval;
                 continue;
             };
-            let Some(first) = runner.evaluate(&current, &first_slip, cx, &mut step)? else {
+            let Some(first) =
+                runner.evaluate(&current, &first_slip, first_duration, cx, &mut step)?
+            else {
                 rejected += 1;
                 width = 0.5 * interval;
                 continue;
             };
-            let Some(second) = runner.evaluate(&first.candidate, &second_slip, cx, &mut step)?
+            let Some(second) = runner.evaluate(
+                &first.candidate,
+                &second_slip,
+                second_duration,
+                cx,
+                &mut step,
+            )?
             else {
                 rejected += 1;
                 width = 0.5 * interval;
@@ -345,6 +511,7 @@ struct Runner {
     evaluations: usize,
     accepted: usize,
     last_refusal: Option<SourcePlasticWearError>,
+    prescribed_speeds_m_per_s: Option<Vec<f64>>,
 }
 impl Runner {
     fn budget_error(&self) -> WearIntegrationError {
@@ -358,10 +525,13 @@ impl Runner {
         &mut self,
         before: &SourcePlasticWearState,
         slip: &[f64],
+        duration_s: Option<f64>,
         cx: &Cx<'_>,
         step: &mut impl FnMut(
             &SourcePlasticWearState,
             &[f64],
+            Option<f64>,
+            Option<&[f64]>,
         ) -> Result<SourcePlasticWearAdvance, SourcePlasticWearError>,
     ) -> Result<Option<SourcePlasticWearAdvance>, WearIntegrationError> {
         checkpoint(cx)?;
@@ -369,7 +539,12 @@ impl Runner {
             return Err(self.budget_error());
         }
         self.evaluations += 1;
-        match step(before, slip) {
+        match step(
+            before,
+            slip,
+            duration_s,
+            self.prescribed_speeds_m_per_s.as_deref(),
+        ) {
             Ok(advance) => Ok(Some(advance)),
             Err(error) if retryable(&error) => {
                 checkpoint(cx)?;

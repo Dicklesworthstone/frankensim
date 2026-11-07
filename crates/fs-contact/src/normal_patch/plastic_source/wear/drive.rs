@@ -142,6 +142,38 @@ impl SourcePlasticArchardWear {
         Ok(SourcePlasticWearDriveAdvance { wear, drive })
     }
 
+    fn advance_wear_with_drive_at_speeds(
+        &self,
+        before: &SourcePlasticWearState,
+        local_unsigned_slip_m: &[f64],
+        duration_s: Option<f64>,
+        prescribed_speeds_m_per_s: &[f64],
+        drive: FiniteGapPlasticDrive,
+        controls: FiniteGapPlasticLoadControls,
+        cx: &Cx<'_>,
+    ) -> Result<SourcePlasticWearDriveAdvance, SourcePlasticWearError> {
+        self.admit(before)?;
+        checkpoint(cx)?;
+        self.contact.admit_load_controls(controls)?;
+        let (wear, drive) = self.advance_wear_at_pressure_and_speeds_with_recession(
+            before,
+            before.contact.contact_state().pressure_pa(),
+            local_unsigned_slip_m,
+            duration_s,
+            Some(prescribed_speeds_m_per_s),
+            cx,
+            |increment| {
+                let response = self
+                    .contact
+                    .model()
+                    .recede_with_drive(&before.contact.contact, increment, drive, controls, cx)
+                    .map_err(SourcePlasticDriveError::from)?;
+                Ok((response.continuation, response.drive))
+            },
+        )?;
+        Ok(SourcePlasticWearDriveAdvance { wear, drive })
+    }
+
     /// Integrate a complete local sliding path with finite-stiffness load feedback.
     ///
     /// The same error-controlled driver used for fixed approach and force
@@ -158,12 +190,81 @@ impl SourcePlasticArchardWear {
         controls: WearIntegrationControls,
         cx: &Cx<'_>,
     ) -> Result<IntegratedWearAdvance, WearIntegrationError> {
+        self.integrate_wear_with_drive_over_interval(
+            before,
+            total_local_slip_m,
+            None,
+            drive,
+            drive_controls,
+            controls,
+            cx,
+        )
+    }
+
+    /// Integrate timed local sliding with the loading-device position held fixed.
+    /// Subdivision retains each cell's actual speed while wear changes the spring load.
+    pub fn integrate_wear_with_drive_during(
+        &self,
+        before: &SourcePlasticWearState,
+        total_local_slip_m: &[f64],
+        duration_s: f64,
+        drive: FiniteGapPlasticDrive,
+        drive_controls: FiniteGapPlasticLoadControls,
+        controls: WearIntegrationControls,
+        cx: &Cx<'_>,
+    ) -> Result<IntegratedWearAdvance, WearIntegrationError> {
+        self.integrate_wear_with_drive_over_interval(
+            before,
+            total_local_slip_m,
+            Some(duration_s),
+            drive,
+            drive_controls,
+            controls,
+            cx,
+        )
+    }
+
+    fn integrate_wear_with_drive_over_interval(
+        &self,
+        before: &SourcePlasticWearState,
+        total_local_slip_m: &[f64],
+        duration_s: Option<f64>,
+        drive: FiniteGapPlasticDrive,
+        drive_controls: FiniteGapPlasticLoadControls,
+        controls: WearIntegrationControls,
+        cx: &Cx<'_>,
+    ) -> Result<IntegratedWearAdvance, WearIntegrationError> {
         self.contact
             .admit_load_controls(drive_controls)
             .map_err(SourcePlasticWearError::from)?;
-        self.integrate_wear_with(before, total_local_slip_m, controls, cx, |state, slip| {
-            self.advance_wear_with_drive(state, slip, drive, drive_controls, cx)
+        self.integrate_wear_with(
+            before,
+            total_local_slip_m,
+            duration_s,
+            controls,
+            cx,
+            |state, slip, duration, speeds| {
+                match speeds {
+                    Some(speeds) => self.advance_wear_with_drive_at_speeds(
+                        state,
+                        slip,
+                        duration,
+                        speeds,
+                        drive,
+                        drive_controls,
+                        cx,
+                    ),
+                    None => self.advance_wear_with_drive_over_interval(
+                        state,
+                        slip,
+                        duration,
+                        drive,
+                        drive_controls,
+                        cx,
+                    ),
+                }
                 .map(|advance| advance.wear)
-        })
+            },
+        )
     }
 }

@@ -479,6 +479,33 @@ impl SourcePlasticArchardWear {
         .map(|(advance, ())| advance)
     }
 
+    fn advance_wear_at_speeds(
+        &self,
+        before: &SourcePlasticWearState,
+        local_unsigned_slip_m: &[f64],
+        duration_s: Option<f64>,
+        prescribed_speeds_m_per_s: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<SourcePlasticWearAdvance, SourcePlasticWearError> {
+        self.advance_wear_at_pressure_and_speeds_with_recession(
+            before,
+            before.contact.contact_state().pressure_pa(),
+            local_unsigned_slip_m,
+            duration_s,
+            Some(prescribed_speeds_m_per_s),
+            cx,
+            |increment| {
+                let geometry = self
+                    .contact
+                    .model()
+                    .recede(&before.contact.contact, increment, cx)
+                    .map_err(SourcePlasticContactError::from)?;
+                Ok((geometry, ()))
+            },
+        )
+        .map(|(advance, ())| advance)
+    }
+
     // The native boundary condition changes the equilibrium solve, not the
     // Archard law, source ownership, volume/profile accounting, or admissibility.
     // A trial geometry is accepted only with the complete per-body inventory.
@@ -518,6 +545,30 @@ impl SourcePlasticArchardWear {
         )
             -> Result<(FiniteGapPlasticContinuation, T), SourcePlasticWearError>,
     ) -> Result<(SourcePlasticWearAdvance, T), SourcePlasticWearError> {
+        self.advance_wear_at_pressure_and_speeds_with_recession(
+            before,
+            pressure,
+            local_unsigned_slip_m,
+            duration_s,
+            None,
+            cx,
+            equilibrate,
+        )
+    }
+
+    fn advance_wear_at_pressure_and_speeds_with_recession<T>(
+        &self,
+        before: &SourcePlasticWearState,
+        pressure: &[f64],
+        local_unsigned_slip_m: &[f64],
+        duration_s: Option<f64>,
+        prescribed_speeds_m_per_s: Option<&[f64]>,
+        cx: &Cx<'_>,
+        equilibrate: impl FnOnce(
+            &[f64],
+        )
+            -> Result<(FiniteGapPlasticContinuation, T), SourcePlasticWearError>,
+    ) -> Result<(SourcePlasticWearAdvance, T), SourcePlasticWearError> {
         self.admit(before)?;
         checkpoint(cx)?;
         if pressure.len() != before.contact.contact_state().pressure_pa().len()
@@ -533,8 +584,18 @@ impl SourcePlasticArchardWear {
                 "finite nonnegative local slip at every original cell",
             ));
         }
-        let sampled =
-            self.sample_local_coefficients(pressure, local_unsigned_slip_m, duration_s, cx)?;
+        let sampled = match prescribed_speeds_m_per_s {
+            Some(speeds) => self.sample_local_coefficients_at_speeds(
+                pressure,
+                local_unsigned_slip_m,
+                duration_s,
+                Some(speeds),
+                cx,
+            )?,
+            None => {
+                self.sample_local_coefficients(pressure, local_unsigned_slip_m, duration_s, cx)?
+            }
+        };
         let grid = self.contact.model().config().grid;
         let area = grid.cell_width_m * grid.cell_depth_m;
         let mut increment = [vec![0.0; pressure.len()], vec![0.0; pressure.len()]];

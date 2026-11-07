@@ -2995,6 +2995,21 @@ cancellation govern the subdivision. This is an estimated local error
 controller around the existing first-order law, not a certified global error
 bound or a new second-order constitutive model.
 
+`integrate_wear_during`, `integrate_wear_at_load_during` and
+`integrate_wear_with_drive_during` also accept the positive physical duration of
+the prescribed path. Every full and half trial gets both its own local slip and
+elapsed time from the same path endpoints, preserving each cell's prescribed
+speed while pressure-dependent coefficients are resampled. Source queries use
+the fixed whole-segment `total_slip / duration` prepared once per cell; dividing
+rounded subinterval endpoints cannot move a supported speed outside its claim.
+Actual trial slip and time still govern motion and accounting. Refinement never
+changes the physical speed or uses the entire duration for a shorter trial,
+and source bounds are never widened or snapped to a nearby supported speed.
+Invalid durations refuse even for zero sliding; a zero path needs no speed
+coverage. Unrepresentable positive time subdivisions refuse with the same
+atomic resolution limit as lost slip increments. Variable speeds and evolving
+source temperatures require successive prescribed segments.
+
 Only accepted substeps contribute removed volumes, pressure-weighted sliding,
 plastic work and the separate normal/recession work accounts. Rejected trials
 are discarded without changing the caller's state. The original source and
@@ -3006,8 +3021,13 @@ introduce a debris/heat model.
 Focused G1/G3 fixtures specify one-cell force/compliance, preserved dents,
 constant-load Archard volume and approach, separate boundary/parameter work,
 exponential pressure decay at fixed approach, pressure redistribution,
-refinement, retained source identity, and immutable refusal. These are synthetic
-model and implementation checks; experimental validation remains separate.
+refinement, retained source identity, and immutable refusal. Timed G1/G3 checks
+cover exact speed-dependent constant-load wear, distance/time subdivision, and
+nonlinear pressure-dependent decay against an independent scalar solution at
+held approach and spring position. Exact speed-support endpoints and one-ULP
+interior paths at nonbinary durations remain admitted under all three controls.
+These are synthetic model and implementation
+checks; experimental validation remains separate.
 
 
 ## Material changes at maintained load and a finite loading-device stiffness

@@ -153,4 +153,42 @@ impl SourcePlasticArchardWear {
         )?;
         Ok(SourcePlasticWearLoadAdvance { wear, load })
     }
+
+    pub(super) fn advance_wear_at_load_at_speeds(
+        &self,
+        before: &SourcePlasticWearState,
+        local_unsigned_slip_m: &[f64],
+        duration_s: Option<f64>,
+        prescribed_speeds_m_per_s: &[f64],
+        target_force_n: f64,
+        controls: FiniteGapPlasticLoadControls,
+        cx: &Cx<'_>,
+    ) -> Result<SourcePlasticWearLoadAdvance, SourcePlasticWearError> {
+        self.admit(before)?;
+        checkpoint(cx)?;
+        self.contact.admit_load_controls(controls)?;
+        let (wear, load) = self.advance_wear_at_pressure_and_speeds_with_recession(
+            before,
+            before.contact.contact_state().pressure_pa(),
+            local_unsigned_slip_m,
+            duration_s,
+            Some(prescribed_speeds_m_per_s),
+            cx,
+            |increment| {
+                let response = self
+                    .contact
+                    .model()
+                    .recede_at_load(
+                        &before.contact.contact,
+                        increment,
+                        target_force_n,
+                        controls,
+                        cx,
+                    )
+                    .map_err(SourcePlasticLoadError::from)?;
+                Ok((response.continuation, response.load))
+            },
+        )?;
+        Ok(SourcePlasticWearLoadAdvance { wear, load })
+    }
 }
