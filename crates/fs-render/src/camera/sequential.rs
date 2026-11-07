@@ -1,11 +1,11 @@
 //! Exact sequential refraction through an authored, rotationally symmetric lens.
 //!
 //! The sensor is at z=0 and light is traced backwards toward positive z. Each
-//! surface is a spherical cap (signed curvature) or a plane, with an explicit
+//! surface is a spherical cap, conic/even asphere or plane, with an explicit
 //! clear aperture and the material on its scene side. Exterior media may be
 //! authored explicitly; the original constructor retains index-one exteriors.
 //! Only the direct transmitted image is modeled: reflected
-//! ghosts, diffraction, aspheres and automatic focusing are separate models.
+//! ghosts, diffraction and automatic focusing are separate models.
 //!
 //! We sample the actual rear cap, not a guessed exit-pupil bounding box. The
 //! projected-area to sensor-solid-angle Jacobian retains obliquity and clipping
@@ -26,13 +26,16 @@ use fs_math::{dd::Dd, det};
 
 const LIGHT_M_S: f64 = 299_792_458.0;
 
-/// A sphere cap or plane, ordered from sensor to scene in a lens prescription.
+mod asphere;
+
+/// A rotationally symmetric surface, ordered from sensor to scene.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LensSurface {
     vertex_z_m: f64,
     curvature_per_m: f64,
     clear_radius_m: f64,
     medium_after: Option<DielectricGlass>,
+    asphere: Option<asphere::AsphericSurface>,
 }
 
 impl LensSurface {
@@ -61,9 +64,59 @@ impl LensSurface {
             curvature_per_m,
             clear_radius_m,
             medium_after,
+            asphere: None,
         };
         let edge = vertex_z_m + surface.sag(clear_radius_m * clear_radius_m);
         if !edge.is_finite() || edge <= 0.0 {
+            return Err(CameraError::InvalidSequentialLens);
+        }
+        Ok(surface)
+    }
+
+    /// An authored conic plus even-polynomial sag in SI metres:
+    /// `z(r)-vertex = c*r²/(1+sqrt(1-(1+k)*c²*r²)) + A4*r⁴ + ... + A16*r¹⁶`.
+    /// `c` is the vertex curvature [1/m], `k` the dimensionless conic constant,
+    /// and the seven coefficients have units m^-3, m^-5, ..., m^-15.
+    /// There is no quadratic departure term: the original paraxial reference
+    /// continues to use the actual vertex curvature. A zero departure and
+    /// zero conic constant retain the original sphere/plane arithmetic.
+    ///
+    /// Admission requires a finite single-valued conic over the clear disk
+    /// and conservative axial bounds wholly in front of the sensor. Pure
+    /// conics use analytic intersections. Polynomial rays use bounded,
+    /// safeguarded iteration after a global slope bound proves a unique
+    /// forward crossing; unqualified grazing/multiple-crossing cases refuse.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_aspheric(
+        vertex_z_m: f64,
+        curvature_per_m: f64,
+        conic_constant: f64,
+        even_coefficients: [f64; 7],
+        clear_radius_m: f64,
+        medium_after: Option<DielectricGlass>,
+    ) -> Result<Self, CameraError> {
+        if conic_constant == 0.0 && even_coefficients == [0.0; 7] {
+            return Self::try_new(vertex_z_m, curvature_per_m, clear_radius_m, medium_after);
+        }
+        if !vertex_z_m.is_finite() || vertex_z_m <= 0.0 {
+            return Err(CameraError::InvalidSequentialLens);
+        }
+        let asphere = asphere::AsphericSurface::try_new(
+            curvature_per_m,
+            conic_constant,
+            even_coefficients,
+            clear_radius_m,
+        )
+        .ok_or(CameraError::InvalidSequentialLens)?;
+        let surface = Self {
+            vertex_z_m,
+            curvature_per_m,
+            clear_radius_m,
+            medium_after,
+            asphere: Some(asphere),
+        };
+        let [low, high] = surface.bounds();
+        if !low.is_finite() || !high.is_finite() || low <= 0.0 {
             return Err(CameraError::InvalidSequentialLens);
         }
         Ok(surface)
@@ -78,23 +131,53 @@ impl LensSurface {
     pub const fn clear_radius_m(self) -> f64 {
         self.clear_radius_m
     }
+    /// Zero for the original spherical or planar surface.
+    pub const fn conic_constant(&self) -> f64 {
+        match &self.asphere {
+            Some(profile) => profile.conic_constant(),
+            None => 0.0,
+        }
+    }
+    /// Original SI A4 through A16 coefficients; all zero for a sphere/plane.
+    pub const fn even_aspheric_coefficients(&self) -> &[f64; 7] {
+        match &self.asphere {
+            Some(profile) => profile.even_coefficients(),
+            None => &[0.0; 7],
+        }
+    }
     pub const fn medium_after(&self) -> Option<&DielectricGlass> {
         self.medium_after.as_ref()
     }
 
-    fn sag(self, radius_squared: f64) -> f64 {
+    fn sag(&self, radius_squared: f64) -> f64 {
+        if let Some(profile) = &self.asphere {
+            return profile.sag(radius_squared);
+        }
         let c = self.curvature_per_m;
         // Rationalized sphere sag retains the plane limit for weak curvature.
         let numerator = c * radius_squared;
         numerator / (1.0 + det::sqrt((1.0 - c * numerator).max(0.0)))
     }
 
-    fn bounds(self) -> [f64; 2] {
+    fn bounds(&self) -> [f64; 2] {
+        if let Some(profile) = &self.asphere {
+            let [low, high] = profile.sag_bounds();
+            return [
+                (self.vertex_z_m + low).next_down(),
+                (self.vertex_z_m + high).next_up(),
+            ];
+        }
         let edge = self.vertex_z_m + self.sag(self.clear_radius_m * self.clear_radius_m);
         [self.vertex_z_m.min(edge), self.vertex_z_m.max(edge)]
     }
 
-    fn normal(self, p: Point3) -> Result<Vec3, CameraError> {
+    fn normal(&self, p: Point3) -> Result<Vec3, CameraError> {
+        if let Some(profile) = &self.asphere {
+            let [x, y, z] = profile
+                .normal([p.x, p.y])
+                .ok_or(CameraError::SequentialLensOutsideModel)?;
+            return super::scaled_unit(Vec3::new(x, y, z));
+        }
         super::scaled_unit(Vec3::new(
             self.curvature_per_m * p.x,
             self.curvature_per_m * p.y,
@@ -102,7 +185,17 @@ impl LensSurface {
         ))
     }
 
-    fn intersect(self, ray: Ray) -> Result<Option<(Point3, f64)>, CameraError> {
+    fn intersect(&self, ray: Ray) -> Result<Option<(Point3, f64)>, CameraError> {
+        if let Some(profile) = &self.asphere {
+            return profile
+                .intersect(
+                    self.vertex_z_m,
+                    [ray.origin.x, ray.origin.y, ray.origin.z],
+                    [ray.dir.x, ray.dir.y, ray.dir.z],
+                )
+                .map(|hit| hit.map(|(p, t)| (Point3::new(p[0], p[1], p[2]), t)))
+                .map_err(|()| CameraError::SequentialLensOutsideModel);
+        }
         let o = Vec3::new(ray.origin.x, ray.origin.y, ray.origin.z - self.vertex_z_m);
         let c = self.curvature_per_m;
         let mut roots = [f64::INFINITY; 2];
@@ -786,7 +879,7 @@ impl PhysicalCamera {
             .sequential_lens
             .as_ref()
             .ok_or(CameraError::InvalidSequentialLens)?;
-        let rear = lens.surfaces()[0];
+        let rear = &lens.surfaces()[0];
         let sensor = Point3::new(-x_tan * rear.vertex_z_m, -y_tan * rear.vertex_z_m, 0.0);
         let [x, y] = self.aperture.sample(lens_sample);
         let target = Point3::new(x, y, rear.vertex_z_m + rear.sag(x * x + y * y));

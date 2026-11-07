@@ -8,7 +8,7 @@
 //! dispersion. Explicit pupil-wave queries also preserve coherent and partially
 //! coherent illumination on one authored pupil-plane phase reference. Jones fields
 //! retain both polarizations and full point/finite-pixel Stokes on that same pupil. With
-//! `tracer`, an explicit sequential spherical/planar prescription instead traces
+//! `tracer`, an explicit sequential spherical/aspheric/planar prescription traces
 //! real glass thickness, aperture clipping, chromatic and surface aberrations,
 //! Fresnel loss and absorption. Its eye is the sensor centre and its rays carry
 //! wavelength-specific weights. Rolling shutter and autofocus remain separate.
@@ -306,7 +306,7 @@ impl CameraError {
                 CameraFix {
                     rank: 1,
                     code: "admit_sequential_lens",
-                    message: "use ordered nonoverlapping spherical or planar surfaces, source-supported glass, a fixed sensor, and weighted wavelength-specific direct rays",
+                    message: "use ordered nonoverlapping spherical, aspheric or planar surfaces, source-supported glass, a fixed sensor, and weighted wavelength-specific direct rays",
                 },
             ],
             Self::EmptyShot => EMPTY_SHOT,

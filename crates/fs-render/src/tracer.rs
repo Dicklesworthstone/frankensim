@@ -10059,6 +10059,17 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
             update_continuity_f64s(hasher, [
                 surface.vertex_z_m(), surface.curvature_per_m(), surface.clear_radius_m(),
             ]);
+            let coefficients = surface.even_aspheric_coefficients();
+            if surface.conic_constant() != 0.0 || coefficients.iter().any(|&v| v != 0.0) {
+                // A change in off-axis sag changes refraction even when the
+                // paraxial focal length and all materials remain identical.
+                // Keep the original spherical prescription's bytes intact.
+                hasher.update(b"native-sequential-even-asphere.v1");
+                update_continuity_f64(hasher, surface.conic_constant());
+                for &coefficient in coefficients.iter() {
+                    update_continuity_f64(hasher, coefficient);
+                }
+            }
             if let Some(glass) = surface.medium_after() {
                 hasher.update(&[1]);
                 hasher.update(Material::Dielectric {
@@ -17433,6 +17444,10 @@ fn instance_object_id(shape: &Shape) -> Option<u64> {
         Shape::Mesh(_) | Shape::Chart(_) => None,
     }
 }
+
+#[cfg(test)]
+#[path = "tracer/aspheric_lens_tests.rs"]
+mod aspheric_lens_tests;
 
 #[cfg(test)]
 mod tests {
