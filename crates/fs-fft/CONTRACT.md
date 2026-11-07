@@ -950,6 +950,65 @@ quiet fields and exact product residuals, preflight work/storage refusal,
 coefficient caching and transactional cancellation/replay. These are numerical
 regressions, not an arbitrary-null relative-error certificate.
 
+### Reference-assisted interference transfer and held-out residuals
+
+`WelchCrossSpectrum::fit_reference_transfer` learns a complex per-bin map
+from explicitly selected reference channels to one or more separate targets.
+It minimizes the segment-factor residual of
+`target = sum(gain * reference)` in the original negative-time convention,
+with no implicit gain conjugation. The immutable `WelchReferenceTransfer`
+retains DD gains, original channel order, numerical ranks and training segment
+count. It can be applied unchanged to a compatible held-out record through
+`residual_spectrum`; that record may contain a different number of segments.
+
+The fit uses pivoted modified Gram-Schmidt with repeated projection, directly
+on the original factor columns. Each nonzero reference is normalized before
+rank selection, so changing reference units does not discard an independent
+weak channel. The caller supplies a relative residual-norm tolerance in (0,1);
+it controls numerical rank, not a physical noise floor. Zero and dependent
+channels contribute no new direction. Rank-deficient cases return a
+deterministic basic solution, without a minimum-norm or source-identifiability
+claim. Neither a channel covariance matrix nor its inverse is constructed.
+
+Application computes `target - sum(gain * reference)` on every segment
+factor before any power contraction. DD products and sums retain small
+residuals which subtraction of rounded predicted/total power would erase.
+All output cross spectra therefore retain the original PSD factorization,
+Welch normalization, bin widths, clock, endpoint reality and tail accounting.
+The same physical peak-bin owners can observe those residuals. Training and
+application share the exact channel layout, Welch configuration and sample
+interval; channel identities, units and physical interpretation remain caller
+responsibilities.
+
+`reference_fit_requirements` reports the full-rank conservative work bound,
+retained coefficients and peak reusable QR storage. For M references, T
+targets and S segments, scratch is O(M*S + M²), retained gains are
+O(bins*T*M), and fitting work is O(bins*(M²*S + T*M*S + T*M²)).
+The complete output/model and scratch are admitted before allocation.
+Application admits only its new factors and reference products and performs
+no new FFT or refit. Cancellation polls at most every 256 vector/algebra
+entries. Invalid sets, incompatible records, arithmetic range loss and budget
+refusals publish no partial result. Across-segment normalization refuses to
+erase a nonzero component outside its representable range; an absent
+reference subspace leaves even a wide-range target untouched.
+
+This is a finite-record linear prediction/measurement operation. It does not
+establish that correlated content is unwanted, recover physical independent
+sources, implement a causal time-domain filter, deconvolve taper leakage,
+supply cross-frequency covariance or confer statistical confidence.
+Same-record fitting can overfit; a one-segment fit can cancel its training
+factor while failing on independent data. Model selection and physical
+stationarity must be justified separately.
+
+Seven focused new tests and all 26 existing Welch/transfer tests pass using
+the original current FFT core, exact-length owner, streaming owner and
+SIMD/math dependencies. They cover real-record complex-gain recovery and
+held-out multichannel cross spectra, dependent/zero/rescaled references,
+quiet residual power, nearly parallel references and rank choice, endpoint
+phase laws, single-segment overfit, work/storage admission, range refusal,
+cancellation and exact replay. This native execution does not replace the
+unavailable full Cargo/DSR workspace gate.
+
 ### Shared physical-bin admission for propagation owners
 
 `peak_bin_hz` and `peak_bin_rad_s` borrow a `WelchPeakBin` without copying its
