@@ -487,6 +487,417 @@ fn diffusion_controls(
     }
 }
 
+fn adaptive_diffusion_controls(
+    edges: usize,
+) -> super::super::surfactant::diffusion::adaptive::AdaptiveSurfaceDiffusionControls {
+    super::super::surfactant::diffusion::adaptive::AdaptiveSurfaceDiffusionControls {
+        initial_step_s: 0.02,
+        minimum_step_s: 1e-10,
+        maximum_step_s: 0.02,
+        absolute_concentration_tolerance_mol_m2: 1e-9,
+        relative_tolerance: 1e-7,
+        maximum_trials: 1_000,
+        maximum_pair_exchanges: 15_000,
+        maximum_faces: 4,
+        maximum_edges: edges,
+        amount_tolerance_mol: 1e-13,
+        energy_increase_tolerance_j: 1e-13,
+    }
+}
+
+#[test]
+fn adaptive_partitioned_motion_uses_solved_areas_and_independent_exact_pair_flows() {
+    use super::super::surfactant::{SurfactantFace, diffusion::SurfacePartitionDiffusionEdge};
+    use super::surfactant_transport::AdaptiveSurfacePartitionedSurfactantTransport;
+    let (q, faces, masses, _) = tetrahedron();
+    let velocity = q.map(|p| p.map(|x| 0.8 * x));
+    let model = CapillarySurfaceDynamics::try_new(&masses, &faces, 4, 4).unwrap();
+    let laws = partition_laws(false);
+    let original_amounts = [0.02, 0.07, 0.03, 0.05];
+    let coating = |amounts: [f64; 4]| {
+        core::array::from_fn::<_, 4, _>(|i| SurfactantFace {
+            law: laws[i],
+            amount_mol: amounts[i],
+        })
+    };
+    let areas = |p: &[Vector]| {
+        core::array::from_fn::<_, 4, _>(|i| geometry(faces[i].map(|j| p[j])).unwrap().area)
+    };
+    // This exact two-reservoir solution is independent of the production pair
+    // map and controller. References set chemical capacities, not raw area.
+    let exact_pair = |amounts: [f64; 4], area: [f64; 4], duration: f64| {
+        let capacity = [0.4 * area[0], 0.8 * area[1]];
+        let total = amounts[0] + amounts[1];
+        let equilibrium = total * capacity[0] / (capacity[0] + capacity[1]);
+        let decay = (-0.7 * (1.0 / capacity[0] + 1.0 / capacity[1]) * duration).exp();
+        let first = equilibrium + (amounts[0] - equilibrium) * decay;
+        [first, total - first, amounts[2], amounts[3]]
+    };
+    let storage = |p: &[Vector], amounts: [f64; 4]| {
+        coating(amounts)
+            .into_iter()
+            .zip(areas(p))
+            .map(|(face, area)| face.at_area(area).unwrap().free_energy_j)
+            .sum::<f64>()
+    };
+    let inviscid = SurfaceViscosityField::Uniform(SurfaceViscosity::ZERO);
+    let external = [[0.0; 3]; 4];
+    let initial = model
+        .initial_state_surfactant(
+            0.0,
+            &q,
+            &velocity,
+            SurfactantField::PerFace(&coating(original_amounts)),
+            inviscid,
+            &external,
+        )
+        .unwrap();
+    let initial_energy = kinetic(&masses, &initial.v).unwrap() + storage(&q, original_amounts);
+    let dt = 0.03;
+    let intermediate_amounts = exact_pair(original_amounts, areas(&q), 0.5 * dt);
+    let mut reference = initial.clone();
+    model
+        .advance_surfactant(
+            &mut reference,
+            SurfactantField::PerFace(&coating(intermediate_amounts)),
+            inviscid,
+            &external,
+            dt,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    let expected = exact_pair(
+        intermediate_amounts,
+        areas(&positions(&reference)),
+        0.5 * dt,
+    );
+    let held_area = exact_pair(original_amounts, areas(&q), dt);
+    assert!((expected[0] - held_area[0]).abs() > 1e-7);
+
+    let mut state = initial;
+    let mut amounts = original_amounts;
+    let mut adaptive = adaptive_diffusion_controls(1);
+    adaptive.maximum_trials = 2;
+    adaptive.maximum_pair_exchanges = 6;
+    let report = model
+        .advance_partitioned_surfactant_diffusive_adaptive(
+            &mut state,
+            &mut amounts,
+            AdaptiveSurfacePartitionedSurfactantTransport {
+                laws: &laws,
+                edges: &[SurfacePartitionDiffusionEdge {
+                    faces: [0, 1],
+                    conductance_mol_s: 0.7,
+                }],
+                controls: adaptive,
+            },
+            inviscid,
+            &external,
+            dt,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    for (&actual, expected) in amounts.iter().zip(expected) {
+        close(actual, expected, 5e-13);
+    }
+    for (actual, expected) in state
+        .q
+        .iter()
+        .zip(&reference.q)
+        .chain(state.v.iter().zip(&reference.v))
+    {
+        close(*actual, *expected, 5e-12);
+    }
+    close(amounts.iter().sum(), original_amounts.iter().sum(), 2e-14);
+    assert!(amounts.iter().all(|n| *n > 0.0));
+    close(
+        kinetic(&masses, &state.v).unwrap()
+            + storage(&positions(&state), amounts)
+            + report.coupled.diffusion_free_energy_dissipation_j,
+        initial_energy,
+        3e-11,
+    );
+    assert_eq!(report.total_trials, 2);
+    assert_eq!(report.total_evaluated_pair_exchanges, 6);
+    assert_eq!(report.diffusion_before.evaluated_pair_exchanges, 3);
+    assert_eq!(report.diffusion_after.evaluated_pair_exchanges, 3);
+    assert_eq!(
+        report.coupled.diffusion_before,
+        report.diffusion_before.diffusion
+    );
+    assert_eq!(
+        report.coupled.diffusion_after,
+        report.diffusion_after.diffusion
+    );
+}
+
+#[test]
+fn adaptive_partition_equilibrium_moves_without_spurious_chemical_redistribution() {
+    use super::super::surfactant::{SurfactantFace, diffusion::SurfacePartitionDiffusionEdge};
+    use super::surfactant_transport::AdaptiveSurfacePartitionedSurfactantTransport;
+    let (q, faces, masses, _) = tetrahedron();
+    let model = CapillarySurfaceDynamics::try_new(&masses, &faces, 4, 4).unwrap();
+    let translation = [0.2, -0.1, 0.3];
+    let velocity = [translation; 4];
+    let inviscid = SurfaceViscosityField::Uniform(SurfaceViscosity::ZERO);
+    let edges = core::array::from_fn::<_, 3, _>(|i| SurfacePartitionDiffusionEdge {
+        faces: [i, i + 1],
+        conductance_mol_s: 1e6,
+    });
+    for langmuir in [false, true] {
+        let laws = partition_laws(langmuir);
+        let references = [0.4, 0.8, 1.2, 0.6];
+        let original_amounts = core::array::from_fn::<_, 4, _>(|i| {
+            geometry(faces[i].map(|j| q[j])).unwrap().area * references[i] * 0.05
+        });
+        let coating = core::array::from_fn::<_, 4, _>(|i| SurfactantFace {
+            law: laws[i],
+            amount_mol: original_amounts[i],
+        });
+        // Balance the actual capillary forces to isolate rigid translation.
+        // These unequal concentrations have equal activity/occupancy.
+        let external: Vec<_> =
+            assemble_surfactant_step(&q, &q, &faces, SurfactantField::PerFace(&coating))
+                .unwrap()
+                .forces_n
+                .into_iter()
+                .map(|f| f.map(|x| -x))
+                .collect();
+        let mut state = model
+            .initial_state_surfactant(
+                0.0,
+                &q,
+                &velocity,
+                SurfactantField::PerFace(&coating),
+                inviscid,
+                &external,
+            )
+            .unwrap();
+        let mut amounts = original_amounts;
+        let report = model
+            .advance_partitioned_surfactant_diffusive_adaptive(
+                &mut state,
+                &mut amounts,
+                AdaptiveSurfacePartitionedSurfactantTransport {
+                    laws: &laws,
+                    edges: &edges,
+                    controls: adaptive_diffusion_controls(3),
+                },
+                inviscid,
+                &external,
+                0.02,
+                controls(),
+                || false,
+            )
+            .unwrap();
+        for i in 0..4 {
+            close(amounts[i], original_amounts[i], 3e-14);
+            for d in 0..3 {
+                close(state.q[3 * i + d], q[i][d] + 0.02 * translation[d], 5e-12);
+            }
+        }
+        close(
+            report.coupled.diffusion_free_energy_dissipation_j,
+            0.0,
+            3e-14,
+        );
+        assert_eq!(report.total_trials, 2);
+        assert_eq!(report.total_evaluated_pair_exchanges, 30);
+    }
+}
+
+#[test]
+fn adaptive_empty_graph_recovers_native_mechanics_without_consuming_pair_or_trial_budget() {
+    use super::surfactant_transport::AdaptiveSurfaceSurfactantTransport;
+    let (q, faces, masses, velocity) = tetrahedron();
+    let model = CapillarySurfaceDynamics::try_new(&masses, &faces, 4, 4).unwrap();
+    let law = partition_laws(false)[0];
+    let original_amounts = [0.02, 0.07, 0.03, 0.05];
+    let coating = SurfactantField::Uniform {
+        law,
+        amounts_mol: &original_amounts,
+    };
+    let inviscid = SurfaceViscosityField::Uniform(SurfaceViscosity::ZERO);
+    let external = [[0.0; 3]; 4];
+    let mut reference = model
+        .initial_state_surfactant(0.0, &q, &velocity, coating, inviscid, &external)
+        .unwrap();
+    let mut state = reference.clone();
+    model
+        .advance_surfactant(
+            &mut reference,
+            coating,
+            inviscid,
+            &external,
+            0.005,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    let mut adaptive = adaptive_diffusion_controls(0);
+    adaptive.maximum_trials = 1;
+    adaptive.maximum_pair_exchanges = 0;
+    let mut amounts = original_amounts;
+    let report = model
+        .advance_surfactant_diffusive_adaptive(
+            &mut state,
+            &mut amounts,
+            AdaptiveSurfaceSurfactantTransport {
+                law,
+                edges: &[],
+                controls: adaptive,
+            },
+            inviscid,
+            &external,
+            0.005,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    assert_eq!(state, reference);
+    assert_eq!(amounts, original_amounts);
+    assert_eq!(report.total_trials, 0);
+    assert_eq!(report.total_evaluated_pair_exchanges, 0);
+    assert_eq!(report.coupled.diffusion_free_energy_dissipation_j, 0.0);
+}
+
+#[test]
+fn adaptive_work_is_shared_across_motion_and_late_refusals_preserve_both_states() {
+    use super::super::surfactant::{
+        SurfactantFace,
+        diffusion::{SurfacePartitionDiffusionEdge, adaptive::AdaptiveSurfaceDiffusionError},
+    };
+    use super::surfactant_transport::{
+        AdaptiveSurfacePartitionedSurfactantTransport, SurfaceDiffusionPhase,
+    };
+    let (q, faces, masses, velocity) = tetrahedron();
+    let model = CapillarySurfaceDynamics::try_new(&masses, &faces, 4, 4).unwrap();
+    let laws = partition_laws(false);
+    let original_amounts = [0.02, 0.07, 0.03, 0.05];
+    let coating = core::array::from_fn::<_, 4, _>(|i| SurfactantFace {
+        law: laws[i],
+        amount_mol: original_amounts[i],
+    });
+    let inviscid = SurfaceViscosityField::Uniform(SurfaceViscosity::ZERO);
+    let external = [[0.0; 3]; 4];
+    let mut initial = model
+        .initial_state_surfactant(
+            0.0,
+            &q,
+            &velocity,
+            SurfactantField::PerFace(&coating),
+            inviscid,
+            &external,
+        )
+        .unwrap();
+    model
+        .advance_surfactant(
+            &mut initial,
+            SurfactantField::PerFace(&coating),
+            inviscid,
+            &external,
+            0.005,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    assert!(!initial.history.is_empty());
+    let edges = core::array::from_fn::<_, 3, _>(|i| SurfacePartitionDiffusionEdge {
+        faces: [i, i + 1],
+        conductance_mol_s: [30.0, 20.0, 40.0][i],
+    });
+    let adaptive = adaptive_diffusion_controls(3);
+    let transport = AdaptiveSurfacePartitionedSurfactantTransport {
+        laws: &laws,
+        edges: &edges,
+        controls: adaptive,
+    };
+    let mut state = initial.clone();
+    let mut amounts = original_amounts;
+    let mut calls = 0;
+    let report = model
+        .advance_partitioned_surfactant_diffusive_adaptive(
+            &mut state,
+            &mut amounts,
+            transport,
+            inviscid,
+            &external,
+            0.02,
+            controls(),
+            || {
+                calls += 1;
+                false
+            },
+        )
+        .unwrap();
+    assert!(report.diffusion_before.rejected_intervals > 0);
+    assert!(report.diffusion_after.accepted_intervals > 1);
+    for restrict_trials in [true, false] {
+        let mut limited = adaptive;
+        if restrict_trials {
+            limited.maximum_trials = report.total_trials - 1;
+        } else {
+            limited.maximum_pair_exchanges = report.total_evaluated_pair_exchanges - 1;
+        }
+        let mut retry = initial.clone();
+        let mut retry_amounts = original_amounts;
+        let result = model.advance_partitioned_surfactant_diffusive_adaptive(
+            &mut retry,
+            &mut retry_amounts,
+            AdaptiveSurfacePartitionedSurfactantTransport {
+                controls: limited,
+                ..transport
+            },
+            inviscid,
+            &external,
+            0.02,
+            controls(),
+            || false,
+        );
+        match result {
+            Err(SurfaceDynamicsError::AdaptiveDiffusion {
+                phase: SurfaceDiffusionPhase::AfterMotion,
+                error: AdaptiveSurfaceDiffusionError::TrialBudget { completed_trials },
+            }) if restrict_trials => assert_eq!(completed_trials, limited.maximum_trials),
+            Err(SurfaceDynamicsError::AdaptiveDiffusion {
+                phase: SurfaceDiffusionPhase::AfterMotion,
+                error:
+                    AdaptiveSurfaceDiffusionError::PairExchangeBudget {
+                        completed,
+                        required,
+                    },
+            }) if !restrict_trials => {
+                assert!(completed >= report.diffusion_before.evaluated_pair_exchanges);
+                assert!(completed + required > limited.maximum_pair_exchanges);
+            }
+            other => panic!("expected shared final-half budget refusal, got {other:?}"),
+        }
+        assert_eq!(retry, initial);
+        assert_eq!(retry_amounts, original_amounts);
+    }
+    let mut retry = initial.clone();
+    let mut retry_amounts = original_amounts;
+    let mut current = 0;
+    let result = model.advance_partitioned_surfactant_diffusive_adaptive(
+        &mut retry,
+        &mut retry_amounts,
+        transport,
+        inviscid,
+        &external,
+        0.02,
+        controls(),
+        || {
+            current += 1;
+            current == calls
+        },
+    );
+    assert!(matches!(result, Err(SurfaceDynamicsError::Cancelled)));
+    assert_eq!(retry, initial);
+    assert_eq!(retry_amounts, original_amounts);
+}
+
 #[test]
 fn moving_partitioned_coating_preserves_original_energy_amount_and_momentum() {
     use super::super::surfactant::{SurfactantFace, diffusion::SurfacePartitionDiffusionEdge};

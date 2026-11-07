@@ -18,8 +18,13 @@ use super::super::surfactant::{
     SurfactantFace, SurfactantLaw,
     diffusion::{
         SurfaceDiffusionControls, SurfaceDiffusionEdge, SurfaceDiffusionReport,
-        SurfacePartitionDiffusionEdge, diffuse_partitioned_surface_surfactant,
-        diffuse_surface_surfactant,
+        SurfacePartitionDiffusionEdge,
+        adaptive::{
+            AdaptiveSurfaceDiffusionControls, AdaptiveSurfaceDiffusionError,
+            AdaptiveSurfaceDiffusionReport, diffuse_partitioned_surface_surfactant_adaptive,
+            diffuse_surface_surfactant_adaptive,
+        },
+        diffuse_partitioned_surface_surfactant, diffuse_surface_surfactant,
     },
 };
 use super::*;
@@ -48,10 +53,122 @@ pub struct SurfacePartitionedSurfactantTransport<'a> {
     pub controls: SurfaceDiffusionControls,
 }
 
+/// A homogeneous coating with controlled internal diffusion splitting error.
+#[derive(Clone, Copy, Debug)]
+pub struct AdaptiveSurfaceSurfactantTransport<'a> {
+    pub law: SurfactantLaw,
+    pub edges: &'a [SurfaceDiffusionEdge],
+    /// Trial and pair budgets cover BOTH diffusion halves, including rejected
+    /// and coarse evaluations. Concentration tolerances control each accepted
+    /// internal interval, not the mechanical/composition time error.
+    pub controls: AdaptiveSurfaceDiffusionControls,
+}
+
+/// Original per-face laws with adaptively resolved partition diffusion.
+#[derive(Clone, Copy, Debug)]
+pub struct AdaptiveSurfacePartitionedSurfactantTransport<'a> {
+    pub laws: &'a [SurfactantLaw],
+    pub edges: &'a [SurfacePartitionDiffusionEdge],
+    /// One combined work budget and physical allowance for both halves.
+    /// Mechanical and diffusion/motion composition errors still require
+    /// independent refinement of the caller's macro time step.
+    pub controls: AdaptiveSurfaceDiffusionControls,
+}
+
+/// Which held-geometry diffusion interval refused the atomic composition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SurfaceDiffusionPhase {
+    BeforeMotion,
+    AfterMotion,
+}
+
 #[derive(Clone, Copy)]
 enum Transport<'a> {
     Uniform(SurfaceSurfactantTransport<'a>),
     Partitioned(SurfacePartitionedSurfactantTransport<'a>),
+    AdaptiveUniform(AdaptiveSurfaceSurfactantTransport<'a>),
+    AdaptivePartitioned(AdaptiveSurfacePartitionedSurfactantTransport<'a>),
+}
+
+struct DiffusionStageReport {
+    physical: SurfaceDiffusionReport,
+    adaptive: Option<AdaptiveSurfaceDiffusionReport>,
+}
+
+#[derive(Default)]
+struct AdaptiveWork {
+    trials: usize,
+    pair_exchanges: usize,
+}
+
+impl AdaptiveWork {
+    fn stage(
+        &mut self,
+        controls: AdaptiveSurfaceDiffusionControls,
+        phase: SurfaceDiffusionPhase,
+        advance: impl FnOnce(
+            AdaptiveSurfaceDiffusionControls,
+        )
+            -> Result<AdaptiveSurfaceDiffusionReport, AdaptiveSurfaceDiffusionError>,
+    ) -> Result<DiffusionStageReport, SurfaceDynamicsError> {
+        let refusal = |error| SurfaceDynamicsError::AdaptiveDiffusion { phase, error };
+        // Preserve the source's initial control validation when the original
+        // trial cap is zero. Exhaustion after a successful half is a budget
+        // refusal, not an invalid-control error from passing zero downstream.
+        if self.trials > 0 && self.trials == controls.maximum_trials {
+            return Err(refusal(AdaptiveSurfaceDiffusionError::TrialBudget {
+                completed_trials: self.trials,
+            }));
+        }
+        let mut remaining = controls;
+        remaining.maximum_trials = controls.maximum_trials.checked_sub(self.trials).ok_or(
+            SurfaceDynamicsError::Invalid("adaptive trial accounting exceeded its budget"),
+        )?;
+        remaining.maximum_pair_exchanges = controls
+            .maximum_pair_exchanges
+            .checked_sub(self.pair_exchanges)
+            .ok_or(SurfaceDynamicsError::Invalid(
+                "adaptive pair accounting exceeded its budget",
+            ))?;
+        let report = match advance(remaining) {
+            Ok(report) => report,
+            Err(AdaptiveSurfaceDiffusionError::TrialBudget { completed_trials }) => {
+                return Err(refusal(AdaptiveSurfaceDiffusionError::TrialBudget {
+                    completed_trials: self.trials.checked_add(completed_trials).ok_or(
+                        SurfaceDynamicsError::Invalid("adaptive trial count overflow"),
+                    )?,
+                }));
+            }
+            Err(AdaptiveSurfaceDiffusionError::PairExchangeBudget {
+                completed,
+                required,
+            }) => {
+                return Err(refusal(AdaptiveSurfaceDiffusionError::PairExchangeBudget {
+                    completed: self.pair_exchanges.checked_add(completed).ok_or(
+                        SurfaceDynamicsError::Invalid("adaptive pair count overflow"),
+                    )?,
+                    required,
+                }));
+            }
+            Err(error) => return Err(refusal(error)),
+        };
+        self.trials =
+            self.trials
+                .checked_add(report.trials)
+                .ok_or(SurfaceDynamicsError::Invalid(
+                    "adaptive trial count overflow",
+                ))?;
+        self.pair_exchanges = self
+            .pair_exchanges
+            .checked_add(report.evaluated_pair_exchanges)
+            .ok_or(SurfaceDynamicsError::Invalid(
+                "adaptive pair count overflow",
+            ))?;
+        Ok(DiffusionStageReport {
+            physical: report.diffusion,
+            adaptive: Some(report),
+        })
+    }
 }
 
 impl Transport<'_> {
@@ -60,9 +177,11 @@ impl Transport<'_> {
         areas: &[f64],
         amounts: &mut [f64],
         duration_s: f64,
+        phase: SurfaceDiffusionPhase,
+        work: &mut AdaptiveWork,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<SurfaceDiffusionReport, SurfaceDiffusionError> {
-        match self {
+    ) -> Result<DiffusionStageReport, SurfaceDynamicsError> {
+        let physical = match self {
             Self::Uniform(transport) => diffuse_surface_surfactant(
                 transport.law,
                 areas,
@@ -71,7 +190,7 @@ impl Transport<'_> {
                 duration_s,
                 transport.controls,
                 cancelled,
-            ),
+            )?,
             Self::Partitioned(transport) => diffuse_partitioned_surface_surfactant(
                 transport.laws,
                 areas,
@@ -80,8 +199,38 @@ impl Transport<'_> {
                 duration_s,
                 transport.controls,
                 cancelled,
-            ),
-        }
+            )?,
+            Self::AdaptiveUniform(transport) => {
+                return work.stage(transport.controls, phase, |remaining| {
+                    diffuse_surface_surfactant_adaptive(
+                        transport.law,
+                        areas,
+                        amounts,
+                        transport.edges,
+                        duration_s,
+                        remaining,
+                        cancelled,
+                    )
+                });
+            }
+            Self::AdaptivePartitioned(transport) => {
+                return work.stage(transport.controls, phase, |remaining| {
+                    diffuse_partitioned_surface_surfactant_adaptive(
+                        transport.laws,
+                        areas,
+                        amounts,
+                        transport.edges,
+                        duration_s,
+                        remaining,
+                        cancelled,
+                    )
+                });
+            }
+        };
+        Ok(DiffusionStageReport {
+            physical,
+            adaptive: None,
+        })
     }
 }
 
@@ -106,6 +255,57 @@ pub struct SurfaceSurfactantReport {
     pub amount_defect_mol: f64,
     /// Delta K + delta E_surface + viscous loss + diffusion loss - external work [J].
     pub energy_residual_j: f64,
+}
+
+/// One physical coupled account and the actual adaptive work in both halves.
+#[derive(Clone, Debug)]
+pub struct AdaptiveSurfaceSurfactantReport {
+    pub coupled: SurfaceSurfactantReport,
+    pub diffusion_before: AdaptiveSurfaceDiffusionReport,
+    pub diffusion_after: AdaptiveSurfaceDiffusionReport,
+    /// All comparisons in both halves, including rejected comparisons.
+    pub total_trials: usize,
+    /// Coarse, accepted and rejected pair applications across both halves.
+    pub total_evaluated_pair_exchanges: usize,
+}
+
+fn adaptive_report(
+    coupled: SurfaceSurfactantReport,
+    stages: [Option<AdaptiveSurfaceDiffusionReport>; 2],
+    energy_increase_tolerance_j: f64,
+) -> Result<AdaptiveSurfaceSurfactantReport, SurfaceDynamicsError> {
+    let [Some(diffusion_before), Some(diffusion_after)] = stages else {
+        return Err(SurfaceDynamicsError::Invalid(
+            "adaptive transport requires both stage diagnostics",
+        ));
+    };
+    // Numerical energy allowances, like amount allowances, are not doubled
+    // just because the same physical diffusion interval straddles mechanics.
+    if -coupled.diffusion_free_energy_dissipation_j > energy_increase_tolerance_j {
+        return Err(SurfaceDiffusionError::FreeEnergyIncrease {
+            change_j: -coupled.diffusion_free_energy_dissipation_j,
+        }
+        .into());
+    }
+    let total_trials = diffusion_before
+        .trials
+        .checked_add(diffusion_after.trials)
+        .ok_or(SurfaceDynamicsError::Invalid(
+            "adaptive trial count overflow",
+        ))?;
+    let total_evaluated_pair_exchanges = diffusion_before
+        .evaluated_pair_exchanges
+        .checked_add(diffusion_after.evaluated_pair_exchanges)
+        .ok_or(SurfaceDynamicsError::Invalid(
+            "adaptive pair count overflow",
+        ))?;
+    Ok(AdaptiveSurfaceSurfactantReport {
+        coupled,
+        diffusion_before,
+        diffusion_after,
+        total_trials,
+        total_evaluated_pair_exchanges,
+    })
 }
 
 impl CapillarySurfaceDynamics<'_> {
@@ -142,6 +342,7 @@ impl CapillarySurfaceDynamics<'_> {
             dt_s,
             controls,
             cancelled,
+            |report, _| Ok(report),
         )
     }
 
@@ -178,11 +379,88 @@ impl CapillarySurfaceDynamics<'_> {
             dt_s,
             controls,
             cancelled,
+            |report, _| Ok(report),
+        )
+    }
+
+    /// Move a homogeneous coating while adaptively resolving diffusion on the
+    /// actual initial and solved final areas. Both halves share one trial/pair
+    /// budget, and only accepted fine trajectories contribute physical loss.
+    ///
+    /// This controls internal diffusion edge splitting. It does not estimate
+    /// the mechanical or diffusion/motion composition error; refine `dt_s`
+    /// separately. Any stage refusal publishes neither mechanics nor amounts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_surfactant_diffusive_adaptive(
+        &self,
+        state: &mut SecondOrderState,
+        amounts_mol: &mut [f64],
+        transport: AdaptiveSurfaceSurfactantTransport<'_>,
+        viscosity: SurfaceViscosityField<'_>,
+        external_forces_n: &[Vector],
+        dt_s: f64,
+        controls: SurfaceDynamicsControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<AdaptiveSurfaceSurfactantReport, SurfaceDynamicsError> {
+        self.advance_with_surfactant_transport(
+            state,
+            amounts_mol,
+            Transport::AdaptiveUniform(transport),
+            viscosity,
+            external_forces_n,
+            dt_s,
+            controls,
+            cancelled,
+            |report, stages| {
+                adaptive_report(
+                    report,
+                    stages,
+                    transport.controls.energy_increase_tolerance_j,
+                )
+            },
+        )
+    }
+
+    /// Adaptively resolve heterogeneous partition diffusion through the same
+    /// original mechanical trial, original per-face laws and atomic account.
+    ///
+    /// Initial/final geometry supplies each half's capacities; authored laws
+    /// and conductances remain held. Shared work limits include every coarse
+    /// and rejected evaluation. The temporal estimator controls internal
+    /// diffusion splitting only, not macro mechanical/composition accuracy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_partitioned_surfactant_diffusive_adaptive(
+        &self,
+        state: &mut SecondOrderState,
+        amounts_mol: &mut [f64],
+        transport: AdaptiveSurfacePartitionedSurfactantTransport<'_>,
+        viscosity: SurfaceViscosityField<'_>,
+        external_forces_n: &[Vector],
+        dt_s: f64,
+        controls: SurfaceDynamicsControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<AdaptiveSurfaceSurfactantReport, SurfaceDynamicsError> {
+        self.advance_with_surfactant_transport(
+            state,
+            amounts_mol,
+            Transport::AdaptivePartitioned(transport),
+            viscosity,
+            external_forces_n,
+            dt_s,
+            controls,
+            cancelled,
+            |report, stages| {
+                adaptive_report(
+                    report,
+                    stages,
+                    transport.controls.energy_increase_tolerance_j,
+                )
+            },
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn advance_with_surfactant_transport(
+    fn advance_with_surfactant_transport<R>(
         &self,
         state: &mut SecondOrderState,
         amounts_mol: &mut [f64],
@@ -192,7 +470,11 @@ impl CapillarySurfaceDynamics<'_> {
         dt_s: f64,
         controls: SurfaceDynamicsControls,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<SurfaceSurfactantReport, SurfaceDynamicsError> {
+        finish: impl FnOnce(
+            SurfaceSurfactantReport,
+            [Option<AdaptiveSurfaceDiffusionReport>; 2],
+        ) -> Result<R, SurfaceDynamicsError>,
+    ) -> Result<R, SurfaceDynamicsError> {
         if cancelled() {
             return Err(SurfaceDynamicsError::Cancelled);
         }
@@ -205,21 +487,43 @@ impl CapillarySurfaceDynamics<'_> {
                 "complete mechanical coordinates, one amount per face and a positive finite step required",
             ));
         }
-        let (diffusion_controls, edges) = match transport {
-            Transport::Uniform(data) => (data.controls, data.edges.len()),
-            Transport::Partitioned(data) => {
-                if data.laws.len() != self.faces.len() {
-                    return Err(SurfaceDiffusionError::InvalidInput(
-                        "one original constitutive law required per face",
-                    )
-                    .into());
-                }
-                (data.controls, data.edges.len())
-            }
+        let (maximum_faces, maximum_edges, amount_tolerance_mol, edges, laws) = match transport {
+            Transport::Uniform(data) => (
+                data.controls.maximum_faces,
+                data.controls.maximum_edges,
+                data.controls.amount_tolerance_mol,
+                data.edges.len(),
+                None,
+            ),
+            Transport::Partitioned(data) => (
+                data.controls.maximum_faces,
+                data.controls.maximum_edges,
+                data.controls.amount_tolerance_mol,
+                data.edges.len(),
+                Some(data.laws),
+            ),
+            Transport::AdaptiveUniform(data) => (
+                data.controls.maximum_faces,
+                data.controls.maximum_edges,
+                data.controls.amount_tolerance_mol,
+                data.edges.len(),
+                None,
+            ),
+            Transport::AdaptivePartitioned(data) => (
+                data.controls.maximum_faces,
+                data.controls.maximum_edges,
+                data.controls.amount_tolerance_mol,
+                data.edges.len(),
+                Some(data.laws),
+            ),
         };
-        if self.faces.len() > diffusion_controls.maximum_faces
-            || edges > diffusion_controls.maximum_edges
-        {
+        if laws.is_some_and(|laws| laws.len() != self.faces.len()) {
+            return Err(SurfaceDiffusionError::InvalidInput(
+                "one original constitutive law required per face",
+            )
+            .into());
+        }
+        if self.faces.len() > maximum_faces || edges > maximum_edges {
             return Err(SurfaceDiffusionError::WorkBudget.into());
         }
         let before_areas = face_areas(self.faces, &state.q, &mut cancelled)?;
@@ -228,25 +532,35 @@ impl CapillarySurfaceDynamics<'_> {
             .try_reserve_exact(amounts_mol.len())
             .map_err(|_| SurfaceDynamicsError::Allocation)?;
         candidate_amounts.extend_from_slice(amounts_mol);
-        let diffusion_before = transport.diffuse(
+        let mut work = AdaptiveWork::default();
+        let before = transport.diffuse(
             &before_areas,
             &mut candidate_amounts,
             0.5 * dt_s,
+            SurfaceDiffusionPhase::BeforeMotion,
+            &mut work,
             &mut cancelled,
         )?;
         let (candidate, mechanics) = {
             let mut coating_faces = Vec::new();
             let coating = match transport {
-                Transport::Uniform(data) => SurfactantField::Uniform {
-                    law: data.law,
-                    amounts_mol: &candidate_amounts,
-                },
-                Transport::Partitioned(data) => {
+                Transport::Uniform(SurfaceSurfactantTransport { law, .. })
+                | Transport::AdaptiveUniform(AdaptiveSurfaceSurfactantTransport { law, .. }) => {
+                    SurfactantField::Uniform {
+                        law,
+                        amounts_mol: &candidate_amounts,
+                    }
+                }
+                Transport::Partitioned(SurfacePartitionedSurfactantTransport { laws, .. })
+                | Transport::AdaptivePartitioned(AdaptiveSurfacePartitionedSurfactantTransport {
+                    laws,
+                    ..
+                }) => {
                     coating_faces
                         .try_reserve_exact(self.faces.len())
                         .map_err(|_| SurfaceDynamicsError::Allocation)?;
                     for (face, (&law, &amount_mol)) in
-                        data.laws.iter().zip(&candidate_amounts).enumerate()
+                        laws.iter().zip(&candidate_amounts).enumerate()
                     {
                         if face % 64 == 0 && cancelled() {
                             return Err(SurfaceDynamicsError::Cancelled);
@@ -267,12 +581,16 @@ impl CapillarySurfaceDynamics<'_> {
             )?
         };
         let after_areas = face_areas(self.faces, &candidate.q, &mut cancelled)?;
-        let diffusion_after = transport.diffuse(
+        let after = transport.diffuse(
             &after_areas,
             &mut candidate_amounts,
             0.5 * dt_s,
+            SurfaceDiffusionPhase::AfterMotion,
+            &mut work,
             &mut cancelled,
         )?;
+        let diffusion_before = before.physical;
+        let diffusion_after = after.physical;
 
         let mut amount_defect = Sum::default();
         for (face, (&before, &after)) in amounts_mol.iter().zip(&candidate_amounts).enumerate() {
@@ -285,7 +603,7 @@ impl CapillarySurfaceDynamics<'_> {
         if !amount_defect.is_finite() {
             return Err(SurfaceDiffusionError::Unrepresentable.into());
         }
-        if amount_defect.abs() > diffusion_controls.amount_tolerance_mol {
+        if amount_defect.abs() > amount_tolerance_mol {
             return Err(SurfaceDiffusionError::AmountBalance {
                 defect_mol: amount_defect,
             }
@@ -338,9 +656,10 @@ impl CapillarySurfaceDynamics<'_> {
             diffusion_before,
             diffusion_after,
         };
+        let result = finish(report, [before.adaptive, after.adaptive])?;
         publish_state(state, candidate);
         amounts_mol.copy_from_slice(&candidate_amounts);
-        Ok(report)
+        Ok(result)
     }
 }
 

@@ -19,6 +19,7 @@
 //! inferred thermal heat is supplied. Time/mesh refinement is still required.
 
 use super::surfactant::diffusion::SurfaceDiffusionError;
+use super::surfactant::diffusion::adaptive::AdaptiveSurfaceDiffusionError;
 use super::surfactant::{
     SurfactantError, SurfactantField, assemble_surfactant_step, triangle_surfactant_step,
     triangle_surfactant_step_tangent,
@@ -89,6 +90,12 @@ pub enum SurfaceDynamicsError {
     Surfactant(SurfactantError),
     /// Conservative surface-species diffusion refusal.
     Diffusion(SurfaceDiffusionError),
+    /// Adaptive diffusion refusal. Budget counts include all completed work
+    /// in both halves of the attempted composition, including rejected trials.
+    AdaptiveDiffusion {
+        phase: surfactant_transport::SurfaceDiffusionPhase,
+        error: AdaptiveSurfaceDiffusionError,
+    },
     /// A bounded trial could not reserve its staged arrays.
     Allocation,
     /// Original structural/Newton--Krylov refusal.

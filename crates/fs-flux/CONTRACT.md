@@ -2306,6 +2306,29 @@ disconnected-law recovery and late cancellation preserve the original behavior
 and atomic trajectory/inventory publication.
 
 
+### Adaptive diffusion through moving material surfaces
+
+`advance_surfactant_diffusive_adaptive` and
+`advance_partitioned_surfactant_diffusive_adaptive` use the same original
+mechanical composition with adaptive diffusion on its actual initial and solved
+final areas. Original per-face chemical laws supply partition transport,
+mechanical stress and both energy accounts. The before/after intervals share
+one trial and pair-exchange budget, including every coarse and rejected
+evaluation; phase-specific budget refusals include all work already spent.
+Only accepted fine diffusion trajectories contribute physical loss. The
+complete amount allowance and combined diffusion-energy allowance are checked
+once more before either the mechanical state/history or coating amounts publish.
+The result retains the original coupled physical report plus both adaptive
+receipts and total work.
+
+Refinement here resolves internal diffusion edge splitting without rerunning
+the mechanical solve for each diffusion substep. It does not estimate the
+mechanical macro-step error or diffusion/motion composition error; the caller
+must refine that interval independently. Graph conductances remain authored
+held inputs. Four native composed regressions define independent exact pair
+flows on expanding areas, translating ideal/Langmuir partition equilibrium,
+empty-graph mechanical recovery, and shared-budget/final-cancellation rollback.
+
 ## Damped Newton BDF1 for stiff rheology
 
 `FluxSystem::bdf1_rheology_newton_step` advances the same fully implicit
