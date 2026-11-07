@@ -564,6 +564,10 @@ pub struct HeatCapacitySourceQuery<'a> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedHeatCapacityCurve {
     curve: EquilibriumEnthalpyPhaseCurve,
+    // Original source intervals, before optional boundary-chord subdivision.
+    // Retain these once so repeated source-exact heat exchanges neither rebuild
+    // a caloric table nor traverse artificial enthalpy-chart subdivisions.
+    source_heat_capacities: Vec<[f64; 2]>,
 }
 
 impl ResolvedHeatCapacityCurve {
@@ -679,7 +683,11 @@ impl ResolvedHeatCapacityCurve {
         }
         curve.identity = identity.finalize();
         curve.source_receipts = receipts;
-        Ok(Self { curve })
+        let source_heat_capacities = knots
+            .iter()
+            .map(|knot| [knot.temperature_k, knot.specific_heat_capacity_j_kg_k])
+            .collect();
+        Ok(Self { curve, source_heat_capacities })
     }
 
     /// The source-bound chart accepted by thermal and phase-state consumers.
@@ -692,6 +700,10 @@ impl ResolvedHeatCapacityCurve {
     #[must_use]
     pub fn receipts(&self) -> &[PropertyUsageReceipt] {
         self.curve.source_receipts()
+    }
+
+    pub(crate) fn source_heat_capacity_knots(&self) -> &[[f64; 2]] {
+        &self.source_heat_capacities
     }
 }
 

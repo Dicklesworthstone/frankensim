@@ -34,6 +34,7 @@ impl ResolvedHeatCapacityCurve {
         reference_specific_enthalpy_j_kg: f64,
     ) -> Result<Self, PhaseStateError> {
         let invalid = |what| PhaseStateError::InvalidCurve { what };
+        let upper_source = upper;
         let lower = &self.curve;
         let upper = &upper.curve;
         if !reference_specific_enthalpy_j_kg.is_finite()
@@ -111,7 +112,9 @@ impl ResolvedHeatCapacityCurve {
         }
         curve.identity = identity.finalize();
         curve.source_receipts = receipts;
-        Ok(Self { curve })
+        let mut source_heat_capacities = self.source_heat_capacities.clone();
+        source_heat_capacities.extend_from_slice(&upper_source.source_heat_capacities[1..]);
+        Ok(Self { curve, source_heat_capacities })
     }
 }
 

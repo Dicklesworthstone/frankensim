@@ -1,5 +1,24 @@
 # CONTRACT: fs-airflow
 
+## Source-exact liquid channel energy
+
+The material-bound liquid series, its solid-coupled solves and distributed
+pressure-loss heating now use the original affine `Cp(T)` heat-exchange
+integral. Their inlet conversion uses the original nonlinear `h(T)` inverse;
+public enthalpy knots are not treated as an alternate piecewise-constant Cp
+model. Compact source charts and optional finer boundary charts therefore
+describe the same physical channel. Caloric traversal allocates no temporary
+flow path and visits only original source intervals.
+
+Hydraulic dissipation retains its declared constant-density, equal-area and
+equal-elevation assumptions. The original `dp*Q` enters the fluid once, wall
+heat remains distinct, and each Robin reference closes that same wall power.
+Accepted enthalpy states still refuse increments lost at their absolute datum
+or rounded across the driving wall temperature. Source support, source identity,
+per-region balances and transactional refusal remain mandatory. Analytical
+variable-Cp heating/cooling, non-knot inlets, datum shifts, region subdivision
+and the original finite-solid power balance exercise the native consumer.
+
 ## Source-backed gas films for deposition
 
 `graph::thermal::medium::mass_transfer::evaluate_laminar_plate_gas_film`

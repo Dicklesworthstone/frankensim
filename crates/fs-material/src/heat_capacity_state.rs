@@ -5,8 +5,43 @@ use crate::phase::{
     EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, PhaseStateError,
     ResolvedHeatCapacityCurve,
 };
+use crate::thermal::transport::{
+    ThermalTransportError,
+    isobaric::{LinearHeatExchange, source_linear_heat_exchange},
+};
 
 impl ResolvedHeatCapacityCurve {
+    /// Exchange heat against a fixed-temperature reservoir using the original
+    /// source Cp(T), with no frozen capacity or enthalpy-chord approximation.
+    ///
+    /// Solves `integral Cp(T)/(reservoir_k-T) dT = exposure_j_kg_k`.
+    /// Exposure is `G*dt/m` for a lumped body or `UA/m_dot` for a steady channel.
+    /// The caller owns that heat-transfer reduction and the chart's fixed
+    /// pressure/composition convention. Only the material trajectory requires
+    /// source support; the reservoir temperature may lie outside it.
+    ///
+    /// Preparation retained the original source-knot union once. Queries visit
+    /// only crossed source intervals, allocate nothing and use the same exact
+    /// affine-Cp integration/inversion as `IsobaricHeatCapacityLaw`. Optional
+    /// boundary-chart subdivisions do not change this exchange or its cost.
+    /// The returned relative heat and mean temperature preserve weak exchange
+    /// independently of the chart's arbitrary absolute enthalpy datum.
+    ///
+    /// # Errors
+    /// Refuses invalid exposure, unsupported material temperatures, nonzero
+    /// temperature motion below representable resolution or failed inversion.
+    /// It does not publish a phase state or infer pressure-work/phase physics.
+    pub fn linear_heat_exchange(
+        &self,
+        initial_k: f64,
+        reservoir_k: f64,
+        exposure_j_kg_k: f64,
+    ) -> Result<LinearHeatExchange, ThermalTransportError> {
+        source_linear_heat_exchange(
+            self.source_heat_capacity_knots(), initial_k, reservoir_k, exposure_j_kg_k,
+        )
+    }
+
     /// Invert the admitted single-phase chart at an absolute temperature [K].
     /// The result retains the original material and chart identities. No
     /// extrapolation, phase transition, or independent density law is added.

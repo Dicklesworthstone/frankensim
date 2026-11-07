@@ -64,11 +64,11 @@ fn caloric_with_reference(card: &MaterialCard, pressure: f64, phase: SolidLiquid
     reference_h: f64) -> ResolvedHeatCapacityCurve {
     let cp = PropertyKey::with_quantity("specific_heat_capacity", QuantitySpec::dimensional(Dims([2,0,-2,-1,0,0])));
     let rho = PropertyKey::with_quantity("density", QuantitySpec::dimensional(Dims([-3,1,0,0,0,0])));
-    ResolvedHeatCapacityCurve::try_new(card, HeatCapacitySourceQuery {
+    ResolvedHeatCapacityCurve::try_new_exact(card, HeatCapacitySourceQuery {
         heat_capacity: &cp, density: &rho, temperature_axis: "T",
         lower: &point(250.0,pressure), upper: &point(450.0,pressure),
         selection: SelectionPolicy::SingleClaimOnly,
-    }, phase, reference_h, 0.5).unwrap()
+    }, phase, reference_h).unwrap()
 }
 fn section(region: &str, area: f64) -> FlowHeatSection<'_> {
     FlowHeatSection { region, geometry: FlowHeatGeometry {
@@ -124,7 +124,7 @@ fn variable_cp_heating_and_cooling_follow_source_enthalpy_not_frozen_cp() {
     let card = card(true,"varying");
     let liquid = liquid(&card,1.0);
     let source = caloric(&card,1.0,SolidLiquidPhase::Liquid);
-    assert!(source.curve().knots().len() > 100);
+    assert_eq!(source.curve().knots().len(), 3);
     for (inlet,wall) in [(300.0,420.0),(420.0,270.0)] {
         let path = FrozenFlowMedium::Liquid(&liquid).channel_series(VolumetricFlowRate::new(1e-6),
             Temperature::new(inlet), &[section("wall",0.008)]).unwrap();
@@ -132,13 +132,38 @@ fn variable_cp_heating_and_cooling_follow_source_enthalpy_not_frozen_cp() {
             let actual = path.march_liquid_enthalpy(cx,&source,"T",&[wall]).unwrap();
             let ua = path.path().segments()[0].htc_w_per_m2_k()*0.008;
             let expected = continuous_cp_reference(inlet,wall,ua/path.mass_flow_kg_per_s());
-            // Includes the declared 0.5 J/kg Cp-to-enthalpy chord approximation.
-            assert!((actual.outlet().temperature_k()-expected).abs() < 0.002);
+            assert!((actual.outlet().temperature_k()-expected).abs() < 2e-10);
+            assert!((actual.regions()[0].inlet().temperature_k()-inlet).abs() < 2e-12);
             let legacy = path.path().march(&[wall]).unwrap();
             assert!((actual.outlet().temperature_k()-legacy.outlet_temperature_k).abs() > 0.5);
             close(actual.total_heat_rate_w(),path.mass_flow_kg_per_s()*
                 (actual.outlet().specific_enthalpy_j_kg()-actual.regions()[0].inlet().specific_enthalpy_j_kg()));
         });
+    }
+}
+
+#[test]
+fn g1_non_knot_inlets_and_reference_shifts_preserve_original_channel_calorics() {
+    let card = card(true,"exact-original-channel");
+    let liquid = liquid(&card,1.0);
+    for datum in [0.0, 2.0_f64.powi(30)] {
+        let source = caloric_with_reference(&card,1.0,SolidLiquidPhase::Liquid,datum);
+        for (inlet, wall) in [(312.375,420.0),(417.125,270.0)] {
+            let path = FrozenFlowMedium::Liquid(&liquid).channel_series(VolumetricFlowRate::new(1e-6),
+                Temperature::new(inlet), &[section("wall",0.008)]).unwrap();
+            with_cx(|cx| {
+                let result = path.march_liquid_enthalpy(cx,&source,"T",&[wall]).unwrap();
+                let ua = path.path().segments()[0].htc_w_per_m2_k()*0.008;
+                let expected = continuous_cp_reference(inlet,wall,ua/path.mass_flow_kg_per_s());
+                let expected_heat = path.mass_flow_kg_per_s() * (expected-inlet)
+                    * (5.0*(expected+inlet)-1500.0);
+                assert!((result.regions()[0].inlet().temperature_k()-inlet).abs() < 2e-10);
+                assert!((result.outlet().temperature_k()-expected).abs() < 2e-9);
+                assert!((result.total_heat_rate_w()-expected_heat).abs() < 2e-9);
+                close(ua*(wall-result.regions()[0].reference_temperature_k()),expected_heat);
+                close(result.balance_residual_w(),0.0);
+            });
+        }
     }
 }
 
@@ -300,6 +325,10 @@ fn distributed_hydraulic_heating_preserves_variable_cp_energy_under_subdivision(
             close(result.enthalpy_gain_w(),result.mass_flow_kg_per_s()*
                 (result.outlet().specific_enthalpy_j_kg()-result.regions()[0].inlet().specific_enthalpy_j_kg()));
             close(result.balance_residual_w(),0.0);
+            let ua = path.path().segments()[0].htc_w_per_m2_k()*0.008;
+            let expected_temperature = continuous_cp_reference(300.0,320.0+20.0/ua,
+                ua/path.mass_flow_kg_per_s());
+            assert!((result.outlet().temperature_k()-expected_temperature).abs() < 2e-10);
             if let Some((temperature,wall_heat)) = expected {
                 close(result.outlet().temperature_k(),temperature);
                 close(result.total_heat_rate_w(),wall_heat);

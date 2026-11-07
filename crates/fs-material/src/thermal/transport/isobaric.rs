@@ -386,21 +386,35 @@ impl IsobaricHeatCapacityLaw {
         reservoir_k: f64,
         conductance_time_over_mass_j_kg_k: f64,
     ) -> Result<LinearHeatExchange, ThermalTransportError> {
-        let answer = CapacityCurve::new(&self.knots).linear_heat_exchange(
+        source_linear_heat_exchange(
+            &self.knots,
             initial_k,
             reservoir_k,
             conductance_time_over_mass_j_kg_k,
-        )?;
-        Ok(LinearHeatExchange {
-            temperature_k: answer.temperature,
-            specific_enthalpy_change_j_kg: answer.energy_change,
-            mean_temperature_k: answer.mean_temperature,
-            inlet_enthalpy_gain: answer.inlet_energy_gain,
-            inlet_enthalpy_loss: answer.inlet_energy_loss,
-            reservoir_enthalpy_derivative_j_kg_k: answer.reservoir_energy_derivative,
-            mean_reservoir_derivative: answer.mean_reservoir_derivative,
-        })
+        )
     }
+}
+
+/// Shared numerical owner for already admitted original specific-Cp knots.
+/// Source identity and pressure/composition admission remain with each adapter.
+pub(crate) fn source_linear_heat_exchange(
+    knots: &[[f64; 2]],
+    initial_k: f64,
+    reservoir_k: f64,
+    exposure_j_kg_k: f64,
+) -> Result<LinearHeatExchange, ThermalTransportError> {
+    let answer = CapacityCurve::new(knots).linear_heat_exchange(
+        initial_k, reservoir_k, exposure_j_kg_k,
+    )?;
+    Ok(LinearHeatExchange {
+        temperature_k: answer.temperature,
+        specific_enthalpy_change_j_kg: answer.energy_change,
+        mean_temperature_k: answer.mean_temperature,
+        inlet_enthalpy_gain: answer.inlet_energy_gain,
+        inlet_enthalpy_loss: answer.inlet_energy_loss,
+        reservoir_enthalpy_derivative_j_kg_k: answer.reservoir_energy_derivative,
+        mean_reservoir_derivative: answer.mean_reservoir_derivative,
+    })
 }
 
 impl ThermalLaw for IsobaricHeatCapacityLaw {

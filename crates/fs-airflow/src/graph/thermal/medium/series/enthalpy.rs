@@ -1,28 +1,28 @@
 //! Source-backed sensible-enthalpy transport through material-bound channels.
 //!
-//! The existing phase owner supplies a strictly liquid, piecewise-linear T(h)
-//! chart. Within each caloric interval the existing constant-cp `AirPath` march
-//! is exact; this driver stops at source knots before continuing with the next
-//! slope. Heat is mdot*(h_out-h_in), never a frozen cp times total delta T.
+//! The existing material owner integrates the original affine Cp(T) source
+//! through every crossed source interval. It solves the wall-exchange integral
+//! Cp(T)/(Twall-T) without freezing Cp or interpolating enthalpy chords. Heat
+//! is mdot*(h_out-h_in), never a frozen cp times total delta T.
 //!
 //! Hydraulic mass flow and each region's convection coefficient remain frozen
 //! at their original material query. This changes the caloric transport law,
 //! not the momentum solve, film-property iteration, boiling model or source
-//! uncertainty. The Cp-to-enthalpy chart's interpolation limits still apply.
+//! uncertainty. Optional boundary-chart subdivisions do not alter the calorics.
 
 pub mod coupled;
 
 use fs_convection::CorrelationRobinBoundary;
 use fs_exec::Cx;
 use fs_material::phase::{
-    EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState,
+    EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState,
     PhaseStateError, ResolvedHeatCapacityCurve,
 };
 use fs_material::state_point::{DENSITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_PROPERTY};
-use fs_math::det;
+use fs_material::thermal::transport::ThermalTransportError;
 use fs_qty::{MassFlowRate, Temperature};
 
-use crate::conjugate::{AirPath, AirSegment};
+use crate::conjugate::AirSegment;
 use super::{MaterialFlowPath, MaterialHeatExchange};
 use super::hydraulic::{MaterialFlowResistance, ResistanceError, ResistanceEvaluation};
 use super::super::{FrozenFlowMedium, MediumFlowError};
@@ -34,6 +34,8 @@ pub enum LiquidEnthalpyError {
     Invalid(&'static str),
     /// Original material phase/chart refusal.
     Phase(PhaseStateError),
+    /// Original source-Cp heat-exchange integration or support refusal.
+    Caloric(ThermalTransportError),
     /// Original channel/correlation refusal.
     Flow(MediumFlowError),
     /// Original pressure-loss owner refused this region.
@@ -150,9 +152,10 @@ impl<'a> MaterialFlowPath<'a> {
     /// fluid state must stay inside the chart; a hotter/cooler wall may be
     /// outside it as long as the resulting fluid trajectory is supported.
     ///
-    /// Within each piece the original `AirPath` exponential exchange is used.
-    /// At most one traversal of the chart is needed per isothermal wall region.
-    /// Cancellation is checked at source receipts, regions and knot crossings.
+    /// Each region uses the material owner's exact source-Cp exchange. Only
+    /// crossed original intervals are visited; there is no per-knot allocation
+    /// or artificial chord subdivision. Cancellation is checked at source
+    /// receipts and regions; each caloric query has bounded original-knot work.
     /// The original path, source and any previous march remain unchanged on error.
     pub fn march_liquid_enthalpy<'c>(
         &self, cx: &Cx<'_>, source: &'c ResolvedHeatCapacityCurve,
@@ -208,8 +211,7 @@ impl<'a> MaterialFlowPath<'a> {
         {
             return Err(LiquidEnthalpyError::Invalid("one positive finite wall temperature is required per region"));
         }
-        let curve = source.curve();
-        let mut state = state_at_temperature(curve, self.path.inlet_temperature_k())?;
+        let mut state = state_at_temperature(source.curve(), self.path.inlet_temperature_k())?;
         let initial_enthalpy = state.specific_enthalpy_j_kg();
         let mut regions = Vec::with_capacity(self.exchanges.len());
         let mut total = 0.0;
@@ -221,7 +223,7 @@ impl<'a> MaterialFlowPath<'a> {
                     .map_err(|source| LiquidEnthalpyError::Resistance { region: segment.region().to_owned(), source })?)
             } else { None };
             let power = hydraulic_loss.as_ref().map_or(0.0, |loss| loss.dissipated_power_w);
-            let outlet = march_region_with_heat(cx, curve, state, self.mass_flow_kg_per_s, segment, wall, power)?;
+            let outlet = march_region_with_heat(cx, source, state, self.mass_flow_kg_per_s, segment, wall, power)?;
             let enthalpy_gain = self.mass_flow_kg_per_s
                 * (outlet.specific_enthalpy_j_kg() - state.specific_enthalpy_j_kg());
             let heat = enthalpy_gain - power;
@@ -307,7 +309,7 @@ pub(crate) fn admit_dissipative_density(source: &ResolvedHeatCapacityCurve, dens
 }
 
 fn march_region_with_heat(
-    cx: &Cx<'_>, curve: &EquilibriumEnthalpyPhaseCurve, state: EquilibriumPhaseState,
+    cx: &Cx<'_>, source: &ResolvedHeatCapacityCurve, state: EquilibriumPhaseState,
     mass_flow: f64, segment: &AirSegment, wall: f64, hydraulic_power_w: f64,
 ) -> Result<EquilibriumPhaseState, LiquidEnthalpyError> {
     if !hydraulic_power_w.is_finite() || hydraulic_power_w < 0.0 {
@@ -321,7 +323,7 @@ fn march_region_with_heat(
     if !positive(driving) {
         return Err(LiquidEnthalpyError::Invalid("hydraulic-heating driving temperature is unrepresentable"));
     }
-    march_region(cx, curve, state, mass_flow, segment, driving)
+    march_region(cx, source, state, mass_flow, segment, driving)
 }
 
 fn state_at_temperature(
@@ -337,96 +339,44 @@ fn state_at_temperature(
     if index < knots.len() && knots[index].temperature_k == temperature {
         return Ok(curve.state_at_specific_enthalpy(knots[index].specific_enthalpy_j_kg)?);
     }
-    let lo = knots[index - 1];
-    let hi = knots[index];
-    let fraction = (temperature - lo.temperature_k) / (hi.temperature_k - lo.temperature_k);
     Ok(curve.state_at_specific_enthalpy(
-        lo.specific_enthalpy_j_kg + fraction * (hi.specific_enthalpy_j_kg - lo.specific_enthalpy_j_kg),
+        curve.specific_enthalpy_on_sensible_interval(index - 1, temperature)?,
     )?)
 }
 
 fn march_region(
-    cx: &Cx<'_>, curve: &EquilibriumEnthalpyPhaseCurve, mut state: EquilibriumPhaseState,
+    cx: &Cx<'_>, source: &ResolvedHeatCapacityCurve, state: EquilibriumPhaseState,
     mass_flow: f64, segment: &AirSegment, wall: f64,
 ) -> Result<EquilibriumPhaseState, LiquidEnthalpyError> {
-    let knots = curve.knots();
-    let mut area = segment.area_m2();
-    for _ in 0..knots.len() {
-        checkpoint(cx)?;
-        let temperature = state.temperature_k();
-        if temperature == wall { return Ok(state); }
-        let heating = wall > temperature;
-        let enthalpy = state.specific_enthalpy_j_kg();
-        let upper = if heating {
-            knots.partition_point(|k| k.specific_enthalpy_j_kg <= enthalpy)
-        } else {
-            knots.partition_point(|k| k.specific_enthalpy_j_kg < enthalpy)
-        };
-        if upper == 0 || upper == knots.len() {
-            return Err(LiquidEnthalpyError::Invalid("heat exchange would leave the source-supported liquid span"));
-        }
-        let lo = knots[upper - 1];
-        let hi = knots[upper];
-        let cp = (hi.specific_enthalpy_j_kg - lo.specific_enthalpy_j_kg) / (hi.temperature_k - lo.temperature_k);
-        let local = AirPath::new(temperature, mass_flow, cp,
-            vec![AirSegment::new(segment.region(), area, segment.htc_w_per_m2_k())?])?;
-        let step = local.march(&[wall])?;
-        let increment = step.total_heat_rate_w / mass_flow;
-        let trial_enthalpy = enthalpy + increment;
-        // The original exponential owns a nonzero physical transfer even when
-        // division underflows or a large caloric datum hides its addition. Do
-        // not accept unchanged fluid storage and turn that loss into wall heat.
-        if step.total_heat_rate_w != 0.0 && (increment == 0.0 || trial_enthalpy == enthalpy) {
-            return Err(LiquidEnthalpyError::Invalid("nonzero specific-enthalpy increment is unrepresentable"));
-        }
-        if !trial_enthalpy.is_finite() {
-            return Err(LiquidEnthalpyError::Invalid("specific-enthalpy advance is unrepresentable"));
-        }
-        if (lo.specific_enthalpy_j_kg..=hi.specific_enthalpy_j_kg).contains(&trial_enthalpy) {
-            let outlet = curve.state_at_specific_enthalpy(trial_enthalpy)?;
-            // A nonzero rounded increment can still exceed the entire heat
-            // available from this wall. The caloric/Robin balance alone cannot
-            // detect that overshoot: both would reuse the same rounded h.
-            // Admit the original exponential's temperature maximum principle,
-            // allowing only interpolation roundoff on the temperature scale.
-            let roundoff = 8.0 * f64::EPSILON * temperature.max(wall);
-            if outlet.temperature_k() < temperature.min(wall) - roundoff
-                || outlet.temperature_k() > temperature.max(wall) + roundoff
-            {
-                return Err(LiquidEnthalpyError::Invalid("rounded specific enthalpy crosses the driving temperature"));
-            }
-            return Ok(outlet);
-        }
-        let boundary = if heating { hi } else { lo };
-        let consumed = area_to_knot(temperature, wall, boundary, mass_flow, cp, segment.htc_w_per_m2_k())?;
-        let remaining = area - consumed;
-        if !positive(consumed) || !positive(remaining) || remaining >= area {
-            return Err(LiquidEnthalpyError::Invalid("caloric knot crossing is not representable in the remaining exchange area"));
-        }
-        area = remaining;
-        state = curve.state_at_specific_enthalpy(boundary.specific_enthalpy_j_kg)?;
+    checkpoint(cx)?;
+    let temperature = state.temperature_k();
+    if temperature == wall { return Ok(state); }
+    let exposure = (segment.htc_w_per_m2_k() * segment.area_m2()) / mass_flow;
+    if !positive(exposure) {
+        return Err(LiquidEnthalpyError::Invalid("source-caloric exchange exposure is unrepresentable"));
     }
-    Err(LiquidEnthalpyError::Invalid("caloric interval traversal exceeded the chart size"))
-}
-
-fn area_to_knot(
-    temperature: f64, wall: f64, knot: EnthalpyPhaseKnot, mass_flow: f64, cp: f64, htc: f64,
-) -> Result<f64, LiquidEnthalpyError> {
-    let driving = wall - temperature;
-    let fraction = (knot.temperature_k - temperature) / driving;
-    if !(fraction > 0.0 && fraction < 1.0) {
-        return Err(LiquidEnthalpyError::Invalid("the next caloric knot is not between the fluid and wall temperatures"));
+    let exchange = source.linear_heat_exchange(temperature, wall, exposure)
+        .map_err(LiquidEnthalpyError::Caloric)?;
+    let increment = exchange.specific_enthalpy_change_j_kg;
+    let enthalpy = state.specific_enthalpy_j_kg();
+    let trial_enthalpy = enthalpy + increment;
+    // Keep the original absolute-state admission: exact relative heat cannot
+    // justify silently losing stored energy at a large arbitrary datum.
+    if increment != 0.0 && trial_enthalpy == enthalpy {
+        return Err(LiquidEnthalpyError::Invalid("nonzero specific-enthalpy increment is unrepresentable"));
     }
-    // Invert the same exponential exchange. A short local series avoids
-    // cancellation in -ln(1-x); its omitted term is <= x^6/[6(1-x)].
-    let ntu = if fraction < 1e-4 {
-        fraction * (1.0 + fraction * (0.5 + fraction * (1.0/3.0 + fraction * (0.25 + fraction/5.0))))
-    } else {
-        -det::ln((wall - knot.temperature_k) / driving)
-    };
-    let area = ((mass_flow * cp) / htc) * ntu;
-    if !positive(area) {
-        return Err(LiquidEnthalpyError::Invalid("area to caloric knot is unrepresentable"));
+    if !trial_enthalpy.is_finite() {
+        return Err(LiquidEnthalpyError::Invalid("specific-enthalpy advance is unrepresentable"));
     }
-    Ok(area)
+    let outlet = source.curve().state_at_specific_enthalpy(trial_enthalpy)?;
+    // A partially rounded increment can still cross the reservoir. The
+    // independent source maximum principle catches that false energy gain.
+    let roundoff = 8.0 * f64::EPSILON * temperature.max(wall);
+    if outlet.temperature_k() < temperature.min(wall) - roundoff
+        || outlet.temperature_k() > temperature.max(wall) + roundoff
+    {
+        return Err(LiquidEnthalpyError::Invalid("rounded specific enthalpy crosses the driving temperature"));
+    }
+    checkpoint(cx)?;
+    Ok(outlet)
 }

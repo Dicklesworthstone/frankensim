@@ -72,7 +72,7 @@ fn coupled_temperature_dependent_coolant_closes_the_original_solid_power() {
             // Independent integrated source law: h(T)=1000*(T-250)+5*(T-250)^2.
             let h_out = 62500.0+sign*40.0/path.mass_flow_kg_per_s();
             let expected = 250.0+((1e6+20.0*h_out).sqrt()-1000.0)/10.0;
-            assert!((actual.fluid.outlet().temperature_k()-expected).abs()<0.002);
+            assert!((actual.fluid.outlet().temperature_k()-expected).abs()<2e-8);
             assert_eq!(actual.solid.state,solid(&actual.boundary_rows,powers).state);
             assert_eq!(actual.fluid.source(),&source);
             for (body,fluid) in actual.solid.regions.iter().zip(actual.fluid.regions()) {

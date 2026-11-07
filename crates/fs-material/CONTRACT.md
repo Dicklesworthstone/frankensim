@@ -219,6 +219,15 @@ independent exact-volume energy, natural-reference volume and refusal atomicity.
 
 ## Exact source heat capacity through solid and phase transport
 
+`ResolvedHeatCapacityCurve::linear_heat_exchange` uses the existing exact
+affine-Cp exchange kernel for fixed-temperature reservoirs and steady channels.
+Original source Cp knots are retained once at admission and across caloric
+joins. Queries allocate nothing, visit only crossed original intervals and
+ignore optional enthalpy-chart subdivisions. Relative heat, the exchange mean
+and inlet/wall derivatives share that same source integral. Source pressure,
+composition and transfer-model assumptions remain explicit; the adapter adds
+no phase change, hydraulic feedback or independent pressure-work account.
+
 Source heat-capacity ingress retains the original affine `Cp(T)` on every
 generated sensible interval. Its enthalpy integral, quadratic temperature
 inverse and `dT/dh = 1/Cp(T)` share the same immutable curve. The public boundary

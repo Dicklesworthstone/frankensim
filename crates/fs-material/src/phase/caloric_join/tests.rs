@@ -63,6 +63,63 @@ fn pair(card: &MaterialCard, phase: SolidLiquidPhase, error: f64)
 }
 
 #[test]
+fn g1_original_cp_wall_exchange_crosses_joined_spans_without_chord_error() {
+    for cp_slope in [-10.0, 0.0, 10.0] {
+        let material = card(0, cp_slope, false);
+        let (lower, upper) = pair(&material, SolidLiquidPhase::Liquid, 0.001);
+        let joined = lower.try_join_at_reference(&upper, 1e12).unwrap();
+        let whole = span(&material, [280.0, 320.0], 100_000.0,
+            "specific_heat_capacity", SolidLiquidPhase::Liquid, 0.0, 1e6);
+        // The numerical owner traverses original source spans, even when the
+        // optional public enthalpy chart contains hundreds of subdivisions.
+        assert_eq!(joined.source_heat_capacity_knots().len(), 3);
+        assert_eq!(whole.source_heat_capacity_knots().len(), 2);
+        for (initial, expected, wall) in [(285.0_f64, 313.0_f64, 330.0_f64),
+            (315.0, 287.0, 270.0)] {
+            // Independent primitive for Cp(T)=400+s*(T-300). Select the target
+            // and integrate analytically instead of reproducing the inverse.
+            let exposure = (400.0 + cp_slope * (wall - 300.0))
+                * ((wall - initial) / (wall - expected)).ln()
+                - cp_slope * (expected - initial);
+            let expected_heat = (expected - initial)
+                * (400.0 + 0.5 * cp_slope * (expected + initial - 600.0));
+            for law in [&joined, &whole] {
+                let exchange = law.linear_heat_exchange(initial, wall, exposure).unwrap();
+                assert!((exchange.temperature_k - expected).abs() < 2e-12);
+                assert!((exchange.specific_enthalpy_change_j_kg - expected_heat).abs() < 2e-9);
+                assert!((exposure * (wall - exchange.mean_temperature_k) - expected_heat).abs() < 2e-9);
+                let gain = (wall - expected) / (wall - initial);
+                assert!((exchange.inlet_enthalpy_gain - gain).abs() < 2e-14);
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_original_cp_exchange_retains_support_and_weak_heat_independently_of_datum() {
+    let material = card(0, 10.0, false);
+    let ordinary = span(&material, [280.0, 320.0], 100_000.0,
+        "specific_heat_capacity", SolidLiquidPhase::Solid, 0.0, 1e6);
+    let shifted = span(&material, [280.0, 320.0], 100_000.0,
+        "specific_heat_capacity", SolidLiquidPhase::Solid, 1e12, 0.001);
+    let before = shifted.clone();
+    let weak = ordinary.linear_heat_exchange(300.0, 330.0, 1e-8).unwrap();
+    assert!(weak.specific_enthalpy_change_j_kg > 0.0);
+    assert_eq!(shifted.linear_heat_exchange(300.0, 330.0, 1e-8).unwrap(), weak);
+    for (temperature, wall, exposure) in [(279.0, 330.0, 1.0),
+        (300.0, 330.0, 1e6), (300.0, 270.0, 1e6),
+        (300.0, 330.0, -1.0), (300.0, f64::NAN, 1.0)] {
+        assert!(shifted.linear_heat_exchange(temperature, wall, exposure).is_err());
+    }
+    for (wall, exposure) in [(330.0, 0.0), (300.0, 1000.0)] {
+        let exchange = shifted.linear_heat_exchange(300.0, wall, exposure).unwrap();
+        assert_eq!(exchange.temperature_k, 300.0);
+        assert_eq!(exchange.specific_enthalpy_change_j_kg, 0.0);
+    }
+    assert_eq!(shifted, before);
+}
+
+#[test]
 fn joined_calorimetry_preserves_exact_reference_and_source_sensible_density() {
     let material = card(0, 0.0, true);
     for phase in [SolidLiquidPhase::Solid, SolidLiquidPhase::Liquid] {

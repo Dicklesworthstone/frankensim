@@ -2,7 +2,7 @@
 //! Constant-density, equal-area/elevation flow converts the declared pressure
 //! loss entirely to fluid heat. Viscosity uses the regional arithmetic bulk
 //! mean; convection retains the caller's bulk/film convention. The original
-//! caloric exponential integrates both contributions together.
+//! source-Cp exchange integrates both contributions together.
 
 use fs_convection::ThermalDirection;
 use fs_exec::Cx;
@@ -259,7 +259,7 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
         let segment = &channel.path().segments()[0];
         let outlet = march_region_with_heat(
             cx,
-            self.source.curve(),
+            self.source,
             inlet,
             self.mass_flow,
             segment,
