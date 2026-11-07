@@ -440,6 +440,10 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
         let p = self.native.parameters;
         let mut equivalent_work = post_alpha
             * (p.yield_stress_pa + p.hardening_modulus_pa * (0.5 * onset_alpha + 0.5 * alpha));
+        if let Some(table) = self.native.tabulated_hardening() {
+            equivalent_work += table.hardening_energy_increment_j_m3(onset_alpha, post_alpha)
+                .map_err(FiniteJ2Error::Tabulated)?;
+        }
         if let Some(voce) = self.native.voce {
             // Exact translated primitive. No subtraction of large hardening
             // endpoint energies; the native small-increment primitive is reused.

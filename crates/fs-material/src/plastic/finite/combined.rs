@@ -193,7 +193,9 @@ impl FiniteNortonJ2 {
             let correction =
                 -(h / (h + flow.tangent_modulus_pa)) * ((1.0 - 1.0 / exponent) * scale);
             (flow.overstress_pa, flow.increment, 0.0, correction)
-        } else if self.backbone().voce_hardening().is_some() {
+        } else if self.backbone().voce_hardening().is_some()
+            || self.backbone().tabulated_hardening().is_some()
+        {
             return self.radial_return_voce(trial, alpha);
         } else if hardening == 0.0 {
             let creep = self.native.increment_at_stress(yield_old)?;
@@ -270,17 +272,34 @@ impl FiniteNortonJ2 {
     // plastic increment; the remaining residual is strictly increasing.
     fn radial_return_voce(&self, trial: f64, alpha: f64) -> Result<RadialReturn, FiniteJ2Error> {
         let backbone = self.backbone();
-        let voce = backbone.voce_hardening().expect("active saturated branch");
+        let voce = backbone.voce_hardening();
+        let table = backbone.tabulated_hardening();
         let elastic = 3.0 * backbone.parameters.shear_modulus_pa;
         let linear_hardening = backbone.parameters.hardening_modulus_pa;
         let yield_old = backbone.yield_radius(alpha);
         let excess = trial - yield_old;
         let mut lower = 0.0;
-        let mut upper = backbone.saturated_increment(excess, alpha, None)?;
+        let remaining = backbone.limits.maximum_accumulated_plastic_strain - alpha;
+        let mut upper = if table.is_some() {
+            if remaining <= 0.0 {
+                return Err(FiniteJ2Error::Domain {
+                    quantity: "tabulated accumulated plastic strain",
+                    value: alpha + excess / elastic,
+                    limit: backbone.limits.maximum_accumulated_plastic_strain,
+                });
+            }
+            (excess / elastic).min(remaining)
+        } else {
+            backbone.saturated_increment(excess, alpha, None)?
+        };
         let mut plastic = upper;
         for _ in 0..96 {
-            let hardening_increment =
-                linear_hardening * plastic + voce.strength_increment(alpha, plastic);
+            let hardening_increment = if let Some(table) = table {
+                table.strength_increment_pa(alpha, plastic).map_err(FiniteJ2Error::Tabulated)?
+            } else {
+                linear_hardening * plastic
+                    + voce.expect("active saturated branch").strength_increment(alpha, plastic)
+            };
             let q = yield_old + hardening_increment;
             let log_creep = self.native.log_increment_at_stress(q);
             // A high trial yield radius can imply an unrepresentable creep
@@ -309,13 +328,18 @@ impl FiniteNortonJ2 {
                 }
                 let plastic_dissipation = backbone.parameters.yield_stress_pa * plastic;
                 let creep_dissipation = q * creep;
+                let curvature = if table.is_some() {
+                    hardening_increment - hardening * plastic
+                } else {
+                    voce.expect("active saturated branch").curvature_remainder(alpha, plastic)
+                };
                 return Ok(RadialReturn {
                     plastic_increment: plastic,
                     creep_increment: creep,
                     scale: q / trial,
                     tangent_correction: -(elastic / denominator)
                         * ((yield_old
-                            + voce.curvature_remainder(alpha, plastic)
+                            + curvature
                             + hardening * ((self.parameters().exponent - 1.0) * creep))
                             / trial),
                     plastic_dissipation,
@@ -323,6 +347,13 @@ impl FiniteNortonJ2 {
                     primary_potential: plastic_dissipation,
                     rate_potential: (1.0 / (1.0 + 1.0 / self.parameters().exponent))
                         * creep_dissipation,
+                });
+            }
+            if table.is_some() && plastic == remaining && residual < 0.0 {
+                return Err(FiniteJ2Error::Domain {
+                    quantity: "tabulated accumulated plastic strain",
+                    value: alpha + plastic - residual / denominator,
+                    limit: backbone.limits.maximum_accumulated_plastic_strain,
                 });
             }
             if residual > 0.0 {

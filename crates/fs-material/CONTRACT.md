@@ -19046,3 +19046,42 @@ recovery, texture evolution, rate dependence or measured-alloy calibration.
 The adapter preserves the complete original material bundle and its receipts, including unrelated optical/thermal properties. Exact scalar quantities and fixed external source contexts are rechecked on ingress. Original temperature and explicitly typed concentration/composition curves or surfaces may supply changing rates, including quencher-dependent nonradiative loss. Refresh pins the same card, coordinates, requirements and selected claims. An excited-history owner must retain fixed state energies or account for their parameter work. Source authors own the physical validity of reverse rates. Nonradiative channels mean locally thermalized loss; excited-quencher storage and chemistry are absent.
 
 This is a dilute two-state constitutive snapshot, with no trap distribution, population saturation, annihilation, bleaching or measured-material claim. Photon absorption, spectra and transport remain their existing owners. Source resolution occurs at preparation/refresh; reading the native law allocates nothing and performs no source query. Focused manufactured tests in `tests/phosphorescence.rs` check exact roles, complete-bundle retention, pinned thermal refresh, Stern–Volmer-type quenching against independent exponential decay, explicit stable stores and wrong-unit/history/source-domain refusals.
+
+## Bounded tabulated plastic hardening
+
+`plastic::tabulated::TabulatedHardening` retains explicitly supplied absolute
+yield stress versus accumulated equivalent plastic strain. The origin is zero
+plastic strain, strains increase strictly, and positive strengths are
+nondecreasing; plateaus are allowed. Slopes and exact hardening primitives are
+prepared once. Returns and lookups allocate no material-point memory. Support
+ends at the final knot: no constant extension, slope extrapolation, smoothing,
+or automatic conversion from engineering total-strain measurements occurs.
+At an interior kink the right-hand derivative is selected; the final knot uses
+the last measured segment. No two-sided differentiability is claimed there.
+
+`TabulatedJ2` reuses the native small-strain J2 tensor flow, plastic history,
+Prager translation and algorithmic tangent. `UniaxialTabulated` restricts the
+same scalar consistency relation to free-sided axial stress, including lateral
+plastic flow and Poisson contraction. Native plane-stress and layered-section
+consumers retain the full original history and energy account.
+
+`FiniteJ2::with_tabulated_hardening` explicitly selects a Kirchhoff-stress
+table for the original multiplicative Hencky model. Its initial yield must
+match, its original linear modulus must be zero, and table support must cover
+the declared history domain. Linear, Voce and table selections cannot silently
+replace one another. The original inverse plastic metric, analytic matrix-log
+tangent, finite-strain limits, plane-stress thickness solve and volume/area
+conventions remain authoritative. Native Perzyna, joint Norton/J2 and ductile
+work paths use the same table rather than reverting to a linear backbone.
+
+Both stress conventions select energetic isotropic hardening explicitly:
+stored hardening is the integral of `Y(alpha)-Y(0)`; yield dissipation is
+`Y(0)*delta_alpha`. Native viscous/creep work remains separate. A measured flow
+curve alone does not identify this partition experimentally. Numerical work
+defects are not material heat. These fixed-condition tables do not supply
+temperature evolution, annealing, anisotropic texture, a forming-limit curve,
+necking, or experimental calibration. G0/G1/G3 regressions target knot and
+plateau returns, analytical scalar relations, independent tensor derivatives,
+history under reversal, energy partition, and domain refusals in
+`plastic_tabulated`, `plastic_tabulated_reduction`, and
+`plastic_finite_tabulated`.

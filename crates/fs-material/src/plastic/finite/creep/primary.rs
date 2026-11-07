@@ -261,6 +261,15 @@ fn active_combined(
             continue;
         }
         let alpha = plastic_alpha + plastic;
+        if backbone.tabulated_hardening().is_some()
+            && alpha > backbone.limits().maximum_accumulated_plastic_strain
+        {
+            // Increasing creep decreases this eliminated plastic increment.
+            // Bracket trials must not extrapolate the measured hardening curve.
+            lower = y;
+            y = 0.5 * lower + 0.5 * upper;
+            continue;
+        }
         let residual = q - backbone.yield_radius(alpha);
         let hardening = backbone.hardening_tangent(alpha);
         if residual.is_finite() && residual.abs() <= 128.0 * f64::EPSILON * trial {

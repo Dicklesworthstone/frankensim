@@ -42,6 +42,8 @@ pub mod porous;
 pub mod rate;
 /// Strict, explicit model-card binding for this exact Kirchhoff-yield law.
 pub mod source;
+/// Bounded tabulated Kirchhoff hardening through the original finite return.
+pub mod tabulated;
 /// Affine temperature dependence and multiplicative isotropic thermal stretch.
 pub mod thermal;
 /// Energetic Voce saturation on the same finite metric, flow and tangent owner.
@@ -84,6 +86,7 @@ pub struct FiniteJ2 {
     limits: FiniteJ2Limits,
     maximum_creep_alpha: Option<f64>,
     voce: Option<voce::FiniteVoceHardening>,
+    table: Option<crate::plastic::tabulated::TabulatedHardening>,
 }
 
 /// Complete native material-point history, with no hidden deformation reset.
@@ -165,6 +168,8 @@ impl<T: FiniteJ2Material + ?Sized> FiniteJ2Material for &T {
 /// Rejections leave the borrowed accepted state untouched.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FiniteJ2Error {
+    /// An explicitly selected hardening curve is invalid or out of support.
+    Tabulated(crate::plastic::tabulated::TabulatedError),
     /// Invalid constitutive coefficients, domain bounds or caller tolerance.
     Parameters(&'static str),
     /// Invalid or unreachable retained material history or stretch metric.
@@ -192,6 +197,7 @@ pub enum FiniteJ2Error {
 impl fmt::Display for FiniteJ2Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Tabulated(error) => write!(f, "finite J2 hardening: {error}"),
             Self::Parameters(what) => write!(f, "finite J2 parameters: {what}"),
             Self::State(what) => write!(f, "finite J2 history: {what}"),
             Self::Domain {
@@ -284,6 +290,7 @@ impl FiniteJ2 {
             limits,
             maximum_creep_alpha: None,
             voce: None,
+            table: None,
         })
     }
 
@@ -507,6 +514,9 @@ impl FiniteJ2 {
             return Err(FiniteJ2Error::Numerical(
                 "trial equivalent stress is not finite",
             ));
+        }
+        if self.table.is_some() {
+            return self.return_map_tabulated(f, old, trial, q_trial, kinetics);
         }
         if self.voce.is_some() {
             return self.return_map_voce(f, old, trial, q_trial, kinetics);
@@ -796,6 +806,9 @@ impl FiniteJ2 {
     }
 
     fn yield_radius(&self, alpha: f64) -> f64 {
+        if let Some(table) = &self.table {
+            return table.yield_stress_pa(alpha).unwrap_or(f64::NAN);
+        }
         let linear = self.parameters.yield_stress_pa + self.parameters.hardening_modulus_pa * alpha;
         match self.voce {
             Some(voce) => linear + voce.strength(alpha),
@@ -804,6 +817,9 @@ impl FiniteJ2 {
     }
 
     fn hardening_energy(&self, alpha: f64) -> f64 {
+        if let Some(table) = &self.table {
+            return table.hardening_energy_j_m3(alpha).unwrap_or(f64::NAN);
+        }
         let linear = 0.5 * self.parameters.hardening_modulus_pa * alpha * alpha;
         match self.voce {
             Some(voce) => linear + voce.stored_energy(alpha),

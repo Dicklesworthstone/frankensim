@@ -181,6 +181,75 @@ fn linear_and_voce_attenuation_match_independent_integrated_kirchhoff_resistance
     }
 }
 
+#[test]
+fn tabulated_damage_uses_integrated_resistance_across_knots_and_plateaus() {
+    use fs_material::plastic::tabulated::{HardeningPoint, TabulatedHardening};
+
+    let knots = [(0.0, 3.0), (0.01, 5.0), (0.03, 6.0), (0.1, 6.0), (3.0, 20.0)];
+    let table = TabulatedHardening::new(knots.iter().map(|&(plastic_strain, yield_stress_pa)| {
+        HardeningPoint { plastic_strain, yield_stress_pa }
+    }).collect()).unwrap();
+    let reference = native();
+    let backbone = FiniteJ2::new(
+        FiniteJ2Parameters { hardening_modulus_pa: 0.0, ..*reference.parameters() },
+        *reference.limits(),
+    ).unwrap().with_tabulated_hardening(table).unwrap();
+    let onset = 0.002;
+    let m = FiniteDuctileJ2::new(
+        backbone,
+        TabulatedDuctileLocus::new(vec![(-50.0, onset), (50.0, onset)], domain()).unwrap(),
+        settings(),
+    ).unwrap();
+    let mut old = m.initial_state();
+    for alpha in [0.007_f64, 0.021, 0.055, 0.08] {
+        // Integrate the independently supplied line segments, including the
+        // partially consumed onset segment and the later perfect-flow plateau.
+        let mut resistance = 0.0;
+        let mut work = 0.0;
+        for pair in knots.windows(2) {
+            let [(a, ya), (b, yb)] = [pair[0], pair[1]];
+            let slope = (yb - ya) / (b - a);
+            if alpha >= a && alpha <= b {
+                resistance = ya + slope * (alpha - a);
+            }
+            let lower = a.max(onset);
+            let upper = b.min(alpha);
+            if upper > lower {
+                work += (ya + slope * (0.5 * lower + 0.5 * upper - a)) * (upper - lower);
+            }
+        }
+        let f = coaxial(alpha + resistance / 1500.0, 0.002);
+        let r = m.trial(&f, &old, conditions()).unwrap();
+        near(r.state.native_state().alpha, alpha, 3e-13, 3e-12);
+        let equivalent = settings().characteristic_length_m * work;
+        let integrity = (-equivalent / settings().post_initiation_plastic_work_j_m2).exp();
+        near(r.state.equivalent_plastic_work_j_m2(), equivalent, 3e-15, 3e-12);
+        near(r.state.integrity(), integrity, 3e-13, 3e-12);
+        near(
+            r.state.degraded_equivalent_plastic_work_j_m2(),
+            settings().post_initiation_plastic_work_j_m2 * (1.0 - integrity),
+            3e-15,
+            3e-12,
+        );
+        for j in 0..9 {
+            let h = 2e-7;
+            let mut plus = f;
+            let mut minus = f;
+            plus[j] += h;
+            minus[j] -= h;
+            let rp = m.stress(&plus, &old, conditions()).unwrap();
+            let rm = m.stress(&minus, &old, conditions()).unwrap();
+            for i in 0..9 {
+                near(r.tangent_pa[i][j], (rp[i] - rm[i]) / (2.0 * h), 2e-5, 2e-6);
+            }
+        }
+        old = r.state;
+    }
+    let hold = m.trial(old.deformation(), &old, conditions()).unwrap();
+    assert_eq!(hold.state, old);
+    assert_eq!(hold.energy.equivalent_plastic_work_increment_j_m2, 0.0);
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct SmoothLocus(DuctileDomain);
 impl DuctileInitiationLaw for SmoothLocus {

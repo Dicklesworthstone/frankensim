@@ -124,6 +124,11 @@ impl FiniteJ2 {
         saturation_pa: f64,
         rate_per_strain: f64,
     ) -> Result<Self, FiniteJ2Error> {
+        if self.table.is_some() {
+            return Err(FiniteJ2Error::Parameters(
+                "tabulated and Voce hardening are distinct selections",
+            ));
+        }
         let voce = FiniteVoceHardening::new(saturation_pa, rate_per_strain)?;
         let slope = saturation_pa * rate_per_strain;
         if self.parameters.yield_stress_pa <= 0.0
@@ -158,6 +163,9 @@ impl FiniteJ2 {
     }
 
     pub(super) fn hardening_tangent(&self, alpha: f64) -> f64 {
+        if let Some(table) = &self.table {
+            return table.tangent_pa(alpha).unwrap_or(f64::NAN);
+        }
         self.parameters.hardening_modulus_pa + self.voce.map_or(0.0, |v| v.tangent(alpha))
     }
 
