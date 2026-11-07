@@ -5,6 +5,9 @@
 //! claims. Crossing their support refuses; a new temperature cannot silently
 //! choose another formulation, phase, pressure, composition or source table.
 
+mod caloric;
+pub use caloric::{LiquidCaloricEndpoint, LiquidCaloricError};
+
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{QuantitySpec, Temperature};
@@ -268,7 +271,7 @@ mod tests {
     };
     use fs_qty::Dims;
 
-    fn card(basis: LiquidViscosityBasis, split_viscosity: bool) -> MaterialCard {
+    pub(super) fn card(basis: LiquidViscosityBasis, split_viscosity: bool) -> MaterialCard {
         let mut claims = ClaimSet::new();
         for (name, dims, values) in [
             (DENSITY_PROPERTY, Dims([-3, 1, 0, 0, 0, 0]), [1000.0, 800.0]),
@@ -351,7 +354,7 @@ mod tests {
         )
         .unwrap()
     }
-    fn point() -> QueryPoint {
+    pub(super) fn point() -> QueryPoint {
         QueryPoint::new()
             .with_quantity(
                 "T",

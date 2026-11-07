@@ -7721,6 +7721,29 @@ consumer currently requires source-declared validity-wide constant sigma.
 No surface-energy, Marangoni or wetting dynamics are inferred by adoption.
 
 
+### Owned liquid endpoints from original caloric heating
+
+`LiquidTemperatureLaw::prepare_caloric_endpoint` uses the original equilibrium
+enthalpy chart and accepted state to prepare an owned, noncapillary
+`LiquidCaloricEndpoint`. Both endpoints must remain liquid. Card/curve identity,
+selected caloric claims and complete nonthermal query context remain exact.
+Authored charts without receipts retain their authored assumptions.
+
+The endpoint owns its resolved surface source and reanchored temperature law.
+The ordinary reference-state path reuses initial data and resolves final
+transport once; scalar heat/work trials can use the original chart without
+requerying every property. `reanchored_at_temperature` preserves the complete
+claim bundle and separately retained density-derived expansion metadata.
+Kinematic viscosity is converted with the endpoint density.
+
+Source/chart density disagreement is measured at both endpoints and must fit
+the caller's explicit accuracy budget; neither density is rewritten.
+Requested and represented specific enthalpy increments remain separate.
+Fixed-pressure Cp already includes ambient p*dV. Mechanical correction work
+belongs to the physical caller; projection/remap losses never become heat.
+The helper changes no native state, volume or clock. The existing thermal
+owner must accept those together with its mass, energy and cancellation gates.
+
 ### Relative entropy on the admitted enthalpy/phase chart
 
 `EquilibriumEnthalpyPhaseCurve::specific_entropy_change_j_kg_k(h0,h1)`
