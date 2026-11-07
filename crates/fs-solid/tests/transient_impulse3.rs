@@ -252,3 +252,62 @@ fn g4_impulse_refusals_and_unrepresentable_velocity_leave_the_accepted_run_intac
         assert_eq!(moving.state(), &original);
     });
 }
+
+#[test]
+fn g1_g4_original_mass_retains_actual_impulse_and_support_work_defects() {
+    use fs_math::dd::Dd;
+    with_cx(false, |cx| {
+        // One free coordinate has mass 2^54 kg, initial speed 2^-54 m/s
+        // and an applied impulse 2^54 kg m/s. Its returned speed is 1 m/s:
+        // the actual momentum is one kg m/s short, not the solved increment.
+        let mass = 2.0_f64.powi(54);
+        let material = TetElasticMaterial::try_new(60.0 * mass, 60.0, 0.0, [42; 32]).unwrap();
+        let fixed: Vec<_> = (0..12).filter(|&d| d != 3).collect();
+        let p = problem(&material, &fixed);
+        let geometry = TetLoadGeometry3::new(&NODES, &TETS, p.budget, 4, cx).unwrap();
+        let load = geometry.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        for moving in [false, true] {
+            let mut velocity = if moving { [[1.0, 0.0, 0.0]; 4] } else { ZERO };
+            velocity[1][0] = 1.0 / mass;
+            let mut run = if moving {
+                load.begin_transient_with_supports(&p, None, 2.0, &ZERO, &velocity,
+                    &ZERO, config(), cx).unwrap()
+            } else {
+                load.begin_transient(&p, None, 2.0, &ZERO, &velocity, config(), cx).unwrap()
+            };
+            let original = run.state().clone();
+            let mut strict_run = run.clone();
+            let impulses = if moving {
+                vec![(0, 0.5 * mass), (3, mass), (6, 0.5 * mass), (9, 0.5 * mass)]
+            } else { vec![(3, mass)] };
+            let report = run.apply_nodal_impulse(&impulses, Default::default(), cx).unwrap();
+            assert_eq!(run.state().velocity, vec![1.0]);
+            assert_eq!(report.momentum_residual_kg_m_s, 1.0);
+            // Both displayed large energy terms round alike, but independent
+            // applied work exceeds actual storage plus support work by 0.5 J.
+            assert_eq!(report.kinetic_change_j, report.applied_impulse_work_j);
+            close(report.work_residual_j, -0.5, 1e-14);
+            let balance = report.retained_kinetic_energy_change_j()
+                - report.retained_applied_impulse_work_j()
+                - report.retained_support_impulse_work_j();
+            close(balance.to_f64(), -0.5, 1e-14);
+            if moving {
+                for node in [0, 2, 3] {
+                    assert_eq!(report.support_impulse_kg_m_s[node][0], -0.5);
+                }
+                assert_eq!(report.retained_support_impulse_work_j(), Dd::from_f64(-1.5));
+            } else {
+                assert_eq!(report.retained_support_impulse_work_j(), Dd::ZERO);
+                assert!(report.retained_kinetic_energy_change_j().lo < 0.0);
+            }
+            let strict = NodalImpulseControls3 {
+                absolute_momentum_tolerance_kg_m_s: 2.0,
+                absolute_work_tolerance_j: 0.1,
+                relative_tolerance: 1e-18,
+            };
+            assert!(matches!(strict_run.apply_nodal_impulse(&impulses, strict, cx),
+                Err(TransientError3::Energy { defect_j, .. }) if (defect_j + 0.5).abs() < 1e-14));
+            assert_eq!(strict_run.state(), &original);
+        }
+    });
+}

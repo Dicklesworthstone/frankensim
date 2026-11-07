@@ -6,6 +6,7 @@
 //! but the new velocity changes the subsequent acceleration and reactions.
 
 use super::super::*;
+use fs_math::quadratic::{self, QuadraticError};
 
 /// Physical residual tolerances for an instantaneous impulse [G0/G1].
 /// Iteration and storage budgets remain those of the admitted transient run.
@@ -53,6 +54,18 @@ pub struct NodalImpulse3 {
     /// Refreshed acceleration solve residual; zero if velocity was unchanged
     /// and the already accepted finite-force equilibrium needed no new solve.
     pub force_residual_n: f64,
+    kinetic_change: Dd,
+    applied_work: Dd,
+    support_work: Dd,
+}
+
+impl NodalImpulse3 {
+    /// Actual endpoint storage through the original full mass, before rounding.
+    pub const fn retained_kinetic_energy_change_j(&self) -> Dd { self.kinetic_change }
+    /// Work of the independently prescribed applied impulse.
+    pub const fn retained_applied_impulse_work_j(&self) -> Dd { self.applied_work }
+    /// Signed work of the full consistent-mass support impulse.
+    pub const fn retained_support_impulse_work_j(&self) -> Dd { self.support_work }
 }
 
 impl TetTransientRun3<'_, '_, '_, '_> {
@@ -152,10 +165,10 @@ impl TetTransientRun3<'_, '_, '_, '_> {
             }
             (increment, iterations)
         };
-        let before = self.nodal_motion(cx)?;
+        let before_velocity: Vec<_> = self.nodal_motion(cx)?[1]
+            .iter().flatten().copied().collect();
         let mut candidate = self.clone();
-        let mut full_increment = std::array::from_fn(|_| vec![0.0; full]);
-        let mut average_velocity: Vec<_> = before[1].iter().flatten().copied().collect();
+        let mut after_velocity = before_velocity.clone();
         let mut changed = false;
         for (i, (&dof, &increment)) in self.free_dofs().iter().zip(&velocity_increment).enumerate()
         {
@@ -169,18 +182,35 @@ impl TetTransientRun3<'_, '_, '_, '_> {
                 number(self.state.velocity[i] + increment)?
             };
             candidate.state.velocity[i] = next;
-            let actual = number(next - self.state.velocity[i])?;
-            full_increment[1][dof] = actual;
-            average_velocity[dof] = number(0.5 * next + 0.5 * self.state.velocity[i])?;
-            changed |= actual != 0.0;
+            after_velocity[dof] = next;
+            changed |= next != self.state.velocity[i];
         }
         // The original full element action retains M_cf, which a reduced
-        // solve alone cannot supply for physical support impulse accounting.
-        let momentum = self.problem.apply_full_kinematics(&full_increment, cx)?.mv;
+        // solve alone cannot supply. Keep actual endpoint difference tails
+        // through that action, sharing its one or two mass applications with
+        // the independent storage calculation. No unrelated stiffness or
+        // acceleration action is evaluated for this zero-duration event.
+        let mut momentum = vec![Dd::default(); full];
+        let kinetic_change = quadratic::increment(&before_velocity, &after_velocity,
+            |x, y, _| {
+                self.problem.apply_full_storage(x, y, true, cx)
+                    .map_err(TransientError3::from)?;
+                for (i, (total, &action)) in momentum.iter_mut().zip(y.iter()).enumerate() {
+                    if i % 256 == 0 { check(cx)?; }
+                    *total = energy::retained(*total + Dd::from_f64(action))?;
+                }
+                Ok(())
+            }, &mut || cx.checkpoint().is_err())
+            .map_err(|error| match error {
+                QuadraticError::Cancelled => TransientError3::Cancelled,
+                QuadraticError::Operator(error) => error,
+                _ => TransientError3::Invalid("invalid full impulse storage"),
+            })?.change;
         let mut residual = 0.0_f64;
         for &dof in self.free_dofs() {
             check(cx)?;
-            residual = number(residual.hypot(number(momentum[dof] - applied[dof])?))?;
+            let defect = energy::retained(momentum[dof] - Dd::from_f64(applied[dof]))?;
+            residual = number(residual.hypot(defect.to_f64()))?;
         }
         let allowance = number(
             controls.absolute_momentum_tolerance_kg_m_s
@@ -193,25 +223,39 @@ impl TetTransientRun3<'_, '_, '_, '_> {
             });
         }
         let mut support = vec![0.0; full];
+        let mut support_tail = vec![0.0; full];
+        let mut has_support_tail = false;
         for &dof in self.problem.fixed_dofs {
             check(cx)?;
-            support[dof] = number(momentum[dof] - applied[dof])?;
+            let impulse = energy::retained(momentum[dof] - Dd::from_f64(applied[dof]))?;
+            support[dof] = impulse.hi;
+            support_tail[dof] = impulse.lo;
+            has_support_tail |= impulse.lo != 0.0;
         }
-        let kinetic_change = number(inner(&average_velocity, &momentum))?;
-        let applied_work = number(inner(&average_velocity, &applied))?;
-        let support_work = number(inner(&average_velocity, &support))?;
-        let work_residual = number(number(kinetic_change - applied_work)? - support_work)?;
+        // The impulse is the displacement-like factor in endpoint_work;
+        // mean endpoint velocity is its work-conjugate factor. Applied work
+        // remains independent of the mass response and its numerical residual.
+        let zero = vec![0.0; full];
+        let applied_work = energy::source_work(&zero, &applied,
+            &before_velocity, &after_velocity, cx)?;
+        let mut support_work = energy::source_work(&zero, &support,
+            &before_velocity, &after_velocity, cx)?;
+        if has_support_tail {
+            support_work = energy::retained(support_work + energy::source_work(&zero,
+                &support_tail, &before_velocity, &after_velocity, cx)?)?;
+        }
+        let work_residual = energy::retained(kinetic_change - applied_work - support_work)?;
         let work_allowance = number(
             controls.absolute_work_tolerance_j
                 + controls.relative_tolerance
-                    * kinetic_change
+                    * kinetic_change.to_f64()
                         .abs()
-                        .max(applied_work.abs())
-                        .max(support_work.abs()),
+                        .max(applied_work.to_f64().abs())
+                        .max(support_work.to_f64().abs()),
         )?;
-        if work_residual.abs() > work_allowance {
+        if Dd::from_f64(work_allowance).lt(work_residual.abs()) {
             return Err(TransientError3::Energy {
-                defect_j: work_residual,
+                defect_j: work_residual.to_f64(),
                 allowance_j: work_allowance,
             });
         }
@@ -255,18 +299,20 @@ impl TetTransientRun3<'_, '_, '_, '_> {
             step: self.state.step,
             impulse_solve_iterations,
             momentum_residual_kg_m_s: residual,
-            nodal_momentum_change_kg_m_s: momentum.as_chunks::<3>().0.to_vec(),
+            nodal_momentum_change_kg_m_s: momentum.as_chunks::<3>().0.iter()
+                .map(|node| node.map(Dd::to_f64)).collect(),
             support_impulse_kg_m_s: support.as_chunks::<3>().0.to_vec(),
             kinetic_energy_j: [
                 self.state.kinetic_energy_j,
                 candidate.state.kinetic_energy_j,
             ],
-            kinetic_change_j: kinetic_change,
-            applied_impulse_work_j: applied_work,
-            support_impulse_work_j: support_work,
-            work_residual_j: work_residual,
+            kinetic_change_j: kinetic_change.to_f64(),
+            applied_impulse_work_j: applied_work.to_f64(),
+            support_impulse_work_j: support_work.to_f64(),
+            work_residual_j: work_residual.to_f64(),
             acceleration_solve_iterations,
             force_residual_n,
+            kinetic_change, applied_work, support_work,
         };
         check(cx)?;
         *self = candidate;

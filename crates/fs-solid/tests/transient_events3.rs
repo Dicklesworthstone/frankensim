@@ -315,3 +315,55 @@ fn g1_clamped_material_rebind_accounts_eigenstrain_storage_without_motion() {
         assert_eq!(run.state().time_s,0.0); assert_eq!(run.state().step,0);
     });
 }
+
+#[test]
+fn g1_g3_material_work_survives_unchanged_consistent_mass_inventory() {
+    with_cx(false, |cx| {
+        // Two disconnected P1 elements each retain one free x component.
+        // Their consistent reduced masses are 1 and 2^54 kg. Every velocity
+        // stays at or below 1 m/s; the extreme mass is a numerical stress case.
+        let background = 2.0_f64.powi(54);
+        let nodes = [NODES[0], NODES[1], NODES[2], NODES[3],
+            [2.0, 0.0, 0.0], [3.0, 0.0, 0.0], [2.0, 1.0, 0.0], [2.0, 0.0, 1.0]];
+        let tets = [[0, 1, 2, 3], [4, 5, 6, 7]];
+        let old_materials = [source_material(60.0, 60.0),
+            source_material(60.0 * background, 60.0)];
+        let new_materials = [source_material(120.0, 60.0),
+            source_material(60.0 * background, 60.0)];
+        let fixed: Vec<_> = (0..24).filter(|&d| d != 3 && d != 15).collect();
+        let old_problem = TetLinearElasticProblem { nodes_m: &nodes, tetrahedra: &tets,
+            materials: TetMaterialField::PerElement(&old_materials), fixed_dofs: &fixed,
+            budget: Default::default() };
+        let new_problem = TetLinearElasticProblem {
+            materials: TetMaterialField::PerElement(&new_materials), ..old_problem };
+        let geometry = TetLoadGeometry3::new(&nodes, &tets, old_problem.budget, 8, cx).unwrap();
+        let load = geometry.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        let zero = [[0.0; 3]; 8];
+        let mut velocity = zero;
+        velocity[1][0] = 1.0;
+        velocity[5][0] = 1.0;
+        let run = load.begin_transient(&old_problem, None, 3.0, &zero, &velocity,
+            config(), cx).unwrap();
+        let accepted = run.state().clone();
+        let frame = fs_blake3::ContentHash([85; 32]);
+        let (next, report) = run.rebind_material_candidate(&new_problem, None, &load,
+            frame, rebind_controls(), cx).unwrap();
+        assert_eq!(next.state().velocity, vec![0.5, 1.0]);
+        assert_eq!(report.kinetic_energy_j[0], report.kinetic_energy_j[1]);
+        assert_eq!(report.kinetic_work_j, -0.25);
+        assert_eq!(report.retained_kinetic_work_j(), fs_math::dd::Dd::from_f64(-0.25));
+        assert_eq!(report.supplied_work_j, -0.25);
+        assert_eq!(report.reduced_momentum_residual_kg_m_s, 0.0);
+        let zero_work = MaterialRebindConfig3 { maximum_absolute_work_j: 0.0,
+            ..rebind_controls() };
+        assert!(run.rebind_material_candidate(&new_problem, None, &load,
+            frame, zero_work, cx).is_err());
+        assert_eq!(run.state(), &accepted);
+        let (restored, reverse) = next.rebind_material_candidate(&old_problem, None,
+            &load, frame, rebind_controls(), cx).unwrap();
+        assert_eq!(restored.state().velocity, accepted.velocity);
+        assert_eq!(reverse.retained_supplied_work_j(), fs_math::dd::Dd::from_f64(0.25));
+        assert_eq!(restored.state().time_s, 3.0);
+        assert_eq!(restored.state().step, 0);
+    });
+}

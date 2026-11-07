@@ -42,6 +42,15 @@ pub struct MaterialRebind3 {
     /// Original tetrahedron order; each pair retains the exact source binding.
     pub material_state_identities: Vec<[[u8; 32]; 2]>,
     pub thermal_state_identities: Vec<[Option<ContentHash>; 2]>,
+    kinetic_work: Dd,
+    supplied_work: Dd,
+}
+
+impl MaterialRebind3 {
+    /// Original-mass kinetic change before rounding the diagnostic scalar.
+    pub const fn retained_kinetic_work_j(&self) -> Dd { self.kinetic_work }
+    /// Signed external reconfiguration work, retaining the kinetic low word.
+    pub const fn retained_supplied_work_j(&self) -> Dd { self.supplied_work }
 }
 
 impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
@@ -108,10 +117,19 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
         let after = candidate.recover_response(mesh_frame, controls.maximum_strain, cx)?;
         let kinetic = [self.state.kinetic_energy_j, candidate.state.kinetic_energy_j];
         let elastic = [before.stress.elastic_energy_j(), after.stress.elastic_energy_j()];
-        let kinetic_work = number(kinetic[1]-kinetic[0])?;
+        // Delta T = v_bar' M_before delta_v + v_after' delta(M) v_after/2.
+        // Both terms use the original consistent sparse coefficients. The
+        // second term is essential when density changes; unchanged inventory
+        // contributes zero before reduction rather than hiding event work.
+        let velocity_work = energy::sparse_change(&self.operators.mass,
+            &self.state.velocity, &candidate.state.velocity, cx)?;
+        let mass_work = energy::coefficient_change(&self.operators.mass,
+            &candidate.operators.mass, &candidate.state.velocity,
+            &candidate.state.velocity, cx)?[0];
+        let kinetic_work = energy::retained(velocity_work + mass_work)?;
         let elastic_work = number(elastic[1]-elastic[0])?;
-        let supplied_work = number(kinetic_work+elastic_work)?;
-        if supplied_work.abs() > controls.maximum_absolute_work_j {
+        let supplied_work = energy::retained(kinetic_work + Dd::from_f64(elastic_work))?;
+        if Dd::from_f64(controls.maximum_absolute_work_j).lt(supplied_work.abs()) {
             return Err(TransientError3::Invalid("material reconfiguration exceeds its external work allowance"));
         }
         let mut materials = Vec::with_capacity(self.problem.tetrahedra.len());
@@ -133,9 +151,11 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
         let report = MaterialRebind3 { time_s: self.state.time_s, step: self.state.step,
             reference_mass_kg: [self.operators.total_mass_kg, candidate.operators.total_mass_kg],
             kinetic_energy_j: kinetic, elastic_energy_j: elastic,
-            kinetic_work_j: kinetic_work, elastic_work_j: elastic_work, supplied_work_j: supplied_work,
+            kinetic_work_j: kinetic_work.to_f64(), elastic_work_j: elastic_work,
+            supplied_work_j: supplied_work.to_f64(),
             reduced_momentum_residual_kg_m_s: residual,
-            material_state_identities: materials, thermal_state_identities: thermal };
+            material_state_identities: materials, thermal_state_identities: thermal,
+            kinetic_work, supplied_work };
         check(cx)?;
         Ok((candidate, report))
     }

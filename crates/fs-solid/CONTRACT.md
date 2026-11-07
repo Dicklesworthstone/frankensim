@@ -4390,6 +4390,17 @@ fully clamped storage, and late work/strain or cancellation refusal.
 This does not differentiate the replacement map or validate a real material
 transition.
 
+Material replacement retains its kinetic increment through the original sparse
+mass action and the actual old/new mass coefficients before combining external
+work or applying its work bound. An unchanged large kinetic inventory cannot
+erase a smaller density-reconfiguration exchange. Native impulse admission
+likewise retains actual endpoint velocity differences through the original full
+consistent mass, including restrained cross rows; that same mass action supplies
+momentum and kinetic storage. Independent applied and signed support work retain
+endpoint means and support-impulse low words through the work gate. Reports
+expose retained kinetic/source/support or reconfiguration work for composition.
+These numerical work defects remain separate from physical loss and heat.
+
 ## Instantaneous impulses on an accepted P1 trajectory
 
 `loads3::transient::TetTransientRun3::apply_nodal_impulse` applies
