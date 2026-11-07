@@ -111,6 +111,112 @@ fn g1_nonunit_gear_ratio_motor_recoil_phase_and_work_are_analytic() {
 }
 
 #[test]
+fn g1_balanced_large_aerodynamic_ports_preserve_motor_carrier_torque_and_work() {
+    let a = GearedAssembly::new(
+        3.0,
+        diagonal([3.0, 4.0, 5.0]),
+        [rotor(0.5, 1.0, [1.0, 0.0, 0.0]); 2],
+    )
+    .unwrap();
+    let state = a.state_from_speed(rigid(), 0.0, 0.0).unwrap();
+    let dt = 1.0 / 16.0;
+    let large = 2.0_f64.powi(54);
+    let tolerance = 32.0 * f64::EPSILON;
+    // J_eq = 1, c_x = 1, I_reduced,xx = 2. Equal/opposite aerodynamic
+    // ports cancel in both equations and in absolute-shaft work. The last
+    // case also retains nonzero carrier work between the large port works.
+    for (motor, carrier) in [(1.0, 0.0), (0.0, 1.0), (2.0, 1.0)] {
+        let momentum = motor * dt;
+        let omega = (carrier - motor) * dt / 2.0;
+        let speed = momentum - omega;
+        let phase = 0.5 * dt * speed;
+        let motor_work = motor * phase;
+        let external_work = carrier * 0.5 * dt * omega;
+        let energy = omega * omega + 0.5 * momentum * momentum;
+        let mut reference = None;
+        for aerodynamic_nm in [[large, -large], [-large, large]] {
+            let result = geared::step_held(
+                &a,
+                &state,
+                GearedLoads {
+                    carrier: Loads {
+                        moment_nm: [carrier, 0.0, 0.0],
+                        ..no_loads::<2>().carrier
+                    },
+                    motor_nm: motor,
+                    aerodynamic_nm,
+                },
+                ZERO,
+                dt,
+            )
+            .unwrap();
+            assert_eq!(result.state.momentum, momentum);
+            assert!(
+                (v(result.state.rigid.omega_body) - Vec3::new(omega, 0.0, 0.0)).norm() < tolerance
+            );
+            assert!((result.speed_rad_s - speed).abs() < tolerance);
+            assert!((result.state.phase_rad - phase).abs() < tolerance);
+            assert!((result.motor_work_j - motor_work).abs() < tolerance * energy);
+            assert!((result.external_work_j - external_work).abs() < tolerance * energy);
+            assert!((result.kinetic_energy_after_j - energy).abs() < tolerance * energy);
+            assert!(result.kinetic_work_residual_j.abs() < tolerance * energy);
+            assert!(
+                (v(result.external_angular_impulse_world) - Vec3::new(carrier * dt, 0.0, 0.0))
+                    .norm()
+                    < tolerance
+            );
+            assert!(v(result.angular_momentum_residual).norm() < tolerance);
+            if let Some(previous) = reference {
+                assert_eq!(
+                    result, previous,
+                    "permuting identical rotor ports changed the step"
+                );
+            }
+            reference = Some(result);
+        }
+    }
+}
+
+#[test]
+fn g1_held_gear_torque_retains_the_cancelled_product_tail() {
+    let epsilon = 2.0_f64.powi(-27);
+    let a = GearedAssembly::new(
+        3.0,
+        diagonal([3.0, 4.0, 5.0]),
+        [
+            rotor(0.5, 1.0 + epsilon, [1.0, 0.0, 0.0]),
+            rotor(0.5, 1.0, [1.0, 0.0, 0.0]),
+        ],
+    )
+    .unwrap();
+    let state = a.state_from_speed(rigid(), 0.0, 0.0).unwrap();
+    let dt = 1.0 / 16.0;
+    let result = geared::step_held(
+        &a,
+        &state,
+        GearedLoads {
+            aerodynamic_nm: [1.0 - epsilon, -1.0],
+            ..no_loads()
+        },
+        ZERO,
+        dt,
+    )
+    .unwrap();
+    // (1+epsilon)(1-epsilon)-1 = -epsilon^2. Rounding each product
+    // before summation would turn this nonzero shaft drive into zero.
+    assert_eq!(result.state.momentum, -epsilon * epsilon * dt);
+    let omega = (-epsilon * dt
+        - a.cross_inertia_kgm2()[0] * result.state.momentum / a.equivalent_inertia_kgm2())
+        / a.reduced_inertia_kgm2().m[0];
+    let external_work = -epsilon * 0.5 * dt * omega - epsilon * epsilon * result.state.phase_rad;
+    assert!((result.state.rigid.omega_body[0] - omega).abs() < 32.0 * f64::EPSILON * omega.abs());
+    assert!(
+        (result.external_work_j - external_work).abs() < 64.0 * f64::EPSILON * external_work.abs()
+    );
+    assert!(result.kinetic_work_residual_j.abs() < 64.0 * f64::EPSILON * external_work.abs());
+}
+
+#[test]
 fn g0_counterrotation_cancels_motor_recoil_but_unequal_aero_is_external_once() {
     let a = GearedAssembly::new(
         3.0,

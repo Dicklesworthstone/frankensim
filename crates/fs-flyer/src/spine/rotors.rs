@@ -544,7 +544,9 @@ pub fn step_held<const N: usize>(
     next.rigid = canonical;
     let stored_before = assembly.stored(&state.axial_momentum);
     let mut stored_transfer = [dd(0.0); 3];
-    let mut total_torque = vec(loads.moment_nm);
+    // A cancelling pair of rotor torques must not erase a smaller carrier
+    // moment. Retain axis-product tails and round only after summing all ports.
+    let mut total_torque = loads.moment_nm.map(dd);
     for i in 0..N {
         next.axial_momentum[i] = dt_s.mul_add(
             torques.motor_nm[i] + torques.aerodynamic_nm[i],
@@ -559,10 +561,11 @@ pub fn step_held<const N: usize>(
         for j in 0..3 {
             let term = dd(assembly.rotors[i].axis_body[j]) * dd(actual);
             stored_transfer[j] = stored_transfer[j] + term;
+            total_torque[j] = total_torque[j]
+                + dd(assembly.rotors[i].axis_body[j]) * dd(torques.aerodynamic_nm[i]);
         }
-        total_torque =
-            total_torque + vec(assembly.rotors[i].axis_body).scale(torques.aerodynamic_nm[i]);
     }
+    let total_torque = vec(total_torque.map(|value| value.to_f64()));
     let stored_after = assembly.stored(&next.axial_momentum);
     // A resolved shaft impulse can still disappear when another rotor's much
     // larger momentum dominates h. Refuse before the gyrostat loses recoil.
@@ -602,10 +605,11 @@ pub fn step_held<const N: usize>(
     admit_derived_state(&next.rigid, "rotor assembly endpoint")?;
     let omega_mid = vec(canonical.omega_body).scale(0.5) + omega_after.scale(0.5);
     let mut speeds = [0.0; N];
-    let mut motor_work = 0.0;
-    let mut external_work = force
-        .dot((velocity_before.scale(0.5) + velocity_after.scale(0.5)).scale(dt_s))
-        + dt_s * vec(loads.moment_nm).dot(omega_mid);
+    let mut motor_work = dd(0.0);
+    let mut external_work = dot_dd(
+        force,
+        (velocity_before.scale(0.5) + velocity_after.scale(0.5)).scale(dt_s),
+    ) + dd(dt_s) * dot_dd(vec(loads.moment_nm), omega_mid);
     for i in 0..N {
         let rotor = assembly.rotors[i];
         let p_mid = 0.5 * state.axial_momentum[i] + 0.5 * next.axial_momentum[i];
@@ -614,8 +618,9 @@ pub fn step_held<const N: usize>(
         next.relative_phase_rad[i] += phase_delta;
         speeds[i] = next.axial_momentum[i] / rotor.axial_inertia_kgm2
             - vec(rotor.axis_body).dot(omega_after);
-        motor_work += torques.motor_nm[i] * phase_delta;
-        external_work += dt_s * torques.aerodynamic_nm[i] * absolute_mid_speed;
+        motor_work = motor_work + dd(torques.motor_nm[i]) * dd(phase_delta);
+        external_work =
+            external_work + dd(dt_s) * dd(torques.aerodynamic_nm[i]) * dd(absolute_mid_speed);
     }
     let p0 = velocity_before.scale(assembly.reduced_body.mass_kg);
     let p1 = velocity_after.scale(assembly.reduced_body.mass_kg);
@@ -637,7 +642,10 @@ pub fn step_held<const N: usize>(
         .scale(dt_s * 0.5);
     let kinetic_before = assembly.energy(state);
     let kinetic_after = assembly.energy(&next);
-    let kinetic_residual = kinetic_after - kinetic_before - motor_work - external_work;
+    let kinetic_residual =
+        (dd(kinetic_after) - dd(kinetic_before) - motor_work - external_work).to_f64();
+    let motor_work = motor_work.to_f64();
+    let external_work = external_work.to_f64();
     let linear_residual = p1 - p0 - impulse;
     let angular_residual = l1 - l0 - angular_impulse;
     if !next

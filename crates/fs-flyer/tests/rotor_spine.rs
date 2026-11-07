@@ -98,6 +98,68 @@ fn g1_motor_recoil_phase_and_energy_are_analytic() {
 }
 
 #[test]
+fn g1_balanced_rotor_ports_preserve_small_carrier_torque_in_every_axis() {
+    let dt = 1.0 / 16.0;
+    let large = 2.0_f64.powi(54);
+    let tolerance = 32.0 * f64::EPSILON;
+    for axis in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] {
+        let a = RotorAssembly {
+            reduced_body: RigidBody::new(3.0, [2.0; 3]).unwrap(),
+            rotors: [AxialRotor {
+                axis_body: axis,
+                axial_inertia_kgm2: 0.5,
+            }; 2],
+        };
+        let state = a
+            .state_from_relative_spin(rigid(), [0.0; 2], [0.0; 2])
+            .unwrap();
+        let mut reference = None;
+        for aerodynamic_nm in [[large, -large], [-large, large]] {
+            // Opposing motor and aerodynamic loads hold each absolute shaft
+            // momentum at zero. Their net moment/work is zero, leaving only
+            // the unit carrier moment: omega = dt/2 and Delta K = dt^2/4.
+            let result = step_held(
+                &a,
+                &state,
+                Loads {
+                    moment_nm: axis,
+                    ..no_loads()
+                },
+                RotorTorques {
+                    motor_nm: aerodynamic_nm.map(|torque| -torque),
+                    aerodynamic_nm,
+                },
+                ZERO,
+                dt,
+            )
+            .unwrap();
+            let energy = dt * dt / 4.0;
+            assert_eq!(result.state.axial_momentum, [0.0; 2]);
+            assert!(
+                (v(result.state.rigid.omega_body) - v(axis).scale(dt / 2.0)).norm() < tolerance
+            );
+            assert_eq!(result.relative_speed_rad_s, [-dt / 2.0; 2]);
+            assert_eq!(result.state.relative_phase_rad, [-energy; 2]);
+            assert_eq!(result.motor_work_j, 0.0);
+            assert!((result.external_work_j - energy).abs() < tolerance * energy);
+            assert!((result.kinetic_energy_after_j - energy).abs() < tolerance * energy);
+            assert!(result.kinetic_work_residual_j.abs() < tolerance * energy);
+            assert!(
+                (v(result.external_angular_impulse_world) - v(axis).scale(dt)).norm() < tolerance
+            );
+            assert!(v(result.angular_momentum_residual).norm() < tolerance);
+            if let Some(previous) = reference {
+                assert_eq!(
+                    result, previous,
+                    "permuting identical rotor ports changed the step"
+                );
+            }
+            reference = Some(result);
+        }
+    }
+}
+
+#[test]
 fn g1_full_tensor_carrier_has_analytic_cross_axis_motor_recoil() {
     let a = RotorAssembly {
         reduced_body: RigidBody::from_inertia_tensor(

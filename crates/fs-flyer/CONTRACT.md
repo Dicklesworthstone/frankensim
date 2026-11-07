@@ -747,6 +747,16 @@ momenta; the receipt returns relative speeds, fixed-origin linear/angular
 impulse residuals, separate motor/external work, actual kinetic energies and
 the numerical work defect. No numerical defect is relabeled as dissipation.
 
+The independent and ideal-gear held-load paths accumulate torque and work in
+double-double arithmetic, retaining product tails and small net loads through
+cancellation before rounding to the binary64 integrator and receipt fields.
+This improves summation precision without extending the exponent range or
+guaranteeing exact sums: nonfinite arithmetic refuses, and underflow remains
+possible. State updates, phases and endpoint kinetic energies remain binary64;
+compensated sums cannot recover information already lost in those values.
+Finite-step integration defects remain reported, and existing refusal rules
+for erased shaft transfers still apply.
+
 The successful path is allocation-free, O(rotors) plus at most five elementary
 gyrostat rotations, without a nonlinear solve. State, inertia, axes, loads,
 count and finite derived quantities are admitted before publication. G0/G1/G3

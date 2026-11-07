@@ -506,12 +506,19 @@ fn advance_held<const N: usize>(
     {
         return Err(reject("origin and shaft torques must be finite"));
     }
-    let mut generalized_torque = loads.motor_nm;
-    let mut total_torque = vec(loads.carrier.moment_nm);
+    // Keep small motor/carrier moments through cancellation between shaft
+    // ports, including the low part of each gear-ratio/axis product. Round
+    // once at the native integrator boundary, as the impulse path does.
+    let mut generalized_torque = dd(loads.motor_nm);
+    let mut total_torque = loads.carrier.moment_nm.map(dd);
     for (rotor, torque) in assembly.rotors.iter().zip(loads.aerodynamic_nm) {
-        generalized_torque += rotor.ratio * torque;
-        total_torque = total_torque + vec(rotor.axis_body).scale(torque);
+        generalized_torque = generalized_torque + dd(rotor.ratio) * dd(torque);
+        for (component, axis) in total_torque.iter_mut().zip(rotor.axis_body) {
+            *component = *component + dd(axis) * dd(torque);
+        }
     }
+    let generalized_torque = generalized_torque.to_f64();
+    let total_torque = vec(total_torque.map(|value| value.to_f64()));
     let mut next = *state;
     next.momentum += dt_s * generalized_torque;
     let actual_dp =
@@ -555,17 +562,19 @@ fn advance_held<const N: usize>(
     let phase_delta = dt_s * (0.5 * speed0 + 0.5 * speed1);
     next.phase_rad += phase_delta;
     let omega_mid = omega0.scale(0.5) + omega1.scale(0.5);
-    let motor_work = loads.motor_nm * phase_delta;
-    let mut external_work = force.dot((v0.scale(0.5) + v1.scale(0.5)).scale(dt_s))
-        + dt_s * vec(loads.carrier.moment_nm).dot(omega_mid);
+    let motor_work = dd(loads.motor_nm) * dd(phase_delta);
+    let mut external_work = dot_dd(force, (v0.scale(0.5) + v1.scale(0.5)).scale(dt_s))
+        + dd(dt_s) * dot_dd(vec(loads.carrier.moment_nm), omega_mid);
     let mut relative_speed = [0.0; N];
     let mut absolute_speed = [0.0; N];
     for i in 0..N {
         let rotor = assembly.rotors[i];
         relative_speed[i] = rotor.ratio * speed1;
         absolute_speed[i] = relative_speed[i] + vec(rotor.axis_body).dot(omega1);
-        external_work += loads.aerodynamic_nm[i]
-            * (rotor.ratio * phase_delta + dt_s * vec(rotor.axis_body).dot(omega_mid));
+        external_work = external_work
+            + dd(loads.aerodynamic_nm[i])
+                * (dd(rotor.ratio) * dd(phase_delta)
+                    + dd(dt_s) * dot_dd(vec(rotor.axis_body), omega_mid));
     }
     let p0 = v0.scale(assembly.mass_kg);
     let p1 = v1.scale(assembly.mass_kg);
@@ -587,7 +596,10 @@ fn advance_held<const N: usize>(
         .scale(0.5 * dt_s);
     let kinetic_before = assembly.energy(state)?;
     let kinetic_after = assembly.energy(&next)?;
-    let kinetic_residual = kinetic_after - kinetic_before - motor_work - external_work;
+    let kinetic_residual =
+        (dd(kinetic_after) - dd(kinetic_before) - motor_work - external_work).to_f64();
+    let motor_work = motor_work.to_f64();
+    let external_work = external_work.to_f64();
     let linear_residual = p1 - p0 - impulse;
     let angular_residual = l1 - l0 - angular_impulse;
     if ![
