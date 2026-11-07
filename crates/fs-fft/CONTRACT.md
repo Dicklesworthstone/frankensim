@@ -224,6 +224,17 @@ zero at the first sample. The jointly fitted DC and unexplained sampled RMS
 retain the input's units. Reusing `fit_into` needs only caller-provided sample
 scratch and phasor output; it performs no allocation.
 
+The sampled basis and frequency/pole derivatives retain `frequency_hz * dt * j`
+in DD until whole cycles are removed, then evaluate the reduced phase with the
+shared deterministic scalar trigonometry. The low radian component is applied
+before rounding the design columns. Harmonic frequencies are authored once as
+`fundamental_hz * order`, as in the physical propagation consumers: a decimal
+clock does not distinguish that front from identical explicit tones or
+zero-decay poles. This prevents record-length-dependent phase drift from
+polluting weak partials and the residual; it adds no storage or fit-time work.
+Focused G1/G3 regressions compare long records with the independent DD
+observation clock and check exact fit parity between all three fronts.
+
 Admission checks the explicit storage budget, sample count, harmonic ordering,
 strict Nyquist limit and a caller-set reciprocal-condition floor. Conditioning
 is measured using the complete triangular `R` inverse's 1-norm, not a diagonal

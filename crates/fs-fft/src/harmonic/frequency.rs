@@ -1,6 +1,8 @@
 //! Bounded local variable projection for a common harmonic fundamental.
 
-use super::{C64, HarmonicFit, HarmonicFitBudget, HarmonicFitError, HarmonicFitPlan};
+use super::{
+    C64, HarmonicFit, HarmonicFitBudget, HarmonicFitError, HarmonicFitPlan, sample_sin_cos,
+};
 use fs_math::det;
 
 /// Numerical limits for local fundamental-frequency refinement.
@@ -255,8 +257,9 @@ pub fn refine_harmonic_frequency_channels(
         return Err(invalid("record duration must be positive and finite"));
     }
     if harmonics.iter().any(|&h| {
-        let cycles = (upper * timestep_s) * h as f64;
-        !(cycles > 0.0 && cycles < 0.5 && (upper * h as f64).is_finite())
+        let frequency = upper * h as f64;
+        let cycles = frequency * timestep_s;
+        !(cycles > 0.0 && cycles < 0.5 && frequency.is_finite())
     }) {
         return Err(invalid(
             "all harmonics must remain below Nyquist over the search interval",
@@ -389,7 +392,6 @@ fn evaluate(
     derivative: &mut [f64],
 ) -> Result<Candidate, HarmonicFrequencyError> {
     let columns = 2 * plan.harmonics.len() + 1;
-    let cycles = plan.fundamental_hz * plan.timestep_s();
     let mut fits = Vec::with_capacity(channels.len());
     let (mut residual_squared, mut numerator, mut denominator, mut joint_scale) =
         (0.0, 0.0, 0.0, 0.0_f64);
@@ -415,8 +417,7 @@ fn evaluate(
             let centered_time = j as f64 / (samples.len() - 1) as f64 - 0.5;
             let mut value = 0.0;
             for (k, &h) in plan.harmonics.iter().enumerate() {
-                let theta = core::f64::consts::TAU * ((cycles * h as f64) * j as f64);
-                let (s, c) = det::sin_cos(theta);
+                let (s, c) = sample_sin_cos(plan.fundamental_hz * h as f64, plan.timestep_s(), j);
                 let slope = (-scratch[2 * k + 1]).mul_add(s, scratch[2 * k + 2] * c);
                 value = (h as f64 * slope).mul_add(centered_time, value);
             }

@@ -85,7 +85,7 @@ impl DampedToneFitPlan {
             sample_count,
             timestep_s,
             poles.len(),
-            |k| poles[k].frequency_hz * timestep_s,
+            |k| poles[k].frequency_hz,
             |j, k| {
                 let decay = poles[k].decay_rate_per_s;
                 if j == 0 || decay == 0.0 {

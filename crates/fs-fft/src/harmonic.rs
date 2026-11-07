@@ -23,7 +23,7 @@
 
 use crate::C64;
 use fs_la::factor::{Qr, qr};
-use fs_math::det;
+use fs_math::{dd::Dd, det};
 
 #[path = "harmonic/damped.rs"]
 mod damped;
@@ -124,6 +124,27 @@ fn invalid(what: &'static str) -> HarmonicFitError {
     HarmonicFitError::InvalidParameter { what }
 }
 
+// Match the physical Hz clock used by harmonic observations. Multiplying
+// rounded f*dt or a rounded large radian angle lets phase error grow through
+// the record, turning a strong carrier's clock error into fitted residuals.
+// Retain the product until complete cycles have been removed instead.
+//
+// Admission makes the sample index exactly representable and f*dt < 1/2.
+// The reduced DD angle is small; its low part is at most a few ulps of one
+// radian. One scalar sin_cos and the first-order angle-addition correction
+// therefore suffice for the f64 design columns (the omitted term is < 1e-30).
+// This avoids full DD trigonometry, new allocations, or a drifting recurrence.
+fn sample_sin_cos(frequency_hz: f64, timestep_s: f64, index: usize) -> (f64, f64) {
+    let cycles = Dd::from_f64(frequency_hz) * Dd::from_f64(timestep_s) * Dd::from_f64(index as f64);
+    let fraction = cycles - Dd::from_f64(cycles.hi.round());
+    let angle = fraction * crate::harmonic_window::TAU_DD;
+    let (sine, cosine) = det::sin_cos(angle.hi);
+    (
+        cosine.mul_add(angle.lo, sine),
+        (-sine).mul_add(angle.lo, cosine),
+    )
+}
+
 /// Joint fit result in the input record's physical units.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HarmonicFit {
@@ -216,7 +237,6 @@ impl HarmonicFitPlan {
                 "harmonics must be positive, nonempty and strictly increasing",
             ));
         }
-        let cycles_per_sample = fundamental_hz * timestep_s;
         for &order in harmonics {
             if order as u128 > (1_u128 << 53) || !(fundamental_hz * order as f64).is_finite() {
                 return Err(invalid(
@@ -228,7 +248,7 @@ impl HarmonicFitPlan {
             sample_count,
             timestep_s,
             harmonics.len(),
-            |k| cycles_per_sample * harmonics[k] as f64,
+            |k| fundamental_hz * harmonics[k] as f64,
             budget,
         )?;
         Ok(Self {
@@ -314,7 +334,7 @@ impl ToneFitPlan {
             sample_count,
             timestep_s,
             frequencies_hz.len(),
-            |k| frequencies_hz[k] * timestep_s,
+            |k| frequencies_hz[k],
             budget,
         )?;
         Ok(Self {
@@ -375,14 +395,14 @@ impl FitDesign {
         sample_count: usize,
         timestep_s: f64,
         tones: usize,
-        cycles_per_sample: impl Fn(usize) -> f64,
+        frequency_hz: impl Fn(usize) -> f64,
         budget: HarmonicFitBudget,
     ) -> Result<Self, HarmonicFitError> {
         Self::with_envelopes(
             sample_count,
             timestep_s,
             tones,
-            cycles_per_sample,
+            frequency_hz,
             |_, _| 1.0,
             0,
             budget,
@@ -396,7 +416,7 @@ impl FitDesign {
         sample_count: usize,
         timestep_s: f64,
         tones: usize,
-        cycles_per_sample: impl Fn(usize) -> f64,
+        frequency_hz: impl Fn(usize) -> f64,
         envelope: impl Fn(usize, usize) -> f64,
         extra_workspace_bytes: usize,
         budget: HarmonicFitBudget,
@@ -417,8 +437,11 @@ impl FitDesign {
         if sample_count < columns {
             return Err(invalid("need at least 1 + 2 * tone_count samples"));
         }
+        if sample_count as u128 > (1_u128 << 53) {
+            return Err(invalid("sample count exceeds the exact integer clock"));
+        }
         for k in 0..tones {
-            let cycles = cycles_per_sample(k);
+            let cycles = frequency_hz(k) * timestep_s;
             if !(cycles > 0.0 && cycles < 0.5) {
                 return Err(invalid(
                     "tone frequencies must be positive and strictly below Nyquist",
@@ -445,8 +468,7 @@ impl FitDesign {
         for (j, row) in design.chunks_exact_mut(columns).enumerate() {
             row[0] = 1.0;
             for k in 0..tones {
-                let theta = core::f64::consts::TAU * (cycles_per_sample(k) * j as f64);
-                let (s, c) = det::sin_cos(theta);
+                let (s, c) = sample_sin_cos(frequency_hz(k), timestep_s, j);
                 let amplitude = envelope(j, k);
                 row[2 * k + 1] = c * amplitude;
                 row[2 * k + 2] = s * amplitude;

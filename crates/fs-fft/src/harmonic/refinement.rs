@@ -2,7 +2,7 @@
 
 use super::{
     C64, DampedToneBounds, DampedToneFitPlan, DampedTonePole, FitDesign, HarmonicFit,
-    HarmonicFitBudget, HarmonicFitError, ToneFitPlan,
+    HarmonicFitBudget, HarmonicFitError, ToneFitPlan, sample_sin_cos,
 };
 use fs_la::factor::{Qr, qr};
 use fs_math::det;
@@ -27,9 +27,7 @@ impl Domain<'_> {
     fn bound(&self, coordinate: usize) -> [f64; 2] {
         match self {
             Self::Stationary(_, bounds) => bounds[coordinate],
-            Self::Damped(_, bounds) if coordinate % 2 == 0 => {
-                bounds[coordinate / 2].frequency_hz
-            }
+            Self::Damped(_, bounds) if coordinate % 2 == 0 => bounds[coordinate / 2].frequency_hz,
             Self::Damped(_, bounds) => bounds[coordinate / 2].decay_rate_per_s,
         }
     }
@@ -227,7 +225,14 @@ pub(super) fn refine_channels(
         residual: vec![0.0; if domain.damped() { n } else { 0 }],
         augmented: vec![0.0; rows * width],
         folded: vec![0.0; 2 * width * width],
-        projected_folded: vec![0.0; if domain.damped() { 2 * width * width } else { 0 }],
+        projected_folded: vec![
+            0.0;
+            if domain.damped() {
+                2 * width * width
+            } else {
+                0
+            }
+        ],
     };
     let mut current = evaluate(
         channels,
@@ -240,9 +245,12 @@ pub(super) fn refine_channels(
     )?;
     let mut evaluations = 1;
     loop {
-        if current.corrections.iter().enumerate().all(|(i, d)| {
-            d.abs() <= controls.tolerances[usize::from(domain.damped()) * (i % 2)]
-        }) {
+        if current
+            .corrections
+            .iter()
+            .enumerate()
+            .all(|(i, d)| d.abs() <= controls.tolerances[usize::from(domain.damped()) * (i % 2)])
+        {
             return Ok(Report {
                 parameters: current.parameters,
                 fits: current.fits,
@@ -255,7 +263,11 @@ pub(super) fn refine_channels(
         // limit the amplitude envelope change to half an e-fold per record.
         let mut fraction = 1.0_f64;
         for (i, d) in current.corrections.iter().enumerate() {
-            let cap = if domain.damped() && i % 2 == 1 { 0.5 } else { 0.25 };
+            let cap = if domain.damped() && i % 2 == 1 {
+                0.5
+            } else {
+                0.25
+            };
             fraction = fraction.min(cap / duration / d.abs());
         }
         loop {
@@ -317,7 +329,11 @@ fn refinement_bytes(
     let scalars = n
         .checked_mul(if damped { 3 } else { 2 })
         .and_then(|v| rows.checked_mul(s)?.checked_mul(2)?.checked_add(v))
-        .and_then(|v| s.checked_mul(s)?.checked_mul(if damped { 12 } else { 6 })?.checked_add(v))
+        .and_then(|v| {
+            s.checked_mul(s)?
+                .checked_mul(if damped { 12 } else { 6 })?
+                .checked_add(v)
+        })
         .and_then(|v| s.checked_mul(3)?.checked_add(v))
         .and_then(|v| k.checked_mul(if damped { 12 } else { 8 })?.checked_add(v))
         .and_then(|v| {
@@ -391,7 +407,6 @@ impl Plan {
                 (p.frequency_hz, p.decay_rate_per_s)
             }
         };
-        let cycles = frequency * design.timestep_s;
         let a = coefficients[2 * tone + 1];
         let b = coefficients[2 * tone + 2];
         let (mut cos_residual, mut sin_residual, mut raw_scale) = (0.0, 0.0, 0.0_f64);
@@ -399,7 +414,7 @@ impl Plan {
             // Shifting t by a constant adds only columns already in A. Both
             // P_perp A=0 and A^T r=0 make this the same profiled derivative.
             let time = j as f64 / (design.samples - 1) as f64 - 0.5;
-            let (s, c) = det::sin_cos(core::f64::consts::TAU * (cycles * j as f64));
+            let (s, c) = sample_sin_cos(frequency, design.timestep_s, j);
             if damped {
                 let envelope = if j == 0 || decay == 0.0 {
                     1.0

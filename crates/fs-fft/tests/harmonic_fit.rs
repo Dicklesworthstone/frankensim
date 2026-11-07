@@ -1,7 +1,12 @@
 //! G1/G3: known-frequency harmonic amplitudes, phase, and sampled residuals.
 
 use fs_fft::C64;
-use fs_fft::harmonic::{HarmonicFitBudget, HarmonicFitError, HarmonicFitPlan, ToneFitPlan};
+use fs_fft::harmonic::{
+    DampedToneFitPlan, DampedTonePole, HarmonicFitBudget, HarmonicFitError, HarmonicFitPlan,
+    ToneFitPlan,
+};
+use fs_fft::harmonic_window::phase_hz_from_clock_dd;
+use fs_math::dd::Dd;
 
 fn budget() -> HarmonicFitBudget {
     HarmonicFitBudget {
@@ -170,6 +175,96 @@ fn harmonic_and_explicit_tone_fronts_share_the_same_numerical_owner() {
     assert_eq!(result.dc, allocated.dc);
     assert_eq!(result.residual_rms, allocated.residual_rms);
     assert_eq!(output, allocated.phasors);
+}
+
+#[test]
+fn decimal_sample_clocks_keep_harmonic_tone_and_zero_decay_fits_identical() {
+    let n = 1021;
+    let dt = 1.0 / 44_100.0;
+    let f0 = 719.3;
+    let orders = [1, 3, 5, 11];
+    let frequencies: Vec<_> = orders.iter().map(|&h| f0 * h as f64).collect();
+    // Frequency is authored in Hz, as in the acoustic propagation owners.
+    // Rounding f0*dt before multiplying the order describes a different clock.
+    assert!(
+        orders
+            .iter()
+            .zip(&frequencies)
+            .any(|(&h, &f)| { (f0 * dt) * h as f64 != f * dt })
+    );
+    let amplitudes = [
+        C64::new(0.7, -0.3),
+        C64::new(3e-7, -2e-7),
+        C64::new(-0.2, 0.1),
+        C64::new(0.1, -0.4),
+    ];
+    let samples = physical_clock_signal(n, dt, &frequencies, &amplitudes, 0.25);
+    let harmonic = HarmonicFitPlan::new(n, dt, f0, &orders, budget()).unwrap();
+    let tones = ToneFitPlan::new(n, dt, &frequencies, budget()).unwrap();
+    let poles: Vec<_> = frequencies
+        .iter()
+        .map(|&frequency_hz| DampedTonePole {
+            frequency_hz,
+            decay_rate_per_s: 0.0,
+        })
+        .collect();
+    let damped = DampedToneFitPlan::new(n, dt, &poles, budget()).unwrap();
+    let expected = tones.fit(&samples).unwrap();
+    assert_eq!(harmonic.fit(&samples).unwrap(), expected);
+    assert_eq!(damped.fit(&samples).unwrap(), expected);
+    assert_eq!(
+        harmonic.reciprocal_condition(),
+        tones.reciprocal_condition()
+    );
+}
+
+// Independent physical clock from the harmonic observation owner. Its DD
+// trigonometry and multiply order differ from the fitter's f64 design path.
+fn physical_clock_signal(
+    n: usize,
+    dt: f64,
+    frequencies: &[f64],
+    phasors: &[C64],
+    dc: f64,
+) -> Vec<f64> {
+    (0..n)
+        .map(|j| {
+            let time = Dd::from_f64(dt) * Dd::from_f64(j as f64);
+            frequencies
+                .iter()
+                .zip(phasors)
+                .fold(Dd::from_f64(dc), |sum, (&frequency, p)| {
+                    let [real, imaginary] = phase_hz_from_clock_dd(frequency, time).unwrap();
+                    sum + Dd::from_f64(p.re) * real - Dd::from_f64(p.im) * imaginary
+                })
+                .to_f64()
+        })
+        .collect()
+}
+
+#[test]
+fn long_record_harmonics_follow_the_physical_observation_clock() {
+    let n = 32_749;
+    let dt = 1.0 / 44_100.0;
+    let f0 = 1901.137;
+    let orders = [1, 2, 11];
+    let frequencies: Vec<_> = orders.iter().map(|&h| f0 * h as f64).collect();
+    let amplitudes = [
+        C64::new(0.8, -0.6),
+        C64::new(3e-9, -2e-9),
+        C64::new(-0.1, 0.05),
+    ];
+    let samples = physical_clock_signal(n, dt, &frequencies, &amplitudes, -0.17);
+    let fit = HarmonicFitPlan::new(n, dt, f0, &orders, budget())
+        .unwrap()
+        .fit(&samples)
+        .unwrap();
+    close(fit.dc, -0.17, 2e-14);
+    for (actual, expected) in fit.phasors.iter().zip(amplitudes) {
+        close(actual.re, expected.re, 2e-14);
+        close(actual.im, expected.im, 2e-14);
+    }
+    assert!(fit.residual_rms < 2e-14, "{:e}", fit.residual_rms);
 }
 
 #[test]

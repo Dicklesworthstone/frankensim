@@ -592,7 +592,7 @@ fn checked(x: Dd) -> Result<Dd, WindowError> {
 // Mathematical 2*pi to DD precision, using fs-math's existing pi-tail
 // convention. Lifting only f64::TAU leaves its ~2.45e-16 radian error in every
 // cycle; multiplying by an absolute source epoch then creates a spurious phase.
-const TAU_DD: Dd = Dd {
+pub(crate) const TAU_DD: Dd = Dd {
     hi: core::f64::consts::TAU,
     lo: 2.449_293_598_294_706_4e-16,
 };
