@@ -6850,6 +6850,10 @@ rotated coupling and coherent cross terms, differential and integrated
 Poynting/heating balance, transparent reduction, evanescence and admission.
 This probe uses real fs-math, complete production numerical leaves and four
 exact native slab helper bodies in a minimal module wrapper; it excludes
-material resolution. An additional native original-source integration test
-covers retained source identities, spectral support/gaps and depth-dependent
-heat and flux; its native Cargo execution is tracked separately.
+material resolution. The native `fs-em` test executable with `plane-wave` subsequently passed all
+85 uniaxial numerical/propagation/stack cases. All 14 native original-source
+cases also passed, including retained source identities, spectral support/gaps
+and depth-dependent absorption heat and flux. The source fixtures create
+revision zero and advance through MatDb's original immutable predecessor chain;
+they retain their requested revision and source mismatch assertions. Excessive
+spectral gaps still refuse at the original optical-source constructor.

@@ -50,17 +50,23 @@ fn snapshot(properties: &[(&str, Dims, f64)], revision: u32) -> ResolvedMaterial
             ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::Finite).unwrap(),
         );
     }
-    let card = MaterialCard::assemble(
+    let mut card = MaterialCard::assemble(
         MaterialStateId {
             chemistry: "explicit principal-plane optical control".into(),
             phase: "caller-owned transparent homogeneous state".into(),
             process: "source-role and Maxwell admission control".into(),
-            revision,
+            revision: 0,
         },
         claims,
         vec![],
     )
     .unwrap();
+    // Revision is part of the original source identity. Preserve the
+    // requested revision through MatDb's immutable predecessor chain.
+    for _ in 0..revision {
+        card = MaterialCard::supersede(&card, card.claims().clone(), vec![]).unwrap();
+    }
+    assert_eq!(card.id().revision, revision);
     resolve_material_state_point(
         &card,
         &QueryPoint::new(),
@@ -231,18 +237,9 @@ fn original_absorbing_axes_feed_coupled_fields_and_physical_heating() {
                 .is_err()
         );
     }
-    let narrow = UniaxialOpticalResponse::try_new(&o, &e, 10e-9).unwrap();
-    let narrow = OrientedUniaxialInterface::try_new(
-        DielectricResponse::Lossless(&source_incident),
-        narrow,
-        [1.0, 2.0, 3.0],
-    )
-    .unwrap();
-    assert!(
-        narrow
-            .prepare_absorbing_field(frequency(550.0), 0.8, electric)
-            .is_err()
-    );
+    // The original spectral owner rejects the unsupported knot gap during
+    // source admission, before an absorbing interface can be prepared.
+    assert!(UniaxialOpticalResponse::try_new(&o, &e, 10e-9).is_err());
 }
 
 #[test]

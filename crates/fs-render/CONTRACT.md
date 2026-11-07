@@ -10081,8 +10081,14 @@ tails, temperature ordering and analyzer throughput across a null flight,
 the original real Rayleigh Mueller collision, carrier/domain/work/source
 conflicts, deterministic source replay with separate absorption/scattering,
 retained finite depth 800, and polarized environment NEE with complementary
-camera MIS. Their execution status must be recorded from the coordinated
-native build; pinned rustfmt parsing alone is not native test execution.
+camera MIS. All seven passed with native `tracer,volumes` execution, along
+with the existing equilibrium control selected by the same filter (eight total).
+The native cell-transport group passed all 14 cases, including the four new
+observed-column controls; all six constituent thermal-source cases and all 15
+source-connection cases also passed. The source-connection group includes the
+two new replay cases. Four additional public-API end-to-end cases passed against
+the actual compiled renderer with real dependencies and an independent SI Planck
+oracle; no production implementation was copied or stubbed.
 
 The shared observed grid integral retains compensated finite optical depth and
 actual native cell work without changing the original public transport arithmetic.
