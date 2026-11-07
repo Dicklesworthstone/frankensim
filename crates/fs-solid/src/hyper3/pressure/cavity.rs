@@ -30,6 +30,7 @@ use fs_exec::Cx;
 use fs_material::thermochemical_gas::energy::entropy::{GasEntropyError, GasEntropySolve};
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_math::dd::Dd;
+use fs_sparse::{Coo, Csr};
 
 mod tangent;
 pub use tangent::TetCavityGasTangent;
@@ -380,10 +381,7 @@ impl ClosedTetCavity {
             force_n[global] = value;
             volume_gradient[global] = geometry.gradient_m2()[local];
         }
-        let face_pressure = self.face_pressures_pa(load.net_pressure_pa(), cx)?;
-        let geometric = self.surface.force_tangent(
-            displacement_m, super::TetPressure::PerFace(&face_pressure), cx,
-        )?;
+        let geometric = geometry.geometric_tangent(load.net_pressure_pa(), cx)?;
         let tangent = TetCavityGasTangent::new(
             geometric,
             volume_gradient,
@@ -474,6 +472,63 @@ impl TetCavityVolume<'_> {
         &self.cavity.nodes
     }
 
+    /// Pull the SAME volume Hessian into the full solid chart, using only this
+    /// cavity's admitted faces. The complete mesh was admitted by `evaluate`;
+    /// unrelated boundary faces need neither a pressure vector nor resampling.
+    /// Source compressibility remains a separate original acoustic factor.
+    fn geometric_tangent(&self, pressure_pa: f64, cx: &Cx<'_>) -> Result<Csr, HyperTetError> {
+        checkpoint(cx)?;
+        finite(pressure_pa)?;
+        let dofs = 3 * self.cavity.surface.nodes_m.len();
+        let mut entries = Coo::new(dofs, dofs);
+        if pressure_pa != 0.0 {
+            for face in &self.cavity.local_faces {
+                checkpoint(cx)?;
+                let [a, b, c] = face.map(|node| self.positions_m[node]);
+                let edges = [difference(b, a)?, difference(c, a)?];
+                for (corner, &column_node) in face.iter().enumerate() {
+                    for column_axis in 0..3 {
+                        let mut variation = [[0.0; 3]; 2];
+                        match corner {
+                            0 => {
+                                variation[0][column_axis] = -1.0;
+                                variation[1][column_axis] = -1.0;
+                            }
+                            1 => variation[0][column_axis] = 1.0,
+                            _ => variation[1][column_axis] = 1.0,
+                        }
+                        let derivative = face_volume_gradient_derivative(edges, variation)?;
+                        for (row_axis, value) in derivative.into_iter().enumerate() {
+                            let coefficient = finite(pressure_pa * value)?;
+                            if coefficient != 0.0 {
+                                for &row_node in face {
+                                    entries.push(
+                                        3 * self.cavity.nodes[row_node] + row_axis,
+                                        3 * self.cavity.nodes[column_node] + column_axis,
+                                        coefficient,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let tangent = entries.assemble();
+        // All inserted rows belong to this cavity; the remaining global rows
+        // are structurally zero. Also check sums of duplicate face entries.
+        for &node in &self.cavity.nodes {
+            checkpoint(cx)?;
+            for axis in 0..3 {
+                for &value in tangent.row(3 * node + axis).1 {
+                    finite(value)?;
+                }
+            }
+        }
+        checkpoint(cx)?;
+        Ok(tangent)
+    }
+
     /// Exact Hess(V)*direction, without building a sparse or dense matrix.
     ///
     /// The direction covers precisely the compact boundary-node coordinates.
@@ -510,20 +565,36 @@ impl TetCavityVolume<'_> {
                     direction[3 * node + 2],
                 ]
             });
-            let first = cross(difference(vb, va)?, difference(c, a)?);
-            let second = cross(difference(b, a)?, difference(vc, va)?);
+            let derivative = face_volume_gradient_derivative(
+                [difference(b, a)?, difference(c, a)?],
+                [difference(vb, va)?, difference(vc, va)?],
+            )?;
             for &node in face {
                 for axis in 0..3 {
-                    let derivative =
-                        finite(finite(first[axis])? / 6.0 + finite(second[axis])? / 6.0)?;
                     let index = 3 * node + axis;
-                    action[index] = finite(action[index] + derivative)?;
+                    action[index] = finite(action[index] + derivative[axis])?;
                 }
             }
         }
         checkpoint(cx)?;
         Ok(action)
     }
+}
+
+// Each face gives every corner one third of its oriented area vector in grad V.
+// With edges e_b=b-a and e_c=c-a, its derivative is
+// (delta e_b cross e_c + e_b cross delta e_c)/6. Both geometric assembly and
+// matrix-free volume actions consume this original directional derivative.
+fn face_volume_gradient_derivative(
+    edges: [[f64; 3]; 2], variation: [[f64; 3]; 2],
+) -> Result<[f64; 3], HyperTetError> {
+    let first = cross(variation[0], edges[1]);
+    let second = cross(edges[0], variation[1]);
+    let mut derivative = [0.0; 3];
+    for axis in 0..3 {
+        derivative[axis] = finite(finite(first[axis])? / 6.0 + finite(second[axis])? / 6.0)?;
+    }
+    Ok(derivative)
 }
 
 fn enclosed_volume(

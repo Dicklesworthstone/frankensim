@@ -7292,6 +7292,16 @@ access and `apply` include both terms; `apply_into` uses caller-owned output
 and scratch without heap allocation, and leaves output unchanged on refusal.
 The sparse `geometric_part` alone is not the complete gas stiffness.
 
+The gas load now assembles its geometric term directly from the admitted
+cavity's volume Hessian on selected inner faces. Assembly and matrix-free
+Hessian actions share the original oriented area-gradient derivative. This
+removes an all-boundary pressure vector and a second complete-mesh admission
+from every gas load evaluation; sparse dimensions still cover the full solid
+chart and unrelated rows are structurally zero. Zero differential pressure
+removes the geometric term while retaining the original gas compressibility.
+The focused oracle compares positive, zero and negative differential-pressure
+tangents against the original pressure owner and the volume Hessian action.
+
 The static acoustic operator retains independent factors as
 `K_acoustic = sum_c w_c w_c^T`; merging factors would introduce unphysical
 cross-chamber terms. Empty and single-factor actions keep the original

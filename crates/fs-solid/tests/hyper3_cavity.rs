@@ -518,3 +518,67 @@ fn g4_cavity_refuses_bad_selections_invalid_geometry_and_cancellation() {
         ));
     });
 }
+
+#[test]
+fn g0_gas_geometric_tangent_uses_the_admitted_cavity_volume_hessian() {
+    use fs_material::thermochemical_gas::energy::entropy::GasEntropySolve;
+
+    with_cx(|gate, cx| {
+        let (nodes, tets) = shell();
+        let cavity = cavity(&nodes, &tets, cx);
+        let u = affine_displacement(&nodes);
+        let geometry = cavity.evaluate(&u, cx).unwrap();
+        let gas = gas_fixture::gas(cavity.reference_volume_m3(), 100000.0, 0.001, 1e24);
+        let original = gas.clone();
+        let controls = GasEntropySolve {
+            minimum_temperature_k: 200.0,
+            maximum_temperature_k: 600.0,
+            entropy_tolerance_j_kg_k: 1e-10,
+            maximum_iterations: 128,
+        };
+        let first = cavity.adiabatic_gas_load(&u, &gas, 0.0, controls, cx).unwrap();
+        let gas_pressure = first.gas.state().state().pressure;
+        let direction: Vec<_> = (0..u.len()).map(|i| (i as f64 - 7.0) / 32.0).collect();
+        let compact: Vec<_> = cavity.nodes().iter()
+            .flat_map(|&node| direction[3 * node..3 * node + 3].iter().copied()).collect();
+        let volume_action = geometry.hessian_action(&compact, cx).unwrap();
+        for exterior in [0.0, gas_pressure, 2.0 * gas_pressure] {
+            let load = cavity.adiabatic_gas_load(&u, &gas, exterior, controls, cx).unwrap();
+            let pressure = load.net_pressure_pa;
+            let old_field = cavity.face_pressures_pa(pressure, cx).unwrap();
+            let old_geometric = cavity.surface()
+                .force_tangent(&u, TetPressure::PerFace(&old_field), cx).unwrap();
+            let geometric = load.force_tangent.geometric_part();
+            let tolerance = 256.0 * f64::EPSILON * pressure.abs().max(1.0);
+            assert_eq!((geometric.nrows(), geometric.ncols()), (u.len(), u.len()));
+            for row in 0..u.len() {
+                for column in 0..u.len() {
+                    near(geometric.get(row, column), old_geometric.get(row, column), tolerance);
+                }
+                if !cavity.nodes().contains(&(row / 3)) {
+                    assert!(geometric.row(row).1.is_empty());
+                    assert_eq!(load.force_tangent.acoustic_rank_one_vector()[row], 0.0);
+                }
+            }
+            let mut applied = vec![0.0; u.len()];
+            geometric.spmv(&direction, &mut applied);
+            for (local, &node) in cavity.nodes().iter().enumerate() {
+                for axis in 0..3 {
+                    near(applied[3 * node + axis], pressure * volume_action[3 * local + axis], tolerance);
+                }
+            }
+            if exterior == gas_pressure {
+                assert_eq!(pressure, 0.0);
+                assert!((0..u.len()).all(|row| geometric.row(row).1.is_empty()));
+                assert!(load.force_tangent.acoustic_rank_one_vector().iter().any(|&w| w != 0.0));
+                assert!(load.force_tangent.get(3 * cavity.nodes()[0], 3 * cavity.nodes()[0]) < 0.0);
+            }
+        }
+        assert_eq!(gas, original);
+        gate.request();
+        assert!(matches!(
+            cavity.adiabatic_gas_load(&u, &gas, 0.0, controls, cx),
+            Err(HyperTetError::Cancelled)
+        ));
+    });
+}
