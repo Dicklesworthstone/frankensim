@@ -1,3 +1,18 @@
+## Tensile admission from original ribbon material histories
+
+Fiber tensile admission composes sourced Kelvin–Voigt stress with each original
+Maxwell arm, using actual endpoint velocities, nonlinear axial relaxed-strain
+memory and exact linear bending memory. Signed per-layer coefficients combine
+before conservative span envelopes. Original source arms, bending projections,
+stiffnesses and relaxation times are checked when the native bank is bound.
+
+Cold binding, restore and converged native candidates share this guard. Refusal
+publishes no mechanical, history, energy, heat or clock change; prepared buffers
+avoid new per-step allocations. Preload remains nonrelaxing. No rupture, stress
+clipping or additional material evolution is inferred. Focused regressions
+cover axial and bending history overload, retained-memory restore, signed
+elastic/viscous/Maxwell cancellation and width partition invariance.
+
 ## Exact held-flow window-radiation damping
 
 `WindowRadiationLoad::new_with_sampling` explicitly selects

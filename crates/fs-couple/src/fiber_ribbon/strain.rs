@@ -191,6 +191,14 @@ impl TensionedFiberRibbon {
         first_component: usize,
     ) -> Option<(Vec<MappedModalPotentialBinding>, NonlinearModalConfig)> {
         self.strain.as_ref().map(|strain| {
+            // Atomic ribbon assembly binds the complete guarded history next.
+            // A stand-alone public strain clone retains its refusal when that
+            // original memory owner is missing; only this private path hands
+            // total-stress admission to the actual hereditary law.
+            let mut potential = strain.clone();
+            if potential.tensile.as_ref().is_some_and(|guard| guard.hereditary) {
+                potential.tensile = None;
+            }
             let bindings = (0..self.resolution.cells)
                 .map(|cell| MappedModalPotentialBinding {
                     coordinates: (0..self.cell.modes().len())
@@ -200,7 +208,7 @@ impl TensionedFiberRibbon {
                         })
                         .collect(),
                     replaces_linear: (0..self.resolution.axial_modes).collect(),
-                    potential: Box::new(strain.clone()),
+                    potential: Box::new(potential.clone()),
                 })
                 .collect();
             (bindings, strain.config)
@@ -215,6 +223,12 @@ fn invalid() -> ModalCouplingError {
 }
 
 impl FiberStrain {
+    pub(in crate::fiber_ribbon) fn require_tensile_history(&mut self, required: bool) {
+        if let Some(guard) = &mut self.tensile {
+            std::sync::Arc::make_mut(guard).hereditary = required;
+        }
+    }
+
     fn validate_kinematics(&self, q: &[f64]) -> Result<(f64, f64), ModalCouplingError> {
         if q.len() != self.coordinate_count() || q.iter().any(|x| !x.is_finite()) {
             return Err(invalid());
@@ -330,7 +344,7 @@ impl ModalPotential for FiberStrain {
         if let Some(guard) = &self.tensile {
             // Rate stress can oppose elastic stress. The native endpoint gate
             // owns that combined decision; storage/loss quadrature sees only q.
-            if guard.has_viscosity() { return Ok(()); }
+            if guard.has_viscosity() || guard.hereditary { return Ok(()); }
             let axial_strain = self.tension_n / self.axial_rigidity_n + mean + variation;
             if guard
                 .assess(&q[self.model.axial_modes().len()..], axial_strain)?
@@ -345,7 +359,7 @@ impl ModalPotential for FiberStrain {
     }
 
     fn requires_velocity_validation(&self) -> bool {
-        self.tensile.as_ref().is_some_and(|guard| guard.has_viscosity())
+        self.tensile.as_ref().is_some_and(|guard| guard.has_viscosity() || guard.hereditary)
     }
 
     fn validate_state(&self, q: &[f64], velocity: &[f64]) -> Result<(), ModalCouplingError> {

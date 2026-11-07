@@ -43,11 +43,12 @@ impl FiberTensileAssessment {
 
 #[derive(Clone, Debug)]
 pub(super) struct FiberTensileGuard {
-    capacity: KelvinVoigtTensileCapacity,
-    curvature_scales: Vec<f64>,
+    pub(super) capacity: KelvinVoigtTensileCapacity,
+    pub(super) curvature_scales: Vec<f64>,
+    pub(super) hereditary: bool,
 }
 
-fn invalid_strength() -> ModalCouplingError {
+pub(super) fn invalid_strength() -> ModalCouplingError {
     ModalCouplingError::Invalid {
         what: "fiber tensile stress or curvature is unrepresentable",
     }
@@ -193,7 +194,7 @@ impl FiberTensileGuard {
     }
 }
 
-fn product(a: f64, b: f64) -> Result<f64, ModalCouplingError> {
+pub(super) fn product(a: f64, b: f64) -> Result<f64, ModalCouplingError> {
     let value = a * b;
     if !value.is_finite() || (a != 0.0 && b != 0.0 && value == 0.0) {
         Err(invalid_strength())
@@ -202,7 +203,7 @@ fn product(a: f64, b: f64) -> Result<f64, ModalCouplingError> {
     }
 }
 
-fn sum(a: f64, b: f64) -> Result<f64, ModalCouplingError> {
+pub(super) fn sum(a: f64, b: f64) -> Result<f64, ModalCouplingError> {
     let value = a + b;
     if value.is_finite() {
         Ok(value)
@@ -211,7 +212,7 @@ fn sum(a: f64, b: f64) -> Result<f64, ModalCouplingError> {
     }
 }
 
-fn response(
+pub(super) fn response(
     modulus: f64,
     strain: f64,
     viscosity: f64,
@@ -235,15 +236,10 @@ impl TensionedFiberRibbon {
     /// signed elastic/rate modes are combined before spatial bounding. The
     /// source strength itself has no inferred strain-rate dependence. Yielding,
     /// fatigue and fracture are absent.
-    /// Hereditary material combinations refuse in either construction order:
-    /// equilibrium-only stress must not stand in for missing layer memories.
+    /// With original Maxwell material, the joint history owner includes every
+    /// layer's actual axial and bending memories in that same endpoint gate.
     /// Source values are retained unchanged, never converted to design allowables.
     pub fn with_tensile_limit(mut self, property: &str) -> Result<Self, FiberRibbonError> {
-        if self.relaxation.is_some() {
-            return Err(FiberRibbonError::Invalid(
-                "fiber tensile admission needs actual hereditary layer stresses",
-            ));
-        }
         let strain = self.strain.as_mut().ok_or(FiberRibbonError::Invalid(
             "fiber tensile admission requires its original nonlinear strain owner",
         ))?;
@@ -277,6 +273,10 @@ impl TensionedFiberRibbon {
         let guard = FiberTensileGuard {
             capacity,
             curvature_scales,
+            hereditary: self
+                .relaxation
+                .as_ref()
+                .is_some_and(|memory| memory.has_strain_history()),
         };
         let preload_strain = strain.tension_n / strain.axial_rigidity_n;
         if !preload_strain.is_finite() || preload_strain <= 0.0 {
@@ -293,6 +293,9 @@ impl TensionedFiberRibbon {
             ));
         }
         strain.tensile = Some(Arc::new(guard));
+        if let Some(memory) = &mut self.relaxation {
+            memory.update_tensile_guard(strain);
+        }
         Ok(self)
     }
 }
@@ -333,7 +336,8 @@ impl FiberStrain {
     /// span bounds, so unloading may cancel tensile stress. No force, storage,
     /// rate-dependent strength or history is inferred. The viscous assessment
     /// reuses the original longitudinal kinematics in bounded stack workspaces
-    /// without heap allocation.
+    /// without heap allocation. Selected hereditary material requires its
+    /// original joint history owner and refuses this memory-free observation.
     pub fn tensile_state_assessment(
         &self,
         q: &[f64],
@@ -348,6 +352,11 @@ impl FiberStrain {
             self.validate_kinematics(q)?;
             return Ok(None);
         };
+        if guard.hereditary {
+            return Err(ModalCouplingError::Invalid {
+                what: "fiber tensile admission needs its original axial and bending material histories",
+            });
+        }
         if !guard.has_viscosity() {
             let mut assessment = self.tensile_assessment(q)?;
             if let Some(assessment) = &mut assessment {
@@ -364,7 +373,38 @@ impl FiberStrain {
             }
             return Ok(assessment);
         }
-        if q.len() != self.coordinate_count() || q.iter().any(|q| !q.is_finite()) {
+        let axial_count = self.model.axial_modes().len();
+        let mut strain = [0.0; MAX_LONGITUDINAL_MODES];
+        let mut rates = [0.0; MAX_LONGITUDINAL_MODES];
+        let strain = &mut strain[..axial_count];
+        let rates = &mut rates[..axial_count];
+        let (mean, mean_rate) = self.tensile_kinematics(q, velocity, strain, rates)?;
+        guard
+            .assess_state(
+                &q[axial_count..],
+                &velocity[axial_count..],
+                sum(self.tension_n / self.axial_rigidity_n, mean)?,
+                mean_rate,
+                strain,
+                rates,
+            )
+            .map(Some)
+    }
+
+    pub(super) fn tensile_kinematics(
+        &self,
+        q: &[f64],
+        velocity: &[f64],
+        strain: &mut [f64],
+        rates: &mut [f64],
+    ) -> Result<(f64, f64), ModalCouplingError> {
+        if q.len() != self.coordinate_count()
+            || q.iter().any(|q| !q.is_finite())
+            || velocity.len() != q.len()
+            || velocity.iter().any(|v| !v.is_finite())
+            || strain.len() != self.model.axial_modes().len()
+            || rates.len() != strain.len()
+        {
             return Err(invalid());
         }
         let axial_count = self.model.axial_modes().len();
@@ -379,8 +419,6 @@ impl FiberStrain {
         }
         let slopes = &slopes[..=normal_count];
         let slope_velocity = &slope_velocity[..=normal_count];
-        let mut strain = [0.0; MAX_LONGITUDINAL_MODES];
-        let strain = &mut strain[..axial_count];
         let mean = self
             .model
             .geometric_strain(slopes, strain)
@@ -395,21 +433,10 @@ impl FiberStrain {
             variation = sum(variation, harmonic.abs())?;
         }
         self.validate_kinematic_bounds(slope_bound, mean, variation)?;
-        let mut rates = [0.0; MAX_LONGITUDINAL_MODES];
-        let rates = &mut rates[..axial_count];
         let mean_rate = self
             .model
             .strain_rate(slopes, slope_velocity, &velocity[..axial_count], rates)
             .map_err(|_| invalid_strength())?;
-        guard
-            .assess_state(
-                &q[axial_count..],
-                &velocity[axial_count..],
-                sum(self.tension_n / self.axial_rigidity_n, mean)?,
-                mean_rate,
-                strain,
-                rates,
-            )
-            .map(Some)
+        Ok((mean, mean_rate))
     }
 }

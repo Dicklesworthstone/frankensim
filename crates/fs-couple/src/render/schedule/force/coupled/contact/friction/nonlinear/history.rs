@@ -28,6 +28,21 @@ pub trait ModalMaterialHistory: Send + Sync {
     /// may be changed by this call, including failed or repeated trials.
     fn stage(&self, before: &[f64], after: &[f64], memory: &[f64], dt: f64,
         candidate: &mut [f64], reaction: &mut [f64]) -> Result<f64, ModalCouplingError>;
+    /// Opt into admission of the complete native endpoint, including actual
+    /// velocity and separately owned linear Maxwell memory. This does not
+    /// advance memory and must not substitute interval-mean stress or rates.
+    fn requires_state_validation(&self) -> bool { false }
+    /// Admit original global modal indices and immutable linear branches once
+    /// at cold binding. Laws using linear memory must verify their source
+    /// projections and branch order here; later additions preserve that prefix.
+    fn validate_state_binding(&self, _coordinates: &[usize],
+        _branches: &[fs_phs::RelaxationBranch]) -> Result<(), ModalCouplingError>
+    { Ok(()) }
+    /// Read accepted or staged memory from the SAME joint endpoint. The host
+    /// retains mapped q/v workspaces and borrows both history slices directly.
+    fn validate_state(&self, _q: &[f64], _velocity: &[f64], _memory: &[f64],
+        _linear_memory: &[f64]) -> Result<(), ModalCouplingError>
+    { Ok(()) }
     /// Independently computed physical source channels, in the immutable law's
     /// declared order. Each channel must belong to this law's complete loss.
     /// The default is one whole-law channel; source-aware laws may retain their
@@ -100,6 +115,7 @@ pub(super) struct BoundHistory {
     candidate_loss_j: Vec<f64>,
     identity: Arc<()>,
     stiffness_bound_per_s2: f64,
+    state_validation: Option<PotentialStateValidation>,
 }
 impl BoundHistory {
     fn select(&self, q: &[f64]) -> Vec<f64> {
@@ -133,6 +149,9 @@ impl FrictionModalSystem {
                 || channels==0 || channels>memory {
                 return Err(invalid("complete material coordinate/history budget exceeded").into());
             }
+            let mut state_validation = binding.law.requires_state_validation().then(||
+                PotentialStateValidation { coordinates: binding.coordinates.clone(),
+                    q: vec![0.0; n], velocity: vec![0.0; n] });
             let mut indices=Vec::with_capacity(n);
             for coordinate in binding.coordinates {
                 if self.components().get(coordinate.component)
@@ -157,9 +176,15 @@ impl FrictionModalSystem {
             if stiffness_bound_per_s2<0.0 {
                 return Err(invalid("material history requires a nonnegative admitted stiffness bound").into());
             }
+            if let Some(validation) = &mut state_validation {
+                binding.law.validate_state_binding(&indices, self.material_relaxation_branches())?;
+                validation.gather(self.components())?;
+                binding.law.validate_state(&validation.q, &validation.velocity, &accepted,
+                    self.material_memory())?;
+            }
             added.push(BoundHistory {coordinates:indices,law:binding.law,
                 candidate:accepted.clone(),accepted,stiffness_bound_per_s2,
-                candidate_loss_j:vec![f64::NAN;channels],identity:Arc::new(())});
+                candidate_loss_j:vec![f64::NAN;channels],identity:Arc::new(()),state_validation});
         }
         self.nonlinear.as_mut().expect("checked owner").histories.extend(added);
         self.validate_material_history_band()?;
@@ -213,6 +238,18 @@ impl FrictionModalSystem {
 }
 
 impl NonlinearFrictionState {
+    pub(super) fn validate_history_states(&mut self, models: &[ModalAcousticTimeModel],
+        linear_memory: &[f64], candidate: bool) -> Result<(), ModalCouplingError>
+    {
+        for binding in &mut self.histories {
+            let Some(validation) = &mut binding.state_validation else { continue; };
+            validation.gather(models)?;
+            let memory = if candidate { &binding.candidate } else { &binding.accepted };
+            binding.law.validate_state(&validation.q, &validation.velocity, memory, linear_memory)?;
+        }
+        Ok(())
+    }
+
     pub(in crate::render::schedule::force::coupled::contact::friction) fn discard_staged_history_heat(&mut self) {
         self.staged_history_sample=None;
     }

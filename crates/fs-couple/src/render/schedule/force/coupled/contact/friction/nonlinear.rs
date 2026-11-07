@@ -284,6 +284,18 @@ struct PotentialStateValidation {
     q: Vec<f64>,
     velocity: Vec<f64>,
 }
+impl PotentialStateValidation {
+    fn gather(&mut self, models: &[ModalAcousticTimeModel]) -> Result<(), ModalCouplingError> {
+        for (index, address) in self.coordinates.iter().enumerate() {
+            let state = models.get(address.component)
+                .and_then(|model| model.states().get(address.mode))
+                .ok_or_else(|| invalid("constitutive admission lost its original modal state"))?;
+            self.q[index] = state.displacement_m_sqrt_kg;
+            self.velocity[index] = state.velocity_m_sqrt_kg_per_s;
+        }
+        Ok(())
+    }
+}
 impl BoundPotential {
     fn select<'a>(&self, q: &'a [f64]) -> Cow<'a, [f64]> {
         match &self.contiguous {
@@ -559,25 +571,21 @@ impl NonlinearFrictionState {
     fn validate_states(&mut self, models: &[ModalAcousticTimeModel]) -> Result<(), ModalCouplingError> {
         for binding in &mut self.potentials {
             let Some(validation) = &mut binding.state_validation else { continue; };
-            for (index, address) in validation.coordinates.iter().enumerate() {
-                let state = models.get(address.component)
-                    .and_then(|model| model.states().get(address.mode))
-                    .ok_or_else(|| invalid("constitutive admission lost its original modal state"))?;
-                validation.q[index] = state.displacement_m_sqrt_kg;
-                validation.velocity[index] = state.velocity_m_sqrt_kg_per_s;
-            }
+            validation.gather(models)?;
             binding.potential.validate_state(&validation.q, &validation.velocity)?;
         }
         Ok(())
     }
     /// Cold restoration must admit displacement-only laws as well as actual
     /// velocity-dependent limits, while retaining every accepted history.
-    pub(super) fn validate_restored_states(&mut self, models: &[ModalAcousticTimeModel])
+    pub(super) fn validate_restored_states(&mut self, models: &[ModalAcousticTimeModel],
+        linear_memory: &[f64])
         -> Result<(), ModalCouplingError>
     {
         let q = coordinates(models);
         finite(self.potential_energy(&q)? + self.history_energy(&q)?)?;
-        self.validate_states(models)
+        self.validate_states(models)?;
+        self.validate_history_states(models, linear_memory, false)
     }
     fn potential_energy(&self, q: &[f64]) -> Result<f64, ModalCouplingError> {
         let mut energy = 0.0;
@@ -678,6 +686,7 @@ impl NonlinearFrictionState {
             );
         }
         self.validate_states(inner.components())?;
+        self.validate_history_states(inner.components(), inner.material_memory(), false)?;
         let before_q = coordinates(inner.components());
         let dt = inner.sample_period_s();
         let has_loss = self.potentials.iter().any(|p| p.potential.has_constitutive_loss());
@@ -816,6 +825,8 @@ impl NonlinearFrictionState {
                 // The constitutive limit sees the actual converged endpoint,
                 // independently of acceleration observation and loss quadrature.
                 self.validate_states(&inner.network.candidates)?;
+                self.validate_history_states(&inner.network.candidates,
+                    &inner.network.candidate_material_memory, true)?;
                 limit(
                     "total linear, nonlinear and contact energy",
                     total_after,

@@ -65,6 +65,8 @@ impl TensionedFiberRibbon {
     /// construction through normal/tangential contact and support motion.
     /// When nonlinear fiber strain is selected, every axial arm retains its
     /// geometric mean and original axial harmonics in that same transaction.
+    /// A selected tensile limit reads those same candidate memories alongside
+    /// original linear bending memory and actual native endpoint velocities.
     /// The two builder calls may be made in either order. Missing data, a
     /// second binding, insufficient
     /// memory, incomplete source bandwidth or unresolved material times refuse.
@@ -75,15 +77,6 @@ impl TensionedFiberRibbon {
         gate: &CancelGate,
     ) -> Result<Self, FiberRibbonError> {
         poll(gate)?;
-        if self
-            .strain
-            .as_ref()
-            .is_some_and(|strain| strain.tensile_capacity().is_some())
-        {
-            return Err(FiberRibbonError::Invalid(
-                "fiber tensile admission needs actual hereditary layer stresses",
-            ));
-        }
         if self.relaxation.is_some()
             || !(1..=256).contains(&max_memory_states)
             || source.elastic() != self.axial.elastic()
@@ -176,7 +169,8 @@ impl TensionedFiberRibbon {
             det::sqrt(instantaneous.into_iter().fold(0.0, f64::max)),
             self.cell.sample_period_s(),
         )?;
-        if let Some(strain) = &self.strain {
+        if let Some(strain) = &mut self.strain {
+            strain.require_tensile_history(positive_arms > 0);
             let share = self.geometry.fiber_count as f64 / self.resolution.cells as f64;
             image.with_finite_strain(
                 strain,
@@ -226,6 +220,14 @@ impl FiberRibbonRelaxation {
     /// Whether axial memory follows the same nonlinear strain as elastic storage.
     pub const fn has_finite_strain(&self) -> bool {
         self.finite_strain
+    }
+    pub(crate) fn has_strain_history(&self) -> bool {
+        self.strain_history.is_some()
+    }
+    pub(crate) fn update_tensile_guard(&mut self, strain: &FiberStrain) {
+        if let Some(history) = &mut self.strain_history {
+            history.update_tensile_guard(strain);
+        }
     }
     pub const fn max_memory_states(&self) -> usize {
         self.max_memory_states
@@ -279,21 +281,31 @@ impl FiberRibbonRelaxation {
         Ok(())
     }
 
-    pub(crate) fn strain_bindings(&self, first_component: usize) -> Vec<MappedModalHistoryBinding> {
-        self.strain_history.as_ref().map_or_else(Vec::new, |law| {
-            (0..self.cells)
-                .map(|cell| MappedModalHistoryBinding {
+    pub(crate) fn strain_bindings(
+        &self,
+        first_component: usize,
+        first_memory: usize,
+    ) -> Result<Vec<MappedModalHistoryBinding>, FiberRibbonError> {
+        let Some(law) = &self.strain_history else { return Ok(Vec::new()); };
+        (0..self.cells)
+            .map(|cell| {
+                let offset = cell.checked_mul(self.channels.len())
+                    .and_then(|n| first_memory.checked_add(n))
+                    .ok_or(FiberRibbonError::Invalid("fiber tensile memory offset overflows"))?;
+                let mut law = law.clone();
+                law.bind_bending_history(offset, &self.channels, &self.source)?;
+                Ok(MappedModalHistoryBinding {
                     coordinates: (0..self.modes_per_cell)
                         .map(|mode| ModalCoordinate {
                             component: first_component + cell,
                             mode,
                         })
                         .collect(),
-                    law: Box::new(law.clone()),
+                    law: Box::new(law),
                     initial_memory: None,
                 })
-                .collect()
-        })
+            })
+            .collect()
     }
 
     pub(crate) fn validate_band(&self, high: f64, dt: f64) -> Result<(), FiberRibbonError> {

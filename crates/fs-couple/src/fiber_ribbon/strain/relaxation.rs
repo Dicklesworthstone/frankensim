@@ -4,11 +4,15 @@ use crate::render::schedule::force::coupled::contact::friction::nonlinear::histo
 use fs_material::section::relaxation::ConcentricPronySection;
 use fs_nlmodal::longitudinal::relaxation::{StrainRelaxation, StrainRelaxationArm};
 
+mod strength;
+
 #[derive(Clone, Debug)]
 pub(in crate::fiber_ribbon) struct FiberStrainHistory {
     strain: FiberStrain,
     length_m: f64,
     material: StrainRelaxation,
+    layer_arms: Vec<strength::FiberLayerArm>,
+    bending_history: Vec<strength::FiberBendingHistory>,
 }
 
 impl FiberStrainHistory {
@@ -19,10 +23,12 @@ impl FiberStrainHistory {
         share: f64,
     ) -> Result<Option<Self>, FiberRibbonError> {
         let mut arms = Vec::new();
-        for (spectrum, geometry) in source
+        let mut layer_arms = Vec::new();
+        for (layer, (spectrum, geometry)) in source
             .spectra()
             .iter()
             .zip(source.elastic().layer_integrals())
+            .enumerate()
         {
             for &(delta, relaxation_time_s) in &spectrum.terms {
                 if delta == 0.0 {
@@ -32,6 +38,7 @@ impl FiberStrainHistory {
                     stiffness_j: delta * geometry.area_m2() * share * length_m,
                     relaxation_time_s,
                 });
+                layer_arms.push(strength::FiberLayerArm { layer, delta_pa: delta });
             }
         }
         if arms.is_empty() {
@@ -43,7 +50,13 @@ impl FiberStrainHistory {
             strain: strain.clone(),
             length_m,
             material,
+            layer_arms,
+            bending_history: Vec::new(),
         }))
+    }
+
+    pub(in crate::fiber_ribbon) fn update_tensile_guard(&mut self, strain: &FiberStrain) {
+        self.strain.tensile.clone_from(&strain.tensile);
     }
 
     pub(in crate::fiber_ribbon) fn stiffness_bound(&self, memory: Option<&[f64]>) -> f64 {
@@ -172,6 +185,23 @@ impl FiberStrainHistory {
 }
 
 impl ModalMaterialHistory for FiberStrainHistory {
+    fn requires_state_validation(&self) -> bool { self.strain.tensile.is_some() }
+    fn validate_state_binding(&self, coordinates: &[usize],
+        branches: &[fs_phs::RelaxationBranch]) -> Result<(), ModalCouplingError>
+    {
+        self.validate_tensile_binding(coordinates, branches)
+    }
+    fn validate_state(&self, q: &[f64], velocity: &[f64], memory: &[f64],
+        linear_memory: &[f64]) -> Result<(), ModalCouplingError>
+    {
+        if self.tensile_assessment(q, velocity, memory, linear_memory)?
+            .is_some_and(|assessment| assessment.exceeds_limit()) {
+            return Err(ModalCouplingError::Invalid {
+                what: "fiber tensile envelope exceeds its original material limit",
+            });
+        }
+        Ok(())
+    }
     fn coordinate_count(&self) -> usize {
         self.strain.coordinate_count()
     }
@@ -271,6 +301,7 @@ mod tests {
                     force_absolute_tolerance: 1e-10,
                     force_relative_tolerance: 1e-9,
                 },
+                tensile: None,
             },
             length_m: length,
             material: StrainRelaxation::new(
@@ -287,6 +318,8 @@ mod tests {
                 ],
             )
             .unwrap(),
+            layer_arms: Vec::new(),
+            bending_history: Vec::new(),
         }
     }
 

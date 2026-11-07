@@ -536,7 +536,7 @@ impl MultiFrictionModalSystem {
                 .map_err(|source|ModalCouplingError::Component {component,source})?;
             network.validate_staged_material_points(None)?;
             if let Some(state) = nonlinear {
-                state.validate_restored_states(&network.candidates)?;
+                state.validate_restored_states(&network.candidates, &network.material_memory)?;
             }
             // Publication copies the already admitted model, with no fallible
             // restart or constitutive query after accepted state changes.

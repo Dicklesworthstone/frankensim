@@ -219,7 +219,8 @@ impl ReciprocalStringBank {
         }
         let material_history_start = self.system.nonlinear_material_memory().len();
         if let Some(memory) = ribbon.material_relaxation() {
-            let bindings = memory.strain_bindings(component_start);
+            let bindings = memory.strain_bindings(component_start, material_branch_start)
+                .map_err(fiber_memory_error)?;
             if !bindings.is_empty() {
                 // The source budget already covers all ribbon bending and
                 // strain states. Preserve earlier nonlinear histories as well;

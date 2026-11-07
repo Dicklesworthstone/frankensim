@@ -5,6 +5,8 @@ use fs_couple::render::schedule::force::coupled::contact::friction::nonlinear::M
 use fs_material::section::relaxation::LayerRelaxationProperties;
 use fs_phs::Storage;
 
+#[path = "tensile/hereditary.rs"]
+mod hereditary;
 #[path = "tensile/viscous.rs"]
 mod viscous;
 
@@ -124,7 +126,7 @@ fn tensile_fiber_stress_uses_original_radius_and_is_width_refinement_invariant()
 }
 
 #[test]
-fn tensile_fiber_preload_sources_and_memory_combinations_refuse_explicitly() {
+fn tensile_fiber_preload_sources_refuse_and_memory_preserves_its_original_owner() {
     let gate = CancelGate::new_clock_free();
     let preload = 40.0 / (180.0 * core::f64::consts::PI * RADIUS * RADIUS);
     assert!(
@@ -151,18 +153,27 @@ fn tensile_fiber_preload_sources_and_memory_combinations_refuse_explicitly() {
         .unwrap();
     let guarded = original.clone().with_tensile_limit(LIMIT).unwrap();
     assert!(guarded.clone().with_tensile_limit(LIMIT).is_err());
-    assert!(
-        guarded
-            .with_material_relaxation(spectrum.clone(), 64, &gate)
-            .is_err()
-    );
-    assert!(
-        original
-            .with_material_relaxation(spectrum, 64, &gate)
-            .unwrap()
-            .with_tensile_limit(LIMIT)
-            .is_err()
-    );
+    let forward = guarded
+        .with_material_relaxation(spectrum.clone(), 64, &gate)
+        .unwrap();
+    let reverse = original
+        .with_material_relaxation(spectrum, 64, &gate)
+        .unwrap()
+        .with_tensile_limit(LIMIT)
+        .unwrap();
+    for source in [forward, reverse] {
+        assert!(source.strain().unwrap().tensile_capacity().is_some());
+        // A public strain clone cannot silently assess total hereditary stress
+        // without the original two memory owners. Atomic bank binding supplies them.
+        assert!(source.strain().unwrap().requires_velocity_validation());
+        assert!(
+            source
+                .strain()
+                .unwrap()
+                .validate_state(&[0.0; 2], &[0.0; 2])
+                .is_err()
+        );
+    }
 }
 
 #[test]
