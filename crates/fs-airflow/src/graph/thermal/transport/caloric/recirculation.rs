@@ -71,6 +71,11 @@ impl CaloricTransportNetwork<'_> {
                 "imposed return links cannot be added to a closed source-caloric circulation",
             ));
         }
+        if self.recovery.is_some() {
+            return Err(TransportError::InvalidInput(
+                "mass-return links cannot be combined with finite heat recovery",
+            ));
+        }
         if self.feedback.is_some() || !(1..=256).contains(&config.max_iterations) {
             return Err(TransportError::InvalidInput(
                 "source-caloric returns already bound or iteration budget outside 1..=256",
@@ -304,7 +309,6 @@ impl CaloricFeedback {
         cx: &Cx<'_>,
         gains: &[f64],
     ) -> Result<Vec<Vec<f64>>, TransportError> {
-        let topology = &network.topology;
         let n = self.sources.len();
         let mut matrix = vec![vec![0.0; n]; n];
         for (i, row) in matrix.iter_mut().enumerate() {
@@ -312,31 +316,7 @@ impl CaloricFeedback {
         }
         for (column, &source) in self.sources.iter().enumerate() {
             poll(cx)?;
-            let mut mass: Vec<_> = network
-                .external_mass
-                .iter()
-                .map(|flow| flow.max(0.0))
-                .collect();
-            let mut values = vec![0.0; mass.len()];
-            values[source] = 1.0;
-            for &node in &topology.order {
-                poll(cx)?;
-                for &branch in &topology.outgoing[node] {
-                    poll(cx)?;
-                    let down = topology.downstream[branch];
-                    let total = positive(
-                        mass[down] + topology.mass_flows[branch],
-                        "response mixing mass",
-                    )?;
-                    let arriving = values[node] * gains[branch];
-                    values[down] = finite(
-                        values[down]
-                            + (arriving - values[down]) * (topology.mass_flows[branch] / total),
-                        "return enthalpy response",
-                    )?;
-                    mass[down] = total;
-                }
-            }
+            let values = network.inlet_enthalpy_response(cx, source, gains)?;
             for link in &self.links {
                 let row = self
                     .sources

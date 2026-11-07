@@ -2,6 +2,7 @@
 
 mod recirculation;
 mod circulation;
+mod recovery;
 
 use super::*;
 use crate::graph::LossGraph;

@@ -116,6 +116,8 @@ pub struct TransportMarch {
     pub enthalpy_reference_k: f64,
     /// Fresh/return mixtures and the independent outer balance, when requested.
     pub recirculation: Option<RecirculationReport>,
+    /// Finite exhaust/fresh-supply recuperators and their separate outer ledger.
+    pub heat_recovery: Option<caloric::CaloricHeatRecoveryReport>,
 }
 
 /// Input, transport, thermal-balance and cancellation failures.
@@ -145,6 +147,14 @@ pub enum TransportError {
         temperature_correction_bound_k: f64,
         mixing_heat_residual_w: f64,
     },
+    /// The finite exhaust-to-fresh thermal feedback did not close.
+    CaloricHeatRecoveryNotConverged {
+        iterations: usize,
+        temperature_correction_bound_k: f64,
+        supply_heat_residual_w: f64,
+    },
+    /// Original finite-stream exchanger admission or numerical refusal.
+    Exchanger(crate::conjugate::caloric::exchanger::ExchangerError),
     /// A bounded work checkpoint refused more work.
     Interrupted,
     /// Existing channel or conjugate solver refusal, preserved without promotion.
@@ -531,7 +541,7 @@ impl<'a> TransportNetwork<'a> {
             branches: vec![BranchTransport { inlet_temperature_k: None, outlet_temperature_k: None, march: None }; self.models.len()],
             reference_temperatures_k: vec![0.0; self.offsets.last().copied().unwrap_or(0)],
             wall_heat_rate_w: 0.0, external_heat_gain_w: 0.0, heat_imbalance_w: 0.0,
-            hydraulic_energy_defect_w: 0.0, enthalpy_reference_k: reference_k, recirculation: None,
+            hydraulic_energy_defect_w: 0.0, enthalpy_reference_k: reference_k, recirculation: None, heat_recovery: None,
         };
         let mut gross_wall = 0.0;
         let mut gross_external = 0.0;

@@ -30,6 +30,9 @@ mod recirculation;
 pub use recirculation::CaloricRecirculationConfig;
 mod circulation;
 pub use circulation::CaloricCirculationConfig;
+mod recovery;
+pub use recovery::{CaloricHeatRecoveryConfig, CaloricHeatRecoveryLink,
+    CaloricHeatRecoveryReport, CaloricRecoveredStream};
 
 /// Source-caloric specialization of the existing admitted hydraulic network.
 /// The source is shared, never selected independently at a junction or branch.
@@ -42,6 +45,7 @@ pub struct CaloricTransportNetwork<'a> {
     mass_residual: Vec<f64>,
     feedback: Option<recirculation::CaloricFeedback>,
     circulation: Option<circulation::CaloricCirculation>,
+    recovery: Option<recovery::CaloricRecovery>,
 }
 
 impl<'a> CaloricTransportNetwork<'a> {
@@ -147,6 +151,7 @@ impl<'a> CaloricTransportNetwork<'a> {
             mass_residual,
             feedback: None,
             circulation: None,
+            recovery: None,
         };
         if let Some(config) = circulation {
             network.circulation = Some(circulation::CaloricCirculation::new(&network, cx, config)?);
@@ -219,6 +224,9 @@ impl<'a> CaloricTransportNetwork<'a> {
                 "closed source-caloric circulation needs actual wall temperatures",
             ))?);
         }
+        if let Some(recovery) = &self.recovery {
+            return recovery.march(self, cx, walls);
+        }
         if let Some(feedback) = &self.feedback {
             return feedback.march(self, cx, walls);
         }
@@ -230,6 +238,35 @@ impl<'a> CaloricTransportNetwork<'a> {
             Some(self.context()),
             None,
         )
+    }
+
+    /// Eliminate the native DAG for one external-supply enthalpy direction.
+    /// Shared by mass returns and finite thermal recovery; arithmetic and
+    /// actual source branch gains retain the original return owner's order.
+    fn inlet_enthalpy_response(
+        &self, cx: &Cx<'_>, source: usize, gains: &[f64],
+    ) -> Result<Vec<f64>, TransportError> {
+        let topology = &self.topology;
+        if source >= self.external_mass.len() || gains.len() != topology.models.len() {
+            return Err(TransportError::InvalidInput("source inlet response shape"));
+        }
+        let mut mass: Vec<_> = self.external_mass.iter().map(|flow| flow.max(0.0)).collect();
+        let mut values = vec![0.0; mass.len()];
+        values[source] = 1.0;
+        for &node in &topology.order {
+            poll(cx)?;
+            for &branch in &topology.outgoing[node] {
+                poll(cx)?;
+                let down = topology.downstream[branch];
+                let total = positive(mass[down]+topology.mass_flows[branch], "response mixing mass")?;
+                let arriving = values[node]*gains[branch];
+                values[down] = finite(values[down]
+                    +(arriving-values[down])*(topology.mass_flows[branch]/total),
+                    "return enthalpy response")?;
+                mass[down] = total;
+            }
+        }
+        Ok(values)
     }
 
     fn context(&self) -> CaloricContext<'_> {

@@ -5034,3 +5034,55 @@ counterflow anchors, zero UA, accuracy refusal and cancellation. All four
 changed Rust files were parsed with the pinned formatter. Native Cargo
 compilation and test execution were unavailable in this resource-exhausted
 session.
+
+## Finite exhaust heat recovery on native source-caloric networks
+
+`CaloricTransportNetwork::with_heat_recovery` binds
+`CaloricHeatRecoveryLink` values between whole external exhaust and fresh
+supply ports of the existing directed-acyclic hydraulic graph. Actual external
+MASS flows feed the original two-stream exchanger. Each port has at most one
+owner, ordering is deterministic, and the native 64-supply reduced-solve cap
+applies. Finite heat recovery, imposed mass returns and closed circulation are
+exclusive modes in either binding order.
+
+Each trial retains the network's one original isobaric Cp law, relative
+enthalpy coordinates, native branch heat exchange and mass-weighted enthalpy
+mixing. One signed exchanger Q debits the exhaust and credits its paired fresh
+supply, including reverse transfer when the fresh stream is hotter. The
+conditioned supply enthalpies close a reduced damped Newton system using the
+analytic exchanger inlet response and the original DAG branch gains. The
+shared inlet-response traversal preserves the existing recirculation arithmetic.
+Retained own-stream exchanger gains and double-double matrix assembly keep a
+small finite-UA feedback anchor from disappearing in subtraction.
+
+`CaloricHeatRecoveryConfig` bounds accepted iterates, damped trial counts and
+original exchanger work. A wall-path seed refusal may use one bounded native
+zero-wall-heat recovery solve to obtain a supported initial supply. Final
+acceptance requires both the sum of absolute supply-closure watts and a local
+Newton-correction temperature test using the positive original minimum Cp.
+The latter is a local convergence measure, not a global state-error proof.
+Source support, exchanger pinch and Q/UA accuracy, entropy, cancellation and
+original native branch admission all remain active.
+
+`TransportMarch::heat_recovery` supplies a distinct
+`CaloricHeatRecoveryReport`. The unchanged march fields retain the INNER
+network balance with conditioned supplies and pre-exchanger exhausts.
+The report independently recomputes the OUTER balance from original fresh
+inlets and retained post-transfer exhaust enthalpies. Both physical watt
+gates must pass; no exchanger numerical allowance enlarges either budget.
+The report retains each exchanger's original calorimetry, response, entropy
+and numerical diagnostics, actual supply closure, and a separate exhaust
+temperature/enthalpy handoff rounding audit. Summed exchanger entropy is
+explicitly limited to the recuperators; it is not a complete wall/junction
+entropy account.
+
+The existing `march`, initialization and shared-solid `solve` paths use this
+composition, including the native coupling/acceleration driver. The graph's
+hydraulic flow, density and branch film coefficients remain prescribed. This
+held-UA steady recovery owner adds no mass-return edge, pressure-loss model,
+fan work, changing composition, phase change, reservoir or exchanger wall/fluid
+storage. Focused regressions cover independent finite-NTU closure, nonlinear
+original Cp and datum changes, unequal mass rates, multiple port ownership,
+shared-solid use, reverse transfer and transactional refusal. Changed Rust
+sources were parsed with the pinned formatter; native Cargo compilation and
+test execution were unavailable in this resource-exhausted session.
