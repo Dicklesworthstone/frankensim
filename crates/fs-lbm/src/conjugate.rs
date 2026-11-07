@@ -200,8 +200,9 @@ pub use simple::{
     simple_flow_with_viscosity_and_force,
 };
 pub use tensor_conduction::{
-    ConductivityTensor, TensorConductionReport, TensorConductionSolution, TensorConductionStep,
-    advance_tensor_conduction, solve_tensor_conduction,
+    ConductivityTensor, TENSOR_SDIRK2_GAMMA, TensorConductionReport,
+    TensorConductionSdirk2Step, TensorConductionSolution, TensorConductionStep,
+    advance_tensor_conduction, advance_tensor_conduction_sdirk2, solve_tensor_conduction,
 };
 pub use transient::{TransientConfig, TransientRecord, TransientSolution, march_energy};
 pub use unsteady::{

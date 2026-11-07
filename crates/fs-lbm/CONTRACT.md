@@ -1,5 +1,27 @@
 # CONTRACT: fs-lbm
 
+## Physical SDIRK2 on the full-tensor conduction operator
+
+`advance_tensor_conduction_sdirk2` provides two-stage, second-order, L-stable
+conduction for frozen SPD tensors and fixed per-cell sensible capacities.
+Independent stage setups are sampled at c=[gamma,1], gamma=1-1/sqrt(2).
+Both native spatial stages retain their actual face temperatures and heat and
+share one Krylov iteration budget. Stage 2 retains the original interval
+temperature and carries stage 1's native heat through an internal storage RHS,
+excluded from external source accounting. Tableau quadrature includes each
+prescribed cell's reservoir storage and corrects already-carried heat when the
+stage-2 prescribed mask changes. One whole-interval `TransientRecord` reports
+physical storage, source and reservoir heat. Smooth forcing and fixed
+constraints qualify the temporal order; discontinuities require interval
+boundaries. No latent heat, variable capacity, nonlinear tensor law or
+maximum-principle guarantee is inferred.
+
+Evidence: five exact-production temporal numerical tests passed with pinned
+native rustc. Six native pipeline regressions cover contact decay, temporal
+order, rotated-tensor forcing, changing constraints/contacts, thermostat
+storage and shared-budget/transactional refusal. Those pipeline regressions
+were authored but not executed in this capacity/dependency-limited environment.
+
 ## Transient full-tensor conduction with physical cell storage
 
 `advance_tensor_conduction` advances the same conservative hybrid face

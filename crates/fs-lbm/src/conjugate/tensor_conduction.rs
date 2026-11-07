@@ -22,7 +22,11 @@ use super::{
 
 mod local;
 mod transient;
+mod sdirk;
 pub use transient::{TensorConductionStep, advance_tensor_conduction};
+pub use sdirk::{
+    TENSOR_SDIRK2_GAMMA, TensorConductionSdirk2Step, advance_tensor_conduction_sdirk2,
+};
 use local::LocalOperator;
 
 /// Frozen physical conductivity in grid Cartesian coordinates, W/(m K).
@@ -305,11 +309,12 @@ fn prepare(
 
 fn cell_terms(
     op: &LocalOperator, cell: usize, setup: &ThermalSetup, data: &Prepared,
-    step: Option<&PseudoStep<'_>>,
+    step: Option<&PseudoStep<'_>>, carried_power_w: Option<&[f64]>,
 ) -> Result<(f64, f64), ChtError> {
     let mut added = data.sinks[cell].conductance;
     let mut load = data.sinks[cell].relative_load
-        + setup.power_w.get(cell).copied().unwrap_or(0.0);
+        + setup.power_w.get(cell).copied().unwrap_or(0.0)
+        + carried_power_w.map_or(0.0, |carry| carry[cell]);
     if let Some(step) = step {
         added += step.coefficient_w_k[cell];
         load += step.coefficient_w_k[cell] * (step.previous[cell] - data.reference);
@@ -328,7 +333,27 @@ pub(crate) fn solve_tensor_conduction_inner(
     tensors: &[ConductivityTensor], config: &EnergyConfig,
     step: Option<&PseudoStep<'_>>, gate: &CancelGate,
 ) -> Result<TensorConductionSolution, ChtError> {
+    solve_tensor_conduction_stage(domain, solids, setup, tensors, config, step, None, gate)
+}
+
+/// A physical stage may retain heat from an earlier stage. This immutable
+/// carry changes the storage equation only; it is never generated heat.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn solve_tensor_conduction_stage(
+    domain: &VoxelDomain, solids: &[SolidMaterial], setup: &ThermalSetup,
+    tensors: &[ConductivityTensor], config: &EnergyConfig,
+    step: Option<&PseudoStep<'_>>, carried_power_w: Option<&[f64]>, gate: &CancelGate,
+) -> Result<TensorConductionSolution, ChtError> {
     let data = prepare(domain, solids, setup, tensors, config, step, gate)?;
+    if let Some(carry) = carried_power_w {
+        if step.is_none() || carry.len() != domain.cell_count() {
+            return Err(invalid("stage heat carry needs original storage and one value per cell"));
+        }
+        for (cell, &value) in carry.iter().enumerate() {
+            if cell.is_multiple_of(4096) { poll(gate)?; }
+            finite("thermal.tensor_conduction.carried_power_w", value)?;
+        }
+    }
     let unknowns = data.known.len();
     let mut coo = Coo::new(unknowns, unknowns);
     let mut rhs = vec![0.0; unknowns];
@@ -338,7 +363,7 @@ pub(crate) fn solve_tensor_conduction_inner(
         let (matrix, face_load) = if let Some(t) = data.fixed[c] {
             (op.matrix, op.cell_link.map(|b| b * (t - data.reference)))
         } else {
-            let (added, load) = cell_terms(&op, c, setup, &data, step)?;
+            let (added, load) = cell_terms(&op, c, setup, &data, step, carried_power_w)?;
             let diagonal = op.cell_diagonal + added;
             (op.schur(added), op.cell_link.map(|b| b / diagonal * load))
         };
@@ -403,7 +428,7 @@ pub(crate) fn solve_tensor_conduction_inner(
             config.max_iterations - iterations, gate,
         )?;
         iterations += outcome.iterations;
-        let mut solution = recover(domain, setup, tensors, &data, step, &mut trace, gate)?;
+        let mut solution = recover(domain, setup, tensors, &data, step, carried_power_w, &mut trace, gate)?;
         let (residual, scale) = residual_norms(&matrix, &rhs, &trace);
         let relative = if scale > 0.0 { residual / scale } else { residual };
         if !relative.is_finite() {
@@ -431,7 +456,8 @@ pub(crate) fn solve_tensor_conduction_inner(
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn recover(
     domain: &VoxelDomain, setup: &ThermalSetup, tensors: &[ConductivityTensor],
-    data: &Prepared, step: Option<&PseudoStep<'_>>, trace: &mut [f64], gate: &CancelGate,
+    data: &Prepared, step: Option<&PseudoStep<'_>>, carried_power_w: Option<&[f64]>,
+    trace: &mut [f64], gate: &CancelGate,
 ) -> Result<TensorConductionSolution, ChtError> {
     let cells = domain.cell_count();
     let mut surface = Vec::with_capacity(trace.len());
@@ -451,7 +477,7 @@ fn recover(
         let op = operator(domain, tensors, c)?;
         let faces = data.face_ids[c].map(|id| surface[id]);
         let t = if let Some(t) = data.fixed[c] { t } else {
-            let (added, load) = cell_terms(&op, c, setup, data, step)?;
+            let (added, load) = cell_terms(&op, c, setup, data, step, carried_power_w)?;
             let weighted = op.cell_link.iter().zip(data.face_ids[c])
                 .fold(load, |sum, (b, id)| b.mul_add(trace[id], sum));
             data.reference + weighted / (op.cell_diagonal + added)
@@ -490,6 +516,11 @@ fn recover(
                 residual += storage;
                 throughput += storage.abs();
                 rounding += g * (t.abs() + step.previous[c].abs());
+            }
+            if let Some(carry) = carried_power_w {
+                residual -= carry[c];
+                throughput += carry[c].abs();
+                rounding += carry[c].abs();
             }
             maximum = maximum.max(heat_residual_ratio(
                 residual, throughput, rounding, sink.count,
