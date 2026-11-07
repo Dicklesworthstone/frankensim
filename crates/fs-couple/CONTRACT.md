@@ -1,3 +1,35 @@
+## Actual-temperature feedback into finite-strain membrane relaxation
+
+`membrane_thermal::visco::temperature::advance_candidate` feeds each original
+caloric receiver's actual temperature into native Maxwell relaxation times.
+`ViscoMembraneKinetics` retains the original unshifted spectra and one explicit
+WLF/Arrhenius calibration per triangle. Every preparation uses the shared
+`TemperatureShift::shift_hyperelastic` owner; repeated intervals never rescale
+an already shifted spectrum. The native owned-motion kinetic gate pins all
+energy parameters, natural references, branch ordering and solver controls.
+
+The original thermal timeline chooses the interval. Its accepted starting
+temperatures set the kinetics; native physical branch loss returns to the same
+enthalpy cells. Accepted steps and thermal events synchronize endpoint times
+without changing history, physical storage, momentum or interval heat. The
+frozen Kelvin--Voigt, frozen Maxwell and kinetic-feedback routes share receiver
+admission, source/inventory checks, physical/numerical work accounting and atomic
+candidate publication. Numerical kinetic damping never heats a cell.
+
+Both kinetic calibration support and the explicitly admitted fully-solid
+receiver interval are checked, including after final heating. Cancellation,
+foreign energy/reference laws, out-of-domain endpoints and late observer
+refusals preserve all accepted owners. Temperature-independent free energies
+make this kinetic feedback compatible with the existing caloric account; no
+reversible thermal work is inferred. This is first-order lagged-temperature
+coupling, with explicit timestep refinement still required. Thermal expansion,
+temperature-dependent elastic moduli and reciprocal entropy exchange remain
+separate owners.
+
+`tests/visco_membrane_thermal/temperature.rs` covers native shifted/reduced-time
+agreement, self-heating at three timestep rungs, heterogeneous WLF/Arrhenius
+regions, event/continuation equality and late whole-call refusals.
+
 ## Physical nonlinear and hysteretic electrodes with finite heat
 
 ## Finite-strain Maxwell membrane relaxation into original enthalpy cells

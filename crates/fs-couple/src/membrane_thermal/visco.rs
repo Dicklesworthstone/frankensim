@@ -8,18 +8,25 @@
 //! remain separate. A failed interval publishes neither mechanical nor thermal
 //! state, including when the user's observer refuses after heat was proposed.
 //!
-//! Mechanical coefficients and natural references are held during this call.
+//! The baseline entry point holds mechanical coefficients and natural references.
 //! The explicit fully-solid temperature interval admits that approximation;
-//! it is not a temperature-feedback model or a new branch calibration. Native
-//! prescribed-reference events remain separate, with their signed external work.
+//! `temperature` separately supplies actual-temperature kinetic feedback through
+//! the original shift owner. Native prescribed-reference events remain separate,
+//! with their signed external work.
+
+/// Actual-temperature kinetic feedback using the original relaxation spectrum.
+pub mod temperature;
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use fs_exec::CancelGate;
 use fs_material::sheet::MembraneLaw;
-use fs_solid::membrane::visco::dynamics::{FiniteViscoMembraneMotion, FiniteViscoMotionControls};
-use fs_solid::membrane::{MembraneError, MembranePatch, MembraneSolveSettings};
+use fs_solid::membrane::visco::FiniteViscoMembraneEnergy;
+use fs_solid::membrane::visco::dynamics::{
+    FiniteViscoMembraneMotion, FiniteViscoMotionControls, InertialEnergy,
+};
+use fs_solid::membrane::{MembraneError, MembranePatch, MembraneSolution, MembraneSolveSettings};
 use fs_thermal::enthalpy::{DepositionObserver, DepositionSimulation};
 
 use super::{
@@ -37,6 +44,53 @@ pub struct ViscoMembraneThermalControls {
     /// Held signed pressure jump on the current surface, in Pa. Nonzero pressure
     /// retains the native complete prescribed-perimeter admission.
     pub pressure_pa: f64,
+}
+
+// One work identity for both frozen and temperature-shifted native motion.
+fn mechanical_interval<E>(
+    energy: &FiniteViscoMembraneEnergy,
+    inertia: &InertialEnergy,
+    equilibrium: &MembraneSolution,
+    time_s: f64,
+    dt_s: f64,
+    prescribed: &[(usize, f64)],
+) -> Result<MechanicalInterval, E> {
+    // Held loads use displacement work; pressure uses native path work. Its
+    // endpoint quadrature difference remains numerical error, never heat.
+    let mut work = Sum::default();
+    work.add(energy.dead_load_endpoint_work_j)?;
+    work.add(energy.support_endpoint_work_j)?;
+    work.add(energy.pressure_path_work_j)?;
+    let pressure_defect = number(energy.pressure_endpoint_work_j - energy.pressure_path_work_j)?;
+    let mut defect = Sum::default();
+    let mut absolute_defect = Sum::default();
+    for term in [
+        -energy.endpoint_work_defect_j,
+        -inertia.numerical_loss_j,
+        -inertia.balance_error_j,
+        -energy.equilibrium_work_residual_j,
+        pressure_defect,
+    ] {
+        defect.add(term)?;
+        absolute_defect.add(term.abs())?;
+    }
+    let mut support = [Sum::default(); 3];
+    for &(dof, _) in prescribed {
+        support[dof % 3].add(number(equilibrium.residual_n[dof / 3][dof % 3] * dt_s)?)?;
+    }
+    Ok(MechanicalInterval {
+        time_s,
+        dissipated_j: energy.dissipated_j,
+        mechanical_work_j: work.value()?,
+        energy_defect_j: defect.value()?,
+        absolute_energy_defect_j: absolute_defect.value()?,
+        numerical_kinetic_loss_j: inertia.numerical_loss_j,
+        support_impulse_n_s: [
+            support[0].value()?,
+            support[1].value()?,
+            support[2].value()?,
+        ],
+    })
 }
 
 /// Whole-call proposal with retained native memory, original inventory and observer.
@@ -123,47 +177,14 @@ impl ThermalMotion for Adapter<'_, '_, '_> {
                 cancelled,
             )
             .map_err(MembraneThermalError::Viscoelastic)?;
-        let energy = &step.material_energy;
-        // Held dead loads use their exact displacement work. For pressure use
-        // native path work; the difference from endpoint pressure force work is
-        // a numerical quadrature defect, not an unreported thermal source.
-        let mut work = Sum::default();
-        work.add(energy.dead_load_endpoint_work_j)?;
-        work.add(energy.support_endpoint_work_j)?;
-        work.add(energy.pressure_path_work_j)?;
-        let pressure_defect =
-            number(energy.pressure_endpoint_work_j - energy.pressure_path_work_j)?;
-        let mut defect = Sum::default();
-        let mut absolute_defect = Sum::default();
-        for term in [
-            -energy.endpoint_work_defect_j,
-            -step.inertia.numerical_loss_j,
-            -step.inertia.balance_error_j,
-            -energy.equilibrium_work_residual_j,
-            pressure_defect,
-        ] {
-            defect.add(term)?;
-            absolute_defect.add(term.abs())?;
-        }
-        let mut support = [Sum::default(); 3];
-        for &(dof, _) in self.prescribed {
-            support[dof % 3].add(number(
-                step.equilibrium.residual_n[dof / 3][dof % 3] * dt_s,
-            )?)?;
-        }
-        let interval = MechanicalInterval {
-            time_s: step.motion.membrane().time_s(),
-            dissipated_j: energy.dissipated_j,
-            mechanical_work_j: work.value()?,
-            energy_defect_j: defect.value()?,
-            absolute_energy_defect_j: absolute_defect.value()?,
-            numerical_kinetic_loss_j: step.inertia.numerical_loss_j,
-            support_impulse_n_s: [
-                support[0].value()?,
-                support[1].value()?,
-                support[2].value()?,
-            ],
-        };
+        let interval = mechanical_interval(
+            &step.material_energy,
+            &step.inertia,
+            &step.equilibrium,
+            step.motion.membrane().time_s(),
+            dt_s,
+            self.prescribed,
+        )?;
         self.kinetic_j = step.inertia.kinetic_after_j;
         self.element_heat_j = step.element_dissipated_j;
         self.motion = Cow::Owned(step.motion);
@@ -203,6 +224,39 @@ pub fn advance_candidate<'patch, 'thermal, O: DepositionObserver>(
     config: MembraneThermalConfig,
     gate: &CancelGate,
 ) -> Result<ViscoMembraneThermalCandidate<'patch, 'thermal, O>, O::Error> {
+    let (kinetic_j, source_temperature_k) = admit_motion(motion, prescribed, mechanics, gate)?;
+    let adapter = Adapter {
+        motion: Cow::Borrowed(motion),
+        prescribed,
+        controls: mechanics,
+        kinetic_j,
+        element_heat_j: vec![0.0; motion.membrane().patch().sheets().len()],
+        source_temperature_k,
+    };
+    let candidate = advance_native(
+        &adapter,
+        thermal,
+        observer,
+        target_s,
+        dead_load_n,
+        cells,
+        config,
+        gate,
+    )?;
+    Ok(ViscoMembraneThermalCandidate {
+        motion: candidate.motion.motion.into_owned(),
+        thermal: candidate.thermal,
+        observer: candidate.observer,
+        report: candidate.report,
+    })
+}
+
+fn admit_motion<E>(
+    motion: &FiniteViscoMembraneMotion<'_>,
+    prescribed: &[(usize, f64)],
+    mechanics: ViscoMembraneThermalControls,
+    gate: &CancelGate,
+) -> Result<(f64, Vec<Option<f64>>), E> {
     check(gate)?;
     if !mechanics.maximum_step_s.is_finite()
         || mechanics.maximum_step_s <= 0.0
@@ -257,28 +311,5 @@ pub fn advance_candidate<'patch, 'thermal, O: DepositionObserver>(
         };
         source_temperature_k.push(law.model().context().axes().get("T").copied());
     }
-    let adapter = Adapter {
-        motion: Cow::Borrowed(motion),
-        prescribed,
-        controls: mechanics,
-        kinetic_j,
-        element_heat_j: vec![0.0; patch.sheets().len()],
-        source_temperature_k,
-    };
-    let candidate = advance_native(
-        &adapter,
-        thermal,
-        observer,
-        target_s,
-        dead_load_n,
-        cells,
-        config,
-        gate,
-    )?;
-    Ok(ViscoMembraneThermalCandidate {
-        motion: candidate.motion.motion.into_owned(),
-        thermal: candidate.thermal,
-        observer: candidate.observer,
-        report: candidate.report,
-    })
+    Ok((kinetic_j, source_temperature_k))
 }

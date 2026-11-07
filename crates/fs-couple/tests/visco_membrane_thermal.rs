@@ -1,4 +1,7 @@
 //! Synthetic finite-strain Maxwell heat checks; no measured material claims.
+#[path = "visco_membrane_thermal/temperature.rs"]
+mod temperature;
+
 use fs_couple::membrane_thermal::{
     ElementThermalCell, MembraneThermalConfig, MembraneThermalError,
     visco::{ViscoMembraneThermalControls, advance_candidate},

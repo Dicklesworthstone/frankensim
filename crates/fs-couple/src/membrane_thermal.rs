@@ -7,11 +7,13 @@
 //! SheetCaloric law converts stored energy to temperature, including variable
 //! heat capacity. Numerical mechanical defects never become thermal sources.
 //!
-//! This is a fixed-coefficient, one-way self-heating composition. The caller
-//! explicitly admits a fully solid temperature interval for the frozen elastic,
-//! viscous and natural-reference coefficients. No temperature feedback, changing
-//! stress-free geometry, thermoelastic exchange or phase-dependent mechanics is
-//! inferred. Thermal transport retains its native explicit order and CFL limits.
+//! The baseline entry points hold mechanical coefficients fixed. The
+//! `visco::temperature` composition feeds actual receiver temperatures back into
+//! declared Maxwell relaxation times while retaining the same energy parameters
+//! and natural reference. Every entry requires an explicitly admitted fully solid
+//! temperature interval. Changing stress-free geometry, reversible thermoelastic
+//! exchange and phase-dependent mechanics need their own thermodynamic closure.
+//! Thermal transport retains its native explicit order and CFL limits.
 
 /// Native finite-strain Maxwell relaxation heat on the same enthalpy timeline.
 pub mod visco;
@@ -61,6 +63,7 @@ pub enum MembraneThermalError<E> {
     Membrane(MembraneError),
     Damping(MembraneDampingError),
     Viscoelastic(FiniteViscoMembraneError),
+    Temperature(visco::temperature::ViscoMembraneTemperatureError),
     Thermal(DepositionError),
     Phase(PhaseStateError),
     Observer(E),
@@ -95,6 +98,19 @@ trait ThermalMotion: Clone {
     fn max_step_s(&self) -> f64;
     fn source_temperature_k(&self, element: usize) -> Option<f64>;
     fn element_dissipated_j(&self) -> &[f64];
+    fn uses_temperature_feedback(&self) -> bool {
+        false
+    }
+    // Only kinetics may change here: physical storage, reference, momentum and
+    // heat are unchanged. Owners with reversible thermal work need a different
+    // thermodynamic composition, not this zero-work synchronization hook.
+    fn set_temperatures<E>(
+        &mut self,
+        _temperatures_k: &[f64],
+        _cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<(), E> {
+        Ok(())
+    }
     fn advance<E>(
         &mut self,
         dt_s: f64,
@@ -633,6 +649,21 @@ impl<M: ThermalMotion, O: DepositionObserver> HeatObserver<'_, '_, '_, M, O> {
         }
         Ok(())
     }
+
+    fn update_temperatures(&mut self, thermal: &DepositionSimulation<'_>) -> Result<(), O::Error> {
+        if !self.motion.uses_temperature_feedback() {
+            return Ok(());
+        }
+        let mut temperatures = Vec::with_capacity(self.receivers.len());
+        for receiver in &self.receivers {
+            check(self.gate)?;
+            temperatures.push(thermal.temperature_k(receiver.binding.cell)?);
+        }
+        let gate = self.gate;
+        self.motion
+            .to_mut()
+            .set_temperatures(&temperatures, &mut || gate.is_requested())
+    }
 }
 impl<M: ThermalMotion, O: DepositionObserver> DepositionObserver
     for HeatObserver<'_, '_, '_, M, O>
@@ -736,6 +767,7 @@ impl<M: ThermalMotion, O: DepositionObserver> DepositionObserver
             .inner
             .step_sources(thermal, start_s, dt_s, end_s, checkpoint)
             .map_err(MembraneThermalError::Observer)?;
+        self.update_temperatures(thermal)?;
         // This observer is private to the whole native thermal candidate.
         // A later refusal discards it, so no additional per-substep clone is needed.
         let step = self
@@ -808,7 +840,8 @@ impl<M: ThermalMotion, O: DepositionObserver> DepositionObserver
         self.inner
             .event(event, thermal)
             .map_err(MembraneThermalError::Observer)?;
-        self.admit(thermal)
+        self.admit(thermal)?;
+        self.update_temperatures(thermal)
     }
     fn step(
         &mut self,
@@ -833,6 +866,7 @@ impl<M: ThermalMotion, O: DepositionObserver> DepositionObserver
             .step(start_s, dt_s, old, thermal, checkpoint)
             .map_err(MembraneThermalError::Observer)?;
         self.admit(thermal)?;
+        self.update_temperatures(thermal)?;
         for (total, &heat) in self
             .element_heat_j
             .iter_mut()
