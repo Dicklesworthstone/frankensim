@@ -6,6 +6,8 @@
 //! out-of-plane optic axis couples the two incident polarizations; solving
 //! both tangential E and H conditions retains this coupling and both outgoing
 //! eigenmodes. Eigenmode phase and energy directions need not coincide.
+//! [`PreparedOrientedCrystalField`] propagates the solved fields coherently
+//! through their actual half-spaces, retaining both modal phase and decay.
 //!
 //! This is one planar, lossless, homogeneous half-space. It does not supply
 //! absorbing/biaxial crystals, multilayers, transient fields or ray traversal.
@@ -21,7 +23,9 @@ use fs_math::{c64::C64, det};
 
 mod kernel;
 use kernel::Input;
-pub use kernel::{OrientedCrystalMode, OrientedCrystalResponse};
+pub use kernel::{
+    OrientedCrystalField, OrientedCrystalFieldSide, OrientedCrystalMode, OrientedCrystalResponse,
+};
 
 /// Source-bound coherent fields for sparse, authored incident directions.
 pub mod spectrum;
@@ -71,6 +75,46 @@ pub struct OrientedUniaxialInterface<'a> {
     crystal: UniaxialOpticalResponse<'a>,
     incident_mu_h_m: f64,
     optic_axis: [f64; 3],
+}
+
+/// One source-bound frequency and illumination, solved once at z=0.
+/// Repeated spatial queries retain both transmitted modes and allocate nothing;
+/// they do not resolve materials or solve the Maxwell boundary system again.
+pub struct PreparedOrientedCrystalField<'s, 'm> {
+    source: &'s OrientedUniaxialInterface<'m>,
+    omega_rad_s: f64,
+    boundary: OrientedCrystalResponse,
+}
+
+impl<'s, 'm> PreparedOrientedCrystalField<'s, 'm> {
+    pub const fn source(&self) -> &'s OrientedUniaxialInterface<'m> {
+        self.source
+    }
+
+    pub const fn omega_rad_s(&self) -> f64 {
+        self.omega_rad_s
+    }
+
+    pub const fn boundary_response(&self) -> &OrientedCrystalResponse {
+        &self.boundary
+    }
+
+    /// Sample authored Cartesian [x,y,z] in metres, with z=0 at the interface.
+    /// Incident-side queries require z<=0; crystal queries require z>=0.
+    /// Either boundary trace may be requested at z=0. The plane wave has ky=0,
+    /// so fields are independent of y even when its energy walks off in y.
+    /// The authored incident complex amplitude is anchored at [0,0,0].
+    ///
+    /// These are complex peak phasors with the original exp(+i omega t)
+    /// convention. Components interfere before their signed cycle-mean
+    /// Poynting vector is formed; evanescent decay does not represent heat.
+    pub fn field(
+        &self,
+        side: OrientedCrystalFieldSide,
+        position_m: [f64; 3],
+    ) -> Result<OrientedCrystalField> {
+        kernel::field(&self.boundary, side, position_m).map_err(ReflectionError::Invalid)
+    }
 }
 
 impl<'a> OrientedUniaxialInterface<'a> {
@@ -129,6 +173,40 @@ impl<'a> OrientedUniaxialInterface<'a> {
             Incidence::TangentialIndex(tangential_index),
             incident_tangential_e_v_m,
         )
+    }
+
+    /// Resolve the original spectral support and prepare one coherent field
+    /// for repeated physical point queries. Positive cosine implies kx>=0.
+    pub fn prepare_field(
+        &self,
+        omega_rad_s: f64,
+        incidence_cosine: f64,
+        incident_tangential_e_v_m: [C64; 2],
+    ) -> Result<PreparedOrientedCrystalField<'_, 'a>> {
+        Ok(PreparedOrientedCrystalField {
+            source: self,
+            omega_rad_s,
+            boundary: self.response(omega_rad_s, incidence_cosine, incident_tangential_e_v_m)?,
+        })
+    }
+
+    /// Conserved signed kx/k0 counterpart, including exact critical inputs.
+    /// The preparation retains the same original source-law refusals.
+    pub fn prepare_field_at_tangential_index(
+        &self,
+        omega_rad_s: f64,
+        tangential_index: f64,
+        incident_tangential_e_v_m: [C64; 2],
+    ) -> Result<PreparedOrientedCrystalField<'_, 'a>> {
+        Ok(PreparedOrientedCrystalField {
+            source: self,
+            omega_rad_s,
+            boundary: self.response_at_tangential_index(
+                omega_rad_s,
+                tangential_index,
+                incident_tangential_e_v_m,
+            )?,
+        })
     }
 
     fn evaluate(

@@ -456,6 +456,112 @@ fn oriented_crystal_retains_original_sources_dispersion_and_refusal_domains() {
 }
 
 #[test]
+fn prepared_oriented_fields_keep_original_sources_frequency_and_boundary_traces() {
+    use crate::plane_wave::uniaxial::oriented::{
+        OrientedCrystalFieldSide, OrientedUniaxialInterface,
+    };
+    let (ordinary, extraordinary) = axes(
+        [1.4, 1.6],
+        [1.8, 2.0],
+        [0.0; 2],
+        Some(MU),
+        [400.0, 800.0],
+        0,
+    );
+    let crystal = UniaxialOpticalResponse::try_new(&ordinary, &extraordinary, SPAN).unwrap();
+    let outside = incident(1.0, MU);
+    let interface = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside),
+        crystal,
+        [1.0, 2.0, 3.0],
+    )
+    .unwrap();
+    let omega = frequency(550.0);
+    let illumination = [C64::new(0.3, -0.5), C64::new(0.7, 0.2)];
+    let prepared = interface.prepare_field(omega, 0.8, illumination).unwrap();
+    assert!(core::ptr::eq(prepared.source(), &interface));
+    assert!(core::ptr::eq(
+        prepared.source().crystal_response().ordinary_source(),
+        &ordinary,
+    ));
+    assert_eq!(prepared.omega_rad_s(), omega);
+    assert_eq!(
+        *prepared.boundary_response(),
+        interface.response(omega, 0.8, illumination).unwrap(),
+    );
+    let outside_trace = prepared
+        .field(OrientedCrystalFieldSide::TotalIncidentSide, [0.0; 3])
+        .unwrap();
+    let inside_trace = prepared
+        .field(OrientedCrystalFieldSide::Transmitted, [0.0; 3])
+        .unwrap();
+    for j in 0..2 {
+        complex_near(
+            outside_trace.electric_v_m[j],
+            inside_trace.electric_v_m[j],
+            3e-15,
+        );
+        complex_near(
+            outside_trace.magnetic_a_m[j],
+            inside_trace.magnetic_a_m[j],
+            3e-17,
+        );
+    }
+    let point = [0.12e-6, 0.7, 0.37e-6];
+    let propagated = prepared
+        .field(OrientedCrystalFieldSide::Transmitted, point)
+        .unwrap();
+    near(
+        propagated.poynting_w_m2[2],
+        prepared.boundary_response().incident_normal_power_w_m2
+            * prepared.boundary_response().transmitted_power_fraction,
+        2e-17,
+    );
+    assert!(
+        prepared
+            .field(OrientedCrystalFieldSide::Incident, point)
+            .is_err()
+    );
+    assert_eq!(
+        propagated,
+        prepared
+            .field(OrientedCrystalFieldSide::Transmitted, point)
+            .unwrap()
+    );
+    let signed = interface
+        .prepare_field_at_tangential_index(omega, -0.6, illumination)
+        .unwrap();
+    assert!(signed.boundary_response().tangential_wavenumber_rad_m < 0.0);
+    assert!(
+        signed
+            .field(OrientedCrystalFieldSide::Transmitted, point)
+            .is_ok()
+    );
+    for wavelength in [399.0, 801.0] {
+        assert!(
+            interface
+                .prepare_field(frequency(wavelength), 0.8, illumination)
+                .is_err()
+        );
+        assert!(
+            interface
+                .prepare_field_at_tangential_index(frequency(wavelength), -0.6, illumination)
+                .is_err()
+        );
+    }
+    for loss in [[1e-12, 0.0], [0.0, 1e-12]] {
+        let (o, e) = axes([1.5; 2], [1.9; 2], loss, Some(MU), [400.0, 800.0], 0);
+        let interface = OrientedUniaxialInterface::try_new(
+            DielectricResponse::Lossless(&outside),
+            UniaxialOpticalResponse::try_new(&o, &e, SPAN).unwrap(),
+            [1.0, 2.0, 3.0],
+        )
+        .unwrap();
+        assert!(interface.prepare_field(omega, 0.8, illumination).is_err());
+    }
+}
+
+#[test]
 fn prepared_crystal_spectrum_binds_original_laws_and_coherent_spatial_fields() {
     use crate::plane_wave::{
         angular_spectrum::{AngularSpectrumError, AngularSpectrumSide},

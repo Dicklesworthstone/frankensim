@@ -8,10 +8,12 @@
 //! This is a monochromatic, planar, homogeneous transparent half-space, not a
 //! finite crystal, absorbing anisotropy or a causal time-domain reservoir.
 
-use super::{Incidence, OrientedCrystalResponse, OrientedUniaxialInterface, ResolvedFrequency};
-use crate::plane_wave::angular_spectrum::{
-    AngularSpectrumError, AngularSpectrumSide, modes::propagation,
+use super::kernel::FieldSum as CompensatedFieldSum;
+use super::{
+    Incidence, OrientedCrystalFieldSide, OrientedCrystalResponse, OrientedUniaxialInterface,
+    ResolvedFrequency,
 };
+use crate::plane_wave::angular_spectrum::{AngularSpectrumError, AngularSpectrumSide};
 use fs_math::{c64::C64, dd::Dd, det};
 
 type Result<T> = core::result::Result<T, AngularSpectrumError>;
@@ -136,7 +138,7 @@ fn admit(count: usize, limits: UniaxialSpectrumLimits) -> Result<usize> {
     }
     count
         .checked_mul(core::mem::size_of::<Mode>())
-        .and_then(|bytes| bytes.checked_add(core::mem::size_of::<FieldSum>()))
+        .and_then(|bytes| bytes.checked_add(core::mem::size_of::<CompensatedFieldSum>()))
         .and_then(|bytes| bytes.checked_add(core::mem::size_of::<UniaxialSpectrumField>()))
         .filter(|&bytes| bytes <= limits.maximum_workspace_bytes)
         .ok_or_else(|| bad("uniaxial spectrum exceeds its workspace budget"))
@@ -206,51 +208,26 @@ fn rotate_real(v: [f64; 3], p: [f64; 2]) -> [f64; 3] {
     [v[0] * p[0] - v[1] * p[1], v[0] * p[1] + v[1] * p[0], v[2]]
 }
 
+/// Compatibility sum for the finite slab's already anchored wave phasors.
+/// Both public wave owners share the same compensated field contraction.
 pub(super) struct FieldSum {
-    electric: [[Dd; 2]; 3],
-    magnetic: [[Dd; 2]; 3],
+    inner: CompensatedFieldSum,
 }
 impl FieldSum {
     pub(super) const fn new() -> Self {
         Self {
-            electric: [[Dd::ZERO; 2]; 3],
-            magnetic: [[Dd::ZERO; 2]; 3],
+            inner: CompensatedFieldSum::from_phasors(),
         }
     }
     pub(super) fn add(&mut self, electric: [C64; 3], magnetic: [C64; 3], phase: C64) {
-        let [pr, pi] = [phase.re, phase.im].map(Dd::from_f64);
-        for (sum, vector) in [
-            (&mut self.electric, electric),
-            (&mut self.magnetic, magnetic),
-        ] {
-            for j in 0..3 {
-                let [vr, vi] = [vector[j].re, vector[j].im].map(Dd::from_f64);
-                sum[j][0] = sum[j][0] + vr * pr - vi * pi;
-                sum[j][1] = sum[j][1] + vr * pi + vi * pr;
-            }
-        }
+        self.inner.add_phasor(electric, magnetic, phase);
     }
     pub(super) fn finish(self) -> Result<UniaxialSpectrumField> {
-        let electric = self
-            .electric
-            .map(|v| C64::new(v[0].to_f64(), v[1].to_f64()));
-        let magnetic = self
-            .magnetic
-            .map(|v| C64::new(v[0].to_f64(), v[1].to_f64()));
-        let pair = |j: usize, k: usize| {
-            self.electric[j][0] * self.magnetic[k][0] + self.electric[j][1] * self.magnetic[k][1]
-        };
-        let flux = [(1, 2), (2, 0), (0, 1)]
-            .map(|(j, k)| ((pair(j, k) - pair(k, j)) * Dd::from_f64(0.5)).to_f64());
-        if electric.iter().chain(&magnetic).any(|&z| !finite(z))
-            || flux.iter().any(|v| !v.is_finite())
-        {
-            return Err(bad("coherent uniaxial field is unrepresentable"));
-        }
+        let field = self.inner.finish().map_err(bad)?;
         Ok(UniaxialSpectrumField {
-            electric_v_m: electric,
-            magnetic_a_m: magnetic,
-            poynting_w_m2: flux,
+            electric_v_m: field.electric_v_m,
+            magnetic_a_m: field.magnetic_a_m,
+            poynting_w_m2: field.poynting_w_m2,
         })
     }
 }
@@ -275,59 +252,26 @@ fn field_at(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<UniaxialSpectrumField> {
     poll(cancelled)?;
-    if point.iter().any(|v| !v.is_finite())
-        || if side == AngularSpectrumSide::Transmitted {
-            point[2] < 0.0
-        } else {
-            point[2] > 0.0
-        }
-    {
-        return Err(bad(
-            "uniaxial field point must lie in its selected half-space",
-        ));
-    }
-    let mut sum = FieldSum::new();
+    let selected = match side {
+        AngularSpectrumSide::Incident => OrientedCrystalFieldSide::Incident,
+        AngularSpectrumSide::Reflected => OrientedCrystalFieldSide::Reflected,
+        AngularSpectrumSide::TotalIncidentSide => OrientedCrystalFieldSide::TotalIncidentSide,
+        AngularSpectrumSide::Transmitted => OrientedCrystalFieldSide::Transmitted,
+    };
+    let mut sum = CompensatedFieldSum::new(selected, point).map_err(bad)?;
     for mode in modes {
         poll(cancelled)?;
-        let r = &mode.response;
-        let transverse = transverse_phase(r.tangential_wavenumber_rad_m, mode.axis, point)?;
-        let mut add = |e, h, kz| -> Result<()> {
-            let longitudinal = propagation(kz, point[2])
-                .ok_or_else(|| bad("uniaxial propagation is unrepresentable"))?;
-            sum.add(e, h, transverse * longitudinal);
-            Ok(())
-        };
-        if matches!(
-            side,
-            AngularSpectrumSide::Incident | AngularSpectrumSide::TotalIncidentSide
-        ) {
-            add(
-                r.incident_electric_v_m,
-                r.incident_magnetic_a_m,
-                C64::from_re(r.incident_normal_wavenumber_rad_m),
-            )?;
-        }
-        if matches!(
-            side,
-            AngularSpectrumSide::Reflected | AngularSpectrumSide::TotalIncidentSide
-        ) {
-            add(
-                r.reflected_electric_v_m,
-                r.reflected_magnetic_a_m,
-                C64::from_re(-r.incident_normal_wavenumber_rad_m),
-            )?;
-        }
-        if side == AngularSpectrumSide::Transmitted {
-            for wave in &r.transmitted {
-                add(
-                    wave.electric_v_m,
-                    wave.magnetic_a_m,
-                    wave.normal_wavenumber_rad_m,
-                )?;
-            }
-        }
+        // The single-wave and sparse-spectrum paths share phase, modal
+        // interference, scaled evanescent decay and the complete DD flux.
+        // Source preparation above owns the fixed global crystal frame.
+        sum.add_response(&mode.response, mode.axis).map_err(bad)?;
     }
-    sum.finish()
+    let field = sum.finish().map_err(bad)?;
+    Ok(UniaxialSpectrumField {
+        electric_v_m: field.electric_v_m,
+        magnetic_a_m: field.magnetic_a_m,
+        poynting_w_m2: field.poynting_w_m2,
+    })
 }
 
 #[cfg(test)]

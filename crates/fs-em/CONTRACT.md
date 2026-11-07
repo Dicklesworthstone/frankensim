@@ -6196,6 +6196,32 @@ principal sections against the existing decoupled owner. This extension remains
 one lossless planar half-space; it does not claim general anisotropic film,
 beam, absorbing-medium, geometric traversal or group-speed support.
 
+`OrientedUniaxialInterface::prepare_field` and
+`prepare_field_at_tangential_index` retain the original interface, admitted
+frequency and solved boundary in `PreparedOrientedCrystalField`. Repeated
+Cartesian point queries allocate nothing and repeat neither source resolution
+nor the boundary solve. Incident, reflected, total incident-side, ordinary,
+extraordinary and total transmitted selections enforce their physical
+half-spaces; both boundary traces remain available at z=0.
+
+Complex peak E/H retain the original exp(+i omega t - i k.r) convention.
+The infinite plane wave has ky=0 even when energy walks off in y. Both
+transmitted modes interfere before the full signed cycle-mean Poynting vector
+is evaluated. Separate compensated carrier and relative phases retain optical
+path products and birefringent retardance; the shared decay owner preserves
+representable late evanescent tails. Decaying fields create no heat in this
+lossless law. Spatial Maxwell curls, Fresnel standing waves, polarization
+retardance, cross-mode energy transport and critical/evanescent fields are
+covered by focused tests. The prepared point evaluator and the existing
+`spectrum::PreparedUniaxialAngularSpectrum` share one compensated field
+accumulator, retaining relative phase between both eigenmodes and authored
+incident directions before coherent power contraction. Sparse spectra keep
+their original source resolution, global-axis rotations, coefficients,
+mode/workspace limits and cancellation. Finite-slab observers retain their
+original face-anchored phases and helper signatures while sharing the DD
+field contraction and accounting for its actual storage. FFT-grid attachment
+remains outside this change.
+
 
 ### Retained vector polarization on the native planar Gauss solve
 

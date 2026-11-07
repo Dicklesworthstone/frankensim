@@ -6,6 +6,11 @@ const C0: f64 = 299_792_458.0;
 type Vector = [C64; 3];
 type Result<T> = core::result::Result<T, &'static str>;
 
+#[path = "propagation.rs"]
+mod propagation;
+pub(super) use propagation::{FieldSum, field};
+pub use propagation::{OrientedCrystalField, OrientedCrystalFieldSide};
+
 /// Actual transmitted field of one outgoing eigenmode at the interface.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OrientedCrystalMode {

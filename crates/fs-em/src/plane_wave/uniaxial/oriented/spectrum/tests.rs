@@ -418,3 +418,43 @@ fn resource_source_support_and_cancellation_have_no_partial_field() {
     .unwrap();
     assert!(recovered.poynting_w_m2[2] > 0.0);
 }
+
+#[test]
+fn one_mode_spectrum_and_prepared_point_share_compensated_long_path_fields() {
+    let mut data = frequency(1.0, 1.5, 1.9);
+    data.omega = 1e7 * C0;
+    let axis = [1.0, 2.0, 3.0];
+    let electric = [C64::new(0.7, 0.2), C64::new(-0.3, 0.5)];
+    let direct = data.solve(axis, Incidence::TangentialIndex(0.6), electric).unwrap();
+    let modes = prepare_modes(data, axis, &[mode(0.6, [1.0, 0.0], electric)], &mut || false).unwrap();
+    for (side, selected, z) in [
+        (AngularSpectrumSide::Incident, OrientedCrystalFieldSide::Incident, -1000.000_000_000_000_1),
+        (AngularSpectrumSide::Reflected, OrientedCrystalFieldSide::Reflected, -1000.000_000_000_000_1),
+        (AngularSpectrumSide::TotalIncidentSide, OrientedCrystalFieldSide::TotalIncidentSide, -1000.000_000_000_000_1),
+        (AngularSpectrumSide::Transmitted, OrientedCrystalFieldSide::Transmitted, 1000.000_000_000_000_1),
+    ] {
+        let point = [1.000_000_000_000_000_2, -0.3, z];
+        let sparse = field_at(&modes, side, point, &mut || false).unwrap();
+        let one = super::super::kernel::field(&direct, selected, point).unwrap();
+        assert_eq!(sparse.electric_v_m, one.electric_v_m);
+        assert_eq!(sparse.magnetic_a_m, one.magnetic_a_m);
+        assert_eq!(sparse.poynting_w_m2, one.poynting_w_m2);
+    }
+}
+
+#[test]
+fn prepared_sparse_spectrum_preserves_a_scaled_late_evanescent_tail() {
+    let modes = prepare_modes(
+        frequency(2.0, 1.0, 1.7),
+        [0.0, 0.0, 1.0],
+        &[mode(1.9, [1.0, 0.0], [C64::ZERO, C64::from_re(1e100)])],
+        &mut || false,
+    ).unwrap();
+    let ordinary = &modes[0].response.transmitted[0];
+    let z = -800.0 / ordinary.normal_wavenumber_rad_m.im;
+    let expected = (ordinary.electric_v_m[1].abs().ln()
+        + ordinary.normal_wavenumber_rad_m.im * z).exp();
+    let tail = field_at(&modes, AngularSpectrumSide::Transmitted, [0.0, 0.0, z], &mut || false).unwrap();
+    assert!(tail.electric_v_m[1].abs() > 0.0);
+    near(tail.electric_v_m[1].abs() / expected, 1.0, 3e-13);
+}
