@@ -28,6 +28,9 @@ mod conduction;
 #[path = "material_free_surface_enthalpy/buoyancy.rs"]
 mod buoyancy;
 
+#[path = "material_free_surface_enthalpy/volume.rs"]
+mod volume;
+
 #[path = "material_free_surface_enthalpy/frame.rs"]
 mod frame;
 

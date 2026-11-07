@@ -27,6 +27,9 @@ pub use reconstruction::{
 };
 mod resistance;
 pub use resistance::{DensityResistanceReport, ResistiveDensityProjection};
+mod internal_faces;
+pub use internal_faces::InternalPressureFace;
+use std::collections::BTreeMap;
 
 /// Physical step and independent readback budgets for a density projection.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -169,6 +172,9 @@ impl StaggeredBoundaryPressure<'_> {
 pub(super) enum BoundaryPressure<'a> {
     Planes([f64; 6]),
     Profile(StaggeredBoundaryPressure<'a>),
+    // Explicit fluid-to-inactive openings. Exterior Free planes retain zero
+    // correction pressure; every unlisted inactive face remains a wall.
+    Internal(&'a BTreeMap<(usize, usize), f64>),
 }
 
 impl BoundaryPressure<'_> {
@@ -176,6 +182,14 @@ impl BoundaryPressure<'_> {
         match self {
             Self::Planes(values) => values[f],
             Self::Profile(profile) => profile.value(f / 2, slot).unwrap_or(0.0),
+            Self::Internal(_) => 0.0,
+        }
+    }
+
+    fn internal(self, cell: usize, face: usize) -> Option<f64> {
+        match self {
+            Self::Internal(values) => values.get(&(cell, face)).copied(),
+            _ => None,
         }
     }
 }
@@ -202,9 +216,10 @@ pub struct DensityProjectionReport {
     /// `dt sum(p_c Q_out)` on held `Fixed` faces, joules; subtracted from
     /// source work. The combined work is invariant to a sealed-component gauge.
     pub fixed_boundary_pressure_work_j: f64,
-    /// `dt sum(p_boundary Q_out)` on `Free` faces, joules, in the same
-    /// component gauge as source work. Negative values supply mechanical
-    /// energy from the reservoirs; positive values deliver it to them.
+    /// `dt sum(p_boundary Q_out)` on exterior `Free` and explicitly opened
+    /// internal pressure faces, joules, in the same component gauge as source
+    /// work. Negative values supply mechanical energy from the reservoirs;
+    /// positive values deliver it to them.
     pub open_boundary_pressure_work_j: f64,
     /// Nonnegative `sum(M_face delta_u^2 / 2)`, joules. This numerical
     /// projection loss is reported separately and is never converted to heat.
@@ -277,8 +292,21 @@ impl FrozenDensity<'_> {
         self.boundary_pressure.value(f, slot)
     }
 
-    pub(super) fn boundary_potential(&self, f: usize, slot: usize, reference_pa: f64) -> f64 {
-        let relative_pressure = self.boundary_pressure_pa(f, slot) - reference_pa;
+    pub(super) fn internal_pressure_pa(&self, cell: usize, face: usize) -> Option<f64> {
+        self.boundary_pressure.internal(cell, face)
+    }
+
+    pub(super) fn boundary_potential(
+        &self,
+        cell: usize,
+        f: usize,
+        slot: usize,
+        reference_pa: f64,
+    ) -> f64 {
+        let pressure = self
+            .internal_pressure_pa(cell, f)
+            .unwrap_or_else(|| self.boundary_pressure_pa(f, slot));
+        let relative_pressure = pressure - reference_pa;
         self.uniform_density.map_or(relative_pressure, |rho| {
             relative_pressure / (rho / self.duration_s)
         })
@@ -604,9 +632,10 @@ impl FlowField {
         controls: DensityProjectionControls,
         gate: &CancelGate,
     ) -> Result<(DensityProjection, PressureReadback), ChtError> {
-        let mut density = self.admit_density_projection(
+        let density = self.admit_density_projection(
             domain,
             faces,
+            boundary_pressure,
             density_kg_m3,
             target_outflow_m3_s,
             resistance_pa_s_m2,
@@ -616,7 +645,6 @@ impl FlowField {
         if let BoundaryPressure::Profile(profile) = boundary_pressure {
             profile.admit(self, domain, faces, gate)?;
         }
-        density.boundary_pressure = boundary_pressure;
         let mut field = self.clone();
         let (projection, potential) = field.project_with_density(
             domain,
@@ -664,6 +692,7 @@ impl FlowField {
         &self,
         domain: &VoxelDomain,
         faces: [FlowFace; 6],
+        boundary_pressure: BoundaryPressure<'a>,
         density_kg_m3: &'a [f64],
         target_outflow_m3_s: &'a [f64],
         resistance_pa_s_m2: Option<&'a [f64]>,
@@ -681,9 +710,10 @@ impl FlowField {
             "flow.maximum_energy_defect_j",
             controls.maximum_energy_defect_j,
         )?;
-        let mut uniform_density = self.admit_density_field(
+        let mut uniform_density = self.admit_density_field_with_pressure(
             domain,
             faces,
+            boundary_pressure,
             density_kg_m3,
             Some(target_outflow_m3_s),
             gate,
@@ -703,7 +733,7 @@ impl FlowField {
             target_outflow_m3_s,
             duration_s: controls.duration_s,
             uniform_density,
-            boundary_pressure: BoundaryPressure::Planes([0.0; 6]),
+            boundary_pressure,
         };
         if let Some(reference) = uniform_density {
             finite_positive("flow.pressure_scale", reference / controls.duration_s)?;
@@ -715,7 +745,9 @@ impl FlowField {
             }
             for f in 0..6 {
                 let nb = domain.neighbor(c, f);
-                if active_face(domain, faces, f, nb) {
+                let internal = density.internal_pressure_pa(c, f).is_some();
+                if internal || active_face(domain, faces, f, nb) {
+                    let nb = if internal { None } else { nb };
                     finite_positive(
                         "flow.face_dual_mass_kg",
                         density.face_mass(domain, c, f, nb),
@@ -742,6 +774,25 @@ impl FlowField {
         &self,
         domain: &VoxelDomain,
         faces: [FlowFace; 6],
+        density_kg_m3: &[f64],
+        target_outflow_m3_s: Option<&[f64]>,
+        gate: &CancelGate,
+    ) -> Result<Option<f64>, ChtError> {
+        self.admit_density_field_with_pressure(
+            domain,
+            faces,
+            BoundaryPressure::Planes([0.0; 6]),
+            density_kg_m3,
+            target_outflow_m3_s,
+            gate,
+        )
+    }
+
+    fn admit_density_field_with_pressure(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        boundary_pressure: BoundaryPressure<'_>,
         density_kg_m3: &[f64],
         target_outflow_m3_s: Option<&[f64]>,
         gate: &CancelGate,
@@ -781,11 +832,12 @@ impl FlowField {
             for f in 0..6 {
                 let q = self.outward(domain, c, f);
                 finite("flow.initial_face_flux", q)?;
+                let nb = domain.neighbor(c, f);
+                let internal = boundary_pressure.internal(c, f).is_some()
+                    || nb.is_some_and(|n| boundary_pressure.internal(n, f ^ 1).is_some());
                 let blocked = !domain.is_fluid(c)
-                    || domain
-                        .neighbor(c, f)
-                        .map_or(faces[f] == FlowFace::Wall, |n| !domain.is_fluid(n));
-                if blocked && q != 0.0 {
+                    || nb.map_or(faces[f] == FlowFace::Wall, |n| !domain.is_fluid(n));
+                if blocked && !internal && q != 0.0 {
                     return Err(refuse(
                         "flow.blocked_face_flux",
                         "wall and solid faces must carry exactly zero flux",
@@ -861,9 +913,13 @@ fn audit(
         source_work.add(controls.duration_s * pressure[c] * source);
         for f in 0..6 {
             let nb = domain.neighbor(c, f);
-            if !active_face(domain, faces, f, nb) {
+            let internal_pressure = density.internal_pressure_pa(c, f);
+            if internal_pressure.is_none() && !active_face(domain, faces, f, nb) {
                 continue;
             }
+            // A pressure opening has only the liquid half-cell's inertia.
+            // The inactive neighbour has no density or velocity unknown.
+            let nb = if internal_pressure.is_some() { None } else { nb };
             let area = domain.face_area(c, f / 2);
             let mass = density.face_mass(domain, c, f, nb);
             let q0 = before.outward(domain, c, f);
@@ -883,7 +939,9 @@ fn audit(
                         * u1,
                 );
             }
-            if nb.is_none() && faces[f] == FlowFace::Fixed {
+            if let Some(boundary) = internal_pressure {
+                open_work.add(controls.duration_s * (boundary - reference_pa) * q1);
+            } else if nb.is_none() && faces[f] == FlowFace::Fixed {
                 boundary_work.add(controls.duration_s * pressure[c] * q1);
             } else if nb.is_none() && faces[f] == FlowFace::Free {
                 let (slot, _) = after.slot(domain, c, f);

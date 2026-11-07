@@ -25,9 +25,10 @@ pub use density_projection::{
     DensityMomentumReconstruction, DensityMomentumReconstructionControls,
     DensityMomentumReconstructionReport, DensityProjection, DensityProjectionControls,
     DensityProjectionReport, DensityResistanceReport, ForcedDensityProjection,
-    ForcedDensityProjectionReport, MaterialDensityMomentumControls, MaterialDensityMomentumInput,
-    MaterialDensityMomentumReport, MaterialDensityMomentumStep, ReservoirPressure,
-    ResistiveDensityProjection, ResistiveMaterialDensityMomentumStep, StaggeredBoundaryPressure,
+    ForcedDensityProjectionReport, InternalPressureFace, MaterialDensityMomentumControls,
+    MaterialDensityMomentumInput, MaterialDensityMomentumReport, MaterialDensityMomentumStep,
+    ReservoirPressure, ResistiveDensityProjection, ResistiveMaterialDensityMomentumStep,
+    StaggeredBoundaryPressure,
 };
 mod density_transport;
 pub use density_transport::{
@@ -103,7 +104,9 @@ struct ProjectionPotential {
 ///
 /// Layout: `x` faces `(z ny + y)(nx + 1) + i`, `y` faces `(z (ny + 1) + j) nx
 /// + x`, `z` faces `(k ny + y) nx + x`, where `i`, `j`, `k` index the face
-/// planes `0..=n`. Faces touching a solid cell carry exactly zero flux.
+/// planes `0..=n`. Faces touching a solid cell carry exactly zero flux except
+/// explicitly declared internal pressure openings. Their inactive side is
+/// outside the flow domain, not a thermally conducting material transport cell.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlowField {
     dims: [usize; 3],
@@ -331,10 +334,11 @@ impl FlowField {
         (0..6).map(|f| self.outward(domain, c, f)).sum()
     }
 
-    /// Largest per-cell |net outflow|, m^3/s.
+    /// Largest occupied fluid-cell |net outflow|, m^3/s.
     #[must_use]
     pub fn max_divergence(&self, domain: &VoxelDomain) -> f64 {
         (0..domain.cell_count())
+            .filter(|&c| domain.is_fluid(c))
             .map(|c| self.net_outflow(domain, c).abs())
             .fold(0.0, f64::max)
     }
@@ -475,7 +479,14 @@ impl FlowField {
                                 stack.push(r);
                             }
                         }
-                        Some(_) => {}
+                        Some(_) => {
+                            if let Some(pressure) =
+                                density.and_then(|d| d.internal_pressure_pa(c, f))
+                            {
+                                drains = true;
+                                reference.get_or_insert(pressure);
+                            }
+                        }
                         None => {
                             drains |= faces[f] == FlowFace::Free;
                             if faces[f] == FlowFace::Free && reference.is_none() {
@@ -555,7 +566,7 @@ impl FlowField {
         let mut b = vec![0.0f64; n];
         let boundary_potential = |row: usize, f: usize, slot: usize| {
             density.map_or(0.0, |d| {
-                d.boundary_potential(f, slot, reference_pressure_pa[component[row]])
+                d.boundary_potential(fluid[row], f, slot, reference_pressure_pa[component[row]])
             })
         };
         for (row, &c) in fluid.iter().enumerate() {
@@ -575,7 +586,8 @@ impl FlowField {
                         diag += g;
                         coo.push(row, row_of[nb], -g);
                     }
-                    None if faces[f] == FlowFace::Free => {
+                    nb if nb.is_none() && faces[f] == FlowFace::Free
+                        || density.is_some_and(|d| d.internal_pressure_pa(c, f).is_some()) => {
                         let g = conductance(c, f, None);
                         finite_positive("flow.projection_conductance", g)?;
                         diag += g;
@@ -630,7 +642,8 @@ impl FlowField {
                     Some(nb) if f % 2 == 1 && domain.is_fluid(nb) => {
                         -conductance(c, f, Some(nb)) * (phi[row_of[nb]] - phi[row])
                     }
-                    None if faces[f] == FlowFace::Free => {
+                    nb if nb.is_none() && faces[f] == FlowFace::Free
+                        || density.is_some_and(|d| d.internal_pressure_pa(c, f).is_some()) => {
                         let (slot, _) = self.slot(domain, c, f);
                         conductance(c, f, None) * (phi[row] - boundary_potential(row, f, slot))
                     }

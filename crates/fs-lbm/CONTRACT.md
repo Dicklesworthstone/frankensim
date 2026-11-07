@@ -14876,3 +14876,43 @@ nonlinear endpoint-root and wall-work checks, constant-source native wall-SGS
 parity, all-three-closure disabled parity, and late source refusal/retry.
 All changed Rust files passed parser/source and whitespace review; these
 integration tests were not compiled or executed in the constrained environment.
+
+## Original liquid enthalpy volume demand at internal gas pressure faces
+
+`FlowField::project_density_volume_source_with_internal_pressure_faces`
+extends the original physical-density pressure graph with explicitly authored
+fluid-to-inactive full-face pressures. Each opening uses only the occupied
+liquid half-cell mass; the inactive side supplies no density, velocity unknown
+or transported material. Unlisted inactive faces remain walls. Component
+compatibility, gauges, Krylov solve and independent volume/work accounting
+remain with the existing owner. Sealed components must balance independently.
+The companion velocity entry supplies an unprojected physical predictor.
+Relative source and opening pressure work retain their common component datum.
+
+`MaterialFreeSurface3::project_enthalpy_volume_demand` reads the original
+located native inventory as fixed physical M, advances its original caloric
+chart by the supplied NET extensive enthalpy increment, and computes
+`S = M (1/rho_new - 1/rho_old) / dt`. Current M/voxel-volume supplies projection
+inertia; numerical lattice pressure-density excursions never become a guessed
+thermodynamic expansion law. Initial chart volume, represented enthalpy and
+source/chart density agreement have separate explicit physical accuracy
+budgets and measured defects. Original material/claim identities and external
+query conditions remain required. Identical temperatures share source snapshots.
+
+This entry admits full occupied Cartesian voxels and empty ghosts. Partial or
+overfilled interfaces, conversion carry, piston-remapped geometry and nonliquid
+states refuse. Gas correction pressures and signed physical fluxes are exposed
+with the original pressure-work report. The result proposes compatible fluxes;
+it does not advance native populations, VOF geometry, mass, enthalpy or time.
+A conservative moving-interface owner must still consume these fluxes with
+material/energy transport. Mechanical correction work is not silently heat.
+Ordinary conjugate heat transport refuses nonzero internal solid-face flux,
+including a field accepted by this explicitly opened pressure graph.
+
+Nine regression definitions cover graded unequal-density inertia on every
+axis, signed openings and large pressure offsets, component compatibility,
+original-source heating/cooling and interior partial increments, enthalpy datum
+invariance, explicit source-density roundoff budgets, incompatible geometry,
+ordinary thermal refusal and cancellation. Changed Rust sources passed parser
+and whitespace review; these tests were not compiled or executed in the
+constrained environment.

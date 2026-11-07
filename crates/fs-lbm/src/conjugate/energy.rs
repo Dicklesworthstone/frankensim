@@ -1100,6 +1100,26 @@ fn solve_energy_field_kernel(
             ),
         });
     }
+    // This owner has conducting solids, not material-bearing internal gas
+    // reservoirs. A pressure projection may explicitly open such an inactive
+    // face, but ordinary thermal assembly must never advect through it.
+    for c in 0..domain.cell_count() {
+        if c.is_multiple_of(256) {
+            super::poll(gate)?;
+        }
+        for f in [1usize, 3, 5] {
+            if let Some(n) = domain.neighbor(c, f)
+                && (!domain.is_fluid(c) || !domain.is_fluid(n))
+                && flow.outward(domain, c, f) != 0.0
+            {
+                return Err(ChtError::InvalidInput {
+                    field: "thermal.blocked_face_flux",
+                    reason: "ordinary conjugate heat transport cannot cross an internal solid face"
+                        .into(),
+                });
+            }
+        }
+    }
     finite_positive("energy.tolerance", config.tolerance)?;
     let cells = domain.cell_count();
     if !(setup.power_w.is_empty() || setup.power_w.len() == cells) {

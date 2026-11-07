@@ -31,6 +31,11 @@ pub use impulse::{
 
 mod initial;
 pub use initial::MaterialFreeSurfaceInitialCell3;
+mod volume;
+pub use volume::{
+    MaterialFreeSurfaceVolumeCell3, MaterialFreeSurfaceVolumeControls3,
+    MaterialFreeSurfaceVolumeInput3, MaterialFreeSurfaceVolumeProjection3,
+};
 mod bulk;
 mod forcing;
 pub use forcing::{MaterialAffineAcceleration3, MaterialCoriolis3, MaterialRigidFrame3};
