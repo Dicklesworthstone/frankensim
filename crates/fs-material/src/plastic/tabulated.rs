@@ -12,6 +12,9 @@
 //! This partition is a model choice, not heat-fraction data inferred from a
 //! tensile curve. The backward-Euler hardening remainder is numerical loss.
 
+/// Original material-card curves with explicit stress and plastic-strain meaning.
+pub mod source;
+
 use super::energy::{EnergyError, EnergyIncrement, EnergyTolerances, StoredEnergy};
 use super::{J2Plasticity, J2State, Update};
 use crate::{MaterialAdmissibility, MaterialError, SmallStrainLaw, Tangent6, Voigt};

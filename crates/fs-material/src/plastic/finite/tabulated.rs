@@ -17,6 +17,9 @@
 //! does not identify that partition for a real specimen. Perzyna kinetics adds
 //! its original viscous work and potential without changing the table's domain.
 
+/// Original material-card Kirchhoff curves on the native finite owner.
+pub mod source;
+
 use super::rate::FiniteOverstressJ2;
 use super::{ElasticEndpoint, FiniteJ2, FiniteJ2Error, FiniteJ2State, RadialReturn, ReturnMap};
 use crate::plastic::tabulated::TabulatedHardening;
