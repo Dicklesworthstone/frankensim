@@ -287,10 +287,9 @@ impl PreparedPse {
                 let half = PairKernel::new(self.law(), h, 0.25);
                 for &[i, j] in self.edges() {
                     meter.unit(&mut accountant, cx, "fs-vpm.pse-adaptive-fraction", || {
-                        let areas = [self.areas_m2()[i], self.areas_m2()[j]];
                         let pair = [
-                            full.fraction(state[i], state[j], areas),
-                            half.fraction(state[i], state[j], areas),
+                            self.pair_fraction(&full, i, j),
+                            self.pair_fraction(&half, i, j),
                         ];
                         if pair
                             .iter()

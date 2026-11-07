@@ -31,7 +31,9 @@ use crate::{
 };
 use fs_exec::{AdmittedBudget, BudgetConsumption, Cx};
 
+mod periodic;
 mod wall;
+pub use periodic::PeriodicBox2;
 
 /// Explicit admission limits for constructing one reusable spatial graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +98,7 @@ pub struct PreparedPse {
     areas: Vec<f64>,
     law: PseDiffusion,
     edges: Vec<[usize; 2]>,
+    periodic: Option<PeriodicBox2>,
     preparation: PreparationReport,
 }
 
@@ -117,13 +120,51 @@ impl PreparedPse {
     /// Refuses Gaussian laws, invalid/mismatched inputs, unrepresentable cell
     /// coordinates, any local/ambient cap, cancellation or allocation failure.
     /// No partial graph or physical state is published.
-    #[allow(clippy::too_many_lines)]
     pub fn prepare_with_cx(
         cx: &Cx<'_>,
         particles: &[VortexParticle],
         areas_m2: &[f64],
         law: PseDiffusion,
         budget: PreparationBudget,
+    ) -> Result<Self, VpmError> {
+        Self::prepare_impl(cx, particles, areas_m2, law, budget, None)
+    }
+
+    /// Prepare compact diffusion on the rectangular torus `[0,Lx) × [0,Ly)`.
+    ///
+    /// Particles across either seam interact through their minimum-image
+    /// distance. The support radius must not exceed half the shortest period,
+    /// so every supported pair has exactly one image; no image sums or cutoffs
+    /// are approximated. Positions must already lie in the fundamental box
+    /// and remain pinned bitwise, as for the finite-cloud preparation.
+    ///
+    /// Wrapped cells are visited once even when a period contains only two
+    /// cells. The original canonical pair order, memory/work budgets, exact
+    /// transfer and adaptive time integrator are retained. This supplies
+    /// periodic diffusion only, not periodic Biot–Savart advection.
+    ///
+    /// # Errors
+    /// Refuses an inadmissible box/support ratio, out-of-box position, or any
+    /// of the ordinary preparation failures, publishing no partial graph.
+    pub fn prepare_periodic_with_cx(
+        cx: &Cx<'_>,
+        particles: &[VortexParticle],
+        areas_m2: &[f64],
+        law: PseDiffusion,
+        domain: PeriodicBox2,
+        budget: PreparationBudget,
+    ) -> Result<Self, VpmError> {
+        Self::prepare_impl(cx, particles, areas_m2, law, budget, Some(domain))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn prepare_impl(
+        cx: &Cx<'_>,
+        particles: &[VortexParticle],
+        areas_m2: &[f64],
+        law: PseDiffusion,
+        budget: PreparationBudget,
+        periodic: Option<PeriodicBox2>,
     ) -> Result<Self, VpmError> {
         let n = particles.len();
         validate_inputs(n, areas_m2, 0.0)?;
@@ -134,6 +175,9 @@ impl PreparedPse {
                 None,
             ));
         }
+        let periodic_grid = periodic
+            .map(|domain| domain.grid(law.kernel_width_m()))
+            .transpose()?;
         admit_cap("particles", n, budget.max_particles)?;
         admit_count(
             "preparation work",
@@ -156,10 +200,14 @@ impl PreparedPse {
             work.unit("fs-vpm.pse-prepare-input", || {
                 validate_particle(particle, i)?;
                 validate_area(areas_m2[i], i)?;
-                let cell = [
-                    cell_coordinate(particle.pos[0], law.kernel_width_m(), i)?,
-                    cell_coordinate(particle.pos[1], law.kernel_width_m(), i)?,
-                ];
+                let cell = if let Some(grid) = periodic_grid {
+                    grid.cell(particle.pos, i)?
+                } else {
+                    [
+                        cell_coordinate(particle.pos[0], law.kernel_width_m(), i)?,
+                        cell_coordinate(particle.pos[1], law.kernel_width_m(), i)?,
+                    ]
+                };
                 positions.push(particle.pos);
                 areas.push(areas_m2[i]);
                 cells.push(CellEntry { cell, particle: i });
@@ -172,10 +220,11 @@ impl PreparedPse {
 
         let mut candidate_visits = 0;
         let mut edge_count = 0_usize;
-        visit_candidates(
+        visit_candidates_impl(
             particles,
             &cells,
             law.kernel_width_m(),
+            periodic_grid,
             &mut candidate_visits,
             budget.max_candidate_visits,
             &mut work.borrowed(),
@@ -213,10 +262,11 @@ impl PreparedPse {
         }
         let mut edges = reserved_vec("pse-prepared-edges", edge_count)?;
         if edge_count != 0 {
-            visit_candidates(
+            visit_candidates_impl(
                 particles,
                 &cells,
                 law.kernel_width_m(),
+                periodic_grid,
                 &mut candidate_visits,
                 budget.max_candidate_visits,
                 &mut work.borrowed(),
@@ -252,6 +302,7 @@ impl PreparedPse {
             areas,
             law,
             edges,
+            periodic,
             preparation: PreparationReport {
                 candidate_visits,
                 work_units: work.meter.completed,
@@ -277,6 +328,26 @@ impl PreparedPse {
     #[must_use]
     pub const fn law(&self) -> PseDiffusion {
         self.law
+    }
+
+    /// The explicit periodic domain, or `None` for the original finite cloud.
+    #[must_use]
+    pub const fn periodic_domain(&self) -> Option<PeriodicBox2> {
+        self.periodic
+    }
+
+    pub(super) fn pair_fraction(&self, kernel: &PairKernel, i: usize, j: usize) -> f64 {
+        let a = VortexParticle::new(self.positions[i], 0.0);
+        let b = VortexParticle::new(self.positions[j], 0.0);
+        let areas = [self.areas[i], self.areas[j]];
+        if let Some(domain) = self.periodic {
+            kernel.fraction_at_distance2(
+                domain.scaled_distance2(a.pos, b.pos, self.law.kernel_width_m()),
+                areas,
+            )
+        } else {
+            kernel.fraction(a, b, areas)
+        }
     }
 
     /// Rebind homogeneous kinematic viscosity [m²/s] on this exact graph.
@@ -444,8 +515,7 @@ impl PreparedPse {
             let kernel = PairKernel::new(self.law, dt, 0.5);
             for &[i, j] in &self.edges {
                 meter.unit(&mut accountant, cx, "fs-vpm.pse-prepared-fraction", || {
-                    let fraction =
-                        kernel.fraction(state[i], state[j], [self.areas[i], self.areas[j]]);
+                    let fraction = self.pair_fraction(&kernel, i, j);
                     if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
                         return Err(VpmError::NonFiniteResult {
                             phase: "fs-vpm.pse-prepared-fraction",
@@ -710,15 +780,33 @@ pub(super) fn visit_candidates(
     visits: &mut u64,
     max_visits: u64,
     work: &mut SpatialWork<'_, '_, '_>,
+    accept: impl FnMut([usize; 2]) -> Result<(), VpmError>,
+) -> Result<(), VpmError> {
+    visit_candidates_impl(
+        particles, cells, radius, None, visits, max_visits, work, accept,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit_candidates_impl(
+    particles: &[VortexParticle],
+    cells: &[CellEntry],
+    radius: f64,
+    periodic: Option<periodic::PeriodicGrid>,
+    visits: &mut u64,
+    max_visits: u64,
+    work: &mut SpatialWork<'_, '_, '_>,
     mut accept: impl FnMut([usize; 2]) -> Result<(), VpmError>,
 ) -> Result<(), VpmError> {
+    let halo_end = periodic.map_or([3; 2], |grid| grid.halo_end());
     for source in cells {
         let i = source.particle;
-        for dx in -2_i64..=2 {
-            for dy in -2_i64..=2 {
+        for dx in -2_i64..halo_end[0] {
+            for dy in -2_i64..halo_end[1] {
                 let target = work.unit("fs-vpm.pse-prepare-probe", || {
+                    let cell = [source.cell[0] + dx, source.cell[1] + dy];
                     Ok(CellEntry {
-                        cell: [source.cell[0] + dx, source.cell[1] + dy],
+                        cell: periodic.map_or(cell, |grid| grid.wrap(cell)),
                         particle: i + 1,
                     })
                 })?;
@@ -733,7 +821,17 @@ pub(super) fn visit_candidates(
                         })?;
                         admit_count("preparation candidate visits", next, max_visits)?;
                         *visits = next;
-                        if scaled_distance2(particles[i], particles[j], radius) < 1.0 {
+                        let distance2 = periodic.map_or_else(
+                            || scaled_distance2(particles[i], particles[j], radius),
+                            |grid| {
+                                grid.domain.scaled_distance2(
+                                    particles[i].pos,
+                                    particles[j].pos,
+                                    radius,
+                                )
+                            },
+                        );
+                        if distance2 < 1.0 {
                             accept([i, j])?;
                         }
                         Ok(())

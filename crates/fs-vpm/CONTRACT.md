@@ -597,6 +597,38 @@ the analytical continuum solution and reports actual sparse/dense pair counts.
 These counts establish algorithmic work, not measured machine speed. The
 finite-cloud, support-resolution and splitting-error limits still apply.
 
+### Periodic vorticity diffusion
+
+`PreparedPse::prepare_periodic_with_cx` accepts an explicit `PeriodicBox2`
+with finite positive x/y periods [m]. Particle coordinates must lie in the
+fundamental cell `[0,Lx) × [0,Ly)`; callers wrap moved geometry before preparing
+a new graph. Compact support must not exceed half either period, so the
+periodized kernel has exactly one nonzero image for each interacting pair.
+The kernel is zero at the half-period support boundary. Gaussian laws and
+ambiguous overlapping-image configurations refuse instead of dropping tails
+or silently selecting one image.
+
+Cells tile each full period. Wrapped neighbor searches admit seam and corner
+neighbors, visit each cell residue once even when a period has fewer than five
+cells, and retain one canonical unordered edge per physical pair. Distances
+across a seam use the sum of the two distances to that seam to preserve small
+represented separations. Period/support ratios are bounded by 2^50 for the
+rounding-safe halo. Preparation retains the existing work/memory caps and
+actual candidate accounting. Fixed and adaptive evolution share the periodic
+metric and cached exact pair fractions; there is no per-step image search or
+extra particle inventory. Viscosity rebinding preserves the geometry.
+
+The original pair maps conserve signed total circulation, preserve uniform
+sampled vorticity, and dissipate area-weighted enstrophy with no diffusion
+stability restriction on the positive time step. Time-splitting accuracy still
+requires refinement or the adaptive controller. `tests/periodic_diffusion.rs`
+checks unequal-area analytical seam exchange, exhaustive image membership,
+stiff diffusion invariants, adaptive evolution, and Fourier-mode convergence
+to the periodic heat equation under support/grid refinement. Periodicity here
+applies to fixed-site diffusion; it does not supply a periodic Biot–Savart
+advection solver or infer a wall. The planar-wall entry point refuses periodic
+graphs because its reflected finite-half-space geometry is incompatible.
+
 ### Adaptive time accuracy on the prepared graph
 
 `PreparedPse::advance_adaptive_with_cx` completes an explicit duration using

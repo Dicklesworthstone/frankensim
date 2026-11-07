@@ -55,7 +55,7 @@ pub(crate) mod moving;
 pub use material::{MaterialPseDiffusion, MaterialPseError};
 /// Reusable spatial graphs for fixed-site compact-support diffusion.
 pub mod sparse;
-pub use sparse::{PreparationBudget, PreparationReport, PreparedPse};
+pub use sparse::{PeriodicBox2, PreparationBudget, PreparationReport, PreparedPse};
 
 mod wall;
 
@@ -516,6 +516,12 @@ impl PairKernel {
 
     fn fraction(&self, a: VortexParticle, b: VortexParticle, areas: [f64; 2]) -> f64 {
         let r2 = scaled_distance2(a, b, self.width);
+        self.fraction_at_distance2(r2, areas)
+    }
+
+    // Prepared periodic graphs supply the torus distance while retaining the
+    // original kernel normalization and exact positive pair integration.
+    fn fraction_at_distance2(&self, r2: f64, areas: [f64; 2]) -> f64 {
         if r2.is_infinite() || (self.shape == PseKernel::CompactWendland && r2 >= 1.0) {
             return 0.0;
         }

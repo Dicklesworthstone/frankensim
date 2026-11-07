@@ -56,9 +56,9 @@ impl PreparedPse {
     /// original wall law; this is not a no-slip or moving-wall boundary model.
     ///
     /// # Errors
-    /// Original prepared-run refusals, invalid wall clearance or reflection,
-    /// and nonrepresentable wall maps. Inputs and graph remain unchanged;
-    /// no partially advanced cloud is published.
+    /// Refuses periodic graphs, original prepared-run failures, invalid wall
+    /// clearance or reflection, and nonrepresentable wall maps. Inputs and
+    /// graph remain unchanged; no partially advanced cloud is published.
     #[allow(clippy::too_many_lines)]
     pub fn diffuse_at_wall_with_cx(
         &self,
@@ -69,6 +69,13 @@ impl PreparedPse {
         wall: PlanarWall2,
         budget: VpmBudget,
     ) -> Result<VpmRun, VpmError> {
+        if self.periodic_domain().is_some() {
+            return Err(invalid_scalar(
+                "planar wall on periodic diffusion graph",
+                dt,
+                None,
+            ));
+        }
         let n = self.positions.len();
         if particles.len() != n {
             return Err(VpmError::LengthMismatch {
