@@ -111,5 +111,188 @@ fn query_domain_and_constitutive_stability_are_independent_gates() {
     assert!(adopt(&entries()).membrane().unwrap().response([f64::NAN;3]).is_err());
 }
 
+// G3: one original source law reaches sheet inertia, membrane and independent
+// bending at different held environments. These are independently initialized
+// specimens; no live moisture transfer or pressure work is inferred.
+fn environmental_sheet(
+    axis: &str,
+    quantity: Option<fs_qty::QuantitySpec>,
+    bounds: (f64, f64),
+    curve: bool,
+) -> MaterialCard {
+    let mut claims = ClaimSet::new();
+    let factors = [2.0, 1.25, 0.5, 0.5, 1.0, 0.5, 3.0, 3.0, 3.0, 3.0, 1.0];
+    for ((name, value, dims), factor) in entries().into_iter().zip(factors) {
+        let validity = ValidityDomain::unconstrained().with("T", 290.0, 310.0);
+        let validity = match quantity {
+            Some(quantity) => validity.with_quantity(axis, quantity, bounds.0, bounds.1),
+            None => validity.with(axis, bounds.0, bounds.1),
+        };
+        claims.insert_claim(PropertyClaim {
+            key: PropertyKey::new(name, dims),
+            value: if curve {
+                PropertyValue::Curve {
+                    abscissa: axis.into(),
+                    abscissa_dims: quantity.map_or(Dims::NONE, |q| q.dims()),
+                    knots: vec![(bounds.0, value), (bounds.1, factor * value)],
+                    dims,
+                }
+            } else {
+                PropertyValue::Scalar { value, dims }
+            },
+            validity,
+            interpolation: if curve {
+                InterpolationPolicy::LinearInside
+            } else {
+                InterpolationPolicy::ConstantWithinValidity
+            },
+            uncertainty: UncertaintyModel::Unstated,
+            observations: vec![],
+            provenance: Provenance {
+                source: "manufactured held-environment sheet".into(),
+                license: "test-only".into(),
+                artifact: None,
+            },
+        }).unwrap();
+    }
+    MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "synthetic sheet".into(),
+            phase: "solid".into(),
+            process: "held environment".into(),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    ).unwrap()
+}
+
+fn environmental_query(
+    axis: &str,
+    quantity: Option<fs_qty::QuantitySpec>,
+    value: f64,
+) -> QueryPoint {
+    let point = QueryPoint::new().with("T", 300.0).unwrap();
+    match quantity {
+        Some(quantity) => point.with_quantity(axis, quantity, value).unwrap(),
+        None => point.with(axis, value).unwrap(),
+    }
+}
+
+#[test]
+fn g3_held_environment_reaches_independent_sheet_channels() {
+    use fs_qty::{QuantitySpec, semantic::{MoistureBasis, QuantityKind, SemanticType, ValueForm}};
+    for (axis, kind, bounds) in [
+        ("moisture_content", QuantityKind::Moisture(MoistureBasis::DryMass), (0.0, 0.2)),
+        ("ambient_pressure", QuantityKind::Pressure, (100_000.0, 200_000.0)),
+    ] {
+        let quantity = Some(QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static)));
+        let card = environmental_sheet(axis, quantity, bounds, true);
+        let caps = SheetCapabilities { membrane: true, bending: true };
+        let low_query = environmental_query(axis, quantity, bounds.0);
+        let high_query = environmental_query(axis, quantity, bounds.1);
+        let low = resolve_sheet(&card, &low_query, caps, Pick::SingleClaimOnly).unwrap();
+        let high = resolve_sheet(&card, &high_query, caps, Pick::SingleClaimOnly).unwrap();
+        assert_eq!(low.material().card_identity(), card.content_hash());
+        assert_eq!(high.material().card_identity(), card.content_hash());
+        assert_eq!(low.material().query(), low_query);
+        assert_eq!(high.material().query(), high_query);
+        assert_ne!(low.material().identity(), high.material().identity());
+        close(high.areal_density_kg_m2(), 2.0 * low.areal_density_kg_m2());
+        close(high.thickness_m(), 1.25 * low.thickness_m());
+
+        let strain = [0.02, -0.01, 0.03];
+        let a = low.membrane().unwrap().response(strain).unwrap();
+        let b = high.membrane().unwrap().response(strain).unwrap();
+        close(b.energy_j_m2, 0.5 * a.energy_j_m2);
+        for i in 0..3 {
+            close(b.resultants_n_m[i], 0.5 * a.resultants_n_m[i]);
+        }
+        let a = low.bending().unwrap();
+        let b = high.bending().unwrap();
+        for i in [0, 1, 3, 4, 8] {
+            close(b.coefficients()[i], 3.0 * a.coefficients()[i]);
+        }
+
+        let mid_query = environmental_query(axis, quantity, 0.5 * (bounds.0 + bounds.1));
+        let requirements = entries().into_iter().map(|(name, _, dims)|
+            ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::Finite).unwrap()
+        ).collect::<Vec<_>>();
+        let bundle = resolve_material_state_point(
+            &card, &mid_query, &requirements, Pick::SingleClaimOnly,
+        ).unwrap();
+        let original = bundle.clone();
+        let mid = ResolvedSheet::try_from_material(bundle).unwrap();
+        assert_eq!(mid.material(), &original);
+        assert!(mid.material().property("specific_heat_capacity").is_some());
+        close(mid.areal_density_kg_m2(), 1.5 * low.areal_density_kg_m2());
+        let property = mid.material().property(AREAL_DENSITY).unwrap();
+        assert_eq!(property.source_axes(), &[(axis.into(), quantity.unwrap().dims())]);
+        assert!(matches!(property.answer().receipt.decision,
+            fs_matdb::EvaluationDecision::LinearInside { .. }));
+        assert!(resolve_sheet(
+            &card, &environmental_query(axis, quantity, bounds.1 * 1.1),
+            caps, Pick::SingleClaimOnly,
+        ).is_err());
+    }
+}
+
+#[test]
+fn g0_sheet_never_freezes_unowned_response_axes() {
+    use fs_qty::{QuantitySpec, semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm}};
+    for (axis, quantity, bounds) in [
+        ("moisture_content", None, (0.0, 0.2)),
+        ("normal_stress", Some(QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Stress, ValueForm::Static))), (1.0, 2.0)),
+        ("omega", Some(QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Frequency(FrequencyConvention::Angular), ValueForm::Static))), (0.0, 20_000.0)),
+    ] {
+        let card = environmental_sheet(axis, quantity, bounds, true);
+        let query = environmental_query(axis, quantity, 0.5 * (bounds.0 + bounds.1));
+        // The original data query succeeds. The constant sheet model cannot
+        // freeze these response axes into reference inventory or stiffness.
+        let requirements = entries().into_iter().map(|(name, _, dims)|
+            ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::Finite).unwrap()
+        ).collect::<Vec<_>>();
+        let bundle = resolve_material_state_point(
+            &card, &query, &requirements, Pick::SingleClaimOnly,
+        ).unwrap();
+        assert!(ResolvedSheet::try_from_material(bundle).is_err());
+    }
+}
+
+#[test]
+fn legacy_characterization_and_spectral_applicability_stay_source_bound() {
+    use fs_qty::{QuantitySpec, semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm}};
+    let angular = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::Frequency(FrequencyConvention::Angular), ValueForm::Static));
+    for (axis, quantity, bounds) in [
+        ("specimen", None, (3.0, 3.0)),
+        ("ftx_characterization", None, (0.0, 0.0)),
+        ("omega", Some(angular), (0.0, 1000.0)),
+    ] {
+        let card = environmental_sheet(axis, quantity, bounds, false);
+        let query = environmental_query(axis, quantity, bounds.0);
+        let sheet = resolve_sheet(&card, &query,
+            SheetCapabilities { membrane: true, bending: true }, Pick::SingleClaimOnly,
+        ).unwrap();
+        assert_eq!(sheet.material().card_identity(), card.content_hash());
+        assert_eq!(sheet.material().query(), query);
+        close(sheet.areal_density_kg_m2(), 0.2);
+        close(sheet.thickness_m(), 0.001);
+        close(sheet.bending().unwrap().coefficients()[0], 3e-5);
+        for property in sheet.material().properties() {
+            assert_eq!(property.answer().evidence.model.validity.bound(axis), Some(bounds));
+            assert_eq!(property.angular_frequency_band_rad_s().unwrap(),
+                if axis == "omega" { Some(bounds) } else { None });
+        }
+        // Generic adoption does not erase source limits. The eventual
+        // constitutive owner remains responsible for its spectral contract.
+        assert!(resolve_sheet(&card, &environmental_query(axis, quantity, bounds.1 + 1.0),
+            SheetCapabilities { membrane: true, bending: true }, Pick::SingleClaimOnly,
+        ).is_err());
+    }
+}
+
 #[path="sheet/thermal.rs"]
 mod thermal;

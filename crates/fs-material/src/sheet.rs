@@ -86,9 +86,15 @@ pub struct ResolvedSheet {
 fn property(m: &ResolvedMaterialStatePoint, key: &'static str, dims: Dims)
     -> Result<f64, SheetError> {
     let p = m.property(key).ok_or(SheetError::Invalid(key))?;
+    // Preserve characterized scalar/temperature-only sheet records, including
+    // their opaque specimen selectors and original applicability. New response
+    // axes use the shared typed, held-environment policy. Constitutive owners
+    // still enforce their own domains; no source or receipt is rewritten here.
+    let constant = p.is_constant_at_fixed_temperature()
+        || p.is_static_at_fixed_external_conditions();
     if p.requirement().quantity() != QuantitySpec::dimensional(dims)
-        || !p.is_constant_at_fixed_temperature() || !p.value_si().is_finite() {
-        return Err(SheetError::Invalid("sheet needs static or temperature-only coefficients in the declared sheet units"));
+        || !constant || !p.value_si().is_finite() {
+        return Err(SheetError::Invalid("sheet needs characterized constants or coefficients at a complete held environment in the declared sheet units"));
     }
     Ok(p.value_si())
 }
