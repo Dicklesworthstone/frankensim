@@ -996,6 +996,9 @@ fn g0_g4_spectral_exposure_refuses_invalid_models_and_preflights_work() {
     );
 }
 
+#[path = "coherent_diffraction/polarization.rs"]
+mod polarization;
+
 const RADIUS: f64 = 0.001;
 const LAMBDA_NM: f64 = 550.0;
 const LAMBDA: f64 = LAMBDA_NM * 1e-9;

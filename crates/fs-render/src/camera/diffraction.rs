@@ -23,9 +23,10 @@
 //! wave PSF. The radiance renderer uses incoherent imaging. Explicit complex
 //! transfer queries retain the pupil phase for authored coherent fields;
 //! they do not infer coherence or propagation phase between scene points.
-//! Jones exposure queries share this transfer between two paraxial transverse
-//! components. Polarization-dependent pupil transfer, other aberrations and
-//! pupil-dependent occlusion are outside this paraxial, isoplanatic model.
+//! Jones point, pixel and exposure queries share this transfer between two
+//! common-frame paraxial transverse components. Vector high-NA diffraction,
+//! polarization-dependent pupil transfer, other aberrations and pupil-dependent
+//! occlusion remain outside this model.
 
 use super::{ApertureKind, CameraError, LensSample, PhysicalCamera, direct_unit};
 use crate::charts::Ray;
@@ -43,6 +44,8 @@ mod polygon;
 use annular::AnnularPupil;
 use circular::{CircularDefocus, jinc};
 pub use coherent::{
+    PolarizedCoherentDiffractionPixelPower, PolarizedCoherentDiffractionSample,
+    PolarizedDiffractionCoherency, PreparedPolarizedCoherentDiffraction,
     CoherentDiffractionError, CoherentDiffractionExposureLimits,
     CoherentDiffractionExposurePixelLimits, CoherentDiffractionExposureSample,
     CoherentDiffractionLimits, CoherentDiffractionPixel, CoherentDiffractionPixelExposure,

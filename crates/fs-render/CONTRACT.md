@@ -9732,3 +9732,55 @@ temperature feedback error: the same native explicit state and
 complete-trajectory refinement remain authoritative. Geometry, density and beam
 area stay prescribed; carrier storage, material saturation, nonlinear refraction
 and ultrafast relaxation remain unmodeled.
+
+### Common-frame Jones pupil diffraction
+
+`PhysicalCamera::prepare_polarized_coherent_diffraction` accepts the existing `CoherentJonesPupilWave`, `CoherentJonesPupilIllumination` and
+`JonesPupilCoherenceFactor` inputs owned by Jones spectral exposure. These
+same authored two-component waves propagate through the focused or
+declared-plane defocused circular, annular or polygon pupil transfer. Every wave uses one
+complex scalar transfer for both components in the same declared transverse
+pupil frame and with the same pupil-centre phase reference. The axes are
+camera right/up for common incoming propagation along -camera.forward,
+forming the same right-handed convention used by native Stokes transport.
+The deterministic mean and each authored covariance factor interfere internally before their
+coherencies are formed. Independent factors add coherencies without cross
+terms. Equal wavelength alone never establishes mutual coherence; source
+weights remain square-root amplitudes and no isolated-power renormalization
+is applied.
+
+Point queries return the deterministic Jones field and separate mean,
+fluctuation and total coherencies. Each coherency retains its two diagonal
+powers and complex cross moment independently of its native Stokes result:
+`I=Cxx+Cyy, Q=Cxx-Cyy, U=2 Re(Cxy), V=2 Im(Cxy)`, with
+`Cxy=Ex conj(Ey)`. DD field and moment accumulation precedes rounding, so a
+weak diagonal remains directly available when rounded Stokes I and Q agree.
+Exact coherent cancellation remains dark. A product of nonzero complex
+wave/transfer values that underflows completely, and a represented nonzero
+field whose axis power underflows, are refused rather than reported as exact
+extinction.
+
+Finite physical-pixel queries integrate the four coherency moments with the
+existing positive area quadrature, after interference at each sample. They
+retain spatial depolarization instead of assigning one Jones field to an
+intensity-integrating detector. The existing paraxial, material/wavelength,
+pupil, source/factor and exact pixel-work budgets remain authoritative.
+Each authored wave costs one pupil evaluation per quadrature sample shared
+by both Jones components. Immutable preparations allocate nothing during
+queries and remain reusable after cancellation or refusal. The generic
+moment integrator preserves the original scalar/exposure arithmetic order.
+
+This is monochromatic paraxial propagation in one common pupil frame, using
+the original scalar transfer. It does not implement vector high-NA
+diffraction, a polarization-dependent pupil, inferred scene coherence, or
+cross-frequency Stokes exposure. The existing Jones spectral-exposure query
+continues to own cross-frequency detector-power integration with these shared
+inputs. Quadrature refinement controls
+resolution; it is not a certified model-error bound. No relative-error
+guarantee is made at a dark fringe.
+
+Six native regression functions cover scalar parity across the original pupils,
+coherent versus independent Jones illumination, polarization and covariance
+basis changes, finite-pixel depolarization, cancellation and weak-axis range,
+and admission/work/cancellation bounds. They were source-reviewed but could
+not be executed because the execution environment was unavailable.

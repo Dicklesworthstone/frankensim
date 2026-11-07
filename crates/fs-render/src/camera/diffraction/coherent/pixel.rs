@@ -233,13 +233,13 @@ pub(super) fn pixel_work(
     Ok((subdivisions, samples, evaluations))
 }
 
-pub(super) fn integrate_moments<C: FnMut() -> bool>(
+pub(super) fn integrate_moments<const N: usize, C: FnMut() -> bool>(
     pixel: CoherentDiffractionPixel,
     subdivisions: [usize; 2],
     cancelled: &mut C,
-    mut moments: impl FnMut([f64; 2], &mut C) -> Result<[Dd; 2], CoherentDiffractionError>,
-) -> Result<[Dd; 2], CoherentDiffractionError> {
-    let mut power = [Dd::ZERO; 2];
+    mut moments: impl FnMut([f64; 2], &mut C) -> Result<[Dd; N], CoherentDiffractionError>,
+) -> Result<[Dd; N], CoherentDiffractionError> {
+    let mut power = [Dd::ZERO; N];
     if subdivisions.contains(&0) {
         return Ok(power);
     }
@@ -262,8 +262,11 @@ pub(super) fn integrate_moments<C: FnMut() -> bool>(
                     });
                     let value = moments(at, cancelled)?;
                     let weight = cell_area * Dd::from_f64(wx) * Dd::from_f64(wy);
-                    power[0] = power[0] + weight * value[0];
-                    power[1] = power[1] + weight * value[1];
+                    // N=2 preserves the scalar/exposure reduction order.
+                    // Jones callers integrate four coherency moments per bank.
+                    for i in 0..N {
+                        power[i] = power[i] + weight * value[i];
+                    }
                 }
             }
         }

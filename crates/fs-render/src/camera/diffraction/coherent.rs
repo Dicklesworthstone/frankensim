@@ -15,8 +15,9 @@
 //!
 //! All waves share one vacuum wavelength and the declared source-plane
 //! curvature. This clear-pupil, scalar, paraxial query does not make the
-//! radiance path tracer coherent, resolve polarization,
-//! or infer phases from arbitrary scene points. Finite rectangular pixels
+//! radiance path tracer coherent or infer phases from arbitrary scene points.
+//! The companion Jones query retains both common-frame transverse components
+//! and their coherency through this same scalar transfer. Finite rectangular pixels
 //! integrate the same field with bandwidth-guided positive quadrature. The
 //! separate spectral exposure query retains cross-frequency beats over an
 //! actual shutter and the physical sensor plane's common Fresnel phase. Its
@@ -30,6 +31,11 @@ use fs_math::{c64::C64, dd::Dd};
 
 mod exposure;
 mod pixel;
+mod polarization;
+pub use polarization::{
+    PolarizedCoherentDiffractionPixelPower, PolarizedCoherentDiffractionSample,
+    PolarizedDiffractionCoherency, PreparedPolarizedCoherentDiffraction,
+};
 pub use exposure::{
     CoherentDiffractionExposureLimits, CoherentDiffractionExposurePixelLimits,
     CoherentDiffractionExposureSample, CoherentDiffractionPixelExposure,

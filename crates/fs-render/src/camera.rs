@@ -6,7 +6,8 @@
 //! focused, declared-plane and separated multi-plane defocused imaging. With
 //! `tracer`, native material laws can explicitly drive longitudinal thin-lens
 //! dispersion. Explicit pupil-wave queries also preserve coherent and partially
-//! coherent illumination on one authored pupil-plane phase reference. With
+//! coherent illumination on one authored pupil-plane phase reference. Jones fields
+//! retain both polarizations and full point/finite-pixel Stokes on that same pupil. With
 //! `tracer`, an explicit sequential spherical/planar prescription instead traces
 //! real glass thickness, aperture clipping, chromatic and surface aberrations,
 //! Fresnel loss and absorption. Its eye is the sensor centre and its rays carry
@@ -25,6 +26,8 @@ mod diffraction;
 #[cfg(feature = "tracer")]
 pub(crate) use diffraction::ProjectedPupilFootprint;
 pub use diffraction::{
+    PolarizedCoherentDiffractionPixelPower, PolarizedCoherentDiffractionSample,
+    PolarizedDiffractionCoherency, PreparedPolarizedCoherentDiffraction,
     CoherentDiffractionError, CoherentDiffractionExposureLimits,
     CoherentDiffractionExposurePixelLimits, CoherentDiffractionExposureSample,
     CoherentDiffractionLimits, CoherentDiffractionPixel, CoherentDiffractionPixelExposure,
