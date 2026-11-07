@@ -73,6 +73,35 @@ mechanical separation. The general joint callback also accepts other thermal
 network owners; do not apply pair solves sequentially to a shared node and call
 that a simultaneous network solve.
 
+## Contact and exposed-surface reservoirs together
+
+`advance_contact_pair_with_environments` accepts an original
+`LumpedThermalEnvironment` for each body. It solves finite contact and boundary
+exchange at the same endpoint, using the original finite-contact solver and
+the original environmental convection/radiation powers. Contact area is removed
+from both exposed surfaces; a separating pair continues to cool or heat through
+its restored free surfaces. Internal sources and material enthalpy remain owned
+by the original two inputs.
+
+For a temperature/phase-dependent interface, call
+`MaterialContactLaw::advance_with_environments`. Its selected source stays pinned
+while both bulk temperatures and the specified interface coordinates follow
+the candidates. Contact and boundary iterations have separate bounded controls;
+neither publishes intermediate thermal state.
+
+Each returned `ContactEnvironmentPairReport` retains the original contact
+receipt, signed contact transfer, per-body convection/radiation heat and actual
+energy residuals. When passing these proposals to `CoupledThermalStep`, set its
+`boundary_heat_j` to the sum of `convection_heat_j` and `radiation_heat_j` across
+the two bodies. The contact transfer cancels inside the collection and must not
+be added to that external heat. Existing material-feedback and atomic
+mechanical/thermal acceptance paths consume these same canonical proposals.
+
+The combined Biot check adds conservative contact and exposed-environment
+bounds; the original whole-surface environmental gate also remains active.
+Iteration failure returns no pair. This uniform-body reduction still needs
+time refinement and a spatial model when internal gradients matter.
+
 ## Energy and acceptance
 
 The finite solver removes Q from A and supplies the same Q to B. Those signs

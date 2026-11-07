@@ -4218,6 +4218,21 @@ flash temperatures, evolving pressure/composition or ambient/radiative exchange.
 The coupled impact regression uses the actual mechanical contact area and
 publishes both reservoir proposals through the existing coupled thermal owner.
 
+`advance_contact_pair_with_environments` and
+`MaterialContactLaw::advance_with_environments` additionally compose two
+independent `LumpedThermalEnvironment` owners with that same finite contact.
+Contact-covered area is removed from each body's convection/radiation area;
+separation restores it. Bounded boundary-feedback trials reuse the original
+contact solver and exact-enthalpy endpoint power evaluator. Fresh local and
+combined heat balances, the environmental owners' residual allowances and a
+conservative combined contact/environment Biot bound precede acceptance.
+The original whole-surface environmental admission remains conservative with
+partial coverage. Neither state is advanced in isolation or published during
+iteration. Reports separate the internal contact transfer from actual ambient
+and radiation heat, so the collection's external heat excludes contact Q.
+This remains a fixed-geometry, uniform-body backward-Euler reduction with
+explicit iteration limits and independent timestep-refinement requirements.
+
 ## Pointwise radiation in coupled endpoint evaluation
 
 `EnthalpyBackwardEuler` and its heterogeneous wrapper expose

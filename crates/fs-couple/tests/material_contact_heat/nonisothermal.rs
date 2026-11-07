@@ -117,6 +117,91 @@ fn unequal_temperature_feedback_composes_with_actual_contact_area_and_finite_hea
 }
 
 #[test]
+fn contact_and_exposed_baths_reach_the_same_mechanical_thermal_transaction() {
+    use fs_conduction::interface::lumped_pair::advance_contact_pair_with_environments;
+    use fs_conduction::interface::temperature::ContactIterationConfig;
+    use fs_conduction::lumped::LumpedThermalEnvironment;
+
+    let a = material(0.02);
+    let b = material(0.04);
+    let interface = pair_interface(&a, &b);
+    let cards = pair_cards(&a, &b, &interface);
+    let ca = caloric(&a, 0.02);
+    let cb = caloric(&b, 0.04);
+    let resistance = resistance(&cards);
+    let baths = [(315.0, 5.0), (305.0, 10.0)].map(|(temperature, h)| {
+        LumpedThermalEnvironment {
+            temperature_k: temperature,
+            radiation_temperature_k: temperature,
+            convection_w_per_m2_k: h,
+            transport: LumpedThermalTransport::try_declared(100.0, 0.5).unwrap(),
+            enthalpy_tolerance_j_kg: 1e-12,
+            maximum_thermal_residual_j: 1e-13,
+        }
+    });
+    let iteration = ContactIterationConfig {
+        max_iterations: 64,
+        relaxation: 1.0,
+        residual_tolerance_j: 1e-14,
+    };
+    context(|gate, cx| {
+        let mut system = pair(&cards, [&ca, &cb], [0.2, 0.0]);
+        let initial_energy = system.mechanics().stored_energy_j();
+        let mut environmental_heat = 0.0;
+        let mut active = 0;
+        let mut dry_heat = 0.0;
+        for _ in 0..1800 {
+            let frame = system.step_with_material_feedback(
+                &[0.0; 2], gate, |contact, stores| refresh(contact, stores, &cards), |trial| {
+                    let stores = trial.reservoirs();
+                    let area = trial.contact_patch_area_m2("touch")?;
+                    let transfers = advance_contact_pair_with_environments(
+                        cx, [stores[0].thermal, stores[1].thermal], [&baths[0], &baths[1]],
+                        &resistance, area, 1e-15, iteration,
+                    ).map_err(|error| ImpactError::Owner(error.to_string()))?;
+                    let report = &transfers[0].report;
+                    let boundary_heat_j = report.convection_heat_j.iter()
+                        .chain(&report.radiation_heat_j).sum();
+                    Ok(CoupledThermalStep { transfers: Vec::from(transfers), boundary_heat_j })
+                },
+            ).unwrap();
+            let report = &frame.thermal.transfers[0].report;
+            environmental_heat += frame.thermal.boundary_heat_j;
+            assert!(frame.thermal.impact.combined_energy_residual_j.abs() < 1e-9);
+            if report.contact.area_m2 > 0.0 {
+                active += 1;
+            } else {
+                assert_eq!(report.heat_a_to_b_j, 0.0);
+                dry_heat += frame.thermal.boundary_heat_j;
+            }
+        }
+        assert!(active > 0 && dry_heat > 0.0 && environmental_heat > 0.0);
+        near(system.mechanics().stored_energy_j()
+            + system.reservoirs().iter().map(|r| r.storage_change_j()).sum::<f64>(),
+            initial_energy + environmental_heat, 1e-9);
+        near(system.reservoirs().iter().map(|r| r.boundary_heat_j()).sum(),
+            environmental_heat, 1e-14);
+
+        let motion = system.mechanics().state().to_vec();
+        let samples = system.mechanics().samples();
+        let stores = system.reservoirs().to_vec();
+        let refused = system.step_with_coupled_transport(&[0.0; 2], gate, |trial| {
+            let stores = trial.reservoirs();
+            let transfers = advance_contact_pair_with_environments(
+                cx, [stores[0].thermal, stores[1].thermal], [&baths[0], &baths[1]],
+                &resistance, trial.contact_patch_area_m2("touch")?, 1e-15,
+                ContactIterationConfig { max_iterations: 0, ..iteration },
+            ).map_err(|error| ImpactError::Owner(error.to_string()))?;
+            Ok(CoupledThermalStep { transfers: Vec::from(transfers), boundary_heat_j: 0.0 })
+        });
+        assert!(refused.is_err());
+        assert_eq!(system.mechanics().state(), motion);
+        assert_eq!(system.mechanics().samples(), samples);
+        assert_eq!(system.reservoirs(), stores);
+    });
+}
+
+#[test]
 fn unequal_source_refresh_rolls_back_with_transport_solver_or_late_cancellation() {
     let a=material(0.02);let b=material(0.04);let i=pair_interface(&a,&b);let cards=pair_cards(&a,&b,&i);
     let ca=caloric(&a,0.02);let cb=caloric(&b,0.04);let mut s=pair(&cards,[&ca,&cb],[0.2,0.0]);

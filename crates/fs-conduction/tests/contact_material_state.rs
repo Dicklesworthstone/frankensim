@@ -1,6 +1,8 @@
 //! Original resistance law with independent thermal states, not measured contact qualification.
 #[path = "contact_material_state/common.rs"]
 mod common;
+#[path = "contact_material_state/environment.rs"]
+mod environment;
 use common::*;
 mod support;
 use fs_conduction::interface::lumped_pair::{MaterialContactLaw, advance_contact_pair};

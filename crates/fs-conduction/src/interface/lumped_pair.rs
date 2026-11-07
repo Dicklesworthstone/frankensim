@@ -1,6 +1,9 @@
 //! Source-backed contact-area exchange between two canonical thermal inputs.
 //! The original finite-body solver owns the single signed transfer Q. No heat
 //! capacity, conduction law, latent-heat rule or nonlinear solver is duplicated.
+mod environment;
+pub use environment::{ContactEnvironmentPairReport, advance_contact_pair_with_environments};
+
 use super::{InterfaceResistance,SeriesThermalResistance};
 use crate::ConductionError;
 use crate::lumped::{LumpedContactStep,LumpedContactStepConfig,LumpedEnthalpyBody,
@@ -47,18 +50,7 @@ pub fn advance_contact_pair(
     area_m2:f64, energy_tolerance_j:f64,
 ) -> Result<[UniformEnthalpyStep<ContactPairReport>;2],ConductionError> {
     poll(cx)?;
-    if !area_m2.is_finite() || area_m2<0.0 || !positive(energy_tolerance_j)
-        || !positive(inputs[0].duration_s) || inputs[0].duration_s!=inputs[1].duration_s {
-        return Err(invalid("contact area, thermal allowance or common clock is invalid"));
-    }
-    for i in &inputs {
-        if ![i.mass_kg,i.volume_m3,i.surface_area_m2].into_iter().all(positive)
-            || !i.internal_heat_j.is_finite() || area_m2>i.surface_area_m2
-            || i.curve.state_at_specific_enthalpy(i.initial.specific_enthalpy_j_kg())
-                .map_err(|e|invalid(&e.to_string()))?!=i.initial {
-            return Err(invalid("thermal pair needs valid geometry/heat and each original chart state"));
-        }
-    }
+    admit_inputs(inputs, area_m2, energy_tolerance_j)?;
     // Source identity and continuous transport support remain load-bearing even
     // at separation. Do not skip admission merely because Q or supplied heat is zero.
     let a=body("contact side A",inputs[0],transports[0])?;
@@ -94,6 +86,24 @@ pub fn advance_contact_pair(
     let report=ContactPairReport {interface:interface.clone(),area_m2,resistance,contact};
     Ok([0,1].map(|side|UniformEnthalpyStep {state:states[side],external_heat_j:boundary[side],
         energy_residual_tolerance_j:energy_tolerance_j,report:report.clone()}))
+}
+
+fn admit_inputs(
+    inputs: [UniformEnthalpyStepInput<'_>; 2], area_m2: f64, energy_tolerance_j: f64,
+) -> Result<(), ConductionError> {
+    if !area_m2.is_finite() || area_m2 < 0.0 || !positive(energy_tolerance_j)
+        || !positive(inputs[0].duration_s) || inputs[0].duration_s != inputs[1].duration_s {
+        return Err(invalid("contact area, thermal allowance or common clock is invalid"));
+    }
+    for input in inputs {
+        if ![input.mass_kg, input.volume_m3, input.surface_area_m2].into_iter().all(positive)
+            || !input.internal_heat_j.is_finite() || area_m2 > input.surface_area_m2
+            || input.curve.state_at_specific_enthalpy(input.initial.specific_enthalpy_j_kg())
+                .map_err(|error| invalid(&error.to_string()))? != input.initial {
+            return Err(invalid("thermal pair needs valid geometry/heat and each original chart state"));
+        }
+    }
+    Ok(())
 }
 fn body<'a>(name:&str,input:UniformEnthalpyStepInput<'a>,transport:&LumpedThermalTransport)
     ->Result<LumpedEnthalpyBody<'a>,ConductionError> {

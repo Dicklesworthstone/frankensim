@@ -86,6 +86,13 @@ impl LumpedThermalEnvironment {
 }
 
 impl LumpedEnthalpyEndpoint<'_> {
+    /// Original whole-surface convection/radiation bound used at preparation.
+    /// Coupled owners must add independently occupied heat paths to this bound.
+    #[must_use]
+    pub fn maximum_biot(&self) -> f64 {
+        self.body.maximum_biot(self.config.radiation_temperature_k)
+    }
+
     /// Evaluate native backward-Euler storage and source/boundary powers.
     ///
     /// `storage_increment_j` is a numerical coordinate; the residual uses its
@@ -99,11 +106,7 @@ impl LumpedEnthalpyEndpoint<'_> {
         ambient_temperature_k: f64,
         internal_heat_j: f64,
     ) -> Result<LumpedEnthalpyEndpointSample, ConductionError> {
-        if !storage_increment_j.is_finite()
-            || !internal_heat_j.is_finite()
-            || !ambient_temperature_k.is_finite()
-            || ambient_temperature_k <= 0.0
-        {
+        if !storage_increment_j.is_finite() {
             return Err(lumped_error(
                 &self.body.name,
                 "nonfinite endpoint heat or invalid ambient temperature".to_owned(),
@@ -117,6 +120,30 @@ impl LumpedEnthalpyEndpoint<'_> {
                 "endpoint energy cannot change its original enthalpy coordinate".to_owned(),
             ));
         }
+        self.evaluate_specific_enthalpy(h, ambient_temperature_k, internal_heat_j)
+    }
+
+    /// Evaluate the same native powers at an already represented caloric state.
+    /// This avoids converting an accepted h to joules and back when composing
+    /// another thermal owner. It does not accept or advance that state.
+    pub fn evaluate_specific_enthalpy(
+        &self,
+        specific_enthalpy_j_kg: f64,
+        ambient_temperature_k: f64,
+        internal_heat_j: f64,
+    ) -> Result<LumpedEnthalpyEndpointSample, ConductionError> {
+        if !specific_enthalpy_j_kg.is_finite()
+            || !internal_heat_j.is_finite()
+            || !ambient_temperature_k.is_finite()
+            || ambient_temperature_k <= 0.0
+        {
+            return Err(lumped_error(
+                &self.body.name,
+                "nonfinite endpoint heat or invalid ambient temperature".to_owned(),
+            ));
+        }
+        let h0 = self.config.initial_specific_enthalpy_j_kg;
+        let h = specific_enthalpy_j_kg;
         let values = self
             .body
             .phase_curve
