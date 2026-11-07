@@ -32,12 +32,15 @@ impl PlaneStressPoint {
     ) -> Result<PlaneStressRelaxation> {
         poll(gate)?;
         if self.source.viscosity_matrix().iter().any(|v| *v != 0.0) {
-            return Err(bad("Kelvin plane-stress viscosity is not a pure Maxwell relaxation image"));
+            return Err(bad(
+                "Kelvin plane-stress viscosity is not a pure Maxwell relaxation image",
+            ));
         }
         let n = self.coordinates;
         let r = self.memory_coordinates();
         let m = n + r;
-        let d = n + 3;
+        let constrained = self.normal_map.len();
+        let d = n + constrained;
         let work = 512 * (r as u128).pow(3)
             + 8 * (m as u128).pow(3)
             + (n as u128).pow(2) * (d as u128).pow(2);
@@ -52,9 +55,13 @@ impl PlaneStressPoint {
         for i in 0..n {
             poll(gate)?;
             t[i][i] = 1.0;
-            let rhs: [f64; 3] =
-                core::array::from_fn(|k| -self.source.equilibrium_stiffness()[(n + k) * d + i]);
-            let normal = normal_solve(self.source.equilibrium_stiffness(), d, n, &rhs)?;
+            let all: Vec<_> = (0..constrained).collect();
+            let rhs: Vec<_> = all
+                .iter()
+                .map(|&k| -self.source.equilibrium_stiffness()[(n + k) * d + i])
+                .collect();
+            let normal =
+                normal_subset_solve(self.source.equilibrium_stiffness(), d, n, &all, &rhs)?;
             t[i][n..].copy_from_slice(&normal);
         }
         let mut equilibrium = vec![0.0; n * n];
@@ -209,6 +216,136 @@ impl PlaneStressPoint {
 }
 
 impl PlaneStressRelaxation {
+    /// Project one unit-volume five-strain shell image into physical displacement
+    /// columns and quadrature volume, without another constitutive eigensolve.
+    /// Prepare `self` with `new_shell` on the five identity engineering-strain
+    /// columns at volume 1. Every rate and original-history transformation is
+    /// reused exactly; only strain rows and equilibrium work are projected.
+    ///
+    /// The underlying full-law point is prepared by the same `new_shell` owner,
+    /// so source strain limits, physical stresses and normal reconstruction stay
+    /// available in the caller's coordinates. The budget includes that complete
+    /// preparation plus this congruence and a full original-energy comparison.
+    pub fn project_shell(
+        &self,
+        columns: &[[f64; 5]],
+        volume_m3: f64,
+        budget: TensorProjectionBudget,
+        gate: &CancelGate,
+    ) -> Result<Self> {
+        poll(gate)?;
+        const UNIT_COLUMNS: [Voigt; 6] = [
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.5, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.5, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.5],
+            [0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        ];
+        if self.point.coordinates() != 5
+            || self.point.normal_map.len() != 1
+            || self.point.source.volume_m3() != 1.0
+            || self.point.source.strain_columns() != UNIT_COLUMNS
+        {
+            return Err(bad(
+                "shell image projection requires unit-volume identity five-strain coordinates",
+            ));
+        }
+        let n = columns.len();
+        let r = self.rates.len();
+        let m = n
+            .checked_add(r)
+            .ok_or_else(|| bad("shell image projection extent"))?;
+        let extra = 64 * (m as u128).pow(2) + 8 * r as u128 * n as u128 + 256;
+        if extra > budget.max_scalar_terms as u128 {
+            return Err(bad("shell image projection exceeds scalar-work budget"));
+        }
+        let point = PlaneStressPoint::new_shell(
+            self.point.material(),
+            columns,
+            volume_m3,
+            TensorProjectionBudget {
+                max_scalar_terms: budget.max_scalar_terms - extra as usize,
+                ..budget
+            },
+            gate,
+        )?;
+        let root = det::sqrt(volume_m3);
+        let rows: Vec<Vec<f64>> = self
+            .rows
+            .iter()
+            .map(|row| {
+                columns
+                    .iter()
+                    .map(|column| root * (0..5).fold(0.0, |s, k| s + row[k] * column[k]))
+                    .collect()
+            })
+            .collect();
+        let mut equilibrium = vec![0.0; n * n];
+        for i in 0..n {
+            poll(gate)?;
+            for j in i..n {
+                let mut value = 0.0;
+                for a in 0..5 {
+                    for b in 0..5 {
+                        value += (root * columns[i][a])
+                            * self.equilibrium[5 * a + b]
+                            * (root * columns[j][b]);
+                    }
+                }
+                equilibrium[i * n + j] = value;
+                equilibrium[j * n + i] = value;
+            }
+        }
+        if !finite(&equilibrium) || rows.iter().flatten().any(|v| !v.is_finite()) {
+            return Err(bad("shell image projection overflow"));
+        }
+        // a_global=sqrt(V)*a_unit and z_global=sqrt(V)*z_unit, hence the
+        // original-from-image memory matrix is UNCHANGED. Check the original
+        // complete Q under [q_unit,a_unit]=[S*q,a_global/sqrt(V)].
+        let original = 5 + r;
+        for i in 0..m {
+            poll(gate)?;
+            for j in i..m {
+                let expected = if j < n {
+                    let mut value = 0.0;
+                    for a in 0..5 {
+                        for b in 0..5 {
+                            value += (root * columns[i][a])
+                                * self.point.energy[a * original + b]
+                                * (root * columns[j][b]);
+                        }
+                    }
+                    value
+                } else if i < n {
+                    (0..5).fold(0.0, |s, k| {
+                        s + root * columns[i][k] * self.point.energy[k * original + 5 + j - n]
+                    })
+                } else {
+                    self.point.energy[(5 + i - n) * original + 5 + j - n]
+                };
+                let scale = det::sqrt(point.energy[i * m + i]) * det::sqrt(point.energy[j * m + j]);
+                if !expected.is_finite()
+                    || !scale.is_finite()
+                    || (expected - point.energy[i * m + j]).abs()
+                        > 1e-9 * scale.max(f64::MIN_POSITIVE)
+                {
+                    return Err(bad(
+                        "shell image does not reconstruct the original full-law point energy",
+                    ));
+                }
+            }
+        }
+        poll(gate)?;
+        Ok(Self {
+            point,
+            equilibrium,
+            rows,
+            rates: self.rates.clone(),
+            original_from_memory: self.original_from_memory.clone(),
+        })
+    }
+
     /// The original full-law point and its normal-traction constraint.
     pub fn point(&self) -> &PlaneStressPoint {
         &self.point
@@ -250,5 +387,12 @@ impl PlaneStressRelaxation {
     pub fn normal_stress_pa(&self, displacement: &[f64], memory: &[f64]) -> Result<[f64; 3]> {
         self.point
             .normal_stress_pa(displacement, &self.original_memory(memory)?)
+    }
+
+    /// Original thickness-normal traction. Shell transverse shear remains
+    /// physical and is not included in the zero-traction constraint.
+    pub fn thickness_normal_stress_pa(&self, displacement: &[f64], memory: &[f64]) -> Result<f64> {
+        self.point
+            .thickness_normal_stress_pa(displacement, &self.original_memory(memory)?)
     }
 }

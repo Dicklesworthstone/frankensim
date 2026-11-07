@@ -4176,3 +4176,31 @@ the selected distributed memory. Their own constitutive and radiation laws
 remain separately selected. Regional gases, physical Foster spectra, source
 bands, fit/scattering gates and interval-mean work ports retain their original
 owners. Exact selection adds no acoustic filter or new fitted coefficients.
+
+## Five-strain constrained tensor memory
+
+`PlaneStressPoint::new_shell` retains engineering strains
+`[epsilon_xx, epsilon_yy, gamma_xy, gamma_yz, gamma_zx]` and enforces only
+`sigma_zz = 0`. The original `new` constructor and descriptor retain their
+three-traction plane-stress meaning. Both constructors use the same complete
+equilibrium/Maxwell energy reduction; all six coordinates of every original
+branch and all in-plane/shear cross terms survive. The shell coordinate budget
+includes one local thickness-normal strain. `normal_stress_pa` reports actual
+`[sigma_zz, sigma_yz, sigma_zx]`; its transverse components need not vanish.
+`thickness_normal_stress_pa` observes the one shell constraint explicitly.
+
+The existing full-inertia body owns motion, work and independently integrated
+heat. A resolved thickness-normal Kelvin viscosity retains one massless normal
+history and requires velocity-aware traction observation. Original passivity
+and exact-propagation admission still apply; arbitrary unresolved singular
+Kelvin resistance is not newly admitted. `relaxation_image` continues to
+refuse every nonzero Kelvin term, preserving the pure-Maxwell meaning.
+
+A unit-volume identity five-strain `PlaneStressRelaxation` can be mapped with
+`project_shell` into physical columns and positive quadrature volume. Its
+rates and original-history transformation are copied exactly, while strain
+rows scale by the square root of volume and equilibrium work by volume. The
+original `new_shell` point remains the source observation owner; its complete
+energy must agree with the mapped reference energy. Preparation and comparison
+share an explicit work budget. No new eigensolve, approximate pole merge,
+branchwise constraint, damping fit or time integrator is introduced.

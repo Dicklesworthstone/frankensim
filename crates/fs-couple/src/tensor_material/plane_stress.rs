@@ -3,7 +3,7 @@
 //! Let e=(e_parallel,e_normal) and a_j be the viscous Gram coordinates.
 //! H=V e^T C_eq e/2 + sum |sqrt(V) B_j e-a_j|^2/2.
 //! Without normal viscosity, zero normal traction minimizes this energy over
-//! the three normal strains in one coupled Schur complement. Damped normal
+//! the constrained normal strains in one coupled Schur complement. Damped normal
 //! directions remain massless dynamic coordinates; exactly undamped coordinate
 //! directions are condensed through the same full material energy.
 //! The retained a_j obey a_j' = -(1/tau_j) dH/da_j. Coupling this energy to
@@ -20,8 +20,10 @@ mod descriptor;
 pub use descriptor::{DescriptorPlaneStressBody, DescriptorPlaneStressHistory, DescriptorPlaneStressPoint};
 
 /// One homogeneous material quadrature contribution under local z-plane stress.
-/// In-plane columns are [epsilon_xx,epsilon_yy,gamma_xy] per displacement [1/m].
-/// Normal epsilon_zz,epsilon_yz,epsilon_zx are reconstructed at EVERY state.
+/// `new` retains [epsilon_xx,epsilon_yy,gamma_xy] per displacement [1/m]
+/// and reconstructs epsilon_zz,epsilon_yz,epsilon_zx at EVERY state. `new_shell`
+/// also retains gamma_yz,gamma_zx and constrains only sigma_zz: transverse
+/// shear traction remains physical and is not forced to zero.
 /// A fixed material orientation must be applied before construction. Kelvin
 /// viscosity may act on any subset of the three local normal directions.
 /// Eliminated directions require exactly zero Kelvin rows; the retained normal
@@ -36,11 +38,14 @@ pub struct PlaneStressPoint {
     rates: Vec<f64>,
     viscosity: Vec<f64>,
     normal_viscosity: Option<NormalViscosity>,
+    /// Original volume-scaled branch probes for physical yz/zx traction in the
+    /// five-strain shell. The three-constraint path already owns these columns.
+    shear_traction_rows: Option<Vec<[f64;2]>>,
 }
 
 #[derive(Clone, Debug)]
 struct NormalViscosity {
-    /// Retained local normal coordinates, in [zz,yz,zx] order.
+    /// Retained constrained-normal coordinates: [zz,yz,zx], or just [zz].
     indices: Vec<usize>,
     /// D_ss^-1 on the retained normal coordinates.
     mobility: Vec<f64>,
@@ -51,7 +56,11 @@ struct NormalViscosity {
 // Only exact structural zero rows may be eliminated. No threshold decides
 // material rank, so arbitrarily small resolved positive viscosity survives.
 fn retained_normals(material:&TensorProny)->Vec<usize> {
-    material.kv_pa_s().map_or_else(Vec::new,|d|[2,4,5].iter().enumerate()
+    retained_normal_axes(material,&[2,4,5])
+}
+
+fn retained_normal_axes(material:&TensorProny,axes:&[usize])->Vec<usize> {
+    material.kv_pa_s().map_or_else(Vec::new,|d|axes.iter().enumerate()
         .filter_map(|(k,&i)|(0..6).any(|j|d[i][j]!=0.0).then_some(k)).collect())
 }
 
@@ -99,16 +108,42 @@ impl PlaneStressPoint {
     pub fn new(material:&TensorProny,columns:&[[f64;3]],volume_m3:f64,
         budget:TensorProjectionBudget,gate:&CancelGate)->Result<Self>
     {
+        Self::new_constrained(material,columns.len(),|i| {
+            let s=columns[i];[s[0],s[1],0.0,0.5*s[2],0.0,0.0]
+        },&[2,4,5],volume_m3,budget,gate)
+    }
+
+    /// Prepare the COMPLETE three-dimensional law for a shear-deformable shell.
+    /// Columns are [epsilon_xx,epsilon_yy,gamma_xy,gamma_yz,gamma_zx] per
+    /// displacement [1/m]; gamma denotes engineering shear. Only sigma_zz=0
+    /// is enforced. All in-plane/shear tensor couplings and every original
+    /// Maxwell history survive. The coordinate ceiling includes ONE local
+    /// epsilon_zz column; volume includes the physical quadrature weight.
+    ///
+    /// A nonzero thickness-normal Kelvin row retains epsilon_zz as a massless
+    /// history coordinate in the existing body. Pure Maxwell relaxation images
+    /// continue to refuse all Kelvin viscosity rather than discarding it.
+    pub fn new_shell(material:&TensorProny,columns:&[[f64;5]],volume_m3:f64,
+        budget:TensorProjectionBudget,gate:&CancelGate)->Result<Self>
+    {
+        Self::new_constrained(material,columns.len(),|i| {
+            let s=columns[i];[s[0],s[1],0.0,0.5*s[2],0.5*s[3],0.5*s[4]]
+        },&[2],volume_m3,budget,gate)
+    }
+
+    fn new_constrained(material:&TensorProny,n:usize,column:impl Fn(usize)->Voigt,
+        normal_axes:&[usize],volume_m3:f64,budget:TensorProjectionBudget,gate:&CancelGate)->Result<Self>
+    {
         poll(gate)?;
-        let n=columns.len();let d=n.checked_add(3).ok_or_else(||bad("plane-stress coordinate extent"))?;
+        let constrained=normal_axes.len();
+        let d=n.checked_add(constrained).ok_or_else(||bad("plane-stress coordinate extent"))?;
         let memory=material.branches().len().checked_mul(6).ok_or_else(||bad("plane-stress memory extent"))?;
-        let internal=internal_coordinate_count(material)?;
-        let normal_indices=retained_normals(material);
+        let normal_indices=retained_normal_axes(material,normal_axes);
         let normal_count=normal_indices.len();
-        let algebraic_indices:Vec<_>=(0..3).filter(|i|!normal_indices.contains(i)).collect();
+        let internal=memory.checked_add(normal_count).ok_or_else(||bad("plane-stress internal-coordinate extent"))?;
+        let algebraic_indices:Vec<_>=(0..constrained).filter(|i|!normal_indices.contains(i)).collect();
         let m=n.checked_add(internal).ok_or_else(||bad("plane-stress energy extent"))?;
-        if n==0 || d>budget.max_coordinates || m>MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
-            || columns.iter().flatten().any(|v|!v.is_finite()) {
+        if n==0 || d>budget.max_coordinates || m>MAX_LINEAR_EXPONENTIAL_BLOCK_DIM {
             return Err(bad("plane stress requires bounded finite in-plane strain columns and full memory"));
         }
         // Include the original strain projection, total K, normal solves, full
@@ -117,12 +152,22 @@ impl PlaneStressPoint {
             +12*(d as u128).pow(2)+memory as u128*(d as u128).pow(2)
             +128*m as u128+(m as u128).pow(2)*((d as u128).pow(2)+memory as u128)
             +memory as u128*m as u128*d as u128
-            +(material.branches().len() as u128+2)*36*n as u128+24*(d as u128).pow(2);
+            +(material.branches().len() as u128+2)*36*n as u128+24*(d as u128).pow(2)
+            +if constrained==1 {(material.branches().len() as u128+2)*72+48} else {0};
         if work>budget.max_scalar_terms as u128 {return Err(bad("plane-stress condensation exceeds scalar-work budget"));}
-        let mut full:Vec<Voigt>=columns.iter().map(|s|[s[0],s[1],0.0,0.5*s[2],0.0,0.0]).collect();
-        full.extend([[0.0,0.0,1.0,0.0,0.0,0.0],[0.0,0.0,0.0,0.0,1.0,0.0],[0.0,0.0,0.0,0.0,0.0,1.0]]);
+        let mut full:Vec<Voigt>=(0..n).map(column).collect();
+        if full.iter().flatten().any(|v|!v.is_finite()) {
+            return Err(bad("plane stress requires bounded finite in-plane strain columns and full memory"));
+        }
+        full.extend(normal_axes.iter().map(|&axis|core::array::from_fn(|i|if i==axis {1.0} else {0.0})));
         let source=material.project_strain(&full,volume_m3,budget,||gate.is_requested())
             .map_err(TensorMaterialError::Material)?;
+        let shear_traction_rows=if constrained==1 {
+            let probes=material.project_strain(&[[0.0,0.0,0.0,0.0,1.0,0.0],
+                [0.0,0.0,0.0,0.0,0.0,1.0]],volume_m3,budget,||gate.is_requested())
+                .map_err(TensorMaterialError::Material)?;
+            Some(probes.branches().iter().flat_map(|b|b.rows()).map(|r|[r[0],r[1]]).collect())
+        } else {None};
         let damping=source.viscosity_matrix();
         // The original structural zero must survive projection exactly.
         // Lost nonzero rate contributions are never condensed away.
@@ -176,7 +221,7 @@ impl PlaneStressPoint {
             }}
         }
         if !finite(&instantaneous) {return Err(bad("plane-stress instantaneous stiffness overflow"));}
-        let mut normal_map=vec![vec![0.0;m];3];
+        let mut normal_map=vec![vec![0.0;m];constrained];
         for (k,&i) in normal_indices.iter().enumerate() {normal_map[i][n+memory+k]=1.0;}
         if !algebraic_indices.is_empty() {
             for col in 0..m {
@@ -194,7 +239,7 @@ impl PlaneStressPoint {
         // residual-factor Grams, rather than subtracting two large energies.
         let mut t=vec![vec![0.0;m];d];
         for i in 0..n {t[i][i]=1.0;}
-        for i in 0..3 {t[n+i].copy_from_slice(&normal_map[i]);}
+        for i in 0..constrained {t[n+i].copy_from_slice(&normal_map[i]);}
         let mut residuals=vec![vec![0.0;m];memory];
         for (r,row) in rows.iter().enumerate() {
             poll(gate)?;
@@ -216,10 +261,11 @@ impl PlaneStressPoint {
         let mut relaxed_memory=vec![vec![0.0;n];internal];
         for col in 0..n {
             poll(gate)?;
-            let rhs:[f64;3]=core::array::from_fn(|i|-source.equilibrium_stiffness()[(n+i)*d+col]);
-            let normal=normal_solve(source.equilibrium_stiffness(),d,n,&rhs)?;
+            let all:Vec<_>=(0..constrained).collect();
+            let rhs:Vec<_>=all.iter().map(|&i|-source.equilibrium_stiffness()[(n+i)*d+col]).collect();
+            let normal=normal_subset_solve(source.equilibrium_stiffness(),d,n,&all,&rhs)?;
             for (r,row) in rows.iter().enumerate() {
-                relaxed_memory[r][col]=row[col]+(0..3).fold(0.0,|s,k|s+row[n+k]*normal[k]);
+                relaxed_memory[r][col]=row[col]+(0..constrained).fold(0.0,|s,k|s+row[n+k]*normal[k]);
             }
             for (k,&i) in normal_indices.iter().enumerate() {relaxed_memory[memory+k][col]=normal[i];}
         }
@@ -227,9 +273,9 @@ impl PlaneStressPoint {
             return Err(bad("plane-stress energy or initialization overflow"));
         }
         poll(gate)?;
-        Ok(Self {source,coordinates:n,energy,normal_map,relaxed_memory,rates,viscosity,normal_viscosity})
+        Ok(Self {source,coordinates:n,energy,normal_map,relaxed_memory,rates,viscosity,normal_viscosity,shear_traction_rows})
     }
-    /// Original in-plane displacement coordinates.
+    /// Original displacement coordinates, including shell transverse shear.
     pub fn coordinates(&self)->usize {self.coordinates}
     /// All original six-per-branch viscous coordinates a_j [sqrt(J)], followed
     /// by retained normal tensor strains, in [zz,yz,zx] order with exactly
@@ -268,43 +314,81 @@ impl PlaneStressPoint {
     }
     /// Original 3D normal tractions [sigma_zz,sigma_yz,sigma_zx] [Pa].
     /// Recomputed from full material factors, not set to zero by definition.
-    /// Normal Kelvin viscosity requires the velocity-aware variant.
+    /// Shell shear tractions are generally NONZERO. A Kelvin contribution to
+    /// these tractions requires the velocity-aware variant.
     pub fn normal_stress_pa(&self,u:&[f64],a:&[f64])->Result<[f64;3]> {
-        if self.normal_viscosity.is_some() {
+        if self.normal_viscosity.is_some() || (self.shear_traction_rows.is_some()
+            && self.material().kv_pa_s().is_some_and(|d|[4,5].iter().any(|&i|d[i].iter().any(|v|*v!=0.0)))) {
             return Err(bad("normal Kelvin traction requires the actual in-plane velocity"));
         }
         self.normal_stress_pa_with_velocity(u,&vec![0.0;self.coordinates],a)
     }
 
+    /// Recompute the constrained thickness-normal stress sigma_zz [Pa].
+    /// This observation does not assume that physical shell shear traction is
+    /// zero. Thickness-normal Kelvin viscosity requires the velocity variant.
+    pub fn thickness_normal_stress_pa(&self,u:&[f64],a:&[f64])->Result<f64> {
+        if self.normal_viscosity.is_some() {
+            return Err(bad("normal Kelvin traction requires the actual in-plane velocity"));
+        }
+        self.thickness_normal_stress_pa_with_velocity(u,&vec![0.0;self.coordinates],a)
+    }
+
+    /// Thickness-normal traction including the actual Kelvin rate constraint.
+    pub fn thickness_normal_stress_pa_with_velocity(&self,u:&[f64],velocity:&[f64],a:&[f64])->Result<f64> {
+        Ok(self.normal_stress_pa_with_velocity(u,velocity,a)?[0])
+    }
+
     /// Recompute total elastic, Maxwell and Kelvin normal traction [Pa].
     /// Retained rates solve D_ss e_s'=-dH/de_s-D_su u'; remaining tractions
     /// vanish through the algebraic energy constraint, including branch memory.
-    /// This exposes the original constitutive traction, not a literal zero.
+    /// Only sigma_zz is constrained for `new_shell`; yz/zx are actual physical
+    /// shear stresses, including their Kelvin dependence on retained velocity.
     pub fn normal_stress_pa_with_velocity(&self,u:&[f64],velocity:&[f64],a:&[f64])->Result<[f64;3]> {
         if velocity.len()!=self.coordinates || !finite(velocity) {
             return Err(bad("plane-stress traction requires matching finite velocity"));
         }
         let full=self.full_strain_coordinates(u,a)?;
-        self.source.strain(&full).map_err(TensorMaterialError::Material)?;
-        let n=self.coordinates;let d=n+3;
-        let mut force:[f64;3]=core::array::from_fn(|i|(0..d).fold(0.0,|s,k|s+self.source.equilibrium_stiffness()[(n+i)*d+k]*full[k]));
-        for (row,&memory) in self.source.branches().iter().flat_map(|b|b.rows()).zip(a) {
+        let strain=self.source.strain(&full).map_err(TensorMaterialError::Material)?;
+        let n=self.coordinates;let count=self.normal_map.len();let d=n+count;
+        let mut force:Vec<_>=(0..count).map(|i|(0..d).fold(0.0,|s,k|s+self.source.equilibrium_stiffness()[(n+i)*d+k]*full[k])).collect();
+        let mut shear_force=[0.0;2];
+        for (r,(row,&memory)) in self.source.branches().iter().flat_map(|b|b.rows()).zip(a).enumerate() {
             let z=row.iter().zip(&full).fold(0.0,|s,(b,x)|s+b*x)-memory;
-            for i in 0..3 {force[i]+=row[n+i]*z;}
+            for i in 0..count {force[i]+=row[n+i]*z;}
+            if let Some(probes)=&self.shear_traction_rows {
+                for i in 0..2 {shear_force[i]+=probes[r][i]*z;}
+            }
         }
+        let mut full_rate=vec![0.0;d];full_rate[..n].copy_from_slice(velocity);
         if let Some(normal)=&self.normal_viscosity {
             let damping=self.source.viscosity_matrix();
             let rhs:Vec<_>=normal.indices.iter().map(|&i|-force[i]
                 -(0..n).fold(0.0,|s,j|s+damping[(n+i)*d+j]*velocity[j])).collect();
             let normal_rate=normal_subset_solve(damping,d,n,&normal.indices,&rhs)?;
-            for i in 0..3 {
+            for (k,&i) in normal.indices.iter().enumerate() {full_rate[n+i]=normal_rate[k];}
+            for i in 0..count {
                 force[i]+=(0..n).fold(0.0,|s,j|s+damping[(n+i)*d+j]*velocity[j]);
                 force[i]+=(0..normal.indices.len()).fold(0.0,|s,j|
                     s+damping[(n+i)*d+n+normal.indices[j]]*normal_rate[j]);
             }
         }
         let volume=self.source.volume_m3();
-        let stress=[force[0]/volume,0.5*force[1]/volume,0.5*force[2]/volume];
+        let stress=if self.shear_traction_rows.is_some() {
+            // Kelvin rows of all eliminated normal directions are exactly zero,
+            // so their unspecified rates cannot contribute to physical stress.
+            let weight=[1.0,1.0,1.0,core::f64::consts::SQRT_2,core::f64::consts::SQRT_2,core::f64::consts::SQRT_2];
+            let mandel:Voigt=core::array::from_fn(|i|weight[i]*strain[i]);
+            let rate:Voigt=core::array::from_fn(|i|weight[i]*(0..d).fold(0.0,|s,k|
+                s+self.source.strain_columns()[k][i]*full_rate[k]));
+            let mut stress=[force[0]/volume,0.0,0.0];
+            for (i,axis) in [4,5].into_iter().enumerate() {
+                let elastic=(0..6).fold(0.0,|s,k|s+self.material().equilibrium_mandel()[axis][k]*mandel[k]);
+                let viscous=self.material().kv_pa_s().map_or(0.0,|c|(0..6).fold(0.0,|s,k|s+c[axis][k]*rate[k]));
+                stress[1+i]=(elastic+viscous)/weight[axis]+0.5*shear_force[i]/volume;
+            }
+            stress
+        } else {[force[0]/volume,0.5*force[1]/volume,0.5*force[2]/volume]};
         if !finite(&stress) {return Err(bad("plane-stress traction overflow"));}
         Ok(stress)
     }
@@ -418,7 +502,14 @@ impl TensorMaterialHistory<'_> {
         p.normal_stress_pa_with_velocity(self.displacement_m(),&self.velocity_m_s(),
             &self.state[offset..offset+p.memory_coordinates()])
     }
+
+    /// Accepted thickness-normal traction, including a shell's rate constraint.
+    pub fn plane_stress_thickness_normal_stress_pa(&self,point:usize)->Result<f64> {
+        Ok(self.plane_stress_normal_stress_pa(point)?[0])
+    }
 }
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod shear_constraints;
