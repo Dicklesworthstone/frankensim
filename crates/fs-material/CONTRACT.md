@@ -10794,17 +10794,18 @@ closure. Existing two-layer parity and the 64-layer limit are included.
 ## Regional liquid/dense-water/steam caloric paths
 
 `phase::water::regional::RegionalWater` prepares one fixed-pressure original
-IF97 path across Regions 1, 3 and 2, including Region 4 liquid/vapor coexistence
-when present. Its admitted temperature window lies within 273.16..=1073.15 K
-and its pressure within 0<p<=100 MPa; the exact critical singular state remains
-unsupported. Only source pieces, saturation and junctions intersecting the
-requested window are prepared. Cold compressed feedwater, high-temperature
+IF97 path across Regions 1, 3, 2 and 5, including Region 4 liquid/vapor coexistence
+when present. Windows through 1073.15 K retain the original 0<p<=100 MPa domain;
+windows extending above that temperature admit the original high-temperature
+steam equation through 2273.15 K only at 0<p<=50 MPa. The exact critical singular
+state remains unsupported. Only source pieces, saturation and junctions
+intersecting the requested window are prepared. Cold compressed feedwater, high-temperature
 boiling and superheated or supercritical steam can consequently share one
 caloric owner. Low-pressure vapor-only windows and exact saturation endpoint
 windows retain their original source admission.
 
-Preparation retains bounded fixed arrays of original source pieces and events,
-with no heap allocation or coefficient/reference changes. Each single-phase
+Preparation retains at most five sensible pieces and four physical/source events
+in bounded fixed arrays, with no heap allocation or coefficient/reference changes. Each single-phase
 regional junction carries the original signed h, u, s and v differences and
 temperature/pressure residuals. Callers separately budget enthalpy, entropy,
 volume and boundary-temperature matching. A source matching defect is not
@@ -10833,12 +10834,18 @@ when their source routing reaches Region 2. Invalid budgets, exhausted work,
 unrepresentable nonzero heat or phase mass, unsupported/ambiguous states,
 chart mismatch and early/late cancellation produce no partial result.
 
-Six focused native tests cover 20/25 MPa heating and cooling across both source
-junctions; independent h/s gap and overlap behavior; Cp and Cp/T quadrature;
+Focused regressions cover heating and cooling from cold feed through dense-water
+coexistence and all three source junctions into high-temperature steam;
+independent h/s gap and overlap behavior, including different signs at the
+Region 2/5 boundary; original Cp and Cp/T quadrature;
 window-scoped preparation, low-pressure vapor and exact latent endpoints;
 subdivision, tiny heat/quality and zero-heat identity; and source, matching,
-work, energy and cancellation refusal. This equilibrium pressure owner does
-not supply a whole-path Cp stability certificate for `ThermalLaw`, ice,
+work, energy and cancellation refusal. Published Region 5 states exercise both
+caloric inverses, and existing throttle/shaft/cycle consumers retain the same
+original h, raw s and pressure-flow-work convention at high temperature. Region 5
+retains the pure-water source assumption without a chemical dissociation model.
+This equilibrium pressure owner does not supply a whole-path Cp stability
+certificate for `ThermalLaw`, ice,
 resolved phase kinetics, spatial two-phase flow, or vessel mechanics.
 
 ## Complete high-pressure water cycles through the regional chart
@@ -10852,16 +10859,18 @@ audits. Regional preparation and matching budgets remain owned by the chart.
 The dispatch introduces no heap allocation, caloric datum shift, duplicate
 flow work or alternative device efficiency convention.
 
-`cargo run -p fs-material --example water_regional_rankine` runs two complete
+`cargo run -p fs-material --example water_regional_rankine` runs three complete
 four-device Rankine cycles: a 10 kPa saturated-liquid condenser outlet enters
 an explicitly 80% efficient feed pump, a single regional boiler path heats to
-823.15 K at 20 MPa or 25 MPa, an explicitly 85% efficient turbine returns to
+823.15 K at 20 MPa or 25 MPa, or to 1500 K at 30 MPa, and an explicitly 85%
+efficient turbine returns to
 10 kPa, and the condenser returns exactly to the original saturated-liquid
 state. Pump discharge is cold Region 1 water; each boiler traverses Region 3
-and reaches Region 2 steam. The 20 MPa boiler includes physical vaporization;
-the 25 MPa boiler has zero latent heat and no invented supercritical quality.
+and reaches Region 2 or Region 5 steam. The 20 MPa boiler includes physical
+vaporization; the 25/30 MPa boilers have zero latent heat and no invented
+supercritical quality.
 
-The example reports every stage, both original regional junctions, sensible/
+The example reports every stage, all traversed original regional junctions, sensible/
 latent/matching heat contributions, phase quality, net shaft work, thermal
 efficiency, fluid entropy changes and independent energy residuals.
 It uses illustrative efficiencies, no pressure-drop model, and no assigned
@@ -10869,14 +10878,12 @@ thermal reservoirs; it does not claim measured machinery performance or total
 reservoir entropy production. The earlier hot-inlet steam-train example remains
 a partial train and retains its stated limits.
 
-Three integrated regressions exercise both complete cycles and cold-feed
-region crossings, recover the existing 4 MPa Gibbs Rankine reference without
-changing its h/s datum or device behavior, and check regional outlet-domain and
-cancellation refusal. Combined with the six regional caloric tests and the
-15 existing dense/caloric/pressure-device tests, the original-source native
-water integration has 24 passing tests. Both water examples compile and run.
-The full workspace/DSR gate remains unavailable in this checkout because the
-required sibling constellation repositories and DSR executable are absent.
+Integrated regressions exercise complete cycles and cold-feed region crossings,
+recover the existing 4 MPa Gibbs Rankine reference without changing its h/s datum
+or device behavior, and check regional outlet-domain and cancellation refusal.
+Independent evaluations of the original Gibbs equations verify high-temperature
+throttling and ideal/inefficient expansion from 30 MPa/1500 K to 1 MPa, including
+the original h, u+p*v and s balances.
 
 ## Coherent thermal-fluid transport view
 

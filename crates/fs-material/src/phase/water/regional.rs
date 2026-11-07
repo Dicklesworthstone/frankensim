@@ -1,7 +1,7 @@
 //! Original-source water calorimetry across the IF97 liquid, dense and steam regions.
 //!
-//! A prepared isobar retains at most four sensible pieces, its physical
-//! liquid/vapor plateau, and the two possible single-phase regional junctions.
+//! A prepared isobar retains at most five sensible pieces, its physical
+//! liquid/vapor plateau, and the three possible single-phase regional junctions.
 //! The original equations do not match exactly at those junctions. Their finite
 //! h/s/v changes are admitted by explicit budgets and reported separately from
 //! sensible and latent changes; no reference shift or artificial phase is used.
@@ -22,9 +22,14 @@ use fs_thermochem::water::if97::regions::{
     If97JunctionSolve, If97RegionalJunction,
 };
 use fs_thermochem::water::if97::{
-    CRITICAL_PRESSURE_PA, CRITICAL_TEMPERATURE_K, MAXIMUM_PRESSURE_PA, boundary23_pressure,
-    saturation_pressure, saturation_temperature,
+    CRITICAL_PRESSURE_PA, CRITICAL_TEMPERATURE_K, MAXIMUM_PRESSURE_PA,
+    REGION2_MAXIMUM_TEMPERATURE_K, REGION5_MAXIMUM_PRESSURE_PA, REGION5_MAXIMUM_TEMPERATURE_K,
+    boundary23_pressure, saturation_pressure, saturation_temperature,
 };
+
+// At an isobar below the critical pressure the complete chart can cross
+// Region 1/3, physical liquid/vapor coexistence, Region 3/2 and Region 2/5.
+const MAX_EVENTS: usize = 4;
 
 /// Original-source matching allowances, separate from caloric inverse accuracy.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -156,8 +161,8 @@ enum Point {
 pub struct RegionalWater {
     pressure: Pressure,
     controls: RegionalWaterControls,
-    pieces: [Option<Piece>; 4],
-    events: [Option<Event>; 3],
+    pieces: [Option<Piece>; MAX_EVENTS + 1],
+    events: [Option<Event>; MAX_EVENTS],
     event_count: usize,
     saturation_entropy_defect_j_kg_k: f64,
 }
@@ -387,7 +392,8 @@ impl RegionalWater {
             || !lo.is_finite()
             || !hi.is_finite()
             || lo < 273.16
-            || hi > 1073.15
+            || hi > REGION5_MAXIMUM_TEMPERATURE_K
+            || (hi > REGION2_MAXIMUM_TEMPERATURE_K && p > REGION5_MAXIMUM_PRESSURE_PA)
             || lo > hi
             || ![
                 controls.maximum_saturation_entropy_defect_j_kg_k,
@@ -416,8 +422,8 @@ impl RegionalWater {
         let mut chart = Self {
             pressure,
             controls,
-            pieces: [None; 4],
-            events: [None; 3],
+            pieces: [None; MAX_EVENTS + 1],
+            events: [None; MAX_EVENTS],
             event_count: 0,
             saturation_entropy_defect_j_kg_k: 0.0,
         };
@@ -501,6 +507,18 @@ impl RegionalWater {
                 return Err(RegionalWaterError::TemperatureGap { bounds_k: [a, b] });
             }
             chart.admit_junction(junction)?;
+        }
+        // A chart ending at the original Region 2 ceiling keeps its existing
+        // 100 MPa domain. Entering Region 5 admits the two original boundary
+        // values and their signed matching defects under the same budgets.
+        // In particular, an enthalpy gap and an entropy overlap may coexist.
+        if lo <= REGION2_MAXIMUM_TEMPERATURE_K && hi > REGION2_MAXIMUM_TEMPERATURE_K {
+            chart.admit_junction(If97RegionalJunction::new(
+                pressure,
+                If97JunctionKind::VaporHighTemperature,
+                source_junction,
+                &mut cancelled,
+            )?)?;
         }
         if lo == hi && chart.saturation().is_none() {
             return Err(RegionalWaterError::Invalid(
@@ -792,7 +810,8 @@ impl RegionalWater {
         if !target.is_finite() || target < bounds[0] || target > bounds[1] {
             return Err(RegionalWaterError::OutsideDomain);
         }
-        let mut candidates: [Option<(RegionalWaterState, f64)>; 5] = [None; 5];
+        let mut candidates: [Option<(RegionalWaterState, f64)>; MAX_EVENTS + 2] =
+            [None; MAX_EVENTS + 2];
         let mut count = 0;
         let mut iterations = 0;
         let mut density_queries = 0;

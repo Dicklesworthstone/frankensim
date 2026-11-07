@@ -59,12 +59,17 @@ fn near(a: f64, b: f64, tolerance: f64) {
 }
 
 #[test]
-fn complete_high_pressure_cycles_include_cold_feed_and_both_source_region_crossings() {
+fn complete_high_pressure_cycles_include_cold_feed_and_all_source_region_crossings() {
     // G3: these are complete four-device cycles, unlike the earlier hot-inlet
     // steam train. Every heat operation uses one chart across all source pieces.
-    for p in [20e6, 25e6] {
+    for (p, hot_t, maximum) in [
+        (20e6, 823.15, 873.15),
+        (25e6, 823.15, 873.15),
+        (20e6, 1500.0, 2273.15),
+    ] {
         let low = chart(10_000.0);
-        let high = chart(p);
+        let high =
+            RegionalWater::new(Pressure::new(p), controls(273.16, maximum), || false).unwrap();
         let liquid = low.state_at_quality(0.0, || false).unwrap();
         let pump = WaterFlowState::from(liquid)
             .adiabatic_shaft_to(
@@ -93,11 +98,18 @@ fn complete_high_pressure_cycles_include_cold_feed_and_both_source_region_crossi
             assert_eq!(source.region(), region);
         }
         let target = high
-            .state_at_temperature(Temperature::new(823.15), || false)
+            .state_at_temperature(Temperature::new(hot_t), || false)
             .unwrap();
+        if hot_t > 1073.15 {
+            assert_eq!(
+                target.single_phase_source().unwrap().region(),
+                If97FluidRegion::Region5
+            );
+            assert_eq!(high.junctions().count(), 3);
+        }
         let q_in = target.specific_enthalpy_j_kg() - feed.specific_enthalpy_j_kg();
         let boiler = high.advance_heat(feed, 1.0, q_in, 2e-5, || false).unwrap();
-        near(boiler.state.temperature_k(), 823.15, 2e-8);
+        near(boiler.state.temperature_k(), hot_t, 2e-8);
         near(
             boiler.sensible_enthalpy_change_j
                 + boiler.latent_enthalpy_change_j
@@ -106,7 +118,10 @@ fn complete_high_pressure_cycles_include_cold_feed_and_both_source_region_crossi
             2e-5,
         );
         assert!(boiler.regional_enthalpy_matching_change_j.abs() > 1e-3);
-        assert!(boiler.regional_enthalpy_matching_change_j.abs() < 400.0);
+        assert!(
+            boiler.regional_enthalpy_matching_change_j.abs()
+                < 200.0 * high.junctions().count() as f64
+        );
         if p < 22.064e6 {
             assert!(high.saturation().is_some());
             assert!(boiler.latent_enthalpy_change_j > 500_000.0);
@@ -122,7 +137,12 @@ fn complete_high_pressure_cycles_include_cold_feed_and_both_source_region_crossi
             })
             .unwrap();
         let exhaust = regional(turbine.outlet);
-        assert!(exhaust.vapor_quality().is_some_and(|x| x > 0.0 && x < 1.0));
+        if hot_t > 1073.15 {
+            assert_eq!(exhaust.vapor_mass_fraction(), Some(1.0));
+            assert_eq!(exhaust.vapor_quality(), None);
+        } else {
+            assert!(exhaust.vapor_quality().is_some_and(|x| x > 0.0 && x < 1.0));
+        }
         let q_out = liquid.specific_enthalpy_j_kg() - exhaust.specific_enthalpy_j_kg();
         let condenser = low
             .advance_heat(exhaust, 1.0, q_out, 2e-5, || false)
@@ -159,6 +179,94 @@ fn complete_high_pressure_cycles_include_cold_feed_and_both_source_region_crossi
         }
         for total in totals {
             near(total, 0.0, 8e-5);
+        }
+    }
+}
+
+#[test]
+fn high_temperature_throttle_and_turbine_recover_independent_gibbs_balances() {
+    let high = RegionalWater::new(Pressure::new(30e6), controls(900.0, 2273.15), || false).unwrap();
+    let low = RegionalWater::new(Pressure::new(1e6), controls(600.0, 2273.15), || false).unwrap();
+    let inlet = WaterFlowState::from(
+        high.state_at_temperature(Temperature::new(1500.0), || false)
+            .unwrap(),
+    );
+    // Independent 65-digit evaluation of original IAPWS R7-97(2012) Gibbs
+    // equations, with scalar h/s roots. The inlet is Table 42's 30 MPa state.
+    near(inlet.specific_enthalpy_j_kg(), 5_167_235.140089517, 1e-6);
+    near(inlet.specific_entropy_j_kg_k(), 7729.701326182763, 1e-8);
+    let check_first_law = |outlet: WaterFlowState, work| {
+        near(
+            outlet.specific_enthalpy_j_kg() - inlet.specific_enthalpy_j_kg() + work,
+            0.0,
+            2e-5,
+        );
+        near(
+            outlet.specific_internal_energy_j_kg() - inlet.specific_internal_energy_j_kg()
+                + outlet.pressure_pa() * outlet.specific_volume_m3_kg()
+                - inlet.pressure_pa() * inlet.specific_volume_m3_kg()
+                + work,
+            0.0,
+            2e-5,
+        );
+        assert!(outlet.specific_entropy_j_kg_k() - inlet.specific_entropy_j_kg_k() >= -2e-8);
+    };
+    let throttle = inlet
+        .throttle_to(&low.into(), shaft(1.0).balance, || false)
+        .unwrap();
+    near(throttle.outlet.temperature_k(), 1480.238263631873, 2e-8);
+    near(
+        throttle.outlet.specific_entropy_j_kg_k(),
+        9298.941428651517,
+        2e-8,
+    );
+    assert_eq!(
+        regional(throttle.outlet)
+            .single_phase_source()
+            .unwrap()
+            .region(),
+        If97FluidRegion::Region5
+    );
+    assert!(throttle.balance.source_entropy_change_j_kg_k > 0.0);
+    check_first_law(throttle.outlet, 0.0);
+    for (eta, expected_t, expected_work, expected_s) in [
+        (
+            1.0,
+            761.0112142691587,
+            1_714_514.0425254162,
+            7729.701326182763,
+        ),
+        (
+            0.85,
+            878.2454305113812,
+            1_457_336.9361466037,
+            8043.898627729243,
+        ),
+    ] {
+        let turbine = inlet
+            .adiabatic_shaft_to(&low.into(), WaterShaftDevice::Expander, shaft(eta), || {
+                false
+            })
+            .unwrap();
+        near(turbine.outlet.temperature_k(), expected_t, 2e-8);
+        near(turbine.outlet.specific_entropy_j_kg_k(), expected_s, 2e-8);
+        near(turbine.balance.shaft_work_j_kg, expected_work, 2e-5);
+        near(
+            turbine.isentropic_outlet.temperature_k(),
+            761.0112142691587,
+            2e-8,
+        );
+        assert_eq!(
+            regional(turbine.outlet)
+                .single_phase_source()
+                .unwrap()
+                .region(),
+            If97FluidRegion::Region2
+        );
+        assert_eq!(turbine.dense_source_evaluations, 0);
+        check_first_law(turbine.outlet, turbine.balance.shaft_work_j_kg);
+        if eta < 1.0 {
+            assert!(turbine.balance.source_entropy_change_j_kg_k > 0.0);
         }
     }
 }

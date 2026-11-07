@@ -1,8 +1,8 @@
 //! Complete subcritical and supercritical Rankine cycles on original IF97.
 //!
 //! Run: `cargo run -p fs-material --example water_regional_rankine`.
-//! A single prepared isobar spans cold liquid, Region 3 and hot Region 2 steam.
-//! The two illustrated boiler pressures are 20 MPa and 25 MPa; both cycles
+//! A single prepared isobar spans cold liquid, Region 3 and Regions 2/5 steam.
+//! The illustrated boiler pressures are 20 MPa, 25 MPa and 30 MPa; all cycles
 //! include the feed pump, boiler, turbine and complete condensation at 10 kPa.
 //! All energy quantities are per kilogram of steady throughput. Heat exchangers
 //! have no pressure drop; the pump and turbine are adiabatic, with explicitly
@@ -25,17 +25,19 @@ use fs_thermochem::water::if97::region3::pressure::DensePressureSolve;
 use fs_thermochem::water::if97::{SOURCE_RELEASE, SOURCE_URL};
 
 const CONDENSER_PA: f64 = 10_000.0;
-const BOILER_OUTLET_K: f64 = 823.15;
 const PUMP_EFFICIENCY: f64 = 0.80;
 const TURBINE_EFFICIENCY: f64 = 0.85;
 const ENERGY_TOLERANCE_J_KG: f64 = 2e-5;
 
-fn chart(pressure_pa: f64) -> Result<RegionalWater, Box<dyn std::error::Error>> {
+fn chart(
+    pressure_pa: f64,
+    maximum_temperature_k: f64,
+) -> Result<RegionalWater, Box<dyn std::error::Error>> {
     Ok(RegionalWater::new(
         Pressure::new(pressure_pa),
         RegionalWaterControls {
             minimum_temperature_k: 273.16,
-            maximum_temperature_k: 873.15,
+            maximum_temperature_k,
             enthalpy_tolerance_j_kg: 1e-6,
             maximum_iterations: 96,
             maximum_saturation_entropy_defect_j_kg_k: 0.1,
@@ -96,9 +98,12 @@ fn row(label: &str, state: RegionalWaterState) {
     );
 }
 
-fn run_cycle(boiler_pressure_pa: f64) -> Result<(), Box<dyn std::error::Error>> {
-    let low = chart(CONDENSER_PA)?;
-    let high = chart(boiler_pressure_pa)?;
+fn run_cycle(
+    boiler_pressure_pa: f64,
+    boiler_outlet_k: f64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let low = chart(CONDENSER_PA, 873.15)?;
+    let high = chart(boiler_pressure_pa, 873.15_f64.max(boiler_outlet_k + 50.0))?;
     let liquid = low.state_at_quality(0.0, || false)?;
     let pump = WaterFlowState::from(liquid).adiabatic_shaft_to(
         &WaterFlowChart::from(high),
@@ -107,7 +112,7 @@ fn run_cycle(boiler_pressure_pa: f64) -> Result<(), Box<dyn std::error::Error>> 
         || false,
     )?;
     let feed = regional(pump.outlet)?;
-    let target = high.state_at_temperature(Temperature::new(BOILER_OUTLET_K), || false)?;
+    let target = high.state_at_temperature(Temperature::new(boiler_outlet_k), || false)?;
     let heat_in = target.specific_enthalpy_j_kg() - feed.specific_enthalpy_j_kg();
     // One accepted heat operation traverses the source regions and any actual
     // saturation plateau. The caller does not split or reconcile the sources.
@@ -135,7 +140,9 @@ fn run_cycle(boiler_pressure_pa: f64) -> Result<(), Box<dyn std::error::Error>> 
         return Err("Rankine heat, work or complete-condensation admission failed".into());
     }
 
-    println!("# Complete Rankine cycle: boiler_pressure={boiler_pressure_pa:.0} Pa");
+    println!(
+        "# Complete Rankine cycle: boiler_pressure={boiler_pressure_pa:.0} Pa, boiler_outlet={boiler_outlet_k:.2} K"
+    );
     println!(
         "state,source,pressure_Pa,temperature_K,enthalpy_J_kg,internal_energy_J_kg,source_entropy_J_kg_K,specific_volume_m3_kg,vapor_quality"
     );
@@ -251,14 +258,12 @@ fn run_cycle(boiler_pressure_pa: f64) -> Result<(), Box<dyn std::error::Error>> 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("# {SOURCE_RELEASE}: {SOURCE_URL}");
     println!("# Heat positive into water; shaft work positive outward; all amounts per kg.");
-    println!(
-        "# eta_pump={PUMP_EFFICIENCY}; eta_turbine={TURBINE_EFFICIENCY}; boiler_outlet={BOILER_OUTLET_K} K."
-    );
+    println!("# eta_pump={PUMP_EFFICIENCY}; eta_turbine={TURBINE_EFFICIENCY}.");
     println!(
         "# Regional matching defects remain source-fit diagnostics; no reservoir entropy claim."
     );
-    for pressure in [20e6, 25e6] {
-        run_cycle(pressure)?;
+    for (pressure, outlet) in [(20e6, 823.15), (25e6, 823.15), (30e6, 1500.0)] {
+        run_cycle(pressure, outlet)?;
     }
     Ok(())
 }

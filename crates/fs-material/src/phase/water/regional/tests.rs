@@ -45,25 +45,27 @@ fn entropy_controls() -> WaterEntropySolve {
 }
 
 #[test]
-fn cold_feed_to_steam_and_supercritical_heat_close_original_energy_across_both_junctions() {
-    for p in [20e6, 25e6] {
-        let chart = chart(p, 290.0, 873.15);
+fn cold_feed_to_steam_and_supercritical_heat_close_original_energy_across_all_junctions() {
+    for (p, maximum, hot_t, region, junctions) in [
+        (20e6, 873.15, 823.15, If97FluidRegion::Region2, 2),
+        (25e6, 873.15, 823.15, If97FluidRegion::Region2, 2),
+        (20e6, 2273.15, 1500.0, If97FluidRegion::Region5, 3),
+        (25e6, 2273.15, 2000.0, If97FluidRegion::Region5, 3),
+    ] {
+        let chart = chart(p, 290.0, maximum);
         let cold = at_t(&chart, 300.0);
-        let hot = at_t(&chart, 823.15);
+        let hot = at_t(&chart, hot_t);
         assert_eq!(
             cold.single_phase_source().unwrap().region(),
             If97FluidRegion::Region1
         );
-        assert_eq!(
-            hot.single_phase_source().unwrap().region(),
-            If97FluidRegion::Region2
-        );
+        assert_eq!(hot.single_phase_source().unwrap().region(), region);
         let mass = 0.5;
         let heat = mass * (hot.specific_enthalpy_j_kg() - cold.specific_enthalpy_j_kg());
         let step = chart
             .advance_heat(cold, mass, heat, 2e-5, || false)
             .unwrap();
-        near(step.state.temperature_k(), 823.15, 2e-8);
+        near(step.state.temperature_k(), hot_t, 2e-8);
         near(step.enthalpy_change_j, heat, 2e-5);
         near(
             step.internal_energy_change_j + step.boundary_work_j,
@@ -83,7 +85,12 @@ fn cold_feed_to_steam_and_supercritical_heat_close_original_energy_across_both_j
             mass * matching,
             1e-10,
         );
-        assert_eq!(chart.junctions().count(), 2);
+        assert_eq!(chart.junctions().count(), junctions);
+        assert_eq!(
+            chart.event_count,
+            junctions + usize::from(p < CRITICAL_PRESSURE_PA)
+        );
+        assert_eq!(chart.pieces.iter().flatten().count(), chart.event_count + 1);
         if p < CRITICAL_PRESSURE_PA {
             near(
                 step.latent_enthalpy_change_j,
@@ -99,7 +106,7 @@ fn cold_feed_to_steam_and_supercritical_heat_close_original_energy_across_both_j
         let inverse = chart
             .state_at_specific_entropy(hot.specific_entropy_j_kg_k(), entropy_controls(), || false)
             .unwrap();
-        near(inverse.state().temperature_k(), 823.15, 2e-8);
+        near(inverse.state().temperature_k(), hot_t, 2e-8);
         let back = chart
             .advance_heat(step.state, mass, -heat, 2e-5, || false)
             .unwrap();
@@ -117,9 +124,25 @@ fn cold_feed_to_steam_and_supercritical_heat_close_original_energy_across_both_j
 fn caloric_gaps_and_overlaps_are_explicit_and_heat_continues_in_its_retained_direction() {
     // The h and s jump signs can differ at the same boundary. Every coordinate
     // must be classified using its actual original one-sided endpoint values.
-    for p in [20e6, 25e6] {
-        let chart = chart(p, 300.0, 873.15);
+    for (p, lo, hi) in [
+        (20e6, 300.0, 873.15),
+        (25e6, 300.0, 873.15),
+        (20e6, 900.0, 1500.0),
+        (30e6, 900.0, 1500.0),
+    ] {
+        let chart = chart(p, lo, hi);
         for junction in chart.junctions() {
+            if p == 30e6 {
+                assert_eq!(junction.kind(), If97JunctionKind::VaporHighTemperature);
+                // Independent 65-digit evaluation of the released Gibbs
+                // equations: h has a gap while s overlaps at this same seam.
+                near(junction.enthalpy_change().value(), 32.04491113273910, 1e-7);
+                near(
+                    junction.entropy_change().value(),
+                    -0.05102423581883115,
+                    1e-10,
+                );
+            }
             let (a, b) = (junction.lower(), junction.upper());
             for coordinate in [WaterCoordinate::Enthalpy, WaterCoordinate::Entropy] {
                 let read = |s: If97FluidState| {
@@ -193,8 +216,8 @@ fn caloric_gaps_and_overlaps_are_explicit_and_heat_continues_in_its_retained_dir
 fn independent_piece_cp_and_cp_over_t_integrals_separate_sensible_latent_and_matching() {
     // G1: numerical quadrature uses source derivatives and never differences
     // source calorics. Matching defects and physical latent changes are separate.
-    for p in [20e6, 25e6] {
-        let chart = chart(p, 300.0, 823.15);
+    for (p, hot_t) in [(20e6, 1500.0), (25e6, 823.15)] {
+        let chart = chart(p, 300.0, hot_t);
         let mut h = 0.0;
         let mut s = 0.0;
         let panels = 1024;
@@ -232,7 +255,7 @@ fn independent_piece_cp_and_cp_over_t_integrals_separate_sensible_latent_and_mat
             }
         }
         let cold = at_t(&chart, 300.0);
-        let hot = at_t(&chart, 823.15);
+        let hot = at_t(&chart, hot_t);
         let heat = hot.specific_enthalpy_j_kg() - cold.specific_enthalpy_j_kg();
         let step = chart.advance_heat(cold, 1.0, heat, 2e-5, || false).unwrap();
         near(step.sensible_enthalpy_change_j, h, 0.03);
@@ -318,9 +341,9 @@ fn unused_junctions_do_not_block_cold_liquid_dense_boiling_or_very_low_pressure_
 
 #[test]
 fn heating_subdivision_and_tiny_phase_changes_preserve_the_original_accounts() {
-    let chart = chart(20e6, 290.0, 873.15);
+    let chart = chart(20e6, 290.0, 2273.15);
     let cold = at_t(&chart, 300.0);
-    let hot = at_t(&chart, 823.15);
+    let hot = at_t(&chart, 1500.0);
     let heat = hot.specific_enthalpy_j_kg() - cold.specific_enthalpy_j_kg();
     let direct = chart.advance_heat(cold, 1.0, heat, 2e-5, || false).unwrap();
     let mut state = cold;
@@ -355,6 +378,87 @@ fn heating_subdivision_and_tiny_phase_changes_preserve_the_original_accounts() {
     let tiny = low.advance_heat(liquid, 1.0, q, q, || false).unwrap();
     assert!(tiny.state.vapor_quality().unwrap() > 0.0);
     assert_eq!(tiny.state.temperature_k(), liquid.temperature_k());
+}
+
+#[test]
+fn region5_inverses_recover_published_table42_without_unused_matching_budgets() {
+    // IAPWS R7-97(2012), Table 42, after kJ-to-J conversion. The printed
+    // h/s rounding implies less than 5 microkelvin of inverse uncertainty.
+    for (p, t, h, s) in [
+        (0.5e6, 1500.0, 5_219_768.55, 9654.08875),
+        (30e6, 1500.0, 5_167_235.14, 7729.70133),
+        (30e6, 2000.0, 6_571_226.04, 8536.40523),
+    ] {
+        let mut c = controls(1073.15_f64.next_up(), 2273.15);
+        c.junctions.maximum_enthalpy_jump_j_kg = 0.0;
+        c.junctions.maximum_entropy_jump_j_kg_k = 0.0;
+        c.junctions.maximum_volume_jump_m3_kg = 0.0;
+        let chart = RegionalWater::new(Pressure::new(p), c, || false).unwrap();
+        assert_eq!(chart.junctions().count(), 0);
+        assert!(chart.saturation().is_none());
+        let h_state = chart.state_at_specific_enthalpy(h, || false).unwrap();
+        let s_state = chart
+            .state_at_specific_entropy(s, entropy_controls(), || false)
+            .unwrap();
+        near(h_state.state().temperature_k(), t, 5e-6);
+        near(s_state.state().temperature_k(), t, 5e-6);
+        assert_eq!(
+            h_state.state().single_phase_source().unwrap().region(),
+            If97FluidRegion::Region5
+        );
+        assert_eq!(h_state.dense_source_evaluations(), 0);
+        assert_eq!(s_state.dense_source_evaluations(), 0);
+        assert_eq!(
+            chart.state_at_specific_enthalpy(h, || true),
+            Err(RegionalWaterError::Cancelled)
+        );
+    }
+}
+
+#[test]
+fn region5_domain_endpoints_and_matching_limits_preserve_region2_compatibility() {
+    for p in [50e6_f64.next_up(), 100e6] {
+        let old = chart(p, 900.0, 1073.15);
+        assert_eq!(old.junctions().count(), 0);
+        assert_eq!(
+            at_t(&old, 1073.15).single_phase_source().unwrap().region(),
+            If97FluidRegion::Region2
+        );
+    }
+    let hot = chart(50e6, 1073.15, 2273.15);
+    assert_eq!(hot.junctions().count(), 1);
+    assert_eq!(
+        at_t(&hot, 1073.15).single_phase_source().unwrap().region(),
+        If97FluidRegion::Region2
+    );
+    for t in [1073.15_f64.next_up(), 2273.15] {
+        assert_eq!(
+            at_t(&hot, t).single_phase_source().unwrap().region(),
+            If97FluidRegion::Region5
+        );
+    }
+    for (p, maximum) in [
+        (50e6_f64.next_up(), 1073.15_f64.next_up()),
+        (50e6, 2273.15_f64.next_up()),
+    ] {
+        assert!(RegionalWater::new(Pressure::new(p), controls(900.0, maximum), || false).is_err());
+    }
+    for (h, s, v) in [(32.0, 0.25, 1e-5), (200.0, 0.05, 1e-5), (200.0, 0.25, 2e-7)] {
+        let mut c = controls(900.0, 1500.0);
+        c.junctions.maximum_enthalpy_jump_j_kg = h;
+        c.junctions.maximum_entropy_jump_j_kg_k = s;
+        c.junctions.maximum_volume_jump_m3_kg = v;
+        assert!(matches!(
+            RegionalWater::new(Pressure::new(30e6), c, || false),
+            Err(RegionalWaterError::JunctionBudget {
+                kind: If97JunctionKind::VaporHighTemperature
+            })
+        ));
+    }
+    assert_eq!(
+        RegionalWater::new(Pressure::new(50e6), controls(1073.15, 2273.15), || true),
+        Err(RegionalWaterError::Cancelled)
+    );
 }
 
 #[test]
