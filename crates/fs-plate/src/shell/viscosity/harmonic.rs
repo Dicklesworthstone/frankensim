@@ -1,6 +1,6 @@
 //! Dispersive forced motion of the original CST/DKT shell.
 //!
-//! Each retained homogeneous tensor law is reduced by the material owner's
+//! Each retained homogeneous or laminate tensor law is reduced by the material owner's
 //! COMPLEX plane-stress constraint at the requested frequency. The original
 //! CST membrane and DKT curvature operators integrate its complete anisotropic
 //! storage and loss. The shared harmonic owner solves the full physical pencil
@@ -13,8 +13,9 @@ use super::{
     strain_rows,
 };
 use crate::shell::{
-    CstDktMass, DRILLING_ALPHA, ShellMesh, ShellModel, ShellSection, ShellSupport,
-    add_drilling_stiffness, assemble_shell_materials_with_mass,
+    CstDktMass, DRILLING_ALPHA, ReferenceDensityMoments, ShellMesh, ShellModel, ShellSection,
+    ShellSupport, add_drilling_stiffness, assemble_shell_materials_with_mass,
+    assemble_shell_materials_with_reference_density_moments,
 };
 use crate::{PlateError, PlateSection};
 use fs_exec::Cx;
@@ -33,6 +34,10 @@ use fs_sparse::{Coo, Csr};
 
 type Resultants = ([f64; 9], [f64; 9], [f64; 9]);
 
+mod section;
+use section::PreparedSection;
+pub use section::TensorPronyShellSection;
+
 /// The original material, spatial or shared harmonic refusal.
 #[derive(Debug)]
 pub enum TensorShellHarmonicError {
@@ -40,6 +45,11 @@ pub enum TensorShellHarmonicError {
     Plate(PlateError),
     /// Original tensor frequency, passivity, strain domain or representability.
     Material { element: usize, source: ViscoError },
+    /// Original layer, orientation, section integration or source strain domain.
+    Laminate {
+        element: usize,
+        source: fs_material::laminate::LaminateError,
+    },
     /// Shared dense factor, physical port, tangent or numerical audit refusal.
     Harmonic(HarmonicResponseError),
 }
@@ -66,48 +76,6 @@ fn invalid(what: &'static str) -> TensorShellHarmonicError {
     HarmonicResponseError::Invalid(what).into()
 }
 
-/// A centered homogeneous solid section in its facet's local (ex,ey,ez) frame.
-/// Rotate the complete original tensor with `TensorProny::rotated` before
-/// constructing this section; independent storage/loss rotations are invalid.
-/// This is a CST/DKT thin-shell model, without transverse shear deformation.
-#[derive(Clone, Debug)]
-pub struct TensorPronyShellSection {
-    law: TensorProny,
-    thickness_m: f64,
-    density_kg_m3: f64,
-}
-impl TensorPronyShellSection {
-    /// Retain the original law, positive full thickness and reference density.
-    pub fn new(law: TensorProny, thickness_m: f64, density_kg_m3: f64) -> Result<Self, PlateError> {
-        if !thickness_m.is_finite()
-            || thickness_m <= 0.0
-            || !density_kg_m3.is_finite()
-            || density_kg_m3 <= 0.0
-        {
-            return Err(bad(
-                "tensor shell requires positive finite thickness and reference density",
-            ));
-        }
-        Ok(Self {
-            law,
-            thickness_m,
-            density_kg_m3,
-        })
-    }
-    /// Original tensor, including its frequency band and small-strain limit.
-    pub const fn law(&self) -> &TensorProny {
-        &self.law
-    }
-    /// Full centered section thickness [m].
-    pub const fn thickness_m(&self) -> f64 {
-        self.thickness_m
-    }
-    /// Original reference inertia density [kg/m3].
-    pub const fn density_kg_m3(&self) -> f64 {
-        self.density_kg_m3
-    }
-}
-
 /// Native shell and the exact material/geometry selections that assembled it.
 /// The model's original reference drilling stiffness and all chosen mass terms
 /// remain fixed. Only physical membrane/bending storage disperses; stabilization
@@ -125,8 +93,9 @@ pub struct TensorPronyShell {
 
 impl TensorPronyShell {
     /// Assemble the original CST/DKT pencil at an explicitly admitted reference
-    /// frequency. Supply one homogeneous centered section per original facet.
-    /// Native supports and consistent/lumped inertia retain their full coupling.
+    /// frequency. Supply one original homogeneous or laminate section per facet.
+    /// Native supports retain their full coupling. Laminates require consistent
+    /// inertia, including their signed first and physical second density moments.
     /// Material loss is absent from the reference pencil and added exactly once
     /// by each prepared harmonic operator. No modal projection is performed.
     ///
@@ -145,31 +114,58 @@ impl TensorPronyShell {
         cx: &Cx<'_>,
     ) -> Result<Self, TensorShellHarmonicError> {
         checkpoint(cx)?;
-        admit_construction(&mesh, sections.len(), boundary_nodes, support, budget, cx)?;
+        admit_construction(&mesh, &sections, boundary_nodes, support, budget, cx)?;
+        let layered = sections.iter().any(|s| s.laminate().is_some());
+        if layered && mass != CstDktMass::Consistent {
+            return Err(invalid(
+                "layered harmonic shells require consistent reference-density inertia",
+            ));
+        }
         let mut native = Vec::with_capacity(sections.len());
+        let mut storage_sections = Vec::with_capacity(sections.len());
         for (element, section) in sections.iter().enumerate() {
             checkpoint(cx)?;
-            let (q, _) = section
-                .law
-                .plane_stress_complex(MaterialPlane::Axes12, reference_omega_rad_s)
-                .map_err(|source| TensorShellHarmonicError::Material { element, source })?;
-            let (a, _, d) = resultants(q, section.thickness_m)?;
+            let (_, (a, b, d), _) = section.prepare(element, reference_omega_rad_s, cx)?;
             let membrane = SheetMatrix::from_coefficients(a)
                 .map_err(|_| bad("tensor shell reference membrane is unrepresentable"))?;
             native.push(ShellSection::new(
                 PlateSection {
                     d,
-                    thickness: section.thickness_m,
-                    density: section.density_kg_m3,
+                    thickness: section.thickness_m(),
+                    density: section.density_kg_m3(),
                 },
                 membrane,
             )?);
+            storage_sections.push(ShellViscosity::new_coupled(a, b, d)?);
         }
         // The original source assembly owns inertia, physical axial rotations,
         // homogeneous support elimination and relative-spin drilling stiffness.
-        let model =
-            assemble_shell_materials_with_mass(&mesh, &native, boundary_nodes, support, mass)?;
+        let mut model = if layered {
+            let moments: Result<Vec<_>, PlateError> = sections
+                .iter()
+                .map(|s| s.density_moments().map(|m| [m; 3]))
+                .collect();
+            assemble_shell_materials_with_reference_density_moments(
+                &mesh,
+                &native,
+                &moments?,
+                boundary_nodes,
+                support,
+            )?
+        } else {
+            assemble_shell_materials_with_mass(&mesh, &native, boundary_nodes, support, mass)?
+        };
         let drilling = assemble_drilling(&mesh, &native, &model, cx)?;
+        if layered {
+            // Basic native sections have no B block. Use the SAME original
+            // coupled strain owner for reference K and all prepared frequencies;
+            // never subtract large reference terms to recover physical storage.
+            let physical =
+                assemble_constitutive_operator(&mesh, &storage_sections, &model, budget, || {
+                    cx.checkpoint().is_err()
+                })?;
+            model.k = add_operators(&physical, &drilling, model.free, cx)?;
+        }
         checkpoint(cx)?;
         Ok(Self {
             mesh,
@@ -265,17 +261,19 @@ impl TensorPronyShell {
         {
             return Err(invalid("shell harmonic residual budget must lie in (0,1)"));
         }
-        let facet_bytes = core::mem::size_of::<PlaneStressHarmonic>()
-            + 2 * core::mem::size_of::<ShellViscosity>();
+        let section_bytes = self
+            .sections
+            .iter()
+            .try_fold(0usize, |sum, section| {
+                PreparedSection::payload_bytes(section.layer_count())
+                    .and_then(|v| v.checked_add(2 * core::mem::size_of::<ShellViscosity>()))
+                    .and_then(|v| sum.checked_add(v))
+            })
+            .ok_or_else(|| invalid("shell harmonic layer payload overflows"))?;
         let source_bytes = n
             .checked_mul(n)
             .and_then(|v| v.checked_mul(24))
-            .and_then(|v| {
-                self.sections
-                    .len()
-                    .checked_mul(facet_bytes)
-                    .and_then(|w| v.checked_add(w))
-            })
+            .and_then(|v| v.checked_add(section_bytes))
             .ok_or_else(|| invalid("shell harmonic source payload overflows"))?;
         let total = n
             .checked_mul(n)
@@ -296,14 +294,14 @@ impl TensorPronyShell {
         let mut losses = Vec::with_capacity(self.sections.len());
         for (element, section) in self.sections.iter().enumerate() {
             checkpoint(cx)?;
-            let material = section
-                .law
-                .prepare_plane_stress_harmonic(MaterialPlane::Axes12, omega)
-                .map_err(|source| TensorShellHarmonicError::Material { element, source })?;
-            let (a, b, d) = resultants(*material.storage_pa(), section.thickness_m)?;
+            let (material, (a, b, d), mut viscosity) = section.prepare(element, omega, cx)?;
             storage_sections.push(ShellViscosity::new_coupled(a, b, d)?);
-            let mut viscosity = *material.loss_pa();
-            for value in &mut viscosity {
+            for value in viscosity
+                .0
+                .iter_mut()
+                .chain(&mut viscosity.1)
+                .chain(&mut viscosity.2)
+            {
                 let loss = *value;
                 *value /= omega;
                 if !value.is_finite() || loss != 0.0 && *value == 0.0 {
@@ -312,7 +310,7 @@ impl TensorPronyShell {
                     ));
                 }
             }
-            let (a, b, d) = resultants(viscosity, section.thickness_m)?;
+            let (a, b, d) = viscosity;
             losses.push(ShellViscosity::new_coupled(a, b, d)?);
             materials.push(material);
         }
@@ -375,7 +373,7 @@ impl TensorPronyShell {
 pub struct PreparedTensorPronyShell<'a> {
     source: &'a TensorPronyShell,
     omega_rad_s: f64,
-    materials: Vec<PlaneStressHarmonic>,
+    materials: Vec<PreparedSection>,
     response: PreparedHarmonicResponse,
 }
 impl<'a> PreparedTensorPronyShell<'a> {
@@ -394,7 +392,7 @@ impl<'a> PreparedTensorPronyShell<'a> {
     /// absorbed work is separate. No numerical drilling loss is introduced.
     ///
     /// Before publication, recover all six complex Mandel strains and admit the
-    /// maximum norm over the ENTIRE harmonic cycle at both thickness surfaces.
+    /// maximum norm over the ENTIRE harmonic cycle at every original layer face.
     /// DKT curvature is affine over each facet: its vertex extrema bound this
     /// finite-element strain field by convexity, including membrane/bending
     /// interference. This is not a spatial-discretization or shell-model bound.
@@ -453,13 +451,7 @@ impl<'a> PreparedTensorPronyShell<'a> {
                     midpoint[vertex][r] + midpoint[(vertex + 2) % 3][r]
                         - midpoint[(vertex + 1) % 3][r]
                 });
-                for z in [-0.5, 0.5] {
-                    let z = z * self.source.sections[element].thickness_m;
-                    let in_plane = core::array::from_fn(|r| strain[r] + strain[r + 3].scale(z));
-                    material
-                        .recover_strain(&in_plane)
-                        .map_err(|source| TensorShellHarmonicError::Material { element, source })?;
-                }
+                material.admit(&self.source.sections[element], element, &strain, cx)?;
             }
         }
         checkpoint(cx)
@@ -476,16 +468,22 @@ impl<'a> PreparedTensorPronyShell<'a> {
     ) -> Result<PreparedTensorPronyShellFrequency<'a>, TensorShellHarmonicError> {
         checkpoint(cx)?;
         let n = self.source.model.free;
+        let layer_bytes = self
+            .source
+            .sections
+            .iter()
+            .try_fold(0usize, |sum, section| {
+                section
+                    .layer_count()
+                    .checked_mul(2 * core::mem::size_of::<[f64; 9]>())
+                    .and_then(|v| v.checked_add(2 * core::mem::size_of::<Resultants>()))
+                    .and_then(|v| sum.checked_add(v))
+            })
+            .ok_or_else(|| invalid("shell material frequency layer payload overflows"))?;
         let bytes = n
             .checked_mul(n)
             .and_then(|v| v.checked_mul(24))
-            .and_then(|v| {
-                self.source
-                    .sections
-                    .len()
-                    .checked_mul(2 * core::mem::size_of::<Resultants>())
-                    .and_then(|w| v.checked_add(w))
-            })
+            .and_then(|v| v.checked_add(layer_bytes))
             .ok_or_else(|| invalid("shell material frequency payload overflows"))?;
         if bytes > maximum_payload_bytes {
             return Err(HarmonicResponseError::Budget {
@@ -499,18 +497,14 @@ impl<'a> PreparedTensorPronyShell<'a> {
         let mut viscosity = Vec::with_capacity(self.source.sections.len());
         for (element, section) in self.source.sections.iter().enumerate() {
             checkpoint(cx)?;
-            let (re, im) = section
-                .law
-                .plane_stress_complex_frequency_derivative(MaterialPlane::Axes12, self.omega_rad_s)
-                .map_err(|source| TensorShellHarmonicError::Material { element, source })?;
-            let slope = core::array::from_fn(|i| {
-                let omega = Dd::from_f64(self.omega_rad_s);
-                ((Dd::from_f64(im[i]) - Dd::from_f64(self.materials[element].loss_pa()[i]) / omega)
-                    / omega)
-                    .to_f64()
-            });
-            storage.push(resultants(re, section.thickness_m)?);
-            viscosity.push(resultants(slope, section.thickness_m)?);
+            let (re, slope) = section.frequency_derivative(
+                &self.materials[element],
+                element,
+                self.omega_rad_s,
+                cx,
+            )?;
+            storage.push(re);
+            viscosity.push(slope);
         }
         let model = &self.source.model;
         let k = assemble_signed_constitutive_operator(
@@ -616,6 +610,32 @@ fn add_sparse(
     Ok(())
 }
 
+fn add_operators(
+    physical: &Csr,
+    drilling: &Csr,
+    n: usize,
+    cx: &Cx<'_>,
+) -> Result<Csr, TensorShellHarmonicError> {
+    let mut out = Coo::new(n, n);
+    for i in 0..n {
+        checkpoint(cx)?;
+        for matrix in [physical, drilling] {
+            let (columns, values) = matrix.row(i);
+            for (&j, &value) in columns.iter().zip(values) {
+                if value != 0.0 {
+                    out.push(i, j, value);
+                }
+            }
+        }
+    }
+    let out = out.assemble();
+    if (0..n).any(|r| out.row(r).1.iter().any(|v| !v.is_finite())) {
+        return Err(bad("layered shell reference stiffness overflow").into());
+    }
+    checkpoint(cx)?;
+    Ok(out)
+}
+
 fn assemble_drilling(
     mesh: &ShellMesh,
     sections: &[ShellSection],
@@ -672,25 +692,44 @@ fn assemble_drilling(
 
 fn admit_construction(
     mesh: &ShellMesh,
-    count: usize,
+    sections: &[TensorPronyShellSection],
     boundary: &[usize],
     support: ShellSupport,
     budget: ShellViscosityBudget,
     cx: &Cx<'_>,
 ) -> Result<(), TensorShellHarmonicError> {
+    if sections.len() != mesh.tris.len() {
+        return Err(PlateError::SectionCount {
+            expected: mesh.tris.len(),
+            actual: sections.len(),
+        }
+        .into());
+    }
+    if mesh.tris.len() > budget.max_elements {
+        return Err(PlateError::Budget {
+            what: "tensor shell elements",
+            requested: mesh.tris.len(),
+            limit: budget.max_elements,
+        }
+        .into());
+    }
     let full = mesh
         .nodes
         .len()
         .checked_mul(6)
         .ok_or_else(|| bad("shell coordinate overflow"))?;
+    let mut material_work = 0usize;
+    for section in sections {
+        checkpoint(cx)?;
+        material_work = section
+            .material_work()
+            .and_then(|v| material_work.checked_add(v))
+            .ok_or_else(|| bad("shell material work overflow"))?;
+    }
     let work = projection_terms(full, mesh.tris.len(), 18)
+        .and_then(|v| v.checked_add(material_work))
         .ok_or_else(|| bad("shell assembly work overflow"))?;
     for (what, requested, limit) in [
-        (
-            "tensor shell elements",
-            mesh.tris.len(),
-            budget.max_elements,
-        ),
         ("tensor shell full coordinates", full, budget.max_full_dofs),
         ("tensor shell assembly work", work, budget.max_work),
     ] {
@@ -702,13 +741,6 @@ fn admit_construction(
             }
             .into());
         }
-    }
-    if count != mesh.tris.len() {
-        return Err(PlateError::SectionCount {
-            expected: mesh.tris.len(),
-            actual: count,
-        }
-        .into());
     }
     let mut fixed = vec![false; mesh.nodes.len()];
     for &node in boundary {

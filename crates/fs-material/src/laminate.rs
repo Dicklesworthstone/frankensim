@@ -211,9 +211,7 @@ fn rotate_reduced(q: &[f64; 9], angle: f64) -> Option<[f64; 9]> {
     if angle == 0.0 {
         return Some(*q);
     }
-    let (s, c) = angle.sin_cos();
-    let (cc, ss, cs) = (c * c, s * s, c * s);
-    let t = [[cc, ss, cs], [ss, cc, -cs], [-2.0 * cs, 2.0 * cs, cc - ss]];
+    let t = strain_to_principal(angle);
     let mut out = [0.0f64; 9];
     for i in 0..3 {
         for j in i..3 {
@@ -228,6 +226,12 @@ fn rotate_reduced(q: &[f64; 9], angle: f64) -> Option<[f64; 9]> {
         }
     }
     out.iter().all(|v| v.is_finite()).then_some(out)
+}
+
+fn strain_to_principal(angle: f64) -> [[f64; 3]; 3] {
+    let (s, c) = angle.sin_cos();
+    let (cc, ss, cs) = (c * c, s * s, c * s);
+    [[cc, ss, cs], [ss, cc, -cs], [-2.0 * cs, 2.0 * cs, cc - ss]]
 }
 
 /// Rotate the in-plane `[G_xz, G_yz]` diagonal transverse shear by `angle`
@@ -454,6 +458,22 @@ impl LaminateSection {
     #[must_use]
     pub fn layer_integrals(&self) -> &[LaminaIntegrals] {
         &self.integrals
+    }
+    /// Work-conjugate engineering-strain transform from section coordinates
+    /// `[epsilon_x, epsilon_y, gamma_xy]` to one original layer's material axes.
+    /// This is exactly the `T` used in that layer's `T^T Q T` resultants, so
+    /// harmonic strain/stress recovery cannot choose an independent orientation.
+    /// Consumers may cache this real matrix and apply it to complex phasors.
+    ///
+    /// # Errors
+    /// [`LaminateError::Invalid`] when `layer` is not an original layer index.
+    pub fn principal_strain_transform(&self, layer: usize)
+        -> Result<[[f64; 3]; 3], LaminateError>
+    {
+        let layer = self.layers.get(layer).ok_or(LaminateError::Invalid {
+            quantity: "layer strain transform index",
+        })?;
+        Ok(strain_to_principal(layer.orientation_rad))
     }
     /// The declared reference surface.
     #[must_use]

@@ -2156,9 +2156,9 @@ tangent work retain the shared harmonic owner's own budgets. Cancellation or
 source/numerical refusal publishes no partial response. Repeated excitations at
 one frequency reuse the material reductions and factor.
 
-This capability is a centered homogeneous CST/DKT thin-shell model. It does not
-supply MITC transverse-shear dispersion, laminate membrane/bending coupling,
-nonlinear or prestressed/tied assembly response, moving supports, DC, startup
+The homogeneous constructor supplies a centered CST/DKT thin-shell model. It
+does not supply MITC transverse-shear dispersion, nonlinear or prestressed/tied
+assembly response, moving supports, DC, startup
 transients, spatial convergence or experimental validation. The six focused
 regressions in `tests/shell_prony_harmonic.rs` define analytic motion/heat/slopes,
 full anisotropic loaded frequency changes, undamped drilling, strongly separated
@@ -2194,3 +2194,40 @@ square allocation; arithmetic overflow and cancellation refuse the image.
 Focused tests compare original dimensional tensor work, varied directors,
 oblique supports, signed A/B/D and independent shear spectra, rigid/drilling
 nulls, resolved weak shear, zero spectra and admission bounds.
+
+## Layered tensor-Prony harmonic sections
+
+`TensorPronyShellSection::from_laminate` retains the original immutable
+`fs-material::laminate::LaminateSection`, including physical layer faces,
+orientations, source laws and declared reference surface. Full elastic layers
+use an exact lossless tensor lowering with their original strain limits;
+original Prony branches and frequency bands remain intact. Reduced-only
+plane-stress layers are refused because they do not declare full transverse
+strain constants. `law()` returns the optional homogeneous law; `laminate()`
+returns the optional original stack, without an invented equivalent material.
+
+Each frequency integrates storage, loss and signed frequency derivatives through
+the existing laminate A/B/D owner and the existing coupled CST/DKT strain owner.
+Both reference `model().k` and prepared harmonic stiffness include physical
+membrane/bending coupling. Reference drilling remains separate and unchanged.
+The existing laminate density-moment adapter supplies exact I0/I1/I2 to the
+original consistent mass owner, including signed translation/director coupling.
+Lumped mass is explicitly refused for layered sections. Mesh position and normal
+must represent the declared reference surface and thickness orientation.
+
+Prepared layer transforms are the same engineering transforms used by the
+material owner's `T^T Q T` integration. All triangle vertices at both faces of
+every layer recover the original six complex strains and admit the complete
+harmonic cycle. The bound covers this affine thin-shell strain field only.
+Layer count, source branches and retained recovery arrays enter existing work
+and payload ceilings; preparation and admission remain cancellable per layer.
+The shared physical-port response and analytic frequency tangent need no
+separate laminate solve or finite differences.
+
+This extension does not supply MITC transverse-shear dispersion, transverse
+interface traction recovery, delamination, thermal evolution or spatial/model
+error certification. The four native regressions in
+`tests/shell_prony_laminate_harmonic.rs` cover offset rotated A/B/D, signed physical
+inertia, mixed-layer motion/heat/frequency slopes and original layer-domain
+refusals. Formatting/parsing checks passed; native execution remains pending
+because the original dependency graph exceeds this session's available memory.
