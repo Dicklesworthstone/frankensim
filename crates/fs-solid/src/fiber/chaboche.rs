@@ -10,6 +10,9 @@ use fs_material::fiber::Uniaxial;
 use fs_material::plastic::chaboche::axial::{UniaxialChaboche, UniaxialChabocheState};
 use fs_material::plastic::chaboche::{ChabocheError, ChabocheJ2};
 
+/// Source-bound thermal intervals with exact independent branch histories.
+pub mod thermal;
+
 /// Two through eight independent native backstress branches. The existing
 /// single-branch FiberLaw::Chaboche variant remains the N=1 representation.
 #[derive(Clone, Debug, PartialEq)]

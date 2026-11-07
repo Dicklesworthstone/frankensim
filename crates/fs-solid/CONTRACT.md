@@ -12138,3 +12138,37 @@ rustfmt stdin attempt could not start; these new sources and tests have source
 review and independent scalar-oracle checks, but no new formatting, compilation
 or native-runtime pass is claimed. This seam itself adds no heat-transfer law,
 simultaneous heat/motion integrator, gas momentum, phase split or contact model.
+
+## Thermal cyclic fiber malleability
+
+The native physical-time frame owner accepts source-bound thermal Chaboche
+intervals with one through eight independently retained backstress branches.
+Runtime dispatch preserves the exact native law, branch ordering and complete
+history. Clones share material preparation; mechanical trials perform no source
+query, branch aggregation or history reset.
+
+Quasistatic and backward-Euler steps retain the actual physical interval and
+original reference mass. Temperature changes transport each branch through
+the material owner's strain-like history before the existing axial return.
+Rebinding preserves original source/caloric identities, branch count and
+ordering, and accepted temperature. Untimed structural routes refuse these
+interval-bearing laws.
+
+Yield-offset work, physical viscous overstress and nonlinear branch recovery
+are reported separately. Their sum enters physical material heat once;
+reversible thermal exchange remains signed, and material/inertial numerical
+loss stays outside heat. The audit compares every independent plastic and
+backstress component with the native tensor account in declared stress units.
+
+The shared thermal inventory covers heterogeneous tabulated and cyclic fibers
+with original quadrature volumes and member mass. Missing or mismatched
+families refuse without omitting physical inventory. Three focused regression
+definitions cover thermal reversal, unequal heating with eight branches, and
+timed motion with both native mass formulations. Independent fixture arithmetic
+and bounded API/conservation review were completed; native compilation,
+execution and formatting remain unverified because the execution environment
+became unavailable.
+
+The native linear-geometry, small-strain, stationary-support and fixed-reference
+mass limits remain in force. This supplies no finite cyclic-forming or
+experimental calibration claim.

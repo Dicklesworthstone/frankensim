@@ -18,13 +18,15 @@ pub struct FrameInelasticEnergy {
     pub initial_stored_j_m3: f64,
     pub final_stored_j_m3: f64,
     pub mechanical_work_j_m3: f64,
-    /// Sum of creep, yield-offset and physical overstress dissipation.
+    /// Sum of creep, yield-offset, physical overstress and branch-recovery dissipation.
     pub physical_dissipation_j_m3: f64,
     pub creep_dissipation_j_m3: f64,
     /// Yield-offset work only; hardening is retained as storage.
     pub plastic_dissipation_j_m3: f64,
     /// Endpoint viscous overstress times accumulated plastic increment.
     pub overstress_dissipation_j_m3: f64,
+    /// Independent backstress recovery, already included in physical dissipation.
+    pub recovery_dissipation_j_m3: f64,
     /// Native endpoint integration loss, never a caloric heat source.
     pub numerical_dissipation_j_m3: f64,
     pub thermoelastic_storage_change_j_m3: f64,
@@ -48,6 +50,7 @@ impl From<CreepEnergy> for FrameInelasticEnergy {
             creep_dissipation_j_m3: value.creep_dissipation_j_m3,
             plastic_dissipation_j_m3: value.plastic_dissipation_j_m3,
             overstress_dissipation_j_m3: 0.0,
+            recovery_dissipation_j_m3: 0.0,
             numerical_dissipation_j_m3: value.numerical_dissipation_j_m3,
             thermoelastic_storage_change_j_m3: value.thermoelastic_storage_change_j_m3,
             reversible_heat_j_m3: value.reversible_heat_j_m3,
@@ -137,6 +140,7 @@ pub(super) fn audit(
         creep_dissipation_j_m3: 0.0,
         plastic_dissipation_j_m3: plasticity.yield_stress * delta,
         overstress_dissipation_j_m3: viscous * delta,
+        recovery_dissipation_j_m3: 0.0,
         numerical_dissipation_j_m3: energy.numerical_dissipation_j_m3,
         thermoelastic_storage_change_j_m3: 0.0,
         reversible_heat_j_m3: 0.0,

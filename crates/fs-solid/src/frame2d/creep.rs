@@ -9,7 +9,8 @@
 //! This checked path admits linear geometry, stationary supports and Norton or
 //! joint Norton/J2, with optional independent resistance recovery and sourced
 //! thermal-expansion wrappers, or measured-curve plastic/Perzyna flow with sourced
-//! temperature-dependent hardening, elasticity and expansion. Temperature
+//! temperature-dependent hardening, elasticity and expansion, and thermal
+//! Chaboche flow with independently retained cyclic recovery branches. Temperature
 //! is prescribed through original source-bound laws between intervals; this
 //! owner reports reciprocal heat but does not itself solve a caloric field.
 //! Nodal rotations and the sum of absolute quadrature curvature are bounded;
@@ -17,6 +18,7 @@
 
 use super::{Frame2d, Geometry, SectionModel, SolidError, StaticStep};
 use crate::fiber::{FiberLaw, FiberState};
+use crate::fiber::chaboche::thermal::{ThermalChabocheFiberLaw, ThermalChabocheFiberState};
 use fs_material::creep::plastic::uniaxial::{UniaxialNortonJ2, UniaxialNortonJ2State};
 use fs_material::creep::recovery::CreepRecoveryParameters;
 use fs_material::creep::recovery::plastic::uniaxial::{
@@ -39,6 +41,7 @@ use fs_material::plastic::energy::EnergyError;
 use fs_material::plastic::reduction::UniaxialJ2State;
 use fs_material::plastic::tabulated::rate::axial::UniaxialTabulatedOverstress;
 use fs_material::plastic::thermal::FeedbackError;
+use fs_material::plastic::thermal::chaboche::ThermalChabocheError;
 use fs_material::plastic::thermal::tabulated::axial::{
     UniaxialThermalTabulated, UniaxialThermalTabulatedState,
 };
@@ -53,7 +56,9 @@ pub mod overstress;
 pub use overstress::FrameInelasticEnergy;
 /// Prescribed thermal hardening and the original reciprocal material account.
 pub mod thermal_tabulated;
-pub use thermal_tabulated::FrameThermalTabulatedFiber;
+pub use thermal_tabulated::{FrameThermalFiber, FrameThermalFiberLaw, FrameThermalTabulatedFiber};
+/// Exact thermal cyclic history and independent branch-recovery heat.
+pub mod thermal_chaboche;
 
 /// Independent physical-unit gates and work bound for one native frame step.
 #[derive(Clone, Copy, Debug)]
@@ -73,6 +78,7 @@ pub enum FrameCreepError {
     Material(CreepError),
     Plastic(EnergyError),
     Thermal(FeedbackError),
+    ThermalChaboche(ThermalChabocheError),
     Cancelled,
     Equilibrium {
         dof: usize,
@@ -111,6 +117,8 @@ pub struct FrameCreepEnergy {
     pub plastic_dissipation_j: f64,
     /// Physical viscous plastic work, distinct from yield-offset heat and creep.
     pub overstress_dissipation_j: f64,
+    /// Physical nonlinear backstress recovery, already included in total heat.
+    pub recovery_dissipation_j: f64,
     pub physical_dissipation_j: f64,
     /// Change in T times mechanical entropy, separate from free-energy storage.
     pub thermoelastic_storage_change_j: f64,
@@ -171,6 +179,7 @@ fn energy_gate(residual: f64, tolerance: f64) -> Result<(), FrameCreepError> {
 enum CreepPoint<'a> {
     TabulatedOverstress(&'a UniaxialTabulatedOverstress, &'a UniaxialJ2State),
     ThermalTabulated(&'a UniaxialThermalTabulated, &'a UniaxialThermalTabulatedState),
+    ThermalChaboche(&'a ThermalChabocheFiberLaw, &'a ThermalChabocheFiberState),
     Norton(&'a UniaxialNorton, &'a UniaxialNortonState),
     RecoveringNorton(&'a UniaxialRecoveringNorton, &'a UniaxialRecoveringNortonState),
     NortonJ2(&'a UniaxialNortonJ2, &'a UniaxialNortonJ2State),
@@ -188,6 +197,9 @@ impl<'a> CreepPoint<'a> {
             }
             (FiberLaw::ThermalTabulated(law), FiberState::ThermalTabulated(state)) => {
                 Ok(Self::ThermalTabulated(law, state))
+            }
+            (FiberLaw::ThermalChaboche(law), FiberState::ThermalChaboche(state)) => {
+                Ok(Self::ThermalChaboche(law, state))
             }
             (FiberLaw::Norton(law), FiberState::Norton(state)) => Ok(Self::Norton(law, state)),
             (FiberLaw::RecoveringNorton(law), FiberState::RecoveringNorton(state)) => {
@@ -226,7 +238,7 @@ impl<'a> CreepPoint<'a> {
             Self::ThermalNortonJ2(law, _) => law.kinetics(),
             Self::ThermalRecoveringNorton(law, _) => law.kinetics(),
             Self::ThermalRecoveringNortonJ2(law, _) => law.kinetics(),
-            Self::TabulatedOverstress(..) | Self::ThermalTabulated(..) => return Err(FrameCreepError::Invalid(
+            Self::TabulatedOverstress(..) | Self::ThermalTabulated(..) | Self::ThermalChaboche(..) => return Err(FrameCreepError::Invalid(
                 "Norton and Perzyna physical histories cannot be interchanged",
             )),
         })
@@ -235,6 +247,7 @@ impl<'a> CreepPoint<'a> {
         match self {
             Self::TabulatedOverstress(law, _) => Ok(&law.backbone().backbone().backbone().elastic),
             Self::ThermalTabulated(law, _) => Ok(&law.tensor_law().tabulated_law().backbone().elastic),
+            Self::ThermalChaboche(law, _) => Ok(law.elastic()),
             _ => Ok(self.kinetics()?.elastic()),
         }
     }
@@ -242,6 +255,7 @@ impl<'a> CreepPoint<'a> {
         match self {
             Self::TabulatedOverstress(law, _) => Ok(law.duration_s()),
             Self::ThermalTabulated(law, _) => Ok(law.duration_s()),
+            Self::ThermalChaboche(law, _) => Ok(law.duration_s()),
             _ => Ok(self.kinetics()?.duration_s()),
         }
     }
@@ -249,6 +263,7 @@ impl<'a> CreepPoint<'a> {
         match self {
             Self::TabulatedOverstress(law, _) => law.material(),
             Self::ThermalTabulated(law, _) => Some(law.material()),
+            Self::ThermalChaboche(law, _) => Some(law.material()),
             Self::Norton(law, _) => law.material(),
             Self::RecoveringNorton(law, _) => law.material(),
             Self::NortonJ2(law, _) => law.material(),
@@ -267,12 +282,12 @@ impl<'a> CreepPoint<'a> {
             Self::ThermalRecoveringNortonJ2(law, _) => Some(law.expansion_material()),
             Self::Norton(..) | Self::RecoveringNorton(..) | Self::NortonJ2(..)
                 | Self::RecoveringNortonJ2(..) | Self::TabulatedOverstress(..)
-                | Self::ThermalTabulated(..) => None,
+                | Self::ThermalTabulated(..) | Self::ThermalChaboche(..) => None,
         }
     }
     fn hardening(self) -> Option<f64> {
         match self {
-            Self::TabulatedOverstress(..) | Self::ThermalTabulated(..) => None,
+            Self::TabulatedOverstress(..) | Self::ThermalTabulated(..) | Self::ThermalChaboche(..) => None,
             Self::Norton(..) | Self::RecoveringNorton(..) | Self::ThermalNorton(..)
                 | Self::ThermalRecoveringNorton(..) => None,
             Self::NortonJ2(law, _) => Some(law.backbone().plastic().hardening),
@@ -285,6 +300,7 @@ impl<'a> CreepPoint<'a> {
         match self {
             Self::TabulatedOverstress(law, _) => Some(law.backbone().backbone().backbone().yield_stress),
             Self::ThermalTabulated(law, _) => Some(law.tensor_law().tabulated_law().backbone().yield_stress),
+            Self::ThermalChaboche(law, _) => Some(law.yield_stress_pa()),
             Self::Norton(..) | Self::RecoveringNorton(..) | Self::ThermalNorton(..)
                 | Self::ThermalRecoveringNorton(..) => None,
             Self::NortonJ2(law, _) => Some(law.backbone().plastic().yield_stress),
@@ -308,6 +324,8 @@ impl<'a> CreepPoint<'a> {
                 .map(|_| ()).map_err(FrameCreepError::Plastic),
             Self::ThermalTabulated(law, state) => return law.tensor_strain(strain, state)
                 .map(|_| ()).map_err(FrameCreepError::Thermal),
+            Self::ThermalChaboche(law, state) => return law.tensor_strain(strain, state)
+                .map(|_| ()).map_err(FrameCreepError::ThermalChaboche),
             Self::Norton(law, state) => law.tensor_strain(strain, state),
             Self::RecoveringNorton(law, state) => law.tensor_strain(strain, state),
             Self::NortonJ2(law, state) => law.tensor_strain(strain, state),
@@ -336,6 +354,11 @@ impl<'a> CreepPoint<'a> {
             (self, committed)
         {
             return thermal_tabulated::audit(law, state, accepted, old_strain, new_strain, tolerances);
+        }
+        if let (Self::ThermalChaboche(law, state), Self::ThermalChaboche(_, accepted)) =
+            (self, committed)
+        {
+            return thermal_chaboche::audit(law, state, accepted, old_strain, new_strain, tolerances);
         }
         let modulus = self.elastic()?.youngs;
         let close = |a: &[f64; 6], b: &[f64; 6], pa: f64, pb: f64| {
@@ -620,6 +643,8 @@ impl Frame2d {
     /// original curve, kinetics, receipts and fixed external source coordinates.
     /// Thermal tabulated fibers prepare old/new endpoints from their own original
     /// source family; each family retains its explicit temperature axis internally.
+    /// Thermal cyclic fibers also retain every independently named backstress,
+    /// its original branch count and the source-defined temperature transport.
     pub fn with_creep_laws<L: Clone + Into<FiberLaw>>(
         &self,
         laws: &[L],
@@ -662,6 +687,16 @@ impl Frame2d {
                         require(
                             b.old_temperature_k() == state.temperature_k(),
                             "thermal table interval must start at the fiber's accepted temperature",
+                        )?;
+                    } else if let (
+                        CreepPoint::ThermalChaboche(a, state),
+                        CreepPoint::ThermalChaboche(b, _),
+                    ) = (old, law)
+                    {
+                        a.admit_successor(b).map_err(FrameCreepError::ThermalChaboche)?;
+                        require(
+                            b.old_temperature_k() == state.temperature_k(),
+                            "thermal cyclic interval must start at the fiber's accepted temperature",
                         )?;
                     } else {
                         let old_kinetics = old.kinetics()?;
@@ -960,6 +995,7 @@ impl Frame2d {
                     energy.creep_dissipation_j += volume * account.creep_dissipation_j_m3;
                     energy.plastic_dissipation_j += volume * account.plastic_dissipation_j_m3;
                     energy.overstress_dissipation_j += volume * account.overstress_dissipation_j_m3;
+                    energy.recovery_dissipation_j += volume * account.recovery_dissipation_j_m3;
                     energy.physical_dissipation_j += volume * account.physical_dissipation_j_m3;
                     energy.thermoelastic_storage_change_j +=
                         volume * account.thermoelastic_storage_change_j_m3;

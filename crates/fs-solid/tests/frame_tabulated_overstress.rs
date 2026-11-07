@@ -668,3 +668,6 @@ fn clock_source_and_support_refusals_leave_nonvirgin_frames_usable() {
 
 #[path = "frame_tabulated_overstress/thermal.rs"]
 mod thermal;
+
+#[path = "frame_tabulated_overstress/thermal_chaboche.rs"]
+mod thermal_chaboche;

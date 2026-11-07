@@ -8,6 +8,8 @@ use super::{
     Frame2d, FrameCreepError, FrameInelasticEnergy, SectionModel, poll, positive, require,
 };
 use crate::fiber::{FiberLaw, FiberState};
+use crate::fiber::chaboche::thermal::{ThermalChabocheFiberLaw, ThermalChabocheFiberState};
+use fs_blake3::ContentHash;
 use fs_material::creep::CreepTolerances;
 use fs_material::plastic::energy::{EnergyError, EnergyTolerances};
 use fs_material::plastic::thermal::tabulated::axial::{
@@ -28,6 +30,95 @@ pub struct FrameThermalTabulatedFiber<'a> {
     pub axial_strain: f64,
     pub law: &'a UniaxialThermalTabulated,
     pub state: &'a UniaxialThermalTabulatedState,
+}
+
+/// A retained source-bound thermal law and its original accepted history.
+/// Heterogeneous members keep each native family and exact branch count.
+#[derive(Clone, Copy, Debug)]
+pub enum FrameThermalFiberLaw<'a> {
+    Tabulated {
+        law: &'a UniaxialThermalTabulated,
+        state: &'a UniaxialThermalTabulatedState,
+    },
+    Chaboche {
+        law: &'a ThermalChabocheFiberLaw,
+        state: &'a ThermalChabocheFiberState,
+    },
+}
+
+impl FrameThermalFiberLaw<'_> {
+    pub fn temperature_k(self) -> f64 {
+        match self {
+            Self::Tabulated { state, .. } => state.temperature_k(),
+            Self::Chaboche { state, .. } => state.temperature_k(),
+        }
+    }
+    pub fn old_temperature_k(self) -> f64 {
+        match self {
+            Self::Tabulated { law, .. } => law.old_temperature_k(),
+            Self::Chaboche { law, .. } => law.old_temperature_k(),
+        }
+    }
+    pub fn law_temperature_k(self) -> f64 {
+        match self {
+            Self::Tabulated { law, .. } => law.temperature_k(),
+            Self::Chaboche { law, .. } => law.temperature_k(),
+        }
+    }
+    pub fn density_kg_m3(self) -> f64 {
+        match self {
+            Self::Tabulated { law, .. } => law.density_kg_m3(),
+            Self::Chaboche { law, .. } => law.density_kg_m3(),
+        }
+    }
+    pub fn caloric_curve_identity(self) -> ContentHash {
+        match self {
+            Self::Tabulated { law, .. } => law.caloric_curve_identity(),
+            Self::Chaboche { law, .. } => law.caloric_curve_identity(),
+        }
+    }
+    /// Admit the next original-source interval without evolving any history.
+    pub fn admit_successor(self, next: &FiberLaw) -> Result<(), FrameCreepError> {
+        let next_old_temperature = match (self, next) {
+            (Self::Tabulated { law, .. }, FiberLaw::ThermalTabulated(next)) => {
+                law.admit_successor(next).map_err(FrameCreepError::Thermal)?;
+                next.old_temperature_k()
+            }
+            (Self::Chaboche { law, .. }, FiberLaw::ThermalChaboche(next)) => {
+                law.admit_successor(next).map_err(FrameCreepError::ThermalChaboche)?;
+                next.old_temperature_k()
+            }
+            _ => return Err(FrameCreepError::Invalid(
+                "thermal frame history cannot change its native material family",
+            )),
+        };
+        require(
+            next_old_temperature == self.temperature_k(),
+            "thermal frame interval must start at the original accepted temperature",
+        )
+    }
+
+    fn admit_strain(self, strain: f64) -> Result<(), FrameCreepError> {
+        match self {
+            Self::Tabulated { law, state } => law.tensor_strain(strain, state)
+                .map(|_| ()).map_err(FrameCreepError::Thermal),
+            Self::Chaboche { law, state } => law.tensor_strain(strain, state)
+                .map(|_| ()).map_err(FrameCreepError::ThermalChaboche),
+        }
+    }
+}
+
+/// Original geometric and inertial inventory, shared by all admitted thermal
+/// inelastic families. Reading this record consumes no physical interval.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameThermalFiber<'a> {
+    pub element: usize,
+    pub section: usize,
+    pub fiber: usize,
+    pub reference_volume_m3: f64,
+    pub member_reference_mass_kg: f64,
+    pub axial_strain: f64,
+    pub law: FrameThermalFiberLaw<'a>,
 }
 
 impl Frame2d {
@@ -51,15 +142,45 @@ impl Frame2d {
         }
     }
 
-    /// Inspect a complete thermal-table frame before coupling it to heat cells.
-    /// Nonmatching fibers refuse rather than silently excluding part of a
-    /// member's physical volume or stored history. Work and allocation are
-    /// bounded by `maximum_fiber_points`; cancellation leaves the frame unchanged.
+    /// Inspect a complete thermal-table frame through the same original
+    /// inventory used for heterogeneous thermal materials.
     pub fn thermal_tabulated_fibers(
         &self,
         maximum_fiber_points: usize,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Vec<FrameThermalTabulatedFiber<'_>>, FrameCreepError> {
+        self.thermal_inelastic_fibers(maximum_fiber_points, &mut cancelled)?
+            .into_iter()
+            .map(|point| {
+                poll(&mut cancelled)?;
+                let FrameThermalFiberLaw::Tabulated { law, state } = point.law else {
+                    return Err(FrameCreepError::Invalid(
+                        "thermal table inventory cannot substitute another native fiber family",
+                    ));
+                };
+                Ok(FrameThermalTabulatedFiber {
+                    element: point.element,
+                    section: point.section,
+                    fiber: point.fiber,
+                    reference_volume_m3: point.reference_volume_m3,
+                    member_reference_mass_kg: point.member_reference_mass_kg,
+                    axial_strain: point.axial_strain,
+                    law,
+                    state,
+                })
+            })
+            .collect()
+    }
+
+    /// Inspect every original thermal plastic fiber before caloric composition.
+    /// Mixed tabulated and cyclic materials retain their exact native histories.
+    /// Missing families refuse; no physical volume or inertia is omitted.
+    /// Work and allocation are bounded by the original fiber-point budget.
+    pub fn thermal_inelastic_fibers(
+        &self,
+        maximum_fiber_points: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<FrameThermalFiber<'_>>, FrameCreepError> {
         poll(&mut cancelled)?;
         require(
             maximum_fiber_points > 0 && !self.elements.is_empty(),
@@ -95,9 +216,12 @@ impl Frame2d {
                         inventory.len() < maximum_fiber_points,
                         "thermal frame inventory exceeds its fiber point budget",
                     )?;
-                    let (law, state) = match (&fiber.law, state) {
+                    let law = match (&fiber.law, state) {
                         (FiberLaw::ThermalTabulated(law), FiberState::ThermalTabulated(state)) => {
-                            (law, state)
+                            FrameThermalFiberLaw::Tabulated { law, state }
+                        }
+                        (FiberLaw::ThermalChaboche(law), FiberState::ThermalChaboche(state)) => {
+                            FrameThermalFiberLaw::Chaboche { law, state }
                         }
                         _ => {
                             return Err(FrameCreepError::Invalid(
@@ -115,9 +239,8 @@ impl Frame2d {
                             && axial_strain.is_finite(),
                         "thermal frame inventory requires finite accepted strain and positive reference volume",
                     )?;
-                    law.tensor_strain(axial_strain, state)
-                        .map_err(FrameCreepError::Thermal)?;
-                    inventory.push(FrameThermalTabulatedFiber {
+                    law.admit_strain(axial_strain)?;
+                    inventory.push(FrameThermalFiber {
                         element,
                         section: section_index,
                         fiber: fiber_index,
@@ -125,7 +248,6 @@ impl Frame2d {
                         member_reference_mass_kg,
                         axial_strain,
                         law,
-                        state,
                     });
                 }
             }
@@ -187,6 +309,7 @@ pub(super) fn audit(
         creep_dissipation_j_m3: 0.0,
         plastic_dissipation_j_m3,
         overstress_dissipation_j_m3,
+        recovery_dissipation_j_m3: 0.0,
         numerical_dissipation_j_m3: native.numerical_dissipation_j_m3,
         thermoelastic_storage_change_j_m3: thermal.thermoelastic_storage_change_j_m3,
         reversible_heat_j_m3: thermal.reversible_heat_j_m3,

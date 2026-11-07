@@ -2,8 +2,9 @@
 //!
 //! Every constituent keeps one immutable material-state bundle. Selecting source
 //! coefficients does not calibrate the Mander or Menegotto-Pinto cyclic model.
-//! Temperature and other external conditions are prescribed and fixed; sampled
-//! strain, rate, frequency or history dependence cannot be frozen into a law.
+//! Fixed-condition laws cannot freeze sampled strain, rate, frequency or history
+//! dependence. Explicit thermal interval laws retain their original temperature
+//! path, physical duration and caloric reference density instead.
 //!
 //! Reinforcement is represented by two symmetric, full-core-width thin bands.
 //! Their specified areas replace concrete at the specified centroids. The steel
@@ -11,6 +12,7 @@
 //! This is a smeared reinforcement model, not resolved round-bar geometry.
 
 use super::{Fiber, FiberLaw, Section};
+use super::chaboche::thermal::ThermalChabocheFiberLaw;
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::MaterialError;
 use fs_material::creep::plastic::uniaxial::UniaxialNortonJ2;
@@ -169,6 +171,13 @@ impl FiberMaterial {
                     "thermal tabulated fibers retain their original caloric reference density",
                 )?;
                 Self::thermal_tabulated(law)
+            }
+            FiberLaw::ThermalChaboche(law) => {
+                require(
+                    density_kg_m3 == law.density_kg_m3(),
+                    "thermal Chaboche fibers retain their original caloric reference density",
+                )?;
+                Self::thermal_chaboche(law)
             }
             FiberLaw::Chaboche(law) => Self::chaboche(law, density_kg_m3),
             FiberLaw::ChabocheBranches(law) => {
@@ -413,6 +422,24 @@ impl FiberMaterial {
         let source = Some(law.material().clone());
         Ok(Self {
             law: FiberLaw::ThermalTabulated(law),
+            density_kg_m3,
+            source,
+            chaboche_branch_properties: None,
+        })
+    }
+
+    /// Adopt the original caloric reference density and all prepared thermal
+    /// Chaboche branches. No branch reduction or independent density query occurs.
+    pub fn thermal_chaboche(law: impl Into<ThermalChabocheFiberLaw>) -> Result<Self> {
+        let law = law.into();
+        let density_kg_m3 = law.density_kg_m3();
+        require(
+            positive(density_kg_m3),
+            "thermal Chaboche fibers require positive original reference density",
+        )?;
+        let source = Some(law.material().clone());
+        Ok(Self {
+            law: FiberLaw::ThermalChaboche(law),
             density_kg_m3,
             source,
             chaboche_branch_properties: None,

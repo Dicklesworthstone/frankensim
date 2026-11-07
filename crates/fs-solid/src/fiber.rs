@@ -46,6 +46,7 @@ pub mod chaboche;
 /// Material-bound fiber laws, RC section geometry and coherent member mass.
 pub mod material;
 use chaboche::{ChabocheFiberLaw, ChabocheFiberState};
+use chaboche::thermal::{ThermalChabocheFiberLaw, ThermalChabocheFiberState};
 
 /// A fiber's constitutive card.
 #[derive(Debug, Clone)]
@@ -79,6 +80,8 @@ pub enum FiberLaw {
     /// Original temperature-dependent hardening, expansion and optional Perzyna
     /// flow over one prepared physical interval.
     ThermalTabulated(UniaxialThermalTabulated),
+    /// Source-bound thermal cyclic flow with one through eight independent branches.
+    ThermalChaboche(ThermalChabocheFiberLaw),
     /// Independent nonlinear backstress recovery with native Voce isotropic hardening.
     Chaboche(UniaxialChaboche),
     /// Two through eight independently evolving native recovery branches.
@@ -118,6 +121,8 @@ pub enum FiberState {
     TabulatedOverstress(UniaxialJ2State),
     /// Permanent signed/path plastic history and its accepted source temperature.
     ThermalTabulated(UniaxialThermalTabulatedState),
+    /// Accepted temperature, plastic flow and every independent backstress.
+    ThermalChaboche(ThermalChabocheFiberState),
     /// Signed axial plastic history and independently retained backstress.
     Chaboche(UniaxialChabocheState),
     /// Ordered native histories, with the same branch count as the fiber law.
@@ -181,7 +186,7 @@ impl FiberLaw {
                 | Self::RecoveringNortonJ2(_) | Self::ThermalNorton(_)
                 | Self::ThermalNortonJ2(_) | Self::ThermalRecoveringNorton(_)
                 | Self::ThermalRecoveringNortonJ2(_) | Self::TabulatedOverstress(_)
-                | Self::ThermalTabulated(_)
+                | Self::ThermalTabulated(_) | Self::ThermalChaboche(_)
         )
     }
 }
@@ -226,6 +231,7 @@ impl Section {
                 FiberLaw::Tabulated(l) => FiberState::Tabulated(l.initial_state()),
                 FiberLaw::TabulatedOverstress(l) => FiberState::TabulatedOverstress(l.initial_state()),
                 FiberLaw::ThermalTabulated(l) => FiberState::ThermalTabulated(l.initial_state()),
+                FiberLaw::ThermalChaboche(l) => FiberState::ThermalChaboche(l.initial_state()),
                 FiberLaw::Chaboche(l) => FiberState::Chaboche(l.initial_state()),
                 FiberLaw::ChabocheBranches(l) => FiberState::ChabocheBranches(l.initial_state()),
                 FiberLaw::Steel(l) => FiberState::Steel(l.initial_state()),
@@ -354,6 +360,9 @@ impl Section {
                         .map_err(|error| refused(&error.to_string()))?;
                     (response.stress_pa, response.tangent_pa)
                 }
+                (FiberLaw::ThermalChaboche(l), FiberState::ThermalChaboche(s)) => {
+                    l.response(eps, s).map_err(|error| refused(&error.to_string()))?
+                }
                 (FiberLaw::Tabulated(l), FiberState::Tabulated(s)) => match l.response(eps, s) {
                     // The native checked reduction admits the full compatible
                     // tensor strain and the table's accumulated-strain support.
@@ -471,6 +480,11 @@ impl Section {
                         .map_err(|error| SolidError::MaterialRefused {
                             what: error.to_string(),
                         })?.state;
+                }
+                (FiberLaw::ThermalChaboche(l), FiberState::ThermalChaboche(s)) => {
+                    l.commit(eps, s).map_err(|error| SolidError::MaterialRefused {
+                        what: error.to_string(),
+                    })?;
                 }
                 (FiberLaw::Chaboche(l), FiberState::Chaboche(s)) => *s = l.update_state(eps, s),
                 (FiberLaw::ChabocheBranches(l), FiberState::ChabocheBranches(s)) => {
