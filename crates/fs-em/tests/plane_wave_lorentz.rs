@@ -167,6 +167,75 @@ mod integration {
     }
 
     #[test]
+    fn lorentz_sources_support_absorbing_incidence_with_actual_interference_flux() {
+        let ambient = outside();
+        let material = resonant_source(0.03 * NATURAL, "resonant absorbing incident medium");
+        let polarization = lorentz(material.clone());
+        let conductor = ResolvedConductorState::try_from_material_with_basis(
+            material,
+            ElectricalPropertyBasis::Conductivity,
+        )
+        .unwrap();
+        let electric = [C64::new(0.7, 0.2), C64::new(-0.3, 0.5)];
+        for ratio in [0.5, 1.0, 1.15, 2.0] {
+            let omega = ratio * NATURAL;
+            let bare = polarization.permittivity_f_m(omega).unwrap();
+            for (incident, epsilon) in [
+                (DielectricResponse::Lorentz(&polarization), bare),
+                (
+                    DielectricResponse::LorentzWithOhmic {
+                        dielectric: &polarization,
+                        conductor: &conductor,
+                    },
+                    C64::new(bare.re, bare.im - SIGMA / omega),
+                ),
+            ] {
+                let interface = PlanarDielectricInterface::try_new_with_incident_response(
+                    incident,
+                    DielectricResponse::Lossless(&ambient),
+                )
+                .unwrap();
+                assert!(std::ptr::eq(
+                    interface.incident_material(),
+                    polarization.material()
+                ));
+                assert!(interface.response(omega, 0.8, Polarization::Te).is_err());
+                let kx = 0.4 * omega * (E * M).sqrt();
+                let actual = interface
+                    .response_at_transverse_wavenumber(omega, kx, electric)
+                    .unwrap();
+                complex_close(
+                    actual.incident_permittivity_f_m,
+                    epsilon,
+                    3e-14 * epsilon.abs(),
+                );
+                if ratio == 1.15 {
+                    assert!(actual.incident_permittivity_f_m.re < 0.0);
+                }
+                let qi = (epsilon.scale(omega * omega * M) - C64::from_re(kx * kx)).sqrt();
+                let qt = (omega * omega * E * M - kx * kx).sqrt();
+                let yi = [epsilon.scale(omega) / qi, qi.scale(1.0 / (omega * M))];
+                let yt = [C64::from_re(omega * E / qt), C64::from_re(qt / (omega * M))];
+                for c in 0..2 {
+                    complex_close(
+                        actual.reflected_tangential_e_gain[c],
+                        (yi[c] - yt[c]) / (yi[c] + yt[c]),
+                        2e-13,
+                    );
+                }
+                assert!(actual.incident_normal_power_w_m2 > 0.0);
+                close(
+                    actual.incident_normal_power_w_m2
+                        + actual.reflected_normal_power_w_m2
+                        + actual.interference_normal_power_w_m2,
+                    actual.transmitted_normal_power_w_m2,
+                    3e-13 * actual.incident_normal_power_w_m2,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn resonance_and_independent_ohmic_loss_preserve_coherent_passive_scattering() {
         let ambient = outside();
         let material = resonant_source(0.03 * NATURAL, "resonant specimen A");

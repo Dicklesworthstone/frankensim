@@ -3592,10 +3592,10 @@ has separate native tests for SI dispersion, attenuation and band admission.
 
 `PlanarDielectricInterface::try_new_with_incident_response` and
 `PlanarDielectricLayers::try_new_with_incident_response` retain an original
-frequency-dependent incident law as well. Each selected frequency must have
-strictly positive real permittivity and exactly zero loss; absorbing incidence
-remains refused so incoming/reflected normal powers keep their existing
-additive interpretation. Cauchy, tabulated and Sellmeier incident glass uses its
+frequency-dependent incident law as well. Their existing angle-based R/T and
+film/beam paths require strictly positive real permittivity and exactly zero
+incident loss, so incoming/reflected normal powers keep their additive
+interpretation. Cauchy, tabulated and Sellmeier incident glass uses its
 original vacuum-wavelength parameterization, without a second static epsilon
 property. The incident phase wavelength is `lambda_vac/n`; its conserved
 transverse wave number controls Snell refraction, total internal reflection,
@@ -3614,6 +3614,49 @@ film phase and internal E/H, both illumination ports, wavelength-dependent
 light-cone admission, absorbing/out-of-band refusals and the original static
 constructor equivalence. These remain monochromatic-source numerical checks,
 not a causal pulse-propagation or measured-material claim.
+
+### Reflection launched inside an absorbing medium
+
+`PlanarDielectricInterface::response_at_transverse_wavenumber` separately
+admits passive absorbing incidence at a single stationary isotropic interface.
+It accepts signed real conserved kx [rad/m], ky=0, frequency and actual complex
+peak [Ex,Ey] [V/m] at z=0. A real angle is not substituted for the complex
+incident wave direction. Both original material laws and sourced permeabilities
+remain attached, including Debye, Ohmic, Lorentz and same-snapshot combined
+responses; original spectral-band and material-domain refusals remain active.
+
+The result retains full Cartesian incident/reflected/transmitted E and H,
+complex normal wave numbers, constitutive values and tangential reflection and
+transmission gains. Four unnormalized normal powers [W/m²] are explicit:
+incident, signed reflected, incident/reflected interference, and transmitted.
+Their boundary balance is `P_incident + P_reflected + P_interference =
+P_transmitted`, with reflected power nonpositive. The cross term can have
+either sign. Transmitted power can exceed the separately evaluated incident
+power without gain; neither that result nor the interference is clipped or
+relabelled as interface heat. Subsequent bulk absorption remains separate.
+These are local boundary fields from an authored finite-source amplitude;
+no upstream launch distance or attenuation correction is inferred.
+
+The shared outgoing branch and bounded Fresnel pair are reused. Binary
+constitutive references and compensated dispersion preserve the original real
+transverse wave number without forming an overflowing omega² or epsilon*mu.
+Power-conjugate magnetic traces keep finite longitudinal TM fields at a
+critical exit; evanescent exit fields retain their phase and zero normal flux.
+Incoming pure evanescent/grazing ports, gain and unrepresentable fields/powers
+refuse. Zero authored illumination retains zero fields after material admission.
+Actual plasma fields refuse because the two-wave incident field has no original
+drift-amplitude admission owner. Existing angle, film and beam ports retain
+their lossless-incidence restrictions.
+
+G1/G3 native kernel tests cover independent complex Fresnel equations, both
+Maxwell curls, full boundary traces, signed Poynting flux, a closed-form
+absorbing-incidence interference case, exact critical/evanescent exits,
+lossless-owner reduction, material-product residuals and field/frequency scaling.
+Source-backed integration cases specify the original Debye, both Ohmic source
+bases and Lorentz/combined-law APIs; their Cargo execution remains pending in
+this resource-limited session. The power convention follows the Poynting
+derivation in [Byrnes, sections 4.3–4.4.1 and Appendix B](https://arxiv.org/pdf/1603.02720),
+with this owner's conjugate time convention and explicitly sourced permeability.
 
 ### Coherent finite dielectric films
 

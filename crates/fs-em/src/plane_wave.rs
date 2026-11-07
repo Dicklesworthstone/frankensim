@@ -40,6 +40,9 @@ use fs_math::{c64::C64, dd::Dd, det};
 /// Coherent finite dielectric films, with the same source laws and conventions.
 pub mod layers;
 
+/// Local interface fields and signed power when the incident medium absorbs.
+pub mod absorbing_incidence;
+
 /// Source-bound ordinary/extraordinary refraction in a principal crystal section.
 pub mod uniaxial;
 
@@ -399,24 +402,39 @@ impl WaveMedium {
     }
 
     fn normal(self, cosine: f64) -> Result<C64, ReflectionError> {
-        let mut normal =
+        let normal =
             if self.index_squared_ratio == C64::ONE && self.index_squared_real_residual == 0.0 {
                 C64::from_re(cosine)
             } else {
                 self.normal_squared(cosine).sqrt()
             };
-        // The principal square root has +i on the negative real axis; the
-        // outgoing exp(+i omega t) evanescent branch instead has -i.
-        if normal.im > 0.0 {
-            normal = -normal;
-        }
-        if !finite(normal) || normal.re < 0.0 {
-            return Err(ReflectionError::Invalid(
-                "outgoing wave number is unrepresentable",
-            ));
-        }
-        Ok(normal)
+        checked_outgoing_normal(normal)
     }
+}
+
+fn checked_outgoing_normal(mut normal: C64) -> Result<C64, ReflectionError> {
+    // The principal square root has +i on the negative real axis; the
+    // outgoing exp(+i omega t) evanescent branch instead has -i.
+    if normal.im > 0.0 {
+        normal = -normal;
+    }
+    if !finite(normal) || normal.re < 0.0 {
+        return Err(ReflectionError::Invalid(
+            "outgoing wave number is unrepresentable",
+        ));
+    }
+    Ok(normal)
+}
+
+// Shared bounded boundary pair. The caller gives a/b=Y_i/Y_t without
+// evaluating a singular transmitted TM admittance at critical incidence.
+fn normalized_interface_pair(a: C64, b: C64) -> Result<(C64, C64, C64, f64), ReflectionError> {
+    let scale = positive(a.re.abs().max(a.im.abs()).max(b.re.abs()).max(b.im.abs()))?;
+    let a = C64::new(a.re / scale, a.im / scale);
+    let b = C64::new(b.re / scale, b.im / scale);
+    let denominator = a + b;
+    let norm = positive(denominator.norm_sq())?;
+    Ok((a, b, denominator, norm))
 }
 
 impl<'a> PlanarDielectricInterface<'a> {
@@ -431,10 +449,11 @@ impl<'a> PlanarDielectricInterface<'a> {
     }
 
     /// Retain both original constitutive laws, including spectral incident
-    /// glass. Each response query reuses its actual incident permittivity at
-    /// that frequency and requires it to be positive and exactly lossless.
-    /// Absorbing incidence and out-of-band optical queries refuse; a static
-    /// electric-permittivity property is not required by an optical source.
+    /// glass. The angle-based `response` requires positive, exactly lossless
+    /// incident permittivity at each queried frequency. The explicit transverse
+    /// wave-number query separately admits absorbing incidence with interference
+    /// flux. Out-of-band optical queries refuse; an optical source does not
+    /// require a second static electric-permittivity property.
     pub fn try_new_with_incident_response(
         incident: DielectricResponse<'a>,
         transmitted: DielectricResponse<'a>,
@@ -549,11 +568,7 @@ fn interface_response(
         Polarization::Te => (C64::from_re(medium.mu_ratio * cosine), normal),
         Polarization::Tm => (normal, medium.epsilon_ratio.scale(cosine)),
     };
-    let scale = positive(a.re.abs().max(a.im.abs()).max(b.re.abs()).max(b.im.abs()))?;
-    let a = C64::new(a.re / scale, a.im / scale);
-    let b = C64::new(b.re / scale, b.im / scale);
-    let denominator = a + b;
-    let norm = positive(denominator.norm_sq())?;
+    let (a, b, denominator, norm) = normalized_interface_pair(a, b)?;
     let reflected = (a - b) / denominator;
     let transmitted = a.scale(2.0) / denominator;
     let transmitted_h = b.scale(2.0) / denominator;
