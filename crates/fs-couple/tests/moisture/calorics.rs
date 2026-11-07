@@ -12,6 +12,9 @@ use fs_material::state_point::{
 };
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
+#[path = "calorics/radial.rs"]
+mod radial;
+
 fn source(q: [f64; 2]) -> MaterialCard {
     let base = card([0.01; 2], 0.3);
     let mut claims = base.claims().clone();

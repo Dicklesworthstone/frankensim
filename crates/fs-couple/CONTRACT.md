@@ -3335,6 +3335,27 @@ require explicit cuts. Six focused native regressions use unequal-shell modes,
 nonlinear dry-front solutions, an independent mass-weighted error ratio and
 work/cancellation rollback.
 
+### Radial sorption energy and finite-solution mechanics
+
+`FiniteMoistureAtmosphere::advance_radial_with_sorption_energy` and its SDIRK2
+counterpart integrate the original differential isosteric heat over each actual
+shell's dry-mass-weighted loading change. The existing caloric owner closes
+original gas plus bound-water internal energy against the heat supplied by the
+external isothermal thermostat. Loading-dependent internal redistribution can
+require heat even when no water leaves the specimen. The intermediate SDIRK
+stage is never added as a separate energy debit. Source work and energy-balance
+failure withhold the complete transport/energy candidate. This is global heat
+duty, not a reconstructed local heat equation or temperature feedback.
+
+`MoistureRadialSolid::advance_finite_solution` and its SDIRK2 counterpart resolve
+compatible native deformation, stress and the wet prestressed vibration pencil
+from the exact finite-solution diffusion endpoint. Late mechanical/source
+refusal withholds both water inventories and their dependent solid state.
+Osmotic pressure remains diagnostic; no immersion flow, inferred traction or
+elastic-work feedback into chemical potential is added. Five authored tests
+define unequal-shell heat integrals, sealed redistribution, late caloric
+refusal, native affine swelling/wet inertia and late mechanical refusal.
+
 ### Radial diffusion driving native solid mechanics
 
 `moisture::solid::MoistureRadialSolid` maps every original cylindrical or

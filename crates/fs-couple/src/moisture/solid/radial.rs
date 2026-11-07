@@ -16,6 +16,8 @@ use crate::moisture::radial::{MoistureRadial, RadialMoistureSymmetry};
 mod finite;
 #[path = "radial/mesh.rs"]
 mod mesh;
+#[path = "radial/solution.rs"]
+mod solution;
 
 /// Resolution of the actual cylindrical reference geometry. The native solid's
 /// assembly controls separately bound total nodes, tetrahedra and free DOFs.

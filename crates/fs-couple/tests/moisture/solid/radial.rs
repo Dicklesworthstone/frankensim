@@ -2,6 +2,9 @@
 use super::*;
 use fs_couple::moisture::radial::{MoistureRadial, MoistureRadialGeometry, RadialMoistureSymmetry};
 
+#[path = "radial/solution.rs"]
+mod finite_solution;
+
 fn radial_specimen(
     material: MaterialCard,
     radii: Vec<f64>,

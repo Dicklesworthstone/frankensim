@@ -35,6 +35,9 @@ use fs_thermochem::{
     Nasa9EvaluationReceiptV1, ThermochemErrorV1, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R,
 };
 
+mod radial;
+pub use radial::{RadialSdirk2SorptionEnergyCandidate, RadialSorptionEnergyCandidate};
+
 /// Additional source-integration work and independent closed-energy admission.
 #[derive(Clone, Copy, Debug)]
 pub struct SorptionEnergyControls {
@@ -174,14 +177,14 @@ fn admit(
     Ok(())
 }
 
-fn finish<Field: ReservoirField<N>, const N: usize>(
+fn finish<Field: ReservoirField<N>, Report, const N: usize>(
     atmosphere: &FiniteMoistureAtmosphere,
     before: &Field,
-    native: AtmosphereMoistureCandidate<Field, Field::Report, N>,
+    native: AtmosphereMoistureCandidate<Field, Report, N>,
     law: &MoistureSorptionEnergy,
     controls: SorptionEnergyControls,
     cx: &Cx<'_>,
-) -> Result<SorptionEnergyCandidate<Field, Field::Report, N>> {
+) -> Result<SorptionEnergyCandidate<Field, Report, N>> {
     let old = before.inventory();
     let next = native.moisture().inventory();
     if old.identity != next.identity
