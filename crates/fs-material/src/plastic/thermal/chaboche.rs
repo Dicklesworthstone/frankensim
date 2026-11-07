@@ -13,8 +13,10 @@
 //! preserve the native saturation bound and add no frozen-history second-T
 //! derivative to the existing caloric capacity admission. An explicitly sourced
 //! linear or power-law overstress uses the actual physical interval in the same
-//! implicit branch return. Kinetic coefficients store no energy. Static recovery
-//! and finite-deformation plasticity are not represented.
+//! implicit branch return. An explicitly selected linear static-recovery rate
+//! evolves each branch during the same physical interval, including a dwell.
+//! Kinetic coefficients store no energy. Nonlinear static recovery, isotropic
+//! annealing and finite-deformation plasticity are not represented.
 //!
 //! Nonisothermal model family and the positive temperature-rate term (Eq. 9):
 //! <https://neml.readthedocs.io/en/stable/hardening/non/chaboche.html>.
@@ -23,10 +25,12 @@
 
 /// Owned free-sided thermal intervals retaining every native cyclic branch.
 pub mod axial;
+mod recovery;
 
 use super::expansion::ThermalHistoryContribution;
 use super::*;
 use crate::plastic::chaboche::rate::ChabocheOverstressJ2;
+use crate::plastic::chaboche::recovery::ChabocheStaticRecoveryJ2;
 use crate::plastic::chaboche::source::{BackstressProperties, chaboche_branch_requirements};
 use crate::plastic::chaboche::{
     BackstressBranch, ChabocheError, ChabocheJ2, ChabocheResponse, ChabocheState,
@@ -44,6 +48,7 @@ pub struct ThermalChabocheSource<'a, const N: usize = 1> {
     reference_moduli_pa: [f64; N],
     modulus_slopes_pa_k: [f64; N],
     recovery_per_strain: [f64; N],
+    static_recovery_properties: Option<[String; N]>,
 }
 
 /// One temperature transition and its endpoint mechanical law. Incoming
@@ -61,6 +66,7 @@ pub struct ThermalChaboche<const N: usize = 1> {
     previous_law: ChabocheJ2<N>,
     law: ChabocheJ2<N>,
     rate: Option<ChabocheOverstressJ2<N>>,
+    recovery: Option<ChabocheStaticRecoveryJ2<N>>,
     expansion_strain: f64,
 }
 
@@ -239,6 +245,7 @@ impl<'a, const N: usize> ThermalChabocheSource<'a, N> {
             reference_moduli_pa,
             modulus_slopes_pa_k,
             recovery_per_strain,
+            static_recovery_properties: None,
         };
         // Admit the sum of every native return modulus at both affine extrema.
         for temperature in [first_temperature, last_temperature] {
@@ -258,7 +265,10 @@ impl<'a, const N: usize> ThermalChabocheSource<'a, N> {
         &self.properties
     }
 
-    pub(super) fn law_at(&self, source: &ResolvedJ2Plasticity) -> Result<ChabocheJ2<N>, FeedbackError> {
+    pub(super) fn law_at(
+        &self,
+        source: &ResolvedJ2Plasticity,
+    ) -> Result<ChabocheJ2<N>, FeedbackError> {
         let mut branches =
             [BackstressBranch::new(0.0, 0.0).map_err(|e| FeedbackError::Source(e.into()))?; N];
         for (i, names) in self.properties.iter().enumerate() {
@@ -359,6 +369,7 @@ impl<'a, const N: usize> ThermalChabocheSource<'a, N> {
         let previous_law = self.law_at(&previous)?;
         let law = self.law_at(&source)?;
         let rate = self.overstress_law(&source, &law, duration_s)?;
+        let recovery = self.static_recovery_law(&source, &law, rate.as_ref(), duration_s)?;
         let expansion_strain = self
             .base
             .expansion_strain_between(self.base.reference_temperature_k, temperature_k)?;
@@ -367,6 +378,7 @@ impl<'a, const N: usize> ThermalChabocheSource<'a, N> {
             previous_law,
             law,
             rate,
+            recovery,
             expansion_strain,
         })
     }
@@ -510,26 +522,36 @@ impl<'a, const N: usize> ThermalChabocheSource<'a, N> {
         tolerances: EnergyTolerances,
         duration_s: Option<f64>,
     ) -> Result<(ResolvedJ2Plasticity, ThermalChabocheIncrement<N>), ThermalChabocheError> {
-        let resolved = self.resolve_at_temperatures(old_temperature_k, temperature_k, duration_s)?;
+        let resolved =
+            self.resolve_at_temperatures(old_temperature_k, temperature_k, duration_s)?;
         let old_mechanical = self.base.mechanical_strain(old_temperature_k, old_strain)?;
         let mechanical_strain = self.base.mechanical_strain(temperature_k, strain)?;
         resolved
             .previous_law
             .validate_history(&old_mechanical, old_state)?;
         let transported = resolved.transport_history(old_state)?;
-        let mechanical = match &resolved.rate {
-            Some(rate) => rate.advance_with_energy(
+        let mechanical = if let Some(recovery) = &resolved.recovery {
+            recovery.advance_with_energy(
                 &old_mechanical,
                 &transported,
                 &mechanical_strain,
                 tolerances,
-            ),
-            None => resolved.law.advance_with_energy(
-                &old_mechanical,
-                &transported,
-                &mechanical_strain,
-                tolerances,
-            ),
+            )
+        } else {
+            match &resolved.rate {
+                Some(rate) => rate.advance_with_energy(
+                    &old_mechanical,
+                    &transported,
+                    &mechanical_strain,
+                    tolerances,
+                ),
+                None => resolved.law.advance_with_energy(
+                    &old_mechanical,
+                    &transported,
+                    &mechanical_strain,
+                    tolerances,
+                ),
+            }
         }?;
         let contribution = branch_history_contribution(
             &self.modulus_slopes_pa_k,
@@ -592,9 +614,8 @@ fn branch_history_contribution<const N: usize>(
             finite(contribution.old_entropy_j_m3_k - product(slope, shape0)?)?;
         contribution.new_entropy_j_m3_k =
             finite(contribution.new_entropy_j_m3_k - product(slope, shape1)?)?;
-        contribution.coefficient_storage_change_j_m3 = finite(
-            contribution.coefficient_storage_change_j_m3 + product(c1 - c0, shape0)?,
-        )?;
+        contribution.coefficient_storage_change_j_m3 =
+            finite(contribution.coefficient_storage_change_j_m3 + product(c1 - c0, shape0)?)?;
     }
     Ok(contribution)
 }
@@ -615,6 +636,13 @@ impl<const N: usize> ThermalChaboche<N> {
     /// History must first be thermally transported before direct native use.
     pub const fn rate_law(&self) -> Option<&ChabocheOverstressJ2<N>> {
         self.rate.as_ref()
+    }
+
+    /// Joint static/dynamic recovery and optional overstress at actual dt.
+    /// This is the complete native timed law when static recovery is selected;
+    /// the bare `law`/`rate_law` getters do not apply its time recovery.
+    pub const fn static_recovery_law(&self) -> Option<&ChabocheStaticRecoveryJ2<N>> {
+        self.recovery.as_ref()
     }
 
     /// Change only branch stress coordinates; native plastic strain and alpha
@@ -657,9 +685,13 @@ impl<const N: usize> ThermalChaboche<N> {
     ) -> Result<ChabocheResponse<N>, ChabocheError> {
         let mechanical = self.mechanical_strain(strain)?;
         let transported = self.transport_history(state)?;
-        let mut response = match &self.rate {
-            Some(rate) => rate.response(&mechanical, &transported),
-            None => self.law.response(&mechanical, &transported),
+        let mut response = if let Some(recovery) = &self.recovery {
+            recovery.response(&mechanical, &transported)
+        } else {
+            match &self.rate {
+                Some(rate) => rate.response(&mechanical, &transported),
+                None => self.law.response(&mechanical, &transported),
+            }
         }?;
         response.strain = *strain;
         Ok(response)
@@ -676,10 +708,16 @@ impl<const N: usize> SmallStrainLaw for ThermalChaboche<N> {
             self.mechanical_strain(strain),
             self.transport_history(state),
         ) {
-            (Ok(mechanical), Ok(transported)) => self.rate.as_ref().map_or_else(
-                || self.law.stress(&mechanical, &transported),
-                |rate| rate.stress(&mechanical, &transported),
-            ),
+            (Ok(mechanical), Ok(transported)) => {
+                if let Some(recovery) = &self.recovery {
+                    recovery.stress(&mechanical, &transported)
+                } else {
+                    self.rate.as_ref().map_or_else(
+                        || self.law.stress(&mechanical, &transported),
+                        |rate| rate.stress(&mechanical, &transported),
+                    )
+                }
+            }
             _ => [f64::NAN; 6],
         }
     }
@@ -692,10 +730,16 @@ impl<const N: usize> SmallStrainLaw for ThermalChaboche<N> {
             self.mechanical_strain(strain),
             self.transport_history(state),
         ) {
-            (Ok(mechanical), Ok(transported)) => self.rate.as_ref().map_or_else(
-                || self.law.update_state(&mechanical, &transported),
-                |rate| rate.update_state(&mechanical, &transported),
-            ),
+            (Ok(mechanical), Ok(transported)) => {
+                if let Some(recovery) = &self.recovery {
+                    recovery.update_state(&mechanical, &transported)
+                } else {
+                    self.rate.as_ref().map_or_else(
+                        || self.law.update_state(&mechanical, &transported),
+                        |rate| rate.update_state(&mechanical, &transported),
+                    )
+                }
+            }
             _ => ChabocheState {
                 plastic: J2State {
                     plastic_strain: [f64::NAN; 6],
@@ -707,7 +751,7 @@ impl<const N: usize> SmallStrainLaw for ThermalChaboche<N> {
     }
     fn admissibility(&self) -> MaterialAdmissibility {
         MaterialAdmissibility {
-            failure_envelope: "small-strain thermal Chaboche with affine positive C, fixed gamma and optional explicit-time overstress",
+            failure_envelope: "small-strain thermal Chaboche with affine positive C, fixed gamma and optional timed overstress/static recovery",
             ..self
                 .rate
                 .as_ref()
@@ -725,7 +769,9 @@ impl<const N: usize> SmallStrainLaw for ThermalChaboche<N> {
                 "native implicit return and generally nonsymmetric consistent tangent".into(),
                 "branch entropy, coefficient storage and physical recovery retained separately"
                     .into(),
-                if self.rate.is_some() {
+                if self.recovery.is_some() {
+                    "joint source-defined linear static recovery at explicit physical dt"
+                } else if self.rate.is_some() {
                     "joint source-defined overstress at explicit physical dt"
                 } else {
                     "rate-independent response"
@@ -734,7 +780,7 @@ impl<const N: usize> SmallStrainLaw for ThermalChaboche<N> {
             ],
             self.law.card().validity,
             vec![
-                "no static recovery, sub-yield creep or finite-deformation plasticity".into(),
+                "no nonlinear static recovery, isotropic annealing, independent sub-yield creep or finite-deformation plasticity".into(),
                 "no experimental thermal-cyclic calibration or fatigue-life claim".into(),
             ],
             0.05,

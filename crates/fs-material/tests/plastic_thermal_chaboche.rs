@@ -1364,3 +1364,6 @@ fn absent_rate_branches_recover_thermal_voce_and_power_one_recovers_linear_exact
 
 #[path = "plastic_thermal_chaboche/axial.rs"]
 mod axial;
+
+#[path = "plastic_thermal_chaboche/recovery.rs"]
+mod recovery;

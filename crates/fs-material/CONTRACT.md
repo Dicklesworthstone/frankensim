@@ -21086,3 +21086,28 @@ partition closure, thin standing waves and square-underflow opaque tails.
 The query retains the source identity and the original conservative whole-layer
 strain bound. It does not itself advance a thermal history or infer changes to
 the frozen acoustic material laws.
+
+
+### Original-source thermal dwell recovery across cyclic consumers
+
+`ThermalChabocheSource::with_static_recovery` explicitly selects one complete
+`-r X` coefficient in s^-1 for each ordered branch. Original same-card receipts
+and nonnegative full caloric-span support are pinned: no aliased roles, source
+extrapolation, inferred rates or duration-free evolution. Temperature-dependent
+kinetic rates add no stored energy or entropy. Native thermal history transport
+precedes the simultaneous implicit recovery/flow return; original branch moduli
+still own storage, coefficient work and entropy.
+
+Tensor, owned axial and uniform caloric paths preserve actual duration, all
+material history and physical recovery heat exactly once. Existing thermal
+fiber/frame and continuum enthalpy consumers inherit this source family through
+the same APIs. Family identity also retains the ordered static-rate names.
+Selection on a uniform caloric point must precede loading and physical time.
+
+Three synthetic G0/G1 regression definitions cover hot dwell/reversal with
+independent branch/rate/storage equations and native tensor/axial parity, full
+source/quantity/family/time refusals, and uniform adiabatic recovery heat with
+unchanged plastic accumulation and cancellation/retry. Rustfmt checks passed;
+compilation and native tests remain unverified. This is linear static recovery;
+nonlinear recovery, isotropic annealing, recrystallization, finite cyclic
+deformation and empirical calibration remain outside this implementation.

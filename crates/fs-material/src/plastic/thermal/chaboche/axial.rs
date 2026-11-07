@@ -11,15 +11,16 @@ use super::{
 };
 use crate::fiber::Uniaxial;
 use crate::plastic::chaboche::axial::{
-    UniaxialChaboche, UniaxialChabocheOverstress, UniaxialChabocheResponse,
-    UniaxialChabocheState,
+    UniaxialChaboche, UniaxialChabocheOverstress, UniaxialChabocheResponse, UniaxialChabocheState,
 };
 use crate::plastic::chaboche::source::BackstressProperties;
 use crate::plastic::chaboche::{ChabocheError, ChabocheJ2};
 use crate::plastic::energy::{EnergyError, EnergyIncrement, EnergyTolerances, StoredEnergy};
 use crate::plastic::source::ResolvedJ2Plasticity;
 use crate::plastic::thermal::expansion::PreparedThermoplasticEnergy;
-use crate::plastic::thermal::{FeedbackError, OverstressSelection, ThermoplasticIncrement, product};
+use crate::plastic::thermal::{
+    FeedbackError, OverstressSelection, ThermoplasticIncrement, product,
+};
 use crate::state_point::ResolvedMaterialStatePoint;
 use crate::tensor::contract;
 use crate::{MaterialAdmissibility, SmallStrainLaw, Voigt};
@@ -68,6 +69,7 @@ pub struct UniaxialThermalChabocheIncrement<const N: usize = 1> {
 enum Mechanical<const N: usize> {
     Independent(UniaxialChaboche<N>),
     Overstress(UniaxialChabocheOverstress<N>),
+    Recovery(crate::plastic::chaboche::recovery::ChabocheStaticRecoveryJ2<N>),
 }
 impl<const N: usize> Mechanical<N> {
     fn response(
@@ -78,6 +80,7 @@ impl<const N: usize> Mechanical<N> {
         match self {
             Self::Independent(law) => law.response(strain, state),
             Self::Overstress(law) => law.response(strain, state),
+            Self::Recovery(law) => law.uniaxial_response(strain, state),
         }
     }
 }
@@ -92,6 +95,7 @@ struct Family<const N: usize> {
     kinetics: Option<OverstressSelection>,
     properties: [BackstressProperties; N],
     modulus_slopes_pa_k: [f64; N],
+    static_recovery_properties: Option<[String; N]>,
     density_kg_m3: f64,
     caloric_curve_identity: ContentHash,
 }
@@ -132,15 +136,19 @@ impl<const N: usize> ThermalChabocheSource<'_, N> {
         }
         let next =
             self.resolve_at_temperatures(old_temperature_k, temperature_k, Some(duration_s))?;
-        let mechanical = match &next.rate {
-            Some(rate) => Mechanical::Overstress(
-                UniaxialChabocheOverstress::new(rate.clone())
-                    .map_err(|error| FeedbackError::Source(error.into()))?,
-            ),
-            None => Mechanical::Independent(
-                UniaxialChaboche::new(next.law.clone())
-                    .map_err(|error| FeedbackError::Source(error.into()))?,
-            ),
+        let mechanical = if let Some(recovery) = &next.recovery {
+            Mechanical::Recovery(recovery.clone())
+        } else {
+            match &next.rate {
+                Some(rate) => Mechanical::Overstress(
+                    UniaxialChabocheOverstress::new(rate.clone())
+                        .map_err(|error| FeedbackError::Source(error.into()))?,
+                ),
+                None => Mechanical::Independent(
+                    UniaxialChaboche::new(next.law.clone())
+                        .map_err(|error| FeedbackError::Source(error.into()))?,
+                ),
+            }
         };
         let old_expansion_strain = self
             .base
@@ -158,6 +166,7 @@ impl<const N: usize> ThermalChabocheSource<'_, N> {
             kinetics: self.base.overstress,
             properties: self.properties.clone(),
             modulus_slopes_pa_k: self.modulus_slopes_pa_k,
+            static_recovery_properties: self.static_recovery_properties.clone(),
             density_kg_m3: self.base.density_kg_m3,
             // Includes original Cp and density receipts, not only equal knots.
             caloric_curve_identity: self.base.caloric.curve().identity(),
@@ -224,10 +233,7 @@ impl<const N: usize> UniaxialThermalChaboche<N> {
                 self.prepared.old_expansion_strain,
             ))
         } else if state.temperature_k == self.temperature_k() {
-            Ok((
-                &self.prepared.next.law,
-                self.prepared.next.expansion_strain,
-            ))
+            Ok((&self.prepared.next.law, self.prepared.next.expansion_strain))
         } else {
             Err(FeedbackError::Invalid(
                 "retained cyclic temperature is not an endpoint of this physical interval",
@@ -280,10 +286,9 @@ impl<const N: usize> UniaxialThermalChaboche<N> {
         yield_tolerance_pa: f64,
     ) -> Result<(), ThermalChabocheError> {
         if !yield_tolerance_pa.is_finite() || yield_tolerance_pa <= 0.0 {
-            return Err(FeedbackError::Invalid(
-                "positive finite cyclic yield allowance required",
-            )
-            .into());
+            return Err(
+                FeedbackError::Invalid("positive finite cyclic yield allowance required").into(),
+            );
         }
         let total = self.tensor_strain(strain, state)?;
         let (law, free) = self.endpoint(state)?;
@@ -293,7 +298,9 @@ impl<const N: usize> UniaxialThermalChaboche<N> {
         let stress = law.backbone().backbone().elastic.stress(&elastic, &());
         let residual = law.yield_function_with_state(&stress, history);
         if !residual.is_finite() {
-            return Err(ChabocheError::Invalid("accepted cyclic yield is not representable").into());
+            return Err(
+                ChabocheError::Invalid("accepted cyclic yield is not representable").into(),
+            );
         }
         if self.prepared.family.kinetics.is_none() && residual > yield_tolerance_pa {
             return Err(ChabocheError::Energy(EnergyError::YieldResidual {
@@ -374,19 +381,28 @@ impl<const N: usize> UniaxialThermalChaboche<N> {
         let transported = endpoint.transport_history(old_state)?;
         let old_mechanical = subtract_free(old_total, self.prepared.old_expansion_strain);
         let next_mechanical = subtract_free(candidate.strain, endpoint.expansion_strain);
-        let mechanical = match &endpoint.rate {
-            Some(rate) => rate.advance_with_energy(
+        let mechanical = if let Some(recovery) = &endpoint.recovery {
+            recovery.advance_with_energy(
                 &old_mechanical,
                 &transported,
                 &next_mechanical,
                 tolerances,
-            ),
-            None => endpoint.law.advance_with_energy_from_admitted_history(
-                &old_mechanical,
-                &transported,
-                &next_mechanical,
-                tolerances,
-            ),
+            )
+        } else {
+            match &endpoint.rate {
+                Some(rate) => rate.advance_with_energy(
+                    &old_mechanical,
+                    &transported,
+                    &next_mechanical,
+                    tolerances,
+                ),
+                None => endpoint.law.advance_with_energy_from_admitted_history(
+                    &old_mechanical,
+                    &transported,
+                    &next_mechanical,
+                    tolerances,
+                ),
+            }
         }?;
         let expected = candidate.state.mechanical.tensor_history();
         let modulus = endpoint.law.backbone().backbone().elastic.youngs;
@@ -403,8 +419,8 @@ impl<const N: usize> UniaxialThermalChaboche<N> {
         {
             residual = residual.max(modulus * (actual - expected).abs());
         }
-        residual = residual
-            .max(modulus * (mechanical.state.plastic.alpha - expected.plastic.alpha).abs());
+        residual =
+            residual.max(modulus * (mechanical.state.plastic.alpha - expected.plastic.alpha).abs());
         for (actual, expected) in mechanical
             .state
             .backstress_pa
@@ -488,10 +504,12 @@ impl<const N: usize> Uniaxial for UniaxialThermalChaboche<N> {
         }
     }
     fn stress(&self, strain: f64, state: &Self::State) -> f64 {
-        self.response(strain, state).map_or(f64::NAN, |r| r.stress_pa)
+        self.response(strain, state)
+            .map_or(f64::NAN, |r| r.stress_pa)
     }
     fn tangent(&self, strain: f64, state: &Self::State) -> f64 {
-        self.response(strain, state).map_or(f64::NAN, |r| r.tangent_pa)
+        self.response(strain, state)
+            .map_or(f64::NAN, |r| r.tangent_pa)
     }
     fn update_state(&self, strain: f64, state: &Self::State) -> Self::State {
         self.response(strain, state).map_or(
