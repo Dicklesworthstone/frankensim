@@ -2321,6 +2321,14 @@ declared filament operating point: `V²/R = εσA(T⁴ - T_ambient⁴)`. It comp
 the crate-owned Stefan-Boltzmann constant with explicit electrical and geometry
 inputs. It does not infer carbon resistance, emissivity, surface area, lead
 conduction, gas conduction, lifetime, or visible-light efficacy.
+The steady solve scales by the fourth root of `εσA`, so representable results
+do not require the coefficient or either `T⁴` to be representable separately.
+Net radiation retains a factored temperature difference near equilibrium.
+Zero drive preserves any admitted bath temperature exactly. Nonfinite derived
+outputs and positive electrical power that underflows to zero return
+`IncandescentRadiativeError::Unrepresentable`; browser bindings emit a typed
+refusal rather than invalid JSON numbers. G0/G1/G3 tests cover these numerical
+limits, a small net heat flow, and area/emissivity rescaling.
 
 Assemble and solve the STEADY heat-conduction equation on `fs-feec` tet
 complexes, with anisotropic and temperature-dependent conductivity from

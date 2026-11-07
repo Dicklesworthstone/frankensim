@@ -67,6 +67,11 @@ pub fn edison_radiative_step(
                     "radiative surroundings temperature must be positive",
                     "Supply ambient absolute temperature in kelvin",
                 ),
+                IncandescentRadiativeError::Unrepresentable => (
+                    "unrepresentable-balance",
+                    "the declared balance exceeds numerical current, power, or temperature range",
+                    "Supply operating-point SI values with representable derived quantities",
+                ),
             };
             return refusal_json(code, message, repair);
         }
@@ -123,5 +128,13 @@ mod tests {
         let output = edison_radiative_step(110.0, 150.0, 0.000_123, 1.2, 293.15);
         assert!(output.contains("\"code\":\"invalid-emissivity\""));
         assert!(!output.contains("\"ok\""));
+    }
+
+    #[test]
+    fn unrepresentable_balance_refuses_without_invalid_json_numbers() {
+        let output = edison_radiative_step(1.0e200, 1.0, 0.000_123, 0.8, 293.15);
+        assert!(output.contains("\"code\":\"unrepresentable-balance\""));
+        assert!(!output.contains("\"ok\""));
+        assert!(!output.contains("NaN") && !output.contains("inf"));
     }
 }
