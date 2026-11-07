@@ -131,89 +131,171 @@ fn g1_free_coordinate_and_moving_supports_match_original_consistent_mass_equatio
             },
         )
         .unwrap();
-        let density = [700.0, 2700.0];
-        // Exact normalized moments of the two actual half-thickness layers.
-        let moments = ReferenceDensityMoments::new(
-            (density[0] + density[1]) / 2.0,
-            (density[1] - density[0]) / 8.0,
-            (density[0] + density[1]) / 24.0,
-        )
-        .unwrap();
-        let dt = 0.07;
-        let free = 14; // One global transverse translation remains genuinely free.
-        let loads = [(free, 0.001), (0, -0.0003)];
-        let prescribed: Vec<_> = (0..18)
-            .filter(|&d| d != free)
-            .map(|d| (d, 2e-6 * ((d * 7 % 9) as f64 - 4.0)))
-            .collect();
-        let velocity: Vec<[f64; 6]> = (0..3)
-            .map(|i| core::array::from_fn(|c| 1e-4 * (((6 * i + c) * 5 % 13) as f64 - 6.0)))
-            .collect();
-        let original = assemble_shell_sections_with_reference_density_moments(
-            &mesh,
-            &[PlateSection::isotropic(E, NU, H, 1700.0).unwrap()],
-            &[[moments; 3]],
-            &[],
-            ShellSupport::Free,
-        )
-        .unwrap();
-        let p = problem(&mesh, &material, &prescribed, &loads, &[1.0], 0.3);
-        let reference = p
-            .prepare_reference_inertia(PlasticShellDensity::Layers(&density), cx)
-            .unwrap();
-        let mut old_momentum = vec![0.0; 18];
-        original.m.spmv(velocity.as_flattened(), &mut old_momentum);
-        let mut expected = vec![0.0; 18];
-        for &(d, value) in &prescribed {
-            expected[d] = value;
-        }
-        let effective = |i, j| original.k.get(i, j) + original.m.get(i, j) / (dt * dt);
-        expected[free] = (loads[0].1 + old_momentum[free] / dt
-            - (0..18)
+        for density in [
+            vec![[700.0; 3], [2700.0; 3]],
+            vec![[300.0, 900.0, 900.0], [2000.0, 2700.0, 3400.0]],
+        ] {
+            // Exact normalized moments at each corner of the two real layers.
+            let moments = core::array::from_fn(|corner| {
+                let lower = density[0][corner];
+                let upper = density[1][corner];
+                ReferenceDensityMoments::new(
+                    (lower + upper) / 2.0,
+                    (upper - lower) / 8.0,
+                    (lower + upper) / 24.0,
+                )
+                .unwrap()
+            });
+            let dt = 0.07;
+            let free = 14; // One global transverse translation remains genuinely free.
+            let loads = [(free, 0.001), (0, -0.0003)];
+            let prescribed: Vec<_> = (0..18)
                 .filter(|&d| d != free)
-                .map(|d| effective(free, d) * expected[d])
-                .sum::<f64>())
-            / effective(free, free);
-        let step = p
-            .advance_backward_euler(None, &velocity, &reference, dt, cx)
+                .map(|d| (d, 2e-6 * ((d * 7 % 9) as f64 - 4.0)))
+                .collect();
+            let velocity: Vec<[f64; 6]> = (0..3)
+                .map(|i| core::array::from_fn(|c| 1e-4 * (((6 * i + c) * 5 % 13) as f64 - 6.0)))
+                .collect();
+            let original = assemble_shell_sections_with_reference_density_moments(
+                &mesh,
+                &[PlateSection::isotropic(E, NU, H, 1700.0).unwrap()],
+                &[moments],
+                &[],
+                ShellSupport::Free,
+            )
             .unwrap();
-        assert_eq!(step.solution.increments[0].evolving_elements, 0);
-        for d in 0..18 {
-            near(step.solution.coordinates[d / 6][d % 6], expected[d], 2e-12);
-            near(step.velocity[d / 6][d % 6], expected[d] / dt, 3e-11);
-        }
-        for (&(d, _), &reaction) in prescribed
-            .iter()
-            .zip(&step.solution.increments[0].reactions)
-        {
-            let expected_reaction = (0..18).map(|j| effective(d, j) * expected[j]).sum::<f64>()
-                - old_momentum[d] / dt
-                - loads
+            let p = problem(&mesh, &material, &prescribed, &loads, &[1.0], 0.3);
+            let field = [density.clone()];
+            let reference = p
+                .prepare_reference_inertia(PlasticShellDensity::PerElementCorners(&field), cx)
+                .unwrap();
+            assert_eq!(reference.reference_layer_densities(0), None);
+            assert_eq!(
+                reference
+                    .reference_layer_corner_densities(0)
+                    .unwrap()
+                    .collect::<Vec<_>>(),
+                density
+            );
+            // Independent exact simplex integration of rho(N) N_i N_j, including
+            // each real layer's signed first and second thickness moments.
+            let facet = mesh.facet(0).unwrap();
+            let physical_kinetic = |densities: &[[f64; 3]], v: &[f64]| {
+                let mut energy = 0.0;
+                for (layer, rho) in densities.iter().enumerate() {
+                    let z0 = (layer as f64 - 1.0) * H / 2.0;
+                    let z1 = z0 + H / 2.0;
+                    let dz = z1 - z0;
+                    let first = (z1 * z1 - z0 * z0) / 2.0;
+                    let second = (z1.powi(3) - z0.powi(3)) / 3.0;
+                    for i in 0..3 {
+                        let vi = core::array::from_fn(|c| v[6 * i + c]);
+                        let di = cross(core::array::from_fn(|c| v[6 * i + 3 + c]), facet.frame[2]);
+                        for j in 0..3 {
+                            let vj = core::array::from_fn(|c| v[6 * j + c]);
+                            let dj =
+                                cross(core::array::from_fn(|c| v[6 * j + 3 + c]), facet.frame[2]);
+                            let density_gram = facet.area_m2
+                                * (rho.iter().sum::<f64>() + rho[i] + rho[j])
+                                / if i == j { 30.0 } else { 60.0 };
+                            energy += 0.5
+                                * density_gram
+                                * (dz * dot3(vi, vj)
+                                    + first * (dot3(vi, dj) + dot3(di, vj))
+                                    + second * dot3(di, dj));
+                        }
+                    }
+                }
+                energy
+            };
+            near(
+                reference.reference_mass_kg(),
+                facet.area_m2 * H * 1700.0,
+                1e-11,
+            );
+            let constant_reference = p
+                .prepare_reference_inertia(PlasticShellDensity::Layers(&[700.0, 2700.0]), cx)
+                .unwrap();
+            if density[0] == [700.0; 3] {
+                assert_eq!(
+                    reference.reference_mass_kg(),
+                    constant_reference.reference_mass_kg()
+                );
+            } else {
+                // All per-layer means match the constant case; the original mass
+                // distribution and eccentric inertia nevertheless differ.
+                let mean_inventory = [[700.0; 3], [2700.0; 3]];
+                assert!(
+                    (physical_kinetic(&density, velocity.as_flattened())
+                        - physical_kinetic(&mean_inventory, velocity.as_flattened()))
+                    .abs()
+                        > 1e-10
+                );
+            }
+            let mut old_momentum = vec![0.0; 18];
+            original.m.spmv(velocity.as_flattened(), &mut old_momentum);
+            let mut expected = vec![0.0; 18];
+            for &(d, value) in &prescribed {
+                expected[d] = value;
+            }
+            let effective = |i, j| original.k.get(i, j) + original.m.get(i, j) / (dt * dt);
+            expected[free] = (loads[0].1 + old_momentum[free] / dt
+                - (0..18)
+                    .filter(|&d| d != free)
+                    .map(|d| effective(free, d) * expected[d])
+                    .sum::<f64>())
+                / effective(free, free);
+            let step = p
+                .advance_backward_euler(None, &velocity, &reference, dt, cx)
+                .unwrap();
+            assert_eq!(step.solution.increments[0].evolving_elements, 0);
+            for d in 0..18 {
+                near(step.solution.coordinates[d / 6][d % 6], expected[d], 2e-12);
+                near(step.velocity[d / 6][d % 6], expected[d] / dt, 3e-11);
+            }
+            for (&(d, _), &reaction) in prescribed
+                .iter()
+                .zip(&step.solution.increments[0].reactions)
+            {
+                let expected_reaction = (0..18).map(|j| effective(d, j) * expected[j]).sum::<f64>()
+                    - old_momentum[d] / dt
+                    - loads
+                        .iter()
+                        .filter(|&&(row, _)| row == d)
+                        .map(|&(_, f)| f)
+                        .sum::<f64>();
+                near(reaction, expected_reaction, 3e-10);
+            }
+            let next_velocity: Vec<_> = expected.iter().map(|q| q / dt).collect();
+            let mut next_momentum = vec![0.0; 18];
+            original.m.spmv(&next_velocity, &mut next_momentum);
+            let expected_before = 0.5
+                * velocity
+                    .as_flattened()
                     .iter()
-                    .filter(|&&(row, _)| row == d)
-                    .map(|&(_, f)| f)
+                    .zip(&old_momentum)
+                    .map(|(v, p)| v * p)
                     .sum::<f64>();
-            near(reaction, expected_reaction, 3e-10);
+            let expected_after = 0.5
+                * next_velocity
+                    .iter()
+                    .zip(&next_momentum)
+                    .map(|(v, p)| v * p)
+                    .sum::<f64>();
+            near(step.inertia.total.kinetic_before_j, expected_before, 2e-12);
+            near(step.inertia.total.kinetic_after_j, expected_after, 2e-12);
+            near(
+                step.inertia.physical.kinetic_before_j,
+                physical_kinetic(&density, velocity.as_flattened()),
+                2e-12,
+            );
+            near(
+                step.inertia.physical.kinetic_after_j,
+                physical_kinetic(&density, &next_velocity),
+                2e-12,
+            );
+            assert!(step.inertia.total.numerical_loss_j > 0.0);
         }
-        let next_velocity: Vec<_> = expected.iter().map(|q| q / dt).collect();
-        let mut next_momentum = vec![0.0; 18];
-        original.m.spmv(&next_velocity, &mut next_momentum);
-        let expected_before = 0.5
-            * velocity
-                .as_flattened()
-                .iter()
-                .zip(&old_momentum)
-                .map(|(v, p)| v * p)
-                .sum::<f64>();
-        let expected_after = 0.5
-            * next_velocity
-                .iter()
-                .zip(&next_momentum)
-                .map(|(v, p)| v * p)
-                .sum::<f64>();
-        near(step.inertia.total.kinetic_before_j, expected_before, 2e-12);
-        near(step.inertia.total.kinetic_after_j, expected_after, 2e-12);
-        assert!(step.inertia.total.numerical_loss_j > 0.0);
     });
 }
 
@@ -356,6 +438,24 @@ fn g0_retained_mass_refusals_and_cancellation_leave_accepted_motion_unchanged() 
             p.prepare_reference_inertia(PlasticShellDensity::PerElement(&[]), cx)
                 .is_err()
         );
+        for field in [
+            vec![],
+            vec![vec![]],
+            vec![vec![[1200.0; 3]], vec![[1200.0; 3]]],
+            vec![vec![[1200.0; 3], [1200.0; 3]]],
+        ] {
+            assert!(
+                p.prepare_reference_inertia(PlasticShellDensity::PerElementCorners(&field), cx)
+                    .is_err()
+            );
+        }
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let field = [vec![[1200.0, 1200.0, invalid]]];
+            assert!(
+                p.prepare_reference_inertia(PlasticShellDensity::PerElementCorners(&field), cx)
+                    .is_err()
+            );
+        }
         for dt in [0.0, -0.1, f64::NAN] {
             assert!(
                 p.advance_backward_euler(

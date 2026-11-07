@@ -16,7 +16,8 @@ use fs_plate::shell::inertia::{prepare_reference_mass, reference_kinetic_increme
 use fs_plate::shell::{ReferenceDensityMoments, ShellMesh};
 use fs_sparse::Coo;
 
-/// Original density in kg/m³, constant within each physical material layer.
+/// Original density in kg/m³, constant through each physical material layer
+/// and either constant or P1-interpolated across its reference triangle.
 /// Values describe the closed reference inventory, never the current volume.
 #[derive(Debug, Clone, Copy)]
 pub enum PlasticShellDensity<'a> {
@@ -26,14 +27,24 @@ pub enum PlasticShellDensity<'a> {
     Layers(&'a [f64]),
     /// One complete layer-density vector per element, in connectivity order.
     PerElement(&'a [Vec<f64>]),
+    /// One density triplet per physical layer of each element. Triplets follow
+    /// that element's three connectivity corners and interpolate linearly
+    /// within the original facet. Adjacent facets may retain density jumps.
+    PerElementCorners(&'a [Vec<[f64; 3]>]),
+}
+
+#[derive(Debug)]
+enum LayerDensityInventory {
+    Constant(Vec<f64>),
+    Corners(Vec<[f64; 3]>),
 }
 
 #[derive(Debug)]
 struct FacetInventory {
     bounds: Vec<[f64; 2]>,
-    densities_kg_m3: Vec<f64>,
+    densities_kg_m3: LayerDensityInventory,
     thickness_m: f64,
-    moments: ReferenceDensityMoments,
+    moments: [ReferenceDensityMoments; 3],
 }
 
 /// Immutable original mass, bound to the actual reference mesh, layer bounds
@@ -78,13 +89,35 @@ impl<'m> PlasticShellReferenceInertia<'m> {
         self.mass.reference_mass_kg()
     }
 
-    /// Original physical layer densities [kg/m³], in section order. Coupled
-    /// source owners can bind the exact inventory, including eccentric moments;
-    /// equal total mass alone does not identify the reference inertia.
+    /// Original physical layer densities [kg/m³] for a piecewise-constant
+    /// density input, in section order. Returns `None` for corner inputs;
+    /// use [`Self::reference_layer_corner_densities`] to inspect every inventory
+    /// without replacing a spatial field by its mean.
     pub fn reference_layer_densities(&self, element: usize) -> Option<&[f64]> {
-        self.facets
-            .get(element)
-            .map(|facet| facet.densities_kg_m3.as_slice())
+        match &self.facets.get(element)?.densities_kg_m3 {
+            LayerDensityInventory::Constant(values) => Some(values),
+            LayerDensityInventory::Corners(_) => None,
+        }
+    }
+
+    /// Exact original density at each connectivity corner [kg/m³], in physical
+    /// layer order. Constant inputs repeat their value at all three corners.
+    /// The iterator borrows retained inventory and allocates nothing. Coupled
+    /// source owners must compare the complete field: equal layer means or
+    /// total mass do not identify eccentric or spatial reference inertia.
+    pub fn reference_layer_corner_densities(
+        &self,
+        element: usize,
+    ) -> Option<impl ExactSizeIterator<Item = [f64; 3]> + '_> {
+        let inventory = &self.facets.get(element)?.densities_kg_m3;
+        let count = match inventory {
+            LayerDensityInventory::Constant(values) => values.len(),
+            LayerDensityInventory::Corners(values) => values.len(),
+        };
+        Some((0..count).map(move |layer| match inventory {
+            LayerDensityInventory::Constant(values) => [values[layer]; 3],
+            LayerDensityInventory::Corners(values) => values[layer],
+        }))
     }
 
     fn admit<L: SmallStrainLaw>(
@@ -161,9 +194,12 @@ impl<'m, L: SmallStrainLaw> SmallStrainShellProblem<'m, L> {
         cx: &Cx<'_>,
     ) -> Result<(Vec<FacetInventory>, ReferenceMass), SmallStrainTetError> {
         let elements = self.prepare(cx)?;
-        if let PlasticShellDensity::PerElement(values) = density
-            && values.len() != elements.len()
-        {
+        let density_elements = match density {
+            PlasticShellDensity::PerElement(values) => Some(values.len()),
+            PlasticShellDensity::PerElementCorners(values) => Some(values.len()),
+            _ => None,
+        };
+        if density_elements.is_some_and(|count| count != elements.len()) {
             return Err(invalid(
                 "shell reference density needs one layer inventory per element",
             ));
@@ -175,47 +211,69 @@ impl<'m, L: SmallStrainLaw> SmallStrainShellProblem<'m, L> {
         for (e, element) in elements.iter().enumerate() {
             checkpoint(cx)?;
             let layers = self.sections.at(e).layers();
-            let values = match density {
-                PlasticShellDensity::Uniform(_) => None,
-                PlasticShellDensity::Layers(values) => Some(values),
-                PlasticShellDensity::PerElement(values) => Some(values[e].as_slice()),
+            let layer_count = match density {
+                PlasticShellDensity::Uniform(_) => layers.len(),
+                PlasticShellDensity::Layers(values) => values.len(),
+                PlasticShellDensity::PerElement(values) => values[e].len(),
+                PlasticShellDensity::PerElementCorners(values) => values[e].len(),
             };
-            if values.is_some_and(|values| values.len() != layers.len()) {
+            if layer_count != layers.len() {
                 return Err(invalid(
                     "shell reference density count differs from physical layer count",
                 ));
             }
             let thickness = layers.last().expect("admitted section").top_z_m - layers[0].bottom_z_m;
-            let mut q = [0.0; 3];
+            let mut q = [[0.0; 3]; 3];
             let mut bounds = Vec::with_capacity(layers.len());
-            let mut densities_kg_m3 = Vec::with_capacity(layers.len());
-            for (i, layer) in layers.iter().enumerate() {
-                let rho = match density {
-                    PlasticShellDensity::Uniform(rho) => rho,
-                    _ => values.expect("layer density field")[i],
-                };
-                if !rho.is_finite() || rho <= 0.0 {
-                    return Err(invalid(
-                        "shell reference layer density must be finite and positive",
-                    ));
+            let mut densities_kg_m3 = match density {
+                PlasticShellDensity::PerElementCorners(_) => {
+                    LayerDensityInventory::Corners(Vec::with_capacity(layers.len()))
                 }
+                _ => LayerDensityInventory::Constant(Vec::with_capacity(layers.len())),
+            };
+            for (i, layer) in layers.iter().enumerate() {
+                let corners = match density {
+                    PlasticShellDensity::Uniform(rho) => [rho; 3],
+                    PlasticShellDensity::Layers(values) => [values[i]; 3],
+                    PlasticShellDensity::PerElement(values) => [values[e][i]; 3],
+                    PlasticShellDensity::PerElementCorners(values) => values[e][i],
+                };
                 let width = layer.top_z_m - layer.bottom_z_m;
                 let fraction = width / thickness;
                 let center = (layer.bottom_z_m + 0.5 * width) / thickness;
-                let weight = rho * fraction;
-                if !fraction.is_finite() || fraction <= 0.0 || !weight.is_finite() || weight <= 0.0
-                {
-                    return Err(invalid("reference layer mass fraction is unrepresentable"));
+                for (moments, rho) in q.iter_mut().zip(corners) {
+                    if !rho.is_finite() || rho <= 0.0 {
+                        return Err(invalid(
+                            "shell reference layer density must be finite and positive",
+                        ));
+                    }
+                    let weight = rho * fraction;
+                    if !fraction.is_finite()
+                        || fraction <= 0.0
+                        || !weight.is_finite()
+                        || weight <= 0.0
+                    {
+                        return Err(invalid("reference layer mass fraction is unrepresentable"));
+                    }
+                    moments[0] += weight;
+                    moments[1] += weight * center;
+                    moments[2] += weight * (center * center + fraction * fraction / 12.0);
                 }
-                q[0] += weight;
-                q[1] += weight * center;
-                q[2] += weight * (center * center + fraction * fraction / 12.0);
                 bounds.push([layer.bottom_z_m, layer.top_z_m]);
-                densities_kg_m3.push(rho);
+                match &mut densities_kg_m3 {
+                    LayerDensityInventory::Constant(values) => values.push(corners[0]),
+                    LayerDensityInventory::Corners(values) => values.push(corners),
+                }
             }
-            let moments = ReferenceDensityMoments::new(q[0], q[1], q[2])
-                .map_err(|e| invalid(e.to_string()))?;
-            let native = prepare_reference_mass(&element.geometry, [thickness; 3], [moments; 3])
+            let admit_moments = |q: [f64; 3]| {
+                ReferenceDensityMoments::new(q[0], q[1], q[2]).map_err(|e| invalid(e.to_string()))
+            };
+            let moments = [
+                admit_moments(q[0])?,
+                admit_moments(q[1])?,
+                admit_moments(q[2])?,
+            ];
+            let native = prepare_reference_mass(&element.geometry, [thickness; 3], moments)
                 .map_err(|e| invalid(e.to_string()))?;
             total_mass += native.reference_mass_kg;
             // Transform local physical axial rotations with the same frame as
@@ -432,7 +490,7 @@ impl PlasticShellReferenceInertia<'_> {
             let (physical, drilling) = reference_kinetic_increment(
                 &element.geometry,
                 [inventory.thickness_m; 3],
-                [inventory.moments; 3],
+                inventory.moments,
                 &before,
                 &after,
             )

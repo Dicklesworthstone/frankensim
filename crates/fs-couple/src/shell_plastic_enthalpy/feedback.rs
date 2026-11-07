@@ -429,14 +429,13 @@ impl<'a, S: ThermalSectionSourceFamily<'a>> ThermoplasticShell<'a, S> {
             // admitted source density, in the original physical layer order.
             for (e, facet) in self.facets.iter().enumerate() {
                 poll(cx)?;
-                let density = reference.reference_layer_densities(e).ok_or(
+                let density = reference.reference_layer_corner_densities(e).ok_or(
                     ShellThermoplasticError::Invalid("missing original shell layer mass inventory"),
                 )?;
                 if density.len() != facet.layers.len()
                     || density
-                        .iter()
                         .zip(&facet.layers)
-                        .any(|(&rho, layer)| rho != layer.law.reference_density_kg_m3())
+                        .any(|(rho, layer)| rho != [layer.law.reference_density_kg_m3(); 3])
                 {
                     return Err(ShellThermoplasticError::Invalid(
                         "shell inertia must retain the original sourced density of every layer",

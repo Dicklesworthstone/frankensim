@@ -64,31 +64,42 @@ fn g1_dynamic_shell_heats_only_plastic_work_and_retains_history_when_motion_stop
             budget: d.shell_budget,
             settings: IncrementSettings::default(),
         };
-        let wrong_reference = wrong_problem
-            .prepare_reference_inertia(PlasticShellDensity::Layers(&[0.5 * RHO, 1.5 * RHO]), cx)
-            .unwrap();
-        close(
-            wrong_reference.reference_mass_kg(),
-            reference.reference_mass_kg(),
-            1e-18,
-        );
-        assert!(
-            shell
-                .advance_backward_euler(
-                    &thermal,
-                    &(),
-                    dt,
-                    &prescribed,
-                    &[],
-                    &velocity,
-                    &wrong_reference,
-                    IncrementSettings::default(),
-                    thermal_config(),
-                    config(),
-                    cx,
-                )
-                .is_err()
-        );
+        // The second wrong inventory preserves EACH layer's mean density,
+        // but moves mass between corners and changes the local first moment.
+        let corner_density = [vec![
+            [0.5 * RHO, RHO, 1.5 * RHO],
+            [1.5 * RHO, RHO, 0.5 * RHO],
+        ]];
+        for density in [
+            PlasticShellDensity::Layers(&[0.5 * RHO, 1.5 * RHO]),
+            PlasticShellDensity::PerElementCorners(&corner_density),
+        ] {
+            let wrong_reference = wrong_problem
+                .prepare_reference_inertia(density, cx)
+                .unwrap();
+            close(
+                wrong_reference.reference_mass_kg(),
+                reference.reference_mass_kg(),
+                1e-18,
+            );
+            assert!(
+                shell
+                    .advance_backward_euler(
+                        &thermal,
+                        &(),
+                        dt,
+                        &prescribed,
+                        &[],
+                        &velocity,
+                        &wrong_reference,
+                        IncrementSettings::default(),
+                        thermal_config(),
+                        config(),
+                        cx,
+                    )
+                    .is_err()
+            );
+        }
 
         let quasistatic = shell
             .advance(

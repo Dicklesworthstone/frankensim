@@ -10934,6 +10934,21 @@ checked on reuse. Signed first moments retain translation/director coupling
 for eccentric or unequal-density stacks. Reference inventory is actual
 material mass; the numerical relative-drilling gauge adds no matter.
 
+`PlasticShellDensity::PerElementCorners` supplies one positive original density
+triplet for each physical layer of each facet. Density interpolates in the
+original triangle and may jump between facets. The actual layer bounds give
+three distinct zeroth, signed first and second density moments; the original
+native shell quadrature retains their full P1 fields in momentum, support
+reactions and physical/gauge kinetic work. No facet or layer mean replaces the
+original distribution. Constant inputs keep their compact scalar inventory;
+corner inputs retain their exact triplets and both expose an allocation-free
+corner iterator. Sourced thermoplastic/contact motion compares every original
+corner against its source density, rejecting inventories with matching layer
+means but different spatial inertia. This does not add in-plane caloric
+reconstruction, finite rotations or matter transfer. Existing dynamics tests
+now exercise graded two-layer fields against exact cubic simplex/thickness
+integrals and native moving-support equilibrium, plus source/count refusals.
+
 `advance_backward_euler` uses the original shell constitutive history and
 solid Newton owner with the original dimension-independent reference inertia.
 The same mass supplies force, M/dt² tangent, free-row force scaling and full

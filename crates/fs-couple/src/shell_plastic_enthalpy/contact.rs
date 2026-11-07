@@ -280,14 +280,13 @@ impl<'a, S: ThermalSectionSourceFamily<'a>> ThermoplasticShell<'a, S> {
         if let Some((_, reference)) = motion {
             for (e, facet) in self.facets.iter().enumerate() {
                 check()?;
-                let density = reference.reference_layer_densities(e).ok_or(
+                let density = reference.reference_layer_corner_densities(e).ok_or(
                     ShellContactHeatError::Invalid("missing shell reference mass inventory"),
                 )?;
                 if density.len() != facet.layers.len()
                     || density
-                        .iter()
                         .zip(&facet.layers)
-                        .any(|(&rho, layer)| rho != layer.law.reference_density_kg_m3())
+                        .any(|(rho, layer)| rho != [layer.law.reference_density_kg_m3(); 3])
                 {
                     return Err(ShellContactHeatError::Invalid(
                         "contact motion must retain every original sourced layer density",
