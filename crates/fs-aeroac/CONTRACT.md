@@ -589,6 +589,13 @@ material scaling and domain/representability refusals.
   momentum-exchange plate force, `run_slot_jet_3d` /
   `classify_rung` / `SlotJet3dRung::to_jsonl` receipts with the FFT
   bin disclosure and the `FORCE_RMS_AMPLITUDE_FLOOR` amplitude law.
+  The rung verdict (peak, prominence, flatness) reads the admitted jet
+  band only: periodogram bins from `RUNG_DC_GUARD_BINS` (4) up to
+  `RUNG_BAND_TOP_STROUHAL` (St_h 1). A record whose band holds fewer
+  than `RUNG_MIN_BAND_BINS` (128) bins refuses by name, so a pure tone
+  cannot read broadband for want of bins. Verdicts written before this
+  band law used an n/8 guard and flatness to Nyquist; those rows are
+  not re-read.
   Chunked checkpoints fail closed on unknown format versions, files beyond the
   configured size envelope, inconsistent settle/record/force counters, any
   truncated or trailing state bytes, non-finite force/population values, and
@@ -1069,7 +1076,8 @@ is the bounce-back parity artifact (executed at rate 1.60: bin 4095 of
 (`parity_filtered_force_series`, `classify_rung_parity_filtered`):
 non-overlapping pair averaging annihilates the period-2 line exactly,
 keeps a tone's bin index and Strouhal (record duration unchanged; the
-pipeline Strouhal is halved), refuses odd/short records.
+verdict reads the halved record at sample period 2, so its admitted
+band and Strouhal are the raw record's), refuses odd/short records.
 
 `tests/forced_jet.rs` (6, full suite minutes-class): the published spatial mode
 downstream; step kernel against harmonic forcing; the dx 0.2/0.1/0.05

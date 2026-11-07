@@ -56,6 +56,28 @@ pub mod distributed;
 /// ~1e-15 lattice force while prominence cannot detect it).
 pub const FORCE_RMS_AMPLITUDE_FLOOR: f64 = 1.0e-12;
 
+/// Lowest periodogram bins the rung verdict never admits: the Hann main
+/// lobe of the removed mean and of slow record drift reaches two bins
+/// above DC.
+pub const RUNG_DC_GUARD_BINS: usize = 4;
+
+/// Top of the band the rung verdict admits, as the jet Strouhal number
+/// `St_h = f (2 slot_half) / u_jet` (f in cycles per lattice step): the
+/// jet's own convective time `h / u_jet`. A resolved force spectrum falls
+/// through many decades between this scale and the temporal Nyquist, so a
+/// flatness taken up to Nyquist reads any resolved broadband record as
+/// tonal, and the bounce-back parity line sits at Nyquist itself.
+pub const RUNG_BAND_TOP_STROUHAL: f64 = 1.0;
+
+/// Fewest admitted bins a verdict needs. Over a band of `D` bins, a clean
+/// Hann-windowed tone's flatness is bounded below by its sidelobe leakage,
+/// measured at up to about `3 e^6 / D^5` over fractional bin positions;
+/// 128 bins keep that at least 30 times under
+/// [`crate::regime::TONAL_FLATNESS_CEILING`], so a pure tone cannot read
+/// broadband for want of bins (62 bins, an 8192-step record at
+/// `u_jet` 0.04 and `slot_half` 2.5, reaches 1.7e-6).
+pub const RUNG_MIN_BAND_BINS: usize = 128;
+
 /// Configuration of one 3-D slot-jet run (lattice units throughout).
 #[derive(Debug, Clone)]
 pub struct SlotJet3dConfig {
@@ -181,7 +203,8 @@ pub struct SlotJet3dRung {
     pub second_order_rate: f64,
     /// Central-moment higher-order rate.
     pub higher_order_rate: f64,
-    /// Measured spectral flatness (geometric/arithmetic mean).
+    /// Measured spectral flatness (geometric/arithmetic mean) over the
+    /// admitted jet band ([`RUNG_DC_GUARD_BINS`] to [`RUNG_BAND_TOP_STROUHAL`]).
     pub flatness: f64,
     /// Classification against [`crate::regime::TONAL_FLATNESS_CEILING`].
     pub tonal: bool,
@@ -801,13 +824,31 @@ mod material_diagnostics_tests {
 
 /// Classify one run through the shared measurement pipeline
 /// ([`crate::jetlab::transverse_force_spectrum`] +
-/// [`crate::regime::measure_spectral_flatness`]).
+/// [`crate::regime::measure_spectral_flatness`]) over the admitted jet
+/// band only: periodogram bins from [`RUNG_DC_GUARD_BINS`] up to
+/// [`RUNG_BAND_TOP_STROUHAL`]. The peak, its prominence and the flatness
+/// all come from that band, so a physical tone of any period inside it
+/// can be the peak and a resolved broadband record is not read as tonal
+/// for the decades it falls through before Nyquist.
 ///
 /// # Errors
-/// Pipeline refusals (record length, degenerate spectrum).
+/// Pipeline refusals (record length, degenerate spectrum), and
+/// [`AeroacError::InvalidParameter`] when the record is too short for the
+/// admitted band to hold [`RUNG_MIN_BAND_BINS`] bins.
 pub fn classify_rung(
     run: &SlotJet3dRun,
     cfg: &SlotJet3dConfig,
+) -> Result<SlotJet3dRung, AeroacError> {
+    classify_rung_sampled(run, cfg, 1)
+}
+
+/// The rung verdict for a record sampled every `sample_period` lattice
+/// steps: the admitted band and the reported Strouhal are physical, in
+/// cycles per lattice step.
+fn classify_rung_sampled(
+    run: &SlotJet3dRun,
+    cfg: &SlotJet3dConfig,
+    sample_period: usize,
 ) -> Result<SlotJet3dRung, AeroacError> {
     let CollisionModel3::CentralMoment {
         second_order_rate,
@@ -818,16 +859,41 @@ pub fn classify_rung(
             what: "the 3-D slot-jet lane is pinned to the D3Q19 central-moment operator",
         });
     };
-    // skip_bins must satisfy 1 <= skip < n/4 (pipeline refusal);
-    // n/8 keeps the fringe-transient guard inside the window.
+    // The pipeline refuses unless 1 <= skip < n/4 and slot_half, u_jet are
+    // finite and positive; the band below needs those checks first.
     let (power, peak) = transverse_force_spectrum(
         &run.force_series,
         cfg.slot_half,
         cfg.u_jet,
-        run.diagnostics.record_len / 8,
+        RUNG_DC_GUARD_BINS,
     )?;
-    let flatness = measure_spectral_flatness(&power)?;
-    let tonal = matches!(classify_spectrum(&power)?, SpectrumClass::Tonal { .. });
+    let n = run.force_series.len();
+    // Bin k is the frequency k / (n sample_period) cycles per lattice step.
+    let samples = n as f64 * sample_period as f64;
+    let top = (samples * cfg.u_jet * RUNG_BAND_TOP_STROUHAL / (2.0 * cfg.slot_half)).floor();
+    let top = (top as usize).min(power.len() - 1);
+    if top < RUNG_DC_GUARD_BINS || top + 1 - RUNG_DC_GUARD_BINS < RUNG_MIN_BAND_BINS {
+        return Err(AeroacError::InvalidParameter {
+            what: "force record too short: the admitted jet band (4 DC-guard bins to St_h 1) \
+                   holds fewer than 128 bins",
+        });
+    }
+    let band = &power[RUNG_DC_GUARD_BINS..=top];
+    let (offset, peak_power) = band
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(i, p)| (i, *p))
+        .ok_or(AeroacError::InvalidParameter {
+            what: "empty admitted jet band",
+        })?;
+    let mut sorted = band.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let prominence = peak_power / sorted[sorted.len() / 2].max(1e-300);
+    let peak_bin = RUNG_DC_GUARD_BINS + offset;
+    let strouhal = (peak_bin as f64 / samples) * 2.0 * cfg.slot_half / cfg.u_jet;
+    let flatness = measure_spectral_flatness(band)?;
+    let tonal = matches!(classify_spectrum(band)?, SpectrumClass::Tonal { .. });
     let force_rms = peak.force_rms;
     let imbalance = if run.diagnostics.flux_plate_plane.abs() > f64::EPSILON {
         (run.diagnostics.flux_plate_plane - run.diagnostics.flux_fringe_plane).abs()
@@ -841,9 +907,9 @@ pub fn classify_rung(
         higher_order_rate,
         flatness,
         tonal,
-        strouhal: peak.strouhal,
-        peak_bin: peak.bin,
-        prominence: peak.prominence,
+        strouhal,
+        peak_bin,
+        prominence,
         force_rms,
         amplitude_qualified: force_rms > FORCE_RMS_AMPLITUDE_FLOOR,
         strouhal_bin_width: run.diagnostics.strouhal_bin_width,
@@ -891,13 +957,13 @@ pub fn parity_filtered_force_series(
 /// [`parity_filtered_force_series`]): the same pipeline and classifier
 /// thresholds on half the samples at twice the sample period. The
 /// record DURATION is unchanged, so the Strouhal bin width is the raw
-/// one and the Nyquist Strouhal halves; the shared pipeline does not
-/// know the sample period, so its Strouhal is halved here. Use it to
-/// read the physical content under a Nyquist-edge artifact; the raw
+/// one and the Nyquist Strouhal halves; the verdict is given the sample
+/// period, so its admitted band and Strouhal are the raw record's. Use it
+/// to read the physical content under a Nyquist-edge artifact; the raw
 /// classification stays the primary receipt.
 ///
 /// # Errors
-/// Filter refusals and the pipeline refusals of [`classify_rung`].
+/// Filter refusals and the refusals of [`classify_rung`].
 pub fn classify_rung_parity_filtered(
     run: &SlotJet3dRun,
     cfg: &SlotJet3dConfig,
@@ -910,11 +976,9 @@ pub fn classify_rung_parity_filtered(
         },
         scope: run.scope,
     };
-    let mut rung = classify_rung(&filtered, cfg)?;
-    // bin k of the halved record at sample period 2 is the frequency
+    // Bin k of the halved record at sample period 2 is the frequency
     // k / (2 n') = k / n of the raw record.
-    rung.strouhal *= 0.5;
-    Ok(rung)
+    classify_rung_sampled(&filtered, cfg, 2)
 }
 
 impl SlotJet3dRung {

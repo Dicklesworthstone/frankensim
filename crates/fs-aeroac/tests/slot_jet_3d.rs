@@ -1,8 +1,11 @@
 //! The 3-D slot-jet rig battery (bead frankensim-music-v8-root-3ez8g.10.1):
 //! config refusals, determinism, fringe no-op law, momentum-exchange
 //! sanity through a full smoke run, the shared-classifier wiring
-//! (tone vs noise vs roundoff), and the MEASURED 3-D fringe
-use fs_aeroac::regime::TONAL_FLATNESS_CEILING;
+//! (short records refuse the admitted jet band; an in-band tone reads
+//! tonal, a steep broadband record broadband, roundoff fails the
+//! amplitude floor), and the MEASURED 3-D fringe
+use fs_aeroac::jetlab::transverse_force_spectrum;
+use fs_aeroac::regime::{TONAL_FLATNESS_CEILING, measure_spectral_flatness};
 use fs_aeroac::slot_jet_3d::{
     FORCE_RMS_AMPLITUDE_FLOOR, Fringe3, SlotJet3dConfig, SlotJet3dDiagnostics, SlotJet3dRun,
     classify_rung, run_slot_jet_3d, run_slot_jet_3d_chunked,
@@ -103,6 +106,40 @@ fn config_refusals() {
     );
 }
 
+/// The refusal every record too short for the admitted jet band receives.
+const SHORT_BAND_REFUSAL: &str = "force record too short";
+
+/// A synthetic force record wrapped as a run of the smoke rig's geometry.
+fn synthetic_run(cfg: &SlotJet3dConfig, series: Vec<[f64; 2]>) -> SlotJet3dRun {
+    let n = series.len();
+    SlotJet3dRun {
+        force_series: series,
+        diagnostics: SlotJet3dDiagnostics {
+            mach_max_lattice: 0.05,
+            flux_plate_plane: 0.01,
+            flux_fringe_plane: 0.0099,
+            reynolds: 100.0,
+            record_len: n,
+            #[allow(clippy::cast_precision_loss)]
+            strouhal_bin_width: (1.0 / n as f64) * 2.0 * cfg.slot_half / cfg.u_jet,
+        },
+        scope: "test",
+    }
+}
+
+/// `n` deterministic uniform values in [-1, 1) from a 64-bit LCG.
+fn lcg_units(n: usize, seed: u64) -> Vec<f64> {
+    let mut lcg = seed;
+    (0..n)
+        .map(|_| {
+            lcg = lcg
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((lcg >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+        })
+        .collect()
+}
+
 #[test]
 fn smoke_run_classifies_and_discloses_bin() {
     let mut cfg = smoke_config();
@@ -113,17 +150,13 @@ fn smoke_run_classifies_and_discloses_bin() {
     #[allow(clippy::cast_precision_loss)]
     let bin_width = (1.0 / cfg.steps_record as f64) * 2.0 * cfg.slot_half / cfg.u_jet;
     assert!((run.diagnostics.strouhal_bin_width - bin_width).abs() < 1e-12);
-    let rung = classify_rung(&run, &cfg).expect("classification must succeed");
-    // A 67-step smoke cannot carry physics claims either way; the
-    // receipt must still be fully populated.
-    assert!(rung.flatness.is_finite());
-    assert_eq!(
-        rung.amplitude_qualified,
-        rung.force_rms > FORCE_RMS_AMPLITUDE_FLOOR
+    // A 67-step smoke holds no bin of the admitted jet band (St_h 1 is
+    // bin 0.5): the verdict refuses by name instead of reading noise.
+    let err = classify_rung(&run, &cfg).expect_err("a 67-step record must refuse");
+    assert!(
+        err.to_string().contains(SHORT_BAND_REFUSAL),
+        "refusal must name the short band: {err}"
     );
-    let line = rung.to_jsonl();
-    assert!(line.contains("\"schema\":\"fs-aeroac.slot-jet-3d.rung/v1\""));
-    assert!(line.contains("\"strouhal_bin_width\":"));
 }
 
 #[test]
@@ -218,16 +251,103 @@ fn classifier_tone_vs_noise_vs_roundoff() {
             1e-16 * (2.0 * core::f64::consts::PI * 12.0 * t / n as f64).sin(),
         ]);
     }
-    let tone_rung = classify_rung(&mk_run(tone), &cfg).expect("tone classifies");
-    assert!(tone_rung.tonal, "pure tone must classify tonal");
-    assert!(tone_rung.amplitude_qualified, "1e-3 tone clears the floor");
-    let noise_rung = classify_rung(&mk_run(noise), &cfg).expect("noise classifies");
-    assert!(!noise_rung.tonal, "white noise must NOT classify tonal");
-    assert!(noise_rung.flatness > TONAL_FLATNESS_CEILING);
-    let roundoff_rung = classify_rung(&mk_run(roundoff), &cfg).expect("roundoff classifies");
+    // 512 steps put 4 bins under St_h 1, so the admitted band holds one:
+    // each record refuses by name whatever it carries. The verdict on
+    // band-holding records is exercised by the two regressions below.
+    for (label, series) in [("tone", tone), ("noise", noise), ("roundoff", roundoff)] {
+        let err = classify_rung(&mk_run(series), &cfg).expect_err("a 512-step record must refuse");
+        assert!(
+            err.to_string().contains(SHORT_BAND_REFUSAL),
+            "{label}: refusal must name the short band: {err}"
+        );
+    }
+}
+
+/// Regression: a tone whose period (400 steps) sits well inside the jet
+/// band reads tonal at its own Strouhal. The pre-fix verdict skipped the
+/// first n/8 bins, so on this record it could find no period above 8
+/// steps (its peak landed at St 56).
+#[test]
+fn rung_verdict_reads_period_400_tone_tonal() {
+    // 16384 steps at u_jet 0.04, slot_half 2.5: St_h 1 is bin 131, so
+    // the admitted band holds 128 bins.
+    let n = 16_384usize;
+    let cfg = smoke_config();
+    let floor = lcg_units(n, 0x243f_6a88_85a3_08d3);
+    let tone_at = |amplitude: f64, floor_amplitude: f64| -> Vec<[f64; 2]> {
+        (0..n)
+            .map(|i| {
+                #[allow(clippy::cast_precision_loss)]
+                let t = i as f64;
+                [
+                    0.0,
+                    amplitude * (2.0 * core::f64::consts::PI * t / 400.0).sin()
+                        + floor_amplitude * floor[i],
+                ]
+            })
+            .collect()
+    };
+    let rung = classify_rung(&synthetic_run(&cfg, tone_at(1e-3, 1e-9)), &cfg)
+        .expect("a band-holding record classifies");
     assert!(
-        !roundoff_rung.amplitude_qualified,
+        rung.tonal && rung.flatness <= TONAL_FLATNESS_CEILING,
+        "a period-400 tone must read tonal: flatness {}",
+        rung.flatness
+    );
+    let expected = 2.0 * cfg.slot_half / cfg.u_jet / 400.0;
+    assert!(
+        (rung.strouhal - expected).abs() <= rung.strouhal_bin_width,
+        "peak Strouhal {} must sit within a bin ({}) of the tone's {expected}",
+        rung.strouhal,
+        rung.strouhal_bin_width
+    );
+    assert!(rung.amplitude_qualified, "1e-3 tone clears the floor");
+    let line = rung.to_jsonl();
+    assert!(line.contains("\"schema\":\"fs-aeroac.slot-jet-3d.rung/v1\""));
+    assert!(line.contains("\"strouhal_bin_width\":"));
+    // The same tone at roundoff scale still fails the amplitude floor.
+    let roundoff = classify_rung(&synthetic_run(&cfg, tone_at(1e-16, 0.0)), &cfg)
+        .expect("a roundoff-scale record classifies");
+    assert!(
+        !roundoff.amplitude_qualified && roundoff.force_rms <= FORCE_RMS_AMPLITUDE_FLOOR,
         "roundoff-scale force must fail the amplitude floor"
+    );
+}
+
+/// Regression: a resolved broadband record whose power falls steeply
+/// (white noise through four one-pole low-passes at 0.004 cycles/step,
+/// about 190 dB across the half-spectrum) reads broadband. Its flatness
+/// to Nyquist, the pre-fix verdict, reads it tonal.
+#[test]
+fn rung_verdict_reads_steep_broadband_record_broadband() {
+    let n = 16_384usize;
+    let cfg = smoke_config();
+    let a = (-2.0 * core::f64::consts::PI * 0.004).exp();
+    let mut y: Vec<f64> = lcg_units(n, 0x1319_8a2e_0370_7344)
+        .into_iter()
+        .map(|u| 1e-3 * u)
+        .collect();
+    for _ in 0..4 {
+        let mut prev = 0.0;
+        for v in &mut y {
+            prev = a * prev + (1.0 - a) * *v;
+            *v = prev;
+        }
+    }
+    let series: Vec<[f64; 2]> = y.iter().map(|&v| [0.0, v]).collect();
+    let (power, _) = transverse_force_spectrum(&series, cfg.slot_half, cfg.u_jet, n / 8)
+        .expect("spectrum of a valid record");
+    let to_nyquist = measure_spectral_flatness(&power).expect("full-band flatness");
+    assert!(
+        to_nyquist <= TONAL_FLATNESS_CEILING,
+        "the record must exercise the defect: flatness to Nyquist {to_nyquist}"
+    );
+    let rung = classify_rung(&synthetic_run(&cfg, series), &cfg)
+        .expect("a band-holding record classifies");
+    assert!(
+        !rung.tonal && rung.flatness > TONAL_FLATNESS_CEILING,
+        "a steeply falling broadband record must read broadband: flatness {}",
+        rung.flatness
     );
 }
 

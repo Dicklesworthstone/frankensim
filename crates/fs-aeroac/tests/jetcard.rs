@@ -511,8 +511,14 @@ fn jc_014_refusal_boundary_card_mints_from_the_archived_campaign_receipts() {
         )
         .is_err()
     );
-    let card = mint_refusal_boundary_card(&filtered, profile, rig_fingerprint, receipts)
+    let mut card = mint_refusal_boundary_card(&filtered, profile, rig_fingerprint, receipts)
         .expect("the executed campaign mints the refusal-boundary card");
+    // The stored rows' tonal flags are pre-fix verdicts and no force
+    // record is stored to re-read them, so the retained card states that
+    // in place of the minter's all-tonal text.
+    card.provenance.classification = "not re-read: the pre-fix verdict used an n/8 guard and \
+                                      flatness to Nyquist, and no force record is stored"
+        .to_owned();
     let JetCardClaim::BroadbandRefusalBoundary {
         max_reynolds_probed,
         rungs_probed,
