@@ -16,6 +16,12 @@ use fs_exec::Cx;
 use fs_fft::harmonic_window::{HarmonicProduct, HarmonicWindow, WindowError};
 use fs_math::{c64::C64, dd::Dd};
 
+mod receivers;
+pub use receivers::{
+    HarmonicReceiver, HarmonicReceiverControls, HarmonicReceiverPairMoments,
+    HarmonicReceiverQuantity, MAX_INTERFERENCE_RECEIVERS, PreparedHarmonicReceivers,
+};
+
 mod ensemble;
 pub use ensemble::{
     HarmonicEnsembleControls, HarmonicFactorStatistics, HarmonicForceFactor,

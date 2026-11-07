@@ -468,6 +468,25 @@ impl PreparedHarmonicInterferenceEnsemble {
         Ok(result)
     }
 
+    /// Prepare physical receiver rows while retaining all authored joint moments.
+    /// Projections preserve each factor's complete temporal/spatial coherence.
+    /// The returned owner does not borrow this response or the supplied rows.
+    pub fn prepare_receivers(
+        &self,
+        receivers: &[super::HarmonicReceiver<'_>],
+        controls: super::HarmonicReceiverControls,
+        cx: &Cx<'_>,
+    ) -> Result<super::PreparedHarmonicReceivers, HarmonicResponseError> {
+        super::PreparedHarmonicReceivers::prepare(
+            self.n,
+            receivers,
+            self.banks.iter().map(|bank| (bank.statistics, bank.tones.as_slice())),
+            self.maximum_relative_response_residual,
+            controls,
+            cx,
+        )
+    }
+
     fn factor(&self, factor: usize) -> Option<&Bank> {
         self.banks.get(factor.checked_add(1)?)
     }

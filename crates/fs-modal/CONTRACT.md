@@ -1272,3 +1272,37 @@ forward-error guarantee near a pole. `tests/harmonic_supports.rs` independently
 checks consistent cross-mass base excitation, relative support phases,
 gyroscopic work, applied support-force redistribution, stationary parity,
 DC, all-prescribed motion, singular free resonance and admission/cancellation.
+
+### Physical receiver interference and averaged-reading covariance
+
+Both prepared harmonic interference owners expose `prepare_receivers` for
+signed real rows in the original pencil coordinates. A row observes
+displacement, velocity, or acceleration; physical point/area/differential
+pickups and linear strain/stress recovery use the caller's original map and
+units. Receiver interpolation and frequency-dependent sensing dynamics are
+not inferred. Projection uses DD before any temporal products, preserving
+spatial cancellation. Acceleration differentiates projected velocity once,
+without forming an unnecessary omega-squared intermediate.
+
+`PreparedHarmonicReceivers::observe_pair` gives signed receiver cross moments
+or self mean squares over the actual uniform/triangular observation window.
+It reports deterministic means, coherent products, stochastic products, and
+their total. Real factors retain sum/difference terms; proper factors retain
+within-factor beats. Stochastic products accumulate directly, so a large
+coherent bias does not erase small physical variance through subtraction.
+Distinct declared factors are never combined coherently.
+
+The separate `averaged_covariance` is the ensemble covariance of the two
+window-averaged readings. Each factor's window amplitude is summed before
+multiplication. It differs from the average instantaneous covariance: a
+finite exposure can suppress a carrier in its averaged reading while the
+mechanical mean-square motion remains positive. No stationary spectrum,
+Gaussian law, fourth-order statistic, random realization, or near-null
+relative accuracy certificate is inferred.
+
+Count/payload/projection/product budgets are checked before projection
+allocation. At most 128 receiver rows are retained, with DD real/imaginary
+amplitudes per bank-frequency-row. Warm pair observation allocates nothing and
+does no solve or original-coordinate contraction; requesting selected pairs
+does not construct a dense receiver covariance matrix. Source response
+residuals remain available and signed rounding is never clipped.
