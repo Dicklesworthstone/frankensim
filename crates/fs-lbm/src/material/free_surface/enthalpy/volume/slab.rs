@@ -29,7 +29,8 @@ pub(super) struct SlabRemap {
 ///
 /// Depth is measured outward from the anchored wall. The caller maps this
 /// coordinate/index and momentum sign into its chosen Cartesian orientation.
-/// Original and endpoint masses are physical kg per FULL Cartesian cell.
+/// Original depth includes the actual terminal-cell fraction and may be less
+/// than one cell. Original and endpoint masses are kg per FULL Cartesian cell.
 /// `capacity_cells` is the caller's admitted allocation/work ceiling.
 ///
 /// Every destination receives only original material; contraction admits no
@@ -43,7 +44,7 @@ pub(super) struct SlabRemap {
 /// available depth, allocation failure, or requested cancellation. Cancellation
 /// is polled at entry, every 256 destination cells, and before publication.
 pub(super) fn remap(
-    original_cells: usize,
+    original_depth_cells: f64,
     capacity_cells: usize,
     dx_m: f64,
     dt_s: f64,
@@ -54,42 +55,52 @@ pub(super) fn remap(
     if cancelled() {
         return None;
     }
-    if original_cells == 0
-        || original_cells > capacity_cells
+    if capacity_cells == 0
+        || !original_depth_cells.is_finite()
+        || original_depth_cells <= 0.0
+        || original_depth_cells > capacity_cells as f64
         || [dx_m, dt_s, original_cell_mass_kg, endpoint_cell_mass_kg]
             .iter()
             .any(|x| !x.is_finite() || *x <= 0.0)
     {
         return None;
     }
-    let stretch = original_cell_mass_kg / endpoint_cell_mass_kg;
-    // Preserve small changes that would disappear in (rounded stretch - 1).
-    let relative_change = (original_cell_mass_kg - endpoint_cell_mass_kg) / endpoint_cell_mass_kg;
-    let depth = original_cells as f64 * stretch;
-    if !stretch.is_finite()
-        || stretch <= 0.0
-        || !relative_change.is_finite()
-        || !depth.is_finite()
-        || depth <= 0.0
-        || depth > capacity_cells as f64
-    {
+    // A partial original column can have a representable endpoint even when
+    // the density ratio alone overflows. Combine the original depth before
+    // restoring the binary exponent; do not form that ratio independently.
+    let depth = product_ratio(
+        [original_depth_cells, original_cell_mass_kg, 1.0, 1.0],
+        [endpoint_cell_mass_kg, 1.0],
+    );
+    if !depth.is_finite() || depth <= 0.0 || depth > capacity_cells as f64 {
         return None;
     }
     let count = depth.ceil() as usize;
     if count == 0 || count > capacity_cells {
         return None;
     }
-    let initial_height = product_ratio([original_cells as f64, dx_m, 1.0, 1.0], 1.0);
-    let height_m = product_ratio([depth, dx_m, 1.0, 1.0], 1.0);
-    let edge_velocity = product_ratio([relative_change, initial_height, 1.0, 1.0], dt_s);
-    let source_mass_kg = product_ratio(
-        [original_cells as f64, original_cell_mass_kg, 1.0, 1.0],
-        1.0,
+    let initial_height = product_ratio([original_depth_cells, dx_m, 1.0, 1.0], [1.0, 1.0]);
+    let height_m = product_ratio([depth, dx_m, 1.0, 1.0], [1.0, 1.0]);
+    // Preserve changes that disappear in (rounded stretch - 1), and avoid an
+    // intermediate inverse tiny dt or overflowing density/time product.
+    let edge_velocity = product_ratio(
+        [
+            original_cell_mass_kg - endpoint_cell_mass_kg,
+            original_depth_cells,
+            dx_m,
+            1.0,
+        ],
+        [endpoint_cell_mass_kg, dt_s],
     );
-    let source_momentum_kg_m_s = product_ratio([source_mass_kg, edge_velocity, 0.5, 1.0], 1.0);
+    let source_mass_kg = product_ratio(
+        [original_depth_cells, original_cell_mass_kg, 1.0, 1.0],
+        [1.0, 1.0],
+    );
+    let source_momentum_kg_m_s =
+        product_ratio([source_mass_kg, edge_velocity, 0.5, 1.0], [1.0, 1.0]);
     let source_kinetic_energy_j = product_ratio(
         [source_mass_kg, edge_velocity, edge_velocity, 1.0 / 6.0],
-        1.0,
+        [1.0, 1.0],
     );
     if [initial_height, height_m, source_mass_kg]
         .iter()
@@ -114,16 +125,16 @@ pub(super) fn remap(
         if !fill_fraction.is_finite() || fill_fraction <= 0.0 {
             return None;
         }
-        let mass_kg = product_ratio([endpoint_cell_mass_kg, fill_fraction, 1.0, 1.0], 1.0);
+        let mass_kg = product_ratio([endpoint_cell_mass_kg, fill_fraction, 1.0, 1.0], [1.0, 1.0]);
         // Coordinates normalized by the COMPLETE target material depth are
         // also the original material-coordinate fractions under x -> s*x.
         let width = fill_fraction / depth;
         let midpoint = index as f64 / depth + 0.5 * width;
-        let momentum_kg_m_s = product_ratio([mass_kg, edge_velocity, midpoint, 1.0], 1.0);
+        let momentum_kg_m_s = product_ratio([mass_kg, edge_velocity, midpoint, 1.0], [1.0, 1.0]);
         let mean_square = midpoint * midpoint + width * width / 12.0;
         let carried_kinetic_energy_j = product_ratio(
             [mass_kg, edge_velocity, edge_velocity, 0.5 * mean_square],
-            1.0,
+            [1.0, 1.0],
         );
         if !mass_kg.is_finite()
             || mass_kg <= 0.0
@@ -152,10 +163,10 @@ pub(super) fn remap(
     })
 }
 
-// Finite factors and a positive finite denominator. Binary scaling prevents
+// Finite factors and positive finite denominators. Binary scaling prevents
 // density*volume, squared speed and inverse tiny dt from overflowing before a
 // representable final mass/momentum/energy is formed.
-fn product_ratio(factors: [f64; 4], denominator: f64) -> f64 {
+fn product_ratio(factors: [f64; 4], denominators: [f64; 2]) -> f64 {
     fn parts(mut value: f64) -> (f64, i32) {
         let mut shift = 0;
         if value < f64::MIN_POSITIVE {
@@ -186,12 +197,14 @@ fn product_ratio(factors: [f64; 4], denominator: f64) -> f64 {
             exponent += 1;
         }
     }
-    let (part, power) = parts(denominator);
-    fraction /= part;
-    exponent -= power;
-    if fraction < 1.0 {
-        fraction *= 2.0;
-        exponent -= 1;
+    for denominator in denominators {
+        let (part, power) = parts(denominator);
+        fraction /= part;
+        exponent -= power;
+        if fraction < 1.0 {
+            fraction *= 2.0;
+            exponent -= 1;
+        }
     }
     let value = if exponent > 1023 {
         f64::INFINITY
@@ -219,7 +232,7 @@ mod tests {
         endpoint_cell_mass_kg: f64,
     ) -> Option<SlabRemap> {
         super::remap(
-            original_cells,
+            original_cells as f64,
             capacity_cells,
             dx_m,
             dt_s,
@@ -231,10 +244,10 @@ mod tests {
 
     #[test]
     fn cancellation_never_publishes_a_partial_column() {
-        assert!(super::remap(1, 2, 1.0, 1.0, 1.0, 1.0, || true).is_none());
+        assert!(super::remap(1.0, 2, 1.0, 1.0, 1.0, 1.0, || true).is_none());
         let mut checks = 0;
         assert!(
-            super::remap(1, 512, 1.0, 1.0, 512.0, 1.0, || {
+            super::remap(1.0, 512, 1.0, 1.0, 512.0, 1.0, || {
                 checks += 1;
                 checks >= 3
             })
@@ -381,5 +394,76 @@ mod tests {
             assert!(remap(1, 2, 1.0, 1.0, 1.0, bad).is_none());
         }
         assert!(remap(2, 2, 1.0, 1.0, f64::MAX, f64::MAX).is_none());
+    }
+    #[test]
+    fn partial_source_preserves_exact_affine_mass_momentum_and_kinetic_storage() {
+        // H0=1.25 m, M=7.5 kg, s=3/4, surface velocity=-1.25 m/s.
+        let r = super::remap(2.5, 8, 0.5, 0.25, 3.0, 4.0, || false).unwrap();
+        close(r.height_m, 0.9375);
+        close(r.source_mass_kg, 7.5);
+        close(r.source_momentum_kg_m_s, -4.6875);
+        close(r.source_kinetic_energy_j, 1.953125);
+        assert_eq!(r.cells.len(), 2);
+        close(r.cells[0].fill_fraction, 1.0);
+        close(r.cells[1].fill_fraction, 0.875);
+        close(r.cells[0].momentum_kg_m_s, -4.0 / 3.0);
+        close(r.cells[1].momentum_kg_m_s, -3.3541666666666665);
+        totals(&r);
+    }
+
+    #[test]
+    fn subcell_source_expands_and_contracts_without_an_integer_cell_assumption() {
+        let grow = super::remap(0.25, 4, 2.0, 1.0, 8.0, 1.0, || false).unwrap();
+        close(grow.height_m, 4.0);
+        close(grow.source_mass_kg, 2.0);
+        close(grow.source_momentum_kg_m_s, 3.5);
+        close(grow.source_kinetic_energy_j, 49.0 / 12.0);
+        assert_eq!(grow.cells.len(), 2);
+        totals(&grow);
+        let shrink = super::remap(0.25, 4, 2.0, 1.0, 1.0, 8.0, || false).unwrap();
+        assert_eq!(shrink.cells.len(), 1);
+        close(shrink.cells[0].fill_fraction, 0.03125);
+        close(shrink.source_mass_kg, 0.25);
+        totals(&shrink);
+        let steady = super::remap(0.25, 4, 2.0, 1.0, 8.0, 8.0, || false).unwrap();
+        close(steady.cells[0].fill_fraction, 0.25);
+        assert_eq!(steady.source_momentum_kg_m_s, 0.0);
+        assert_eq!(steady.source_kinetic_energy_j, 0.0);
+    }
+
+    #[test]
+    fn successive_partial_density_maps_preserve_closed_mass_and_return_geometry() {
+        let mut depth = 2.375;
+        let mut cell_mass = 7.0;
+        let mass = depth * cell_mass;
+        for next_mass in [5.0, 9.0, 3.0, 7.0] {
+            let r = super::remap(depth, 16, 0.2, 0.1, cell_mass, next_mass, || false).unwrap();
+            close(r.source_mass_kg, mass);
+            totals(&r);
+            depth = r.cells.iter().map(|c| c.fill_fraction).sum();
+            close(depth * next_mass, mass);
+            cell_mass = next_mass;
+        }
+        close(depth, 2.375);
+    }
+
+    #[test]
+    fn partial_source_keeps_representable_totals_when_density_ratio_overflows() {
+        assert!((1e200_f64 / 1e-110).is_infinite());
+        let r = super::remap(1e-310, 2, 1e10, 1e10, 1e200, 1e-110, || false).unwrap();
+        close(r.source_mass_kg, 1e-110);
+        close(r.height_m, 1e10);
+        close(r.source_momentum_kg_m_s, 0.5e-110);
+        close(r.source_kinetic_energy_j, 1e-110 / 6.0);
+        totals(&r);
+    }
+
+    #[test]
+    fn invalid_partial_depth_is_atomic() {
+        for depth in [0.0, -0.25, 2.5, f64::NAN, f64::INFINITY] {
+            assert!(super::remap(depth, 2, 1.0, 1.0, 1.0, 1.0, || false).is_none());
+        }
+        assert!(super::remap(0.5, 0, 1.0, 1.0, 1.0, 1.0, || false).is_none());
+        assert!(super::remap(0.5, 2, 1.0, 1.0, 1.0, 1.0, || true).is_none());
     }
 }

@@ -10,12 +10,24 @@ use super::super::{
     MaterialFreeSurfaceVolumeProjection3, plan_free_surface_from_material,
 };
 use super::*;
+use crate::conjugate::{FlowField, Voxel, VoxelDomain};
 use crate::d3q19::Face3;
+use crate::d3q19::freesurface3::transport::VolumeSlabProfile3;
 use fs_exec::Cx;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_math::dd::Dd;
 
 mod slab;
+
+/// Only this source split may create a continuation binding. Exact native
+/// moments are checked before its affine velocity is used as a predictor.
+#[derive(Clone)]
+pub(super) struct MappedSlabState {
+    anchored_face: Face3,
+    specific_enthalpy_j_kg: f64,
+    affine_rate_s_inv: f64,
+    profile: VolumeSlabProfile3,
+}
 
 /// Explicit discrepancy between the original caloric/source density and the
 /// retained constant physical reference. This is numerical accuracy, not a
@@ -38,9 +50,13 @@ pub struct FreeSurfaceSlabVolumeControls {
     pub maximum_momentum_defect_kg_m_s: f64,
     /// Maximum actual native volume vs original caloric volume demand [m3].
     pub maximum_geometry_volume_defect_m3: f64,
-    /// Sum of ABSOLUTE face-to-affine and affine-to-native kinetic changes
-    /// [J]. Both unresolved loss and gain consume this physical accuracy
-    /// allowance; neither discrepancy becomes material heat.
+    /// Maximum offset between a terminal liquid-volume centroid and its
+    /// native Cartesian sample point [m], at either endpoint. The explicit
+    /// cut metric represents the actual liquid; native velocities store means.
+    pub maximum_native_centroid_offset_m: f64,
+    /// Sum of ABSOLUTE incoming native-to-face, outgoing face-to-affine and
+    /// affine-to-native kinetic changes [J]. Unresolved loss and gain consume
+    /// this physical accuracy allowance; neither discrepancy becomes heat.
     pub maximum_kinetic_mapping_change_j: f64,
 }
 
@@ -48,7 +64,10 @@ pub struct FreeSurfaceSlabVolumeControls {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FreeSurfaceSlabVolumeReport {
     pub anchored_face: Face3,
+    /// Number of initially occupied layers, including a partial terminal one.
     pub initial_depth_cells: usize,
+    pub initial_height_m: f64,
+    pub initial_terminal_fill_fraction: f64,
     pub final_height_m: f64,
     pub newly_wet_cells: usize,
     pub vacated_cells: usize,
@@ -65,25 +84,32 @@ pub struct FreeSurfaceSlabVolumeReport {
     /// because an enthalpy datum must not hide a real inventory discrepancy.
     pub mass_defect_enthalpy_datum_j: f64,
     pub pressure_impulse_kg_m_s: [f64; 3],
+    pub momentum_before_kg_m_s: [f64; 3],
     pub momentum_after_kg_m_s: [f64; 3],
     pub momentum_defect_kg_m_s: f64,
+    pub native_kinetic_energy_before_j: f64,
     pub affine_kinetic_energy_j: f64,
     pub native_kinetic_energy_j: f64,
     /// Pressure/source mechanical work required by this volume-changing step,
     /// separate from the supplied NET caloric increment. The caller owns its
     /// physical source; fixed-pressure Cp already includes ambient p*dV.
     pub required_mechanical_work_j: f64,
+    /// Incoming face kinetic storage minus actual incoming native storage.
+    /// Reconstructing a retained affine field is explicitly bounded; missing
+    /// subcell motion is never silently restored as physical energy.
+    pub native_to_face_kinetic_change_j: f64,
     /// Affine material kinetic storage minus pressure-face kinetic storage.
     /// This includes the discrete face quadrature difference, not physical heat.
     pub face_to_affine_kinetic_change_j: f64,
     /// Native cell-mean kinetic storage minus exact carried affine storage.
     /// Negative values are unresolved subcell motion, not physical heat.
     pub affine_to_native_kinetic_change_j: f64,
-    /// Original pressure work minus native kinetic storage, pressure projection
-    /// loss and the separately reported mapping losses [J].
+    /// Original pressure work minus the native kinetic INCREMENT and pressure
+    /// projection loss, plus the signed incoming/outgoing mapping changes [J].
     pub mechanical_energy_defect_j: f64,
     pub maximum_face_flux_defect_m3_s: f64,
     pub geometry_volume_defect_m3: f64,
+    pub maximum_native_centroid_offset_m: f64,
     pub density_agreement: FreeSurfaceDensityAgreement,
 }
 
@@ -125,21 +151,30 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         }))
     }
 
-    /// Advance one uniformly heated/cooled planar liquid slab from exact rest.
+    /// Advance one uniform planar thermal source step on the native liquid.
     ///
-    /// The initial positive inventory must fill one complete Cartesian slab
-    /// anchored at the selected domain face. Its opposite face touches gas;
-    /// other domain faces are stationary walls. Partial initial cells, holes,
-    /// disconnected bodies, internal solids, numerical pressure, stored
-    /// non-equilibrium stress, force/capillary and coupled thermal owners refuse.
+    /// The liquid fills the entire transverse cross section from the selected
+    /// stationary wall, with one optional partial terminal layer touching an
+    /// unoccupied native gas layer at both endpoints.
+    /// An initial state must be at canonical rest. A later moving state is
+    /// admitted only with this method's retained exact per-layer native
+    /// population/mass binding, unchanged enthalpy and anchored orientation.
+    /// Ordinary native ticks invalidate that binding. Holes, arbitrary moving
+    /// liquid, internal solids, capillary/force and coupled thermal owners refuse.
     ///
-    /// This first-order split applies the original physical pressure impulse,
-    /// then carries its affine normal velocity on the exact material map
-    /// x -> (rho_old/rho_new)*x. The pressure flux and native momentum/kinetic
-    /// readback must agree within explicit physical budgets. The new surface
-    /// actually expands into gas or retreats within old liquid; gas supplies no
-    /// mass or enthalpy. This is not a general cut-cell or repeated thermal VOF
-    /// integrator. Continued ordinary steps use the existing native mass routes.
+    /// The pressure solve uses the actual partial-cell width and gas face,
+    /// corrects the admitted incoming affine predictor, then carries its new
+    /// velocity on the exact material map x -> (rho_old/rho_new)*x. Actual
+    /// incoming and outgoing native mass, momentum and kinetic storage are
+    /// audited. Gas supplies no mass or enthalpy during either direction of
+    /// interface motion. Terminal velocity is the liquid-volume mean, with its
+    /// offset from the native sample point explicitly reported and bounded.
+    ///
+    /// Repeated calls compose this THERMAL SOURCE SPLIT. They do not perform
+    /// native viscous collision, wall relaxation or mass-route advection, and
+    /// therefore do not replace a general time integrator. Known affine
+    /// molecular stress is reseeded for the new source state; unrelated stored
+    /// nonequilibrium cannot enter through the retained-state admission.
     ///
     /// Endpoint source and law are explicitly borrowed at the new caloric
     /// temperature. Their original card, claims and external conditions must
@@ -172,6 +207,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             controls.maximum_mass_defect_kg,
             controls.maximum_momentum_defect_kg_m_s,
             controls.maximum_geometry_volume_defect_m3,
+            controls.maximum_native_centroid_offset_m,
             controls.maximum_kinetic_mapping_change_j,
         ] {
             if !value.is_finite() || value < 0.0 {
@@ -199,7 +235,6 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
                 "uniform thermal slab cannot discard its electrical owner",
             ));
         }
-        let redistribution = self.flow.lattice.admit_quiescent_volume_slab(gate)?;
         let dt = self.flow.scaling.timestep_s();
         let dx = self.flow.scaling.cell_size_m();
         if controls.volume.projection.duration_s != dt {
@@ -222,6 +257,32 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         let upper = anchored_face as usize % 2 == 1;
         let direction = if upper { -1.0 } else { 1.0 };
         let size = self.flow.lattice.domain_cells();
+        size[0]
+            .checked_mul(size[1])
+            .and_then(|n| n.checked_mul(size[2]))
+            .filter(|n| *n > 0 && *n <= controls.volume.max_cells)
+            .ok_or(Error::Invalid(
+                "thermal slab exceeds its complete grid budget",
+            ))?;
+        if self
+            .volume_slab
+            .as_ref()
+            .is_some_and(|state| state.anchored_face != anchored_face)
+        {
+            return Err(Error::Invalid(
+                "thermal slab continuation changed its anchored face",
+            ));
+        }
+        let redistribution = self.flow.lattice.admit_volume_slab(
+            axis,
+            upper,
+            self.volume_slab.as_ref().map(|state| &state.profile),
+            gate,
+        )?;
+        let incoming_rate = self
+            .volume_slab
+            .as_ref()
+            .map_or(0.0, |state| state.affine_rate_s_inv);
         let transverse = [0, 1, 2]
             .into_iter()
             .filter(|&a| a != axis)
@@ -235,9 +296,15 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         let mut occupied = 0usize;
         let mut h0 = None;
         let mut source_mass = Dd::ZERO;
+        let mut source_momentum = [Dd::ZERO; 3];
+        let mut source_kinetic = Dd::ZERO;
+        let mut layer_fills = BTreeMap::new();
         let mut input = Vec::new();
         for (&location, &mass) in &masses {
             checkpoint(gate, cx)?;
+            if !mass.is_finite() || mass < 0.0 {
+                return Err(Error::Invalid("thermal slab has invalid native mass"));
+            }
             if mass == 0.0 {
                 continue;
             }
@@ -257,19 +324,63 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             };
             depth = depth.max(index + 1);
             occupied += 1;
-            source_mass = source_mass + Dd::from_f64(mass) * Dd::from_f64(m0);
+            let sample = self
+                .flow
+                .sample_at_si(coordinates[0], coordinates[1], coordinates[2])?
+                .ok_or(Error::Invalid("thermal slab lost occupied native sample"))?;
+            let fill = sample.fill_fraction;
+            if !fill.is_finite()
+                || fill <= 0.0
+                || fill > 1.0
+                || layer_fills.get(&index).is_some_and(|f| *f != fill)
+            {
+                return Err(Error::Invalid(
+                    "thermal slab requires one common planar fill per layer",
+                ));
+            }
+            layer_fills.insert(index, fill);
+            let physical_mass = Dd::from_f64(mass) * Dd::from_f64(m0);
+            source_mass = source_mass + physical_mass;
+            for a in 0..3 {
+                let p = physical_mass * Dd::from_f64(sample.velocity_m_s[a]);
+                source_momentum[a] = source_momentum[a] + p;
+                source_kinetic =
+                    source_kinetic + Dd::from_f64(0.5) * p * Dd::from_f64(sample.velocity_m_s[a]);
+            }
             input.push(MaterialFreeSurfaceVolumeInput3 {
                 coordinates,
                 state: self.caloric.state_at_specific_enthalpy(specific)?,
-                net_enthalpy_increment_j: m0 * net_specific_enthalpy_increment_j_kg,
+                net_enthalpy_increment_j: value(
+                    physical_mass * Dd::from_f64(net_specific_enthalpy_increment_j_kg),
+                ),
             });
         }
         if depth == 0 || depth >= size[axis] || depth.checked_mul(columns) != Some(occupied) {
             return Err(Error::Invalid(
-                "thermal slab must be one complete full-cell section with gas above it",
+                "thermal slab must be one complete planar section with gas above it",
             ));
         }
+        let terminal_fill = layer_fills[&(depth - 1)];
+        if layer_fills
+            .iter()
+            .any(|(&index, &fill)| index + 1 < depth && fill != 1.0)
+        {
+            return Err(Error::Invalid(
+                "only the terminal thermal slab layer may be partial",
+            ));
+        }
+        let original_depth = (depth - 1) as f64 + terminal_fill;
+        let initial_height = original_depth * dx;
         let h0 = h0.ok_or(Error::Invalid("thermal slab has no liquid"))?;
+        if self
+            .volume_slab
+            .as_ref()
+            .is_some_and(|state| state.specific_enthalpy_j_kg.to_bits() != h0.to_bits())
+        {
+            return Err(Error::Invalid(
+                "thermal slab continuation changed its original enthalpy",
+            ));
+        }
         let initial = self.caloric.state_at_specific_enthalpy(h0)?;
         let proposed = self
             .caloric
@@ -328,7 +439,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             scaling = scaling.with_pressure_reference(reference)?;
         }
         let m1 = scaling.mass_unit_kg();
-        let column = slab::remap(depth, size[axis], dx, dt, m0, m1, || {
+        let column = slab::remap(original_depth, size[axis], dx, dt, m0, m1, || {
             gate.is_requested() || cx.is_cancel_requested()
         });
         checkpoint(gate, cx)?;
@@ -337,40 +448,55 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         ))?;
         // A gas layer remains: the next ordinary native step must still have
         // its actual pressure boundary, not an accidentally sealed domain.
-        if column.height_m >= size[axis] as f64 * dx {
+        if column.cells.len() >= size[axis] {
             return Err(Error::Invalid(
-                "thermal slab reaches the opposite closed wall",
+                "thermal slab requires an unoccupied gas-side native layer",
             ));
         }
-        let projection = self.flow.project_enthalpy_volume_demand(
+        let domain = planar_domain(size, axis, upper, depth, terminal_fill, dx, gate, cx)?;
+        let predictor = affine_predictor(&domain, axis, upper, incoming_rate, gate, cx)?;
+        let projection = self.flow.project_enthalpy_volume_demand_on_domain(
             self.law,
             self.caloric,
             &input,
             |_, _| 0.0,
             controls.volume,
             gate,
+            domain,
+            Some(predictor.clone()),
         )?;
         let rate = ((m0 - m1) / m1) / dt;
         let mut flux_defect = 0.0_f64;
         let mut pressure_impulse = [Dd::ZERO; 3];
+        let mut incoming_momentum_defect = 0.0;
+        let mut centroid_offset = 0.5 * (1.0 - terminal_fill) * dx;
+        let extent = projection.domain.face_coord(axis, size[axis]);
         for c in 0..projection.domain.cell_count() {
             checkpoint(gate, cx)?;
             if !projection.domain.is_fluid(c) {
                 continue;
             }
             let position = projection.domain.coords(c);
+            let center = projection
+                .domain
+                .center(position[0], position[1], position[2]);
+            let sample = self
+                .flow
+                .sample_at_si(position[0], position[1], position[2])?
+                .ok_or(Error::Invalid("thermal slab lost incoming velocity"))?;
+            let mass = Dd::from_f64(projection.cells[&position].mass_kg);
             for f in 0..6 {
                 let a = f / 2;
                 let expected = if a == axis {
-                    let face_index = position[a] + f % 2;
+                    let coordinate = projection.domain.face_coord(a, position[a] + f % 2);
                     let distance = if upper {
-                        size[axis] - face_index
+                        extent - coordinate
                     } else {
-                        face_index
+                        coordinate
                     };
                     direction
                         * rate
-                        * (distance as f64 * dx)
+                        * distance
                         * if f % 2 == 0 { -1.0 } else { 1.0 }
                         * projection.domain.face_area(c, a)
                 } else {
@@ -383,6 +509,9 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
                 flux_defect = flux_defect.max((actual - expected).abs());
             }
             for a in 0..3 {
+                centroid_offset =
+                    centroid_offset.max((center[a] - (position[a] as f64 + 0.5) * dx).abs());
+                let area = projection.domain.face_area(c, a);
                 let velocity = 0.5
                     * (projection
                         .projection
@@ -392,10 +521,20 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
                             .projection
                             .field
                             .outward(&projection.domain, c, 2 * a))
-                    / projection.domain.face_area(c, a);
+                    / area;
+                let previous = 0.5
+                    * (predictor.outward(&projection.domain, c, 2 * a + 1)
+                        - predictor.outward(&projection.domain, c, 2 * a))
+                    / area;
+                incoming_momentum_defect +=
+                    value(mass * (Dd::from_f64(previous) - Dd::from_f64(sample.velocity_m_s[a])))
+                        .abs();
                 pressure_impulse[a] =
-                    pressure_impulse[a] + Dd::from_f64(m0) * Dd::from_f64(velocity);
+                    pressure_impulse[a] + mass * (Dd::from_f64(velocity) - Dd::from_f64(previous));
             }
+        }
+        for target in &column.cells {
+            centroid_offset = centroid_offset.max(0.5 * (1.0 - target.fill_fraction) * dx);
         }
         if !rate.is_finite()
             || !flux_defect.is_finite()
@@ -497,16 +636,16 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             let expected = &column.cells[index];
             let location = FreeSurface3::transport_location(p)
                 .ok_or(Error::Invalid("thermal slab lost target address"))?;
-            let mass = Dd::from_f64(liquid.flow.lattice.transport_cell_mass(location)?)
-                * Dd::from_f64(m1);
+            let mass =
+                Dd::from_f64(liquid.flow.lattice.transport_cell_mass(location)?) * Dd::from_f64(m1);
             native_mass = native_mass + mass;
             let sample = liquid
                 .flow
                 .sample_at_si(p[0], p[1], p[2])?
                 .ok_or(Error::Invalid("thermal slab lost target liquid"))?;
             mass_mapping_defect += value(mass - Dd::from_f64(expected.mass_kg)).abs();
-            actual_volume = actual_volume
-                + Dd::from_f64(sample.fill_fraction) * Dd::from_f64(projection.domain.volume(0));
+            actual_volume =
+                actual_volume + Dd::from_f64(sample.fill_fraction) * Dd::from_f64(dx * dx * dx);
             for a in 0..3 {
                 let momentum = mass * Dd::from_f64(sample.velocity_m_s[a]);
                 native_momentum[a] = native_momentum[a] + momentum;
@@ -522,28 +661,39 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         }
         let mass_before = self.flow.ledger_mass_kg()?;
         let mass_after = liquid.flow.ledger_mass_kg()?;
-        let mass_defect = (mass_after - mass_before).abs()
-            .max(value(native_mass - source_mass).abs()).max(mass_mapping_defect);
+        let mass_defect = (mass_after - mass_before)
+            .abs()
+            .max(value(native_mass - source_mass).abs())
+            .max(mass_mapping_defect);
         let pressure_impulse = pressure_impulse.map(value);
+        let source_momentum = source_momentum.map(value);
         let native_momentum = native_momentum.map(value);
         let analytic_p = direction * column.source_momentum_kg_m_s * columns as f64;
         let momentum_defect = (0..3)
             .map(|a| {
                 let expected = if a == axis { analytic_p } else { 0.0 };
-                (pressure_impulse[a] - expected).abs() + (native_momentum[a] - expected).abs()
+                (source_momentum[a] + pressure_impulse[a] - expected).abs()
+                    + (native_momentum[a] - expected).abs()
             })
             .sum::<f64>()
-            .max(momentum_mapping_defect);
+            .max(momentum_mapping_defect + incoming_momentum_defect);
         let demanded_volume = projection.cells.values().fold(Dd::ZERO, |sum, cell| {
             sum + Dd::from_f64(cell.proposed_volume_m3)
         });
         let volume_defect = value(actual_volume - demanded_volume).abs();
         let affine_kinetic = column.source_kinetic_energy_j * columns as f64;
-        let native_kinetic = value(native_kinetic);
-        let face_kinetic = projection.projection.report.kinetic_energy_after_j;
-        let face_to_affine = affine_kinetic - face_kinetic;
-        let affine_to_native = native_kinetic - affine_kinetic;
-        let mapping_change = face_to_affine.abs() + affine_to_native.abs();
+        let pr = &projection.projection.report;
+        // Retain the pressure owner's compensated kinetic increment. Rounded
+        // absolute endpoint diagnostics are not subtracted to recover work.
+        let face_before = Dd::from_f64(pr.kinetic_energy_before_j);
+        let face_after = face_before + Dd::from_f64(pr.kinetic_energy_change_j);
+        let native_to_face_dd = face_before - source_kinetic;
+        let face_to_affine_dd = Dd::from_f64(affine_kinetic) - face_after;
+        let affine_to_native_dd = native_kinetic - Dd::from_f64(affine_kinetic);
+        let native_to_face = value(native_to_face_dd);
+        let face_to_affine = value(face_to_affine_dd);
+        let affine_to_native = value(affine_to_native_dd);
+        let mapping_change = native_to_face.abs() + face_to_affine.abs() + affine_to_native.abs();
         let enthalpy_before = self.total_enthalpy_j()?;
         let enthalpy_after = liquid.total_enthalpy_j()?;
         // Absolute H values are diagnostics. Form the original-chart
@@ -552,23 +702,31 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         // is exposed separately; no convenient reference erases it.
         let requested_dd = source_mass * Dd::from_f64(net_specific_enthalpy_increment_j_kg);
         let mass_datum = (native_mass - source_mass) * Dd::from_f64(h0);
-        let enthalpy_defect = value(
-            native_mass * (Dd::from_f64(h1) - Dd::from_f64(h0))
-                + mass_datum - requested_dd,
-        );
+        let enthalpy_defect =
+            value(native_mass * (Dd::from_f64(h1) - Dd::from_f64(h0)) + mass_datum - requested_dd);
         let requested = value(requested_dd);
         let mass_datum = value(mass_datum);
-        let pr = &projection.projection.report;
-        let required_work = pr.pressure_source_work_j
-            - pr.fixed_boundary_pressure_work_j
-            - pr.open_boundary_pressure_work_j;
-        let mechanical_defect = required_work - native_kinetic - pr.projection_loss_j
-            + face_to_affine
-            + affine_to_native;
+        let required_work_dd = Dd::from_f64(pr.pressure_source_work_j)
+            - Dd::from_f64(pr.fixed_boundary_pressure_work_j)
+            - Dd::from_f64(pr.open_boundary_pressure_work_j);
+        let mechanical_defect = value(
+            required_work_dd
+                - (native_kinetic - source_kinetic)
+                - Dd::from_f64(pr.projection_loss_j)
+                - Dd::from_f64(pr.resistance_correction_work_j)
+                + native_to_face_dd
+                + face_to_affine_dd
+                + affine_to_native_dd,
+        );
+        let required_work = value(required_work_dd);
+        let source_kinetic = value(source_kinetic);
+        let native_kinetic = value(native_kinetic);
         for measured in [
             mass_defect,
             momentum_defect,
             volume_defect,
+            centroid_offset,
+            source_kinetic,
             affine_kinetic,
             native_kinetic,
             mapping_change,
@@ -585,6 +743,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         if mass_defect > controls.maximum_mass_defect_kg
             || momentum_defect > controls.maximum_momentum_defect_kg_m_s
             || volume_defect > controls.maximum_geometry_volume_defect_m3
+            || centroid_offset > controls.maximum_native_centroid_offset_m
             || mapping_change > controls.maximum_kinetic_mapping_change_j
             || enthalpy_defect.abs() > controls.volume.maximum_enthalpy_defect_j
             || mechanical_defect.abs() > controls.volume.projection.maximum_energy_defect_j
@@ -596,11 +755,19 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         let density_agreement = liquid
             .density_agreement()?
             .ok_or(Error::Invalid("thermal slab lost density accuracy binding"))?;
+        liquid.volume_slab = Some(MappedSlabState {
+            anchored_face,
+            specific_enthalpy_j_kg: h1,
+            affine_rate_s_inv: ((m0 - m1) / m0) / dt,
+            profile: liquid.flow.lattice.volume_slab_profile(axis, upper, gate)?,
+        });
         checkpoint(gate, cx)?;
         Ok(FreeSurfaceSlabVolumeStep {
             report: FreeSurfaceSlabVolumeReport {
                 anchored_face,
                 initial_depth_cells: depth,
+                initial_height_m: initial_height,
+                initial_terminal_fill_fraction: terminal_fill,
                 final_height_m: column.height_m,
                 newly_wet_cells: column.cells.len().saturating_sub(depth) * columns,
                 vacated_cells: depth.saturating_sub(column.cells.len()) * columns,
@@ -613,22 +780,99 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
                 enthalpy_defect_j: enthalpy_defect,
                 mass_defect_enthalpy_datum_j: mass_datum,
                 pressure_impulse_kg_m_s: pressure_impulse,
+                momentum_before_kg_m_s: source_momentum,
                 momentum_after_kg_m_s: native_momentum,
                 momentum_defect_kg_m_s: momentum_defect,
+                native_kinetic_energy_before_j: source_kinetic,
                 affine_kinetic_energy_j: affine_kinetic,
                 native_kinetic_energy_j: native_kinetic,
                 required_mechanical_work_j: required_work,
+                native_to_face_kinetic_change_j: native_to_face,
                 face_to_affine_kinetic_change_j: face_to_affine,
                 affine_to_native_kinetic_change_j: affine_to_native,
                 mechanical_energy_defect_j: mechanical_defect,
                 maximum_face_flux_defect_m3_s: flux_defect,
                 geometry_volume_defect_m3: volume_defect,
+                maximum_native_centroid_offset_m: centroid_offset,
                 density_agreement,
             },
             liquid,
             projection,
         })
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn planar_domain(
+    size: [usize; 3],
+    axis: usize,
+    upper: bool,
+    depth: usize,
+    terminal_fill: f64,
+    dx: f64,
+    gate: &CancelGate,
+    cx: &Cx<'_>,
+) -> Result<VoxelDomain, Error> {
+    let mut widths = size.map(|n| vec![dx; n]);
+    let terminal = if upper { size[axis] - depth } else { depth - 1 };
+    let gas = if upper { terminal - 1 } else { terminal + 1 };
+    widths[axis][terminal] = terminal_fill * dx;
+    widths[axis][gas] = (2.0 - terminal_fill) * dx;
+    let mut domain = VoxelDomain::graded(widths)?;
+    for c in 0..domain.cell_count() {
+        checkpoint(gate, cx)?;
+        let p = domain.coords(c);
+        let index = if upper {
+            size[axis] - 1 - p[axis]
+        } else {
+            p[axis]
+        };
+        if index >= depth {
+            domain.set(p[0], p[1], p[2], Voxel::Solid(0));
+        }
+    }
+    Ok(domain)
+}
+
+/// This known affine predictor includes the actual internal gas-face velocity.
+/// Adjacent-center copying at a partial opening would lose the retained motion.
+fn affine_predictor(
+    domain: &VoxelDomain,
+    axis: usize,
+    upper: bool,
+    rate: f64,
+    gate: &CancelGate,
+    cx: &Cx<'_>,
+) -> Result<FlowField, Error> {
+    let field = FlowField::quiescent(domain);
+    let mut arrays = field.face_arrays().map(<[f64]>::to_vec);
+    let extent = domain.face_coord(axis, domain.dims()[axis]);
+    let direction = if upper { -1.0 } else { 1.0 };
+    for c in 0..domain.cell_count() {
+        checkpoint(gate, cx)?;
+        if !domain.is_fluid(c) {
+            continue;
+        }
+        let p = domain.coords(c);
+        for f in [2 * axis, 2 * axis + 1] {
+            let coordinate = domain.face_coord(axis, p[axis] + f % 2);
+            let distance = if upper {
+                extent - coordinate
+            } else {
+                coordinate
+            };
+            let flux = direction * rate * distance * domain.face_area(c, axis);
+            if !flux.is_finite() {
+                return Err(Error::Invalid(
+                    "retained thermal slab face motion overflows",
+                ));
+            }
+            let (slot, _) = field.slot(domain, c, f);
+            arrays[axis][slot] = flux;
+        }
+    }
+    let [x, y, z] = arrays;
+    Ok(FlowField::from_face_arrays(domain, x, y, z))
 }
 
 fn checkpoint(gate: &CancelGate, cx: &Cx<'_>) -> Result<(), Error> {

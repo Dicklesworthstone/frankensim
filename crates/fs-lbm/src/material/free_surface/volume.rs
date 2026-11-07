@@ -65,7 +65,9 @@ pub struct MaterialFreeSurfaceVolumeCell3 {
 /// Original-chart volume demand and its native pressure/flux proposal.
 #[derive(Clone, Debug)]
 pub struct MaterialFreeSurfaceVolumeProjection3 {
-    /// Exact binary occupied-voxel domain for the returned staggered fluxes.
+    /// Occupied Cartesian domain for the returned staggered fluxes. The
+    /// public full-voxel entry uses the original uniform metric; the admitted
+    /// planar moving-interface owner can supply its exact terminal cut width.
     /// Inactive entries represent gas or walls, not an inferred gas material.
     pub domain: VoxelDomain,
     pub projection: DensityProjection,
@@ -122,9 +124,63 @@ impl MaterialFreeSurface3<'_> {
         law: &LiquidTemperatureLaw<'_>,
         caloric: &EquilibriumEnthalpyPhaseCurve,
         input: &[MaterialFreeSurfaceVolumeInput3],
+        gas_pressure: impl FnMut([usize; 3], Face3) -> f64,
+        controls: MaterialFreeSurfaceVolumeControls3,
+        gate: &CancelGate,
+    ) -> Result<MaterialFreeSurfaceVolumeProjection3, Error> {
+        self.project_enthalpy_volume_demand_impl(
+            law,
+            caloric,
+            input,
+            gas_pressure,
+            controls,
+            gate,
+            None,
+            None,
+        )
+    }
+
+    /// Internal moving-interface entry. Its owner proves the Cartesian cut
+    /// geometry and the incoming native population state before calling.
+    /// Every positive native fill must agree with this metric, independently
+    /// of the original caloric mass/rho check. An explicitly supplied predictor
+    /// carries that owner's admitted face reconstruction; the existing
+    /// pressure projection still owns its inertia, work and residual checks.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn project_enthalpy_volume_demand_on_domain(
+        &self,
+        law: &LiquidTemperatureLaw<'_>,
+        caloric: &EquilibriumEnthalpyPhaseCurve,
+        input: &[MaterialFreeSurfaceVolumeInput3],
+        gas_pressure: impl FnMut([usize; 3], Face3) -> f64,
+        controls: MaterialFreeSurfaceVolumeControls3,
+        gate: &CancelGate,
+        domain: VoxelDomain,
+        predictor: Option<FlowField>,
+    ) -> Result<MaterialFreeSurfaceVolumeProjection3, Error> {
+        self.project_enthalpy_volume_demand_impl(
+            law,
+            caloric,
+            input,
+            gas_pressure,
+            controls,
+            gate,
+            Some(domain),
+            predictor,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn project_enthalpy_volume_demand_impl(
+        &self,
+        law: &LiquidTemperatureLaw<'_>,
+        caloric: &EquilibriumEnthalpyPhaseCurve,
+        input: &[MaterialFreeSurfaceVolumeInput3],
         mut gas_pressure: impl FnMut([usize; 3], Face3) -> f64,
         controls: MaterialFreeSurfaceVolumeControls3,
         gate: &CancelGate,
+        supplied_domain: Option<VoxelDomain>,
+        supplied_predictor: Option<FlowField>,
     ) -> Result<MaterialFreeSurfaceVolumeProjection3, Error> {
         poll(gate)?;
         for value in [
@@ -206,7 +262,17 @@ impl MaterialFreeSurface3<'_> {
                 "thermal-volume input exceeds the original grid",
             ));
         }
-        let mut domain = VoxelDomain::new(size[0], size[1], size[2], self.scaling.cell_size_m())?;
+        let explicit_metric = supplied_domain.is_some();
+        let mut domain = if let Some(domain) = supplied_domain {
+            if domain.dims() != size {
+                return Err(Error::Invalid(
+                    "thermal-volume metric changed the original cell indexing",
+                ));
+            }
+            domain
+        } else {
+            VoxelDomain::new(size[0], size[1], size[2], self.scaling.cell_size_m())?
+        };
         for c in 0..count {
             poll(gate)?;
             let [x, y, z] = domain.coords(c);
@@ -218,6 +284,7 @@ impl MaterialFreeSurface3<'_> {
         let mut sources = vec![0.0; count];
         let native_mass = self.lattice.mass_snapshot();
         let mut occupied = 0usize;
+        let mut native_metric_defect_m3 = 0.0_f64;
         for (&location, &mass) in &native_mass {
             poll(gate)?;
             if !mass.is_finite() || mass < 0.0 {
@@ -236,12 +303,43 @@ impl MaterialFreeSurface3<'_> {
                 "thermal-volume inventory is not an occupied native cell",
             ))?;
             // Check the actual tracked inventory, not its clamped fill readback.
-            if sample.fill_fraction != 1.0 || mass != sample.density {
+            // The ordinary entry preserves its original full-voxel admission.
+            if !explicit_metric && (sample.fill_fraction != 1.0 || mass != sample.density) {
                 return Err(Error::Invalid(
                     "partial or overfilled interfaces need an explicit cut-cell volume metric",
                 ));
             }
             let c = domain.index(x, y, z);
+            if explicit_metric {
+                if !sample.density.is_finite()
+                    || sample.density <= 0.0
+                    || mass > sample.density
+                    || sample.fill_fraction <= 0.0
+                {
+                    return Err(Error::Invalid(
+                        "thermal-volume cut metric needs positive bounded native fill",
+                    ));
+                }
+                let dx = self.scaling.cell_size_m();
+                let native_volume = positive(
+                    ((mass / sample.density * dx) * dx) * dx,
+                    "native occupied cut volume is unrepresentable",
+                )?;
+                let metric_volume = positive(
+                    domain.volume(c),
+                    "thermal-volume cut metric has no positive occupied volume",
+                )?;
+                let defect = finite(
+                    (native_volume - metric_volume).abs(),
+                    "native/cut-metric volume defect is unrepresentable",
+                )?;
+                native_metric_defect_m3 = native_metric_defect_m3.max(defect);
+                if defect > controls.maximum_initial_volume_defect_m3 {
+                    return Err(Error::Invalid(
+                        "native filled volume disagrees with the supplied cut metric",
+                    ));
+                }
+            }
             domain.set(x, y, z, Voxel::Fluid);
             masses[c] = positive(
                 mass * self.scaling.mass_unit_kg(),
@@ -263,7 +361,7 @@ impl MaterialFreeSurface3<'_> {
         }
         let mut cache = BTreeMap::new();
         let mut cells = BTreeMap::new();
-        let mut maximum_initial_volume_defect_m3 = 0.0_f64;
+        let mut maximum_initial_volume_defect_m3 = native_metric_defect_m3;
         let mut maximum_source_density_defect_kg_m3 = 0.0_f64;
         let mut absolute_enthalpy_defect_j = 0.0_f64;
         for entry in input {
@@ -390,13 +488,17 @@ impl MaterialFreeSurface3<'_> {
             }
         }
         let faces = [FlowFace::Wall; 6];
-        let predictor = FlowField::from_cell_velocity_predictor_with_internal_pressure_faces(
-            &domain,
-            &velocities,
-            faces,
-            &openings,
-            gate,
-        )?;
+        let predictor = if let Some(predictor) = supplied_predictor {
+            predictor
+        } else {
+            FlowField::from_cell_velocity_predictor_with_internal_pressure_faces(
+                &domain,
+                &velocities,
+                faces,
+                &openings,
+                gate,
+            )?
+        };
         let projection = predictor.project_density_volume_source_with_internal_pressure_faces(
             &domain,
             faces,

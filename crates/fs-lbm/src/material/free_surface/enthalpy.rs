@@ -351,6 +351,7 @@ pub struct MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     time_origin_s: f64,
     accepted_steps: u64,
     density_accuracy_kg_m3: Option<f64>,
+    volume_slab: Option<volume::MappedSlabState>,
     h: BTreeMap<MassLocation3, f64>,
     states: BTreeMap<MassLocation3, ResolvedLiquidState>,
     phase_conduction: Option<LiquidMassFractionConductivity>,
@@ -592,6 +593,7 @@ impl<'s> MaterialFreeSurface3<'s> {
             time_origin_s: 0.0,
             accepted_steps: 0,
             density_accuracy_kg_m3,
+            volume_slab: None,
             h,
             states: BTreeMap::new(),
             phase_conduction: None,
@@ -963,6 +965,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         prepared: PreparedEnthalpyTick<'m>,
     ) -> (FreeSurfaceEnthalpyReport, Option<motion::ThermalWallReport>) {
         self.flow.lattice = prepared.lattice;
+        self.volume_slab = None;
         self.h = prepared.h;
         self.states = prepared.states;
         self.rheology_samples = prepared.rheology_samples;

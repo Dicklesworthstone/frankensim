@@ -479,46 +479,138 @@ mod inflow_tests {
     }
 }
 
+
+/// Exact, compact native state retained by the planar thermal source split.
+/// All transverse cells in one layer must share populations and actual mass.
+#[derive(Clone)]
+pub(crate) struct VolumeSlabProfile3 {
+    axis: usize,
+    upper: bool,
+    size: [usize; 3],
+    count: usize,
+    layers: BTreeMap<usize, ([f64; Q3], f64)>,
+}
+
 impl FreeSurface3 {
-    /// Admit the exact mechanical basis of the uniform thermal slab bridge.
-    /// No stored pressure, velocity, non-equilibrium stress, force, wall history
-    /// or surface law may disappear when its changed physical mass unit enters
-    /// the original native constructor.
-    pub(crate) fn admit_quiescent_volume_slab(
-        &self, gate: &CancelGate,
+    /// Admit rest or the exact mapped native state from a previous source step.
+    /// An arbitrary velocity/stress field cannot enter this affine split.
+    pub(crate) fn admit_volume_slab(
+        &self,
+        axis: usize,
+        upper: bool,
+        previous: Option<&VolumeSlabProfile3>,
+        gate: &CancelGate,
     ) -> Result<ConversionRedistribution3, FreeSurfaceError3> {
         check_cancel(gate)?;
-        if !self.solid.is_empty() || self.planar_piston.is_some() || self.geometry_epoch != 0
-            || self.carry != 0.0 || self.sigma != 0.0 || self.local_sigma.is_some()
-            || self.local_bulk_relaxation.is_some() || self.planar_contact.is_some()
-            || self.planar_contact_field.is_some() || !matches!(self.contact, ContactModel3::Neutral)
-            || !matches!(self.collision_model(), crate::d3q19::CollisionModel3::Bgk { .. })
+        if !self.solid.is_empty()
+            || self.planar_piston.is_some()
+            || self.geometry_epoch != 0
+            || self.carry != 0.0
+            || self.sigma != 0.0
+            || self.local_sigma.is_some()
+            || self.local_bulk_relaxation.is_some()
+            || self.planar_contact.is_some()
+            || self.planar_contact_field.is_some()
+            || !matches!(self.contact, ContactModel3::Neutral)
+            || !matches!(
+                self.collision_model(),
+                crate::d3q19::CollisionModel3::Bgk { .. }
+            )
             || self.body_acceleration != Some(BodyAccelerationField3::Uniform([0.0; 3]))
-            || self.material_gravity != Some([0.0; 3]) || self.reference_force() != [0.0; 3]
+            || self.material_gravity != Some([0.0; 3])
+            || self.reference_force() != [0.0; 3]
         {
             return Err(FreeSurfaceError3::Transport(
                 "thermal slab bridge requires stationary neutral walls, zero acceleration/capillarity and ordinary BGK",
             ));
         }
-        let mut equilibrium = equilibrium3(1.0, [0.0; 3]);
-        forcing::preserve_density(&mut equilibrium, 1.0)?;
+        let actual = self.volume_slab_profile(axis, upper, gate)?;
+        if let Some(previous) = previous {
+            if previous.axis != axis
+                || previous.upper != upper
+                || previous.size != actual.size
+                || previous.count != actual.count
+                || previous.layers != actual.layers
+            {
+                return Err(FreeSurfaceError3::Transport(
+                    "thermal slab continuation lost its exact mapped native state",
+                ));
+            }
+        } else {
+            let mut equilibrium = equilibrium3(1.0, [0.0; 3]);
+            forcing::preserve_density(&mut equilibrium, 1.0)?;
+            if actual
+                .layers
+                .values()
+                .any(|(populations, mass)| *populations != equilibrium || *mass > 1.0)
+            {
+                return Err(FreeSurfaceError3::Transport(
+                    "initial thermal slab requires canonical pressure-density one at exact rest",
+                ));
+            }
+        }
+        Ok(self.redistribution)
+    }
+
+    /// Retain full native moments and actual inventory, never a reconstructed
+    /// equilibrium approximation. Storage is one population vector per layer.
+    pub(crate) fn volume_slab_profile(
+        &self,
+        axis: usize,
+        upper: bool,
+        gate: &CancelGate,
+    ) -> Result<VolumeSlabProfile3, FreeSurfaceError3> {
+        check_cancel(gate)?;
+        let size = self.domain_cells();
+        if axis >= 3 {
+            return Err(FreeSurfaceError3::Transport("invalid thermal slab axis"));
+        }
+        let mut profile = VolumeSlabProfile3 {
+            axis,
+            upper,
+            size,
+            count: 0,
+            layers: BTreeMap::new(),
+        };
         for (&key, tile) in &self.tiles {
             check_cancel(gate)?;
             let slot = self.grid.slot_of(key).expect("active");
             for lane in 0..TILE_CELLS {
-                if tile.cells[lane] == Cell3::Gas || (tile.cells[lane] == Cell3::Interface && tile.mass[lane] == 0.0) {
+                if tile.cells[lane] == Cell3::Gas
+                    || (tile.cells[lane] == Cell3::Interface && tile.mass[lane] == 0.0)
+                {
                     continue;
                 }
-                if self.grid.populations(slot, lane) != equilibrium
-                    || self.force_at_lane(key, lane) != [0.0; 3]
-                    || (tile.cells[lane] == Cell3::Interface && tile.mass[lane] != 1.0)
-                {
+                let location = MassLocation3::Cell(key, lane);
+                let mass = self.transport_cell_mass(location)?;
+                if !mass.is_finite() || mass <= 0.0 || self.force_at_lane(key, lane) != [0.0; 3] {
                     return Err(FreeSurfaceError3::Transport(
-                        "thermal slab bridge cannot discard native pressure, velocity, stress or partial fill",
+                        "thermal slab has invalid inventory or an unmatched force",
                     ));
                 }
+                let p = Self::transport_coordinates(location).ok_or(
+                    FreeSurfaceError3::Transport("thermal slab has unlocated inventory"),
+                )?;
+                let index = if upper {
+                    size[axis] - 1 - p[axis]
+                } else {
+                    p[axis]
+                };
+                let state = (self.grid.populations(slot, lane), mass);
+                if profile
+                    .layers
+                    .get(&index)
+                    .is_some_and(|previous| *previous != state)
+                {
+                    return Err(FreeSurfaceError3::Transport(
+                        "thermal slab native moments differ across a planar layer",
+                    ));
+                }
+                profile.layers.insert(index, state);
+                profile.count += 1;
             }
         }
-        Ok(self.redistribution)
+        check_cancel(gate)?;
+        Ok(profile)
     }
 }

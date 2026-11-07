@@ -15279,45 +15279,68 @@ spatial-force torque, retained stress, Galilean work, and late refusal/cancellat
 
 ## Native planar liquid expansion from original thermal density
 
-`MaterialFreeSurfaceEnthalpy3::advance_uniform_slab_volume` advances one
-uniformly heated or cooled planar slab into actual native full/partial cells.
-The initial liquid fills a complete Cartesian cross section anchored at either
-domain face, with gas above it. Canonical density-one rest populations are
-checked after the same density-preserving normalization as native ingress.
-Incoming pressure, motion, nonequilibrium stress, partial fill, disconnected
-geometry, internal solids, piston history and unsupported coupled force or
-surface owners refuse.
+`MaterialFreeSurfaceEnthalpy3::advance_uniform_slab_volume` advances uniformly
+heated or cooled planar liquid into actual native full/partial cells. The
+liquid occupies the complete transverse section from either anchored domain
+wall, with one optional common partial terminal layer; the whole slab may be
+thinner than one cell. An actual unoccupied native gas-side layer must remain
+at both endpoints. A partial last domain cell beside the opposite wall is
+not silently assigned a different pressure boundary.
 
-The original physical-density projection supplies compatible volume flux and
-pressure impulse. Exact affine material overlaps carry physical M, uniform h
-and momentum into the moved interface. Contraction obtains no mass or enthalpy
-from gas. Endpoint source density consistently sets the new mass/pressure
-units; population density remains numerical pressure, not an imposed thermal
-EOS ratio. The existing native strain initializer supplies the carried affine
-molecular response before actual mass/momentum readback.
+Initial states require canonical density-one rest populations after the
+same density-preserving normalization as native ingress. Moving continuation
+requires the exact retained per-layer native population/mass profile produced
+by this bridge, unchanged uniform enthalpy and the same anchored face.
+Storage is proportional to slab depth, not the entire three-dimensional grid.
+Accepted ordinary native ticks invalidate the binding; exact readback also
+refuses unmatched changes through other paths. Arbitrary incoming motion or
+nonequilibrium, holes, disconnected geometry, internal solids, piston history
+and unsupported coupled force or surface owners remain outside this rung.
 
-The returned original enthalpy owner retains its caloric chart, datum, source
-claims, external conditions and clock, and continues through native collision,
-mass routes and interface conversion. An explicit physical source/chart/reference
-density agreement allowance is retained and reported. Ordinary constructors
-retain their previous exact admission. Subsequent constant-reference stepping
-refuses density changes outside the admitted allowance.
+The existing pressure/source owner receives an explicitly graded metric:
+terminal wet width is `fill*dx`, with its missing width added to the adjacent
+gas-side cell. Original indices, total extent and other occupied cells remain.
+The private metric admission independently checks native
+`mass/population_density*dx^3` and original `M/rho(h)` against actual wet
+volume. The public voxel proposal retains its original full-cell admission.
+The retained affine predictor reaches the actual gas face, including the
+occupied half-cell inertia; terminal-center velocity is not copied there.
+Pressure impulse is measured relative to actual incoming native momentum.
 
-Input is NET caloric increment. Required pressure/source mechanical work,
-native kinetic storage, face quadrature difference and unresolved affine
-motion remain separate; neither projection nor remap loss becomes heat.
-The noncancelling absolute kinetic mapping changes consume an explicit physical
-accuracy budget. Extensive enthalpy change uses retained Dd mass sums and
-h1-h0, with the actual mass-defect datum term exposed separately.
+Exact affine overlaps carry physical M, uniform h and momentum through the
+moved interface. Contraction obtains no mass or enthalpy from gas. Endpoint
+source density consistently sets physical mass/pressure units; population
+density remains the numerical pressure coordinate, not an imposed thermal
+EOS ratio. The existing strain initializer supplies the new known affine
+molecular response before native mass/momentum readback. The terminal native
+velocity stores the liquid-volume mean; its centroid offset from the native
+Cartesian sample point is explicitly reported and bounded in metres.
 
-Numerical-leaf regressions cover exact affine mass, momentum and kinetic
-integrals, expansion/contraction, partial cells, zero and tiny volume change,
-extreme finite products, invalid inputs and cancellation. Native integration
-regression definitions cover all oriented axes, interior heating/cooling and
-continuation, zero-input and datum behavior, physical accuracy refusals and
-atomic cancellation. This remains a bounded planar, initially quiescent
-thermal-volume bridge; general repeated thermal VOF and phase change require
+The original caloric chart, datum, source claims, external conditions and
+clock remain authoritative. A physical source/chart/reference density
+agreement allowance is retained and reported. Ordinary constructors retain
+their exact admission; subsequent constant-reference stepping refuses larger
+unmodeled density changes. Input is NET caloric increment. Required pressure
+mechanical work is separate from actual native kinetic storage and heat.
+Incoming native-to-face reconstruction and both outgoing kinetic mapping
+changes consume one noncancelling absolute accuracy budget. The pressure
+owner's compensated kinetic increment closes the mechanical account. No
+projection, reconstruction or remap loss becomes heat. Extensive enthalpy
+uses retained Dd mass sums and h1-h0, including the explicit mass-defect datum.
+
+Repeated calls compose this thermal source split. They do not perform native
+viscous collision, wall relaxation or mass-route advection and therefore do
+not replace a general time integrator. Ordinary native continuation remains
+available; general arbitrary-moving thermal VOF and phase change still need
 their own physical evolution and conservative transport owners.
+
+Numerical-leaf regressions cover exact affine mass/momentum/kinetic integrals,
+noninteger initial depth, subcell slabs, repeated density maps, tiny changes,
+extreme finite products, invalid inputs and cancellation. Native integration
+definitions cover all oriented axes, partial gas-face geometry, heat/cool/heat
+sequences, actual incoming pressure impulse and work, zero-source projection
+without new expansion/heat, centroid and kinetic refusals, missing gas-side
+capacity, ordinary-tick invalidation, original datum and atomic cancellation.
 
 
 ## Localized wrench on retained free-surface liquid
