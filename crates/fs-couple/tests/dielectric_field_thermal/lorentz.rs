@@ -4,6 +4,7 @@ use super::*;
 use fs_em::electrostatic::dispersion::lorentz::PlanarLorentzDielectric;
 use fs_material::field_storage::dielectric::lorentz::{
     LorentzPoleProperties, LorentzState, ResolvedLorentzMaterial,
+    leaky::ResolvedLeakyLorentzMaterial,
 };
 use fs_qty::{Dims, semantic::FrequencyConvention};
 
@@ -220,5 +221,193 @@ fn changing_lorentz_coefficients_and_cancellation_cannot_publish_a_thermal_candi
                 assert_eq!(field.polarization_states(), history.as_slice());
             },
         );
+    }
+}
+
+fn conducting_inertial_field(
+    card: &MaterialCard,
+    geometry: &PlanarDebyeDielectric,
+) -> PlanarLorentzDielectric {
+    let source = ResolvedLeakyLorentzMaterial::resolve(
+        card,
+        &point(300.0),
+        MaterialPropertySelection::SingleClaimOnly,
+        "epsilon_inf",
+        &[LorentzPoleProperties {
+            permittivity_increment: "delta".into(),
+            angular_frequency: "omega0".into(),
+            damping_rate: "gamma".into(),
+        }],
+        "sigma",
+    )
+    .unwrap();
+    PlanarLorentzDielectric::new_leaky(
+        geometry.mesh().clone(),
+        vec![source; 2],
+        geometry.voltage_v().to_vec(),
+        vec![
+            vec![LorentzState {
+                polarization_c_m2: [0.4, 0.0],
+                current_a_m2: [3.0, 0.0],
+            }];
+            2
+        ],
+        &[0, 1, 2, 3],
+        0.0,
+        WeightedAssemblyLimits {
+            max_cells: 10,
+            max_dofs: 20,
+            max_triplets: 200,
+        },
+        field_controls(),
+        &mut || false,
+    )
+    .unwrap()
+}
+
+#[test]
+fn conducting_lorentz_history_deposits_each_physical_loss_once() {
+    for sigma in [0.0, 4.0] {
+        for gamma in [0.0, 2.0] {
+            let cards = [with_leakage(
+                resonant_card(card(2.0, 3.0, 0.2, 10.0, 1.0, 500.0, false), gamma, false),
+                sigma,
+                false,
+            )];
+            with_case(
+                &cards,
+                &[300.0],
+                true,
+                false,
+                |network, mut thermal, geometry| {
+                    let mut field = conducting_inertial_field(&cards[0], &geometry);
+                    let dt = 0.03;
+                    let prepared = field.prepare_step(dt, &mut || false).unwrap();
+                    let total0 = field.stored_energy_j() + thermal.energy_j();
+                    let heat0 = thermal.energy_j();
+                    let (mut total_heat, mut total_work) = (0.0, 0.0);
+                    for _ in 0..6 {
+                        let proposal = field
+                            .step_candidate(&prepared, &ends(1), field_controls(), &mut || false)
+                            .unwrap();
+                        let step = proposal.step();
+                        let expected_friction: f64 = field
+                            .polarization_states()
+                            .iter()
+                            .zip(proposal.field().polarization_states())
+                            .zip(field.cell_volumes_m3())
+                            .map(|((before, after), volume)| {
+                                let j =
+                                    0.5 * (before[0].current_a_m2[0] + after[0].current_a_m2[0]);
+                                volume * dt * gamma * j * j / (3.0 * 100.0)
+                            })
+                            .sum();
+                        near(step.polarization_heat_j, expected_friction, 2e-12);
+                        near(step.joule_heat_j, dt * sigma, 2e-12);
+                        near(step.heat_j, expected_friction + dt * sigma, 2e-12);
+                        let next = network
+                            .step_dielectric_field_candidate(
+                                &thermal,
+                                &proposal,
+                                controls(),
+                                &[0.0],
+                                || false,
+                            )
+                            .unwrap();
+                        near(
+                            next.thermal().energy_j() - thermal.energy_j(),
+                            step.heat_j,
+                            2e-8,
+                        );
+                        near(next.report().coupled.deposited_joule_j, step.heat_j, 2e-12);
+                        for snapshot in &next.report().coupled.source.dielectric {
+                            for key in ["epsilon_inf", "delta", "omega0", "gamma", "sigma"] {
+                                assert!(snapshot.property(key).is_some());
+                            }
+                            near(snapshot.property("sigma").unwrap().value_si(), sigma, 0.0);
+                            near(
+                                snapshot.query().axes()["T"],
+                                next.thermal().temperature_k(CellId(7)).unwrap(),
+                                1e-10,
+                            );
+                        }
+                        assert!(field.same_problem(next.field()));
+                        assert!(
+                            next.field().polarization_states()[0][0].current_a_m2[0].abs() > 0.0
+                        );
+                        total_heat += step.heat_j;
+                        total_work += step.supplied_work_j;
+                        (thermal, field, _) = next.into_parts();
+                    }
+                    near(thermal.energy_j() - heat0, total_heat, 5e-8);
+                    near(
+                        thermal.energy_j() + field.stored_energy_j() - total0,
+                        total_work,
+                        5e-8,
+                    );
+                    if gamma == 0.0 && sigma == 0.0 {
+                        assert_eq!(total_heat, 0.0);
+                    } else {
+                        assert!(total_heat > 0.0);
+                    }
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn varying_leakage_and_cancellation_refuse_without_consuming_resonant_heat() {
+    for sigma in [0.0, 4.0] {
+        for variable in [false, true] {
+            let cards = [with_leakage(
+                resonant_card(card(2.0, 3.0, 0.2, 10.0, 1.0, 500.0, false), 2.0, false),
+                sigma,
+                variable,
+            )];
+            with_case(
+                &cards,
+                &[300.0],
+                true,
+                false,
+                |network, thermal, geometry| {
+                    let field = conducting_inertial_field(&cards[0], &geometry);
+                    let prepared = field.prepare_step(0.03, &mut || false).unwrap();
+                    let proposal = field
+                        .step_candidate(&prepared, &ends(1), field_controls(), &mut || false)
+                        .unwrap();
+                    let history = field.polarization_states().to_vec();
+                    let energy = thermal.energy_j();
+                    let rejected = network.step_dielectric_field_candidate(
+                        &thermal,
+                        &proposal,
+                        controls(),
+                        &[0.0],
+                        || !variable,
+                    );
+                    assert!(rejected.is_err());
+                    assert_eq!(field.time_s(), 0.0);
+                    assert_eq!(thermal.time_s(), 0.0);
+                    assert_eq!(field.polarization_states(), history.as_slice());
+                    assert_eq!(thermal.energy_j(), energy);
+                    if !variable {
+                        let retried = network
+                            .step_dielectric_field_candidate(
+                                &thermal,
+                                &proposal,
+                                controls(),
+                                &[0.0],
+                                || false,
+                            )
+                            .unwrap();
+                        near(
+                            retried.thermal().energy_j() - energy,
+                            proposal.step().heat_j,
+                            2e-8,
+                        );
+                    }
+                },
+            );
+        }
     }
 }

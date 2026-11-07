@@ -33,6 +33,21 @@ const DELTA: f64 = 3e-11;
 const OMEGA: f64 = 10.0;
 
 fn law(poles: &[(f64, f64, f64)]) -> ResolvedLorentzMaterial {
+    let (card, names) = source(poles, None);
+    ResolvedLorentzMaterial::resolve(
+        &card,
+        &QueryPoint::new(),
+        MaterialPropertySelection::SingleClaimOnly,
+        "epsilon_inf",
+        &names,
+    )
+    .unwrap()
+}
+
+fn source(
+    poles: &[(f64, f64, f64)],
+    conductivity_s_m: Option<f64>,
+) -> (MaterialCard, Vec<LorentzPoleProperties>) {
     let permittivity = QuantitySpec::dimensional(ELECTRIC_PERMITTIVITY_DIMS);
     let frequency = QuantitySpec::semantic(SemanticType::new(
         QuantityKind::Frequency(FrequencyConvention::Angular),
@@ -58,6 +73,13 @@ fn law(poles: &[(f64, f64, f64)]) -> ResolvedLorentzMaterial {
             names
         })
         .collect();
+    if let Some(sigma) = conductivity_s_m {
+        values.push((
+            "sigma_dc".into(),
+            QuantitySpec::dimensional(fs_material::conductor::ELECTRICAL_CONDUCTIVITY_DIMS),
+            sigma,
+        ));
+    }
     let mut claims = ClaimSet::new();
     for (name, quantity, value) in values {
         claims
@@ -90,14 +112,7 @@ fn law(poles: &[(f64, f64, f64)]) -> ResolvedLorentzMaterial {
         vec![],
     )
     .unwrap();
-    ResolvedLorentzMaterial::resolve(
-        &card,
-        &QueryPoint::new(),
-        MaterialPropertySelection::SingleClaimOnly,
-        "epsilon_inf",
-        &names,
-    )
-    .unwrap()
+    (card, names)
 }
 fn controls() -> ElectrostaticControls {
     ElectrostaticControls {
@@ -385,3 +400,7 @@ fn zero_poles_and_failed_trials_preserve_original_field_identity_and_history() {
         1e-12,
     );
 }
+
+#[cfg(feature = "resolved-leaky-dielectric")]
+#[path = "dielectric_lorentz/leaky.rs"]
+mod leaky;

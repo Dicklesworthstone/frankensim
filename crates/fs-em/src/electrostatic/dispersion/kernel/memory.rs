@@ -14,6 +14,37 @@ use fs_material::field_storage::{
 
 type Result<T> = core::result::Result<T, FieldStorageError>;
 
+/// Source extraction only: the shared field owner integrates Ohmic current
+/// independently of the original relaxation or inertial polarization law.
+#[cfg(feature = "resolved-leaky-dielectric")]
+pub(crate) trait LeakyMemoryLaw<const D: usize> {
+    type Memory: MemoryLaw<D>;
+
+    fn into_parts(self) -> (Self::Memory, String, f64);
+}
+
+#[cfg(feature = "resolved-leaky-dielectric")]
+impl<const D: usize> LeakyMemoryLaw<D>
+    for fs_material::field_storage::dielectric::leaky::ResolvedLeakyDielectric
+{
+    type Memory = ResolvedDebyeMaterial;
+
+    fn into_parts(self) -> (Self::Memory, String, f64) {
+        Self::into_parts(self)
+    }
+}
+
+#[cfg(feature = "resolved-leaky-dielectric")]
+impl<const D: usize> LeakyMemoryLaw<D>
+    for fs_material::field_storage::dielectric::lorentz::leaky::ResolvedLeakyLorentzMaterial
+{
+    type Memory = ResolvedLorentzMaterial;
+
+    fn into_parts(self) -> (Self::Memory, String, f64) {
+        Self::into_parts(self)
+    }
+}
+
 pub(crate) struct Recovery<S, const D: usize> {
     pub states_after: Vec<S>,
     pub displacement_after_c_m2: [f64; D],

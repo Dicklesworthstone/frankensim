@@ -5062,3 +5062,29 @@ difference, finite-air uptake/desorption with loading-dependent heat, unequal
 spherical/cylindrical shells, partition equilibrium with zero integration work,
 and late source/budget/cancellation refusals. Rust formatting and independent
 analytical fixture calculations passed; native integration tests remain unrun.
+
+### Conducting resonant dielectric heat in the native receiver
+
+The existing `step_dielectric_field_candidate` receiver now accepts Lorentz
+fields constructed with independent source-bound DC conductivity through the
+same `DielectricFieldState` interface. No new thermal integration or deposition
+path is introduced. The original field candidate supplies separate pole-friction
+and Ohmic Joule losses, their sum is deposited once into the original physical
+cell volumes, and restoring/kinetic polarization storage remains in the field.
+The total balance includes both displacement and conduction electrode work.
+
+Every original epsilon, pole increment, angular frequency, damping and selected
+conductivity role survives the complete source snapshot. Existing validity-wide
+coefficient-constancy checks apply to conductivity even when its selected value
+is zero. Thermal trial snapshots refresh their actual temperature query while
+the retained field owner and its fixed coefficients remain unchanged. Variable
+conductivity, source mismatch and cancellation refuse the joint candidate
+without consuming field history or heat.
+
+Two focused integration regressions are authored for all four zero/finite
+conductivity and pole-damping combinations over retained-history steps, original
+source-role/temperature recovery, independent physical loss accounting, and
+variable-conductivity/cancellation refusal followed by replay. They are not
+claimed executed without the full fs-couple dependency closure. Carrier
+transport, temperature-dependent resonant/conductive coefficient work and
+induction remain outside this fixed-source bridge.

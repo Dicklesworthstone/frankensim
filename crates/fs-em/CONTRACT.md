@@ -6718,3 +6718,43 @@ thermal regressions check physical heat deposition and source/refusal behavior.
 These full-crate tests are authored but unexecuted without the complete native
 dependency closure. Formatting and bounded source/API/physics review passed;
 material numerical tests are reported separately, not as field integration.
+
+### Conducting Lorentz fields and original total-current balance
+
+The planar, axisymmetric and spatial Lorentz owners now expose `new_leaky`
+under the existing `resolved-leaky-dielectric` feature. Each cell consumes one
+`ResolvedLeakyLorentzMaterial`, preserving the original complete Lorentz source
+and independently selected scalar DC conductivity. A private source-extraction
+adapter admits both Debye and Lorentz laws into the existing field constructor;
+all geometry, Hodge assembly, potential solves, charge recovery and work/loss
+accounting remain shared. The insulating constructor retains its original scope.
+
+The field solves the original weak total-current equation. At an unprescribed
+node, Delta free charge plus the integrated Ohmic outflow is zero. Lorentz
+polarization/current recovery retains the original pole equations. Local
+elimination adds `dt*sigma/2` to the positive algorithmic endpoint coefficient
+and the corresponding old-field conduction history. This coefficient is never
+reported as stored permittivity. Physical storage remains epsilon-infinity
+field energy plus each pole's restoring and kinetic energy. Independent
+`dt*sigma*|E_mid|^2` Joule heat and original pole friction are reported separately,
+as are displacement and conduction contributions to electrode work. An exact
+source-backed zero conductivity follows the same numerical path as insulation.
+
+Prepared coefficient banks and native field operators remain reusable at fixed
+dt and bound to the original geometry/material owner. Conductivity is visible
+through the same original property-name/value getters used by thermal receivers.
+The scope is fixed-geometry isotropic electroquasistatics with static DC Ohmic
+conduction: no carrier inertia, anisotropic transport, breakdown, temperature
+parameter work or propagating Maxwell wave claim is added. Midpoint is passive
+and second order; stiff leakage need not be monotone, and resonant phase still
+requires time refinement.
+
+Four G1/G3/G4 field regressions are authored: isolated three-state charge/
+polarization/current dynamics against independent continuous roots on three
+time refinements; equilibrium DC current with unchanged resonant storage;
+revolved and oblique tetrahedral physical-volume/current accounting; and exact
+zero-conductivity equivalence plus owner/cancellation refusal. Two receiving
+thermal tests cover the joint loss and source-validity path in fs-couple. These
+full-field tests remain unexecuted while the complete workspace dependency
+closure is unavailable; formatting and focused source/API review are the
+executed checks for this adapter extension.

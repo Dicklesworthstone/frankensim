@@ -9,8 +9,10 @@
 //!
 //! This is fixed-geometry, isotropic electroquasistatics: magnetic induction,
 //! propagating Maxwell waves and temperature-dependent coefficient work are
-//! outside this owner. It is explicitly insulating; pole friction is its only
-//! material heat. Midpoint conserves lossless discrete energy, but its phase
+//! outside this owner. `new` is insulating; `new_leaky`, under the existing
+//! `resolved-leaky-dielectric` feature, additionally retains original DC Ohmic
+//! conductivity. Free charge then obeys total-current continuity. Pole friction
+//! and Joule heat remain distinct. Midpoint conserves lossless discrete energy, but its phase
 //! error requires time refinement through the highest participating resonance.
 
 use super::{
@@ -20,6 +22,8 @@ use super::{
     sealed, triangle_geometry,
 };
 use fs_feec::weighted::WeightedAssemblyLimits;
+#[cfg(feature = "resolved-leaky-dielectric")]
+use fs_material::field_storage::dielectric::lorentz::leaky::ResolvedLeakyLorentzMaterial;
 use fs_material::field_storage::dielectric::lorentz::{LorentzState, ResolvedLorentzMaterial};
 use fs_rep_mesh::TriComplex2;
 use std::sync::Arc;
@@ -94,6 +98,51 @@ impl<const AXISYMMETRIC: bool> MeridionalLorentzDielectric<AXISYMMETRIC> {
         Ok(Self { geometry, core })
     }
 
+    /// Couple original polarization inertia to independently sourced DC leakage.
+    /// The native weak equation enforces Delta D + dt sigma E_mid, so interior
+    /// free charge may relax while every pole retains both of its state vectors.
+    /// Conductivity contributes heat and boundary current, never extra storage.
+    #[cfg(feature = "resolved-leaky-dielectric")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_leaky(
+        mesh: TriComplex2,
+        materials: Vec<ResolvedLeakyLorentzMaterial>,
+        voltage_v: Vec<f64>,
+        states: Vec<Vec<LorentzState<2>>>,
+        voltage_vertices: &[usize],
+        time_s: f64,
+        limits: WeightedAssemblyLimits,
+        controls: ElectrostaticControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
+        let geometry = triangle_geometry::<AXISYMMETRIC>(mesh, limits, cancelled)?;
+        if voltage_v.len() != geometry.mesh.vertices().len()
+            || voltage_vertices.len() > voltage_v.len()
+            || voltage_vertices.iter().any(|&v| v >= voltage_v.len())
+        {
+            return Err(invalid(
+                "complete dielectric voltage state and valid trace vertices required",
+            ));
+        }
+        let traces: Vec<_> = voltage_vertices
+            .iter()
+            .map(|&v| (v, voltage_v[v]))
+            .collect();
+        let prescribed = boundary::<AXISYMMETRIC>(&geometry.mesh, &traces, cancelled)?;
+        let core = Field::new_leaky(
+            Arc::clone(&geometry) as Arc<dyn DebyeGeometry<2>>,
+            materials,
+            voltage_v,
+            states,
+            prescribed,
+            time_s,
+            limits,
+            controls,
+            cancelled,
+        )?;
+        Ok(Self { geometry, core })
+    }
+
     pub fn mesh(&self) -> &TriComplex2 {
         &self.geometry.mesh
     }
@@ -125,6 +174,13 @@ impl<const AXISYMMETRIC: bool> MeridionalLorentzDielectric<AXISYMMETRIC> {
     }
     pub fn cell_volumes_m3(&self) -> &[f64] {
         self.core.cell_volumes_m3()
+    }
+    /// Original cell conductivity, excluding every polarization loss channel.
+    pub fn conductivity_s_m(&self) -> &[f64] {
+        self.core.conductivity_s_m()
+    }
+    pub fn conductivity_properties(&self) -> &[Option<String>] {
+        self.core.conductivity_properties()
     }
     pub fn stored_energy_j(&self) -> f64 {
         self.core.stored_energy_j()

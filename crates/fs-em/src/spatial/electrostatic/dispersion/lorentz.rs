@@ -4,7 +4,9 @@
 //! potential solver and shared charge/work recovery. Each local pole keeps
 //! its original polarization and current vectors; only scalar-potential DOFs
 //! enter the global solve. Complete restoring/kinetic storage and frictional
-//! heat are recovered separately. See the planar Lorentz owner for the fixed
+//! heat are recovered separately. The optional source-bound Ohmic path uses
+//! the same total-current equation and reports its Joule heat independently.
+//! See the planar Lorentz owner for the fixed
 //! geometry, electroquasistatic and time-resolution boundaries.
 
 use super::{
@@ -13,6 +15,8 @@ use super::{
 };
 use crate::electrostatic::dispersion::{DielectricFieldState, sealed};
 use fs_feec::weighted::WeightedAssemblyLimits;
+#[cfg(feature = "resolved-leaky-dielectric")]
+use fs_material::field_storage::dielectric::lorentz::leaky::ResolvedLeakyLorentzMaterial;
 use fs_material::field_storage::dielectric::lorentz::{LorentzState, ResolvedLorentzMaterial};
 use fs_rep_mesh::TetComplex;
 use std::sync::Arc;
@@ -64,6 +68,38 @@ impl SpatialLorentzDielectric {
         )?;
         Ok(Self { geometry, core })
     }
+    /// Retain source-bound DC conduction alongside all original Lorentz poles.
+    /// Free nodal charge follows the total-current weak equation; source work
+    /// includes both displacement and conduction current at physical electrodes.
+    #[cfg(feature = "resolved-leaky-dielectric")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_leaky(
+        positions_m: Vec<[f64; 3]>,
+        tetrahedra: Vec<[u32; 4]>,
+        materials: Vec<ResolvedLeakyLorentzMaterial>,
+        voltage_v: Vec<f64>,
+        states: Vec<Vec<LorentzState<3>>>,
+        voltage_vertices: &[usize],
+        time_s: f64,
+        limits: WeightedAssemblyLimits,
+        controls: ElectrostaticControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
+        let geometry = TetrahedralGeometry::new(positions_m, tetrahedra, limits, cancelled)?;
+        let prescribed = geometry.initial_boundary(&voltage_v, voltage_vertices, cancelled)?;
+        let core = Field::new_leaky(
+            Arc::clone(&geometry) as Arc<dyn DebyeGeometry<3>>,
+            materials,
+            voltage_v,
+            states,
+            prescribed,
+            time_s,
+            limits,
+            controls,
+            cancelled,
+        )?;
+        Ok(Self { geometry, core })
+    }
     pub fn mesh(&self) -> &TetComplex {
         &self.geometry.native.mesh
     }
@@ -96,6 +132,12 @@ impl SpatialLorentzDielectric {
     }
     pub fn cell_volumes_m3(&self) -> &[f64] {
         self.core.cell_volumes_m3()
+    }
+    pub fn conductivity_s_m(&self) -> &[f64] {
+        self.core.conductivity_s_m()
+    }
+    pub fn conductivity_properties(&self) -> &[Option<String>] {
+        self.core.conductivity_properties()
     }
     pub fn stored_energy_j(&self) -> f64 {
         self.core.stored_energy_j()

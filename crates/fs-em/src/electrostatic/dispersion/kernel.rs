@@ -7,13 +7,13 @@ use super::{
 };
 use crate::scalar_potential;
 use fs_feec::weighted::WeightedAssemblyLimits;
-#[cfg(feature = "resolved-leaky-dielectric")]
-use fs_material::field_storage::dielectric::leaky::ResolvedLeakyDielectric;
 use fs_material::field_storage::{
     ELECTRIC_PERMITTIVITY_DIMS, dielectric::bulk::ResolvedDebyeMaterial,
 };
 use fs_qty::Dims;
 use fs_sparse::Csr;
+#[cfg(feature = "resolved-leaky-dielectric")]
+use memory::LeakyMemoryLaw;
 use std::sync::Arc;
 
 mod memory;
@@ -697,13 +697,13 @@ impl<const D: usize, M: MemoryLaw<D>> Field<D, M> {
 }
 
 #[cfg(feature = "resolved-leaky-dielectric")]
-impl<const D: usize> Field<D> {
+impl<const D: usize, M: MemoryLaw<D>> Field<D, M> {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new_leaky(
+    pub(crate) fn new_leaky<L: LeakyMemoryLaw<D, Memory = M>>(
         geometry: Arc<dyn DebyeGeometry<D>>,
-        materials: Vec<ResolvedLeakyDielectric>,
+        materials: Vec<L>,
         voltage_v: Vec<f64>,
-        polarization_c_m2: Vec<Vec<[f64; D]>>,
+        states: Vec<Vec<M::State>>,
         prescribed: Vec<Option<f64>>,
         time_s: f64,
         limits: WeightedAssemblyLimits,
@@ -730,7 +730,7 @@ impl<const D: usize> Field<D> {
             conductivity_s_m,
             conductivity_properties,
             voltage_v,
-            polarization_c_m2,
+            states,
             prescribed,
             time_s,
             limits,
