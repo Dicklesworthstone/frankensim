@@ -20439,3 +20439,29 @@ coherent subdivision and source/support refusal. The model is frozen,
 linear, isotropic, planar and normal-incidence. It does not infer measured
 authority, oblique P/S coupling, poroelastic frame motion, finite-aperture
 scattering or thermal evolution.
+
+## Calibrated temperature snapshots of source-resolved plane-stress viscosity
+
+`TemperatureShift::shift_plane_stress_viscosity` applies the existing calibrated
+WLF/Arrhenius kinetics to the original reduced Kelvin source: `V_T = a_T V_ref`.
+The source's exact reference coordinate must match the declared reference
+temperature and carry absolute/static semantics, or the legacy `T` convention.
+All selected coefficients must retain only admitted fixed external conditions;
+an existing dependence on that temperature axis or a second temperature owner
+refuses. Other held moisture, pressure or composition context remains intact.
+
+The original source receipts, selected properties and material plane stay
+unchanged. Original matrix entries scale by `a_T`; cached passive Gram factors
+scale by its square root without refactorization or loss of resolved weak
+channels. Exact zeros/signs survive; nonzero underflow and overflow refuse.
+The original tensor-shift frequency policy transports support to
+`[omega_lo/a_T, omega_hi/a_T]`, intersecting its upper endpoint with finite
+representable frequencies. Reference-temperature evaluation clones identically.
+The returned `ShiftedViscoelastic` retains the actual temperature/calibration.
+
+Each low-level call requires the original reference law, as for `shift_tensor`.
+This is a prepared fixed-temperature source interpretation, not live thermal
+history, an elastic modulus shift, a caloric balance or independent authority
+for time-temperature superposition. Focused tests use genuine resolved scalar
+sources to check stress/heat, weak passive channels, held moisture, source-axis
+refusals, immutable reference data and support/representability bounds.

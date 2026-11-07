@@ -22,6 +22,8 @@ mod hyperelastic;
 pub use hyperelastic::*;
 mod scalar;
 pub use scalar::*;
+mod plane_stress;
+pub use plane_stress::*;
 
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as GAS_CONSTANT_J_MOL_K;
 
@@ -240,27 +242,37 @@ impl TemperatureShift {
                 *value = scaled(*value, root)?;
             }
         }
-        let low = reference.band_rad_s.0 / state.factor;
-        let high = (reference.band_rad_s.1 / state.factor).min(f64::MAX);
-        if !low.is_finite()
-            || low < 0.0
-            || !high.is_finite()
-            || low > high
-            || reference.band_rad_s.0 > 0.0 && low == 0.0
-            || reference.band_rad_s.1 > 0.0 && high == 0.0
-        {
-            return Err(invalid(
-                "shifted source frequency support is unrepresentable",
-            ));
-        }
-        law.band_rad_s = (low, high);
+        law.band_rad_s = shifted_tensor_frequency_band(reference.band_rad_s, state.factor)?;
         Ok(ShiftedTensorProny { law, state })
     }
 }
 
+// Original tensor support policy, also used by source-bound reduced viscosity.
+// Upper support intersects finite representable frequencies; a positive lower
+// endpoint must remain representable rather than silently becoming DC.
+pub(crate) fn shifted_tensor_frequency_band(
+    band: (f64, f64),
+    factor: f64,
+) -> Result<(f64, f64), ViscoError> {
+    let low = band.0 / factor;
+    let high = (band.1 / factor).min(f64::MAX);
+    if !low.is_finite()
+        || low < 0.0
+        || !high.is_finite()
+        || low > high
+        || band.0 > 0.0 && low == 0.0
+        || band.1 > 0.0 && high == 0.0
+    {
+        return Err(invalid(
+            "shifted source frequency support is unrepresentable",
+        ));
+    }
+    Ok((low, high))
+}
+
 // Preserve exact zeros and signs, including legitimate negative off-diagonal
 // tensor entries. A nonzero coupling cannot silently vanish through underflow.
-fn scaled(value: f64, factor: f64) -> Result<f64, ViscoError> {
+pub(crate) fn scaled(value: f64, factor: f64) -> Result<f64, ViscoError> {
     let next = value * factor;
     if !next.is_finite() || value != 0.0 && next == 0.0 {
         return Err(invalid(

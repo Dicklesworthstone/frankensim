@@ -224,6 +224,28 @@ fn admit_matrix(v: &[f64; 9]) -> Result<(), MaterialError> {
 }
 
 impl PlaneStressViscosity {
+    // Preserve the original source and admitted semidefinite channels while
+    // preparing a fixed-temperature kinetics snapshot. The calibrated public
+    // temperature owner admits source axes and evaluates the positive factor.
+    // No second material query, eigensolve or coefficient fit occurs here.
+    pub(crate) fn with_kinetic_scale(&self, factor: f64) -> Result<Self, crate::visco::ViscoError> {
+        use crate::visco::temperature::{scaled, shifted_tensor_frequency_band};
+        if !factor.is_finite() || factor <= 0.0 {
+            return Err(crate::visco::ViscoError::Parameters {
+                what: "source viscosity shift requires a finite positive factor",
+            });
+        }
+        if factor == 1.0 { return Ok(self.clone()); }
+        let mut law = self.clone();
+        for value in &mut law.matrix { *value = scaled(*value, factor)?; }
+        if let Some(gram) = &mut law.gram {
+            let root = fs_math::det::sqrt(factor);
+            for value in gram.iter_mut().flatten() { *value = scaled(*value, root)?; }
+        }
+        law.omega_band = shifted_tensor_frequency_band(self.omega_band, factor)?;
+        Ok(law)
+    }
+
     /// Bind six source-resolved scalar coefficients at the SAME frozen state.
     /// Every selected property must have an explicit frequency-validity band;
     /// their intersection is retained even for zero entries. Only constants or
