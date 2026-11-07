@@ -7757,6 +7757,40 @@ constant-fit context refresh preserves magnetic memory and refuses unsupported
 conditions or changed coefficients through the existing source owner. Scalar
 coupon evidence is not promoted to experimental rotating-field validation.
 
+### Intrinsic finite-rate magnetic switching
+
+The same vector owner optionally accepts one explicit viscosity eta [m s/H]
+per branch through `with_viscosities_m_s_h`. Timed H- and B-driven candidates
+minimize the original dry-friction potential plus eta|delta z|²/(2 dt), inside
+the same saturation ball. The scalar saturation multiplier, full symmetric
+active-set tangent and bounded inverse remain native. The implementation forms
+the physical switching drive before adding viscous stiffness, avoiding the
+large shifted-field cancellation of an effective-coefficient construction.
+Storage always uses the original chi. The physical balance reports pinning
+heat hc|delta z|, viscous heat eta|delta z|²/dt and numerical dissipation
+separately. The B-driven incremental potential contains **half** the viscous
+heat; the physical heat receipt contains its full value. Resolved Ohmic loss
+remains a distinct owner and must not also be fitted into eta.
+
+Finite holds can relax polarization and release heat. Every trial uses the
+same accepted memory and positive finite duration; a changed kinetic profile,
+clockless update, unrepresentable stiffness, failed native residual or exhausted
+budget refuses atomically. An all-zero profile takes the original numerical
+path. This is a first-order overdamped, isotropic, fixed-fit model requiring
+time refinement, not a domain-resolved magnetic dynamics or empirical excess
+loss model.
+
+`ResolvedVectorHysteresis::from_isotropic_source_with_viscosity` selects the
+additional original-card viscosity keys explicitly, retaining every existing
+receipt unchanged. Repeated keys share a source coefficient while preserving
+branch multiplicity. The combined material bundle retains all kinetic claims,
+including zero coefficients, through complete-query refreshes and full-interval
+temperature admission. Missing, negative, variable, dynamically conditioned or
+dimensionally incompatible viscosity sources refuse. Synthetic native tests
+cover relaxation, rate dependence, constrained rotation, tangent/potential
+derivatives, physical energy accounting, zero-profile recovery and original
+source validity; their authorship is not experimental material qualification.
+
 ### Compressible porous leakage and selective membrane permeation
 
 `porous::permeability` separates intrinsic permeability [m²] from gas viscosity,

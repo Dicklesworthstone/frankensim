@@ -1,4 +1,6 @@
-//! Source-selected coefficients for the original rate-independent play model.
+//! Source-selected coefficients for the play model and optional intrinsic
+//! finite-rate switching. Viscosity is an independently fitted material role;
+//! conductivity and resolved eddy-current losses never supply it implicitly.
 //!
 //! A material card supplies the fitted background, pinning, saturation and
 //! reversible branch slopes. Explicit keys assign their physical roles; no
@@ -11,8 +13,8 @@
 //! while retaining incompatible magnetic memory. A temperature-dependent fit
 //! needs its own free-energy/entropy and history-transfer law and refuses here.
 
-use super::{FieldStorageError, HysteresisBranch, ScalarHysteresis, UniformHystereticCore};
 use super::vector::{VectorHysteresis, VectorHysteresisError};
+use super::{FieldStorageError, HysteresisBranch, ScalarHysteresis, UniformHystereticCore};
 use crate::field_storage::{
     MAGNETIC_PERMEABILITY_DIMS,
     permanent::{FIELD_STRENGTH_DIMS, FLUX_DENSITY_DIMS},
@@ -24,6 +26,10 @@ use crate::state_point::{
 use fs_matdb::{EvaluationDecision, MaterialCard, PropertyKey, QueryPoint};
 use fs_qty::{Dims, QuantitySpec};
 use std::sync::Arc;
+
+/// Intrinsic magnetic switching viscosity eta [m s/H]. A branch contributes
+/// eta |dz/dt|² to physical heating, separately from resolved Ohmic losses.
+pub const MAGNETIC_VISCOSITY_DIMS: Dims = Dims([-1, -1, 3, 0, 2, 0]);
 
 /// Exact material properties for one fitted play branch. Repeated keys across
 /// branches deliberately share a coefficient; branch multiplicity stays data.
@@ -68,6 +74,7 @@ pub struct ResolvedScalarHysteresis {
 pub struct ResolvedVectorHysteresis {
     source: ResolvedScalarHysteresis,
     law: VectorHysteresis,
+    viscosity_sources: Vec<PropertyKey>,
 }
 
 impl ResolvedVectorHysteresis {
@@ -77,7 +84,71 @@ impl ResolvedVectorHysteresis {
         source: ResolvedScalarHysteresis,
     ) -> Result<Self, VectorHysteresisError> {
         let law = VectorHysteresis::from_isotropic_scalar(source.law())?;
-        Ok(Self { source, law })
+        Ok(Self {
+            source,
+            law,
+            viscosity_sources: Vec::new(),
+        })
+    }
+
+    /// Add an explicitly fitted intrinsic viscosity for every original branch.
+    /// The selection applies only to these additional coefficients: all original
+    /// claims, quantities and usage receipts remain verbatim. Repeated keys may
+    /// deliberately share one viscosity; branch order remains the original fit.
+    ///
+    /// These are nonnegative, source-constant coefficients at fixed external
+    /// conditions, not total measured core loss or a conductivity surrogate.
+    /// The complete bundle, including zero viscosities, owns source validity
+    /// and temperature admission. Native updates require a physical timestep
+    /// whenever any viscosity is positive.
+    pub fn from_isotropic_source_with_viscosity(
+        mut source: ResolvedScalarHysteresis,
+        viscosities: Vec<PropertyKey>,
+        selection: MaterialPropertySelection,
+    ) -> Result<Self, FieldStorageError> {
+        if viscosities.len() != source.roles.branches.len() {
+            return Err(invalid(
+                "one viscosity source is required per hysteresis branch",
+            ));
+        }
+        let mut keys = Vec::<PropertyKey>::new();
+        let mut requirements = Vec::new();
+        for key in &viscosities {
+            require_scalar_role(key, MAGNETIC_VISCOSITY_DIMS)?;
+            if !keys.contains(key) {
+                requirements.push(ScalarPropertyRequirement::try_with_key(
+                    key,
+                    ScalarAdmissibility::NonNegative,
+                )?);
+                keys.push(key.clone());
+            }
+        }
+        let material =
+            source
+                .material
+                .with_additional_requirements(&source.card, &requirements, selection)?;
+        admit_constant_coefficients(&material)?;
+        let values = viscosities
+            .iter()
+            .map(|key| {
+                material
+                    .property_by_key(key)
+                    .expect("complete viscosity requirements were resolved")
+                    .value_si()
+            })
+            .collect();
+        let law = VectorHysteresis::from_isotropic_scalar(source.law())
+            .and_then(|law| law.with_viscosities_m_s_h(values))
+            .map_err(|_| invalid("invalid intrinsic magnetic switching viscosity"))?;
+        // The original refresh and thermal owner must see the kinetic sources,
+        // including an explicitly selected zero profile. It rechecks the same
+        // immutable claims and preserves the shared native history identity.
+        source.material = material;
+        Ok(Self {
+            source,
+            law,
+            viscosity_sources: viscosities,
+        })
     }
 
     /// Original source identity, quantities, query and evidence receipts.
@@ -88,6 +159,12 @@ impl ResolvedVectorHysteresis {
     /// Original fitted coefficient roles and branch order.
     pub const fn sources(&self) -> &HysteresisSources {
         self.source.sources()
+    }
+
+    /// Original ordered viscosity roles, empty for the rate-independent owner.
+    /// An explicitly sourced all-zero profile retains its source roles here.
+    pub fn viscosity_sources(&self) -> &[PropertyKey] {
+        &self.viscosity_sources
     }
 
     /// Shared variational constitutive owner with full vector history.
@@ -101,7 +178,7 @@ impl ResolvedVectorHysteresis {
     pub fn at_query_point(&self, point: &QueryPoint) -> Result<Self, FieldStorageError> {
         Ok(Self {
             source: self.source.at_query_point(point)?,
-            law: self.law.clone(),
+            ..self.clone()
         })
     }
 
@@ -117,6 +194,36 @@ impl ResolvedVectorHysteresis {
 
 fn invalid(reason: &'static str) -> FieldStorageError {
     FieldStorageError::Invalid(reason)
+}
+
+fn require_scalar_role(key: &PropertyKey, dims: Dims) -> Result<(), FieldStorageError> {
+    if key.quantity() != QuantitySpec::dimensional(dims)
+        || key.hardness_test().is_some()
+        || key.elastic_component().is_some()
+        || key.strain_component().is_some()
+        || key.stress_component().is_some()
+    {
+        return Err(invalid(
+            "hysteresis roles require their explicit scalar SI quantities",
+        ));
+    }
+    Ok(())
+}
+
+fn admit_constant_coefficients(
+    material: &ResolvedMaterialStatePoint,
+) -> Result<(), FieldStorageError> {
+    for property in material.properties() {
+        if !property.source_axes().is_empty()
+            || property.answer().receipt.decision != EvaluationDecision::ConstantWithinValidity
+            || !property.is_static_at_fixed_external_conditions()
+        {
+            return Err(invalid(
+                "hysteretic memory requires source-constant fitted coefficients without unowned dynamic applicability",
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl ResolvedScalarHysteresis {
@@ -136,23 +243,15 @@ impl ResolvedScalarHysteresis {
         }
         let mut keys = Vec::<PropertyKey>::new();
         let mut requirements = Vec::new();
-        let mut require = |key: &PropertyKey, dims: Dims, admissibility| {
-            if key.quantity() != QuantitySpec::dimensional(dims)
-                || key.hardness_test().is_some()
-                || key.elastic_component().is_some()
-                || key.strain_component().is_some()
-                || key.stress_component().is_some()
-            {
-                return Err(invalid(
-                    "hysteresis roles require their explicit scalar SI quantities",
-                ));
-            }
-            if !keys.contains(key) {
-                requirements.push(ScalarPropertyRequirement::try_with_key(key, admissibility)?);
-                keys.push(key.clone());
-            }
-            Ok(())
-        };
+        let mut require =
+            |key: &PropertyKey, dims: Dims, admissibility| -> Result<(), FieldStorageError> {
+                require_scalar_role(key, dims)?;
+                if !keys.contains(key) {
+                    requirements.push(ScalarPropertyRequirement::try_with_key(key, admissibility)?);
+                    keys.push(key.clone());
+                }
+                Ok(())
+            };
         require(
             &roles.background_permeability,
             MAGNETIC_PERMEABILITY_DIMS,
@@ -181,16 +280,7 @@ impl ResolvedScalarHysteresis {
             )?;
         }
         let material = resolve_material_state_point(&card, point, &requirements, selection)?;
-        for property in material.properties() {
-            if !property.source_axes().is_empty()
-                || property.answer().receipt.decision != EvaluationDecision::ConstantWithinValidity
-                || !property.is_static_at_fixed_external_conditions()
-            {
-                return Err(invalid(
-                    "hysteretic memory requires source-constant fitted coefficients without unowned dynamic applicability",
-                ));
-            }
-        }
+        admit_constant_coefficients(&material)?;
         let value = |key: &PropertyKey| {
             material
                 .property_by_key(key)

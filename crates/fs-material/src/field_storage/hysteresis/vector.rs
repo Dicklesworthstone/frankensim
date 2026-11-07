@@ -17,6 +17,12 @@
 //! segment, a finite rotating-field increment does not determine an exact
 //! continuous path integral. Resolve turns/reversals and refine the history.
 //!
+//! An explicitly fitted branch viscosity `eta >= 0` [m s/H] adds
+//! `eta |z-z_old|²/(2 dt)` to that SAME incremental objective. Its backward
+//! Euler force is `eta (z-z_old)/dt`; its physical switching heat is the FULL
+//! `eta |z-z_old|²/dt`, while the original stored energy is unchanged. This
+//! intrinsic polarization kinetics does not represent Ohmic eddy-current loss.
+//!
 //! Parameters are explicit caller fits at fixed temperature/stress. This law
 //! supplies neither empirical material authority, eddy/excess loss, texture
 //! anisotropy, magnetic damage, nor automatic spatial/circuit/thermal coupling.
@@ -77,12 +83,14 @@ type Result<T> = core::result::Result<T, VectorHysteresisError>;
 #[derive(Clone, Debug, PartialEq)]
 pub struct VectorHysteresis {
     parameters: Arc<Parameters>,
+    viscosities_m_s_h: Option<Arc<[f64]>>,
 }
 
 /// Private accepted three-dimensional polarization memory and its physical state.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VectorHysteresisState {
     parameters: Arc<Parameters>,
+    viscosities_m_s_h: Option<Arc<[f64]>>,
     field_a_m: Vector,
     flux_density_t: Vector,
     polarizations_t: Vec<Vector>,
@@ -107,15 +115,20 @@ impl VectorHysteresisState {
 #[derive(Clone, Debug, PartialEq)]
 pub struct VectorHysteresisStep {
     pub state: VectorHysteresisState,
-    /// Nonnegative incremental dry-friction heat; deposit at most once [J/m³].
+    /// Total physical switching heat, pinning plus viscosity; deposit once [J/m³].
     pub irreversible_heat_j_m3: f64,
+    /// Nonnegative dry-friction heat `sum(hc |delta z|)` [J/m³].
+    pub pinning_heat_j_m3: f64,
+    /// Nonnegative viscous heat `sum(eta |delta z|²/dt)` [J/m³].
+    /// This is intrinsic switching heat, excluding resolved Ohmic eddy loss.
+    pub viscous_heat_j_m3: f64,
     /// Stable difference of the complete stored energy [J/m³].
     pub energy_change_j_m3: f64,
     /// H_new dot the actually retained change of B [J/m³].
     pub endpoint_work_j_m3: f64,
     /// Nonnegative endpoint-discretization remainder, never physical heat [J/m³].
     pub numerical_dissipation_j_m3: f64,
-    /// Endpoint work minus stored change, pinning heat and numerical remainder.
+    /// Endpoint work minus stored change, physical heat and numerical remainder.
     pub energy_residual_j_m3: f64,
     /// Frozen-history dB/dH [H/m], symmetric positive definite. At pinning and
     /// saturation kinks the selected active set is not a smoothness claim.
@@ -127,20 +140,22 @@ pub struct VectorHysteresisStep {
 }
 
 impl VectorHysteresisStep {
-    /// Frozen-history incremental potential `W(B,z_new) + Q(z_new-z_old)`.
+    /// Frozen-history potential `W(B,z_new) + Q_pinning + Q_viscous/2`.
     /// Its B-gradient is the endpoint H and its Hessian is the incremental
     /// reluctivity. A field Newton solve must minimize this potential rather
     /// than reversible storage alone. This is an incremental variational
     /// functional; it is not path-independent physical stored energy.
     pub fn incremental_potential_j_m3(&self) -> Result<f64> {
-        finite(self.state.stored_energy_j_m3 + self.irreversible_heat_j_m3)
+        finite(
+            self.state.stored_energy_j_m3 + self.pinning_heat_j_m3 + 0.5 * self.viscous_heat_j_m3,
+        )
     }
 
     /// Same frozen-history potential relative to the accepted stored energy.
     /// This stable form avoids subtracting two large state energies when
     /// globalizing a small increment about a magnetized operating point.
     pub fn incremental_potential_change_j_m3(&self) -> Result<f64> {
-        finite(self.energy_change_j_m3 + self.irreversible_heat_j_m3)
+        finite(self.energy_change_j_m3 + self.pinning_heat_j_m3 + 0.5 * self.viscous_heat_j_m3)
     }
 
     /// Consistent frozen-history `dH/dB` [m/H] for a B-driven field solver.
@@ -253,6 +268,20 @@ struct BranchResponse {
 // D=(I-hc/|r|*(I-n*n^T))/a, r=H-a*z_old. Also dz/da=-D*z.
 fn unconstrained(old: Vector, h: Vector, a: f64, hc: f64) -> Result<(Vector, Matrix)> {
     let r = std::array::from_fn(|i| (-a).mul_add(old[i], h[i]));
+    shrinkage(old, r, a, hc)
+}
+
+fn shrinkage(old: Vector, r: Vector, a: f64, hc: f64) -> Result<(Vector, Matrix)> {
+    if hc == 0.0 {
+        // No pinning cusp exists at r=0. A viscous branch still has compliance
+        // 1/a there, including during an initially unpolarized field hold.
+        let z = std::array::from_fn(|i| (r[i] / a) + old[i]);
+        let tangent = symmetric_matrix(|i, j| if i == j { a.recip() } else { 0.0 });
+        for value in z.into_iter().chain(tangent.into_iter().flatten()) {
+            finite(value)?;
+        }
+        return Ok((z, tangent));
+    }
     let length = finite(norm(r))?;
     if length <= hc {
         return Ok((old, [[0.0; 3]; 3]));
@@ -269,6 +298,29 @@ fn unconstrained(old: Vector, h: Vector, a: f64, hc: f64) -> Result<(Vector, Mat
     Ok((z, tangent))
 }
 
+// The same shrinkage and constrained return map serve both laws. For eta=0,
+// retain the original a=1/chi+lambda arithmetic exactly. For eta>0 the root
+// coordinate is lambda itself: forming H+k*z_old would lose the physical drive
+// and inflate residual tolerances when k=eta/dt is large.
+fn branch_unconstrained(
+    old: Vector,
+    h: Vector,
+    inverse_chi: f64,
+    viscous_stiffness: f64,
+    normal_coordinate: f64,
+    hc: f64,
+) -> Result<(Vector, Matrix)> {
+    if viscous_stiffness == 0.0 {
+        unconstrained(old, h, normal_coordinate, hc)
+    } else {
+        let drive = std::array::from_fn(|i| {
+            (-normal_coordinate).mul_add(old[i], (-inverse_chi).mul_add(old[i], h[i]))
+        });
+        let stiffness = finite(inverse_chi + viscous_stiffness + normal_coordinate)?;
+        shrinkage(old, drive, stiffness, hc)
+    }
+}
+
 fn stationarity_residual(
     old: Vector,
     h: Vector,
@@ -276,6 +328,7 @@ fn stationarity_residual(
     chi: f64,
     hc: f64,
     lambda: f64,
+    viscous_stiffness: f64,
 ) -> Result<f64> {
     let increment = sub(z, old);
     let distance = finite(norm(increment))?;
@@ -283,7 +336,12 @@ fn stationarity_residual(
         (norm(std::array::from_fn(|i| h[i] - z[i] / chi - lambda * z[i])) - hc).max(0.0)
     } else {
         norm(std::array::from_fn(|i| {
-            h[i] - z[i] / chi - lambda * z[i] - hc * increment[i] / distance
+            let dry = h[i] - z[i] / chi - lambda * z[i] - hc * increment[i] / distance;
+            if viscous_stiffness == 0.0 {
+                dry
+            } else {
+                (-viscous_stiffness).mul_add(increment[i], dry)
+            }
         }))
     })
 }
@@ -292,6 +350,7 @@ fn branch_response(
     branch: &HysteresisBranch,
     old: Vector,
     h: Vector,
+    viscous_stiffness: f64,
     c: VectorHysteresisControls,
     index: usize,
     cancelled: &mut impl FnMut() -> bool,
@@ -303,7 +362,7 @@ fn branch_response(
     let a0 = chi.recip();
     let old_radius = norm(old);
     let target = field_target(c, norm(h) + old_radius / chi + hc);
-    if hc == 0.0 {
+    if hc == 0.0 && viscous_stiffness == 0.0 {
         // A reversible branch has no finite pinning region, even at H=0 or on
         // the saturation sphere. Its transverse derivative must remain active.
         let magnitude = norm(h);
@@ -347,7 +406,7 @@ fn branch_response(
         pinned_remainder = std::array::from_fn(|i| drive[i] - normal * unit[i]);
     }
     let pinned_residual = (norm(pinned_remainder) - hc).max(0.0);
-    if pinned_residual <= target {
+    if hc > 0.0 && pinned_residual <= target {
         // At a numerical pinning boundary, an unrepresentable displacement
         // cannot supply a reliable direction. Admit the retained state only
         // against the user's unchanged, directly measured field residual.
@@ -363,29 +422,47 @@ fn branch_response(
             iterations: 0,
         });
     }
-    let (free, free_tangent) = unconstrained(old, h, a0, hc)?;
+    let normal_origin = if viscous_stiffness == 0.0 { a0 } else { 0.0 };
+    let (free, free_tangent) =
+        branch_unconstrained(old, h, a0, viscous_stiffness, normal_origin, hc)?;
     let (mut z, mut tangent, mut lambda, mut iterations) = (free, free_tangent, 0.0, 0);
     if norm(free) > zs {
-        let mut lo = a0;
-        let mut hi = finite((norm(h) + hc) / zs)?.max(a0);
+        let mut lo = normal_origin;
+        // At an active sphere z.(z-z_old)>=0 and the pinning normal work is
+        // nonnegative. Thus lambda <= |H|/zs; this bracket needs no k*z_old.
+        let mut hi = finite((norm(h) + hc) / zs)?.max(normal_origin);
         let mut a = hi;
         let mut accepted = false;
         for iteration in 0..c.maximum_branch_iterations {
             poll(cancelled)?;
             iterations = iteration + 1;
-            let (point, d) = unconstrained(old, h, a, hc)?;
+            let (point, d) = branch_unconstrained(old, h, a0, viscous_stiffness, a, hc)?;
             let radius = finite(norm(point))?;
             let defect = radius - zs;
             // Radius error converted through the local inverse scale to A/m.
-            if defect.abs() * a <= target && radius > 0.0 {
+            let stiffness = if viscous_stiffness == 0.0 {
+                a
+            } else {
+                finite(a0 + viscous_stiffness + a)?
+            };
+            if defect.abs() * stiffness <= target && radius > 0.0 {
                 let normalized = point.map(|x| x * (zs / radius));
-                let candidate_lambda = a - a0;
+                let candidate_lambda = if viscous_stiffness == 0.0 { a - a0 } else { a };
                 // Radial normalization also rotates the pinning direction.
                 // Its inverse scale hc/|delta z| can exceed a greatly, so a
                 // small radius defect alone does not establish stationarity.
                 // Keep refining this SAME multiplier/bracket until the actual
                 // retained point passes the original field residual as well.
-                if stationarity_residual(old, h, normalized, chi, hc, candidate_lambda)? <= target {
+                if stationarity_residual(
+                    old,
+                    h,
+                    normalized,
+                    chi,
+                    hc,
+                    candidate_lambda,
+                    viscous_stiffness,
+                )? <= target
+                {
                     z = normalized;
                     let dz = mv(d, z);
                     let denominator = finite(dot(z, dz))?;
@@ -432,7 +509,7 @@ fn branch_response(
             });
         }
     }
-    let residual = stationarity_residual(old, h, z, chi, hc, lambda)?;
+    let residual = stationarity_residual(old, h, z, chi, hc, lambda, viscous_stiffness)?;
     if !residual.is_finite() || residual > target || norm(z) > zs * (1.0 + 8.0 * f64::EPSILON) {
         return Err(invalid(
             "vector branch failed its original stationarity or saturation constraint",
@@ -492,11 +569,49 @@ impl VectorHysteresis {
         }
         Ok(Self {
             parameters: Arc::clone(&law.parameters),
+            viscosities_m_s_h: None,
         })
     }
+
+    /// Bind one intrinsic polarization viscosity [m s/H] to each original
+    /// branch. All values must be finite and nonnegative. A zero profile is
+    /// exactly the original rate-independent law, without a new numerical path.
+    ///
+    /// A positive profile requires explicit durations for every candidate. Its
+    /// fitted kinetics must exclude losses already owned by an Ohmic eddy model.
+    /// Changing this profile does not convert an existing accepted history.
+    pub fn with_viscosities_m_s_h(mut self, viscosities_m_s_h: Vec<f64>) -> Result<Self> {
+        if viscosities_m_s_h.len() != self.parameters.branches.len()
+            || viscosities_m_s_h
+                .iter()
+                .any(|eta| !eta.is_finite() || *eta < 0.0)
+        {
+            return Err(invalid(
+                "one finite nonnegative intrinsic viscosity per original branch required",
+            ));
+        }
+        self.viscosities_m_s_h = if viscosities_m_s_h.iter().any(|eta| *eta > 0.0) {
+            Some(viscosities_m_s_h.into())
+        } else {
+            None
+        };
+        Ok(self)
+    }
+
+    /// Original immutable intrinsic kinetic fit, or None for exact zero rate
+    /// dependence. Values have units [m s/H] and retain original branch order.
+    pub fn viscosities_m_s_h(&self) -> Option<&[f64]> {
+        self.viscosities_m_s_h.as_deref()
+    }
+
+    pub const fn is_rate_dependent(&self) -> bool {
+        self.viscosities_m_s_h.is_some()
+    }
+
     pub fn initial_state(&self) -> VectorHysteresisState {
         VectorHysteresisState {
             parameters: Arc::clone(&self.parameters),
+            viscosities_m_s_h: self.viscosities_m_s_h.clone(),
             field_a_m: [0.0; 3],
             flux_density_t: [0.0; 3],
             polarizations_t: vec![[0.0; 3]; self.parameters.branches.len()],
@@ -506,6 +621,7 @@ impl VectorHysteresis {
     fn admit_history(&self, previous: &VectorHysteresisState) -> Result<()> {
         if !Arc::ptr_eq(&self.parameters, &previous.parameters)
             && self.parameters != previous.parameters
+            || self.viscosities_m_s_h != previous.viscosities_m_s_h
         {
             return Err(invalid(
                 "vector history must retain its original constitutive parameters",
@@ -513,8 +629,41 @@ impl VectorHysteresis {
         }
         Ok(())
     }
-    fn admit(&self, previous: &VectorHysteresisState, c: VectorHysteresisControls) -> Result<()> {
+    fn admit_duration(&self, duration_s: Option<f64>) -> Result<()> {
+        if let Some(duration) = duration_s {
+            if !duration.is_finite() || duration <= 0.0 {
+                return Err(invalid("positive finite switching duration required"));
+            }
+        } else if self.is_rate_dependent() {
+            return Err(invalid(
+                "rate-dependent vector history requires an explicit switching duration",
+            ));
+        }
+        Ok(())
+    }
+
+    fn viscous_stiffness(&self, index: usize, duration_s: Option<f64>) -> Result<f64> {
+        let Some(viscosities) = &self.viscosities_m_s_h else {
+            return Ok(0.0);
+        };
+        let duration = duration_s
+            .ok_or_else(|| invalid("rate-dependent vector history requires a duration"))?;
+        let eta = viscosities[index];
+        let stiffness = finite(eta / duration)?;
+        if eta > 0.0 && stiffness == 0.0 {
+            return Err(invalid("intrinsic viscous stiffness is unrepresentable"));
+        }
+        Ok(stiffness)
+    }
+
+    fn admit(
+        &self,
+        previous: &VectorHysteresisState,
+        c: VectorHysteresisControls,
+        duration_s: Option<f64>,
+    ) -> Result<()> {
         admit_controls(c)?;
+        self.admit_duration(duration_s)?;
         self.admit_history(previous)
     }
 
@@ -530,6 +679,7 @@ impl VectorHysteresis {
         from: &VectorHysteresisState,
         to: &VectorHysteresisState,
     ) -> Result<f64> {
+        self.admit_duration(None)?;
         self.admit_history(previous)?;
         self.admit_history(from)?;
         self.admit_history(to)?;
@@ -584,18 +734,20 @@ impl VectorHysteresis {
         &self,
         previous: &VectorHysteresisState,
         h: Vector,
+        duration_s: Option<f64>,
         c: VectorHysteresisControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Response> {
-        self.response_with(previous, h, c, cancelled, &mut |_, _, _| {})
+        self.response_with(previous, h, duration_s, c, cancelled, &mut |_, _, _, _| {})
     }
     fn response_with(
         &self,
         previous: &VectorHysteresisState,
         h: Vector,
+        duration_s: Option<f64>,
         c: VectorHysteresisControls,
         cancelled: &mut impl FnMut() -> bool,
-        observe: &mut impl FnMut(&HysteresisBranch, Vector, &BranchResponse),
+        observe: &mut impl FnMut(&HysteresisBranch, Vector, f64, &BranchResponse),
     ) -> Result<Response> {
         poll(cancelled)?;
         let magnitude = norm(h);
@@ -620,7 +772,8 @@ impl VectorHysteresis {
             .zip(&previous.polarizations_t)
             .enumerate()
         {
-            let r = branch_response(branch, old, h, c, index, cancelled)?;
+            let stiffness = self.viscous_stiffness(index, duration_s)?;
+            let r = branch_response(branch, old, h, stiffness, c, index, cancelled)?;
             for i in 0..3 {
                 result.b[i] = finite(result.b[i] + r.z[i])?;
                 for j in 0..3 {
@@ -629,7 +782,7 @@ impl VectorHysteresis {
             }
             result.maximum_residual = result.maximum_residual.max(r.residual_a_m);
             result.branch_iterations += r.iterations;
-            observe(branch, old, &r);
+            observe(branch, old, stiffness, &r);
         }
         Ok(result)
     }
@@ -642,7 +795,34 @@ impl VectorHysteresis {
         controls: VectorHysteresisControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<VectorHysteresisStep> {
-        self.admit(previous, controls)?;
+        self.candidate_field_increment(previous, field_a_m, None, controls, cancelled)
+    }
+
+    /// Backward Euler switching over one positive physical duration [s]. Every
+    /// candidate starts from the same accepted memory. Holds can continue to
+    /// relax while the applied field is unchanged; time refinement is required
+    /// to resolve the continuous kinetics. Original storage and physical dry,
+    /// viscous, and numerical transfers remain separately identifiable.
+    pub fn candidate_field_timed(
+        &self,
+        previous: &VectorHysteresisState,
+        field_a_m: Vector,
+        duration_s: f64,
+        controls: VectorHysteresisControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<VectorHysteresisStep> {
+        self.candidate_field_increment(previous, field_a_m, Some(duration_s), controls, cancelled)
+    }
+
+    fn candidate_field_increment(
+        &self,
+        previous: &VectorHysteresisState,
+        field_a_m: Vector,
+        duration_s: Option<f64>,
+        controls: VectorHysteresisControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<VectorHysteresisStep> {
+        self.admit(previous, controls, duration_s)?;
         let mu = self.parameters.background_permeability_h_m;
         let dh = sub(field_a_m, previous.field_a_m);
         let mut energy = 0.5 * mu * dot(field_a_m, field_a_m);
@@ -652,16 +832,18 @@ impl VectorHysteresis {
                 std::array::from_fn(|i| f64::midpoint(field_a_m[i], previous.field_a_m[i])),
             );
         let mut dissipation = 0.5 * mu * dot(dh, dh);
-        let mut heat = 0.0;
+        let mut pinning_heat = 0.0;
+        let mut viscous_heat = 0.0;
         let mut polarizations = Vec::with_capacity(self.parameters.branches.len());
         // Each branch return map is evaluated once. Inverse trials use the
         // same kernel without allocating or retaining candidate branch memory.
         let response = self.response_with(
             previous,
             field_a_m,
+            duration_s,
             controls,
             cancelled,
-            &mut |branch, old, r| {
+            &mut |branch, old, stiffness, r| {
                 let dz = sub(r.z, old);
                 let radius = norm(old);
                 let zs = branch.saturation_polarization_t;
@@ -673,17 +855,30 @@ impl VectorHysteresis {
                 energy += 0.5 * dot(r.z, r.z) / branch.susceptibility_h_m;
                 change += dot(dz, std::array::from_fn(|i| f64::midpoint(r.z[i], old[i])))
                     / branch.susceptibility_h_m;
-                heat += branch.pinning_field_a_m * norm(dz);
+                pinning_heat += branch.pinning_field_a_m * norm(dz);
+                // Form force before work to avoid squaring a tiny increment
+                // before multiplying by a large, still representable stiffness.
+                viscous_heat += dot(dz, dz.map(|value| stiffness * value));
                 dissipation += 0.5 * dot(dz, dz) / branch.susceptibility_h_m + normal_work;
                 polarizations.push(r.z);
             },
         )?;
+        let heat = pinning_heat + viscous_heat;
         let work = dot(field_a_m, sub(response.b, previous.flux_density_t));
         let residual = work - change - heat - dissipation;
         let allowance = controls
             .work_tolerance_j_m3
             .max(controls.relative_tolerance * (work.abs() + change.abs() + heat + dissipation));
-        for x in [energy, change, heat, dissipation, work, residual] {
+        for x in [
+            energy,
+            change,
+            pinning_heat,
+            viscous_heat,
+            heat,
+            dissipation,
+            work,
+            residual,
+        ] {
             finite(x)?;
         }
         if heat < 0.0 || dissipation < 0.0 || residual.abs() > allowance {
@@ -695,12 +890,15 @@ impl VectorHysteresis {
         Ok(VectorHysteresisStep {
             state: VectorHysteresisState {
                 parameters: Arc::clone(&self.parameters),
+                viscosities_m_s_h: self.viscosities_m_s_h.clone(),
                 field_a_m,
                 flux_density_t: response.b,
                 polarizations_t: polarizations,
                 stored_energy_j_m3: energy,
             },
             irreversible_heat_j_m3: heat,
+            pinning_heat_j_m3: pinning_heat,
+            viscous_heat_j_m3: viscous_heat,
             energy_change_j_m3: change,
             endpoint_work_j_m3: work,
             numerical_dissipation_j_m3: dissipation,
@@ -724,7 +922,38 @@ impl VectorHysteresis {
         controls: VectorHysteresisControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<VectorHysteresisStep> {
-        self.admit(previous, controls)?;
+        self.candidate_flux_increment(previous, flux_density_t, None, controls, cancelled)
+    }
+
+    /// Timed B-driven inverse of the same backward Euler return map. All Newton
+    /// trials use this unchanged duration and original accepted polarization;
+    /// the returned flux, tangent, work, and both physical heats are recomputed.
+    pub fn candidate_flux_density_timed(
+        &self,
+        previous: &VectorHysteresisState,
+        flux_density_t: Vector,
+        duration_s: f64,
+        controls: VectorHysteresisControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<VectorHysteresisStep> {
+        self.candidate_flux_increment(
+            previous,
+            flux_density_t,
+            Some(duration_s),
+            controls,
+            cancelled,
+        )
+    }
+
+    fn candidate_flux_increment(
+        &self,
+        previous: &VectorHysteresisState,
+        flux_density_t: Vector,
+        duration_s: Option<f64>,
+        controls: VectorHysteresisControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<VectorHysteresisStep> {
+        self.admit(previous, controls, duration_s)?;
         if flux_density_t.iter().any(|x| !x.is_finite()) {
             return Err(invalid("finite vector flux density required"));
         }
@@ -748,13 +977,14 @@ impl VectorHysteresis {
                 .max(controls.relative_tolerance * magnitude),
         )?;
         let mut h = previous.field_a_m;
-        let mut response = self.response(previous, h, controls, cancelled)?;
+        let mut response = self.response(previous, h, duration_s, controls, cancelled)?;
         let mut residual = finite(norm(sub(response.b, flux_density_t)))?;
         let mut branch_iterations = response.branch_iterations;
         for iteration in 0..=controls.maximum_inverse_iterations {
             poll(cancelled)?;
             if residual <= target {
-                let mut result = self.candidate_field(previous, h, controls, cancelled)?;
+                let mut result =
+                    self.candidate_field_increment(previous, h, duration_s, controls, cancelled)?;
                 result.inverse_iterations = iteration;
                 result.branch_iterations += branch_iterations;
                 result.inverse_residual_t =
@@ -785,7 +1015,7 @@ impl VectorHysteresis {
                 poll(cancelled)?;
                 let trial = std::array::from_fn(|i| (-scale).mul_add(direction[i], h[i]));
                 if norm(trial) <= self.parameters.field_limit_a_m {
-                    let next = self.response(previous, trial, controls, cancelled)?;
+                    let next = self.response(previous, trial, duration_s, controls, cancelled)?;
                     branch_iterations += next.branch_iterations;
                     let error = finite(norm(sub(next.b, flux_density_t)))?;
                     if error <= target || error <= (1.0 - 1e-4 * scale) * residual {

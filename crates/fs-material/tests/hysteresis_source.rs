@@ -17,6 +17,8 @@ use std::sync::Arc;
 
 #[path = "hysteresis_source/lamination.rs"]
 mod lamination;
+#[path = "hysteresis_source/viscosity.rs"]
+mod viscosity;
 
 fn point(temperature: f64) -> QueryPoint {
     QueryPoint::new()
