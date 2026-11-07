@@ -1,7 +1,8 @@
 //! Omitted-mode compliance among fixed obstacles (pexfp.299, MagentaBadger
 //! 7592 gate 3): the joint solve sees each support in series with it, the
 //! ledger stores f G f / 2, and the step-held quasi-static response books its
-//! declared numerical loss dR G dR / 2.
+//! declared numerical loss dR G dR / 2. The same holds beside bound nonlinear
+//! storage, in its steps and its static preload.
 
 use super::*;
 use crate::render::schedule::force::coupled::contact::friction::multiple::obstacles::motion::ObstacleMotionLimits;
@@ -308,6 +309,38 @@ fn a_refused_residual_preload_leaves_the_held_reactions_alone() {
     assert_eq!(displacements(&joint), vec![0.0]);
 }
 
+// Bound nonlinear storage beside the condensed supports: a quartic hardening of
+// the stopped mode, bound before the supports, is the cheap owner of the
+// nonlinear path. Its outer balance carries f G f / 2 and dR G dR / 2, and its
+// static preload settles each support in series with G.
+const HARDENING: f64 = 1e12;
+struct Hardening;
+impl Storage for Hardening {
+    fn hamiltonian(&self, q: &[f64]) -> f64 { 0.25*HARDENING*q[0].powi(4) }
+    fn gradient(&self, q: &[f64], out: &mut [f64]) { out[0] = HARDENING*q[0].powi(3); }
+}
+impl super::super::super::super::nonlinear::ModalPotential for Hardening {
+    fn coordinate_count(&self) -> usize { 1 }
+    fn validate_coordinates(&self, q: &[f64]) -> Result<(), ModalCouplingError> {
+        if q.len() != 1 || !q[0].is_finite() { return Err(invalid("hardening test coordinate")); }
+        Ok(())
+    }
+}
+fn hardened(signs: &[f64], compliance: Option<Vec<f64>>, velocity: f64) -> MultiFrictionModalSystem {
+    use super::super::super::super::nonlinear::{ModalPotentialBinding, NonlinearModalConfig};
+    let gate = CancelGate::new_clock_free();
+    let core = friction(moving(velocity)).with_nonlinear_potentials(vec![ModalPotentialBinding {
+        component: 0, coordinate_start: 0, potential: Box::new(Hardening) }], NonlinearModalConfig {
+        max_iterations: 64, maximum_generalized_force: 1e5, force_absolute_tolerance: 1e-11,
+        force_relative_tolerance: 1e-10 }, &gate).unwrap();
+    let contacts = signs.iter().map(|&sign| (obstacle(sign, -1e-4), normal_limits())).collect();
+    let joint = multi(core).with_obstacles(contacts, limits(), &gate).unwrap();
+    match compliance {
+        Some(g) => joint.with_obstacle_residual_compliance(g, &gate).unwrap(),
+        None => joint,
+    }
+}
+
 fn translation_limits() -> ObstacleMotionLimits {
     ObstacleMotionLimits { maximum_abs_offset_m: 0.01, maximum_speed_m_s: 1.0 }
 }
@@ -334,6 +367,96 @@ fn translated_residual(motion_first: bool, maximum_pressure: f64) -> MultiFricti
         joint.with_obstacle_residual_compliance(vec![PAIR_G], &gate).unwrap()
             .with_obstacle_motion(translation_limits(), &gate).unwrap()
     }
+}
+
+#[test]
+fn nonlinear_storage_books_the_omitted_modes_storage_and_numerical_loss() {
+    let mut joint = hardened(&[1.0, -1.0], Some(vec![PAIR_G, -PAIR_G, -PAIR_G, PAIR_G]), 0.004);
+    assert_eq!(joint.obstacle_pairs(), vec![(0, 1)]);
+    let (mut stored, mut net) = (0.0, 0.0);
+    let mut unbooked = 0;
+    let steps = 4096;
+    for _ in 0..steps {
+        let f = joint.step(&[0.0], &[released()]).unwrap().clone();
+        assert!(f.nonlinear.is_some(), "the step left the nonlinear owner");
+        let n = joint.last_obstacle_frames().unwrap();
+        let now = n[0].normal_force_n-n[1].normal_force_n;
+        assert!((f.obstacle_residual_energy_j-0.5*PAIR_G*now*now).abs() <= 1e-18);
+        let change = now-net;
+        assert!((f.obstacle_residual_loss_j-0.5*PAIR_G*change*change).abs() <= 1e-18);
+        assert!(f.energy_residual_j.abs() <= f.energy_tolerance_j);
+        // The same step's identity with f G f / 2 dropped from both ends.
+        let dropped = f.energy_residual_j-(f.obstacle_residual_energy_j-stored);
+        if dropped.abs() > f.energy_tolerance_j { unbooked += 1; }
+        (stored, net) = (f.obstacle_residual_energy_j, now);
+    }
+    assert!(unbooked > 3*steps/4, "without f G f / 2 the identity still closed on {} of {steps} steps", steps-unbooked);
+}
+
+#[test]
+fn nonlinear_storage_with_a_zero_compliance_is_the_original_preload_to_the_bit() {
+    let gate = CancelGate::new_clock_free();
+    let (mut bound, mut plain) = (hardened(&[1.0], Some(vec![0.0]), 0.0), hardened(&[1.0], None, 0.0));
+    let energy = bound.initialize_released_equilibrium(&[0.5], &gate).unwrap();
+    assert_eq!(energy.to_bits(), plain.initialize_released_equilibrium(&[0.5], &gate).unwrap().to_bits());
+    assert_eq!(states(&bound), states(&plain));
+    assert_eq!(bound.nonlinear_preload_diagnostics(), plain.nonlinear_preload_diagnostics());
+}
+
+#[test]
+fn nonlinear_storage_preload_settles_the_support_in_series_with_the_omitted_modes() {
+    let gate = CancelGate::new_clock_free();
+    let (k, load) = (SUPPORT_N_M, 0.5);
+    // k g = 1: the support's series stiffness halves.
+    let g = 2.0*PAIR_G;
+    let mut joint = hardened(&[1.0], Some(vec![g]), 0.0);
+    let energy = joint.initialize_released_equilibrium(&[load], &gate).unwrap();
+    let report = *joint.nonlinear_preload_diagnostics().unwrap();
+    assert!(report.force_residual <= report.force_tolerance);
+    let (q, r) = (displacements(&joint)[0], accepted_reactions(&joint)[0]);
+    // The support's law at the closure its own reaction implies: x = q - g R, closed by 1e-4 m.
+    let penetration = q-g*r+1e-4;
+    assert!((r-k*penetration).abs() <= 1e-9*r, "R {r} against k x {}", k*penetration);
+    // The retained mode balances the load against its linear, hardening and support forces.
+    let balance = 1e4*q+HARDENING*q.powi(3)+r;
+    assert!((balance-load).abs() <= 1e-9*load, "balance {balance} against {load}");
+    assert!(HARDENING*q.powi(3) > 1e-3*load, "the hardening must matter here");
+    // Stored: the mode, its hardening, the support and the omitted modes' f G f / 2.
+    let expected = 0.5*1e4*q*q+0.25*HARDENING*q.powi(4)+0.5*k*penetration*penetration+0.5*g*r*r;
+    assert!((energy-expected).abs() <= 1e-9*expected, "energy {energy} against {expected}");
+    assert!((energy-joint.total_energy_j().unwrap()).abs() <= 1e-15, "the ledger reads a different start");
+    assert!(joint.last_obstacle_frames().is_none() && joint.samples_rendered() == 0, "a report was fabricated");
+
+    // Without G the same support settles measurably elsewhere, so this test can fail.
+    let mut plain = hardened(&[1.0], None, 0.0);
+    plain.initialize_released_equilibrium(&[load], &gate).unwrap();
+    assert!((displacements(&plain)[0]-q).abs() > 0.01*q.abs());
+
+    // The held load keeps it: no first-step jump in the omitted modes' lag.
+    for _ in 0..64 {
+        let frame = joint.step(&[load], &[released()]).unwrap().clone();
+        assert!(frame.nonlinear.is_some(), "the step left the nonlinear owner");
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        assert!(frame.obstacle_residual_loss_j <= 1e-18, "the settled omitted modes jumped: {}", frame.obstacle_residual_loss_j);
+        let now = joint.last_obstacle_frames().unwrap()[0].normal_force_n;
+        assert!((now-r).abs() <= 1e-6*r, "R {now} against the preload's {r}");
+        for state in joint.components()[0].states() { assert!(state.velocity_m_sqrt_kg_per_s.abs() <= 1e-8); }
+    }
+}
+
+#[test]
+fn nonlinear_storage_refuses_moving_supports_beside_residual_compliance() {
+    let gate = CancelGate::new_clock_free();
+    let travel = ObstacleMotionLimits { maximum_abs_offset_m: 0.001, maximum_speed_m_s: 1.0 };
+    let moving = hardened(&[1.0], None, 0.0).with_obstacle_motion(travel, &gate).unwrap();
+    assert!(moving.with_obstacle_residual_compliance(vec![1e-4], &gate).is_err());
+    // The reverse binding order refuses too: the compliance first, then the translation.
+    let compliant = hardened(&[1.0], Some(vec![1e-4]), 0.0);
+    assert!(compliant.with_obstacle_motion(travel, &gate).is_err());
+    let mut played = hardened(&[1.0], None, 0.0);
+    played.step(&[0.0], &[released()]).unwrap();
+    assert!(played.with_obstacle_residual_compliance(vec![1e-4], &gate).is_err());
+    assert!(hardened(&[1.0], None, 0.0).with_obstacle_residual_compliance(vec![1e-4], &gate).is_ok());
 }
 
 #[test]

@@ -14,6 +14,7 @@ use super::super::super::{
     force_tolerance, law_force,
 };
 use crate::render::schedule::force::coupled::extension_terms;
+use crate::render::schedule::force::coupled::equilibrium::solve_joint;
 use fs_contact::normal_patch::source::SourcePointContact;
 use fs_dcontact::{ContactStorage, OpeningContactStep};
 use fs_phs::Storage;
@@ -235,14 +236,24 @@ impl MultiFrictionModalSystem {
     /// `with_obstacle_motion`: closure is N^T q - G R - s and the original
     /// support supplies -R delta_s. Either binding order retains the same
     /// response, residual storage and separately reported numerical loss.
-    /// Moving attachment maps and bound nonlinear storage still refuse; their
-    /// omitted-mode response is not supplied by this fixed compliance.
+    /// Moving attachment maps still refuse; their omitted-mode response is not
+    /// supplied by this fixed compliance.
+    ///
+    /// Bound nonlinear storage on fixed supports keeps both: its static preload
+    /// settles each trial's closures in series with G, and its steps book
+    /// R G R / 2 and dR G dR / 2 in the same transaction. G stays the static
+    /// compliance it was bound with; nothing rebuilds it while the nonlinear
+    /// storage moves. Nonlinear storage beside a prescribed translation refuses,
+    /// in either binding order: that combination is not verified.
     pub fn with_obstacle_residual_compliance(mut self, compliance: Vec<f64>, gate: &CancelGate)
         -> Result<Self, ModalFrictionError>
     {
         poll(Some(gate))?;
-        if self.samples_rendered() != 0 || self.core.has_nonlinear_potentials() {
-            return Err(invalid("obstacle residual compliance binds once, before playback and without nonlinear storage").into());
+        if self.samples_rendered() != 0 {
+            return Err(invalid("obstacle residual compliance binds once, before playback").into());
+        }
+        if self.core.has_nonlinear_potentials() && self.obstacles.as_ref().is_some_and(|set| set.motion.is_some()) {
+            return Err(invalid("obstacle residual compliance does not carry nonlinear storage beside moving supports").into());
         }
         let set = self.obstacles.as_mut()
             .ok_or_else(|| invalid("obstacle residual compliance requires bound obstacles"))?;
@@ -346,6 +357,14 @@ impl NormalPoint {
         let energy = finite(self.storage.hamiltonian(&[-x, 0.0]))?;
         if energy < 0.0 { return Err(invalid("obstacle potential must be nonnegative")); }
         Ok(energy)
+    }
+    // The stationary potential's derivative at closure x: no dashpot, no step.
+    fn static_force(&self, x: f64) -> Result<f64, ModalCouplingError> {
+        let mut gradient = [0.0; 2];
+        self.storage.gradient(&[-x, 0.0], &mut gradient);
+        let force = finite(-gradient[0])?;
+        if force < 0.0 { return Err(invalid("static normal reaction cannot be attractive")); }
+        Ok(force)
     }
     fn penetration(&self, x: f64) -> Result<f64, ModalCouplingError> {
         let penetration = finite(x-self.contact.law.gaps()[0])?.max(0.0);
@@ -494,21 +513,43 @@ impl ObstacleSet {
     /// trial positions do not publish contact histories or dynamic reports.
     /// Physical source/force/penetration limits apply to the accepted candidate;
     /// an unconstrained trial need not itself be a realizable initial condition.
+    ///
+    /// With residual compliance G each closure reads x = N^T q - s - G R at the
+    /// reactions R it settles at this q (the linear preload's fixed point, here
+    /// at a fixed q, by the same joint solve), and the omitted modes store
+    /// R G R / 2. Their deflection is stationary, so the generalized reaction
+    /// stays -N R. A trial whose settled reaction would pass a contact's force
+    /// ceiling refuses, and the descent shrinks it. Returns the stored energy and,
+    /// with G only, those settled reactions, which the first step holds.
     pub(in super::super) fn static_response(&self, q: &[f64], reaction: &mut [f64],
-        admit: bool, dt: f64, gate: &CancelGate) -> Result<f64, ModalCouplingError>
+        admit: bool, dt: f64, max_sweeps: usize, gate: &CancelGate)
+        -> Result<(f64, Vec<f64>), ModalCouplingError>
     {
-        if self.residual.is_some() {
-            return Err(invalid("nonlinear static preload does not include obstacle residual compliance"));
-        }
-        let mut energy = 0.0;
+        let mut free = Vec::with_capacity(self.points.len());
         for (i, point) in self.points.iter().enumerate() {
             poll(Some(gate))?;
             let offset = self.motion.as_ref().map_or(0.0, |motion| motion.accepted[i]);
-            let x = finite(dot(&point.column, q)? - offset)?;
-            let mut gradient = [0.0; 2];
-            point.storage.gradient(&[-x, 0.0], &mut gradient);
-            let force = finite(-gradient[0])?;
-            if force < 0.0 { return Err(invalid("static normal reaction cannot be attractive")); }
+            free.push(finite(dot(&point.column, q)? - offset)?);
+        }
+        let settled = match &self.residual {
+            Some(residual) => {
+                let mut settled = vec![0.0; free.len()];
+                solve_joint(&residual.compliance, &free, |i| self.points[i].config,
+                    |i, x| self.points[i].static_force(x), max_sweeps, &mut settled, Some(gate))?;
+                settled
+            },
+            None => Vec::new(),
+        };
+        let mut energy = 0.0;
+        for (i, point) in self.points.iter().enumerate() {
+            poll(Some(gate))?;
+            let mut x = free[i];
+            if self.residual.is_some() {
+                let lag = self.lag(i, &settled)?;
+                x = finite(x-lag)?;
+                energy = finite(energy+0.5*settled[i]*lag)?;
+            }
+            let force = point.static_force(x)?;
             if admit {
                 limit("static contact force", force, point.config.maximum_force_n)?;
                 let penetration = point.penetration(x)?;
@@ -522,7 +563,14 @@ impl ObstacleSet {
                 *value = finite(*value - shape * force)?;
             }
         }
-        Ok(energy)
+        Ok((energy, settled))
+    }
+    // The first step holds a nonlinear static preload's settled reactions, as it
+    // holds the linear preload's: the omitted modes keep their deflection.
+    pub(super) fn hold_static_reactions(&mut self, settled: &[f64]) {
+        if self.residual.is_none() { return; }
+        debug_assert_eq!(settled.len(), self.accepted.len());
+        for (frame, reaction) in self.accepted.iter_mut().zip(settled) { frame.normal_force_n = *reaction; }
     }
     pub(super) const fn has_residual(&self) -> bool { self.residual.is_some() }
     // Closure lag of contact i through the omitted modes under reactions `r`: (G r)_i.

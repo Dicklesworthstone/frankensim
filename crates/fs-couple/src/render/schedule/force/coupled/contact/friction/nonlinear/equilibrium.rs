@@ -46,6 +46,8 @@ struct Evaluation {
     gradient: Vec<f64>,
     reaction: Vec<f64>,
     normal_energy_j: f64,
+    // Obstacle reactions settled through residual compliance (else empty).
+    settled: Vec<f64>,
 }
 
 // The static diagonal and bilateral springs are exactly the original network
@@ -56,7 +58,7 @@ fn evaluate(
     network: &CoupledModalSystem,
     q: &[f64],
     external: &[f64],
-    obstacles: Option<&ObstacleSet>,
+    obstacles: Option<(&ObstacleSet, usize)>,
     admit_contacts: bool,
     gate: &CancelGate,
 ) -> Result<Evaluation, ModalFrictionError> {
@@ -64,15 +66,16 @@ fn evaluate(
     let mut energy = state.potential_energy(q)?;
     let mut reaction = vec![0.0; q.len()];
     state.reactions(q, q, &mut reaction, Some(gate))?;
-    let normal_energy = match obstacles {
-        Some(obstacles) => obstacles.static_response(
+    let (normal_energy, settled) = match obstacles {
+        Some((obstacles, max_sweeps)) => obstacles.static_response(
             q,
             &mut reaction,
             admit_contacts,
             network.sample_period_s(),
+            max_sweeps,
             gate,
         )?,
-        None => 0.0,
+        None => (0.0, Vec::new()),
     };
     energy = finite(energy + normal_energy)?;
     let mut gradient = external
@@ -112,6 +115,7 @@ fn evaluate(
         gradient,
         reaction,
         normal_energy_j: normal_energy,
+        settled,
     })
 }
 
@@ -200,9 +204,9 @@ pub(super) fn initialize(
     state: &mut NonlinearFrictionState,
     network: &mut CoupledModalSystem,
     external: &[f64],
-    obstacles: Option<&ObstacleSet>,
+    obstacles: Option<(&ObstacleSet, usize)>,
     gate: &CancelGate,
-) -> Result<NonlinearPreloadDiagnostics, ModalFrictionError> {
+) -> Result<(NonlinearPreloadDiagnostics, Vec<f64>), ModalFrictionError> {
     poll(Some(gate))?;
     network.require_static_initialization(external)?;
     let response = StaticResponse::new(network, gate)?;
@@ -259,13 +263,14 @@ pub(super) fn initialize(
                 &mut network.material_memory,
                 &mut network.candidate_material_memory,
             );
-            return Ok(NonlinearPreloadDiagnostics {
+            // The reactions settled on these same staged states, for the first step.
+            return Ok((NonlinearPreloadDiagnostics {
                 iterations,
                 force_residual: actual_check.force,
                 force_tolerance: actual_check.tolerance,
                 nonlinear_energy_j: nonlinear,
                 total_energy_j: energy,
-            });
+            }, actual.settled));
         }
         let failed = |iterations| ModalFrictionError::NonlinearEquilibrium {
             residual: check.force,

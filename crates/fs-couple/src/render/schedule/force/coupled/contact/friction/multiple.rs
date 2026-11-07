@@ -570,10 +570,12 @@ impl MultiFrictionModalSystem {
             return Err(invalid("released static preload cannot discard retained material-layer shear").into());
         }
         if let Some(state) = &mut self.core.nonlinear {
-            let report = state.initialize_equilibrium(&mut self.core.network, external,
-                self.obstacles.as_ref(), gate)?;
+            let (report, settled) = state.initialize_equilibrium(&mut self.core.network, external,
+                self.obstacles.as_ref().map(|obstacles| (obstacles, self.config.max_sweeps)), gate)?;
             let energy = report.total_energy_j;
             state.preload = Some(report);
+            // The omitted modes hold the settled reactions' deflection into the first step.
+            if let Some(obstacles) = &mut self.obstacles { obstacles.hold_static_reactions(&settled); }
             return Ok(energy);
         }
         if let Some(obstacles) = &mut self.obstacles {
@@ -662,9 +664,6 @@ impl MultiFrictionModalSystem {
         -> Result<MultiFrictionFrame, ModalFrictionError> {
         self.core.network.require_time_domain()?;
         if self.core.has_nonlinear_potentials() {
-            if self.obstacles.as_ref().is_some_and(obstacles::ObstacleSet::has_residual) {
-                return Err(invalid("bound nonlinear storage is not staged with the obstacles' residual compliance").into());
-            }
             self.stage_with_nonlinear(external, drives, obstacle_offsets, gate)
         } else { self.stage_multiple(external, drives, obstacle_offsets, gate) }
     }

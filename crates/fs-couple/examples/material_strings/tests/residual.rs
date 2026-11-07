@@ -92,6 +92,44 @@ fn a_released_preload_reaches_the_stopped_card_with_the_record() {
     });
 }
 
+// The stopped force-loaded card with longitudinal waves for its stretching: the stop stays
+// condensed, the nonlinear static preload settles it in series with the omitted modes, and
+// the nonlinear steps play with their storage booked. The card releases its 0.5 N load at
+// sample zero.
+fn longitudinal_stopped(residual: bool) -> input::Spec {
+    let record = if residual { "residual-flexibility exact-static-green\n" } else { "" };
+    let text = include_str!("../nonlinear-stopped-preload.material-strings").replace("48000 4096", "48000 129")
+        .replace("cylinder-gas-loading 0.001 30 4\n", "")
+        .replace("geometric-stretching 0.2 128 100000 1e-11 1e-10",
+            &format!("{record}longitudinal-waves 0.2 0.01 128 100000 1e-11 1e-10 2 1 2"));
+    input::Spec::parse(text.as_bytes()).unwrap()
+}
+
+#[test]
+fn a_stopped_preload_with_longitudinal_waves_keeps_the_condensed_stop() {
+    scoped(|cx, gate| {
+        let mut soft = stopped(cx, gate, longitudinal_stopped(true)).unwrap();
+        let mut plain = stopped(cx, gate, longitudinal_stopped(false)).unwrap();
+        let bank = soft.performance.bank();
+        assert!(bank.source().bank().longitudinal_waves().is_some());
+        assert!(bank.source().bank().cylinder_gas_loading().is_none());
+        assert!(bank.system().obstacle_residual_compliance().unwrap()[0] > 0.0);
+        assert!(plain.performance.bank().system().obstacle_residual_compliance().is_none());
+        let report = *bank.system().nonlinear_preload_diagnostics().unwrap();
+        assert!(report.force_residual <= report.force_tolerance);
+        let total = bank.system().total_energy_j().unwrap();
+        let preload = soft.performance.preload_energy_j().unwrap();
+        assert!(preload > 0.0 && (preload-total).abs() <= 1e-12*total, "preload {preload} against the ledger's {total}");
+        let expected = pressure(&mut soft, 37);
+        assert!(expected.iter().any(|p| p.abs() > 1e-12));
+        assert_eq!(expected, pressure(&mut stopped(cx, gate, longitudinal_stopped(true)).unwrap(), 128));
+        let frame = soft.performance.bank().system().last_frame().unwrap();
+        assert!(frame.nonlinear.is_some(), "the steps left the nonlinear owner");
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        assert!(expected.iter().zip(&pressure(&mut plain, 128)).any(|(x, y)| (x-y).abs() > 1e-12));
+    });
+}
+
 #[test]
 fn what_the_residual_does_not_own_refuses_by_name() {
     scoped(|cx, gate| {

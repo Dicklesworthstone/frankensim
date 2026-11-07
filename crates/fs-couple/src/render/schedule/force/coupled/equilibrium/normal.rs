@@ -26,7 +26,9 @@ pub(super) fn admit_setup(
 
 // The caller supplies the original static potential derivative. No contact
 // force, gap or stiffness is changed to accelerate coordinate convergence.
-pub(super) fn solve_joint(
+// The obstacles' nonlinear static preload solves its closures through the
+// omitted modes' compliance with this same solve.
+pub(in super::super) fn solve_joint(
     compliance: &[f64], free_x: &[f64], config_at: impl Fn(usize) -> ModalContactConfig,
     law_at: impl Fn(usize, f64) -> Result<f64, ModalCouplingError>,
     max_sweeps: usize, reactions: &mut [f64], gate: Option<&CancelGate>,

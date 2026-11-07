@@ -79,6 +79,12 @@ stiffness bound that `render.log` prints fell from about 3.50e5 to 2.59e5 rad/s,
 and a stopped note's stop pair carried the residual cross terms
 (`stop_compliance_m_N`).
 
+A stopped note whose finger load stays held on a nonlinear string (geometric
+stretching or longitudinal waves) refuses at its first sample: from the exact
+static equilibrium the step does not move, and the reaction iteration cannot
+settle on the string storage's discrete gradient at a rounding-sized
+increment. Released preloads render. This case is open.
+
 The four open strings are tuned to equal temperament (A4 = 440 Hz) by a tension
 factor per string. Each factor is read from the assembled instrument's own
 pulse response, never from a recording. A probe is this card with these

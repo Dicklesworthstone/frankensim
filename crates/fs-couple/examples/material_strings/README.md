@@ -2426,7 +2426,13 @@ pitch changes.
   carried into its prediction. A load applied through `forces` projects on the
   retained modes only, on both paths, so the omitted modes do not deflect under
   the load itself.
-- Refused: moving or migrating stops, bound nonlinear storage,
+- Bound nonlinear storage (`geometric-stretching`, `longitudinal-waves`) keeps
+  the condensed stops. Its static preload settles every trial's closures in
+  series with the same compliance, and the first sample holds those reactions;
+  each step books f G f / 2 and dR G dR / 2 in its nonlinear energy balance.
+  The omitted modes' compliance is held at the static tension while the
+  tension moves.
+- Refused: moving or migrating stops,
   additional directed translational bridges, rotational and constant-loss bridges, and a string with other than
   one bridge connection.
 - Bow ports retain their original maps unless the separate record below is supplied.

@@ -66,7 +66,9 @@ compliance in `MultiFrictionModalSystem`. The accepted contact closure is
 `N^T q - G R - s`; each candidate uses its proposed support offset and the
 same original contact potential, secant reaction, retained modal response and
 joint friction solve. Translation and compliance may bind in either order.
-Changing attachment maps and nonlinear storage retain their existing refusals.
+Changing attachment maps retain their existing refusals. Bound nonlinear
+storage composes with the compliance on fixed supports only: beside a
+prescribed translation it refuses, in either binding order.
 
 The native account retains prescribed support work `-R delta_s`, omitted-mode
 storage `R^T G R / 2`, and the declared numerical loss

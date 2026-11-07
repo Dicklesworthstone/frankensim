@@ -559,9 +559,11 @@ impl FrictionModalSystem {
     }
 }
 impl NonlinearFrictionState {
+    // The obstacles come with the owner's sweep budget. Also returns their settled
+    // reactions where residual compliance holds them (empty otherwise).
     pub(super) fn initialize_equilibrium(&mut self, network: &mut CoupledModalSystem,
-        external: &[f64], obstacles: Option<&super::multiple::obstacles::ObstacleSet>,
-        gate: &CancelGate) -> Result<NonlinearPreloadDiagnostics, ModalFrictionError>
+        external: &[f64], obstacles: Option<(&super::multiple::obstacles::ObstacleSet, usize)>,
+        gate: &CancelGate) -> Result<(NonlinearPreloadDiagnostics, Vec<f64>), ModalFrictionError>
     {
         if !self.histories.is_empty() {
             return Err(invalid("initialize static equilibrium before binding hereditary material history").into());

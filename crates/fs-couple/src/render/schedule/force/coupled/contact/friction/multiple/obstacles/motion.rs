@@ -51,6 +51,7 @@ impl MultiFrictionModalSystem {
     /// reactions. The extra actuator work belongs only to the prescribed s.
     /// Fixed-map residual compliance remains in series with this contact;
     /// translation changes neither its projection nor its material source.
+    /// Residual compliance beside bound nonlinear storage refuses translation.
     pub fn with_obstacle_motion(mut self, limits: ObstacleMotionLimits,
         gate: &CancelGate) -> Result<Self, ModalFrictionError>
     {
@@ -58,6 +59,9 @@ impl MultiFrictionModalSystem {
         limits.validate()?;
         if self.samples_rendered() != 0 {
             return Err(invalid("normal motion must bind before the first physical sample").into());
+        }
+        if self.core.has_nonlinear_potentials() && self.obstacles.as_ref().is_some_and(|set| set.has_residual()) {
+            return Err(invalid("normal motion does not carry residual compliance beside nonlinear storage").into());
         }
         let obstacles = self.obstacles.as_mut()
             .ok_or_else(|| invalid("normal motion requires existing compliant obstacles"))?;

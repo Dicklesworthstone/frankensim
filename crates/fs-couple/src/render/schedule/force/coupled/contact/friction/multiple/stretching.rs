@@ -37,13 +37,22 @@ impl NonlinearTrial for MultipleTrial<'_> {
                     after_energy_j: frame.shear_layer_energy_j + frame.mindlin_energy_j + series_energy }
             }),
             contacts: match (&self.inner.obstacles, self.initial_contact_energy_j) {
-                (Some(obstacles), Some(before_energy_j)) => Some(NonlinearContactWork {
-                    before_energy_j,
-                    after_energy_j: frame.obstacle_energy_j,
-                    dissipation_j: frame.obstacle_dissipation_j,
-                    work_j: frame.obstacle_work_j,
-                    absolute_work_j: obstacles.staged_absolute_work_j()?,
-                }),
+                (Some(obstacles), Some(before_energy_j)) => {
+                    // The accepted energy holds the omitted modes' R G R / 2; the staged
+                    // end holds it too, and the step's dR G dR / 2 is its declared loss,
+                    // as in the linear ledger.
+                    let (after_energy_j, dissipation_j) = if obstacles.has_residual() {
+                        (finite(frame.obstacle_energy_j+frame.obstacle_residual_energy_j)?,
+                            finite(frame.obstacle_dissipation_j+frame.obstacle_residual_loss_j)?)
+                    } else { (frame.obstacle_energy_j, frame.obstacle_dissipation_j) };
+                    Some(NonlinearContactWork {
+                        before_energy_j,
+                        after_energy_j,
+                        dissipation_j,
+                        work_j: frame.obstacle_work_j,
+                        absolute_work_j: obstacles.staged_absolute_work_j()?,
+                    })
+                },
                 (None, None) => None,
                 _ => return Err(invalid("nonlinear trial lost its original contact storage").into()),
             },

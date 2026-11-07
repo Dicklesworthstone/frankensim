@@ -5,6 +5,7 @@ mod preload;
 mod normal;
 mod free;
 use free::FreeResponse;
+pub(super) use normal::solve_joint;
 
 impl CoupledModalSystem {
     /// Establish a settled equilibrium of the COMPLETE spring-connected network.
