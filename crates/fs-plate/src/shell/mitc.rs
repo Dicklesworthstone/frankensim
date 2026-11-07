@@ -453,6 +453,10 @@ pub(super) fn factor_coupled_block(a: &[f64; 9], b: &[f64; 9], d: &[f64; 9], sem
         }
         scale[i] = if block[i][i] == 0.0 { 1.0 } else { det::sqrt(block[i][i]) };
     }
+    if semidefinite {
+        return fs_material::plane_stress_viscosity::factor_passive_work_matrix(&block)
+            .map_err(|_| bad());
+    }
     let tolerance = if semidefinite { 64.0*f64::EPSILON } else { 0.0 };
     let mut l = [[0.0; 6]; 6];
     for i in 0..6 { for j in 0..=i {

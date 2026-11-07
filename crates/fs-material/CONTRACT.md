@@ -20138,6 +20138,24 @@ cycle limits, transverse-domain refusal and original frequency/DC admission.
 Those integration tests remain unexecuted because the real runtime dependency
 build is killed before reaching the material crate in this environment.
 
+## Original-unit factors for weak passive constitutive work
+
+`plane_stress_viscosity::factor_passive_work_matrix` factors six work-conjugate
+coordinates with fixed-storage compensated LDL updates in the original units.
+The three-component resultant and passive shell A/B/D owners share this kernel.
+Square roots occur only in output channels, so subtracting rounded square-root
+products or normalizing a source matrix cannot distort a resolved weak pivot.
+No global positive rank threshold removes an independent small loss channel.
+Per-row admission and reconstruction allowances remain `64*EPSILON`; negative
+diagonals, coupled zero diagonals and unresolved active work refuse.
+
+Source stress/power and actual CST/DKT strain-work regressions cover nonbinary
+weak couplings, both signs of membrane/bending coupling, exact nulls and loss
+scales separated by hundreds of decades. The original strict elastic factor
+and successful full-rank source stress arithmetic remain unchanged. This
+matrix admission cannot recover accuracy absent from the supplied coefficients.
+
+
 ## Source-preserving tabulated flow, axial reduction and small-strain thermal families
 
 `plastic::tabulated::rate::source` binds original Cauchy hardening observations and the explicit canonical Perzyna coefficients from one fixed material context. Linear and power-law kinetics are explicit selections; missing coefficients are not inferred from unrelated viscosity roles. `ResolvedTabulatedOverstressJ2::for_duration` retains the original source and changes only the actual positive physical interval. Immutable knot, slope and stored-energy arrays are shared, and maximum table slope is cached, so duration rebinding neither copies nor scans the measured table.

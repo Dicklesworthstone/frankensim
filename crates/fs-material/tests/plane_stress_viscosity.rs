@@ -144,6 +144,26 @@ fn passive_resultant_is_scale_independent_and_rejects_active_cross_coupling() {
 }
 
 #[test]
+fn weak_source_work_and_exact_nulls_survive_nonbinary_and_mixed_scales() {
+    for a in [1.0, 3.7, 3.7e120, 3.7e-120] {
+        let b = a + a*2.0_f64.powi(-48);
+        let original = source([a,b,0.0,a,0.0,0.0],None,false,false);
+        let law = PlaneStressViscosity::from_material(
+            original.clone(),MaterialPlane::Axes12,KEYS).unwrap();
+        assert_eq!(law.source(),&original);
+        let (_, power) = law.stress_and_power([-1.0,1.0,0.0]).unwrap();
+        let expected = b-a; // work of the original coefficients, before any normalization
+        assert!((power/expected-1.0).abs() < 2e-12,"{power:e} != {expected:e}");
+    }
+    for a in [3.7,1e200,1e308] {
+        let law = law([a,a,1e-100,a,0.0,0.0]);
+        assert_eq!(law.stress_and_power([-1.0,1.0,0.0]).unwrap(),([0.0;3],0.0));
+        let (_, power) = law.stress_and_power([0.0,0.0,1.0]).unwrap();
+        assert!((power/1e-100-1.0).abs() < 2e-14,"weak independent power {power:e}");
+    }
+}
+
+#[test]
 fn held_source_moisture_changes_viscous_stress_power_and_bending_without_new_loss_law() {
     use fs_material::state_point::query_at_fixed_environment;
     use fs_qty::{QuantitySpec, semantic::{MoistureBasis, QuantityKind, SemanticType, ValueForm}};

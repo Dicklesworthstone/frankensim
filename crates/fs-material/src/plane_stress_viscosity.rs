@@ -59,9 +59,9 @@ fn invalid(what: &str) -> MaterialError {
 /// `V = L L^T`. This is bilinear-form admission, not a three-dimensional
 /// constitutive reduction. Zero eigenvalues and directional loss are allowed.
 ///
-/// Reuses the tensor Prony owner's PSD check after normalization, including its
-/// `64*EPSILON*norm` allowance for roundoff in a zero eigenvalue. No positive
-/// loss floor is added. The six columns are the shared owner's factor layout.
+/// Uses the shared original-unit compensated work-matrix factor below. The
+/// `64*EPSILON` admission allowance is relative to each pair of diagonal row
+/// scales; no positive loss floor or rounded normalized source is introduced.
 /// # Errors
 /// Nonfinite, asymmetric or active data, or an unrepresentable factor.
 pub fn factor_passive_resultant(v: &[f64; 9]) -> Result<[[f64; 6]; 3], MaterialError> {
@@ -75,19 +75,119 @@ pub fn factor_passive_resultant(v: &[f64; 9]) -> Result<[[f64; 6]; 3], MaterialE
             return Err(invalid("passive resultant has a negative diagonal or coupled zero diagonal"));
         }
     }
-    let scale = v.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
-    if scale == 0.0 { return Ok([[0.0; 6]; 3]); }
     let mut block = [[0.0; 6]; 6];
-    for i in 0..3 { for j in 0..3 { block[i][j] = v[3*i+j]/scale; } }
-    let factor = crate::visco::tensor::psd_factor(&block)
-        .map_err(|_| invalid("resultant viscosity must be positive semidefinite"))?;
-    let root = fs_math::det::sqrt(scale);
-    let out = core::array::from_fn(|i| factor[i].map(|x| x*root));
-    for i in 0..3 { for j in 0..3 {
-        let reconstructed: f64 = (0..6).map(|k| factor[i][k]*factor[j][k]).sum();
-        if !reconstructed.is_finite() || (reconstructed-block[i][j]).abs() > 1e-12 {
-            return Err(invalid("passive resultant factor does not reconstruct its source"));
+    for i in 0..3 { for j in 0..3 { block[i][j] = v[3*i+j]; } }
+    let factor = factor_passive_work_matrix(&block)?;
+    Ok(core::array::from_fn(|i| factor[i]))
+}
+
+/// Factor a finite symmetric passive six-component work matrix as `L L^T`.
+/// The supplied coordinates are work-conjugate: Mandel tensors and shell
+/// membrane/curvature resultants may use different dimensional row scales.
+/// Zero and rank-deficient inputs preserve their resolved null directions.
+///
+/// Pivoted LDL Schur updates use original dimensional coefficients and the
+/// shared double-double owner. Square roots occur only in output channels.
+/// Positive pivots are retained down to local introduced-arithmetic uncertainty,
+/// independently of the largest diagonal. The final factor reconstructs each
+/// source entry within `64*EPSILON` of its pair of diagonal row scales.
+/// This matrix-only admission cannot identify error already present in input
+/// data, and supplies no empirical material or discretization certificate.
+///
+/// Fixed six-component storage needs no heap allocation or eigensolve.
+pub fn factor_passive_work_matrix(block: &[[f64; 6]; 6])
+    -> Result<[[f64; 6]; 6], MaterialError>
+{
+    use fs_math::dd::Dd;
+    let bad = || invalid("material work matrix is not finite, symmetric, representable and passive");
+    if block.iter().flatten().any(|x| !x.is_finite())
+        || (0..6).any(|i| (0..6).any(|j| block[i][j] != block[j][i])) {
+        return Err(bad());
+    }
+    let mut scale = [0.0; 6];
+    for i in 0..6 {
+        if block[i][i] < 0.0
+            || (block[i][i] == 0.0 && block[i].iter().any(|v| *v != 0.0)) {
+            return Err(bad());
         }
+        scale[i] = if block[i][i] == 0.0 { 1.0 } else { fs_math::det::sqrt(block[i][i]) };
+    }
+    const ADMISSION: f64 = 64.0 * f64::EPSILON;
+    // Error starts at zero for the exact input f64 coefficients. An untouched
+    // small diagonal therefore has no tolerance tied to a stronger direction.
+    const ROUND: f64 = 16.0 * f64::EPSILON * f64::EPSILON;
+    let mut residual = block.map(|row| row.map(Dd::from_f64));
+    let mut uncertainty = [[0.0; 6]; 6];
+    let mut used = [false; 6];
+    let mut out = [[0.0; 6]; 6];
+    for column in 0..6 {
+        let mut pivot = None;
+        let mut diagonal = Dd::ZERO;
+        for i in 0..6 {
+            if used[i] { continue; }
+            let value = residual[i][i];
+            let normalized = value.to_f64() / scale[i] / scale[i];
+            if !normalized.is_finite() || normalized < -ADMISSION { return Err(bad()); }
+            if diagonal.lt(value) && Dd::from_f64(uncertainty[i][i]).lt(value) {
+                pivot = Some(i);
+                diagonal = value;
+            }
+        }
+        let Some(p) = pivot else { break; };
+        used[p] = true;
+        let lower = diagonal.to_f64() - uncertainty[p][p];
+        if !lower.is_finite() || lower <= 0.0 { return Err(bad()); }
+        let root = diagonal.sqrt();
+        out[p][column] = root.to_f64();
+        let mut ratios = [Dd::ZERO; 6];
+        let mut ratio_error = [0.0; 6];
+        for i in 0..6 {
+            if used[i] { continue; }
+            out[i][column] = (residual[i][p] / root).to_f64();
+            ratios[i] = residual[i][p] / diagonal;
+            let ratio = ratios[i].abs().to_f64();
+            ratio_error[i] = (uncertainty[i][p] + ratio * uncertainty[p][p]) / lower
+                + ROUND * ratio;
+        }
+        if out[p][column] == 0.0 || out.iter().any(|row| !row[column].is_finite()) {
+            return Err(bad());
+        }
+        for i in 0..6 {
+            if used[i] { continue; }
+            for j in i..6 {
+                if used[j] { continue; }
+                // Dividing the larger numerator first retains representable
+                // products even when the smaller individual ratio underflows.
+                let (a, b) = if residual[i][p].abs().lt(residual[j][p].abs()) {
+                    (j, i)
+                } else { (i, j) };
+                let update = ratios[a] * residual[b][p];
+                let error = uncertainty[i][j]
+                    + ratios[a].abs().to_f64() * uncertainty[b][p]
+                    + ratio_error[a] * residual[b][p].abs().to_f64()
+                    + ratio_error[a] * uncertainty[b][p]
+                    + ROUND * residual[i][j].abs().to_f64()
+                    + ROUND * update.abs().to_f64();
+                let next = residual[i][j] - update;
+                if !error.is_finite() || !next.hi.is_finite() || !next.lo.is_finite() {
+                    return Err(bad());
+                }
+                residual[i][j] = next;
+                residual[j][i] = next;
+                uncertainty[i][j] = error;
+                uncertainty[j][i] = error;
+            }
+        }
+    }
+    // An active cross term cannot disappear behind an unrelated strong axis.
+    for i in 0..6 { for j in i..6 {
+        let mut actual = Dd::ZERO;
+        for column in 0..6 {
+            actual = actual + Dd::from_f64(out[i][column]) * Dd::from_f64(out[j][column]);
+        }
+        let difference = (actual - Dd::from_f64(block[i][j])).abs().to_f64();
+        let normalized = difference / scale[i] / scale[j];
+        if !normalized.is_finite() || normalized > ADMISSION { return Err(bad()); }
     } }
     Ok(out)
 }
