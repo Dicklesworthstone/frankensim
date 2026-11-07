@@ -144,3 +144,98 @@ fn full_axis_work_and_unresolved_modes_refuse_without_a_running_receiver() {
     assert!(BaffledPressure::circular_modal_outlet_multirate_differentiating(
         0.04, ModeCount(3), 48_000, 48_000, point, &gas, options(), || true).is_err());
 }
+
+#[test]
+fn material_modal_receiver_preserves_signed_modes_and_original_path_propagation() {
+    use super::super::gas::{GasPropagation, GasPropagationLimits};
+    let gas = air();
+    let point = CircularOutletReceiver { position_m: [0.0, 0.0, 0.06],
+        radial_rings: 16, angular_points: 32, maximum_frequency_hz: 1000.0 };
+    let options = ModalOutletOptions { relative_kernel_tolerance: 1e-2,
+        maximum_kernel_terms: 1_000_000 };
+    let propagation = GasPropagation::classical(GasPropagationLimits::surface_reference());
+    let (mut actual, modal, report) =
+        BaffledPressure::circular_modal_outlet_multirate_gas_differentiating(
+            0.04, ModeCount(3), 48_000, 48_000, point, &gas, options,
+            &propagation, || false).unwrap();
+    let basis = AxisymmetricMouthBasis::new(ModeCount(3)).unwrap();
+    let (samples, _, _) = surface(0.04, &basis, 16, 32).unwrap();
+    let (mut expected, original) = BaffledPressure::new_multirate_gas_differentiating(
+        &samples, 3, 48_000, 48_000, point.position_m, &gas,
+        &propagation, &mut || false).unwrap();
+    let (mut lossless, _) = BaffledPressure::circular_modal_outlet_multirate_differentiating(
+        0.04, ModeCount(3), 48_000, 48_000, point, &gas, options, || false).unwrap();
+    assert_eq!(modal.modes, 3);
+    assert_eq!(modal.radial_nodes, [4, 8, 16]);
+    assert_eq!(report.surface_filter_indices, original.surface_filter_indices);
+    assert_eq!(report.filters, original.filters);
+    assert_eq!(report.kernel_terms, original.kernel_terms);
+    assert_eq!(report.additional_latency_samples, original.additional_latency_samples);
+    assert_eq!(actual.filter_delay_samples(), expected.filter_delay_samples());
+    assert_eq!(actual.kernels, expected.kernels);
+    let (mut peak, mut change) = (0.0_f64, 0.0_f64);
+    for sample in 0..actual.delay_samples.1 + 1024 {
+        // Both higher coordinates have zero total volume flow. They must still
+        // reach the near-field microphone with their original spatial signs.
+        let phase = TAU*700.0*sample as f64/48_000.0;
+        let flow = [0.0, 1e-7*phase.sin(), -0.6e-7*phase.cos()];
+        let pressure = actual.step(&flow).unwrap();
+        assert_eq!(pressure, expected.step(&flow).unwrap());
+        peak = peak.max(pressure.abs());
+        change = change.max((pressure-lossless.step(&flow).unwrap()).abs());
+    }
+    assert!(peak > 1e-9, "zero-net-flow modes must reach actual pressure");
+    assert!(change > 0.0, "the material path must affect signed modal pressure");
+}
+
+#[test]
+fn modal_material_comparison_removes_only_common_numerical_padding() {
+    let gas = air();
+    let basis = AxisymmetricMouthBasis::new(ModeCount(3)).unwrap();
+    let (samples, _, _) = surface(0.04, &basis, 16, 32).unwrap();
+    let build = || BaffledPressure::new_multirate_differentiating(
+        &samples, 3, 48_000, 48_000, [0.0, 0.0, 0.06], RayleighMedium::from(&gas)).unwrap();
+    let original = build();
+    let mut padded = build();
+    padded.add_gas_padding(7).unwrap();
+    assert_eq!(padded.filter_delay_samples(), original.filter_delay_samples()+7.0);
+    assert_eq!(kernel_change(&original, &padded, 1.0), vec![0.0; 3]);
+    assert_eq!(kernel_change(&padded, &original, 1.0), vec![0.0; 3]);
+}
+
+#[test]
+fn modal_material_work_limits_cover_the_complete_convergence_ladder() {
+    use super::super::gas::{GasPropagation, GasPropagationLimits};
+    use crate::air_path::GasAbsorptionModel;
+    let gas = air();
+    let point = CircularOutletReceiver { position_m: [0.0, 0.0, 0.10],
+        radial_rings: 8, angular_points: 32, maximum_frequency_hz: 1000.0 };
+    let options = ModalOutletOptions { relative_kernel_tolerance: 1e-2,
+        maximum_kernel_terms: 1_000_000 };
+    let propagation = GasPropagation { law: GasAbsorptionModel::Lossless,
+        relaxation: None, limits: GasPropagationLimits::surface_reference() };
+    let build = |propagation: &GasPropagation| {
+        BaffledPressure::circular_modal_outlet_multirate_gas_differentiating(
+            0.01, ModeCount(1), 48_000, 48_000, point, &gas, options,
+            propagation, || false)
+    };
+    let (_, _, fine) = build(&propagation).unwrap();
+    // Each of these budgets admits the final fine receiver by itself, but
+    // cannot also admit the mandatory discarded convergence rungs.
+    for budget in 0..3 {
+        let mut limited = propagation.clone();
+        match budget {
+            0 => limited.limits.max_unique_paths = fine.filters.len(),
+            1 => limited.limits.max_filter_taps = fine.filters.iter().map(|f| f.taps).sum(),
+            _ => limited.limits.max_kernel_terms = fine.kernel_terms,
+        }
+        assert!(build(&limited).is_err(), "all rungs must share budget {budget}");
+    }
+    assert!(BaffledPressure::circular_modal_outlet_multirate_gas_differentiating(
+        0.01, ModeCount(1), 48_000, 48_000,
+        CircularOutletReceiver { radial_rings: 6, ..point }, &gas, options,
+        &propagation, || false).is_err());
+    assert!(BaffledPressure::circular_modal_outlet_multirate_gas_differentiating(
+        0.01, ModeCount(1), 48_000, 48_000, point, &gas, options,
+        &propagation, || true).is_err());
+}

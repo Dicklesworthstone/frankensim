@@ -50,8 +50,10 @@ relaxation declaration and an explicit `ambient mixture` or `thermochemical`
 source. Classical transport does not invent molecular relaxation coefficients.
 Both linear and nonlinear brass retain their original lip/bore dynamics and
 every mechanics sample. The sidecar reports the applied gas and causal filter
-latency; that latency stays in the WAV. `modal_baffle` currently refuses this
-record because its multimode receiver has no material propagation path.
+latency; that latency stays in the WAV. `modal_baffle` applies the same law to
+every signed mouth-mode surface path, using the original exterior gas. Its
+complete radial/angular convergence ladder shares the declared material-work
+budgets and compares kernels after aligning numerical padding.
 Files without `observer_gas` keep their existing lossless observation.
 
 ## Compare a change

@@ -111,11 +111,8 @@ fn observer_gas_binds_original_species_in_either_record_order_and_refuses_unsupp
             .contains("may only appear once")
     );
     let modal = format!("{CLASSICAL}modal_baffle 1e-3 1000000\n");
-    let error = LipDescription::from_bytes(fixture(AMBIENT, &modal).as_bytes()).unwrap_err();
-    assert!(
-        error.contains("observer_gas") && error.contains("modal_baffle"),
-        "{error}"
-    );
+    let combined = LipDescription::from_bytes(fixture(AMBIENT, &modal).as_bytes()).unwrap();
+    assert!(combined.modal_baffle.is_some() && combined.observer_gas.is_some());
     let error = LipDescription::from_bytes(fixture("moist_air 300 101325 0", MOLECULAR).as_bytes())
         .unwrap_err();
     assert!(
@@ -143,26 +140,29 @@ fn compare_with_original_owners(description: &LipDescription, propagation: &GasP
     assert!(direct.info().observer_gas.is_none());
     let ratio = direct.ratio;
     let gas = description.ambient_gas();
-    let (mut receiver, report) = BaffledPressure::circular_openings_multirate_gas_differentiating(
-        &[CircularOpening {
-            center_m: [0.0; 2],
-            radius_m: direct.info().mouth_radius_m,
-        }],
-        description.rate_hz * ratio as u32,
-        description.rate_hz,
-        description.microphone,
-        gas,
-        propagation,
-        &mut || false,
-    )
-    .unwrap();
+    let (mut receiver, report) = if let Some(options) = description.modal_baffle {
+        let (receiver, _, report) =
+            BaffledPressure::circular_modal_outlet_multirate_gas_differentiating(
+                direct.info().mouth_radius_m, fs_duct::modal::ModeCount(description.modes),
+                description.rate_hz * ratio as u32, description.rate_hz,
+                description.microphone, gas, options, propagation, || false,
+            ).unwrap();
+        (receiver, report)
+    } else {
+        BaffledPressure::circular_openings_multirate_gas_differentiating(
+            &[CircularOpening { center_m: [0.0; 2], radius_m: direct.info().mouth_radius_m }],
+            description.rate_hz * ratio as u32, description.rate_hz,
+            description.microphone, gas, propagation, &mut || false,
+        ).unwrap()
+    };
     let actual = native.info().observer_gas.as_ref().unwrap();
     assert_eq!(actual.gas, *gas);
     assert_eq!(actual.law, propagation.law);
-    assert_eq!(actual.surface_filter_indices.len(), 16);
+    assert_eq!(actual.surface_filter_indices.len(),
+        description.microphone.radial_rings * description.microphone.angular_points);
     assert!(
         actual.filters.len() > 1,
-        "off-axis original path lengths are distinct"
+        "original surface paths retain distinct distances"
     );
     assert_eq!(actual.surface_filter_indices, report.surface_filter_indices);
     assert_eq!(actual.filters, report.filters);
@@ -185,7 +185,9 @@ fn compare_with_original_owners(description: &LipDescription, propagation: &GasP
     let mut expected = Vec::new();
     let mut original_pressure = Vec::new();
     let mut mouthpiece = Vec::new();
-    let mut flows = vec![0.0; ratio];
+    let flow_modes = if description.modal_baffle.is_some() { description.modes } else { 1 };
+    let mut flows = vec![0.0; ratio * flow_modes];
+    let mut higher_flow_peak = 0.0_f64;
     for _ in 0..description.samples {
         let mut internal = [0.0];
         match &mut direct.engine {
@@ -194,15 +196,23 @@ fn compare_with_original_owners(description: &LipDescription, propagation: &GasP
                 voice
                     .step_block_outgoing(&mut internal, &mut outgoing)
                     .unwrap();
-                assert_eq!(mouth.len(), 1);
-                flows[0] = mouth[0].push(outgoing[0]).unwrap();
+                assert_eq!(mouth.len(), flow_modes);
+                for (flow, filter) in flows.iter_mut().zip(mouth) {
+                    *flow = filter.push(outgoing[0]).unwrap();
+                }
             }
             #[cfg(feature = "nonlinear-brass")]
             Engine::Nonlinear(lip) => lip.step_block(&mut internal, &mut flows).unwrap(),
         }
+        for flow in &flows[1..flow_modes] {
+            higher_flow_peak = higher_flow_peak.max(flow.abs());
+        }
         expected.push(receiver.step_trace(&flows).unwrap());
         original_pressure.push(direct.receiver.step_trace(&flows).unwrap());
         mouthpiece.push(internal[0]);
+    }
+    if flow_modes > 1 {
+        assert!(higher_flow_peak > 0.0, "all retained source modes must reach observation");
     }
     let mut pressure = vec![0.0; description.samples as usize];
     for output in pressure.chunks_mut(17) {
@@ -276,4 +286,22 @@ fn declared_observer_budgets_reach_the_actual_surface_owner() {
             .unwrap();
         assert!(error.contains("observer_gas"), "{error}");
     }
+}
+
+#[test]
+fn molecular_modal_brass_renders_all_original_mouth_flows_through_the_exterior_gas() {
+    let rows = format!("{MOLECULAR}modal_baffle 1e-2 1000000\n\
+        mouth_flow_tail_tol 2e-6\n\
+        bore_gas mixture 305 101325 mole 2 N2 0.8 O2 0.2\n");
+    let source = fixture(AMBIENT, &rows)
+        .replace("audio 24000 512", "audio 24000 1536")
+        .replace("modes 1 1", "modes 3 1")
+        .replace("cylinder 0.006 0.30", "cylinder 0.006 0.30\n\
+            cone 0.006 0.012 0.25\ncone 0.012 0.035 0.12")
+        .replace("microphone 0.02 0.01 0.15 2 8 1000",
+            "microphone 0 0 0.15 16 32 1000");
+    let description = LipDescription::from_bytes(source.as_bytes()).unwrap();
+    assert_eq!(description.transverse_mode_count(), 3);
+    assert_ne!(description.bore_gas(), description.ambient_gas());
+    compare_with_original_owners(&description, &molecular(description.gas_record()));
 }

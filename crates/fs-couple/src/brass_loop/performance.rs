@@ -53,8 +53,9 @@
 //! a name. Both the linear and nonlinear total-flow receivers carry this law,
 //! retaining every mechanics substep and the common causal filter latency.
 //! It changes observation only, not lip motion, bore feedback or bell loading.
-//! It currently refuses `modal_baffle`, whose signed multimode receiver has no
-//! material-propagation path. Without the row, observation is unchanged.
+//! The signed `modal_baffle` receiver uses the same per-path law and checks its
+//! actual material kernels on the complete spatial quadrature ladder. Without
+//! the row, observation is unchanged.
 //!
 //! `mouth_reservoir` attaches a rigid adiabatic upstream gas volume to
 //! `bore nonlinear`. Its pressure and temperature evolve with the bore's
@@ -824,9 +825,6 @@ impl LipDescription {
         {
             return Err("modal_baffle requires a linear bore and termination flanged; no foreign exterior load is substituted".into());
         }
-        if observer_gas_record.is_some() && modal_baffle.is_some() {
-            return Err("observer_gas is not supported with modal_baffle; the modal receiver has no material propagation path".into());
-        }
         let gas = gas.ok_or_else(|| missing("ambient"))?;
         if let Some(bore) = &bore_gas {
             if modal_baffle.is_none() {
@@ -1112,10 +1110,20 @@ impl LipDescription {
             let geometry = fs_duct::modal::PreparedModalDuct::new(&self.duct,
                 self.modes, self.extra_slices).map_err(|e| e.to_string())?;
             let radius = geometry.mouth_radius_m();
-            let (receiver, report) = BaffledPressure::circular_modal_outlet_multirate_differentiating(
-                radius, fs_duct::modal::ModeCount(self.modes), self.rate_hz,
-                self.rate_hz, self.microphone, gas, options, || false)?;
-            Some((radius, receiver, report))
+            let (receiver, report, propagation) = if let Some(propagation) = &self.observer_gas {
+                let (receiver, report, gas_report) =
+                    BaffledPressure::circular_modal_outlet_multirate_gas_differentiating(
+                        radius, fs_duct::modal::ModeCount(self.modes), self.rate_hz,
+                        self.rate_hz, self.microphone, gas, options, propagation, || false,
+                    ).map_err(|error| format!("observer_gas refused: {error}"))?;
+                (receiver, report, Some(gas_report))
+            } else {
+                let (receiver, report) = BaffledPressure::circular_modal_outlet_multirate_differentiating(
+                    radius, fs_duct::modal::ModeCount(self.modes), self.rate_hz,
+                    self.rate_hz, self.microphone, gas, options, || false)?;
+                (receiver, report, None)
+            };
+            Some((radius, receiver, report, propagation))
         } else { None };
         // What the bore, cup and lip hold; `gas` stays the exterior (the room) for the radiation load and the receiver.
         // Without a `bore_gas` row the two are the same state, so every operand below is the one it always was.
@@ -1173,11 +1181,11 @@ impl LipDescription {
         }
         .map_err(|e| format!("mouth-flow line refused: {e}"))?;
         let mouth_radius_m = mouth_receipt.mouth_radius_m;
-        let (receiver, modal_radiation, observer_gas) = if let Some((radius, receiver, report)) = modal_receiver {
+        let (receiver, modal_radiation, observer_gas) = if let Some((radius, receiver, report, propagation)) = modal_receiver {
             if radius != mouth_radius_m {
                 return Err("modal load and receiver must retain the same actual mouth radius".into());
             }
-            (receiver, Some(report), None)
+            (receiver, Some(report), propagation)
         } else {
             let (receiver, observer_gas) = self.scalar_receiver(mouth_radius_m, self.rate_hz)?;
             (receiver, None, observer_gas)

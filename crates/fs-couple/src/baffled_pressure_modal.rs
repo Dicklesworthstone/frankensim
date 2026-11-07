@@ -12,6 +12,7 @@
 //! its source. An unflanged/BEM load cannot acquire this exterior implicitly.
 
 use super::{BaffledPressure, CircularOutletReceiver, RayleighMedium, SurfaceSample};
+use super::gas::{GasPropagation, GasPropagationReport};
 use fs_duct::modal::{AxisymmetricMouthBasis, ModeCount};
 use fs_feec::highorder::quad1d::gauss_legendre;
 use fs_material::gas::GasState;
@@ -78,6 +79,40 @@ impl BaffledPressure {
         spec: CircularOutletReceiver, exterior: &GasState, options: ModalOutletOptions,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(Self, ModalOutletReport), String> {
+        let (receiver, report, _) = Self::prepare_modal_outlet(
+            radius_m, modes, mechanics_rate, output_rate, spec, exterior,
+            options, None, &mut cancelled,
+        )?;
+        Ok((receiver, report))
+    }
+
+    /// The same signed mouth basis and five-rung spatial convergence, with
+    /// material gas propagation on every original surface-to-receiver path.
+    ///
+    /// All five rungs share the supplied gas work budgets. Their kernels are
+    /// compared at a common numerical padding, so differing causal padding
+    /// cannot masquerade as quadrature error. The returned gas report describes
+    /// the final fine receiver and its actual latency; discarded rungs add no
+    /// playback latency. No source motion or exterior load is changed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn circular_modal_outlet_multirate_gas_differentiating(
+        radius_m: f64, modes: ModeCount, mechanics_rate: u32, output_rate: u32,
+        spec: CircularOutletReceiver, exterior: &GasState, options: ModalOutletOptions,
+        propagation: &GasPropagation, mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(Self, ModalOutletReport, GasPropagationReport), String> {
+        let (receiver, report, gas) = Self::prepare_modal_outlet(
+            radius_m, modes, mechanics_rate, output_rate, spec, exterior,
+            options, Some(propagation), &mut cancelled,
+        )?;
+        Ok((receiver, report, gas.ok_or("modal material propagation report is missing")?))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_modal_outlet(
+        radius_m: f64, modes: ModeCount, mechanics_rate: u32, output_rate: u32,
+        spec: CircularOutletReceiver, exterior: &GasState, options: ModalOutletOptions,
+        propagation: Option<&GasPropagation>, cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Self, ModalOutletReport, Option<GasPropagationReport>), String> {
         exterior.validate_coherence().map_err(|e| e.to_string())?;
         let basis = AxisymmetricMouthBasis::new(modes).map_err(|e| e.to_string())?;
         let (nr, na, n) = (spec.radial_rings, spec.angular_points, modes.0);
@@ -105,14 +140,32 @@ impl BaffledPressure {
         if !scale.is_finite() || scale <= 0.0 {
             return Err("modal outlet radiation scale is unrepresentable".into());
         }
-        let mut prepare = |r: usize, a: usize| -> Result<(Self, f64, f64), String> {
+        // Each discarded convergence rung still performs real filter design
+        // and convolution. Consume one shared allowance instead of granting
+        // every rung a fresh copy of the caller's material-work budget.
+        let mut remaining = propagation.cloned();
+        let mut prepare = |r: usize, a: usize|
+            -> Result<(Self, f64, f64, Option<GasPropagationReport>), String>
+        {
             if cancelled() { return Err("modal outlet preparation cancelled".into()); }
             let (surface, gram, spacing) = surface(radius_m, &basis, r, a)?;
-            let receiver = Self::new_multirate_differentiating(&surface, n,
-                mechanics_rate, output_rate, spec.position_m, medium)?;
-            Ok((receiver, gram, spacing))
+            let (receiver, gas) = if let Some(remaining) = &mut remaining {
+                let (receiver, report) = Self::new_multirate_gas_differentiating(
+                    &surface, n, mechanics_rate, output_rate, spec.position_m,
+                    exterior, remaining, cancelled,
+                )?;
+                remaining.limits.max_unique_paths -= report.filters.len();
+                remaining.limits.max_filter_taps -= report.filters.iter()
+                    .map(|filter| filter.taps).sum::<usize>();
+                remaining.limits.max_kernel_terms -= report.kernel_terms;
+                (receiver, Some(report))
+            } else {
+                (Self::new_multirate_differentiating(&surface, n,
+                    mechanics_rate, output_rate, spec.position_m, medium)?, None)
+            };
+            Ok((receiver, gram, spacing, gas))
         };
-        let (fine, basis_gram_defect, spacing) = prepare(nr, na)?;
+        let (fine, basis_gram_defect, spacing, gas) = prepare(nr, na)?;
         let phase = TAU*spec.maximum_frequency_hz*radius_m/exterior.sound_speed
             * (spacing + TAU/na as f64);
         let radial_phase = basis.radial_eigenvalues()[n-1]*spacing;
@@ -122,9 +175,9 @@ impl BaffledPressure {
             return Err("modal outlet quadrature underresolves the original basis or declared radiation band; refine it".into());
         }
         let mut changes = |radial: bool| -> Result<[Vec<f64>; 2], String> {
-            let (half, _, _) = prepare(if radial {nr/2} else {nr}, if radial {na} else {na/2})?;
+            let (half, _, _, _) = prepare(if radial {nr/2} else {nr}, if radial {na} else {na/2})?;
             let last = kernel_change(&fine, &half, scale);
-            let (quarter, _, _) = prepare(if radial {nr/4} else {nr}, if radial {na} else {na/4})?;
+            let (quarter, _, _, _) = prepare(if radial {nr/4} else {nr}, if radial {na} else {na/4})?;
             let first = kernel_change(&half, &quarter, scale);
             if last.iter().any(|v| !v.is_finite() || *v > tolerance)
                 || first.iter().any(|v| !v.is_finite())
@@ -139,7 +192,7 @@ impl BaffledPressure {
         if cancelled() { return Err("modal outlet preparation cancelled".into()); }
         Ok((fine, ModalOutletReport { modes: n, radial_nodes: [nr/4,nr/2,nr],
             angular_points: [na/4,na/2,na], radial_changes, angular_changes,
-            basis_gram_defect, kernel_terms, tolerance }))
+            basis_gram_defect, kernel_terms, tolerance }, gas))
     }
 }
 
@@ -175,15 +228,20 @@ fn surface(radius: f64, basis: &AxisymmetricMouthBasis, radial: usize, angular: 
     Ok((samples, defect, spacing))
 }
 
-// Both kernels use the same physical origin and numerical delay. Missing rows
-// are zero. Sum absolute differences before normalizing, so signed cancellation
-// cannot hide an unresolved lobe or a quiet higher-mode contribution.
+// Compare at the same physical origin and numerical delay. Gas filters can
+// require different whole-sample padding on different quadrature rungs; align
+// their indices without changing either actual receiver or its latency report.
+// Missing rows are zero. Sum absolute differences before normalizing, so signed
+// cancellation cannot hide an unresolved lobe or a quiet higher-mode contribution.
 fn kernel_change(a: &BaffledPressure, b: &BaffledPressure, scale: f64) -> Vec<f64> {
+    let padding = a.material_path_delay.max(b.material_path_delay);
+    let shift_a = padding - a.material_path_delay;
+    let shift_b = padding - b.material_path_delay;
     let mut change = vec![0.0; a.modes];
     let (mut i, mut j) = (0, 0);
     while i < a.kernels.len() || j < b.kernels.len() {
-        let da = a.kernels.get(i).map_or(usize::MAX, |row| row.0);
-        let db = b.kernels.get(j).map_or(usize::MAX, |row| row.0);
+        let da = a.kernels.get(i).map_or(usize::MAX, |row| row.0 + shift_a);
+        let db = b.kernels.get(j).map_or(usize::MAX, |row| row.0 + shift_b);
         for (m, error) in change.iter_mut().enumerate() {
             let left = if da <= db {a.kernels[i].1[m]} else {0.0};
             let right = if db <= da {b.kernels[j].1[m]} else {0.0};
