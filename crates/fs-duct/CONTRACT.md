@@ -354,7 +354,17 @@ Eq. 16, `Z_nm = j k rho c exp(-j k d) / (eps pi d)`, conjugated here for
 full space). Each hole keeps its own chimney, loss, wall, local gas and flanged
 self radiation as the diagonal term. The bore retains its original scattering
 two-ports and uses the small admittance/nodal solve where that elimination is
-regular. At isolated half/full-wave run poles or a singular nodal solve, it
+regular. Chimney loading is assembled jointly as `M = A Z + B`, with diagonal
+chimney coefficients, before solving `U_mouth = M^-1 p_junction` and
+`U_bore = (C Z + D) U_mouth`. It never divides by an isolated
+`A_i Z_ii + B_i`: mutual loading can regularize that isolated chimney pole.
+Mouth flows come directly from the joint inverse, avoiding cancellation near
+those poles. The scaled solve checks M's actual infinity-norm condition against
+the caller's limit and includes it in the reported condition. A G2 reactive
+limiting fixture checks the analytic two-mouth inverse through an exact isolated
+pole; unequal lossless chimneys separately check the primitive boundary equations
+and conservation of acoustic power. At isolated half/full-wave bore-run poles
+or a singular nodal solve, it
 reuses the graph owner's pressure/flow scattering constraints, applying all
 coupled aperture loads before inversion. The fallback inherits the 800-unknown
 graph cap and uses the caller's bound on the equilibrated complete system;

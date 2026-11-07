@@ -148,58 +148,55 @@ fn pair_distance(a: &CoupledPort, b: &CoupledPort) -> f64 {
 struct Coupling {
     /// Flow into each chimney from its bore junction = `admittance` (q x q, row-major) times the junction pressures.
     admittance: Vec<C64>,
-    /// Extra mouth pressure from the other openings = `external` times the junction pressures.
-    external: Vec<C64>,
-    /// `1 / (A Z_nn + B)`: mouth flow = this times (junction pressure - A * extra mouth pressure).
-    mouth_gain: Vec<C64>,
+    /// Flow leaving each mouth = `mouth_admittance` times the junction pressures.
+    mouth_admittance: Vec<C64>,
+    /// Infinity-norm condition of the jointly loaded chimney matrix.
+    condition: f64,
 }
 
-/// With `p_ex = Z_off U_mouth` and `U_mouth = W (p - A p_ex)`: `p_ex = (I + Z_off W A)^-1 Z_off W p`
-/// and the chimney inflow is `Y p + (C - Y A) p_ex` with `Y = (C Z_nn + D)/(A Z_nn + B)`.
+#[cfg(test)]
 fn couple(
     ports: &[CoupledPort], exterior: &GasState, omega: f64, interaction: OpenHoleInteraction,
 ) -> Result<Coupling, DuctError> {
+    couple_with_limit(ports, exterior, omega, interaction, ComposeOptions::default().maximum_condition)
+}
+
+/// Keep the complete mouth load before eliminating any chimney: with diagonal A, B, C, D,
+/// `p = (A Z + B) U_mouth` and `U_bore = (C Z + D) U_mouth`. An isolated `A_i Z_ii + B_i`
+/// can vanish even when `A Z + B` is invertible. Dividing by it first creates false poles
+/// and makes the reconstructed mouth flow a cancellation of divergent terms near resonance.
+fn couple_with_limit(
+    ports: &[CoupledPort], exterior: &GasState, omega: f64, interaction: OpenHoleInteraction,
+    maximum_condition: f64,
+) -> Result<Coupling, DuctError> {
     let q = ports.len();
-    let (mut y, mut w) = (vec![C64::ZERO; q], vec![C64::ZERO; q]);
-    for (i, port) in ports.iter().enumerate() {
-        let [a, b, c, d] = port.chimney;
-        let top = a * port.self_radiation + b;
-        let bottom = c * port.self_radiation + d;
-        if !finite(top) || !finite(bottom) || top.abs() == 0.0 {
-            return Err(DuctError::Singular);
-        }
-        w[i] = top.recip();
-        y[i] = bottom / top;
-    }
-    let (mut m, mut rhs) = (vec![C64::ZERO; q * q], vec![C64::ZERO; q * q]);
+    let (mut m, mut inflow) = (vec![C64::ZERO; q * q], vec![C64::ZERO; q * q]);
     for i in 0..q {
-        for j in 0..q {
-            let z = if i == j {
-                C64::ZERO
-            } else {
-                mutual_radiation_impedance(exterior, omega, pair_distance(&ports[i], &ports[j]), interaction)?
-            };
-            rhs[i * q + j] = z * w[j];
-            m[i * q + j] = z * (w[j] * ports[j].chimney[0]) + if i == j { C64::ONE } else { C64::ZERO };
+        let [a, b, c, d] = ports[i].chimney;
+        m[i * q + i] = a * ports[i].self_radiation + b;
+        inflow[i * q + i] = c * ports[i].self_radiation + d;
+        for j in i + 1..q {
+            // The exterior is reciprocal; evaluate each mutual kernel once.
+            let z = mutual_radiation_impedance(exterior, omega, pair_distance(&ports[i], &ports[j]), interaction)?;
+            m[i * q + j] = a * z;
+            m[j * q + i] = ports[j].chimney[0] * z;
+            inflow[i * q + j] = c * z;
+            inflow[j * q + i] = ports[j].chimney[2] * z;
         }
     }
-    let lu = lu_complex(&m, q).map_err(|_| DuctError::Singular)?;
-    let mut external = vec![C64::ZERO; q * q];
-    for j in 0..q {
-        let mut column: Vec<C64> = (0..q).map(|i| rhs[i * q + j]).collect();
-        lu.solve(&mut column);
-        for i in 0..q {
-            external[i * q + j] = column[i];
-        }
-    }
+    let (mouth_admittance, condition) = crate::network::inverse_with_limit(&m, q, maximum_condition)?;
     let mut admittance = vec![C64::ZERO; q * q];
     for i in 0..q {
-        let gain = ports[i].chimney[2] - y[i] * ports[i].chimney[0];
         for j in 0..q {
-            admittance[i * q + j] = gain * external[i * q + j] + if i == j { y[i] } else { C64::ZERO };
+            admittance[i * q + j] = (0..q).fold(C64::ZERO, |sum, k| {
+                sum + inflow[i * q + k] * mouth_admittance[k * q + j]
+            });
         }
     }
-    Ok(Coupling { admittance, external, mouth_gain: w })
+    if admittance.iter().any(|&z| !finite(z)) {
+        return Err(DuctError::Singular);
+    }
+    Ok(Coupling { admittance, mouth_admittance, condition })
 }
 
 /// The coupled solution for a unit input flow.
@@ -214,7 +211,7 @@ pub(crate) struct CoupledSolution {
     pub condition: f64,
 }
 
-/// Solve the bore between openings and the openings through [`couple`].
+/// Solve the bore between openings and the openings through [`couple_with_limit`].
 /// A half-wave run has singular I+S, not necessarily a singular loaded instrument.
 /// Such runs use the existing graph owner's retained scattering constraints.
 /// `holes` and `ports` are the open holes in axial order; `bell` is the radiating open end, or
@@ -280,7 +277,8 @@ pub(crate) fn solve(
     let mut all: Vec<CoupledPort> = ports.to_vec();
     all.extend(bell);
     let q = all.len();
-    let coupling = couple(&all, exterior, omega, interaction)?;
+    let coupling = couple_with_limit(&all, exterior, omega, interaction, maximum_condition)?;
+    condition = condition.max(coupling.condition);
     for i in 0..q {
         for j in 0..q {
             let at = (i + 1) * nodes + j + 1;
@@ -308,7 +306,7 @@ pub(crate) fn solve(
             } }
             let (inverse, c) = crate::network::wave_pressure_inverse(
                 &boundary_y, nodes, &wave_edges, maximum_condition)?;
-            condition = propagation_condition.max(c);
+            condition = propagation_condition.max(c).max(coupling.condition);
             (0..nodes).map(|i| inverse[i * nodes]).collect()
         }
         Err(error) => return Err(error),
@@ -316,9 +314,7 @@ pub(crate) fn solve(
     let junction = &p[1..=q];
     let row = |matrix: &[C64], i: usize| (0..q).fold(C64::ZERO, |sum, j| sum + matrix[i * q + j] * junction[j]);
     let inflow: Vec<C64> = (0..q).map(|i| row(&coupling.admittance, i)).collect();
-    let mouth: Vec<C64> = (0..q)
-        .map(|i| coupling.mouth_gain[i] * (junction[i] - all[i].chimney[0] * row(&coupling.external, i)))
-        .collect();
+    let mouth: Vec<C64> = (0..q).map(|i| row(&coupling.mouth_admittance, i)).collect();
     // A passive one-port has a nonnegative input resistance.
     if p[0].re < -1.0e-9 * p[0].abs() {
         return Err(bad("coupled radiation is active at this frequency"));

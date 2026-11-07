@@ -934,7 +934,7 @@ fn inverse(a: &[C64], n: usize) -> Result<(Vec<C64>, f64), DuctError> {
     inverse_with_limit(a, n, MAX_NETWORK_CONDITION)
 }
 
-fn inverse_with_limit(a: &[C64], n: usize, maximum_condition: f64) -> Result<(Vec<C64>, f64), DuctError> {
+pub(crate) fn inverse_with_limit(a: &[C64], n: usize, maximum_condition: f64) -> Result<(Vec<C64>, f64), DuctError> {
     if n == 0 || a.iter().any(|&z| !finite(z)) {
         return Err(DuctError::Singular);
     }

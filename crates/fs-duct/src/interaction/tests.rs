@@ -68,6 +68,99 @@ fn zero_length_chimneys_give_the_inverse_of_the_two_opening_radiation_matrix() {
     }
 }
 
+#[test]
+fn mutual_loading_regularizes_an_isolated_chimney_pole_without_cancellation() {
+    // G2: a lossless reactive limiting fixture, with a series compliance cancelling
+    // the self-load inertance. At kd = pi the mutual load is reactive to rounding.
+    // The isolated denominator is r, but the complete mouth system is
+    // [[r, Zm], [Zm, r]], regular even at r = 0. Its closed-form inverse gives
+    // finite mouth flows through the resonance; no artificial damping is needed.
+    let gas = air();
+    let distance = 0.05;
+    let omega = core::f64::consts::PI * gas.sound_speed / distance;
+    let zm = mutual_radiation_impedance(&gas, omega, distance, interaction(2.0)).unwrap();
+    for relative_resistance in [1.0e-2, 1.0e-6, 1.0e-10, 1.0e-14, 0.0] {
+        let r = C64::from_re(zm.abs() * relative_resistance);
+        let make = |position_m| CoupledPort {
+            position_m,
+            radius_m: 0.002,
+            chimney: [C64::ONE, r + C64::new(0.0, 1.0e5), C64::ZERO, C64::ONE],
+            self_radiation: C64::new(0.0, -1.0e5),
+        };
+        let ports = [make(0.0), make(distance)];
+        let determinant = r * r - zm * zm;
+        let expected = [r / determinant, -zm / determinant, -zm / determinant, r / determinant];
+        let coupling = couple(&ports, &gas, omega, interaction(2.0)).unwrap();
+        assert!(coupling.condition < 1.1, "{}", coupling.condition);
+        for map in [&coupling.admittance, &coupling.mouth_admittance] {
+            for (got, want) in map.iter().zip(expected) {
+                assert!((*got - want).abs() * zm.abs() < 2.0e-12,
+                    "r/|Zm|={relative_resistance}: {got:?} vs {want:?}");
+            }
+        }
+        // A genuine uncoupled pole still refuses; the fix does not regularize it.
+        if relative_resistance == 0.0 {
+            assert!(matches!(couple(&ports[..1], &gas, omega, interaction(2.0)), Err(DuctError::Singular)));
+        }
+    }
+}
+
+#[test]
+fn unequal_lossless_chimneys_preserve_the_full_boundary_equations_and_acoustic_power() {
+    // Independent checks at the original pressure/flow boundaries. Lossless
+    // lines under exp(-i wt) have negative imaginary off-diagonal entries and
+    // preserve Re(p conj(U)) even when their mouths exchange radiation power.
+    let gas = air();
+    let omega = TAU * 500.0;
+    let ports: Vec<CoupledPort> = [(0.0, 0.2, 1.2e7), (0.04, 0.9, 2.0e7), (0.11, 1.7, 1.0e7)]
+        .into_iter()
+        .map(|(position_m, phase, reference): (f64, f64, f64)| {
+            let (s, c) = phase.sin_cos();
+            CoupledPort {
+                position_m,
+                radius_m: 0.002,
+                chimney: [C64::from_re(c), C64::new(0.0, -reference * s),
+                    C64::new(0.0, -s / reference), C64::from_re(c)],
+                self_radiation: C64::new(2.0e5, -3.0e5),
+            }
+        })
+        .collect();
+    let junction = [C64::new(1.0, 0.4), C64::new(-0.5, 0.2), C64::new(0.3, -0.7)];
+    let coupling = couple(&ports, &gas, omega, interaction(2.0)).unwrap();
+    let response = |map: &[C64], i: usize| (0..3).fold(C64::ZERO, |sum, j| sum + map[i * 3 + j] * junction[j]);
+    let mouth: Vec<_> = (0..3).map(|i| response(&coupling.mouth_admittance, i)).collect();
+    let inflow: Vec<_> = (0..3).map(|i| response(&coupling.admittance, i)).collect();
+    let power = |pressure: C64, flow: C64| pressure.re * flow.re + pressure.im * flow.im;
+    let (mut bore_power, mut mouth_power) = (0.0, 0.0);
+    for (i, port) in ports.iter().enumerate() {
+        let mut pressure = port.self_radiation * mouth[i];
+        for j in 0..3 {
+            if i != j {
+                pressure = pressure + mutual_radiation_impedance(
+                    &gas, omega, pair_distance(port, &ports[j]), interaction(2.0)).unwrap() * mouth[j];
+            }
+        }
+        let [a, b, c, d] = port.chimney;
+        assert!(close(a * pressure + b * mouth[i], junction[i], 2.0e-12));
+        assert!(close(c * pressure + d * mouth[i], inflow[i], 2.0e-12));
+        bore_power += power(junction[i], inflow[i]);
+        mouth_power += power(pressure, mouth[i]);
+    }
+    assert!(mouth_power > 0.0);
+    assert!((bore_power - mouth_power).abs() <= 2.0e-11 * mouth_power,
+        "bore={bore_power}, mouths={mouth_power}");
+}
+
+#[test]
+fn the_joint_chimney_condition_respects_the_callers_limit() {
+    let gas = air();
+    let ports = [CoupledPort::open_end(0.0, C64::ONE), CoupledPort::open_end(0.1, C64::from_re(100.0))];
+    let weak = interaction(1.0e9);
+    assert!(matches!(couple_with_limit(&ports, &gas, 1.0, weak, 50.0), Err(DuctError::Singular)));
+    let coupling = couple_with_limit(&ports, &gas, 1.0, weak, 200.0).unwrap();
+    assert!(coupling.condition > 99.0 && coupling.condition < 101.0, "{}", coupling.condition);
+}
+
 fn chimney_ports(positions: &[f64]) -> Vec<CoupledPort> {
     let gas = air();
     positions
