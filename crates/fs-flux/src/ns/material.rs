@@ -1,7 +1,7 @@
 //! Shared-material entry to the existing BDM1 incompressible solver.
 //!
-//! The homogeneous entry advances `du/dt + u.grad(u) - nu*lap(u) + grad(pi)
-//! = a`. The rheological entry uses `-div(2 nu D(u))`, including one-sided
+//! Both homogeneous and rheological entries advance
+//! `du/dt + u.grad(u) - div(2 nu D(u)) + grad(pi) = a`, including one-sided
 //! viscous tractions at material interfaces. Both use `nu = mu/rho`,
 //! `pi = p/rho`, and `a = force_density/rho` with the SAME constant density.
 //! This binding owns those conversions together. It retains the original
@@ -360,8 +360,13 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, 'a, F> {
             force_density,
             boundary_velocity,
             |acceleration, velocity| {
-                self.system
-                    .assemble(self.params, acceleration, velocity, None)
+                self.system.assemble_variable_viscosity(
+                    self.params,
+                    &|_, _| self.params.nu,
+                    acceleration,
+                    velocity,
+                    None,
+                )
             },
         )
     }
@@ -407,10 +412,21 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, 'a, F> {
             force_density,
             boundary_velocity,
             |acceleration, velocity| {
-                self.system.picard_report(
+                let assemble = |advect: Option<&[f64]>| {
+                    self.system.assemble_variable_viscosity(
+                        self.params,
+                        &|_, _| self.params.nu,
+                        acceleration,
+                        velocity,
+                        advect,
+                    )
+                };
+                let (operator, rhs) = assemble(None);
+                let initial = self.system.solve_linear(&operator, &rhs, self.params);
+                self.system.steady_picard(
                     self.params,
-                    acceleration,
-                    velocity,
+                    initial,
+                    &|current| assemble(Some(current)),
                     max_iterations,
                     relative_tolerance,
                 )
@@ -462,13 +478,16 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, 'a, F> {
             force_density,
             boundary_velocity,
             |acceleration, velocity| {
-                self.system.bdf1_step(
+                let (operator, rhs) = self.system.assemble_viscous_transient(
                     self.params,
+                    &|_, _| self.params.nu,
                     acceleration,
                     velocity,
-                    previous_velocity,
-                    timestep_s,
-                )
+                    Some(previous_velocity),
+                    timestep_s.recip(),
+                    Some(previous_velocity),
+                );
+                self.system.solve_linear(&operator, &rhs, self.params)
             },
         )?;
         self.physical_solution(solution)

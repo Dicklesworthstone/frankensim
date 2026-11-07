@@ -39,6 +39,94 @@ fn near(actual: f64, expected: f64, tolerance: f64) {
     );
 }
 
+/// G1: independently integrate the sole free incompressible BDM1 mode on a
+/// rectangle split along its diagonal. With width a, height b, diagonal L
+/// and k=6L/(ab), its two affine traces are k[a-x,y] and k[-x,y-b].
+/// The mass is M=k²abL²/6 and the symmetric-stress volume form is 4nu*k²ab.
+/// Consistency contributes minus twice that volume form. Boundary tangential
+/// penalties contribute sigma*nu*k²*2(a³/b+b³/a)/3 and the diagonal jump
+/// contributes sigma*nu*k²*L⁴/(ab), using each cell's NORMAL height.
+/// Upwinding adds M*beta*|m_advect|, with beta=9L/(ab).
+#[test]
+fn homogeneous_material_stress_and_decay_match_affine_mode_on_stretched_cells() {
+    let numerics = MaterialFluxNumerics::default();
+    for width in [0.25, 1.0, 4.0] {
+        let height = 1.0;
+        let mesh = TriMesh::from_mesh2(&Mesh2::triangles(width, height, 1, 1));
+        let system = FluxSystem::new(&mesh);
+        let internal = mesh
+            .edges
+            .iter()
+            .position(|edge| edge.tris.1 != usize::MAX)
+            .unwrap();
+        let moment = 2 * internal + 1;
+        let diagonal = width.hypot(height);
+        let area = width * height;
+        let k = 6.0 * diagonal / area;
+        let mass = k * k * area * diagonal * diagonal / 6.0;
+        let penalty_integral = k
+            * k
+            * (2.0 * (width.powi(3) / height + height.powi(3) / width) / 3.0
+                + diagonal.powi(4) / area);
+        let strain_integral = 4.0 * k * k * area;
+        let beta = 9.0 * diagonal / area;
+        let mode = |p: [f64; 2]| {
+            if width * p[1] <= height * p[0] {
+                [k * (width - p[0]), k * p[1]]
+            } else {
+                [-k * p[0], k * (p[1] - height)]
+            }
+        };
+        // The first two materials have the same nu; the third doubles mu
+        // at fixed rho. Force conversion and physical energy still use rho.
+        for (rho, mu) in [(2.0, 0.008), (5.0, 0.02), (5.0, 0.04)] {
+            let material = transport(rho, mu);
+            let flow = MaterialFluxSystem::new(&system, &material, numerics).unwrap();
+            let stiffness = (mu / rho) * (numerics.penalty * penalty_integral - strain_integral);
+            let lambda = stiffness / mass;
+            let (operator, _) = flow.assemble_stokes(&zero_force, &no_slip).unwrap();
+            near(operator.get(moment, moment), stiffness, 3e-12 * stiffness);
+
+            let target = 0.1;
+            let stokes_force = |p| mode(p).map(|v| rho * lambda * target * v);
+            let stokes = flow.solve_stokes(&stokes_force, &no_slip).unwrap();
+            near(stokes.velocity_dofs()[moment], target, 2e-12);
+
+            let ns_force = |p| mode(p).map(|v| rho * target * (lambda + beta * target) * v);
+            let (steady, _, update) = flow.solve_picard(&ns_force, &no_slip, 100, 1e-10).unwrap();
+            near(steady.velocity_dofs()[moment], target, 2e-11);
+            assert!(update < 1e-10);
+
+            // BDF1 retains the OLD advecting moment and the new viscous
+            // stress. Both signs decay: upwind loss depends on |m_old|.
+            for old_moment in [-target, target] {
+                let mut previous = vec![0.0; system.n_u];
+                previous[moment] = old_moment;
+                let dt = 0.07;
+                let expected = old_moment / (1.0 + dt * (lambda + beta * old_moment.abs()));
+                let step = flow
+                    .bdf1_step(&zero_force, &no_slip, &previous, dt)
+                    .unwrap();
+                for (dof, &value) in step.velocity_dofs().iter().enumerate() {
+                    near(value, if dof == moment { expected } else { 0.0 }, 2e-12);
+                }
+                let expected_energy = 0.5 * rho * mass * expected * expected;
+                near(
+                    step.kinetic_energy_j_per_m(),
+                    expected_energy,
+                    3e-12 * expected_energy,
+                );
+                let expected_heat = mu * strain_integral * expected * expected;
+                near(
+                    step.viscous_dissipation().total_power_w_per_m(),
+                    expected_heat,
+                    3e-12 * expected_heat,
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn viscous_heat_is_objective_and_matches_couette_and_extensional_work() {
     // A = [[a, s-w], [w, -a]] has gamma²=4*a²+s². Translation and

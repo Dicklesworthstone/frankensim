@@ -206,7 +206,10 @@ adjoints.
   density [N/m³] divided by rho, physical mean-zero pressure [Pa] and kinetic
   energy per unit out-of-plane depth [J/m] are derived together. Numerical
   controls cannot independently override viscosity. Stokes assembly/solve,
-  Picard iteration and IMEX BDF1 all use the existing operator; original source
+  Picard iteration and IMEX BDF1 all use the same symmetric Newtonian stress
+  `2 nu D(u)` and normal-cell-height SIP stabilization as the rheological
+  material path, including for a spatially constant viscosity. The primitive
+  legacy vector-Laplacian APIs remain available separately. Original source
   receipts remain available through `material()`. Invalid inputs, nonfinite
   outputs and failed convergence return `MaterialFluxError` without publishing
   a physical solution. Steady Picard publication checks the update and both
