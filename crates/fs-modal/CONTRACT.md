@@ -139,6 +139,50 @@ mass-normalized damped modes (`time`, moved from fs-couple under owner decision 
   exceeded (a parallel plan's converged mode over its certificate cap),
   unrepresentable mass-coordinate equilibration, quadratic-eig failure.
 
+### `relaxation_modes`: complete Maxwell memory spectra
+
+`MaxwellDampingBranch { strain, stiffness, relaxation_time_s }` describes one
+original scalar strain channel `e_j = b_j^T q`, with n finite strain entries,
+positive stiffness `k_j` and positive relaxation time `tau_j`. Omit branches
+with zero stiffness. `maxwell_eigenvalues` and `maxwell_eigenvalues_with_cancel`
+retain the full dense mechanical M/C/K and every branch through
+`M q'' + C q' + K q + sum(b_j s_j) = 0` and
+`s_j' = k_j b_j^T q' - s_j/tau_j`. M must be symmetric positive definite;
+nonproportional and signed gyroscopic C entries remain coupled. K is the
+**relaxed** stiffness: the branches dynamically supply their unrelaxed
+stiffness, which must not also be added to K. Eliminating memory gives
+`C(lambda) = C + sum(k_j tau_j b_j b_j^T / (1 + lambda tau_j))`.
+
+Both entry points return all `2*n + branches.len()` state poles, including
+internal material relaxation, in physical [1/s] under `exp(lambda*t)`, sorted
+by real then imaginary part. Energy normalization `z_j = s_j/sqrt(k_j)` makes
+velocity/memory coupling antisymmetric using the same rounded coefficient
+on both sides. Branch storage is `s_j^2/(2*k_j)` and physical heat rate is
+`s_j^2/(k_j*tau_j)`; gyroscopic coupling does no work. The symmetric part of
+the supplied C is not certified positive semidefinite, and active source
+coefficients are retained.
+
+Exact binary coordinate/time scaling and Cholesky mass whitening feed the
+existing fs-la dense complex QR owner. With no branches, the original
+quadratic owner preserves its analytic scalar/diagonal paths. A free scalar
+coordinate with one Maxwell branch factors out its exact zero pole and uses
+the same robust quadratic root owner on
+`m*tau*lambda^2 + (m+C*tau)*lambda + C+k_b*b^2*tau`.
+Binary-factored source products and signed DD coefficient sums preserve weak
+relaxation and active C before common scaling; unrepresentable coefficients
+or poles refuse. The default QR cap is 120 sweeps per active window;
+`_with_cancel` accepts an explicit cap and cancellation, returning no partial
+spectrum on refusal. Invalid source data and failed mass factors also refuse.
+Exact source structure can bound zero multiplicity for triangular invertible
+K and certain free scalar systems; excessive exact zeros from QR refuse.
+Dense work is cubic in state count; callers bound their source model size.
+These are numerical pole values, not eigenvectors, certified eigenvalue
+enclosures, Rouché damping certificates, a full-system passivity certificate
+or a time-domain realization. Dense QR does not guarantee relative accuracy
+of very slow poles or tiny real parts of oscillatory poles across widely
+separated rates. The zero-count guards detect only some such failures and
+do not certify the remaining decay rates.
+
 ### `harmonic::resonance`: actual driven peaks, notches and linewidths
 
 `refine_transfer_extremum` accepts the actual complex transfer `H(omega)` and

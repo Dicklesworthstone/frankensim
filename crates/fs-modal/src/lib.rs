@@ -54,6 +54,9 @@ pub mod harmonic;
 /// Physical complex right mode shapes of complete mechanical quadratic pencils.
 pub mod quadratic_modes;
 
+/// Complete mechanical spectra with explicit Maxwell material relaxation.
+pub mod relaxation_modes;
+
 mod windows;
 pub use windows::{MultiSliceReport, SliceTimingReceipt, WindowPlan, slice_windows};
 

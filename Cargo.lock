@@ -2206,6 +2206,7 @@ dependencies = [
  "fs-exec",
  "fs-fft",
  "fs-la",
+ "fs-material",
  "fs-math",
  "fs-mms",
  "fs-rand",

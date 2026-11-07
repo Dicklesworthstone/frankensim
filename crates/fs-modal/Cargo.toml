@@ -19,6 +19,7 @@ fs-math = { path = "../fs-math" }
 fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
+fs-material = { path = "../fs-material" }
 fs-mms = { path = "../fs-mms" }
 fs-rand = { path = "../fs-rand" }
 fs-solid = { path = "../fs-solid" }
