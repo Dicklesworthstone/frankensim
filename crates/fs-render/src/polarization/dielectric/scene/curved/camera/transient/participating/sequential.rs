@@ -136,7 +136,7 @@ impl TransientCurvedRayleighCameraScene<'_, '_, '_, '_, '_> {
         optical: &SequentialCameraBeam,
         initial_medium: usize,
     ) -> Result<(PolarizedBeam, Dd), TransientCameraError> {
-        if self.camera.analyzer().is_some() {
+        if self.camera.analyzer_response().is_some() {
             return Err(TransientCameraError::AnalyzerMustPrecedeLens);
         }
         let delay = lens_delay(optical)?;

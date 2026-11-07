@@ -22,6 +22,59 @@ impl CurvedCameraRaster<'_> {
         pixel: u32,
         sample: u32,
     ) -> Result<RayleighPixelSample, CurvedRasterError> {
+        self.sample_pixel_rayleigh_with_analyzer(
+            cx,
+            scene,
+            initial_medium,
+            AnalyzerResponse::Constant(analyzer),
+            settings,
+            seed,
+            pixel,
+            sample,
+        )
+    }
+
+    /// Resolve a passive spectral detector before each native molecular walk.
+    /// The entire visible band must be supported. Free-flight and scattering
+    /// proposals retain their original counters and complete Mueller response.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_pixel_rayleigh_spectrally_analyzed(
+        &self,
+        cx: &Cx<'_>,
+        scene: &CurvedRayleighCameraScene<'_, '_, '_, '_>,
+        initial_medium: usize,
+        analyzer: &SpectralCameraAnalyzer,
+        settings: CurvedRayleighTraceSettings,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+    ) -> Result<RayleighPixelSample, CurvedRasterError> {
+        cx.checkpoint().map_err(CameraError::from)?;
+        analyzer.admit_band(LAMBDA_MIN, LAMBDA_MAX)?;
+        self.sample_pixel_rayleigh_with_analyzer(
+            cx,
+            scene,
+            initial_medium,
+            AnalyzerResponse::Spectral(analyzer),
+            settings,
+            seed,
+            pixel,
+            sample,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sample_pixel_rayleigh_with_analyzer(
+        &self,
+        cx: &Cx<'_>,
+        scene: &CurvedRayleighCameraScene<'_, '_, '_, '_>,
+        initial_medium: usize,
+        analyzer: AnalyzerResponse<'_>,
+        settings: CurvedRayleighTraceSettings,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+    ) -> Result<RayleighPixelSample, CurvedRasterError> {
         let key = [seed as u32, (seed >> 32) as u32];
         let mut volume_events = [0; CAMERA_WAVELENGTHS];
         let mut free_flight_draws = [0; CAMERA_WAVELENGTHS];
@@ -36,7 +89,7 @@ impl CurvedCameraRaster<'_> {
                     ray,
                     wavelength,
                     initial_medium,
-                    analyzer,
+                    analyzer.at(wavelength)?,
                     settings,
                     |event| {
                         let block =
@@ -76,6 +129,64 @@ impl CurvedCameraRaster<'_> {
         pixel: u32,
         sample: u32,
     ) -> Result<CurvedRayleighSensorPixelSample<C>, CurvedRasterError> {
+        self.sample_sensor_rayleigh_with_analyzer(
+            cx,
+            scene,
+            sensor,
+            initial_medium,
+            AnalyzerResponse::Constant(analyzer),
+            settings,
+            seed,
+            pixel,
+            sample,
+        )
+    }
+
+    /// Integrate the wavelength-dependent analyzed molecular radiance through
+    /// the original QE/photon observer. All channels share the same four paths;
+    /// the complete sensor band must lie within the authored detector table.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_pixel_sensor_rayleigh_spectrally_analyzed<const C: usize>(
+        &self,
+        cx: &Cx<'_>,
+        scene: &CurvedRayleighCameraScene<'_, '_, '_, '_>,
+        sensor: &QuantumEfficiencySensor<C>,
+        initial_medium: usize,
+        analyzer: &SpectralCameraAnalyzer,
+        settings: CurvedRayleighTraceSettings,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+    ) -> Result<CurvedRayleighSensorPixelSample<C>, CurvedRasterError> {
+        cx.checkpoint().map_err(CameraError::from)?;
+        let (lo, hi) = sensor.wavelength_bounds_nm();
+        analyzer.admit_band(lo, hi)?;
+        self.sample_sensor_rayleigh_with_analyzer(
+            cx,
+            scene,
+            sensor,
+            initial_medium,
+            AnalyzerResponse::Spectral(analyzer),
+            settings,
+            seed,
+            pixel,
+            sample,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sample_sensor_rayleigh_with_analyzer<const C: usize>(
+        &self,
+        cx: &Cx<'_>,
+        scene: &CurvedRayleighCameraScene<'_, '_, '_, '_>,
+        sensor: &QuantumEfficiencySensor<C>,
+        initial_medium: usize,
+        analyzer: AnalyzerResponse<'_>,
+        settings: CurvedRayleighTraceSettings,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+    ) -> Result<CurvedRayleighSensorPixelSample<C>, CurvedRasterError> {
         let key = [seed as u32, (seed >> 32) as u32];
         let mut volume_events = [0; CAMERA_WAVELENGTHS];
         let mut free_flight_draws = [0; CAMERA_WAVELENGTHS];
@@ -91,7 +202,7 @@ impl CurvedCameraRaster<'_> {
                     ray,
                     wavelength,
                     initial_medium,
-                    analyzer,
+                    analyzer.at(wavelength)?,
                     settings,
                     |event| {
                         let block =

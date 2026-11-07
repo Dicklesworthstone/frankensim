@@ -106,6 +106,7 @@ impl CurvedCameraRaster<'_> {
         pixel: u32,
         sample: u32,
     ) -> Result<ExposureRayleighPixelSample, TransientRasterError> {
+        admit_analyzer_band(scene.transient_camera(), LAMBDA_MIN, LAMBDA_MAX)?;
         let key = [seed as u32, (seed >> 32) as u32];
         let mut volume_events = [0; CAMERA_WAVELENGTHS];
         let mut free_flight_draws = [0; CAMERA_WAVELENGTHS];
@@ -172,6 +173,8 @@ impl CurvedCameraRaster<'_> {
         pixel: u32,
         sample: u32,
     ) -> Result<ExposureRayleighSensorPixelSample<C>, TransientRasterError> {
+        let (lo, hi) = sensor.wavelength_bounds_nm();
+        admit_analyzer_band(scene.transient_camera(), lo, hi)?;
         let key = [seed as u32, (seed >> 32) as u32];
         let mut volume_events = [0; CAMERA_WAVELENGTHS];
         let mut free_flight_draws = [0; CAMERA_WAVELENGTHS];

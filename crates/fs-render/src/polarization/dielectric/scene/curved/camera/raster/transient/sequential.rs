@@ -60,7 +60,7 @@ impl CurvedCameraRaster<'_> {
             seed,
             pixel,
             sample,
-            scene.analyzer(),
+            scene.analyzer_response(),
             true,
             timed_transport(
                 scene,
@@ -113,7 +113,7 @@ impl CurvedCameraRaster<'_> {
             seed,
             pixel,
             sample,
-            scene.analyzer(),
+            scene.analyzer_response(),
             true,
             timed_transport(
                 scene,

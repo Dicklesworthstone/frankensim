@@ -20,6 +20,170 @@ use fs_blake3::{ContentHash, hash_domain};
 use fs_exec::{CancelGate, ExecMode, StreamKey};
 use fs_geom::Point3;
 
+#[test]
+fn g1_spectral_detector_rows_reach_native_xyz_qe_and_finite_exposure() {
+    use super::super::SourcePolarization;
+    use super::super::transient::TransientCurvedCameraScene;
+    use super::super::transient::exposure::ExposureWindow;
+    use crate::spectral::{cie_x, cie_y, cie_z, y_integral};
+    use fs_math::dd::Dd;
+
+    with_cx(|cx, _| {
+        let x = Vec3::new(1.0, 0.0, 0.0);
+        let geometry = InstanceScene::try_new(vec![patch(
+            9,
+            Point3::new(0.0, 0.0, 2.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            50.0,
+        )])
+        .unwrap();
+        let vacuum = glass(1.0);
+        let media = [SceneMedium::Homogeneous(&vacuum)];
+        let native =
+            CurvedPolarizedScene::try_new(cx, &geometry, &media, vec![opaque(9)], 100_000).unwrap();
+        let emitters = [source(9, 10.0)
+            .with_polarization(
+                SourcePolarization::try_constant(
+                    x,
+                    Stokes {
+                        i: 1.0,
+                        q: 0.0,
+                        u: 0.0,
+                        v: 1.0,
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap()];
+        let scene = CurvedCameraScene::try_new(cx, &native, &emitters, None).unwrap();
+        let camera = PhysicalCamera::try_look_at(
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.0, 0.0, 2.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            CameraProjection::try_half_tangent(0.1).unwrap(),
+            2.0,
+            Aperture::try_circular(0.01).unwrap(),
+        )
+        .unwrap();
+        let raster = CurvedCameraRaster::try_new(&camera, 3, 2).unwrap();
+        let blue = Stokes {
+            i: 0.4,
+            q: 0.2,
+            u: 0.0,
+            v: 0.1,
+        };
+        let red = Stokes {
+            i: 0.6,
+            q: -0.1,
+            u: 0.0,
+            v: -0.2,
+        };
+        let analyzer =
+            SpectralCameraAnalyzer::try_new(x, vec![(380.0, blue), (780.0, red)]).unwrap();
+        // Circular polarization is invariant under the ray-dependent frame
+        // projection. The independent incoming-light result is 10*(a0+aV).
+        let expected = |w: f64| 5.0 - (w - 380.0) / 400.0;
+        let sample = raster
+            .sample_pixel_spectrally_analyzed(cx, &scene, 0, &analyzer, settings(), 73, 4, 9)
+            .unwrap();
+        let mut xyz = [0.0; 3];
+        for (&w, path) in sample
+            .wavelengths_nm()
+            .iter()
+            .zip(sample.spectral_samples())
+        {
+            near(path.radiance_w_m2_sr_nm(), expected(w), 2e-12);
+            for (sum, cie) in xyz.iter_mut().zip([cie_x(w), cie_y(w), cie_z(w)]) {
+                *sum += expected(w) * 100.0 / y_integral() * cie;
+            }
+        }
+        for (&a, b) in sample.xyz().iter().zip(xyz) {
+            near(a, b, 2e-12);
+        }
+        let sensor =
+            QuantumEfficiencySensor::try_new(vec![(380.0, [1.0, 0.0]), (780.0, [1.0, 1.0])])
+                .unwrap();
+        let measured = raster
+            .sample_pixel_sensor_spectrally_analyzed(
+                cx,
+                &scene,
+                &sensor,
+                0,
+                &analyzer,
+                settings(),
+                73,
+                4,
+                9,
+            )
+            .unwrap();
+        for c in 0..2 {
+            let power: f64 = measured
+                .detector_wavelengths()
+                .iter()
+                .map(|draw| expected(draw.wavelength_nm()) * draw.radiance_weights_nm()[c] / 4.0)
+                .sum();
+            let photons: f64 = measured
+                .detector_wavelengths()
+                .iter()
+                .map(|draw| {
+                    expected(draw.wavelength_nm()) * draw.electron_weights_nm_per_joule()[c] / 4.0
+                })
+                .sum();
+            near(
+                measured.qe_weighted_radiance_w_m2_sr()[c],
+                power,
+                power * 2e-13,
+            );
+            near(
+                measured.photoelectron_rate_per_m2_sr()[c],
+                photons,
+                photons * 2e-13,
+            );
+        }
+        let timed = TransientCurvedCameraScene::try_new(cx, &scene, &[])
+            .unwrap()
+            .with_spectral_analyzer(&analyzer);
+        assert_eq!(timed.analyzer(), None);
+        assert_eq!(timed.spectral_analyzer(), Some(&analyzer));
+        let window = ExposureWindow::try_new(Dd::from_f64(1.0), Dd::from_f64(1.25)).unwrap();
+        let exposure = raster
+            .sample_pixel_during_exposure(cx, &timed, 0, window, settings(), 73, 4, 9)
+            .unwrap();
+        assert_eq!(exposure.mean_pixel_sample(), &sample);
+        let row = CameraAnalyzer::try_circular(x, true).unwrap();
+        let constant =
+            SpectralCameraAnalyzer::try_new(x, vec![(380.0, row.row()), (780.0, row.row())])
+                .unwrap();
+        assert_eq!(
+            raster
+                .sample_pixel_spectrally_analyzed(cx, &scene, 0, &constant, settings(), 73, 4, 9)
+                .unwrap(),
+            raster
+                .sample_pixel_analyzed(cx, &scene, 0, row, settings(), 73, 4, 9)
+                .unwrap()
+        );
+        let narrow = SpectralCameraAnalyzer::try_new(x, vec![(400.0, blue), (700.0, red)]).unwrap();
+        assert_eq!(
+            raster.sample_pixel_spectrally_analyzed(cx, &scene, 0, &narrow, settings(), 73, 4, 9),
+            Err(CameraRadianceError::InvalidPolarization.into())
+        );
+        assert_eq!(
+            raster.sample_pixel_sensor_spectrally_analyzed(
+                cx,
+                &scene,
+                &sensor,
+                0,
+                &narrow,
+                settings(),
+                73,
+                4,
+                9
+            ),
+            Err(CameraRadianceError::InvalidPolarization.into())
+        );
+    });
+}
+
 fn with_cx(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
     let gate = CancelGate::new();
     fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {

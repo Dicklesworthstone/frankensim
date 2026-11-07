@@ -101,6 +101,7 @@ impl CurvedCameraRaster<'_> {
         pixel: u32,
         sample: u32,
     ) -> Result<TransientAreaLightPixelSample, TransientAreaLightRasterError> {
+        super::admit_analyzer_band(scene.source_camera(), super::LAMBDA_MIN, super::LAMBDA_MAX)?;
         let (observation_time_s, area) = self.sample_timed_area_transport(
             scene,
             initial_medium,
@@ -137,6 +138,8 @@ impl CurvedCameraRaster<'_> {
         TransientAreaLightPixelSample<CurvedSensorPixelSample<C>>,
         TransientAreaLightRasterError,
     > {
+        let (lo, hi) = sensor.wavelength_bounds_nm();
+        super::admit_analyzer_band(scene.source_camera(), lo, hi)?;
         let (observation_time_s, area) = self.sample_timed_area_transport(
             scene,
             initial_medium,
@@ -169,6 +172,7 @@ impl CurvedCameraRaster<'_> {
         pixel: u32,
         sample: u32,
     ) -> Result<AreaLightPixelSample<ExposurePixelSample>, TransientAreaLightRasterError> {
+        super::admit_analyzer_band(scene.source_camera(), super::LAMBDA_MIN, super::LAMBDA_MAX)?;
         let (_, area) = self.sample_timed_area_transport(
             scene,
             initial_medium,
@@ -200,6 +204,8 @@ impl CurvedCameraRaster<'_> {
         sample: u32,
     ) -> Result<AreaLightPixelSample<ExposureSensorPixelSample<C>>, TransientAreaLightRasterError>
     {
+        let (lo, hi) = sensor.wavelength_bounds_nm();
+        super::admit_analyzer_band(scene.source_camera(), lo, hi)?;
         let (_, area) = self.sample_timed_area_transport(
             scene,
             initial_medium,

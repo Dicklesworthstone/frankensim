@@ -99,7 +99,34 @@ impl CurvedCameraRaster<'_> {
             seed,
             pixel,
             sample,
-            Some(analyzer),
+            Some(AnalyzerResponse::Constant(analyzer)),
+        )
+    }
+
+    /// Install the actual wavelength-dependent passive row at the sensor
+    /// before lens transport. A missing analyzer band refuses before any lens
+    /// ray; physical clipping retains the original wavelength sample mass.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_pixel_sequential_spectrally_analyzed(
+        &self,
+        cx: &Cx<'_>,
+        scene: &CurvedCameraScene<'_, '_>,
+        initial_medium: usize,
+        analyzer: &SpectralCameraAnalyzer,
+        settings: CurvedTraceSettings,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+    ) -> Result<CurvedSequentialPixelSample, CurvedRasterError> {
+        self.sample_sequential_pixel(
+            cx,
+            scene,
+            initial_medium,
+            settings,
+            seed,
+            pixel,
+            sample,
+            Some(AnalyzerResponse::Spectral(analyzer)),
         )
     }
 
@@ -113,7 +140,7 @@ impl CurvedCameraRaster<'_> {
         seed: u64,
         pixel: u32,
         sample: u32,
-        analyzer: Option<CameraAnalyzer>,
+        analyzer: Option<AnalyzerResponse<'_>>,
     ) -> Result<CurvedSequentialPixelSample, CurvedRasterError> {
         let key = [seed as u32, (seed >> 32) as u32];
         self.sample_sequential_pixel_with_transport(
@@ -145,7 +172,7 @@ impl CurvedCameraRaster<'_> {
         seed: u64,
         pixel: u32,
         sample: u32,
-        analyzer: Option<CameraAnalyzer>,
+        analyzer: Option<AnalyzerResponse<'_>>,
         trace: impl FnMut(
             &Cx<'_>,
             &SequentialCameraBeam,
@@ -163,7 +190,7 @@ impl CurvedCameraRaster<'_> {
         seed: u64,
         pixel: u32,
         sample: u32,
-        analyzer: Option<CameraAnalyzer>,
+        analyzer: Option<AnalyzerResponse<'_>>,
         timed_lens: bool,
         mut trace: impl FnMut(
             &Cx<'_>,
@@ -174,6 +201,9 @@ impl CurvedCameraRaster<'_> {
         cx.checkpoint().map_err(CameraError::from)?;
         if self.camera.sequential_lens().is_none() {
             return Err(CameraError::InvalidSequentialLens.into());
+        }
+        if let Some(analyzer) = analyzer {
+            analyzer.admit_band(LAMBDA_MIN, LAMBDA_MAX)?;
         }
         let packet = self.sample_optional_packet_with_transport(
             cx,

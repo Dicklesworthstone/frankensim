@@ -8960,9 +8960,9 @@ No scene-table clone, extra traversal, per-query allocation or second spectral
 integration is introduced. Native phase/group paths, Beer absorption, medium
 identity, cancellation and work limits remain authoritative.
 
-This is an ideal, wavelength-independent detector row at the geometric camera
-launch plane. It does not provide a finite-thickness or angle-dependent
-polarizer, resolved lens propagation, bulk
+The original `CameraAnalyzer` is an ideal wavelength-independent detector row;
+the spectral extension below retains a source-owned chromatic row. Neither
+provides a finite-thickness or angle-dependent polarizer, bulk
 birefringence or analyzer overloads for explicit emitter-connection consumers.
 The molecular-scattering extension is described below.
 
@@ -9183,7 +9183,9 @@ Configuration moves the original history bindings and adds no samples,
 path integrations, random draws or source-history allocations. An invalid
 projected analyzer axis refuses the complete observation.
 
-This remains an ideal passive wavelength-independent launch-plane analyzer
+The constant analyzer remains an ideal passive wavelength-independent launch-plane response;
+`with_spectral_analyzer` instead borrows the chromatic detector law described below,
+resolved at each original wavelength before launch. Both operate
 over the original emitters, frozen geometry/media and narrowband
 envelope/group-delay assumptions. A prescribed intensity history scales the
 source's complete spectral Stokes state together. It introduces no lens/analyzer
@@ -9196,6 +9198,47 @@ epoch; and chromatic XYZ/QE observation, shared four-path work, zero-response
 channels and unsupported-source-integral refusal. Pinned Rust formatting/
 parser checks and bounded source/API/physics review passed. The native Rust
 regressions were authored but not executed in the shared editing environment.
+
+## Source-owned spectral polarization detectors
+
+`SpectralCameraAnalyzer` retains 2..=1024 ordered positive vacuum-wavelength
+knots and a common world reference axis. Every knot is an absolute passive
+Mueller intensity row: `0 < a0 <= 1` and `norm([aQ,aU,aV]) <= min(a0,1-a0)`.
+All-zero rows retain the existing camera's extinction/underflow refusal.
+The source declaration is immutable; no measured accuracy or missing spectral
+support is inferred. Queries return exact authored knots and linearly
+interpolate absolute rows, including their throughput, without interpolating
+angles or normalizing Stokes fractions. Generated roundoff is directed inward
+to the convex passive set; authored inputs are never repaired. Constant rows
+retain the original values bit for bit. Lookup is bounded logarithmic work
+and allocates nothing.
+
+Geometric `sample_pixel_spectrally_analyzed` and
+`sample_pixel_sensor_spectrally_analyzed` resolve each row before the original
+scene walk and integrate the measured radiances through the existing XYZ/QE
+owners. Steady molecular counterparts retain the original free-flight counters,
+scattering Mueller response and shared per-channel paths. Their sequential
+counterparts install each wavelength's detector row
+at the sensor BEFORE the real lens. The original lens geometry, basis changes,
+Fresnel/Beer response, clipping and proposal mass remain authoritative. The
+shared lens generator accepts an explicitly resolved row array; no wavelength
+borrows the hero's response and no extra analyzer factor is applied afterwards.
+
+`TransientCurvedCameraScene::with_spectral_analyzer` borrows the same source law
+for instantaneous and finite-exposure clear, molecular and finite-area paths.
+Native sequential raster observers place the row before lens propagation and
+retain the lens's original group delay. Public raw-lens continuations refuse a
+separately configured constant OR spectral analyzer, preventing accidental
+application after the lens. Visible and QE raster owners require the complete
+integration band before tracing; unsupported rows never become dark samples.
+The existing constant APIs and analyzer-free paths are retained.
+
+This is a local, time-independent detector response, not resolved bulk
+birefringence, an angle-dependent polarizer, additional group delay or coherent
+spectral phase. Focused G0/G1 regressions cover passive interpolation and support,
+independent circular-source spectral powers through XYZ/QE/exposure, orthogonal
+channel superposition through a dispersive real lens and curved scene, and
+constant-response parity. Native execution results are reported separately.
 
 ## Retarded finite-area source connections and finite shutters
 

@@ -65,6 +65,7 @@ impl CurvedCameraRaster<'_> {
         pixel: u32,
         sample: u32,
     ) -> Result<ExposurePixelSample, TransientRasterError> {
+        admit_analyzer_band(scene, LAMBDA_MIN, LAMBDA_MAX)?;
         let key = [seed as u32, (seed >> 32) as u32];
         let mut source_error = None;
         let result = self.sample_pixel_with_transport(
@@ -117,6 +118,8 @@ impl CurvedCameraRaster<'_> {
         pixel: u32,
         sample: u32,
     ) -> Result<ExposureSensorPixelSample<C>, TransientRasterError> {
+        let (lo, hi) = sensor.wavelength_bounds_nm();
+        admit_analyzer_band(scene, lo, hi)?;
         let key = [seed as u32, (seed >> 32) as u32];
         let mut source_error = None;
         let result = self.sample_sensor_with_transport(

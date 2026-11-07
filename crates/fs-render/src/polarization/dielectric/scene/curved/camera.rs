@@ -89,7 +89,7 @@ pub use thermal::AxialGasTemperatureField;
 
 /// Passive polarization analysis at the original camera launch plane.
 pub mod analyzer;
-pub use analyzer::CameraAnalyzer;
+pub use analyzer::{CameraAnalyzer, SpectralCameraAnalyzer};
 
 // Complete reciprocal lens state on the original surface and molecular paths.
 mod sequential;

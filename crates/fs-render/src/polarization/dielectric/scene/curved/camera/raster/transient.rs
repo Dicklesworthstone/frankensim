@@ -24,6 +24,7 @@ use crate::polarization::dielectric::scene::curved::camera::transient::{
     TransientCameraError, TransientCurvedCameraScene,
 };
 use crate::spectral::detector::QuantumEfficiencySensor;
+use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
 use fs_exec::Cx;
 use fs_math::dd::Dd;
 
@@ -51,6 +52,19 @@ impl core::fmt::Display for TransientRasterError {
     }
 }
 impl core::error::Error for TransientRasterError {}
+
+fn admit_analyzer_band(
+    scene: &TransientCurvedCameraScene<'_, '_, '_>,
+    min_nm: f64,
+    max_nm: f64,
+) -> Result<(), TransientRasterError> {
+    if let Some(analyzer) = scene.analyzer_response() {
+        analyzer
+            .admit_band(min_nm, max_nm)
+            .map_err(|error| TransientRasterError::Source(error.into()))?;
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TransientPixelSample {
@@ -97,6 +111,7 @@ impl CurvedCameraRaster<'_> {
         pixel: u32,
         sample: u32,
     ) -> Result<TransientPixelSample, TransientRasterError> {
+        admit_analyzer_band(scene, LAMBDA_MIN, LAMBDA_MAX)?;
         let key = [seed as u32, (seed >> 32) as u32];
         let mut source_error = None;
         let mut admitted_time = None;
@@ -158,6 +173,8 @@ impl CurvedCameraRaster<'_> {
         pixel: u32,
         sample: u32,
     ) -> Result<TransientSensorPixelSample<C>, TransientRasterError> {
+        let (lo, hi) = sensor.wavelength_bounds_nm();
+        admit_analyzer_band(scene, lo, hi)?;
         let key = [seed as u32, (seed >> 32) as u32];
         let mut source_error = None;
         let mut admitted_time = None;

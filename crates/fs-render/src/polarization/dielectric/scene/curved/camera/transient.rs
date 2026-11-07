@@ -29,7 +29,7 @@
 //! <https://imaging.cs.cmu.edu/rrte/assets/Renderer_AuthorCopy.pdf>.
 
 use super::super::{CurvedTraceEvent, CurvedTraceSettings};
-use super::analyzer::CameraAnalyzer;
+use super::analyzer::{AnalyzerResponse, CameraAnalyzer, SpectralCameraAnalyzer};
 use super::emission::SurfaceEmission;
 use super::{
     CameraRadianceError, CameraRadianceSample, CurvedCameraScene, CurvedPathResult,
@@ -183,7 +183,7 @@ impl TransientCameraSample {
 pub struct TransientCurvedCameraScene<'a, 's, 'm> {
     camera: &'a CurvedCameraScene<'s, 'm>,
     histories: Vec<Option<SurfaceEmissionHistoryBinding<'a>>>,
-    analyzer: Option<CameraAnalyzer>,
+    analyzer: Option<AnalyzerResponse<'a>>,
 }
 
 impl<'a, 's, 'm> TransientCurvedCameraScene<'a, 's, 'm> {
@@ -239,11 +239,38 @@ impl<'a, 's, 'm> TransientCurvedCameraScene<'a, 's, 'm> {
     /// axis is projected per camera ray; invalid projections refuse that whole
     /// observation. Calling this again replaces the previous analyzer.
     pub fn with_analyzer(mut self, analyzer: CameraAnalyzer) -> Self {
-        self.analyzer = Some(analyzer);
+        self.analyzer = Some(AnalyzerResponse::Constant(analyzer));
         self
     }
 
+    /// Borrow one source-owned chromatic detector response. Every original
+    /// wavelength resolves its absolute passive row before launch, including
+    /// transient/exposure and molecular observations. Sequential raster paths
+    /// install that row at the sensor before propagating through the lens.
+    /// This replaces any previous constant or spectral analyzer; it adds no
+    /// delay and never normalizes the authored throughput or extends its band.
+    pub fn with_spectral_analyzer(mut self, analyzer: &'a SpectralCameraAnalyzer) -> Self {
+        self.analyzer = Some(AnalyzerResponse::Spectral(analyzer));
+        self
+    }
+
+    /// The constant response, when configured. A chromatic response is exposed
+    /// separately by [`Self::spectral_analyzer`].
     pub const fn analyzer(&self) -> Option<CameraAnalyzer> {
+        match self.analyzer {
+            Some(AnalyzerResponse::Constant(analyzer)) => Some(analyzer),
+            _ => None,
+        }
+    }
+
+    pub const fn spectral_analyzer(&self) -> Option<&'a SpectralCameraAnalyzer> {
+        match self.analyzer {
+            Some(AnalyzerResponse::Spectral(analyzer)) => Some(analyzer),
+            _ => None,
+        }
+    }
+
+    pub(super) const fn analyzer_response(&self) -> Option<AnalyzerResponse<'a>> {
         self.analyzer
     }
 
@@ -258,7 +285,11 @@ impl<'a, 's, 'm> TransientCurvedCameraScene<'a, 's, 'm> {
         medium: usize,
     ) -> Result<PolarizedBeam, CameraRadianceError> {
         match self.analyzer {
-            Some(analyzer) => analyzer.launch(self.camera, ray, wavelength_nm, medium),
+            Some(analyzer) => {
+                analyzer
+                    .at(wavelength_nm)?
+                    .launch(self.camera, ray, wavelength_nm, medium)
+            }
             None => self.camera.launch(ray, wavelength_nm, medium),
         }
     }

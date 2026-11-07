@@ -819,6 +819,94 @@ impl PhysicalCamera {
         )
     }
 
+    /// Install one absolute passive detector row for each original wavelength
+    /// before the real lens. Rows share the supplied world reference axis and
+    /// retain their throughput; the original ray, Fresnel, aperture and Beer
+    /// owners are unchanged. Callers resolve their source-owned spectral law
+    /// before this query; this method never interpolates or borrows support.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_sequential_spectral_beams_with_detector_rows_from_tangent_offsets<
+        const N: usize,
+    >(
+        &self,
+        cx: &Cx<'_>,
+        x_tan: f64,
+        y_tan: f64,
+        lens_sample: LensSample,
+        wavelengths_nm: &[f64; N],
+        reference_axis: Vec3,
+        detector_rows: &[Stokes; N],
+    ) -> Result<[Option<SequentialCameraBeam>; N], CameraError> {
+        self.generate_sequential_detector_rows(
+            cx,
+            x_tan,
+            y_tan,
+            lens_sample,
+            wavelengths_nm,
+            reference_axis,
+            detector_rows,
+            false,
+        )
+    }
+
+    /// Per-wavelength detector rows with the same qualified sensor-to-front
+    /// group delays as the original timed generator. The analyzer contributes
+    /// no invented residence time, spectral phase or pulse reshaping.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_sequential_spectral_timed_beams_with_detector_rows_from_tangent_offsets<
+        const N: usize,
+    >(
+        &self,
+        cx: &Cx<'_>,
+        x_tan: f64,
+        y_tan: f64,
+        lens_sample: LensSample,
+        wavelengths_nm: &[f64; N],
+        reference_axis: Vec3,
+        detector_rows: &[Stokes; N],
+    ) -> Result<[Option<SequentialCameraBeam>; N], CameraError> {
+        self.generate_sequential_detector_rows(
+            cx,
+            x_tan,
+            y_tan,
+            lens_sample,
+            wavelengths_nm,
+            reference_axis,
+            detector_rows,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn generate_sequential_detector_rows<const N: usize>(
+        &self,
+        cx: &Cx<'_>,
+        x_tan: f64,
+        y_tan: f64,
+        lens_sample: LensSample,
+        wavelengths_nm: &[f64; N],
+        reference_axis: Vec3,
+        detector_rows: &[Stokes; N],
+        timed: bool,
+    ) -> Result<[Option<SequentialCameraBeam>; N], CameraError> {
+        cx.checkpoint()?;
+        for &row in detector_rows {
+            cx.checkpoint()?;
+            admit_detector_row(row)?;
+        }
+        let axis = super::scaled_unit(reference_axis)
+            .map_err(|_| CameraError::SequentialLensOutsideModel)?;
+        admit_reciprocal_beams(self.generate_sequential_beams(
+            cx,
+            x_tan,
+            y_tan,
+            lens_sample,
+            wavelengths_nm,
+            Some((axis, *detector_rows)),
+            timed,
+        )?)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn generate_sequential_analyzed_beams<const N: usize>(
         &self,
@@ -832,21 +920,7 @@ impl PhysicalCamera {
         timed: bool,
     ) -> Result<[Option<SequentialCameraBeam>; N], CameraError> {
         cx.checkpoint()?;
-        if ![
-            detector_row.i,
-            detector_row.q,
-            detector_row.u,
-            detector_row.v,
-        ]
-        .into_iter()
-        .all(f64::is_finite)
-            || detector_row.i <= 0.0
-            || detector_row.i > 1.0
-            || det::hypot(det::hypot(detector_row.q, detector_row.u), detector_row.v)
-                > detector_row.i.min(1.0 - detector_row.i)
-        {
-            return Err(CameraError::SequentialLensOutsideModel);
-        }
+        admit_detector_row(detector_row)?;
         let axis = super::scaled_unit(reference_axis)
             .map_err(|_| CameraError::SequentialLensOutsideModel)?;
         admit_reciprocal_beams(self.generate_sequential_beams(
@@ -855,7 +929,7 @@ impl PhysicalCamera {
             y_tan,
             lens_sample,
             wavelengths_nm,
-            Some((axis, detector_row)),
+            Some((axis, [detector_row; N])),
             timed,
         )?)
     }
@@ -868,7 +942,7 @@ impl PhysicalCamera {
         y_tan: f64,
         lens_sample: LensSample,
         wavelengths_nm: &[f64; N],
-        detector: Option<(Vec3, Stokes)>,
+        detector: Option<(Vec3, [Stokes; N])>,
         timed: bool,
     ) -> Result<[Option<SequentialCameraBeam>; N], CameraError> {
         cx.checkpoint()?;
@@ -895,21 +969,23 @@ impl PhysicalCamera {
         if !geometry.is_finite() || geometry < 0.0 {
             return Err(CameraError::SequentialLensOutsideModel);
         }
-        let (axis, power) = detector.map_or((None, Stokes::unpolarized(1.0)), |(axis, row)| {
-            let local_axis = if row.q == 0.0 && row.u == 0.0 && row.v == 0.0 {
-                None
-            } else {
-                Some(Vec3::new(
-                    axis.dot(self.right),
-                    axis.dot(self.up),
-                    axis.dot(self.forward),
-                ))
-            };
-            // (right, up, forward) has determinant -1: world and local
-            // right-handed polarization frames share h but reverse v. Thus
-            // H=diag(1,1,-1,-1) converts coordinates, independently of the
-            // reciprocal reversal A=diag(1,1,-1,1). The local seed is H*A*row.
-            (local_axis, Stokes { v: -row.v, ..row })
+        let detector = detector.map(|(axis, rows)| {
+            let local_axis = Vec3::new(
+                axis.dot(self.right),
+                axis.dot(self.up),
+                axis.dot(self.forward),
+            );
+            rows.map(|row| {
+                let axis = if row.q == 0.0 && row.u == 0.0 && row.v == 0.0 {
+                    None
+                } else {
+                    Some(local_axis)
+                };
+                // (right, up, forward) has determinant -1: world and local
+                // right-handed frames share h but reverse v. H*A*row retains
+                // both the geometric and reciprocal reversal conventions.
+                (axis, Stokes { v: -row.v, ..row })
+            })
         });
         let to_world = |v: Vec3| {
             Vec3::new(
@@ -919,7 +995,10 @@ impl PhysicalCamera {
             )
         };
         let mut result = [None; N];
-        for (entry, &wavelength) in result.iter_mut().zip(wavelengths_nm) {
+        for (lane, (entry, &wavelength)) in result.iter_mut().zip(wavelengths_nm).enumerate() {
+            let (axis, power) = detector
+                .as_ref()
+                .map_or((None, Stokes::unpolarized(1.0)), |seeds| seeds[lane]);
             if let Some(traced) = lens.trace_seeded_ray(
                 cx,
                 Ray {
@@ -967,6 +1046,17 @@ impl PhysicalCamera {
         }
         Ok(result)
     }
+}
+
+fn admit_detector_row(row: Stokes) -> Result<(), CameraError> {
+    if ![row.i, row.q, row.u, row.v].into_iter().all(f64::is_finite)
+        || row.i <= 0.0
+        || row.i > 1.0
+        || det::hypot(det::hypot(row.q, row.u), row.v) > row.i.min(1.0 - row.i)
+    {
+        return Err(CameraError::SequentialLensOutsideModel);
+    }
+    Ok(())
 }
 
 fn segment_group_delay(group_index: f64, distance_m: f64) -> Result<Dd, CameraError> {

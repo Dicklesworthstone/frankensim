@@ -96,7 +96,36 @@ impl CurvedCameraRaster<'_> {
             seed,
             pixel,
             sample,
-            Some(analyzer),
+            Some(AnalyzerResponse::Constant(analyzer)),
+        )
+    }
+
+    /// Source-bounded chromatic polarization response at the real lens sensor.
+    /// Each wavelength keeps its full detector/lens/scene Stokes correlation
+    /// before the original QE and photon-rate integrations.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_pixel_sensor_sequential_spectrally_analyzed<const C: usize>(
+        &self,
+        cx: &Cx<'_>,
+        scene: &CurvedCameraScene<'_, '_>,
+        sensor: &QuantumEfficiencySensor<C>,
+        initial_medium: usize,
+        analyzer: &SpectralCameraAnalyzer,
+        settings: CurvedTraceSettings,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+    ) -> Result<CurvedSequentialSensorPixelSample<C>, CurvedRasterError> {
+        self.sample_sequential_sensor(
+            cx,
+            scene,
+            sensor,
+            initial_medium,
+            settings,
+            seed,
+            pixel,
+            sample,
+            Some(AnalyzerResponse::Spectral(analyzer)),
         )
     }
 
@@ -111,7 +140,7 @@ impl CurvedCameraRaster<'_> {
         seed: u64,
         pixel: u32,
         sample: u32,
-        analyzer: Option<CameraAnalyzer>,
+        analyzer: Option<AnalyzerResponse<'_>>,
     ) -> Result<CurvedSequentialSensorPixelSample<C>, CurvedRasterError> {
         let key = [seed as u32, (seed >> 32) as u32];
         self.sample_sequential_sensor_with_transport(
@@ -145,7 +174,7 @@ impl CurvedCameraRaster<'_> {
         seed: u64,
         pixel: u32,
         sample: u32,
-        analyzer: Option<CameraAnalyzer>,
+        analyzer: Option<AnalyzerResponse<'_>>,
         trace: impl FnMut(
             &Cx<'_>,
             &SequentialCameraBeam,
@@ -165,7 +194,7 @@ impl CurvedCameraRaster<'_> {
         seed: u64,
         pixel: u32,
         sample: u32,
-        analyzer: Option<CameraAnalyzer>,
+        analyzer: Option<AnalyzerResponse<'_>>,
         timed_lens: bool,
         mut trace: impl FnMut(
             &Cx<'_>,
@@ -176,6 +205,10 @@ impl CurvedCameraRaster<'_> {
         cx.checkpoint().map_err(CameraError::from)?;
         if self.camera.sequential_lens().is_none() {
             return Err(CameraError::InvalidSequentialLens.into());
+        }
+        if let Some(analyzer) = analyzer {
+            let (lo, hi) = sensor.wavelength_bounds_nm();
+            analyzer.admit_band(lo, hi)?;
         }
         let mut draws = None;
         let packet = self.sample_optional_packet_with_transport(

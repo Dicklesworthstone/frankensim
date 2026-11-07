@@ -81,7 +81,7 @@ impl CurvedCameraRaster<'_> {
             seed,
             pixel,
             sample,
-            Some(analyzer),
+            Some(AnalyzerResponse::Constant(analyzer)),
         )
     }
 
@@ -95,7 +95,7 @@ impl CurvedCameraRaster<'_> {
         seed: u64,
         pixel: u32,
         sample: u32,
-        analyzer: Option<CameraAnalyzer>,
+        analyzer: Option<AnalyzerResponse<'_>>,
     ) -> Result<CurvedSequentialRayleighPixelSample<CurvedSequentialPixelSample>, CurvedRasterError>
     {
         let mut volume_events = [0; CAMERA_WAVELENGTHS];
@@ -183,7 +183,7 @@ impl CurvedCameraRaster<'_> {
             seed,
             pixel,
             sample,
-            Some(analyzer),
+            Some(AnalyzerResponse::Constant(analyzer)),
         )
     }
 
@@ -198,7 +198,7 @@ impl CurvedCameraRaster<'_> {
         seed: u64,
         pixel: u32,
         sample: u32,
-        analyzer: Option<CameraAnalyzer>,
+        analyzer: Option<AnalyzerResponse<'_>>,
     ) -> Result<
         CurvedSequentialRayleighPixelSample<CurvedSequentialSensorPixelSample<C>>,
         CurvedRasterError,

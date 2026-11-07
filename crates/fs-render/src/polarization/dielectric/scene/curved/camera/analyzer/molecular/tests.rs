@@ -12,7 +12,7 @@ use crate::instances::{GeometryInstance, InstanceScene, RigidTransform, SharedGe
 use crate::polarization::Stokes;
 use crate::polarization::dielectric::scene::curved::camera::raster::CurvedCameraRaster;
 use crate::polarization::dielectric::scene::curved::camera::{
-    CurvedCameraScene, EmissionSides, RadianceSpectrum, SurfaceEmitter,
+    CurvedCameraScene, EmissionSides, RadianceSpectrum, SpectralCameraAnalyzer, SurfaceEmitter,
 };
 use crate::polarization::dielectric::scene::curved::participating::{
     CurvedDensityField, CurvedRayleighMedium, CurvedRayleighScene,
@@ -541,6 +541,88 @@ fn real_xyz_and_qe_molecular_pixels_retain_paths_counters_and_complementary_chan
             assert_eq!(a.path().beam().ray(), original.path().beam().ray());
             assert_eq!(b.path().beam().ray(), original.path().beam().ray());
         }
+        // Independent superposition of the two original +/-Q detector
+        // channels checks a chromatic row BEFORE the actual molecular walk.
+        let blue = Stokes {
+            i: 0.3,
+            q: 0.2,
+            u: 0.0,
+            v: 0.0,
+        };
+        let red = Stokes {
+            i: 0.6,
+            q: -0.3,
+            u: 0.0,
+            v: 0.0,
+        };
+        let chromatic =
+            SpectralCameraAnalyzer::try_new(axis, vec![(380.0, blue), (780.0, red)]).unwrap();
+        let combine = |w: f64, positive: f64, negative: f64| {
+            let fraction = (w - 380.0) / 400.0;
+            (0.55 - 0.325 * fraction) * positive + (0.05 + 0.925 * fraction) * negative
+        };
+        let spectral = raster
+            .sample_pixel_rayleigh_spectrally_analyzed(cx, &scene, 0, &chromatic, limits, 73, 4, 0)
+            .unwrap();
+        assert_eq!(spectral.volume_events(), scalar.volume_events());
+        assert_eq!(spectral.free_flight_draws(), scalar.free_flight_draws());
+        assert_eq!(
+            spectral.pixel_sample().camera_rays(),
+            scalar.pixel_sample().camera_rays()
+        );
+        let mut expected_xyz = [0.0; 3];
+        let mut polarized_effect = false;
+        for lane in 0..4 {
+            let w = spectral.pixel_sample().wavelengths_nm()[lane];
+            let expected = combine(
+                w,
+                channels[0].pixel_sample().spectral_samples()[lane].radiance_w_m2_sr_nm(),
+                channels[1].pixel_sample().spectral_samples()[lane].radiance_w_m2_sr_nm(),
+            );
+            close(
+                spectral.pixel_sample().spectral_samples()[lane].radiance_w_m2_sr_nm(),
+                expected,
+                3e-11,
+            );
+            let scalar_power = scalar.pixel_sample().spectral_samples()[lane].radiance_w_m2_sr_nm();
+            polarized_effect |=
+                (expected - (0.3 + 0.3 * (w - 380.0) / 400.0) * scalar_power).abs() > 1e-10;
+            let weight = expected * spectral.pixel_sample().diffraction_weights()[lane] * 100.0
+                / crate::spectral::y_integral();
+            for (sum, cie) in expected_xyz.iter_mut().zip([
+                crate::spectral::cie_x(w),
+                crate::spectral::cie_y(w),
+                crate::spectral::cie_z(w),
+            ]) {
+                *sum += weight * cie;
+            }
+        }
+        assert!(
+            polarized_effect,
+            "fixture must resolve polarization after real scattering"
+        );
+        for (actual, expected) in spectral.pixel_sample().xyz().into_iter().zip(expected_xyz) {
+            close(actual, expected, 3e-11);
+        }
+        let flat = SpectralCameraAnalyzer::try_new(
+            axis,
+            vec![(380.0, analyzers[0].row()), (780.0, analyzers[0].row())],
+        )
+        .unwrap();
+        assert_eq!(
+            raster
+                .sample_pixel_rayleigh_spectrally_analyzed(cx, &scene, 0, &flat, limits, 73, 4, 0,)
+                .unwrap(),
+            channels[0]
+        );
+        let narrow =
+            SpectralCameraAnalyzer::try_new(axis, vec![(400.0, blue), (700.0, red)]).unwrap();
+        assert_eq!(
+            raster.sample_pixel_rayleigh_spectrally_analyzed(
+                cx, &scene, 0, &narrow, limits, 73, 4, 0,
+            ),
+            Err(CameraRadianceError::InvalidPolarization.into())
+        );
         let sensor = QuantumEfficiencySensor::try_new(vec![
             (380.0, [0.0, 1.0, 0.0]),
             (780.0, [1.0, 0.0, 0.0]),
@@ -589,6 +671,63 @@ fn real_xyz_and_qe_molecular_pixels_retain_paths_counters_and_complementary_chan
         assert_eq!(
             channels[0].pixel_sample().photoelectron_rate_per_m2_sr()[2],
             0.0
+        );
+        let spectral = raster
+            .sample_pixel_sensor_rayleigh_spectrally_analyzed(
+                cx, &scene, &sensor, 0, &chromatic, limits, 73, 4, 0,
+            )
+            .unwrap();
+        assert_eq!(spectral.volume_events(), scalar.volume_events());
+        assert_eq!(spectral.free_flight_draws(), scalar.free_flight_draws());
+        assert_eq!(
+            spectral.pixel_sample().camera_rays(),
+            scalar.pixel_sample().camera_rays()
+        );
+        let mut power = [0.0; 3];
+        let mut electrons = [0.0; 3];
+        for lane in 0..4 {
+            let draw = spectral.pixel_sample().detector_wavelengths()[lane];
+            let expected = combine(
+                draw.wavelength_nm(),
+                channels[0].pixel_sample().spectral_samples()[lane].radiance_w_m2_sr_nm(),
+                channels[1].pixel_sample().spectral_samples()[lane].radiance_w_m2_sr_nm(),
+            );
+            close(
+                spectral.pixel_sample().spectral_samples()[lane].radiance_w_m2_sr_nm(),
+                expected,
+                3e-11,
+            );
+            let weight = expected * spectral.pixel_sample().diffraction_weights()[lane] / 4.0;
+            for c in 0..3 {
+                power[c] += weight * draw.radiance_weights_nm()[c];
+                electrons[c] += weight * draw.electron_weights_nm_per_joule()[c];
+            }
+        }
+        for c in 0..3 {
+            close(
+                spectral.pixel_sample().qe_weighted_radiance_w_m2_sr()[c],
+                power[c],
+                3e-11 * power[c].abs().max(1.0),
+            );
+            close(
+                spectral.pixel_sample().photoelectron_rate_per_m2_sr()[c],
+                electrons[c],
+                3e-11 * electrons[c].abs().max(1.0),
+            );
+        }
+        assert_eq!(
+            raster
+                .sample_pixel_sensor_rayleigh_spectrally_analyzed(
+                    cx, &scene, &sensor, 0, &flat, limits, 73, 4, 0,
+                )
+                .unwrap(),
+            channels[0]
+        );
+        assert_eq!(
+            raster.sample_pixel_sensor_rayleigh_spectrally_analyzed(
+                cx, &scene, &sensor, 0, &narrow, limits, 73, 4, 0,
+            ),
+            Err(CameraRadianceError::InvalidPolarization.into())
         );
     });
 }

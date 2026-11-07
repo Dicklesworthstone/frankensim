@@ -9,8 +9,8 @@
 use super::super::CAMERA_WAVELENGTHS;
 use super::{
     CameraRadianceError, CurvedCameraRaster, CurvedPixelSample, CurvedRasterError,
-    CurvedSensorPixelSample, TransientPixelSample, TransientRasterError,
-    TransientSensorPixelSample, philox4x32_10, unit,
+    CurvedSensorPixelSample, LAMBDA_MAX, LAMBDA_MIN, TransientPixelSample, TransientRasterError,
+    TransientSensorPixelSample, admit_analyzer_band, philox4x32_10, unit,
 };
 use crate::polarization::dielectric::scene::curved::camera::transient::participating::TransientCurvedRayleighCameraScene;
 use crate::polarization::dielectric::scene::curved::participating::CurvedRayleighTraceSettings;
@@ -87,6 +87,7 @@ impl CurvedCameraRaster<'_> {
         pixel: u32,
         sample: u32,
     ) -> Result<TransientRayleighPixelSample, TransientRasterError> {
+        admit_analyzer_band(scene.transient_camera(), LAMBDA_MIN, LAMBDA_MAX)?;
         let key = [seed as u32, (seed >> 32) as u32];
         let mut volume_events = [0; CAMERA_WAVELENGTHS];
         let mut free_flight_draws = [0; CAMERA_WAVELENGTHS];
@@ -159,6 +160,8 @@ impl CurvedCameraRaster<'_> {
         pixel: u32,
         sample: u32,
     ) -> Result<TransientRayleighSensorPixelSample<C>, TransientRasterError> {
+        let (lo, hi) = sensor.wavelength_bounds_nm();
+        admit_analyzer_band(scene.transient_camera(), lo, hi)?;
         let key = [seed as u32, (seed >> 32) as u32];
         let mut volume_events = [0; CAMERA_WAVELENGTHS];
         let mut free_flight_draws = [0; CAMERA_WAVELENGTHS];

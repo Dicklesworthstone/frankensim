@@ -21,6 +21,193 @@ mod participating;
 const SEED: u64 = 79;
 const SAMPLE: u32 = 6;
 
+#[test]
+fn g1_spectral_detector_precedes_real_lens_and_native_scene_without_averaging_rows() {
+    use crate::polarization::Stokes;
+    use crate::polarization::dielectric::scene::curved::camera::transient::TransientCurvedCameraScene;
+    use fs_math::dd::Dd;
+
+    with_cx(|cx, _| {
+        let geometry = geometry();
+        let field = Field {
+            curved: true,
+            calls: AtomicUsize::new(0),
+        };
+        let media = [SceneMedium::GradientIndex {
+            field: &field,
+            identity: ContentHash([66; 32]),
+        }];
+        let native =
+            CurvedPolarizedScene::try_new(cx, &geometry, &media, bindings(), 100_000).unwrap();
+        let emitters = [emitter(380.0, 780.0)];
+        let scene = CurvedCameraScene::try_new(cx, &native, &emitters, None).unwrap();
+        let physical = camera(visible_glass(), 550.0, None);
+        let raster = CurvedCameraRaster::try_new(&physical, 1, 1).unwrap();
+        let x = Vec3::new(1.0, 0.0, 0.0);
+        let blue = Stokes {
+            i: 0.3,
+            q: 0.2,
+            u: 0.0,
+            v: 0.0,
+        };
+        let red = Stokes {
+            i: 0.6,
+            q: -0.3,
+            u: 0.0,
+            v: 0.0,
+        };
+        let analyzer =
+            SpectralCameraAnalyzer::try_new(x, vec![(380.0, blue), (780.0, red)]).unwrap();
+        let actual = raster
+            .sample_pixel_sequential_spectrally_analyzed(
+                cx,
+                &scene,
+                0,
+                &analyzer,
+                settings(),
+                SEED,
+                0,
+                SAMPLE,
+            )
+            .unwrap();
+        let basis = [-1.0, 1.0].map(|q| {
+            raster
+                .sample_pixel_sequential_analyzed(
+                    cx,
+                    &scene,
+                    0,
+                    CameraAnalyzer::try_new(
+                        x,
+                        Stokes {
+                            i: 0.5,
+                            q: q * 0.5,
+                            u: 0.0,
+                            v: 0.0,
+                        },
+                    )
+                    .unwrap(),
+                    settings(),
+                    SEED,
+                    0,
+                    SAMPLE,
+                )
+                .unwrap()
+        });
+        let mut xyz = [0.0; 3];
+        let mut has_polarized_lens_effect = false;
+        for (lane, &w) in actual.wavelengths_nm().iter().enumerate() {
+            let fraction = (w - 380.0) / 400.0;
+            // Independent linear superposition of orthogonal passive
+            // detector channels. The lens/scene response is NOT scalar.
+            let t_x = 0.5 - 0.2 * fraction;
+            let t_y = 0.1 + 0.8 * fraction;
+            let x_power = basis[1].spectral_samples()[lane]
+                .unwrap()
+                .radiance_w_m2_sr_nm();
+            let y_power = basis[0].spectral_samples()[lane]
+                .unwrap()
+                .radiance_w_m2_sr_nm();
+            let expected = t_x * x_power + t_y * y_power;
+            let radiance = actual.spectral_samples()[lane]
+                .unwrap()
+                .radiance_w_m2_sr_nm();
+            near(radiance, expected, 3e-12);
+            assert_eq!(actual.camera_rays()[lane], basis[0].camera_rays()[lane]);
+            assert_eq!(
+                actual.geometry_weights()[lane],
+                basis[0].geometry_weights()[lane]
+            );
+            has_polarized_lens_effect |=
+                (expected - (0.3 + 0.3 * fraction) * (x_power + y_power)).abs() > 1e-10;
+            for (sum, cie) in xyz.iter_mut().zip([cie_x(w), cie_y(w), cie_z(w)]) {
+                *sum += expected * actual.geometry_weights()[lane] * 100.0 / y_integral() * cie;
+            }
+        }
+        assert!(
+            has_polarized_lens_effect,
+            "fixture must distinguish native polarization from post-hoc scalar loss"
+        );
+        for (&a, b) in actual.xyz().iter().zip(xyz) {
+            near(a, b, 3e-12);
+        }
+
+        let constant = CameraAnalyzer::try_new(x, blue).unwrap();
+        let flat = SpectralCameraAnalyzer::try_new(x, vec![(380.0, blue), (780.0, blue)]).unwrap();
+        assert_eq!(
+            raster
+                .sample_pixel_sequential_spectrally_analyzed(
+                    cx,
+                    &scene,
+                    0,
+                    &flat,
+                    settings(),
+                    SEED,
+                    0,
+                    SAMPLE
+                )
+                .unwrap(),
+            raster
+                .sample_pixel_sequential_analyzed(
+                    cx,
+                    &scene,
+                    0,
+                    constant,
+                    settings(),
+                    SEED,
+                    0,
+                    SAMPLE
+                )
+                .unwrap()
+        );
+
+        // The high-level transient owner must install this SAME chromatic
+        // response before the lens, and carry its real group transit forward.
+        let timed = TransientCurvedCameraScene::try_new(cx, &scene, &[])
+            .unwrap()
+            .with_spectral_analyzer(&analyzer);
+        let observed = raster
+            .sample_pixel_sequential_transient_at_time(
+                cx,
+                &timed,
+                0,
+                Dd::from_f64(1.0),
+                settings(),
+                SEED,
+                0,
+                SAMPLE,
+            )
+            .unwrap();
+        for (a, b) in observed
+            .pixel_sample()
+            .spectral_samples()
+            .iter()
+            .zip(actual.spectral_samples())
+        {
+            near(
+                a.unwrap().radiance_w_m2_sr_nm(),
+                b.unwrap().radiance_w_m2_sr_nm(),
+                3e-12,
+            );
+        }
+        let narrow = SpectralCameraAnalyzer::try_new(x, vec![(400.0, blue), (700.0, red)]).unwrap();
+        let before = field.calls.load(Ordering::Relaxed);
+        assert_eq!(
+            raster.sample_pixel_sequential_spectrally_analyzed(
+                cx,
+                &scene,
+                0,
+                &narrow,
+                settings(),
+                SEED,
+                0,
+                SAMPLE
+            ),
+            Err(CameraRadianceError::InvalidPolarization.into())
+        );
+        assert_eq!(field.calls.load(Ordering::Relaxed), before);
+    });
+}
+
 fn near(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance,

@@ -8,10 +8,11 @@
 //! s^T*A*M_reverse*A*a = a^T*M_forward*s. V is NOT negated, and the seed's
 //! intensity retains the physical analyzer throughput instead of being one.
 //!
-//! This is an ideal local analyzer at the geometric camera launch plane, with
-//! a wavelength-independent declared row. It supplies no finite-thickness or
-//! angle-dependent polarizer, bulk birefringence, or
-//! propagation through a resolved camera lens. The existing ray geometry,
+//! This is an ideal local analyzer at the camera launch plane. A
+//! [`SpectralCameraAnalyzer`] retains a source-owned wavelength-dependent row;
+//! [`CameraAnalyzer`] retains the original constant response. Neither supplies finite-thickness or
+//! angle-dependent polarizer or bulk birefringence. Sequential camera consumers
+//! install the row before the original resolved lens. The existing ray geometry,
 //! complete Stokes Fresnel response, Beer path and radiance index conversion
 //! remain authoritative. All-zero rows refuse because the original traversal
 //! cannot distinguish extinguished power from floating-point underflow.
@@ -24,6 +25,10 @@ use crate::polarization::dielectric::transport::{BeamError, PolarizationFrame, P
 use fs_exec::Cx;
 use fs_geom::Vec3;
 use fs_math::det;
+
+mod spectral;
+pub(crate) use spectral::AnalyzerResponse;
+pub use spectral::SpectralCameraAnalyzer;
 
 #[cfg(feature = "volumes")]
 mod molecular;

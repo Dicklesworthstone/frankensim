@@ -20,7 +20,11 @@
 //! polarization into the scene. Aperture/TIR misses have no ray and retain
 //! the original zero-contribution wavelength draw.
 
-use super::{CameraAnalyzer, CameraRadianceError, CameraRadianceSample, CurvedCameraScene};
+use super::analyzer::AnalyzerResponse;
+use super::{
+    CameraAnalyzer, CameraRadianceError, CameraRadianceSample, CurvedCameraScene,
+    SpectralCameraAnalyzer,
+};
 use crate::camera::{CameraError, LensSample, PhysicalCamera, SequentialCameraBeam};
 use crate::charts::Ray;
 use crate::hero_wavelength_packet;
@@ -366,7 +370,7 @@ impl<'a> CurvedCameraRaster<'a> {
         seed: u64,
         pixel: u32,
         sample: u32,
-        analyzer: Option<CameraAnalyzer>,
+        analyzer: Option<AnalyzerResponse<'_>>,
         timed_lens: bool,
         wavelengths: impl FnOnce(f64) -> Result<[f64; CAMERA_WAVELENGTHS], CurvedRasterError>,
         mut trace: impl FnMut(
@@ -411,8 +415,32 @@ impl<'a> CurvedCameraRaster<'a> {
             None
         };
         let (launches, mut diffraction_weights) = if self.camera.sequential_lens().is_some() {
-            let beams = if timed_lens {
-                if let Some(analyzer) = analyzer {
+            let beams = if let Some(AnalyzerResponse::Spectral(spectrum)) = analyzer {
+                // Resolve the complete source-owned packet before tracing ANY
+                // lens path, including lanes that will be aperture-clipped.
+                let mut rows = [crate::polarization::Stokes::unpolarized(1.0); CAMERA_WAVELENGTHS];
+                for (row, &wavelength) in rows.iter_mut().zip(&wavelengths_nm) {
+                    *row = spectrum.at(wavelength)?.row();
+                }
+                if timed_lens {
+                    self.camera.generate_sequential_spectral_timed_beams_with_detector_rows_from_tangent_offsets(
+                        &render_cx, x_tan, y_tan, lens_sample, &wavelengths_nm,
+                        spectrum.reference_axis(), &rows,
+                    )?
+                } else {
+                    self.camera
+                        .generate_sequential_spectral_beams_with_detector_rows_from_tangent_offsets(
+                            &render_cx,
+                            x_tan,
+                            y_tan,
+                            lens_sample,
+                            &wavelengths_nm,
+                            spectrum.reference_axis(),
+                            &rows,
+                        )?
+                }
+            } else if timed_lens {
+                if let Some(AnalyzerResponse::Constant(analyzer)) = analyzer {
                     self.camera
                         .generate_sequential_spectral_timed_beams_analyzed_from_tangent_offsets(
                             &render_cx,
@@ -433,7 +461,7 @@ impl<'a> CurvedCameraRaster<'a> {
                             &wavelengths_nm,
                         )?
                 }
-            } else if let Some(analyzer) = analyzer {
+            } else if let Some(AnalyzerResponse::Constant(analyzer)) = analyzer {
                 self.camera
                     .generate_sequential_spectral_beams_analyzed_from_tangent_offsets(
                         &render_cx,

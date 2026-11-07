@@ -29,6 +29,59 @@ impl CurvedCameraRaster<'_> {
         pixel: u32,
         sample: u32,
     ) -> Result<CurvedPixelSample, CurvedRasterError> {
+        self.sample_pixel_with_analyzer(
+            cx,
+            scene,
+            initial_medium,
+            AnalyzerResponse::Constant(analyzer),
+            settings,
+            seed,
+            pixel,
+            sample,
+        )
+    }
+
+    /// Integrate a source-owned chromatic polarization response on the same
+    /// visible spectral paths. The complete visible band is admitted before
+    /// tracing; each absolute row acts before scene transport, not on XYZ.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_pixel_spectrally_analyzed(
+        &self,
+        cx: &Cx<'_>,
+        scene: &CurvedCameraScene<'_, '_>,
+        initial_medium: usize,
+        analyzer: &SpectralCameraAnalyzer,
+        settings: CurvedTraceSettings,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+    ) -> Result<CurvedPixelSample, CurvedRasterError> {
+        cx.checkpoint().map_err(CameraError::from)?;
+        analyzer.admit_band(LAMBDA_MIN, LAMBDA_MAX)?;
+        self.sample_pixel_with_analyzer(
+            cx,
+            scene,
+            initial_medium,
+            AnalyzerResponse::Spectral(analyzer),
+            settings,
+            seed,
+            pixel,
+            sample,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sample_pixel_with_analyzer(
+        &self,
+        cx: &Cx<'_>,
+        scene: &CurvedCameraScene<'_, '_>,
+        initial_medium: usize,
+        analyzer: AnalyzerResponse<'_>,
+        settings: CurvedTraceSettings,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+    ) -> Result<CurvedPixelSample, CurvedRasterError> {
         let key = [seed as u32, (seed >> 32) as u32];
         self.sample_pixel_with_transport(cx, seed, pixel, sample, |cx, ray, wavelength, lane| {
             scene.sample_ray_analyzed_with_samples(
@@ -36,7 +89,7 @@ impl CurvedCameraRaster<'_> {
                 ray,
                 wavelength,
                 initial_medium,
-                analyzer,
+                analyzer.at(wavelength)?,
                 settings,
                 |event| {
                     let block =
@@ -64,6 +117,64 @@ impl CurvedCameraRaster<'_> {
         pixel: u32,
         sample: u32,
     ) -> Result<CurvedSensorPixelSample<C>, CurvedRasterError> {
+        self.sample_sensor_with_analyzer(
+            cx,
+            scene,
+            sensor,
+            initial_medium,
+            AnalyzerResponse::Constant(analyzer),
+            settings,
+            seed,
+            pixel,
+            sample,
+        )
+    }
+
+    /// A chromatic polarization response followed by the original QE channels.
+    /// The analyzer must cover the entire authored sensor band, including any
+    /// infrared support; its absolute row and QE are each applied exactly once.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_pixel_sensor_spectrally_analyzed<const C: usize>(
+        &self,
+        cx: &Cx<'_>,
+        scene: &CurvedCameraScene<'_, '_>,
+        sensor: &QuantumEfficiencySensor<C>,
+        initial_medium: usize,
+        analyzer: &SpectralCameraAnalyzer,
+        settings: CurvedTraceSettings,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+    ) -> Result<CurvedSensorPixelSample<C>, CurvedRasterError> {
+        cx.checkpoint().map_err(CameraError::from)?;
+        let (lo, hi) = sensor.wavelength_bounds_nm();
+        analyzer.admit_band(lo, hi)?;
+        self.sample_sensor_with_analyzer(
+            cx,
+            scene,
+            sensor,
+            initial_medium,
+            AnalyzerResponse::Spectral(analyzer),
+            settings,
+            seed,
+            pixel,
+            sample,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sample_sensor_with_analyzer<const C: usize>(
+        &self,
+        cx: &Cx<'_>,
+        scene: &CurvedCameraScene<'_, '_>,
+        sensor: &QuantumEfficiencySensor<C>,
+        initial_medium: usize,
+        analyzer: AnalyzerResponse<'_>,
+        settings: CurvedTraceSettings,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+    ) -> Result<CurvedSensorPixelSample<C>, CurvedRasterError> {
         let key = [seed as u32, (seed >> 32) as u32];
         self.sample_sensor_with_transport(
             cx,
@@ -77,7 +188,7 @@ impl CurvedCameraRaster<'_> {
                     ray,
                     wavelength,
                     initial_medium,
-                    analyzer,
+                    analyzer.at(wavelength)?,
                     settings,
                     |event| {
                         let block =
