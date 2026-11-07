@@ -1,4 +1,6 @@
 //! Physical electrode work drives retained 3D vector memory and Ohmic current.
+#[path = "hysteretic/circuit.rs"]
+mod circuit;
 #[allow(dead_code)]
 #[path = "../hysteretic/common.rs"]
 mod data;

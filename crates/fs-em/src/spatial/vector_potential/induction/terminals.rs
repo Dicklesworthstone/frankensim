@@ -219,6 +219,10 @@ impl TerminalLayout {
         &self.faces
     }
 
+    pub fn references(&self) -> &[usize] {
+        &self.reference
+    }
+
     pub fn voltage_drive(
         &self,
         voltage_v: &[f64],

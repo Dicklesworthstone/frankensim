@@ -13,6 +13,9 @@
 //! fitted terminal impedance, contact resistance or moving memory is introduced.
 
 use super::super::terminals::TerminalLayout;
+/// Native RLC circuits driving physical electrodes with retained vector memory.
+pub mod circuit;
+
 use super::*;
 
 fn magnetic_entries(

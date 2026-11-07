@@ -1,5 +1,41 @@
 # fs-em contract
 
+## Native circuits on nonlinear and hysteretic solid electrodes
+
+The `nonlinear::terminals::circuit` and feature-gated
+`hysteretic::terminals::circuit` modules close the original 3D solid-conductor
+electrodes against native RLC, mutual-inductance and ideal-transformer graphs.
+The accepted owner retains original graph fluxes/charges, field cochains,
+physical time and, for hysteresis, every vector polarization. Actual electrode
+currents come from the same spatial charge reactions used by voltage control.
+
+The nonlinear interface uses the existing bounded Newton–Krylov solver. Every
+residual, Jacobian and final replay restarts the identical accepted circuit and
+field histories. The constitutive field is evaluated at each proposed drive;
+no affine field admittance is reused across saturation or magnetic memory.
+Endpoint material/conductor operators are prepared once and shared across the
+terminal trials. The original linear circuit retains its affine response cache.
+
+All field variants share original graph preparation and physical accounting.
+The numerical reference resistor and compensating current source cancel from
+the physical terminal law and heat. Actual graph resistor losses, graph storage,
+transformer work, electrode current balance and external-source work are
+reconstructed before publication. Original source-bound graph resistance may be
+refreshed without changing graph storage coordinates or field history.
+
+Native circuit midpoint efforts/flows pair with the field's endpoint drive and
+reaction through the same `dt * V * I`. The coupled nonlinear/hysteretic method
+remains first order. Its stable balance includes graph and magnetic storage,
+bulk Joule and pinning heat, authored graph heat, numerical field dissipation,
+external and impressed supply, and the original parameter/mechanical terms.
+Private interface work is internal. Trial exhaustion, cancellation, material
+refusal or failed KCL/energy replay publishes neither history.
+
+This remains fixed-geometry MQS with the underlying field's admitted material
+model. Hysteresis requires the existing `magnetic-hysteresis` feature and fixed
+fits; moving/rotating magnetic memory and temperature-dependent fit free energy
+are not supplied by electrical graph coupling.
+
 ## Physical 3D electrodes with nonlinear and hysteretic induction
 
 `spatial::vector_potential::induction::nonlinear::terminals` supplies voltage and

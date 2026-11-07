@@ -13,6 +13,9 @@
 //! reports parameter work separately from physical heat and numerical loss.
 //! External lead fields, contact impedance and moving interfaces are not added.
 
+/// Native RLC circuit closure of these physical electrode currents.
+pub mod circuit;
+
 use super::super::terminals::TerminalLayout;
 use super::*;
 

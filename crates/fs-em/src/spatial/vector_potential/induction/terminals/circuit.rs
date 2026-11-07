@@ -19,10 +19,17 @@
 //! Geometry, material refresh, switching and nonlinear field evolution are
 //! outside this fixed-configuration owner.
 
+mod native;
+pub(in crate::spatial::vector_potential::induction) mod nonlinear;
+pub use nonlinear::SpatialTerminalCircuitNonlinearControls;
+
 use super::super::{SpatialInductionControls, SpatialInductionStep};
 use super::{SpatialTerminalInduction, SpatialTerminalInductionCandidate};
 use crate::spatial::SpatialMagneticError;
 use crate::winding::nonlinear::{NonlinearWindingError, native_seed};
+use crate::winding::{
+    nonlinear::resistors::GraphResistorMaterial, ohmic::WindingGraphResistorHeat,
+};
 use fs_la::factor::{FactorError, Lu, lu};
 use fs_material::conductor::{ResolvedConductorState, spatial::SpatialConductorMaterial};
 use fs_phs::{
@@ -32,6 +39,7 @@ use fs_phs::{
         assemble_circuit_with_mutual_inductance,
     },
 };
+use fs_solver::{NewtonError, NewtonReport, SolverRunProgress};
 use std::rc::Rc;
 
 /// Native dense allocation and terminal probing are deliberately small.
@@ -85,9 +93,15 @@ pub struct SpatialTerminalCircuitControls {
 pub enum SpatialTerminalCircuitError {
     Invalid(&'static str),
     Field(SpatialMagneticError),
+    NonlinearField(super::super::nonlinear::SpatialNonlinearInductionError),
+    #[cfg(feature = "magnetic-hysteresis")]
+    HystereticField(super::super::hysteretic::SpatialHystereticInductionError),
     Circuit(CircuitError),
     Initial(NonlinearWindingError),
     Factor(FactorError),
+    Newton(NewtonError),
+    Interrupted(SolverRunProgress),
+    NotConverged(NewtonReport),
     FieldTrialBudget,
     Balance(&'static str),
     Cancelled,
@@ -111,6 +125,40 @@ impl From<CircuitError> for SpatialTerminalCircuitError {
         Self::Circuit(error)
     }
 }
+impl From<super::super::nonlinear::SpatialNonlinearInductionError> for SpatialTerminalCircuitError {
+    fn from(error: super::super::nonlinear::SpatialNonlinearInductionError) -> Self {
+        use super::super::nonlinear::SpatialNonlinearInductionError;
+        use crate::spatial::vector_potential::nonlinear::NonlinearVectorError;
+        match error {
+            SpatialNonlinearInductionError::Spatial(SpatialMagneticError::Cancelled)
+            | SpatialNonlinearInductionError::Magnetic(NonlinearVectorError::Spatial(
+                SpatialMagneticError::Cancelled,
+            )) => Self::Cancelled,
+            other => Self::NonlinearField(other),
+        }
+    }
+}
+#[cfg(feature = "magnetic-hysteresis")]
+impl From<super::super::hysteretic::SpatialHystereticInductionError>
+    for SpatialTerminalCircuitError
+{
+    fn from(error: super::super::hysteretic::SpatialHystereticInductionError) -> Self {
+        use super::super::hysteretic::SpatialHystereticInductionError;
+        use fs_material::field_storage::hysteresis::vector::VectorHysteresisError;
+        match error {
+            SpatialHystereticInductionError::Spatial(SpatialMagneticError::Cancelled)
+            | SpatialHystereticInductionError::Material(VectorHysteresisError::Cancelled) => {
+                Self::Cancelled
+            }
+            other => Self::HystereticField(other),
+        }
+    }
+}
+impl From<NewtonError> for SpatialTerminalCircuitError {
+    fn from(error: NewtonError) -> Self {
+        Self::Newton(error)
+    }
+}
 impl From<FactorError> for SpatialTerminalCircuitError {
     fn from(error: FactorError) -> Self {
         Self::Factor(error)
@@ -123,6 +171,7 @@ struct Layout {
     mutual: Vec<MutualInductance>,
     dae: CircuitDae,
     nodes: Vec<usize>,
+    reference: Vec<usize>,
     coordinates: Vec<usize>,
     source_kinds: Vec<Option<bool>>,
     external_ports: usize,
@@ -159,17 +208,22 @@ pub struct SpatialTerminalCircuitBranch {
     pub absorbed_work_j: f64,
 }
 
-pub struct SpatialTerminalCircuitStep {
+pub struct SpatialTerminalCircuitStep<F = SpatialInductionStep> {
     /// Native diagnostic record, including the canceled numerical reference.
     /// Physical circuit heat is resistor_heat_j, not native.dissipated.
     pub native: StepRecord,
-    pub field: SpatialInductionStep,
+    pub field: F,
     pub node_voltages_v: Vec<f64>,
     /// Original electrode order; these are native circuit-node potentials.
     pub terminal_voltage_v: Vec<f64>,
     /// Positive currents enter the original conducting body.
     pub terminal_current_a: Vec<f64>,
     pub branches: Vec<SpatialTerminalCircuitBranch>,
+    /// Only physical authored resistors; numerical references are excluded.
+    pub graph_resistors: Vec<WindingGraphResistorHeat>,
+    /// Original-branch material bindings at this accepted resistance update.
+    /// Empty for a numerically authored resistor graph.
+    pub graph_materials: Vec<GraphResistorMaterial>,
     pub external_source_outputs: Vec<f64>,
     /// Only original authored graph resistors, independently reconstructed.
     pub resistor_heat_j: f64,
@@ -179,6 +233,19 @@ pub struct SpatialTerminalCircuitStep {
     pub circuit_stored_after_j: f64,
     /// Constitutive effort times original flux/charge increments.
     pub circuit_stored_change_j: f64,
+    pub stored_before_j: f64,
+    pub stored_after_j: f64,
+    /// Stable native graph increment plus the original field's own increment.
+    pub stored_change_j: f64,
+    /// Physical field heat plus authored graph resistor heat, payable once.
+    pub heat_j: f64,
+    /// Field endpoint dissipation, excluded from every physical heat receipt.
+    pub numerical_dissipation_j: f64,
+    /// Original external circuit work plus impressed field work.
+    pub supplied_work_j: f64,
+    pub impressed_work_j: f64,
+    pub parameter_work_j: f64,
+    pub mechanical_work_j: f64,
     /// Original external sources only; private interface ports are excluded.
     pub external_work_j: f64,
     pub energy_residual_j: f64,
@@ -188,6 +255,9 @@ pub struct SpatialTerminalCircuitStep {
     pub maximum_kirchhoff_current_defect_a: f64,
     pub field_trials: usize,
     pub reused_response: bool,
+    /// Nonlinear electrode closure report; None for the direct affine path or
+    /// a graph that shorts every electrode to its component reference.
+    pub report: Option<NewtonReport>,
 }
 
 pub struct SpatialTerminalCircuitCandidate<'m, C: SpatialConductorMaterial = ResolvedConductorState>
@@ -299,152 +369,16 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalCircuit<'m, C> {
         config: SpatialTerminalCircuitConfig,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self> {
-        poll(cancelled)?;
-        let count = field.electrode_faces().len();
-        if terminal_nodes.len() != count || terminal_nodes.iter().any(|&n| n >= graph.node_count) {
-            return Err(invalid("complete original electrode-to-node map required"));
-        }
-        let coordinates: Vec<_> = field
-            .terminals
-            .reference
-            .iter()
-            .enumerate()
-            .filter_map(|(t, &reference)| {
-                // A real wire to the same node fixes zero relative voltage.
-                // It needs neither a reference resistor nor a self-loop source.
-                (terminal_nodes[t] != terminal_nodes[reference]).then_some(t)
-            })
-            .collect();
-        let k = coordinates.len();
-        if k > MAX_TERMINAL_CIRCUIT_COORDINATES
-            || !(2..=MAX_TERMINAL_CIRCUIT_NODES).contains(&graph.node_count)
-            || graph.branches.len().saturating_add(2 * k) > MAX_TERMINAL_CIRCUIT_BRANCHES
-            || graph.transformers.len() > 16
-            || mutual.len() > graph.branches.len().saturating_mul(graph.branches.len()) / 2
-            || !positive(config.reference_resistance_ohm)
-        {
-            return Err(invalid(
-                "bounded native graph, complete electrode nodes and positive reference required",
-            ));
-        }
-        let mut source_kinds = vec![None; MAX_TERMINAL_CIRCUIT_SOURCE_PORTS];
-        let (mut external_ports, mut inductors, mut capacitors, mut voltage_sources) = (0, 0, 0, 0);
-        for &(_, _, branch) in &graph.branches {
-            poll(cancelled)?;
-            let (port, kind) = match branch {
-                Branch::Resistor { ohms } => {
-                    if !positive(ohms) {
-                        return Err(invalid("representable physical resistance required"));
-                    }
-                    continue;
-                }
-                Branch::Inductor { henries } => {
-                    if !positive(henries) {
-                        return Err(invalid("representable physical inductance required"));
-                    }
-                    inductors += 1;
-                    continue;
-                }
-                Branch::Capacitor { farads } => {
-                    if !positive(farads) {
-                        return Err(invalid("representable physical capacitance required"));
-                    }
-                    capacitors += 1;
-                    continue;
-                }
-                Branch::VoltageSource { port } => {
-                    voltage_sources += 1;
-                    (port, true)
-                }
-                Branch::CurrentSource { port } => (port, false),
-            };
-            if port >= source_kinds.len() || source_kinds[port].is_some_and(|old| old != kind) {
-                return Err(invalid(
-                    "source port exceeds capacity or mixes voltage/current units",
-                ));
-            }
-            source_kinds[port] = Some(kind);
-            external_ports = external_ports.max(port + 1);
-        }
-        let n = inductors + 2 * capacitors + graph.node_count - 1
-            + voltage_sources
-            + graph.transformers.len();
-        let payload =
-            16 * k * k + 12 * k + 8 * n + 6 * graph.branches.len() + 6 * count + 4 * external_ports;
-        let payload = field
-            .problem()
-            .mesh()
-            .vertex_count
-            .checked_mul(3)
-            .and_then(|v| v.checked_add(payload));
-        if external_ports
-            .checked_add(k)
-            .is_none_or(|ports| ports > MAX_TERMINAL_CIRCUIT_PORTS)
-            || n > MAX_TERMINAL_CIRCUIT_STATES
-            || n > config.maximum_native_states
-            || payload.is_none_or(|v| v > config.maximum_interface_scalars)
-            || initial.fluxes_wb.len() != inductors
-            || initial.charges_c.len() != capacitors
-            || initial
-                .fluxes_wb
-                .iter()
-                .chain(&initial.charges_c)
-                .any(|v| !v.is_finite())
-        {
-            return Err(invalid(
-                "bounded native states and complete original circuit storage required",
-            ));
-        }
-        let mut lowered = graph.clone();
-        for (p, &terminal) in coordinates.iter().enumerate() {
-            let a = terminal_nodes[terminal];
-            let b = terminal_nodes[field.terminals.reference[terminal]];
-            lowered.branches.push((
-                a,
-                b,
-                Branch::Resistor {
-                    ohms: config.reference_resistance_ohm,
-                },
-            ));
-            lowered.branches.push((
-                a,
-                b,
-                Branch::CurrentSource {
-                    port: external_ports + p,
-                },
-            ));
-        }
-        poll(cancelled)?;
-        let dae = assemble_circuit_with_mutual_inductance(&lowered, &mutual)?;
-        poll(cancelled)?;
-        if dae.ports != external_ports + k {
-            return Err(invalid(
-                "native assembly changed the original/private port map",
-            ));
-        }
-        let layout = Rc::new(Layout {
+        let (layout, state) = native::prepare(
+            field.terminals.references(),
+            field.problem().mesh().vertex_count,
             graph,
+            terminal_nodes,
             mutual,
-            dae,
-            nodes: terminal_nodes,
-            coordinates,
-            source_kinds,
-            external_ports,
-            reference_ohm: config.reference_resistance_ohm,
-        });
-        admit_inputs(&layout, &initial.external_inputs)?;
-        let mut state = vec![0.0; layout.dae.system.state_dim()];
-        for (&index, &flux) in layout.dae.flux_index.iter().zip(&initial.fluxes_wb) {
-            state[index] = flux;
-        }
-        for (&index, &charge) in layout.dae.charge_index.iter().zip(&initial.charges_c) {
-            state[index] = charge;
-        }
-        let mut input = initial.external_inputs;
-        input.resize(layout.dae.ports, 0.0);
-        let state = native_seed(&layout.dae, &state, &input)
-            .map_err(SpatialTerminalCircuitError::Initial)?;
-        poll(cancelled)?;
+            initial,
+            config,
+            cancelled,
+        )?;
         Ok(Self {
             field,
             layout,
@@ -478,12 +412,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalCircuit<'m, C> {
         dt: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<StepRecord> {
-        poll(cancelled)?;
-        // A finite-stage voltage is not a new initial condition. Preserve all
-        // accepted storage and let the original descriptor solve its multipliers.
-        let (step, _) = self.layout.dae.step_audited(&self.state, input, dt)?;
-        poll(cancelled)?;
-        Ok(step)
+        native::advance(&self.layout, &self.state, input, dt, cancelled)
     }
 
     fn currents(&self, trial: &SpatialTerminalInductionCandidate<'_, C>) -> Vec<f64> {
@@ -704,7 +633,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalCircuit<'m, C> {
         })
     }
 
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     fn account(
         &self,
         native: StepRecord,
@@ -715,234 +644,22 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalCircuit<'m, C> {
         controls: SpatialTerminalCircuitControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialTerminalCircuitStep> {
-        let layout = &self.layout;
-        let dae = &layout.dae;
-        let midpoint: Vec<_> = self
-            .state
-            .iter()
-            .zip(&native.x)
-            .map(|(&a, &b)| f64::midpoint(a, b))
-            .collect();
-        let mut nodes = vec![0.0; layout.graph.node_count];
-        for (node, &index) in dae.node_potential_index.iter().enumerate() {
-            nodes[node + 1] = finite(midpoint[index])?;
-        }
-        let mut maximum_voltage = 0.0_f64;
-        let mut maximum_current = 0.0_f64;
-        let mut reference_heat = 0.0;
-        let mut interface_work = 0.0;
-        for (p, &terminal) in layout.coordinates.iter().enumerate() {
-            poll(cancelled)?;
-            let reference = self.field.terminals.reference[terminal];
-            let v = finite(nodes[layout.nodes[terminal]] - nodes[layout.nodes[reference]])?;
-            let current = finite(v / layout.reference_ohm - input[layout.external_ports + p])?;
-            maximum_voltage = maximum_voltage
-                .max(finite(v - field.terminals[terminal].voltage_to_reference_v)?.abs());
-            maximum_current = maximum_current
-                .max(finite(current - field.terminals[terminal].incoming_current_a)?.abs());
-            close(
-                v - native.y[layout.external_ports + p],
-                controls.voltage_tolerance_v,
-                "native private port and original node voltage disagree",
-            )?;
-            reference_heat = finite(reference_heat + dt * v * (v / layout.reference_ohm))?;
-            interface_work = finite(
-                interface_work
-                    + dt * input[layout.external_ports + p] * native.y[layout.external_ports + p],
-            )?;
-        }
-        close(
-            maximum_voltage,
-            controls.voltage_tolerance_v,
-            "native circuit and field electrode voltages disagree",
-        )?;
-        close(
-            maximum_current,
-            controls.current_tolerance_a,
-            "native circuit and field electrode currents disagree",
-        )?;
-        close(
-            interface_work + field.terminal_work_j - reference_heat,
-            controls.energy_tolerance_j,
-            "private circuit work does not cancel physical terminal work and reference loss",
-        )?;
-
-        let currents = dae.inductor_currents(&midpoint)?;
-        let (mut l, mut c, mut source) = (0, 0, 0);
-        let source_start =
-            dae.system.differential_dim() + layout.graph.node_count - 1 + dae.charge_index.len();
-        let mut kcl = vec![0.0; layout.graph.node_count];
-        let mut branches = Vec::with_capacity(layout.graph.branches.len());
-        let (mut resistor_heat, mut stored_change) = (0.0, 0.0);
-        for (branch, &(a, b, kind)) in layout.graph.branches.iter().enumerate() {
-            poll(cancelled)?;
-            let v = finite(nodes[a] - nodes[b])?;
-            let current = match kind {
-                Branch::Resistor { ohms } => finite(v / ohms)?,
-                Branch::Inductor { .. } => {
-                    let index = dae.flux_index[l];
-                    let current = currents[l];
-                    stored_change = finite(
-                        stored_change + current * finite(native.x[index] - self.state[index])?,
-                    )?;
-                    close(
-                        finite(native.x[index] - self.state[index])? - dt * v,
-                        dt * controls.voltage_tolerance_v,
-                        "original inductor flux increment violates terminal voltage",
-                    )?;
-                    l += 1;
-                    current
-                }
-                Branch::Capacitor { farads } => {
-                    let index = dae.charge_index[c];
-                    let dq = finite(native.x[index] - self.state[index])?;
-                    let effort = finite(midpoint[index] / farads)?;
-                    close(
-                        v - effort,
-                        controls.voltage_tolerance_v,
-                        "original capacitor charge violates terminal voltage",
-                    )?;
-                    stored_change = finite(stored_change + effort * dq)?;
-                    c += 1;
-                    finite(dq / dt)?
-                }
-                Branch::VoltageSource { port } => {
-                    close(
-                        v - external[port],
-                        controls.voltage_tolerance_v,
-                        "original voltage source does not hold its authored effort",
-                    )?;
-                    let value = finite(midpoint[source_start + source])?;
-                    source += 1;
-                    value
-                }
-                Branch::CurrentSource { port } => -external[port],
-            };
-            let work = finite(dt * v * current)?;
-            if matches!(kind, Branch::Resistor { .. }) {
-                resistor_heat = finite(resistor_heat + work)?;
-            }
-            kcl[a] = finite(kcl[a] + current)?;
-            kcl[b] = finite(kcl[b] - current)?;
-            branches.push(SpatialTerminalCircuitBranch {
-                branch,
-                voltage_v: v,
-                current_a: current,
-                absorbed_work_j: work,
-            });
-        }
-        let transformer_start = dae.system.state_dim() - layout.graph.transformers.len();
-        for (index, transformer) in layout.graph.transformers.iter().enumerate() {
-            poll(cancelled)?;
-            let primary = finite(midpoint[transformer_start + index])?;
-            let secondary = finite(-transformer.ratio * primary)?;
-            let (a, b) = transformer.primary;
-            let (c, d) = transformer.secondary;
-            let vp = finite(nodes[a] - nodes[b])?;
-            let vs = finite(nodes[c] - nodes[d])?;
-            close(
-                vp - transformer.ratio * vs,
-                controls.voltage_tolerance_v,
-                "original ideal transformer voltage constraint failed",
-            )?;
-            close(
-                dt * (vp * primary + vs * secondary),
-                controls.energy_tolerance_j,
-                "original ideal transformer creates work",
-            )?;
-            for ((a, b), current) in [
-                (transformer.primary, primary),
-                (transformer.secondary, secondary),
-            ] {
-                kcl[a] = finite(kcl[a] + current)?;
-                kcl[b] = finite(kcl[b] - current)?;
-            }
-        }
-        let mut component_balance = std::collections::BTreeMap::new();
-        for (terminal, transfer) in field.terminals.iter().enumerate() {
-            let node = layout.nodes[terminal];
-            kcl[node] = finite(kcl[node] + transfer.incoming_current_a)?;
-            let balance = component_balance.entry(transfer.component).or_insert(0.0);
-            *balance = finite(*balance + transfer.incoming_current_a)?;
-        }
-        for balance in component_balance.into_values() {
-            close(
-                balance,
-                controls.current_tolerance_a,
-                "physical conductor electrode currents do not balance",
-            )?;
-        }
-        let maximum_kcl = kcl.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-        close(
-            maximum_kcl,
-            controls.current_tolerance_a,
-            "original graph and physical electrodes violate Kirchhoff current balance",
-        )?;
-        let mut external_work = 0.0;
-        for (&u, &y) in external.iter().zip(&native.y) {
-            external_work = finite(external_work + dt * u * y)?;
-        }
-        close(
-            native.delta_h - stored_change,
-            controls.energy_tolerance_j,
-            "native and original constitutive storage changes disagree",
-        )?;
-        close(
-            native.dissipated - resistor_heat - reference_heat,
-            controls.energy_tolerance_j,
-            "physical resistor and canceled reference heat do not reproduce native dissipation",
-        )?;
-        close(
-            native.supplied - external_work - interface_work,
-            controls.energy_tolerance_j,
-            "original external source and private interface work disagree with native supply",
-        )?;
-        let energy_residual = finite(
-            field.stored_after_j - field.stored_before_j
-                + stored_change
-                + field.heat_j
-                + resistor_heat
-                + field.mechanical_work_j
-                - field.impressed_work_j
-                - field.parameter_work_j
-                - external_work,
-        )?;
-        close(
-            energy_residual,
-            controls.energy_tolerance_j,
-            "coupled circuit/field storage, Ohmic heat, Lorentz work and external supply do not close",
-        )?;
-        let stored_before = finite(dae.system.hamiltonian(&self.state))?;
-        let stored_after = finite(dae.system.hamiltonian(&native.x))?;
-        let terminal_voltage_v = layout.nodes.iter().map(|&n| nodes[n]).collect();
-        let terminal_current_a = field
-            .terminals
-            .iter()
-            .map(|t| t.incoming_current_a)
-            .collect();
-        let external_source_outputs = native.y[..layout.external_ports].to_vec();
-        Ok(SpatialTerminalCircuitStep {
+        native::account(
+            &self.layout,
+            &self.state,
             native,
             field,
-            node_voltages_v: nodes,
-            terminal_voltage_v,
-            terminal_current_a,
-            branches,
-            external_source_outputs,
-            resistor_heat_j: resistor_heat,
-            cancelled_reference_heat_j: reference_heat,
-            circuit_stored_before_j: stored_before,
-            circuit_stored_after_j: stored_after,
-            circuit_stored_change_j: stored_change,
-            external_work_j: external_work,
-            energy_residual_j: energy_residual,
-            relative_terminal_residual: 0.0,
-            maximum_terminal_voltage_defect_v: maximum_voltage,
-            maximum_terminal_current_defect_a: maximum_current,
-            maximum_kirchhoff_current_defect_a: maximum_kcl,
-            field_trials: 0,
-            reused_response: false,
-        })
+            &[],
+            input,
+            external,
+            dt,
+            native::Allowances {
+                voltage_v: controls.voltage_tolerance_v,
+                current_a: controls.current_tolerance_a,
+                energy_j: controls.energy_tolerance_j,
+            },
+            cancelled,
+        )
     }
 }
 

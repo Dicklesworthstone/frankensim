@@ -1,4 +1,6 @@
 //! Massive conductor electrodes retain the actual reversible magnetic field.
+#[path = "nonlinear/circuit.rs"]
+mod circuit;
 use super::super::{near, preparation, source};
 use crate::nonlinear::{energy, history, mode, model, nonlinear_controls, saturation};
 use fs_em::spatial::{
