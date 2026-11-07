@@ -86,6 +86,21 @@ linear-Gaussian core of weak-constraint assimilation.
   Joseph-workspace, poll, output, and one-evaluation capacity before execution;
   the borrowed child owns deadline and cancellation polling through final
   publication. Demotion uses the admitted envelope but publishes no posterior.
+- `nonlinear::iterated::IndependentMeasurements` — one fixed batch of up to
+  256 readings with explicitly independent positive Gaussian noise variances,
+  unique instruments, and a caller-declared model identity. A model callback
+  returns the predictions and physical-coordinate Jacobian together, or an
+  explicit `OutsideDomain` trial refusal. Analytic, AD, and adjoint Jacobians
+  are accepted through the same callback; their correctness remains the
+  model owner's responsibility.
+- `nonlinear::iterated::assimilate_iterated` — prior-whitened, damped
+  Gauss–Newton estimation using the existing UD observation and square-root
+  prediction kernels. Every proposal starts from the original prior, so
+  iteration does not repeatedly count the same data. `IteratedSettings` bounds
+  accepted steps, all model evaluations, and line-search halvings. Only
+  `IteratedOutcome::Stationary` publishes a local Gaussian approximation;
+  iteration/evaluation limits and stalled searches retain the last accepted
+  state, objective trace, and content receipt, with no posterior.
 - `assimilate_colored(&Belief, &[Observation], regime_param, lo, hi, &Cx) ->
   AssimilatedPosterior { belief, color, misfit_before, misfit_after }` — a
   read-only, regime-tagged **estimated candidate**. Access is through getters.
@@ -320,6 +335,17 @@ linear-Gaussian core of weak-constraint assimilation.
   difference and gate settings, prediction, innovation and variance, Jacobian,
   every actual probe value, and disposition. The arbitrary callback itself
   cannot be authenticated by this crate.
+- Iterated updates minimize `0.5 z^T z + 0.5 sum_i ((y_i-h_i(m+Lz))/sigma_i)^2`
+  with the original prior factor `P=L L^T`. Exact null directions stay fixed;
+  no jitter is introduced. Accepted trials satisfy Armijo sufficient decrease
+  against this original objective. Stationarity means the infinity norm of
+  its whitened gradient meets the caller's threshold; a small step alone does
+  not qualify. The returned covariance is the Gauss–Newton curvature
+  approximation at the accepted Jacobian, transported through `L` and admitted
+  through the existing PSD gate. It is computed once from the original prior.
+  `iterated-nonlinear:v1:<64 lowercase hex>` binds the prior, ordered batch,
+  numerical settings, every evaluated state and returned model/Jacobian
+  (including rejected trials), stopping outcome, accepted trace, and posterior.
 - The candidate's `Color::Estimated.estimator` is
   `assimilation-candidate:v4:<64 lowercase hex>`. Its BLAKE3 input uses typed
   length framing and binds the full prior, canonical observation multiset
@@ -419,6 +445,9 @@ and Jacobian order. Replay is deterministic only when the supplied callback is
 a pure deterministic implementation of the declared `model_id` under the same
 binary64 implementation/toolchain manifest. The crate cannot enforce callback
 purity or prove that two callbacks sharing an identity are equivalent.
+Iterated batches likewise retain declaration order for model and Jacobian rows.
+Their replay guarantee requires the same deterministic callback and execution
+manifest; there is no cross-toolchain or measurement-permutation bit guarantee.
 
 ## Cancellation behavior
 
@@ -446,6 +475,12 @@ cancellation cannot be bypassed by the inner scalar update. A model callback is
 one bounded synchronous evaluation and cannot be interrupted from inside this
 crate; callers needing finer cancellation must implement it inside their
 callback.
+The iterated driver checks cancellation before and after each model evaluation,
+within its linear algebra and hashing, and before final publication. One
+cumulative driver accountant precharges conservative allowances for reused
+factor kernels. The callback owns its internal numerical work, memory, and
+intra-evaluation polling; the driver caps calls, including rejected trials.
+The iterated API does not yet expose a typed child-resource composition seam.
 
 ## Unsafe boundary
 
@@ -490,6 +525,13 @@ demotion with no affine observation or posterior; malformed policy and identity
 refusals; non-finite model/Jacobian and unrepresentable-step refusals; exact
 callback count; and pre-cancellation.
 
+`tests/iterated.rs`: reduction to the established affine Gaussian update;
+independent nonlinear objective solution; line-search domain handling;
+correlated and singular prior behavior; explicit numerical-limit outcomes;
+model-shape/Jacobian refusals; deterministic replay; and cancellation before
+and after model evaluation. `examples/nonlinear_calibration.rs` fits a cooling
+rate and shared thermometer bias from a synthetic observation batch.
+
 `tests/factor.rs` (bead `sj31i.37`, G0/G1/G2/G3/G4/G5): hand-computed one- and
 two-component goldens; dense-Joseph oracle differential across deterministic
 priors up to dimension 17 with independent-checker verification; exact
@@ -527,16 +569,20 @@ and clean pre-cancellation.
   Censored, saturated, and delayed records are typed audited refusals, not
   silently Gaussianized data. A time constant is retained as metadata but is
   not a delay correction.
-- The nonlinear observation v1 seam is one local central-finite-difference linearization,
-  not Gauss-Newton iteration, `fs-ad` automatic differentiation, a derivative
+- The finite-difference observation v1 seam is one local linearization,
+  not `fs-ad` automatic differentiation, a derivative
   certificate, or a nonlinear-posterior accuracy guarantee. It does not select
   or adapt the step, compare multiple steps for truncation/roundoff stability,
   prove model smoothness, retain an AD authority, or authenticate callback code.
   Its standardized-innovation threshold is caller policy for local demotion,
   not a validity certificate, calibrated hypothesis test, outlier likelihood,
-  convergence criterion, or `Color::Validated` promotion. Multi-iteration
-  solvers, automatic Jacobians, typed child-resource planning, temporal
-  augmentation, and calibrated full-rig replay remain separate work.
+  convergence criterion, or `Color::Validated` promotion. The separate iterated
+  API checks local stationarity and objective decrease, without certifying a
+  local/global minimum, nonlinear posterior accuracy, or derivative validity.
+  Its callback may supply an analytic, AD, or adjoint Jacobian, but this crate
+  does not construct or authenticate one. Automatic Jacobians, typed child
+  planning for iteration, temporal augmentation, and calibrated full-rig replay
+  remain separate work.
 - The observation covariance gate certifies PSD using the crate's existing
   bounded interval policy, then requires a successful binary64 Cholesky factor
   for whitening. This is not a condition-number certificate, an exact

@@ -9,6 +9,9 @@
 #[cfg(feature = "ensemble")]
 pub mod ensemble;
 
+/// Damped, iterated observation updates with caller-supplied model Jacobians.
+pub mod iterated;
+
 use fs_blake3::DomainHasher;
 use fs_exec::Cx;
 
