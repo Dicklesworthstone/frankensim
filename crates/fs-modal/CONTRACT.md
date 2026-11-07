@@ -824,6 +824,16 @@ complex transfer's displacement-quadrature term. This prevents a static load
 from being misreported as DC acoustic pressure while leaving free modal motion
 unchanged; the caller must provide the same generalized ZOH force that drove
 the structural transition.
+Every ZOH frame (`step[_into]` and `step_duration[_into]`) uses this same
+equilibrium-relative pressure before applying the acoustic ceiling. A settled
+load therefore consumes no pressure headroom, while load-on, release and
+oscillation about that load retain their signed amplitudes. Zero transfers and
+free coordinates need no compliance division; near-rigid modes can evaluate
+the finite quadrature `omega*q - F/omega` without representing `F/omega^2`.
+This baseline is specific to held-force observations; ramp, harmonic and
+impulse observation laws are unchanged. Inline G0/G1 regressions cover static
+silence across damping regimes and step APIs, analytic oscillation and signed
+load transients, pressure refusals and free/soft-coordinate limits.
 
 The acoustic realization is explicitly narrow-band: one complex transfer value
 per mode is exact only at that mode's natural frequency. Broadband radiation,

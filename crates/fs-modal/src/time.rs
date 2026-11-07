@@ -8,10 +8,12 @@
 //! has the standard mass-normalized units
 //! `q [m sqrt(kg)]`, `qdot [m sqrt(kg) / s]`, and modal energy [J].
 //!
-//! Each sample advances the viscously damped oscillator exactly for a
-//! zero-order-held force. The pressure observation
-//! `p = Re(H) qdot + Im(H) omega q` is the exact real-valued realization of a
-//! complex transfer `H` at that mode's natural frequency under the shared
+//! Each held-force sample advances the viscously damped oscillator exactly.
+//! Its pressure observation is relative to the held-load equilibrium:
+//! `p = Re(H) qdot + Im(H) omega (q - F/omega^2)`. Static deflection is silent;
+//! load-on and release transients retain their physical amplitude. With zero
+//! force this is the exact real-valued realization of a complex transfer `H`
+//! at that mode's natural frequency under the shared
 //! `exp(-i omega t)` convention. It is therefore a narrow-band modal
 //! radiation realization, not a broadband replacement for vector fitting an
 //! acoustic frequency response.
@@ -1027,9 +1029,13 @@ impl ModalAcousticTimeModel {
                 // No acoustic contribution, and no fictitious F/omega^2 baseline.
                 continue;
             }
-            let dynamic_displacement = state.displacement_m_sqrt_kg - force / (omega * omega);
             pressure_pa.add(transfer.re * state.velocity_m_sqrt_kg_per_s);
-            pressure_pa.add(transfer.im * omega * dynamic_displacement);
+            pressure_pa.add(held_force_pressure_quadrature(
+                omega,
+                state.displacement_m_sqrt_kg,
+                transfer.im,
+                *force,
+            ));
         }
         let pressure_pa = pressure_pa.value();
         if !pressure_pa.is_finite() {
@@ -1046,6 +1052,10 @@ impl ModalAcousticTimeModel {
     }
 
     /// Advance all modes by one exact zero-order-held sample.
+    ///
+    /// Narrow-band pressure observes vibration about the held force's static
+    /// equilibrium, so a settled load consumes no acoustic pressure headroom.
+    /// Actual load-on and release transients are retained.
     ///
     /// The step is transactional: a refusal leaves every state unchanged.
     ///
@@ -1216,13 +1226,16 @@ impl ModalAcousticTimeModel {
             });
         }
         let transition_coefficients = self.transition_kernel.for_duration(&self.modes, duration_s);
-        stage_modal_frame(
+        stage_modal_frame_with_held_forces(
             &self.modes,
             &self.states,
             self.budget,
             workspace,
-            "independent viscous heat and held-force energy balance disagree",
-            "aggregate viscous integral and held-force energy balance disagree",
+            (
+                "independent viscous heat and held-force energy balance disagree",
+                "aggregate viscous integral and held-force energy balance disagree",
+            ),
+            Some(generalized_force_n_per_sqrt_kg),
             |index, mode, state| {
                 let force = generalized_force_n_per_sqrt_kg[index];
                 let prepared = match transition_coefficients {
@@ -1340,6 +1353,31 @@ struct ModalStepData<Work = f64> {
     loss_allowance: f64,
 }
 
+// The imaginary narrow-band transfer acts on motion about the held load,
+// not on the static elastic deflection. Retain the established arithmetic
+// for ordinary modes; a near-rigid mode need not represent F/omega^2 just to
+// observe the finite velocity-like quadrature omega*q - F/omega.
+fn held_force_pressure_quadrature(
+    omega: f64,
+    displacement: f64,
+    transfer_im: f64,
+    force: f64,
+) -> f64 {
+    if transfer_im == 0.0 || omega == 0.0 {
+        return 0.0;
+    }
+    if force == 0.0 {
+        return transfer_im * omega * displacement;
+    }
+    let stiffness = omega * omega;
+    let dynamic_displacement = displacement - force / stiffness;
+    if stiffness.is_normal() && dynamic_displacement.is_finite() {
+        transfer_im * omega * dynamic_displacement
+    } else {
+        transfer_im * (omega * displacement - force / omega)
+    }
+}
+
 // Fixed-order Neumaier accumulation retains quiet coherent terms beside
 // cancelling modes and prevents separate large-bank energy sums from
 // overwhelming the independent work/heat audit. No physical tolerance changes.
@@ -1420,7 +1458,6 @@ impl ModalWork for fs_math::dd::Dd {
 // Shared state admission and independent work/heat balance for held forces,
 // ramps, harmonic loads and impulses. A forcing owner proposes motion and integrals;
 // it cannot bypass the physical budgets or commit only part of a mode bank.
-#[allow(clippy::too_many_lines)] // one shared, transactional physics loop
 fn stage_modal_frame<Work: ModalWork>(
     modes: &[ModalAcousticMode],
     states: &[ModalAcousticState],
@@ -1428,6 +1465,33 @@ fn stage_modal_frame<Work: ModalWork>(
     workspace: &mut ModalAcousticWorkspace,
     mode_balance_error: &'static str,
     aggregate_balance_error: &'static str,
+    advance: impl FnMut(
+        usize,
+        ModalAcousticMode,
+        ModalAcousticState,
+    ) -> Result<ModalStepData<Work>, ModalAcousticTimeError>,
+) -> Result<(), ModalAcousticTimeError> {
+    stage_modal_frame_with_held_forces(
+        modes,
+        states,
+        budget,
+        workspace,
+        (mode_balance_error, aggregate_balance_error),
+        None,
+        advance,
+    )
+}
+
+// Only genuine ZOH transitions supply an equilibrium baseline. Ramps,
+// harmonic trajectories and impulses retain their own observation semantics.
+#[allow(clippy::too_many_lines)] // one shared, transactional physics loop
+fn stage_modal_frame_with_held_forces<Work: ModalWork>(
+    modes: &[ModalAcousticMode],
+    states: &[ModalAcousticState],
+    budget: ModalAcousticTimeBudget,
+    workspace: &mut ModalAcousticWorkspace,
+    (mode_balance_error, aggregate_balance_error): (&'static str, &'static str),
+    held_forces: Option<&[f64]>,
     mut advance: impl FnMut(
         usize,
         ModalAcousticMode,
@@ -1502,11 +1566,19 @@ fn stage_modal_frame<Work: ModalWork>(
             roundoff_tolerance_j: loss_allowance,
         };
         pressure_pa.add(mode.pressure_per_modal_velocity.re * next.velocity_m_sqrt_kg_per_s);
-        pressure_pa.add(
+        let quadrature_pressure = if let Some(forces) = held_forces {
+            held_force_pressure_quadrature(
+                mode.angular_frequency_rad_s,
+                next.displacement_m_sqrt_kg,
+                mode.pressure_per_modal_velocity.im,
+                forces[index],
+            )
+        } else {
             mode.pressure_per_modal_velocity.im
                 * mode.angular_frequency_rad_s
-                * next.displacement_m_sqrt_kg,
-        );
+                * next.displacement_m_sqrt_kg
+        };
+        pressure_pa.add(quadrature_pressure);
         workspace.frame.modal_energy_j[index] = after;
         workspace.candidate[index] = next;
     }
@@ -1882,6 +1954,13 @@ mod tests {
         assert_eq!(
             actual.velocity_m_sqrt_kg_per_s.to_bits(),
             expected.velocity_m_sqrt_kg_per_s.to_bits()
+        );
+    }
+
+    fn assert_pressure_close(actual: f64, expected: f64) {
+        assert!(
+            actual.is_finite() && (actual - expected).abs() <= 64.0 * f64::EPSILON,
+            "pressure={actual:.17e} Pa, expected={expected:.17e} Pa"
         );
     }
 
@@ -2423,7 +2502,10 @@ mod tests {
         assert!((model.states()[0].velocity_m_sqrt_kg_per_s - expected_v).abs() < 1.0e-15);
         assert!((frame.input_work_j - frame.total_modal_energy_j).abs() < 1.0e-15);
         assert!(frame.viscous_dissipation_j.abs() <= frame.dissipation_roundoff_tolerance_j);
-        let expected_pressure = 2.0 * expected_v - 0.25 * omega * expected_q;
+        // The analytic transient is q-q_static = -F*cos(omega*t)/omega^2;
+        // the settled elastic deflection contributes no acoustic pressure.
+        let expected_pressure =
+            force / omega * (2.0 * det::sin(omega * dt) + 0.25 * det::cos(omega * dt));
         assert!((frame.observer_pressure_pa - expected_pressure).abs() < 1.0e-15);
     }
 
@@ -2617,6 +2699,176 @@ mod tests {
                 .unwrap()
                 .to_bits(),
             legacy.to_bits()
+        );
+    }
+
+    #[test]
+    fn g1_zoh_static_load_is_silent_with_physical_pressure_headroom() {
+        for damping_ratio in [0.0, 0.125, 1.0, 3.0] {
+            let mode = ModalAcousticMode {
+                angular_frequency_rad_s: 128.0,
+                damping_ratio,
+                pressure_per_modal_velocity: C64::new(1.25, -3.0),
+            };
+            let mut limits = budget();
+            limits.maximum_abs_pressure_pa = 1.0e-12;
+            let mut model = ModalAcousticTimeModel::try_new(48_000, vec![mode], limits).unwrap();
+            let forces = [2.0];
+            model.initialize_static_equilibrium(&forces).unwrap();
+            let initial = model.states()[0];
+            let mut workspace = ModalAcousticWorkspace::new(&model);
+            // The old total-displacement quadrature contributed -0.046875 Pa
+            // and rejected this motionless equilibrium against the pressure cap.
+            let frames = [
+                model.step(&forces).unwrap(),
+                model.step_into(&forces, &mut workspace).unwrap().clone(),
+                model.step_duration(&forces, 0.000_37).unwrap(),
+                model
+                    .step_duration_into(&forces, 0.5 / 48_000.0, &mut workspace)
+                    .unwrap()
+                    .clone(),
+            ];
+            for frame in frames {
+                assert_eq!(frame.observer_pressure_pa, 0.0);
+                assert_eq!(frame.input_work_j, 0.0);
+                assert_eq!(frame.viscous_dissipation_j, 0.0);
+                assert!(frame.total_modal_energy_j > 0.0);
+            }
+            assert_state_bits_eq(model.states()[0], initial);
+        }
+    }
+
+    #[test]
+    fn g1_zoh_pressure_retains_signed_oscillation_about_static_load() {
+        let omega = 128.0;
+        let transfer = C64::new(2.0, -3.0);
+        let force = 64.0;
+        let equilibrium = force / (omega * omega);
+        let mode = ModalAcousticMode {
+            angular_frequency_rad_s: omega,
+            damping_ratio: 0.0,
+            pressure_per_modal_velocity: transfer,
+        };
+        let mut limits = budget();
+        limits.maximum_abs_pressure_pa = 1.0;
+        let seed = ModalAcousticTimeModel::try_new(48_000, vec![mode], limits).unwrap();
+        for scale in [0.25, 1.0, -2.0] {
+            let q0 = scale / 4_096.0;
+            let v0 = -0.125 * scale;
+            for duration in [0.001, 0.01, 0.023, 0.04] {
+                let mut model = seed.clone();
+                model
+                    .restore_states(&[ModalAcousticState {
+                        displacement_m_sqrt_kg: equilibrium + q0,
+                        velocity_m_sqrt_kg_per_s: v0,
+                    }])
+                    .unwrap();
+                let phase = omega * duration;
+                let dynamic_q = q0 * det::cos(phase) + v0 / omega * det::sin(phase);
+                let velocity = -omega * q0 * det::sin(phase) + v0 * det::cos(phase);
+                let expected = transfer.re * velocity + transfer.im * omega * dynamic_q;
+                let frame = model.step_duration(&[force], duration).unwrap();
+                assert_pressure_close(frame.observer_pressure_pa, expected);
+                assert_eq!(
+                    frame.observer_pressure_pa,
+                    model
+                        .observer_pressure_with_transfers_about_static_equilibrium(
+                            &[transfer],
+                            &[force],
+                        )
+                        .unwrap(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g1_zoh_load_on_and_release_preserve_signed_pressure_transients() {
+        let omega = 128.0;
+        let transfer = C64::new(2.0, -3.0);
+        let mode = ModalAcousticMode {
+            angular_frequency_rad_s: omega,
+            damping_ratio: 0.0,
+            pressure_per_modal_velocity: transfer,
+        };
+        let seed = ModalAcousticTimeModel::try_new(48_000, vec![mode], budget()).unwrap();
+        for force in [-2.0, 1.0, 4.0] {
+            for phase in [0.2, 1.5, 3.0, 4.8] {
+                let duration = phase / omega;
+                // A suddenly applied force gives q-q_static=-F*cos(wt)/w^2
+                // and v=F*sin(wt)/w. A released settled load gives their negatives.
+                let expected =
+                    force / omega * (transfer.re * det::sin(phase) - transfer.im * det::cos(phase));
+                let mut attack = seed.clone();
+                let attack_frame = attack.step_duration(&[force], duration).unwrap();
+                assert_pressure_close(attack_frame.observer_pressure_pa, expected);
+
+                let mut release = seed.clone();
+                release.initialize_static_equilibrium(&[force]).unwrap();
+                let release_frame = release.step_duration(&[0.0], duration).unwrap();
+                assert_pressure_close(release_frame.observer_pressure_pa, -expected);
+            }
+        }
+    }
+
+    #[test]
+    fn g0_zoh_pressure_cap_rejects_a_real_attack_transactionally() {
+        let mode = ModalAcousticMode {
+            angular_frequency_rad_s: 128.0,
+            damping_ratio: 0.0,
+            pressure_per_modal_velocity: C64::new(0.0, 1.0),
+        };
+        let mut limits = budget();
+        limits.maximum_abs_pressure_pa = 0.001;
+        let mut model = ModalAcousticTimeModel::try_new(48_000, vec![mode], limits).unwrap();
+        let initial = model.states().to_vec();
+        let mut workspace = ModalAcousticWorkspace::new(&model);
+        assert!(matches!(
+            model.step_into(&[2.0], &mut workspace),
+            Err(ModalAcousticTimeError::BudgetExceeded {
+                what: "absolute observer pressure",
+                ..
+            }),
+        ));
+        assert_eq!(model.states(), initial);
+    }
+
+    #[test]
+    fn g1_zoh_pressure_does_not_require_unrepresentable_static_compliance() {
+        let modes = vec![
+            ModalAcousticMode {
+                angular_frequency_rad_s: 0.0,
+                damping_ratio: 0.0,
+                pressure_per_modal_velocity: C64::ZERO,
+            },
+            ModalAcousticMode {
+                angular_frequency_rad_s: 1.0e-200,
+                damping_ratio: 0.0,
+                pressure_per_modal_velocity: C64::from_re(2.0),
+            },
+            ModalAcousticMode {
+                angular_frequency_rad_s: 1.0e-200,
+                damping_ratio: 0.0,
+                pressure_per_modal_velocity: C64::new(0.0, 1.0),
+            },
+        ];
+        let transfers: Vec<_> = modes
+            .iter()
+            .map(|mode| mode.pressure_per_modal_velocity)
+            .collect();
+        let mut model =
+            ModalAcousticTimeModel::try_new_with_free_coordinates(48_000, modes, budget()).unwrap();
+        let forces = [2.0, 3.0, 1.0e-200];
+        let frame = model.step_duration(&forces, 0.125).unwrap();
+        // The free coordinate is silent. The real transfer contributes 0.75 Pa;
+        // the imaginary transfer contributes -F/omega=-1 Pa even though omega^2
+        // underflows. No fictitious infinite static displacement is needed.
+        assert_eq!(frame.observer_pressure_pa, -0.25);
+        assert_eq!(
+            frame.observer_pressure_pa,
+            model
+                .observer_pressure_with_transfers_about_static_equilibrium(&transfers, &forces)
+                .unwrap(),
         );
     }
 
