@@ -4,6 +4,7 @@ use super::{
     atmosphere::DryBasisSorption,
     binding::MoistureField,
     cartesian::{MoistureCartesian, MoistureCartesianReport},
+    radial::MoistureRadial,
     sdirk::StageLoad,
     surface::ResolvedMoistureFace,
     *,
@@ -106,6 +107,25 @@ impl ReservoirField<6> for MoistureCartesian {
     }
 }
 
+impl ReservoirField<2> for MoistureRadial {
+    type Report = MoistureStepReport;
+    type Controls = (MoistureStepConfig, MoistureNonlinearConfig);
+
+    fn inventory(&self) -> MoistureField<'_> {
+        self.field()
+    }
+
+    fn advance_resolved(
+        &self,
+        dt_s: f64,
+        boundary: [ResolvedMoistureFace; 2],
+        controls: Self::Controls,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, Self::Report), MoistureError> {
+        self.advance_stage(dt_s, dt_s, boundary, controls.0, controls.1, None, cx)
+    }
+}
+
 pub(super) struct ReservoirParticipant<'a, F: ReservoirField<N>, const N: usize> {
     pub id: u64,
     pub field: &'a F,
@@ -158,6 +178,62 @@ impl ReservoirField<6> for CartesianSdirkStage<'_> {
             dt_s,
             self.implicit_dt_s,
             boundaries,
+            controls.0,
+            controls.1,
+            Some(self.known),
+            cx,
+        )?;
+        Ok((
+            Self {
+                field: Cow::Owned(field),
+                known: self.known,
+                implicit_dt_s: self.implicit_dt_s,
+            },
+            report,
+        ))
+    }
+}
+
+/// Borrow original curved-shell storage during finite-reservoir stage trials.
+pub(super) struct RadialSdirkStage<'a> {
+    field: Cow<'a, MoistureRadial>,
+    known: &'a StageLoad,
+    implicit_dt_s: f64,
+}
+
+impl<'a> RadialSdirkStage<'a> {
+    pub(super) fn new(field: &'a MoistureRadial, known: &'a StageLoad, implicit_dt_s: f64) -> Self {
+        Self {
+            field: Cow::Borrowed(field),
+            known,
+            implicit_dt_s,
+        }
+    }
+
+    pub(super) fn into_field(self) -> MoistureRadial {
+        self.field.into_owned()
+    }
+}
+
+impl ReservoirField<2> for RadialSdirkStage<'_> {
+    type Report = MoistureStepReport;
+    type Controls = (MoistureStepConfig, MoistureNonlinearConfig);
+
+    fn inventory(&self) -> MoistureField<'_> {
+        self.field.field()
+    }
+
+    fn advance_resolved(
+        &self,
+        dt_s: f64,
+        boundary: [ResolvedMoistureFace; 2],
+        controls: Self::Controls,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, Self::Report), MoistureError> {
+        let (field, report) = self.field.advance_stage(
+            dt_s,
+            self.implicit_dt_s,
+            boundary,
             controls.0,
             controls.1,
             Some(self.known),

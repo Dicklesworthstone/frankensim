@@ -6,6 +6,8 @@ use fs_couple::moisture::radial::*;
 mod adaptive;
 #[path = "radial/atmosphere.rs"]
 mod finite_atmosphere;
+#[path = "radial/solution.rs"]
+mod finite_solution;
 #[path = "radial/sdirk.rs"]
 mod sdirk;
 

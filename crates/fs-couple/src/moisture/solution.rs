@@ -43,12 +43,18 @@
 //! Mechanical response is one way; elastic work does not feed solvent chemical
 //! potential, and no closed chemo-mechanical energy balance is claimed.
 
+mod radial;
 mod shared;
 
 // These are views of the original physical fields and their native receipts;
 // they carry no vapor inventory or atmospheric solver state.
 pub use super::atmosphere::{
     CartesianMoistureParticipant, MoistureParticipant, SharedMoistureSolid,
+};
+pub use super::radial::atmosphere::RadialMoistureParticipant;
+pub use radial::{
+    RadialSolutionMoistureCandidate, RadialSolutionSdirk2Candidate, RadialSolutionSdirk2Step,
+    SharedRadialSolutionMoistureCandidate, SharedRadialSolutionSdirk2Candidate,
 };
 pub use shared::{
     CartesianSolutionSdirk2Candidate, CartesianSolutionSdirk2Step,

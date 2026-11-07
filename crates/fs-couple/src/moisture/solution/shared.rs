@@ -38,6 +38,18 @@ pub struct SharedSolutionMoistureCandidate<Field = MoistureSlab, Report = Moistu
     step: SharedSolutionMoistureStep,
 }
 impl<Field, Report> SharedSolutionMoistureCandidate<Field, Report> {
+    pub(super) fn from_accepted(
+        reservoir: FiniteMoistureSolution,
+        solids: Vec<SharedMoistureSolid<Field, Report>>,
+        step: SharedSolutionMoistureStep,
+    ) -> Self {
+        Self {
+            reservoir,
+            solids,
+            step,
+        }
+    }
+
     pub const fn reservoir(&self) -> &FiniteMoistureSolution {
         &self.reservoir
     }
@@ -69,7 +81,7 @@ struct Trial<Field, Report> {
     residual_kg: f64,
 }
 
-fn admit_count(count: usize, maximum: usize) -> Result<(), SolutionMoistureError> {
+pub(super) fn admit_count(count: usize, maximum: usize) -> Result<(), SolutionMoistureError> {
     if count == 0
         || maximum == 0
         || maximum > crate::moisture::MAX_MOISTURE_CELLS
@@ -169,8 +181,7 @@ impl FiniteMoistureSolution {
                     "shared-solution total cell budget exhausted",
                 ))?;
             if inventory.time_s.to_bits() != time_s.to_bits()
-                || inventory.temperature_kelvin().to_bits()
-                    != temperature.to_bits()
+                || inventory.temperature_kelvin().to_bits() != temperature.to_bits()
             {
                 return Err(SolutionMoistureError::Invalid(
                     "shared solution specimens need the same accepted clock and solution temperature",

@@ -3218,6 +3218,32 @@ eigenmode, nonlinear dry-front balance and finite surface flux define the focuse
 verification in `tests/moisture/radial.rs`; they are not measured validation or
 a continuum-error certificate for an arbitrary mesh or time step.
 
+### Finite solution activity on radial geometry
+
+`FiniteMoistureSolution::advance_radial` and `advance_shared_radial` connect
+native cylindrical and spherical diffusion to the original finite aqueous
+inventory. Each shell contributes its actual dry-mass-weighted water change;
+one common activity root retains all nonvolatile solutes and any admitted
+neutral/ionic or kinetic phase owner. Curved half-cell resistance, nonlinear
+Kirchhoff transport and sourced surface exchange remain in the radial solver.
+Stable specimen IDs fix signed transfer summation, and all fields and the
+solution publish together after the original water and source checks.
+
+The corresponding `advance_radial_sdirk2` and `advance_shared_radial_sdirk2`
+solve activity at both physical stages. Both start from the original solution
+inventory; the final report already contains the full weighted water transfer.
+Kinetic crystallization explicitly refuses this second-order path because its
+endpoint-frozen phase law supplies no RK stage equations. Equilibrium crystal
+stocks remain finite and may buffer the activity. Smooth-branch temporal
+accuracy requires refinement; phase events need their own resolution.
+
+The coupling retains prescribed common temperature, equal pressure and an
+equilibrated vapor path with negligible vapor storage. It does not reinterpret
+vapor transfer coefficients as liquid-immersion permeability or move solutes
+into the solid. Five focused authored regressions define analytic curved uptake
+and release, concentration feedback, unequal-shell shared conservation/order,
+second-order convergence, finite crystal buffering and transactional refusal.
+
 ### Finite atmosphere exchange on radial geometry
 
 `FiniteMoistureAtmosphere::advance_radial`, `advance_shared_radial` and
