@@ -6,6 +6,8 @@
 //! direction and coefficient normalization have already been resolved by the
 //! source. A J2 hardening slope, hardness or elongation cannot supply missing
 //! directional data. The caller explicitly binds fixed material axes.
+//! Mixed hardening additionally selects its own Prager coefficient C in
+//! X=C*eps_p; the J2 uniaxial H_k convention is never substituted.
 //!
 //! Original claims, conditions, units, uncertainty and usage receipts remain
 //! in the complete material bundle. This adapter freezes supported external
@@ -37,6 +39,9 @@ pub const HILL_REFERENCE_YIELD_STRESS_PROPERTY: &str = "hill_reference_yield_str
 /// Energetic dY/dalpha [Pa] for Hill's work-conjugate accumulated flow.
 /// An isotropic J2 equivalent-strain modulus is not substituted.
 pub const HILL_HARDENING_MODULUS_PROPERTY: &str = "hill_hardening_modulus";
+/// Energetic Prager coefficient C [Pa] in `X=C*eps_p`, with storage
+/// `C*eps_p:eps_p/2`. This is not the J2 uniaxial hardening modulus H_k.
+pub const HILL_KINEMATIC_MODULUS_PROPERTY: &str = "hill_kinematic_hardening_modulus";
 /// Dimensionless coefficients in the exact order F, G, H, L, M, N.
 /// Normal stress differences use F/G/H; shear yz/zx/xy uses 2L/2M/2N.
 pub const HILL_COEFFICIENT_PROPERTIES: [&str; 6] = [
@@ -90,6 +95,19 @@ pub fn hill48_requirements() -> Result<Vec<ScalarPropertyRequirement>, MaterialS
     Ok(requirements)
 }
 
+/// All eleven independent coefficients of mixed isotropic/Prager Hill flow.
+/// An explicitly sourced zero C preserves the isotropic-hardening model.
+pub fn hill48_mixed_requirements() -> Result<Vec<ScalarPropertyRequirement>, MaterialStatePointError>
+{
+    let mut requirements = hill48_requirements()?;
+    requirements.push(ScalarPropertyRequirement::try_new(
+        HILL_KINEMATIC_MODULUS_PROPERTY,
+        Pressure::DIMS,
+        ScalarAdmissibility::NonNegative,
+    )?);
+    Ok(requirements)
+}
+
 /// Original source bundle, immutable orientation and one native constitutive law.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedHill48 {
@@ -134,6 +152,30 @@ impl ResolvedHill48 {
         )?;
         let law = OrientedHill48::new(local, material_to_spatial)?;
         Ok(Self { material, law })
+    }
+
+    /// Opt into the original native Prager law using the independently selected
+    /// C already retained in this material bundle. Every original receipt and
+    /// the immutable orientation survive. The ordinary constructor retains C=0
+    /// even if an extra C receipt is present, until this explicit opt-in.
+    ///
+    /// Select this before retaining specimen history; this constructor does
+    /// not rebind an existing accepted state or infer C from J2, tensile or
+    /// isotropic-hardening data. Missing, negative or unowned-axis C refuses.
+    pub fn with_linear_kinematic_hardening(mut self) -> Result<Self, HillSourceError> {
+        let modulus = coefficient(
+            &self.material,
+            HILL_KINEMATIC_MODULUS_PROPERTY,
+            Pressure::DIMS,
+        )?
+        .value_si();
+        let local = self
+            .law
+            .law()
+            .clone()
+            .with_linear_kinematic_hardening(modulus)?;
+        self.law = OrientedHill48::new(local, *self.law.material_to_spatial())?;
+        Ok(self)
     }
 
     /// Complete original material identity, query, source selection and receipts.
@@ -203,6 +245,21 @@ pub fn resolve_hill48(
 ) -> Result<ResolvedHill48, HillSourceError> {
     let material = resolve_material_state_point(card, point, &hill48_requirements()?, selection)?;
     ResolvedHill48::try_from_material(material, strain_limit, material_to_spatial)
+}
+
+/// Resolve all independent mixed-hardening coefficients at one fixed physical
+/// point, retaining their source selection and explicit material orientation.
+pub fn resolve_hill48_mixed(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    selection: MaterialPropertySelection,
+    strain_limit: f64,
+    material_to_spatial: [[f64; 3]; 3],
+) -> Result<ResolvedHill48, HillSourceError> {
+    let material =
+        resolve_material_state_point(card, point, &hill48_mixed_requirements()?, selection)?;
+    ResolvedHill48::try_from_material(material, strain_limit, material_to_spatial)?
+        .with_linear_kinematic_hardening()
 }
 
 /// Original source, elasticity, orientation or native Hill refusal.

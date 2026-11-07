@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::plastic::hill::source::{
-    HILL_COEFFICIENT_PROPERTIES, HILL_HARDENING_MODULUS_PROPERTY,
+    HILL_COEFFICIENT_PROPERTIES, HILL_HARDENING_MODULUS_PROPERTY, HILL_KINEMATIC_MODULUS_PROPERTY,
     HILL_REFERENCE_YIELD_STRESS_PROPERTY, hill48_requirements,
 };
 use crate::state_point::{
@@ -11,7 +11,7 @@ use crate::state_point::{
     pinned_temperature_line, resolve_material_state_point,
 };
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-use fs_qty::{Dims, QuantitySpec, Temperature};
+use fs_qty::{Dims, Pressure, QuantitySpec, Temperature};
 
 /// Fixed source context and independently selected Hill directional data.
 /// The initial query temperature must agree with the supplied initial enthalpy.
@@ -304,12 +304,114 @@ impl<'a> ThermalHillSource<'a> {
             expansion_per_k,
             youngs_slope_pa_k: youngs_slope,
             hardening_slope_pa_k: hardening_slope,
+            kinematic_slope_pa_k: None,
         };
         // The native owner checks elasticity and the return-map denominator at
         // both affine extrema. Convex combinations keep the fixed Hill metric.
         result.resolve_temperature(knots[0].temperature_k)?;
         result.resolve_temperature(knots[knots.len() - 1].temperature_k)?;
         Ok(result)
+    }
+
+    /// Select independently sourced energetic Prager hardening before retaining
+    /// any material histories. The source is C [Pa] in X=C*eps_p and
+    /// psi_k=C*eps_p:eps_p/2, not the differently normalized J2 H_k modulus.
+    /// C must be affine and nonnegative throughout the original caloric span;
+    /// zero is admitted without dividing by C or changing the strain-like state.
+    /// The fixed-history second temperature derivative is zero, so this adds
+    /// no hidden hardening term to the admitted effective heat capacity.
+    pub fn with_linear_kinematic_hardening(
+        mut self,
+        selection: MaterialPropertySelection,
+    ) -> Result<Self, ThermalHillError> {
+        let invalid = ThermalHillError::Invalid;
+        if self.kinematic_slope_pa_k.is_some()
+            || self
+                .requirements
+                .iter()
+                .any(|r| r.name() == HILL_KINEMATIC_MODULUS_PROPERTY)
+        {
+            return Err(invalid(
+                "Hill kinematic hardening must be selected once as a distinct material role",
+            ));
+        }
+        let requirement = ScalarPropertyRequirement::try_new(
+            HILL_KINEMATIC_MODULUS_PROPERTY,
+            Pressure::DIMS,
+            ScalarAdmissibility::NonNegative,
+        )?;
+        let resolved = resolve_material_state_point(
+            self.card,
+            &self.context,
+            std::slice::from_ref(&requirement),
+            selection,
+        )?;
+        let property = &resolved.properties()[0];
+        self.thermal_material_point().admit_static(property)?;
+        if !property.has_only_fixed_external_conditions(Some(&self.temperature_axis), false)
+            || property.angular_frequency_band_rad_s()?.is_some()
+        {
+            return Err(invalid(
+                "kinematic hardening requires only the owned temperature and fixed external conditions, without rate or frequency dependence",
+            ));
+        }
+        let selected = property.answer().receipt.selected;
+        let claim = self.card.claims().claim(selected).ok_or(invalid(
+            "selected Hill kinematic source is absent from the original material card",
+        ))?;
+        let knots = self.caloric.curve().knots();
+        let lower = point_at(
+            &self.context,
+            &self.temperature_axis,
+            knots[0].temperature_k,
+        )?;
+        let upper = point_at(
+            &self.context,
+            &self.temperature_axis,
+            knots[knots.len() - 1].temperature_k,
+        )?;
+        let path = pinned_temperature_line(
+            self.card,
+            &claim.key,
+            &self.temperature_axis,
+            &lower,
+            &upper,
+            selected,
+        )?;
+        if path
+            .iter()
+            .any(|(_, value)| !value.is_finite() || *value < 0.0)
+        {
+            return Err(invalid(
+                "Hill kinematic modulus must remain finite and nonnegative on every source-line cell",
+            ));
+        }
+        let slope =
+            affine_temperature_slope(&path, self.reference_temperature_k, property.value_si())
+                .map_err(invalid)?;
+        let MaterialPropertySelection::PinnedByProperty(pins) = &mut self.selection else {
+            return Err(invalid("thermal Hill source lost its original claim pins"));
+        };
+        pins.push((HILL_KINEMATIC_MODULUS_PROPERTY.to_owned(), selected));
+        self.requirements.push(requirement);
+        let bundle = resolve_material_state_point(
+            self.card,
+            &self.context,
+            &self.requirements,
+            self.selection.clone(),
+        )?;
+        self.reference = ResolvedHill48::try_from_material(
+            bundle,
+            self.reference.local_law().elastic().strain_limit,
+            *self.reference.law().material_to_spatial(),
+        )?
+        .with_linear_kinematic_hardening()?;
+        self.kinematic_slope_pa_k = Some(slope);
+        // Endpoint checks use the original scalar return denominator. Affine
+        // C and E cannot hide an interior maximum or minimum between them.
+        self.resolve_temperature(knots[0].temperature_k)?;
+        self.resolve_temperature(knots[knots.len() - 1].temperature_k)?;
+        Ok(self)
     }
 
     /// Complete initial source bundle, including original caloric receipts.
@@ -340,11 +442,16 @@ impl<'a> ThermalHillSource<'a> {
             &self.requirements,
             self.selection.clone(),
         )?;
-        Ok(ResolvedHill48::try_from_material(
+        let resolved = ResolvedHill48::try_from_material(
             bundle,
             self.reference.local_law().elastic().strain_limit,
             *self.reference.law().material_to_spatial(),
-        )?)
+        )?;
+        Ok(if self.kinematic_slope_pa_k.is_some() {
+            resolved.with_linear_kinematic_hardening()?
+        } else {
+            resolved
+        })
     }
 }
 

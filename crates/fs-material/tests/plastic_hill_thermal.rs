@@ -1,6 +1,9 @@
 //! G0/G1/G3: source-bound anisotropic heating on the original Hill and section owners.
 //! The numerical coefficients below are authored fixtures, not measured sheet data.
 
+#[path = "plastic_hill_thermal/mixed.rs"]
+mod mixed;
+
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,

@@ -18983,3 +18983,30 @@ condensed tangent. Scoped parsing, formatting and scalar reference checks do
 not replace native compilation or execution. These are bounded small-strain
 material laws with prescribed endpoint temperature; a thermal fiber alone does
 not solve heat transport, add damage or establish calibrated service life.
+
+## Source-bound mixed and thermal Hill hardening
+
+`hill48_mixed_requirements`, `resolve_hill48_mixed` and the explicit
+`ResolvedHill48::with_linear_kinematic_hardening` opt-in select the independent
+`hill_kinematic_hardening_modulus` C [Pa]. Native Prager backstress is X=C eps_p
+and recoverable storage is C eps_p:eps_p/2, including tensor shear twice. J2
+uniaxial H_k, scalar tensile slopes and missing directional data cannot stand in
+for this source. Original source claims, fixed material axes, scalar return,
+analytical tangent and local plastic history remain owned by the native law.
+The ordinary constructor retains C=0 until the explicit opt-in.
+
+`ThermalHillSource::with_linear_kinematic_hardening` pins a nonnegative affine
+C(T) over every source-line cell and refuses repeated selection or aliasing.
+Each endpoint refreshes that same claim. Mechanical entropy includes
+-C' eps_p:eps_p/2; frozen-history coefficient work includes
+(C1-C0) eps_p0:eps_p0/2. The complete native yield heat and numerical loss remain
+separate. C may reach zero without dividing by it, rescaling a backstress or
+replacing retained plastic strain. Affine C has no additional frozen-history
+second-temperature derivative in the existing capacity admission.
+
+`tests/plastic_hill_source_mixed.rs` covers source/native cyclic parity, exact
+zero-C equivalence, directional Bauschinger thresholds/tangents and source-role
+refusals. `tests/plastic_hill_thermal/mixed.rs` covers native section reversals,
+independent tensor storage/entropy through C=0, original claim pins and corrupt
+history refusal. These authored conformance cases do not establish nonlinear
+recovery, texture evolution, rate dependence or measured-alloy calibration.

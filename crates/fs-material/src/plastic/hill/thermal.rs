@@ -1,14 +1,18 @@
 //! Source-bound heating of the original fixed-axis Hill return map.
 //!
 //! The anisotropic metric and material frame stay fixed. The reference yield
-//! radius may vary with temperature; elastic and energetic hardening moduli
-//! are affine, with fixed Poisson ratio and reference density. Optional sourced
-//! isotropic expansion is constant. These restrictions keep the retained Hill
+//! radius may vary with temperature; elastic and energetic isotropic/Prager
+//! hardening moduli are affine, with fixed Poisson ratio and reference density.
+//! Optional sourced isotropic expansion is constant. These restrictions keep the retained Hill
 //! multiplier meaningful and the mechanical entropy differentiable.
 //!
 //! With e = eps - eps_p - a(T-T_ref)I, the free energy is
-//! psi = e:C(T):e/2 + H(T)alpha²/2. Its mechanical entropy is
-//! s = a tr(sigma) - (E'/E)psi_elastic - H'alpha²/2.
+//! psi = e:C_el(T):e/2 + H(T)alpha²/2 + C_k(T)eps_p:eps_p/2.
+//! Its mechanical entropy is
+//! s = a tr(sigma) - (E'/E)psi_elastic - H'alpha²/2 - C_k'eps_p:eps_p/2.
+//! Prager hardening requires an explicit independent source selection. Its
+//! retained coordinate is plastic strain, so changing C_k, including reaching
+//! zero, never divides by the modulus or discards a backstress history.
 //! Native endpoint yield work is physical heat. Coefficient storage and delta(Ts)
 //! give the separate reversible caloric transfer; numerical loss is never heat.
 //! The existing thermal section/shell owners perform reduction, equilibrium,
@@ -97,6 +101,9 @@ pub struct ThermalHillSource<'a> {
     expansion_per_k: f64,
     youngs_slope_pa_k: f64,
     hardening_slope_pa_k: f64,
+    /// None means no kinematic source was selected; Some(0) is an explicitly
+    /// selected constant modulus. The original source bundle owns its value.
+    kinematic_slope_pa_k: Option<f64>,
 }
 
 /// The original oriented Hill law at one endpoint, with stress-free expansion.
@@ -221,13 +228,13 @@ impl ThermalHillSource<'_> {
         };
         // Both native energies use E(T1); E'/E1 times native initial energy
         // equals E'/E0 times actual initial energy, including E'(T)=0.
-        let old_entropy = entropy(&old_stress, energy.initial.elastic_j_m3, old_square)?;
-        let new_entropy = entropy(
+        let mut old_entropy = entropy(&old_stress, energy.initial.elastic_j_m3, old_square)?;
+        let mut new_entropy = entropy(
             &native.response.stress_pa,
             energy.final_state.elastic_j_m3,
             new_square,
         )?;
-        let coefficient_storage_change_j_m3 = finite(
+        let mut coefficient_storage_change_j_m3 = finite(
             product(
                 (law.elastic().youngs - old_law.elastic().youngs) / law.elastic().youngs,
                 energy.initial.elastic_j_m3,
@@ -236,29 +243,54 @@ impl ThermalHillSource<'_> {
                 old_square,
             )?,
         )?;
+        let kinematic_slope = self.kinematic_slope_pa_k.unwrap_or(0.0);
+        if kinematic_slope != 0.0 {
+            // Plastic strain is already the retained Prager coordinate in
+            // fixed material axes. Differentiate the native C*eps_p:eps_p/2
+            // directly; neither C=0 nor a stress-free endpoint loses history.
+            let old_shape = product(0.5, contract(&old.plastic_strain, &old.plastic_strain))?;
+            let new_shape = product(
+                0.5,
+                contract(
+                    &native.response.state.plastic_strain,
+                    &native.response.state.plastic_strain,
+                ),
+            )?;
+            old_entropy = finite(old_entropy - product(kinematic_slope, old_shape)?)?;
+            new_entropy = finite(new_entropy - product(kinematic_slope, new_shape)?)?;
+            coefficient_storage_change_j_m3 = finite(
+                coefficient_storage_change_j_m3
+                    + product(
+                        law.kinematic_modulus_pa() - old_law.kinematic_modulus_pa(),
+                        old_shape,
+                    )?,
+            )?;
+        }
         let thermoelastic_storage_change_j_m3 = finite(
             product(phase.temperature_k(), new_entropy)?
                 - product(old_phase.temperature_k(), old_entropy)?,
         )?;
-        let reversible_heat_j_m3 =
-            if self.youngs_slope_pa_k == 0.0 && self.hardening_slope_pa_k == 0.0 {
-                // Exact constant-modulus reduction avoids subtracting large T*s terms.
+        let reversible_heat_j_m3 = if self.youngs_slope_pa_k == 0.0
+            && self.hardening_slope_pa_k == 0.0
+            && kinematic_slope == 0.0
+        {
+            // Exact constant-modulus reduction avoids subtracting large T*s terms.
+            product(
+                -old_phase.temperature_k(),
+                finite(new_entropy - old_entropy)?,
+            )?
+        } else {
+            finite(
                 product(
-                    -old_phase.temperature_k(),
-                    finite(new_entropy - old_entropy)?,
-                )?
-            } else {
-                finite(
+                    trace(&native.response.stress_pa),
                     product(
-                        trace(&native.response.stress_pa),
-                        product(
-                            self.expansion_per_k,
-                            phase.temperature_k() - old_phase.temperature_k(),
-                        )?,
-                    )? - coefficient_storage_change_j_m3
-                        - thermoelastic_storage_change_j_m3,
-                )?
-            };
+                        self.expansion_per_k,
+                        phase.temperature_k() - old_phase.temperature_k(),
+                    )?,
+                )? - coefficient_storage_change_j_m3
+                    - thermoelastic_storage_change_j_m3,
+            )?
+        };
         let stored_change_j_m3 =
             finite(energy.stored_change_j_m3() + coefficient_storage_change_j_m3)?;
         let delta = core::array::from_fn(|i| strain[i] - old_strain[i]);
