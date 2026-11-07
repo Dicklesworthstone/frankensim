@@ -15,7 +15,8 @@ use fs_material::plane_stress_viscosity::{
 };
 use fs_material::state_point::{
     IsotropicElasticStatePoint, MaterialPropertySelection, MaterialStatePointError,
-    ScalarAdmissibility, ScalarPropertyRequirement, resolve_isotropic_elastic_state_point,
+    ResolvedMaterialStatePoint, ScalarAdmissibility, ScalarPropertyRequirement,
+    resolve_isotropic_elastic_state_point,
     resolve_material_state_point,
 };
 use fs_qty::{
@@ -117,7 +118,7 @@ pub struct KitMaterials {
 }
 
 /// The film claim a film loss reads: the loss tangent as a curve over a typed
-/// cyclic-frequency axis, at the head's temperature.
+/// cyclic-frequency axis, at the head's complete held material environment.
 pub const FILM_LOSS_TANGENT: &str = "loss_tangent_tensile";
 
 /// Carried in place of FILM_LOSS_STATED_UNKNOWN_RECEIPT by a drum whose film
@@ -128,11 +129,13 @@ pub const EDGE_LOSS_STATED_UNKNOWN_RECEIPT: &str = "head edge, hoop, shell and m
 /// Where the head cards' FILM_LOSS_TANGENT curve is read.
 #[derive(Clone, Debug, PartialEq)]
 struct FilmCurve {
-    temperature_axis: String,
     frequency_axis: String,
     temperature_k: f64,
     /// Each head card's frequency band [Hz], from its claim's validity.
     band_hz: [(f64, f64); 2],
+    /// Selected claims at the complete original environment and each band's
+    /// lower frequency. Refresh changes only this owner's frequency coordinate.
+    sources: [ResolvedMaterialStatePoint; 2],
 }
 
 /// One head card's FILM_LOSS_TANGENT at `frequency_hz`, through the canonical
@@ -140,32 +143,22 @@ struct FilmCurve {
 fn film_curve_tan_delta(
     pack: &NormalizedMaterialCardPack,
     curve: &FilmCurve,
+    head: usize,
     frequency_hz: f64,
 ) -> Result<f64, String> {
-    let point = temperature_frequency_point(
-        &curve.temperature_axis,
-        curve.temperature_k,
-        &curve.frequency_axis,
-        frequency_hz,
-    )?;
-    let requirement = ScalarPropertyRequirement::try_new(
-        FILM_LOSS_TANGENT,
-        Dims::NONE,
-        ScalarAdmissibility::StrictlyPositive,
-    )
-    .map_err(|e| e.to_string())?;
-    resolve_material_state_point(
-        pack.card(),
-        &point,
-        &[requirement],
-        MaterialPropertySelection::SingleClaimOnly,
-    )
-    .map_err(|e| {
-        format!("film loss curve: the head card does not resolve {FILM_LOSS_TANGENT} at {frequency_hz} Hz: {e}")
-    })?
-    .property(FILM_LOSS_TANGENT)
-    .map(|p| p.value_si())
-    .ok_or_else(|| format!("film loss curve: {FILM_LOSS_TANGENT} did not resolve"))
+    let source = &curve.sources[head];
+    let point = source
+        .query()
+        .with(&curve.frequency_axis, frequency_hz)
+        .map_err(|e| e.to_string())?;
+    source
+        .at_query_point(pack.card(), &point)
+        .map_err(|e| {
+            format!("film loss curve: the head card does not resolve {FILM_LOSS_TANGENT} at {frequency_hz} Hz: {e}")
+        })?
+        .property(FILM_LOSS_TANGENT)
+        .map(|p| p.value_si())
+        .ok_or_else(|| format!("film loss curve: {FILM_LOSS_TANGENT} did not resolve"))
 }
 
 impl KitMaterials {
@@ -365,13 +358,17 @@ impl KitMaterials {
     /// Declare the head films' loss hysteretic, with the loss tangent each
     /// head's card gives as its FILM_LOSS_TANGENT curve over `frequency_axis`
     /// (a typed cyclic frequency) at `temperature_k` on `temperature_axis`.
+    /// That temperature must match the bound head state. Every other held
+    /// coordinate and its exact quantity convention are retained; frequency
+    /// alone changes, with the original loss claim pinned on every query.
     /// The kit fits each head's generalized-Maxwell law to that curve alone
     /// (`film::fit`) and puts it on the head's bending operator
     /// (`Body::attach_film_maxwell`), so every grid mode carries the curve's
     /// tan delta at its own frequency times its bending share. The edge loss stays a
     /// stated unknown entered as zero (EDGE_LOSS_STATED_UNKNOWN_RECEIPT).
     /// A head card without exactly one such claim, or one that does not
-    /// resolve inside its own band at this temperature, refuses.
+    /// resolve inside its own band at this environment, refuses. Response or
+    /// applicability axes beyond frequency and fixed external conditions refuse.
     pub fn with_film_loss_curve(
         mut self,
         temperature_axis: &str,
@@ -387,6 +384,25 @@ impl KitMaterials {
         if self.packs.len() < 2 {
             return Err("a film loss curve reads the head cards; these materials have none".into());
         }
+        if temperature_axis.trim().is_empty()
+            || frequency_axis.trim().is_empty()
+            || temperature_axis.len() > 128
+            || frequency_axis.len() > 128
+            || temperature_axis == frequency_axis
+        {
+            return Err("film loss curve: temperature and frequency need distinct source coordinates (at most 128 bytes each)".into());
+        }
+        if !temperature_k.is_finite() || temperature_k <= 0.0 {
+            return Err("film loss curve: absolute temperature must be finite and positive [K]".into());
+        }
+        let temperature = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        let frequency = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Frequency(FrequencyConvention::Cyclic),
+            ValueForm::Static,
+        ));
         let mut band_hz = [(0.0, 0.0); 2];
         for (slot, pack) in band_hz.iter_mut().zip(&self.packs[..2]) {
             let claims = pack.card().claims_for(FILM_LOSS_TANGENT);
@@ -406,16 +422,59 @@ impl KitMaterials {
                     )
                 })?;
         }
+        let resolve = |head: usize| -> Result<ResolvedMaterialStatePoint, String> {
+            let elastic = [&self.primary, &self.secondary][head].resolved();
+            let quantity = elastic.axis_quantities().get(temperature_axis).copied();
+            let legacy_temperature = temperature_axis == "T"
+                && (quantity.is_none()
+                    || quantity == Some(QuantitySpec::dimensional(fs_qty::Temperature::DIMS)));
+            if elastic.state_coordinate(temperature_axis) != Some(temperature_k)
+                || (quantity != Some(temperature) && !legacy_temperature)
+            {
+                return Err("film loss curve: temperature must match the bound head's absolute-temperature coordinate".into());
+            }
+            let mut point = elastic.query();
+            if point.axes().contains_key(frequency_axis) {
+                if point.axis_quantities().get(frequency_axis) != Some(&frequency) {
+                    return Err("film loss curve: an existing frequency coordinate must retain its typed cyclic-frequency convention".into());
+                }
+                point = point
+                    .with(frequency_axis, band_hz[head].0)
+                    .map_err(|e| e.to_string())?;
+            } else {
+                point = point
+                    .with_quantity(frequency_axis, frequency, band_hz[head].0)
+                    .map_err(|e| e.to_string())?;
+            }
+            let requirement = ScalarPropertyRequirement::try_new(
+                FILM_LOSS_TANGENT,
+                Dims::NONE,
+                ScalarAdmissibility::StrictlyPositive,
+            )
+            .map_err(|e| e.to_string())?;
+            let source = resolve_material_state_point(
+                self.packs[head].card(),
+                &point,
+                &[requirement],
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .map_err(|e| format!("film loss curve: {e}"))?;
+            if !source.property(FILM_LOSS_TANGENT).is_some_and(|property| {
+                property.has_only_owned_and_fixed_external_conditions(frequency_axis, frequency)
+            }) {
+                return Err("film loss curve: only cyclic frequency may vary; every other source coordinate must be a supported held environment".into());
+            }
+            Ok(source)
+        };
         let curve = FilmCurve {
-            temperature_axis: temperature_axis.into(),
             frequency_axis: frequency_axis.into(),
             temperature_k,
             band_hz,
+            sources: [resolve(0)?, resolve(1)?],
         };
-        // Each card answers at both ends of its band here, or the binding refuses.
-        for (pack, (lo, hi)) in self.packs[..2].iter().zip(band_hz) {
-            film_curve_tan_delta(pack, &curve, lo)?;
-            film_curve_tan_delta(pack, &curve, hi)?;
+        // Both endpoints resolve on the same claim and complete environment.
+        for (head, pack) in self.packs[..2].iter().enumerate() {
+            film_curve_tan_delta(pack, &curve, head, band_hz[head].1)?;
         }
         self.film_curve = Some(curve);
         Ok(self)
@@ -448,7 +507,7 @@ impl KitMaterials {
         if frequency_hz < lo || frequency_hz > hi {
             return Ok(None);
         }
-        film_curve_tan_delta(&self.packs[head.min(1)], curve, frequency_hz).map(Some)
+        film_curve_tan_delta(&self.packs[head.min(1)], curve, head.min(1), frequency_hz).map(Some)
     }
 
     /// Bind the snare wires' steel: the wire card (density, E, expansion, heat
@@ -493,7 +552,7 @@ impl KitMaterials {
         self.film_curve.as_ref().map(|curve| {
             let [(b_lo, b_hi), (r_lo, r_hi)] = curve.band_hz;
             format!(
-                "head film loss: each head's generalized-Maxwell law on its bending operator, fitted to its card's {FILM_LOSS_TANGENT} curve at {} K alone (batter card {b_lo}-{b_hi} Hz, resonant card {r_lo}-{r_hi} Hz), so every grid mode carries the tan delta at its own frequency times its bending share; tension and the Berger in-plane stretching stay elastic",
+                "head film loss: each head's generalized-Maxwell law on its bending operator, fitted to its card's {FILM_LOSS_TANGENT} curve at {} K and the head's complete held material environment (batter card {b_lo}-{b_hi} Hz, resonant card {r_lo}-{r_hi} Hz), so every grid mode carries the tan delta at its own frequency times its bending share; tension and the Berger in-plane stretching stay elastic",
                 curve.temperature_k
             )
         })

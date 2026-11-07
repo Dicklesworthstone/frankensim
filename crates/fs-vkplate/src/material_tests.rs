@@ -1634,6 +1634,232 @@ fn receipt_number(line: &str, before: &str, after: &str) -> f64 {
     rest[..rest.find(after).unwrap()].parse().unwrap()
 }
 
+/// A manufactured two-axis loss surface: frequency is the film owner's
+/// response coordinate, while pressure or moisture selects the held section.
+/// The elastic card is unchanged, isolating the environmental loss response.
+fn film_environment_pack(
+    name: &str,
+    axis: &str,
+    kind: QuantityKind,
+    range: (f64, f64),
+) -> NormalizedMaterialCardPack {
+    let elastic = pack(name, 1390.0, 4e9, Some(0.38));
+    let mut claims = elastic.claims_pack().claims().clone();
+    let raw = format!(
+        "{name}; elastic={}; film loss surface: frequency 20..20000 Hz; {axis} {kind:?} {range:?}; tan_delta 0.02..0.04",
+        elastic.content_hash()
+    );
+    let artifact = hash_domain("frankensim.kit.film-environment-test", raw.as_bytes());
+    let provenance = Provenance {
+        source: format!("manufactured environmental film response {name}"),
+        license: "CC0-1.0".into(),
+        artifact: Some(artifact),
+    };
+    let observation = claims.register_observation(ObservationDataset {
+        specimen: name.into(),
+        method: "manufactured two-axis film loss; not measured material data".into(),
+        artifact,
+        caveats: raw,
+        provenance: provenance.clone(),
+    }).unwrap();
+    let quantity = QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+    let (lo, hi) = range;
+    claims.insert_claim(PropertyClaim {
+        key: PropertyKey::new(materials::FILM_LOSS_TANGENT, Dims::NONE),
+        value: PropertyValue::Surface2D {
+            axes: ["frequency".into(), axis.into()],
+            axis_dims: [Frequency::DIMS, quantity.dims()],
+            samples: vec![
+                ([20.0, lo], 0.02),
+                ([20000.0, lo], 0.02),
+                ([20.0, hi], 0.04),
+                ([20000.0, hi], 0.04),
+            ],
+            triangles: vec![[0, 1, 2], [1, 3, 2]],
+            dims: Dims::NONE,
+        },
+        validity: ValidityDomain::unconstrained()
+            .with_quantity("T", QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::AbsoluteTemperature, ValueForm::Static,
+            )), 273.15, 323.15)
+            .with_quantity("frequency", QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::Frequency(FrequencyConvention::Cyclic), ValueForm::Static,
+            )), 20.0, 20000.0)
+            .with_quantity(axis, quantity, lo, hi),
+        uncertainty: UncertaintyModel::Unstated,
+        interpolation: InterpolationPolicy::LinearInside,
+        observations: vec![observation],
+        provenance,
+    }).unwrap();
+    let claims = NormalizedPack::new(
+        name, "manufactured-film-environment", artifact,
+        "CC0-1.0 synthetic test data", claims, vec![], vec![],
+    ).unwrap();
+    NormalizedMaterialCardPack::new(MaterialStateId {
+        chemistry: name.into(),
+        phase: "solid".into(),
+        process: "manufactured environmental film response".into(),
+        revision: 0,
+    }, claims).unwrap()
+}
+
+fn film_environment_point(pressure: f64, water: f64) -> fs_matdb::QueryPoint {
+    materials::temperature_point("T", 293.15).unwrap()
+        .with_quantity("pressure", QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Pressure, ValueForm::Static,
+        )), pressure).unwrap()
+        .with_quantity("water", QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Moisture(fs_qty::semantic::MoistureBasis::DryMass),
+            ValueForm::Static,
+        )), water).unwrap()
+}
+
+#[test]
+fn g1_g3_film_loss_retains_each_heads_pressure_and_moisture_in_native_laws() {
+    let pressure = film_environment_pack(
+        "pressure-dependent head loss", "pressure", QuantityKind::Pressure,
+        (100_000.0, 200_000.0),
+    ).to_bytes();
+    let moisture = film_environment_pack(
+        "moisture-dependent head loss", "water",
+        QuantityKind::Moisture(fs_qty::semantic::MoistureBasis::DryMass),
+        (0.1, 0.2),
+    ).to_bytes();
+    let striker = pack("film environment striker", 800.0, 12e9, Some(0.3)).to_bytes();
+    let bind = |point: &fs_matdb::QueryPoint| {
+        KitMaterials::from_card_packs(
+            &pressure, &moisture, &striker, point, 9e-6, 0.005, 0.05,
+        ).unwrap()
+    };
+    let point = film_environment_point(100_000.0, 0.1);
+    let elastic = bind(&point);
+    let base = elastic.clone().with_film_loss_curve("T", "frequency", 293.15).unwrap();
+    let high_pressure = bind(&film_environment_point(200_000.0, 0.1))
+        .with_film_loss_curve("T", "frequency", 293.15).unwrap();
+    let high_moisture = bind(&film_environment_point(100_000.0, 0.2))
+        .with_film_loss_curve("T", "frequency", 293.15).unwrap();
+    let middle = bind(&film_environment_point(150_000.0, 0.15))
+        .with_film_loss_curve("T", "frequency", 293.15).unwrap();
+    assert_eq!(base.primary(), elastic.primary());
+    assert_eq!(base.secondary(), elastic.secondary());
+    assert_eq!(base.primary().resolved().query(), point);
+    for hz in [20.0, 632.0, 1000.0, 5000.0, 20000.0] {
+        for (source, expected) in [
+            (&base, [0.02, 0.02]),
+            (&high_pressure, [0.04, 0.02]),
+            (&high_moisture, [0.02, 0.04]),
+            (&middle, [0.03, 0.03]),
+        ] {
+            for (head, loss) in expected.into_iter().enumerate() {
+                near(source.film_tan_delta(head, hz).unwrap().unwrap(), loss);
+            }
+        }
+    }
+    assert_eq!(base.film_tan_delta(0, 19.0), Ok(None));
+    assert_eq!(base.film_tan_delta(1, 20001.0), Ok(None));
+    // The environmental coordinates belong to the actual loss claims, not
+    // merely unused context on an otherwise temperature-only fixture.
+    let no_water = materials::temperature_point("T", 293.15).unwrap()
+        .with_quantity("pressure", QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Pressure, ValueForm::Static,
+        )), 100_000.0).unwrap();
+    assert!(bind(&no_water).with_film_loss_curve("T", "frequency", 293.15).is_err());
+    let wrong_water_basis = point.clone().with_quantity("water", QuantitySpec::semantic(
+        SemanticType::new(
+            QuantityKind::Moisture(fs_qty::semantic::MoistureBasis::WetMass),
+            ValueForm::Static,
+        ),
+    ), 0.1).unwrap();
+    assert!(bind(&wrong_water_basis)
+        .with_film_loss_curve("T", "frequency", 293.15).is_err());
+
+    let mut spec = kit::tom(12.0);
+    spec.grid *= 6.0;
+    let build = |source: &KitMaterials| {
+        kit::drum_with_materials(&spec, &[(0.002, 3.5)], standard_gas(), source)
+            .unwrap().instrument
+    };
+    let mut instruments = [build(&base), build(&high_pressure), build(&high_moisture)];
+    for head in 0..2 {
+        let original = &instruments[0].bodies[head];
+        for changed in &instruments[1..] {
+            assert_eq!(original.mass, changed.bodies[head].mass);
+            assert_eq!(original.xy, changed.bodies[head].xy);
+            assert_eq!(original.tension, changed.bodies[head].tension);
+        }
+        for (index, expected) in [0.02, if head == 0 { 0.04 } else { 0.02 },
+            if head == 1 { 0.04 } else { 0.02 }].into_iter().enumerate()
+        {
+            let law = instruments[index].bodies[head].film_law().unwrap();
+            assert!(law.sup_rel_tan_delta_err < 0.02);
+            assert!((law.tan_delta(1000.0) / expected - 1.0).abs() < 0.02);
+        }
+    }
+    // Both independently fitted laws are attached to their native bending
+    // operators and dissipate physical heat during the scheduled strike.
+    for instrument in &mut instruments {
+        let mut output = vec![0.0; instrument.mics.len()];
+        for _ in 0..(0.03 / instrument.k()) as usize {
+            instrument.step(&mut output);
+            assert!(output.iter().all(|sample| sample.is_finite()));
+        }
+        for head in 0..2 {
+            assert!(instrument.bodies[head].film_heat_j() > 0.0);
+        }
+    }
+}
+
+#[test]
+fn g0_film_loss_keeps_temperature_coordinate_meanings_and_owned_response_axes() {
+    let source = film_environment_pack(
+        "film query admission", "pressure", QuantityKind::Pressure,
+        (100_000.0, 200_000.0),
+    ).to_bytes();
+    let striker = pack("film query striker", 800.0, 12e9, Some(0.3)).to_bytes();
+    let point = film_environment_point(150_000.0, 0.15);
+    let bind = |bytes: &[u8], point: &fs_matdb::QueryPoint| {
+        KitMaterials::from_card_packs(bytes, &[], &striker, point, 9e-6, 0.005, 0.05)
+            .unwrap()
+    };
+    // Both temperatures are inside the source's domain, but the film cannot
+    // be evaluated at a different state from the already-bound elastic head.
+    let error = bind(&source, &point)
+        .with_film_loss_curve("T", "frequency", 296.15).unwrap_err();
+    assert!(error.contains("temperature must match"), "{error}");
+    let cyclic = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::Frequency(FrequencyConvention::Cyclic), ValueForm::Static,
+    ));
+    let existing = point.clone().with_quantity("frequency", cyclic, 1000.0).unwrap();
+    let film = bind(&source, &existing)
+        .with_film_loss_curve("T", "frequency", 293.15).unwrap();
+    near(film.film_tan_delta(0, 5000.0).unwrap().unwrap(), 0.03);
+    assert_eq!(film.primary().resolved().query(), existing);
+    let angular = point.clone().with_quantity("frequency", QuantitySpec::semantic(
+        SemanticType::new(
+            QuantityKind::Frequency(FrequencyConvention::Angular), ValueForm::Static,
+        ),
+    ), 1000.0).unwrap();
+    let error = bind(&source, &angular)
+        .with_film_loss_curve("T", "frequency", 293.15).unwrap_err();
+    assert!(error.contains("cyclic-frequency convention"), "{error}");
+    let no_pressure = materials::temperature_point("T", 293.15).unwrap();
+    assert!(bind(&source, &no_pressure)
+        .with_film_loss_curve("T", "frequency", 293.15).is_err());
+
+    // Equal SI dimensions do not make evolving mechanical stress a held
+    // thermodynamic pressure; only frequency is owned by the film fit.
+    let stress = film_environment_pack(
+        "unowned stress-dependent film", "pressure", QuantityKind::Stress,
+        (100_000.0, 200_000.0),
+    ).to_bytes();
+    let stress_point = point.with_quantity("pressure", QuantitySpec::semantic(
+        SemanticType::new(QuantityKind::Stress, ValueForm::Static),
+    ), 150_000.0).unwrap();
+    let error = bind(&stress, &stress_point)
+        .with_film_loss_curve("T", "frequency", 293.15).unwrap_err();
+    assert!(error.contains("supported held environment"), "{error}");
+}
+
 #[test]
 fn g1_the_film_card_curve_gives_each_head_mode_the_loss_tangent_at_its_own_frequency() {
     let cards = || {
