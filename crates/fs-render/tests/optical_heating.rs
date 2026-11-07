@@ -276,6 +276,83 @@ fn sourced_uv_and_infrared_power_heat_native_cells_without_visible_extrapolation
 }
 
 #[test]
+fn two_photon_absorption_heats_original_enthalpy_cells_and_closes_the_energy_balance() {
+    use fs_render::volumes::transport::deposition::nonlinear::{
+        TwoPhotonAbsorbingGrid, TwoPhotonAbsorption,
+    };
+
+    with_cx(|cx| {
+        let medium = grid(
+            cx,
+            &[1.0, 1.0],
+            MassAbsorptionSpectrum::constant(0.0).unwrap(),
+        );
+        let law = TwoPhotonAbsorption::try_new(
+            0.5,
+            (500.0, 600.0),
+            20.0,
+            fs_blake3::ContentHash([63; 32]),
+        )
+        .unwrap();
+        let nonlinear = TwoPhotonAbsorbingGrid::try_new(cx, &medium, law).unwrap();
+        let deposition = nonlinear
+            .deposit_beam_power(
+                cx,
+                Point3::new(-1.0, 0.5, 0.5),
+                Vec3::new(1.0, 0.0, 0.0),
+                4.0,
+                550.0,
+                12.0,
+                2.0,
+                2,
+            )
+            .unwrap();
+        // Pure quadratic absorption: P(s) = 12/(1 + 3s), in watts.
+        let absorbed = [9.0, 3.0 - 12.0 / 7.0];
+        close(deposition.transmitted_power_w[0], 12.0 / 7.0);
+        for (cell, heat) in deposition.cells.iter().zip(absorbed) {
+            close(cell.absorbed_power_w[0], heat);
+        }
+        let original = thermal(
+            vec![cell(11, 1.0, 1.0, 0.0), cell(22, 2.0, 1.0, 0.0)],
+            &SENSIBLE,
+            vec![],
+        );
+        let heating = OpticalHeating::try_new(
+            deposition,
+            &[(0, CellId(11)), (1, CellId(22))],
+            &original,
+            1e-12,
+            || Ok(()),
+        )
+        .unwrap();
+        let (heated, accepted, audit) = original
+            .advance_observed(&heating, 2.0, config(0.13), || Ok(()))
+            .unwrap();
+        close(
+            heated.temperature_k(CellId(11)).unwrap(),
+            300.0 + absorbed[0] / 2.0,
+        );
+        close(
+            heated.temperature_k(CellId(22)).unwrap(),
+            300.0 + absorbed[1] / 4.0,
+        );
+        close(audit.external_heat_j, 2.0 * absorbed.iter().sum::<f64>());
+        close(accepted.energy().thermal_input_j, audit.external_heat_j);
+        close(
+            accepted.energy().incident_j[0],
+            accepted.energy().transmitted_j[0] + audit.external_heat_j,
+        );
+        assert_eq!(
+            accepted.power().medium_identity,
+            nonlinear.content_identity()
+        );
+        assert_eq!(accepted.power().scattered_w, [0.0]);
+        close(original.temperature_k(CellId(11)).unwrap(), 300.0);
+    });
+}
+
+#[test]
 fn infrared_mie_particle_absorption_heats_native_enthalpy_without_scattering_heat() {
     use fs_render::volumes::transport::scattering::mie::{MieBudget, MieSphere};
 

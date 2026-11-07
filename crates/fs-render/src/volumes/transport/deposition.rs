@@ -20,6 +20,9 @@ use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
+/// Intensity-dependent, monochromatic two-photon absorption on native cells.
+pub mod nonlinear;
+
 /// Incident-beam power removed in one original simulation cell.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CellBeamPower<const N: usize> {
@@ -148,7 +151,6 @@ impl AbsorbingGrid<'_> {
 
 /// The same stable Beer-law power partition used by cell deposition, with a
 /// coefficient supplied by the temperature-dependent constitutive owner.
-#[cfg(feature = "optical-heating")]
 pub(crate) fn absorb_beam(power: f64, density: f64, length: f64, coefficient: f64) -> (f64, f64) {
     if power == 0.0 || coefficient == 0.0 {
         return (0.0, power);

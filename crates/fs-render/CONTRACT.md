@@ -9056,3 +9056,43 @@ hosts refuse. Directional thermal sources currently enter through camera hits;
 the uniform-source finite-area proposal API does not substitute a fixed-angle
 thermal spectrum. Time-varying thermal states, directional thermal area NEE,
 bulk birefringence and polarized environment laws remain separate work.
+
+## Intensity-dependent two-photon beam absorption and native heat
+
+`volumes::transport::deposition::nonlinear` binds explicit uniform or native-cell
+bulk beta coefficients to the original absorbing grid. Beta is in m/W and
+already accounts for the energy of both photons. Each source declares its
+constant-beta wavelength band, irradiance ceiling and nonzero identity; prepared
+models retain the intersection with the original linear spectrum. Numerical
+identity binds every model and native cell index without copying density fields.
+Zero-density cells remain vacuum. Bulk beta is applied at the authored material
+state, with no inferred density, temperature or polarization scaling.
+
+For a monochromatic beam of constant area A, each physical DDA crossing solves
+`dI/ds = -alpha I - beta I²`, `I=P/A`, `alpha=rho*kappa_a` analytically.
+The exact solution is `P_out=P*exp(-alpha*L)/(1+beta*(P/A)*L_eff)`, with
+`L_eff=-expm1(-alpha*L)/alpha` and its continuous zero-alpha limit L. See
+[Sheik-Bahae et al. (1990), equations (23)–(25)](https://doi.org/10.1109/3.53394).
+Positive power partitions avoid subtracting nearly equal beam powers; a rare
+logarithmic fallback retains finite watts when optical fractions underflow or
+intermediate products overflow. Beta zero uses the original Beer-law arithmetic.
+Only crossed cells are visited after preparation; output allocation and traversal
+are explicitly bounded, cancellation is polled through the original DDA, and a
+late failure publishes no partial report.
+
+`BeamPowerDeposition<1>` carries the absorbed watts into the existing
+`OpticalHeating` and enthalpy timeline. This requires the explicitly declared
+passive, promptly thermalizing channel: the model does not infer retained
+carrier/excitation energy, fluorescence, bleaching, saturation, nonlinear
+refraction, diffraction, reflection or cross-frequency absorption. Input power
+is already inside the medium and uniform across the given area. Pulses require
+their instantaneous power; replacing a pulse by mean power or adding independently
+deposited overlapping beams is generally invalid for this nonlinear law.
+
+G0/G1/G3/G4 regressions cover an independent Runge–Kutta attenuation solution,
+linear and pure-quadratic limits, weak and opaque cells, extreme representable
+power, subdivision, area scaling, non-superposition, heterogeneous source maps,
+source support, budgets and cancellation. A native enthalpy regression checks
+local temperatures and incident/transmitted/thermal energy closure. These are
+numerical checks of the declared constitutive law, not measured beta calibration
+or evidence that other high-intensity processes can be neglected.
