@@ -66,8 +66,9 @@ fn missing_sheet_data_never_becomes_bulk_plate_or_default_fabric() {
     let partial=adopt(&rows);
     assert!(partial.membrane().is_ok());assert!(partial.bending().is_err());
     let mut wrong=entries();wrong[2].2=Dims([-1,1,-2,0,0,0]);
-    // The common source boundary already rejects bulk Pa under this sheet key.
-    assert!(try_card(&wrong).is_err());
+    // An open material key may retain bulk Pa; the membrane owner still
+    // requires effective sheet stiffness in N/m and must not reinterpret it.
+    if try_card(&wrong).is_ok() { assert!(adopt(&wrong).membrane().is_err()); }
     let mut wrong=entries();wrong[6].2=Dims([3,1,-2,0,0,0]);
     // A consumer also refuses wrong units when a source key has no registered
     // dimension contract; either boundary must reject, never reinterpret.
