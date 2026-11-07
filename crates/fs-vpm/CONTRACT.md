@@ -1222,6 +1222,41 @@ rescaling and large-origin geometry. A native coupled-advection case resolves
 new material vertices under a quadratic divergence-free incident field and
 compares their motion with the analytic trajectory and the unresolved chord.
 
+## Repeated retirement into the existing far wake
+
+`FarField::retire_near_rows` transfers complete groups of the oldest near rows
+into an existing retained far field, allowing subsequent shedding to continue
+within the near certificate's row cap. At least one near row remains. Explicit
+`FarRetirementLimits` bound the complete resulting far-cell and source counts,
+including existing and empty cells; insufficient capacity refuses before any
+physical mutation. Zero requested rows is an admitted identity.
+
+The native edge visitor captures every newly retired physical source once in
+its original order, including the trailing endpoints at the first remaining
+near row. The last retired row's captured quad circulations become the new
+downstream interface. Each source's already evolved core is stored as its new
+base with zero additional offset, so future spreading adds only future time.
+Existing far geometry, diffusion offsets, source buffers and expansion caches
+remain unchanged. Near row ages, shedding ticks and the physical clock do not
+advance. Exact velocity, Jacobian, curl and both geometric impulses survive to
+roundoff; this does not certify or repair an earlier pruned/open inventory.
+
+Only new source arrays and moments are prepared. Existing source validation is
+linear, and near compaction moves row headers without cloning the physical
+near/far inventory. Preparation and final cancellation precede destination
+reservation and publication. Changing cell grouping can change multipole
+approximation error; separately prepared trees and image snapshots must be
+rebuilt. Far storage still grows: this operation neither drops vorticity nor
+replaces an explicitly admitted coarsening/pruning policy.
+
+`tests/far_retirement3d.rs` checks exact source/field/impulse preservation with
+mixed cores, prior far refinement and elapsed diffusion; continued future core
+growth; repeated native self-induced motion beyond a four-row near cap against
+an unpartitioned sixteen-row reference in frozen and spreading modes; exact
+total capacities, every cancellation checkpoint, retry, and invalid clocks or
+sources. All four tests passed in a targeted build of the unchanged production
+3-D numerical modules plus this extension; this was not a full Cargo gate.
+
 ## Complete physical wake impulse and interval exchange
 
 `FarField::hydrodynamic_impulse_per_density(near, origin_m, max_sources,

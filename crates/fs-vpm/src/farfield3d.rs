@@ -40,6 +40,10 @@ pub use impulse::{WakeImpulse, WakeImpulseExchange};
 mod remesh;
 pub use remesh::FarSegmentRefinement;
 
+#[path = "farfield3d/retire.rs"]
+mod retire;
+pub use retire::{FarRetirement, FarRetirementLimits};
+
 /// Registered core-evolution mode (enters identity).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WakeCoreEvolutionMode {
