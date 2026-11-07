@@ -36,7 +36,8 @@ pub struct UniaxialIncidentMode {
 #[derive(Clone, Copy, Debug)]
 pub struct UniaxialSpectrumLimits {
     /// Bound both preparation solves and O(N) work per point. Each query uses
-    /// at most two propagated plane-wave fields per retained input mode.
+    /// at most two propagated plane-wave fields per retained input mode in a
+    /// half-space, or four inside a finite crystal slab.
     pub maximum_modes: usize,
     /// Logical retained mode storage plus one field and DD accumulator.
     /// Caller input/source storage, stack temporaries and allocator overhead
@@ -194,7 +195,7 @@ fn prepare_modes(
     Ok(modes)
 }
 
-fn rotate(v: [C64; 3], p: [f64; 2]) -> [C64; 3] {
+pub(super) fn rotate(v: [C64; 3], p: [f64; 2]) -> [C64; 3] {
     [
         v[0].scale(p[0]) - v[1].scale(p[1]),
         v[0].scale(p[1]) + v[1].scale(p[0]),
@@ -205,12 +206,18 @@ fn rotate_real(v: [f64; 3], p: [f64; 2]) -> [f64; 3] {
     [v[0] * p[0] - v[1] * p[1], v[0] * p[1] + v[1] * p[0], v[2]]
 }
 
-struct FieldSum {
+pub(super) struct FieldSum {
     electric: [[Dd; 2]; 3],
     magnetic: [[Dd; 2]; 3],
 }
 impl FieldSum {
-    fn add(&mut self, electric: [C64; 3], magnetic: [C64; 3], phase: C64) {
+    pub(super) const fn new() -> Self {
+        Self {
+            electric: [[Dd::ZERO; 2]; 3],
+            magnetic: [[Dd::ZERO; 2]; 3],
+        }
+    }
+    pub(super) fn add(&mut self, electric: [C64; 3], magnetic: [C64; 3], phase: C64) {
         let [pr, pi] = [phase.re, phase.im].map(Dd::from_f64);
         for (sum, vector) in [
             (&mut self.electric, electric),
@@ -223,7 +230,7 @@ impl FieldSum {
             }
         }
     }
-    fn finish(self) -> Result<UniaxialSpectrumField> {
+    pub(super) fn finish(self) -> Result<UniaxialSpectrumField> {
         let electric = self
             .electric
             .map(|v| C64::new(v[0].to_f64(), v[1].to_f64()));
@@ -248,6 +255,19 @@ impl FieldSum {
     }
 }
 
+pub(super) fn transverse_phase(k: f64, axis: [f64; 2], point: [f64; 3]) -> Result<C64> {
+    // Preserve the authored binary64 spatial products until trigonometric
+    // reduction, just as the shared longitudinal propagation owner does.
+    let phase = Dd::from_f64(k)
+        * (Dd::from_f64(axis[0]) * Dd::from_f64(point[0])
+            + Dd::from_f64(axis[1]) * Dd::from_f64(point[1]));
+    if !phase.hi.is_finite() || !phase.lo.is_finite() {
+        return Err(bad("uniaxial transverse phase is unrepresentable"));
+    }
+    let (sine, cosine) = det::sin_cos_dd(phase);
+    Ok(C64::new(cosine.to_f64(), -sine.to_f64()))
+}
+
 fn field_at(
     modes: &[Mode],
     side: AngularSpectrumSide,
@@ -266,23 +286,11 @@ fn field_at(
             "uniaxial field point must lie in its selected half-space",
         ));
     }
-    let mut sum = FieldSum {
-        electric: [[Dd::ZERO; 2]; 3],
-        magnetic: [[Dd::ZERO; 2]; 3],
-    };
+    let mut sum = FieldSum::new();
     for mode in modes {
         poll(cancelled)?;
         let r = &mode.response;
-        // Preserve the authored binary64 spatial products until trigonometric
-        // reduction, just as the shared longitudinal propagation owner does.
-        let phase = Dd::from_f64(r.tangential_wavenumber_rad_m)
-            * (Dd::from_f64(mode.axis[0]) * Dd::from_f64(point[0])
-                + Dd::from_f64(mode.axis[1]) * Dd::from_f64(point[1]));
-        if !phase.hi.is_finite() || !phase.lo.is_finite() {
-            return Err(bad("uniaxial transverse phase is unrepresentable"));
-        }
-        let (sine, cosine) = det::sin_cos_dd(phase);
-        let transverse = C64::new(cosine.to_f64(), -sine.to_f64());
+        let transverse = transverse_phase(r.tangential_wavenumber_rad_m, mode.axis, point)?;
         let mut add = |e, h, kz| -> Result<()> {
             let longitudinal = propagation(kz, point[2])
                 .ok_or_else(|| bad("uniaxial propagation is unrepresentable"))?;

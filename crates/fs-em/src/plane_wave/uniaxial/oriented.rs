@@ -26,6 +26,9 @@ pub use kernel::{OrientedCrystalMode, OrientedCrystalResponse};
 /// Source-bound coherent fields for sparse, authored incident directions.
 pub mod spectrum;
 
+/// Coherent scattering and internal fields of one finite transparent crystal.
+pub mod slab;
+
 const C0: f64 = 299_792_458.0;
 type Result<T> = core::result::Result<T, ReflectionError>;
 

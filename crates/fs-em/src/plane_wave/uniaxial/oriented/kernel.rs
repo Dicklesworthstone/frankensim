@@ -50,11 +50,11 @@ pub(super) struct Input {
     pub(super) electric: [C64; 2],
 }
 #[derive(Clone, Copy)]
-struct Mode {
-    z: C64,
-    kind: UniaxialWaveKind,
-    e: Vector,
-    h: Vector,
+pub(super) struct Mode {
+    pub(super) z: C64,
+    pub(super) kind: UniaxialWaveKind,
+    pub(super) e: Vector,
+    pub(super) h: Vector,
 }
 
 fn invalid(message: &'static str) -> &'static str {
@@ -91,18 +91,19 @@ fn cross(a: Vector, b: Vector) -> Vector {
 fn power(e: Vector, h: Vector) -> [f64; 3] {
     cross(e, h.map(C64::conj)).map(|z| 0.5 * z.re)
 }
-pub(super) fn solve(data: Input) -> Result<OrientedCrystalResponse> {
-    if data.electric.iter().any(|z| !finite(*z)) {
-        return Err(invalid("finite crystal incident field required"));
-    }
-    let amplitude = positive(
-        data.electric
-            .iter()
-            .fold(0.0_f64, |m, z| m.max(z.re.abs()).max(z.im.abs())),
-    )?;
-    let ei = data
-        .electric
-        .map(|z| C64::new(z.re / amplitude, z.im / amplitude));
+/// The original two outgoing eigenvectors before interface amplitudes.
+/// Shared by the half-space and finite-slab boundary owners.
+#[derive(Clone, Copy)]
+pub(super) struct Eigenbasis {
+    pub(super) i: f64,
+    pub(super) p: f64,
+    pub(super) qi: f64,
+    pub(super) scale: f64,
+    pub(super) ratio_mu: f64,
+    pub(super) modes: [Mode; 2],
+}
+
+pub(super) fn eigenbasis(data: Input) -> Result<Eigenbasis> {
     let axis = unit(data.axis)?;
     let scale = binary_scale(positive(data.ni.max(data.no).max(data.ne))?);
     let (i, o, e) = (
@@ -220,6 +221,37 @@ pub(super) fn solve(data: Input) -> Result<OrientedCrystalResponse> {
         modes[m].e = modes[m].e.map(|z| z.scale(1.0 / basis_scale));
         modes[m].h = modes[m].h.map(|z| z.scale(1.0 / basis_scale));
     }
+    Ok(Eigenbasis {
+        i,
+        p,
+        qi,
+        scale,
+        ratio_mu,
+        modes,
+    })
+}
+
+pub(super) fn solve(data: Input) -> Result<OrientedCrystalResponse> {
+    if data.electric.iter().any(|z| !finite(*z)) {
+        return Err(invalid("finite crystal incident field required"));
+    }
+    let amplitude = positive(
+        data.electric
+            .iter()
+            .fold(0.0_f64, |m, z| m.max(z.re.abs()).max(z.im.abs())),
+    )?;
+    let ei = data
+        .electric
+        .map(|z| C64::new(z.re / amplitude, z.im / amplitude));
+    let Eigenbasis {
+        i,
+        p,
+        qi,
+        scale,
+        ratio_mu,
+        mut modes,
+    } = eigenbasis(data)?;
+    let ko = modes[0].kind;
     // Eliminate the reflected field. The two equations below are the exact
     // tangential Maxwell conditions with the incident admittances multiplied
     // through, so no 1/qi or critical transmitted admittance is formed.

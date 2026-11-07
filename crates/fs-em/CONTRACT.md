@@ -6357,3 +6357,42 @@ This sparse monochromatic owner introduces no sampling grid, FFT, paraxial
 approximation, spectral interpolation, power normalization or inferred source
 coherence. Finite crystals, absorbing anisotropy, films, transient reservoirs
 and geometric ray traversal remain outside this half-space capability.
+
+### Finite arbitrarily oriented crystal slabs and coherent beams
+
+`uniaxial::oriented::slab::OrientedUniaxialSlab` binds the original
+`OrientedUniaxialInterface`, an original lossless isotropic exit response and a
+positive physical thickness. Each frequency query retains both original
+principal-index laws, all three original permeabilities and the fixed crystal
+axis. The existing arbitrary-axis eigensystem supplies ordinary/extraordinary
+waves; exact normal-coordinate reversal supplies the backward family with
+polar E and axial H transformation. A tilted extraordinary backward normal is
+the other dispersion root, not an assumed negative of its forward normal.
+
+Both faces are solved together through one fixed-size complex 8x8 tangential
+E/H system. Forward waves are anchored at the entrance and backward waves at
+the exit, so every evanescent propagation factor decays. Coherent internal
+reflections retain etalon resonances, polarization conversion and frustrated
+total-reflection tunneling. Results expose the four internal vector fields,
+the actual exit-plane transmitted field, independently evaluated reflected and
+transmitted normal powers, and allocation-free physical-point E/H and Poynting
+queries in the incident half-space, crystal interior or exit half-space.
+Row-scaled pivoting, coherent boundary-continuity checks and an independent
+normal-power balance gate precede publication of the field snapshot.
+
+`PreparedUniaxialSlabSpectrum` reuses the authored sparse incident modes,
+resource limits and double-double field accumulator of the half-space owner.
+Original source laws are resolved once, each occupied direction receives one
+two-face solve, and all four internal waves and all source directions are
+summed before forming Poynting flux. The same global crystal axis applies to
+every azimuth. Preparation is bounded O(N); point queries allocate nothing and
+perform no material or boundary reevaluation. Cancellation returns no partial
+source or field.
+
+This is one homogeneous transparent uniaxial slab. The exit can propagate,
+be critical or be evanescent. Exactly coalesced **internal crystal** critical
+modes require a generalized Jordan basis and explicitly refuse, as do
+numerically unresolved systems or unrepresentable positive propagating output
+power. Existing half-space critical support remains unchanged. Absorbing
+anisotropy, crystal multilayer stacks, varying optic axes and causal transient
+reservoirs remain outside this capability.

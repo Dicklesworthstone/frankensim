@@ -561,3 +561,129 @@ fn prepared_crystal_spectrum_binds_original_laws_and_coherent_spatial_fields() {
         Err(AngularSpectrumError::Cancelled)
     ));
 }
+
+#[test]
+fn finite_crystal_slab_and_spectrum_retain_original_ports_and_both_interfaces() {
+    use crate::plane_wave::{
+        angular_spectrum::AngularSpectrumError,
+        uniaxial::oriented::{
+            OrientedUniaxialInterface,
+            slab::{OrientedUniaxialSlab, PreparedUniaxialSlabSpectrum, SlabRegion},
+            spectrum::{UniaxialIncidentMode, UniaxialSpectrumLimits},
+        },
+    };
+    let (ordinary, extraordinary) = axes(
+        [1.4, 1.6],
+        [1.8, 2.0],
+        [0.0; 2],
+        Some(MU),
+        [400.0, 800.0],
+        0,
+    );
+    let crystal = UniaxialOpticalResponse::try_new(&ordinary, &extraordinary, SPAN).unwrap();
+    let outside = incident(1.0, MU);
+    let exit = incident(1.2, 0.8 * MU);
+    let entrance = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside),
+        crystal,
+        [1.0, 2.0, 3.0],
+    )
+    .unwrap();
+    let slab =
+        OrientedUniaxialSlab::try_new(&entrance, DielectricResponse::Lossless(&exit), 0.5e-6)
+            .unwrap();
+    assert!(core::ptr::eq(slab.entrance_interface(), &entrance));
+    assert!(core::ptr::eq(slab.exit_response().material(), &exit));
+    let input = [
+        UniaxialIncidentMode {
+            tangential_phase_index: 0.4,
+            incidence_plane_axis: [1.0, 0.0],
+            electric_v_m: [C64::new(0.7, 0.2), C64::new(-0.3, 0.5)],
+        },
+        UniaxialIncidentMode {
+            tangential_phase_index: -0.6,
+            incidence_plane_axis: [3.0, 4.0],
+            electric_v_m: [C64::ONE, C64::ZERO],
+        },
+    ];
+    let limits = UniaxialSpectrumLimits {
+        maximum_modes: 2,
+        maximum_workspace_bytes: 20000,
+    };
+    let mut transmitted = Vec::new();
+    for wavelength in [400.0, 550.0, 800.0] {
+        let omega = frequency(wavelength);
+        let one = slab
+            .response_at_tangential_index(omega, 0.4, input[0].electric_v_m)
+            .unwrap();
+        near(
+            one.reflected_power_fraction + one.transmitted_power_fraction,
+            1.0,
+            3e-13,
+        );
+        transmitted.push(one.transmitted_electric_v_m[0]);
+        let prepared =
+            PreparedUniaxialSlabSpectrum::prepare(&slab, omega, &input, limits, || false).unwrap();
+        assert!(core::ptr::eq(prepared.source(), &slab));
+        assert_eq!(prepared.angular_frequency_rad_s(), omega);
+        assert_eq!(prepared.retained_mode_count(), 2);
+        assert!(prepared.workspace_bytes() <= limits.maximum_workspace_bytes);
+        for (z, left, right) in [
+            (0.0, SlabRegion::TotalIncidentSide, SlabRegion::Crystal),
+            (
+                slab.thickness_m(),
+                SlabRegion::Crystal,
+                SlabRegion::Transmitted,
+            ),
+        ] {
+            let a = prepared
+                .field_at(left, [0.3e-6, -0.2e-6, z], || false)
+                .unwrap();
+            let b = prepared
+                .field_at(right, [0.3e-6, -0.2e-6, z], || false)
+                .unwrap();
+            for j in 0..2 {
+                complex_near(a.electric_v_m[j], b.electric_v_m[j], 3e-13);
+                complex_near(a.magnetic_a_m[j], b.magnetic_a_m[j], 3e-15);
+            }
+            near(a.poynting_w_m2[2], b.poynting_w_m2[2], 3e-15);
+        }
+    }
+    assert!((transmitted[0] - transmitted[2]).abs() > 0.1);
+    assert!(
+        slab.response_at_tangential_index(frequency(399.0), 0.4, input[0].electric_v_m)
+            .is_err()
+    );
+    assert!(matches!(
+        PreparedUniaxialSlabSpectrum::prepare(
+            &slab,
+            frequency(399.0),
+            &input,
+            UniaxialSpectrumLimits {
+                maximum_modes: 0,
+                ..limits
+            },
+            || false
+        ),
+        Err(AngularSpectrumError::Invalid(_))
+    ));
+    assert!(matches!(
+        PreparedUniaxialSlabSpectrum::prepare(&slab, frequency(399.0), &input, limits, || true),
+        Err(AngularSpectrumError::Cancelled)
+    ));
+    let (lossy, _) = axes([1.2; 2], [1.2; 2], [0.01, 0.0], Some(MU), [400.0, 800.0], 0);
+    let absorbing =
+        SpectralOpticalResponse::try_new(SpectralOpticalSource::ComplexIndex(&lossy), SPAN)
+            .unwrap();
+    let refused = OrientedUniaxialSlab::try_new(
+        &entrance,
+        DielectricResponse::SpectralOptical(absorbing),
+        0.5e-6,
+    )
+    .unwrap();
+    assert!(
+        refused
+            .response(frequency(550.0), 0.8, input[0].electric_v_m)
+            .is_err()
+    );
+}
