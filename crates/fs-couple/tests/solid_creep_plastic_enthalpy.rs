@@ -9,14 +9,22 @@ use fs_matdb::{
     PropertyValue, Provenance, QueryPoint, SelectionPolicy, UncertaintyModel,
 };
 use fs_material::creep::plastic::source::NortonJ2Source;
+use fs_material::creep::recovery::CreepRecoveryParameters;
+use fs_material::creep::recovery::plastic::source::RecoveringNortonJ2Source;
+use fs_material::creep::recovery::source::{
+    CREEP_RECOVERY_ACTIVATION_ENERGY_PROPERTY, CREEP_RECOVERY_REFERENCE_RATE_PROPERTY,
+    CREEP_RECOVERY_REFERENCE_TEMPERATURE_PROPERTY,
+};
 use fs_material::creep::source::*;
 use fs_material::creep::thermal::expansion::ExpandingCreepSource;
+use fs_material::creep::{GAS_CONSTANT_J_MOL_K, StrainHardeningCreep};
 use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase};
 use fs_material::plastic::source::{HardeningPropertyBasis, ISOTROPIC_HARDENING_MODULUS_PROPERTY};
 use fs_material::state_point::{
     LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, MaterialPropertySelection,
-    POISSON_RATIO_PROPERTY, ScalarAdmissibility, ScalarPropertyRequirement, YIELD_STRESS_PROPERTY,
-    YOUNG_MODULUS_PROPERTY, resolve_material_state_point,
+    POISSON_RATIO_PROPERTY, ResolvedMaterialStatePoint, ScalarAdmissibility,
+    ScalarPropertyRequirement, YIELD_STRESS_PROPERTY, YOUNG_MODULUS_PROPERTY,
+    resolve_material_state_point,
 };
 use fs_qty::{Dims, Pressure, QuantitySpec, Temperature};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
@@ -93,6 +101,12 @@ impl Fixture {
         Self::with_expansion(None)
     }
     fn with_expansion(alpha: Option<f64>) -> Self {
+        Self::with_recovery(alpha, None)
+    }
+    fn with_recovery(
+        alpha: Option<f64>,
+        recovery: Option<(StrainHardeningCreep, CreepRecoveryParameters)>,
+    ) -> Self {
         let mut claims = ClaimSet::new();
         for (name, dims, value) in [
             (YOUNG_MODULUS_PROPERTY, Pressure::DIMS, E),
@@ -139,6 +153,42 @@ impl Fixture {
                     alpha,
                 ))
                 .unwrap();
+        }
+        if let Some((primary, recovery)) = recovery {
+            for (name, dims, value) in [
+                (
+                    CREEP_HARDENING_REFERENCE_STRAIN_PROPERTY,
+                    Dims([0; 6]),
+                    primary.reference_strain,
+                ),
+                (
+                    CREEP_HARDENING_EXPONENT_PROPERTY,
+                    Dims([0; 6]),
+                    primary.exponent,
+                ),
+                (
+                    CREEP_RESIDUAL_RATE_FRACTION_PROPERTY,
+                    Dims([0; 6]),
+                    primary.residual_rate_fraction,
+                ),
+                (
+                    CREEP_RECOVERY_REFERENCE_RATE_PROPERTY,
+                    CREEP_RATE_DIMS,
+                    recovery.reference_rate_s,
+                ),
+                (
+                    CREEP_RECOVERY_ACTIVATION_ENERGY_PROPERTY,
+                    CREEP_ACTIVATION_ENERGY_DIMS,
+                    recovery.activation_energy_j_mol,
+                ),
+                (
+                    CREEP_RECOVERY_REFERENCE_TEMPERATURE_PROPERTY,
+                    Temperature::DIMS,
+                    recovery.reference_temperature_k,
+                ),
+            ] {
+                claims.insert_claim(claim(name, dims, value, value)).unwrap();
+            }
         }
         let card = MaterialCard::assemble(
             MaterialStateId {
@@ -243,8 +293,8 @@ impl Fixture {
         .unwrap()
     }
 
-    fn expanding_source(&self) -> ExpandingCreepSource<NortonJ2Source<'_>> {
-        let expansion = resolve_material_state_point(
+    fn expansion_reference(&self) -> ResolvedMaterialStatePoint {
+        resolve_material_state_point(
             &self.card,
             &point(300.0),
             &[ScalarPropertyRequirement::try_new(
@@ -255,7 +305,10 @@ impl Fixture {
             .unwrap()],
             MaterialPropertySelection::SingleClaimOnly,
         )
-        .unwrap();
+        .unwrap()
+    }
+    fn expanding_source(&self) -> ExpandingCreepSource<NortonJ2Source<'_>> {
+        let expansion = self.expansion_reference();
         ExpandingCreepSource::new(&self.card, self.source(), &expansion, || false).unwrap()
     }
     fn bind_expanding<'a>(
@@ -836,6 +889,243 @@ fn restrained_heating_yields_and_creeps_then_relaxation_returns_heat_atomically(
             solid = next_solid;
             t0 = t;
             q0 = q;
+        }
+    });
+}
+
+#[test]
+fn recovering_joint_solid_keeps_yield_history_through_heated_dwell_and_reload() {
+    let expansion = 1e-6;
+    let primary = StrainHardeningCreep {
+        reference_strain: 2e-4,
+        exponent: 1.0,
+        residual_rate_fraction: 0.0,
+    };
+    let recovery = CreepRecoveryParameters {
+        reference_rate_s: 2.0,
+        activation_energy_j_mol: 15_000.0,
+        reference_temperature_k: 300.0,
+    };
+    let fixture = Fixture::with_recovery(Some(expansion), Some((primary, recovery)));
+    with_gate(&CancelGate::new(), |cx| {
+        let mut thermal = fixture.thermal();
+        let source = RecoveringNortonJ2Source::new(
+            &fixture.card,
+            NortonSourceQuery {
+                lower: &point(280.0),
+                upper: &point(380.0),
+                temperature_axis: "T",
+                selection: MaterialPropertySelection::SingleClaimOnly,
+                strain_limit: 0.05,
+            },
+            HardeningPropertyBasis::PlasticStrainModulus,
+            || false,
+        )
+        .unwrap();
+        let source = ExpandingCreepSource::new(
+            &fixture.card,
+            source,
+            &fixture.expansion_reference(),
+            || false,
+        )
+        .unwrap();
+        let mut solid = CreepSolid::try_new(
+            &thermal,
+            &NODES,
+            &TETS,
+            vec![CreepCell {
+                cell: CellId(0),
+                card: &fixture.card,
+                source,
+                caloric: &fixture.caloric,
+            }],
+            TetAssemblyBudget::standard(),
+            cx,
+        )
+        .unwrap();
+        let claims: Vec<_> = solid.materials()[0]
+            .mechanical()
+            .material()
+            .properties()
+            .iter()
+            .map(|p| p.answer().receipt.selected)
+            .collect();
+        assert_eq!(claims.len(), 15);
+        let (mut temperature, mut previous_stress, mut time) = (300.0, 0.0, 0.0);
+        let (mut creep, mut plastic, mut resistance) = (0.0, 0.0_f64, 0.0);
+        for (step, (stress, dt, external_rise)) in [
+            (2.3e6_f64, 0.5, 0.0),
+            (2.3e6, 0.5, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 1.0, 20.0),
+            (2.4e6, 0.5, 0.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // Solve the independent constant-stress first law. Primary creep
+            // has an exact quadratic; plastic consistency uses its own alpha.
+            // The recovered resistance carries neither stored energy nor heat.
+            let increments = |t: f64| {
+                let k = recovery.reference_rate_s
+                    * (recovery.activation_energy_j_mol / GAS_CONSTANT_J_MOL_K
+                        * (1.0 / recovery.reference_temperature_k - 1.0 / t))
+                        .exp();
+                let g = 1.0 + k * dt;
+                let rate = RATE
+                    * (stress / STRESS).powi(3)
+                    * (ACTIVATION / GAS_CONSTANT_J_MOL_K * (1.0 / 300.0 - 1.0 / t)).exp();
+                let b = primary.reference_strain * g + resistance;
+                let c = dt * rate * primary.reference_strain * g;
+                let dc = 2.0 * c / (b + (b * b + 4.0 * c).sqrt());
+                let dp = ((stress - yield_stress(t)) / HARDENING - plastic).max(0.0);
+                (dc, dp, (resistance + dc) / g)
+            };
+            let reversible = -temperature * expansion * (stress - previous_stress);
+            let residual = |t: f64| {
+                let (dc, dp, _) = increments(t);
+                RHO * CP * (t - temperature - external_rise)
+                    - stress * dc
+                    - yield_stress(t) * dp
+                    - reversible
+            };
+            let (mut lo, mut hi) = (
+                temperature + external_rise - 2.0,
+                temperature + external_rise + 2.0,
+            );
+            assert!(residual(lo) < 0.0 && residual(hi) > 0.0);
+            for _ in 0..80 {
+                let mid = 0.5 * (lo + hi);
+                if residual(mid) > 0.0 {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            let next_temperature = 0.5 * (lo + hi);
+            let (dc, dp, next_resistance) = increments(next_temperature);
+            let external_j = RHO * V * CP * external_rise;
+            let observer = Heating {
+                watts: external_j / dt,
+                steps: 0,
+                fail: false,
+            };
+            let old_solution = solid.solution().clone();
+            let old_cells = thermal.cells().clone();
+            let candidate = solid
+                .advance(
+                    &thermal,
+                    &observer,
+                    time + dt,
+                    &ROLLERS,
+                    &[(3, stress * V / L)],
+                    IncrementSettings::default(),
+                    heat_config(),
+                    config(),
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(solid.solution(), &old_solution);
+            assert_eq!(thermal.cells(), &old_cells);
+            assert_eq!(observer.steps, 0);
+            let solution = candidate.solid().solution();
+            let state = &solution.element_states[0];
+            let history = &state.mechanical;
+            close(
+                history.native.creep.equivalent_creep_strain,
+                creep + dc,
+                3e-10,
+            );
+            close(history.native.creep.creep_strain[0], creep + dc, 3e-10);
+            close(history.native.plastic.alpha, plastic + dp, 3e-10);
+            close(history.native.plastic.plastic_strain[0], plastic + dp, 3e-10);
+            close(history.resistance_strain, next_resistance, 3e-10);
+            close(state.temperature_k(), next_temperature, 3e-7);
+            close(
+                candidate.thermal().temperature_k(CellId(0)).unwrap(),
+                next_temperature,
+                3e-7,
+            );
+            close(solution.element_stress[0][0], stress, 2e-2);
+            close(
+                solution.displacement_m[1][0],
+                L * (stress / E
+                    + creep
+                    + dc
+                    + plastic
+                    + dp
+                    + expansion * (next_temperature - 300.0)),
+                4e-12,
+            );
+            let report = candidate.report();
+            let energy = report.element_energy[0];
+            let physical = stress * dc + yield_stress(next_temperature) * dp;
+            close(energy.creep_dissipation_j_m3 * V, stress * dc * V, 1e-9);
+            close(
+                energy.plastic_dissipation_j_m3 * V,
+                yield_stress(next_temperature) * dp * V,
+                1e-9,
+            );
+            close(energy.reversible_heat_j_m3 * V, reversible * V, 1e-9);
+            close(
+                energy.thermoelastic_storage_change_j_m3 * V,
+                expansion * (next_temperature * stress - temperature * previous_stress) * V,
+                1e-9,
+            );
+            close(
+                energy.final_stored_j_m3 * V,
+                (0.5 * stress * stress / E + 0.5 * HARDENING * (plastic + dp).powi(2)) * V,
+                1e-9,
+            );
+            close(report.applied_heat_j, V * (physical + reversible), 1e-9);
+            close(
+                report.thermal_audit.stored_energy_change_j,
+                external_j + V * (physical + reversible),
+                1e-9,
+            );
+            close(report.combined_residual_j, 0.0, config().energy_tolerance_j);
+            if stress == 0.0 {
+                assert!(next_resistance < resistance);
+                close(energy.physical_dissipation_j_m3 * V, 0.0, 1e-12);
+                for i in 0..6 {
+                    let before = &old_solution.element_states[0].mechanical.native;
+                    close(
+                        history.native.creep.creep_strain[i],
+                        before.creep.creep_strain[i],
+                        3e-10,
+                    );
+                    close(
+                        history.native.plastic.plastic_strain[i],
+                        before.plastic.plastic_strain[i],
+                        3e-10,
+                    );
+                }
+                if step == 2 {
+                    assert!(energy.numerical_dissipation_j_m3 > 0.0);
+                    assert!(energy.reversible_heat_j_m3 > 0.0);
+                } else {
+                    close(report.applied_heat_j, 0.0, 1e-12);
+                }
+            } else if step == 0 || step == 4 {
+                assert!(dc > 0.0 && dp > 0.0);
+            }
+            assert_eq!(
+                candidate.solid().materials()[0]
+                    .mechanical()
+                    .material()
+                    .properties()
+                    .iter()
+                    .map(|p| p.answer().receipt.selected)
+                    .collect::<Vec<_>>(),
+                claims
+            );
+            (thermal, solid, _, _) = candidate.into_parts();
+            creep += dc;
+            plastic += dp;
+            resistance = next_resistance;
+            temperature = next_temperature;
+            previous_stress = stress;
+            time += dt;
         }
     });
 }

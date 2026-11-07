@@ -11,7 +11,15 @@ use fs_material::creep::plastic::NortonJ2;
 use fs_material::creep::plastic::source::{
     NortonJ2Source, norton_j2_requirements, norton_j2_strain_hardening_requirements,
 };
+use fs_material::creep::recovery::plastic::source::{
+    RecoveringNortonJ2Source, recovering_norton_j2_requirements,
+};
+use fs_material::creep::recovery::source::{
+    CREEP_RECOVERY_ACTIVATION_ENERGY_PROPERTY, CREEP_RECOVERY_REFERENCE_RATE_PROPERTY,
+    CREEP_RECOVERY_REFERENCE_TEMPERATURE_PROPERTY,
+};
 use fs_material::creep::source::*;
+use fs_material::creep::thermal::expansion::CreepHistoryStrain;
 use fs_material::creep::{CreepLaw, CreepTolerances, NortonCreep, StrainHardeningCreep};
 use fs_material::plastic::source::{
     HardeningPropertyBasis, ISOTROPIC_HARDENING_MODULUS_PROPERTY,
@@ -91,6 +99,23 @@ fn primary_coefficients() -> Vec<PropertyClaim> {
     ]);
     properties
 }
+fn recovery_coefficients() -> Vec<PropertyClaim> {
+    let mut properties = primary_coefficients();
+    properties.extend([
+        scalar(CREEP_RECOVERY_REFERENCE_RATE_PROPERTY, CREEP_RATE_DIMS, 0.5),
+        scalar(
+            CREEP_RECOVERY_ACTIVATION_ENERGY_PROPERTY,
+            CREEP_ACTIVATION_ENERGY_DIMS,
+            20_000.0,
+        ),
+        scalar(
+            CREEP_RECOVERY_REFERENCE_TEMPERATURE_PROPERTY,
+            Temperature::DIMS,
+            350.0,
+        ),
+    ]);
+    properties
+}
 fn card(properties: Vec<PropertyClaim>) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for property in properties {
@@ -141,6 +166,20 @@ fn primary_source(card: &MaterialCard) -> Result<NortonJ2Source<'_>, CreepSource
         || false,
     )
 }
+fn recovery_source(card: &MaterialCard) -> Result<RecoveringNortonJ2Source<'_>, CreepSourceError> {
+    RecoveringNortonJ2Source::new(
+        card,
+        NortonSourceQuery {
+            lower: &point(300.0),
+            upper: &point(500.0),
+            temperature_axis: "T",
+            selection: MaterialPropertySelection::SingleClaimOnly,
+            strain_limit: 0.02,
+        },
+        H,
+        || false,
+    )
+}
 fn tolerances() -> CreepTolerances {
     CreepTolerances {
         stress_pa: 1e-4,
@@ -152,6 +191,145 @@ fn near(actual: f64, expected: f64) {
         (actual - expected).abs() <= 1e-10 * expected.abs().max(1e-9),
         "{actual:.16e} != {expected:.16e}"
     );
+}
+
+#[test]
+fn g1_recovering_source_retains_three_histories_through_thermal_yield_and_dwell() {
+    let card = card(recovery_coefficients());
+    let source = recovery_source(&card).unwrap();
+    assert_eq!(recovering_norton_j2_requirements(H).unwrap().len(), 15);
+    assert_eq!(source.reference().properties().len(), 15);
+    assert_eq!(source.recovery_source().reference().properties().len(), 13);
+    let cold = source.at_temperature(300.0, 0.1).unwrap();
+    let hot = source.at_temperature(500.0, 0.1).unwrap();
+    for law in [&cold, &hot] {
+        assert_eq!(law.material().card_identity(), card.content_hash());
+        assert_eq!(law.material().properties().len(), 15);
+        assert_eq!(law.hardening_basis(), H);
+        assert_eq!(law.kinetics().duration_s(), 0.1);
+        for property in law.material().properties() {
+            assert_eq!(
+                property.answer().receipt.selected,
+                source
+                    .reference()
+                    .property(property.requirement().name())
+                    .unwrap()
+                    .answer()
+                    .receipt
+                    .selected,
+            );
+        }
+    }
+    near(
+        hot.law().recovery_rate_s() / cold.law().recovery_rate_s(),
+        (20_000.0_f64 / fs_material::creep::GAS_CONSTANT_J_MOL_K * (1.0 / 300.0 - 1.0 / 500.0))
+            .exp(),
+    );
+    let strain = [0.002, -0.001, -0.001, 0.0, 0.0, 0.0];
+    let virgin = cold.initial_state();
+    let loaded = cold
+        .creep_increment(&[0.0; 6], &virgin, &strain, tolerances())
+        .unwrap();
+    assert_eq!(loaded.state.native.plastic.alpha, 0.0);
+    assert!(loaded.state.native.creep.equivalent_creep_strain > 0.0);
+    let frozen = loaded.state.clone();
+    let yielded = hot
+        .creep_increment(&strain, &loaded.state, &strain, tolerances())
+        .unwrap();
+    assert_eq!(loaded.state, frozen);
+    assert!(yielded.state.native.plastic.alpha > 0.0);
+    assert!(
+        yielded.state.native.creep.equivalent_creep_strain
+            > loaded.state.native.creep.equivalent_creep_strain
+    );
+    assert!(yielded.state.resistance_strain < yielded.state.native.creep.equivalent_creep_strain);
+    assert!(yielded.energy.creep_dissipation_j_m3 > 0.0);
+    assert!(yielded.energy.plastic_dissipation_j_m3 > 0.0);
+    near(
+        yielded.energy.physical_dissipation_j_m3,
+        yielded.energy.creep_dissipation_j_m3 + yielded.energy.plastic_dissipation_j_m3,
+    );
+    assert_eq!(yielded.energy.mechanical_work_j_m3, 0.0);
+    assert!(yielded.energy.residual_j_m3.abs() <= tolerances().energy_j_m3);
+
+    let unloaded_strain = yielded.state.inelastic_strain();
+    let unloaded = hot
+        .creep_increment(&strain, &yielded.state, &unloaded_strain, tolerances())
+        .unwrap();
+    let dwell_law = source.at_temperature(500.0, 2.0).unwrap();
+    let dwell = dwell_law
+        .creep_increment(
+            &unloaded_strain,
+            &unloaded.state,
+            &unloaded_strain,
+            tolerances(),
+        )
+        .unwrap();
+    for endpoint in [&unloaded, &dwell] {
+        assert!(
+            (endpoint.state.native.creep.equivalent_creep_strain
+                - yielded.state.native.creep.equivalent_creep_strain)
+                .abs()
+                < 1e-15
+        );
+        assert_eq!(endpoint.state.native.plastic, yielded.state.native.plastic);
+        assert!(endpoint.energy.physical_dissipation_j_m3.abs() < 1e-12);
+    }
+    near(
+        dwell.state.resistance_strain,
+        unloaded.state.resistance_strain / (1.0 + 2.0 * dwell_law.law().recovery_rate_s()),
+    );
+    assert!(dwell.state.resistance_strain < unloaded.state.resistance_strain);
+    near(
+        dwell.energy.final_stored_j_m3,
+        dwell.energy.initial_stored_j_m3,
+    );
+    assert_eq!(virgin, cold.initial_state());
+}
+
+#[test]
+fn g0_recovering_joint_source_keeps_original_yield_and_hardening_admission() {
+    for absent in [7, 8] {
+        let incomplete = recovery_coefficients()
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| *index != absent)
+            .map(|(_, property)| property)
+            .collect();
+        assert!(recovery_source(&card(incomplete)).is_err());
+    }
+    for (index, knots) in [
+        (7, vec![(300.0, 4e6), (400.0, -1.0), (500.0, 1e6)]),
+        (8, vec![(300.0, 4e8), (400.0, 5e8), (500.0, 4e8)]),
+    ] {
+        let mut changed = recovery_coefficients();
+        changed[index] = curve(changed[index].key.name(), knots);
+        assert!(recovery_source(&card(changed)).is_err());
+    }
+    assert!(
+        recovering_norton_j2_requirements(HardeningPropertyBasis::MixedPlasticStrainModuli)
+            .is_err()
+    );
+    let mut tangent_basis = recovery_coefficients();
+    tangent_basis[8] = scalar(POST_YIELD_TANGENT_MODULUS_PROPERTY, Pressure::DIMS, 3e8);
+    let card = card(tangent_basis);
+    let source = RecoveringNortonJ2Source::new(
+        &card,
+        NortonSourceQuery {
+            lower: &point(300.0),
+            upper: &point(500.0),
+            temperature_axis: "T",
+            selection: MaterialPropertySelection::SingleClaimOnly,
+            strain_limit: 0.02,
+        },
+        HardeningPropertyBasis::UniaxialTangentModulus,
+        || false,
+    )
+    .unwrap();
+    let resolved = source.at_temperature(450.0, 0.5).unwrap();
+    near(resolved.law().norton_j2().plastic().hardening, 4e8);
+    assert_eq!(resolved.material().properties().len(), 15);
+    assert!(source.at_temperature(501.0, 0.5).is_err());
 }
 
 #[test]

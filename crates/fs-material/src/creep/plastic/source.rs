@@ -25,7 +25,7 @@ use crate::state_point::{
 };
 use crate::{MaterialAdmissibility, SmallStrainLaw, Tangent6, Voigt};
 use fs_evidence::ModelCard;
-use fs_matdb::{ClaimSelection, MaterialCard};
+use fs_matdb::{ClaimSelection, MaterialCard, QueryPoint};
 
 /// The actual kinetic, elastic, yield and hardening source roles. Missing
 /// hardening data never supplies an implicit perfectly plastic material.
@@ -43,7 +43,7 @@ pub fn norton_j2_strain_hardening_requirements(
     combined_requirements(basis, norton_strain_hardening_requirements()?)
 }
 
-fn combined_requirements(
+pub(crate) fn combined_requirements(
     basis: HardeningPropertyBasis,
     mut requirements: Vec<ScalarPropertyRequirement>,
 ) -> Result<Vec<ScalarPropertyRequirement>, CreepSourceError> {
@@ -61,6 +61,69 @@ fn combined_requirements(
         }
     }
     Ok(requirements)
+}
+
+// One admission owner for the original and recovering joint source families.
+// Yield may change dissipation with temperature; hardening cannot change stored
+// energy without an explicit coefficient-work account.
+pub(crate) fn admit_plastic_span(
+    card: &MaterialCard,
+    reference: &ResolvedMaterialStatePoint,
+    basis: HardeningPropertyBasis,
+    lower: &QueryPoint,
+    upper: &QueryPoint,
+    temperature_axis: &str,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), CreepSourceError> {
+    for name in [YIELD_STRESS_PROPERTY, basis.property_name()] {
+        poll(cancelled)?;
+        let property = reference.property(name).ok_or(CreepSourceError::Invalid(
+            "joint source is missing a selected plastic role",
+        ))?;
+        if !property.has_only_fixed_external_conditions(Some(temperature_axis), false) {
+            return Err(CreepSourceError::Invalid(
+                "plastic coefficients cannot freeze evolving stress, strain, rate or frequency",
+            ));
+        }
+        let selected = property.answer().receipt.selected;
+        let claim = card
+            .claims()
+            .claim(selected)
+            .ok_or(CreepSourceError::Invalid(
+                "selected plastic coefficient is absent",
+            ))?;
+        let line = card
+            .claims()
+            .query_line_typed(
+                &claim.key,
+                temperature_axis,
+                lower,
+                upper,
+                ClaimSelection::Pinned(selected),
+            )
+            .map_err(|error| CreepSourceError::Support {
+                property: name.into(),
+                reason: error.to_string(),
+            })?;
+        for (index, (_, answer)) in line.knots.iter().enumerate() {
+            if index % 256 == 0 {
+                poll(cancelled)?;
+            }
+            let value = answer.evidence.value.value;
+            if name == YIELD_STRESS_PROPERTY {
+                if !value.is_finite() || value <= 0.0 {
+                    return Err(CreepSourceError::Invalid(
+                        "yield stress must stay finite and positive throughout the source span",
+                    ));
+                }
+            } else if value != property.value_si() {
+                return Err(CreepSourceError::Invalid(
+                    "energetic hardening must be constant over the complete thermal span",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -149,54 +212,15 @@ impl<'a> NortonJ2Source<'a> {
         } else {
             NortonCreepSource::new(card, creep_query, &mut cancelled)?
         };
-        for name in [YIELD_STRESS_PROPERTY, basis.property_name()] {
-            poll(&mut cancelled)?;
-            let property = reference
-                .property(name)
-                .expect("combined source contains the selected plastic role");
-            if !property.has_only_fixed_external_conditions(Some(query.temperature_axis), false) {
-                return Err(CreepSourceError::Invalid(
-                    "plastic coefficients cannot freeze evolving stress, strain, rate or frequency",
-                ));
-            }
-            let selected = property.answer().receipt.selected;
-            let claim = card
-                .claims()
-                .claim(selected)
-                .ok_or(CreepSourceError::Invalid(
-                    "selected plastic coefficient is absent",
-                ))?;
-            let line = card
-                .claims()
-                .query_line_typed(
-                    &claim.key,
-                    query.temperature_axis,
-                    query.lower,
-                    query.upper,
-                    ClaimSelection::Pinned(selected),
-                )
-                .map_err(|error| CreepSourceError::Support {
-                    property: name.into(),
-                    reason: error.to_string(),
-                })?;
-            for (index, (_, answer)) in line.knots.iter().enumerate() {
-                if index % 256 == 0 {
-                    poll(&mut cancelled)?;
-                }
-                let value = answer.evidence.value.value;
-                if name == YIELD_STRESS_PROPERTY {
-                    if !value.is_finite() || value <= 0.0 {
-                        return Err(CreepSourceError::Invalid(
-                            "yield stress must stay finite and positive throughout the source span",
-                        ));
-                    }
-                } else if value != property.value_si() {
-                    return Err(CreepSourceError::Invalid(
-                        "energetic hardening must be constant over the complete thermal span",
-                    ));
-                }
-            }
-        }
+        admit_plastic_span(
+            card,
+            &reference,
+            basis,
+            query.lower,
+            query.upper,
+            query.temperature_axis,
+            &mut cancelled,
+        )?;
         let plastic =
             ResolvedJ2Plasticity::try_from_material(reference.clone(), basis, query.strain_limit)?;
         NortonJ2::new(

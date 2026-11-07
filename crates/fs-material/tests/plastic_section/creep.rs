@@ -1,5 +1,6 @@
 use super::*;
 use fs_material::creep::plastic::NortonJ2;
+use fs_material::creep::recovery::plastic::RecoveringNortonJ2;
 use fs_material::creep::recovery::{CreepRecoveryParameters, RecoveringNortonCreep};
 use fs_material::creep::{NortonCreep, NortonCreepParameters, StrainHardeningCreep};
 use fs_material::plastic::energy::EnergyTolerances;
@@ -252,4 +253,121 @@ fn recovering_sections_keep_resistance_separate_from_permanent_strain_and_heat()
     near(energy.physical_dissipation_j_m2, 0.0, 1e-12);
     assert!(energy.numerical_dissipation_j_m2 > 0.0);
     near(energy.balance_residual_j_m2, 0.0, 1e-10);
+}
+
+#[test]
+fn recovering_joint_section_retains_both_permanent_histories_through_dwell_and_reload() {
+    let creep = norton(true);
+    let plastic = J2Plasticity::new(creep.elastic().clone(), 3.0, 40.0).unwrap();
+    let law = RecoveringNortonJ2::new(
+        NortonJ2::new(creep, plastic).unwrap(),
+        CreepRecoveryParameters {
+            reference_rate_s: 2.0,
+            activation_energy_j_mol: 0.0,
+            reference_temperature_k: 300.0,
+        },
+    )
+    .unwrap();
+    assert_eq!(law.physical_duration_s(), Some(DT));
+    assert_eq!((&law).physical_duration_s(), Some(DT));
+    let section = section(law, 2);
+    let mut old = section.initial_state();
+    let (mut alpha_c, mut alpha_p, mut resistance) = (0.0, 0.0_f64, 0.0);
+    let g = 1.0 + 2.0 * DT;
+    for (step, stress) in [3.2_f64, 3.2, 0.0, 0.0, 3.4].into_iter().enumerate() {
+        // Independent uniaxial endpoint equations: the primary quadratic uses
+        // recovering resistance, while yield uses permanent plastic hardening.
+        let b: f64 = PRIMARY_STRAIN * g + resistance;
+        let c = DT * RATE * (stress / STRESS) * PRIMARY_STRAIN * g;
+        let dc = 2.0 * c / (b + (b * b + 4.0 * c).sqrt());
+        let plastic = alpha_p.max((stress - 3.0) / 40.0);
+        let dp = plastic - alpha_p;
+        let next_resistance = (resistance + dc) / g;
+        let permanent = alpha_c + dc + plastic;
+        let strain = [
+            stress / 1200.0 + permanent,
+            -0.2 * stress / 1200.0 - 0.5 * permanent,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        let saved = old.clone();
+        let next = section.evaluate(strain, &old).unwrap();
+        let energy = section
+            .audit_energy(&old, &next.state, gates(), 1e-10)
+            .unwrap();
+        assert_eq!(old, saved);
+        for (before, after) in old.points.iter().zip(&next.state.points) {
+            let history = &after.history;
+            near(
+                history.native.creep.equivalent_creep_strain,
+                alpha_c + dc,
+                2e-14,
+            );
+            near(history.native.creep.creep_strain[0], alpha_c + dc, 2e-14);
+            near(history.native.plastic.alpha, plastic, 2e-14);
+            near(history.native.plastic.plastic_strain[0], plastic, 2e-14);
+            near(history.resistance_strain, next_resistance, 2e-14);
+            near(after.strain[2], strain[1], 2e-14);
+            if stress == 0.0 {
+                for i in 0..6 {
+                    near(
+                        history.native.creep.creep_strain[i],
+                        before.history.native.creep.creep_strain[i],
+                        2e-14,
+                    );
+                    near(
+                        history.native.plastic.plastic_strain[i],
+                        before.history.native.plastic.plastic_strain[i],
+                        2e-14,
+                    );
+                }
+                assert!(history.resistance_strain < before.history.resistance_strain);
+            }
+        }
+        near(next.resultants[0], 0.2 * stress, 2e-11);
+        for resultant in &next.resultants[1..] {
+            near(*resultant, 0.0, 2e-11);
+        }
+        near(
+            energy.final_state.elastic_j_m2,
+            0.2 * 0.5 * stress * stress / 1200.0,
+            1e-12,
+        );
+        near(
+            energy.initial.hardening_j_m2,
+            0.2 * 0.5 * 40.0 * alpha_p.powi(2),
+            1e-12,
+        );
+        near(
+            energy.final_state.hardening_j_m2,
+            0.2 * 0.5 * 40.0 * plastic.powi(2),
+            1e-12,
+        );
+        near(
+            energy.physical_dissipation_j_m2,
+            0.2 * (stress * dc + 3.0 * dp),
+            1e-12,
+        );
+        assert_eq!(energy.final_state.kinematic_hardening_j_m2, 0.0);
+        near(energy.balance_residual_j_m2, 0.0, 1e-10);
+        if step == 0 || step == 4 {
+            assert!(dc > 0.0 && dp > 0.0);
+        } else if stress == 0.0 {
+            near(energy.physical_dissipation_j_m2, 0.0, 1e-12);
+            assert!(energy.final_state.hardening_j_m2 > 0.0);
+            if step == 2 {
+                // Elastic unloading loses BE energy without caloric heat;
+                // recovery continues during the following zero-work dwell.
+                assert!(energy.numerical_dissipation_j_m2 > 0.0);
+            } else {
+                near(energy.generalized_work_j_m2, 0.0, 1e-12);
+            }
+        }
+        alpha_c += dc;
+        alpha_p = plastic;
+        resistance = next_resistance;
+        old = next.state;
+    }
 }

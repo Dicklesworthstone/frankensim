@@ -8,9 +8,11 @@
 //! interval. This account does not transport heat or calibrate its partition.
 
 use super::{LayeredPlaneStressSection, LayeredPlaneStressState, SectionError};
-use crate::creep::plastic::NortonJ2;
 use crate::creep::plastic::source::ResolvedNortonJ2;
+use crate::creep::plastic::{NortonJ2, NortonJ2State};
 use crate::creep::recovery::RecoveringNortonCreep;
+use crate::creep::recovery::plastic::RecoveringNortonJ2;
+use crate::creep::recovery::plastic::source::ResolvedRecoveringNortonJ2;
 use crate::creep::recovery::source::ResolvedRecoveringNorton;
 use crate::creep::source::ResolvedNortonCreep;
 use crate::creep::{CreepEnergy, CreepLaw, CreepTolerances, NortonCreep};
@@ -153,25 +155,57 @@ impl NativeSectionEnergyLaw for NortonJ2 {
             .map_err(|e| MaterialError::State {
                 what: e.to_string(),
             })?;
-        // Query the original energetic J2 owner with the shared elastic strain.
-        // Subtracting H alpha_p^2/2 from a large total would lose this partition.
-        let storage = |total: &Voigt, state: &Self::State| {
-            let elastic = core::array::from_fn(|i| {
-                total[i] - state.creep.creep_strain[i] - state.plastic.plastic_strain[i]
-            });
-            self.plastic()
-                .energy_of(&elastic, state.plastic.alpha, &state.plastic.plastic_strain)
-                .map_err(|e| MaterialError::State {
-                    what: e.to_string(),
-                })
-        };
         let energy = creep_energy(
             value.energy,
-            storage(old_strain, old_state)?,
-            storage(strain, &value.state)?,
+            joint_creep_storage(self, old_strain, old_state)?,
+            joint_creep_storage(self, strain, &value.state)?,
         );
         Ok((value.state, value.stress_pa, energy))
     }
+}
+
+impl NativeSectionEnergyLaw for RecoveringNortonJ2 {
+    fn physical_duration_s(&self) -> Option<f64> {
+        Some(self.kinetics().duration_s())
+    }
+
+    fn native_energy_increment(
+        &self,
+        old_strain: &Voigt,
+        old_state: &Self::State,
+        strain: &Voigt,
+        tolerances: EnergyTolerances,
+    ) -> Result<(Self::State, Voigt, IncrementEnergy), MaterialError> {
+        let value = self
+            .creep_increment(old_strain, old_state, strain, creep_tolerances(tolerances))
+            .map_err(|e| MaterialError::State {
+                what: e.to_string(),
+            })?;
+        let energy = creep_energy(
+            value.energy,
+            joint_creep_storage(self.norton_j2(), old_strain, &old_state.native)?,
+            joint_creep_storage(self.norton_j2(), strain, &value.state.native)?,
+        );
+        Ok((value.state, value.stress_pa, energy))
+    }
+}
+
+// Query the original energetic J2 owner with the shared elastic strain.
+// Subtracting H alpha_p^2/2 from a large total would lose this partition.
+// Recovering kinetic resistance contributes no additional stored energy.
+fn joint_creep_storage(
+    law: &NortonJ2,
+    total: &Voigt,
+    state: &NortonJ2State,
+) -> Result<StoredEnergy, MaterialError> {
+    let elastic = core::array::from_fn(|i| {
+        total[i] - state.creep.creep_strain[i] - state.plastic.plastic_strain[i]
+    });
+    law.plastic()
+        .energy_of(&elastic, state.plastic.alpha, &state.plastic.plastic_strain)
+        .map_err(|e| MaterialError::State {
+            what: e.to_string(),
+        })
 }
 
 fn creep_tolerances(value: EnergyTolerances) -> CreepTolerances {
@@ -219,6 +253,7 @@ macro_rules! native_creep_source {
 native_creep_source!(ResolvedNortonCreep);
 native_creep_source!(ResolvedNortonJ2);
 native_creep_source!(ResolvedRecoveringNorton);
+native_creep_source!(ResolvedRecoveringNortonJ2);
 
 impl<const N: usize> NativeSectionEnergyLaw for ChabocheJ2<N> {
     fn native_energy_increment(

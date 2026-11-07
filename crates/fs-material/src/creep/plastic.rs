@@ -170,7 +170,7 @@ impl NortonJ2 {
         &self,
         q_trial: f64,
         alpha: f64,
-        creep_alpha: f64,
+        kinetic_memory: f64,
         stiffness: &CoupledStiffness,
     ) -> Result<CoupledRelaxation> {
         let h = stiffness.modulus_pa;
@@ -183,7 +183,7 @@ impl NortonJ2 {
             // frozen old history; otherwise the wrong plastic branch is chosen.
             let crossing_creep = (q_trial - yield_stress) / h;
             let log_rate = self.creep.log_rate(yield_stress)
-                + self.creep.hardening_value(creep_alpha + crossing_creep)?.0;
+                + self.creep.hardening_value(kinetic_memory + crossing_creep)?.0;
             let log_flow = stiffness.log_modulus + self.creep.log_duration + log_rate;
             let log_gap = det::ln(q_trial - yield_stress);
             // At sustained yield, log rounding can spuriously activate plasticity
@@ -208,7 +208,7 @@ impl NortonJ2 {
                 q_trial,
                 stiffness.log_step_scale,
                 stiffness.log_modulus,
-                creep_alpha,
+                kinetic_memory,
             )?;
             return Ok(CoupledRelaxation {
                 q,
@@ -223,7 +223,7 @@ impl NortonJ2 {
                 yield_stress,
                 self.creep.fixed_stress_increment(
                     yield_stress,
-                    creep_alpha,
+                    kinetic_memory,
                     (q_trial - yield_stress) / h,
                 )?,
                 0.0,
@@ -235,7 +235,7 @@ impl NortonJ2 {
                 effective_trial,
                 stiffness.log_effective_step_scale,
                 stiffness.log_effective_modulus,
-                creep_alpha,
+                kinetic_memory,
             )?;
             (
                 relaxed.q,
@@ -262,12 +262,27 @@ impl NortonJ2 {
     }
 
     fn update(&self, strain: &Voigt, old: &NortonJ2State) -> Result<Update> {
+        self.update_with_memory(strain, old, old.creep.equivalent_creep_strain)
+    }
+
+    // Recovery changes only the primary kinetic memory. The actual permanent
+    // creep and plastic paths keep their original validation and reconstruction.
+    fn update_with_memory(
+        &self,
+        strain: &Voigt,
+        old: &NortonJ2State,
+        kinetic_memory: f64,
+    ) -> Result<Update> {
         self.validate_history(strain, old)?;
+        require(
+            kinetic_memory.is_finite() && kinetic_memory >= 0.0,
+            "primary kinetic memory must be finite and nonnegative",
+        )?;
         let trial = self.creep.predictor(&Self::elastic_strain(strain, old))?;
         let relaxed = self.relaxation(
             trial.q,
             old.plastic.alpha,
-            old.creep.equivalent_creep_strain,
+            kinetic_memory,
             &self.stiffness,
         )?;
         let mut state = old.clone();
@@ -309,6 +324,18 @@ impl NortonJ2 {
         self.update(strain, old).map(|next| next.response)
     }
 
+    // Reuse the one coupled return and retain dc even when alpha_old + dc
+    // rounds back to alpha_old. The resistance wrapper never subtracts paths.
+    pub(super) fn response_with_memory(
+        &self,
+        strain: &Voigt,
+        old: &NortonJ2State,
+        kinetic_memory: f64,
+    ) -> Result<(NortonJ2Response, f64)> {
+        let next = self.update_with_memory(strain, old, kinetic_memory)?;
+        Ok((next.response, next.relaxed.delta_c))
+    }
+
     /// Propose and audit one simultaneous interval without changing old history.
     /// The total stored account includes elastic and energetic hardening storage.
     pub fn advance_with_energy(
@@ -318,12 +345,30 @@ impl NortonJ2 {
         strain: &Voigt,
         tolerances: CreepTolerances,
     ) -> Result<CreepIncrement<NortonJ2State>> {
+        self.advance_with_memory(
+            old_strain,
+            old,
+            strain,
+            tolerances,
+            old.creep.equivalent_creep_strain,
+        )
+        .map(|(increment, _)| increment)
+    }
+
+    pub(super) fn advance_with_memory(
+        &self,
+        old_strain: &Voigt,
+        old: &NortonJ2State,
+        strain: &Voigt,
+        tolerances: CreepTolerances,
+        kinetic_memory: f64,
+    ) -> Result<(CreepIncrement<NortonJ2State>, f64)> {
         require(
             positive(tolerances.stress_pa) && positive(tolerances.energy_j_m3),
             "stress and energy tolerances must be positive and finite",
         )?;
         self.validate_history(old_strain, old)?;
-        let next = self.update(strain, old)?;
+        let next = self.update_with_memory(strain, old, kinetic_memory)?;
         let old_e = Self::elastic_strain(old_strain, old);
         let new_e = Self::elastic_strain(strain, &next.response.state);
         let stored_stress = self.creep.elastic.stress(&new_e, &());
@@ -399,13 +444,16 @@ impl NortonJ2 {
                 tolerance_j_m3: tolerances.energy_j_m3,
             });
         }
-        Ok(CreepIncrement {
-            strain: *strain,
-            stress_pa: next.response.stress_pa,
-            tangent_pa: next.response.tangent_pa,
-            state: next.response.state,
-            energy,
-        })
+        Ok((
+            CreepIncrement {
+                strain: *strain,
+                stress_pa: next.response.stress_pa,
+                tangent_pa: next.response.tangent_pa,
+                state: next.response.state,
+                energy,
+            },
+            dc,
+        ))
     }
 }
 

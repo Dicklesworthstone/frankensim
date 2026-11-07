@@ -18650,3 +18650,40 @@ native section history are covered by authored regressions. Compilation and
 native execution remain pending the prescribed build runner. This increment
 does not add recovery to joint plasticity, finite-deformation laws or frame
 fiber dispatch, nor does it establish tertiary damage, rupture or service life.
+
+## Joint recovering creep/plasticity and its exact axial restriction
+
+`creep::recovery::plastic::RecoveringNortonJ2` extends the standalone recovery
+model to simultaneous Norton flow and energetic isotropic J2 plasticity. The
+original active-set return, including yield crossing, perfect plasticity and
+positive hardening, uses recovering resistance as its kinetic memory. Permanent
+creep and plastic tensors and their accumulated paths remain independent. The
+shared `RecoveryStep` prepares the original monotone return once per physical
+interval; no additional nonlinear solve, source query or history projection is
+introduced in the stress/tangent path. Resistance evolves from the actual solved
+creep increment even when it rounds away in accumulated permanent strain.
+
+The joint work account retains elastic plus `H alpha_p^2/2` storage and separate
+`q delta_alpha_c` creep and `yield_stress delta_alpha_p` plastic heat. Unloaded
+resistance recovery neither erases permanent strain nor supplies heat or stored
+energy. `NativeSectionEnergyLaw` queries the same original J2 storage owner.
+`RecoveringNortonJ2Source` selects all fifteen original claims together, admits
+the full thermal span through the existing source owners and refreshes the
+complete pinned bundle once per interval. Its two permanent strain fields pass
+unchanged through generic sourced expansion, solids and caloric sections.
+
+`creep::recovery::uniaxial::UniaxialRecoveringNorton` is the exact free-sided
+restriction of standalone recovering creep. It reuses the original axial root
+with Young's modulus, retains signed strain, accumulated path and resistance,
+and returns the compatible transverse strain and consistent axial tangent.
+The original tensor recovery owner audits its work and heat. Source-resolved
+axial laws retain all thirteen receipts and expose original physical coefficients,
+never the privately timestep-scaled primary strain.
+
+Authored regressions cover independent quadratic joint/axial returns, both J2
+active branches, recovery-induced branch changes, nonproportional and condensed
+tangents, zero-recovery equivalence, tiny solved increments, source admission,
+native section history and heated solid dwell/reload. Scoped Rust parsing and
+format checks do not constitute compilation or test execution. Finite-strain
+recovery, kinematic hardening, tertiary damage and rupture remain outside these
+bounded phenomenological laws.

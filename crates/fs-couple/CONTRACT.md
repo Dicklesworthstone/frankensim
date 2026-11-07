@@ -2105,3 +2105,20 @@ check deformation, both histories, endpoint temperature, complete source
 receipts and atomic refusal. The shell case includes nonzero sourced expansion.
 These regression definitions have not yet run on a prescribed build runner;
 their independently checked scalar trajectories are not production test results.
+
+### Simultaneous recovering creep and plasticity in thermal solids
+
+`RecoveringNortonJ2Source` composes with the existing `ExpandingCreepSource`
+and native `CreepSolid` without a second material clock or projected history.
+The complete fifteen-claim source and both permanent strain fields remain with
+each point while primary resistance recovers independently. Physical heat is
+exactly the native creep-plus-plastic dissipation; reciprocal expansion heat,
+`T` times mechanical entropy storage and numerical loss stay separate. Neither
+source refresh nor an unloaded recovering dwell invents heat or resets plastic
+hardening. All candidate thermal roots reuse the complete accepted state.
+
+A manufactured load/hold/unload/heated-dwell/reload regression independently
+solves primary flow, plastic consistency and the thermal first law, checks all
+three histories and retained receipts, and verifies proposal evaluation leaves
+accepted cells, solid solution and observer unchanged. Native Rust execution
+remains pending; the independent scalar reference is not a production test run.

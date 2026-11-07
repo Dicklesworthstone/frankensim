@@ -109,6 +109,23 @@ impl UniaxialNorton {
         strain: f64,
         old: &UniaxialNortonState,
     ) -> Result<UniaxialNortonResponse> {
+        self.response_with_memory(strain, old, old.equivalent_creep_strain)
+            .map(|(response, _)| response)
+    }
+
+    /// Keep kinetic resistance independent of irreversible accumulated creep.
+    /// Return the solved increment itself, including when adding it to the
+    /// accumulated path rounds away. The original axial root is evaluated once.
+    pub(super) fn response_with_memory(
+        &self,
+        strain: f64,
+        old: &UniaxialNortonState,
+        kinetic_memory: f64,
+    ) -> Result<(UniaxialNortonResponse, f64)> {
+        require(
+            kinetic_memory.is_finite() && kinetic_memory >= 0.0,
+            "axial creep kinetic memory must be finite and nonnegative",
+        )?;
         let old_tensor = old.tensor_history();
         self.backbone
             .validate_history(&old_tensor.creep_strain, &old_tensor)?;
@@ -118,7 +135,7 @@ impl UniaxialNorton {
             trial.abs(),
             self.log_step_scale,
             det::ln(self.backbone.elastic.youngs),
-            old.equivalent_creep_strain,
+            kinetic_memory,
         )?;
         let state = UniaxialNortonState {
             creep_strain: old.creep_strain + trial.signum() * relaxed.delta_alpha,
@@ -132,12 +149,15 @@ impl UniaxialNorton {
             stress_pa.is_finite() && tangent_pa.is_finite(),
             "axial stress or tangent is not representable",
         )?;
-        Ok(UniaxialNortonResponse {
-            strain: tensor,
-            stress_pa,
-            tangent_pa,
-            state,
-        })
+        Ok((
+            UniaxialNortonResponse {
+                strain: tensor,
+                stress_pa,
+                tangent_pa,
+                state,
+            },
+            relaxed.delta_alpha,
+        ))
     }
 
     /// Audit the candidate through the original full-tensor work/heat owner.

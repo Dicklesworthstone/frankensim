@@ -17,8 +17,12 @@
 //! No viscoelastic strain recovery, tertiary damage, rupture or finite-strain
 //! behavior is implied.
 
+/// Simultaneous resistance recovery and native energetic isotropic J2 plasticity.
+pub mod plastic;
 /// Immutable source binding for independently selected recovery coefficients.
 pub mod source;
+/// Exact free-sided axial restriction with the original resistance history.
+pub mod uniaxial;
 
 use super::thermal::expansion::CreepHistoryStrain;
 use super::{
@@ -60,19 +64,21 @@ impl CreepHistoryStrain for RecoveringCreepState {
     }
 }
 
-/// A fixed-temperature, fixed-duration native Norton interval with recovering
-/// primary resistance. Rebuild from the original parameters for each interval.
-#[derive(Clone, Debug, PartialEq)]
-pub struct RecoveringNortonCreep {
-    native: NortonCreep,
-    prepared: NortonCreep,
-    recovery: CreepRecoveryParameters,
-    recovery_rate_s: f64,
-    recovery_divisor: f64,
+// One preparation and resistance evolution for pure creep and simultaneous J2.
+// The transformed Norton law is returned to the original mechanical owner;
+// recovery never supplies another constitutive return or stored-energy model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RecoveryStep {
+    parameters: CreepRecoveryParameters,
+    rate_s: f64,
+    divisor: f64,
 }
 
-impl RecoveringNortonCreep {
-    pub fn new(native: NortonCreep, recovery: CreepRecoveryParameters) -> Result<Self> {
+impl RecoveryStep {
+    fn prepare(
+        native: &NortonCreep,
+        recovery: CreepRecoveryParameters,
+    ) -> Result<(NortonCreep, Self)> {
         let mut primary = *native.strain_hardening().ok_or(super::CreepError::Invalid(
             "resistance recovery requires explicitly selected primary creep coefficients",
         ))?;
@@ -121,12 +127,44 @@ impl RecoveringNortonCreep {
             )?;
         }
         let prepared = native.clone().with_strain_hardening(primary)?;
+        Ok((
+            prepared,
+            Self {
+                parameters: recovery,
+                rate_s: recovery_rate_s,
+                divisor: recovery_divisor,
+            },
+        ))
+    }
+
+    fn next_resistance(&self, old: f64, delta: f64, alpha: f64) -> Result<f64> {
+        let numerator = old + delta;
+        let resistance = numerator / self.divisor;
+        require(
+            numerator.is_finite() && (numerator == 0.0 || positive(resistance)),
+            "recovered resistance history is not representable",
+        )?;
+        validate_resistance(resistance, alpha)?;
+        Ok(resistance)
+    }
+}
+
+/// A fixed-temperature, fixed-duration native Norton interval with recovering
+/// primary resistance. Rebuild from the original parameters for each interval.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecoveringNortonCreep {
+    native: NortonCreep,
+    prepared: NortonCreep,
+    recovery: RecoveryStep,
+}
+
+impl RecoveringNortonCreep {
+    pub fn new(native: NortonCreep, recovery: CreepRecoveryParameters) -> Result<Self> {
+        let (prepared, recovery) = RecoveryStep::prepare(&native, recovery)?;
         Ok(Self {
             native,
             prepared,
             recovery,
-            recovery_rate_s,
-            recovery_divisor,
         })
     }
 
@@ -137,12 +175,16 @@ impl RecoveringNortonCreep {
     }
 
     pub const fn recovery_parameters(&self) -> &CreepRecoveryParameters {
-        &self.recovery
+        &self.recovery.parameters
     }
 
     /// Independently shifted recovery rate at this interval's temperature [1/s].
     pub const fn recovery_rate_s(&self) -> f64 {
-        self.recovery_rate_s
+        self.recovery.rate_s
+    }
+
+    pub(super) const fn prepared_norton(&self) -> &NortonCreep {
+        &self.prepared
     }
 
     /// Validate the original permanent history and its independent resistance.
@@ -154,15 +196,8 @@ impl RecoveringNortonCreep {
         )
     }
 
-    fn next_resistance(&self, old: f64, delta: f64, alpha: f64) -> Result<f64> {
-        let numerator = old + delta;
-        let resistance = numerator / self.recovery_divisor;
-        require(
-            numerator.is_finite() && (numerator == 0.0 || positive(resistance)),
-            "recovered resistance history is not representable",
-        )?;
-        validate_resistance(resistance, alpha)?;
-        Ok(resistance)
+    pub(super) fn next_resistance(&self, old: f64, delta: f64, alpha: f64) -> Result<f64> {
+        self.recovery.next_resistance(old, delta, alpha)
     }
 
     fn update(&self, strain: &Voigt, old: &RecoveringCreepState) -> Result<(Update, f64)> {
