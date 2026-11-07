@@ -1871,6 +1871,12 @@ differentiable lift). Pure Rust throughout.
   emission `sigma_a * B_lambda(T)` using the same SI Planck owner as thermal
   surfaces. Front-to-back emission has correct intervening absorption, stable
   optically thin `expm1` evaluation and a repeated-temperature packet cache.
+  Public and observed transport share compensated optical-depth accumulation.
+  Thermal radiance is scaled before applying subnormal survival weights;
+  subnormal cell absorption retains the original density, mass coefficient
+  and path-length factors, preserving representable emission. Public APIs
+  retain transparent/opaque limits, while observed APIs additionally require
+  representable finite depth and positive emitted contributions.
   Admission validates and hashes borrowed fields once. Ray traversal allocates
   nothing, visits intersected cells through DDA, checks cancellation and enforces
   the caller's cell-scan/segment-step limits. Shadow transport skips Planck

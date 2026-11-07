@@ -721,7 +721,7 @@ fn g0_observed_finite_columns_keep_log_survival_and_refuse_range_loss() {
 }
 
 #[test]
-fn g0_observed_bright_thermal_source_survives_underflowed_foreground_weight() {
+fn g0_bright_thermal_source_survives_underflowed_foreground_weight() {
     with_cx(|cx, _| {
         let temperatures = [1.0, 1e8];
         let wavelength = 550.0;
@@ -743,14 +743,9 @@ fn g0_observed_bright_thermal_source_survives_underflowed_foreground_weight() {
             )
             .unwrap();
             assert_eq!((-foreground_depth).exp(), 0.0);
-            // The original public path retains its arithmetic and rounding.
-            assert_eq!(
-                medium
-                    .transport(cx, origin, direction, f64::INFINITY, &[wavelength])
-                    .unwrap()
-                    .emission_w_m2_sr_nm,
-                [0.0]
-            );
+            let public = medium
+                .transport(cx, origin, direction, f64::INFINITY, &[wavelength])
+                .unwrap();
             let result = medium.transport_observed::<1, true>(
                 cx,
                 origin,
@@ -765,11 +760,191 @@ fn g0_observed_bright_thermal_source_survives_underflowed_foreground_weight() {
                 let actual = result.transport.emission_w_m2_sr_nm[0];
                 assert!(actual > 0.0);
                 assert!((actual - expected).abs() <= 8.0 * f64::from_bits(1));
+                assert_eq!(public, result.transport);
                 assert_eq!(result.optical_depth, [foreground_depth + 1.0]);
                 assert_eq!(result.cell_visits, 2);
             } else {
+                assert_eq!(public.emission_w_m2_sr_nm, [0.0]);
                 assert_eq!(result, Err(VolumeTransportError::Unrepresentable));
             }
         }
+    });
+}
+
+#[test]
+fn g0_subnormal_transfer_weights_do_not_quantize_finite_thermal_radiance() {
+    with_cx(|cx, _| {
+        let temperatures = [1.0, 1e100];
+        let wavelength = 550.0;
+        let source = planck_radiance_w_m2_sr_nm(temperatures[1], wavelength).unwrap();
+        let origin = Point3::new(-1.0, 0.5, 0.5);
+        let direction = Vec3::new(1.0, 0.0, 0.0);
+        // The first survival is subnormal; the second survival is normal but
+        // multiplying it by a thin cell's absorption underflows to zero.
+        for (foreground_depth, emitting_depth) in [(740.0_f64, 1.0_f64), (700.0, 1e-20)] {
+            let density = [foreground_depth, emitting_depth];
+            let medium = AbsorbingGrid::try_new(
+                cx,
+                VolumeGrid::new([2, 1, 1], &density, [0.0; 3], [1.0; 3]),
+                MassAbsorptionSpectrum::constant(1.0).unwrap(),
+                Some(&temperatures),
+                budget(),
+            )
+            .unwrap();
+            let absorbed = -(-emitting_depth).exp_m1();
+            assert!((-foreground_depth).exp() * absorbed < f64::MIN_POSITIVE);
+            let expected = (source.ln() + absorbed.ln() - foreground_depth).exp();
+            assert!(expected > f64::MIN_POSITIVE);
+            let public = medium
+                .transport(cx, origin, direction, f64::INFINITY, &[wavelength])
+                .unwrap();
+            let observed = medium
+                .transport_observed::<1, true>(
+                    cx,
+                    origin,
+                    direction,
+                    f64::INFINITY,
+                    &[wavelength],
+                    2,
+                )
+                .unwrap();
+            assert_eq!(public, observed.transport);
+            assert!((public.emission_w_m2_sr_nm[0] / expected - 1.0).abs() < 2e-12);
+        }
+    });
+}
+
+#[test]
+fn g0_tiny_cell_absorption_retains_source_scaled_emission() {
+    with_cx(|cx, _| {
+        let density = [1e-200];
+        let temperatures = [1e100];
+        let wavelength = 550.0;
+        let source = planck_radiance_w_m2_sr_nm(temperatures[0], wavelength).unwrap();
+        let origin = Point3::new(-1.0, 0.5, 0.5);
+        let direction = Vec3::new(1.0, 0.0, 0.0);
+        for coefficient in [1e-120, 1e-200] {
+            let medium = AbsorbingGrid::try_new(
+                cx,
+                VolumeGrid::new([1; 3], &density, [0.0; 3], [1.0; 3]),
+                MassAbsorptionSpectrum::constant(coefficient).unwrap(),
+                Some(&temperatures),
+                budget(),
+            )
+            .unwrap();
+            // For these depths, 1-exp(-tau) equals tau to far beyond binary64
+            // accuracy. This independent multiplication order stays normal.
+            let expected = (source * density[0]) * coefficient;
+            assert!(expected > f64::MIN_POSITIVE);
+            let public = medium
+                .transport(cx, origin, direction, f64::INFINITY, &[wavelength])
+                .unwrap();
+            assert_eq!(public.transmittance, [1.0]);
+            assert!((public.emission_w_m2_sr_nm[0] / expected - 1.0).abs() < 2e-12);
+            let observed = medium.transport_observed::<1, true>(
+                cx,
+                origin,
+                direction,
+                f64::INFINITY,
+                &[wavelength],
+                1,
+            );
+            if density[0] * coefficient == 0.0 {
+                assert_eq!(observed, Err(VolumeTransportError::Unrepresentable));
+            } else {
+                assert_eq!(public, observed.unwrap().transport);
+            }
+        }
+    });
+}
+
+#[test]
+fn g3_public_shadow_transport_retains_many_weak_layers_in_either_direction() {
+    with_cx(|cx, _| {
+        const THIN_CELLS: usize = 8192;
+        let thin = 2.0_f64.powi(-60);
+        let mut density = vec![thin; THIN_CELLS + 1];
+        density[0] = 1.0;
+        let medium = AbsorbingGrid::try_new(
+            cx,
+            VolumeGrid::new([density.len(), 1, 1], &density, [0.0; 3], [1.0; 3]),
+            MassAbsorptionSpectrum::constant(1.0).unwrap(),
+            None,
+            AbsorbingGridBudget {
+                max_grid_cells: density.len(),
+                max_steps_per_segment: density.len() as u32,
+            },
+        )
+        .unwrap();
+        let depth = 1.0 + THIN_CELLS as f64 * thin;
+        let expected = (-depth).exp();
+        let mut forward = None;
+        for (x, direction) in [(-1.0, 1.0), (density.len() as f64 + 1.0, -1.0)] {
+            let origin = Point3::new(x, 0.5, 0.5);
+            let direction = Vec3::new(direction, 0.0, 0.0);
+            let public = medium
+                .transmittance(cx, origin, direction, f64::INFINITY, &[550.0])
+                .unwrap();
+            let observed = medium
+                .transport_observed::<1, false>(
+                    cx,
+                    origin,
+                    direction,
+                    f64::INFINITY,
+                    &[550.0],
+                    density.len() as u32,
+                )
+                .unwrap();
+            assert_eq!(observed.optical_depth, [depth]);
+            assert_eq!(public, observed.transport.transmittance);
+            assert!((public[0] - expected).abs() <= 2.0 * f64::EPSILON * expected);
+            if let Some(forward) = forward {
+                assert_eq!(public, forward);
+            } else {
+                forward = Some(public);
+            }
+        }
+    });
+}
+
+#[test]
+fn g0_public_opaque_limit_does_not_poison_compensated_depth_or_emission() {
+    with_cx(|cx, _| {
+        let density = [1e300, 1.0];
+        let temperatures = [2500.0, 1e8];
+        let wavelength = 550.0;
+        let source = planck_radiance_w_m2_sr_nm(temperatures[0], wavelength).unwrap();
+        let medium = AbsorbingGrid::try_new(
+            cx,
+            VolumeGrid::new([2, 1, 1], &density, [0.0; 3], [1.0; 3]),
+            MassAbsorptionSpectrum::constant(1e300).unwrap(),
+            Some(&temperatures),
+            budget(),
+        )
+        .unwrap();
+        let origin = Point3::new(-1.0, 0.5, 0.5);
+        let direction = Vec3::new(1.0, 0.0, 0.0);
+        let public = medium
+            .transport(cx, origin, direction, f64::INFINITY, &[wavelength])
+            .unwrap();
+        assert_eq!(public.transmittance, [0.0]);
+        assert_eq!(public.emission_w_m2_sr_nm, [source]);
+        assert_eq!(
+            medium
+                .transmittance(cx, origin, direction, f64::INFINITY, &[wavelength])
+                .unwrap(),
+            public.transmittance,
+        );
+        assert_eq!(
+            medium.transport_observed::<1, true>(
+                cx,
+                origin,
+                direction,
+                f64::INFINITY,
+                &[wavelength],
+                2,
+            ),
+            Err(VolumeTransportError::Unrepresentable),
+        );
     });
 }

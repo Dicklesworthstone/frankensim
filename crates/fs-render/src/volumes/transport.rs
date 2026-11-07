@@ -15,7 +15,7 @@ use crate::thermal_surface::planck_radiance_w_m2_sr_nm;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
-use fs_math::det;
+use fs_math::{decay, det};
 
 mod cells;
 pub(crate) use cells::{grid_forward_interval, grid_scattering_optical_depth};
@@ -593,7 +593,9 @@ impl<'a> AbsorbingGrid<'a> {
     }
 
     /// Integrate a unit-direction segment, clipped to the finite grid bounds.
-    /// Positive infinity is accepted for an environment-bound ray.
+    /// Positive infinity is accepted for an environment-bound ray. Compensated
+    /// optical depth retains weak layers; scaled attenuation preserves finite
+    /// emission even when the corresponding unit-radiance survival underflows.
     pub fn transport<const N: usize>(
         &self,
         cx: &Cx<'_>,
@@ -733,13 +735,10 @@ impl<'a> AbsorbingGrid<'a> {
                         return Err(VolumeTransportError::Unrepresentable);
                     }
                     if emit {
-                        let prefix = if OBSERVED {
-                            optical_depth[lane] + depth_correction[lane]
-                        } else {
-                            optical_depth[lane]
-                        };
-                        let weight = det::exp(-prefix) * -det::expm1(-tau);
-                        if (OBSERVED || weight > 0.0)
+                        let prefix = optical_depth[lane] + depth_correction[lane];
+                        let absorbed = decay::decayed_fraction(tau);
+                        let weight = det::exp(-prefix) * absorbed;
+                        if (OBSERVED || prefix.is_finite())
                             && let Some(source) = self.source_radiance_at_cell(
                                 cell,
                                 wavelengths[lane],
@@ -747,51 +746,61 @@ impl<'a> AbsorbingGrid<'a> {
                             )?
                         {
                             let direct = weight * source;
-                            // A bright original source can remain representable
-                            // after its separately evaluated survival underflows.
-                            // Keep ordinary products unchanged and rescue only
-                            // the observed path before losing that source power.
-                            let contribution = if OBSERVED && source > 0.0 && direct == 0.0 {
-                                let value =
-                                    det::exp(det::ln(source) + det::ln(-det::expm1(-tau)) - prefix);
-                                if value == 0.0 {
-                                    return Err(VolumeTransportError::Unrepresentable);
-                                }
-                                value
+                            // A bright source can survive a separately rounded
+                            // subnormal/zero weight. Keep normal-weight products
+                            // unchanged; otherwise attenuate the source before
+                            // multiplying by the cell's absorbed fraction.
+                            let contribution = if source > 0.0 && tau < f64::MIN_POSITIVE {
+                                // Here 1-exp(-tau) = tau to binary64 accuracy.
+                                // Retain the original positive factors rather
+                                // than magnifying a rounded subnormal tau (or
+                                // losing an underflowed tau in the public path).
+                                det::exp(
+                                    det::ln(source)
+                                        + det::ln(density)
+                                        + det::ln(kappa[lane])
+                                        + det::ln(length)
+                                        - prefix,
+                                )
+                            } else if source > 0.0 && weight < f64::MIN_POSITIVE {
+                                decay::attenuate(source, prefix) * absorbed
                             } else {
                                 direct
                             };
+                            if OBSERVED && source > 0.0 && contribution == 0.0 {
+                                return Err(VolumeTransportError::Unrepresentable);
+                            }
                             result.emission_w_m2_sr_nm[lane] += contribution;
                             if !result.emission_w_m2_sr_nm[lane].is_finite() {
                                 return Err(VolumeTransportError::Unrepresentable);
                             }
                         }
                     }
-                    if OBSERVED {
-                        let previous = optical_depth[lane];
-                        let next = previous + tau;
-                        if !next.is_finite() {
+                    let previous = optical_depth[lane];
+                    let next = previous + tau;
+                    if !next.is_finite() {
+                        if OBSERVED {
                             return Err(VolumeTransportError::Unrepresentable);
                         }
+                        // The public path admits the opaque limit. Do not feed
+                        // infinity into compensation and create a NaN prefix.
+                        optical_depth[lane] = f64::INFINITY;
+                        depth_correction[lane] = 0.0;
+                    } else {
                         depth_correction[lane] += if previous >= tau {
                             (previous - next) + tau
                         } else {
                             (tau - next) + previous
                         };
                         optical_depth[lane] = next;
-                    } else {
-                        // Preserve the original public transport arithmetic.
-                        optical_depth[lane] += tau;
                     }
                 }
             }
         }
         for lane in 0..N {
-            if OBSERVED {
-                optical_depth[lane] += depth_correction[lane];
-                if !optical_depth[lane].is_finite() {
-                    return Err(VolumeTransportError::Unrepresentable);
-                }
+            optical_depth[lane] += depth_correction[lane];
+            if OBSERVED && !optical_depth[lane].is_finite() {
+                return Err(VolumeTransportError::Unrepresentable);
             }
             result.transmittance[lane] = det::exp(-optical_depth[lane]);
         }
