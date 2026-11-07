@@ -91,8 +91,9 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
     ///
     /// The existing positive spatial quadrature resolves both pupil bandwidth
     /// and chromatic sensor chirp. It integrates all matrix entries together,
-    /// preserving temporal and spatial depolarization. Each vector wave still
-    /// evaluates its physical pupil once per spatial sample. Pair work is
+    /// preserving temporal and spatial depolarization. Each vector wave evaluates
+    /// its original pupil once per retained Jones-pupil mode and spatial sample.
+    /// Unmasked waves have one mode. Pair work is
     /// preflighted against preparation and total pixel limits; queries allocate
     /// nothing and cancellation returns no partial result. Refine the existing
     /// spatial phase-span bound to assess quadrature error.
@@ -106,7 +107,7 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
         let contractions = self.coherency_work()?;
         let (subdivisions, quadrature_samples, pupil_evaluations, pair_contractions) = self
             .optics
-            .pixel_work(pixel, limits, self.waves, contractions)?;
+            .pixel_work(pixel, limits, self.pupil_evaluations, contractions)?;
         let mut nonzero = [false; 4];
         let power: [Dd; 8] =
             pixel::integrate_moments(pixel, subdivisions, &mut cancelled, |at, cancelled| {
@@ -173,7 +174,7 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<[Moments; 2], CoherentDiffractionError> {
         let mut result = [[Dd::ZERO; 4]; 2];
-        if self.waves == 0 {
+        if self.pupil_evaluations == 0 {
             return Ok(result);
         }
         let rotations = self.optics.rotations(at, cancelled)?;

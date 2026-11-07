@@ -6,10 +6,10 @@
 //! The projection precedes temporal and spatial power integration, retaining
 //! cross-polarization phase without subtracting already rounded intensities.
 //!
-//! This is two-component PARAXIAL diffraction through an isotropic scalar
-//! pupil. It does not model longitudinal fields, high-NA vector diffraction,
-//! polarization-dependent lens transfer or transport between nonparallel ray
-//! frames. Both components use the original pupil transfer independently.
+//! This is two-component PARAXIAL diffraction through the original scalar
+//! pupil, optionally carrying passive patterned Jones layers. It does not model
+//! longitudinal fields, high-NA vector diffraction, thick anisotropic lenses or
+//! transport between nonparallel ray frames.
 //! See TU Delft, *Polarisation*, for the Jones-vector and analyzer conventions:
 //! <https://interactivetextbooks.tudelft.nl/interactive-optics/content/Chap4_Polarisation/Polarization_2022_01Clean.html>.
 
@@ -24,6 +24,13 @@ use super::{
 };
 use fs_math::c64::C64;
 
+mod pupil;
+use pupil::PreparedJonesPupil;
+pub use pupil::{
+    CoherentJonesPupilLayer, CoherentJonesPupilLimits, CoherentJonesPupilResponse,
+    MAX_COHERENT_JONES_PUPIL_MODES,
+};
+
 mod coherency;
 pub use coherency::{
     PolarizedCoherentDiffractionExposureSample, PolarizedCoherentDiffractionPixelExposure,
@@ -37,7 +44,8 @@ pub struct CoherentJonesPupilWave {
     /// Same dimensionless tangent coordinates and domain as the scalar query.
     pub tangent_direction: [f64; 2],
     /// Complex x/y amplitudes in sqrt(W), with the common pupil-centre phase
-    /// and clock. |a_x|² + |a_y|² is this wave's transmitted power in isolation.
+    /// and clock. |a_x|² + |a_y|² is this wave's clear-pupil power in isolation,
+    /// before any installed Jones-pupil layers; passive loss is not renormalized.
     /// Relative polarization phase is physical and must not be discarded.
     pub amplitude_sqrt_w: [C64; 2],
 }
@@ -119,8 +127,9 @@ impl CoherentJonesDetector {
 
 /// Reusable Jones source spectrum through the original scalar pupil optics.
 ///
-/// Each authored wave evaluates its original chromatic pupil ONCE per spatial
-/// sample, updating both DD field components. Observation allocates nothing.
+/// Each unmasked wave evaluates its original chromatic pupil once per spatial
+/// sample, updating both DD components. Patterned pupils use one evaluation per
+/// compiled Fourier mode, with explicit total work bounds. Observation allocates nothing.
 /// The common transverse basis and scalar pupil are a paraxial model boundary,
 /// not a claim of vector Maxwell transport or a relative-error certificate.
 pub struct PreparedCoherentJonesDiffractionExposure<'camera, 'source> {
@@ -130,7 +139,9 @@ pub struct PreparedCoherentJonesDiffractionExposure<'camera, 'source> {
     optics: PreparedCoherentDiffractionExposure<'camera, 'static>,
     sources: Vec<CoherentJonesPupilIllumination<'source>>,
     factors: usize,
-    waves: usize,
+    pupil_evaluations: usize,
+    pupil_radius_m: f64,
+    pupils: Option<Vec<PreparedJonesPupil>>,
     contractions_per_component: usize,
     maximum_pair_contractions: usize,
 }
@@ -268,7 +279,9 @@ impl PhysicalCamera {
             optics,
             sources: tones.iter().map(|tone| tone.illumination).collect(),
             factors,
-            waves,
+            pupil_evaluations: waves,
+            pupil_radius_m: self.aperture().radius_m(),
+            pupils: None,
             contractions_per_component,
             maximum_pair_contractions: limits.maximum_pair_contractions,
         })
@@ -323,7 +336,7 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
         let contractions = self.contractions_per_component * detector.components();
         let (subdivisions, samples, pupil_evaluations, pair_contractions) = self
             .optics
-            .pixel_work(pixel, limits, self.waves, contractions)?;
+            .pixel_work(pixel, limits, self.pupil_evaluations, contractions)?;
         let power =
             pixel::integrate_moments(pixel, subdivisions, &mut cancelled, |at, cancelled| {
                 self.moments(at, detector, cancelled)
@@ -353,7 +366,7 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
         detector: CoherentJonesDetector,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<[Dd; 2], CoherentDiffractionError> {
-        if self.waves == 0 {
+        if self.pupil_evaluations == 0 {
             return Ok([Dd::ZERO; 2]);
         }
         let rotations = self.optics.rotations(at, cancelled)?;
@@ -416,6 +429,14 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
             };
             for wave in waves {
                 poll(cancelled)?;
+                if let Some(pupils) = &self.pupils {
+                    let value = pupils[group].field(&tone.pupil, wave, at, cancelled)?;
+                    for (field, added) in fields[group].iter_mut().zip(value) {
+                        field[0] = field[0] + added[0];
+                        field[1] = field[1] + added[1];
+                    }
+                    continue;
+                }
                 let h = tone.pupil.amplitude([
                     at[0] - wave.tangent_direction[0],
                     at[1] - wave.tangent_direction[1],

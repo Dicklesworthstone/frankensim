@@ -3943,7 +3943,8 @@ physical-conjugate refusal, work preflight and cancellation/reuse.
 `CoherentJonesPupilWave` spectra through the original wavelength-specific pupil,
 defocus, physical medium and finite-shutter optics. Each vector wave has two
 complex sqrt(W) amplitudes in the same orthonormal paraxial pupil x/y basis;
-their squared magnitudes sum to its isolated transmitted power. One tone is
+their squared magnitudes sum to its isolated clear-pupil power, before any
+optional Jones-pupil layers described below. One tone is
 the monochromatic case. Frequencies retain the common pupil-centre clock,
 negative-time analytic-field convention and original chromatic sensor phase.
 
@@ -3970,8 +3971,9 @@ coherence between independent source columns.
 Point observations return shutter-average tangent-coordinate power density;
 finite pixels return average watts and integrated joules. They reuse the
 original positive spatial quadrature, physical pupil bandwidth, cross-frequency
-sensor-chirp bound and analytic shutter kernels. Each vector source evaluates
-its pupil once per spatial sample for both components. Source budgets count
+sensor-chirp bound and analytic shutter kernels. Each unmasked vector source
+evaluates its pupil once per spatial sample for both components; patterned
+layers multiply this count by their retained Fourier modes. Source budgets count
 vector waves. Preparation preflights both polarization components so a cached
 query supports either detector; each pixel charges its actual one or two
 analyzed components. Observation uses bounded scratch, no allocations and
@@ -3979,9 +3981,10 @@ bounded cancellation checks. Errors publish no partial measurement, and the
 same source/pupil preparation is reusable with another analyzer or after
 cancellation. Original numerical refusals and resolution limits remain.
 
-This is two-component paraxial diffraction through an isotropic scalar pupil,
-not longitudinal/high-NA vector diffraction, polarization-dependent pupil
-transfer, nonparallel ray-frame transport or coherent scene rendering. An
+The default is two-component paraxial diffraction through an isotropic scalar
+pupil; the optional passive patterned layers below extend its Jones response.
+Longitudinal/high-NA vector diffraction, nonparallel ray-frame transport and
+coherent scene rendering remain outside this query. An
 arbitrary finite-pixel polarization state is not inferred from its integrated
 power. Scalar/paraxial and quadrature errors are not certified by this API.
 
@@ -3990,6 +3993,61 @@ law, complex circular-mode conjugation, shared versus independent spectral
 coherence, wavelength-specific defocused beats, independent square-pupil pixel
 integrals, complementary analyzer power, exposure energy, DD weak residuals,
 basis rotation, exact logical work bounds and cancellation/reuse.
+
+### Passive patterned Jones pupils for spectral camera interference
+
+`PreparedCoherentJonesDiffractionExposure::set_pupil_responses` installs one
+explicit `CoherentJonesPupilResponse` per distinct source frequency. Repeated
+tones at that frequency share the same pupil. Each response is an ordered
+stack of passive thin `CoherentJonesPupilLayer` elements on the same pupil
+plane: `J(u)=R(theta) diag(t0,t1) R(theta)^T`, with
+`theta=theta0+g.u` and `tj=sqrt(Tj) exp(i phi_j)`, `0<=Tj<=1`.
+Uniform layers represent linear retarders, polarizers and diattenuators;
+a rotating axis represents a geometric-phase polarization grating. Authored
+frequency-specific loss and both principal phases retain the common phase
+needed for finite-exposure beats. No spectral interpolation or missing
+material response is inferred. Input amplitudes remain normalized to the
+clear pupil, so passive loss is never renormalized away.
+
+Each layer has at most three exact spatial Fourier modes. Coplanar composition
+preserves matrix order, convolves those modes and merges identical gradients
+in DD; only exact-zero matrices are removed. Each mode applies its Jones
+matrix before coherent field addition and queries the ORIGINAL chromatic
+pupil at `theta_observation-theta_source-q/k_medium`. Circular, annular and
+polygon geometry, signed defocus, medium wavelength and common sensor phase
+remain owned by the original transfer. Deterministic means and shared spectral
+covariance columns retain their existing coherent/incoherent semantics. The
+shared field owner supplies detector power, analyzer projection and full
+spectral coherency/Stokes through the same pupil; sensor phase stays at the
+actual observation coordinate, not at a shifted Fourier-mode coordinate.
+The original analytic shutter and positive finite-pixel integration remain
+unchanged. Multiplying the physical pupil by a Jones layer does not enlarge
+its spatial support, so the original intensity-bandwidth resolution remains
+applicable; it is still not a quadrature certificate.
+
+`CoherentJonesPupilLimits` bounds total authored layers, completed frequency
+modes plus the active intermediate expansion, and original pupil evaluations
+per point. Each frequency has an additional hard cap of 64 intermediate
+modes; expansion refuses instead of truncating coefficients. Pixel work
+includes every compiled mode for every wave/factor and is preflighted before
+evaluation. Shifted incident directions retain the original paraxial admission.
+Wholly underflowed products of nonzero complex fields/transfers or layer
+coefficients refuse rather than becoming false extinction. Preparation is
+transactional under data, work, range or cancellation failure, while
+point/pixel queries allocate nothing and retain bounded cancellation checks.
+Empty layer lists restore the clear pupil. This model excludes propagation
+between layers, multiple reflections, arbitrary pupil textures and high-NA
+longitudinal fields; it does not extend the separate monochromatic Stokes owner.
+
+Five focused regression groups check independent physical square-aperture
+Jones integration with a 32/64/128 refinement ladder and both defocus signs,
+noncommuting layers, weak aligned transmission, chromatic finite-exposure
+phase, polarization-grating steering, finite-pixel energy, and transactional
+bounds/cancellation. The focused actual-source coherent camera suite passes
+36 tests, including the existing scalar, spectral, monochromatic coherency
+and full spectral coherency tests. Patterned coherency traces and analyzer
+contractions agree with detector power, and both pixel APIs account for modes. This bounded native execution is not a full workspace/tracer build or
+experimental validation of authored material responses.
 
 ### Source-depth-resolved diffraction across separated planes
 
@@ -9898,8 +9956,9 @@ weak-channel correlation checks refuse invalid contractions without clipping.
 positive spatial rule, shortest-wavelength pupil bandwidth and mixed-frequency
 sensor-chirp bound. It returns spatially integrated average coherency in watts
 and shutter-integrated coherency in joules; all signed Stokes components share
-those units. This retains temporal and spatial depolarization. Each authored
-vector wave still evaluates its physical pupil once per spatial sample.
+those units. This retains temporal and spatial depolarization. Each unmasked
+vector wave evaluates its physical pupil once per spatial sample; optional
+patterned Jones pupils charge every retained Fourier mode in that same count.
 
 For n distinct frequencies and each mean/covariance bank, full coherency costs
 four diagonal real moments plus six per unequal-frequency pair: n*(3*n+1).
@@ -9913,8 +9972,9 @@ allocate nothing, and remain reusable after refusal or cancellation.
 
 The original uniform-shutter, cycle-averaged analytic-field detector and scalar
 paraxial pupil assumptions remain. There is no optical-carrier time raster,
-subcycle real-field detector, inferred coherence, vector high-NA diffraction,
-or polarization-dependent pupil transfer. Spatial resolution is not an error
+subcycle real-field detector, inferred coherence or vector high-NA diffraction.
+Passive patterned Jones pupils use the shared field owner described above.
+Spatial resolution is not an error
 certificate, and DD moments do not guarantee relative accuracy at an arbitrary
 interference null. Point results are tangent-coordinate power densities; this
 does not change physical scene radiance or imply a sensor QE/electronics model.

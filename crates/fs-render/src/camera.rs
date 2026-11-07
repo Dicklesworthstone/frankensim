@@ -26,20 +26,21 @@ mod diffraction;
 #[cfg(feature = "tracer")]
 pub(crate) use diffraction::ProjectedPupilFootprint;
 pub use diffraction::{
-    PolarizedCoherentDiffractionPixelPower, PolarizedCoherentDiffractionSample,
-    PolarizedDiffractionCoherency, PreparedPolarizedCoherentDiffraction,
     CoherentDiffractionError, CoherentDiffractionExposureLimits,
     CoherentDiffractionExposurePixelLimits, CoherentDiffractionExposureSample,
     CoherentDiffractionLimits, CoherentDiffractionPixel, CoherentDiffractionPixelExposure,
     CoherentDiffractionPixelLimits, CoherentDiffractionPixelPower, CoherentDiffractionSample,
     CoherentDiffractionShutter, CoherentDiffractionTone, CoherentJonesDetector,
-    CoherentJonesDiffractionTone, CoherentJonesPupilIllumination, CoherentJonesPupilWave,
+    CoherentJonesDiffractionTone, CoherentJonesPupilIllumination, CoherentJonesPupilLayer,
+    CoherentJonesPupilLimits, CoherentJonesPupilResponse, CoherentJonesPupilWave,
     CoherentPupilIllumination, CoherentPupilWave, DefocusedDiffraction, FocusedDiffraction,
     JonesPupilCoherenceFactor, LayeredCameraRay, LayeredDiffraction,
-    MAX_COHERENT_DIFFRACTION_TONES, MAX_COHERENT_PUPIL_TANGENT, PreparedCoherentDiffraction,
-    PreparedCoherentDiffractionExposure, PreparedCoherentJonesDiffractionExposure,
+    MAX_COHERENT_DIFFRACTION_TONES, MAX_COHERENT_JONES_PUPIL_MODES, MAX_COHERENT_PUPIL_TANGENT,
     PolarizedCoherentDiffractionExposureSample, PolarizedCoherentDiffractionPixelExposure,
-    PupilCoherenceFactor, SpectralCameraRay,
+    PolarizedCoherentDiffractionPixelPower, PolarizedCoherentDiffractionSample,
+    PolarizedDiffractionCoherency, PreparedCoherentDiffraction,
+    PreparedCoherentDiffractionExposure, PreparedCoherentJonesDiffractionExposure,
+    PreparedPolarizedCoherentDiffraction, PupilCoherenceFactor, SpectralCameraRay,
 };
 #[cfg(feature = "tracer")]
 pub use diffraction::{DispersiveThinLens, ThinLensElement};

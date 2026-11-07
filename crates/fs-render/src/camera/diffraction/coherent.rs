@@ -40,10 +40,11 @@ pub use exposure::{
     CoherentDiffractionExposureLimits, CoherentDiffractionExposurePixelLimits,
     CoherentDiffractionExposureSample, CoherentDiffractionPixelExposure,
     CoherentDiffractionShutter, CoherentDiffractionTone, CoherentJonesDetector,
-    CoherentJonesDiffractionTone, CoherentJonesPupilIllumination, CoherentJonesPupilWave,
-    JonesPupilCoherenceFactor, MAX_COHERENT_DIFFRACTION_TONES, PreparedCoherentDiffractionExposure,
-    PreparedCoherentJonesDiffractionExposure,
+    CoherentJonesDiffractionTone, CoherentJonesPupilIllumination, CoherentJonesPupilLayer,
+    CoherentJonesPupilLimits, CoherentJonesPupilResponse, CoherentJonesPupilWave,
+    JonesPupilCoherenceFactor, MAX_COHERENT_DIFFRACTION_TONES, MAX_COHERENT_JONES_PUPIL_MODES,
     PolarizedCoherentDiffractionExposureSample, PolarizedCoherentDiffractionPixelExposure,
+    PreparedCoherentDiffractionExposure, PreparedCoherentJonesDiffractionExposure,
 };
 pub use pixel::{
     CoherentDiffractionPixel, CoherentDiffractionPixelLimits, CoherentDiffractionPixelPower,
@@ -129,6 +130,10 @@ pub enum CoherentDiffractionError {
     InconsistentCoherenceFactors,
     /// An ideal Jones analyzer needs a finite, nonzero polarization direction.
     InvalidPolarizationAnalyzer,
+    /// Jones-pupil powers must lie in [0,1] and all layer parameters be finite.
+    InvalidJonesPupil,
+    /// Every distinct source frequency needs exactly one pupil response.
+    InconsistentJonesPupilSpectrum,
     /// The original analytic shutter kernel refused its clock or contraction.
     Shutter(fs_fft::harmonic_window::WindowError),
     /// A preparation count exceeds the caller's explicit bound.

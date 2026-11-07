@@ -24,9 +24,10 @@
 //! transfer queries retain the pupil phase for authored coherent fields;
 //! they do not infer coherence or propagation phase between scene points.
 //! Jones point, pixel and exposure queries share this transfer between two
-//! common-frame paraxial transverse components. Vector high-NA diffraction,
-//! polarization-dependent pupil transfer, other aberrations and pupil-dependent
-//! occlusion remain outside this model.
+//! common-frame paraxial transverse components. Spectral Jones exposure can
+//! additionally compose passive patterned pupil layers through finite Fourier
+//! shifts of this same transfer. Vector high-NA diffraction, arbitrary pupil
+//! textures, other aberrations and pupil-dependent occlusion remain outside.
 
 use super::{ApertureKind, CameraError, LensSample, PhysicalCamera, direct_unit};
 use crate::charts::Ray;
@@ -44,19 +45,20 @@ mod polygon;
 use annular::AnnularPupil;
 use circular::{CircularDefocus, jinc};
 pub use coherent::{
-    PolarizedCoherentDiffractionPixelPower, PolarizedCoherentDiffractionSample,
-    PolarizedDiffractionCoherency, PreparedPolarizedCoherentDiffraction,
     CoherentDiffractionError, CoherentDiffractionExposureLimits,
     CoherentDiffractionExposurePixelLimits, CoherentDiffractionExposureSample,
     CoherentDiffractionLimits, CoherentDiffractionPixel, CoherentDiffractionPixelExposure,
     CoherentDiffractionPixelLimits, CoherentDiffractionPixelPower, CoherentDiffractionSample,
     CoherentDiffractionShutter, CoherentDiffractionTone, CoherentJonesDetector,
-    CoherentJonesDiffractionTone, CoherentJonesPupilIllumination, CoherentJonesPupilWave,
+    CoherentJonesDiffractionTone, CoherentJonesPupilIllumination, CoherentJonesPupilLayer,
+    CoherentJonesPupilLimits, CoherentJonesPupilResponse, CoherentJonesPupilWave,
     CoherentPupilIllumination, CoherentPupilWave, JonesPupilCoherenceFactor,
-    MAX_COHERENT_DIFFRACTION_TONES, MAX_COHERENT_PUPIL_TANGENT, PreparedCoherentDiffraction,
-    PreparedCoherentDiffractionExposure, PreparedCoherentJonesDiffractionExposure,
+    MAX_COHERENT_DIFFRACTION_TONES, MAX_COHERENT_JONES_PUPIL_MODES, MAX_COHERENT_PUPIL_TANGENT,
     PolarizedCoherentDiffractionExposureSample, PolarizedCoherentDiffractionPixelExposure,
-    PupilCoherenceFactor,
+    PolarizedCoherentDiffractionPixelPower, PolarizedCoherentDiffractionSample,
+    PolarizedDiffractionCoherency, PreparedCoherentDiffraction,
+    PreparedCoherentDiffractionExposure, PreparedCoherentJonesDiffractionExposure,
+    PreparedPolarizedCoherentDiffraction, PupilCoherenceFactor,
 };
 #[cfg(feature = "tracer")]
 pub use dispersive::{DispersiveThinLens, ThinLensElement};

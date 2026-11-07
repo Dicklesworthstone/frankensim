@@ -1612,3 +1612,6 @@ fn g0_g4_pixel_admission_work_preflight_and_cancelled_reuse() {
     assert_eq!(dark.power_w, 0.0);
     assert_eq!(dark.quadrature_samples, 0);
 }
+
+#[path = "coherent_diffraction/pupil.rs"]
+mod pupil;

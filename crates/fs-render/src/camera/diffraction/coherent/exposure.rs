@@ -26,8 +26,10 @@ use fs_math::det;
 mod jones;
 pub use jones::{
     CoherentJonesDetector, CoherentJonesDiffractionTone, CoherentJonesPupilIllumination,
-    CoherentJonesPupilWave, JonesPupilCoherenceFactor, PreparedCoherentJonesDiffractionExposure,
+    CoherentJonesPupilLayer, CoherentJonesPupilLimits, CoherentJonesPupilResponse,
+    CoherentJonesPupilWave, JonesPupilCoherenceFactor, MAX_COHERENT_JONES_PUPIL_MODES,
     PolarizedCoherentDiffractionExposureSample, PolarizedCoherentDiffractionPixelExposure,
+    PreparedCoherentJonesDiffractionExposure,
 };
 
 const C_M_S: f64 = 299_792_458.0;
