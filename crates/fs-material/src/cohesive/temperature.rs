@@ -81,8 +81,12 @@ impl CohesivePoint<'_> {
             });
         }
         let mut point = CohesivePoint { law, ..*self };
-        let before_damage = if let Some(p) = law.mixed_mode {
-            let intact = self.mixed_integrity();
+        let intact = if self.law.mixed_mode.is_some() {
+            self.mixed_integrity()
+        } else {
+            self.law.intact(self.maximum)
+        };
+        if let Some(p) = law.mixed_mode {
             // Viscosity-only/compression-only updates preserve the exact
             // existing envelope and damage coordinate without roundoff drift.
             if self.law.mixed_mode != law.mixed_mode {
@@ -112,17 +116,7 @@ impl CohesivePoint<'_> {
             point.fracture_reference = point
                 .mixed_history
                 .map_or(0.0, |history| history.fracture(point.maximum));
-            if intact == 0.0 {
-                0.0
-            } else {
-                let g = active(self.jump);
-                let recoverable = 0.5 * (p.normal_stiffness_pa_m * g[0]) * g[0]
-                    + 0.5 * (p.tangential_stiffness_pa_m * g[1]) * g[1]
-                    + 0.5 * (p.tangential_stiffness_pa_m * g[2]) * g[2];
-                intact * recoverable
-            }
         } else {
-            let intact = self.law.intact(self.maximum);
             let retained =
                 equivalent_maximum(law.onset, law.failure, intact, |value| law.intact(value))?;
             point.maximum = if intact == 0.0 {
@@ -131,27 +125,49 @@ impl CohesivePoint<'_> {
                 retained.max(norm(active(self.jump))?).min(law.failure)
             };
             point.fracture_reference = law.fracture(point.maximum);
-            let stiffness = law.stiffness * intact;
-            active(self.jump)
-                .iter()
-                .map(|&x| (0.5 * stiffness * x) * x)
-                .sum::<f64>()
-        };
+        }
         point.dissipated_reference = self.dissipated_j_m2();
         let compression = self.jump[0].min(0.0);
-        let before_damage =
-            finite(before_damage + (0.5 * law.compression_stiffness * compression) * compression)?;
-        let old_storage = self.stored_energy_j_m2();
-        let next_storage = point.stored_energy_j_m2();
-        let released = finite(before_damage - next_storage)?;
-        if released < 0.0 || point.damage() < self.damage() {
+        let next_intact = if law.mixed_mode.is_some() {
+            point.mixed_integrity()
+        } else {
+            law.intact(point.maximum)
+        };
+        let lost_integrity = finite(intact - next_intact)?;
+        if lost_integrity < 0.0 {
             return Err(CohesiveError::Invalid(
                 "temperature transfer cannot heal damage or create negative fracture loss",
             ));
         }
+        // Differentiate the physical coefficients at the held jump instead of
+        // subtracting whole energies. A large unchanged compressive preload must
+        // not hide a small adhesive weakening, nor count as its fracture release.
+        let stiffness = |material: &BilinearCohesive| {
+            material.mixed_mode.map_or([material.stiffness; 3], |p| [
+                p.normal_stiffness_pa_m, p.tangential_stiffness_pa_m,
+                p.tangential_stiffness_pa_m,
+            ])
+        };
+        let old_stiffness = stiffness(self.law);
+        let next_stiffness = stiffness(law);
+        let mut parameter_work = finite((0.5
+            * (law.compression_stiffness - self.law.compression_stiffness) * compression)
+            * compression)?;
+        let mut stored_change = parameter_work;
+        let mut released = 0.0;
+        // Failed bonds can have arbitrary finite detached gaps. Their inactive
+        // adhesive coefficients must not evaluate 0 * infinity in this update.
+        if intact > 0.0 {
+            for (i, gap) in active(self.jump).into_iter().enumerate() {
+                let parameter = finite((0.5
+                    * (intact * (next_stiffness[i] - old_stiffness[i])) * gap) * gap)?;
+                let release = finite((0.5 * (lost_integrity * next_stiffness[i]) * gap) * gap)?;
+                parameter_work = finite(parameter_work + parameter)?;
+                released = finite(released + release)?;
+                stored_change = finite(stored_change + (parameter - release))?;
+            }
+        }
         point.dissipated_reference = finite(point.dissipated_reference + released)?;
-        let parameter_work = finite(before_damage - old_storage)?;
-        let stored_change = finite(next_storage - old_storage)?;
         let defect = finite(parameter_work - stored_change - released)?;
         if defect.abs() > energy_tolerance_j_m2 {
             return Err(CohesiveError::EnergyDefect(defect));

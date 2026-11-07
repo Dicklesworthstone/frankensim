@@ -7463,6 +7463,25 @@ This is not a calibrated mixed-mode adhesion model. The focused
 fixed-temperature substitution, independent fracture work and source/unit/domain
 refusals; structural source-to-force tests live in `fs-solid`.
 
+### Cohesive energy increments under retained preloads
+
+Common-mode and frozen-onset BK trials calculate recoverable work component by
+component while damage is fixed. Damage loading uses independently factored
+envelope-storage and fracture increments. An unchanged compressive preload,
+held orthogonal shear or large accumulated fracture inventory therefore cannot
+erase a smaller representable change in another physical channel. Signed
+unloading, compression after rupture and the original analytic path-mean
+traction retain the same constitutive law and absolute energy gate.
+
+At a fixed-jump temperature transfer, coefficient differences supply parameter
+work and the lost intact fraction supplies new fracture release. Unchanged
+compression is excluded from that release. Absolute endpoint energies remain
+diagnostics and can legitimately round to the same value while an incremental
+account is nonzero. The focused `cohesive::energy_tests` specify common/BK
+softening and unloading, orthogonal motion, historical loss, thermal weakening
+and separate physical viscosity under retained preloads. These are numerical
+model checks, not new material calibration or a change to the fracture law.
+
 ### Irreversible cohesive history through temperature changes
 
 `CohesivePoint::transfer_temperature` preserves the original jump, retained

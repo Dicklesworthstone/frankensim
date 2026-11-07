@@ -145,6 +145,9 @@ impl BilinearCohesive {
         else if maximum >= self.failure { self.fracture_energy }
         else { self.fracture_energy * ((maximum-self.onset)/(self.failure-self.onset)) }
     }
+    fn fracture_increment(&self, start: f64, end: f64) -> f64 {
+        fracture_increment(self.fracture_energy, self.onset, self.failure, start, end)
+    }
     // Exact radial work on the loading envelope; stable difference of integrals.
     fn envelope_work(&self, start: f64, end: f64) -> f64 {
         let a = start.min(self.onset);
@@ -276,18 +279,19 @@ impl<'a> CohesivePoint<'a> {
         // The effective radius is convex on a straight jump segment, so it
         // cannot exceed both endpoints. Below the old maximum, constant-damage
         // work telescopes even if the path passes through compression or turns.
-        let work = if radius > self.maximum {
-            0.5*stiffness_old*(self.maximum-old_radius)*(self.maximum+old_radius)
-                + self.law.envelope_work(self.maximum, radius)
+        let (work, stored_change) = if radius > self.maximum && radius > self.law.onset {
+            let retained = 0.5*stiffness_old*(self.maximum-old_radius)*(self.maximum+old_radius);
+            (retained + self.law.envelope_work(self.maximum, radius),
+                retained + loading_storage_change(self.law.stiffness, self.law.onset,
+                    self.law.failure, self.maximum, radius))
         } else {
-            0.5*stiffness_old*(radius-old_radius)*(radius+old_radius)
+            let elastic = elastic_work([stiffness_old; 3], self.jump, jump_m)?;
+            (elastic, elastic)
         };
-        let old_compression = self.jump[0].min(0.0);
-        let compression = jump_m[0].min(0.0);
-        let work = finite(work + 0.5*self.law.compression_stiffness
-            *(compression-old_compression)*(compression+old_compression))?;
-        let stored_change = finite(point.stored_energy_j_m2()-self.stored_energy_j_m2())?;
-        let dissipated = finite(point.dissipated_j_m2()-self.dissipated_j_m2())?;
+        let compression = compression_work(self.law.compression_stiffness, self.jump[0], jump_m[0])?;
+        let work = finite(work + compression)?;
+        let stored_change = finite(stored_change + compression)?;
+        let dissipated = finite(self.law.fracture_increment(self.maximum, maximum))?;
         let defect = finite(work-stored_change-dissipated)?;
         if defect.abs() > energy_tolerance_j_m2 { return Err(CohesiveError::EnergyDefect(defect)); }
         let traction_pa = point.traction_pa();
@@ -317,11 +321,9 @@ impl<'a> CohesivePoint<'a> {
     fn trial_failed(&self, jump: [f64; 3], tolerance: f64)
         -> Result<CohesiveStep<'a>, CohesiveError> {
         let point = Self { jump, ..*self };
-        let a = self.jump[0].min(0.0);
         let b = jump[0].min(0.0);
-        let factor = 0.5*self.law.compression_stiffness*(b-a);
-        let work = finite(factor*b + factor*a)?;
-        let stored_change = finite(point.stored_energy_j_m2()-self.stored_energy_j_m2())?;
+        let work = compression_work(self.law.compression_stiffness, self.jump[0], jump[0])?;
+        let stored_change = work;
         let defect = finite(work-stored_change)?;
         if defect.abs() > tolerance { return Err(CohesiveError::EnergyDefect(defect)); }
         let traction_pa = [finite(self.law.compression_stiffness*b)?, 0.0, 0.0];
@@ -355,6 +357,48 @@ impl<'a> CohesivePoint<'a> {
 
 fn active(jump: [f64; 3]) -> [f64; 3] { [jump[0].max(0.0), jump[1], jump[2]] }
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 { a[0]*b[0]+a[1]*b[1]+a[2]*b[2] }
+
+// Work and storage increments stay in their physical channels. Subtracting
+// absolute totals loses a small shear change beside an unchanged compressive
+// preload; subtracting radii likewise loses it beside a large held shear.
+fn elastic_work(stiffness: [f64; 3], old: [f64; 3], end: [f64; 3])
+    -> Result<f64, CohesiveError> {
+    let a = active(old);
+    let b = active(end);
+    let mut work = 0.0;
+    for i in 0..3 {
+        let factor = 0.5*stiffness[i]*(b[i]-a[i]);
+        work = finite(work + finite(factor*b[i] + factor*a[i])?)?;
+    }
+    Ok(work)
+}
+
+fn compression_work(stiffness: f64, old: f64, end: f64) -> Result<f64, CohesiveError> {
+    let a = old.min(0.0);
+    let b = end.min(0.0);
+    let factor = 0.5*stiffness*(b-a);
+    finite(factor*b + factor*a)
+}
+
+// On the softening envelope psi(r)=K*r0*r*(rf-r)/(2*(rf-r0)).
+// Factor its difference directly; no old compression or accumulated fracture
+// inventory enters this signed recoverable increment. For the mixed-mode
+// energy coordinate K=1. Work uses its separate traction integral above.
+fn loading_storage_change(stiffness: f64, onset: f64, failure: f64,
+    start: f64, end: f64) -> f64 {
+    let a = start.min(onset);
+    let b = end.min(onset);
+    let elastic = 0.5*stiffness*(b-a)*(b+a);
+    let a = start.max(onset).min(failure);
+    let b = end.max(onset).min(failure);
+    elastic + (0.5*stiffness*onset)*((b-a)/(failure-onset))*((failure-b)-a)
+}
+
+fn fracture_increment(energy: f64, onset: f64, failure: f64, start: f64, end: f64) -> f64 {
+    let a = start.max(onset).min(failure);
+    let b = end.max(onset).min(failure);
+    energy*((b-a)/(failure-onset))
+}
 
 // First outward crossing of ||[<x_n>, x_t1, x_t2]|| = radius on a straight
 // path. Inputs may already be scaled by strength or sqrt(stiffness). Starting
@@ -425,6 +469,9 @@ fn positive(value: f64) -> Result<f64, CohesiveError> {
     if value.is_finite() && value > 0.0 { Ok(value) }
     else { Err(CohesiveError::Invalid("requires positive finite data")) }
 }
+
+#[cfg(test)]
+mod energy_tests;
 
 #[cfg(test)]
 mod tests {

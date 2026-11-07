@@ -25,7 +25,8 @@
 
 use super::{
     BilinearCohesive, CohesiveEnergy, CohesiveError, CohesivePoint, CohesiveStep, active, det, dot,
-    finite, norm, outward_crossing, positive,
+    compression_work, elastic_work, finite, fracture_increment, loading_storage_change, norm,
+    outward_crossing, positive,
 };
 
 /// Explicit ordered-interface coefficients. All values are coherent SI.
@@ -339,18 +340,30 @@ impl<'a> CohesivePoint<'a> {
             ..*self
         };
         let old_intact = self.mixed_integrity();
-        let work = match history {
-            Some(h) if radius > old_maximum => {
-                0.5 * old_intact * (old_maximum - old_radius) * (old_maximum + old_radius)
-                    + h.envelope_work(old_maximum, radius)
+        let stiffness = [
+            p.normal_stiffness_pa_m,
+            p.tangential_stiffness_pa_m,
+            p.tangential_stiffness_pa_m,
+        ];
+        let (work, stored_change) = match history {
+            Some(h) if radius > old_maximum && radius > h.onset_sqrt_energy => {
+                let retained =
+                    0.5 * old_intact * (old_maximum - old_radius) * (old_maximum + old_radius);
+                (retained + h.envelope_work(old_maximum, radius),
+                    retained + loading_storage_change(1.0, h.onset_sqrt_energy,
+                        h.failure_sqrt_energy, old_maximum, radius))
             }
-            _ => 0.5 * old_intact * (radius - old_radius) * (radius + old_radius),
+            _ => {
+                let elastic = elastic_work(stiffness.map(|k| old_intact*k), self.jump, jump)?;
+                (elastic, elastic)
+            }
         };
-        let a = self.jump[0].min(0.0);
-        let b = jump[0].min(0.0);
-        let work = finite(work + 0.5 * self.law.compression_stiffness * (b - a) * (b + a))?;
-        let stored_change = finite(point.stored_energy_j_m2() - self.stored_energy_j_m2())?;
-        let dissipated = finite(point.dissipated_j_m2() - self.dissipated_j_m2())?;
+        let compression = compression_work(self.law.compression_stiffness, self.jump[0], jump[0])?;
+        let work = finite(work + compression)?;
+        let stored_change = finite(stored_change + compression)?;
+        let dissipated = finite(history.map_or(0.0, |h|
+            fracture_increment(h.fracture_energy_j_m2, h.onset_sqrt_energy,
+                h.failure_sqrt_energy, old_maximum, maximum)))?;
         let defect = finite(work - stored_change - dissipated)?;
         if defect.abs() > tolerance {
             return Err(CohesiveError::EnergyDefect(defect));
@@ -359,11 +372,6 @@ impl<'a> CohesivePoint<'a> {
         for value in traction_pa {
             finite(value)?;
         }
-        let stiffness = [
-            p.normal_stiffness_pa_m,
-            p.tangential_stiffness_pa_m,
-            p.tangential_stiffness_pa_m,
-        ];
         let active_jump = active(jump);
         let intact = point.mixed_integrity();
         let mut tangent = [[0.0; 3]; 3];
