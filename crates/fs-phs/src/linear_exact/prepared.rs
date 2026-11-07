@@ -706,7 +706,8 @@ impl PreparedQuadraticFlow {
         &self, state: &[f64], input: &[f64], z: &mut [f64], balanced: &mut [f64],
         endpoint: &mut [f64], integrals: &mut [f64],
     ) -> Result<(), PhsError> {
-        self.evaluate_impl(state, input, z, balanced, endpoint, integrals, false).map(|_| ())
+        self.evaluate_impl(state, input, z, balanced, endpoint, integrals, false,
+            |_, _| Ok(())).map(|_| ())
     }
 
     /// Held physical-port observations retain their integrated low words
@@ -717,18 +718,48 @@ impl PreparedQuadraticFlow {
         &self, state: &[f64], input: &[f64], z: &mut [f64], balanced: &mut [f64],
         endpoint: &mut [f64], integrals: &mut [f64],
     ) -> Result<f64, PhsError> {
+        self.evaluate_port_work_observed_into(state, input, [], z, balanced, endpoint, integrals)
+            .map(|(work, _)| work)
+    }
+
+    /// Contract every work contribution with the integrated port low words
+    /// before rounding the public observations. All contributions see the same
+    /// physical trajectory; none is recovered by subtracting two total works.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn evaluate_port_work_observed_into<const K: usize>(
+        &self, state: &[f64], input: &[f64], work_inputs: [&[f64]; K],
+        z: &mut [f64], balanced: &mut [f64], endpoint: &mut [f64], integrals: &mut [f64],
+    ) -> Result<(f64, [f64; K]), PhsError> {
         if self.rotating_sources || self.integrals.len() != self.m
             || self.integrals.iter().any(|form| !matches!(form, CachedIntegral::Linear(_)))
         {
             return Err(refuse("held port work requires one linear observation per input"));
         }
-        self.evaluate_impl(state, input, z, balanced, endpoint, integrals, true)
+        if work_inputs.iter().any(|values| values.len() != self.m || !finite(values)) {
+            return Err(refuse("held work observations require complete finite inputs"));
+        }
+        let mut observed = [Sum::default(); K];
+        let supplied = self.evaluate_impl(state, input, z, balanced, endpoint, integrals, true,
+            |port, integral| {
+                for (work, values) in observed.iter_mut().zip(work_inputs) {
+                    work.add_scaled(integral, values[port])
+                        .ok_or_else(|| refuse("prepared observed work is unrepresentable"))?;
+                }
+                Ok(())
+            })?;
+        let mut work = [0.0; K];
+        for (value, sum) in work.iter_mut().zip(observed) {
+            *value = sum.value()
+                .ok_or_else(|| refuse("prepared observed work is unrepresentable"))?;
+        }
+        Ok((supplied, work))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn evaluate_impl(
         &self, state: &[f64], input: &[f64], z: &mut [f64], balanced: &mut [f64],
         endpoint: &mut [f64], integrals: &mut [f64], physical_work: bool,
+        mut observe: impl FnMut(usize, Sum) -> Result<(), PhsError>,
     ) -> Result<f64, PhsError> {
         if state.len() != self.n || input.len() != self.m || !finite(state) || !finite(input)
             || z.len() != self.d || balanced.len() != self.n || endpoint.len() != self.n
@@ -773,6 +804,7 @@ impl PreparedQuadraticFlow {
                         .ok_or_else(|| refuse("prepared port integral is unrepresentable"))?;
                     work.add_scaled(integral, input[p])
                         .ok_or_else(|| refuse("prepared supplied work is unrepresentable"))?;
+                    observe(p, integral)?;
                     integral.value()
                         .ok_or_else(|| refuse("prepared port integral is unrepresentable"))?
                 }

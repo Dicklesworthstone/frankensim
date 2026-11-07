@@ -1597,6 +1597,18 @@ mode, damping term or port is removed. Warm calls perform matrix-vector products
 and quadratic contractions, with allocating result vectors. Heat is independently
 integrated from the original loss law, never recovered as an energy remainder.
 
+`PreparedExactZoh::step_with_work_inputs_into` independently integrates held
+work contributions on that same complete trajectory, retaining integrated port
+low words before rounding the mean outputs. The contributions need not sum to
+the physical input; they are observations, not additional forcing. Successful
+warm calls add only the work contractions, with no allocation or propagation.
+Invalid observations leave both caller output buffers unchanged, including at
+zero duration. Multirate source and interface work use these native contractions
+or the accepted nonlinear discrete effort, never a product of rounded outputs.
+Continuous-source interface work likewise uses the original paired power
+integral. Opposing ports therefore retain small signed net work even beneath a
+large common port output; heat remains independently integrated.
+
 `multirate::MultiratePair` advances both complete physical states on independently
 declared clocks of 1 through 16 native steps per common window. Its held interface
 inputs satisfy `u_left = -average(y_right)` and `u_right = average(y_left)` using

@@ -169,21 +169,52 @@ impl<'a> PreparedExactZoh<'a> {
     /// Neither output is changed on ANY refusal. Scratch may change.
     pub fn step_into(&mut self, initial: &[f64], input: &[f64], next: &mut [f64],
         average_output: &mut [f64]) -> Result<PreparedStepRecord, PhsError> {
+        self.step_with_work_inputs_into(initial, input, [], next, average_output)
+            .map(|(record, _)| record)
+    }
+
+    /// Evolve `input` and independently integrate each held contribution's work
+    /// `integral(work_inputs[k]^T y(t) dt)` on that same trajectory. Contributions
+    /// may describe external sources and interface reactions; they do not drive
+    /// additional trajectories and need not sum to `input`.
+    ///
+    /// Work retains the integrated port low words before outputs are rounded.
+    /// Multiplying the returned mean outputs by a contribution can lose small
+    /// net work between opposing ports. This call requires no warm allocation
+    /// or extra propagation and leaves both output buffers unchanged on refusal.
+    pub fn step_with_work_inputs_into<const K: usize>(
+        &mut self, initial: &[f64], input: &[f64], work_inputs: [&[f64]; K],
+        next: &mut [f64], average_output: &mut [f64],
+    ) -> Result<(PreparedStepRecord, [f64; K]), PhsError> {
         let sys = self.system.get();
         if next.len() != sys.n || average_output.len() != sys.m {
             return Err(refuse("prepared ZOH output buffers must match the complete state and ports"));
         }
-        let record = evaluate_step(sys, self.duration, self.flow.as_ref(), self.heat.as_ref(), initial, input, &mut self.scratch)?;
+        let result = evaluate_step_with_work_inputs(sys, self.duration, self.flow.as_ref(),
+            self.heat.as_ref(), initial, input, work_inputs, &mut self.scratch)?;
         next.copy_from_slice(&self.scratch.endpoint);
         average_output.copy_from_slice(&self.scratch.output);
-        Ok(record)
+        Ok(result)
     }
 }
 
 fn evaluate_step(sys: &PortHamiltonian, duration: f64, flow: Option<&PreparedQuadraticFlow>,
     heat: Option<&PositiveHeat>, initial: &[f64], input: &[f64], scratch: &mut Scratch) -> Result<PreparedStepRecord, PhsError> {
+    evaluate_step_with_work_inputs(sys, duration, flow, heat, initial, input, [], scratch)
+        .map(|(record, _)| record)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_step_with_work_inputs<const K: usize>(
+    sys: &PortHamiltonian, duration: f64, flow: Option<&PreparedQuadraticFlow>,
+    heat: Option<&PositiveHeat>, initial: &[f64], input: &[f64],
+    work_inputs: [&[f64]; K], scratch: &mut Scratch,
+) -> Result<(PreparedStepRecord, [f64; K]), PhsError> {
     if initial.len() != sys.n || input.len() != sys.m || !finite(initial) || !finite(input) {
         return Err(refuse("prepared ZOH requires complete finite state and input"));
+    }
+    if work_inputs.iter().any(|values| values.len() != sys.m || !finite(values)) {
+        return Err(refuse("prepared ZOH work observations require complete finite inputs"));
     }
     let Some(flow) = flow else {
         scratch.effort.fill(0.0);
@@ -193,10 +224,11 @@ fn evaluate_step(sys: &PortHamiltonian, duration: f64, flow: Option<&PreparedQua
             return Err(refuse("prepared ZOH initial energy/output is nonfinite"));
         }
         scratch.endpoint.copy_from_slice(initial);
-        return Ok(PreparedStepRecord { delta_h: 0.0, dissipated: 0.0, supplied: 0.0,
-            newton_iters: 0, solver_residual: 0.0, solver_certificate: None });
+        return Ok((PreparedStepRecord { delta_h: 0.0, dissipated: 0.0, supplied: 0.0,
+            newton_iters: 0, solver_residual: 0.0, solver_certificate: None }, [0.0; K]));
     };
-    let supplied = flow.evaluate_port_work_into(initial, input, &mut scratch.augmented, &mut scratch.balanced,
+    let (supplied, observed_work) = flow.evaluate_port_work_observed_into(initial, input,
+        work_inputs, &mut scratch.augmented, &mut scratch.balanced,
         &mut scratch.endpoint, &mut scratch.integrals)?;
     for (out, value) in scratch.output.iter_mut().zip(&scratch.integrals) { *out = value/duration; }
     let dissipated = heat.ok_or_else(||refuse("prepared positive heat is missing"))?
@@ -213,6 +245,6 @@ fn evaluate_step(sys: &PortHamiltonian, duration: f64, flow: Option<&PreparedQua
         || dissipated < -1e-12*scale || residual.abs() > 1e-12*scale {
         return Err(refuse("prepared ZOH physical energy balance refused"));
     }
-    Ok(PreparedStepRecord { delta_h, dissipated, supplied,
-        newton_iters: 0, solver_residual: 0.0, solver_certificate: None })
+    Ok((PreparedStepRecord { delta_h, dissipated, supplied,
+        newton_iters: 0, solver_residual: 0.0, solver_certificate: None }, observed_work))
 }

@@ -129,9 +129,11 @@ fn owning_and_borrowed_flows_preserve_complete_work_and_warm_steps_allocate_noth
     TRACK.with(|cell| cell.set((true, 0)));
     for _ in 0..1000 {
         let (free, mobility) = owned.average_relation(&x, &[f64::NAN, -0.23], 0).unwrap();
-        let record = owned
-            .step_into(&x, &[0.17, -0.23], &mut next, &mut output)
+        let (record, work) = owned
+            .step_with_work_inputs_into(&x, &[0.17, -0.23],
+                [&[0.17, 0.0], &[0.0, -0.23]], &mut next, &mut output)
             .unwrap();
+        close(work[0] + work[1], record.supplied);
         close(free + mobility * 0.17, output[0]);
         heat += record.dissipated;
         supplied += record.supplied;
@@ -148,6 +150,50 @@ fn owning_and_borrowed_flows_preserve_complete_work_and_warm_steps_allocate_noth
     );
     assert!(heat > 0.01);
     close(owned.system().hamiltonian(&x) - before + heat, supplied);
+}
+
+#[test]
+fn work_contributions_retain_information_absent_from_rounded_outputs() {
+    let system = PortHamiltonian::new(
+        2, 2, vec![0.0; 4], vec![0.0, 0.0, 0.0, 1.0],
+        vec![1.0, 1.0, 1.0, 0.0],
+        Box::new(QuadraticStorage::new(vec![1.0, 0.0, 0.0, 1.0], 2).unwrap()),
+    ).unwrap();
+    let large = 2.0_f64.powi(54);
+    let mut flow = PreparedExactZoh::new(&system, 0.25, budget()).unwrap();
+    let mut next = [0.0; 2];
+    let mut output = [0.0; 2];
+    let (record, [source, exchange]) = flow.step_with_work_inputs_into(
+        &[large, 1.0], &[1.0, -1.0], [&[1.5, -1.5], &[-0.5, 0.5]],
+        &mut next, &mut output,
+    ).unwrap();
+    assert_eq!(output[0], output[1]);
+    close(source, 0.375);
+    close(exchange, -0.125);
+    close(record.supplied, source + exchange);
+    close(record.dissipated, 0.25);
+    close(record.delta_h, 0.0);
+    assert_eq!(next[0], large);
+    close(next[1], 1.0);
+
+    // Observers are validated before either caller output is published,
+    // including the otherwise trivial zero-duration path.
+    for duration in [0.0, 0.25] {
+        let mut flow = PreparedExactZoh::new(&system, duration, budget()).unwrap();
+        for invalid in [&[1.0][..], &[f64::NAN, 0.0][..]] {
+            next.fill(71.0);
+            output.fill(83.0);
+            assert!(flow.step_with_work_inputs_into(&[large, 1.0], &[1.0, -1.0],
+                [invalid], &mut next, &mut output).is_err());
+            assert_eq!(next, [71.0; 2]);
+            assert_eq!(output, [83.0; 2]);
+        }
+    }
+    let mut zero = PreparedExactZoh::new(&system, 0.0, budget()).unwrap();
+    let (_, work) = zero.step_with_work_inputs_into(&[large, 1.0], &[1.0, -1.0],
+        [&[1.5, -1.5], &[-0.5, 0.5]], &mut next, &mut output).unwrap();
+    assert_eq!(work, [0.0; 2]);
+    assert_eq!(next, [large, 1.0]);
 }
 
 #[test]

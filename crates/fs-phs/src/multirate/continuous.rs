@@ -144,7 +144,7 @@ impl<'a> ContinuousClock<'a> {
         step: usize,
         next: &mut [f64],
         output: &mut [f64],
-    ) -> Result<(PreparedStepRecord, f64), PhsError> {
+    ) -> Result<(PreparedStepRecord, f64, f64), PhsError> {
         let (c0, s0, c1, s1) = match input {
             SourceInput::Tones { cosine, sine } => (cosine, sine, cosine, sine),
             SourceInput::AffineTones {
@@ -196,6 +196,7 @@ impl<'a> ContinuousClock<'a> {
             self.source
                 .is_affine()
                 .then_some((&self.external[2], &self.external[3])),
+            exchange,
             &mut self.work_input,
             next,
             output,

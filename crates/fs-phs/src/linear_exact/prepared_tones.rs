@@ -387,10 +387,11 @@ impl<'a> PreparedExactTones<'a> {
         source_cosine: &[f64],
         source_sine: &[f64],
         source_end: Option<(&[f64], &[f64])>,
+        held_exchange: &[f64],
         work_input: &mut [f64],
         next: &mut [f64],
         average_output: &mut [f64],
-    ) -> Result<(PreparedStepRecord, f64), PhsError> {
+    ) -> Result<(PreparedStepRecord, f64, f64), PhsError> {
         self.check_outputs(next, average_output)?;
         let count = self.port_dim() * self.tone_count();
         if source_cosine.len() != count
@@ -402,6 +403,9 @@ impl<'a> PreparedExactTones<'a> {
                 c.len() != count || s.len() != count || !finite(c) || !finite(s)
             })
             || work_input.len() < self.scratch.input.len()
+            || held_exchange.len() != self.port_dim()
+            || !finite(held_exchange)
+            || self.frequencies.first().copied() != Some(0.0)
         {
             return Err(refuse(
                 "continuous-tone source-work input or scratch extent",
@@ -439,9 +443,24 @@ impl<'a> PreparedExactTones<'a> {
             work_input,
             &mut self.scratch.coordinates,
         )?;
+        // The multirate adapter reserves its first tone for the held interface.
+        // Use the same native power integral as the physical/source work; the
+        // rounded mean outputs can have lost small opposing-port transfers.
+        work_input.fill(0.0);
+        let stride = if self.affine { 4 } else { 2 };
+        for (port, &input) in held_exchange.iter().enumerate() {
+            work_input[stride * (port * self.unique.len() + self.mapping[0])] = input;
+        }
+        let exchange_work = self.power.source_work_into(
+            &self.scratch.effort,
+            &self.scratch.derivative,
+            &self.scratch.input,
+            work_input,
+            &mut self.scratch.coordinates,
+        )?;
         next.copy_from_slice(&self.scratch.endpoint);
         average_output.copy_from_slice(&self.scratch.output);
-        Ok((record, source_work))
+        Ok((record, source_work, exchange_work))
     }
 
     fn evaluate(

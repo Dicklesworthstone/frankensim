@@ -69,6 +69,47 @@ fn free_mass(mass: f64) -> PortHamiltonian {
         Box::new(QuadraticStorage::new(vec![1.0/mass],1).unwrap())).unwrap()
 }
 
+#[test]
+fn native_work_survives_opposing_rounded_ports_on_every_local_clock() {
+    // Both public port velocities round to `large`, but the first also has
+    // the second coordinate's physical velocity. Its small work must survive
+    // cancellation of the large common motion. Port 2 is an idle connection.
+    let large = 2.0_f64.powi(54);
+    let right = free_mass(1.0);
+    for (resistance, force, expected_work, expected_heat, endpoint) in [
+        (1.0, 1.0, 0.25, 0.25, 1.0),
+        (0.0, -1.0, -0.21875, 0.0, 0.75),
+    ] {
+        let left = PortHamiltonian::new(
+            2, 3, vec![0.0; 4], vec![0.0, 0.0, 0.0, resistance],
+            vec![1.0, 1.0, 0.0, 1.0, 0.0, 0.0],
+            Box::new(QuadraticStorage::new(vec![1.0, 0.0, 0.0, 1.0], 2).unwrap()),
+        ).unwrap();
+        for substeps in [1, 2, 8] {
+            for method in [IntegrationMethod::ExactQuadratic,
+                IntegrationMethod::DiscreteGradient {
+                    maximum_rate_rad_s: 1.0, maximum_rate_dt: 0.5,
+                }]
+            {
+                let mut coupling = MultiratePair::new(
+                    &left, &right, &[PortPair { left: 2, right: 0, input_scale: 1.0 }],
+                    0.25, Clock { substeps, method, maximum_contact_step_s: None },
+                    exact(1), SolveConfig::default(),
+                ).unwrap();
+                let r = coupling.step(&[large, 1.0], &[0.0],
+                    &[force, -force, 0.0], &[0.0]).unwrap();
+                assert_eq!(r.left.average_output[0], r.left.average_output[1]);
+                close(r.external_work_j[0], expected_work, 2e-13);
+                close(r.left.supplied_j, expected_work, 2e-13);
+                close(r.left.dissipated_j, expected_heat, 2e-13);
+                close(r.left.state[1], endpoint, 2e-13);
+                assert_eq!(r.exchange_work_j, [0.0, 0.0]);
+                close(r.balance_residual_j, 0.0, 2e-13);
+            }
+        }
+    }
+}
+
 fn inertias(masses: &[f64]) -> PortHamiltonian {
     let n = masses.len();
     let mut storage = vec![0.0; n * n];

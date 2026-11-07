@@ -302,28 +302,39 @@ impl<'a> LocalClock<'a> {
         let (mut external_work,mut exchange_work) = (Sum::default(),Sum::default());
         for step in 0..self.clock.substeps {
             check(cancelled)?;
-            let (r, source_work) = if let Some(source) = external.at(step,sys.m) {
+            let (r, source_work, interface_work) = if let Some(source) = external.at(step,sys.m) {
                 for ((u,&value),&coupled) in input.iter_mut().zip(source).zip(exchange) {
                     *u=value+coupled;
                 }
-                let r = match &mut self.evolution {
-                    Evolution::Exact(flow) => flow.step_into(&state,&input,&mut next,&mut y)
-                        .map_err(|error| MultirateError::Subsystem { side: self.side, error })?,
-                    Evolution::Gonzalez(workspace) => workspace.step_into_controlled(sys,
-                        &state,&input,self.dt,&mut next,&mut y,&mut *cancelled)
-                        .map_err(|e| native(self.side,e))?,
-                };
-                (r,self.dt*sum(source.iter().zip(&y).map(|(u,y)|u*y)))
+                match &mut self.evolution {
+                    Evolution::Exact(flow) => {
+                        let (record, [source_work, interface_work]) = flow.step_with_work_inputs_into(
+                            &state,&input,[source,exchange],&mut next,&mut y)
+                            .map_err(|error| MultirateError::Subsystem { side: self.side, error })?;
+                        (record, source_work, interface_work)
+                    }
+                    Evolution::Gonzalez(workspace) => {
+                        let record = workspace.step_into_controlled(sys,
+                            &state,&input,self.dt,&mut next,&mut y,&mut *cancelled)
+                            .map_err(|e| native(self.side,e))?;
+                        let effort = workspace.last_step_discrete_effort()
+                            .ok_or(MultirateError::Invalid("native discrete effort is unavailable"))?;
+                        let work = |values: &[f64]| crate::port_work_from_effort(
+                            sys.n,sys.m,&sys.g,effort,values,self.dt,0.0)
+                            .map_err(|error| MultirateError::Subsystem { side: self.side, error });
+                        (record, work(source)?, work(exchange)?)
+                    }
+                }
             } else {
                 self.continuous.as_mut().expect("continuous source admitted above")
                     .step(&state,external,exchange,step,&mut next,&mut y)
                     .map_err(|error| MultirateError::Subsystem {side:self.side,error})?
             };
-            // Source work must use each native interval's actual conjugate
-            // output. Averaging a switched source before multiplying by the
-            // window-average output discards their correlation and its work.
+            // Keep the native work contraction, including its retained low
+            // words. Even each local interval's rounded mean outputs can lose
+            // physical work when large opposing port contributions cancel.
             external_work.add(source_work);
-            exchange_work.add(self.dt*sum(exchange.iter().zip(&y).map(|(u,y)|u*y)));
+            exchange_work.add(interface_work);
             for (total,&value) in output.iter_mut().zip(&y) { total.add(value/self.clock.substeps as f64); }
             change.add(r.delta_h); heat.add(r.dissipated); work.add(r.supplied);
             core::mem::swap(&mut state,&mut next);
