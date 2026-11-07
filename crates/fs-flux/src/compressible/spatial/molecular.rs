@@ -1,7 +1,9 @@
 //! Source-owned Fourier conduction and full three-dimensional Newtonian stress.
 //!
-//! Every face evaluates the original transport law at its actual temperature,
-//! pressure and frozen composition. Stress work and Fourier heat share one
+//! The original transport law supplies actual temperature, pressure and frozen
+//! composition coefficients. Compatible molecular stress samples cell values
+//! on periodic, zero-flux and free-slip domains; Fourier heat keeps its native
+//! face sampling. Stress work and Fourier heat share one
 //! conservative total-energy flux; kinetic energy lost to viscosity becomes
 //! internal energy without an additional heat source. These operators do not
 //! resolve a physical shock thickness without an adequate grid and source data.
@@ -57,6 +59,7 @@ struct MolecularWorkspace {
     primitive: Vec<Primitive>,
     // gradient[velocity component][derivative axis], prepared once per cell.
     gradient: Vec<[[f64; 3]; 3]>,
+    viscosity: Vec<crate::compressible::stress::Viscosity>,
     flux: [Vec<SpatialFaceFlux>; 3],
     binary: Vec<f64>,
     boundary_step: Vec<BoundaryImpulse>,
@@ -77,6 +80,10 @@ struct MolecularWorkspace {
 /// have zero molecular flux by default. [`Self::with_reservoir_exchange`]
 /// enables heat and stress exchange through complete source-admitted uniform
 /// or face-resolved reservoirs. All workspaces are preallocated.
+/// Compatible cell-weighted molecular stress retains sixteen bytes of
+/// viscosity scratch per cell. Any prescribed no-slip/Navier wall or enabled
+/// molecular bath exchange keeps the original full mechanical discretization.
+/// SGS retains its authored face closure and has no new dissipation guarantee.
 pub struct MolecularTransport3d<L> {
     gas: FrozenGas,
     grid: CartesianGrid,
@@ -127,6 +134,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 candidate: allocated(n, State::default())?,
                 primitive: allocated(n, Primitive::default())?,
                 gradient: allocated(n, [[0.0; 3]; 3])?,
+                viscosity: allocated(n, crate::compressible::stress::Viscosity::default())?,
                 flux: [
                     allocated(flow.grid.face_len(0), SpatialFaceFlux::default())?,
                     allocated(flow.grid.face_len(1), SpatialFaceFlux::default())?,
@@ -144,6 +152,17 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     /// Original immutable material/collision source and its reusable workspace.
     pub const fn law(&self) -> &L {
         &self.law
+    }
+
+    /// Whether the complete domain admits the compatible molecular stress
+    /// identity. This describes the molecular contribution; modeled SGS stress
+    /// retains its own physical and numerical qualifications.
+    pub fn uses_compatible_molecular_stress(&self) -> bool {
+        !self.reservoir_exchange
+            && self
+                .walls
+                .iter()
+                .all(|wall| matches!(wall, MolecularWall3d::SlipAdiabatic))
     }
 
     /// Enable molecular heat and full Newtonian stress at complete reservoirs.
@@ -299,6 +318,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 &mut self.law,
                 &mut self.work.primitive,
                 &mut self.work.gradient,
+                &mut self.work.viscosity,
                 &mut self.work.flux,
                 &mut self.work.binary,
                 #[cfg(feature = "experimental-sgs")]
@@ -351,6 +371,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                             &mut self.law,
                             &mut self.work.primitive,
                             &mut self.work.gradient,
+                            &mut self.work.viscosity,
                             &mut self.work.flux,
                             &mut self.work.binary,
                             #[cfg(feature = "experimental-sgs")]
@@ -404,6 +425,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         &mut self.law,
                         &mut self.work.primitive,
                         &mut self.work.gradient,
+                        &mut self.work.viscosity,
                         &mut self.work.flux,
                         &mut self.work.binary,
                         #[cfg(feature = "experimental-sgs")]
@@ -541,11 +563,16 @@ fn spatial<L: TransportLaw>(
     law: &mut L,
     primitive: &mut [Primitive],
     gradient: &mut [[[f64; 3]; 3]],
+    viscosity: &mut [crate::compressible::stress::Viscosity],
     fluxes: &mut [Vec<SpatialFaceFlux>; 3],
     binary: &mut [f64],
     #[cfg(feature = "experimental-sgs")] mut subgrid: Option<&mut sgs::SubgridTransport>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, MolecularError> {
+    let compatible = reservoirs.is_none()
+        && walls
+            .iter()
+            .all(|wall| matches!(wall, MolecularWall3d::SlipAdiabatic));
     let mut minimum_density = f64::INFINITY;
     let mut minimum_cv = f64::INFINITY;
     for (q, p) in states.iter().zip(primitive.iter_mut()) {
@@ -562,6 +589,27 @@ fn spatial<L: TransportLaw>(
         }
         minimum_density = minimum_density.min(p.density);
         minimum_cv = minimum_cv.min(volumetric_cv);
+    }
+    if compatible {
+        for (p, value) in primitive.iter().zip(viscosity.iter_mut()) {
+            poll(cancelled)?;
+            let coefficients = law.evaluate(
+                Temperature::new(p.temperature),
+                Pressure::new(p.pressure),
+                gas.source().mole_composition().fractions(),
+                binary,
+                cancelled,
+            )?;
+            *value = crate::compressible::stress::Viscosity {
+                shear: coefficients.dynamic_viscosity.value(),
+                bulk: coefficients.bulk_viscosity.value(),
+            };
+            if !value.valid() || !value.scale::<3>().is_finite() {
+                return Err(MolecularError::Invalid(
+                    "nonfinite or negative cell viscosity",
+                ));
+            }
+        }
     }
     // Cell central gradients are reused by the six adjacent face traces. This
     // retains the same centered stencil without redoing every neighbor lookup.
@@ -698,6 +746,11 @@ fn spatial<L: TransportLaw>(
             )?;
             let mu = coefficients.dynamic_viscosity.value();
             let bulk = coefficients.bulk_viscosity.value();
+            let molecular_viscosity = crate::compressible::stress::Viscosity { shear: mu, bulk };
+            let replace_molecular = compatible
+                && !wall
+                && (viscosity[left] != molecular_viscosity
+                    || viscosity[right] != molecular_viscosity);
             let conductivity = coefficients.thermal_conductivity.value();
             if ![mu, bulk, conductivity]
                 .into_iter()
@@ -708,7 +761,7 @@ fn spatial<L: TransportLaw>(
                 ));
             }
             #[cfg(feature = "experimental-sgs")]
-            let (mu, conductivity) =
+            let (mu, conductivity, modeled_mu) =
                 if let Some(sgs) = subgrid.as_ref().filter(|_| !wall && bath.is_none()) {
                     sgs.face_coefficients(
                         gas,
@@ -725,8 +778,10 @@ fn spatial<L: TransportLaw>(
                         conductivity,
                     )?
                 } else {
-                    (mu, conductivity)
+                    (mu, conductivity, 0.0)
                 };
+            #[cfg(not(feature = "experimental-sgs"))]
+            let modeled_mu = 0.0;
             let longitudinal = (4.0 / 3.0) * mu + bulk;
             let cross = bulk - (2.0 / 3.0) * mu;
             // The wall law replaces only tangential traction. Bulk and normal
@@ -752,9 +807,19 @@ fn spatial<L: TransportLaw>(
             let (wall_mu, shear_diffusion) = (mu, mu);
             // Cover both tangential cross-derivative stencils, variable face
             // coefficients and doubled half-cell wall or reservoir gradients.
-            let diffusivity = ((longitudinal + 2.0 * cross.abs() + 4.0 * shear_diffusion)
-                / minimum_density)
-                .max(conductivity / minimum_cv);
+            let stress_scale = if replace_molecular {
+                let modeled = crate::compressible::stress::Viscosity {
+                    shear: modeled_mu,
+                    bulk: 0.0,
+                };
+                viscosity[left]
+                    .scale::<3>()
+                    .max(viscosity[right].scale::<3>())
+                    + modeled.scale::<3>()
+            } else {
+                longitudinal + 2.0 * cross.abs() + 4.0 * shear_diffusion
+            };
+            let diffusivity = (stress_scale / minimum_density).max(conductivity / minimum_cv);
             if !diffusivity.is_finite() {
                 return Err(MolecularError::Invalid(
                     "molecular diffusion scale overflow",
@@ -797,8 +862,9 @@ fn spatial<L: TransportLaw>(
                     .sum::<f64>()
                     * wall_trace_fraction
             };
-            let normal_stress = longitudinal * normal_derivative + cross * transverse_divergence;
-            let (shear_stress, energy) = if let Some(model) = wall_model {
+            let mut normal_stress =
+                longitudinal * normal_derivative + cross * transverse_divergence;
+            let (mut shear_stress, mut energy) = if let Some(model) = wall_model {
                 let (shear, energy) = model.shear_and_energy(
                     axis,
                     if face == 0 { -1.0 } else { 1.0 },
@@ -836,6 +902,37 @@ fn spatial<L: TransportLaw>(
                 };
                 (shear, energy)
             };
+            if replace_molecular {
+                // Form molecular traction directly, retaining modeled viscosity
+                // separately. Subtracting a huge old midpoint-law stress would
+                // lose finite compatible stress, SGS and conductive heat.
+                let traction = crate::compressible::stress::traction(
+                    axis,
+                    distance,
+                    [pl.velocity, pr.velocity],
+                    [viscosity[left], viscosity[right]],
+                    |side, component, derivative| {
+                        gradient[[left, right][side]][component][derivative]
+                    },
+                );
+                normal_stress = traction[axis]
+                    + modeled_mu
+                        * ((4.0 / 3.0) * normal_derivative - (2.0 / 3.0) * transverse_divergence);
+                for tangent in 0..2 {
+                    let t = tangential[tangent];
+                    shear_stress[tangent] = traction[t]
+                        + modeled_mu
+                            * ((pr.velocity[t] - pl.velocity[t]) / distance
+                                + 0.5 * gradient[left][axis][t]
+                                + 0.5 * gradient[right][axis][t]);
+                }
+                energy = -normal_stress * (0.5 * pl.velocity[axis] + 0.5 * pr.velocity[axis])
+                    - shear_stress[0]
+                        * (0.5 * pl.velocity[tangential[0]] + 0.5 * pr.velocity[tangential[0]])
+                    - shear_stress[1]
+                        * (0.5 * pl.velocity[tangential[1]] + 0.5 * pr.velocity[tangential[1]])
+                    - conductivity * (pr.temperature - pl.temperature) / grid.spacing[axis];
+            }
             if ![normal_stress, shear_stress[0], shear_stress[1], energy]
                 .into_iter()
                 .all(f64::is_finite)

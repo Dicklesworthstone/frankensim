@@ -139,6 +139,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             &mut self.law,
             &mut self.work.primitive,
             &mut self.work.gradient,
+            &mut self.work.viscosity,
             &mut self.work.flux,
             &mut self.work.binary,
             #[cfg(feature = "experimental-sgs")]

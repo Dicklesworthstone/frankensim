@@ -248,7 +248,7 @@ impl ChannelDynamicThermalTransport {
         rho_alpha: f64,
         molecular_mu: f64,
         molecular_conductivity: f64,
-    ) -> Result<(f64, f64), MolecularError> {
+    ) -> Result<(f64, f64, f64), MolecularError> {
         thermal::ThermalWorkspace::face_coefficients(
             gas,
             axis,

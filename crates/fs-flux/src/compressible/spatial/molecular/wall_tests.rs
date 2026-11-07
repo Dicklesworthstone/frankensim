@@ -22,6 +22,7 @@ fn prepare(op: &mut MolecularTransport3d<ConstantTransport>, flow: &Euler3d) {
         &mut op.law,
         &mut op.work.primitive,
         &mut op.work.gradient,
+        &mut op.work.viscosity,
         &mut op.work.flux,
         &mut op.work.binary,
         #[cfg(feature = "experimental-sgs")]

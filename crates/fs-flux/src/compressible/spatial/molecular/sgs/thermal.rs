@@ -181,7 +181,7 @@ impl DynamicThermalTransport {
         rho_alpha: f64,
         molecular_mu: f64,
         molecular_conductivity: f64,
-    ) -> Result<(f64, f64), MolecularError> {
+    ) -> Result<(f64, f64, f64), MolecularError> {
         ThermalWorkspace::face_coefficients(
             gas,
             axis,
@@ -269,9 +269,9 @@ impl ThermalWorkspace {
         molecular_conductivity: f64,
         maximum_viscosity_ratio: f64,
         maximum_diffusivity_ratio: f64,
-    ) -> Result<(f64, f64), MolecularError> {
+    ) -> Result<(f64, f64, f64), MolecularError> {
         if mu_t == 0.0 && rho_alpha == 0.0 {
-            return Ok((molecular_mu, molecular_conductivity));
+            return Ok((molecular_mu, molecular_conductivity, 0.0));
         }
         if mu_t != 0.0 {
             let ratio = mu_t / molecular_mu;
@@ -315,6 +315,6 @@ impl ThermalWorkspace {
                 "unrepresentable dynamic stress or heat coefficient",
             ));
         }
-        Ok((mu, conductivity))
+        Ok((mu, conductivity, mu_t))
     }
 }

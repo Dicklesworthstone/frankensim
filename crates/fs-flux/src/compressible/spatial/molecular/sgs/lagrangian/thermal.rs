@@ -88,11 +88,11 @@ impl LagrangianTransport {
         pressure: f64,
         molecular_mu: f64,
         molecular_conductivity: f64,
-    ) -> Result<(f64, f64), MolecularError> {
+    ) -> Result<(f64, f64, f64), MolecularError> {
         let momentum = 0.5 * momentum_coefficients[left] + 0.5 * momentum_coefficients[right];
         let heat = 0.5 * self.heat_coefficient[left] + 0.5 * self.heat_coefficient[right];
         if momentum == 0.0 && heat == 0.0 {
-            return Ok((molecular_mu, molecular_conductivity));
+            return Ok((molecular_mu, molecular_conductivity, 0.0));
         }
         // Reconstruct once, at the exact conservative face. A zero centered
         // cell strain must not erase a shear resolved by this face stencil.
@@ -169,6 +169,6 @@ impl LagrangianTransport {
                 "unrepresentable Lagrangian stress or heat coefficient",
             ));
         }
-        Ok((mu, conductivity))
+        Ok((mu, conductivity, mu_t))
     }
 }

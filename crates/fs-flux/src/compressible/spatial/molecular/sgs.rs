@@ -205,6 +205,9 @@ impl SubgridTransport {
         }
     }
 
+    /// Total viscosity/conductivity plus the separately retained modeled
+    /// viscosity. Molecular face quadrature may change without subtracting a
+    /// small modeled stress back out of a much larger molecular coefficient.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn face_coefficients(
         &self,
@@ -220,7 +223,7 @@ impl SubgridTransport {
         pressure: f64,
         molecular_mu: f64,
         molecular_conductivity: f64,
-    ) -> Result<(f64, f64), MolecularError> {
+    ) -> Result<(f64, f64, f64), MolecularError> {
         if let SubgridClosure::Lagrangian(dynamic) = &self.closure {
             if let Some(config) = dynamic.thermal_config() {
                 return dynamic.thermal_face_coefficients(
@@ -248,7 +251,7 @@ impl SubgridTransport {
         } = &self.closure
         {
             if config.model.coefficient() == 0.0 {
-                return Ok((molecular_mu, molecular_conductivity));
+                return Ok((molecular_mu, molecular_conductivity, 0.0));
             }
             let g = face_gradient(
                 primitive[left].velocity,
@@ -366,7 +369,7 @@ impl SubgridTransport {
         };
         // Preserve the original molecular arithmetic and source calls exactly.
         if mu_t == 0.0 {
-            return Ok((molecular_mu, molecular_conductivity));
+            return Ok((molecular_mu, molecular_conductivity, 0.0));
         }
         let ratio = mu_t / molecular_mu;
         if !ratio.is_finite() || ratio > maximum_ratio {
@@ -390,6 +393,6 @@ impl SubgridTransport {
                 "unrepresentable subgrid stress or heat coefficient",
             ));
         }
-        Ok((mu, conductivity))
+        Ok((mu, conductivity, mu_t))
     }
 }

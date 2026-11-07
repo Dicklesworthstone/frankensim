@@ -184,6 +184,7 @@ struct MolecularWorkspace {
     candidate: Vec<State>,
     primitive: Vec<Primitive>,
     gradient: Vec<[[f64; 2]; 2]>,
+    viscosity: Vec<super::stress::Viscosity>,
     x_flux: Vec<NormalFaceFlux>,
     y_flux: Vec<NormalFaceFlux>,
     binary: Vec<f64>,
@@ -198,6 +199,9 @@ struct MolecularWorkspace {
 /// half-cell distance and admit prescribed tangential motion or temperature.
 /// The same energy flux carries their wall work and Fourier heat; no separate
 /// viscous heat source is added. Transmissive ends have zero molecular flux.
+/// Periodic, zero-flux and free-slip domains use compatible cell-weighted
+/// molecular stress, retaining sixteen bytes of viscosity scratch per cell.
+/// A prescribed no-slip or Navier wall keeps the original full discretization.
 pub struct MolecularTransport2d<L> {
     gas: FrozenGas,
     grid: CartesianGrid,
@@ -238,6 +242,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                 candidate: allocated(n, State::default())?,
                 primitive: allocated(n, Primitive::default())?,
                 gradient: allocated(n, [[0.0; 2]; 2])?,
+                viscosity: allocated(n, super::stress::Viscosity::default())?,
                 x_flux: allocated((nx + 1) * ny, NormalFaceFlux::default())?,
                 y_flux: allocated(nx * (ny + 1), NormalFaceFlux::default())?,
                 binary: allocated(species * species, 0.0)?,
@@ -251,6 +256,15 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
     /// Original immutable law identity and retained collision/source data.
     pub const fn law(&self) -> &L {
         &self.law
+    }
+
+    /// Whether the complete domain admits the compatible molecular stress
+    /// identity. Prescribed velocity and finite-slip walls retain their native
+    /// mechanical discretization, including their original physical wall work.
+    pub fn uses_compatible_molecular_stress(&self) -> bool {
+        self.walls
+            .iter()
+            .all(|wall| matches!(wall, MolecularWall2d::SlipAdiabatic))
     }
 
     /// Configure a flat impermeable side. Its prescribed tangential velocity
@@ -331,6 +345,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                 &mut self.law,
                 &mut self.work.primitive,
                 &mut self.work.gradient,
+                &mut self.work.viscosity,
                 &mut self.work.x_flux,
                 &mut self.work.y_flux,
                 &mut self.work.binary,
@@ -368,6 +383,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                         &mut self.law,
                         &mut self.work.primitive,
                         &mut self.work.gradient,
+                        &mut self.work.viscosity,
                         &mut self.work.x_flux,
                         &mut self.work.y_flux,
                         &mut self.work.binary,
@@ -406,6 +422,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                         &mut self.law,
                         &mut self.work.primitive,
                         &mut self.work.gradient,
+                        &mut self.work.viscosity,
                         &mut self.work.x_flux,
                         &mut self.work.y_flux,
                         &mut self.work.binary,
@@ -542,11 +559,15 @@ fn spatial<L: TransportLaw>(
     law: &mut L,
     primitive: &mut [Primitive],
     gradient: &mut [[[f64; 2]; 2]],
+    viscosity: &mut [super::stress::Viscosity],
     x_flux: &mut [NormalFaceFlux],
     y_flux: &mut [NormalFaceFlux],
     binary: &mut [f64],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, MolecularError> {
+    let compatible = walls
+        .iter()
+        .all(|wall| matches!(wall, MolecularWall2d::SlipAdiabatic));
     let mut minimum_density = f64::INFINITY;
     let mut minimum_cv = f64::INFINITY;
     for (q, p) in states.iter().zip(primitive.iter_mut()) {
@@ -563,6 +584,27 @@ fn spatial<L: TransportLaw>(
         }
         minimum_density = minimum_density.min(p.density);
         minimum_cv = minimum_cv.min(cv);
+    }
+    if compatible {
+        for (p, value) in primitive.iter().zip(viscosity.iter_mut()) {
+            poll(cancelled)?;
+            let coefficients = law.evaluate(
+                Temperature::new(p.temperature),
+                Pressure::new(p.pressure),
+                gas.source().mole_composition().fractions(),
+                binary,
+                cancelled,
+            )?;
+            *value = super::stress::Viscosity {
+                shear: coefficients.dynamic_viscosity.value(),
+                bulk: coefficients.bulk_viscosity.value(),
+            };
+            if !value.valid() || !value.scale::<2>().is_finite() {
+                return Err(MolecularError::Invalid(
+                    "nonfinite or negative cell viscosity",
+                ));
+            }
+        }
     }
     let [nx, _] = grid.shape;
     // Each original cell gradient serves its neighboring faces. Mirror all
@@ -686,8 +728,14 @@ fn spatial<L: TransportLaw>(
                 }
                 let longitudinal = (4.0 / 3.0) * mu + bulk;
                 let cross = bulk - (2.0 / 3.0) * mu;
-                let diffusivity = ((longitudinal + cross.abs() + 2.0 * mu) / minimum_density)
-                    .max(conductivity / minimum_cv);
+                let stress_scale = if compatible {
+                    viscosity[left]
+                        .scale::<2>()
+                        .max(viscosity[right].scale::<2>())
+                } else {
+                    longitudinal + cross.abs() + 2.0 * mu
+                };
+                let diffusivity = (stress_scale / minimum_density).max(conductivity / minimum_cv);
                 if !diffusivity.is_finite() {
                     return Err(MolecularError::Invalid(
                         "molecular diffusion scale overflow",
@@ -726,8 +774,8 @@ fn spatial<L: TransportLaw>(
                                 + 0.5 * gradient[right][tangent][tangent],
                         )
                     };
-                let normal_stress = longitudinal * normal_gradient + cross * tangent_transverse;
-                let (shear_stress, energy) = if let Some(model) = wall_model {
+                let mut normal_stress = longitudinal * normal_gradient + cross * tangent_transverse;
+                let (mut shear_stress, mut energy) = if let Some(model) = wall_model {
                     let (shear, energy) = model.shear_and_energy(
                         axis,
                         if face == 0 { -1.0 } else { 1.0 },
@@ -746,6 +794,26 @@ fn spatial<L: TransportLaw>(
                         - conductivity * (pr.temperature - pl.temperature) / grid.spacing[axis];
                     (shear, energy)
                 };
+                let face_viscosity = super::stress::Viscosity { shear: mu, bulk };
+                if compatible
+                    && !wall
+                    && (viscosity[left] != face_viscosity || viscosity[right] != face_viscosity)
+                {
+                    let traction = super::stress::traction(
+                        axis,
+                        grid.spacing[axis],
+                        [pl.velocity, pr.velocity],
+                        [viscosity[left], viscosity[right]],
+                        |side, component, derivative| {
+                            gradient[[left, right][side]][component][derivative]
+                        },
+                    );
+                    normal_stress = traction[axis];
+                    shear_stress = traction[tangent];
+                    energy = -normal_stress * (0.5 * pl.velocity[axis] + 0.5 * pr.velocity[axis])
+                        - shear_stress * (0.5 * pl.velocity[tangent] + 0.5 * pr.velocity[tangent])
+                        - conductivity * (pr.temperature - pl.temperature) / grid.spacing[axis];
+                }
                 if ![normal_stress, shear_stress, energy]
                     .into_iter()
                     .all(f64::is_finite)

@@ -27,6 +27,7 @@ pub mod mixture;
 pub mod molecular;
 /// Volumetric shock propagation with three conservative momentum components.
 pub mod spatial;
+mod stress;
 use cartesian::StageStats;
 
 /// Conservative density, Cartesian momentum and full referenced total energy.

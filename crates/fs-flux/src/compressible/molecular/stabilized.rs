@@ -254,7 +254,8 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                         return spatial(
                             &self.gas, &self.grid, self.boundaries, &self.walls,
                             &self.work.current, &mut self.law, &mut self.work.primitive,
-                            &mut self.work.gradient, &mut self.work.x_flux, &mut self.work.y_flux,
+                            &mut self.work.gradient, &mut self.work.viscosity,
+                            &mut self.work.x_flux, &mut self.work.y_flux,
                             &mut self.work.binary, cancelled,
                         ).map(|rate| Stage { rate, ..Stage::default() });
                     }
@@ -312,7 +313,8 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
             spatial(
                 &self.gas, &self.grid, self.boundaries, &self.walls,
                 &self.work.current, &mut self.law, &mut self.work.primitive,
-                &mut self.work.gradient, &mut self.work.x_flux, &mut self.work.y_flux,
+                &mut self.work.gradient, &mut self.work.viscosity,
+                &mut self.work.x_flux, &mut self.work.y_flux,
                 &mut self.work.binary, cancelled,
             )?
         };
@@ -342,7 +344,8 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
             let stage_rate = spatial(
                 &self.gas, &self.grid, self.boundaries, &self.walls,
                 &self.work.stage, &mut self.law, &mut self.work.primitive,
-                &mut self.work.gradient, &mut self.work.x_flux, &mut self.work.y_flux,
+                &mut self.work.gradient, &mut self.work.viscosity,
+                &mut self.work.x_flux, &mut self.work.y_flux,
                 &mut self.work.binary, cancelled,
             )?;
             parabolic(dt * stage_rate, maximum)?;
@@ -391,7 +394,8 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
         let endpoint_rate = spatial(
             &self.gas, &self.grid, self.boundaries, &self.walls,
             &self.work.stage, &mut self.law, &mut self.work.primitive,
-            &mut self.work.gradient, &mut self.work.x_flux, &mut self.work.y_flux,
+            &mut self.work.gradient, &mut self.work.viscosity,
+            &mut self.work.x_flux, &mut self.work.y_flux,
             &mut self.work.binary, cancelled,
         )?;
         parabolic(dt * endpoint_rate, maximum)?;

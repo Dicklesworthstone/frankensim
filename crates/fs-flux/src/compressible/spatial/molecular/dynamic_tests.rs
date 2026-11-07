@@ -45,6 +45,7 @@ fn prepare<L: TransportLaw>(op: &mut MolecularTransport3d<L>, flow: &Euler3d) ->
         &mut op.law,
         &mut op.work.primitive,
         &mut op.work.gradient,
+        &mut op.work.viscosity,
         &mut op.work.flux,
         &mut op.work.binary,
         op.sgs.as_mut(),

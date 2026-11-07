@@ -7817,3 +7817,47 @@ tests were not compiled or executed in this constrained environment.
 Each canonical face uses two implicit scalar exchanges: an entropy-conjugate chemical/enthalpy exchange with frozen original kinetic mobility and transported partial enthalpy plus authored Soret heat, then Fourier heat exchange. Both recover local temperatures through original pure and mixing calorics. Conductivity is the zero-diffusive-flux value, and the same signed heat-of-transport coefficient supplies reciprocal Dufour heat. Original D(T,x) claims are sampled at actual endpoint temperatures/compositions and the mean face outside scalar roots. Completed stages and final fields retain original source support. Exact physical zero coefficients are admitted; positive unrepresentable mobilities refuse.
 
 Every proposal checks whole-field component amounts, per-cell capacity, total enthalpy and actual entropy before publishing. The first-order split has adaptive step doubling with independent composition and temperature tolerances, accepts the two-half-step result, and applies the original conservation/entropy allowance again to the whole requested interval. Cancellation, exhausted work, source refusal or failed numerical admission leaves the input unchanged. Conductivity and heat of transport are explicitly authored fixed face data; this owner does not infer experimental coefficients, model pressure/volume work, or couple advection/mechanics.
+
+### Compatible molecular stress with variable viscosity
+
+Frozen-composition planar and spatial molecular owners now sample the original
+transport law at cells and use a shared compatible Newtonian mechanical
+stencil on periodic, zero-diffusive-flux and SlipAdiabatic domains. Normal face
+derivatives use arithmetic cell viscosities; each centered cross derivative
+carries its own cell coefficient before face averaging. For nonnegative shear
+and bulk viscosity, the resulting semidiscrete molecular kinetic-energy loss
+is a sum of squared symmetric/deviatoric centered strains and nonnegative
+normal-derivative residuals. Smooth variable-material manufactured fields
+retain second-order force convergence. This prevents a demonstrated
+positive-viscosity stencil from creating kinetic energy and spurious vorticity
+while conserving total energy.
+
+`uses_compatible_molecular_stress` reports the complete-domain selection. Any
+prescribed no-slip/Navier wall, or enabled molecular bath exchange in 3D,
+retains the entire original mechanical discretization and physical boundary
+law. The new dissipation identity is not claimed for that fallback, arbitrary
+time steps, shocks or the combined SGS model. Original SGS face viscosity,
+ratio/source admission and heat remain authored model contributions. Its
+modeled viscosity is retained separately so replacement of a large molecular
+midpoint sample cannot erase a finite modeled stress.
+
+Every SSP/RKL stage and stress-vorticity observation refreshes a preallocated
+16-byte/cell source-viscosity cache. Mechanical parabolic bounds use the actual
+cell coefficients and the global minimum density; heat keeps the native face
+coefficient. Matching constant cell/face coefficients preserve original stress,
+work and step-bound arithmetic. Otherwise traction and total-energy work are
+formed directly, without cancellation against a possibly enormous unused
+midpoint stress. No extra viscous-heating source is introduced; conductive
+heat remains in the same conservative energy flux. Molecular cancellation and
+publication remain with the original owners.
+
+Six tests of the exact shared Rust kernel passed in an isolated rustc build:
+275 mixed supported-boundary energy identities, the positive-energy
+counterexample, constant-coefficient agreement, affine stress, second-order
+variable-material refinement, and an extreme midpoint-coefficient cancellation
+case. Four owner regression groups cover both dimensions, actual source
+sampling and parabolic bounds, retained heat/SGS at extreme contrast, explicit
+boundary scope/constant-law trajectory bits, and late cancellation/replay.
+Those owner tests were parsed and source-reviewed but not compiled or executed
+in the resource-constrained environment; the isolated kernel tests do not
+replace a full Cargo or DSR gate.

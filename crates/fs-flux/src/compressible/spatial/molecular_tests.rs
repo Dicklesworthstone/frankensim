@@ -39,6 +39,9 @@ mod dynamic_sgs;
 #[path = "molecular/wall_tests.rs"]
 mod walls;
 
+#[path = "molecular/compatible_tests.rs"]
+mod compatible;
+
 #[path = "molecular/vorticity_tests.rs"]
 mod vorticity;
 
