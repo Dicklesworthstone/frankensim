@@ -223,6 +223,9 @@ impl KitMaterials {
     /// surfaces. Each law must describe the same card, coordinates and axis
     /// meanings as that surface's elastic source. Orientations are relative to
     /// the plate grid; no viscous tensor is inferred from elastic Poisson ratio.
+    /// Temperature, pressure, moisture and composition remain fixed at their
+    /// original typed query coordinates. Frequency is only applicability;
+    /// the kit builder still checks every source against its internal clock.
     pub fn with_bending_viscosity(
         mut self,
         primary: PlaneStressViscosity,
@@ -249,8 +252,8 @@ impl KitMaterials {
                 return Err("bending viscosity and elasticity must retain the same material card and exact state point".into());
             }
             for property in a.properties() {
-                if !property.is_constant_at_fixed_temperature() {
-                    return Err("bending-loss elasticity and density must be constants or temperature-only curves at fixed positive absolute temperature".into());
+                if !property.is_constant_at_fixed_environment() {
+                    return Err("bending-loss elasticity and density need constant coefficients at the complete held environment; dynamic response axes cannot be frozen".into());
                 }
                 property
                     .angular_frequency_band_rad_s()

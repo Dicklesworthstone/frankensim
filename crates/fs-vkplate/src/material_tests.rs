@@ -28,10 +28,12 @@ fn pack_with_viscosity(
     poisson: Option<f64>,
     viscosity: Option<([f64; 6], (f64, f64), bool)>,
 ) -> NormalizedMaterialCardPack {
-    manufactured_pack(name, rho, young, poisson, viscosity, &[])
+    manufactured_pack(name, rho, young, poisson, viscosity, &[], None)
 }
 
-/// `extra` adds dimensionless scalar claims with the same validity.
+/// `extra` adds dimensionless scalar claims with the same validity. A held
+/// environment adds manufactured density/modulus curves and elastic frequency
+/// support; the reduced viscosity stays an independently declared constant.
 fn manufactured_pack(
     name: &str,
     rho: f64,
@@ -39,6 +41,7 @@ fn manufactured_pack(
     poisson: Option<f64>,
     viscosity: Option<([f64; 6], (f64, f64), bool)>,
     extra: &[(&str, f64)],
+    environment: Option<QuantityKind>,
 ) -> NormalizedMaterialCardPack {
     let temperature = QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,
@@ -52,6 +55,9 @@ fn manufactured_pack(
     );
     if !extra.is_empty() {
         raw.push_str(&format!("extra={extra:?}\n"));
+    }
+    if let Some(kind) = environment {
+        raw.push_str(&format!("environment={kind:?}; density multiplier=1.25; modulus multiplier=0.5\n"));
     }
     let artifact = hash_domain("frankensim.kit.material-test", raw.as_bytes());
     let observation = claims
@@ -79,18 +85,42 @@ fn manufactured_pack(
             .map(|&(key, value)| (key, Some(value), Dims::NONE)),
     ) {
         if let Some(value) = value {
+            let mut validity = ValidityDomain::unconstrained()
+                .with_quantity("T", temperature, 273.15, 323.15);
+            let mut model = PropertyValue::Scalar { value, dims };
+            let mut interpolation = InterpolationPolicy::ConstantWithinValidity;
+            if let Some(kind) = environment {
+                let quantity = QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+                validity = validity.with_quantity("material_environment", quantity, 100_000.0, 200_000.0);
+                if matches!(key, "density" | "young_modulus") {
+                    let factor = if key == "density" { 1.25 } else { 0.5 };
+                    model = PropertyValue::Curve {
+                        abscissa: "material_environment".into(),
+                        abscissa_dims: quantity.dims(),
+                        knots: vec![(100_000.0, value), (200_000.0, factor * value)],
+                        dims,
+                    };
+                    interpolation = InterpolationPolicy::LinearInside;
+                }
+                if let Some((_, (lo, hi), _)) = viscosity {
+                    validity = validity.with_quantity(
+                        "frequency",
+                        QuantitySpec::semantic(SemanticType::new(
+                            QuantityKind::Frequency(FrequencyConvention::Cyclic),
+                            ValueForm::Static,
+                        )),
+                        lo,
+                        hi,
+                    );
+                }
+            }
             claims
                 .insert_claim(PropertyClaim {
                     key: PropertyKey::new(key, dims),
-                    value: PropertyValue::Scalar { value, dims },
-                    validity: ValidityDomain::unconstrained().with_quantity(
-                        "T",
-                        temperature,
-                        273.15,
-                        323.15,
-                    ),
+                    value: model,
+                    validity,
                     uncertainty: UncertaintyModel::Unstated,
-                    interpolation: InterpolationPolicy::ConstantWithinValidity,
+                    interpolation,
                     observations: vec![observation],
                     provenance: Provenance {
                         source: format!("manufactured kit test {name}/{key}"),
@@ -399,6 +429,120 @@ fn viscous_binding(source: &NormalizedMaterialCardPack, angle: f64) -> KitMateri
         [angle, 0.0],
     )
     .unwrap()
+}
+
+fn viscous_binding_at(
+    source: &NormalizedMaterialCardPack,
+    point: &fs_matdb::QueryPoint,
+) -> Result<KitMaterials, String> {
+    use fs_material::plane_stress_viscosity::{MaterialPlane, PLANE_STRESS_VISCOSITY_PROPERTIES};
+    use fs_material::state_point::{
+        MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
+        resolve_material_state_point,
+    };
+    let striker = pack("held-environment striker", 800.0, 12e9, Some(0.3)).to_bytes();
+    let materials = KitMaterials::from_card_packs(
+        &source.to_bytes(), &[], &striker, point, 9e-6, 0.005, 0.05,
+    )?;
+    let requirements = PLANE_STRESS_VISCOSITY_PROPERTIES.iter().map(|name| {
+        ScalarPropertyRequirement::try_new(*name, DynViscosity::DIMS, ScalarAdmissibility::Finite)
+    }).collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let state = resolve_material_state_point(
+        source.card(), point, &requirements, MaterialPropertySelection::SingleClaimOnly,
+    ).map_err(|error| error.to_string())?;
+    let law = PlaneStressViscosity::from_material(
+        state, MaterialPlane::Axes12, PLANE_STRESS_VISCOSITY_PROPERTIES,
+    ).map_err(|error| error.to_string())?;
+    materials.with_bending_viscosity(law.clone(), law, [0.0; 2])
+}
+
+fn held_environment_point(kind: QuantityKind, value: f64) -> fs_matdb::QueryPoint {
+    materials::temperature_frequency_point("T", 293.15, "frequency", 1000.0).unwrap()
+        .with_quantity(
+            "material_environment",
+            QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static)),
+            value,
+        ).unwrap()
+}
+
+#[test]
+fn g1_g3_held_material_pressure_reaches_plate_operators_and_live_pressure() {
+    let source = manufactured_pack(
+        "held-pressure film", 1390.0, 4e9, Some(0.38),
+        Some(([1e6, 1e6, 4e5, 2e5, 0.0, 0.0], (0.0, 1e6), false)),
+        &[], Some(QuantityKind::Pressure),
+    );
+    let low = viscous_binding_at(&source, &held_environment_point(QuantityKind::Pressure, 100_000.0))
+        .unwrap();
+    let high = viscous_binding_at(&source, &held_environment_point(QuantityKind::Pressure, 200_000.0))
+        .unwrap();
+    assert_eq!(low.primary().resolved().card_identity(), high.primary().resolved().card_identity());
+    assert_ne!(low.primary().resolved().identity(), high.primary().resolved().identity());
+    let modulus = high.primary().resolved().property("young_modulus").unwrap();
+    assert_eq!(modulus.source_axes(), &[("material_environment".into(), Pressure::DIMS)]);
+    assert!(matches!(modulus.answer().receipt.decision, fs_matdb::EvaluationDecision::ExactTabulated { .. }));
+
+    // Only the declared material state changes. Geometry, supports, tension,
+    // gas, forcing and the independently prescribed viscous tensor stay fixed.
+    let mut a = viscous_plate(&low, Edge::Clamped);
+    let mut b = viscous_plate(&high, Edge::Clamped);
+    assert_eq!(a.xy, b.xy);
+    assert_eq!(a.tension, b.tension);
+    for (&original, &changed) in a.mass.iter().zip(&b.mass) {
+        near(changed, 1.25 * original);
+    }
+    near(b.max_rate2(), 0.4 * a.max_rate2());
+    assert_eq!(a.viscosity.as_ref().unwrap().c.val, b.viscosity.as_ref().unwrap().c.val);
+
+    let mut original = live::Live::with_materials_record("kick", 6.0, "293.15 101325 0", low)
+        .unwrap();
+    let mut changed = live::Live::with_materials_record("kick", 6.0, "293.15 101325 0", high)
+        .unwrap();
+    assert_eq!(original.ins.gas, changed.ins.gas);
+    assert!(impact_k(&changed.ins) < impact_k(&original.ins));
+    for player in [&mut original, &mut changed] {
+        player.strike(0.03, 0.01, 1.0);
+    }
+    let (mut first, mut second) = ([0.0; 2048], [0.0; 2048]);
+    original.render(&mut first, 1.0);
+    changed.render(&mut second, 1.0);
+    assert!(first.iter().chain(&second).all(|value| value.is_finite()));
+    assert!(first.iter().any(|value| value.abs() > 1e-9));
+    assert_ne!(first, second);
+    assert!(original.ins.bodies[0].bending_loss_dissipated_j() > 0.0);
+    assert!(changed.ins.bodies[0].bending_loss_dissipated_j() > 0.0);
+}
+
+#[test]
+fn g0_held_material_environment_keeps_dynamic_axes_and_clock_limits() {
+    let make = |kind, band| manufactured_pack(
+        "environment admission", 1390.0, 4e9, Some(0.38),
+        Some(([1e6, 1e6, 4e5, 2e5, 0.0, 0.0], band, false)), &[], Some(kind),
+    );
+    // Stress has the same dimensions as pressure, but cannot be frozen while
+    // this mechanical owner evolves stress. The shared viscosity is constant;
+    // it is the elastic source dependence that must refuse here.
+    let stress = make(QuantityKind::Stress, (0.0, 1e6));
+    let error = viscous_binding_at(&stress, &held_environment_point(QuantityKind::Stress, 150_000.0))
+        .unwrap_err();
+    assert!(error.contains("held environment"), "{error}");
+    for band in [(100.0, 1e6), (0.0, 2000.0)] {
+        let source = make(QuantityKind::Pressure, band);
+        let material = viscous_binding_at(
+            &source, &held_environment_point(QuantityKind::Pressure, 150_000.0),
+        ).unwrap();
+        assert!(material.validate_bending_loss_clock(48_000.0).is_err());
+    }
+    let low = viscous_binding_at(
+        &make(QuantityKind::Pressure, (0.0, 1e6)),
+        &held_environment_point(QuantityKind::Pressure, 100_000.0),
+    ).unwrap();
+    let high = viscous_binding_at(
+        &make(QuantityKind::Pressure, (0.0, 1e6)),
+        &held_environment_point(QuantityKind::Pressure, 200_000.0),
+    ).unwrap();
+    let (foreign, _) = high.primary_bending_loss().unwrap();
+    assert!(low.with_bending_viscosity(foreign.clone(), foreign.clone(), [0.0; 2]).is_err());
 }
 
 fn viscous_plate(materials: &KitMaterials, edge: Edge) -> Body {
@@ -1025,7 +1169,7 @@ fn g1_a_striker_tip_takes_all_four_anisotropy_claims_or_none() {
     let film = pack("tip film", 1390.0, 4.9e9, Some(0.38));
     let nu = 0.3;
     let striker = |claims: &[(&str, f64)]| {
-        manufactured_pack("tip striker", 800.0, 12e9, Some(nu), None, claims)
+        manufactured_pack("tip striker", 800.0, 12e9, Some(nu), None, claims, None)
     };
     let isotropic = [1.0, 1.0 / (2.0 * (1.0 + nu)), nu, nu];
     let claims: Vec<_> = TIP_ANISOTROPY.into_iter().zip(isotropic).collect();
