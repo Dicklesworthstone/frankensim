@@ -77,6 +77,8 @@ pub mod compose;
 /// Material-driven pressure waves and viscothermal losses for gases and liquids,
 /// with shared geometry, wall response and stable pressure/volume-flow composition.
 pub mod fluid;
+/// Exact subsonic uniform-flow cylinder characteristics and physical disturbance power.
+pub mod convected;
 /// Finite porous layers with transmission, reflection and coherent absorption.
 pub mod porous;
 /// Smooth plane-wave profiles and declared integration/slice axes.
