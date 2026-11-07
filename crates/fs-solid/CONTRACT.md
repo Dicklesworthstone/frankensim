@@ -9811,6 +9811,29 @@ and original Timoshenko curvature. This is a normal-stress observation;
 it does not include transverse shear failure, plastic redistribution, buckling,
 fracture evolution or a validated component allowable.
 
+`PreparedFrameRelaxationTransient::assess_tensile_strength` observes the original
+selected hereditary members from their accepted nodal motion and every native
+Maxwell history. Equilibrium stress and each original layer/arm's signed stress
+add before extrema. Its reconstruction uses the individual native channel
+forces and original layer area/inertia, avoiding both aggregate-force
+redistribution and loss from an underflowed diagnostic arm extension. A nonzero
+canonical memory whose native force underflows refuses explicitly. Constrained
+internal stresses remain observable even at zero nodal displacement, and decay
+on their original relaxation times through the native transient owner.
+
+The original Timoshenko bending fraction and two-end affine normal-stress
+envelope are retained. Independent transverse-shear histories remain in the
+mechanics but are not relabeled as longitudinal normal stress. Capacities must
+match the original sections in selected-member order. A checked layer budget,
+fallible result allocation and cancellation protect immutable observation;
+work is linear in selected layers plus original memory coordinates, with no
+secondary constitutive update or source lookup. Regression definitions in
+`tests/frame2d_poles/relaxation/tensile.rs` cover distinct layer histories at
+identical motion, signed stress relief, constrained bending stress and decay,
+original shear-flexible interpolation, foreign sources and numerical refusal.
+This observer covers selected Maxwell members and longitudinal tensile demand;
+it does not claim shear interaction, fatigue or fracture evolution.
+
 ## Material-bound tensile strength on native solid stresses
 
 `strength::TensileMaterialBinding` binds an explicitly selected isotropic

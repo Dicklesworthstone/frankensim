@@ -3,6 +3,9 @@
 //! and every ordinary boundary state together. These observations never replay
 //! a constitutive update or turn the integration defect into material heat.
 
+/// Tensile normal stress from the actual accepted equilibrium and Maxwell state.
+pub mod strength;
+
 use super::{
     FrameRelaxationCoordinate, FrameRelaxationError, PreparedFrameRelaxation, invalid, poll,
 };

@@ -6,10 +6,10 @@ use fs_phs::linear_exact::DenseExponentialBudget;
 use fs_solid::frame2d::coupled::transient::FrameTransientControls;
 use fs_solid::frame2d::relaxation::FrameTransverseRelaxation;
 
-const LENGTH: f64 = 0.7;
-const CORRECTION: f64 = 0.8;
+pub(super) const LENGTH: f64 = 0.7;
+pub(super) const CORRECTION: f64 = 0.8;
 
-fn shear_frame(
+pub(super) fn shear_frame(
     guided_axial: bool,
 ) -> (
     Frame2d,

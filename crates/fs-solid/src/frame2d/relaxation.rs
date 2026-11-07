@@ -79,6 +79,10 @@ pub struct FrameRelaxationMember {
     pub transverse_source: Option<ConcentricPronyTransverseSection>,
     dofs: [usize; 6],
     weights: [[f64; 6]; 3],
+    // The same immutable interpolation used by the native memory operator.
+    length_m: f64,
+    bending_fraction: f64,
+    coordinate_range: core::ops::Range<usize>,
 }
 
 /// One positive source arm/channel. A zero projection onto free motion still
@@ -430,6 +434,7 @@ impl Frame2d {
             let (dofs, weights, length) = self
                 .reference_member_coordinates(selection.element)
                 .map_err(FrameCoupledError::Frame)?;
+            let first_coordinate = coordinates.len();
             for (layer, (geometry, law)) in source
                 .elastic()
                 .layer_integrals()
@@ -522,6 +527,9 @@ impl Frame2d {
                 transverse_source,
                 dofs,
                 weights,
+                length_m: length,
+                bending_fraction,
+                coordinate_range: first_coordinate..coordinates.len(),
             });
         }
         let nm = coordinates.len();

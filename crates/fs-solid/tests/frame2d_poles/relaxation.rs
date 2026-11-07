@@ -1,6 +1,7 @@
 //! Source Maxwell storage/loss, original native poles, full strain coupling and
 //! physical descriptor loading. Independent closed-form member equations.
 
+mod tensile;
 mod transient;
 mod transverse;
 
@@ -77,6 +78,7 @@ fn material_layer_with_transverse(
         ("density".to_string(), RHO, Density::DIMS, false),
         ("young_modulus".to_string(), YOUNG, Pressure::DIMS, false),
         ("equilibrium".to_string(), YOUNG, Pressure::DIMS, true),
+        ("tensile_limit".to_string(), 1.0, Pressure::DIMS, false),
     ];
     let mut branches = Vec::new();
     for (index, &(delta, tau)) in arms.iter().enumerate() {
