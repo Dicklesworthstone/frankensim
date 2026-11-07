@@ -2017,3 +2017,21 @@ not every possible attitude or placement. G1/G3/G4 regressions in
 `tests/hydrostatic/equilibrium.rs` cover analytic drafts, stratification,
 conserved liquid inventories, heterogeneous holding torque, rigid-frame
 covariance, bounded work and transactional cancellation.
+
+## Cached hydrostatic geometry without a new clipping owner
+
+`DisplacementMesh` retains whole-volume moments, a relative centroid and a
+body-frame bounding box at admission. The same affine depth expression used
+by each vertex supplies conservative dry/full/slab bounds for arbitrary
+attitude. Dry queries and empty profile slabs avoid cell traversal; fully
+immersed constant-density pieces reuse admitted moments only when finite
+arithmetic and a well-conditioned depth sum permit it. Ill-conditioned large
+origins and unrepresentable relative contributions retain the original
+per-tetrahedron path and its refusals. No physical wet-volume threshold is
+introduced, and degree-two gradient moments still use the original integrator.
+
+`tests/hydrostatic_cache.rs` checks analytic thin caps and exact waterline
+contacts, rotated/refined cube work counts, translated world datums, large
+body-coordinate depth cancellation, original arithmetic refusal and initial/
+final cancellation. The optimization changes eligible query work, not fluid
+density, material identity, displaced geometry or the mechanical load owner.

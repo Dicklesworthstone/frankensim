@@ -128,8 +128,18 @@ energy-exact. Passing a local defect gate does not establish global stability,
 experimental accuracy or a general fluid-structure energy certificate. Timestep
 refinement and the appropriate physical regime remain necessary.
 
-A load pass traverses at most 65,536 cells and polls cancellation between cells.
-A time step performs two such passes and one existing rigid-body step; failure
+The immutable displacement mesh caches whole-volume moments and body-frame
+bounds. Wholly dry envelopes and empty density-profile slabs can return after
+a constant-work bound check. Fully immersed constant-density pieces reuse the
+cached moments when the depth calculation is well-conditioned; cancellation
+between large coordinate terms retains the original per-cell integration.
+Bounds use the same affine expression as the clipping owner, with no
+wet-fraction epsilon that could discard a positive thin cap.
+
+An interface-clipping pass traverses at most 65,536 cells and polls cancellation
+between cells. Continuous-gradient loads retain their degree-two moment
+integration. A uniform-medium time step performs two load queries and one
+existing rigid-body step; failure
 leaves caller state untouched. Fluid/material/envelope changes construct a new
 model: the API does not invent a mass/energy-conserving live replacement event.
 

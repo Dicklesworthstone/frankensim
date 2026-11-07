@@ -1,8 +1,8 @@
 //! Plane-clipped displacement geometry. Material mass geometry is deliberately
 //! separate: a sealed hollow body displaces its envelope, not just its walls.
-use fs_ga::{Se3, Vec3};
 use super::{HydrostaticError, finite, finite_vec, poll};
 use crate::VolumeMoments;
+use fs_ga::{Se3, Vec3};
 
 /// Maximum tetrahedra in a displacement mesh and one interface-clipping pass.
 /// Layered loading can traverse the mesh once per nonzero density jump.
@@ -16,29 +16,86 @@ pub struct DisplacementMesh {
     cells: Vec<[Vec3; 4]>,
     volume_m3: f64,
     centroid_body_m: Vec3,
+    depth_origin_body_m: Vec3,
+    centroid_relative_body_m: Option<Vec3>,
+    lower_body_m: Vec3,
+    upper_body_m: Vec3,
 }
 impl DisplacementMesh {
     /// Admit an immutable displacement envelope in the original body frame.
     /// The original volume-moment owner validates each nondegenerate cell.
     /// Vertex orientation does not select a sign for displaced volume.
-    pub fn new(cells: Vec<[Vec3; 4]>, max_cells: usize,
-        mut cancelled: impl FnMut() -> bool) -> Result<Self, HydrostaticError> {
+    pub fn new(
+        cells: Vec<[Vec3; 4]>,
+        max_cells: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, HydrostaticError> {
         poll(&mut cancelled)?;
-        if max_cells == 0 || max_cells > MAX_DISPLACEMENT_CELLS
-            || cells.is_empty() || cells.len() > max_cells {
-            return Err(HydrostaticError::Invalid("displacement cell budget exceeded or empty mesh"));
+        if max_cells == 0
+            || max_cells > MAX_DISPLACEMENT_CELLS
+            || cells.is_empty()
+            || cells.len() > max_cells
+        {
+            return Err(HydrostaticError::Invalid(
+                "displacement cell budget exceeded or empty mesh",
+            ));
         }
         let mut volume_m3 = 0.0;
         let mut centroid_body_m = Vec3::new(0.0, 0.0, 0.0);
+        let depth_origin_body_m = cells[0][0];
+        let mut centroid_relative_body_m = Some(Vec3::new(0.0, 0.0, 0.0));
+        let mut lower_body_m = Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+        let mut upper_body_m = Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
         for cell in &cells {
             poll(&mut cancelled)?;
             let moments = VolumeMoments::tetrahedron(*cell).map_err(HydrostaticError::Geometry)?;
             volume_m3 = finite(volume_m3 + moments.volume_m3())?;
-            centroid_body_m = finite_vec(centroid_body_m
-                + (moments.centroid_m()-centroid_body_m).scale(moments.volume_m3()/volume_m3))?;
+            let weight = moments.volume_m3() / volume_m3;
+            centroid_body_m = finite_vec(
+                centroid_body_m + (moments.centroid_m() - centroid_body_m).scale(weight),
+            )?;
+            // Keep sub-ULP centroid offsets before adding a large body origin.
+            // Subtracting that origin from moments.centroid_m() is too late:
+            // the original absolute centroid may already have rounded onto a
+            // surface vertex. An unrepresentable relative cache simply disables
+            // the new full-immersion shortcut; it does not reject the mesh.
+            centroid_relative_body_m = centroid_relative_body_m.and_then(|center| {
+                // The native per-cell accumulator refuses an underflowed
+                // positive volume weight. Do not hide that refusal in a cache.
+                if weight <= 0.0 {
+                    return None;
+                }
+                let local_center = (cell[0] - depth_origin_body_m)
+                    + ((cell[1] - cell[0]) + (cell[2] - cell[0]) + (cell[3] - cell[0])).scale(0.25);
+                let next = center + (local_center - center).scale(weight);
+                [next.x, next.y, next.z]
+                    .into_iter()
+                    .all(f64::is_finite)
+                    .then_some(next)
+            });
+            for point in cell {
+                lower_body_m = Vec3::new(
+                    lower_body_m.x.min(point.x),
+                    lower_body_m.y.min(point.y),
+                    lower_body_m.z.min(point.z),
+                );
+                upper_body_m = Vec3::new(
+                    upper_body_m.x.max(point.x),
+                    upper_body_m.y.max(point.y),
+                    upper_body_m.z.max(point.z),
+                );
+            }
         }
         poll(&mut cancelled)?;
-        Ok(Self { cells, volume_m3, centroid_body_m })
+        Ok(Self {
+            cells,
+            volume_m3,
+            centroid_body_m,
+            depth_origin_body_m,
+            centroid_relative_body_m,
+            lower_body_m,
+            upper_body_m,
+        })
     }
 
     /// A centered cuboid envelope, partitioned into six straight tetrahedra.
@@ -46,61 +103,202 @@ impl DisplacementMesh {
     pub fn cuboid(sides: Vec3, cancelled: impl FnMut() -> bool) -> Result<Self, HydrostaticError> {
         VolumeMoments::cuboid(sides).map_err(HydrostaticError::Geometry)?;
         let start = sides.scale(-0.5);
-        let axes = [Vec3::new(sides.x,0.0,0.0), Vec3::new(0.0,sides.y,0.0), Vec3::new(0.0,0.0,sides.z)];
-        let cells = [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]]
-            .map(|p| [start, start+axes[p[0]], start+axes[p[0]]+axes[p[1]], sides.scale(0.5)]);
+        let axes = [
+            Vec3::new(sides.x, 0.0, 0.0),
+            Vec3::new(0.0, sides.y, 0.0),
+            Vec3::new(0.0, 0.0, sides.z),
+        ];
+        let cells = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ]
+        .map(|p| {
+            [
+                start,
+                start + axes[p[0]],
+                start + axes[p[0]] + axes[p[1]],
+                sides.scale(0.5),
+            ]
+        });
         Self::new(cells.to_vec(), 6, cancelled)
     }
 
     /// Complete undeformed fluid-excluding volume [m3], not material volume.
-    pub const fn volume_m3(&self) -> f64 { self.volume_m3 }
+    pub const fn volume_m3(&self) -> f64 {
+        self.volume_m3
+    }
     /// Original body-frame cells in the deterministic integration order.
-    pub fn cells(&self) -> &[[Vec3; 4]] { &self.cells }
+    pub fn cells(&self) -> &[[Vec3; 4]] {
+        &self.cells
+    }
 
-    pub(super) fn submerged(&self, world_from_body: Se3, down: Vec3,
-        surface: Vec3, cancelled: &mut impl FnMut() -> bool) -> Result<DisplacedVolume, HydrostaticError> {
+    pub(super) fn submerged(
+        &self,
+        world_from_body: Se3,
+        down: Vec3,
+        surface: Vec3,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<DisplacedVolume, HydrostaticError> {
         self.submerged_below(world_from_body, down, surface, 0.0, cancelled)
     }
 
-    pub(super) fn whole(&self, world_from_body: Se3, down: Vec3,
-        datum: Vec3) -> Result<DisplacedVolume, HydrostaticError> {
+    pub(super) fn whole(
+        &self,
+        world_from_body: Se3,
+        down: Vec3,
+        datum: Vec3,
+    ) -> Result<DisplacedVolume, HydrostaticError> {
         let direction = world_from_body.rotation().inverse().rotate(down)?;
-        let mean_depth = finite(down.dot(world_from_body.translation()-datum)
-            + direction.dot(self.centroid_body_m))?;
-        Ok(DisplacedVolume { volume_m3: self.volume_m3,
-            centroid_body_m: Some(self.centroid_body_m),
-            depth_integral_m4: finite(self.volume_m3*mean_depth)? })
+        let origin_depth = finite(down.dot(world_from_body.translation() - datum))?;
+        // Preserve the pre-existing signed whole-volume query if the relative
+        // cache is unavailable or ill-conditioned. The submerged shortcut below instead
+        // falls back to its original vertex-depth integration in that case.
+        let mean_depth = self
+            .cached_mean_depth(direction, origin_depth)
+            .unwrap_or_else(|| origin_depth + direction.dot(self.centroid_body_m));
+        self.whole_at_mean_depth(mean_depth)
     }
 
-    pub(super) fn submerged_below(&self, world_from_body: Se3, down: Vec3,
-        datum: Vec3, interface_depth_m: f64,
-        cancelled: &mut impl FnMut() -> bool) -> Result<DisplacedVolume, HydrostaticError> {
+    fn cached_mean_depth(&self, direction: Vec3, origin_depth: f64) -> Option<f64> {
+        let relative = self.centroid_relative_body_m?;
+        let anchor_depth = origin_depth + direction.dot(self.depth_origin_body_m);
+        let mean_depth = anchor_depth + direction.dot(relative);
+        // Reassociation through one cached centroid must not replace the
+        // original vertex-depth arithmetic across cancelling large terms.
+        // Bound the magnitude of that affine expression over the entire box
+        // and admit only a well-conditioned cached mean (condition <= 2).
+        // This selects an optimization, not a minimum immersion or volume:
+        // rejected submerged queries retain the original per-cell integration.
+        let magnitude = origin_depth.abs()
+            + direction.x.abs() * self.lower_body_m.x.abs().max(self.upper_body_m.x.abs())
+            + direction.y.abs() * self.lower_body_m.y.abs().max(self.upper_body_m.y.abs())
+            + direction.z.abs() * self.lower_body_m.z.abs().max(self.upper_body_m.z.abs());
+        (anchor_depth.is_finite()
+            && mean_depth.is_finite()
+            && magnitude.is_finite()
+            && mean_depth.abs() >= 0.5 * magnitude)
+            .then_some(mean_depth)
+    }
+
+    fn whole_at_mean_depth(&self, mean_depth: f64) -> Result<DisplacedVolume, HydrostaticError> {
+        let mean_depth = finite(mean_depth)?;
+        Ok(DisplacedVolume {
+            volume_m3: self.volume_m3,
+            centroid_body_m: Some(self.centroid_body_m),
+            depth_integral_m4: finite(self.volume_m3 * mean_depth)?,
+        })
+    }
+
+    // Extremize the SAME affine depth expression as the per-vertex path.
+    // A body-frame box contains every tetrahedron at every attitude. Selecting
+    // its support corners keeps each product and sum monotone, including at
+    // an exactly touching plane; no wet-fraction epsilon discards thin caps.
+    // Nonfinite bounds simply miss the fast path and leave native admission
+    // to the actual vertices, since a box corner need not belong to the mesh.
+    fn depth_bounds(&self, direction: Vec3, origin_depth: f64) -> (f64, f64) {
+        let [x, y, z] = [direction.x >= 0.0, direction.y >= 0.0, direction.z >= 0.0];
+        let lower = Vec3::new(
+            if x {
+                self.lower_body_m.x
+            } else {
+                self.upper_body_m.x
+            },
+            if y {
+                self.lower_body_m.y
+            } else {
+                self.upper_body_m.y
+            },
+            if z {
+                self.lower_body_m.z
+            } else {
+                self.upper_body_m.z
+            },
+        );
+        let upper = Vec3::new(
+            if x {
+                self.upper_body_m.x
+            } else {
+                self.lower_body_m.x
+            },
+            if y {
+                self.upper_body_m.y
+            } else {
+                self.lower_body_m.y
+            },
+            if z {
+                self.upper_body_m.z
+            } else {
+                self.lower_body_m.z
+            },
+        );
+        (
+            origin_depth + direction.dot(lower),
+            origin_depth + direction.dot(upper),
+        )
+    }
+
+    pub(super) fn submerged_below(
+        &self,
+        world_from_body: Se3,
+        down: Vec3,
+        datum: Vec3,
+        interface_depth_m: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<DisplacedVolume, HydrostaticError> {
         self.submerged_moments::<false>(world_from_body, down, datum, interface_depth_m, cancelled)
             .map(|(volume, _)| volume)
     }
 
-    pub(super) fn submerged_depth_moments(&self, world_from_body: Se3, down: Vec3,
-        surface: Vec3, cancelled: &mut impl FnMut() -> bool)
-        -> Result<(DisplacedVolume, DepthMoments), HydrostaticError> {
+    pub(super) fn submerged_depth_moments(
+        &self,
+        world_from_body: Se3,
+        down: Vec3,
+        surface: Vec3,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(DisplacedVolume, DepthMoments), HydrostaticError> {
         self.submerged_moments::<true>(world_from_body, down, surface, 0.0, cancelled)
     }
 
     /// Integrate one slab directly, rather than subtracting nearly equal
     /// submerged volumes. Depth moments are relative to the slab's upper plane.
     /// Both clips retain the same affine depth coordinate at intersections.
-    pub(super) fn slab_depth_moments(&self, world_from_body: Se3, down: Vec3,
-        datum: Vec3, upper_depth_m: f64, thickness_m: Option<f64>,
-        cancelled: &mut impl FnMut() -> bool)
-        -> Result<(DisplacedVolume, DepthMoments), HydrostaticError> {
+    pub(super) fn slab_depth_moments(
+        &self,
+        world_from_body: Se3,
+        down: Vec3,
+        datum: Vec3,
+        upper_depth_m: f64,
+        thickness_m: Option<f64>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(DisplacedVolume, DepthMoments), HydrostaticError> {
         poll(cancelled)?;
         let direction = world_from_body.rotation().inverse().rotate(down)?;
-        let origin_depth = finite(down.dot(world_from_body.translation()-datum)-upper_depth_m)?;
+        let origin_depth = finite(down.dot(world_from_body.translation() - datum) - upper_depth_m)?;
+        let (minimum_depth, maximum_depth) = self.depth_bounds(direction, origin_depth);
+        if minimum_depth.is_finite()
+            && maximum_depth.is_finite()
+            && (maximum_depth <= 0.0
+                || thickness_m.is_some_and(|thickness| minimum_depth >= thickness))
+        {
+            poll(cancelled)?;
+            return Ok((DisplacedVolume::dry(), DepthMoments::default()));
+        }
         let mut sum = Accumulator::<true>::default();
         for cell in &self.cells {
             poll(cancelled)?;
-            let mut vertices = [Vertex { point: Vec3::new(0.0,0.0,0.0), depth: 0.0 };4];
+            let mut vertices = [Vertex {
+                point: Vec3::new(0.0, 0.0, 0.0),
+                depth: 0.0,
+            }; 4];
             for (out, &point) in vertices.iter_mut().zip(cell) {
-                *out = Vertex { point, depth: finite(origin_depth+direction.dot(point))? };
+                *out = Vertex {
+                    point,
+                    depth: finite(origin_depth + direction.dot(point))?,
+                };
             }
             clip_plane::<true>(vertices, 0.0, &mut |wet| {
                 if let Some(thickness) = thickness_m {
@@ -112,37 +310,82 @@ impl DisplacementMesh {
         }
         let depth_integral_m4 = finite(sum.volume * sum.mean_depth)?;
         if sum.volume > 0.0 && depth_integral_m4 <= 0.0 {
-            return Err(HydrostaticError::Invalid("slab depth integral is unrepresentable"));
+            return Err(HydrostaticError::Invalid(
+                "slab depth integral is unrepresentable",
+            ));
         }
         poll(cancelled)?;
-        Ok((DisplacedVolume { volume_m3: sum.volume,
-            centroid_body_m: (sum.volume > 0.0).then_some(sum.center), depth_integral_m4 }, sum.depth))
+        Ok((
+            DisplacedVolume {
+                volume_m3: sum.volume,
+                centroid_body_m: (sum.volume > 0.0).then_some(sum.center),
+                depth_integral_m4,
+            },
+            sum.depth,
+        ))
     }
 
-    fn submerged_moments<const DEPTH: bool>(&self, world_from_body: Se3, down: Vec3,
-        datum: Vec3, interface_depth_m: f64,
-        cancelled: &mut impl FnMut() -> bool)
-        -> Result<(DisplacedVolume, DepthMoments), HydrostaticError> {
+    fn submerged_moments<const DEPTH: bool>(
+        &self,
+        world_from_body: Se3,
+        down: Vec3,
+        datum: Vec3,
+        interface_depth_m: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(DisplacedVolume, DepthMoments), HydrostaticError> {
         poll(cancelled)?;
         // Transform the plane once, not every vertex into a large world origin.
         let direction = world_from_body.rotation().inverse().rotate(down)?;
-        let origin_depth = finite(down.dot(world_from_body.translation()-datum)-interface_depth_m)?;
+        let origin_depth =
+            finite(down.dot(world_from_body.translation() - datum) - interface_depth_m)?;
+        let (minimum_depth, maximum_depth) = self.depth_bounds(direction, origin_depth);
+        let finite_bounds = minimum_depth.is_finite() && maximum_depth.is_finite();
+        if finite_bounds && maximum_depth <= 0.0 {
+            poll(cancelled)?;
+            return Ok((DisplacedVolume::dry(), DepthMoments::default()));
+        }
+        // Uniform-density loads need only cached volume/centroid. Gradient
+        // loads retain their degree-two integration and exact maximum depth.
+        if !DEPTH
+            && finite_bounds
+            && minimum_depth >= 0.0
+            && let Some(mean_depth) = self.cached_mean_depth(direction, origin_depth)
+            && let Ok(whole) = self.whole_at_mean_depth(mean_depth)
+            && whole.depth_integral_m4 > 0.0
+        {
+            poll(cancelled)?;
+            return Ok((whole, DepthMoments::default()));
+        }
         let mut sum = Accumulator::<DEPTH>::default();
         for cell in &self.cells {
             poll(cancelled)?;
-            let mut vertices = [Vertex { point: Vec3::new(0.0,0.0,0.0), depth: 0.0 };4];
+            let mut vertices = [Vertex {
+                point: Vec3::new(0.0, 0.0, 0.0),
+                depth: 0.0,
+            }; 4];
             for (out, &point) in vertices.iter_mut().zip(cell) {
-                *out = Vertex { point, depth: finite(origin_depth+direction.dot(point))? };
+                *out = Vertex {
+                    point,
+                    depth: finite(origin_depth + direction.dot(point))?,
+                };
             }
             clip(vertices, &mut sum)?;
         }
         let depth_integral_m4 = finite(sum.volume * sum.mean_depth)?;
         if sum.volume > 0.0 && depth_integral_m4 <= 0.0 {
-            return Err(HydrostaticError::Invalid("submerged depth integral is unrepresentable"));
+            return Err(HydrostaticError::Invalid(
+                "submerged depth integral is unrepresentable",
+            ));
         }
         poll(cancelled)?;
-        Ok((DisplacedVolume { volume_m3: sum.volume,
-            centroid_body_m: (sum.volume > 0.0).then_some(sum.center), depth_integral_m4 }, sum.depth))
+        Ok((
+            DisplacedVolume {
+                volume_m3: sum.volume,
+                centroid_body_m: (sum.volume > 0.0).then_some(sum.center),
+                depth_integral_m4,
+            },
+            sum.depth,
+        ))
     }
 }
 
@@ -156,26 +399,40 @@ pub struct DisplacedVolume {
 }
 impl DisplacedVolume {
     pub(super) const fn dry() -> Self {
-        Self { volume_m3: 0.0, centroid_body_m: None, depth_integral_m4: 0.0 }
+        Self {
+            volume_m3: 0.0,
+            centroid_body_m: None,
+            depth_integral_m4: 0.0,
+        }
     }
     /// Immersed volume [m3]; exactly zero for a dry envelope.
-    pub const fn volume_m3(&self) -> f64 { self.volume_m3 }
+    pub const fn volume_m3(&self) -> f64 {
+        self.volume_m3
+    }
     /// Geometric centroid in the ORIGINAL geometry frame; None when dry.
     /// Equals the center of buoyancy only for a homogeneous fluid density.
-    pub const fn centroid_body_m(&self) -> Option<Vec3> { self.centroid_body_m }
+    pub const fn centroid_body_m(&self) -> Option<Vec3> {
+        self.centroid_body_m
+    }
 }
 
 #[derive(Clone, Copy)]
-struct Vertex { point: Vec3, depth: f64 }
+struct Vertex {
+    point: Vec3,
+    depth: f64,
+}
 impl Vertex {
     fn intersection(self, dry: Self, plane: f64) -> Result<Self, HydrostaticError> {
         // Opposite signs, with a possible exactly-on-plane dry endpoint.
-        let a = finite(self.depth-plane)?;
-        let b = finite(dry.depth-plane)?;
+        let a = finite(self.depth - plane)?;
+        let b = finite(dry.depth - plane)?;
         let scale = a.abs().max(b.abs());
-        let fraction = (a/scale) / (a/scale-b/scale);
-        let point = finite_vec(self.point+(dry.point-self.point).scale(fraction))?;
-        Ok(Self { point, depth: plane })
+        let fraction = (a / scale) / (a / scale - b / scale);
+        let point = finite_vec(self.point + (dry.point - self.point).scale(fraction))?;
+        Ok(Self {
+            point,
+            depth: plane,
+        })
     }
 }
 
@@ -190,36 +447,54 @@ pub(super) struct DepthMoments {
 }
 impl Default for DepthMoments {
     fn default() -> Self {
-        Self { center_body_m: Vec3::new(0.0,0.0,0.0), mean_depth_m: 0.0, maximum_depth_m: 0.0 }
+        Self {
+            center_body_m: Vec3::new(0.0, 0.0, 0.0),
+            mean_depth_m: 0.0,
+            maximum_depth_m: 0.0,
+        }
     }
 }
 
 // The extra degree-two integration compiles out of uniform/layered loading.
 struct Accumulator<const DEPTH: bool> {
-    volume: f64, center: Vec3, mean_depth: f64,
-    depth_weight: f64, depth: DepthMoments,
+    volume: f64,
+    center: Vec3,
+    mean_depth: f64,
+    depth_weight: f64,
+    depth: DepthMoments,
 }
 impl<const DEPTH: bool> Default for Accumulator<DEPTH> {
-    fn default() -> Self { Self { volume:0.0, center:Vec3::new(0.0,0.0,0.0), mean_depth:0.0,
-        depth_weight:0.0, depth:DepthMoments::default() } }
+    fn default() -> Self {
+        Self {
+            volume: 0.0,
+            center: Vec3::new(0.0, 0.0, 0.0),
+            mean_depth: 0.0,
+            depth_weight: 0.0,
+            depth: DepthMoments::default(),
+        }
+    }
 }
 impl<const DEPTH: bool> Accumulator<DEPTH> {
-    fn add(&mut self, vertices: [Vertex;4]) -> Result<(), HydrostaticError> {
+    fn add(&mut self, vertices: [Vertex; 4]) -> Result<(), HydrostaticError> {
         let p = vertices.map(|v| v.point);
-        let offset = p.map(|v| v-p[0]);
-        let volume = finite(offset[1].dot(offset[2].cross(offset[3])).abs()/6.0)?;
+        let offset = p.map(|v| v - p[0]);
+        let volume = finite(offset[1].dot(offset[2].cross(offset[3])).abs() / 6.0)?;
         // On-plane vertices can make some pieces exactly degenerate. They
         // contribute zero; no epsilon discards a small positive wet volume.
-        if volume == 0.0 { return Ok(()); }
-        let center = finite_vec(p[0]+(offset[1]+offset[2]+offset[3]).scale(0.25))?;
-        let mean_depth = finite(vertices.iter().map(|v| 0.25*v.depth).sum())?;
-        let next = finite(self.volume+volume)?;
-        let weight = volume/next;
-        if weight <= 0.0 || mean_depth < 0.0 {
-            return Err(HydrostaticError::Invalid("clipped volume moments are unrepresentable"));
+        if volume == 0.0 {
+            return Ok(());
         }
-        self.center = finite_vec(self.center+(center-self.center).scale(weight))?;
-        self.mean_depth = finite(self.mean_depth+(mean_depth-self.mean_depth)*weight)?;
+        let center = finite_vec(p[0] + (offset[1] + offset[2] + offset[3]).scale(0.25))?;
+        let mean_depth = finite(vertices.iter().map(|v| 0.25 * v.depth).sum())?;
+        let next = finite(self.volume + volume)?;
+        let weight = volume / next;
+        if weight <= 0.0 || mean_depth < 0.0 {
+            return Err(HydrostaticError::Invalid(
+                "clipped volume moments are unrepresentable",
+            ));
+        }
+        self.center = finite_vec(self.center + (center - self.center).scale(weight))?;
+        self.mean_depth = finite(self.mean_depth + (mean_depth - self.mean_depth) * weight)?;
         self.volume = next;
         if DEPTH {
             // For affine d on a tetrahedron, integral(lambda_i*d) /
@@ -227,56 +502,106 @@ impl<const DEPTH: bool> Accumulator<DEPTH> {
             // integrate both r*d and d² analytically, including every cut case.
             let scale = vertices.iter().fold(0.0_f64, |s, v| s.max(v.depth));
             self.depth.maximum_depth_m = self.depth.maximum_depth_m.max(scale);
-            let normalized = vertices.map(|v| v.depth/scale);
+            let normalized = vertices.map(|v| v.depth / scale);
             let total: f64 = normalized.iter().sum();
-            let barycentric = normalized.map(|d| (1.0+d/total)/5.0);
-            let depth_center = finite_vec(p[0] + offset[1].scale(barycentric[1])
-                + offset[2].scale(barycentric[2]) + offset[3].scale(barycentric[3]))?;
-            let depth_mean = finite(vertices.iter().zip(barycentric)
-                .map(|(v,w)| v.depth*w).sum())?;
-            let contribution = finite(volume*mean_depth)?;
-            let next_depth_weight = finite(self.depth_weight+contribution)?;
-            let depth_fraction = contribution/next_depth_weight;
+            let barycentric = normalized.map(|d| (1.0 + d / total) / 5.0);
+            let depth_center = finite_vec(
+                p[0] + offset[1].scale(barycentric[1])
+                    + offset[2].scale(barycentric[2])
+                    + offset[3].scale(barycentric[3]),
+            )?;
+            let depth_mean = finite(
+                vertices
+                    .iter()
+                    .zip(barycentric)
+                    .map(|(v, w)| v.depth * w)
+                    .sum(),
+            )?;
+            let contribution = finite(volume * mean_depth)?;
+            let next_depth_weight = finite(self.depth_weight + contribution)?;
+            let depth_fraction = contribution / next_depth_weight;
             if contribution <= 0.0 || !depth_fraction.is_finite() || depth_fraction <= 0.0 {
-                return Err(HydrostaticError::Invalid("density-gradient moments are unrepresentable"));
+                return Err(HydrostaticError::Invalid(
+                    "density-gradient moments are unrepresentable",
+                ));
             }
-            self.depth.center_body_m = finite_vec(self.depth.center_body_m
-                + (depth_center-self.depth.center_body_m).scale(depth_fraction))?;
-            self.depth.mean_depth_m = finite(self.depth.mean_depth_m
-                + (depth_mean-self.depth.mean_depth_m)*depth_fraction)?;
+            self.depth.center_body_m = finite_vec(
+                self.depth.center_body_m
+                    + (depth_center - self.depth.center_body_m).scale(depth_fraction),
+            )?;
+            self.depth.mean_depth_m = finite(
+                self.depth.mean_depth_m + (depth_mean - self.depth.mean_depth_m) * depth_fraction,
+            )?;
             self.depth_weight = next_depth_weight;
         }
         Ok(())
     }
 }
 
-fn clip<const DEPTH: bool>(v: [Vertex;4], sum: &mut Accumulator<DEPTH>) -> Result<(), HydrostaticError> {
+fn clip<const DEPTH: bool>(
+    v: [Vertex; 4],
+    sum: &mut Accumulator<DEPTH>,
+) -> Result<(), HydrostaticError> {
     clip_plane::<true>(v, 0.0, &mut |tet| sum.add(tet))
 }
 
-fn clip_plane<const DEEPER: bool>(v: [Vertex;4], plane: f64,
-    consume: &mut impl FnMut([Vertex;4]) -> Result<(), HydrostaticError>) -> Result<(), HydrostaticError> {
-    let mut wet = [0usize;4]; let mut dry = [0usize;4]; let mut n = 0; let mut m = 0;
+fn clip_plane<const DEEPER: bool>(
+    v: [Vertex; 4],
+    plane: f64,
+    consume: &mut impl FnMut([Vertex; 4]) -> Result<(), HydrostaticError>,
+) -> Result<(), HydrostaticError> {
+    let mut wet = [0usize; 4];
+    let mut dry = [0usize; 4];
+    let mut n = 0;
+    let mut m = 0;
     for (i, vertex) in v.iter().enumerate() {
-        let inside = if DEEPER { vertex.depth > plane } else { vertex.depth < plane };
-        if inside { wet[n]=i; n+=1; } else { dry[m]=i; m+=1; }
+        let inside = if DEEPER {
+            vertex.depth > plane
+        } else {
+            vertex.depth < plane
+        };
+        if inside {
+            wet[n] = i;
+            n += 1;
+        } else {
+            dry[m] = i;
+            m += 1;
+        }
     }
     match n {
         0 => Ok(()),
         4 => consume(v),
         1 => {
-            let a=v[wet[0]];
-            consume([a,a.intersection(v[dry[0]],plane)?,a.intersection(v[dry[1]],plane)?,a.intersection(v[dry[2]],plane)?])
+            let a = v[wet[0]];
+            consume([
+                a,
+                a.intersection(v[dry[0]], plane)?,
+                a.intersection(v[dry[1]], plane)?,
+                a.intersection(v[dry[2]], plane)?,
+            ])
         }
         2 => {
-            let (a,b,c,d)=(v[wet[0]],v[wet[1]],v[dry[0]],v[dry[1]]);
-            let (ac,ad,bc,bd)=(a.intersection(c,plane)?,a.intersection(d,plane)?,b.intersection(c,plane)?,b.intersection(d,plane)?);
-            consume([a,b,ac,ad])?; consume([b,ac,ad,bc])?; consume([b,ad,bc,bd])
+            let (a, b, c, d) = (v[wet[0]], v[wet[1]], v[dry[0]], v[dry[1]]);
+            let (ac, ad, bc, bd) = (
+                a.intersection(c, plane)?,
+                a.intersection(d, plane)?,
+                b.intersection(c, plane)?,
+                b.intersection(d, plane)?,
+            );
+            consume([a, b, ac, ad])?;
+            consume([b, ac, ad, bc])?;
+            consume([b, ad, bc, bd])
         }
         _ => {
-            let (a,b,c,d)=(v[wet[0]],v[wet[1]],v[wet[2]],v[dry[0]]);
-            let (ad,bd,cd)=(a.intersection(d,plane)?,b.intersection(d,plane)?,c.intersection(d,plane)?);
-            consume([a,b,c,ad])?; consume([b,c,ad,bd])?; consume([c,ad,bd,cd])
+            let (a, b, c, d) = (v[wet[0]], v[wet[1]], v[wet[2]], v[dry[0]]);
+            let (ad, bd, cd) = (
+                a.intersection(d, plane)?,
+                b.intersection(d, plane)?,
+                c.intersection(d, plane)?,
+            );
+            consume([a, b, c, ad])?;
+            consume([b, c, ad, bd])?;
+            consume([c, ad, bd, cd])
         }
     }
 }
